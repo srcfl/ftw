@@ -26,17 +26,18 @@
 //	host.modbus_write_multi(addr, values)
 //	host.json_decode(s)             -- convenience JSON → Lua table
 //	host.json_encode(t)             -- Lua table → JSON string
-//	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
-//	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
-//	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
-//	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
-//	host.ws_messages()              -- drain inbound frames; "" entry = EOF
-//	host.ws_is_open()               -- boolean
-//	host.ws_close()                 -- close + free
-//	host.tcp_open(addr)             -- open raw TCP socket "host:port"; (true, nil) or (nil, err)
-//	host.tcp_recv()                 -- drain inbound bytes as a Lua string ("" if nothing)
-//	host.tcp_is_open()              -- boolean
-//	host.tcp_close()                -- close + free
+//	host.http_get(url, headers)          -- HTTP GET, returns (body, nil) or (nil, err)
+//	host.http_post(url, body, headers)   -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.http_patch(url, body, headers)  -- HTTP PATCH, returns (body, nil) or (nil, err)
+//	host.ws_open(url, headers)           -- open WebSocket; (true, nil) or (nil, err)
+//	host.ws_send(text)                   -- send one text frame; (true, nil) or (nil, err)
+//	host.ws_messages()                   -- drain inbound frames; "" entry = EOF
+//	host.ws_is_open()                    -- boolean
+//	host.ws_close()                      -- close + free
+//	host.tcp_open(addr)                  -- open raw TCP socket "host:port"; (true, nil) or (nil, err)
+//	host.tcp_recv()                      -- drain inbound bytes as a Lua string ("" if nothing)
+//	host.tcp_is_open()                   -- boolean
+//	host.tcp_close()                     -- close + free
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -496,6 +497,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// ---- HTTP capability ----
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
+	// host.http_patch(url, body, headers?) → (body, nil) or (nil, error_string)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
 	// hostAllowed checks the URL's host component against the
 	// per-driver allowlist. Empty allowlist = any host (legacy
@@ -636,6 +638,49 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 		payload := L.CheckString(2)
 		req, err := net_http.NewRequest("POST", url, strings.NewReader(payload))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		req.Header.Set("Content-Type", "application/json")
+		applyHeaders(req, L, 3)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		if resp.StatusCode >= 400 {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+			return 2
+		}
+		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
+		if !env.HTTP {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: capability not granted"))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := hostAllowed(url); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http: " + reason))
+			return 2
+		}
+		payload := L.CheckString(2)
+		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
@@ -809,6 +854,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		_ = env.TCP.Close()
 		return 0
 	}))
+
 
 	L.SetGlobal("host", host)
 }
