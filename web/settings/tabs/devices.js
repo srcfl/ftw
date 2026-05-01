@@ -101,6 +101,8 @@
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
+        var hasApiCredsField = Object.prototype.hasOwnProperty.call(dcfg, 'client_id') ||
+                               Object.prototype.hasOwnProperty.call(dcfg, 'client_secret');
         var catalogEntry = (S.catalogByLua || {})[d.lua];
         var caps = (catalogEntry && catalogEntry.capabilities) || [];
         var isVehicleDriver = cap.http != null &&
@@ -108,7 +110,9 @@
            Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
            Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
         var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
-        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+        // OAuth2 client_credentials drivers (e.g. MyUplink): identify via client_id/client_secret keys.
+        var isApiCredsDriver = !isVehicleDriver && cap.http != null && !hasHostField && hasApiCredsField;
+        var isCloudDriver = !isVehicleDriver && !isApiCredsDriver && cap.http != null && !hasHostField &&
           (hasAuthField || Object.keys(dcfg).length === 0);
         if (isVehicleDriver) {
           // TeslaBLEProxy-style drivers only need the LAN IP of the
@@ -146,6 +150,33 @@
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
+            '</label>' +
+            '</fieldset>';
+        }
+        if (isApiCredsDriver) {
+          // OAuth2 client_credentials drivers (e.g. MyUplink).
+          // User registers an app at the provider's developer portal and
+          // pastes Client ID + Client Secret here. No redirect needed.
+          var acfg = d.config || {};
+          var hasSecret = acfg.client_secret && acfg.client_secret.length > 0;
+          var secretBadge = hasSecret
+            ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+            : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+          // max_charge_w === 0 means block extra production at cheap prices.
+          var blockCharge = (d.max_charge_w === 0);
+          html += '<fieldset><legend>API credentials</legend>' +
+            '<p style="color:var(--text-dim);font-size:0.75rem;margin:0 0 8px">Register an application at the provider\'s developer portal to get a Client ID and Client Secret.</p>' +
+            '<div class="field-row"><div>' +
+            '<label>Client ID ' + help('Application identifier from the developer portal.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+            '</div><div>' +
+            '<label>Client Secret ' + secretBadge + '</label>' +
+            '<input type="password" data-path="drivers.' + idx + '.config.client_secret" value="' + escHtml(acfg.client_secret || '') + '" placeholder="your-client-secret">' +
+            '</div></div>' +
+            '<label style="margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:normal">' +
+            '<input type="checkbox" class="apicreds-block-charge" data-driver-idx="' + idx + '"' + (blockCharge ? ' checked' : '') + '>' +
+            'Block extra production at low price ' +
+            help('Sets max_charge_w = 0 so the optimiser never commands the pump to run extra at cheap electricity prices. The pump runs on its own schedule — the optimiser can only block during expensive hours.') +
             '</label>' +
             '</fieldset>';
         }
@@ -390,6 +421,9 @@
             driver.config = { ip: "", vin: "" };
           } else if (connHost) {
             driver.config = { host: connHost };
+          } else if (entryCaps.indexOf("apicreds") >= 0) {
+            // OAuth2 client_credentials drivers (e.g. MyUplink).
+            driver.config = { client_id: "", client_secret: "" };
           } else {
             driver.config = { email: "", password: "", serial: "" };
           }
@@ -577,6 +611,22 @@
         }
         inp.addEventListener("input", syncAllowedHosts);
         inp.addEventListener("blur", syncAllowedHosts);
+      });
+
+      // API creds drivers: "blockera extra produktion" checkbox.
+      // Checked   → max_charge_w = 0  (MPC may never charge/pre-heat)
+      // Unchecked → delete max_charge_w (no restriction)
+      bodyEl.querySelectorAll(".apicreds-block-charge").forEach(function (cb) {
+        cb.addEventListener("change", function () {
+          var dIdx = parseInt(cb.dataset.driverIdx, 10);
+          var d = config.drivers[dIdx];
+          if (!d) return;
+          if (cb.checked) {
+            d.max_charge_w = 0;
+          } else {
+            delete d.max_charge_w;
+          }
+        });
       });
 
       // Add/remove-device buttons.
