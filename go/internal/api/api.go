@@ -1865,8 +1865,16 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 // decorateLoadpointsWithVehicle overlays the best-matching DerVehicle
 // reading onto each plugged-in loadpoint state. Mutates the input
 // slice in place. Picker (rank + freshness + bounds) lives in
-// telemetry.PickBestVehicle so main.go's MPC plumbing and this
-// presentation path agree on which vehicle is "the one".
+// telemetry.PickBestVehicleForLoadpoint so main.go's MPC plumbing and
+// this presentation path agree on which vehicle is "the one".
+//
+// Pairing is decided per loadpoint: when a loadpoint is currently
+// delivering power, the pick is gated on charging_state ∈
+// {Charging, Starting}. That prevents a second vehicle (parked at
+// home, returning SoC, but not on this charger) from winning the
+// pick on freshness alone and flipping the loadpoint's SoC source
+// every tick — the failure mode observed with two Teslas in the same
+// household.
 //
 // CurrentSoCPct is intentionally NOT overwritten with the BMS reading.
 // The loadpoint controller uses CurrentSoCPct as its inference state;
@@ -1885,11 +1893,13 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		}
 		return
 	}
-	pick := telemetry.PickBestVehicle(tel, time.Now())
+	now := time.Now()
 	for i := range states {
 		if !states[i].PluggedIn {
 			continue
 		}
+		delivering := states[i].CurrentPowerW > loadpointDeliveringW
+		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
 		if pick.Driver == "" {
 			states[i].SoCSource = "inferred"
 			continue
@@ -1902,6 +1912,13 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		states[i].SoCSource = "vehicle"
 	}
 }
+
+// loadpointDeliveringW is the current_power_w threshold above which we
+// treat a loadpoint as actively delivering power to a vehicle. Easee's
+// minimum step is ~1380 W (1Φ 6 A); 100 W gives margin against settling
+// noise on session start/stop without ever crossing into legitimate
+// charging territory.
+const loadpointDeliveringW = 100.0
 
 // POST /api/loadpoints/{id}/target sets user intent for an EV
 // loadpoint: the SoC % the vehicle should reach by the target time.

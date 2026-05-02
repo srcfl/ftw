@@ -666,15 +666,17 @@ func main() {
 				// car); when a vehicle driver such as TeslaBLEProxy is
 				// online, its SoC reading is ground truth.
 				//
-				// Picker (rank + freshness + bounds) lives in
-				// telemetry.PickBestVehicle so api.go's loadpoint
-				// decoration agrees with us on which vehicle is "the
-				// one". Falls back to inferred SoC when nothing usable
-				// online matches.
+				// Picker (rank + freshness + bounds + connection
+				// evidence when delivering power) lives in
+				// telemetry.PickBestVehicleForLoadpoint so api.go's
+				// loadpoint decoration agrees with us on which vehicle
+				// is "the one". Falls back to inferred SoC when nothing
+				// usable online matches.
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
 				var vehicleChargeLimit float64 // 0 = unknown
-				if pick := telemetry.PickBestVehicle(tel, time.Now()); pick.Driver != "" {
+				delivering := st.CurrentPowerW > 100.0
+				if pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now()); pick.Driver != "" {
 					initSoC = pick.SoCPct
 					socSource = "vehicle:" + pick.Driver
 					vehicleChargeLimit = pick.ChargeLimitPct

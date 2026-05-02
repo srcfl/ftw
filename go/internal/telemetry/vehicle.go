@@ -72,6 +72,34 @@ func VehicleConnectedRank(chargingState string) int {
 // Lives in telemetry/ rather than api/ or cmd/ because both packages
 // need it and the dependency direction otherwise cycles.
 func PickBestVehicle(s *Store, now time.Time) VehiclePick {
+	return pickBestVehicle(s, 0, now)
+}
+
+// PickBestVehicleForLoadpoint adds connection-evidence gating: when
+// the loadpoint is delivering power right now (current_power_w over
+// the threshold), the picker requires the vehicle's charging_state
+// to be Charging or Starting (rank 3). Any other state — including
+// Stopped/Complete on a vehicle parked elsewhere — is rejected, so
+// a second car returning SoC from outside this charger cannot win
+// the pick on freshness alone.
+//
+// When the loadpoint is plugged but idle (no current draw), gating
+// falls back to the standard rank-based pick. We don't have strong
+// evidence which car is connected during idle, but the planner is
+// also not actively committing power, so a wrong pick during this
+// window is much lower-impact than during active delivery.
+func PickBestVehicleForLoadpoint(s *Store, lpDeliveringPower bool, now time.Time) VehiclePick {
+	minRank := 0 // any non-Disconnected
+	if lpDeliveringPower {
+		// Strict: only Charging/Starting count as evidence the vehicle
+		// is on this charger. A vehicle reporting Stopped while another
+		// loadpoint is at 11 kW is definitely not the connected one.
+		minRank = 3
+	}
+	return pickBestVehicle(s, minRank, now)
+}
+
+func pickBestVehicle(s *Store, minRank int, now time.Time) VehiclePick {
 	if s == nil {
 		return VehiclePick{}
 	}
@@ -99,7 +127,7 @@ func PickBestVehicle(s *Store, now time.Time) VehiclePick {
 			_ = json.Unmarshal(vr.Data, &meta)
 		}
 		rank := VehicleConnectedRank(meta.ChargingState)
-		if rank < 0 {
+		if rank < 0 || rank < minRank {
 			continue
 		}
 		if rank < bestRank || (rank == bestRank && !vr.UpdatedAt.After(best.UpdatedAt)) {
