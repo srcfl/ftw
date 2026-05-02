@@ -626,17 +626,21 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 	if !ok || driver == "" {
 		return
 	}
-	// Only Stopped / Disconnected / Complete are "needs wake" states.
-	// Charging / Starting / NoPower mean the car is doing the right
-	// thing on its own — also reset the failure counter so future
-	// detaches start with a fresh budget.
+	// "Complete" is intentionally NOT in the wake set: the car says
+	// charging is done because it reached its OWN charge_limit.
+	// Trying to wake it would mean fighting the user's in-app
+	// limit, which they often set lower than our target_soc_pct
+	// (e.g. limit 60% to preserve battery health while we plan to
+	// 100%). Treat Complete as "session intentionally finished" and
+	// reset the failure counter so a real detach later starts
+	// fresh.
 	switch state {
-	case "Charging", "Starting":
+	case "Charging", "Starting", "Complete":
 		c.wakeMu.Lock()
 		delete(c.wakeAttempts, lpID)
 		c.wakeMu.Unlock()
 		return
-	case "Stopped", "Disconnected", "Complete":
+	case "Stopped", "Disconnected":
 	default:
 		return
 	}
