@@ -541,8 +541,18 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// Pass operator's phase preferences through verbatim. The driver
 		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
 		// charger min/max amps, phase-switch latency, and the requested W.
-		if lpCfg.PhaseMode != "" {
-			cmd["phase_mode"] = lpCfg.PhaseMode
+		// Override to "1p" when surplus_only locked the loadpoint to 1Φ
+		// for the day — without this, Easee (and similar) ignore the
+		// low-power request and stay on 3Φ at zero amps because their
+		// pick_phases respects an operator-set "3p" lock over the
+		// dispatch's wantW. The 1Φ lock IS the operator's intent for
+		// this day.
+		phaseMode := lpCfg.PhaseMode
+		if c.surplusLockedTo1P(lpCfg.ID) {
+			phaseMode = "1p"
+		}
+		if phaseMode != "" {
+			cmd["phase_mode"] = phaseMode
 		}
 		if lpCfg.PhaseSplitW > 0 {
 			cmd["phase_split_w"] = lpCfg.PhaseSplitW
@@ -887,6 +897,17 @@ func (c *Controller) pickSurplusSteps(lpCfg Config) []float64 {
 	slog.Info("loadpoint surplus_only locked to 1Φ for the day",
 		"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
 	return lpCfg.AllowedStepsW
+}
+
+// surplusLockedTo1P reports whether the surplus_only 1Φ lock is
+// currently active for the given loadpoint. Read-only accessor.
+func (c *Controller) surplusLockedTo1P(id string) bool {
+	if c == nil {
+		return false
+	}
+	c.phaseLockMu.Lock()
+	defer c.phaseLockMu.Unlock()
+	return c.phaseLocked1P[id]
 }
 
 // sameLocalDay reports whether two time.Time values fall on the
