@@ -897,6 +897,27 @@ func main() {
 			}
 			return ctrl.FuseEVMaxW, true
 		})
+		// Wire the matched-vehicle reader for auto-wake. When the
+		// loadpoint is commanding power but the matched Tesla
+		// reports `Stopped` / `Disconnected` / `Complete`, the
+		// controller fires a charge_start command at the vehicle
+		// driver — TeslaBLEProxy translates it to BLE and re-engages
+		// the session. Without this, a long pause from the surplus
+		// clamp (or arbitrage-mode planning) detaches Tesla and
+		// nothing software-side can wake it.
+		lpController.SetVehicleStatus(func(lpID string) (string, string, bool) {
+			st, ok := lpMgr.State(lpID)
+			if !ok || !st.PluggedIn {
+				return "", "", false
+			}
+			delivering := st.CurrentPowerW > 100.0
+			pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now())
+			if pick.Driver == "" {
+				return "", "", false
+			}
+			return pick.Driver, pick.ChargingState, true
+		})
+
 		// Wire the EV-available surplus computation for the
 		// surplus_only clamp. We want the W of PV that exceeds house
 		// load, regardless of how the home battery is currently

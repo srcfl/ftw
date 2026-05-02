@@ -81,7 +81,26 @@ type Controller struct {
 	surplusWin      map[string]*surplusWindow
 	surplusPaused   map[string]bool
 	surplusPausedAt map[string]time.Time
+
+	// vehicleStatus reports the matched vehicle driver + its
+	// charging_state for a given loadpoint, so the controller can
+	// trigger a charge_start command when the EV detached mid-
+	// session ("Stopped") while we're trying to deliver power.
+	// nil disables the wake feature.
+	vehicleStatus func(loadpointID string) (driver, chargingState string, ok bool)
+
+	// wakeMu protects the per-loadpoint last-wake timestamp used to
+	// throttle charge_start retries. Tesla rate-limits BLE commands;
+	// retrying every 5 s would just exhaust the radio.
+	wakeMu     sync.Mutex
+	wakeLast   map[string]time.Time
 }
+
+// vehicleWakeCooldown caps how often we'll send a charge_start to the
+// same loadpoint's matched vehicle. Tesla's BLE radio rate-limits
+// "Command Disallowed" after a few rapid sends; 90 s gives the car
+// time to actually transition out of Stopped before we poke again.
+const vehicleWakeCooldown = 90 * time.Second
 
 // surplusWindowSize is the length of the rolling-average buffer used
 // for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s
@@ -213,6 +232,21 @@ func (c *Controller) SetSiteSurplusForEV(f func() (float64, bool)) {
 		return
 	}
 	c.siteSurplusForEVW = f
+}
+
+// SetVehicleStatus wires the matched-vehicle reader used by the auto-
+// wake path. The function takes a loadpoint id and returns the
+// matched vehicle driver name + its current `charging_state` (one of
+// `Charging` / `Starting` / `Stopped` / `Disconnected` / `Complete`),
+// or (_, _, false) if no online vehicle is paired to the loadpoint.
+// Called once at startup from main.go. Pass nil to disable auto-
+// wake, in which case the operator must manually start charging
+// from the Tesla app after a session detach.
+func (c *Controller) SetVehicleStatus(f func(loadpointID string) (driver, chargingState string, ok bool)) {
+	if c == nil {
+		return
+	}
+	c.vehicleStatus = f
 }
 
 // SetSiteFuse installs the grid-boundary fuse so the controller can
@@ -454,6 +488,78 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if err := c.send(ctx, lpCfg.DriverName, payload); err != nil {
 		slog.Warn("loadpoint dispatch", "lp", lpCfg.ID,
 			"driver", lpCfg.DriverName, "err", err)
+	}
+
+	// Auto-wake: if the matched vehicle reports `Stopped` /
+	// `Disconnected` / `Complete` — i.e. it detached mid-session and
+	// won't draw — send a generic `charge_start` action to the
+	// matched vehicle driver. Driver-agnostic: the controller doesn't
+	// know which vehicle protocol is behind it, only that whichever
+	// driver published the latest DerVehicle reading should accept
+	// this action. Today only `tesla_vehicle.lua` implements it (via
+	// TeslaBLEProxy → BLE charge_start); future drivers (BMW, Audi,
+	// Polestar, etc.) inherit auto-wake by implementing the same
+	// action in their own `driver_command`. Throttled by
+	// vehicleWakeCooldown so a flapping radio doesn't get rate-
+	// limited. Fires under two conditions:
+	//
+	//   1. We just commanded power_w > 0 (normal post-restart wake).
+	//   2. Loadpoint is surplus_only — even if cmd power_w is 0
+	//      because the surplus clamp paused us. This breaks the
+	//      chicken-and-egg of "can't see surplus without EV
+	//      drawing, can't command power without surplus" by
+	//      periodically poking the car so it negotiates with Easee.
+	//      The 90 s cooldown caps Tesla BLE wear; if the car is
+	//      genuinely asleep at night the proxy returns 503 and we
+	//      back off.
+	c.maybeWakeVehicle(ctx, now, lpCfg.ID, lpCfg, cmd)
+}
+
+func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID string, lpCfg Config, cmd map[string]any) {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return
+	}
+	pw, _ := cmd["power_w"].(float64)
+	wantWake := pw > 0
+	if lpCfg.SurplusOnly {
+		wantWake = true
+	}
+	if !wantWake {
+		return
+	}
+	driver, state, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return
+	}
+	// Only Stopped / Disconnected / Complete are "needs wake" states.
+	// Charging / Starting / NoPower mean the car is doing the right
+	// thing on its own.
+	switch state {
+	case "Stopped", "Disconnected", "Complete":
+	default:
+		return
+	}
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+	}
+	last := c.wakeLast[lpID]
+	if !last.IsZero() && now.Sub(last) < vehicleWakeCooldown {
+		c.wakeMu.Unlock()
+		return
+	}
+	c.wakeLast[lpID] = now
+	c.wakeMu.Unlock()
+
+	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
+	if err != nil {
+		return
+	}
+	slog.Info("loadpoint auto-wake", "lp", lpID, "vehicle_driver", driver,
+		"vehicle_state", state, "cmd_w", pw)
+	if err := c.send(ctx, driver, payload); err != nil {
+		slog.Warn("loadpoint auto-wake failed", "lp", lpID,
+			"vehicle_driver", driver, "err", err)
 	}
 }
 
