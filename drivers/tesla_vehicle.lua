@@ -325,7 +325,7 @@ function driver_command(action, _, _)
     -- Empty JSON object body — TeslaBLEProxy's command endpoints
     -- accept GET-ish POSTs; some Tesla SDKs send `{}` for parity
     -- with the cloud API. Either form works on the proxy.
-    local _, err = host.http_post(url, "{}", auth_headers())
+    local body, err = host.http_post(url, "{}", auth_headers())
     if err then
       local es = tostring(err)
       -- 503 / "Command Disallowed" means the proxy's BLE radio is
@@ -338,7 +338,13 @@ function driver_command(action, _, _)
       host.log("warn", "tesla: charge_start failed: " .. es)
       return false
     end
-    host.log("info", "tesla: charge_start sent")
+    -- Surface the proxy's response body so we can see WHY a
+    -- nominally-successful POST didn't wake the car. Common cases:
+    -- Tesla returned `not_charging` (already at limit), `is_charging`
+    -- (idempotent / no-op), or a vehicle-side rejection (e.g. user
+    -- has charge-on-schedule enabled).
+    local snippet = (body and #body > 0) and body:sub(1, 200) or "(empty body)"
+    host.log("info", "tesla: charge_start response: " .. snippet)
     return true
   end
   host.log("debug", "tesla: command ignored: " .. tostring(action))

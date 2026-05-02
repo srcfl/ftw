@@ -92,9 +92,20 @@ type Controller struct {
 	// wakeMu protects the per-loadpoint last-wake timestamp used to
 	// throttle charge_start retries. Tesla rate-limits BLE commands;
 	// retrying every 5 s would just exhaust the radio.
-	wakeMu     sync.Mutex
-	wakeLast   map[string]time.Time
+	wakeMu        sync.Mutex
+	wakeLast      map[string]time.Time
+	wakeKickUntil map[string]time.Time
 }
+
+// wakeKickDuration is how long a wake-kick forces the EV charger to
+// signal min 3Φ current after a charge_start fires. The wallbox must
+// actively present current (not 0 A) for the car to negotiate the new
+// session — sending charge_start while Easee is at 0 A is futile.
+// This briefly violates surplus_only's no-import rule, which is the
+// price of recovering from a detached session without operator
+// intervention. 15 s is enough for Tesla's BLE handshake plus a few
+// seconds of pilot-signal stabilisation.
+const wakeKickDuration = 30 * time.Second
 
 // vehicleWakeCooldown caps how often we'll send a charge_start to the
 // same loadpoint's matched vehicle. Tesla's BLE radio rate-limits
@@ -437,6 +448,21 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 			// 0 W standdown so the charger pauses cleanly.
 			cmdW = 0
 		}
+		// Wake-kick: when an auto-wake recently fired, force the
+		// wallbox to signal at least min 3Φ current for a few
+		// seconds so the car-side negotiation has something to land
+		// on. This is the only thing that's empirically observed to
+		// rescue a detached Tesla without operator intervention. The
+		// kick window is bounded by wakeKickDuration; outside it the
+		// normal surplus clamp resumes.
+		if c.wakeKickActive(lpCfg.ID, now) {
+			minKick := smallestNonZero(surplus3PhaseSteps(lpCfg))
+			if minKick > 0 && cmdW < minKick {
+				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
+					"prev_cmd_w", cmdW, "kick_w", minKick)
+				cmdW = minKick
+			}
+		}
 		// Surplus-only live clamp: regardless of what the MPC slot
 		// budget said for this 15-minute window, the EV must not
 		// import grid right now. We smooth the pause/resume decision
@@ -542,6 +568,7 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 	c.wakeMu.Lock()
 	if c.wakeLast == nil {
 		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
 	}
 	last := c.wakeLast[lpID]
 	if !last.IsZero() && now.Sub(last) < vehicleWakeCooldown {
@@ -549,6 +576,11 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 		return
 	}
 	c.wakeLast[lpID] = now
+	// Also arm the wake-kick window so the next few dispatch ticks
+	// force the wallbox to signal current — without it the BLE
+	// charge_start lands on a 0 A wallbox and the car has nothing
+	// to negotiate with.
+	c.wakeKickUntil[lpID] = now.Add(wakeKickDuration)
 	c.wakeMu.Unlock()
 
 	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
@@ -701,6 +733,18 @@ func smallestNonZero(steps []float64) float64 {
 		}
 	}
 	return min
+}
+
+// wakeKickActive reports whether the wake-kick window for this
+// loadpoint is currently in force.
+func (c *Controller) wakeKickActive(id string, now time.Time) bool {
+	if c == nil {
+		return false
+	}
+	c.wakeMu.Lock()
+	defer c.wakeMu.Unlock()
+	t, ok := c.wakeKickUntil[id]
+	return ok && now.Before(t)
 }
 
 // resetSurplusSession drops the per-loadpoint rolling buffer + paused
