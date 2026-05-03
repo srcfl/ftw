@@ -1553,14 +1553,11 @@
         }
         body = { soc_pct: 100, target_time_ms: target.getTime(), surplus_only: true };
       } else {
-        var existingMs = 0;
-        var parsed = parseTargetTime(lp.target_time);
-        if (parsed) existingMs = parsed.getTime();
-        body = {
-          soc_pct: lp.target_soc_pct || 0,
-          target_time_ms: existingMs,
-          surplus_only: false,
-        };
+        // Pointer/patch semantics on the backend: omitting fields
+        // preserves their existing values. Sending only surplus_only
+        // avoids overwriting the user's target/deadline with whatever
+        // (possibly stale or missing) snapshot we last fetched.
+        body = { surplus_only: false };
       }
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",

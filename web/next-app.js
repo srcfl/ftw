@@ -1839,7 +1839,7 @@
     // the backend returns when no driver filter is honored.
     var url = "/api/ev/status" + (evModalDriver ? "?driver=" + encodeURIComponent(evModalDriver) : "");
     Promise.all([
-      fetch(url).then(function (r) { return r.json(); }).catch(function () { return null; }),
+      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var d = results[0];
@@ -1873,6 +1873,8 @@
       if (matched) {
         evModalBody.appendChild(buildSurplusOnlyControl(matched));
       }
+    }).catch(function () {
+      setEvModalMessage("Failed to load EV status");
     });
   }
 
@@ -1918,16 +1920,11 @@
         if (t.getTime() <= now.getTime()) t.setUTCDate(t.getUTCDate() + 1);
         body = { soc_pct: 100, target_time_ms: t.getTime(), surplus_only: true };
       } else {
-        var existingMs = 0;
-        if (lp.target_time) {
-          var d = new Date(lp.target_time);
-          if (!isNaN(d.getTime()) && d.getFullYear() >= 2000) existingMs = d.getTime();
-        }
-        body = {
-          soc_pct: lp.target_soc_pct || 0,
-          target_time_ms: existingMs,
-          surplus_only: false,
-        };
+        // Pointer/patch semantics on the backend: omitting fields
+        // preserves their existing values. Sending only surplus_only
+        // avoids overwriting the user's target/deadline with whatever
+        // (possibly stale or missing) snapshot we last fetched.
+        body = { surplus_only: false };
       }
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",

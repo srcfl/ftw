@@ -1898,7 +1898,7 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		if !states[i].PluggedIn {
 			continue
 		}
-		delivering := states[i].CurrentPowerW > loadpointDeliveringW
+		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
 		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
 		if pick.Driver == "" {
 			states[i].SoCSource = "inferred"
@@ -1912,13 +1912,6 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		states[i].SoCSource = "vehicle"
 	}
 }
-
-// loadpointDeliveringW is the current_power_w threshold above which we
-// treat a loadpoint as actively delivering power to a vehicle. Easee's
-// minimum step is ~1380 W (1Φ 6 A); 100 W gives margin against settling
-// noise on session start/stop without ever crossing into legitimate
-// charging territory.
-const loadpointDeliveringW = 100.0
 
 // POST /api/loadpoints/{id}/target sets user intent for an EV
 // loadpoint: the SoC % the vehicle should reach by the target time.

@@ -23,6 +23,16 @@ import (
 	"time"
 )
 
+// DeliveringW is the current_power_w threshold above which we treat a
+// loadpoint as actively delivering power to a vehicle. Easee's minimum
+// step is ~1380 W (1Φ 6 A); 100 W gives margin against settling noise
+// on session start/stop without ever crossing into legitimate charging
+// territory.
+//
+// Centralised so the MPC plumbing in main.go, the API decoration in
+// internal/api, and any future consumers all gate the same way.
+const DeliveringW = 100.0
+
 // Config is the YAML-facing definition of one loadpoint. Wired into
 // config.Config under "loadpoints". All electrical fields are
 // optional with sensible defaults for a typical single-phase /

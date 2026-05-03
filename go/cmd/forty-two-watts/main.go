@@ -675,7 +675,7 @@ func main() {
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
 				var vehicleChargeLimit float64 // 0 = unknown
-				delivering := st.CurrentPowerW > 100.0
+				delivering := st.CurrentPowerW > loadpoint.DeliveringW
 				if pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now()); pick.Driver != "" {
 					initSoC = pick.SoCPct
 					socSource = "vehicle:" + pick.Driver
@@ -910,7 +910,7 @@ func main() {
 			if !ok || !st.PluggedIn {
 				return "", "", false
 			}
-			delivering := st.CurrentPowerW > 100.0
+			delivering := st.CurrentPowerW > loadpoint.DeliveringW
 			pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now())
 			if pick.Driver == "" {
 				return "", "", false

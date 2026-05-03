@@ -750,11 +750,14 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 //     drives pause/resume. Pause only when avg drops below the 3Φ
 //     minimum step; resume only when avg ≥ that minimum + a margin
 //     (so we don't oscillate at the boundary).
-//  4. When not paused, snap the lower of (planner wantW, avg surplus)
-//     to a 3Φ-eligible step. Snapping to *avg* rather than *instant*
-//     keeps the setpoint steady through brief dips — the home battery
-//     fills the gap reactively for ~1-2 min, which is the user-
-//     authorised smoothing budget.
+//  4. When not paused, snap the lower of (planner wantW, INSTANT surplus)
+//     to a 3Φ-eligible step. Pause/resume uses the rolling avg (so we
+//     don't cycle the contactor on transients) but the magnitude
+//     tracks instant — using avg for magnitude lags reality on a
+//     dropping cloud front and the difference leaks straight into
+//     grid import. The home battery's reactive PI in self_consumption
+//     fills sub-tick gaps. See the long-form rationale immediately
+//     above the `target := wantW` block in the function body.
 func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) float64 {
 	if c == nil {
 		return wantW

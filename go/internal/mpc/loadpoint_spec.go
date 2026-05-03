@@ -56,10 +56,13 @@ type LoadpointSpec struct {
 
 	// SurplusOnly forbids EV actions that would turn the site into a
 	// net importer. Hard constraint in the DP feasibility loop: any
-	// (battW, evW) combination with gridW > 0 AND evW > 0 is rejected.
-	// evW = 0 is always feasible, so the DP degrades gracefully when
-	// no PV surplus exists — the deadline shortfall penalty handles
-	// the lexicographic "miss target rather than break constraint"
+	// (battW, evW) combination with gridW > 50 AND evW > 0 is rejected
+	// (mpc.go:474). The 50 W epsilon absorbs grid-discretisation and
+	// FP dither so we don't reject solutions that are zero-import in
+	// every operationally meaningful sense. evW = 0 is always
+	// feasible, so the DP degrades gracefully when no PV surplus
+	// exists — the deadline shortfall penalty handles the
+	// lexicographic "miss target rather than break constraint"
 	// preference.
 	SurplusOnly bool
 }
