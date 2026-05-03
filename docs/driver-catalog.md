@@ -6,8 +6,8 @@ in `drivers/` that follows the v2.1 host API (see
 
 ## At a glance
 
-21 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
-MQTT, HTTP/REST). Read-only: 12. With control: 9.
+22 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 13. With control: 9.
 
 Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
@@ -19,6 +19,8 @@ back to the device; read-only drivers only emit telemetry.
 
 | Driver | Manufacturer | Protocol | Capabilities | Control | Tested models | File |
 |---|---|---|---|---|---|---|
+| CTEK Chargestorm (API v1) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek.lua` |
+| CTEK Chargestorm (API v2) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek_v2.lua` |
 | Deye hybrid inverter | Deye | Modbus | battery, meter, pv | yes | SUN-5K-SG03LP1-EU, SUN-8K-SG04LP3-EU, SUN-12K-SG04LP3-EU | `drivers/deye.lua` |
 | Easee Cloud | Easee | HTTP | ev | yes | Home, Charge | `drivers/easee_cloud.lua` |
 | Eastron SDM630 / SDM72D-M | Eastron | Modbus | meter | no | SDM630-Modbus, SDM72D-M | `drivers/sdm630.lua` |
@@ -29,8 +31,6 @@ back to the device; read-only drivers only emit telemetry.
 | GoodWe ET-Plus / EH | GoodWe | Modbus | battery, meter, pv | no | GW10K-ET, GW8K-EH | `drivers/goodwe.lua` |
 | Growatt SPH / MOD | Growatt | Modbus | battery, meter, pv | no | SPH6000, MOD9000TL3-XH | `drivers/growatt.lua` |
 | Huawei SUN2000 | Huawei | Modbus | battery, meter, pv | yes | SUN2000-10KTL-M1, SUN2000-5KTL-L1 | `drivers/huawei.lua` |
-| CTEK Chargestorm (API v1) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek.lua` |
-| CTEK Chargestorm (API v2) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek_v2.lua` |
 | Kostal Plenticore Plus / Piko IQ | Kostal | Modbus | battery, meter, pv | no | Plenticore Plus 10, Piko IQ 7.0 | `drivers/kostal.lua` |
 | Pixii PowerShaper | Pixii | Modbus | battery, meter | no | PowerShaper 2, PowerShaper 20 | `drivers/pixii.lua` |
 | SMA Sunny Tripower / Sunny Boy Storage | SMA | Modbus | battery, meter, pv | no | Sunny Tripower 10.0, Sunny Boy Storage 3.7 | `drivers/sma.lua` |
