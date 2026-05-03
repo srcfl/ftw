@@ -146,10 +146,15 @@ const wakeBackoffAfter = 5
 const wakeBackoffCooldown = 10 * time.Minute
 
 // vehicleWakeCooldown caps how often we'll send a charge_start to the
-// same loadpoint's matched vehicle. Tesla's BLE radio rate-limits
-// "Command Disallowed" after a few rapid sends; 90 s gives the car
-// time to actually transition out of Stopped before we poke again.
-const vehicleWakeCooldown = 90 * time.Second
+// same loadpoint's matched vehicle. Tesla's BLE radio is shared with
+// every other proxy poll the driver does (vehicle_data, charge_amps,
+// wake_up); poking it every 90 s on top of routine 60 s polls quickly
+// pushes it into "Command Disallowed" rate-limits, after which all
+// proxy reads start failing and the picker sees stale data. 5 min
+// gives the radio room to breathe between active wake attempts —
+// the wallbox-cycle fired on each wake is what actually rescues
+// detached sessions; charge_start is the secondary signal.
+const vehicleWakeCooldown = 5 * time.Minute
 
 // surplusWindowSize is the length of the rolling-average buffer used
 // for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s

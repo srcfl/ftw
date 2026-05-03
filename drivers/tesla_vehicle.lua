@@ -202,16 +202,22 @@ function driver_poll()
   -- length 0 on every poll, which silently emit_last()'d the driver.
   local body, err = host.http_get(url, auth_headers())
   if err ~= nil then
-    -- 503 "Command Disallowed" means the proxy's BLE radio is
-    -- busy (usually because we just poked or the car just started
-    -- charging and the radio negotiation hasn't cleared). Log at
-    -- debug to avoid noise — the next poll will succeed.
+    -- 503 "Command Disallowed" or 408 timeouts mean the proxy's
+    -- BLE radio is busy (usually because we just poked or the car
+    -- just started charging and the radio negotiation hasn't
+    -- cleared). Back off to a longer interval rather than
+    -- continuing to hammer at the steady-state rate — every poll
+    -- in this state piles onto the rate-limit and prolongs it.
+    -- Recovery is automatic when the next emit succeeds:
+    -- driver_poll resets to POLL_INTERVAL_MS at the top of the
+    -- next call.
     local es = tostring(err)
-    if es:match("HTTP 503") then
-      host.log("debug", "tesla: proxy busy (BLE busy) — will retry")
-    else
-      host.log("warn", "tesla: poll HTTP error: " .. es)
+    if es:match("HTTP 503") or es:match("HTTP 408") or es:match("Command Disallowed") then
+      host.log("debug", "tesla: proxy busy (BLE busy) — backing off 3 min")
+      emit_last()
+      return 180000  -- 3 min
     end
+    host.log("warn", "tesla: poll HTTP error: " .. es)
     emit_last()
     return POLL_INTERVAL_MS
   end
