@@ -1508,8 +1508,70 @@
     block.appendChild(header);
 
     block.appendChild(buildSoCRow(lp));
+    block.appendChild(buildSurplusOnlyRow(lp));
     block.appendChild(buildTargetRow(lp));
     return block;
+  }
+
+  // buildSurplusOnlyRow renders a single checkbox: when ticked, the
+  // loadpoint is auto-configured for "charge only from PV surplus"
+  // with a 100 % target by 16 UTC (today, advancing to tomorrow if
+  // 16 UTC has already passed). The MPC will not plan any grid-funded
+  // EV charging — surplus_only is a hard DP constraint, the dispatch
+  // controller also clamps live setpoint to PV export, and the EV is
+  // held at 3Φ-eligible steps to avoid contactor-wearing phase swaps.
+  // Unticking restores manual target control without touching the
+  // existing SoC/deadline values.
+  function buildSurplusOnlyRow(lp) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.5rem";
+    row.style.marginBottom = "0.3rem";
+    var label = document.createElement("label");
+    label.style.display = "flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.4rem";
+    label.style.fontSize = "0.8rem";
+    label.style.cursor = "pointer";
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!lp.surplus_only;
+    cb.title = "Charge only from PV surplus. Auto-targets 100 % by 16:00 UTC. The DP refuses any plan that would import grid for this loadpoint, and the live dispatch holds 3-phase to avoid contactor wear.";
+    var text = document.createElement("span");
+    text.textContent = "Surplus-only (PV-only, 100 % by 16:00 UTC)";
+    cb.addEventListener("change", function () {
+      cb.disabled = true;
+      var body;
+      if (cb.checked) {
+        var now = new Date();
+        var target = new Date(Date.UTC(
+          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+          16, 0, 0));
+        if (target.getTime() <= now.getTime()) {
+          target.setUTCDate(target.getUTCDate() + 1);
+        }
+        body = { soc_pct: 100, target_time_ms: target.getTime(), surplus_only: true };
+      } else {
+        // Pointer/patch semantics on the backend: omitting fields
+        // preserves their existing values. Sending only surplus_only
+        // avoids overwriting the user's target/deadline with whatever
+        // (possibly stale or missing) snapshot we last fetched.
+        body = { surplus_only: false };
+      }
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function () {
+        cb.disabled = false;
+        refreshEvModal();
+      }).catch(function () { cb.disabled = false; });
+    });
+    label.appendChild(cb);
+    label.appendChild(text);
+    row.appendChild(label);
+    return row;
   }
 
   function buildSoCRow(lp) {

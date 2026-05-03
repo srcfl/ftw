@@ -202,16 +202,22 @@ function driver_poll()
   -- length 0 on every poll, which silently emit_last()'d the driver.
   local body, err = host.http_get(url, auth_headers())
   if err ~= nil then
-    -- 503 "Command Disallowed" means the proxy's BLE radio is
-    -- busy (usually because we just poked or the car just started
-    -- charging and the radio negotiation hasn't cleared). Log at
-    -- debug to avoid noise — the next poll will succeed.
+    -- 503 "Command Disallowed" or 408 timeouts mean the proxy's
+    -- BLE radio is busy (usually because we just poked or the car
+    -- just started charging and the radio negotiation hasn't
+    -- cleared). Back off to a longer interval rather than
+    -- continuing to hammer at the steady-state rate — every poll
+    -- in this state piles onto the rate-limit and prolongs it.
+    -- Recovery is automatic when the next emit succeeds:
+    -- driver_poll resets to POLL_INTERVAL_MS at the top of the
+    -- next call.
     local es = tostring(err)
-    if es:match("HTTP 503") then
-      host.log("debug", "tesla: proxy busy (BLE busy) — will retry")
-    else
-      host.log("warn", "tesla: poll HTTP error: " .. es)
+    if es:match("HTTP 503") or es:match("HTTP 408") or es:match("Command Disallowed") then
+      host.log("debug", "tesla: proxy busy (BLE busy) — backing off 3 min")
+      emit_last()
+      return 180000  -- 3 min
     end
+    host.log("warn", "tesla: poll HTTP error: " .. es)
     emit_last()
     return POLL_INTERVAL_MS
   end
@@ -308,10 +314,45 @@ function driver_poll()
 end
 
 function driver_command(action, _, _)
-  -- Read-only driver. Commands are intentionally not supported —
-  -- forty-two-watts does not try to wake / set_charge_limit /
-  -- start_charging the vehicle. Operators manage that via their
-  -- Tesla app or the proxy's own UI.
+  -- Wake-and-start support. The loadpoint controller fires the
+  -- generic `charge_start` action (defined as a cross-driver
+  -- protocol — any vehicle driver can implement it) when the
+  -- matched vehicle detached mid-session and won't accept current
+  -- from the wallbox. We translate that to the Tesla BLE command;
+  -- other vehicle drivers (BMW, Audi, Polestar via their own
+  -- proxies) implement the same action against their own back-end
+  -- — the Go side has no Tesla-specific knowledge.
+  if action == "charge_start" or action == "ev_start" then
+    if not base_url or not vin then
+      host.log("warn", "tesla: charge_start before init")
+      return false
+    end
+    local url = base_url .. "/api/1/vehicles/" .. vin .. "/command/charge_start"
+    -- Empty JSON object body — TeslaBLEProxy's command endpoints
+    -- accept GET-ish POSTs; some Tesla SDKs send `{}` for parity
+    -- with the cloud API. Either form works on the proxy.
+    local body, err = host.http_post(url, "{}", auth_headers())
+    if err then
+      local es = tostring(err)
+      -- 503 / "Command Disallowed" means the proxy's BLE radio is
+      -- busy or rate-limited. Not an error from our perspective —
+      -- the controller's cooldown will retry on the next window.
+      if es:match("HTTP 503") or es:match("HTTP 408") then
+        host.log("debug", "tesla: charge_start busy/asleep, will retry: " .. es)
+        return false
+      end
+      host.log("warn", "tesla: charge_start failed: " .. es)
+      return false
+    end
+    -- Surface the proxy's response body so we can see WHY a
+    -- nominally-successful POST didn't wake the car. Common cases:
+    -- Tesla returned `not_charging` (already at limit), `is_charging`
+    -- (idempotent / no-op), or a vehicle-side rejection (e.g. user
+    -- has charge-on-schedule enabled).
+    local snippet = (body and #body > 0) and body:sub(1, 200) or "(empty body)"
+    host.log("info", "tesla: charge_start response: " .. snippet)
+    return true
+  end
   host.log("debug", "tesla: command ignored: " .. tostring(action))
   return false
 end

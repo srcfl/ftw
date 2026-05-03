@@ -128,3 +128,64 @@ func TestPickBestVehicleTiebreakByFreshness(t *testing.T) {
 		t.Errorf("fresher reading should win tiebreak, got %q (soc=%v)", pick.Driver, pick.SoCPct)
 	}
 }
+
+// Connection-evidence gate: when the loadpoint is actively delivering
+// power, only vehicles in Charging/Starting are accepted as the
+// connected one. A second car at home reporting Stopped (parked,
+// charge-limit reached on a previous session, etc.) must NOT win the
+// pick — that's the two-Tesla flap behaviour the gate exists to
+// prevent.
+func TestPickBestVehicleForLoadpointGatesByDeliveringPower(t *testing.T) {
+	s := NewStore()
+	// Tesla #1: actively charging on this loadpoint.
+	pushVehicle(t, s, "tesla-charging", 50, 80, "Charging", false, 0)
+	// Tesla #2: parked elsewhere, fresher reading but not charging.
+	pushVehicle(t, s, "tesla-parked", 60, 80, "Stopped", false, 0)
+
+	// Loadpoint NOT delivering power → existing behaviour: rank-based
+	// pick still wins, charging > stopped.
+	pick := PickBestVehicleForLoadpoint(s, false, time.Now())
+	if pick.Driver != "tesla-charging" {
+		t.Errorf("idle loadpoint: expected tesla-charging, got %q", pick.Driver)
+	}
+
+	// Loadpoint delivering power → strict gate, only Charging/Starting
+	// accepted. Same outcome here, but the test below demonstrates
+	// the gate excludes a parked-but-fresher vehicle.
+	pick = PickBestVehicleForLoadpoint(s, true, time.Now())
+	if pick.Driver != "tesla-charging" {
+		t.Errorf("delivering loadpoint: expected tesla-charging, got %q", pick.Driver)
+	}
+}
+
+func TestPickBestVehicleForLoadpointStrictExcludesStopped(t *testing.T) {
+	s := NewStore()
+	// Only a Stopped vehicle is reporting (e.g. parked Tesla in
+	// driveway), with no Charging-state counterpart. When the
+	// loadpoint is delivering power, the gate must reject — there's
+	// no evidence this Stopped car is the one connected.
+	pushVehicle(t, s, "tesla-parked", 60, 80, "Stopped", false, 0)
+	pick := PickBestVehicleForLoadpoint(s, true, time.Now())
+	if pick.Driver != "" {
+		t.Errorf("delivering loadpoint with only Stopped vehicle: must return zero pick, got %q", pick.Driver)
+	}
+	// Without the gate (idle loadpoint), the Stopped car is a valid
+	// pick — ranks above Disconnected, can be the connected one.
+	pick = PickBestVehicleForLoadpoint(s, false, time.Now())
+	if pick.Driver != "tesla-parked" {
+		t.Errorf("idle loadpoint: expected tesla-parked, got %q", pick.Driver)
+	}
+}
+
+// Regression: two Charging readings at different freshness must still
+// pick the freshest under the strict gate (rank parity falls back to
+// freshness, exactly as before).
+func TestPickBestVehicleForLoadpointStrictTiebreakByFreshness(t *testing.T) {
+	s := NewStore()
+	pushVehicle(t, s, "a", 40, 80, "Charging", false, 60*time.Second)
+	pushVehicle(t, s, "b", 60, 80, "Charging", false, 5*time.Second)
+	pick := PickBestVehicleForLoadpoint(s, true, time.Now())
+	if pick.Driver != "b" {
+		t.Errorf("strict gate: fresher reading should win tiebreak, got %q", pick.Driver)
+	}
+}

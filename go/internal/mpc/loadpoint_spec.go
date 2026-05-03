@@ -53,6 +53,18 @@ type LoadpointSpec struct {
 	// Charge-side efficiency (AC → battery). Typical 0.90 for a
 	// modern 3-phase EV charger. 0 defaults to 0.90.
 	ChargeEfficiency float64
+
+	// SurplusOnly forbids EV actions that would turn the site into a
+	// net importer. Hard constraint in the DP feasibility loop: any
+	// (battW, evW) combination with gridW > 50 AND evW > 0 is rejected
+	// (mpc.go:474). The 50 W epsilon absorbs grid-discretisation and
+	// FP dither so we don't reject solutions that are zero-import in
+	// every operationally meaningful sense. evW = 0 is always
+	// feasible, so the DP degrades gracefully when no PV surplus
+	// exists — the deadline shortfall penalty handles the
+	// lexicographic "miss target rather than break constraint"
+	// preference.
+	SurplusOnly bool
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

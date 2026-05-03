@@ -1838,16 +1838,104 @@
     // to the clicked planet (multi-EV setups). Falls back to whatever
     // the backend returns when no driver filter is honored.
     var url = "/api/ev/status" + (evModalDriver ? "?driver=" + encodeURIComponent(evModalDriver) : "");
-    fetch(url).then(function (r) { return r.json(); }).then(function (d) {
+    Promise.all([
+      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+    ]).then(function (results) {
+      var d = results[0];
+      var lps = results[1];
       if (!d || d.connected === false) {
         setEvModalMessage("No EV charger connected");
         return;
       }
       evModalBody.textContent = "";
       evModalBody.appendChild(renderEvStatusTable(d));
+      // Match the modal's driver to a configured loadpoint; the
+      // surplus-only control only makes sense when the driver is
+      // wired to one. With no driver filter we pick the first
+      // plugged-in loadpoint as a best-effort fallback.
+      var matched = null;
+      if (lps && Array.isArray(lps.loadpoints) && lps.loadpoints.length > 0) {
+        if (evModalDriver) {
+          for (var i = 0; i < lps.loadpoints.length; i++) {
+            if (lps.loadpoints[i].driver_name === evModalDriver) {
+              matched = lps.loadpoints[i];
+              break;
+            }
+          }
+        }
+        if (!matched) {
+          for (var j = 0; j < lps.loadpoints.length; j++) {
+            if (lps.loadpoints[j].plugged_in) { matched = lps.loadpoints[j]; break; }
+          }
+        }
+      }
+      if (matched) {
+        evModalBody.appendChild(buildSurplusOnlyControl(matched));
+      }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
+  }
+
+  // buildSurplusOnlyControl renders the "charge only from PV" toggle
+  // at the bottom of the EV modal. Ticking auto-targets 100 % by the
+  // next 16:00 UTC; unticking preserves the existing target/deadline
+  // and just clears the flag. Live state comes from /api/loadpoints
+  // so the checkbox always reflects server truth on modal refresh.
+  function buildSurplusOnlyControl(lp) {
+    var box = document.createElement("div");
+    box.style.marginTop = "0.75rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+    var label = document.createElement("label");
+    label.style.display = "flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.5rem";
+    label.style.cursor = "pointer";
+    label.style.fontSize = "0.85rem";
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!lp.surplus_only;
+    cb.style.accentColor = "var(--accent-e)";
+    var text = document.createElement("span");
+    text.textContent = "Surplus-only · 100 % by 16:00 UTC";
+    label.appendChild(cb);
+    label.appendChild(text);
+    var hint = document.createElement("small");
+    hint.style.display = "block";
+    hint.style.marginTop = "0.35rem";
+    hint.style.color = "var(--text-dim)";
+    hint.textContent = "Charge only from PV surplus. Holds 3-phase. MPC won't plan grid-funded charging for this loadpoint.";
+    box.appendChild(label);
+    box.appendChild(hint);
+    cb.addEventListener("change", function () {
+      cb.disabled = true;
+      var body;
+      if (cb.checked) {
+        var now = new Date();
+        var t = new Date(Date.UTC(
+          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+          16, 0, 0));
+        if (t.getTime() <= now.getTime()) t.setUTCDate(t.getUTCDate() + 1);
+        body = { soc_pct: 100, target_time_ms: t.getTime(), surplus_only: true };
+      } else {
+        // Pointer/patch semantics on the backend: omitting fields
+        // preserves their existing values. Sending only surplus_only
+        // avoids overwriting the user's target/deadline with whatever
+        // (possibly stale or missing) snapshot we last fetched.
+        body = { surplus_only: false };
+      }
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).finally(function () {
+        if (cb.isConnected) cb.disabled = false;
+        refreshEvModal();
+      });
+    });
+    return box;
   }
 
   var evRefreshTimer = null;

@@ -1865,8 +1865,16 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 // decorateLoadpointsWithVehicle overlays the best-matching DerVehicle
 // reading onto each plugged-in loadpoint state. Mutates the input
 // slice in place. Picker (rank + freshness + bounds) lives in
-// telemetry.PickBestVehicle so main.go's MPC plumbing and this
-// presentation path agree on which vehicle is "the one".
+// telemetry.PickBestVehicleForLoadpoint so main.go's MPC plumbing and
+// this presentation path agree on which vehicle is "the one".
+//
+// Pairing is decided per loadpoint: when a loadpoint is currently
+// delivering power, the pick is gated on charging_state ∈
+// {Charging, Starting}. That prevents a second vehicle (parked at
+// home, returning SoC, but not on this charger) from winning the
+// pick on freshness alone and flipping the loadpoint's SoC source
+// every tick — the failure mode observed with two Teslas in the same
+// household.
 //
 // CurrentSoCPct is intentionally NOT overwritten with the BMS reading.
 // The loadpoint controller uses CurrentSoCPct as its inference state;
@@ -1885,11 +1893,13 @@ func decorateLoadpointsWithVehicle(states []loadpoint.State, tel *telemetry.Stor
 		}
 		return
 	}
-	pick := telemetry.PickBestVehicle(tel, time.Now())
+	now := time.Now()
 	for i := range states {
 		if !states[i].PluggedIn {
 			continue
 		}
+		delivering := states[i].CurrentPowerW > loadpoint.DeliveringW
+		pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, now)
 		if pick.Driver == "" {
 			states[i].SoCSource = "inferred"
 			continue
@@ -1921,21 +1931,61 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "id required"})
 		return
 	}
+	// All three fields are pointers so a caller can omit any of them
+	// and the corresponding piece of loadpoint state is preserved.
+	// This matters most for surplus_only-only flips (e.g. the "PV
+	// surplus" checkbox in the UI), which used to silently zero the
+	// SoC target + deadline because SoCPct/TargetTimeMs defaulted to
+	// 0 and the handler unconditionally called SetTarget. To clear
+	// the target the way the legacy client does, pass an explicit
+	// `{"soc_pct": 0, "target_time_ms": 0}` — pointers to zero are
+	// distinct from nil here.
 	var req struct {
-		SoCPct       float64 `json:"soc_pct"`
-		TargetTimeMs int64   `json:"target_time_ms"`
+		SoCPct       *float64 `json:"soc_pct,omitempty"`
+		TargetTimeMs *int64   `json:"target_time_ms,omitempty"`
+		SurplusOnly  *bool    `json:"surplus_only,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	var deadline time.Time
-	if req.TargetTimeMs > 0 {
-		deadline = time.UnixMilli(req.TargetTimeMs).UTC()
-	}
-	if !s.deps.Loadpoints.SetTarget(id, req.SoCPct, deadline) {
-		writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+	if req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil {
+		writeJSON(w, 400, map[string]string{"error": "no fields to update"})
 		return
+	}
+	if req.SoCPct != nil || req.TargetTimeMs != nil {
+		// SetTarget always takes both fields, so when the caller
+		// omitted one we have to look up the existing value to
+		// preserve it. Read-modify-write under the manager's lock
+		// is two RLocks (states + setter) which is fine off the
+		// hot path; the alternative would be a richer API surface.
+		st, ok := s.deps.Loadpoints.State(id)
+		if !ok {
+			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+			return
+		}
+		soc := st.TargetSoCPct
+		if req.SoCPct != nil {
+			soc = *req.SoCPct
+		}
+		deadline := st.TargetTime
+		if req.TargetTimeMs != nil {
+			if *req.TargetTimeMs > 0 {
+				deadline = time.UnixMilli(*req.TargetTimeMs).UTC()
+			} else {
+				deadline = time.Time{}
+			}
+		}
+		if !s.deps.Loadpoints.SetTarget(id, soc, deadline) {
+			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+			return
+		}
+	}
+	if req.SurplusOnly != nil {
+		if !s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly) {
+			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+			return
+		}
 	}
 	// Trigger replan so the new target lands in the schedule fast.
 	if s.deps.MPC != nil {

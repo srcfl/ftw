@@ -666,15 +666,17 @@ func main() {
 				// car); when a vehicle driver such as TeslaBLEProxy is
 				// online, its SoC reading is ground truth.
 				//
-				// Picker (rank + freshness + bounds) lives in
-				// telemetry.PickBestVehicle so api.go's loadpoint
-				// decoration agrees with us on which vehicle is "the
-				// one". Falls back to inferred SoC when nothing usable
-				// online matches.
+				// Picker (rank + freshness + bounds + connection
+				// evidence when delivering power) lives in
+				// telemetry.PickBestVehicleForLoadpoint so api.go's
+				// loadpoint decoration agrees with us on which vehicle
+				// is "the one". Falls back to inferred SoC when nothing
+				// usable online matches.
 				initSoC := st.CurrentSoCPct
 				socSource := "inferred"
 				var vehicleChargeLimit float64 // 0 = unknown
-				if pick := telemetry.PickBestVehicle(tel, time.Now()); pick.Driver != "" {
+				delivering := st.CurrentPowerW > loadpoint.DeliveringW
+				if pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now()); pick.Driver != "" {
 					initSoC = pick.SoCPct
 					socSource = "vehicle:" + pick.Driver
 					vehicleChargeLimit = pick.ChargeLimitPct
@@ -728,6 +730,7 @@ func main() {
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
+					SurplusOnly:     st.SurplusOnly,
 				}
 			}
 			return nil
@@ -893,6 +896,118 @@ func main() {
 				return 0, false
 			}
 			return ctrl.FuseEVMaxW, true
+		})
+		// Wire the matched-vehicle reader for auto-wake. When the
+		// loadpoint is commanding power but the matched Tesla
+		// reports `Stopped` / `Disconnected` / `Complete`, the
+		// controller fires a charge_start command at the vehicle
+		// driver — TeslaBLEProxy translates it to BLE and re-engages
+		// the session. Without this, a long pause from the surplus
+		// clamp (or arbitrage-mode planning) detaches Tesla and
+		// nothing software-side can wake it.
+		lpController.SetVehicleStatus(func(lpID string) (string, string, bool) {
+			st, ok := lpMgr.State(lpID)
+			if !ok || !st.PluggedIn {
+				return "", "", false
+			}
+			delivering := st.CurrentPowerW > loadpoint.DeliveringW
+			pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now())
+			if pick.Driver == "" {
+				return "", "", false
+			}
+			return pick.Driver, pick.ChargingState, true
+		})
+
+		// Wire the EV-available surplus computation for the
+		// surplus_only clamp. We want the W of PV that exceeds house
+		// load, regardless of how the home battery is currently
+		// splitting it — otherwise on a sunny day with the home
+		// battery absorbing all surplus the EV controller would see
+		// gridW≈0 and conclude "no surplus", contradicting reality.
+		//
+		// Identity (using api.go's convention `loadW = gridW − batW
+		// − pvW − evW`): pvSurplus = −pvW − loadW = −gridW + batW
+		// + evW. We compute the right-hand form because the
+		// telemetry store already publishes those three signals
+		// directly. Returns (_, false) when the site meter is
+		// missing — without it we can't bound grid import.
+		// Wire the peak-remaining-surplus reader for the surplus_only
+		// 1Φ-fallback decision. Iterates the MPC plan's remaining
+		// daylight slots and returns max(−pvW − loadW). When that
+		// peak can't sustain a 3Φ minimum (4140 W on a 6 A 3Φ
+		// charger), surplus_only locks the loadpoint to 1Φ for the
+		// day rather than pausing it forever — a slow-charging EV
+		// is still better than no charging at all.
+		lpController.SetPeakRemainingSurplusW(func() (float64, bool) {
+			if mpcSvc == nil {
+				return 0, false
+			}
+			plan := mpcSvc.Latest()
+			if plan == nil || len(plan.Actions) == 0 {
+				return 0, false
+			}
+			now := time.Now()
+			endOfDay := time.Date(now.Year(), now.Month(), now.Day(),
+				23, 59, 59, 0, now.Location())
+			var peak float64
+			any := false
+			for _, a := range plan.Actions {
+				slotEnd := time.UnixMilli(a.SlotStartMs).Add(
+					time.Duration(a.SlotLenMin) * time.Minute)
+				if slotEnd.Before(now) {
+					continue
+				}
+				if time.UnixMilli(a.SlotStartMs).After(endOfDay) {
+					break
+				}
+				surplus := -a.PVW - a.LoadW
+				if !any || surplus > peak {
+					peak = surplus
+					any = true
+				}
+			}
+			if !any {
+				return 0, false
+			}
+			return peak, true
+		})
+
+		lpController.SetSiteSurplusForEV(func() (float64, bool) {
+			meterDriver := cfg.SiteMeterDriver()
+			if meterDriver == "" {
+				return 0, false
+			}
+			// Refuse to publish a surplus when the meter is stale —
+			// last-known SmoothedW lingers indefinitely after a
+			// driver crash, and trusting it would silently violate
+			// the surplus_only "never import" promise. The watchdog
+			// timeout matches what the control loop uses elsewhere
+			// for site-meter staleness.
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			if watchdog <= 0 {
+				watchdog = 60 * time.Second
+			}
+			if tel.IsStale(meterDriver, telemetry.DerMeter, watchdog) {
+				return 0, false
+			}
+			meter := tel.Get(meterDriver, telemetry.DerMeter)
+			if meter == nil {
+				return 0, false
+			}
+			gridW := meter.SmoothedW
+			// Sum battery only over drivers that are currently online.
+			// A crashed battery driver leaves SmoothedW at last-known
+			// (e.g. +5 kW from a sunny moment) which would inflate
+			// surplus indefinitely.
+			var batW float64
+			for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+				if h := tel.DriverHealth(r.Driver); h == nil || h.Status == telemetry.StatusOffline {
+					continue
+				}
+				batW += r.SmoothedW
+			}
+			evW := tel.SumOnlineEVW()
+			return -gridW + batW + evW, true
 		})
 	}
 

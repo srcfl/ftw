@@ -23,6 +23,16 @@ import (
 	"time"
 )
 
+// DeliveringW is the current_power_w threshold above which we treat a
+// loadpoint as actively delivering power to a vehicle. Easee's minimum
+// step is ~1380 W (1Φ 6 A); 100 W gives margin against settling noise
+// on session start/stop without ever crossing into legitimate charging
+// territory.
+//
+// Centralised so the MPC plumbing in main.go, the API decoration in
+// internal/api, and any future consumers all gate the same way.
+const DeliveringW = 100.0
+
 // Config is the YAML-facing definition of one loadpoint. Wired into
 // config.Config under "loadpoints". All electrical fields are
 // optional with sensible defaults for a typical single-phase /
@@ -67,6 +77,16 @@ type Config struct {
 	// is not instantaneous (~5-10 s observed), and MPC slots can flap
 	// across the split threshold on noisy wantW. Default 60 s.
 	MinPhaseHoldS int `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
+
+	// SurplusOnly forbids the loadpoint from drawing grid power: the EV
+	// only charges from PV surplus (site-export). Enforced as a hard
+	// constraint in the MPC DP (no action that turns site-export into
+	// site-import is feasible) and as a live cap in the dispatch
+	// controller (wantW clamped to the current site export). Implies
+	// EV charging takes priority over battery surplus charging because
+	// the deadline shortfall penalty outweighs the battery's terminal-
+	// SoC credit when both compete for the same surplus.
+	SurplusOnly bool `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
 }
 
 // SiteFuse describes the shared grid-boundary breaker in terms the
@@ -134,6 +154,12 @@ type State struct {
 	MinChargeW    float64   `json:"min_charge_w"`
 	MaxChargeW    float64   `json:"max_charge_w"`
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
+
+	// SurplusOnly mirrors Config.SurplusOnly with any runtime override
+	// (set via POST /api/loadpoints/{id}/target). Always emitted (no
+	// omitempty) so a polling client can distinguish "explicitly off"
+	// from "field absent because the server is too old to know".
+	SurplusOnly bool `json:"surplus_only"`
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
@@ -335,6 +361,21 @@ func (m *Manager) SetTarget(id string, socPct float64, targetTime time.Time) boo
 	return true
 }
 
+// SetSurplusOnly toggles the runtime surplus_only flag for a loadpoint.
+// Mutates Config.SurplusOnly so subsequent Configs() calls reflect the
+// new value (both the MPC LoadpointSpec builder in main.go and the
+// dispatch controller read from there). Returns false for unknown IDs.
+func (m *Manager) SetSurplusOnly(id string, v bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	lp.Config.SurplusOnly = v
+	return true
+}
+
 // SetCurrentSoC lets an operator correct the inferred vehicle SoC
 // mid-session. Chargers like Easee don't report the vehicle's actual
 // BMS state, so the manager defaults to
@@ -396,5 +437,6 @@ func (lp *loadpointRuntime) snapshot() State {
 		MinChargeW:         lp.MinChargeW,
 		MaxChargeW:         lp.MaxChargeW,
 		AllowedStepsW:      steps,
+		SurplusOnly:        lp.Config.SurplusOnly,
 	}
 }
