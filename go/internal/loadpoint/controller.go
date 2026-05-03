@@ -454,7 +454,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// honoured — only the W setpoint is clamped, and we log it so
 		// the operator notices the conflict.
 		if lpCfg.SurplusOnly && holdW > 0 {
-			clamped := c.computeSurplusCmd(lpCfg, holdW, sample.PowerW)
+			clamped := c.computeSurplusCmd(now, lpCfg, holdW, sample.PowerW)
 			if clamped < holdW {
 				slog.Warn("loadpoint manual hold clamped by surplus_only",
 					"lp", lpCfg.ID, "hold_w", holdW, "clamped_w", clamped)
@@ -518,7 +518,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// reactive self_consumption PI in dispatch.go — that's the
 		// "battery smooths PV transients for ~1-2 min" path.
 		if lpCfg.SurplusOnly && cmdW > 0 {
-			cmdW = c.computeSurplusCmd(lpCfg, cmdW, sample.PowerW)
+			cmdW = c.computeSurplusCmd(now, lpCfg, cmdW, sample.PowerW)
 		}
 		// Wake-kick AFTER the surplus clamp: when an auto-wake just
 		// fired and the surplus clamp paused us to 0, force the
@@ -535,7 +535,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 			// minimum (1380 W) rather than 3Φ (4140 W). pickSurplusSteps
 			// already returns the right step set for the current
 			// lock state.
-			minKick := smallestNonZero(c.pickSurplusSteps(lpCfg))
+			minKick := smallestNonZero(c.pickSurplusSteps(now, lpCfg))
 			if minKick > 0 && cmdW < minKick {
 				slog.Info("loadpoint wake-kick", "lp", lpCfg.ID,
 					"prev_cmd_w", cmdW, "kick_w", minKick)
@@ -758,7 +758,20 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID s
 //     grid import. The home battery's reactive PI in self_consumption
 //     fills sub-tick gaps. See the long-form rationale immediately
 //     above the `target := wantW` block in the function body.
-func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) float64 {
+//
+// `now` is the dispatch tick's time, threaded from Tick → tickOne so the
+// pause/resume timestamps stay consistent with the rest of the cycle and
+// tests can drive it deterministically with a fixed clock.
+//
+// TODO(multi-loadpoint): siteSurplusForEVW is currently a site-wide PV-
+// minus-house surplus, not a per-loadpoint allowance. With a single EV
+// loadpoint that's correct (the closure already nets the EV's own draw
+// out). With two or more EV loadpoints active concurrently, each
+// controller tick will clamp to the same full-site surplus and they
+// collectively over-allocate, breaking the never-import promise. Fix
+// when a second loadpoint actually exists: switch to a site-level
+// allocator that hands each loadpoint a remaining-budget reading.
+func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, currentEvW float64) float64 {
 	if c == nil {
 		return wantW
 	}
@@ -799,7 +812,7 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 	// sticky: once we've gone 1Φ for the session we stay 1Φ to
 	// avoid cycling the contactor across the phase-mode boundary
 	// each time clouds shift.
-	steps := c.pickSurplusSteps(lpCfg)
+	steps := c.pickSurplusSteps(now, lpCfg)
 	minStep := smallestNonZero(steps)
 
 	// Compatibility variables for the rest of the function — the
@@ -808,7 +821,6 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 	minStep3 := minStep
 
 	paused, pausedAt := c.getSurplusPause(lpCfg.ID)
-	now := time.Now()
 	if paused {
 		// Hold a paused contactor for at least surplusMinPauseHold
 		// (Easee min on/off is ~30 s) before considering resume,
@@ -850,13 +862,17 @@ func (c *Controller) computeSurplusCmd(lpCfg Config, wantW, currentEvW float64) 
 // when the day's peak forecast surplus can't sustain a 3Φ minimum,
 // we fall back to all allowed steps and STICK there for the session
 // — re-upgrading would just cycle the contactor when clouds shift.
-func (c *Controller) pickSurplusSteps(lpCfg Config) []float64 {
+//
+// `now` is the dispatch tick's time, threaded down from Tick →
+// computeSurplusCmd / wake-kick so day-rollover unlock + lock-set
+// timestamps share the same clock as the rest of the cycle and tests
+// can drive it deterministically.
+func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	if c == nil {
 		return surplus3PhaseSteps(lpCfg)
 	}
 	steps3 := surplus3PhaseSteps(lpCfg)
 	minStep3 := smallestNonZero(steps3)
-	now := time.Now()
 
 	c.phaseLockMu.Lock()
 	locked := c.phaseLocked1P[lpCfg.ID]
