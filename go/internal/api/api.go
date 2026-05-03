@@ -660,7 +660,115 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			masked.EVCharger = &cp
 		}
 	}
+	// Mask driver-declared config_secrets (e.g. sonnen api_token) so
+	// the UI never sees the plaintext token in /api/config. The
+	// settings tab renders an empty input + "Saved" badge; on POST the
+	// PreserveMaskedSecrets pass restores the real value when the
+	// browser sends back the placeholder (or an empty string).
+	maskDriverConfigSecrets(&masked, s.driverSecretKeys())
 	writeJSON(w, 200, masked)
+}
+
+// driverSecretKeys returns a map[lua-path]→[]secret-key built from the
+// drivers/ catalog. Used by handleGetConfig + handlePostConfig to scope
+// which `Driver.Config[*]` keys participate in the mask/restore cycle.
+// On catalog read errors returns nil — handlers then skip the secrets
+// pass entirely (fail-open: they still mask the structured fields).
+func (s *Server) driverSecretKeys() map[string][]string {
+	dir := s.deps.DriverDir
+	if dir == "" {
+		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
+	}
+	entries, err := drivers.LoadCatalog(dir)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for _, e := range entries {
+		if len(e.ConfigSecrets) == 0 {
+			continue
+		}
+		out[e.Path] = e.ConfigSecrets
+	}
+	return out
+}
+
+// maskDriverConfigSecrets walks each driver in `cfg.Drivers` and, for
+// every key listed in the catalog's config_secrets for that driver,
+// replaces a non-empty stored value with maskedPlaceholder. Mirrors
+// MaskSecrets for fields the config package can't know about (the
+// catalog isn't a config-package dependency on purpose).
+func maskDriverConfigSecrets(cfg *config.Config, secretsByLua map[string][]string) {
+	if cfg == nil || len(secretsByLua) == 0 {
+		return
+	}
+	for i := range cfg.Drivers {
+		keys := secretsByLua[cfg.Drivers[i].Lua]
+		if len(keys) == 0 || cfg.Drivers[i].Config == nil {
+			continue
+		}
+		// Defensive copy so we don't mutate the live cfg.Drivers map
+		// (callers pass a value copy of Config, but the inner Config
+		// map is by-reference).
+		cp := make(map[string]any, len(cfg.Drivers[i].Config))
+		for k, v := range cfg.Drivers[i].Config {
+			cp[k] = v
+		}
+		for _, k := range keys {
+			if v, ok := cp[k]; ok {
+				if s, ok := v.(string); ok && s != "" {
+					cp[k] = maskedPlaceholder
+				}
+			}
+		}
+		cfg.Drivers[i].Config = cp
+	}
+}
+
+// restoreDriverConfigSecrets is the symmetric POST-side step: for each
+// driver, any catalog-declared secret value the UI sent back as the
+// masked placeholder OR as an empty string (with a non-empty existing
+// value) gets restored from `existing`. Without this, blanking the
+// password input in the Settings tab would clobber the saved token.
+func restoreDriverConfigSecrets(incoming, existing *config.Config, secretsByLua map[string][]string) {
+	if incoming == nil || existing == nil || len(secretsByLua) == 0 {
+		return
+	}
+	for i := range incoming.Drivers {
+		keys := secretsByLua[incoming.Drivers[i].Lua]
+		if len(keys) == 0 {
+			continue
+		}
+		// Match the existing driver by Name (same key PreserveMaskedSecrets uses).
+		var ed *config.Driver
+		for j := range existing.Drivers {
+			if existing.Drivers[j].Name == incoming.Drivers[i].Name {
+				ed = &existing.Drivers[j]
+				break
+			}
+		}
+		if ed == nil || ed.Config == nil {
+			continue
+		}
+		if incoming.Drivers[i].Config == nil {
+			incoming.Drivers[i].Config = map[string]any{}
+		}
+		for _, k := range keys {
+			existingV, hasE := ed.Config[k]
+			if !hasE {
+				continue
+			}
+			existingS, _ := existingV.(string)
+			if existingS == "" {
+				continue
+			}
+			incomingV, hasI := incoming.Drivers[i].Config[k]
+			incomingS, _ := incomingV.(string)
+			if !hasI || incomingS == "" || incomingS == maskedPlaceholder {
+				incoming.Drivers[i].Config[k] = existingS
+			}
+		}
+	}
 }
 
 func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
@@ -672,6 +780,12 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	// Preserve secrets the UI sent back as empty (masked) values.
 	s.deps.CfgMu.RLock()
 	newCfg.PreserveMaskedSecrets(s.deps.Cfg)
+	// Restore catalog-declared driver secrets (api_token etc.) the UI
+	// returned as maskedPlaceholder or empty. Same semantics as
+	// PreserveMaskedSecrets but scoped to keys the driver itself
+	// declared via DRIVER.config_secrets — keeps config-package
+	// catalog-agnostic.
+	restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
 	s.deps.CfgMu.RUnlock()
 
 	// EV charger password: persist to state.db instead of config.yaml.

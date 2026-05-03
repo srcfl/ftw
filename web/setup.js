@@ -236,6 +236,23 @@
       if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('http') >= 0) defPort = 8080;
       document.getElementById('drv-port').value = defPort;
     }
+
+    // Render password inputs for each catalog-declared config secret
+    // (e.g. sonnen Auth-Token). Each input id is "drv-secret-<key>" and
+    // saveDriver reads them back into driver.config[<key>].
+    var secretsGroup = document.getElementById('drv-secrets-group');
+    secretsGroup.innerHTML = '';
+    var secrets = selectedCatalog.config_secrets || [];
+    secrets.forEach(function (key) {
+      var label = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      var fg = document.createElement('div');
+      fg.className = 'form-group';
+      fg.innerHTML =
+        '<label for="drv-secret-' + key + '">' + esc(label) + '</label>' +
+        '<input type="password" id="drv-secret-' + key + '" autocomplete="off" ' +
+        'placeholder="Paste from device web UI">';
+      secretsGroup.appendChild(fg);
+    });
   }
 
   window.saveDriver = function () {
@@ -288,13 +305,30 @@
       // for allowed-hosts handling but have no connection_defaults.host;
       // their vendor endpoint is hardcoded and they key off
       // config.email/password instead, so leave config untouched here.
-      var connHost = (selectedCatalog && selectedCatalog.connection_defaults &&
-                      selectedCatalog.connection_defaults.host) || '';
-      if (connHost) {
+      var connDefaults = (selectedCatalog && selectedCatalog.connection_defaults) || {};
+      // connection_defaults.host being declared (even when empty) is the
+      // signal that this driver takes a user-configurable local endpoint.
+      // Cloud drivers don't declare it and key off email/password.
+      if (Object.prototype.hasOwnProperty.call(connDefaults, 'host')) {
         driver.config = driver.config || {};
         driver.config.host = ip;
       }
     }
+
+    // Persist per-driver secrets the prefill rendered (api_token, etc.)
+    // into driver.config.<key>. Lives OUTSIDE the protocol branches so
+    // a future Modbus/MQTT driver that declares config_secrets still
+    // captures them — the previous version silently dropped operator-
+    // entered secrets for any driver whose top-protocol wasn't http.
+    var secrets = (selectedCatalog && selectedCatalog.config_secrets) || [];
+    secrets.forEach(function (key) {
+      var el = document.getElementById('drv-secret-' + key);
+      if (!el) return;
+      var v = (el.value || '').trim();
+      if (v === '') return;
+      driver.config = driver.config || {};
+      driver.config[key] = v;
+    });
 
     // If this is the site meter, uncheck others
     if (isSiteMeter) {

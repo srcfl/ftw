@@ -38,6 +38,15 @@ type CatalogEntry struct {
 	VerifiedAt         string   `json:"verified_at,omitempty"`         // ISO date of most recent entry
 	VerificationNotes  string   `json:"verification_notes,omitempty"`
 	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
+
+	// ConfigSecrets lists driver-specific config keys that the Settings
+	// UI / setup wizard should render as password inputs and store
+	// under config.<key>. Used for things like Auth-Tokens that the
+	// operator would otherwise have to drop into config.yaml by hand
+	// (e.g. the sonnen JSON-API v2 Auth-Token). The Lua side just
+	// reads `config.<key>` like any other entry — this is purely a
+	// hint for the UI layer.
+	ConfigSecrets []string `json:"config_secrets,omitempty"`
 }
 
 // LoadCatalog scans dir (and any direct sub-directories) for .lua driver
@@ -111,6 +120,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.VerifiedAt = pickString(block, "verified_at")
 	e.VerificationNotes = pickString(block, "verification_notes")
 	e.TestedModels = pickList(block, "tested_models")
+	e.ConfigSecrets = pickList(block, "config_secrets")
 	return e, nil
 }
 

@@ -38,8 +38,14 @@ DRIVER = {
   verification_status = "experimental",
   verification_notes = "Community-contributed local-API driver; not yet verified against live hardware on a 42w site.",
   connection_defaults = {
+    host = "",
     port = 80,
   },
+  -- Secret config keys the wizard / Settings UI should render password
+  -- inputs for and stuff into config.<key>. Keeps Auth-Token out of
+  -- yaml-by-hand and lets the operator paste it from the Sonnen web UI
+  -- (Software-Integration → JSON API).
+  config_secrets = { "api_token" },
 }
 
 PROTOCOL = "http"

@@ -127,6 +127,9 @@
             '</label>' +
             '</fieldset>';
         }
+        // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
+        // Filled by the after() pass once /api/drivers/catalog has resolved.
+        html += '<div class="drv-secrets-slot" data-driver-idx="' + idx + '"></div>';
         if (isCloudDriver) {
           var cfg = d.config || {};
           var hasPw = d.has_password === true;
@@ -166,6 +169,7 @@
     after: function (ctx) {
       var config = ctx.config;
       var bodyEl = ctx.bodyEl;
+      var escHtml = ctx.escHtml;
 
       // Driver catalog picker — fetch async, render into select.
       fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -181,6 +185,55 @@
         // catalog-driven driver kinds (e.g. "vehicle") on re-renders
         // without waiting for the fetch to resolve again.
         S.catalogByLua = byLua;
+        // Populate per-driver secret inputs (api_token, etc.) using the
+        // catalog's config_secrets list. Each input uses the standard
+        // data-path="drivers.<idx>.config.<key>" so the settings shell
+        // saves it back into config.drivers[idx].config[key] like any
+        // other form field. Empty existing values render as empty
+        // password inputs; the `has_<key>` mirror for masked-saved
+        // semantics is intentionally not modeled here — operators can
+        // re-enter the token if they need to rotate it.
+        bodyEl.querySelectorAll(".drv-secrets-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          var entry = byLua[d.lua];
+          var secrets = (entry && entry.config_secrets) || [];
+          if (secrets.length === 0) return;
+          var dcfg = d.config || {};
+          var fs = '<fieldset><legend>Secrets</legend>';
+          secrets.forEach(function (key) {
+            // Title-case, keep the raw key for the data-path attribute.
+            // BOTH go through ctx.escHtml — config_secrets ultimately
+            // comes from driver-authored Lua and a hostile/malformed
+            // key containing < or > would otherwise be parsed as
+            // markup when we innerHTML this fieldset. Same for the
+            // value-readback branch (paranoia: the masked placeholder
+            // is server-controlled, but a downstream change might
+            // make this user-controlled).
+            var label = key.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+            // Render the input EMPTY regardless of stored value — the
+            // value coming back from /api/config is the masked
+            // placeholder anyway (api masks driver config_secrets on
+            // GET), but inserting any value into a `value=""` attribute
+            // exposes it in the DOM/HTML. Mirror the cloud-password
+            // pattern instead: empty input + saved/missing badge.
+            var saved = typeof dcfg[key] === "string" && dcfg[key] !== "";
+            var badge = saved
+              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+            var placeholder = saved
+              ? "•••••••• (leave empty to keep)"
+              : "Paste from device web UI";
+            fs +=
+              '<label>' + escHtml(label) + ' ' + badge + '</label>' +
+              '<input type="password" autocomplete="off" ' +
+              'data-path="drivers.' + dIdx + '.config.' + escHtml(key) + '" ' +
+              'value="" placeholder="' + escHtml(placeholder) + '">';
+          });
+          fs += '</fieldset>';
+          slot.innerHTML = fs;
+        });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
           var lua = lbl.getAttribute("data-drv-lua");
           var entry = lua && byLua[lua];
