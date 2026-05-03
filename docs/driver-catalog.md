@@ -6,8 +6,8 @@ in `drivers/` that follows the v2.1 host API (see
 
 ## At a glance
 
-19 drivers covering 16 manufacturers across 3 protocols (Modbus TCP,
-MQTT, HTTP/REST). Read-only: 12. With control: 7.
+22 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 13. With control: 9.
 
 Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
@@ -19,6 +19,8 @@ back to the device; read-only drivers only emit telemetry.
 
 | Driver | Manufacturer | Protocol | Capabilities | Control | Tested models | File |
 |---|---|---|---|---|---|---|
+| CTEK Chargestorm (API v1) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek.lua` |
+| CTEK Chargestorm (API v2) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek_v2.lua` |
 | Deye hybrid inverter | Deye | Modbus | battery, meter, pv | yes | SUN-5K-SG03LP1-EU, SUN-8K-SG04LP3-EU, SUN-12K-SG04LP3-EU | `drivers/deye.lua` |
 | Easee Cloud | Easee | HTTP | ev | yes | Home, Charge | `drivers/easee_cloud.lua` |
 | Eastron SDM630 / SDM72D-M | Eastron | Modbus | meter | no | SDM630-Modbus, SDM72D-M | `drivers/sdm630.lua` |
