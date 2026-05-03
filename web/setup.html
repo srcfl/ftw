@@ -659,6 +659,10 @@
       <input type="number" id="drv-battery-kwh" value="10" min="0" step="0.1">
     </div>
 
+    <!-- Dynamic per-driver secret inputs (Auth-Token etc.). prefillDriverConfig
+         populates this from the catalog entry's config_secrets list. -->
+    <div id="drv-secrets-group"></div>
+
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(4)">Back</button>
       <button class="btn-primary" onclick="saveDriver()">Add device</button>

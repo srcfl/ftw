@@ -127,6 +127,9 @@
             '</label>' +
             '</fieldset>';
         }
+        // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
+        // Filled by the after() pass once /api/drivers/catalog has resolved.
+        html += '<div class="drv-secrets-slot" data-driver-idx="' + idx + '"></div>';
         if (isCloudDriver) {
           var cfg = d.config || {};
           var hasPw = d.has_password === true;
@@ -181,6 +184,36 @@
         // catalog-driven driver kinds (e.g. "vehicle") on re-renders
         // without waiting for the fetch to resolve again.
         S.catalogByLua = byLua;
+        // Populate per-driver secret inputs (api_token, etc.) using the
+        // catalog's config_secrets list. Each input uses the standard
+        // data-path="drivers.<idx>.config.<key>" so the settings shell
+        // saves it back into config.drivers[idx].config[key] like any
+        // other form field. Empty existing values render as empty
+        // password inputs; the `has_<key>` mirror for masked-saved
+        // semantics is intentionally not modeled here — operators can
+        // re-enter the token if they need to rotate it.
+        bodyEl.querySelectorAll(".drv-secrets-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          var entry = byLua[d.lua];
+          var secrets = (entry && entry.config_secrets) || [];
+          if (secrets.length === 0) return;
+          var dcfg = d.config || {};
+          var fs = '<fieldset><legend>Secrets</legend>';
+          secrets.forEach(function (key) {
+            var label = key.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+            var v = dcfg[key] || "";
+            fs +=
+              '<label>' + label + '</label>' +
+              '<input type="password" autocomplete="off" ' +
+              'data-path="drivers.' + dIdx + '.config.' + key + '" ' +
+              'value="' + (v ? v.replace(/"/g, "&quot;") : "") + '" ' +
+              'placeholder="Paste from device web UI">';
+          });
+          fs += '</fieldset>';
+          slot.innerHTML = fs;
+        });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
           var lua = lbl.getAttribute("data-drv-lua");
           var entry = lua && byLua[lua];
