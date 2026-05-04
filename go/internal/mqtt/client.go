@@ -19,9 +19,8 @@ type Capability struct {
 	mu       sync.Mutex
 	incoming []drivers.MQTTMessage
 
-	// subsMu guards the subscription set. Held briefly during Subscribe
-	// and during the OnConnect re-subscribe walk; never held across a
-	// network call other than the SUBSCRIBE itself.
+	// subsMu guards the subscription set. Released before any
+	// network call (SUBSCRIBE) — never held across I/O.
 	subsMu sync.Mutex
 	subs   map[string]struct{}
 }
@@ -38,10 +37,14 @@ type Capability struct {
 // resumes (real incident: Pixii MQTT going silent at dusk after a broker
 // blip, recovered only by 42W-side driver restart).
 //
-// Fix: remember every Subscribe() in cap.subs, and re-issue them all
-// from an OnConnect handler. OnConnect fires on first connect AND every
-// reconnect, so initial subscription still flows through this path
-// (Subscribe records, OnConnect issues), keeping one source of truth.
+// Fix: every Subscribe() records the topic in cap.subs and issues
+// SUBSCRIBE directly (so the initial flow from driver_init is
+// unchanged). The OnConnectHandler replays the recorded set on every
+// (re)connect — on first connect cap.subs is still empty (driver_init
+// hasn't run yet), which is fine: the replay is a no-op and Subscribe
+// will set up the bindings in a moment. From the second connect onward
+// the replay is what restores the subscription set the broker just
+// dropped.
 func Dial(host string, port int, username, password, clientID string) (*Capability, error) {
 	cap := &Capability{
 		subs: make(map[string]struct{}),
@@ -86,11 +89,21 @@ func (c *Capability) Close() error {
 
 // replaySubscriptions issues a SUBSCRIBE for every topic recorded in
 // cap.subs against the given paho client. Called from OnConnectHandler
-// on first connect AND every reconnect — that's the whole reason the
-// bookkeeping exists. Default CleanSession=true means the broker drops
-// the session on disconnect; without this, an evening network blip
-// silently leaves the driver subscribed to nothing while the TCP link
-// looks healthy.
+// on every (re)connect; on the very first connect cap.subs is empty
+// because driver_init hasn't run yet — the loop becomes a no-op and
+// Subscribe handles initial bindings directly. From the second connect
+// onward this is what restores the dropped subscription set.
+//
+// Default CleanSession=true means the broker drops the session on
+// disconnect; without this an evening network blip silently leaves the
+// driver subscribed to nothing while the TCP link looks healthy.
+//
+// Failure handling: a SUBSCRIBE token can either complete with an error
+// (broker rejected) or time out without completing (broker hung,
+// network slow). Both leave the topic unbound; both must surface so
+// operators see them during incident response. The summary line at the
+// end reports total + failure counts and downgrades from "restored" to
+// "partially restored" when any subscription failed.
 func (c *Capability) replaySubscriptions(client paho.Client, clientID string) {
 	c.subsMu.Lock()
 	topics := make([]string, 0, len(c.subs))
@@ -98,16 +111,30 @@ func (c *Capability) replaySubscriptions(client paho.Client, clientID string) {
 		topics = append(topics, t)
 	}
 	c.subsMu.Unlock()
+	if len(topics) == 0 {
+		return
+	}
+	failed := 0
 	for _, t := range topics {
 		tok := client.Subscribe(t, 0, nil)
-		if tok.WaitTimeout(5*time.Second) && tok.Error() != nil {
-			// A failed re-subscribe leaves the topic unbound until
-			// the next reconnect; the driver's poll loop will see
-			// no messages, watchdog will flip it offline.
-			slog.Warn("mqtt: resubscribe failed", "topic", t, "err", tok.Error())
+		if !tok.WaitTimeout(5 * time.Second) {
+			// SUBSCRIBE didn't complete within timeout — topic is
+			// unbound until the next reconnect. The driver's poll
+			// loop will see no messages, watchdog will flip it
+			// offline.
+			slog.Warn("mqtt: resubscribe timed out", "topic", t, "client_id", clientID)
+			failed++
+			continue
+		}
+		if err := tok.Error(); err != nil {
+			slog.Warn("mqtt: resubscribe failed", "topic", t, "client_id", clientID, "err", err)
+			failed++
 		}
 	}
-	if len(topics) > 0 {
+	if failed > 0 {
+		slog.Warn("mqtt: (re)connected, partially restored subscriptions",
+			"client_id", clientID, "count", len(topics), "failed", failed)
+	} else {
 		slog.Info("mqtt: (re)connected, restored subscriptions",
 			"client_id", clientID, "count", len(topics))
 	}
