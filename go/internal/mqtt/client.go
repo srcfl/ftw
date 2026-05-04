@@ -3,6 +3,7 @@ package mqtt
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,17 +18,43 @@ type Capability struct {
 
 	mu       sync.Mutex
 	incoming []drivers.MQTTMessage
+
+	// subsMu guards the subscription set. Held briefly during Subscribe
+	// and during the OnConnect re-subscribe walk; never held across a
+	// network call other than the SUBSCRIBE itself.
+	subsMu sync.Mutex
+	subs   map[string]struct{}
 }
 
 // Dial connects to an MQTT broker and returns a Capability.
+//
+// On reconnect (paho's auto-reconnect), the broker has no record of the
+// previous session's subscriptions because we use the default
+// CleanSession=true. Without intervention, paho does NOT automatically
+// re-issue SUBSCRIBE on reconnect — the TCP link comes back but the
+// driver never receives another message, the poll loop reads an empty
+// queue forever, and the watchdog flips the driver offline. Restarting
+// the driver re-runs driver_init → host.mqtt_subscribe and traffic
+// resumes (real incident: Pixii MQTT going silent at dusk after a broker
+// blip, recovered only by 42W-side driver restart).
+//
+// Fix: remember every Subscribe() in cap.subs, and re-issue them all
+// from an OnConnect handler. OnConnect fires on first connect AND every
+// reconnect, so initial subscription still flows through this path
+// (Subscribe records, OnConnect issues), keeping one source of truth.
 func Dial(host string, port int, username, password, clientID string) (*Capability, error) {
-	cap := &Capability{}
+	cap := &Capability{
+		subs: make(map[string]struct{}),
+	}
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", host, port)).
 		SetClientID(clientID).
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(5 * time.Second).
+		SetOnConnectHandler(func(c paho.Client) {
+			cap.replaySubscriptions(c, clientID)
+		}).
 		SetDefaultPublishHandler(func(_ paho.Client, m paho.Message) {
 			cap.mu.Lock()
 			cap.incoming = append(cap.incoming, drivers.MQTTMessage{
@@ -57,8 +84,45 @@ func (c *Capability) Close() error {
 	return nil
 }
 
+// replaySubscriptions issues a SUBSCRIBE for every topic recorded in
+// cap.subs against the given paho client. Called from OnConnectHandler
+// on first connect AND every reconnect — that's the whole reason the
+// bookkeeping exists. Default CleanSession=true means the broker drops
+// the session on disconnect; without this, an evening network blip
+// silently leaves the driver subscribed to nothing while the TCP link
+// looks healthy.
+func (c *Capability) replaySubscriptions(client paho.Client, clientID string) {
+	c.subsMu.Lock()
+	topics := make([]string, 0, len(c.subs))
+	for t := range c.subs {
+		topics = append(topics, t)
+	}
+	c.subsMu.Unlock()
+	for _, t := range topics {
+		tok := client.Subscribe(t, 0, nil)
+		if tok.WaitTimeout(5*time.Second) && tok.Error() != nil {
+			// A failed re-subscribe leaves the topic unbound until
+			// the next reconnect; the driver's poll loop will see
+			// no messages, watchdog will flip it offline.
+			slog.Warn("mqtt: resubscribe failed", "topic", t, "err", tok.Error())
+		}
+	}
+	if len(topics) > 0 {
+		slog.Info("mqtt: (re)connected, restored subscriptions",
+			"client_id", clientID, "count", len(topics))
+	}
+}
+
 // Subscribe — implements drivers.MQTTCap.
+//
+// Records the topic in cap.subs so OnConnect can re-issue it after a
+// reconnect. Subscribe() is typically called once per topic from
+// driver_init, but is idempotent — repeated calls are deduped by the
+// map.
 func (c *Capability) Subscribe(topic string) error {
+	c.subsMu.Lock()
+	c.subs[topic] = struct{}{}
+	c.subsMu.Unlock()
 	tok := c.client.Subscribe(topic, 0, nil)
 	tok.WaitTimeout(5 * time.Second)
 	return tok.Error()
