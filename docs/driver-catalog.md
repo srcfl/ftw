@@ -4,6 +4,10 @@ forty-two-watts' driver library at a glance. Each driver is a Lua file
 in `drivers/` that follows the v2.1 host API (see
 [`docs/writing-a-driver.md`](writing-a-driver.md)).
 
+For the planned non-breaking move from bundled-only drivers to a
+default external device repository, see
+[`docs/device-repository.md`](device-repository.md).
+
 ## At a glance
 
 23 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
