@@ -6,8 +6,8 @@ in `drivers/` that follows the v2.1 host API (see
 
 ## At a glance
 
-22 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
-MQTT, HTTP/REST). Read-only: 13. With control: 9.
+23 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 14. With control: 9.
 
 Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
@@ -39,6 +39,7 @@ back to the device; read-only drivers only emit telemetry.
 | SolarEdge inverter (PV only) | SolarEdge | Modbus | pv | no | HD-Wave, StorEdge | `drivers/solaredge_pv.lua` |
 | SolarEdge legacy K-series (display) | SolarEdge | Modbus | pv | no | SE7K, SE10K, SE17K, SE25K | `drivers/solaredge_legacy.lua` |
 | Solis hybrid inverter | Solis | Modbus | battery, meter, pv | yes | RHI-6K-48ES-5G, S6-EH3P10K-H | `drivers/solis.lua` |
+| Solis string inverter | Solis | Modbus | pv | no | S5-GC, S6-GR1P, 3P-G4, 1P-G4 | `drivers/solis_string.lua` |
 | Sungrow SH Hybrid Inverter | Sungrow | Modbus | battery, meter, pv | yes | SH5.0RT, SH6.0RT, SH8.0RT, SH10RT | `drivers/sungrow.lua` |
 | Victron Cerbo GX / Venus GX | Victron | Modbus | battery, meter, pv | no | Cerbo GX, Venus GX | `drivers/victron.lua` |
 
