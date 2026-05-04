@@ -31,6 +31,7 @@ func TestCatalogVerificationStatus(t *testing.T) {
 		{"sourceful-zap", "beta"},
 		{"deye", "experimental"},
 		{"solis", "experimental"},
+		{"solis-string", "experimental"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
@@ -73,14 +74,14 @@ func TestCatalogProductionDriversHaveVerifier(t *testing.T) {
 // "experimental" rather than propagate an invalid label to the UI.
 func TestNormalizeVerificationStatus(t *testing.T) {
 	cases := map[string]string{
-		"production":     "production",
-		"PRODUCTION":     "production",
-		"Beta":           "beta",
-		"experimental":   "experimental",
-		"":               "experimental",
-		"  ":             "experimental",
-		"prod":           "experimental", // typo → safest default
-		"alpha":          "experimental", // non-canonical → safest default
+		"production":   "production",
+		"PRODUCTION":   "production",
+		"Beta":         "beta",
+		"experimental": "experimental",
+		"":             "experimental",
+		"  ":           "experimental",
+		"prod":         "experimental", // typo → safest default
+		"alpha":        "experimental", // non-canonical → safest default
 	}
 	for in, want := range cases {
 		if got := normalizeVerificationStatus(in); got != want {
