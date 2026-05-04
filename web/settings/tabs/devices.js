@@ -492,15 +492,30 @@
             driver.config = { ip: "", vin: "" };
           } else if (connHost) {
             driver.config = { host: connHost };
-          } else if (entryCaps.indexOf("apicreds") >= 0 && (chosen.dataset.connPort || "")) {
+		  } else if (entryCaps.indexOf("apicreds") >= 0 && (chosen.dataset.connPort || "")) {
             // Local HTTP device with HTTP Basic auth (e.g. NIBE local REST API):
             // host + username + password + an optional self-signed cert pin. The
             // backend auto-derives capabilities.http.allowed_hosts from config.host.
             driver.config = { host: "", username: "", password: "" };
-          } else if (entryCaps.indexOf("apicreds") >= 0) {
+		  } else if (entryCaps.indexOf("apicreds") >= 0) {
             // OAuth2 client_credentials drivers (e.g. MyUplink).
-            driver.config = { client_id: "", client_secret: "" };
+			  driver.config = { client_id: "", client_secret: "" };
+		  } else if (entryCaps.indexOf("meter") >= 0 ||
+                     entryCaps.indexOf("pv") >= 0 ||
+                     entryCaps.indexOf("battery") >= 0) {
+            // Local-HTTP meter / PV / battery driver without a canned
+            // hostname in connection_defaults (typical for generic
+            // ESPHome / DSMR firmwares — every install picks its own
+            // mDNS name from `name:` in the YAML, so no hard-coded
+            // default would be right). The operator types the IP or
+            // hostname into the Host/IP field; empty config is a
+            // local-HTTP signal, NOT a cloud one.
+			  driver.config = { host: "" };
           } else {
+            // Account-based cloud service (easee_cloud, etc.). HTTP
+            // capability + no host pre-fill + no meter/pv/battery
+            // capability narrows the field down enough to assume
+            // {email, password, serial} is the right shape.
             driver.config = { email: "", password: "", serial: "" };
           }
         }
