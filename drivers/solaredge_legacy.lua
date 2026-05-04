@@ -195,28 +195,31 @@ function driver_poll()
     local temp_c  = scale(host.decode_i16(reg(regs, 40103)), temp_sf)
 
     -- MPPT readings live OUTSIDE Model 103 in SolarEdge's proprietary
-    -- block (starting around 40123 / 40140 / 40160), so they need
-    -- their own reads. Pair the SF read with the value reads atomically
-    -- per pair. Failure here is non-fatal — single-string K-series
-    -- units genuinely return zeros for MPPT2 and we treat that as
-    -- correct.
-    local mppt_a_sf, mppt_v_sf = 0, 0
-    local ok_mppt_sf, mppt_sf_regs = pcall(host.modbus_read, 40123, 2, "holding")
-    if ok_mppt_sf and mppt_sf_regs then
-        mppt_a_sf = host.decode_i16(mppt_sf_regs[1])
-        mppt_v_sf = host.decode_i16(mppt_sf_regs[2])
-    end
-    local mppt1_a, mppt1_v = 0, 0
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
-    if ok_m1 and m1_regs then
-        mppt1_a = scale(m1_regs[1], mppt_a_sf)
-        mppt1_v = scale(m1_regs[2], mppt_v_sf)
-    end
-    local mppt2_a, mppt2_v = 0, 0
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
-    if ok_m2 and m2_regs then
-        mppt2_a = scale(m2_regs[1], mppt_a_sf)
-        mppt2_v = scale(m2_regs[2], mppt_v_sf)
+    -- block (40123 SFs, 40140 MPPT1 A/V, 40160 MPPT2 A/V). Read the
+    -- whole span 40123..40161 (39 regs) in ONE transaction so SF and
+    -- value come from the same Modbus snapshot — same atomicity rule
+    -- as the Model 103 block above. Without this, an SF read that
+    -- transiently returns 0 (legacy K-series firmware does this on
+    -- holding-register reads) would scale the corresponding value at
+    -- ×1 for the rest of the poll, the exact failure-vs-zero
+    -- ambiguity this PR is fixing for AC power.
+    --
+    -- Block layout: SFs at offset 1 (40123), 2 (40124); MPPT1 A/V at
+    -- offset 18-19 (40140-40141); MPPT2 A/V at offset 38-39
+    -- (40160-40161). reg_off below converts a doc address into the
+    -- 1-based block index.
+    local mppt1_a, mppt1_v, mppt2_a, mppt2_v = 0, 0, 0, 0
+    local ok_mppt, mppt_regs = pcall(host.modbus_read, 40123, 39, "holding")
+    if ok_mppt and mppt_regs and #mppt_regs >= 39 then
+        local function reg_off(addr) return mppt_regs[addr - 40123 + 1] end
+        local mppt_a_sf = host.decode_i16(reg_off(40123))
+        local mppt_v_sf = host.decode_i16(reg_off(40124))
+        mppt1_a = scale(reg_off(40140), mppt_a_sf)
+        mppt1_v = scale(reg_off(40141), mppt_v_sf)
+        -- Single-string K-series units return zeros for MPPT2; that's
+        -- the correct emit, no warning needed.
+        mppt2_a = scale(reg_off(40160), mppt_a_sf)
+        mppt2_v = scale(reg_off(40161), mppt_v_sf)
     end
 
     -- Site convention: generation is negative W.
