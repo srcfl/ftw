@@ -48,16 +48,18 @@ DRIVER = {
 
 PROTOCOL = "modbus"
 
--- Cached per-device metadata. Scale factors are factory-set constants
--- (SunSpec guarantees they never change during a session), so we read
--- them once and cache. That cuts ~6 Modbus round trips per poll.
--- However, if the first read attempt fails (returns zeros), we retry on
--- subsequent polls until all SFs are non-zero or we exhaust retries.
-local sn_read       = false
-local sunspec_ok    = nil  -- true / false / nil (= not yet probed)
-local sf_cache      = nil
-local sf_retries    = 0
-local SF_MAX_RETRIES = 5
+-- The previous version cached scale factors across polls and retried up
+-- to 5x on a per-register `read_sf()` call. That was wrong on K-series
+-- legacy firmware: those per-register reads sporadically return 0, and
+-- 0 is ALSO a valid SunSpec scale factor (×1) — so a failed read was
+-- indistinguishable from a real-but-zero SF. After 5 retries the
+-- driver would permanently latch sf.ac_power = 0 and display 1490 W
+-- as 149 W (the raw register value with no ×10 applied). Switching to
+-- the same one-shot block read the working solaredge_pv.lua uses
+-- guarantees value + SF come from the same atomic Modbus transaction
+-- and removes the failure-vs-zero ambiguity entirely.
+local sn_read    = false
+local sunspec_ok = nil  -- true / false / nil (= not yet probed)
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -80,25 +82,21 @@ local function scale(value, sf)
     return value * pow10(sf)
 end
 
-local function read_sf(addr)
-    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
-    if ok and regs then
-        return host.decode_i16(regs[1])
-    end
-    return 0
+-- Read the Model 103 block in one transaction so every value pairs
+-- atomically with its SF. 40069 is the SunSpec model header (id +
+-- length); 40069..40120 (52 regs) covers the header plus everything
+-- we care about: AC W/V/A + SFs, energy + SF, heat-sink temp + SF.
+-- Returns the raw register slice or nil on error.
+local function read_inverter_block()
+    local ok, regs = pcall(host.modbus_read, 40069, 52, "holding")
+    if not ok or not regs then return nil end
+    return regs
 end
 
--- Subset of solaredge.lua's load_scale_factors — only the inverter-side
--- factors we actually use (the meter block is omitted in v1).
-local function load_scale_factors()
-    return {
-        ac_power = read_sf(40084),
-        hz       = read_sf(40086),
-        energy   = read_sf(40095),
-        temp     = read_sf(40106),
-        mppt_a   = read_sf(40123),
-        mppt_v   = read_sf(40124),
-    }
+-- Index helper for the inverter block: doc address → 1-based block
+-- index. reg(40083) → regs[40083 - 40069 + 1] = regs[15].
+local function reg(regs, addr)
+    return regs[addr - 40069 + 1]
 end
 
 local function decode_ascii(regs, n)
@@ -173,75 +171,52 @@ function driver_poll()
         end
     end
 
-    -- ---- Scale factors (cached with retry on zero reads) ----
-    local need_sf_read = (sf_cache == nil)
-    if not need_sf_read and sf_retries < SF_MAX_RETRIES then
-        for _, v in pairs(sf_cache) do
-            if v == 0 then need_sf_read = true; break end
-        end
-    end
-    if need_sf_read then
-        local fresh = load_scale_factors()
-        if sf_cache == nil then
-            sf_cache = fresh
-        else
-            for k, v in pairs(fresh) do
-                if v ~= 0 then sf_cache[k] = v end
-            end
-        end
-        sf_retries = sf_retries + 1
-        if sf_retries >= SF_MAX_RETRIES then
-            host.log("warn", "SolarEdge-legacy: accepting scale factors after "
-                .. tostring(SF_MAX_RETRIES) .. " retries (some may be 0)")
-        end
-    end
-    local sf = sf_cache
-
-    -- ---- Inverter AC ----
-
-    -- AC power: 40083, I16
-    local ok_acw, acw_regs = pcall(host.modbus_read, 40083, 1, "holding")
-    local ac_w = 0
-    if ok_acw and acw_regs then
-        ac_w = scale(host.decode_i16(acw_regs[1]), sf.ac_power)
+    -- ---- Inverter Model 103 in one shot — value + SF are atomic ----
+    local regs = read_inverter_block()
+    if regs == nil then
+        host.log("warn", "SolarEdge-legacy: inverter block read 40069..40120 failed")
+        return 5000
     end
 
-    -- Frequency: 40085, U16
-    local ok_hz, hz_regs = pcall(host.modbus_read, 40085, 1, "holding")
-    local hz = 0
-    if ok_hz and hz_regs then
-        hz = scale(hz_regs[1], sf.hz)
-    end
+    -- AC power: 40083 I16, SF at 40084
+    local ac_w_sf = host.decode_i16(reg(regs, 40084))
+    local ac_w    = scale(host.decode_i16(reg(regs, 40083)), ac_w_sf)
 
-    -- Lifetime energy: 40093-40094, U32 BE
-    local ok_le, le_regs = pcall(host.modbus_read, 40093, 2, "holding")
-    local lifetime_wh = 0
-    if ok_le and le_regs then
-        lifetime_wh = scale(host.decode_u32_be(le_regs[1], le_regs[2]), sf.energy)
-    end
+    -- Frequency: 40085 U16, SF at 40086
+    local hz_sf = host.decode_i16(reg(regs, 40086))
+    local hz    = scale(reg(regs, 40085), hz_sf)
 
-    -- Heat-sink temperature: 40103, I16
-    local ok_temp, temp_regs = pcall(host.modbus_read, 40103, 1, "holding")
-    local temp_c = 0
-    if ok_temp and temp_regs then
-        temp_c = scale(host.decode_i16(temp_regs[1]), sf.temp)
-    end
+    -- Lifetime energy: 40093-40094 U32 BE, SF at 40095
+    local energy_sf   = host.decode_i16(reg(regs, 40095))
+    local lifetime_wh = scale(host.decode_u32_be(reg(regs, 40093), reg(regs, 40094)), energy_sf)
 
-    -- MPPT1 A/V: 40140-40141, U16 each
-    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
+    -- Heat-sink temperature: 40103 I16, SF at 40106
+    local temp_sf = host.decode_i16(reg(regs, 40106))
+    local temp_c  = scale(host.decode_i16(reg(regs, 40103)), temp_sf)
+
+    -- MPPT readings live OUTSIDE Model 103 in SolarEdge's proprietary
+    -- block (starting around 40123 / 40140 / 40160), so they need
+    -- their own reads. Pair the SF read with the value reads atomically
+    -- per pair. Failure here is non-fatal — single-string K-series
+    -- units genuinely return zeros for MPPT2 and we treat that as
+    -- correct.
+    local mppt_a_sf, mppt_v_sf = 0, 0
+    local ok_mppt_sf, mppt_sf_regs = pcall(host.modbus_read, 40123, 2, "holding")
+    if ok_mppt_sf and mppt_sf_regs then
+        mppt_a_sf = host.decode_i16(mppt_sf_regs[1])
+        mppt_v_sf = host.decode_i16(mppt_sf_regs[2])
+    end
     local mppt1_a, mppt1_v = 0, 0
+    local ok_m1, m1_regs = pcall(host.modbus_read, 40140, 2, "holding")
     if ok_m1 and m1_regs then
-        mppt1_a = scale(m1_regs[1], sf.mppt_a)
-        mppt1_v = scale(m1_regs[2], sf.mppt_v)
+        mppt1_a = scale(m1_regs[1], mppt_a_sf)
+        mppt1_v = scale(m1_regs[2], mppt_v_sf)
     end
-
-    -- MPPT2 A/V: 40160-40161, U16 each. Larger K-series have two strings;
-    -- single-string units will return zeros here, which is correct.
-    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
     local mppt2_a, mppt2_v = 0, 0
+    local ok_m2, m2_regs = pcall(host.modbus_read, 40160, 2, "holding")
     if ok_m2 and m2_regs then
-        mppt2_a = scale(m2_regs[1], sf.mppt_a)
-        mppt2_v = scale(m2_regs[2], sf.mppt_v)
+        mppt2_a = scale(m2_regs[1], mppt_a_sf)
+        mppt2_v = scale(m2_regs[2], mppt_v_sf)
     end
 
     -- Site convention: generation is negative W.
