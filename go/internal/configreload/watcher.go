@@ -160,6 +160,21 @@ func (w *Watcher) reload() {
 	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
 		w.ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
 	}
+	// Site-meter swap (operator moved `is_site_meter: true` from one
+	// driver to another, or set it for the first time). Without this
+	// the dispatcher keeps reading the old driver's meter telemetry —
+	// after the old driver stops emitting, grid_w pegs at 0 and the
+	// control loop has no idea where the actual grid boundary is. The
+	// fix is to update ctrl.SiteMeterDriver under the same lock that
+	// gates every dispatch read of it. main.go's applier callback
+	// follows up by syncing the field on mpc.Service + loadmodel.Service
+	// (those services capture site-meter at construction and need the
+	// same hot-update treatment).
+	if newCfg.SiteMeterDriver() != oldCfg.SiteMeterDriver() {
+		slog.Info("config reload: site_meter",
+			"old", oldCfg.SiteMeterDriver(), "new", newCfg.SiteMeterDriver())
+		w.ctrl.SiteMeterDriver = newCfg.SiteMeterDriver()
+	}
 	w.ctrlMu.Unlock()
 
 	// Swap global pointer

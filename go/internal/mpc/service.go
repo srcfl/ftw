@@ -243,6 +243,17 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 	}
 }
 
+// SetSiteMeter updates the grid-boundary driver used by reactive replanning.
+// Config hot reload calls this while the planner goroutine may be reading it.
+func (s *Service) SetSiteMeter(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SiteMeter = name
+	s.mu.Unlock()
+}
+
 // UpdateCapacity swaps the aggregate battery capacity + charge/discharge
 // bounds on the active planner. Called from the config-reload path when
 // the operator adds or removes a driver (or promotes/demotes an EV
@@ -534,6 +545,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
 	last := s.lastReplanAt
+	siteMeter := s.SiteMeter
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
@@ -570,8 +582,8 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	// have a site meter wired.
 	var loadW float64
 	haveLoad := false
-	if s.SiteMeter != "" && s.driverOnline(s.SiteMeter) {
-		if m := s.Tele.Get(s.SiteMeter, telemetry.DerMeter); m != nil {
+	if siteMeter != "" && s.driverOnline(siteMeter) {
+		if m := s.Tele.Get(siteMeter, telemetry.DerMeter); m != nil {
 			var batW float64
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 				if !s.driverOnline(r.Driver) {

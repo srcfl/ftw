@@ -157,6 +157,80 @@ func TestWatcherIgnoresInvalidYAML(t *testing.T) {
 	}
 }
 
+func TestWatcherUpdatesSiteMeterDriverOnReload(t *testing.T) {
+	// Operator moves `is_site_meter: true` from `ferroamp` to
+	// `zap-p1` (typical when commissioning a real meter alongside
+	// the sim). Without this change the dispatcher kept reading
+	// from the old driver — grid_w pegged at 0 once the old
+	// driver stopped emitting. The fix updates ctrl.SiteMeterDriver
+	// inside the same ctrlMu block that gates dispatch reads of it.
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfgMu sync.RWMutex
+	var ctrlMu sync.Mutex
+	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
+	if ctrl.SiteMeterDriver != "ferroamp" {
+		t.Fatalf("setup precondition: ctrl.SiteMeterDriver = %q, want ferroamp", ctrl.SiteMeterDriver)
+	}
+
+	applierCh := make(chan struct{}, 1)
+	w, err := New(cfgPath, &cfgMu, cfg, &ctrlMu, ctrl, func(_, _ *config.Config) {
+		applierCh <- struct{}{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Start()
+	defer w.Stop()
+	time.Sleep(100 * time.Millisecond) // let watcher subscribe
+
+	// Two-driver YAML with the site-meter flag moved to zap-p1.
+	updatedYAML := `
+site:
+  name: Test
+  grid_target_w: 0
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+  - name: zap-p1
+    lua: drivers/esphome_dsmr.lua
+    is_site_meter: true
+    capabilities:
+      http:
+        allowed_hosts: ["192.168.1.147"]
+    config:
+      host: "192.168.1.147"
+api:
+  port: 8080
+`
+	writeConfig(t, cfgPath, updatedYAML)
+
+	select {
+	case <-applierCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("applier not called within 3 s after config change")
+	}
+
+	ctrlMu.Lock()
+	got := ctrl.SiteMeterDriver
+	ctrlMu.Unlock()
+	if got != "zap-p1" {
+		t.Errorf("after hot reload, ctrl.SiteMeterDriver = %q, want zap-p1", got)
+	}
+}
+
 func TestWatcherStopIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
