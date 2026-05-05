@@ -144,6 +144,32 @@ func TestSamplesBeforeKeepsSameTimestampAcrossBatches(t *testing.T) {
 	}
 }
 
+func TestLoadSeriesDownsamplingIncludesLatestSample(t *testing.T) {
+	s := freshStore(t)
+	samples := make([]Sample, 0, 10)
+	for i := 0; i < 10; i++ {
+		samples = append(samples, Sample{
+			Driver: "meter",
+			Metric: "power_w",
+			TsMs:   int64(i),
+			Value:  float64(i),
+		})
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+	got, err := s.LoadSeries("meter", "power_w", 0, 9, 3)
+	if err != nil {
+		t.Fatalf("LoadSeries: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("LoadSeries returned %d points, want 3: %+v", len(got), got)
+	}
+	if got[0].TsMs != 0 || got[len(got)-1].TsMs != 9 {
+		t.Fatalf("downsampled series endpoints = %d..%d, want 0..9: %+v", got[0].TsMs, got[len(got)-1].TsMs, got)
+	}
+}
+
 func TestBatteryModelStore(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveBatteryModel("ferroamp", `{"a":0.7,"b":0.3}`); err != nil {
@@ -206,6 +232,10 @@ func TestHistoryDownsampling(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(pts) != 10 {
 		t.Errorf("expected 10 downsampled points, got %d", len(pts))
+	}
+	if pts[0].TsMs != now || pts[len(pts)-1].TsMs != now+99 {
+		t.Errorf("downsampled history endpoints = %d..%d, want %d..%d",
+			pts[0].TsMs, pts[len(pts)-1].TsMs, now, now+99)
 	}
 }
 

@@ -174,11 +174,12 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 	}
 	if err := rows.Err(); err != nil { return out, err }
 	if maxPoints > 0 && len(out) > maxPoints {
-		step := float64(len(out)) / float64(maxPoints)
+		if maxPoints == 1 {
+			return []Sample{out[len(out)-1]}, nil
+		}
 		ds := make([]Sample, 0, maxPoints)
 		for i := 0; i < maxPoints; i++ {
-			idx := int(float64(i) * step)
-			if idx >= len(out) { idx = len(out) - 1 }
+			idx := i * (len(out) - 1) / (maxPoints - 1)
 			ds = append(ds, out[idx])
 		}
 		return ds, nil
