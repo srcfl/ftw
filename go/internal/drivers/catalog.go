@@ -14,7 +14,7 @@ import (
 // directory. Populated from the DRIVER={…} table each .lua file declares
 // at the top. Missing fields are left empty.
 type CatalogEntry struct {
-	Path               string         `json:"path"`          // relative to config dir
+	Path               string         `json:"path"`          // portable config lua path
 	Filename           string         `json:"filename"`      // e.g. "ferroamp.lua"
 	ID                 string         `json:"id"`
 	Name               string         `json:"name"`
@@ -70,7 +70,7 @@ func LoadCatalog(dir string) ([]CatalogEntry, error) {
 			return nil // skip malformed
 		}
 		rel, _ := filepath.Rel(dir, path)
-		entry.Path = filepath.Join(filepath.Base(dir), rel)
+		entry.Path = filepath.ToSlash(filepath.Join("drivers", rel))
 		entry.Filename = filepath.Base(path)
 		out = append(out, entry)
 		return nil
