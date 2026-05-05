@@ -91,7 +91,7 @@ type ChargerView struct {
 // connection callbacks, not part of CoreHandler.
 func (h *Handler) OnConnect(id string) {
 	slog.Info("OCPP charger connected", "charger", id)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 }
 
 func (h *Handler) OnDisconnect(id string) {
@@ -115,7 +115,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 		"vendor", req.ChargePointVendor,
 		"model", req.ChargePointModel,
 		"fw", req.FirmwareVersion)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,
@@ -124,7 +124,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 }
 
 func (h *Handler) OnHeartbeat(id string, _ *core.HeartbeatRequest) (*core.HeartbeatConfirmation, error) {
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewHeartbeatConfirmation(types.NewDateTime(time.Now())), nil
 }
 
@@ -174,7 +174,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 		"charger", id, "connector", req.ConnectorId, "status", req.Status)
 
 	h.pushReading(id, s)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewStatusNotificationConfirmation(), nil
 }
 
@@ -211,7 +211,7 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 	h.mu.Unlock()
 
 	h.pushReading(id, s)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewMeterValuesConfirmation(), nil
 }
 
@@ -230,7 +230,7 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 	slog.Info("OCPP transaction started",
 		"charger", id, "txid", txID, "tag", req.IdTag, "meter_start_wh", req.MeterStart)
 	h.pushReading(id, s)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewStartTransactionConfirmation(
 		types.NewIdTagInfo(types.AuthorizationStatusAccepted),
 		txID,
@@ -252,7 +252,7 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 		"session_wh", sessionWh, "reason", req.Reason)
 	h.pushReading(id, s)
 	h.tel.EmitMetric(id, "ev_session_wh", sessionWh)
-	h.tel.DriverHealthMut(id).RecordSuccess()
+	h.tel.RecordDriverSuccess(id)
 	return core.NewStopTransactionConfirmation(), nil
 }
 

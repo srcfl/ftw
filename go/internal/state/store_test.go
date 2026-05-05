@@ -18,6 +18,49 @@ func freshStore(t *testing.T) *Store {
 	return s
 }
 
+func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := Open(filepath.Join(dir, "one.db"))
+	if err != nil { t.Fatal(err) }
+	if err := s1.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 1, Value: 10}}); err != nil {
+		t.Fatalf("record first store: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	secondPath := filepath.Join(dir, "two.db")
+	s2, err := Open(secondPath)
+	if err != nil { t.Fatal(err) }
+	if err := s2.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 2, Value: 20}}); err != nil {
+		t.Fatalf("record second store: %v", err)
+	}
+	var driverRows, metricRows int
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&driverRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metricRows); err != nil {
+		t.Fatal(err)
+	}
+	if driverRows != 1 || metricRows != 1 {
+		t.Fatalf("second store intern rows: drivers=%d metrics=%d, want 1/1", driverRows, metricRows)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatalf("close second store: %v", err)
+	}
+
+	reopened, err := Open(secondPath)
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(func() { reopened.Close() })
+	series, err := reopened.LoadSeries("driver", "metric_w", 0, 10, 0)
+	if err != nil {
+		t.Fatalf("load reopened series: %v", err)
+	}
+	if len(series) != 1 || series[0].TsMs != 2 || series[0].Value != 20 {
+		t.Fatalf("reopened series = %+v, want one persisted sample", series)
+	}
+}
+
 func TestConfigRoundtrip(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveConfig("mode", "self_consumption"); err != nil {
@@ -65,6 +108,39 @@ func TestEventsRecorded(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(events) < 1 {
 		t.Errorf("expected ≥1 events, got %d", len(events))
+	}
+}
+
+func TestSamplesBeforeKeepsSameTimestampAcrossBatches(t *testing.T) {
+	s := freshStore(t)
+	samples := []Sample{
+		{Driver: "a", Metric: "power_w", TsMs: 10, Value: 1},
+		{Driver: "b", Metric: "power_w", TsMs: 10, Value: 2},
+		{Driver: "c", Metric: "power_w", TsMs: 10, Value: 3},
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	var got []Sample
+	err := s.SamplesBefore(context.Background(), 11, 2, func(batch []Sample) error {
+		got = append(got, batch...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SamplesBefore: %v", err)
+	}
+	if len(got) != len(samples) {
+		t.Fatalf("SamplesBefore returned %d samples, want %d: %+v", len(got), len(samples), got)
+	}
+	seen := map[string]bool{}
+	for _, sm := range got {
+		seen[sm.Driver] = true
+	}
+	for _, driver := range []string{"a", "b", "c"} {
+		if !seen[driver] {
+			t.Fatalf("SamplesBefore skipped driver %q from shared timestamp batch: %+v", driver, got)
+		}
 	}
 }
 
