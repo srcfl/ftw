@@ -98,6 +98,24 @@ func TestLuaHTTPAllowlistEnforcement(t *testing.T) {
 	}
 }
 
+func TestLuaHTTPAllowlistEnforcesRedirectTargets(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`redirected`))
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	allowedHostPort := strings.TrimPrefix(redirector.URL, "http://")
+	got, errMsg := runHTTPTestDriver(t, []string{allowedHostPort}, redirector.URL)
+	if got {
+		t.Fatalf("redirect target outside allowed_hosts was fetched (err=%s)", errMsg)
+	}
+}
+
 func TestLuaHTTPCapabilityNotGranted(t *testing.T) {
 	tel := telemetry.NewStore()
 	env := NewHostEnv("nohttp", tel) // NO WithHTTP()
