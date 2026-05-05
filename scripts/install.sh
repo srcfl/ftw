@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # forty-two-watts one-shot installer.
 #
-# Designed for a freshly-installed Raspberry Pi OS (arm64) but works on
-# any Debian/Ubuntu-flavoured Linux with curl + sudo.
+# Supported environments:
+#   - Raspberry Pi OS (arm64)
+#   - Debian / Ubuntu amd64 (bare-metal or VM)
+#   - LXC containers with Docker pre-installed (e.g. Proxmox community-scripts
+#     Docker LXC — https://community-scripts.github.io/ProxmoxVE/)
+#   - Any Debian/Ubuntu-flavoured Linux with curl + sudo
+#
+# The pre-built GHCR image is multi-arch (linux/amd64 + linux/arm64), so the
+# right variant is pulled automatically for both Pi and x86 hosts.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
@@ -10,7 +17,7 @@
 # What this does:
 #   1. Installs Docker Engine + the `docker compose` plugin via
 #      get.docker.com (skipped if Docker is already present).
-#   2. Adds your user to the `docker` group.
+#   2. Adds your user to the `docker` group (skipped when running as root).
 #   3. Creates ~/forty-two-watts/ with data/ subdir owned by the
 #      in-container ftw user (uid 100 / gid 101).
 #   4. Fetches docker-compose.yml from the repo.
@@ -33,6 +40,20 @@ IMAGE="${FTW_IMAGE:-ghcr.io/${REPO}:latest}"
 INSTALL_DIR="${FTW_DIR:-$HOME/forty-two-watts}"
 COMPOSE_URL="${FTW_COMPOSE_URL:-https://raw.githubusercontent.com/${REPO}/${BRANCH}/docker-compose.yml}"
 
+# ---- Environment detection ----
+# Use id -un rather than $USER — the latter can be unset in minimal root
+# environments (e.g. LXC containers booted without a login shell).
+CURRENT_USER="$(id -un)"
+
+# Detect LXC containers: try systemd-detect-virt first (most reliable when
+# available), then fall back to scanning /proc/1/environ (set by lxc-start).
+IN_LXC=0
+if systemd-detect-virt --container 2>/dev/null | grep -q lxc 2>/dev/null; then
+  IN_LXC=1
+elif grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+  IN_LXC=1
+fi
+
 # Banner
 cat <<'BANNER'
 
@@ -42,6 +63,12 @@ cat <<'BANNER'
   └─────────────────────────────────────────────────┘
 
 BANNER
+
+_arch="$(uname -m)"
+_env_note="host (${_arch})"
+[ "$IN_LXC" = "1" ] && _env_note="LXC container (${_arch})"
+echo "  Detected environment: ${_env_note}"
+echo ""
 
 # ---- Prerequisites ----
 if ! command -v curl >/dev/null 2>&1; then
@@ -84,21 +111,33 @@ fi
 
 # uidmap (newuidmap/newgidmap) is required if the user later wants to
 # switch to rootless Docker via `dockerd-rootless-setuptool.sh install`.
-# Tiny package, harmless to have, saves a confusing second-step detour.
+# Rootless Docker rarely works inside LXC (kernel user-namespace nesting
+# constraints), so we skip this step there to avoid spurious failures.
+# On bare-metal / VMs we install it but treat failure as non-fatal.
 if ! command -v newuidmap >/dev/null 2>&1; then
-  echo "    Installing uidmap (needed for rootless Docker)..."
-  $SUDO apt-get update -qq
-  $SUDO apt-get install -y -qq uidmap
+  if [ "$IN_LXC" = "1" ]; then
+    echo "    Skipping uidmap in LXC (rootless Docker not supported in most LXC setups)."
+  else
+    echo "    Installing uidmap (needed for rootless Docker)..."
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq uidmap 2>/dev/null || \
+      echo "    WARNING: uidmap install failed — rootless Docker won't be available, continuing."
+  fi
 fi
 
 # ---- 2. Docker group ----
 echo ""
-echo "==[2/5]== Adding $USER to the docker group"
-if id -nG "$USER" 2>/dev/null | grep -qw docker; then
-  echo "    $USER is already in the docker group — skipping."
+echo "==[2/5]== Docker group"
+if [ "$(id -u)" -eq 0 ]; then
+  # Root already has access to the Docker socket; group membership doesn't
+  # apply and `usermod -aG docker root` would just produce noise.
+  echo "    Running as root — docker group not needed, skipping."
+  NEED_RELOGIN=0
+elif id -nG "$CURRENT_USER" 2>/dev/null | grep -qw docker; then
+  echo "    $CURRENT_USER is already in the docker group — skipping."
   NEED_RELOGIN=0
 else
-  $SUDO usermod -aG docker "$USER"
+  $SUDO usermod -aG docker "$CURRENT_USER"
   echo "    Done. You'll need to run 'newgrp docker' or log out + back in"
   echo "    before 'docker' works without sudo in your shell."
   NEED_RELOGIN=1
@@ -123,8 +162,8 @@ curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/docker-compose.yml"
 # to the docker group in step 2, their current shell hasn't picked it up
 # yet — `sg docker -c ...` executes under the new primary group without
 # requiring a re-login. NEED_RELOGIN from step 2 is authoritative here:
-# `id -nG "$USER"` reads /etc/group (already updated by usermod), not the
-# current process's credentials, so it can't answer this question.
+# `id -nG` reads /etc/group (already updated by usermod), not the current
+# process's credentials, so it can't answer this question.
 if [ "$(id -u)" -eq 0 ] || [ "$NEED_RELOGIN" = "0" ]; then
   run_docker() { docker "$@"; }
 else
