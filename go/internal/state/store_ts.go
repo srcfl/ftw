@@ -251,19 +251,24 @@ func (s *Store) SamplesBefore(ctx context.Context, cutoffMs int64, batchSize int
 	for n, id := range ts.metrics { mRev[id] = n }
 	ts.mu.RUnlock()
 
-	var lastTs int64 = -1
+	var lastTs, lastDriverID, lastMetricID int64
+	cursorSet := 0
 	batch := make([]Sample, 0, batchSize)
 	for {
 		rows, err := s.db.QueryContext(ctx, `SELECT driver_id, metric_id, ts_ms, value
-			FROM ts_samples WHERE ts_ms < ? AND ts_ms > ?
-			ORDER BY ts_ms ASC LIMIT ?`, cutoffMs, lastTs, batchSize)
+			FROM ts_samples
+			WHERE ts_ms < ?
+			  AND (? = 0 OR ts_ms > ? OR (ts_ms = ? AND (driver_id > ? OR (driver_id = ? AND metric_id > ?))))
+			ORDER BY ts_ms ASC, driver_id ASC, metric_id ASC
+			LIMIT ?`, cutoffMs, cursorSet, lastTs, lastTs, lastDriverID, lastDriverID, lastMetricID, batchSize)
 		if err != nil { return err }
 		batch = batch[:0]
 		for rows.Next() {
 			var dID, mID, t int64; var v float64
 			if err := rows.Scan(&dID, &mID, &t, &v); err != nil { rows.Close(); return err }
 			batch = append(batch, Sample{Driver: dRev[dID], Metric: mRev[mID], TsMs: t, Value: v})
-			lastTs = t
+			lastTs, lastDriverID, lastMetricID = t, dID, mID
+			cursorSet = 1
 		}
 		rows.Close()
 		if len(batch) == 0 { return nil }

@@ -111,6 +111,39 @@ func TestEventsRecorded(t *testing.T) {
 	}
 }
 
+func TestSamplesBeforeKeepsSameTimestampAcrossBatches(t *testing.T) {
+	s := freshStore(t)
+	samples := []Sample{
+		{Driver: "a", Metric: "power_w", TsMs: 10, Value: 1},
+		{Driver: "b", Metric: "power_w", TsMs: 10, Value: 2},
+		{Driver: "c", Metric: "power_w", TsMs: 10, Value: 3},
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	var got []Sample
+	err := s.SamplesBefore(context.Background(), 11, 2, func(batch []Sample) error {
+		got = append(got, batch...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SamplesBefore: %v", err)
+	}
+	if len(got) != len(samples) {
+		t.Fatalf("SamplesBefore returned %d samples, want %d: %+v", len(got), len(samples), got)
+	}
+	seen := map[string]bool{}
+	for _, sm := range got {
+		seen[sm.Driver] = true
+	}
+	for _, driver := range []string{"a", "b", "c"} {
+		if !seen[driver] {
+			t.Fatalf("SamplesBefore skipped driver %q from shared timestamp batch: %+v", driver, got)
+		}
+	}
+}
+
 func TestBatteryModelStore(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveBatteryModel("ferroamp", `{"a":0.7,"b":0.3}`); err != nil {
