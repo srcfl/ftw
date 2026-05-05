@@ -1004,5 +1004,8 @@ func relDriverPath(baseDir, p string) string {
 	if err != nil {
 		return p
 	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
 	return rel
 }

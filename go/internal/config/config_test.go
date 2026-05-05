@@ -333,6 +333,27 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSaveAtomicKeepsOutOfTreeDriverPathAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "external.lua")
+	c.Drivers[0].Lua = outside
+	if err := SaveAtomic(path, c); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Drivers[0].Lua != outside {
+		t.Fatalf("driver path after save/load = %q, want original absolute %q", loaded.Drivers[0].Lua, outside)
+	}
+}
+
 func pretty(f float64) string {
 	return fmt.Sprintf("%g", f)
 }
