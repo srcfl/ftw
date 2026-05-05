@@ -495,13 +495,12 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 
 	// Downsample by evenly picking maxPoints rows
 	if maxPoints > 0 && len(all) > maxPoints {
-		step := float64(len(all)) / float64(maxPoints)
+		if maxPoints == 1 {
+			return []HistoryPoint{all[len(all)-1]}, nil
+		}
 		out := make([]HistoryPoint, 0, maxPoints)
 		for i := 0; i < maxPoints; i++ {
-			idx := int(float64(i) * step)
-			if idx >= len(all) {
-				idx = len(all) - 1
-			}
+			idx := i * (len(all) - 1) / (maxPoints - 1)
 			out = append(out, all[idx])
 		}
 		return out, nil
