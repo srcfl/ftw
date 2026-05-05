@@ -27,7 +27,7 @@ type Sample struct {
 	Value  float64
 }
 
-// internCache holds the in-memory id↔name maps shared across all writers.
+// internCache holds the in-memory id↔name maps for one Store.
 type internCache struct {
 	mu       sync.RWMutex
 	drivers  map[string]int64
@@ -35,13 +35,16 @@ type internCache struct {
 	loaded   bool
 }
 
-var ts = &internCache{
-	drivers: make(map[string]int64),
-	metrics: make(map[string]int64),
+func newInternCache() *internCache {
+	return &internCache{
+		drivers: make(map[string]int64),
+		metrics: make(map[string]int64),
+	}
 }
 
 // hydrate loads the existing id mappings from disk. Idempotent.
 func (s *Store) hydrateIntern() error {
+	ts := s.ts
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 	if ts.loaded { return nil }
@@ -68,6 +71,7 @@ func (s *Store) hydrateIntern() error {
 // driverID returns the id for a driver name, allocating one on first use.
 // Holds the intern mutex for the lookup; safe for concurrent calls.
 func (s *Store) driverID(name string) (int64, error) {
+	ts := s.ts
 	ts.mu.RLock()
 	if id, ok := ts.drivers[name]; ok {
 		ts.mu.RUnlock()
@@ -87,6 +91,7 @@ func (s *Store) driverID(name string) (int64, error) {
 
 // metricID returns the id for a metric name, allocating one on first use.
 func (s *Store) metricID(name string) (int64, error) {
+	ts := s.ts
 	ts.mu.RLock()
 	if id, ok := ts.metrics[name]; ok {
 		ts.mu.RUnlock()
@@ -148,6 +153,7 @@ func (s *Store) RecordSamples(samples []Sample) error {
 // returned rows are evenly downsampled to at most maxPoints.
 func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]Sample, error) {
 	if err := s.hydrateIntern(); err != nil { return nil, err }
+	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
 	mID, mOK := ts.metrics[metric]
@@ -184,6 +190,7 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
 	if err := s.hydrateIntern(); err != nil { return Sample{}, err }
+	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
 	mID, mOK := ts.metrics[metric]
@@ -201,6 +208,7 @@ func (s *Store) LatestSample(driver, metric string) (Sample, error) {
 // MetricNames returns all known metric names, sorted alphabetically.
 func (s *Store) MetricNames() ([]string, error) {
 	if err := s.hydrateIntern(); err != nil { return nil, err }
+	ts := s.ts
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	out := make([]string, 0, len(ts.metrics))
@@ -211,6 +219,7 @@ func (s *Store) MetricNames() ([]string, error) {
 // DriverNames returns all known driver names, sorted alphabetically.
 func (s *Store) DriverNames() ([]string, error) {
 	if err := s.hydrateIntern(); err != nil { return nil, err }
+	ts := s.ts
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	out := make([]string, 0, len(ts.drivers))
@@ -234,6 +243,7 @@ func (s *Store) SamplesBefore(ctx context.Context, cutoffMs int64, batchSize int
 	if err := s.hydrateIntern(); err != nil { return err }
 	if batchSize <= 0 { batchSize = 10000 }
 	// Rebuild reverse maps so we can return strings.
+	ts := s.ts
 	ts.mu.RLock()
 	dRev := make(map[int64]string, len(ts.drivers))
 	for n, id := range ts.drivers { dRev[id] = n }

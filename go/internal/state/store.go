@@ -31,6 +31,7 @@ const (
 // Store is the persistent state DB (thin wrapper around *sql.DB).
 type Store struct {
 	db *sql.DB
+	ts *internCache
 }
 
 // Open initializes (or creates) the DB at path. Runs all migrations.
@@ -42,7 +43,7 @@ func Open(path string) (*Store, error) {
 	// Single connection — SQLite doesn't benefit from pooling
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, ts: newInternCache()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
