@@ -276,32 +276,30 @@ function driver_poll()
         l3_w = scale(host.decode_i16(lpw_regs[3]), meter_w_sf)
     end
 
-    -- Per-phase apparent power (VA): 40258-40260, I16 each. Diagnostic
-    -- only — the per-phase amp register reports magnitude including
-    -- reactive content, so |I| × V can exceed |W| substantially when a
-    -- phase is carrying mostly reactive current. Emitting VA + VAR per
-    -- phase to the TS DB lets us check whether `√(P²+Q²) ≈ V×I` (real
-    -- reactive load) or whether the relationship doesn't close (register
-    -- semantics mismatch — would mean the amp register is something
-    -- other than RMS line current).
-    local ok_lva, lva_regs = pcall(host.modbus_read, 40258, 3, "holding")
-    local l1_va, l2_va, l3_va = 0, 0, 0
-    if ok_lva and lva_regs then
-        l1_va = scale(host.decode_i16(lva_regs[1]), meter_va_sf)
-        l2_va = scale(host.decode_i16(lva_regs[2]), meter_va_sf)
-        l3_va = scale(host.decode_i16(lva_regs[3]), meter_va_sf)
+    -- Reactive-power diagnostics: total VA and total VAR (model 213
+    -- offsets 23 + 28 → 40257 / 40262, both I16). Per-phase variants
+    -- (offsets 24-26 / 29-31) are the SunSpec "not implemented" sentinel
+    -- 0x8000 on Pixii — confirmed live 2026-05-06 — so we don't bother
+    -- reading them. Total registers usually ARE populated.
+    --
+    -- Sentinel-aware: SunSpec uses 0x8000 (= -32768 i16) for "register
+    -- not implemented". Filter before emit so the TS DB doesn't get
+    -- polluted with constant `-32768 × 10^sf` rows that look like real
+    -- measurements.
+    local function i16_present(reg)
+        return reg ~= 0x8000
     end
-
-    -- Per-phase reactive power (VAR): 40263-40265, I16 each. Signed —
-    -- positive convention is inductive (current lags voltage), negative
-    -- is capacitive. Whatever convention Pixii uses, the magnitude is
-    -- what matters for the diagnostic.
-    local ok_lvar, lvar_regs = pcall(host.modbus_read, 40263, 3, "holding")
-    local l1_var, l2_var, l3_var = 0, 0, 0
-    if ok_lvar and lvar_regs then
-        l1_var = scale(host.decode_i16(lvar_regs[1]), meter_var_sf)
-        l2_var = scale(host.decode_i16(lvar_regs[2]), meter_var_sf)
-        l3_var = scale(host.decode_i16(lvar_regs[3]), meter_var_sf)
+    local ok_va, va_regs = pcall(host.modbus_read, 40257, 1, "holding")
+    local meter_va, meter_va_ok = 0, false
+    if ok_va and va_regs and i16_present(va_regs[1]) then
+        meter_va = scale(host.decode_i16(va_regs[1]), meter_va_sf)
+        meter_va_ok = true
+    end
+    local ok_var, var_regs = pcall(host.modbus_read, 40262, 1, "holding")
+    local meter_var, meter_var_ok = 0, false
+    if ok_var and var_regs and i16_present(var_regs[1]) then
+        meter_var = scale(host.decode_i16(var_regs[1]), meter_var_sf)
+        meter_var_ok = true
     end
 
     -- Compose signed per-phase current = sign(power) × |amperage|.
@@ -359,12 +357,8 @@ function driver_poll()
     host.emit_metric("meter_l1_a", l1_a)
     host.emit_metric("meter_l2_a", l2_a)
     host.emit_metric("meter_l3_a", l3_a)
-    host.emit_metric("meter_l1_va",  l1_va)
-    host.emit_metric("meter_l2_va",  l2_va)
-    host.emit_metric("meter_l3_va",  l3_va)
-    host.emit_metric("meter_l1_var", l1_var)
-    host.emit_metric("meter_l2_var", l2_var)
-    host.emit_metric("meter_l3_var", l3_var)
+    if meter_va_ok  then host.emit_metric("meter_va",  meter_va)  end
+    if meter_var_ok then host.emit_metric("meter_var", meter_var) end
     host.emit_metric("grid_hz",    meter_hz)
 
     return 5000
