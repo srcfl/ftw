@@ -185,7 +185,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	// data the operator told us to ignore.
 	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 {
 		if h.Telemetry != nil {
-			h.Telemetry.DriverHealthMut(h.DriverName).RecordSuccess()
+			h.Telemetry.RecordDriverSuccess(h.DriverName)
 		}
 		return nil
 	}
@@ -194,7 +194,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
-		h.Telemetry.DriverHealthMut(h.DriverName).RecordSuccess()
+		h.Telemetry.RecordDriverSuccess(h.DriverName)
 	}
 	return nil
 }

@@ -380,22 +380,52 @@ func (s *Store) IsStale(driver string, t DerType, timeout time.Duration) bool {
 	return time.Since(r.UpdatedAt) > timeout
 }
 
-// DriverHealth returns the health record for a driver (or nil if unknown).
+// DriverHealth returns a snapshot of the health record for a driver
+// (or nil if unknown). Mutations must go through Store methods or
+// DriverHealthMut in single-threaded test setup.
 func (s *Store) DriverHealth(name string) *DriverHealth {
 	s.mu.RLock(); defer s.mu.RUnlock()
-	return s.health[name]
+	h := s.health[name]
+	if h == nil { return nil }
+	cp := *h
+	return &cp
 }
 
 // DriverHealthMut returns the (mutable) health record, creating if missing.
-// Holds no lock after return — callers shouldn't share the pointer across goroutines.
+// Holds no lock after return — callers must not share the pointer across
+// goroutines. Runtime code should use the Store RecordDriver* helpers.
 func (s *Store) DriverHealthMut(name string) *DriverHealth {
 	s.mu.Lock(); defer s.mu.Unlock()
+	return s.driverHealthLocked(name)
+}
+
+func (s *Store) driverHealthLocked(name string) *DriverHealth {
 	h, ok := s.health[name]
 	if !ok {
 		h = &DriverHealth{Name: name}
 		s.health[name] = h
 	}
 	return h
+}
+
+func (s *Store) EnsureDriverHealth(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name)
+}
+
+func (s *Store) RecordDriverSuccess(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordSuccess()
+}
+
+func (s *Store) RecordDriverTick(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordTick()
+}
+
+func (s *Store) RecordDriverError(name, err string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordError(err)
 }
 
 // Remove drops all in-memory state for a driver: readings, Kalman

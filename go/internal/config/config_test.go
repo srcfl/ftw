@@ -230,6 +230,37 @@ api: { port: 8080 }
 	}
 }
 
+func TestRejectsNegativeSiteControlValues(t *testing.T) {
+	cases := []struct {
+		field string
+		value string
+	}{
+		{"control_interval_s", "-1"},
+		{"grid_tolerance_w", "-1"},
+		{"watchdog_timeout_s", "-1"},
+		{"gain", "-0.1"},
+		{"slew_rate_w", "-500"},
+		{"min_dispatch_interval_s", "-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+site: { name: x, %s: %s }
+fuse: { max_amps: 16 }
+drivers:
+  - name: a
+    lua: a.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`, tc.field, tc.value)
+			if _, err := Parse([]byte(yaml), "."); err == nil {
+				t.Fatalf("expected validation error for site.%s=%s", tc.field, tc.value)
+			}
+		})
+	}
+}
+
 func TestAllOptionalSectionsParse(t *testing.T) {
 	yaml := `
 site: { name: Full }
@@ -299,6 +330,27 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 	if c2.Site.Name != c.Site.Name {
 		t.Errorf("roundtrip site.name: got %q", c2.Site.Name)
+	}
+}
+
+func TestSaveAtomicKeepsOutOfTreeDriverPathAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "external.lua")
+	c.Drivers[0].Lua = outside
+	if err := SaveAtomic(path, c); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Drivers[0].Lua != outside {
+		t.Fatalf("driver path after save/load = %q, want original absolute %q", loaded.Drivers[0].Lua, outside)
 	}
 }
 

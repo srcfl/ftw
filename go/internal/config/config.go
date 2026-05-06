@@ -851,8 +851,26 @@ func (c *Config) Validate() error {
 		return errors.New("at least one driver must be is_site_meter: true")
 	}
 
+	if c.Site.ControlIntervalS < 0 {
+		return errors.New("site.control_interval_s must be >= 0")
+	}
+	if c.Site.GridToleranceW < 0 {
+		return errors.New("site.grid_tolerance_w must be >= 0")
+	}
+	if c.Site.WatchdogTimeoutS < 0 {
+		return errors.New("site.watchdog_timeout_s must be >= 0")
+	}
 	if c.Site.SmoothingAlpha <= 0 || c.Site.SmoothingAlpha > 1 {
 		return errors.New("site.smoothing_alpha must be in (0, 1]")
+	}
+	if c.Site.Gain < 0 {
+		return errors.New("site.gain must be >= 0")
+	}
+	if c.Site.SlewRateW < 0 {
+		return errors.New("site.slew_rate_w must be >= 0")
+	}
+	if c.Site.MinDispatchIntervalS < 0 {
+		return errors.New("site.min_dispatch_interval_s must be >= 0")
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
@@ -984,6 +1002,9 @@ func relDriverPath(baseDir, p string) string {
 	}
 	rel, err := filepath.Rel(baseDir, p)
 	if err != nil {
+		return p
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return p
 	}
 	return rel

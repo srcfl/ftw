@@ -161,22 +161,7 @@ func main() {
 	tel := telemetry.NewStore()
 
 	// ---- Control state ----
-	ctrl := control.NewState(cfg.Site.GridTargetW, cfg.Site.GridToleranceW, cfg.SiteMeterDriver())
-	ctrl.SlewRateW = cfg.Site.SlewRateW
-	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
-	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
-	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
-	ctrl.DriverLimits = driverLimitsFrom(cfg.Drivers, cfg.Batteries)
-	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
-	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
-	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
-	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
-	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
-	ctrl.SiteFusePhases = cfg.Fuse.Phases
-	// EffectiveSafetyMarginA distinguishes nil ("unset, use default")
-	// from explicit 0 ("operator chose to disable"). The earlier
-	// `<= 0 → default` shortcut clobbered the disable case.
-	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
+	ctrl := newControlStateFromConfig(cfg)
 	// Restore persisted mode + target if present. The planner variants
 	// have to be listed too — without them the strategy the user picked in
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
