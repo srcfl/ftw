@@ -293,3 +293,36 @@ func TestSumOnlineEVWEmptyStore(t *testing.T) {
 		t.Errorf("want 0, got %f", got)
 	}
 }
+
+// Regression: a Kalman residual decaying toward zero produces smoothed
+// values like 1e-77 (subnormal). Without the sub-watt floor those leak
+// into State.EVChargingW via control/dispatch.go's `evSum > 0` guard,
+// then trip the BatteryCoversEV cap (dispatch.go:730) which inverts a
+// planned discharge into a charge command, which trips applyPlanSignFloor
+// and zeros every battery target — observed live as
+// `ev_charging_w: 1.09e-77` blocking a peak-price discharge slot.
+func TestSumOnlineEVWFloorsSubWattReadings(t *testing.T) {
+	s := NewStore()
+	s.Update("easee", DerEV, 1e-77, nil, nil)
+	s.DriverHealthMut("easee").RecordSuccess()
+	if got := s.SumOnlineEVW(); got != 0 {
+		t.Errorf("subnormal EV reading must floor to 0, got %g", got)
+	}
+	// Negative trash (e.g. 1e-300 sign-flipped by another path) must
+	// also clamp — any consumer's `> 0` guard is honest only when the
+	// floor is symmetric.
+	s.Update("easee", DerEV, -0.5, nil, nil)
+	if got := s.SumOnlineEVW(); got != 0 {
+		t.Errorf("sub-watt negative EV reading must floor to 0, got %g", got)
+	}
+	// Sanity: a real charger draw on a fresh store passes through (the
+	// Kalman seeds itself from the first measurement, so first-update
+	// equality is meaningful; subsequent updates are smoothed and not
+	// useful as an exact assertion).
+	s2 := NewStore()
+	s2.Update("easee", DerEV, 3600, nil, nil)
+	s2.DriverHealthMut("easee").RecordSuccess()
+	if got := s2.SumOnlineEVW(); got != 3600 {
+		t.Errorf("real EV reading must pass through, got %g", got)
+	}
+}

@@ -3,6 +3,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -328,6 +329,16 @@ func (s *Store) ReadingsByType(t DerType) []*DerReading {
 // Offline drivers (stale telemetry, watchdog tripped) are skipped so a
 // dangling 3.6 kW last-known reading can't sneak into load or grid
 // accounting after the driver has actually stopped reporting.
+//
+// Sub-watt floor: when the Kalman residual decays toward zero (driver
+// reports a real 0 W), the smoothed value asymptotes to denormals like
+// 1e-77. Those leak through any `> 0` guard and corrupt downstream
+// arithmetic — most acutely the BatteryCoversEV cap in control/dispatch.go,
+// which on a non-zero EVChargingW flips a planned discharge target into
+// a charge command and trips applyPlanSignFloor for the whole tick.
+// Floor at 1 W: real EV chargers draw kW or zero; nothing in between
+// matters here, and forcing exact 0 keeps every consumer's `> 0` guard
+// honest.
 func (s *Store) SumOnlineEVW() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -341,6 +352,9 @@ func (s *Store) SumOnlineEVW() float64 {
 			continue
 		}
 		sum += r.SmoothedW
+	}
+	if math.Abs(sum) < 1.0 {
+		return 0
 	}
 	return sum
 }
