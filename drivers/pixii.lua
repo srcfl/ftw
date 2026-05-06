@@ -142,6 +142,8 @@ function driver_poll()
     local meter_v_sf     = read_sf(40249)
     local meter_hz_sf    = read_sf(40251)
     local meter_w_sf     = read_sf(40256)
+    local meter_va_sf    = read_sf(40261) -- SunSpec model 213 offset 27
+    local meter_var_sf   = read_sf(40266) -- SunSpec model 213 offset 32
     local meter_energy_sf = read_sf(40288)
 
     -- ---- Battery Values ----
@@ -274,6 +276,34 @@ function driver_poll()
         l3_w = scale(host.decode_i16(lpw_regs[3]), meter_w_sf)
     end
 
+    -- Per-phase apparent power (VA): 40258-40260, I16 each. Diagnostic
+    -- only — the per-phase amp register reports magnitude including
+    -- reactive content, so |I| × V can exceed |W| substantially when a
+    -- phase is carrying mostly reactive current. Emitting VA + VAR per
+    -- phase to the TS DB lets us check whether `√(P²+Q²) ≈ V×I` (real
+    -- reactive load) or whether the relationship doesn't close (register
+    -- semantics mismatch — would mean the amp register is something
+    -- other than RMS line current).
+    local ok_lva, lva_regs = pcall(host.modbus_read, 40258, 3, "holding")
+    local l1_va, l2_va, l3_va = 0, 0, 0
+    if ok_lva and lva_regs then
+        l1_va = scale(host.decode_i16(lva_regs[1]), meter_va_sf)
+        l2_va = scale(host.decode_i16(lva_regs[2]), meter_va_sf)
+        l3_va = scale(host.decode_i16(lva_regs[3]), meter_va_sf)
+    end
+
+    -- Per-phase reactive power (VAR): 40263-40265, I16 each. Signed —
+    -- positive convention is inductive (current lags voltage), negative
+    -- is capacitive. Whatever convention Pixii uses, the magnitude is
+    -- what matters for the diagnostic.
+    local ok_lvar, lvar_regs = pcall(host.modbus_read, 40263, 3, "holding")
+    local l1_var, l2_var, l3_var = 0, 0, 0
+    if ok_lvar and lvar_regs then
+        l1_var = scale(host.decode_i16(lvar_regs[1]), meter_var_sf)
+        l2_var = scale(host.decode_i16(lvar_regs[2]), meter_var_sf)
+        l3_var = scale(host.decode_i16(lvar_regs[3]), meter_var_sf)
+    end
+
     -- Compose signed per-phase current = sign(power) × |amperage|.
     -- A small dead-band around 0 W avoids flipping the sign when a
     -- near-zero phase reads as +0.4 W vs -0.4 W between polls. With
@@ -329,6 +359,12 @@ function driver_poll()
     host.emit_metric("meter_l1_a", l1_a)
     host.emit_metric("meter_l2_a", l2_a)
     host.emit_metric("meter_l3_a", l3_a)
+    host.emit_metric("meter_l1_va",  l1_va)
+    host.emit_metric("meter_l2_va",  l2_va)
+    host.emit_metric("meter_l3_va",  l3_va)
+    host.emit_metric("meter_l1_var", l1_var)
+    host.emit_metric("meter_l2_var", l2_var)
+    host.emit_metric("meter_l3_var", l3_var)
     host.emit_metric("grid_hz",    meter_hz)
 
     return 5000
