@@ -688,7 +688,15 @@ func (s *Server) driverSecretKeys() map[string][]string {
 		if len(e.ConfigSecrets) == 0 {
 			continue
 		}
-		out[e.Path] = e.ConfigSecrets
+		path := filepath.ToSlash(e.Path)
+		out[path] = e.ConfigSecrets
+		base := filepath.ToSlash(filepath.Base(dir))
+		if rel, ok := strings.CutPrefix(path, base+"/"); ok {
+			// Config round-trips paths resolved via -drivers as
+			// "drivers/<rel>" regardless of the actual directory name.
+			// Keep catalog secret matching on that portable alias too.
+			out[filepath.ToSlash(filepath.Join("drivers", rel))] = e.ConfigSecrets
+		}
 	}
 	return out
 }

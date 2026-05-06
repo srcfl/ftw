@@ -164,7 +164,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	// arrived (which can be 30+ s for slow telemetry topics), and
 	// mis-presented an alive-but-waiting driver as a failed one.
 	if r.tel != nil {
-		r.tel.DriverHealthMut(cfg.Name)
+		r.tel.EnsureDriverHealth(cfg.Name)
 	}
 	go r.runLoop(rd)
 	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
@@ -210,7 +210,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		case <-timer.C:
 			if _, err := rd.driver.Poll(ctx); err != nil {
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
-				r.tel.DriverHealthMut(rd.cfg.Name).RecordError(err.Error())
+				r.tel.RecordDriverError(rd.cfg.Name, err.Error())
 			} else if r.tel != nil {
 				// Bump TickCount so the loop is visibly alive in
 				// /api/status, but DON'T touch LastSuccess — that
@@ -220,7 +220,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				// stale cache after upstream death) needs to surface
 				// as stale to the watchdog; otherwise a dead ferroamp
 				// re-stamps LastSuccess every tick from cached values.
-				r.tel.DriverHealthMut(rd.cfg.Name).RecordTick()
+				r.tel.RecordDriverTick(rd.cfg.Name)
 			}
 			// Re-arm timer at driver's requested interval
 			interval = rd.env.PollInterval()

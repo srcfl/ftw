@@ -3,6 +3,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -328,6 +329,16 @@ func (s *Store) ReadingsByType(t DerType) []*DerReading {
 // Offline drivers (stale telemetry, watchdog tripped) are skipped so a
 // dangling 3.6 kW last-known reading can't sneak into load or grid
 // accounting after the driver has actually stopped reporting.
+//
+// Sub-watt floor: when the Kalman residual decays toward zero (driver
+// reports a real 0 W), the smoothed value asymptotes to denormals like
+// 1e-77. Those leak through any `> 0` guard and corrupt downstream
+// arithmetic — most acutely the BatteryCoversEV cap in control/dispatch.go,
+// which on a non-zero EVChargingW flips a planned discharge target into
+// a charge command and trips applyPlanSignFloor for the whole tick.
+// Floor at 1 W: real EV chargers draw kW or zero; nothing in between
+// matters here, and forcing exact 0 keeps every consumer's `> 0` guard
+// honest.
 func (s *Store) SumOnlineEVW() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -341,6 +352,9 @@ func (s *Store) SumOnlineEVW() float64 {
 			continue
 		}
 		sum += r.SmoothedW
+	}
+	if math.Abs(sum) < 1.0 {
+		return 0
 	}
 	return sum
 }
@@ -366,22 +380,52 @@ func (s *Store) IsStale(driver string, t DerType, timeout time.Duration) bool {
 	return time.Since(r.UpdatedAt) > timeout
 }
 
-// DriverHealth returns the health record for a driver (or nil if unknown).
+// DriverHealth returns a snapshot of the health record for a driver
+// (or nil if unknown). Mutations must go through Store methods or
+// DriverHealthMut in single-threaded test setup.
 func (s *Store) DriverHealth(name string) *DriverHealth {
 	s.mu.RLock(); defer s.mu.RUnlock()
-	return s.health[name]
+	h := s.health[name]
+	if h == nil { return nil }
+	cp := *h
+	return &cp
 }
 
 // DriverHealthMut returns the (mutable) health record, creating if missing.
-// Holds no lock after return — callers shouldn't share the pointer across goroutines.
+// Holds no lock after return — callers must not share the pointer across
+// goroutines. Runtime code should use the Store RecordDriver* helpers.
 func (s *Store) DriverHealthMut(name string) *DriverHealth {
 	s.mu.Lock(); defer s.mu.Unlock()
+	return s.driverHealthLocked(name)
+}
+
+func (s *Store) driverHealthLocked(name string) *DriverHealth {
 	h, ok := s.health[name]
 	if !ok {
 		h = &DriverHealth{Name: name}
 		s.health[name] = h
 	}
 	return h
+}
+
+func (s *Store) EnsureDriverHealth(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name)
+}
+
+func (s *Store) RecordDriverSuccess(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordSuccess()
+}
+
+func (s *Store) RecordDriverTick(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordTick()
+}
+
+func (s *Store) RecordDriverError(name, err string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordError(err)
 }
 
 // Remove drops all in-memory state for a driver: readings, Kalman

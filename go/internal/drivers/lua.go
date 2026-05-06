@@ -437,8 +437,6 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
-	httpClient := &net_http.Client{Timeout: 15 * time.Second}
-
 	// hostAllowed checks the URL's host component against the
 	// per-driver allowlist. Empty allowlist = any host (legacy
 	// behaviour). Matched case-insensitively.
@@ -496,6 +494,19 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			}
 		}
 		return false, fmt.Sprintf("host %q (port %s) not in allowed_hosts", host, port)
+	}
+
+	httpClient := &net_http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(req *net_http.Request, via []*net_http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if ok, reason := hostAllowed(req.URL.String()); !ok {
+				return fmt.Errorf("redirect blocked: %s", reason)
+			}
+			return nil
+		},
 	}
 
 	applyHeaders := func(req *net_http.Request, L *lua.LState, argIdx int) {
@@ -716,4 +727,3 @@ func luaToGo(v lua.LValue) any {
 	}
 	return nil
 }
-
