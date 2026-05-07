@@ -558,18 +558,19 @@
       }
     }
     if (!canvas) return;
-    canvas.addEventListener('mousemove', function (e) {
+
+    // Single render path used by both mouse-hover and touch-scrub.
+    // Returns true when a slot was matched (for the touch path so it
+    // can decide whether to keep blocking the page scroll).
+    function showTipAtClient(clientX, clientY) {
       if (!state.priceBarBounds || state.priceBarBounds.length === 0) {
-        tip.style.display = 'none';
-        if (hoverLine) hoverLine.style.display = 'none';
-        return;
+        hideTipAndLine();
+        return false;
       }
       const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
-      // Track the line on every move that lands inside the canvas,
-      // even when the cursor is between bars (the gutters between
-      // 15-minute slots) — the visual cue should follow the pointer
-      // continuously, not jump bar-to-bar.
+      const cx = clientX - rect.left;
+      // Hover line tracks the pointer continuously across the canvas,
+      // even in the gutters between 15-minute bars.
       if (hoverLine) {
         hoverLine.style.left = cx + 'px';
         hoverLine.style.display = 'block';
@@ -578,7 +579,7 @@
       for (const b of state.priceBarBounds) {
         if (cx >= b.x0 && cx <= b.x1) { found = b; break; }
       }
-      if (!found) { tip.style.display = 'none'; return; }
+      if (!found) { tip.style.display = 'none'; return false; }
       const a = found.action;
       const d = new Date(found.ts);
       const hh = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
@@ -639,15 +640,88 @@
         lines.push(`<div class="tip-reason">${a.reason}</div>`);
       }
       tip.innerHTML = lines.join('');
-      tip.style.left = (e.clientX + 14) + 'px';
-      tip.style.top = (e.clientY + 14) + 'px';
+      // Touch scrub on a phone has no cursor, so the tooltip is positioned
+      // relative to the canvas (above the touch point) rather than offset
+      // from it — fingers occlude the slot otherwise. Mouse path keeps
+      // the original "near the cursor" placement.
+      if (isTouching) {
+        const r = canvas.getBoundingClientRect();
+        const left = Math.min(window.innerWidth - 8 - 280, Math.max(8, clientX - 140));
+        const top  = Math.max(8, r.top - 8 + window.scrollY - tip.offsetHeight);
+        tip.style.left = left + 'px';
+        tip.style.top  = top  + 'px';
+      } else {
+        tip.style.left = (clientX + 14) + 'px';
+        tip.style.top  = (clientY + 14) + 'px';
+      }
       tip.style.display = 'block';
+      return true;
+    }
+
+    function hideTipAndLine() {
+      tip.style.display = 'none';
+      if (hoverLine) hoverLine.style.display = 'none';
+    }
+
+    canvas.addEventListener('mousemove', function (e) {
+      if (isTouching) return; // touch path owns the tooltip
+      showTipAtClient(e.clientX, e.clientY);
     });
     canvas.addEventListener('mouseleave', function () {
-      tip.style.display = 'none';
-      const hl = document.getElementById('plan-hover-line');
-      if (hl) hl.style.display = 'none';
+      if (!isTouching) hideTipAndLine();
     });
+
+    // Touch — long-press to enter scrub mode, then drag to walk the
+    // tooltip across slots. 250 ms threshold lets a vertical
+    // swipe-to-scroll pass through unmolested; if the finger moves
+    // > 10 px before the timer fires the press is cancelled (gesture
+    // is a scroll, not a press). Mirrors ftw-price-chart.js's
+    // implementation so phone users get the same affordance on both
+    // charts.
+    let isTouching = false;
+    let pressTimer = null;
+    let scrubbing = false;
+    let startX = 0, startY = 0;
+    const SCRUB_DELAY_MS = 250;
+    const SCRUB_TOLERANCE_PX = 10;
+    const cancelPress = () => {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    };
+    const enterScrub = () => {
+      pressTimer = null;
+      scrubbing = true;
+      if (navigator.vibrate) { try { navigator.vibrate(8); } catch (_) {} }
+      showTipAtClient(startX, startY);
+    };
+    const endTouch = () => {
+      cancelPress();
+      if (scrubbing) { scrubbing = false; hideTipAndLine(); }
+      // Defer clearing isTouching past the synthesized mouse events
+      // that fire after touchend on iOS/Android — without this the
+      // tooltip flashes back open as the page settles.
+      setTimeout(() => { isTouching = false; }, 400);
+    };
+    canvas.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) { cancelPress(); return; }
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY;
+      isTouching = true;
+      cancelPress();
+      pressTimer = setTimeout(enterScrub, SCRUB_DELAY_MS);
+    }, { passive: true });
+    canvas.addEventListener('touchmove', function (e) {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (!scrubbing) {
+        if (Math.hypot(t.clientX - startX, t.clientY - startY) > SCRUB_TOLERANCE_PX) cancelPress();
+        return;
+      }
+      // In scrub mode — block page scroll so the chart owns the gesture.
+      e.preventDefault();
+      showTipAtClient(t.clientX, t.clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchend', endTouch);
+    canvas.addEventListener('touchcancel', endTouch);
   }
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.

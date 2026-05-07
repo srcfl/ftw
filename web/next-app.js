@@ -565,13 +565,23 @@
     var gridHint = document.getElementById("grid-target-hint");
     if (gridSlider) gridSlider.disabled = plannerActive;
     if (gridSend) gridSend.disabled = plannerActive;
-    if (gridHint) gridHint.style.display = plannerActive ? "block" : "none";
+    if (gridHint) {
+      // Always show the hint inside the modal — when planner is
+      // driving, the hint *is* the explanation for the disabled
+      // control, so it takes a brighter style (card-hint-active);
+      // when the operator can edit the slider, it stays as quiet
+      // small print.
+      gridHint.style.display = "block";
+      gridHint.classList.toggle("card-hint-active", plannerActive);
+    }
     // Plan-stale banner
     if (data.plan_stale && plannerActive && gridHint) {
       gridHint.textContent = "⚠ Plan stale — falling back to self_consumption.";
       gridHint.classList.add("card-hint-warn");
     } else if (gridHint) {
-      gridHint.textContent = "Planner controls this when a strategy is active.";
+      gridHint.textContent = plannerActive
+        ? "Planner is driving — set strategy to Manual to edit grid target."
+        : "Planner controls this when a strategy is active.";
       gridHint.classList.remove("card-hint-warn");
     }
 
@@ -598,7 +608,10 @@
       peakLimitSlider.disabled = !enabled;
       const display = enabled ? peakSrcW : readLastPeakLimitW();
       peakLimitSlider.value = display;
-      peakLimitValue.textContent = formatW(display) + (enabled ? "" : " (off)");
+      // Don't decorate the value with " (off)" — the toggle is the
+      // single source of truth for enabled/disabled, doubling that
+      // signal is the kind of redundancy DESIGN.md warns about.
+      peakLimitValue.textContent = formatW(display);
       if (enabled) writeLastPeakLimitW(peakSrcW);
       if (peakLimitSend) peakLimitSend.disabled = true; // pristine
     }
@@ -1852,7 +1865,7 @@
       // straight through: post immediately on toggle change.
       const w = enabled ? Number(peakLimitSlider.value) || readLastPeakLimitW() : 0;
       if (enabled && peakLimitSlider) peakLimitSlider.value = w;
-      if (peakLimitValue) peakLimitValue.textContent = formatW(w) + (enabled ? "" : " (off)");
+      if (peakLimitValue) peakLimitValue.textContent = formatW(w);
       peakLimitEnableToggle.disabled = true;
       setPeakImportCeiling(w)
         .then(function () { peakLimitDirty = false; if (peakLimitSend) peakLimitSend.disabled = true; })

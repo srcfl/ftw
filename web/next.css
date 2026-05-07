@@ -774,6 +774,16 @@ body.ftw-next .card-hint {
   color: var(--fg-muted);
   margin-top: 8px;
 }
+body.ftw-next .card-hint.card-hint-active {
+  /* Used when the hint is the *active* explanation of a disabled
+     control (e.g. grid-target slider greyed out because the MPC
+     planner is driving). Lifts the colour from --fg-muted to --fg
+     and bumps size a hair so the reason for the disabled state
+     reads at the same weight as the control's label, not as quiet
+     small print. */
+  color: var(--fg);
+  font-size: 11px;
+}
 
 body.ftw-next .btn-send {
   background: var(--accent-e);
