@@ -201,6 +201,27 @@
   const peakLimitSlider = $("peak-limit-slider");
   const peakLimitValue = $("peak-limit-value");
   const peakLimitSend = $("peak-limit-send");
+  const peakLimitEnableToggle = $("peak-limit-enabled-toggle");
+  const peakLimitEnableLabel = $("peak-limit-enabled-label");
+  // Dirty-tracking for sliders that POST on click. The poll handler
+  // skips overwrite while dirty so the user's pending edit isn't
+  // silently reverted; the Save button mirrors `dirty` so users get a
+  // visual cue that there's work to commit. Cleared on successful POST.
+  let peakLimitDirty = false;
+  let gridTargetDirty = false;
+  // Last non-zero peak ceiling, remembered so unchecking + rechecking
+  // the enable toggle restores the previous value instead of resetting
+  // to the default. Keyed by localStorage so it survives reloads.
+  function readLastPeakLimitW() {
+    try {
+      const v = localStorage.getItem("ftw-peak-import-ceiling-w");
+      const n = v == null ? null : Number(v);
+      return Number.isFinite(n) && n > 0 ? n : 5000;
+    } catch (e) { return 5000; }
+  }
+  function writeLastPeakLimitW(w) {
+    try { localStorage.setItem("ftw-peak-import-ceiling-w", String(w)); } catch (e) {}
+  }
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
@@ -554,14 +575,32 @@
       gridHint.classList.remove("card-hint-warn");
     }
 
-    // Grid target — only update slider if user is not actively dragging
-    if (gridTargetSlider && document.activeElement !== gridTargetSlider) {
+    // Grid target — only update slider if user has no pending edit. We
+    // check `dirty` rather than activeElement so a value that was
+    // dragged then mouse-released doesn't revert before Save is clicked.
+    if (gridTargetSlider && !gridTargetDirty) {
       gridTargetSlider.value = data.grid_target_w;
       gridTargetValue.textContent = formatW(data.grid_target_w);
     }
-    if (peakLimitSlider && document.activeElement !== peakLimitSlider && data.peak_limit_w != null) {
-      peakLimitSlider.value = data.peak_limit_w;
-      peakLimitValue.textContent = formatW(data.peak_limit_w);
+    // Peak import ceiling. Backed by the new peak_import_ceiling_w
+    // (hard rule across modes); 0 = disabled. Falls back to the legacy
+    // peak_limit_w field for older backends so the UI doesn't go blank
+    // during a partial-deploy window.
+    const peakSrcW = data.peak_import_ceiling_w != null
+      ? data.peak_import_ceiling_w
+      : data.peak_limit_w;
+    if (peakLimitSlider && !peakLimitDirty && peakSrcW != null) {
+      const enabled = peakSrcW > 0;
+      if (peakLimitEnableToggle) {
+        peakLimitEnableToggle.checked = enabled;
+        if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      }
+      peakLimitSlider.disabled = !enabled;
+      const display = enabled ? peakSrcW : readLastPeakLimitW();
+      peakLimitSlider.value = display;
+      peakLimitValue.textContent = formatW(display) + (enabled ? "" : " (off)");
+      if (enabled) writeLastPeakLimitW(peakSrcW);
+      if (peakLimitSend) peakLimitSend.disabled = true; // pristine
     }
     if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
       evSlider.value = data.ev_charging_w;
@@ -1697,6 +1736,14 @@
     postJson("/api/peak_limit", { peak_limit_w: w }).catch(function () {});
   }
 
+  // POST the new hard-rule peak ceiling. 0 = disabled (operator opted
+  // out of tariff protection — only the physical fuse applies).
+  // Returns the postJson promise so callers can clear dirty + show
+  // success on resolution.
+  function setPeakImportCeiling(w) {
+    return postJson("/api/peak_import_ceiling", { peak_import_ceiling_w: w });
+  }
+
   function setEvCharging(w) {
     postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
@@ -1761,20 +1808,68 @@
     });
   }
 
-  gridTargetSlider.addEventListener("input", function () {
-    gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
-  });
+  // Grid target slider: dirty on input, Save enabled while dirty,
+  // poll skips overwrite while dirty. Mirrors the peak slider pattern.
+  if (gridTargetSlider) {
+    gridTargetSlider.addEventListener("input", function () {
+      gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
+      gridTargetDirty = true;
+      if (gridTargetSend) gridTargetSend.disabled = false;
+    });
+  }
+  if (gridTargetSend) {
+    gridTargetSend.addEventListener("click", function () {
+      const w = Number(gridTargetSlider.value);
+      gridTargetSend.disabled = true;
+      postJson("/api/target", { grid_target_w: w })
+        .then(function () { gridTargetDirty = false; })
+        .catch(function () { gridTargetSend.disabled = false; /* keep dirty so user can retry */ });
+    });
+  }
 
-  gridTargetSend.addEventListener("click", function () {
-    setTarget(Number(gridTargetSlider.value));
-  });
-
-  peakLimitSlider.addEventListener("input", function () {
-    peakLimitValue.textContent = formatW(Number(peakLimitSlider.value));
-  });
-  peakLimitSend.addEventListener("click", function () {
-    setPeakLimit(Number(peakLimitSlider.value));
-  });
+  // Peak slider: same dirty pattern, plus an enable/disable checkbox.
+  // Off → POST 0 (backend reads 0 = disabled). On → POST slider value.
+  // The slider is disabled when the toggle is off so the operator can't
+  // accidentally drag a dead control.
+  if (peakLimitSlider) {
+    peakLimitSlider.addEventListener("input", function () {
+      const w = Number(peakLimitSlider.value);
+      peakLimitValue.textContent = formatW(w);
+      peakLimitDirty = true;
+      if (peakLimitSend) peakLimitSend.disabled = false;
+    });
+  }
+  if (peakLimitEnableToggle) {
+    peakLimitEnableToggle.addEventListener("change", function () {
+      const enabled = peakLimitEnableToggle.checked;
+      if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      if (peakLimitSlider) peakLimitSlider.disabled = !enabled;
+      // Show the value the toggle is about to enable (last known)
+      // without committing — the operator still has to press Save
+      // unless the toggle is being switched OFF, which is a destructive
+      // change worth one extra click confirmation. Wait — the spec
+      // calls for the toggle itself to be the on/off control, so flip
+      // straight through: post immediately on toggle change.
+      const w = enabled ? Number(peakLimitSlider.value) || readLastPeakLimitW() : 0;
+      if (enabled && peakLimitSlider) peakLimitSlider.value = w;
+      if (peakLimitValue) peakLimitValue.textContent = formatW(w) + (enabled ? "" : " (off)");
+      peakLimitEnableToggle.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; if (peakLimitSend) peakLimitSend.disabled = true; })
+        .catch(function () { /* leave dirty so user can retry */ })
+        .finally(function () { peakLimitEnableToggle.disabled = false; });
+    });
+  }
+  if (peakLimitSend) {
+    peakLimitSend.addEventListener("click", function () {
+      const w = Number(peakLimitSlider.value);
+      writeLastPeakLimitW(w);
+      peakLimitSend.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; })
+        .catch(function () { peakLimitSend.disabled = false; /* keep dirty */ });
+    });
+  }
 
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
@@ -1961,7 +2056,10 @@
 
     // Planet click routing. EV → EV modal scoped to driver. Battery →
     // <ftw-battery-control> manual-hold modal (no driver scoping; the
-    // hold applies to the aggregate battery setpoint).
+    // hold applies to the aggregate battery setpoint). Grid → grid
+    // modal hosting the peak-import ceiling and the (legacy) grid
+    // target setpoint.
+    var gridModal = document.getElementById("grid-modal");
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
@@ -1970,6 +2068,7 @@
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
+        if (d.role === "grid" && gridModal) gridModal.open();
       });
     }
 

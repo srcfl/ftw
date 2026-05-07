@@ -284,40 +284,12 @@
           <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
         </div>
       </div>
-      <div class="card control-card advanced-only">
-        <div class="card-label" id="target-label">Grid target</div>
-        <div class="slider-group-compact">
-          <input type="range" id="grid-target-slider" min="-5000" max="5000" step="50" value="0">
-          <span id="grid-target-value" class="slider-current">0 W</span>
-          <button id="grid-target-send" class="btn-send">Set</button>
-        </div>
-        <div class="card-sub card-hint" id="grid-target-hint">Planner controls this when a strategy is active.</div>
-      </div>
-      <div class="card control-card advanced-only">
-        <div class="card-label">Peak limit</div>
-        <div class="slider-group-compact">
-          <input type="range" id="peak-limit-slider" min="0" max="11000" step="100" value="5000">
-          <span id="peak-limit-value" class="slider-current">5000 W</span>
-          <button id="peak-limit-send" class="btn-send">Set</button>
-        </div>
-      </div>
-      <!-- EV charging slider removed — ev_charging_w is now set
-           automatically by the Easee Cloud driver (or any DerEV driver).
-           The manual /api/ev_charging endpoint stays as a debug override. -->
-
-      <!-- Battery-covers-EV toggle. When ON, self-consumption lets the
-           home battery discharge into the EV — useful when grid prices
-           are high now and cheap PV/off-peak is expected later. OFF
-           (default) keeps the battery from draining to feed the car. -->
-      <div class="card control-card">
-        <div class="card-label">Let battery cover EV</div>
-        <label class="ftw-toggle">
-          <input type="checkbox" id="battery-covers-ev-toggle">
-          <span class="ftw-toggle-slider"></span>
-          <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
-        </label>
-        <div class="card-sub card-hint">On = home battery discharges into the EV (e.g. expensive grid now, cheap solar later). Off = battery stays out of EV charging.</div>
-      </div>
+      <!-- Grid-side knobs (peak limit, grid target) live inside the
+           Grid bubble modal — click the GRID planet in the energy-flow
+           hero to open. EV-side knob ("Let battery cover EV") lives
+           inside the EV bubble modal. Inline cards removed; the modals
+           own the markup so the JS hooks (#peak-limit-slider, etc.)
+           still resolve. -->
     </section>
 
     <!-- Live power + plan side-by-side -->
@@ -546,10 +518,60 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
+    <!-- Battery-covers-EV toggle lives in the EV modal (operator opens
+         it from the EV planet click). When ON, self-consumption lets
+         the home battery discharge into the EV — useful when grid
+         prices are high now and cheap PV/off-peak is expected later. -->
+    <div class="control-card" style="margin-top:1rem">
+      <div class="card-label">Let battery cover EV</div>
+      <label class="ftw-toggle">
+        <input type="checkbox" id="battery-covers-ev-toggle">
+        <span class="ftw-toggle-slider"></span>
+        <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
+      </label>
+      <div class="card-sub card-hint">On = home battery discharges into the EV. Off = battery stays out of EV charging.</div>
+    </div>
     <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
       <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
       <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
       <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
+    </div>
+  </ftw-modal>
+
+  <!-- Grid detail popup — peak import ceiling + grid target. Open from
+       the GRID planet in the energy-flow hero. -->
+  <ftw-modal id="grid-modal" style="--ftw-modal-max-width:420px">
+    <span slot="title">Grid</span>
+    <div id="grid-modal-body">
+      <!-- Peak import ceiling (tariff cap, hard rule across all modes).
+           Default off — operator opts in via the checkbox. When on, the
+           slider value caps grid import; battery briefly bridges while
+           EV throttles. See PR for the full enforcement matrix. -->
+      <div class="control-card">
+        <div class="card-label">Peak import limit</div>
+        <label class="ftw-toggle" style="margin-bottom:0.5rem">
+          <input type="checkbox" id="peak-limit-enabled-toggle">
+          <span class="ftw-toggle-slider"></span>
+          <span class="ftw-toggle-label" id="peak-limit-enabled-label">Off</span>
+        </label>
+        <div class="slider-group-compact">
+          <input type="range" id="peak-limit-slider" min="500" max="11000" step="100" value="5000" disabled>
+          <span id="peak-limit-value" class="slider-current">5000 W</span>
+          <button id="peak-limit-send" class="btn-send" disabled>Save</button>
+        </div>
+        <div class="card-sub card-hint">Hard cap on grid import (tariff peak). Off = no cap; only the physical fuse applies.</div>
+      </div>
+
+      <!-- Grid target (legacy PI setpoint for manual modes). -->
+      <div class="control-card" style="margin-top:1rem">
+        <div class="card-label" id="target-label">Grid target</div>
+        <div class="slider-group-compact">
+          <input type="range" id="grid-target-slider" min="-5000" max="5000" step="50" value="0">
+          <span id="grid-target-value" class="slider-current">0 W</span>
+          <button id="grid-target-send" class="btn-send" disabled>Save</button>
+        </div>
+        <div class="card-sub card-hint" id="grid-target-hint">Planner controls this when a strategy is active.</div>
+      </div>
     </div>
   </ftw-modal>
 

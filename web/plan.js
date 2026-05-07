@@ -537,14 +537,43 @@
       tip.style.display = 'none';
       document.body.appendChild(tip);
     }
+    // Vertical hover line — mirrors the Live chart's drawHoverOverlay
+    // line. Implemented as an absolutely-positioned <div> over the
+    // canvas instead of a canvas-redraw, so the plan-chart's existing
+    // single-pass draw model stays untouched. Parented to the canvas's
+    // offset parent so it scrolls/resizes with it.
+    let hoverLine = document.getElementById('plan-hover-line');
+    if (canvas && !hoverLine) {
+      hoverLine = document.createElement('div');
+      hoverLine.id = 'plan-hover-line';
+      hoverLine.style.cssText =
+        'position:absolute;top:0;width:1px;height:100%;' +
+        'background:rgba(255,255,255,0.3);' +
+        'border-left:1px dashed rgba(255,255,255,0.45);' +
+        'pointer-events:none;display:none;z-index:2';
+      const host = canvas.parentElement;
+      if (host) {
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        host.appendChild(hoverLine);
+      }
+    }
     if (!canvas) return;
     canvas.addEventListener('mousemove', function (e) {
       if (!state.priceBarBounds || state.priceBarBounds.length === 0) {
         tip.style.display = 'none';
+        if (hoverLine) hoverLine.style.display = 'none';
         return;
       }
       const rect = canvas.getBoundingClientRect();
       const cx = e.clientX - rect.left;
+      // Track the line on every move that lands inside the canvas,
+      // even when the cursor is between bars (the gutters between
+      // 15-minute slots) — the visual cue should follow the pointer
+      // continuously, not jump bar-to-bar.
+      if (hoverLine) {
+        hoverLine.style.left = cx + 'px';
+        hoverLine.style.display = 'block';
+      }
       let found = null;
       for (const b of state.priceBarBounds) {
         if (cx >= b.x0 && cx <= b.x1) { found = b; break; }
@@ -614,7 +643,11 @@
       tip.style.top = (e.clientY + 14) + 'px';
       tip.style.display = 'block';
     });
-    canvas.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+    canvas.addEventListener('mouseleave', function () {
+      tip.style.display = 'none';
+      const hl = document.getElementById('plan-hover-line');
+      if (hl) hl.style.display = 'none';
+    });
   }
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
