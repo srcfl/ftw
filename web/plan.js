@@ -7,6 +7,23 @@
 
   const PLAN_REFRESH_MS = 30000;
 
+  // Horizon controls the x-axis bounds; mirrors the price chart's
+  // 3-position pill so operators have a consistent affordance across
+  // both charts. Persisted in localStorage so a user who prefers
+  // "Today only" doesn't have to re-pick on every reload.
+  //
+  // Defined ABOVE `state` because state's initializer calls
+  // readHorizonPref(); even though function declarations hoist, the
+  // const HORIZON_PREF_KEY would be in its temporal dead zone at that
+  // point and the module would throw a ReferenceError.
+  const HORIZON_PREF_KEY = "ftw.planChart.horizon";
+  function readHorizonPref() {
+    try {
+      const v = localStorage.getItem(HORIZON_PREF_KEY);
+      return (v === "today" || v === "all" || v === "tomorrow") ? v : "all";
+    } catch (e) { return "all"; }
+  }
+
   const state = {
     prices: null,
     forecast: null,
@@ -15,18 +32,6 @@
     lastUpdate: null,
     horizon: readHorizonPref(),  // "today" | "all" | "tomorrow"
   };
-
-  // Horizon controls the x-axis bounds; mirrors the price chart's
-  // 3-position pill so operators have a consistent affordance across
-  // both charts. Persisted in localStorage so a user who prefers
-  // "Today only" doesn't have to re-pick on every reload.
-  const HORIZON_PREF_KEY = "ftw.planChart.horizon";
-  function readHorizonPref() {
-    try {
-      const v = localStorage.getItem(HORIZON_PREF_KEY);
-      return (v === "today" || v === "all" || v === "tomorrow") ? v : "all";
-    } catch (e) { return "all"; }
-  }
   function writeHorizonPref(v) {
     try { localStorage.setItem(HORIZON_PREF_KEY, v); } catch (e) {}
   }
