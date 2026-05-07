@@ -46,6 +46,25 @@ class FtwPriceChart extends FtwElement {
       font-size: 11px;
       color: var(--fg-dim);
     }
+    .meta-stats {
+      display: flex;
+      gap: 0.9rem;
+      row-gap: 0.35rem;
+      flex-wrap: wrap;
+      margin-top: 0.15rem;
+      /* line-height 1 keeps each "now / low / high / avg" item tight
+         vertically so when the row wraps onto two lines on a phone the
+         line-spacing comes from row-gap, not from per-item baseline
+         leading (which otherwise stacked the wrapped row too far down). */
+      line-height: 1;
+    }
+    .meta-stats .meta-label {
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--fg-muted);
+      margin-right: 0.18em;
+    }
+    .meta-stats span { white-space: nowrap; }
     .toggle {
       position: relative;
       display: inline-grid;
@@ -285,11 +304,59 @@ class FtwPriceChart extends FtwElement {
             <button type="button" data-horizon="all"      class="${effectiveHorizon === "all"   ? "active" : ""}"    aria-selected="${effectiveHorizon === "all"}">+ Tomorrow</button>
             <button type="button" data-horizon="tomorrow" class="${effectiveHorizon === "tomorrow" ? "active" : ""}" aria-selected="${effectiveHorizon === "tomorrow"}">Tomorrow</button>
           </div>` : "";
+    // Filter first so the stats row reflects the active horizon.
+    let visible = [];
+    if (data) {
+      if (effectiveHorizon === "today")         visible = filterToday(data.items);
+      else if (effectiveHorizon === "tomorrow") visible = filterTomorrow(data.items);
+      else                                      visible = data.items;
+    }
+    // Compute stats over the visible window using the consumer-resolved
+    // öre/kWh (spot + grid + VAT, matching whichever toggle is active),
+    // so the numbers in the subtitle line up exactly with what the
+    // chart bars are showing. `current` is the slot covering wall-clock
+    // now if it's in the window, else the nearest. Empty horizon → no
+    // stats row, falls through to the existing "no data" message.
+    let statsHtml = "";
+    if (visible.length > 0) {
+      const prices = visible.map(it => this._priceFor(it));
+      const now = Date.now();
+      let curIdx = visible.findIndex(it => {
+        const start = (it.tsMs || 0);
+        const end   = start + 60 * 60 * 1000;
+        return now >= start && now < end;
+      });
+      if (curIdx < 0) {
+        // Nearest by absolute time delta (used when "Tomorrow" tab is
+        // active and the wall clock is still in today, etc.).
+        let best = -1, bestD = Infinity;
+        for (let i = 0; i < visible.length; i++) {
+          const start = new Date(visible[i].starts_at || visible[i].ts || 0).getTime();
+          const d = Math.abs(start - now);
+          if (d < bestD) { bestD = d; best = i; }
+        }
+        curIdx = best;
+      }
+      const cur = curIdx >= 0 ? prices[curIdx] : null;
+      const lo = Math.min(...prices);
+      const hi = Math.max(...prices);
+      const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
+      const fmt = v => (v == null ? "—" : v.toFixed(1) + " öre");
+      statsHtml = `
+          <div class="meta meta-stats">
+            <span><span class="meta-label">now</span> ${fmt(cur)}</span>
+            <span><span class="meta-label">low</span> ${fmt(lo)}</span>
+            <span><span class="meta-label">high</span> ${fmt(hi)}</span>
+            <span><span class="meta-label">avg</span> ${fmt(avg)}</span>
+          </div>
+      `;
+    }
     const head = `
       <div class="head">
         <div>
           <div class="label">Electricity prices</div>
           <div class="meta">${data ? `${escapeXml(data.zone)} · ${vatLabel} · ${horizonLabel}` : "—"}</div>
+          ${statsHtml}
         </div>
         <div class="toggles">
           <div class="toggle" role="tablist" data-vat="${this._vatOn ? "on" : "off"}">
@@ -302,10 +369,6 @@ class FtwPriceChart extends FtwElement {
     if (!data || !data.items.length) {
       return head + `<div class="empty">No price data available.</div>`;
     }
-    let visible;
-    if (effectiveHorizon === "today")         visible = filterToday(data.items);
-    else if (effectiveHorizon === "tomorrow") visible = filterTomorrow(data.items);
-    else                                      visible = data.items;
     if (!visible.length) {
       const which = effectiveHorizon === "tomorrow" ? "tomorrow" : "today";
       return head + `<div class="empty">No price data for ${which}.</div>`;
@@ -343,12 +406,20 @@ class FtwPriceChart extends FtwElement {
     // labels rendered too close to the card's left border).
     // Phones get bigger fonts AND more padding so the larger labels
     // stay inside the SVG box and below the NOW pill clears its top.
+    // +4 px left padding so 3-digit öre prices (e.g. "234 ö") clear the
+    // SVG edge — the label is text-anchored "end" at `pad.l - 4` and
+    // extends left from there, so a tighter pad.l clipped large prices.
     const pad = small
-      ? { t: 26, r: 16, b: 40, l: 80 }
-      : { t: 16, r: 16, b: 28, l: 56 };
-    const fsAxis = small ? 18 : 10;  // y-axis öre + x-axis time
-    const fsNow  = small ? 18 : 10;  // NOW label
-    const fsMark = small ? 20 : 11;  // peak/low ▼▲ glyphs
+      ? { t: 26, r: 16, b: 40, l: 84 }
+      : { t: 16, r: 16, b: 28, l: 60 };
+    // Phone sizes bumped per operator request (2026-05): axis labels
+    // were readable but the NOW marker felt thin and crowded against
+    // the bars. +50 % on axes, +33 % on NOW + thicker stroke so the
+    // current hour reads at-a-glance from across a room.
+    const fsAxis = small ? 27 : 10;  // y-axis öre + x-axis time
+    const fsNow  = small ? 24 : 10;  // NOW label
+    const fsMark = small ? 26 : 11;  // peak/low ▼▲ glyphs
+    const nowStrokeW = small ? 3 : 1.5;
     // Tick density drops from every 3 h to every 6 h on phones so the
     // bigger labels don't overlap each other across a 48 h chart.
     const tickStepMs = (small ? 6 : 3) * 3600_000;
@@ -446,11 +517,13 @@ class FtwPriceChart extends FtwElement {
       const x = pad.l + (nowIdx + 0.5) * barW;
       nowMarker = `
         <line x1="${x}" x2="${x}" y1="${pad.t}" y2="${pad.t + plotH}"
-              stroke="var(--accent-e)" stroke-width="1.5" stroke-dasharray="2 3"
+              stroke="var(--accent-e)" stroke-width="${nowStrokeW}" stroke-dasharray="2 3"
               opacity="0.7" />
         <text x="${x}" y="${pad.t - 6}" text-anchor="middle"
               fill="var(--accent-e)" font-family="var(--mono)" font-size="${fsNow}"
-              font-weight="600">NOW</text>
+              font-weight="700"
+              stroke="var(--accent-e)" stroke-width="${small ? 0.6 : 0}"
+              paint-order="stroke fill">NOW</text>
       `;
     }
 

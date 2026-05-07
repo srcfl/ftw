@@ -182,6 +182,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)
 	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
+	s.handle("POST /api/peak_import_ceiling", s.handleSetPeakImportCeiling)
 	s.handle("POST /api/ev_charging", s.handleSetEVCharging)
 	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
 	s.handle("GET  /api/drivers", s.handleDrivers)
@@ -572,6 +573,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"bat_soc":          avgSoC,
 		"grid_target_w":    ctrl.GridTargetW,
 		"peak_limit_w":     ctrl.PeakLimitW,
+		"peak_import_ceiling_w": ctrl.PeakImportCeilingW,
 		"ev_charging_w":    ctrl.EVChargingW,
 		"battery_covers_ev": ctrl.BatteryCoversEV,
 		// True when an EV charger password is persisted in state.db. The
@@ -938,6 +940,35 @@ func (s *Server) handleSetPeakLimit(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.PeakLimitW = req.PeakLimitW
 	s.deps.CtrlMu.Unlock()
 	writeJSON(w, 200, map[string]any{"status": "ok", "peak_limit_w": req.PeakLimitW})
+}
+
+// ---- /api/peak_import_ceiling ----
+//
+// Hard import ceiling enforced in every mode. Default 0 = disabled. When
+// > 0, dispatch's import-side clamps (joint EV/battery allocator,
+// applyFuseGuard import branch, forceFuseDischarge) use min(fuse, peak)
+// as the binding threshold. Persisted in state.db so the operator's
+// tariff stays armed across restarts. See control.State.PeakImportCeilingW
+// for the full rationale.
+func (s *Server) handleSetPeakImportCeiling(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PeakImportCeilingW float64 `json:"peak_import_ceiling_w"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.PeakImportCeilingW < 0 {
+		writeJSON(w, 400, map[string]string{"error": "peak_import_ceiling_w must be ≥ 0"})
+		return
+	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.PeakImportCeilingW = req.PeakImportCeilingW
+	s.deps.CtrlMu.Unlock()
+	if s.deps.State != nil {
+		_ = s.deps.State.SaveConfig("peak_import_ceiling_w", strconv.FormatFloat(req.PeakImportCeilingW, 'f', 1, 64))
+	}
+	writeJSON(w, 200, map[string]any{"status": "ok", "peak_import_ceiling_w": req.PeakImportCeilingW})
 }
 
 // ---- /api/ev_charging ----

@@ -518,13 +518,14 @@
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
         .badge {
-          /* Blue blinking dot so it's unmistakably "this is the
-             update indicator" and not confused with the green
-             connection dot next door. Pulsing animation stays so
-             it reads as actionable, not a static state. */
+          /* Amber pulse — the system's single accent (DESIGN.md). The
+             green connection dot next door is reserved for liveness
+             state; the amber dot is an actionable affordance ("update
+             available, open me"). Pulsing animation stays so it reads
+             as actionable, not a static state. */
           appearance: none;
           background: transparent;
-          color: #3b82f6;
+          color: var(--accent-e, #f59e0b);
           border: none;
           cursor: pointer;
           font-size: 1.1rem;
@@ -554,38 +555,38 @@
              laptop-height browser running the /next dashboard. */
           max-height: 85vh;
           overflow-y: auto;
-          background: var(--surface, #1e293b);
-          color: var(--text, #e2e8f0);
-          border: 1px solid var(--border, #334155);
-          border-radius: 8px;
+          background: var(--ink-raised, #1e293b);
+          color: var(--fg, #e2e8f0);
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-sm, 8px);
           z-index: 1001;
           display: flex; flex-direction: column;
-          font-family: system-ui, -apple-system, sans-serif;
+          font-family: var(--sans, system-ui, -apple-system, sans-serif);
           font-size: 0.9rem;
         }
         .modal header {
           display: flex; align-items: center; justify-content: space-between;
           padding: 0.9rem 1rem;
-          border-bottom: 1px solid var(--border, #334155);
+          border-bottom: 1px solid var(--line, #334155);
         }
         .modal h3 { margin: 0; font-size: 1rem; }
         .modal .x {
           appearance: none; background: transparent;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           border: none; cursor: pointer;
           font-size: 1.25rem; line-height: 1;
         }
         .modal .body { padding: 1rem; }
         .modal .body.center { text-align: center; padding: 1.4rem 1rem; }
-        .subtitle { margin: 0 0 0.75rem; color: var(--text-dim, #94a3b8); }
+        .subtitle { margin: 0 0 0.75rem; color: var(--fg-dim, #94a3b8); }
         dl { margin: 0; display: grid; gap: 0.35rem; grid-template-columns: auto 1fr; }
         dl > div { display: contents; }
-        dt { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
+        dt { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
         dd { margin: 0; font-variant-numeric: tabular-nums; }
         .changelog {
           margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(255,255,255,0.02);
         }
         .changelog > summary {
@@ -593,7 +594,7 @@
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           list-style: none;
         }
         .changelog > summary::-webkit-details-marker { display: none; }
@@ -614,12 +615,12 @@
         .changelog-body h4 {
           margin: 0.75rem 0 0.3rem;
           font-size: 0.9rem;
-          color: var(--text, #e2e8f0);
+          color: var(--fg, #e2e8f0);
         }
         .changelog-body h5 {
           margin: 0.6rem 0 0.25rem;
           font-size: 0.8rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           text-transform: uppercase;
           letter-spacing: 0.03em;
         }
@@ -636,7 +637,7 @@
           font-size: 0.82rem;
         }
         .changelog-body a {
-          color: var(--accent, #f59e0b);
+          color: var(--accent-e, #f59e0b);
           text-decoration: none;
         }
         .changelog-body a:hover { text-decoration: underline; }
@@ -645,17 +646,17 @@
           font-size: 0.8rem;
         }
         .notes-link {
-          color: var(--accent, #f59e0b);
+          color: var(--accent-e, #f59e0b);
           text-decoration: none;
         }
         .notes-link:hover { text-decoration: underline; }
         .snapshot-hint {
           margin-top: 0.75rem;
           padding: 0.5rem 0.7rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(148, 163, 184, 0.06);
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           font-size: 0.78rem;
           line-height: 1.4;
         }
@@ -666,7 +667,7 @@
           gap: 0.4rem;
           margin-top: 0.4rem;
           font-size: 0.76rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           cursor: pointer;
           user-select: none;
         }
@@ -676,8 +677,8 @@
         }
         .snapshots {
           margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(255,255,255,0.02);
         }
         .snapshots > summary {
@@ -685,7 +686,7 @@
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           list-style: none;
         }
         .snapshots > summary::-webkit-details-marker { display: none; }
@@ -704,21 +705,21 @@
           width: 100%;
           border-collapse: collapse;
           font-size: 0.78rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
         }
         .snapshots-table th,
         .snapshots-table td {
           padding: 0.3rem 0.75rem;
           text-align: left;
-          border-top: 1px solid var(--border, #334155);
+          border-top: 1px solid var(--line, #334155);
         }
         .snapshots-table th {
           font-weight: 600;
           border-top: none;
-          color: var(--text, #e2e8f0);
+          color: var(--fg, #e2e8f0);
         }
         .snapshots-table .nowrap { white-space: nowrap; }
-        .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .snapshots-table .mono { font-family: var(--mono, ui-monospace, monospace); }
         .snapshot-actions {
           display: flex;
           gap: 0.3rem;
@@ -731,45 +732,49 @@
         }
         .err {
           margin-top: 0.75rem;
-          color: #f87171; font-size: 0.85rem;
+          color: var(--red-e, #f87171); font-size: 0.85rem;
         }
-        .dim { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
+        .dim { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
         .modal footer {
           display: flex; gap: 0.5rem; justify-content: flex-end;
           padding: 0.75rem 1rem;
-          border-top: 1px solid var(--border, #334155);
+          border-top: 1px solid var(--line, #334155);
           flex-wrap: wrap;
           /* Stick to the bottom of the modal while body scrolls so
              the primary action (Update / Restart) remains visible
              however long the release-notes body grows. */
           position: sticky;
           bottom: 0;
-          background: var(--surface, #1e293b);
+          background: var(--ink-raised, #1e293b);
         }
         .btn {
           appearance: none;
           padding: 0.4rem 0.9rem;
-          border: 1px solid var(--border, #334155);
+          border: 1px solid var(--line, #334155);
           background: transparent;
-          color: var(--text, #e2e8f0);
-          border-radius: 4px;
+          color: var(--fg, #e2e8f0);
+          border-radius: var(--radius-xs, 4px);
           cursor: pointer;
           font-size: 0.85rem;
           font-family: inherit;
         }
         .btn:hover { background: rgba(255,255,255,0.04); }
         .btn-primary {
-          background: var(--accent, #f59e0b);
-          border-color: var(--accent, #f59e0b);
-          color: #0f172a;
+          background: var(--accent-e, #f59e0b);
+          border-color: var(--accent-e, #f59e0b);
+          /* DESIGN.md: on-accent text is near-black (#0a0a0a), never
+             white — keeps the amber legible without halation in dark
+             mode and stays correct when the theme flips to light. */
+          color: #0a0a0a;
+          font-weight: 600;
         }
-        .btn-primary:hover { opacity: 0.9; background: var(--accent, #f59e0b); }
-        .btn-ghost { color: var(--text-dim, #94a3b8); border-color: transparent; }
+        .btn-primary:hover { opacity: 0.9; background: var(--accent-e, #f59e0b); }
+        .btn-ghost { color: var(--fg-dim, #94a3b8); border-color: transparent; }
         .spinner {
           display: inline-block;
           width: 20px; height: 20px;
-          border: 2px solid var(--border, #334155);
-          border-top-color: var(--accent, #f59e0b);
+          border: 2px solid var(--line, #334155);
+          border-top-color: var(--accent-e, #f59e0b);
           border-radius: 50%;
           animation: spin 0.9s linear infinite;
           margin-bottom: 0.6rem;

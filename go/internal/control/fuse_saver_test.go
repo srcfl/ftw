@@ -548,3 +548,104 @@ func TestFuseGuardHoldExpiresAfterWindow(t *testing.T) {
 		t.Errorf("post-expiry, no live overage: target should pass through, got %v", out[0])
 	}
 }
+
+// ---- PeakImportCeilingW (tariff peak, hard rule across modes) ----
+
+// Default 0 → no behaviour change. Same scenario as
+// TestFuseSaverNoOpWhenWithinFuse but explicit about the field default.
+func TestPeakCeilingDisabledByDefaultIsNoop(t *testing.T) {
+	store, state, caps := setupFuseSaver(8000, 0, 0.6, 10000)
+	if state.PeakImportCeilingW != 0 {
+		t.Fatalf("PeakImportCeilingW must default to 0 (disabled), got %v", state.PeakImportCeilingW)
+	}
+	out := forceFuseDischarge(
+		[]DispatchTarget{{Driver: "bat", TargetW: 0}},
+		store, state, caps, 11040)
+	if out[0].TargetW != 0 || out[0].Clamped {
+		t.Errorf("default-disabled peak: target should pass through, got %v", out[0])
+	}
+}
+
+// forceFuseDischarge fires when grid exceeds the operator's tariff peak
+// even though the fuse is intact. Battery briefly bridges; the joint
+// allocator has already throttled the EV via FuseEVMaxW.
+func TestPeakCeilingForcesDischargeBelowFuse(t *testing.T) {
+	// Grid at 8 kW import, well under the 11.04 kW fuse but over a
+	// 5 kW tariff peak.
+	store, state, caps := setupFuseSaver(8000, 0, 0.6, 10000)
+	state.PeakImportCeilingW = 5000
+	out := forceFuseDischarge(
+		[]DispatchTarget{{Driver: "bat", TargetW: 0}},
+		store, state, caps, 11040)
+	// Predicted = 8000. Effective import ceiling = 5000. Overage = 3000.
+	expected := -3000.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("target = %.0f, want %.0f (peak overrun fully covered by battery)",
+			out[0].TargetW, expected)
+	}
+	if !out[0].Clamped {
+		t.Errorf("Clamped flag must mark peak-saver activation")
+	}
+}
+
+// Joint EV/battery allocator caps EV draw against the peak ceiling
+// across modes — the operator's tariff is honoured even with
+// BatteryCoversEV=false (the EV throttles, the battery isn't pulled
+// in to cover steady-state).
+func TestPeakCeilingClampsEVViaJointAllocator(t *testing.T) {
+	// House load 1 kW, EV pinned at 7 kW = 8 kW import. Peak 5 kW.
+	// Fuse 11 kW (won't fire). Battery idle (no charge or discharge).
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, 8000, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("bat").RecordSuccess()
+	st := NewState(0, 50, "meter")
+	st.PeakImportCeilingW = 5000
+	st.EVChargingW = 7000
+	st.BatteryCoversEV = false
+	st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 5000, MaxDischargeW: 10000}}
+	caps := map[string]float64{"bat": 15200}
+
+	// Run a full dispatch cycle so the joint allocator's geometry
+	// fires (it lives inside ComputeDispatch, not as a free function).
+	st.Mode = ModeSelfConsumption
+	_ = ComputeDispatch(store, st, caps, 11040)
+
+	// Joint allocator should have set FuseEVMaxW so that
+	// H + Bn + B*scale + E*scale ≤ 5000 (peak ceiling).
+	// H = rawGrid − currentBat − E = 8000 − 0 − 7000 = 1000.
+	// Bn = 0 (idle), B may be small from PI but the cap should land
+	// near (5000 − 1000) = 4000 W of EV draw.
+	if !st.FuseSaturated {
+		t.Errorf("FuseSaturated must be true under peak overrun, got false")
+	}
+	// EV cap must drop well below the uncapped 7000 W. Exact value
+	// depends on PI internals (a small steady-state discharge command
+	// is legitimately accounted for by the joint allocator), so the
+	// assertion is "capped meaningfully", not an exact number. Anything
+	// above ~5500 means the peak ceiling isn't biting.
+	if st.FuseEVMaxW == 0 {
+		t.Errorf("FuseEVMaxW = 0 — peak ceiling should permit *some* EV draw")
+	}
+	if st.FuseEVMaxW > 5500 {
+		t.Errorf("FuseEVMaxW = %.0f, want ≤ 5500 (peak 5000 binding cap)", st.FuseEVMaxW)
+	}
+}
+
+// Peak above fuse is a no-op: fuse is the binding ceiling.
+// Sanity check the helper picks the tighter of the two.
+func TestPeakCeilingAboveFuseFusewins(t *testing.T) {
+	store, state, caps := setupFuseSaver(12000, 0, 0.6, 10000)
+	state.PeakImportCeilingW = 50000 // operator typo / loose tariff
+	out := forceFuseDischarge(
+		[]DispatchTarget{{Driver: "bat", TargetW: 0}},
+		store, state, caps, 11040)
+	// effFuseW = 11040, peak ignored (looser). Overage = 12000 − 11040 = 960.
+	expected := -960.0
+	if math.Abs(out[0].TargetW-expected) > 1 {
+		t.Errorf("target = %.0f, want %.0f (fuse should bind when peak is looser)",
+			out[0].TargetW, expected)
+	}
+}

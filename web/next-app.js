@@ -201,6 +201,27 @@
   const peakLimitSlider = $("peak-limit-slider");
   const peakLimitValue = $("peak-limit-value");
   const peakLimitSend = $("peak-limit-send");
+  const peakLimitEnableToggle = $("peak-limit-enabled-toggle");
+  const peakLimitEnableLabel = $("peak-limit-enabled-label");
+  // Dirty-tracking for sliders that POST on click. The poll handler
+  // skips overwrite while dirty so the user's pending edit isn't
+  // silently reverted; the Save button mirrors `dirty` so users get a
+  // visual cue that there's work to commit. Cleared on successful POST.
+  let peakLimitDirty = false;
+  let gridTargetDirty = false;
+  // Last non-zero peak ceiling, remembered so unchecking + rechecking
+  // the enable toggle restores the previous value instead of resetting
+  // to the default. Keyed by localStorage so it survives reloads.
+  function readLastPeakLimitW() {
+    try {
+      const v = localStorage.getItem("ftw-peak-import-ceiling-w");
+      const n = v == null ? null : Number(v);
+      return Number.isFinite(n) && n > 0 ? n : 5000;
+    } catch (e) { return 5000; }
+  }
+  function writeLastPeakLimitW(w) {
+    try { localStorage.setItem("ftw-peak-import-ceiling-w", String(w)); } catch (e) {}
+  }
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
@@ -363,6 +384,19 @@
 
     // Load
     loadW.textContent = formatW(data.load_w || 0);
+
+    // EV tile (tile-mode parity with the energy-flow's EV planet).
+    // Reads ev_charging_w (post sub-watt floor in /api/status); the
+    // sub-card label flips to "charging" when active so the tile reads
+    // the same way the planet does.
+    var cardEvWEl   = document.getElementById("card-ev-w");
+    var cardEvSubEl = document.getElementById("card-ev-sub");
+    if (cardEvWEl) {
+      var evWNow = data.ev_charging_w || 0;
+      cardEvWEl.textContent = formatW(evWNow);
+      cardEvWEl.className = evWNow > 1 ? "card-value val-load" : "card-value val-neutral";
+      if (cardEvSubEl) cardEvSubEl.textContent = evWNow > 1 ? "charging" : "charger";
+    }
 
     // Battery — positive=charge, negative=discharge
     batW.textContent = formatW(data.bat_w);
@@ -544,24 +578,55 @@
     var gridHint = document.getElementById("grid-target-hint");
     if (gridSlider) gridSlider.disabled = plannerActive;
     if (gridSend) gridSend.disabled = plannerActive;
-    if (gridHint) gridHint.style.display = plannerActive ? "block" : "none";
+    if (gridHint) {
+      // Always show the hint inside the modal — when planner is
+      // driving, the hint *is* the explanation for the disabled
+      // control, so it takes a brighter style (card-hint-active);
+      // when the operator can edit the slider, it stays as quiet
+      // small print.
+      gridHint.style.display = "block";
+      gridHint.classList.toggle("card-hint-active", plannerActive);
+    }
     // Plan-stale banner
     if (data.plan_stale && plannerActive && gridHint) {
       gridHint.textContent = "⚠ Plan stale — falling back to self_consumption.";
       gridHint.classList.add("card-hint-warn");
     } else if (gridHint) {
-      gridHint.textContent = "Planner controls this when a strategy is active.";
+      gridHint.textContent = plannerActive
+        ? "Planner is driving — set strategy to Manual to edit grid target."
+        : "Planner controls this when a strategy is active.";
       gridHint.classList.remove("card-hint-warn");
     }
 
-    // Grid target — only update slider if user is not actively dragging
-    if (gridTargetSlider && document.activeElement !== gridTargetSlider) {
+    // Grid target — only update slider if user has no pending edit. We
+    // check `dirty` rather than activeElement so a value that was
+    // dragged then mouse-released doesn't revert before Save is clicked.
+    if (gridTargetSlider && !gridTargetDirty) {
       gridTargetSlider.value = data.grid_target_w;
       gridTargetValue.textContent = formatW(data.grid_target_w);
     }
-    if (peakLimitSlider && document.activeElement !== peakLimitSlider && data.peak_limit_w != null) {
-      peakLimitSlider.value = data.peak_limit_w;
-      peakLimitValue.textContent = formatW(data.peak_limit_w);
+    // Peak import ceiling. Backed by the new peak_import_ceiling_w
+    // (hard rule across modes); 0 = disabled. Falls back to the legacy
+    // peak_limit_w field for older backends so the UI doesn't go blank
+    // during a partial-deploy window.
+    const peakSrcW = data.peak_import_ceiling_w != null
+      ? data.peak_import_ceiling_w
+      : data.peak_limit_w;
+    if (peakLimitSlider && !peakLimitDirty && peakSrcW != null) {
+      const enabled = peakSrcW > 0;
+      if (peakLimitEnableToggle) {
+        peakLimitEnableToggle.checked = enabled;
+        if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      }
+      peakLimitSlider.disabled = !enabled;
+      const display = enabled ? peakSrcW : readLastPeakLimitW();
+      peakLimitSlider.value = display;
+      // Don't decorate the value with " (off)" — the toggle is the
+      // single source of truth for enabled/disabled, doubling that
+      // signal is the kind of redundancy DESIGN.md warns about.
+      peakLimitValue.textContent = formatW(display);
+      if (enabled) writeLastPeakLimitW(peakSrcW);
+      if (peakLimitSend) peakLimitSend.disabled = true; // pristine
     }
     if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
       evSlider.value = data.ev_charging_w;
@@ -795,6 +860,19 @@
     var dpr = window.devicePixelRatio || 1;
     var w = canvas.parentElement.clientWidth - 32;
     var h = 300;
+    // Small-screen sizing for canvas-rendered axes + the NOW marker.
+    // Canvas text doesn't honour CSS @media queries, so we branch in
+    // JS — same threshold as ftw-price-chart (600 px) for consistency.
+    // Fonts scale ~50 % up; the now-line stroke doubles. The values
+    // below are read by every ctx.font / ctx.lineWidth assignment in
+    // this function via the chartFont* / chartLine* variables.
+    var smallScreen = window.matchMedia &&
+      window.matchMedia("(max-width: 600px)").matches;
+    var chartFontAxis     = smallScreen ? "16px monospace" : "11px monospace";
+    var chartFontWaiting  = smallScreen ? "18px monospace" : "12px monospace";
+    var chartFontTooltip  = smallScreen ? "14px monospace" : "10px monospace";
+    var chartFontTooltipS = smallScreen ? "13px monospace" : "9px monospace";
+    var chartNowStrokeW   = smallScreen ? 2 : 1;
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
@@ -879,7 +957,7 @@
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#666";
-      ctx.font = "12px monospace";
+      ctx.font = chartFontWaiting;
       ctx.textAlign = "center";
       ctx.fillText("waiting for data...", w / 2, h / 2);
       ctx.textAlign = "left";
@@ -928,7 +1006,7 @@
     // number — that's what lets the y-axis labels stay readable.
     ctx.strokeStyle = "#2a2a2a";
     ctx.lineWidth = 0.5;
-    ctx.font = "11px monospace";
+    ctx.font = chartFontAxis;
     var steps = Math.round(yRange / yStep);
     for (var i = 0; i <= steps; i++) {
       var y = pad.top + plotH - (plotH * i / steps);
@@ -1104,10 +1182,12 @@
     });
     ctx.globalAlpha = 1;
 
-    // Subtle vertical "now" line — anchor point so the eye knows where present is
+    // Subtle vertical "now" line — anchor point so the eye knows
+    // where present is. Stroke width bumps on small screens so the
+    // marker stays visible alongside the larger axis labels.
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = smallScreen ? "rgba(255,255,255,0.30)" : "rgba(255,255,255,0.12)";
+    ctx.lineWidth = chartNowStrokeW;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
     ctx.lineTo(nowX, pad.top + plotH);
@@ -1115,7 +1195,7 @@
 
     // Y-axis labels (outside clip so they're fully visible)
     ctx.fillStyle = "#888";
-    ctx.font = "11px monospace";
+    ctx.font = chartFontAxis;
     for (var i2 = 0; i2 <= steps; i2++) {
       var yVal = yMin + (yRange * i2 / steps);
       var ly = pad.top + plotH - (plotH * i2 / steps);
@@ -1148,7 +1228,7 @@
       ctx.beginPath();
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
-      ctx.font = "10px monospace";
+      ctx.font = chartFontTooltip;
       ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
@@ -1255,7 +1335,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = "10px monospace";
+    ctx.font = chartFontTooltip;
     ctx.fillStyle = "#888";
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
@@ -1279,9 +1359,9 @@
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
           ctx.fillStyle = "#888";
-          ctx.font = "9px monospace";
+          ctx.font = chartFontTooltipS;
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
-          ctx.font = "10px monospace";
+          ctx.font = chartFontTooltip;
         }
       }
       ctx.textAlign = "left";
@@ -1328,7 +1408,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = "10px monospace";
+    ctx.font = chartFontTooltip;
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
     ctx.fillStyle = "#fbbf24";
@@ -1697,6 +1777,14 @@
     postJson("/api/peak_limit", { peak_limit_w: w }).catch(function () {});
   }
 
+  // POST the new hard-rule peak ceiling. 0 = disabled (operator opted
+  // out of tariff protection — only the physical fuse applies).
+  // Returns the postJson promise so callers can clear dirty + show
+  // success on resolution.
+  function setPeakImportCeiling(w) {
+    return postJson("/api/peak_import_ceiling", { peak_import_ceiling_w: w });
+  }
+
   function setEvCharging(w) {
     postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
@@ -1761,20 +1849,68 @@
     });
   }
 
-  gridTargetSlider.addEventListener("input", function () {
-    gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
-  });
+  // Grid target slider: dirty on input, Save enabled while dirty,
+  // poll skips overwrite while dirty. Mirrors the peak slider pattern.
+  if (gridTargetSlider) {
+    gridTargetSlider.addEventListener("input", function () {
+      gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
+      gridTargetDirty = true;
+      if (gridTargetSend) gridTargetSend.disabled = false;
+    });
+  }
+  if (gridTargetSend) {
+    gridTargetSend.addEventListener("click", function () {
+      const w = Number(gridTargetSlider.value);
+      gridTargetSend.disabled = true;
+      postJson("/api/target", { grid_target_w: w })
+        .then(function () { gridTargetDirty = false; })
+        .catch(function () { gridTargetSend.disabled = false; /* keep dirty so user can retry */ });
+    });
+  }
 
-  gridTargetSend.addEventListener("click", function () {
-    setTarget(Number(gridTargetSlider.value));
-  });
-
-  peakLimitSlider.addEventListener("input", function () {
-    peakLimitValue.textContent = formatW(Number(peakLimitSlider.value));
-  });
-  peakLimitSend.addEventListener("click", function () {
-    setPeakLimit(Number(peakLimitSlider.value));
-  });
+  // Peak slider: same dirty pattern, plus an enable/disable checkbox.
+  // Off → POST 0 (backend reads 0 = disabled). On → POST slider value.
+  // The slider is disabled when the toggle is off so the operator can't
+  // accidentally drag a dead control.
+  if (peakLimitSlider) {
+    peakLimitSlider.addEventListener("input", function () {
+      const w = Number(peakLimitSlider.value);
+      peakLimitValue.textContent = formatW(w);
+      peakLimitDirty = true;
+      if (peakLimitSend) peakLimitSend.disabled = false;
+    });
+  }
+  if (peakLimitEnableToggle) {
+    peakLimitEnableToggle.addEventListener("change", function () {
+      const enabled = peakLimitEnableToggle.checked;
+      if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      if (peakLimitSlider) peakLimitSlider.disabled = !enabled;
+      // Show the value the toggle is about to enable (last known)
+      // without committing — the operator still has to press Save
+      // unless the toggle is being switched OFF, which is a destructive
+      // change worth one extra click confirmation. Wait — the spec
+      // calls for the toggle itself to be the on/off control, so flip
+      // straight through: post immediately on toggle change.
+      const w = enabled ? Number(peakLimitSlider.value) || readLastPeakLimitW() : 0;
+      if (enabled && peakLimitSlider) peakLimitSlider.value = w;
+      if (peakLimitValue) peakLimitValue.textContent = formatW(w);
+      peakLimitEnableToggle.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; if (peakLimitSend) peakLimitSend.disabled = true; })
+        .catch(function () { /* leave dirty so user can retry */ })
+        .finally(function () { peakLimitEnableToggle.disabled = false; });
+    });
+  }
+  if (peakLimitSend) {
+    peakLimitSend.addEventListener("click", function () {
+      const w = Number(peakLimitSlider.value);
+      writeLastPeakLimitW(w);
+      peakLimitSend.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; })
+        .catch(function () { peakLimitSend.disabled = false; /* keep dirty */ });
+    });
+  }
 
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
@@ -1961,7 +2097,10 @@
 
     // Planet click routing. EV → EV modal scoped to driver. Battery →
     // <ftw-battery-control> manual-hold modal (no driver scoping; the
-    // hold applies to the aggregate battery setpoint).
+    // hold applies to the aggregate battery setpoint). Grid → grid
+    // modal hosting the peak-import ceiling and the (legacy) grid
+    // target setpoint.
+    var gridModal = document.getElementById("grid-modal");
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
@@ -1970,6 +2109,55 @@
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
+        if (d.role === "grid" && gridModal) gridModal.open();
+      });
+    }
+
+    // Tile-mode (numeric cards) parity: when the operator toggles the
+    // hero off, the energy-flow planets aren't on screen, so the
+    // modal triggers need a second home. Binding click on the matching
+    // .summary-card opens the same modal, with a `.clickable` class
+    // that gives the card a pointer cursor + hover lift to advertise
+    // the affordance. EV has no tile-mode card today (loadpoints are
+    // listed separately) — leave that one to the planet for now.
+    var cardBat = document.getElementById("card-bat");
+    if (cardGrid && gridModal) {
+      cardGrid.classList.add("clickable");
+      cardGrid.setAttribute("role", "button");
+      cardGrid.setAttribute("tabindex", "0");
+      cardGrid.setAttribute("aria-label", "Open grid controls");
+      cardGrid.addEventListener("click", function () { gridModal.open(); });
+      cardGrid.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); gridModal.open(); }
+      });
+    }
+    if (cardBat) {
+      cardBat.classList.add("clickable");
+      cardBat.setAttribute("role", "button");
+      cardBat.setAttribute("tabindex", "0");
+      cardBat.setAttribute("aria-label", "Open battery controls");
+      var openBat = function () {
+        var bc = document.getElementById("battery-control");
+        if (bc && typeof bc.open === "function") bc.open();
+      };
+      cardBat.addEventListener("click", openBat);
+      cardBat.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openBat(); }
+      });
+    }
+    var cardEv = document.getElementById("card-ev");
+    if (cardEv && typeof openEvModal === "function") {
+      cardEv.classList.add("clickable");
+      cardEv.setAttribute("role", "button");
+      cardEv.setAttribute("tabindex", "0");
+      cardEv.setAttribute("aria-label", "Open EV charger");
+      // Pass null so openEvModal aggregates across all EV drivers —
+      // matches the no-driver-scoping fallback the planet click uses
+      // when the operator hasn't picked a specific charger.
+      var openEv = function () { openEvModal(null); };
+      cardEv.addEventListener("click", openEv);
+      cardEv.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEv(); }
       });
     }
 

@@ -774,6 +774,71 @@ body.ftw-next .card-hint {
   color: var(--fg-muted);
   margin-top: 8px;
 }
+/* Plan-chart horizon pill (Today / +Tomorrow / Tomorrow). Mirrors the
+   shadow-DOM .toggle inside <ftw-price-chart> so the affordance reads
+   as the same control across both charts. Lives in document scope
+   because the plan chart isn't a custom element. */
+body.ftw-next .plan-horizon {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 999px);
+  padding: 2px;
+  background: var(--ink-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-right: 0.5rem;
+}
+body.ftw-next .plan-horizon button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-xs, 999px);
+  font: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+body.ftw-next .plan-horizon button:hover { color: var(--fg); }
+body.ftw-next .plan-horizon button.active {
+  background: var(--accent-e);
+  /* On-accent text is near-black per DESIGN.md, never white. */
+  color: #0a0a0a;
+}
+
+/* Advanced-mode toggle row — sits between the live + plan charts and
+   the advanced-only sections, so the affordance lands right where
+   the extra UI surfaces appear when toggled on. Centered, quiet, and
+   only as wide as it needs to be. */
+body.ftw-next .ui-mode-row {
+  display: flex;
+  justify-content: center;
+  margin: 1.25rem 0 1.5rem;
+}
+
+/* Tile-mode cards that open a modal advertise their clickability —
+   pointer cursor + a subtle hover lift. Hero mode still uses the
+   energy-flow planets, so this only matters in tiles mode. */
+body.ftw-next .summary-card.clickable {
+  cursor: pointer;
+  transition: transform 80ms ease, border-color 120ms ease;
+}
+body.ftw-next .summary-card.clickable:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-e);
+}
+
+body.ftw-next .card-hint.card-hint-active {
+  /* Used when the hint is the *active* explanation of a disabled
+     control (e.g. grid-target slider greyed out because the MPC
+     planner is driving). Lifts the colour from --fg-muted to --fg
+     and bumps size a hair so the reason for the disabled state
+     reads at the same weight as the control's label, not as quiet
+     small print. */
+  color: var(--fg);
+  font-size: 11px;
+}
 
 body.ftw-next .btn-send {
   background: var(--accent-e);

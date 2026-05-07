@@ -182,6 +182,11 @@ func main() {
 	if v, ok := st.LoadConfig("battery_covers_ev"); ok {
 		ctrl.BatteryCoversEV = v == "true"
 	}
+	if v, ok := st.LoadConfig("peak_import_ceiling_w"); ok {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f >= 0 {
+			ctrl.PeakImportCeilingW = f
+		}
+	}
 
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh

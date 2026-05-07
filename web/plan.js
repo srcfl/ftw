@@ -7,13 +7,50 @@
 
   const PLAN_REFRESH_MS = 30000;
 
+  // Horizon controls the x-axis bounds; mirrors the price chart's
+  // 3-position pill so operators have a consistent affordance across
+  // both charts. Persisted in localStorage so a user who prefers
+  // "Today only" doesn't have to re-pick on every reload.
+  //
+  // Defined ABOVE `state` because state's initializer calls
+  // readHorizonPref(); even though function declarations hoist, the
+  // const HORIZON_PREF_KEY would be in its temporal dead zone at that
+  // point and the module would throw a ReferenceError.
+  const HORIZON_PREF_KEY = "ftw.planChart.horizon";
+  function readHorizonPref() {
+    try {
+      const v = localStorage.getItem(HORIZON_PREF_KEY);
+      return (v === "today" || v === "all" || v === "tomorrow") ? v : "all";
+    } catch (e) { return "all"; }
+  }
+
   const state = {
     prices: null,
     forecast: null,
     plan: null,
     fuse: null,         // { max_amps, phases, voltage } — drives the power y-axis
     lastUpdate: null,
+    horizon: readHorizonPref(),  // "today" | "all" | "tomorrow"
   };
+  function writeHorizonPref(v) {
+    try { localStorage.setItem(HORIZON_PREF_KEY, v); } catch (e) {}
+  }
+  function localMidnight(offsetDays) {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() + (offsetDays || 0) * 24 * 60 * 60 * 1000;
+  }
+  function horizonBounds(horizon) {
+    const now = Date.now();
+    if (horizon === "today") {
+      return { tMin: now - 30 * 60 * 1000, tMax: localMidnight(1) };
+    }
+    if (horizon === "tomorrow") {
+      return { tMin: localMidnight(1), tMax: localMidnight(2) };
+    }
+    // "all" — current default: now-30 min through next 48 h.
+    return { tMin: now - 30 * 60 * 1000, tMax: now + 48 * 60 * 60 * 1000 };
+  }
 
   async function fetchAll() {
     const [p, f, m, c] = await Promise.all([
@@ -71,10 +108,10 @@
     const plotW = cssW - pad.l - pad.r;
     const plotH = cssH - pad.t - pad.b;
 
-    // X range = now → +24h
+    // X range — driven by the operator-chosen horizon (today / +tomorrow
+    // / tomorrow only). "all" preserves the original now→+48h default.
     const now = Date.now();
-    const tMin = now - 30 * 60 * 1000; // 30 min look-back so in-progress slot is visible
-    const tMax = now + 48 * 60 * 60 * 1000;
+    const { tMin, tMax } = horizonBounds(state.horizon);
     const xScale = t => pad.l + (t - tMin) / (tMax - tMin) * plotW;
 
     // Layout: price bars (top) | mode band (thin strip) | power bars (middle) | SoC (bottom)
@@ -537,19 +574,49 @@
       tip.style.display = 'none';
       document.body.appendChild(tip);
     }
+    // Vertical hover line — mirrors the Live chart's drawHoverOverlay
+    // line. Implemented as an absolutely-positioned <div> over the
+    // canvas instead of a canvas-redraw, so the plan-chart's existing
+    // single-pass draw model stays untouched. Parented to the canvas's
+    // offset parent so it scrolls/resizes with it.
+    let hoverLine = document.getElementById('plan-hover-line');
+    if (canvas && !hoverLine) {
+      hoverLine = document.createElement('div');
+      hoverLine.id = 'plan-hover-line';
+      hoverLine.style.cssText =
+        'position:absolute;top:0;width:1px;height:100%;' +
+        'background:rgba(255,255,255,0.3);' +
+        'border-left:1px dashed rgba(255,255,255,0.45);' +
+        'pointer-events:none;display:none;z-index:2';
+      const host = canvas.parentElement;
+      if (host) {
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        host.appendChild(hoverLine);
+      }
+    }
     if (!canvas) return;
-    canvas.addEventListener('mousemove', function (e) {
+
+    // Single render path used by both mouse-hover and touch-scrub.
+    // Returns true when a slot was matched (for the touch path so it
+    // can decide whether to keep blocking the page scroll).
+    function showTipAtClient(clientX, clientY) {
       if (!state.priceBarBounds || state.priceBarBounds.length === 0) {
-        tip.style.display = 'none';
-        return;
+        hideTipAndLine();
+        return false;
       }
       const rect = canvas.getBoundingClientRect();
-      const cx = e.clientX - rect.left;
+      const cx = clientX - rect.left;
+      // Hover line tracks the pointer continuously across the canvas,
+      // even in the gutters between 15-minute bars.
+      if (hoverLine) {
+        hoverLine.style.left = cx + 'px';
+        hoverLine.style.display = 'block';
+      }
       let found = null;
       for (const b of state.priceBarBounds) {
         if (cx >= b.x0 && cx <= b.x1) { found = b; break; }
       }
-      if (!found) { tip.style.display = 'none'; return; }
+      if (!found) { tip.style.display = 'none'; return false; }
       const a = found.action;
       const d = new Date(found.ts);
       const hh = d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
@@ -610,11 +677,88 @@
         lines.push(`<div class="tip-reason">${a.reason}</div>`);
       }
       tip.innerHTML = lines.join('');
-      tip.style.left = (e.clientX + 14) + 'px';
-      tip.style.top = (e.clientY + 14) + 'px';
+      // Touch scrub on a phone has no cursor, so the tooltip is positioned
+      // relative to the canvas (above the touch point) rather than offset
+      // from it — fingers occlude the slot otherwise. Mouse path keeps
+      // the original "near the cursor" placement.
+      if (isTouching) {
+        const r = canvas.getBoundingClientRect();
+        const left = Math.min(window.innerWidth - 8 - 280, Math.max(8, clientX - 140));
+        const top  = Math.max(8, r.top - 8 + window.scrollY - tip.offsetHeight);
+        tip.style.left = left + 'px';
+        tip.style.top  = top  + 'px';
+      } else {
+        tip.style.left = (clientX + 14) + 'px';
+        tip.style.top  = (clientY + 14) + 'px';
+      }
       tip.style.display = 'block';
+      return true;
+    }
+
+    function hideTipAndLine() {
+      tip.style.display = 'none';
+      if (hoverLine) hoverLine.style.display = 'none';
+    }
+
+    canvas.addEventListener('mousemove', function (e) {
+      if (isTouching) return; // touch path owns the tooltip
+      showTipAtClient(e.clientX, e.clientY);
     });
-    canvas.addEventListener('mouseleave', function () { tip.style.display = 'none'; });
+    canvas.addEventListener('mouseleave', function () {
+      if (!isTouching) hideTipAndLine();
+    });
+
+    // Touch — long-press to enter scrub mode, then drag to walk the
+    // tooltip across slots. 250 ms threshold lets a vertical
+    // swipe-to-scroll pass through unmolested; if the finger moves
+    // > 10 px before the timer fires the press is cancelled (gesture
+    // is a scroll, not a press). Mirrors ftw-price-chart.js's
+    // implementation so phone users get the same affordance on both
+    // charts.
+    let isTouching = false;
+    let pressTimer = null;
+    let scrubbing = false;
+    let startX = 0, startY = 0;
+    const SCRUB_DELAY_MS = 250;
+    const SCRUB_TOLERANCE_PX = 10;
+    const cancelPress = () => {
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    };
+    const enterScrub = () => {
+      pressTimer = null;
+      scrubbing = true;
+      if (navigator.vibrate) { try { navigator.vibrate(8); } catch (_) {} }
+      showTipAtClient(startX, startY);
+    };
+    const endTouch = () => {
+      cancelPress();
+      if (scrubbing) { scrubbing = false; hideTipAndLine(); }
+      // Defer clearing isTouching past the synthesized mouse events
+      // that fire after touchend on iOS/Android — without this the
+      // tooltip flashes back open as the page settles.
+      setTimeout(() => { isTouching = false; }, 400);
+    };
+    canvas.addEventListener('touchstart', function (e) {
+      if (e.touches.length !== 1) { cancelPress(); return; }
+      const t = e.touches[0];
+      startX = t.clientX; startY = t.clientY;
+      isTouching = true;
+      cancelPress();
+      pressTimer = setTimeout(enterScrub, SCRUB_DELAY_MS);
+    }, { passive: true });
+    canvas.addEventListener('touchmove', function (e) {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (!scrubbing) {
+        if (Math.hypot(t.clientX - startX, t.clientY - startY) > SCRUB_TOLERANCE_PX) cancelPress();
+        return;
+      }
+      // In scrub mode — block page scroll so the chart owns the gesture.
+      e.preventDefault();
+      showTipAtClient(t.clientX, t.clientY);
+    }, { passive: false });
+    canvas.addEventListener('touchend', endTouch);
+    canvas.addEventListener('touchcancel', endTouch);
   }
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
@@ -647,6 +791,36 @@
     window.addEventListener('resize', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
+
+    // Horizon toggle wiring. Each click flips state.horizon, persists
+    // the choice, marks the right button active, and re-renders. The
+    // visual style (.toggle .active) is shared with the VAT pill.
+    const horizonRoot = document.getElementById('plan-horizon');
+    if (horizonRoot) {
+      // Reflect the persisted preference on first paint.
+      horizonRoot.setAttribute('data-horizon', state.horizon);
+      horizonRoot.querySelectorAll('button[data-horizon]').forEach(b => {
+        const isActive = b.dataset.horizon === state.horizon;
+        b.classList.toggle('active', isActive);
+        b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      });
+      horizonRoot.addEventListener('click', function (e) {
+        const target = e.target.closest('button[data-horizon]');
+        if (!target) return;
+        const next = target.dataset.horizon;
+        if (next !== 'today' && next !== 'all' && next !== 'tomorrow') return;
+        if (next === state.horizon) return;
+        state.horizon = next;
+        writeHorizonPref(next);
+        horizonRoot.setAttribute('data-horizon', next);
+        horizonRoot.querySelectorAll('button[data-horizon]').forEach(b => {
+          const isActive = b.dataset.horizon === next;
+          b.classList.toggle('active', isActive);
+          b.setAttribute('aria-selected', isActive ? 'true' : 'false');
+        });
+        render();
+      });
+    }
     const helpBtn = document.getElementById('plan-help-btn');
     const helpModal = document.getElementById('plan-help-modal');
     if (helpBtn && helpModal) {

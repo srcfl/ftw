@@ -155,6 +155,23 @@ type State struct {
 
 	// Peak limit — enforced only in PeakShaving mode
 	PeakLimitW float64
+
+	// PeakImportCeilingW is a hard import ceiling enforced in EVERY mode,
+	// parallel to (and at or below) the physical fuse. Default 0 = disabled.
+	// When > 0, the import side of every clamp (applyFuseGuard, joint
+	// EV/battery allocator, forceFuseDischarge) uses min(fuse, peak)
+	// as its threshold; the battery covers transient overruns while
+	// the loadpoint controller ramps the EV down. Steady-state with
+	// BatteryCoversEV=false: EV settles at its throttled rate and the
+	// battery stops being commanded to discharge — the bridge is brief
+	// by construction, not by an explicit timer. Steady-state with
+	// BatteryCoversEV=true: the planner is already aware EV draw is in
+	// scope, no additional behaviour here.
+	//
+	// Export side and per-phase clamp use fuseMaxW unchanged — peak is
+	// an aggregate import-only concept (tariff). Persisted in state.db
+	// under "peak_import_ceiling_w".
+	PeakImportCeilingW float64
 	// EV charging signal — batteries won't try to cover this much of import
 	EVChargingW float64
 	// BatteryCoversEV overrides the default EV-exclusion behaviour. When
@@ -809,14 +826,21 @@ func ComputeDispatch(
 	state.FuseEVMaxW = 0
 	state.FuseSaturated = false
 	if fuseMaxW > 0 && state.EVChargingW > 0 {
+		// Use the effective import ceiling (fuse minus safety margin,
+		// or tariff peak when tighter) so PeakImportCeilingW throttles
+		// the EV through the same surface as the fuse. Steady-state
+		// with peak active and BatteryCoversEV=false: the EV settles
+		// at this scaled rate; the battery's transient discharge to
+		// bridge the ramp-down is handled by forceFuseDischarge below.
+		ceilingW := state.effectiveImportCeilingW(fuseMaxW)
 		targetTotal := currentTotal + totalCorrection
 		B := math.Max(0, targetTotal)
 		Bn := math.Min(0, targetTotal)
 		E := state.EVChargingW
 		H := rawGridW - currentTotal - E
 		projectedGrid := H + targetTotal + E
-		if projectedGrid > fuseMaxW && (B+E) > 0 {
-			scale := (fuseMaxW - H - Bn) / (B + E)
+		if projectedGrid > ceilingW && (B+E) > 0 {
+			scale := (ceilingW - H - Bn) / (B + E)
 			if scale < 0 {
 				scale = 0
 			}
@@ -971,7 +995,19 @@ func ComputeDispatch(
 	// EV against a stale (too-conservative) cap for one tick. Run only
 	// when the joint allocator already engaged this tick — otherwise
 	// FuseEVMaxW is "no advice" and should stay 0.
-	if state.FuseSaturated && state.EVChargingW > 0 && fuseMaxW > 0 {
+	// Skip the republish when the operator's tariff peak is the binding
+	// ceiling (peak < fuse). The republish's purpose is to free up EV
+	// headroom freed by forceFuseDischarge's transient battery bridge —
+	// that's the right thing for FUSE protection (hardware safety,
+	// battery is the last line of defense and there's no policy
+	// preference about how long to drain it). For TARIFF protection,
+	// the EV cap must reflect the steady state where the battery
+	// isn't covering, otherwise the bridge becomes a permanent
+	// shuttle and the operator pays the peak charge anyway. Let the
+	// joint allocator's pre-forceFuseDischarge FuseEVMaxW stand.
+	peakBindingW := fuseMaxW - state.fuseSafetyMarginW()
+	peakBinding := state != nil && state.PeakImportCeilingW > 0 && state.PeakImportCeilingW < peakBindingW
+	if !peakBinding && state.FuseSaturated && state.EVChargingW > 0 && fuseMaxW > 0 {
 		var postBat float64
 		seen := make(map[string]struct{}, len(raw))
 		for _, t := range raw {
@@ -982,14 +1018,19 @@ func ComputeDispatch(
 			postBat += t.TargetW
 		}
 		// H = rawGridW − currentTotal − E (unchanged from joint allocator)
-		// newGrid = H + postBat + E*scale ≤ fuseMaxW
-		// → scale ≤ (fuseMaxW − H − postBat) / E, capped to ≤1
+		// newGrid = H + postBat + E*scale ≤ ceiling
+		// → scale ≤ (ceiling − H − postBat) / E, capped to ≤1
+		// Use the effective import ceiling so peak-driven caps survive
+		// the post-forceFuseDischarge republish (otherwise the joint
+		// allocator's tariff-tightened cap gets overwritten with the
+		// fuse-only headroom).
+		ceilingW := state.effectiveImportCeilingW(fuseMaxW)
 		var rawGridW2 float64
 		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
 			rawGridW2 = r.SmoothedW
 		}
 		H := rawGridW2 - currentTotal - state.EVChargingW
-		headroom := fuseMaxW - H - postBat
+		headroom := ceilingW - H - postBat
 		if headroom < 0 {
 			headroom = 0
 		}
@@ -1359,11 +1400,16 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// Aggregate budget honours the safety margin too — keep dispatch
 	// commands strictly inside the breaker envelope so the inverter's
 	// own per-phase limiter doesn't fire first and cause a flap.
+	//
+	// Import ceiling is the tighter of (fuse − safety margin) and the
+	// operator's tariff peak; export ceiling is fuse-only — peak is
+	// import-only (effekttariff is billed on import).
 	effFuseW := fuseMaxW - state.fuseSafetyMarginW()
 	if effFuseW < 0 {
 		effFuseW = 0
 	}
-	importOverage := predicted - effFuseW
+	effImportW := state.effectiveImportCeilingW(fuseMaxW)
+	importOverage := predicted - effImportW
 	exportOverage := -effFuseW - predicted
 	if perPhase > 0 {
 		if currentGrid >= 0 {
@@ -1518,6 +1564,27 @@ func (s *State) fuseSafetyMarginW() float64 {
 		return 0
 	}
 	return s.SiteFuseSafetyA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
+}
+
+// effectiveImportCeilingW returns the binding ceiling for grid import in
+// watts: the fuse limit minus its safety margin, further capped by
+// PeakImportCeilingW when the operator has opted into a tariff peak
+// (PeakImportCeilingW > 0). Used by every import-side clamp in the
+// dispatch path so peak and fuse share one enforcement surface.
+//
+// Peak is taken at face value (no additional safety subtraction) — the
+// operator typed the contract limit, so the controller honours exactly
+// that. The fuse retains its independent safety margin because it
+// guards against a hardware breaker, not a billing line.
+func (s *State) effectiveImportCeilingW(fuseMaxW float64) float64 {
+	eff := fuseMaxW - s.fuseSafetyMarginW()
+	if eff < 0 {
+		eff = 0
+	}
+	if s != nil && s.PeakImportCeilingW > 0 && s.PeakImportCeilingW < eff {
+		eff = s.PeakImportCeilingW
+	}
+	return eff
 }
 
 // perPhaseOverageW returns the wattage by which the worst single phase
@@ -1784,11 +1851,15 @@ func forceFuseDischarge(
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	effFuseW := fuseMaxW - state.fuseSafetyMarginW()
-	if effFuseW < 0 {
-		effFuseW = 0
-	}
-	overage := predicted - effFuseW
+	// Effective import ceiling: fuse minus safety margin, capped further
+	// by PeakImportCeilingW when the operator has set a tariff peak.
+	// This is what makes the reactive fuse-saver also defend the peak —
+	// the battery briefly bridges while the loadpoint controller ramps
+	// the EV down in response to the joint allocator's FuseEVMaxW.
+	// Per-phase overage stays on the fuse-only path below; tariff is
+	// aggregate, not per-phase.
+	effImportW := state.effectiveImportCeilingW(fuseMaxW)
+	overage := predicted - effImportW
 	// Per-phase overage trumps aggregate when bigger — but ONLY on the
 	// import side. perPhaseOverageW is direction-agnostic (uses |amps|),
 	// so an export-side phase trip would otherwise cause this function
