@@ -7,10 +7,13 @@
 package state
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -78,6 +81,68 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	escaped := strings.ReplaceAll(dstPath, "'", "''")
 	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
 		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+	}
+	return nil
+}
+
+// SnapshotToCompressed writes a gzip-compressed VACUUM INTO snapshot to
+// dstPath. Internally it materialises an uncompressed temp DB next to
+// dstPath (SQLite's VACUUM INTO can't stream), gzip-streams it into the
+// final path, and removes the temp on success. SQLite hot-tier tables
+// compress 5–10× — the typical 200 MB raw snapshot lands at ~25–40 MB,
+// which keeps the five-slot retention budget under ~200 MB instead of
+// ~1 GB on a mature site.
+//
+// dstPath must not exist. The caller is responsible for the .gz suffix
+// convention; this function does not enforce it but `state.db.gz` is what
+// the rollback path expects.
+func (s *Store) SnapshotToCompressed(dstPath string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store: snapshot on nil store")
+	}
+	if _, err := os.Stat(dstPath); err == nil {
+		return fmt.Errorf("snapshot to %s: destination exists", dstPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+	}
+	tmp := dstPath + ".raw.tmp"
+	// Pre-clean any leftover temp from a prior crashed run — VACUUM INTO
+	// would otherwise refuse with "file exists".
+	_ = os.Remove(tmp)
+	if err := s.SnapshotTo(tmp); err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+
+	in, err := os.Open(tmp)
+	if err != nil {
+		return fmt.Errorf("open vacuum temp: %w", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create gz dst: %w", err)
+	}
+	gz := gzip.NewWriter(out)
+	if _, err := io.Copy(gz, in); err != nil {
+		_ = gz.Close()
+		_ = out.Close()
+		_ = os.Remove(dstPath)
+		return fmt.Errorf("gzip snapshot: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dstPath)
+		return fmt.Errorf("gzip close: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dstPath)
+		return fmt.Errorf("gz dst sync: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dstPath)
+		return fmt.Errorf("gz dst close: %w", err)
 	}
 	return nil
 }

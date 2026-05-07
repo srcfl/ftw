@@ -13,10 +13,12 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -362,9 +364,35 @@ func (s *server) runRollback(snapshotID string, files []string) {
 			slog.Info("rollback: source missing, skipping", "file", f, "err", err)
 			continue
 		}
-		dst := "/app/data/" + f
-		cpArgs := []string{"cp", src, mainServiceName + ":" + dst}
-		if err := s.runner(ctx, nil, cpArgs...); err != nil {
+		// Gzipped entries (state.db.gz from #147) are decompressed
+		// to a sibling temp before docker cp so the container side
+		// receives the same bytes the historic uncompressed path did.
+		// We delete the temp eagerly after the copy regardless of
+		// outcome; a leftover would be cleaned by the next rollback
+		// anyway, but eagerness keeps the snapshots dir tidy.
+		copySrc := src
+		copyName := f
+		var tempToRemove string
+		if strings.HasSuffix(f, ".gz") {
+			plain := strings.TrimSuffix(f, ".gz")
+			tmp := filepath.Join(hostSnapDir, plain+".rollback.tmp")
+			if err := decompressGzipFile(src, tmp); err != nil {
+				slog.Error("rollback gunzip failed", "file", f, "err", err)
+				s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "gunzip " + f + " failed: " + err.Error()})
+				_ = s.runner(ctx, nil, s.composeArgs("up", "-d", mainServiceName)...)
+				return
+			}
+			copySrc = tmp
+			copyName = plain
+			tempToRemove = tmp
+		}
+		dst := "/app/data/" + copyName
+		cpArgs := []string{"cp", copySrc, mainServiceName + ":" + dst}
+		err := s.runner(ctx, nil, cpArgs...)
+		if tempToRemove != "" {
+			_ = os.Remove(tempToRemove)
+		}
+		if err != nil {
 			// File-swap failure is serious. Try to bring the
 			// service back anyway so the operator isn't stranded.
 			slog.Error("rollback docker cp failed", "file", f, "err", err)
@@ -384,6 +412,38 @@ func (s *server) runRollback(snapshotID string, files []string) {
 		return
 	}
 	s.writeState(State{State: "done", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "rollback complete"})
+}
+
+// decompressGzipFile expands src (a gzip stream) into dst, refusing to
+// overwrite an existing dst. Used by the rollback path to materialise an
+// uncompressed file from a *.gz snapshot entry before docker cp hands it
+// to the main container, which still expects raw state.db on its side.
+func decompressGzipFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	gz, err := gzip.NewReader(in)
+	if err != nil {
+		return fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gz.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	if _, err := io.Copy(out, gz); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("decompress %s: %w", src, err)
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
 }
 
 func (s *server) writeState(st State) {

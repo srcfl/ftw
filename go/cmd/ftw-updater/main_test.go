@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -290,6 +291,81 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	up := strings.Join(calls[3], " ")
 	if !strings.Contains(up, "up -d") || !strings.Contains(up, "--force-recreate") {
 		t.Errorf("final call must be compose up -d --force-recreate: %v", calls[3])
+	}
+}
+
+// Gzipped state.db.gz from #147 must be decompressed in the snapshot
+// dir before docker cp, and the container destination path must drop
+// the .gz suffix so the main service still finds plain state.db.
+func TestHandleUpdate_RollbackDecompressesGz(t *testing.T) {
+	s, runner := newTestServer(t)
+
+	composeDir := filepath.Dir(s.composeFile)
+	snapID := "2026-04-20T10-00-00Z_0.30.0_to_0.31.0"
+	snapDir := filepath.Join(composeDir, "data", "snapshots", snapID)
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// state.db.gz holds the canonical gzip of the bytes "fakedb".
+	const payload = "fakedb"
+	gzPath := filepath.Join(snapDir, "state.db.gz")
+	gzFile, err := os.Create(gzPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := gzip.NewWriter(gzFile)
+	if _, err := gw.Write([]byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "config.yaml"), []byte("config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("rollback 202 expected, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	st := waitForState(t, s, "done")
+	if st.Action != "rollback" || st.Snapshot != snapID {
+		t.Errorf("state should track rollback + snapshot id: %+v", st)
+	}
+
+	calls := runner.snapshot()
+	if len(calls) != 4 {
+		t.Fatalf("want 4 docker calls, got %d: %v", len(calls), calls)
+	}
+	// docker cp arg for the gz entry must reference a decompressed temp
+	// file (NOT the .gz on disk) and target /app/data/state.db, not
+	// /app/data/state.db.gz.
+	cpDB := strings.Join(calls[1], " ")
+	if !strings.Contains(cpDB, mainServiceName+":/app/data/state.db") {
+		t.Errorf("state.db cp must drop .gz suffix on container side: %v", calls[1])
+	}
+	if strings.Contains(cpDB, "state.db.gz") {
+		t.Errorf("state.db cp source must be the decompressed temp, not the .gz: %v", calls[1])
+	}
+	// Decompressed temp must NOT linger after the rollback completes.
+	leftovers, err := filepath.Glob(filepath.Join(snapDir, "*.rollback.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("decompressed rollback temp leaked: %v", leftovers)
+	}
+
+	// config.yaml (non-gz) takes the legacy direct-cp path.
+	cpCfg := strings.Join(calls[2], " ")
+	if !strings.Contains(cpCfg, mainServiceName+":/app/data/config.yaml") {
+		t.Errorf("config.yaml cp should target /app/data/config.yaml: %v", calls[2])
 	}
 }
 

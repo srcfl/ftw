@@ -90,12 +90,14 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 
 	captured := []string{}
 
-	// 1. state.db via VACUUM INTO — point-in-time consistent even under
-	// live writes, no need to pause anything.
-	if err := s.deps.State.SnapshotTo(filepath.Join(dir, "state.db")); err != nil {
+	// 1. state.db via VACUUM INTO + gzip — point-in-time consistent even
+	// under live writes, and ~5–10× smaller on disk than the raw file
+	// (#147). Stored as state.db.gz; the rollback sidecar decompresses
+	// any *.gz entry transparently before docker cp.
+	if err := s.deps.State.SnapshotToCompressed(filepath.Join(dir, "state.db.gz")); err != nil {
 		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
 	}
-	captured = append(captured, "state.db")
+	captured = append(captured, "state.db.gz")
 
 	// 2. config.yaml — plain file copy. Missing/empty path means the
 	// caller wasn't wired with one; log and move on without failing

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -195,18 +197,44 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("want 1 snapshot dir, got %d", len(entries))
 	}
-	// Snapshot dir should contain state.db + meta.json (no config.yaml
-	// because ConfigPath was empty).
+	// Snapshot dir should contain state.db.gz + meta.json (no config.yaml
+	// because ConfigPath was empty). The compressed snapshot from #147
+	// also keeps no raw state.db on disk.
 	snapPath := filepath.Join(snapDir, entries[0].Name())
-	for _, f := range []string{"state.db", "meta.json"} {
+	for _, f := range []string{"state.db.gz", "meta.json"} {
 		if _, err := os.Stat(filepath.Join(snapPath, f)); err != nil {
 			t.Errorf("snapshot missing %s: %v", f, err)
 		}
 	}
-	// state.db in the snapshot must be usable.
-	snap, err := state.Open(filepath.Join(snapPath, "state.db"))
+	if _, err := os.Stat(filepath.Join(snapPath, "state.db")); !os.IsNotExist(err) {
+		t.Errorf("raw state.db should not be left in snapshot dir: stat err=%v", err)
+	}
+	// Decompressed state.db.gz must open as a valid SQLite DB and contain
+	// the seeded row.
+	gzFile, err := os.Open(filepath.Join(snapPath, "state.db.gz"))
 	if err != nil {
-		t.Fatalf("snapshot state.db unusable: %v", err)
+		t.Fatalf("open state.db.gz: %v", err)
+	}
+	defer gzFile.Close()
+	gzr, err := gzip.NewReader(gzFile)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gzr.Close()
+	rawPath := filepath.Join(t.TempDir(), "restored.db")
+	rawFile, err := os.Create(rawPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(rawFile, gzr); err != nil {
+		t.Fatalf("decompress state.db.gz: %v", err)
+	}
+	if err := rawFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := state.Open(rawPath)
+	if err != nil {
+		t.Fatalf("decompressed snapshot state.db unusable: %v", err)
 	}
 	if v, ok := snap.LoadConfig("mode"); !ok || v != "planner_self" {
 		t.Errorf("snapshot missing seeded mode config: %q ok=%v", v, ok)

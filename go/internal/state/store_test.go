@@ -1,7 +1,10 @@
 package state
 
 import (
+	"compress/gzip"
 	"context"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -368,6 +371,74 @@ func TestSnapshotToRefusesExistingFile(t *testing.T) {
 	// bug.
 	if err := s.SnapshotTo(dst); err == nil {
 		t.Error("second SnapshotTo to existing path should fail")
+	}
+}
+
+func TestSnapshotToCompressedRoundTrip(t *testing.T) {
+	s := freshStore(t)
+	if err := s.SaveConfig("mode", "planner_self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveTelemetry("ferroamp:battery", `{"w":1500,"soc":0.42}`); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	gzPath := filepath.Join(dir, "state.db.gz")
+	if err := s.SnapshotToCompressed(gzPath); err != nil {
+		t.Fatalf("SnapshotToCompressed: %v", err)
+	}
+
+	// Temp file from VACUUM INTO must not be left behind.
+	if _, err := os.Stat(gzPath + ".raw.tmp"); !os.IsNotExist(err) {
+		t.Errorf("vacuum temp leaked next to snapshot: err=%v", err)
+	}
+
+	// Decompressing the snapshot to a sibling file must yield a valid
+	// SQLite DB containing the seeded rows.
+	gzFile, err := os.Open(gzPath)
+	if err != nil {
+		t.Fatalf("open gz snapshot: %v", err)
+	}
+	defer gzFile.Close()
+	gzr, err := gzip.NewReader(gzFile)
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	defer gzr.Close()
+	rawPath := filepath.Join(dir, "restored.db")
+	rawFile, err := os.Create(rawPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(rawFile, gzr); err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	if err := rawFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := Open(rawPath)
+	if err != nil {
+		t.Fatalf("open decompressed snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "planner_self" {
+		t.Errorf("decompressed snapshot missing config row: got %q ok=%v", v, ok)
+	}
+	if v, ok := snap.LoadTelemetry("ferroamp:battery"); !ok || v != `{"w":1500,"soc":0.42}` {
+		t.Errorf("decompressed snapshot missing telemetry row: got %q ok=%v", v, ok)
+	}
+}
+
+func TestSnapshotToCompressedRefusesExistingFile(t *testing.T) {
+	s := freshStore(t)
+	gzPath := filepath.Join(t.TempDir(), "state.db.gz")
+	if err := s.SnapshotToCompressed(gzPath); err != nil {
+		t.Fatalf("first compressed snapshot: %v", err)
+	}
+	if err := s.SnapshotToCompressed(gzPath); err == nil {
+		t.Error("second SnapshotToCompressed to existing path should fail")
 	}
 }
 
