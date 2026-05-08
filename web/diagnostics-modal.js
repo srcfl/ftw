@@ -55,40 +55,69 @@
     var style = document.createElement("style");
     style.id = "ftw-diag-modal-styles";
     style.textContent = [
-      ".ftw-diag-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9000;display:flex;align-items:center;justify-content:center;}",
-      ".ftw-diag-shell{width:min(720px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:hidden;}",
-      ".ftw-diag-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);}",
-      ".ftw-diag-title{display:flex;align-items:center;gap:10px;}",
-      ".ftw-diag-title-eyebrow{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--fg-label);}",
-      ".ftw-diag-title-name{font-family:var(--mono);font-size:1rem;color:var(--fg);}",
-      ".ftw-diag-status-pill{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.12em;text-transform:uppercase;padding:3px 8px;border:1px solid var(--line);border-radius:3px;color:var(--fg-dim);}",
+      // Backdrop + shell — flat, hairline border, ink-raised surface.
+      // No drop shadow on the modal itself per DESIGN.md.
+      ".ftw-diag-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9000;display:flex;align-items:center;justify-content:center;}",
+      ".ftw-diag-shell{width:min(740px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;overflow:hidden;}",
+      // Header: eyebrow + driver name + status pill on the left,
+      // ghost actions on the right.
+      ".ftw-diag-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--ink);}",
+      ".ftw-diag-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}",
+      // Eyebrow label per DESIGN.md: mono, 0.18em tracking, accent amber.
+      ".ftw-diag-title-eyebrow{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e);font-weight:500;}",
+      ".ftw-diag-title-name{font-family:var(--mono);font-size:1rem;color:var(--fg);font-weight:500;}",
+      // Status pill: 999px per DESIGN.md, status dot uses the sanctioned
+      // accent glow on a 6 px dot. Pill text colour follows status.
+      ".ftw-diag-status-pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:0.7rem;letter-spacing:0.12em;text-transform:uppercase;padding:3px 10px;border:1px solid var(--line);border-radius:999px;color:var(--fg-dim);}",
+      ".ftw-diag-status-pill::before{content:'';width:6px;height:6px;border-radius:999px;background:var(--line);}",
+      ".ftw-diag-status-pill.ftw-diag-status-ok{color:var(--accent-e);border-color:var(--accent-e);}",
+      ".ftw-diag-status-pill.ftw-diag-status-ok::before{background:var(--green-e);box-shadow:0 0 10px var(--green-e);}",
+      ".ftw-diag-status-pill.ftw-diag-status-degraded{color:var(--accent-e);border-color:var(--accent-e);}",
+      ".ftw-diag-status-pill.ftw-diag-status-degraded::before{background:var(--accent-e);box-shadow:0 0 10px var(--accent-e);}",
+      ".ftw-diag-status-pill.ftw-diag-status-offline{color:var(--red-e);border-color:var(--red-e);}",
+      ".ftw-diag-status-pill.ftw-diag-status-offline::before{background:var(--red-e);box-shadow:0 0 10px var(--red-e);}",
       ".ftw-diag-actions{display:flex;gap:8px;align-items:center;}",
-      ".ftw-diag-btn{font-family:var(--mono);font-size:0.74rem;letter-spacing:0.06em;text-transform:uppercase;padding:6px 12px;border:1px solid var(--line);border-radius:3px;background:transparent;color:var(--fg);cursor:pointer;}",
-      ".ftw-diag-btn:hover{border-color:var(--accent-e);color:var(--accent-e);}",
+      // Ghost button per DESIGN.md: transparent bg, hover changes ONLY
+      // the border colour (no bg or text-colour shift).
+      ".ftw-diag-btn{font-family:var(--sans);font-size:0.78rem;font-weight:500;letter-spacing:0.02em;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--fg);cursor:pointer;transition:border-color 120ms ease;}",
+      ".ftw-diag-btn:hover{border-color:var(--fg-dim);}",
+      // Primary CTA: amber bg, near-black text, lift on hover (no colour shift).
       ".ftw-diag-btn-primary{background:var(--accent-e);color:#0a0a0a;border-color:var(--accent-e);}",
-      ".ftw-diag-btn-primary:hover{color:#0a0a0a;opacity:0.9;}",
+      ".ftw-diag-btn-primary:hover{border-color:var(--accent-e);transform:translateY(-1px);}",
+      // Close glyph: bare ghost, hover lifts to fg.
       ".ftw-diag-close{font-size:1.4rem;line-height:1;background:transparent;border:none;color:var(--fg-muted);cursor:pointer;padding:4px 8px;}",
       ".ftw-diag-close:hover{color:var(--fg);}",
-      ".ftw-diag-body{padding:16px 18px;overflow:auto;flex:1;}",
-      ".ftw-diag-section + .ftw-diag-section{margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft);}",
-      ".ftw-diag-section h4{margin:0 0 8px;font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--fg-label);font-weight:500;}",
-      ".ftw-diag-kv{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;font-family:var(--mono);font-size:0.84rem;font-variant-numeric:tabular-nums;}",
+      ".ftw-diag-body{padding:16px 18px;overflow:auto;flex:1;background:var(--ink-raised);}",
+      // Sections: hairline divider, eyebrow heading in amber.
+      ".ftw-diag-section + .ftw-diag-section{margin-top:16px;padding-top:16px;border-top:1px solid var(--line-soft);}",
+      ".ftw-diag-section h4{margin:0 0 10px;font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e);font-weight:500;}",
+      // Key/value grid for identity + health.
+      ".ftw-diag-kv{display:grid;grid-template-columns:140px 1fr;gap:6px 14px;font-family:var(--mono);font-size:0.84rem;font-variant-numeric:tabular-nums;}",
       ".ftw-diag-kv .k{color:var(--fg-muted);}",
       ".ftw-diag-kv .v{color:var(--fg);word-break:break-all;}",
-      ".ftw-diag-readings{display:grid;gap:4px;}",
-      ".ftw-diag-reading{display:grid;grid-template-columns:80px 1fr 1fr 100px;gap:10px;font-family:var(--mono);font-size:0.84rem;font-variant-numeric:tabular-nums;padding:4px 0;}",
-      ".ftw-diag-reading .label{color:var(--fg-muted);text-transform:uppercase;letter-spacing:0.1em;font-size:0.7rem;align-self:center;}",
-      ".ftw-diag-reading.stale{color:oklch(0.65 0.18 25);}",
-      ".ftw-diag-metrics{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px;font-family:var(--mono);font-size:0.82rem;font-variant-numeric:tabular-nums;}",
+      ".ftw-diag-kv .v.err{color:var(--red-e);}",
+      // Reading rows: type label, raw, smoothed, soc/age.
+      ".ftw-diag-readings{display:grid;gap:2px;}",
+      ".ftw-diag-reading{display:grid;grid-template-columns:80px 1fr 1fr 110px;gap:10px;font-family:var(--mono);font-size:0.84rem;font-variant-numeric:tabular-nums;padding:5px 0;border-bottom:1px solid var(--line-soft);}",
+      ".ftw-diag-reading:last-child{border-bottom:none;}",
+      ".ftw-diag-reading .label{color:var(--accent-e);text-transform:uppercase;letter-spacing:0.14em;font-size:0.68rem;align-self:center;}",
+      ".ftw-diag-reading .num{color:var(--fg);}",
+      ".ftw-diag-reading .num-dim{color:var(--fg-dim);}",
+      ".ftw-diag-reading.stale .num,.ftw-diag-reading.stale .num-dim,.ftw-diag-reading.stale .meta{color:var(--red-e);}",
+      ".ftw-diag-reading .meta{color:var(--fg-muted);text-align:right;}",
+      // Metrics list: name dim, value strong.
+      ".ftw-diag-metrics{display:grid;grid-template-columns:1fr auto 1fr auto;gap:4px 18px;font-family:var(--mono);font-size:0.82rem;font-variant-numeric:tabular-nums;}",
       ".ftw-diag-metric-name{color:var(--fg-muted);}",
-      ".ftw-diag-logs{background:var(--ink-raised);border:1px solid var(--line-soft);border-radius:3px;padding:8px 10px;font-family:var(--mono);font-size:0.78rem;line-height:1.4;max-height:280px;overflow:auto;white-space:pre;}",
+      ".ftw-diag-metric-val{color:var(--fg);text-align:right;}",
+      // Log tail: ink-sunken (recessed), accent-tinted hairline border.
+      ".ftw-diag-logs{background:var(--ink-sunken);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-family:var(--mono);font-size:0.78rem;line-height:1.5;max-height:300px;overflow:auto;white-space:pre;}",
       ".ftw-diag-log-line{display:block;}",
       ".ftw-diag-log-DEBUG{color:var(--fg-muted);}",
       ".ftw-diag-log-INFO{color:var(--fg);}",
-      ".ftw-diag-log-WARN{color:oklch(0.82 0.16 80);}",
-      ".ftw-diag-log-ERROR{color:oklch(0.7 0.18 25);}",
+      ".ftw-diag-log-WARN{color:var(--accent-e);}",
+      ".ftw-diag-log-ERROR{color:var(--red-e);}",
       ".ftw-diag-empty{color:var(--fg-muted);font-family:var(--mono);font-size:0.84rem;padding:14px 0;text-align:center;}",
-      ".ftw-diag-error{color:oklch(0.7 0.18 25);font-family:var(--mono);font-size:0.82rem;}",
+      ".ftw-diag-error{color:var(--red-e);font-family:var(--mono);font-size:0.82rem;}",
     ].join("");
     document.head.appendChild(style);
   }
@@ -144,7 +173,7 @@
     html += '<span class="k">consecutive errors</span><span class="v">' + escHtml(String(h.ConsecutiveErrors || 0)) + '</span>';
     html += '<span class="k">tick count</span><span class="v">' + escHtml(String(h.TickCount || 0)) + '</span>';
     if (h.LastError) {
-      html += '<span class="k">last error</span><span class="v" style="color:oklch(0.7 0.18 25)">' + escHtml(h.LastError) + '</span>';
+      html += '<span class="k">last error</span><span class="v err">' + escHtml(h.LastError) + '</span>';
     }
     html += '</div></div>';
 
@@ -155,9 +184,9 @@
         var soc = (r.soc != null) ? "soc " + (r.soc * 100).toFixed(1) + "%" : "";
         html += '<div class="ftw-diag-reading' + staleCls + '">' +
           '<span class="label">' + escHtml(r.type) + '</span>' +
-          '<span>raw ' + escHtml(fmtW(r.raw_w)) + '</span>' +
-          '<span>smooth ' + escHtml(fmtW(r.smoothed_w)) + '</span>' +
-          '<span>' + escHtml(soc || (r.updated_at_ms ? fmtAge(Date.now() - r.updated_at_ms) : "")) + '</span>' +
+          '<span class="num">raw ' + escHtml(fmtW(r.raw_w)) + '</span>' +
+          '<span class="num-dim">smooth ' + escHtml(fmtW(r.smoothed_w)) + '</span>' +
+          '<span class="meta">' + escHtml(soc || (r.updated_at_ms ? fmtAge(Date.now() - r.updated_at_ms) : "")) + '</span>' +
           '</div>';
       });
       html += '</div></div>';
@@ -167,7 +196,7 @@
       html += '<div class="ftw-diag-section"><h4>Live metrics</h4><div class="ftw-diag-metrics">';
       metrics.forEach(function (m) {
         html += '<span class="ftw-diag-metric-name">' + escHtml(m.name) + '</span>' +
-          '<span>' + escHtml(fmtNum(m.value, 3)) + '</span>';
+          '<span class="ftw-diag-metric-val">' + escHtml(fmtNum(m.value, 3)) + '</span>';
       });
       html += '</div></div>';
     }
@@ -239,7 +268,7 @@
       '      <span class="ftw-diag-status-pill" data-role="status">…</span>' +
       '    </div>' +
       '    <div class="ftw-diag-actions">' +
-      '      <button class="ftw-diag-btn" data-role="dump" title="Download a gzipped tarball with redacted config, driver health, recent logs, and 1 h of telemetry — small enough to email a developer.">Support bundle</button>' +
+      '      <button class="ftw-diag-btn" data-role="dump" title="Download a gzipped tarball with recent logs, redacted config, driver health, and 1 h of telemetry — small enough to email a developer.">Download recent logs</button>' +
       '      <button class="ftw-diag-close" data-role="close" aria-label="Close">×</button>' +
       '    </div>' +
       '  </div>' +
