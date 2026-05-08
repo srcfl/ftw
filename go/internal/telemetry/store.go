@@ -275,6 +275,35 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 	s.latestMu.Unlock()
 }
 
+// MetricSnapshot is a snapshot of one (driver, metric) latest value.
+type MetricSnapshot struct {
+	Name      string    `json:"name"`
+	Value     float64   `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// LatestMetricsByDriver returns the latest live cache entries for one
+// driver, sorted by metric name. Used by /api/drivers/{name} to render
+// the "what's it actually emitting right now" panel without spinning
+// up a TS-DB query per metric.
+func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
+	prefix := driver + ":"
+	s.latestMu.RLock()
+	defer s.latestMu.RUnlock()
+	out := make([]MetricSnapshot, 0)
+	for k, v := range s.latestMetric {
+		if len(k) <= len(prefix) || k[:len(prefix)] != prefix {
+			continue
+		}
+		out = append(out, MetricSnapshot{
+			Name:      k[len(prefix):],
+			Value:     v.Value,
+			UpdatedAt: v.UpdatedAt,
+		})
+	}
+	return out
+}
+
 // LatestMetric returns the most recent value for a given (driver, metric).
 // ok=false when nothing has been emitted yet. Used by consumers that need
 // live values (e.g. fuse-over-limit rule reading meter_l1_a) without

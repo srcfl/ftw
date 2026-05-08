@@ -56,6 +56,9 @@ const (
 // mutexes from each package.
 type Deps struct {
 	Tel        *telemetry.Store
+	// LogRing is the in-memory log buffer wired in main.go. Nil makes
+	// /api/drivers/{name}/logs and /api/support/dump return 503.
+	LogRing    *telemetry.LogRing
 	Ctrl       *control.State
 	CtrlMu     *sync.Mutex
 	State      *state.Store
@@ -187,6 +190,10 @@ func (s *Server) routes() {
 	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
+	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
+	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
+	s.handle("GET  /api/logs", s.handleGlobalLogs)
+	s.handle("GET  /api/support/dump", s.handleSupportDump)
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)

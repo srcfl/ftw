@@ -1451,6 +1451,7 @@
     // .btn-send style from index.html.
     var isDisabled = d.disabled === true || d.status === "disabled";
     var actions = '<div class="driver-actions" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">';
+    actions += '<button class="btn-send" data-drv-action="diagnose" data-drv="' + escHtml(name) + '">Diagnose</button>';
     if (isDisabled) {
       actions += '<button class="btn-send" data-drv-action="enable" data-drv="' + escHtml(name) + '">Enable</button>';
     } else {
@@ -1470,6 +1471,12 @@
       var name = btn.getAttribute("data-drv");
       var action = btn.getAttribute("data-drv-action");
       if (!name || !action) return;
+      // Diagnose is a UI-only action: no API mutation, just open the
+      // modal and let it poll /api/drivers/{name} on its own cadence.
+      if (action === "diagnose") {
+        if (window.FTWDiagnostics) window.FTWDiagnostics.open(name);
+        return;
+      }
       if (action === "disable" && !window.confirm("Disable driver \"" + name + "\"? It will be stopped and won't auto-start until re-enabled.")) return;
       btn.disabled = true;
       btn.textContent = action + "ing…";
