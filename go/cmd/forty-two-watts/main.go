@@ -94,7 +94,15 @@ func main() {
 		return filepath.Join(filepath.Dir(*configPath), "drivers")
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// Wire a process-wide log ring so /api/drivers/{name}/logs and the
+	// support-bundle endpoint can return recent activity without going
+	// to disk. The ring captures every slog record AND forwards to the
+	// stdout text handler so journald/podman logs/docker logs are
+	// unchanged. Driver-scoped records (slog.With("driver", name)) are
+	// routed into a per-driver sub-ring by the wrapping handler.
+	logRing := telemetry.NewLogRing()
+	stdoutHandler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	logger := slog.New(telemetry.NewLogHandler(stdoutHandler, logRing))
 	slog.SetDefault(logger)
 	slog.Info("forty-two-watts starting", "version", Version, "config", *configPath)
 
@@ -1048,7 +1056,7 @@ func main() {
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
 	deps = &api.Deps{
-		Tel: tel, Ctrl: ctrl, CtrlMu: ctrlMu,
+		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
 		CapMu: capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
