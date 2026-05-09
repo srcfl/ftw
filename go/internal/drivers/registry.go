@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -124,7 +126,8 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	if cfg.Capabilities.HTTP != nil {
 		env.WithHTTP()
-		if hosts := cfg.Capabilities.HTTP.AllowedHosts; len(hosts) > 0 {
+		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
+		if len(hosts) > 0 {
 			env.WithHTTPAllowedHosts(hosts)
 		}
 	}
@@ -388,6 +391,41 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 	}
 	cfg := rd.cfg
 	return r.Restart(ctx, cfg)
+}
+
+// mergeAllowedHosts returns the explicit allowlist plus any host implied
+// by the driver's free-form config (`host` or `url` keys), deduplicated.
+// Saves the user from listing the same IP under both `config.host` and
+// `capabilities.http.allowed_hosts` — the common foot-gun when a driver
+// only talks to one device.
+func mergeAllowedHosts(explicit []string, drvCfg map[string]any) []string {
+	seen := make(map[string]struct{}, len(explicit)+2)
+	out := make([]string, 0, len(explicit)+2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, h := range explicit {
+		add(h)
+	}
+	if drvCfg != nil {
+		if v, ok := drvCfg["host"].(string); ok {
+			add(v)
+		}
+		if v, ok := drvCfg["url"].(string); ok {
+			if u, err := url.Parse(v); err == nil && u.Host != "" {
+				add(u.Host)
+			}
+		}
+	}
+	return out
 }
 
 func findDriver(list []config.Driver, name string) (config.Driver, bool) {
