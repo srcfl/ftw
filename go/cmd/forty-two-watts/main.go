@@ -1005,6 +1005,37 @@ func main() {
 				batW += r.SmoothedW
 			}
 			evW := tel.SumOnlineEVW()
+			// Surplus-only EV priority: when any loadpoint is in
+			// surplus-only mode, battery charging power is NOT
+			// available for the EV. The original formula assumed
+			// "if I told the battery to stop, that surplus would
+			// free up for the EV" — but the MPC, even with the
+			// grid-charge ban now in place, may still legitimately
+			// charge the battery from PV surplus. If we hand that
+			// power back to the EV, the controller commands the EV
+			// on, the battery loses its share, the planner re-budgets
+			// the EV down → flap. The truthful surplus for an EV
+			// under surplus-only is what's left AFTER the battery
+			// has taken its share: -gridW + max(0, -batW) (battery
+			// counts only if it's discharging, contributing to
+			// site supply).
+			surplusOnlyActive := false
+			for _, st := range lpMgr.States() {
+				if st.SurplusOnly {
+					surplusOnlyActive = true
+					break
+				}
+			}
+			if surplusOnlyActive && batW > 0 {
+				batW = 0
+			}
+			// Open follow-up: in self-consumption / planner_self mode,
+			// the dispatch PI absorbs PV into the battery before the
+			// EV controller sees it, defeating surplus-only priority.
+			// The MPC arbitrage path is covered by the new mpc.go
+			// feasibility constraint; the self-consumption fallback
+			// needs a battery-charge cap in control/dispatch.go to
+			// match. Tracked separately to keep this change focused.
 			return -gridW + batW + evW, true
 		})
 	}
@@ -1426,7 +1457,23 @@ func main() {
 			for k, v := range capacities { capsSnap[k] = v }
 			capMu.RUnlock()
 
+			// Surplus-only EV reserve: walk all loadpoints and sum
+			// MaxChargeW for any LP that is surplus_only AND has an EV
+			// plugged in. Result is injected into ctrl.EVSurplusOnlyReserveW
+			// so dispatch caps battery charge to leave that much PV
+			// headroom for the EV controller to claim. See
+			// dispatch.go EVSurplusOnlyReserveW + the (energy/legacy) cap
+			// blocks. Computed every tick so toggling surplus_only or
+			// plugging/unplugging an EV takes effect immediately.
+			var evReserveW float64
+			for _, st := range lpMgr.States() {
+				if st.SurplusOnly && st.PluggedIn {
+					evReserveW += st.MaxChargeW
+				}
+			}
+
 			ctrlMu.Lock()
+			ctrl.EVSurplusOnlyReserveW = evReserveW
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			ctrlMu.Unlock()

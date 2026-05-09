@@ -475,6 +475,29 @@ func Optimize(slots []Slot, p Params) Plan {
 							continue
 						}
 
+						// Surplus-only EV: the battery must not steal
+						// PV that the EV could use, and must not
+						// grid-charge for arbitrage while the EV is
+						// connected. Without this rule the planner
+						// "launders" cheap grid through the battery:
+						// import in slot N to charge battery, discharge
+						// to EV in slot N+1 — gridW in N+1 looks ~0,
+						// the EV-only constraint above doesn't catch
+						// it, and the EV ends up grid-fed at retail
+						// import price + roundtrip loss. Forbidding
+						// (battW > 0 AND gridW > 50) when a surplus-
+						// only LP is plugged in closes that loophole.
+						// Battery charging from genuine PV surplus
+						// (gridW ≤ 50) stays allowed — that just
+						// means PV exceeds load+EV+battery and the
+						// battery soaks up what would otherwise
+						// export. Discharge (battW < 0) is always
+						// allowed (peak shaving, fuse guard, self-
+						// consumption when EV not drawing).
+						if evActive && lp.SurplusOnly && battW > 0 && gridW > 50 {
+							continue
+						}
+
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
 						// battery action pulling the grid further

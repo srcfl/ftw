@@ -517,8 +517,28 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// PV is naturally absorbed by the home battery via the
 		// reactive self_consumption PI in dispatch.go — that's the
 		// "battery smooths PV transients for ~1-2 min" path.
-		if lpCfg.SurplusOnly && cmdW > 0 {
-			cmdW = c.computeSurplusCmd(now, lpCfg, cmdW, sample.PowerW)
+		//
+		// Opportunistic start: when surplus_only is on but the MPC
+		// has no plan budget for this LP (cmdW = 0) — typical when
+		// the LP isn't in the planner's view because the vehicle
+		// driver is offline / has no SoC, or the user has no
+		// deadline set — fall through to the surplus clamp anyway
+		// with the LP's MaxChargeW as the requested ceiling. The
+		// clamp returns 0 if there's no PV surplus, or a snapped
+		// step otherwise. Without this, surplus_only LPs without an
+		// active vehicle telemetry source (Easee + no Tesla, or
+		// any third-party EV without a Go-side vehicle driver)
+		// would never start because (a) MPC won't allocate without
+		// a target, (b) auto-wake requires vehicleStatus, (c) the
+		// surplus clamp was previously gated on cmdW > 0. The
+		// wallbox will silently report what the EV does (op_mode
+		// stays at 2 if the car declines) without grid import.
+		if lpCfg.SurplusOnly {
+			wantW := cmdW
+			if wantW <= 0 {
+				wantW = lpCfg.MaxChargeW
+			}
+			cmdW = c.computeSurplusCmd(now, lpCfg, wantW, sample.PowerW)
 		}
 		// Wake-kick AFTER the surplus clamp: when an auto-wake just
 		// fired and the surplus clamp paused us to 0, force the

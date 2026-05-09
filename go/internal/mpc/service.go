@@ -576,7 +576,9 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// "idle, import to cover load" over "discharge now, refill from PV
 	// tomorrow" (because discharging loses η_rt while the extra retail-
 	// priced terminal credit is never realised).
+	terminalDefaulted := false
 	if p.TerminalSoCPrice <= 0 {
+		terminalDefaulted = true
 		switch p.Mode {
 		case ModeSelfConsumption, ModeCheapCharge:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
@@ -606,6 +608,24 @@ func (s *Service) replan(_ context.Context) *Plan {
 			p.Loadpoint = spec
 			loadpointID = spec.ID
 		}
+	}
+
+	// Surplus-only LP override: when an EV is connected to a surplus-
+	// only loadpoint, the battery is forbidden from grid-charging
+	// (mpc.go feasibility). The default arbitrage terminal credit
+	// (mean retail import price across the horizon) then becomes
+	// misleading — it tells the DP "stored energy is worth full
+	// retail" while the only realistic discharge path is local
+	// self-consumption (battery → house, battery → EV via the still-
+	// allowed PV-only charge). Re-evaluate the terminal credit using
+	// the self-consumption formula so the planner stops chasing a
+	// reward it can no longer earn through grid arbitrage. Only
+	// applies when we just defaulted above; an explicit caller-
+	// supplied TerminalSoCPrice is respected.
+	if terminalDefaulted && p.Loadpoint != nil && p.Loadpoint.SurplusOnly &&
+		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge {
+		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
+			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 	}
 
 	slog.Info("mpc: optimize params",
