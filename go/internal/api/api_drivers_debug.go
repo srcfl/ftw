@@ -9,16 +9,20 @@ package api
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
@@ -47,6 +51,17 @@ type driverIdentityDTO struct {
 	SN       string `json:"sn,omitempty"`
 	MAC      string `json:"mac,omitempty"`
 	Endpoint string `json:"endpoint,omitempty"`
+}
+
+type driverProbeResp struct {
+	Name      string                     `json:"name"`
+	OK        bool                       `json:"ok"`
+	Error     string                     `json:"error,omitempty"`
+	ElapsedMs int64                      `json:"elapsed_ms"`
+	Health    *telemetry.DriverHealth    `json:"health,omitempty"`
+	Readings  []readingDTO               `json:"readings"`
+	Metrics   []telemetry.MetricSnapshot `json:"metrics"`
+	Identity  driverIdentityDTO          `json:"identity"`
 }
 
 // GET /api/drivers/{name} — composite view: health, last readings,
@@ -88,6 +103,172 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, resp)
+}
+
+// POST /api/drivers/test — start one short-lived driver instance from the
+// posted config, wait briefly for telemetry, and return whatever live values
+// it emitted. This lets Settings validate an unsaved driver without writing it
+// into config.yaml or disturbing the running registry.
+func (s *Server) handleDriverTest(w http.ResponseWriter, r *http.Request) {
+	var cfg config.Driver
+	if err := readJSON(r, &cfg); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid driver config: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(cfg.Lua) == "" {
+		writeJSON(w, 400, map[string]string{"error": "missing driver lua path"})
+		return
+	}
+
+	// Match /api/config save semantics: masked/empty secrets in the form are
+	// restored from the live config before the probe runs.
+	if s.deps.CfgMu != nil && s.deps.Cfg != nil {
+		s.deps.CfgMu.RLock()
+		existing := *s.deps.Cfg
+		s.deps.CfgMu.RUnlock()
+		wrapped := config.Config{Drivers: []config.Driver{cfg}}
+		wrapped.PreserveMaskedSecrets(&existing)
+		restoreDriverConfigSecrets(&wrapped, &existing, s.driverSecretKeys())
+		cfg = wrapped.Drivers[0]
+	}
+
+	// Resolve UI-relative Lua paths the same way config.Load does.
+	baseDir := "."
+	if s.deps.ConfigPath != "" {
+		baseDir = filepath.Dir(s.deps.ConfigPath)
+	}
+	resolved := config.Config{Drivers: []config.Driver{cfg}}
+	resolved.ResolveDriverPaths(baseDir)
+	cfg = resolved.Drivers[0]
+
+	if mq := cfg.EffectiveMQTT(); mq != nil {
+		if mq.Port == 0 {
+			mq.Port = 1883
+		}
+		if s.deps.DriverMQTTFactory == nil {
+			writeJSON(w, 503, map[string]string{"error": "mqtt probe unavailable"})
+			return
+		}
+	}
+	if mb := cfg.EffectiveModbus(); mb != nil {
+		if mb.Port == 0 {
+			mb.Port = 502
+		}
+		if mb.UnitID == 0 {
+			mb.UnitID = 1
+		}
+		if s.deps.DriverModbusFactory == nil {
+			writeJSON(w, 503, map[string]string{"error": "modbus probe unavailable"})
+			return
+		}
+	}
+
+	displayName := strings.TrimSpace(cfg.Name)
+	if displayName == "" {
+		displayName = filepath.Base(cfg.Lua)
+	}
+	testName := "__test_" + safeProbeName(displayName) + "_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	cfg.Name = testName
+	if cfg.BatteryCapacityWh <= 0 {
+		// Probe-only: let battery-capable drivers emit enough to prove the
+		// connection even before the operator has entered nameplate capacity.
+		cfg.BatteryCapacityWh = 1
+	}
+
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+	reg.MQTTFactory = s.deps.DriverMQTTFactory
+	reg.ModbusFactory = s.deps.DriverModbusFactory
+	reg.ARPLookup = s.deps.DriverARPLookup
+
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := reg.Add(ctx, cfg); err != nil {
+		writeJSON(w, 200, driverProbeResp{
+			Name:      displayName,
+			OK:        false,
+			Error:     err.Error(),
+			ElapsedMs: time.Since(started).Milliseconds(),
+		})
+		return
+	}
+	defer reg.RemoveProbe(cfg.Name)
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+
+	for {
+		resp := collectDriverProbe(displayName, cfg.Name, tel, reg, started)
+		if len(resp.Readings) > 0 || len(resp.Metrics) > 0 {
+			resp.OK = true
+			writeJSON(w, 200, resp)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			resp.Error = ctx.Err().Error()
+			writeJSON(w, 200, resp)
+			return
+		case <-deadline.C:
+			resp.Error = "no telemetry received within 8s"
+			writeJSON(w, 200, resp)
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func collectDriverProbe(displayName, runtimeName string, tel *telemetry.Store, reg *drivers.Registry, started time.Time) driverProbeResp {
+	resp := driverProbeResp{Name: displayName, ElapsedMs: time.Since(started).Milliseconds()}
+	if h := tel.DriverHealth(runtimeName); h != nil {
+		resp.Health = h
+		if h.LastError != "" {
+			resp.Error = h.LastError
+		}
+	}
+	for _, der := range []telemetry.DerType{telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery, telemetry.DerEV, telemetry.DerVehicle} {
+		rd := tel.Get(runtimeName, der)
+		if rd == nil {
+			continue
+		}
+		resp.Readings = append(resp.Readings, readingDTO{
+			Type:      der.String(),
+			RawW:      rd.RawW,
+			SmoothedW: rd.SmoothedW,
+			SoC:       rd.SoC,
+			UpdatedAt: rd.UpdatedAt.UnixMilli(),
+			Stale:     false,
+		})
+	}
+	resp.Metrics = tel.LatestMetricsByDriver(runtimeName)
+	sort.Slice(resp.Metrics, func(i, j int) bool { return resp.Metrics[i].Name < resp.Metrics[j].Name })
+	if env := reg.Env(runtimeName); env != nil {
+		make, sn, mac, ep := env.FullIdentity()
+		resp.Identity = driverIdentityDTO{Make: make, SN: sn, MAC: mac, Endpoint: ep}
+	}
+	return resp
+}
+
+func safeProbeName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('_')
+	}
+	s := strings.Trim(b.String(), "_")
+	if s == "" {
+		return "driver"
+	}
+	if len(s) > 48 {
+		return s[:48]
+	}
+	return s
 }
 
 // GET /api/drivers/{name}/logs?limit=N — recent log lines for one

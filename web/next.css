@@ -1093,6 +1093,268 @@ body.ftw-next .modal-content {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
 }
+body.ftw-next .modal-header,
+body.ftw-next .modal-footer,
+body.ftw-next .modal-tabs {
+  border-color: var(--line);
+}
+body.ftw-next .modal-header,
+body.ftw-next .modal-tabs {
+  background: var(--ink);
+}
+body.ftw-next .modal-header h2 {
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+body.ftw-next .modal-close {
+  color: var(--fg-muted);
+}
+body.ftw-next .modal-close:hover {
+  color: var(--fg);
+}
+body.ftw-next .modal-tabs {
+  gap: 0;
+  padding: 8px 16px 0;
+}
+body.ftw-next .modal-tabs button {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-bottom-color: transparent;
+}
+body.ftw-next .modal-tabs button.active {
+  color: var(--accent-e);
+  border-bottom-color: var(--accent-e);
+}
+body.ftw-next .modal-body {
+  background: var(--ink-raised);
+}
+body.ftw-next .modal-body label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+body.ftw-next .modal-body label:has(input[type="checkbox"]) {
+  color: var(--fg-label);
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+body.ftw-next .modal-body input[type="text"],
+body.ftw-next .modal-body input[type="number"],
+body.ftw-next .modal-body input[type="password"],
+body.ftw-next .modal-body select {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  min-height: 38px;
+  padding: 10px 12px;
+}
+body.ftw-next .modal-body input:focus,
+body.ftw-next .modal-body select:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-next .modal-body input::placeholder {
+  color: var(--fg-muted);
+}
+body.ftw-next .modal-body fieldset,
+body.ftw-next .device-item {
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+body.ftw-next .modal-body fieldset {
+  padding: 14px 16px 16px;
+}
+body.ftw-next .modal-body fieldset legend {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  padding: 0 8px;
+  text-transform: uppercase;
+}
+body.ftw-next .field-row.field-row-single {
+  grid-template-columns: 1fr;
+}
+body.ftw-next .device-item {
+  padding: 14px;
+}
+body.ftw-next .device-item-header {
+  gap: 12px;
+}
+body.ftw-next .device-item-header strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.94rem;
+  font-weight: 600;
+}
+body.ftw-next .device-meta {
+  color: var(--fg-dim);
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+body.ftw-next .btn-add,
+body.ftw-next .btn-remove {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+body.ftw-next .btn-add:hover {
+  border-color: var(--fg-dim);
+  color: var(--fg);
+}
+body.ftw-next .btn-add:disabled {
+  color: var(--fg-muted);
+  cursor: wait;
+  opacity: 0.75;
+}
+body.ftw-next .btn-remove {
+  color: var(--red-e);
+  flex: 0 0 auto;
+}
+body.ftw-next .btn-remove:hover {
+  background: transparent;
+  border-color: var(--red-e);
+}
+body.ftw-next .settings-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+body.ftw-next .settings-status.success { color: var(--green-e); }
+body.ftw-next .settings-status.error { color: var(--red-e); }
+body.ftw-next .creds-badge {
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+body.ftw-next .creds-badge.creds-saved {
+  background: color-mix(in srgb, var(--green-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green-e) 35%, transparent);
+  color: var(--green-e);
+}
+body.ftw-next .creds-badge.creds-missing {
+  background: color-mix(in srgb, var(--accent-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent-e) 35%, transparent);
+  color: var(--accent-e);
+}
+body.ftw-next .driver-test-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+body.ftw-next .driver-test-btn {
+  margin-top: 0;
+  width: auto;
+}
+body.ftw-next .driver-test-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+body.ftw-next .driver-test-status.ok {
+  color: var(--green-e);
+}
+body.ftw-next .driver-test-status.error {
+  color: var(--red-e);
+}
+body.ftw-next .driver-test-output {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-basis: 100%;
+  padding: 10px 12px;
+}
+body.ftw-next .driver-test-kv,
+body.ftw-next .driver-test-metrics {
+  display: grid;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  gap: 5px 12px;
+  grid-template-columns: max-content 1fr;
+}
+body.ftw-next .driver-test-kv span,
+body.ftw-next .driver-test-metrics span {
+  color: var(--fg-label);
+}
+body.ftw-next .driver-test-kv strong,
+body.ftw-next .driver-test-metrics strong {
+  color: var(--fg);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+body.ftw-next .driver-test-values {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+body.ftw-next .driver-test-values div {
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 3px 10px;
+  grid-template-columns: 72px 1fr;
+  padding-top: 6px;
+}
+body.ftw-next .driver-test-values span {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-next .driver-test-values strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+body.ftw-next .driver-test-values small {
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 2;
+}
+body.ftw-next .driver-test-metrics {
+  border-top: 1px solid var(--line-soft);
+  grid-template-columns: 1fr auto;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+body.ftw-next .driver-test-error,
+body.ftw-next .driver-test-empty {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+body.ftw-next .driver-test-error {
+  color: var(--red-e);
+  margin-top: 8px;
+}
 
 /* ---- Diagnose ---- */
 body.ftw-next .diagnose-title h2 { font-family: var(--sans); }

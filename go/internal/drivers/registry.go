@@ -74,7 +74,7 @@ type runningDriver struct {
 	cfg    config.Driver
 	// Poll loop coordination
 	cmdCh chan driverCmd
-	stop  chan struct{}
+	stop  chan bool
 	done  chan struct{}
 }
 
@@ -153,7 +153,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		env:    env,
 		cfg:    cfg,
 		cmdCh:  make(chan driverCmd, 8),
-		stop:   make(chan struct{}),
+		stop:   make(chan bool, 1),
 		done:   make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -183,8 +183,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	defer timer.Stop()
 	for {
 		select {
-		case <-rd.stop:
-			_ = rd.driver.DefaultMode(ctx)
+		case skipDefault := <-rd.stop:
+			if !skipDefault {
+				_ = rd.driver.DefaultMode(ctx)
+			}
 			_ = rd.driver.Cleanup(ctx)
 			// Tear down capability connections so a subsequent Add
 			// with the same driver name doesn't race an old MQTT
@@ -236,6 +238,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 // driver's entry from the telemetry store so the API status + UI stop
 // showing a stale card for a driver that's no longer in config.
 func (r *Registry) Remove(name string) {
+	r.remove(name, false)
+}
+
+// RemoveProbe stops a short-lived probe driver without sending
+// driver_default_mode. Test-connection probes must not change device
+// operating mode as a side effect of cleanup.
+func (r *Registry) RemoveProbe(name string) {
+	r.remove(name, true)
+}
+
+func (r *Registry) remove(name string, skipDefault bool) {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	if !ok {
@@ -244,7 +257,7 @@ func (r *Registry) Remove(name string) {
 	}
 	delete(r.rec, name)
 	r.mu.Unlock()
-	close(rd.stop)
+	rd.stop <- skipDefault
 	<-rd.done
 	if r.tel != nil {
 		r.tel.Remove(name)

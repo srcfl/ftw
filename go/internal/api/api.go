@@ -112,6 +112,11 @@ type Deps struct {
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
 	Registry *drivers.Registry
+	// Factories mirrored from the runtime registry so /api/drivers/test can
+	// run a short-lived probe without persisting config.
+	DriverMQTTFactory   func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error)
+	DriverModbusFactory func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error)
+	DriverARPLookup     func(host string) (mac string, ok bool)
 
 	// Optional: background version-check + updater-sidecar dispatch.
 	// Nil disables every /api/version/* endpoint (returns 503).
@@ -190,6 +195,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/battery_covers_ev", s.handleSetBatteryCoversEV)
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
+	s.handle("POST /api/drivers/test", s.handleDriverTest)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
