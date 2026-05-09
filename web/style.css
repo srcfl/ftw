@@ -1648,6 +1648,13 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   gap: 12px;
 }
 
+/* Loadpoints section — match the inter-section spacing other advanced
+   sections use (#models-section: margin-top 20px). Without this the
+   .lp-card sits flush against the drivers-section below, which the
+   user reported as "loadpoints overlaps the devices". Add bottom
+   margin too so the model section after drivers stays readable. */
+#loadpoints-section { margin-top: 20px; margin-bottom: 20px; }
+
 /* Loadpoints — advanced-mode panel. Mirrors .twin-card visual language
    (1 px hairline border via --line where the modern theme is loaded,
    subtle raised surface) but lays the body out as config-on-the-left,
