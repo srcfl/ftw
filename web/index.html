@@ -30,7 +30,7 @@
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=lp1">
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
   <link rel="stylesheet" href="/next.css?v=next2">
@@ -405,6 +405,15 @@
       <div class="twins-grid" id="twins-grid"></div>
     </section>
 
+    <!-- Loadpoints — EV charger configuration + planned schedule -->
+    <section id="loadpoints-section" class="advanced-only">
+      <div class="section-header">
+        <h2>Loadpoints</h2>
+        <span id="loadpoints-subtitle" class="plan-summary"></span>
+      </div>
+      <div id="loadpoints-grid"></div>
+    </section>
+
     <!-- Drivers — compact -->
     <section id="drivers-section" class="advanced-only">
       <div class="drivers-grid" id="drivers-grid"></div>
@@ -622,6 +631,7 @@
   <script src="/models.js?v=diag1"></script>
   <script src="/plan.js?v=diag1"></script>
   <script src="/twins.js?v=diag1"></script>
+  <script src="/loadpoints.js?v=lp1"></script>
   <script src="/diagnose.js?v=diag1"></script>
   <script src="/update-badge.js?v=modal1" defer></script>
   <script>

@@ -1647,6 +1647,105 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
 }
+
+/* Loadpoints — advanced-mode panel. Mirrors .twin-card visual language
+   (1 px hairline border via --line where the modern theme is loaded,
+   subtle raised surface) but lays the body out as config-on-the-left,
+   schedule-table-on-the-right so an operator can read state + plan
+   side by side without scrolling. Wraps to a single column under
+   720 px so it stays readable on a tablet. */
+.lp-card {
+  background: var(--ink-raised, rgba(255,255,255,0.03));
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 10px;
+}
+.lp-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0 0 10px 0;
+}
+.lp-card-header h3 {
+  font-family: var(--mono, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.78rem;
+  margin: 0;
+  color: var(--fg-label, var(--text, #e2e8f0));
+}
+.lp-card-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .lp-card-body { grid-template-columns: 1fr; }
+}
+.lp-cfg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lp-cfg-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line-soft, rgba(255,255,255,0.04));
+}
+.lp-cfg-row:last-child { border-bottom: 0; }
+.lp-cfg-key {
+  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  font-family: var(--mono, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.68rem;
+}
+.lp-cfg-val {
+  color: var(--fg, var(--text, #e2e8f0));
+  font-variant-numeric: tabular-nums;
+}
+.lp-badge {
+  display: inline-block;
+  font-family: var(--mono, monospace);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
+  border-radius: 3px;
+  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  background: transparent;
+}
+.lp-badge-on {
+  /* On-accent text MUST be near-black per DESIGN.md, not white. */
+  color: #0a0a0a;
+  background: var(--amber, var(--accent, #5566ff));
+  border-color: transparent;
+}
+.lp-schedule-wrap {
+  /* Bound the table height so a 16-row plan doesn't push the card
+     off-screen on a small viewport. The diag-table inherits a sticky
+     thead so column headers stay visible while the operator scrolls. */
+  max-height: 360px;
+  overflow: auto;
+}
+.lp-schedule { font-size: 0.74rem; }
+.lp-schedule tbody tr.lp-row-charging td {
+  /* Highlight slots where the EV is actively scheduled. Subtle amber
+     wash so it reads as "this is the action" without screaming over
+     the rest of the schedule. */
+  background: color-mix(in oklch, var(--amber, #fbbf24) 14%, transparent);
+}
+.lp-empty {
+  color: var(--fg-muted, var(--text-dim, #94a3b8));
+  font-size: 0.78rem;
+  padding: 12px 0;
+  font-style: italic;
+}
 .model-card {
   background: var(--surface);
   border: 1px solid var(--border);
