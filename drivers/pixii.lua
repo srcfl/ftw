@@ -387,6 +387,9 @@ end
 
 local function write_setpoint_w(pixii_w)
     local hi, lo = encode_i32_be(pixii_w)
+    host.log("info", "Pixii: modbus_write_multi addr=" .. REG_SETPOINT_HI
+        .. " hi=" .. tostring(hi) .. " lo=" .. tostring(lo)
+        .. " (pixii_w=" .. tostring(pixii_w) .. ")")
     local err = host.modbus_write_multi(REG_SETPOINT_HI, { hi, lo })
     if err ~= nil and err ~= "" then
         host.log("warn", "Pixii: setpoint write failed: " .. tostring(err))
@@ -403,7 +406,7 @@ end
 local function set_battery_power(power_w)
     -- Flip EMS → generator frame.
     local pixii_w = -power_w
-    host.log("debug", "Pixii: setpoint ems_w=" .. tostring(power_w)
+    host.log("info", "Pixii: setpoint ems_w=" .. tostring(power_w)
         .. " pixii_w=" .. tostring(pixii_w))
     return write_setpoint_w(pixii_w)
 end
