@@ -1399,6 +1399,19 @@ func main() {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
 				for _, n := range reg.Names() {
+					// Skip the site-meter driver itself: when it's both
+					// the meter AND a battery (e.g. Pixii), its meter
+					// going stale is usually because its own modbus poll
+					// stalled. Writing setpoint 0 into that same hung
+					// session disrupts whatever it was already doing
+					// and creates a flap loop — the symptom the user
+					// actually sees is the battery cutting in/out
+					// every minute. The protection rationale (don't
+					// charge from a stale grid signal) only applies to
+					// OTHER batteries, not the meter owner itself.
+					if n == ctrl.SiteMeterDriver {
+						continue
+					}
 					_ = reg.SendDefault(ctx, n)
 				}
 				continue
