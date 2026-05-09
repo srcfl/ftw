@@ -2147,15 +2147,42 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	surplusDisabled := false
 	if req.SurplusOnly != nil {
-		if !s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly) {
+		prev, ok := s.deps.Loadpoints.SetSurplusOnly(id, *req.SurplusOnly)
+		if !ok {
 			writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
 			return
 		}
+		// Disabling surplus_only is a planner regime change: the
+		// terminal SoC credit flips from self-consumption back to the
+		// arbitrage default (much higher), the grid-charge ban lifts,
+		// and the LP may now be eligible for grid-arbitrage scheduling
+		// (when target_soc_pct > 0). Force a synchronous replan with a
+		// tagged reason so the new schedule is in place by the time
+		// this HTTP response returns and the diagnose snapshot records
+		// "why" the plan changed at this timestamp.
+		if prev && !*req.SurplusOnly {
+			surplusDisabled = true
+		}
 	}
-	// Trigger replan so the new target lands in the schedule fast.
 	if s.deps.MPC != nil {
-		go s.deps.MPC.Replan(r.Context())
+		if surplusDisabled {
+			slog.Info("loadpoint surplus_only disabled — forcing replan",
+				"lp", id)
+			// Synchronous + fresh context (the request context dies the
+			// moment we writeJSON). Replan typically completes in
+			// <100ms for current grid sizes; the API caller blocks
+			// briefly and returns to a UI that can immediately fetch
+			// /api/mpc/plan and see the new schedule.
+			s.deps.MPC.ReplanWithReason(context.Background(), "surplus_only_disabled")
+		} else {
+			// Other field changes: replan is helpful but not load-
+			// bearing — kick it off in the background so the API stays
+			// snappy. The goroutine uses a fresh context for the same
+			// reason as above (request ctx cancellation).
+			go s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_target_changed")
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
 }

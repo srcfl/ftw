@@ -506,6 +506,22 @@ func (s *Service) checkDivergence(ctx context.Context) {
 // Exposed for tests and API triggers.
 func (s *Service) Replan(ctx context.Context) *Plan { return s.replan(ctx) }
 
+// ReplanWithReason is Replan with an explicit reason string that lands
+// in slog + the diagnose snapshot. Use it when an external event (API
+// mutation, settings change, mode flip) forces a replan — the default
+// "scheduled" reason loses that provenance, which makes time-travel
+// debugging harder when the operator asks "why did the plan change at
+// 12:34?". Reasons should be short kebab-style, e.g.
+// "surplus_only_disabled", "target_soc_changed", "mode_changed".
+func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
+	if reason != "" {
+		s.mu.Lock()
+		s.lastReason = reason
+		s.mu.Unlock()
+	}
+	return s.replan(ctx)
+}
+
 func (s *Service) replan(_ context.Context) *Plan {
 	now := time.Now()
 	untilMs := now.Add(s.Horizon).UnixMilli()
