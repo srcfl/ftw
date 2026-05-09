@@ -518,7 +518,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(driver),
           }).then(function (r) {
-            return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+            return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
           }).then(function (res) {
             var body = res.body || {};
             if (!res.ok) {
