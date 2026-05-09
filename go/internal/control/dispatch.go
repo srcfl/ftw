@@ -627,7 +627,26 @@ func ComputeDispatch(
 	// clamps (SoC, per-driver MaxDischargeW, fuse guard) still apply —
 	// exceeding battery capacity just means the residual comes from grid.
 	gridW := rawGridW
-	if !state.BatteryCoversEV {
+	// Surplus-only EV transient cover: when an LP is in surplus_only mode
+	// AND the EV is currently drawing AND the site is importing, the EV
+	// is drawing more than the available surplus. This typically happens
+	// during the 5–15 s window after surplus_only is freshly enabled
+	// (the EV ramps current down through Easee Cloud + the car's onboard
+	// charger — both are slow), or during a sudden cloud transient. The
+	// home battery (Pixii) responds in <1 s, so let it cover the import
+	// burst until the EV ramp-down completes. Mechanism: don't subtract
+	// EV from gridW, so the PI sees the real import and discharges
+	// battery accordingly. Self-deactivates the moment grid goes
+	// negative again — at that point EV draw matches surplus and there's
+	// no import to cover, so steady-state surplus_only behavior is
+	// unchanged. The pre-existing reserve cap on the CHARGE side still
+	// stops the battery from competing with the EV for surplus when PV
+	// exceeds load+EV.
+	coverEV := state.BatteryCoversEV
+	if !coverEV && state.EVSurplusOnlyReserveW > 0 && state.EVChargingW > 0 && rawGridW > 0 {
+		coverEV = true
+	}
+	if !coverEV {
 		gridW -= state.EVChargingW
 	}
 
@@ -758,7 +777,14 @@ func ComputeDispatch(
 		// Charging is left untouched. Mirrors the dispatch.go:453 rule on
 		// the legacy path. The MPC also gets a NoBatteryToEV constraint
 		// so the plan stops prescribing what dispatch then has to censor.
-		if !state.BatteryCoversEV && state.EVChargingW > 0 && targetTotalW < 0 {
+		// EXCEPTION: surplus-only transient cover. Same gate as the
+		// rawGridW-subtraction path above — when a surplus_only LP is
+		// drawing more than current surplus (site importing), the battery
+		// is allowed to bridge the EV ramp-down for ~10 s while the
+		// Easee/car-side current ramp completes. The cap reverts the
+		// moment grid goes negative.
+		surplusTransient := state.EVSurplusOnlyReserveW > 0 && state.EVChargingW > 0 && rawGridW > 0
+		if !state.BatteryCoversEV && !surplusTransient && state.EVChargingW > 0 && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW
 			if targetTotalW < reactiveTotal {
