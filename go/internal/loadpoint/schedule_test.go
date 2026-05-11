@@ -104,26 +104,34 @@ func TestManager_RollSchedules_RecurringPromotes(t *testing.T) {
 	}
 }
 
-func TestManager_RollSchedules_NonRecurringExpiresQuietly(t *testing.T) {
+func TestManager_RollSchedules_NonRecurringSeedsOnce(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
-	// Operator set a one-shot target via the legacy path: target_time
-	// is in the past. The non-recurring schedule shouldn't re-arm it.
-	past := time.Date(2026, 5, 11, 5, 0, 0, 0, time.UTC)
-	m.SetTarget("garage", 60, past)
 	s := Schedule{SoCPct: 50, TimeOfDayMinUTC: 360, Recurring: false}
 	m.SetSchedule("garage", s)
 
+	// Now is 07:00; today's 06:00 has already passed → seed for tomorrow.
 	now := time.Date(2026, 5, 11, 7, 0, 0, 0, time.UTC)
 	m.RollSchedules(now)
-
 	st, _ := m.State("garage")
-	if !st.TargetTime.Equal(past) {
-		t.Errorf("non-recurring should leave existing target_time alone; got %v want %v",
-			st.TargetTime, past)
+	want := time.Date(2026, 5, 12, 6, 0, 0, 0, time.UTC)
+	if !st.TargetTime.Equal(want) {
+		t.Errorf("non-recurring first seed: target_time = %v, want %v",
+			st.TargetTime, want)
 	}
-	if st.TargetSoCPct != 60 {
-		t.Errorf("non-recurring should leave target_soc_pct alone; got %v", st.TargetSoCPct)
+	if st.TargetSoCPct != 50 {
+		t.Errorf("non-recurring first seed: target_soc_pct = %v, want 50", st.TargetSoCPct)
+	}
+
+	// After the deadline passes, RollSchedules must NOT re-seed —
+	// non-recurring expires quietly. The schedule sticks around so
+	// the operator can inspect it, but target_time stays in the past.
+	after := want.Add(2 * time.Hour)
+	m.RollSchedules(after)
+	st, _ = m.State("garage")
+	if !st.TargetTime.Equal(want) {
+		t.Errorf("non-recurring after deadline: target_time should stay at %v, got %v",
+			want, st.TargetTime)
 	}
 }
 

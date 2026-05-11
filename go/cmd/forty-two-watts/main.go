@@ -1058,12 +1058,16 @@ func main() {
 			// has taken its share: -gridW + max(0, -batW) (battery
 			// counts only if it's discharging, contributing to
 			// site supply).
+			// A bat-SoC-armed loadpoint is just as much a "PV-priority"
+			// claimant as a configured surplus_only LP — both want PV
+			// routed to the EV ahead of the home battery. Counting
+			// either via the controller's combined view (configured OR
+			// armed) keeps the flap-avoidance protection symmetric and
+			// closes the loophole where an armed LP would inflate the
+			// apparent surplus by the battery's PV-charge rate.
 			surplusOnlyActive := false
-			for _, st := range lpMgr.States() {
-				if st.SurplusOnly {
-					surplusOnlyActive = true
-					break
-				}
+			if lpController != nil && lpController.AnyLoadpointSurplusActive() {
+				surplusOnlyActive = true
 			}
 			if surplusOnlyActive && batW > 0 {
 				batW = 0

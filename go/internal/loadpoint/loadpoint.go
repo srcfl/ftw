@@ -575,30 +575,44 @@ func (m *Manager) HydrateSchedules(loader func(id string) (Schedule, bool)) {
 	}
 }
 
-// RollSchedules advances recurring deadlines past `now`. For each LP
-// with `Recurring` schedule and a stale (or absent) targetTime, it
-// rewrites target_soc_pct/target_time to "next time-of-day after now".
-// Non-recurring schedules are left alone — they're one-shot.
+// RollSchedules brings each loadpoint's one-shot target_soc / target_time
+// into line with its persisted schedule. Two cases:
 //
-// Idempotent: when a schedule has already been rolled to the future,
-// subsequent calls before that deadline are no-ops. Cheap to call on
-// every dispatch tick.
+//   - Recurring=true: refresh target_time forward each time the prior
+//     deadline passes, so the deadline penalty in MPC never goes stale.
+//   - Recurring=false: seed the one-shot target ONCE on the first roll
+//     after the schedule was saved (SetSchedule clears lastRolledFor as
+//     its sentinel). After the deadline passes, leave target_time in the
+//     past — MPC treats that as "no deadline" and the schedule expires
+//     quietly. The schedule itself stays for the operator to inspect or
+//     clear via the API.
+//
+// Idempotent on subsequent ticks. Cheap to call every dispatch cycle.
 func (m *Manager) RollSchedules(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, lp := range m.byID {
-		if !lp.schedule.Recurring || lp.schedule.Empty() {
+		s := lp.schedule
+		if s.Empty() {
 			continue
 		}
-		// Already rolled past now; do nothing. Use targetTime as the
-		// authority — lastRolledFor is just a tiebreaker for the
-		// "first call after schedule change" case.
-		if !lp.targetTime.IsZero() && lp.targetTime.After(now) {
+		next := NextDailyUTC(now, s.TimeOfDayMinUTC)
+		if s.Recurring {
+			if !lp.targetTime.IsZero() && lp.targetTime.After(now) {
+				continue
+			}
+			lp.targetTime = next
+			lp.targetSoCPct = s.SoCPct
+			lp.lastRolledFor = next
 			continue
 		}
-		next := NextDailyUTC(now, lp.schedule.TimeOfDayMinUTC)
-		lp.targetTime = next
-		lp.targetSoCPct = lp.schedule.SoCPct
-		lp.lastRolledFor = next
+		// Non-recurring: seed exactly once per SetSchedule. The Empty
+		// SetSchedule path (clear) also resets lastRolledFor, so a
+		// re-save with a non-recurring schedule re-seeds.
+		if lp.lastRolledFor.IsZero() {
+			lp.targetTime = next
+			lp.targetSoCPct = s.SoCPct
+			lp.lastRolledFor = next
+		}
 	}
 }
