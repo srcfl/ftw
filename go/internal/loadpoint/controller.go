@@ -364,6 +364,21 @@ func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
 	if c == nil || c.batSoC == nil || threshold <= 0 {
 		return false
 	}
+	// Read the live inputs (bat SoC + site surplus) OUTSIDE the arm
+	// mutex — siteSurplusForEVW is a closure wired in main.go that
+	// itself calls back into AnyLoadpointSurplusActive, which needs
+	// to acquire batSoCArmedMu. Calling it under that lock would
+	// recursively self-deadlock the dispatch loop (debugged: every
+	// tickOne hung on the first LP after we shipped this feature).
+	// Order: gather facts → take lock → mutate the small state map.
+	soc, socOK := c.batSoC()
+	pvGone := true
+	if c.siteSurplusForEVW != nil {
+		if s, ok := c.siteSurplusForEVW(); ok && s > 0 {
+			pvGone = false
+		}
+	}
+
 	c.batSoCArmedMu.Lock()
 	defer c.batSoCArmedMu.Unlock()
 	if c.batSoCArmed == nil {
@@ -371,30 +386,16 @@ func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
 		c.batSoCNoPV = map[string]int{}
 	}
 	prev := c.batSoCArmed[lpID]
-
-	soc, ok := c.batSoC()
-	if !ok {
+	if !socOK {
 		// Stale telemetry: don't change the arm state. A momentary
 		// blip shouldn't release the unlock during peak surplus.
 		return prev
-	}
-
-	// PV-availability gate: live site surplus must be positive to
-	// count as "PV to grab". A negative surplus means PV − load is
-	// in deficit and any apparent battery discharge is covering the
-	// gap — not real surplus, no matter how full the battery is.
-	pvGone := true
-	if c.siteSurplusForEVW != nil {
-		if s, ok := c.siteSurplusForEVW(); ok && s > 0 {
-			pvGone = false
-		}
 	}
 	if pvGone {
 		c.batSoCNoPV[lpID]++
 	} else {
 		c.batSoCNoPV[lpID] = 0
 	}
-
 	socPct := soc * 100
 	armed := prev
 	switch {

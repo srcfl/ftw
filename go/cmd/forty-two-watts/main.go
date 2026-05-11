@@ -1491,11 +1491,35 @@ func main() {
 			// rules without the control loop knowing about them.
 			bus.Publish(events.HealthTick{Health: tel.AllHealth(), Now: time.Now()})
 
+			// ---- EV dispatch first — independent of the site meter ----
+			// Loadpoint Observe() reads its own telemetry (the EV
+			// charger driver), so it MUST run before the site-meter
+			// staleness guard below — otherwise a missing/stale site
+			// meter silently freezes the LP manager's plugged_in
+			// state, MPC never extends the DP with the EV dimension,
+			// and the operator sees "schedule set but EV never
+			// charges". The surplus-only clamp inside the LP controller
+			// already returns 0 when site surplus is unknown, so this
+			// is safe: bad grid signal → LP paused, but at least the
+			// LP state machine is alive.
+			lpMgr.RollSchedules(time.Now().UTC())
+			lpController.Tick(ctx, time.Now())
+
 			// ---- Safety: site meter stale → idle everything this cycle ----
 			// Otherwise stale grid readings cause one battery to charge another.
+			// Only meaningful when a site meter is actually configured;
+			// without one, IsStale("", DerMeter) is permanently true and
+			// the SendDefault loop below would fire on every tick — and
+			// SendDefault is a blocking send into each driver's cmdCh,
+			// which deadlocks the dispatch loop the first time any
+			// driver's channel buffer fills.
 			ctrlMu.Lock()
-			siteMeterStale := tel.IsStale(ctrl.SiteMeterDriver, telemetry.DerMeter, watchdogTimeout)
+			siteMeterDriver := ctrl.SiteMeterDriver
 			ctrlMu.Unlock()
+			siteMeterStale := false
+			if siteMeterDriver != "" {
+				siteMeterStale = tel.IsStale(siteMeterDriver, telemetry.DerMeter, watchdogTimeout)
+			}
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
@@ -1594,14 +1618,8 @@ func main() {
 				}
 			}
 
-			// ---- EV dispatch: per-loadpoint observe + command ----
-			// The per-loadpoint state machine (observe → plan lookup
-			// → snap → send) is owned by loadpoint.Controller so the
-			// main tick stays a thin orchestrator. See issue #172.
-			// Recurring schedules: roll deadlines forward when the
-			// current target_time has passed. Idempotent within a day.
-			lpMgr.RollSchedules(time.Now().UTC())
-			lpController.Tick(ctx, time.Now())
+			// LP dispatch ran at the top of this tick — see the
+			// "EV dispatch first" block above.
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----
 			// The joint allocator (control.dispatch) just throttled
