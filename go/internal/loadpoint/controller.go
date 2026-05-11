@@ -118,6 +118,17 @@ type Controller struct {
 	wakeLast      map[string]time.Time
 	wakeKickUntil map[string]time.Time
 	wakeAttempts  map[string]int
+
+	// batSoC reports the home battery's current state-of-charge (0..1
+	// fraction) for the bat-SoC surplus-unlock feature. nil disables
+	// the feature entirely — the LP behaves exactly as today.
+	batSoC func() (float64, bool)
+
+	// batSoCArmed tracks the per-LP arm/release state for the bat-SoC
+	// hysteresis. Without per-LP state a noisy bat_soc reading right
+	// at the threshold would flap the contactor every tick.
+	batSoCArmedMu sync.Mutex
+	batSoCArmed   map[string]bool
 }
 
 // wakeKickDuration is how long a wake-kick forces the EV charger to
@@ -317,6 +328,65 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 	c.peakRemainingSurplusW = f
 }
 
+// SetBatSoCProvider wires the home-battery SoC reader used by the
+// bat-SoC surplus-unlock feature. The function returns the current
+// SoC as a 0..1 fraction. (_, false) disables the feature for this
+// tick; nil disables it permanently. Called once at startup from
+// main.go.
+func (c *Controller) SetBatSoCProvider(f func() (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.batSoC = f
+}
+
+// evalBatSoCArm decides whether the bat-SoC surplus unlock is armed
+// for the given loadpoint this tick. Arms at threshold, releases at
+// (threshold − BatSoCUnlockHystPp). In the deadband it preserves the
+// previous tick's state — that's the hysteresis. Returns false when
+// no threshold is configured or the bat_soc reader is missing/stale.
+func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
+	if c == nil || c.batSoC == nil || threshold <= 0 {
+		return false
+	}
+	soc, ok := c.batSoC()
+	if !ok {
+		// Stale telemetry: don't change the arm state. A momentary
+		// blip shouldn't release the unlock during peak surplus.
+		c.batSoCArmedMu.Lock()
+		defer c.batSoCArmedMu.Unlock()
+		return c.batSoCArmed[lpID]
+	}
+	socPct := soc * 100
+	c.batSoCArmedMu.Lock()
+	defer c.batSoCArmedMu.Unlock()
+	if c.batSoCArmed == nil {
+		c.batSoCArmed = map[string]bool{}
+	}
+	prev := c.batSoCArmed[lpID]
+	armed := prev
+	switch {
+	case socPct >= threshold:
+		armed = true
+	case socPct < threshold-BatSoCUnlockHystPp:
+		armed = false
+	}
+	c.batSoCArmed[lpID] = armed
+	return armed
+}
+
+// surplusActive reports whether surplus-only dispatch semantics apply
+// to this loadpoint right now. True when the configured SurplusOnly
+// flag is on, OR when the bat-SoC unlock is armed for this LP. The
+// caller passes the loadpoint's schedule so we read the threshold
+// without re-locking the Manager.
+func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
+	if lpCfg.SurplusOnly {
+		return true
+	}
+	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoCPct)
+}
+
 // SetSiteFuse installs the grid-boundary fuse so the controller can
 // pass voltage + per-phase amperage to drivers in every command.
 // Called once at startup from main.go after config load. A zero-value
@@ -421,6 +491,14 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
 	}
+	// Resolve the schedule once per tick — used for bat-SoC unlock
+	// (surplusActive) below. Zero value when no schedule is set,
+	// which makes evalBatSoCArm a no-op.
+	var sched Schedule
+	if c.manager != nil {
+		sched, _ = c.manager.GetSchedule(lpCfg.ID)
+	}
+	surplusOn := c.surplusActive(lpCfg, sched)
 	// Detect the disconnected→connected edge (state.PluggedIn flips
 	// from false to true) so we can reset session-scoped state
 	// before the new session's first dispatch tick. Without this
@@ -453,7 +531,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// The hold's other fields (phase mode, hold time) are still
 		// honoured — only the W setpoint is clamped, and we log it so
 		// the operator notices the conflict.
-		if lpCfg.SurplusOnly && holdW > 0 {
+		if surplusOn && holdW > 0 {
 			clamped := c.computeSurplusCmd(now, lpCfg, holdW, sample.PowerW)
 			if clamped < holdW {
 				slog.Warn("loadpoint manual hold clamped by surplus_only",
@@ -533,7 +611,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// surplus clamp was previously gated on cmdW > 0. The
 		// wallbox will silently report what the EV does (op_mode
 		// stays at 2 if the car declines) without grid import.
-		if lpCfg.SurplusOnly {
+		if surplusOn {
 			wantW := cmdW
 			if wantW <= 0 {
 				wantW = lpCfg.MaxChargeW
@@ -632,16 +710,17 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	//      The 90 s cooldown caps Tesla BLE wear; if the car is
 	//      genuinely asleep at night the proxy returns 503 and we
 	//      back off.
-	c.maybeWakeVehicle(ctx, now, lpCfg.ID, lpCfg, cmd)
+	c.maybeWakeVehicle(ctx, now, lpCfg, surplusOn, cmd)
 }
 
-func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID string, lpCfg Config, cmd map[string]any) {
+func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn bool, cmd map[string]any) {
+	lpID := lpCfg.ID
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
 		return
 	}
 	pw, _ := cmd["power_w"].(float64)
 	wantWake := pw > 0
-	if lpCfg.SurplusOnly {
+	if surplusOn {
 		wantWake = true
 	}
 	if !wantWake {

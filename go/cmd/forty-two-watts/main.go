@@ -313,6 +313,45 @@ func main() {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
+	// Persist operator schedules in the existing state.config k/v.
+	// One row per LP keyed `loadpoint_schedule:<id>`. Clearing a
+	// schedule writes the empty JSON ("{}"), which HydrateSchedules
+	// treats as no-config so a future reload doesn't resurrect it.
+	const lpSchedKeyPrefix = "loadpoint_schedule:"
+	lpMgr.SetScheduleSaver(func(id string, s loadpoint.Schedule) {
+		key := lpSchedKeyPrefix + id
+		if s.Empty() {
+			if err := st.SaveConfig(key, "{}"); err != nil {
+				slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
+			}
+			return
+		}
+		b, err := json.Marshal(s)
+		if err != nil {
+			slog.Warn("failed to marshal loadpoint schedule", "lp", id, "err", err)
+			return
+		}
+		if err := st.SaveConfig(key, string(b)); err != nil {
+			slog.Warn("failed to persist loadpoint schedule", "lp", id, "err", err)
+		}
+	})
+	lpMgr.HydrateSchedules(func(id string) (loadpoint.Schedule, bool) {
+		v, ok := st.LoadConfig(lpSchedKeyPrefix + id)
+		if !ok || v == "" || v == "{}" {
+			return loadpoint.Schedule{}, false
+		}
+		var s loadpoint.Schedule
+		if err := json.Unmarshal([]byte(v), &s); err != nil {
+			slog.Warn("failed to parse persisted loadpoint schedule",
+				"lp", id, "err", err)
+			return loadpoint.Schedule{}, false
+		}
+		return s, !s.Empty()
+	})
+	// Seed any recurring deadlines from boot — without this the first
+	// dispatch tick would race with an empty target_time and might
+	// miss the deadline penalty for ~5 s.
+	lpMgr.RollSchedules(time.Now().UTC())
 
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
@@ -1038,6 +1077,30 @@ func main() {
 			// match. Tracked separately to keep this change focused.
 			return -gridW + batW + evW, true
 		})
+
+		// Bat-SoC surplus-unlock: feed the controller a live home-battery
+		// SoC reading so a loadpoint with a `surplus_unlock_bat_soc_pct`
+		// schedule can flip into surplus-snap mode when the battery is
+		// already comfortable. Sums online battery readings; (_, false)
+		// when no battery driver is online so the controller leaves the
+		// arm state untouched (hysteresis preserved across blips).
+		lpController.SetBatSoCProvider(func() (float64, bool) {
+			var total, count float64
+			for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+				if h := tel.DriverHealth(r.Driver); h == nil || h.Status == telemetry.StatusOffline {
+					continue
+				}
+				if r.SoC == nil || *r.SoC <= 0 {
+					continue
+				}
+				total += *r.SoC
+				count++
+			}
+			if count == 0 {
+				return 0, false
+			}
+			return total / count, true
+		})
 	}
 
 	// ---- Self-update checker ----
@@ -1531,6 +1594,9 @@ func main() {
 			// The per-loadpoint state machine (observe → plan lookup
 			// → snap → send) is owned by loadpoint.Controller so the
 			// main tick stays a thin orchestrator. See issue #172.
+			// Recurring schedules: roll deadlines forward when the
+			// current target_time has passed. Idempotent within a day.
+			lpMgr.RollSchedules(time.Now().UTC())
 			lpController.Tick(ctx, time.Now())
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----

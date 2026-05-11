@@ -7,6 +7,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -233,6 +234,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
+	s.handle("GET  /api/ev/providers", s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
@@ -1965,40 +1967,49 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// POST /api/ev/chargers — authenticate with an EV cloud provider and list chargers.
+// GET /api/ev/providers — return the descriptor for every registered EV
+// charger provider. The wizard reads this to decide which transport +
+// auth fields to render for the user's pick.
+func (s *Server) handleEVProviders(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, evcloud.Describe())
+}
+
+// POST /api/ev/chargers — probe a provider for the chargers reachable
+// from the supplied config. Body is the EVCharger shape (provider +
+// transport block + optional auth). For providers that need auth and
+// the body omits Password, we fall back to the persisted
+// ev_charger_password so the operator doesn't have to re-type it when
+// they're just refreshing the picker.
 func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Provider string `json:"provider"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := readJSON(r, &req); err != nil {
+	var cfg config.EVCharger
+	if err := readJSON(r, &cfg); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
 	}
-	if req.Provider == "" {
-		req.Provider = "easee"
+	cfg.Normalize()
+	if cfg.Provider == "" {
+		cfg.Provider = "easee"
 	}
-	if req.Email == "" {
-		writeJSON(w, 400, map[string]string{"error": "email required"})
-		return
-	}
-	if req.Password == "" {
-		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
-			req.Password = pw
-		}
-	}
-	if req.Password == "" {
-		writeJSON(w, 400, map[string]string{"error": "password required"})
-		return
-	}
-
-	p, err := evcloud.Get(req.Provider)
+	p, err := evcloud.Get(cfg.Provider)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	chargers, err := p.ListChargers(req.Email, req.Password)
+	desc := p.Describe()
+	if desc.NeedsAuth && cfg.Password == "" {
+		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
+			cfg.Password = pw
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if desc.NeedsAuth && cfg.Password == "" {
+		writeJSON(w, 400, map[string]string{"error": "password required"})
+		return
+	}
+	chargers, err := p.ListChargers(&cfg)
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
@@ -2106,18 +2117,54 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 	// the target the way the legacy client does, pass an explicit
 	// `{"soc_pct": 0, "target_time_ms": 0}` — pointers to zero are
 	// distinct from nil here.
+	// Schedule uses json.RawMessage so the handler can distinguish three
+	// states the regular struct-pointer trick can't: absent (leave alone),
+	// null (clear), or object (set). encoding/json collapses absent/null
+	// to nil for *struct pointers, which would lose the explicit-clear
+	// signal the UI needs.
 	var req struct {
-		SoCPct       *float64 `json:"soc_pct,omitempty"`
-		TargetTimeMs *int64   `json:"target_time_ms,omitempty"`
-		SurplusOnly  *bool    `json:"surplus_only,omitempty"`
+		SoCPct       *float64        `json:"soc_pct,omitempty"`
+		TargetTimeMs *int64          `json:"target_time_ms,omitempty"`
+		SurplusOnly  *bool           `json:"surplus_only,omitempty"`
+		Schedule     json.RawMessage `json:"schedule,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil {
+	if req.SoCPct == nil && req.TargetTimeMs == nil && req.SurplusOnly == nil && len(req.Schedule) == 0 {
 		writeJSON(w, 400, map[string]string{"error": "no fields to update"})
 		return
+	}
+
+	// Schedule first: when set, it implies target_soc_pct + target_time
+	// values that SetTarget below will read back, so apply order matters.
+	scheduleChanged := false
+	if len(req.Schedule) > 0 {
+		if bytes.Equal(bytes.TrimSpace(req.Schedule), []byte("null")) {
+			if !s.deps.Loadpoints.ClearSchedule(id) {
+				writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+				return
+			}
+		} else {
+			var sched loadpoint.Schedule
+			if err := json.Unmarshal(req.Schedule, &sched); err != nil {
+				writeJSON(w, 400, map[string]string{"error": "invalid schedule: " + err.Error()})
+				return
+			}
+			if sched.TimeOfDayMinUTC < 0 || sched.TimeOfDayMinUTC >= 1440 {
+				writeJSON(w, 400, map[string]string{"error": "time_of_day_min_utc must be 0..1439"})
+				return
+			}
+			if !s.deps.Loadpoints.SetSchedule(id, sched) {
+				writeJSON(w, 404, map[string]string{"error": "loadpoint not found"})
+				return
+			}
+			// Roll immediately so the upcoming SetTarget read-modify-write
+			// sees the schedule-implied deadline, not stale state.
+			s.deps.Loadpoints.RollSchedules(time.Now().UTC())
+		}
+		scheduleChanged = true
 	}
 	if req.SoCPct != nil || req.TargetTimeMs != nil {
 		// SetTarget always takes both fields, so when the caller
@@ -2176,6 +2223,9 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 			// briefly and returns to a UI that can immediately fetch
 			// /api/mpc/plan and see the new schedule.
 			s.deps.MPC.ReplanWithReason(context.Background(), "surplus_only_disabled")
+		} else if scheduleChanged {
+			slog.Info("loadpoint schedule changed — forcing replan", "lp", id)
+			s.deps.MPC.ReplanWithReason(context.Background(), "loadpoint_schedule_changed")
 		} else {
 			// Other field changes: replan is helpful but not load-
 			// bearing — kick it off in the background so the API stays

@@ -160,13 +160,24 @@ type State struct {
 	// omitempty) so a polling client can distinguish "explicitly off"
 	// from "field absent because the server is too old to know".
 	SurplusOnly bool `json:"surplus_only"`
+
+	// Schedule is the operator's recurring intent. Empty when no
+	// schedule is configured. Always emitted (object, possibly with
+	// zero fields) so the UI can rely on a stable shape — clients
+	// detect "no schedule" via Schedule.Empty() / soc_pct === 0.
+	Schedule Schedule `json:"schedule"`
 }
 
 // Manager holds the running set of loadpoints. Thread-safe.
 type Manager struct {
-	mu     sync.RWMutex
-	byID   map[string]*loadpointRuntime
-	order  []string // insertion-preserving id list for deterministic listing
+	mu    sync.RWMutex
+	byID  map[string]*loadpointRuntime
+	order []string // insertion-preserving id list for deterministic listing
+
+	// scheduleSaver, if non-nil, is invoked synchronously whenever a
+	// schedule is set or cleared. Wired by main.go to persist via
+	// state.SaveConfig. Left nil in tests / sites without storage.
+	scheduleSaver func(id string, s Schedule)
 }
 
 // loadpointRuntime is the in-memory representation. Its fields are the
@@ -189,6 +200,18 @@ type loadpointRuntime struct {
 	// even as session_wh grows. Reset to Config.PluginSoCPct on
 	// every plug-in transition (prev !pluggedIn → now pluggedIn).
 	sessionPluginSoCPct float64
+
+	// schedule carries the operator's persistent intent. Empty when
+	// none is set. Survives config hot-reload because Load() copies
+	// it across from the previous runtime row.
+	schedule Schedule
+
+	// lastRolledFor is the targetTime value that the most recent
+	// RollSchedules promotion produced. Used to keep the roll
+	// idempotent within a tick window — without this, a recurring
+	// schedule re-promotes its own freshly-set targetTime back to
+	// the day after that, racing the clock by 24 h every tick.
+	lastRolledFor time.Time
 }
 
 // NewManager returns an empty manager. Configure with Load().
@@ -223,6 +246,8 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.targetTime = existing.targetTime
 			lp.updatedAtMs = existing.updatedAtMs
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
+			lp.schedule = existing.schedule
+			lp.lastRolledFor = existing.lastRolledFor
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)
@@ -443,5 +468,137 @@ func (lp *loadpointRuntime) snapshot() State {
 		MaxChargeW:         lp.MaxChargeW,
 		AllowedStepsW:      steps,
 		SurplusOnly:        lp.Config.SurplusOnly,
+		Schedule:           lp.schedule,
+	}
+}
+
+// SetScheduleSaver wires the persistence callback. Pass nil to disable.
+// Safe to call before or after Load().
+func (m *Manager) SetScheduleSaver(saver func(id string, s Schedule)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.scheduleSaver = saver
+}
+
+// SetSchedule stores the operator's intent for a loadpoint. Empty
+// schedules clear (equivalent to ClearSchedule). Returns false for
+// unknown IDs. The persistence callback (if wired) is invoked outside
+// the lock so a slow disk doesn't block other readers.
+func (m *Manager) SetSchedule(id string, s Schedule) bool {
+	m.mu.Lock()
+	lp, ok := m.byID[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	if s.SoCPct < 0 {
+		s.SoCPct = 0
+	}
+	if s.SoCPct > 100 {
+		s.SoCPct = 100
+	}
+	if s.SurplusUnlockBatSoCPct < 0 {
+		s.SurplusUnlockBatSoCPct = 0
+	}
+	if s.SurplusUnlockBatSoCPct > 100 {
+		s.SurplusUnlockBatSoCPct = 100
+	}
+	lp.schedule = s
+	// Force RollSchedules to re-evaluate on next call — operator just
+	// changed the contract so any previous idempotence cache is stale.
+	lp.lastRolledFor = time.Time{}
+	saver := m.scheduleSaver
+	m.mu.Unlock()
+	if saver != nil {
+		saver(id, s)
+	}
+	return true
+}
+
+// GetSchedule returns the current schedule and a found flag. The flag
+// is true only when an Empty()=false schedule is set for the ID — an
+// empty schedule is reported as "not configured".
+func (m *Manager) GetSchedule(id string) (Schedule, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return Schedule{}, false
+	}
+	if lp.schedule.Empty() {
+		return Schedule{}, false
+	}
+	return lp.schedule, true
+}
+
+// ClearSchedule removes the operator's intent. Persists Empty so a
+// reload doesn't resurrect the old schedule from disk. Returns false
+// for unknown IDs.
+func (m *Manager) ClearSchedule(id string) bool {
+	m.mu.Lock()
+	lp, ok := m.byID[id]
+	if !ok {
+		m.mu.Unlock()
+		return false
+	}
+	lp.schedule = Schedule{}
+	lp.lastRolledFor = time.Time{}
+	saver := m.scheduleSaver
+	m.mu.Unlock()
+	if saver != nil {
+		saver(id, Schedule{})
+	}
+	return true
+}
+
+// HydrateSchedules loads persisted schedules at boot. `loader(id)`
+// returns the stored schedule for each configured loadpoint; missing
+// entries return (Schedule{}, false). Unknown IDs in storage are
+// silently ignored — the operator may have renamed a loadpoint, and
+// resurrecting a schedule under the new ID would be surprising.
+//
+// Does NOT invoke the saver — this is a load path. Does NOT call
+// RollSchedules either; the controller's first tick will handle that.
+func (m *Manager) HydrateSchedules(loader func(id string) (Schedule, bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		lp, ok := m.byID[id]
+		if !ok {
+			continue
+		}
+		s, found := loader(id)
+		if !found || s.Empty() {
+			continue
+		}
+		lp.schedule = s
+	}
+}
+
+// RollSchedules advances recurring deadlines past `now`. For each LP
+// with `Recurring` schedule and a stale (or absent) targetTime, it
+// rewrites target_soc_pct/target_time to "next time-of-day after now".
+// Non-recurring schedules are left alone — they're one-shot.
+//
+// Idempotent: when a schedule has already been rolled to the future,
+// subsequent calls before that deadline are no-ops. Cheap to call on
+// every dispatch tick.
+func (m *Manager) RollSchedules(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, lp := range m.byID {
+		if !lp.schedule.Recurring || lp.schedule.Empty() {
+			continue
+		}
+		// Already rolled past now; do nothing. Use targetTime as the
+		// authority — lastRolledFor is just a tiebreaker for the
+		// "first call after schedule change" case.
+		if !lp.targetTime.IsZero() && lp.targetTime.After(now) {
+			continue
+		}
+		next := NextDailyUTC(now, lp.schedule.TimeOfDayMinUTC)
+		lp.targetTime = next
+		lp.targetSoCPct = lp.schedule.SoCPct
+		lp.lastRolledFor = next
 	}
 }

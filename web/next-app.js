@@ -1976,6 +1976,16 @@
     evModalBody.appendChild(p);
   }
 
+  // Schedule-control persistence across the modal's auto-refresh tick.
+  // refreshEvModal wipes evModalBody every poll; without these the
+  // user's in-progress edits to the schedule inputs would be reset
+  // every few seconds. The cached element is re-attached as long as
+  // the user has touched any field and hasn't yet hit Save / Clear,
+  // and the LP id hasn't changed (different planet clicked).
+  var schedCacheEl = null;
+  var schedCacheLpId = null;
+  var schedDirty = false;
+
   function refreshEvModal() {
     // Pass driver query if known so the backend can scope the response
     // to the clicked planet (multi-EV setups). Falls back to whatever
@@ -2014,71 +2024,302 @@
         }
       }
       if (matched) {
-        evModalBody.appendChild(buildSurplusOnlyControl(matched));
+        if (schedDirty && schedCacheEl && schedCacheLpId === matched.id) {
+          // User is mid-edit: re-attach their dirty form instead of
+          // rebuilding it from server state and trampling input.
+          evModalBody.appendChild(schedCacheEl);
+        } else {
+          evModalBody.appendChild(buildScheduleControl(matched));
+        }
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
   }
 
-  // buildSurplusOnlyControl renders the "charge only from PV" toggle
-  // at the bottom of the EV modal. Ticking auto-targets 100 % by the
-  // next 16:00 UTC; unticking preserves the existing target/deadline
-  // and just clears the flag. Live state comes from /api/loadpoints
-  // so the checkbox always reflects server truth on modal refresh.
-  function buildSurplusOnlyControl(lp) {
+  // buildScheduleControl renders the persistent charging schedule
+  // section: target SoC + time (local; converted to UTC for the wire),
+  // recurring checkbox, and the bat-SoC surplus-unlock threshold.
+  // The backend persists this across restarts (state.config), rolls the
+  // deadline forward each day when Recurring is set, and arms the
+  // surplus-grab whenever the home battery sits at or above the
+  // threshold (with 5 pp release hysteresis).
+  function buildScheduleControl(lp) {
+    var sched = (lp && lp.schedule) || {};
+    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the
+    // browser's local zone. The UI shows local time everywhere;
+    // we marshal back to UTC minutes on save.
+    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
+    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var initRec = !!sched.recurring;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
+    // The threshold input retains the last-used value (or defaults to 50)
+    // so unchecking + re-checking doesn't wipe the user's pick.
+    var initSurplus = savedUnlock > 0;
+    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+
     var box = document.createElement("div");
     box.style.marginTop = "0.75rem";
     box.style.paddingTop = "0.6rem";
     box.style.borderTop = "1px solid var(--line)";
-    var label = document.createElement("label");
-    label.style.display = "flex";
-    label.style.alignItems = "center";
-    label.style.gap = "0.5rem";
-    label.style.cursor = "pointer";
-    label.style.fontSize = "0.85rem";
-    var cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !!lp.surplus_only;
-    cb.style.accentColor = "var(--accent-e)";
-    var text = document.createElement("span");
-    text.textContent = "Surplus-only · 100 % by 16:00 UTC";
-    label.appendChild(cb);
-    label.appendChild(text);
-    var hint = document.createElement("small");
-    hint.style.display = "block";
-    hint.style.marginTop = "0.35rem";
-    hint.style.color = "var(--text-dim)";
-    hint.textContent = "Charge only from PV surplus. Holds 3-phase. MPC won't plan grid-funded charging for this loadpoint.";
-    box.appendChild(label);
-    box.appendChild(hint);
-    cb.addEventListener("change", function () {
-      cb.disabled = true;
-      var body;
-      if (cb.checked) {
-        var now = new Date();
-        var t = new Date(Date.UTC(
-          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-          16, 0, 0));
-        if (t.getTime() <= now.getTime()) t.setUTCDate(t.getUTCDate() + 1);
-        body = { soc_pct: 100, target_time_ms: t.getTime(), surplus_only: true };
-      } else {
-        // Pointer/patch semantics on the backend: omitting fields
-        // preserves their existing values. Sending only surplus_only
-        // avoids overwriting the user's target/deadline with whatever
-        // (possibly stale or missing) snapshot we last fetched.
-        body = { surplus_only: false };
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Schedule";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.55rem";
+    box.appendChild(eyebrow);
+
+    function row(labelText, controlEl) {
+      var r = document.createElement("div");
+      r.style.display = "flex";
+      r.style.alignItems = "center";
+      r.style.justifyContent = "space-between";
+      r.style.gap = "0.5rem";
+      r.style.marginBottom = "0.4rem";
+      var l = document.createElement("label");
+      l.textContent = labelText;
+      l.style.fontSize = "0.85rem";
+      l.style.color = "var(--fg)";
+      r.appendChild(l);
+      r.appendChild(controlEl);
+      return r;
+    }
+
+    function numInput(value, min, max, step, suffix) {
+      var wrap = document.createElement("div");
+      wrap.style.display = "inline-flex";
+      wrap.style.alignItems = "baseline";
+      wrap.style.gap = "0.25rem";
+      var inp = document.createElement("input");
+      inp.type = "number";
+      inp.value = String(value);
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.step = String(step);
+      inp.style.width = "4.5rem";
+      inp.style.padding = "0.25rem 0.4rem";
+      inp.style.background = "var(--ink-raised)";
+      inp.style.color = "var(--fg)";
+      inp.style.border = "1px solid var(--line)";
+      inp.style.borderRadius = "3px";
+      inp.style.fontFamily = "var(--mono)";
+      inp.style.fontSize = "0.85rem";
+      inp.style.textAlign = "right";
+      wrap.appendChild(inp);
+      if (suffix) {
+        var s = document.createElement("span");
+        s.textContent = suffix;
+        s.style.color = "var(--text-dim)";
+        s.style.fontSize = "0.8rem";
+        wrap.appendChild(s);
       }
+      wrap.input = inp;
+      return wrap;
+    }
+
+    var socWrap = numInput(initSoC, 0, 100, 5, "%");
+    var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
+
+    var timeInp = document.createElement("input");
+    timeInp.type = "time";
+    timeInp.value = initLocalHHMM;
+    timeInp.style.padding = "0.25rem 0.4rem";
+    timeInp.style.background = "var(--ink-raised)";
+    timeInp.style.color = "var(--fg)";
+    timeInp.style.border = "1px solid var(--line)";
+    timeInp.style.borderRadius = "3px";
+    timeInp.style.fontFamily = "var(--mono)";
+    timeInp.style.fontSize = "0.85rem";
+
+    function checkbox(checked, labelText) {
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = checked;
+      cb.style.accentColor = "var(--accent-e)";
+      var wrap = document.createElement("label");
+      wrap.style.display = "inline-flex";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "0.4rem";
+      wrap.style.cursor = "pointer";
+      wrap.style.fontSize = "0.85rem";
+      wrap.appendChild(cb);
+      var txt = document.createElement("span");
+      txt.textContent = labelText;
+      wrap.appendChild(txt);
+      wrap.input = cb;
+      return wrap;
+    }
+
+    var recWrap = checkbox(initRec, "Recurring (every day)");
+    var surWrap = checkbox(initSurplus, "Surplus charge from home battery");
+    var recCb = recWrap.input;
+    var surCb = surWrap.input;
+
+    box.appendChild(row("Target SoC", socWrap));
+    box.appendChild(row("By", timeInp));
+
+    var checkRow = document.createElement("div");
+    checkRow.style.display = "flex";
+    checkRow.style.flexDirection = "column";
+    checkRow.style.gap = "0.35rem";
+    checkRow.style.marginBottom = "0.55rem";
+    checkRow.appendChild(recWrap);
+    checkRow.appendChild(surWrap);
+    box.appendChild(checkRow);
+
+    var unlockHint = document.createElement("small");
+    unlockHint.style.display = "block";
+    unlockHint.style.color = "var(--text-dim)";
+    unlockHint.style.marginTop = "0.2rem";
+    unlockHint.style.marginBottom = "0.3rem";
+    unlockHint.textContent = "Always grab PV surplus when home battery ≥ threshold.";
+    box.appendChild(unlockHint);
+
+    var thresholdRow = row("Threshold", unlockWrap);
+    box.appendChild(thresholdRow);
+
+    function applySurplusGate() {
+      var on = surCb.checked;
+      unlockWrap.input.disabled = !on;
+      thresholdRow.style.opacity = on ? "1" : "0.4";
+      thresholdRow.style.pointerEvents = on ? "auto" : "none";
+      unlockHint.style.opacity = on ? "1" : "0.55";
+    }
+    applySurplusGate();
+    surCb.addEventListener("change", applySurplusGate);
+
+    // Actions
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.marginTop = "0.55rem";
+    btnRow.style.justifyContent = "flex-end";
+
+    function mkBtn(label, primary) {
+      var b = document.createElement("button");
+      b.textContent = label;
+      b.style.padding = "0.3rem 0.8rem";
+      b.style.fontSize = "0.8rem";
+      b.style.fontFamily = "var(--mono)";
+      b.style.letterSpacing = "0.06em";
+      b.style.textTransform = "uppercase";
+      b.style.borderRadius = "3px";
+      b.style.cursor = "pointer";
+      b.style.border = "1px solid var(--line)";
+      if (primary) {
+        b.style.background = "var(--accent-e)";
+        b.style.color = "#0a0a0a";
+        b.style.borderColor = "var(--accent-e)";
+      } else {
+        b.style.background = "transparent";
+        b.style.color = "var(--fg)";
+      }
+      return b;
+    }
+    var clearBtn = mkBtn("Clear", false);
+    var saveBtn = mkBtn(hasSched ? "Update" : "Save", true);
+    clearBtn.disabled = !hasSched;
+    if (!hasSched) clearBtn.style.opacity = "0.4";
+    btnRow.appendChild(clearBtn);
+    btnRow.appendChild(saveBtn);
+    box.appendChild(btnRow);
+
+    var status = document.createElement("small");
+    status.style.display = "block";
+    status.style.color = "var(--text-dim)";
+    status.style.marginTop = "0.4rem";
+    status.style.minHeight = "1em";
+    box.appendChild(status);
+
+    // Cache + dirty wiring: each user edit flips schedDirty=true so
+    // the auto-refresh keeps THIS element on screen instead of
+    // rebuilding it from stale server state.
+    schedCacheEl = box;
+    schedCacheLpId = lp.id;
+    schedDirty = false;
+    function markDirty() { schedDirty = true; }
+    [socWrap.input, timeInp, unlockWrap.input].forEach(function (el) {
+      el.addEventListener("input", markDirty);
+      el.addEventListener("change", markDirty);
+    });
+    recCb.addEventListener("change", markDirty);
+
+    saveBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      status.textContent = "Saving…";
+      var localHHMM = timeInp.value || initLocalHHMM;
+      var minUTC = localHHMMToUtcMins(localHHMM);
+      // Surplus checkbox gates the threshold: when off, the threshold
+      // is sent as 0 (the backend interprets 0 as "feature disabled").
+      var unlockVal = surCb.checked ? Number(unlockWrap.input.value) : 0;
+      var body = {
+        schedule: {
+          soc_pct: Number(socWrap.input.value),
+          time_of_day_min_utc: minUTC,
+          recurring: !!recCb.checked,
+          surplus_unlock_bat_soc_pct: unlockVal,
+        },
+      };
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
-      }).finally(function () {
-        if (cb.isConnected) cb.disabled = false;
+      }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        status.textContent = "Saved.";
+        schedDirty = false;
+        schedCacheEl = null;
         refreshEvModal();
+      }).catch(function (e) {
+        status.textContent = "Save failed: " + e.message;
+        saveBtn.disabled = false;
+        clearBtn.disabled = false;
       });
     });
+
+    clearBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      status.textContent = "Clearing…";
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule: null }),
+      }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        status.textContent = "Cleared.";
+        schedDirty = false;
+        schedCacheEl = null;
+        refreshEvModal();
+      }).catch(function (e) {
+        status.textContent = "Clear failed: " + e.message;
+        saveBtn.disabled = false;
+      });
+    });
+
     return box;
+  }
+
+  function utcMinsToLocalHHMM(min) {
+    var d = new Date();
+    d.setUTCHours(Math.floor(min / 60), min % 60, 0, 0);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  function localHHMMToUtcMins(hhmm) {
+    var parts = String(hhmm).split(":");
+    if (parts.length !== 2) return 360;
+    var h = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m)) return 360;
+    var d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d.getUTCHours() * 60 + d.getUTCMinutes();
   }
 
   var evRefreshTimer = null;
