@@ -796,22 +796,30 @@ func ComputeDispatch(
 		totalCorrection = out.Output
 
 		// Live-meter clamp on the legacy PI path: plan decides charge or
-		// discharge direction; the meter decides magnitude. Prevents the
-		// load-twin over-prediction case where reactive PI commands a
-		// discharge larger than the live import. Scoped to this default
-		// arm only — manualHold, useEnergyPath, and plannerSelfIdleGate
-		// each have their own contracts that intentionally cross the
-		// zero-grid line.
+		// discharge direction; the live error decides magnitude. Prevents
+		// the load-twin over-prediction case where reactive PI commands a
+		// discharge larger than what's needed to close errW. Scoped to
+		// this default arm only — manualHold, useEnergyPath, and
+		// plannerSelfIdleGate each have their own contracts that
+		// intentionally cross the GridTargetW line.
+		//
+		// "Don't overshoot": the resulting grid value should land near
+		// GridTargetW, not punch through it. Headroom is therefore the
+		// signed distance from gridW to GridTargetW in the dispatch
+		// direction. Expressed via the existing errW (gridW - GridTargetW)
+		// so the clamp tracks whatever measurement the active mode feeds
+		// the PI (gridW for self_consumption, EV-aware; the same errW
+		// drives the PI's piMeasurement above).
 		//
 		// Deadband (state.GridToleranceW) is a threshold (do not fire
 		// below it), not a haircut (do not subtract from the headroom):
-		// the deadband already gates entry to this arm at line 763.
+		// the deadband already gates entry to this arm at line 780.
 		targetTotal := currentTotal + totalCorrection
 		dead := state.GridToleranceW
 		var allowed float64
 		switch {
-		case targetTotal > 0: // plan says charge → cap at current export
-			headroom := -rawGridW
+		case targetTotal > 0: // plan says charge → cap so we don't push past GridTargetW
+			headroom := -errW // positive when grid is below target (room to charge up)
 			if headroom < dead {
 				headroom = 0
 			}
@@ -820,8 +828,8 @@ func ComputeDispatch(
 			} else {
 				allowed = targetTotal
 			}
-		case targetTotal < 0: // plan says discharge → cap at current import
-			headroom := rawGridW
+		case targetTotal < 0: // plan says discharge → cap so we don't push past GridTargetW
+			headroom := errW // positive when grid is above target (room to discharge down)
 			if headroom < dead {
 				headroom = 0
 			}
@@ -837,7 +845,9 @@ func ComputeDispatch(
 			slog.Warn("dispatch: meter clamp reduced battery target",
 				"requested_total_w", targetTotal,
 				"clamped_total_w", allowed,
-				"raw_grid_w", rawGridW,
+				"grid_w", gridW,
+				"grid_target_w", state.GridTargetW,
+				"err_w", errW,
 				"current_total_w", currentTotal,
 				"deadband_w", dead,
 				"mode", string(effectiveMode))
