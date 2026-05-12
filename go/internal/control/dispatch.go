@@ -906,14 +906,67 @@ func ComputeDispatch(
 		out := state.PI.Update(piMeasurement)
 		totalCorrection = out.Output
 
-		// Post-PI cap (legacy path): mirror the energy-path cap so the
-		// battery target on the legacy/reactive path also respects the
-		// surplus-only EV reserve. The PI bias above tries to steer the
-		// integrator the right way, but PI windup, deadband interaction,
-		// and the slow integrator unwind would otherwise leave the
-		// battery on a stale charge command for tens of seconds — long
-		// enough to starve the EV. This cap drives the aggregate target
-		// to the same ceiling the energy path uses.
+		// Live-meter clamp on the legacy PI path (#270): plan decides
+		// charge or discharge direction; the meter decides magnitude.
+		// Prevents the load-twin over-prediction case where reactive PI
+		// commands a discharge larger than the live import. Scoped to
+		// this default arm only — manualHold, useEnergyPath, and
+		// plannerSelfIdleGate each have their own contracts that
+		// intentionally cross the zero-grid line.
+		//
+		// Deadband (state.GridToleranceW) is a threshold (do not fire
+		// below it), not a haircut (do not subtract from the headroom):
+		// the deadband already gates entry to this arm at line 763.
+		{
+			targetTotal := currentTotal + totalCorrection
+			dead := state.GridToleranceW
+			var allowed float64
+			switch {
+			case targetTotal > 0: // plan says charge → cap at current export
+				headroom := -rawGridW
+				if headroom < dead {
+					headroom = 0
+				}
+				if targetTotal > headroom {
+					allowed = headroom
+				} else {
+					allowed = targetTotal
+				}
+			case targetTotal < 0: // plan says discharge → cap at current import
+				headroom := rawGridW
+				if headroom < dead {
+					headroom = 0
+				}
+				if -targetTotal > headroom {
+					allowed = -headroom
+				} else {
+					allowed = targetTotal
+				}
+			default:
+				allowed = 0
+			}
+			if allowed != targetTotal {
+				slog.Warn("dispatch: meter clamp reduced battery target",
+					"requested_total_w", targetTotal,
+					"clamped_total_w", allowed,
+					"raw_grid_w", rawGridW,
+					"current_total_w", currentTotal,
+					"deadband_w", dead,
+					"mode", string(effectiveMode))
+			}
+			totalCorrection = allowed - currentTotal
+		}
+
+		// Surplus-only EV reserve cap: stack on top of the meter clamp.
+		// Mirror the energy-path cap so the battery target on the
+		// legacy/reactive path also respects the EV reserve. The PI bias
+		// above tries to steer the integrator the right way, but PI
+		// windup, deadband interaction, and the slow integrator unwind
+		// would otherwise leave the battery on a stale charge command
+		// for tens of seconds — long enough to starve the EV. The meter
+		// clamp above caps "don't import to charge"; this cap is tighter
+		// when EV reserve is active: "don't charge past pvSurplus minus
+		// reserveRemaining" so the EV's promised PV slice stays unspent.
 		if surplusActive {
 			targetTotal := currentTotal + totalCorrection
 			if targetTotal > 0 {
