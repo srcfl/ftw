@@ -906,56 +906,60 @@ func ComputeDispatch(
 		out := state.PI.Update(piMeasurement)
 		totalCorrection = out.Output
 
-		// Live-meter clamp on the legacy PI path (#270): plan decides
-		// charge or discharge direction; the meter decides magnitude.
-		// Prevents the load-twin over-prediction case where reactive PI
-		// commands a discharge larger than the live import. Scoped to
+		// Live-meter clamp on the legacy PI path: plan decides charge or
+		// discharge direction; the live error decides magnitude. Prevents
+		// the load-twin over-prediction case where reactive PI commands a
+		// discharge larger than what's needed to close errW. Scoped to
 		// this default arm only — manualHold, useEnergyPath, and
 		// plannerSelfIdleGate each have their own contracts that
-		// intentionally cross the zero-grid line.
+		// intentionally cross the GridTargetW line.
 		//
-		// Deadband (state.GridToleranceW) is a threshold (do not fire
-		// below it), not a haircut (do not subtract from the headroom):
-		// the deadband already gates entry to this arm at line 763.
-		{
-			targetTotal := currentTotal + totalCorrection
-			dead := state.GridToleranceW
-			var allowed float64
-			switch {
-			case targetTotal > 0: // plan says charge → cap at current export
-				headroom := -rawGridW
-				if headroom < dead {
-					headroom = 0
-				}
-				if targetTotal > headroom {
-					allowed = headroom
-				} else {
-					allowed = targetTotal
-				}
-			case targetTotal < 0: // plan says discharge → cap at current import
-				headroom := rawGridW
-				if headroom < dead {
-					headroom = 0
-				}
-				if -targetTotal > headroom {
-					allowed = -headroom
-				} else {
-					allowed = targetTotal
-				}
-			default:
-				allowed = 0
+		// "Don't overshoot": the resulting grid value should land near
+		// GridTargetW, not punch through it. Headroom is therefore the
+		// signed distance from gridW to GridTargetW in the dispatch
+		// direction. Expressed via the existing errW (gridW - GridTargetW)
+		// so the clamp tracks whatever measurement the active mode feeds
+		// the PI (#270 → #272). Deadband (state.GridToleranceW) is a
+		// threshold (do not fire below it), not a haircut.
+		targetTotal := currentTotal + totalCorrection
+		dead := state.GridToleranceW
+		var allowed float64
+		switch {
+		case targetTotal > 0: // plan says charge → cap so we don't push past GridTargetW
+			headroom := -errW // positive when grid is below target (room to charge up)
+			if headroom < dead {
+				headroom = 0
 			}
-			if allowed != targetTotal {
-				slog.Warn("dispatch: meter clamp reduced battery target",
-					"requested_total_w", targetTotal,
-					"clamped_total_w", allowed,
-					"raw_grid_w", rawGridW,
-					"current_total_w", currentTotal,
-					"deadband_w", dead,
-					"mode", string(effectiveMode))
+			if targetTotal > headroom {
+				allowed = headroom
+			} else {
+				allowed = targetTotal
 			}
-			totalCorrection = allowed - currentTotal
+		case targetTotal < 0: // plan says discharge → cap so we don't push past GridTargetW
+			headroom := errW // positive when grid is above target (room to discharge down)
+			if headroom < dead {
+				headroom = 0
+			}
+			if -targetTotal > headroom {
+				allowed = -headroom
+			} else {
+				allowed = targetTotal
+			}
+		default:
+			allowed = 0
 		}
+		if allowed != targetTotal {
+			slog.Warn("dispatch: meter clamp reduced battery target",
+				"requested_total_w", targetTotal,
+				"clamped_total_w", allowed,
+				"grid_w", gridW,
+				"grid_target_w", state.GridTargetW,
+				"err_w", errW,
+				"current_total_w", currentTotal,
+				"deadband_w", dead,
+				"mode", string(effectiveMode))
+		}
+		totalCorrection = allowed - currentTotal
 
 		// Surplus-only EV reserve cap: stack on top of the meter clamp.
 		// Mirror the energy-path cap so the battery target on the
@@ -964,12 +968,13 @@ func ComputeDispatch(
 		// windup, deadband interaction, and the slow integrator unwind
 		// would otherwise leave the battery on a stale charge command
 		// for tens of seconds — long enough to starve the EV. The meter
-		// clamp above caps "don't import to charge"; this cap is tighter
-		// when EV reserve is active: "don't charge past pvSurplus minus
-		// reserveRemaining" so the EV's promised PV slice stays unspent.
+		// clamp above caps "don't overshoot GridTargetW"; this cap is
+		// tighter when EV reserve is active: "don't charge past
+		// pvSurplus minus reserveRemaining" so the EV's promised PV
+		// slice stays unspent.
 		if surplusActive {
-			targetTotal := currentTotal + totalCorrection
-			if targetTotal > 0 {
+			targetTotal2 := currentTotal + totalCorrection
+			if targetTotal2 > 0 {
 				pvSurplus := -gridW + currentTotal
 				reserveRemaining := state.EVSurplusOnlyReserveW - state.EVChargingW
 				if reserveRemaining < 0 {
@@ -979,7 +984,7 @@ func ComputeDispatch(
 				if ceiling < 0 {
 					ceiling = 0
 				}
-				if targetTotal > ceiling {
+				if targetTotal2 > ceiling {
 					totalCorrection = ceiling - currentTotal
 				}
 			}

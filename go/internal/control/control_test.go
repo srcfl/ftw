@@ -2298,20 +2298,20 @@ func TestMeterClampStopsExportOnLoadOverPrediction(t *testing.T) {
 }
 
 func TestMeterClampStopsImportOnLoadUnderPrediction(t *testing.T) {
-	// Live meter: importing +1000 W. Battery idle. Operator (or planner)
-	// has set GridTargetW = -5000 (wants to export 5 kW), so the PI will
-	// demand a large positive (charge) correction. That command would
-	// pull additional power from the grid, deepening the import — the
-	// opposite of what self_consumption should ever do. Since the meter
-	// is importing, charge headroom is zero, so the clamp must zero the
-	// battery total.
-	store := seedStore(1000, []struct {
+	// Mirror of the over-prediction case. Live meter: exporting -2000 W
+	// (PV momentarily under-loaded relative to forecast). Battery is
+	// already charging at +5000 W. GridTargetW = 0. The reactive PI sees
+	// errW = -2000 and keeps demanding more charge to drive gridW → 0,
+	// but doing so would flip the meter into import. The clamp must cap
+	// the total battery target at +|errW| = +2000 so the site does not
+	// pull additional power from the grid to feed the battery.
+	store := seedStore(-2000, []struct {
 		name          string
 		currentW, soc float64
 	}{
-		{"ferroamp", 0, 0.5},
+		{"ferroamp", 5000, 0.5},
 	})
-	st := NewState(-5000, 50, "ferroamp")
+	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -2319,9 +2319,51 @@ func TestMeterClampStopsImportOnLoadUnderPrediction(t *testing.T) {
 	for _, tg := range targets {
 		sum += tg.TargetW
 	}
-	// With the site already importing, the clamp drops charge headroom
-	// to zero. Sum must not exceed 0 (allow a tiny tolerance for fp).
-	if sum > 1e-6 {
-		t.Errorf("meter clamp should zero charge when importing, got sum=%f", sum)
+	// Magnitude of charge must not exceed live export (2000 W).
+	if sum > 2000+1e-6 {
+		t.Errorf("meter clamp should cap charge at +|errW|=+2000, got sum=%f", sum)
+	}
+	// Direction sanity: should still be charging (or zero), never
+	// discharging when exporting.
+	if sum < 0 {
+		t.Errorf("export case should not produce a discharge command, got sum=%f", sum)
+	}
+}
+
+func TestMeterClampRespectsNonZeroGridTarget(t *testing.T) {
+	// Regression guard for the e2e failure on master after the first
+	// clamp landed: ModeSelfConsumption with GridTargetW = -3000 means
+	// the operator wants the site to export 3 kW. Live meter at -1000
+	// (already exporting 1 kW). The reactive PI must be free to command
+	// additional discharge so gridW moves toward -3000; the clamp must
+	// NOT treat "we're already exporting" as zero discharge headroom.
+	//
+	// Headroom is expressed in errW space (gridW - GridTargetW):
+	//   errW = -1000 - (-3000) = +2000 → discharge headroom is 2000 W,
+	// so a discharge correction of up to 2 kW (toward the GridTargetW)
+	// should pass the clamp unchanged.
+	store := seedStore(-1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-3000, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	var sum float64
+	for _, tg := range targets {
+		sum += tg.TargetW
+	}
+	// Sum must move meaningfully toward discharge — not get pinned at 0
+	// by a clamp that confuses "currently exporting" with "no headroom".
+	if sum >= -1.0 {
+		t.Errorf("clamp pinned dispatch instead of letting PI close the gap to GridTargetW=-3000, got sum=%f", sum)
+	}
+	// And it must not overshoot the target (i.e. don't discharge past
+	// |errW| = 2000 W).
+	if sum < -2000-1e-6 {
+		t.Errorf("clamp let discharge overshoot GridTargetW, got sum=%f", sum)
 	}
 }
