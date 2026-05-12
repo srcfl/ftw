@@ -151,7 +151,7 @@
   }
 
   function loadpointCard(lp, plan) {
-    return '<div class="lp-card">' +
+    return `<div class="lp-card" data-lp-id="${lp.id}">` +
       `<div class="lp-card-header"><h3>${lp.id}</h3></div>` +
       '<div class="lp-card-body">' +
       configBlock(lp) +
@@ -162,11 +162,45 @@
   function render(lps, plan) {
     const grid = document.getElementById('loadpoints-grid');
     if (!grid) return;
+
+    // Capture scroll positions BEFORE swapping innerHTML — otherwise the
+    // 5 s auto-refresh yanks the page (and any per-card schedule scroll)
+    // back to the top mid-read. Page scroll comes from the document's
+    // scrolling element; per-LP scrolls come from each `.lp-schedule-wrap`
+    // keyed by the card's data-lp-id so we restore to the right card even
+    // if LP order or count changes.
+    const scroller = document.scrollingElement || document.documentElement;
+    const pageScroll = { top: scroller.scrollTop, left: scroller.scrollLeft };
+    const wrapScrolls = {};
+    grid.querySelectorAll('.lp-card[data-lp-id]').forEach(card => {
+      const id = card.getAttribute('data-lp-id');
+      const wrap = card.querySelector('.lp-schedule-wrap');
+      if (id && wrap) {
+        wrapScrolls[id] = { top: wrap.scrollTop, left: wrap.scrollLeft };
+      }
+    });
+
     if (!lps || lps.length === 0) {
       grid.innerHTML = '<div class="lp-empty">No loadpoints configured.</div>';
     } else {
       grid.innerHTML = lps.map(lp => loadpointCard(lp, plan)).join('');
     }
+
+    // Restore per-LP wrap scrolls first, then the page. Restoring the
+    // page last avoids browsers re-anchoring the page scroll to the
+    // freshly-laid-out content height.
+    grid.querySelectorAll('.lp-card[data-lp-id]').forEach(card => {
+      const id = card.getAttribute('data-lp-id');
+      const prev = wrapScrolls[id];
+      const wrap = card.querySelector('.lp-schedule-wrap');
+      if (prev && wrap) {
+        wrap.scrollTop = prev.top;
+        wrap.scrollLeft = prev.left;
+      }
+    });
+    scroller.scrollTop = pageScroll.top;
+    scroller.scrollLeft = pageScroll.left;
+
     const sub = document.getElementById('loadpoints-subtitle');
     if (sub) {
       const planMode = plan && plan.plan ? plan.plan.mode : 'no plan';
