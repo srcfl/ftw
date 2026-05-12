@@ -19,10 +19,11 @@
 
   const REFRESH_MS = 10000;
   // How many forward slots of the schedule to render. The plan is
-  // 193 slots × 15 min = 48 h; rendering the lot creates a wall of
-  // numbers nobody reads. 16 slots = next 4 h covers the operator's
-  // "what is this thing about to do?" question without obscuring it.
-  const SCHEDULE_SLOTS = 16;
+  // 193 slots × 15 min = 48 h. 4 h was too narrow — operators looking
+  // at "why does the plan chart show grid burst at 13:00 but my schedule
+  // table doesn't list it?" were confused. 96 slots = 24 h covers the
+  // typical overnight charging window plus the next afternoon.
+  const SCHEDULE_SLOTS = 96;
 
   async function fetchAll() {
     const [lps, plan] = await Promise.all([

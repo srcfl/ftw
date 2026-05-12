@@ -750,10 +750,45 @@ func main() {
 				if initSoC > maxPct {
 					maxPct = initSoC
 				}
+				// Defer grid-funded EV planning when the deadline lies
+				// past the last published price slot AND is more than ~3 h
+				// out. Without this, MPC commits today's afternoon grid
+				// (today's prices are confirmed) instead of waiting for
+				// tomorrow's pre-dawn slots (typically published ~13:00 UTC
+				// for next-day Nordpool). The user-facing intent is "burn
+				// surplus PV during day, only plan grid at night when the
+				// real cheap window is known". Setting LoadpointSpec.SurplusOnly
+				// makes MPC's DP refuse grid-import EV actions; the runtime
+				// loadpoint controller still grabs PV via the bat-SoC unlock
+				// path. Once tomorrow's prices land, MPC's next replan
+				// rebuilds the spec without this guard and proper grid
+				// planning kicks in.
+				deferGridPlan := false
+				if priceSvc != nil {
+					end := time.Now().Add(72 * time.Hour)
+					pts, _ := priceSvc.Load(time.Now().UnixMilli(), end.UnixMilli())
+					var latestEnd time.Time
+					for _, p := range pts {
+						slotEnd := time.UnixMilli(p.SlotTsMs).Add(time.Duration(p.SlotLenMin) * time.Minute)
+						if slotEnd.After(latestEnd) {
+							latestEnd = slotEnd
+						}
+					}
+					if !latestEnd.IsZero() &&
+						st.TargetTime.After(latestEnd) &&
+						time.Until(st.TargetTime) > 3*time.Hour {
+						deferGridPlan = true
+					}
+				}
 				slog.Debug("mpc: loadpoint spec",
 					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
 					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
-					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit)
+					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit,
+					"defer_grid_plan", deferGridPlan)
+				if deferGridPlan {
+					slog.Info("mpc: LP grid-funded planning deferred — target past published prices",
+						"lp", st.ID, "target", st.TargetTime, "hours_to_target", time.Until(st.TargetTime).Hours())
+				}
 				return &mpc.LoadpointSpec{
 					ID:              st.ID,
 					CapacityWh:      capWh,
@@ -767,7 +802,10 @@ func main() {
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
-					SurplusOnly:     st.SurplusOnly,
+					// Either operator-configured surplus_only OR our
+					// "wait for tomorrow's prices" defer triggers MPC's
+					// no-grid constraint for this LP.
+					SurplusOnly: st.SurplusOnly || deferGridPlan,
 				}
 			}
 			return nil
