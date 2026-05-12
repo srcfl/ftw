@@ -749,6 +749,22 @@ func main() {
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
 					maxPct = vehicleChargeLimit
 				}
+				// Effective deadline target: when the operator asked
+				// for 100% but the vehicle (Tesla via TeslaBLEProxy
+				// etc.) is hard-capped at, say, 60%, the DP must plan
+				// against the cap — otherwise the deadline-shortfall
+				// penalty stays elevated forever (the SoC grid maxes
+				// at the cap, can never reach the operator target),
+				// and MPC keeps committing grid charging chasing an
+				// unreachable goal. Cap target_pct to whatever the
+				// car will physically accept.
+				targetPct := st.TargetSoCPct
+				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetPct {
+					targetPct = vehicleChargeLimit
+					slog.Info("mpc: target capped to vehicle charge limit",
+						"lp", st.ID, "operator_target_pct", st.TargetSoCPct,
+						"vehicle_limit_pct", vehicleChargeLimit)
+				}
 				// Guard against degenerate grids: if current SoC > maxPct
 				// (already over target), grow the ceiling to current so
 				// the DP can at least represent it (no charging will be
@@ -812,7 +828,7 @@ func main() {
 					MaxPct:          maxPct,
 					InitialSoCPct:   initSoC,
 					PluggedIn:       true,
-					TargetSoCPct:    st.TargetSoCPct,
+					TargetSoCPct:    targetPct,
 					TargetSlotIdx:   targetSlot,
 					MaxChargeW:      st.MaxChargeW,
 					AllowedStepsW:   st.AllowedStepsW,
