@@ -148,17 +148,102 @@ type OCPP struct {
 }
 
 // EVCharger is the high-level EV charger config written by the Settings UI.
-// The backend auto-generates a Lua driver entry from this on startup so
-// users never touch raw driver YAML for their EV charger.
+// Exactly one transport block (HTTP or Modbus) is meaningful per provider —
+// the runtime picks which to populate based on the provider's declared
+// transport in evcloud.Provider.
 //
 // Password is stored in state.db (key "ev_charger_password"), NOT in config.yaml.
 // It is populated at runtime by main.go after loading state and by the API
-// handler on POST /api/config.
+// handler on POST /api/config. Providers that don't need auth (e.g. local
+// Modbus) leave Username + Password empty.
 type EVCharger struct {
-	Provider string `yaml:"provider" json:"provider"` // "easee" (only option for now)
-	Email    string `yaml:"email" json:"email"`
-	Password string `yaml:"-" json:"password"` // persisted in state.db, not YAML
-	Serial   string `yaml:"serial,omitempty" json:"serial,omitempty"`
+	Provider string `yaml:"provider" json:"provider"` // "easee" | "ctek"
+
+	// Connection — populate the block matching the provider's transport.
+	HTTP   *EVChargerHTTP   `yaml:"http,omitempty" json:"http,omitempty"`
+	Modbus *EVChargerModbus `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+
+	// Optional auth — required by cloud HTTP providers like Easee,
+	// unused by local Modbus providers like CTEK.
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
+
+	Serial string `yaml:"serial,omitempty" json:"serial,omitempty"`
+
+	// EmailLegacy preserves backward compatibility with the original
+	// `email:` field. Normalize() copies it into Username if Username
+	// is empty, so configs written before the generalization still load.
+	// New code should always read Username.
+	EmailLegacy string `yaml:"email,omitempty" json:"email,omitempty"`
+}
+
+// EVChargerHTTP is the HTTP/cloud connection block. BaseURL is optional —
+// when empty the provider uses its default (e.g. https://api.easee.com/api).
+type EVChargerHTTP struct {
+	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+}
+
+// EVChargerModbus is the Modbus/TCP connection block. Port defaults to 502
+// and UnitID defaults to 1 if zero — see provider-specific Validate.
+type EVChargerModbus struct {
+	Host   string `yaml:"host" json:"host"`
+	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`
+	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"`
+}
+
+// Normalize folds the legacy `email:` YAML key into Username and clears
+// it so subsequent writes use the canonical key. Idempotent.
+func (e *EVCharger) Normalize() {
+	if e == nil {
+		return
+	}
+	if e.Username == "" && e.EmailLegacy != "" {
+		e.Username = e.EmailLegacy
+	}
+	e.EmailLegacy = ""
+}
+
+// Validate enforces per-provider shape rules. Password is intentionally
+// not required here — it's loaded from state.db after YAML parse (see
+// main.go's ev_charger_password restore step), so at Validate() time
+// the field may be legitimately empty.
+func (e *EVCharger) Validate() error {
+	if e == nil {
+		return nil
+	}
+	switch e.Provider {
+	case "":
+		return errors.New("ev_charger.provider: required")
+	case "easee":
+		// Username/Password are NOT enforced here. The runtime easee
+		// driver logs + idles when creds are missing, and the API picker
+		// requires both before calling Easee Cloud. Letting a partial
+		// ev_charger block load is the original contract — the wizard
+		// writes provider intent first, then captures creds in a second
+		// API call.
+		if e.Modbus != nil {
+			return errors.New("ev_charger.modbus: not valid for provider easee (HTTP transport)")
+		}
+	case "ctek":
+		if e.Modbus == nil || e.Modbus.Host == "" {
+			return errors.New("ev_charger.modbus.host: required for provider ctek")
+		}
+		if e.Modbus.Port < 0 {
+			return errors.New("ev_charger.modbus.port: must be >= 0")
+		}
+		if e.Modbus.UnitID < 0 || e.Modbus.UnitID > 247 {
+			return errors.New("ev_charger.modbus.unit_id: must be in 0..247")
+		}
+		if e.HTTP != nil {
+			return errors.New("ev_charger.http: not valid for provider ctek (Modbus transport)")
+		}
+		if e.Username != "" || e.Password != "" {
+			return errors.New("ev_charger: username/password not valid for provider ctek")
+		}
+	default:
+		return fmt.Errorf("ev_charger.provider %q: not supported (valid: easee, ctek)", e.Provider)
+	}
+	return nil
 }
 
 // Planner configures the MPC scheduler (optional — disabled if omitted).
@@ -820,6 +905,13 @@ func applyDefaults(c *Config) {
 
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
+	if c.EVCharger != nil {
+		c.EVCharger.Normalize()
+		if err := c.EVCharger.Validate(); err != nil {
+			return err
+		}
+	}
+
 	// Empty drivers list is a valid shape — e.g. an EV-only site that
 	// configured a cloud EV charger in the setup wizard and doesn't
 	// own local inverter/meter hardware. Control loop becomes a no-op

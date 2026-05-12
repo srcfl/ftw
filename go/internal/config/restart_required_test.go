@@ -80,7 +80,7 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"nova toggled", func(c *Config) { c.Nova = &Nova{Enabled: true, URL: "https://x"} }, "nova"},
 		{"ocpp toggled", func(c *Config) { c.OCPP = &OCPP{Enabled: true} }, "ocpp"},
 		{"ev_charger added", func(c *Config) {
-			c.EVCharger = &EVCharger{Provider: "easee", Email: "a@b.c"}
+			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},
 		{"weather provider change", func(c *Config) {
 			c.Weather = &Weather{Provider: "open_meteo", Latitude: 59, Longitude: 18}

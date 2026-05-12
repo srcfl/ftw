@@ -140,38 +140,43 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		writeBootstrapJSON(w, 200, selfUpdater.Status())
 	})
 
-	// POST /api/ev/chargers — authenticate with an EV cloud provider and
-	// list chargers. Mirror of the full-app handler so the setup wizard
-	// can offer a picker instead of asking the operator to transcribe a
-	// serial. No state store here, so password comes only from the body
-	// (no fallback to the persisted ev_charger.password).
+	// GET /api/ev/providers — descriptor list for the wizard's field
+	// renderer. Mirrors the full-app endpoint.
+	mux.HandleFunc("GET /api/ev/providers", func(w http.ResponseWriter, r *http.Request) {
+		writeBootstrapJSON(w, 200, evcloud.Describe())
+	})
+
+	// POST /api/ev/chargers — probe a provider for the chargers reachable
+	// from the supplied config. Mirror of the full-app handler so the
+	// setup wizard can offer a picker instead of asking the operator to
+	// transcribe a serial. No state store here, so password (when
+	// required) comes only from the body — no fallback to the persisted
+	// ev_charger_password.
 	mux.HandleFunc("POST /api/ev/chargers", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Provider string `json:"provider"`
-			Email    string `json:"email"`
-			Password string `json:"password"`
-		}
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		var cfg config.EVCharger
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&cfg); err != nil {
 			writeBootstrapJSON(w, 400, map[string]string{"error": "invalid request"})
 			return
 		}
-		if req.Provider == "" {
-			req.Provider = "easee"
+		cfg.Normalize()
+		if cfg.Provider == "" {
+			cfg.Provider = "easee"
 		}
-		if req.Email == "" {
-			writeBootstrapJSON(w, 400, map[string]string{"error": "email required"})
-			return
-		}
-		if req.Password == "" {
-			writeBootstrapJSON(w, 400, map[string]string{"error": "password required"})
-			return
-		}
-		p, err := evcloud.Get(req.Provider)
+		p, err := evcloud.Get(cfg.Provider)
 		if err != nil {
 			writeBootstrapJSON(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
-		chargers, err := p.ListChargers(req.Email, req.Password)
+		desc := p.Describe()
+		if err := cfg.Validate(); err != nil {
+			writeBootstrapJSON(w, 400, map[string]string{"error": err.Error()})
+			return
+		}
+		if desc.NeedsAuth && cfg.Password == "" {
+			writeBootstrapJSON(w, 400, map[string]string{"error": "password required"})
+			return
+		}
+		chargers, err := p.ListChargers(&cfg)
 		if err != nil {
 			writeBootstrapJSON(w, 502, map[string]string{"error": err.Error()})
 			return

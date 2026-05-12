@@ -1987,8 +1987,13 @@ func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Normalize()
+	// Provider must come from the caller. The api stays vendor-agnostic
+	// — the wizard's GET /api/ev/providers enumerates the registry, the
+	// operator picks one, and that choice is what arrives here. Defaulting
+	// to a specific brand would silently couple the api to one vendor.
 	if cfg.Provider == "" {
-		cfg.Provider = "easee"
+		writeJSON(w, 400, map[string]string{"error": "provider required"})
+		return
 	}
 	p, err := evcloud.Get(cfg.Provider)
 	if err != nil {
@@ -2238,8 +2243,8 @@ func (s *Server) handleLoadpointTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/loadpoints/{id}/soc lets the operator correct the
-// inferred vehicle SoC. Easee (and most chargers) are blind to the
-// vehicle's BMS — without a vehicle API integration (Tesla, VW, …)
+// inferred vehicle SoC. Most EV chargers are blind to the
+// vehicle's BMS — without a vehicle-side API integration
 // we have no way to know actual SoC. We infer from
 // `plugin_soc_pct + delivered_wh / capacity`, but if the plug-in
 // anchor was wrong the estimate drifts. This endpoint re-anchors so
