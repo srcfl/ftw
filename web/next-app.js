@@ -60,6 +60,19 @@
   // homes see each car separately. Shape: { [driverName]: { ev: [...] } }.
   var chartEVs = {};
 
+  // Resolve a CSS custom property off :root at call time. Lazy on
+  // purpose: a runtime theme toggle rewrites the oklch values, so we
+  // re-read every paint rather than caching at module load.
+  function cssVar(name) {
+    try {
+      var v = getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim();
+      return v || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Deterministic color palette for battery series — each driver gets a
   // stable color based on name hash so reload is consistent.
   var BATTERY_PALETTE = [
@@ -67,6 +80,10 @@
     "#eab308", "#14b8a6", "#f43f5e", "#a855f7",
   ];
   function batteryColor(name) {
+    // Route the "pixii" driver through the theme's --violet token so
+    // it visibly separates from "laddning bil" (which hashes to the
+    // same purple slot in EV_PALETTE). Other names fall through.
+    if (name === "pixii") return cssVar('--violet') || BATTERY_PALETTE[7];
     var h = 0;
     for (var i = 0; i < name.length; i++) {
       h = ((h << 5) - h + name.charCodeAt(i)) | 0;
@@ -122,6 +139,10 @@
     "#84cc16", "#f43f5e", "#a855f7", "#14b8a6",
   ];
   function evColor(name) {
+    // Route "laddning bil" through the theme's --cyan token so it
+    // doesn't collide with the Pixii battery purple (both hash to
+    // the same purple slot in their respective palettes).
+    if (name === "laddning bil") return cssVar('--cyan') || EV_PALETTE[6];
     var h = 0;
     for (var i = 0; i < name.length; i++) {
       h = ((h << 5) - h + name.charCodeAt(i)) | 0;
