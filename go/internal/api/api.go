@@ -234,7 +234,6 @@ func (s *Server) routes() {
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
-	s.handle("GET  /api/ev/providers", s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
@@ -1967,49 +1966,40 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
-// GET /api/ev/providers — return the descriptor for every registered EV
-// charger provider. The wizard reads this to decide which transport +
-// auth fields to render for the user's pick.
-func (s *Server) handleEVProviders(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, 200, evcloud.Describe())
-}
-
-// POST /api/ev/chargers — probe a provider for the chargers reachable
-// from the supplied config. Body is the EVCharger shape (provider +
-// transport block + optional auth). For providers that need auth and
-// the body omits Password, we fall back to the persisted
-// ev_charger_password so the operator doesn't have to re-type it when
-// they're just refreshing the picker.
+// POST /api/ev/chargers — authenticate with an EV cloud provider and list chargers.
 func (s *Server) handleEVChargers(w http.ResponseWriter, r *http.Request) {
-	var cfg config.EVCharger
-	if err := readJSON(r, &cfg); err != nil {
+	var req struct {
+		Provider string `json:"provider"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
 	}
-	cfg.Normalize()
-	if cfg.Provider == "" {
-		cfg.Provider = "easee"
+	if req.Provider == "" {
+		req.Provider = "easee"
 	}
-	p, err := evcloud.Get(cfg.Provider)
+	if req.Email == "" {
+		writeJSON(w, 400, map[string]string{"error": "email required"})
+		return
+	}
+	if req.Password == "" {
+		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
+			req.Password = pw
+		}
+	}
+	if req.Password == "" {
+		writeJSON(w, 400, map[string]string{"error": "password required"})
+		return
+	}
+
+	p, err := evcloud.Get(req.Provider)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	desc := p.Describe()
-	if desc.NeedsAuth && cfg.Password == "" {
-		if pw, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
-			cfg.Password = pw
-		}
-	}
-	if err := cfg.Validate(); err != nil {
-		writeJSON(w, 400, map[string]string{"error": err.Error()})
-		return
-	}
-	if desc.NeedsAuth && cfg.Password == "" {
-		writeJSON(w, 400, map[string]string{"error": "password required"})
-		return
-	}
-	chargers, err := p.ListChargers(&cfg)
+	chargers, err := p.ListChargers(req.Email, req.Password)
 	if err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
