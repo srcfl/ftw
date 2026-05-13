@@ -174,6 +174,49 @@ func TestManager_HydrateSchedules(t *testing.T) {
 	}
 }
 
+// Regression: a stale one-shot target_time (set earlier via SetTarget or
+// loaded from disk) used to silently shadow a freshly-saved schedule,
+// because RollSchedules preserves future target_time values across
+// ticks. SetSchedule must wipe the derived target so the next
+// RollSchedules seeds the new deadline. Otherwise pressing Save on the
+// schedule UI is a visible no-op — the MPC keeps planning against the
+// old (often wrong) deadline.
+func TestManager_SetScheduleOverridesStaleTargetTime_Recurring(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
+	now := time.Date(2026, 5, 12, 20, 0, 0, 0, time.UTC)
+	// Operator (or stale state.db) leaves a one-shot target at 07:00
+	// tomorrow morning.
+	staleTarget := time.Date(2026, 5, 13, 5, 0, 0, 0, time.UTC)
+	m.SetTarget("garage", 100, staleTarget)
+	// Operator now saves a recurring schedule for 17:00 local CEST
+	// (15:00 UTC = 900 min).
+	m.SetSchedule("garage", Schedule{SoCPct: 100, TimeOfDayMinUTC: 900, Recurring: true})
+	m.RollSchedules(now)
+	st, _ := m.State("garage")
+	want := time.Date(2026, 5, 13, 15, 0, 0, 0, time.UTC)
+	if !st.TargetTime.Equal(want) {
+		t.Errorf("recurring SetSchedule must override stale target_time; got %v, want %v",
+			st.TargetTime, want)
+	}
+}
+
+func TestManager_SetScheduleOverridesStaleTargetTime_NonRecurring(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{ID: "garage", DriverName: "easee"}})
+	now := time.Date(2026, 5, 12, 20, 0, 0, 0, time.UTC)
+	staleTarget := time.Date(2026, 5, 13, 5, 0, 0, 0, time.UTC)
+	m.SetTarget("garage", 100, staleTarget)
+	m.SetSchedule("garage", Schedule{SoCPct: 100, TimeOfDayMinUTC: 900, Recurring: false})
+	m.RollSchedules(now)
+	st, _ := m.State("garage")
+	want := time.Date(2026, 5, 13, 15, 0, 0, 0, time.UTC)
+	if !st.TargetTime.Equal(want) {
+		t.Errorf("non-recurring SetSchedule must override stale target_time; got %v, want %v",
+			st.TargetTime, want)
+	}
+}
+
 func TestManager_LoadPreservesSchedule(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "garage", DriverName: "easee"}})

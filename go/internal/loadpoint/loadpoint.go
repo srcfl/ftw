@@ -507,6 +507,17 @@ func (m *Manager) SetSchedule(id string, s Schedule) bool {
 	// Force RollSchedules to re-evaluate on next call — operator just
 	// changed the contract so any previous idempotence cache is stale.
 	lp.lastRolledFor = time.Time{}
+	// Clear the one-shot targetTime too. RollSchedules deliberately
+	// preserves a future targetTime (so daily-rolled deadlines stay
+	// stable across ticks), but that same guard makes a freshly-saved
+	// schedule a no-op when a stale future targetTime is sitting in
+	// state.db — the operator presses Save and nothing changes. The
+	// contract for SetSchedule is "this replaces the user's intent",
+	// so we wipe the derived field and let the next RollSchedules
+	// seed it from the new schedule. Applies to both recurring and
+	// non-recurring saves.
+	lp.targetTime = time.Time{}
+	lp.targetSoCPct = 0
 	saver := m.scheduleSaver
 	m.mu.Unlock()
 	if saver != nil {
