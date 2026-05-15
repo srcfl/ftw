@@ -25,5 +25,8 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// from explicit 0 ("operator chose to disable"). The earlier
 	// `<= 0 -> default` shortcut clobbered the disable case.
 	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
+	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
+	ctrl.PVSurplusAbsorbSoCCapPct = cfg.Site.PVSurplusAbsorbSoCCapPct
+	ctrl.PVSurplusAbsorbThresholdW = cfg.Site.PVSurplusAbsorbThresholdW
 	return ctrl
 }

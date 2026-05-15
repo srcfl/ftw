@@ -2367,3 +2367,152 @@ func TestMeterClampRespectsNonZeroGridTarget(t *testing.T) {
 		t.Errorf("clamp let discharge overshoot GridTargetW, got sum=%f", sum)
 	}
 }
+
+// ---- PV surplus absorber underlay ----
+//
+// Opt-in policy reversal of TestEnergyDispatchDoesNotAbsorbPVSurprise: when
+// the operator sets a SoC cap (PVSurplusAbsorbSoCCapPct > 0), the dispatch
+// catches the gap between the planner's 15-min slot allocation and the
+// live PV/load drift — additional export beyond plan flows into the
+// battery instead of out the meter at low spot price. Only kicks in
+// planner_cheap / planner_arbitrage (the modes whose energy path doesn't
+// react to live grid), only adds charge (never reverses a discharge plan),
+// only while SoC < cap. Otherwise the original "let it export" behavior
+// stands. See the operator-report cycle 2026-04-17 → 2026-05-15.
+
+// Same scenario as TestEnergyDispatchDoesNotAbsorbPVSurprise, but with the
+// absorber knob enabled and SoC below cap → battery absorbs the surprise.
+func TestPVSurplusAbsorberAbsorbsExtraExportWhenEnabled(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200, // plan: charge 200 Wh (~ 800 W)
+		Strategy:        "arbitrage",
+	}
+	// Grid exporting 4 kW (PV surprise — PV 4.8 kW, load 0.8 kW, battery 0).
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5}, // SoC 50%, well below 88% cap
+	})
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.PVSurplusAbsorbSoCCapPct = 88 // enable
+	st.PVSurplusAbsorbThresholdW = 100
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	// Energy balance: grid = load + pv + battery, so -4000 = 800 + (-4800) + 0
+	// ⇒ load is 800 W, PV surplus over load is 4000 W. Plan wanted +800 W.
+	// Plan-as-is would leave -3200 W still exporting (rawGridW + planTarget).
+	// Absorber catches the 3200 W leftover and stacks on top of plan →
+	// target ≈ 800 + 3200 = 4000 W, projected grid → 0.
+	// Allow ±400 W slack for energy-formula time drift and threshold.
+	got := targets[0].TargetW
+	if got < 3600 {
+		t.Errorf("TargetW = %.0f W — absorber should be soaking PV surplus into battery (want ≈ 4000 W)", got)
+	}
+	if got > 4400 {
+		t.Errorf("TargetW = %.0f W — absorber overshoot (want ≈ 4000 W, fuse/cap should bound)", got)
+	}
+}
+
+// Defaults preserve back-compat: PVSurplusAbsorbSoCCapPct = 0 means
+// disabled; original "don't absorb surprise" behavior holds.
+func TestPVSurplusAbsorberDisabledByDefault(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	// No PVSurplusAbsorbSoCCapPct set → defaults to 0 → feature off.
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	got := targets[0].TargetW
+	// Same expectations as TestEnergyDispatchDoesNotAbsorbPVSurprise.
+	if got > 1500 {
+		t.Errorf("TargetW = %.0f W — absorber should be off by default; got runaway absorption", got)
+	}
+	if got < 100 {
+		t.Errorf("TargetW = %.0f W — plan intent (~800 W) should still run", got)
+	}
+}
+
+// At-cap: absorber must not push SoC above cap.
+func TestPVSurplusAbsorberHoldsAtCap(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 200,
+		Strategy:        "arbitrage",
+	}
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.88}, // already at cap
+	})
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.PVSurplusAbsorbSoCCapPct = 88
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	got := targets[0].TargetW
+	// SoC already at cap → no absorption beyond the plan's ~800 W intent.
+	if got > 1500 {
+		t.Errorf("TargetW = %.0f W — at cap, absorber should defer to plan (~800 W)", got)
+	}
+}
+
+// Don't reverse a discharge plan: if the planner is deliberately
+// discharging this slot (e.g. evening-peak export), the absorber stays
+// out of the way regardless of live grid sign.
+func TestPVSurplusAbsorberDoesNotReverseDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000, // plan: discharge ~4 kW
+		Strategy:        "arbitrage",
+	}
+	// Grid exporting hard (PV plus planned discharge), but plan is
+	// intentionally export-at-peak. Absorber must NOT flip the sign.
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.PVSurplusAbsorbSoCCapPct = 88
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	got := targets[0].TargetW
+	if got > -1500 {
+		t.Errorf("TargetW = %.0f W — absorber must not blunt a discharge plan (want ≈ -4000 W)", got)
+	}
+}

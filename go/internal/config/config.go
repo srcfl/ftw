@@ -287,6 +287,24 @@ type Site struct {
 	Gain                 float64 `yaml:"gain" json:"gain"`
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
+
+	// PVSurplusAbsorbSoCCapPct enables the opt-in PV-surplus absorber
+	// underlay in the energy-dispatch path (planner_cheap /
+	// planner_arbitrage). When the planner's slot allocation would still
+	// leave grid exporting beyond pv_surplus_absorb_threshold_w AND
+	// average SoC is below this cap, the dispatch redirects the leftover
+	// export into the battery instead of crossing the meter. Never
+	// reverses a discharge plan. 0 = disabled (default).
+	//
+	// Suggested 88 — leaves 2 pp margin below the planner's typical
+	// soc_max_pct = 90 so the absorber doesn't slam into the wall.
+	PVSurplusAbsorbSoCCapPct float64 `yaml:"pv_surplus_absorb_soc_cap_pct,omitempty" json:"pv_surplus_absorb_soc_cap_pct,omitempty"`
+
+	// PVSurplusAbsorbThresholdW is the trigger threshold for the
+	// absorber: only fires when projected grid export exceeds this many
+	// watts after the plan's target. Defaults to 100 W when the cap is
+	// set but this isn't.
+	PVSurplusAbsorbThresholdW float64 `yaml:"pv_surplus_absorb_threshold_w,omitempty" json:"pv_surplus_absorb_threshold_w,omitempty"`
 }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
