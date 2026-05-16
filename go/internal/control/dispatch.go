@@ -78,6 +78,17 @@ type SlotDirectiveFunc func(now time.Time) (SlotDirective, bool)
 // `max_discharge_w` (see PowerLimits + State.DriverLimits, issue #145).
 const MaxCommandW = 5000
 
+// evActiveThresholdW is the floor below which state.EVChargingW is
+// treated as driver-side noise (a connected-but-idle wallbox bleeds a
+// few watts of last-known smoothed reading after the contactor
+// opens). Above the threshold, the BatteryCoversEV=false safety net
+// caps battery discharge to the house side so the planner doesn't
+// drain the battery into the EV. Below it, the EV is effectively
+// idle and the safety net stays off, letting the planner's evening-
+// peak export plan run unmolested. 100 W matches the deadband used
+// elsewhere in this package for sign decisions.
+const evActiveThresholdW = 100.0
+
 // PowerLimits holds the per-driver charge/discharge ceiling. Zero on
 // either field means "use the global MaxCommandW default" — the value
 // an unset config key carries through the YAML → Driver struct →
@@ -799,16 +810,27 @@ func ComputeDispatch(
 		// commanded discharge to the level the reactive path would target
 		// — i.e. enough to zero the *house* side, not to feed the EV.
 		// Charging is left untouched. Mirrors the dispatch.go:453 rule on
-		// the legacy path. The MPC also gets a NoBatteryToEV constraint
-		// so the plan stops prescribing what dispatch then has to censor.
+		// the legacy path.
+		//
+		// Use a real EV-active threshold (evActiveThresholdW) instead of
+		// `> 0`: connected-but-idle chargers report low-W noise (~1 W
+		// from Easee's last-known reading bleed) that would otherwise
+		// trip this safety net on every evening-peak slot — pinning a
+		// planned -9 kW discharge to just-cover-the-house. The threshold
+		// preserves the EV-protection guarantee for any real draw while
+		// letting noise pass through. Regression:
+		// TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold,
+		// TestEnergyDispatchClampsDischargeWhenEVActuallyCharging.
+		//
 		// EXCEPTION: surplus-only transient cover. Same gate as the
 		// rawGridW-subtraction path above — when a surplus_only LP is
 		// drawing more than current surplus (site importing), the battery
 		// is allowed to bridge the EV ramp-down for ~10 s while the
 		// Easee/car-side current ramp completes. The cap reverts the
 		// moment grid goes negative.
-		surplusTransient := state.EVSurplusOnlyReserveW > 0 && state.EVChargingW > 0 && rawGridW > 0
-		if !state.BatteryCoversEV && !surplusTransient && state.EVChargingW > 0 && targetTotalW < 0 {
+		evActive := state.EVChargingW > evActiveThresholdW
+		surplusTransient := state.EVSurplusOnlyReserveW > 0 && evActive && rawGridW > 0
+		if !state.BatteryCoversEV && !surplusTransient && evActive && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW
 			if targetTotalW < reactiveTotal {

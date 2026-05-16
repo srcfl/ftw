@@ -2485,6 +2485,82 @@ func TestPVSurplusAbsorberHoldsAtCap(t *testing.T) {
 	}
 }
 
+// BatteryCoversEV=false must NOT clamp a planned evening-peak discharge
+// when the EV is effectively idle (driver reporting <100 W of noise).
+// Pre-fix, EVChargingW > 0 was the gate and any tiny non-zero from
+// Easee (~1 W on a connected-but-idle cable) tripped the cap, leaving
+// the planner's -9000 W export pinned to "just enough to zero the
+// house" (~-1 kW on a typical evening). Regression: live state showed
+// plan=-9000 W → realised ≈-1.3 kW with ev_w=0, ev_charging_w=1.08.
+func TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -2250, // plan: -9 kW for the slot
+		Strategy:        "arbitrage",
+	}
+	// Evening: PV gone, house ~1.4 kW load, plan wants to export
+	// hard. Battery currently at 0; rawGridW reflects the no-battery
+	// case (house importing 1.4 kW).
+	store := seedStore(1400, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.85},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.BatteryCoversEV = false
+	st.EVChargingW = 1.08 // <-- driver noise; EV is plugged-idle, not drawing
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// With the noise threshold in place, the safety net stays off and
+	// the planner's -9 kW discharge runs. Allow generous slack — slew,
+	// fuse and per-driver clamps may still trim it, but it should be
+	// well below -3 kW (i.e. discharging hard, not just covering house).
+	if got > -3000 {
+		t.Errorf("TargetW = %.0f W — EVChargingW noise (1 W) clamped a -9 kW plan to house-only. Want ≤ -3000 W.", got)
+	}
+}
+
+// Counter-check: when the EV is genuinely drawing (>= threshold), the
+// safety net MUST still fire to prevent the planner's discharge from
+// feeding the EV via the battery. battery_covers_ev=false is a strong
+// promise; the noise threshold doesn't weaken it for real draws.
+func TestEnergyDispatchClampsDischargeWhenEVActuallyCharging(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -2250,
+		Strategy:        "arbitrage",
+	}
+	// House 1.4 kW load + EV drawing 4 kW = rawGridW 5.4 kW import.
+	store := seedStore(5400, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.85},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.BatteryCoversEV = false
+	st.EVChargingW = 4000 // real charging — safety net MUST fire
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	got := targets[0].TargetW
+	// Battery should cover ~the house (~-1.4 kW), NOT the EV.
+	if got < -2500 {
+		t.Errorf("TargetW = %.0f W — safety net failed: battery is feeding the EV (want ≈ -1.4 kW).", got)
+	}
+	if got > -500 {
+		t.Errorf("TargetW = %.0f W — house side not covered (want roughly -1.4 kW).", got)
+	}
+}
+
 // Don't reverse a discharge plan: if the planner is deliberately
 // discharging this slot (e.g. evening-peak export), the absorber stays
 // out of the way regardless of live grid sign.
