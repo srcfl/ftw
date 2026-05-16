@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -560,11 +561,20 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// Plumb the site fuse into per-slot limits so the DP joint-plans
 	// battery + EV under the fuse constraint instead of producing plans
 	// that dispatch then has to scale at execution time. The DP already
-	// honours Slot.Limits.MaxImportW (mpc.go:450); we just feed it.
+	// honours Slot.Limits.MaxImportW + MaxExportW (mpc.go:450); we just
+	// feed both directions — the fuse trips on |I| regardless of sign,
+	// and exporting 14 kW through an 11 kW breaker is just as bad as
+	// importing it (probably worse — the inverter's local current
+	// limiter trips first and the operator sees a sudden zero-output
+	// flap as PV+battery collapses). Pre-fix this only set MaxImportW,
+	// producing plans like 14:45 slot grid=-14.2 kW past an 11 kW fuse.
 	if s.FuseMaxW > 0 {
 		for i := range slots {
 			if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > s.FuseMaxW {
 				slots[i].Limits.MaxImportW = s.FuseMaxW
+			}
+			if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > s.FuseMaxW {
+				slots[i].Limits.MaxExportW = s.FuseMaxW
 			}
 		}
 	}
@@ -600,13 +610,22 @@ func (s *Service) replan(_ context.Context) *Plan {
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 		default:
-			// Arbitrage: battery can export, so full import price is the
-			// right upper bound on SoC value.
-			var sum float64
-			for _, pr := range prices {
-				sum += pr.TotalOreKwh
-			}
-			p.TerminalSoCPrice = sum / float64(len(prices))
+			// Arbitrage: stored SoC at horizon end will be discharged at
+			// the more expensive hours, not at a typical hour. Mean of
+			// all prices systematically undervalues this — on a site
+			// with a strong evening peak (e.g. 170 öre midday vs 345 öre
+			// peak, mean 262), it credits each kWh at 262 öre while the
+			// planner could discharge it at 345. The under-credit makes
+			// the DP too willing to dump SoC at mediocre prices because
+			// holding it "isn't worth much".
+			//
+			// Use the mean of the upper half of prices instead — a
+			// principled proxy for "discharge happens when prices are at
+			// or above median". For the 170/345 example this lifts the
+			// terminal value from ~262 to ~310, much closer to the
+			// realisable discharge value, without being naive about
+			// always discharging at the peak.
+			p.TerminalSoCPrice = upperHalfMeanPrice(prices)
 		}
 	}
 
@@ -895,6 +914,40 @@ func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64)
 		spread = 0
 	}
 	return spread
+}
+
+// upperHalfMeanPrice returns the arithmetic mean of the upper half of
+// retail prices over the horizon — proxy for "this kWh of stored SoC
+// will be discharged when prices are at or above median". Used as the
+// arbitrage-mode terminal credit; biases the DP toward retaining SoC
+// for the more expensive hours instead of dumping it at the mean.
+//
+// Falls back to the plain mean for tiny horizons (≤ 4 slots) where
+// "upper half" loses statistical meaning. Returns 0 on empty input.
+func upperHalfMeanPrice(prices []state.PricePoint) float64 {
+	if len(prices) == 0 {
+		return 0
+	}
+	if len(prices) <= 4 {
+		var sum float64
+		for _, pr := range prices {
+			sum += pr.TotalOreKwh
+		}
+		return sum / float64(len(prices))
+	}
+	// Sort a copy ascending — caller's slice is shared with other
+	// price-using paths (cost calc, export math) and must not mutate.
+	vals := make([]float64, len(prices))
+	for i, pr := range prices {
+		vals[i] = pr.TotalOreKwh
+	}
+	sort.Float64s(vals)
+	half := vals[len(vals)/2:]
+	var sum float64
+	for _, v := range half {
+		sum += v
+	}
+	return sum / float64(len(half))
 }
 
 // PlannerRadiationWeight is how much the RLS twin's prediction

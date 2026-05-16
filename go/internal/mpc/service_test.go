@@ -69,6 +69,56 @@ func TestBuildSlotsKeepsTwinWhenPredictionIsSane(t *testing.T) {
 	}
 }
 
+// ---- upperHalfMeanPrice (arbitrage terminal valuation) ----
+
+func TestUpperHalfMeanLiftsTerminalCreditAboveOverallMean(t *testing.T) {
+	// Live-shaped horizon: midday cheap valley + evening peak. Mean is
+	// pulled down by the cheap hours; upper-half mean reflects the
+	// hours when stored SoC would actually be sold.
+	prices := []state.PricePoint{
+		{TotalOreKwh: 170}, // cheap midday
+		{TotalOreKwh: 175},
+		{TotalOreKwh: 180},
+		{TotalOreKwh: 200},
+		{TotalOreKwh: 250},
+		{TotalOreKwh: 300},
+		{TotalOreKwh: 320}, // evening peak
+		{TotalOreKwh: 345},
+	}
+	overall := 0.0
+	for _, p := range prices {
+		overall += p.TotalOreKwh
+	}
+	overall /= float64(len(prices))
+	got := upperHalfMeanPrice(prices)
+	// Upper half = {250, 300, 320, 345} mean = 303.75.
+	if math.Abs(got-303.75) > 0.01 {
+		t.Errorf("upperHalfMeanPrice = %.2f, want 303.75", got)
+	}
+	if got <= overall {
+		t.Errorf("upper-half mean (%.2f) must exceed overall mean (%.2f) on a non-flat horizon", got, overall)
+	}
+}
+
+func TestUpperHalfMeanFallsBackForTinyHorizon(t *testing.T) {
+	// With 4 or fewer slots, taking the "upper half" loses meaning —
+	// fall back to plain mean.
+	prices := []state.PricePoint{
+		{TotalOreKwh: 100},
+		{TotalOreKwh: 300},
+	}
+	got := upperHalfMeanPrice(prices)
+	if math.Abs(got-200) > 0.01 {
+		t.Errorf("upperHalfMeanPrice (tiny horizon) = %.2f, want 200 (plain mean)", got)
+	}
+}
+
+func TestUpperHalfMeanEmptyReturnsZero(t *testing.T) {
+	if got := upperHalfMeanPrice(nil); got != 0 {
+		t.Errorf("upperHalfMeanPrice(nil) = %f, want 0", got)
+	}
+}
+
 // ---- Terminal SoC valuation ----
 
 func TestSelfConsumptionTerminalPriceIsImportMinusExport(t *testing.T) {
