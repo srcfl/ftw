@@ -49,13 +49,32 @@ local STALE_AFTER_MS    = 900000
 -- Every WAKEUP_INTERVAL_MS we attach `wakeup=true` to ONE poll so the
 -- proxy forces a BLE wake. Without this the proxy serves cached data
 -- indefinitely while the car sleeps and our SoC slowly drifts from
--- reality. 30 min is a balance between freshness and not draining the
--- 12 V battery from constant BLE wakes.
-local WAKEUP_INTERVAL_MS = 1800000
+-- reality.
+--
+-- Two cadences: the conservative IDLE one (30 min) protects the 12 V
+-- battery from constant BLE wakes when the car is parked + asleep;
+-- the tighter CHARGING one (15 min) keeps SoC and charge_limit_pct
+-- fresh while the car is on the wall so the MPC's planning targets
+-- track the operator's in-app settings without 30-minute lag. The
+-- car is already drawing AC power during a session, so the BLE-wake
+-- battery-drain concern doesn't apply.
+local WAKEUP_INTERVAL_MS          = 1800000  -- 30 min, idle
+local WAKEUP_INTERVAL_CHARGING_MS = 900000   -- 15 min, while charging
+
+-- When a non-wake poll fails (timeout, connection refused, anything
+-- that isn't the proxy explicitly saying "BLE busy"), the most likely
+-- cause is "car asleep and proxy gave up". Don't wait for the 30-min
+-- periodic wake — arm a wake-retry on the very next poll. The retry
+-- only fires if we haven't already attempted a wake within the recent
+-- gap, so a flapping proxy can't trigger a wake storm.
+local FAILURE_RETRY_INTERVAL_MS = 5000   -- schedule the retry this soon
+local WAKE_RETRY_MIN_GAP_MS     = 10000  -- don't wake more than once per ~10 s
 
 local base_url = nil
 local vin = nil
 local last_wakeup_ms = 0
+local last_wake_attempt_ms = 0   -- includes both periodic + retry wakes
+local pending_wake_retry = false -- set by failed poll, consumed by next poll
 
 -- Cached last-known reading so we can keep publishing a value while
 -- the vehicle is asleep. Tesla returns 408 "vehicle unavailable" when
@@ -183,10 +202,25 @@ function driver_poll()
   -- operator can press "Verify connection" in settings to force a
   -- one-shot wake, or wait for the next scheduled 30-min wake.
   local now = host.millis()
-  local do_wakeup = (last_wakeup_ms > 0) and ((now - last_wakeup_ms) >= WAKEUP_INTERVAL_MS)
+  -- Cadence depends on whether the last-known state was Charging — see
+  -- WAKEUP_INTERVAL_CHARGING_MS comment above. "Charging" comes from
+  -- the Tesla payload's charge_state.charging_state field; anything
+  -- else (Stopped / Complete / Disconnected / unknown) uses the
+  -- conservative 30-min cadence.
+  local wake_cadence_ms = (last.charging_state == "Charging")
+    and WAKEUP_INTERVAL_CHARGING_MS or WAKEUP_INTERVAL_MS
+  local do_wakeup = false
+  if pending_wake_retry and ((now - last_wake_attempt_ms) >= WAKE_RETRY_MIN_GAP_MS) then
+    -- Previous poll failed; we armed a retry. Consume it.
+    do_wakeup = true
+    pending_wake_retry = false
+    host.log("info", "tesla: wake-retry firing after previous poll failure")
+  elseif (last_wakeup_ms > 0) and ((now - last_wakeup_ms) >= wake_cadence_ms) then
+    do_wakeup = true
+  end
   if last_wakeup_ms == 0 then
-    -- Anchor the cadence at "now" so the first FORCED wake fires
-    -- exactly WAKEUP_INTERVAL_MS after startup, not on first poll.
+    -- Anchor the periodic cadence at "now" so the first FORCED wake
+    -- fires exactly wake_cadence_ms after startup, not on first poll.
     last_wakeup_ms = now
   end
   local url = base_url .. "/api/1/vehicles/" .. vin ..
@@ -194,7 +228,10 @@ function driver_poll()
   if do_wakeup then
     url = url .. "&wakeup=true"
     last_wakeup_ms = now
-    host.log("info", "tesla: forcing BLE wakeup on this poll (30-min cadence)")
+    last_wake_attempt_ms = now
+    host.log("info", "tesla: forcing BLE wakeup on this poll" ..
+                     " (cadence=" .. tostring(wake_cadence_ms / 60000) .. "min" ..
+                     " charging=" .. tostring(last.charging_state == "Charging") .. ")")
   end
   -- host.http_get returns (body_string, nil) or (nil, error_string) —
   -- first return is the body directly, NOT a table with .body. The
@@ -210,15 +247,30 @@ function driver_poll()
     -- in this state piles onto the rate-limit and prolongs it.
     -- Recovery is automatic when the next emit succeeds:
     -- driver_poll resets to POLL_INTERVAL_MS at the top of the
-    -- next call.
+    -- next call. Don't arm a wake-retry for these — the radio is
+    -- already busy; adding another wake won't help.
     local es = tostring(err)
     if es:match("HTTP 503") or es:match("HTTP 408") or es:match("Command Disallowed") then
       host.log("debug", "tesla: proxy busy (BLE busy) — backing off 3 min")
       emit_last()
       return 180000  -- 3 min
     end
+    -- Any other error (most commonly the host's 15 s HTTP timeout
+    -- when the car is asleep and the proxy's read of charge_state
+    -- never returns) — the car is probably asleep and the next
+    -- ordinary poll would just time out again. Arm a wake-retry
+    -- so the next poll attaches `&wakeup=true` and forces the
+    -- proxy to BLE-wake before reading. We don't arm if THIS poll
+    -- already woke (no point retrying with another wake — that's
+    -- the case the proxy is genuinely failing) — fall back to the
+    -- normal interval and let the periodic cadence catch up.
     host.log("warn", "tesla: poll HTTP error: " .. es)
     emit_last()
+    if not do_wakeup then
+      pending_wake_retry = true
+      host.log("info", "tesla: wake-retry armed (next poll will force BLE wake)")
+      return FAILURE_RETRY_INTERVAL_MS
+    end
     return POLL_INTERVAL_MS
   end
   if not body or body == "" then
@@ -364,8 +416,8 @@ end
 function driver_cleanup()
   -- Reset every persistent piece of state so a hot-reload looks
   -- identical to a fresh process start (the `last_wakeup_ms` reset
-  -- in particular re-anchors the 30-min cadence so we don't fire a
-  -- wakeup the moment the reloaded driver runs its first poll).
+  -- in particular re-anchors the periodic cadence so we don't fire
+  -- a wakeup the moment the reloaded driver runs its first poll).
   last.soc                    = nil
   last.charge_limit           = nil
   last.charging_state         = nil
@@ -374,4 +426,6 @@ function driver_cleanup()
   last.charger_actual_current = nil
   last.ts_ms                  = 0
   last_wakeup_ms              = 0
+  last_wake_attempt_ms        = 0
+  pending_wake_retry          = false
 end
