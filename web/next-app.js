@@ -2410,7 +2410,7 @@
       return b;
     }
     var clearBtn = mkBtn("Clear", false);
-    var saveBtn = mkBtn(hasSched ? "Update" : "Save", true);
+    var saveBtn = mkBtn(hasSched ? "Update schedule" : "Set schedule", true);
     clearBtn.disabled = !hasSched;
     if (!hasSched) clearBtn.style.opacity = "0.4";
     btnRow.appendChild(clearBtn);
