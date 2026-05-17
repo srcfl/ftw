@@ -512,17 +512,20 @@ func (c *Controller) AnyLoadpointSurplusActive() bool {
 
 // RefreshVehicle sends a one-off wake command to the vehicle driver
 // bound to the given loadpoint, bypassing the auto-wake cooldown.
-// Used by the API when the operator edits the schedule — wakes Tesla
-// (or whichever vehicle driver is bound) so the next poll surfaces
-// any vehicle-side limit / SoC / connection changes immediately
-// rather than waiting up to the next natural wake window.
+// Used by the API when the operator edits the schedule — wakes
+// Tesla / BMW / whichever vehicle driver is bound so the next poll
+// surfaces any vehicle-side limit / SoC / connection changes
+// immediately rather than waiting up to the next natural wake
+// window.
 //
-// The wake action is the same `charge_start` the auto-wake loop uses;
-// Tesla treats it as "wake + (idempotently) start charging if not
-// already at limit", and the driver's normal poll cycle picks up the
-// fresh state. Returns nil if no vehicle driver is bound or the
-// controller isn't fully wired (no-op). Errors from the send hop are
-// returned for the caller to surface to the operator.
+// Sends the generic `wake_up` action (cross-driver protocol — any
+// vehicle driver implements it against its own back-end). Distinct
+// from `charge_start` (still used by the auto-wake loop when it's
+// trying to convince a detached car to actually start drawing
+// current) — `wake_up` is purely a telemetry refresh, no charge
+// side effects. Returns nil if no vehicle driver is bound or the
+// controller isn't fully wired (no-op). Errors from the send hop
+// are returned for the caller to surface to the operator.
 func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
 		return nil
@@ -531,7 +534,7 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	if !ok || driver == "" {
 		return nil
 	}
-	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
+	payload, err := json.Marshal(map[string]any{"action": "wake_up"})
 	if err != nil {
 		return err
 	}
@@ -550,6 +553,46 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	c.wakeMu.Unlock()
 	slog.Info("loadpoint manual wake (schedule edit)", "lp", lpID, "vehicle_driver", driver)
 	return c.send(ctx, driver, payload)
+}
+
+// wakeVehicleAuto sends a `wake_up` to the loadpoint's bound vehicle
+// driver, gated by the same `vehicleWakeCooldown` (5 min) the
+// charge_start auto-wake loop uses. Used for event-triggered wakes
+// (e.g. the wallbox-delivering rising edge) where we want fresh
+// vehicle state but the trigger can flap — don't storm the BLE radio.
+// No-op when no vehicle is bound; logs but does not return errors
+// (the trigger is opportunistic; failure is fine).
+func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason string) {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return
+	}
+	driver, _, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return
+	}
+	now := time.Now()
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	if last, has := c.wakeLast[lpID]; has && now.Sub(last) < vehicleWakeCooldown {
+		c.wakeMu.Unlock()
+		return
+	}
+	c.wakeLast[lpID] = now
+	c.wakeMu.Unlock()
+	payload, err := json.Marshal(map[string]any{"action": "wake_up"})
+	if err != nil {
+		return
+	}
+	slog.Info("loadpoint auto-wake (vehicle telemetry refresh)",
+		"lp", lpID, "vehicle_driver", driver, "reason", reason)
+	if err := c.send(ctx, driver, payload); err != nil {
+		slog.Warn("loadpoint auto-wake send failed",
+			"lp", lpID, "vehicle_driver", driver, "err", err)
+	}
 }
 
 // IsBatSoCArmed reports whether the bat-SoC surplus unlock is
@@ -691,9 +734,18 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	// before the new session's first dispatch tick. Without this
 	// the rolling-avg buffer keeps stale samples from the previous
 	// session, biasing the first ~20 s of pause/resume decisions.
+	// Also detect the not-delivering→delivering edge separately so
+	// we can wake the bound vehicle for fresh telemetry the moment
+	// the wallbox actually starts pushing current — the planner
+	// otherwise has to wait for the next periodic vehicle poll
+	// (or the proxy's cache to refresh on its own) to learn the
+	// car's current charge_limit_pct + SoC, which costs accuracy
+	// on the first ~15 min of a new charging session.
 	wasPlugged := false
+	wasDelivering := false
 	if st, ok := c.manager.State(lpCfg.ID); ok {
 		wasPlugged = st.PluggedIn
+		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
 	if !sample.Connected {
@@ -702,6 +754,16 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 	if !wasPlugged {
 		c.resetSurplusSession(lpCfg.ID)
+	}
+	// Wallbox just started delivering current: fire a wake at the
+	// bound vehicle so the next vehicle-driver poll comes back with
+	// fresh charging_state / charge_limit_pct / SoC. Gated by
+	// vehicleWakeCooldown inside wakeVehicleAuto so a flapping
+	// pause/resume cycle can't storm the BLE radio. Fire-and-forget
+	// on a background goroutine so the dispatch tick isn't blocked
+	// by the wake HTTP roundtrip.
+	if sample.PowerW >= DeliveringW && !wasDelivering {
+		go c.wakeVehicleAuto(context.Background(), lpCfg.ID, "delivering_edge")
 	}
 
 	cmd := map[string]any{"action": "ev_set_current"}

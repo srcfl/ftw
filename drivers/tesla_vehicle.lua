@@ -366,6 +366,44 @@ function driver_poll()
 end
 
 function driver_command(action, _, _)
+  -- Generic vehicle wake. The Go side fires `wake_up` whenever it
+  -- wants fresh telemetry without side effects — schedule edits,
+  -- the rising edge of wallbox-delivering-power, operator clicks
+  -- "Refresh". Any vehicle driver can implement this against its
+  -- own back-end; nothing here is Tesla-specific at the protocol
+  -- level. We hit the proxy's dedicated wake endpoint (rather than
+  -- the GET-with-wake the poll uses) so the response confirms
+  -- "wake initiated" instead of returning vehicle data — cleaner
+  -- separation between "wake" and "read".
+  --
+  -- Reset the periodic-wake anchor so we don't immediately re-fire
+  -- a second wake on the next 30/15-min cadence right after the
+  -- caller already woke the car. Also clear any pending failure
+  -- retry — if a previous poll failed and armed a retry, the
+  -- caller's wake just supersedes it.
+  if action == "wake_up" or action == "ev_wake" then
+    if not base_url or not vin then
+      host.log("warn", "tesla: wake_up before init")
+      return false
+    end
+    local url = base_url .. "/api/1/vehicles/" .. vin .. "/command/wake_up"
+    local body, err = host.http_post(url, "{}", auth_headers())
+    if err then
+      local es = tostring(err)
+      if es:match("HTTP 503") or es:match("HTTP 408") then
+        host.log("debug", "tesla: wake_up busy, will retry on next caller: " .. es)
+        return false
+      end
+      host.log("warn", "tesla: wake_up failed: " .. es)
+      return false
+    end
+    last_wakeup_ms = host.millis()
+    last_wake_attempt_ms = last_wakeup_ms
+    pending_wake_retry = false
+    local snippet = (body and #body > 0) and body:sub(1, 200) or "(empty body)"
+    host.log("info", "tesla: wake_up sent: " .. snippet)
+    return true
+  end
   -- Wake-and-start support. The loadpoint controller fires the
   -- generic `charge_start` action (defined as a cross-driver
   -- protocol — any vehicle driver can implement it) when the
