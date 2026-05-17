@@ -118,6 +118,14 @@ type Controller struct {
 	nearTermLogMu   sync.Mutex
 	nearTermLogLast map[string]time.Time
 
+	// fusePauseUntil holds the wall-clock time before which an LP must
+	// stay paused after a fuse-clamp-induced full pause. Operator-stated
+	// behaviour: ramp down if possible, pause if the fuse cap is below
+	// the LP's min step, and keep paused for fusePauseCooldown so a
+	// transient doesn't flap. Cleared lazily when the cooldown expires.
+	fusePauseMu    sync.Mutex
+	fusePauseUntil map[string]time.Time
+
 	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
 	// lock is sticky for the rest of the day so a slowly recovering
 	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
@@ -228,6 +236,15 @@ const surplusMinPauseHold = 35 * time.Second
 // unreachable)" log line so a long morning with sustained low surplus
 // produces one line per 10 min per LP instead of one per 5 s tick.
 const nearTermLogCooldown = 10 * time.Minute
+
+// fusePauseCooldown is how long an LP stays at 0 W after a fuse-over-
+// limit force-pause. Long enough that whatever house load caused the
+// overload (oven, EV from another LP, sauna…) has time to clear or for
+// the operator to notice; short enough that a transient inrush doesn't
+// stop charging for the rest of the day. 5 min is the operator-stated
+// preference; chosen vs. e.g. 1 min because the typical "did the oven
+// kick on?" disturbance lasts longer than a minute.
+const fusePauseCooldown = 5 * time.Minute
 
 // defaultPhaseSplitW mirrors loadpoint.Config.PhaseSplitW's default —
 // 3680 W is a 16 A 1Φ ceiling at 230 V. Kept in sync with the comment
@@ -369,6 +386,68 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 		return
 	}
 	c.peakRemainingSurplusW = f
+}
+
+// applyFuseClampAndCooldown enforces the joint fuse allocator's
+// FuseEVMax cap on a requested wattage and tracks the operator-stated
+// pause-cooldown semantics:
+//
+//   - In cooldown: force 0 regardless of wantW.
+//   - cap unset / cap >= wantW: pass-through.
+//   - cap < wantW but a snap-step exists at ≤ cap: ramp down to that step.
+//   - cap < min step (or snap returns 0): force 0 AND arm
+//     fusePauseUntil[lpID] = now + fusePauseCooldown.
+//
+// Both tickOne branches (manual hold + normal MPC dispatch) call this
+// just before writing cmd["power_w"] so the protection is uniform:
+// neither a sticky operator hold nor a stale MPC budget can drive
+// the fuse over limit, and the cooldown prevents fuse flap when a
+// transient overload clears momentarily.
+func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) float64 {
+	if c == nil {
+		return wantW
+	}
+	c.fusePauseMu.Lock()
+	until, has := c.fusePauseUntil[lpCfg.ID]
+	if has && !now.Before(until) {
+		// Cooldown elapsed; release lazily so subsequent ticks see no
+		// hold and can re-attempt charging.
+		delete(c.fusePauseUntil, lpCfg.ID)
+		has = false
+	}
+	c.fusePauseMu.Unlock()
+	if has {
+		return 0
+	}
+	if c.fuseEVMax == nil {
+		return wantW
+	}
+	cap, ok := c.fuseEVMax()
+	if !ok || cap < 0 {
+		return wantW
+	}
+	if wantW <= cap {
+		return wantW
+	}
+	// Need to ramp down. Snap to the largest allowed step ≤ cap.
+	snapped := SnapChargeW(cap, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+	if snapped > 0 && snapped >= lpCfg.MinChargeW {
+		slog.Info("loadpoint fuse-clamp: ramped down",
+			"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap, "snapped_w", snapped)
+		return snapped
+	}
+	// Cap is below the LP's min step → pause + arm cooldown.
+	c.fusePauseMu.Lock()
+	if c.fusePauseUntil == nil {
+		c.fusePauseUntil = map[string]time.Time{}
+	}
+	c.fusePauseUntil[lpCfg.ID] = now.Add(fusePauseCooldown)
+	c.fusePauseMu.Unlock()
+	slog.Warn("loadpoint fuse-clamp: paused for cooldown",
+		"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap,
+		"min_step_w", lpCfg.MinChargeW,
+		"cooldown_s", int(fusePauseCooldown.Seconds()))
+	return 0
 }
 
 // SetNearTermPeakSurplusW wires the short-horizon "peak surplus over
@@ -824,6 +903,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 				holdW = clamped
 			}
 		}
+		// Fuse protection: even an operator-pinned hold must not bust
+		// the fuse. Apply the joint allocator's FuseEVMax cap and the
+		// pause-cooldown guard before sending. A sticky 11 kW Start
+		// hold + house drawing 7 A on one phase = fuse trip without
+		// this clamp.
+		holdW = c.applyFuseClampAndCooldown(now, lpCfg, holdW)
 		cmd["power_w"] = holdW
 		// Phase mode: explicit hold > explicit LP config > surplus
 		// default ("auto") > driver default. Same surplus-active fallback
@@ -932,6 +1017,13 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 				cmdW = minKick
 			}
 		}
+		// Fuse protection: applied LAST (after MPC budget, surplus
+		// clamp, wake-kick) so all upstream sources see their nominal
+		// wantW; only the actual ceiling we send to the wallbox is
+		// reduced when the fuse demands it. Partial ramp-downs are
+		// immediate; only "cap below min step → must pause" arms the
+		// 5-min cooldown.
+		cmdW = c.applyFuseClampAndCooldown(now, lpCfg, cmdW)
 		cmd["power_w"] = cmdW
 		// Pass operator's phase preferences through verbatim. The driver
 		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
