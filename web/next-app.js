@@ -2070,10 +2070,20 @@
             }
           }
         }
+        // Prefer a plugged-in loadpoint when no driver filter is active —
+        // that's the one the operator is most likely thinking about. Fall
+        // back to the first configured loadpoint so the schedule editor
+        // is still reachable when no car is currently connected (the
+        // schedule is persistent loadpoint state, not driver state, and
+        // operators routinely want to set tomorrow morning's target
+        // before plugging in tonight).
         if (!matched) {
           for (var j = 0; j < lps.loadpoints.length; j++) {
             if (lps.loadpoints[j].plugged_in) { matched = lps.loadpoints[j]; break; }
           }
+        }
+        if (!matched) {
+          matched = lps.loadpoints[0];
         }
       }
       if (matched) {
@@ -2144,6 +2154,20 @@
     eyebrow.style.color = "var(--text-dim)";
     eyebrow.style.marginBottom = "0.55rem";
     box.appendChild(eyebrow);
+
+    // Schedule is persistent loadpoint state — operators can configure
+    // tomorrow morning's target tonight before plugging in. Show a
+    // small hint when the loadpoint isn't currently connected so saved
+    // edits don't feel inert: they'll apply at the next plug-in.
+    if (lp && !lp.plugged_in) {
+      var unpluggedHint = document.createElement("div");
+      unpluggedHint.textContent = "Car not plugged in. Edits are saved and apply at next plug-in.";
+      unpluggedHint.style.fontSize = "0.72rem";
+      unpluggedHint.style.color = "var(--text-dim)";
+      unpluggedHint.style.marginBottom = "0.5rem";
+      unpluggedHint.style.fontStyle = "italic";
+      box.appendChild(unpluggedHint);
+    }
 
     function row(labelText, controlEl) {
       var r = document.createElement("div");

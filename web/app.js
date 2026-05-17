@@ -1514,19 +1514,21 @@
   }
 
   // buildSurplusOnlyRow renders a single checkbox: when ticked, the
-  // loadpoint is auto-configured for "charge only from PV surplus"
-  // with a 100 % target by 16 UTC (today, advancing to tomorrow if
-  // 16 UTC has already passed). The MPC will not plan any grid-funded
-  // EV charging — surplus_only is a hard DP constraint, the dispatch
-  // controller also clamps live setpoint to PV export, and the EV is
-  // held at 3Φ-eligible steps to avoid contactor-wearing phase swaps.
-  // Unticking restores manual target control without touching the
-  // existing SoC/deadline values.
+  // loadpoint is configured for "charge only from PV surplus". The
+  // toggle is independent of any schedule — the controller's surplus
+  // clamp harvests live export opportunistically with or without a
+  // target+deadline. Adding a schedule on top is optional: it tells
+  // the MPC the operator wants the car to reach X% by Y, which may
+  // grid-import during cheap slots. Without a schedule the MPC simply
+  // sits this loadpoint out and the runtime dispatch chases surplus.
+  //
+  // Patch semantics: both directions send only `{ surplus_only: ... }`
+  // so the operator's existing target/deadline (if any) is preserved.
   function buildSurplusOnlyRow(lp) {
     var row = document.createElement("div");
     row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "0.5rem";
+    row.style.flexDirection = "column";
+    row.style.gap = "0.25rem";
     row.style.marginBottom = "0.3rem";
     var label = document.createElement("label");
     label.style.display = "flex";
@@ -1537,28 +1539,17 @@
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!lp.surplus_only;
-    cb.title = "Charge only from PV surplus. Auto-targets 100 % by 16:00 UTC. The DP refuses any plan that would import grid for this loadpoint, and the live dispatch holds 3-phase to avoid contactor wear.";
+    cb.title = "Charge only when PV exports exceed local load. No deadline planning, no grid import. Add a schedule below to also catch up via grid when prices are cheap.";
     var text = document.createElement("span");
-    text.textContent = "Surplus-only (PV-only, 100 % by 16:00 UTC)";
+    text.textContent = "Surplus only (PV exports only — never imports grid)";
+    var hint = document.createElement("div");
+    hint.style.fontSize = "0.72rem";
+    hint.style.color = "var(--text-dim)";
+    hint.style.marginLeft = "1.4rem";
+    hint.textContent = "Charges only when PV exports exceed your load. No deadline planning — no grid import. Optional: add a schedule below to also catch up via grid when cheap.";
     cb.addEventListener("change", function () {
       cb.disabled = true;
-      var body;
-      if (cb.checked) {
-        var now = new Date();
-        var target = new Date(Date.UTC(
-          now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-          16, 0, 0));
-        if (target.getTime() <= now.getTime()) {
-          target.setUTCDate(target.getUTCDate() + 1);
-        }
-        body = { soc_pct: 100, target_time_ms: target.getTime(), surplus_only: true };
-      } else {
-        // Pointer/patch semantics on the backend: omitting fields
-        // preserves their existing values. Sending only surplus_only
-        // avoids overwriting the user's target/deadline with whatever
-        // (possibly stale or missing) snapshot we last fetched.
-        body = { surplus_only: false };
-      }
+      var body = { surplus_only: cb.checked };
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1571,6 +1562,7 @@
     label.appendChild(cb);
     label.appendChild(text);
     row.appendChild(label);
+    row.appendChild(hint);
     return row;
   }
 
