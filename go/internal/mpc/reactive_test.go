@@ -118,6 +118,47 @@ func TestReactiveRespectsCooldown(t *testing.T) {
 	}
 }
 
+func TestReactiveLoadDivergenceTriggersFasterInExpensiveSlot(t *testing.T) {
+	// Plan expects 500 W load. Actual load is ~1000 W — a small 500 W
+	// gap that at the default 400 Wh threshold takes ~48 minutes to
+	// cross. In an expensive slot (4× horizon mean) the scaled
+	// threshold is 100 Wh, crossed in ~12 minutes — fast enough that
+	// the planner re-decides before the slot ends instead of letting
+	// the wrong-side trade run for most of the slot.
+	s, tel := buildTestService(t, 0, 500)
+	// Anchor the existing test plan with a price 4× the horizon mean.
+	s.last.Baselines = &Baselines{AvgPriceOre: 100}
+	s.last.Actions[0].PriceOre = 400 // 4× mean → scale = 0.25 → 100 Wh load threshold
+	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
+	// 80 ticks × 10 s = 800 s. Half-life is 900 s, so EMA reaches
+	// ~46% of steady-state = 0.46 × 500 W × 900 s × (1/3600) ≈ 58 Wh
+	// at this rate — but the integral itself accumulates faster;
+	// with a 100 Wh threshold the scaled trigger should fire well
+	// before 80 ticks (vs the 400 Wh threshold which it would not
+	// cross in this duration).
+	driveTicks(s, 80, 10)
+	if s.lastReason != "reactive-load" {
+		t.Errorf("expensive-slot threshold should fire on 500 W sustained gap, got %q (loadInt=%.0fWh)",
+			s.lastReason, s.loadErrIntWh)
+	}
+}
+
+func TestReactiveLoadDivergenceHoldsInCheapSlot(t *testing.T) {
+	// Same 500 W gap, but in a cheap slot (1/4 of horizon mean). The
+	// scaled threshold is 1600 Wh (4× nominal), so the divergence
+	// trigger stays quiet — there's no money to save by chasing the
+	// forecast miss when the slot is essentially free.
+	s, tel := buildTestService(t, 0, 500)
+	s.last.Baselines = &Baselines{AvgPriceOre: 100}
+	s.last.Actions[0].PriceOre = 25 // 0.25× mean → scale = 4.0 → 1600 Wh load threshold
+	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
+	driveTicks(s, 80, 10)
+	if s.lastReason == "reactive-load" {
+		t.Errorf("cheap-slot threshold should suppress replan; fired anyway (loadInt=%.0fWh)",
+			s.loadErrIntWh)
+	}
+}
+
 func TestLastReplanInfoReturnsPair(t *testing.T) {
 	s, _ := buildTestService(t, 0, 0)
 	s.lastReplanAt = time.Unix(1700000000, 0)

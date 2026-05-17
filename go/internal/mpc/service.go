@@ -505,11 +505,37 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	loadInt := s.loadErrIntWh
 	s.mu.Unlock()
 
+	// Price-weighted threshold scaling: tighten the divergence trigger
+	// in expensive slots so the planner re-decides fast when the
+	// wrong-side trade (importing into peak prices because load was
+	// underestimated, or missing PV that would have offset import)
+	// would actually cost money. Loosen it in cheap slots where being
+	// slightly off the forecast is approximately free. Scale is the
+	// inverse of slot price ratio, clamped to [0.25, 4.0] so a single
+	// extreme slot can't either flap us into constant replans or
+	// silence the detector for hours. The architectural rule
+	// (`control/CLAUDE.md`) is "dispatch executes the plan; reactive
+	// replan handles divergence" — making the replan more sensitive in
+	// expensive slots is the lever that doesn't require dispatch to
+	// override the plan.
+	scale := 1.0
+	if plan.Baselines != nil && plan.Baselines.AvgPriceOre > 0 && slot.PriceOre > 0 {
+		scale = plan.Baselines.AvgPriceOre / slot.PriceOre
+		switch {
+		case scale < 0.25:
+			scale = 0.25
+		case scale > 4.0:
+			scale = 4.0
+		}
+	}
+	pvThresh := s.PVDivergenceWh * scale
+	loadThresh := s.LoadDivergenceWh * scale
+
 	reason := ""
 	switch {
-	case s.PVDivergenceWh > 0 && math.Abs(pvInt) > s.PVDivergenceWh:
+	case pvThresh > 0 && math.Abs(pvInt) > pvThresh:
 		reason = "reactive-pv"
-	case s.LoadDivergenceWh > 0 && math.Abs(loadInt) > s.LoadDivergenceWh:
+	case loadThresh > 0 && math.Abs(loadInt) > loadThresh:
 		reason = "reactive-load"
 	}
 	if reason == "" {
@@ -519,7 +545,10 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		"reason", reason,
 		"pv_err_wh", pvInt, "loadint_wh", loadInt,
 		"pv_w_now", pvW, "plan_pv_w", slot.PVW,
-		"load_w_now", loadW, "plan_load_w", slot.LoadW)
+		"load_w_now", loadW, "plan_load_w", slot.LoadW,
+		"price_scale", scale,
+		"slot_price_ore", slot.PriceOre,
+		"horizon_mean_price_ore", baselinesAvgOreOrZero(plan))
 	s.lastReason = reason
 	// Reset integrals after triggering so we don't immediately re-fire.
 	s.mu.Lock()
@@ -1091,6 +1120,16 @@ func (s *Service) waitForRealSoC(ctx context.Context) bool {
 			}
 		}
 	}
+}
+
+// baselinesAvgOreOrZero returns plan.Baselines.AvgPriceOre or 0 when
+// Baselines is nil — keeps the divergence-trigger log line safe to
+// emit even before buildBaselines has populated the field.
+func baselinesAvgOreOrZero(plan *Plan) float64 {
+	if plan == nil || plan.Baselines == nil {
+		return 0
+	}
+	return plan.Baselines.AvgPriceOre
 }
 
 // hasRealSoC reports whether at least one online battery driver has
