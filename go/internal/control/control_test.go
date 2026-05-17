@@ -2254,13 +2254,21 @@ func TestBatteryManualHoldBypassesHoldoff(t *testing.T) {
 // ---- Meter clamp on the legacy PI dispatch arm ----
 //
 // The reactive PI path commits a charge/discharge magnitude based on
-// gridW vs GridTargetW. When the upstream load forecast (or the
-// operator slider) is wrong, PI can demand a battery action that would
-// flip the meter past zero in the opposite direction — discharging
-// more than the site imports (causing unwanted export), or charging
-// from grid when the site is already importing. The live-meter clamp
-// inside the default arm caps |targetTotal| by the current grid
-// magnitude in the matching direction.
+// gridW vs GridTargetW. When the load forecast or operator slider is
+// off, or the PI integrator has wound up across a mode switch, the
+// raw PI request can push the meter past GridTargetW in either
+// direction.
+//
+// Conservation says gridW moves 1:1 with bat within a tick, so the
+// new battery target that lands gridW exactly on GridTargetW is
+//
+//   idealTarget = currentTotal − errW
+//
+// The clamp uses idealTarget as both the overshoot cap (don't punch
+// through GridTargetW) and as the directional reference for catching
+// wrong-direction PI windup (when sign(targetTotal − currentTotal)
+// disagrees with sign(idealTarget − currentTotal), hold at
+// currentTotal until the integrator unwinds).
 
 func TestMeterClampStopsExportOnLoadOverPrediction(t *testing.T) {
 	// Original incident geometry (PR #270): the reactive PI commands a
@@ -2334,6 +2342,79 @@ func TestMeterClampStopsImportOnLoadUnderPrediction(t *testing.T) {
 	}
 	if sum < 1.0 {
 		t.Errorf("clamp swallowed all PI output instead of letting it close the gap, got sum=%f", sum)
+	}
+}
+
+func TestMeterClampStopsExportOnLoadOverPredictionWithBatteryAlreadyDischarging(t *testing.T) {
+	// Non-zero-currentTotal overshoot case (Copilot review on PR #276).
+	// Battery is already partly discharging (-200 W) and the PI integrator
+	// is wound up enough to demand a much larger discharge in this tick.
+	// The clamp must cap at idealTarget = currentTotal − errW = −2200,
+	// not pass an arbitrary -8000 W through unchanged.
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -200, 0.6},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	// Wind up the PI hard enough that its one-tick output, added to the
+	// existing -200 W, lands well past idealTarget.
+	for i := 0; i < 200; i++ {
+		st.PI.Update(2000)
+	}
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	var sum float64
+	for _, tg := range targets {
+		sum += tg.TargetW
+	}
+	// idealTarget = -200 - 2000 = -2200. Clamp must not let it go past.
+	if sum < -2200-1.0 {
+		t.Errorf("clamp let discharge overshoot idealTarget=-2200, got sum=%f", sum)
+	}
+	// And it must actually move further into discharge than currentTotal —
+	// the clamp is one-sided, not a hold-at-current.
+	if sum > -200-1.0 {
+		t.Errorf("clamp pinned dispatch at currentTotal=-200; expected more discharge, got sum=%f", sum)
+	}
+}
+
+func TestMeterClampHoldsSteadyOnWrongDirectionWindup(t *testing.T) {
+	// Regression for the Copilot review on PR #276: if the PI integrator
+	// is wound up in the WRONG direction (e.g. charging windup from a
+	// prior export-heavy mode) while the site is now importing, the raw
+	// PI output asks to charge even though grid is positive. Charging
+	// from the grid in that state would aggravate the import. The clamp
+	// must catch the sign mismatch and hold the battery at currentTotal,
+	// letting the integrator unwind naturally over subsequent ticks
+	// instead of executing the wrong-direction command.
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	// Manufacture wrong-direction windup: feed the PI a long history of
+	// negative measurements (gridW < target) so the integrator climbs
+	// positive. Then in the real tick, gridW will be +2000 (importing)
+	// but the integrator's residual will keep the proportional + integral
+	// sum positive enough to demand a charge.
+	for i := 0; i < 400; i++ {
+		st.PI.Update(-2000)
+	}
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	var sum float64
+	for _, tg := range targets {
+		sum += tg.TargetW
+	}
+	// Must not command a charge while site is importing.
+	if sum > 1.0 {
+		t.Errorf("clamp let PI windup command charge while importing; expected sum<=0, got %f", sum)
 	}
 }
 
