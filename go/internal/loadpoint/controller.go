@@ -213,6 +213,15 @@ const wakeBackoffCooldown = 10 * time.Minute
 // detached sessions; charge_start is the secondary signal.
 const vehicleWakeCooldown = 5 * time.Minute
 
+// vehicleWakeTimeout caps the wake-send roundtrip when wakeVehicleAuto
+// is invoked fire-and-forget on a background goroutine (e.g. from the
+// wallbox-delivering rising edge in tickOne). Without it a stuck
+// vehicle-proxy HTTP call would leak the goroutine until the process
+// exits. 30 s is comfortably longer than the Tesla proxy's own ~15 s
+// host timeout while still bounded enough that a leaked routine per
+// cooldown window is the worst case.
+const vehicleWakeTimeout = 30 * time.Second
+
 // surplusWindowSize is the length of the rolling-average buffer used
 // for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s
 // of smoothing — long enough to ride out single-tick cloud transients
@@ -677,6 +686,12 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 // vehicle state but the trigger can flap — don't storm the BLE radio.
 // No-op when no vehicle is bound; logs but does not return errors
 // (the trigger is opportunistic; failure is fine).
+//
+// Callers commonly invoke this as `go wakeVehicleAuto(...)` with a
+// background context, so the send is bounded internally by
+// `vehicleWakeTimeout` to keep a stuck HTTP roundtrip from leaking the
+// goroutine. The driver's own HTTP client also has a timeout — this is
+// just a belt-and-braces ceiling at the caller boundary.
 func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason string) {
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
 		return
@@ -704,7 +719,9 @@ func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason st
 	}
 	slog.Info("loadpoint auto-wake (vehicle telemetry refresh)",
 		"lp", lpID, "vehicle_driver", driver, "reason", reason)
-	if err := c.send(ctx, driver, payload); err != nil {
+	sendCtx, cancel := context.WithTimeout(ctx, vehicleWakeTimeout)
+	defer cancel()
+	if err := c.send(sendCtx, driver, payload); err != nil {
 		slog.Warn("loadpoint auto-wake send failed",
 			"lp", lpID, "vehicle_driver", driver, "err", err)
 	}
