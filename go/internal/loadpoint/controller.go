@@ -825,11 +825,18 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 			}
 		}
 		cmd["power_w"] = holdW
+		// Phase mode: explicit hold > explicit LP config > surplus
+		// default ("auto") > driver default. Same surplus-active fallback
+		// as the non-hold branch so a sticky Start hold on a 1380 W
+		// surplus slot actually delivers instead of dying at the Easee
+		// driver's unset → "3p" interpretation.
 		switch {
 		case hold.PhaseMode != "":
 			cmd["phase_mode"] = hold.PhaseMode
 		case lpCfg.PhaseMode != "":
 			cmd["phase_mode"] = lpCfg.PhaseMode
+		case surplusOn:
+			cmd["phase_mode"] = "auto"
 		}
 		switch {
 		case hold.PhaseSplitW > 0:
@@ -935,9 +942,20 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// pick_phases respects an operator-set "3p" lock over the
 		// dispatch's wantW. The 1Φ lock IS the operator's intent for
 		// this day.
+		//
+		// Default to "auto" when surplus is active and the operator
+		// didn't explicitly pick a phase mode. The Easee driver
+		// (drivers/easee_cloud.lua:105) interprets an UNSET phase_mode
+		// as "3p" — silently locking the wallbox to 3Φ and rejecting
+		// any 1Φ-eligible step the near-term branch passes through.
+		// Operators who picked surplus_only have clearly opted into
+		// "react to PV"; dynamic phase switching is the only way to
+		// actually deliver low-power surplus to the EV.
 		phaseMode := lpCfg.PhaseMode
 		if c.surplusLockedTo1P(lpCfg.ID) {
 			phaseMode = "1p"
+		} else if surplusOn && phaseMode == "" {
+			phaseMode = "auto"
 		}
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
