@@ -948,6 +948,64 @@ func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
 	}
 }
 
+// Mid-slot replan that GROWS the slot budget must not trigger a
+// catastrophic catch-up demand near slot-end.
+//
+// Production incident on .139 (2026-05-17): planner_arbitrage with a
+// −900 W slot plan. A reactive replan late in the slot grew the slot's
+// BatteryEnergyWh by ~5×. With slotDelivered still tracking the old
+// (smaller) directive's pace, remainingWh × 3600 / remainingS demanded
+// >30 kW for the last ~80 s; battery clamped to MaxDischargeW (−9000 W)
+// and stayed there until slot rollover. The "shrink budget" branch
+// (line 784) handled the symmetric case but the grow case was
+// unprotected — fix rebases slotDelivered to the new pace.
+func TestEnergyDispatchRebasesSlotDeliveredOnBudgetGrow(t *testing.T) {
+	now := time.Now()
+	// Slot is 15 min total; we're 12 min in (80% elapsed). Old plan was
+	// for −225 Wh (−900 W avg). Actual delivered tracks the old pace:
+	// 0.8 × −225 ≈ −180 Wh.
+	slotStart := now.Add(-12 * time.Minute)
+	slotEnd := now.Add(3 * time.Minute)
+	dir1 := SlotDirective{
+		SlotStart:       slotStart,
+		SlotEnd:         slotEnd,
+		BatteryEnergyWh: -225, // −900 W × 0.25 h
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -900, 0.6}, // currently delivering at old pace
+	})
+	st := newStateWithEnergyDispatch(dir1, "ferroamp")
+	// Seed the accumulator to mimic 12 min of −900 W delivery.
+	st.currentDirective = dir1
+	st.slotDelivered = -180
+	st.lastTickTs = now.Add(-5 * time.Second)
+
+	// Replan: same slot, but budget grows 5× (BatteryEnergyWh = −1125 Wh,
+	// avg −4500 W). On the old code, remainingWh = −1125 − (−180) =
+	// −945 Wh over 180 s → −18.9 kW. Even after clamping to driver max,
+	// that's a ~5× overshoot of the new slot avg of −4500 W.
+	dir2 := SlotDirective{
+		SlotStart:       slotStart,
+		SlotEnd:         slotEnd,
+		BatteryEnergyWh: -1125,
+	}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir2, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// New slot avg is −4500 W. After rebase, targetTotalW should be close
+	// to slot avg, not a 4× catch-up. Allow ~10% margin for time drift.
+	if got < -5000-100 || got > -4000+100 {
+		t.Errorf("targetTotalW = %f; expected ≈ slot-avg (−4500 W) after rebase, not catastrophic catch-up", got)
+	}
+}
+
 // Energy-dispatch must keep GridTargetW and PI.Setpoint in lockstep so
 // the legacy path doesn't inherit a stale PI setpoint when the operator
 // later switches out of a planner mode. Regression test for a P1
