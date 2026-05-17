@@ -853,6 +853,8 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.GridToleranceW = newCfg.Site.GridToleranceW
 	s.deps.Ctrl.SlewRateW = newCfg.Site.SlewRateW
 	s.deps.Ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
+	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
+	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	s.deps.CtrlMu.Unlock()
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
