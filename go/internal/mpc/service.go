@@ -370,6 +370,19 @@ func (s *Service) Stop() {
 func (s *Service) loop(ctx context.Context) {
 	defer close(s.done)
 	s.lastReason = "scheduled"
+	// Block on real battery SoC before the initial replan. The
+	// fallback (Params.InitialSoCPct, default 50%) produces a plan
+	// that doesn't match reality, and nothing replans on SoC drift —
+	// once the bogus plan is live it stays live until the next
+	// Interval tick (15 min default), or until PV/load divergence
+	// integrators cross threshold (which can take much longer). The
+	// service is only constructed when at least one battery is
+	// configured (see buildMPC), so waiting is correct rather than
+	// risky. Warn periodically if the wait runs long so operators
+	// notice a stuck driver.
+	if !s.waitForRealSoC(ctx) {
+		return
+	}
 	s.replan(ctx)
 	t := time.NewTicker(s.Interval)
 	defer t.Stop()
@@ -1026,6 +1039,59 @@ func lookupPV(forecasts []state.ForecastPoint, ts int64) float64 {
 	}
 	// After last row — return 0 (no forecast coverage).
 	return 0
+}
+
+// waitForRealSoC blocks until at least one online battery driver is
+// reporting a non-nil SoC, or the context is cancelled. Returns true
+// on success, false on cancellation. Re-warns every warnEvery so a
+// stuck driver shows up in logs even after the first notice scrolls
+// past.
+func (s *Service) waitForRealSoC(ctx context.Context) bool {
+	if s.Tele == nil {
+		return true
+	}
+	const (
+		pollEvery = 250 * time.Millisecond
+		warnEvery = 30 * time.Second
+	)
+	if s.hasRealSoC() {
+		return true
+	}
+	waitStart := time.Now()
+	warn := time.NewTicker(warnEvery)
+	defer warn.Stop()
+	tick := time.NewTicker(pollEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-warn.C:
+			slog.Warn("mpc: still waiting for real battery SoC before first replan",
+				"waited", time.Since(waitStart))
+		case <-tick.C:
+			if s.hasRealSoC() {
+				slog.Info("mpc: real battery SoC available, proceeding with first replan",
+					"waited", time.Since(waitStart))
+				return true
+			}
+		}
+	}
+}
+
+// hasRealSoC reports whether at least one online battery driver has
+// emitted a non-nil SoC value.
+func (s *Service) hasRealSoC() bool {
+	for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
+		if r.SoC == nil {
+			continue
+		}
+		if h := s.Tele.DriverHealth(r.Driver); h == nil || !h.IsOnline() {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // currentSoCPct averages SoC across battery readings in the telemetry store.

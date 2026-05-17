@@ -921,62 +921,8 @@ func main() {
 			"horizon", mpcSvc.Horizon,
 			"interval", mpcSvc.Interval,
 			"pvtwin", pvSvc != nil)
-		// Startup replan: the scheduled tick is up to mpcSvc.Interval
-		// (15 min) away. Don't make the operator wait — fire one
-		// immediately so /api/mpc/plan is populated as soon as
-		// telemetry, prices, and forecasts have settled. Observe ctx
-		// throughout so SIGTERM during startup doesn't keep this
-		// goroutine alive past shutdown.
-		//
-		// Block on real battery SoC arriving before firing. The
-		// planner's fallback (`InitialSoCPct`, default 50%) produces
-		// a plan that doesn't match reality, and nothing replans on
-		// SoC drift — once the bogus plan is live it stays live until
-		// the next 15-min tick, or until PV/load divergence
-		// integrators cross threshold (which can take much longer).
-		// `buildMPC` returns nil when no battery is configured, so
-		// reaching this branch guarantees ≥1 battery driver exists;
-		// waiting until it reports is correct rather than risky.
-		go func() {
-			const (
-				pollEvery = 250 * time.Millisecond
-				warnAfter = 30 * time.Second
-			)
-			waitStart := time.Now()
-			warn := time.After(warnAfter)
-			tick := time.NewTicker(pollEvery)
-			defer tick.Stop()
-
-			haveReal := false
-		WaitLoop:
-			for {
-				for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
-					if r.SoC == nil {
-						continue
-					}
-					if h := tel.DriverHealth(r.Driver); h == nil || !h.IsOnline() {
-						continue
-					}
-					haveReal = true
-					break WaitLoop
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-warn:
-					slog.Warn("mpc: still waiting for real battery SoC before startup replan",
-						"waited", time.Since(waitStart))
-				case <-tick.C:
-				}
-			}
-			if ctx.Err() != nil {
-				return
-			}
-			_ = mpcSvc.Replan(ctx)
-			slog.Info("mpc: startup replan completed",
-				"waited", time.Since(waitStart),
-				"had_real_soc", haveReal)
-		}()
+		// First replan is fired by Service.loop itself once real
+		// battery SoC arrives — no caller-side priming needed.
 	}
 
 	// ---- EV loadpoint controller ----
