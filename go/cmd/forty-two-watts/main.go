@@ -2108,10 +2108,11 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if cfg.Price != nil && cfg.Price.Zone != "" {
 		zone = cfg.Price.Zone
 	}
-	mode := mpc.Mode(pl.Mode)
-	if mode == "" {
-		mode = mpc.ModeSelfConsumption
-	}
+	// cfg.Planner.Mode is in the dashboard's control.Mode namespace
+	// (planner_*); translate to mpc.Mode for the planner internals.
+	// Legacy bare-name values are migrated by config.applyDefaults
+	// before they reach us; ModeFromPlannerCtrl handles them anyway.
+	mode := mpc.ModeFromPlannerCtrl(pl.Mode)
 	socMin := pl.SoCMinPct
 	if socMin <= 0 {
 		socMin = 10

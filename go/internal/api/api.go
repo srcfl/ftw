@@ -881,10 +881,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 // ---- /api/mode ----
 
 // planMode returns the planner.mode string from a config, or "" if
-// planner is absent. The mode string is in mpc.Mode space
-// ("self_consumption" | "cheap_charge" | "arbitrage"); the dashboard
-// ctrl.Mode space uses different strings (planner_self / planner_cheap
-// / planner_arbitrage) — applyPlannerModeChange translates.
+// planner is absent. Post-unification the value is in the dashboard's
+// control.Mode planner_* namespace; mpc.ModeFromPlannerCtrl translates
+// to the planner's internal mpc.Mode where needed.
 func planMode(c *config.Config) string {
 	if c == nil || c.Planner == nil {
 		return ""
@@ -899,21 +898,16 @@ func planMode(c *config.Config) string {
 // already on a planner_* mode — on a non-planner mode (idle / charge /
 // peak_shaving / self_consumption) the change just sits in config as
 // "the strategy to use when the planner is next activated", which
-// matches the dashboard semantics.
+// matches the dashboard semantics. Since unification, cfg.Planner.Mode
+// IS a control.Mode value (planner_*); the only translation needed is
+// to mpc.Mode for the planner's internal state.
 func (s *Server) applyPlannerModeChange(ctx context.Context, newPlannerMode string) {
-	var ctrlMode control.Mode
-	var mpcMode mpc.Mode
-	switch mpc.Mode(newPlannerMode) {
-	case mpc.ModeSelfConsumption:
-		ctrlMode, mpcMode = control.ModePlannerSelf, mpc.ModeSelfConsumption
-	case mpc.ModeCheapCharge:
-		ctrlMode, mpcMode = control.ModePlannerCheap, mpc.ModeCheapCharge
-	case mpc.ModeArbitrage:
-		ctrlMode, mpcMode = control.ModePlannerArbitrage, mpc.ModeArbitrage
-	default:
-		slog.Warn("planner.mode change: unknown value, not mirroring", "mode", newPlannerMode)
+	ctrlMode := control.Mode(newPlannerMode)
+	if !ctrlMode.IsPlannerMode() {
+		slog.Warn("planner.mode change: not a planner_* value, not mirroring", "mode", newPlannerMode)
 		return
 	}
+	mpcMode := mpc.ModeFromPlannerCtrl(newPlannerMode)
 	s.deps.CtrlMu.Lock()
 	active := s.deps.Ctrl.Mode.IsPlannerMode()
 	if active {

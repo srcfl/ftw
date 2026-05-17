@@ -10,8 +10,8 @@
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
-        selectField("Mode", "planner.mode", ["self_consumption", "cheap_charge", "arbitrage"], "self_consumption",
-          "self_consumption = minimise grid import. cheap_charge = charge batteries during cheapest hours. arbitrage = buy low / sell high.") +
+        selectField("Mode", "planner.mode", ["planner_self", "planner_cheap", "planner_arbitrage"], "planner_self",
+          "planner_self = smart self-consumption (no grid charge, no export). planner_cheap = charge batteries during cheapest hours. planner_arbitrage = unrestricted buy-low / sell-high. Same values as the Dashboard's Strategy buttons.") +
         '<div class="field-row"><div>' +
         field("SoC min (%)", "planner.soc_min_pct", "number", 10,
           "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +

@@ -59,6 +59,43 @@ const (
 	ModeArbitrage Mode = "arbitrage"
 )
 
+// PlannerCtrlMode is the namespace used by the dashboard's planner
+// buttons and by cfg.Planner.Mode after the unification migration:
+// the same strings as control.ModePlanner* but kept here as untyped
+// constants so the mpc package can translate without importing
+// control (which would create a cycle). Update both lists in lockstep.
+const (
+	PlannerCtrlModeSelf      = "planner_self"
+	PlannerCtrlModeCheap     = "planner_cheap"
+	PlannerCtrlModeArbitrage = "planner_arbitrage"
+)
+
+// ModeFromPlannerCtrl translates a planner_* value from the dashboard
+// / cfg.Planner.Mode namespace into the mpc.Mode the planner itself
+// uses. Unknown values (including legacy bare names if migration was
+// skipped) fall back to ModeSelfConsumption — the safest default.
+func ModeFromPlannerCtrl(s string) Mode {
+	switch s {
+	case PlannerCtrlModeSelf:
+		return ModeSelfConsumption
+	case PlannerCtrlModeCheap:
+		return ModeCheapCharge
+	case PlannerCtrlModeArbitrage:
+		return ModeArbitrage
+	// Legacy bare names — kept so a fresh config that somehow holds
+	// them (e.g. a hand-edited YAML) still produces a usable mode
+	// instead of silently falling back. applyDefaults normally
+	// rewrites these on load.
+	case string(ModeSelfConsumption):
+		return ModeSelfConsumption
+	case string(ModeCheapCharge):
+		return ModeCheapCharge
+	case string(ModeArbitrage):
+		return ModeArbitrage
+	}
+	return ModeSelfConsumption
+}
+
 // IdleGateThresholdW is the per-slot average battery power below which the
 // plan is treated as "idle this slot" by the planner_self control branch.
 // Mirrors the chargeThresh used by reasonFor — a slot averaging less than

@@ -616,6 +616,26 @@ api: { port: 8080 }
 	}
 }
 
+func TestPlannerModeMigratesLegacyBareNames(t *testing.T) {
+	cases := map[string]string{
+		"self_consumption":  "planner_self",
+		"cheap_charge":      "planner_cheap",
+		"arbitrage":         "planner_arbitrage",
+		"planner_self":      "planner_self",
+		"planner_cheap":     "planner_cheap",
+		"planner_arbitrage": "planner_arbitrage",
+		"":                  "",
+		"weird-value":       "weird-value",
+	}
+	for in, want := range cases {
+		c := &Config{Planner: &Planner{Mode: in}}
+		applyDefaults(c)
+		if c.Planner.Mode != want {
+			t.Errorf("applyDefaults(%q) → %q, want %q", in, c.Planner.Mode, want)
+		}
+	}
+}
+
 func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
 	existing := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{AccessToken: "real_tok", Password: "real_pw"}}}
 	incoming := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{}}}

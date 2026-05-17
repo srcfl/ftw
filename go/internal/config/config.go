@@ -247,7 +247,10 @@ func (e *EVCharger) Validate() error {
 }
 
 // Planner configures the MPC scheduler (optional — disabled if omitted).
-// Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
+// Mode: "planner_self" (default) | "planner_cheap" | "planner_arbitrage" —
+// the same namespace as the dashboard's planner buttons (control.Mode).
+// Older configs may have the bare mpc.Mode names "self_consumption" /
+// "cheap_charge" / "arbitrage"; applyDefaults migrates them.
 type Planner struct {
 	Enabled             bool    `yaml:"enabled" json:"enabled"`
 	Mode                string  `yaml:"mode,omitempty" json:"mode,omitempty"`
@@ -831,6 +834,22 @@ func applyDefaults(c *Config) {
 		}
 		if c.HomeAssistant.PublishIntervalS == 0 {
 			c.HomeAssistant.PublishIntervalS = 5
+		}
+	}
+	// Planner mode namespace migration: the canonical value space is
+	// now the dashboard's control.Mode planner_* prefix so a single
+	// string serves both wire formats. Older configs hold the bare
+	// mpc.Mode names; rewrite them in memory so the Settings UI's
+	// select shows the right option and a save round-trip persists
+	// the new form. Idempotent: already-migrated values pass through.
+	if c.Planner != nil {
+		switch c.Planner.Mode {
+		case "self_consumption":
+			c.Planner.Mode = "planner_self"
+		case "cheap_charge":
+			c.Planner.Mode = "planner_cheap"
+		case "arbitrage":
+			c.Planner.Mode = "planner_arbitrage"
 		}
 	}
 	// Backfill for configs that predate notifications: — lands a

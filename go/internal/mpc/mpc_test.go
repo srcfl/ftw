@@ -619,6 +619,24 @@ func TestZeroEfficiencyDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestModeFromPlannerCtrl(t *testing.T) {
+	cases := map[string]Mode{
+		PlannerCtrlModeSelf:         ModeSelfConsumption,
+		PlannerCtrlModeCheap:        ModeCheapCharge,
+		PlannerCtrlModeArbitrage:    ModeArbitrage,
+		string(ModeSelfConsumption): ModeSelfConsumption,
+		string(ModeCheapCharge):     ModeCheapCharge,
+		string(ModeArbitrage):       ModeArbitrage,
+		"":                          ModeSelfConsumption, // safe default
+		"unknown":                   ModeSelfConsumption, // safe default
+	}
+	for in, want := range cases {
+		if got := ModeFromPlannerCtrl(in); got != want {
+			t.Errorf("ModeFromPlannerCtrl(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestSelfConsumptionWithZeroBaseline(t *testing.T) {
 	// load==PV → baseline=0. Battery must stay at 0.
 	slots := []Slot{
