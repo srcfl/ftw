@@ -1961,12 +1961,67 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
 		return
 	}
+	// Manual Start / Resume / Pause must "stick" against the next
+	// dispatch tick — otherwise the controller's MPC-budget check (or
+	// surplus-only clamp with no live PV) commands `power_w=0` on the
+	// very next 5 s tick and the operator's click looks like a no-op.
+	// Solution: set a no-expiry ManualHold on the matched loadpoint
+	// before forwarding the action to the driver. Pause clears the
+	// hold so the LP reverts to plan / PV-surplus / schedule. Pure
+	// driver-targeted actions (ev_set_current) skip the hold path —
+	// dispatch uses ev_set_current internally and a sticky hold there
+	// would defeat the whole control loop.
+	if req.Action == "ev_start" || req.Action == "ev_resume" || req.Action == "ev_pause" {
+		applyManualEVHold(s.deps, driverName, req.Action)
+	}
 	payload, _ := json.Marshal(map[string]any{"action": req.Action})
 	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, 200, map[string]string{"status": "ok"})
+}
+
+// applyManualEVHold pins / releases the loadpoint matching the given
+// EV driver according to the operator action. Start / Resume install
+// a no-expiry hold at the loadpoint's MaxChargeW so the next dispatch
+// tick can't pull the wallbox back to 0. Pause clears the hold and
+// the loadpoint immediately reverts to plan / surplus rules. No-op
+// when no controller is wired or no loadpoint matches the driver —
+// the action still forwards to the driver in those cases.
+func applyManualEVHold(deps *Deps, driverName string, action string) {
+	if deps == nil || deps.LoadpointCtrl == nil || deps.Loadpoints == nil {
+		return
+	}
+	var lpID string
+	var maxW float64
+	for _, st := range deps.Loadpoints.States() {
+		if st.DriverName == driverName {
+			lpID = st.ID
+			maxW = st.MaxChargeW
+			break
+		}
+	}
+	if lpID == "" {
+		return
+	}
+	if action == "ev_pause" {
+		deps.LoadpointCtrl.ClearManualHold(lpID)
+		slog.Info("ev manual pause — cleared manual hold, reverting to plan", "lp", lpID)
+		return
+	}
+	if maxW <= 0 {
+		maxW = 11000 // 16 A × 3φ × 230 V fallback when the LP config didn't set it
+	}
+	// 100-year expiry serves as "sticky until the operator cancels".
+	// Using time.Now() + a long delta rather than time.Time{} because
+	// SetManualHold treats zero ExpiresAt as "delete" (controller.go:653).
+	deps.LoadpointCtrl.SetManualHold(lpID, loadpoint.ManualHold{
+		PowerW:    maxW,
+		ExpiresAt: time.Now().Add(100 * 365 * 24 * time.Hour),
+	})
+	slog.Info("ev manual start/resume — installed sticky hold",
+		"lp", lpID, "action", action, "hold_w", maxW)
 }
 
 // GET /api/ev/providers — return the descriptor for every registered EV
