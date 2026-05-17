@@ -830,6 +830,15 @@ func ComputeDispatch(
 		// moment grid goes negative.
 		evActive := state.EVChargingW > evActiveThresholdW
 		surplusTransient := state.EVSurplusOnlyReserveW > 0 && evActive && rawGridW > 0
+		// CANONICAL "battery may not feed EV" accounting. The MPC's
+		// NoBatteryToEV DP feasibility rule (mpc.go, see the
+		// houseResidualW check inside the action loop) mirrors this
+		// computation so the planner stops emitting allocations that
+		// this clamp then has to censor. TODO(refactor): extract the
+		// houseResidualW math + the (battW<0, evW>0) feasibility
+		// predicate into a small helper consumed by both this clamp
+		// and the DP rule, so a future change to the accounting can't
+		// drift between plan and runtime.
 		if !state.BatteryCoversEV && !surplusTransient && evActive && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW

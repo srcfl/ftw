@@ -529,9 +529,13 @@ func Optimize(slots []Slot, p Params) Plan {
 						// much and still be claimed as "house only".
 						// Anything beyond it must go to EV (illegal here)
 						// or grid (covered by the rule above).
-						// Matches the runtime safety clamp at
-						// dispatch.go:787 — keep them aligned. 50 W
-						// epsilon mirrors the surrounding constraints.
+						// Matches the canonical runtime safety clamp in
+						// control/dispatch.go (search "CANONICAL
+						// \"battery may not feed EV\"") — keep them
+						// aligned. 50 W epsilon mirrors the surrounding
+						// constraints. TODO(refactor): the
+						// houseResidualW math + feasibility predicate
+						// is duplicated; extract a shared helper.
 						if evActive && lp.NoBatteryToEV && evW > 0 && battW < 0 {
 							houseResidualW := slot.LoadW + slot.PVW // PVW is negative
 							if houseResidualW < 0 {

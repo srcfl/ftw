@@ -73,11 +73,15 @@ type LoadpointSpec struct {
 	// exceeds the PV-residual house demand — i.e. where some of the
 	// battery's energy must, by conservation, have flowed into the EV
 	// or out to grid (and the existing battery-export-vs-EV rule
-	// already covers the export case). The runtime dispatch has an
-	// equivalent clamp at dispatch.go:787 as a safety net; this DP
-	// rule stops the planner from emitting infeasible allocations
-	// that dispatch then has to censor, removing the plan↔reality
-	// divergence operators were seeing on planner_arbitrage slots.
+	// already covers the export case). The runtime dispatch in
+	// control/dispatch.go has the canonical clamp using identical
+	// accounting (search "CANONICAL \"battery may not feed EV\""); the
+	// DP rule here stops the planner from emitting infeasible
+	// allocations that dispatch then has to censor, removing the
+	// plan↔reality divergence operators were seeing on
+	// planner_arbitrage slots. A future refactor should extract the
+	// shared houseResidualW + feasibility predicate into a helper so
+	// the two sites can't drift.
 	NoBatteryToEV bool
 }
 
