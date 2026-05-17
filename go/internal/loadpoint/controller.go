@@ -110,6 +110,14 @@ type Controller struct {
 	// the entire afternoon. Optional; nil means no near-term gate.
 	nearTermPeakSurplusW func(window time.Duration) (float64, bool)
 
+	// nearTermLogLast throttles the "1Φ allowed (near-term 3Φ
+	// unreachable)" log line to once per nearTermLogCooldown per
+	// loadpoint so it doesn't spam every 5 s when the condition
+	// holds for hours. Reset on day rollover via the existing
+	// phase-lock release path.
+	nearTermLogMu   sync.Mutex
+	nearTermLogLast map[string]time.Time
+
 	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
 	// lock is sticky for the rest of the day so a slowly recovering
 	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
@@ -215,6 +223,11 @@ const surplusResumeMarginW = 200.0
 // rolling-avg already smooths transients; this is a hard contactor-
 // protection backstop on top.
 const surplusMinPauseHold = 35 * time.Second
+
+// nearTermLogCooldown caps the rate of the "1Φ allowed (near-term 3Φ
+// unreachable)" log line so a long morning with sustained low surplus
+// produces one line per 10 min per LP instead of one per 5 s tick.
+const nearTermLogCooldown = 10 * time.Minute
 
 // defaultPhaseSplitW mirrors loadpoint.Config.PhaseSplitW's default —
 // 3680 W is a 16 A 1Φ ceiling at 230 V. Kept in sync with the comment
@@ -1292,6 +1305,21 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	if c.nearTermPeakSurplusW != nil {
 		const nearTermWindow = 30 * time.Minute
 		if nearPeak, ok := c.nearTermPeakSurplusW(nearTermWindow); ok && nearPeak < minStep3 {
+			c.nearTermLogMu.Lock()
+			lastFor, has := c.nearTermLogLast[lpCfg.ID]
+			fireLog := !has || now.Sub(lastFor) > nearTermLogCooldown
+			if fireLog {
+				if c.nearTermLogLast == nil {
+					c.nearTermLogLast = map[string]time.Time{}
+				}
+				c.nearTermLogLast[lpCfg.ID] = now
+			}
+			c.nearTermLogMu.Unlock()
+			if fireLog {
+				slog.Info("loadpoint surplus: 1Φ steps allowed (near-term 3Φ unreachable)",
+					"lp", lpCfg.ID, "near_term_peak_w", nearPeak, "min_3p_step_w", minStep3,
+					"window", nearTermWindow.String())
+			}
 			return lpCfg.AllowedStepsW
 		}
 	}
