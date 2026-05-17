@@ -854,6 +854,18 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.SlewRateW = newCfg.Site.SlewRateW
 	s.deps.Ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	s.deps.CtrlMu.Unlock()
+	// Mirror a planner.mode change into the live planner. Without this
+	// the Settings field and the Dashboard's planner buttons store
+	// different things in different places: Settings → cfg.Planner.Mode
+	// (YAML), Dashboard → ctrl.Mode (state.db). When the operator is
+	// currently on a planner_* mode, changing planner.mode in Settings
+	// must take immediate effect, otherwise users have to flip the
+	// strategy in both places. Only mirrors when the active mode is a
+	// planner variant — on a non-planner mode, the new value sits in
+	// config as "the strategy to use when planner is next activated".
+	if oldP, newP := planMode(&oldCfg), planMode(&newCfg); newP != "" && newP != oldP {
+		s.applyPlannerModeChange(r.Context(), newP)
+	}
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
@@ -867,6 +879,60 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- /api/mode ----
+
+// planMode returns the planner.mode string from a config, or "" if
+// planner is absent. The mode string is in mpc.Mode space
+// ("self_consumption" | "cheap_charge" | "arbitrage"); the dashboard
+// ctrl.Mode space uses different strings (planner_self / planner_cheap
+// / planner_arbitrage) — applyPlannerModeChange translates.
+func planMode(c *config.Config) string {
+	if c == nil || c.Planner == nil {
+		return ""
+	}
+	return c.Planner.Mode
+}
+
+// applyPlannerModeChange mirrors a Settings → planner.mode change into
+// the live planner: persists the equivalent ctrl.Mode to state.db so
+// it survives restart, and calls MPC.SetMode so the running planner
+// switches strategy on the next tick. Only fires when the operator is
+// already on a planner_* mode — on a non-planner mode (idle / charge /
+// peak_shaving / self_consumption) the change just sits in config as
+// "the strategy to use when the planner is next activated", which
+// matches the dashboard semantics.
+func (s *Server) applyPlannerModeChange(ctx context.Context, newPlannerMode string) {
+	var ctrlMode control.Mode
+	var mpcMode mpc.Mode
+	switch mpc.Mode(newPlannerMode) {
+	case mpc.ModeSelfConsumption:
+		ctrlMode, mpcMode = control.ModePlannerSelf, mpc.ModeSelfConsumption
+	case mpc.ModeCheapCharge:
+		ctrlMode, mpcMode = control.ModePlannerCheap, mpc.ModeCheapCharge
+	case mpc.ModeArbitrage:
+		ctrlMode, mpcMode = control.ModePlannerArbitrage, mpc.ModeArbitrage
+	default:
+		slog.Warn("planner.mode change: unknown value, not mirroring", "mode", newPlannerMode)
+		return
+	}
+	s.deps.CtrlMu.Lock()
+	active := s.deps.Ctrl.Mode.IsPlannerMode()
+	if active {
+		s.deps.Ctrl.Mode = ctrlMode
+		s.deps.Ctrl.ClearBatteryManualHold()
+	}
+	s.deps.CtrlMu.Unlock()
+	if !active {
+		return
+	}
+	if err := s.deps.State.SaveConfig("mode", string(ctrlMode)); err != nil {
+		slog.Warn("planner.mode mirror: failed to persist ctrl mode", "err", err)
+	}
+	if s.deps.MPC != nil {
+		s.deps.MPC.SetMode(ctx, mpcMode)
+	}
+	slog.Info("planner.mode change mirrored into live planner",
+		"ctrl_mode", ctrlMode, "mpc_mode", mpcMode)
+}
 
 func (s *Server) handleGetMode(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Lock()
