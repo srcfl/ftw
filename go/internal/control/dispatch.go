@@ -1024,16 +1024,28 @@ func ComputeDispatch(
 		//
 		// "Don't overshoot": with load and PV held constant within a tick,
 		// gridW moves 1:1 with bat (conservation: grid = load + bat + pv).
-		// So new bat = currentTotal - errW lands gridW exactly on
+		// So newBat = currentTotal - errW lands gridW exactly on
 		// GridTargetW. The clamp caps the PI's request at that ideal
 		// landing point — anything beyond would push gridW past the
-		// target (the original PR #270 incident: PI overshoots into
-		// export). The earlier formula `allowed = -errW` used errW as if
-		// it were an absolute discharge magnitude rather than a delta,
-		// which made the clamp pin the battery at exactly the level that
-		// produces the current import — a self-consistent stuck state
-		// whenever load exceeds the live grid error, the steady-state
-		// case in any house with continuous load above |errW|.
+		// target (the original PR #270 incident: wound-up PI overshoots
+		// into export).
+		//
+		// The earlier formula `allowed = -errW` used errW as if it were
+		// an absolute discharge magnitude rather than a delta. That
+		// (a) ignored currentTotal entirely, pinning bat at exactly the
+		// level that produces the current import — a self-consistent
+		// stuck state whenever load exceeds |errW|, the steady-state
+		// case in any house with continuous load above the gap; and
+		// (b) forced bat to 0 when targetTotal and errW disagreed in
+		// sign, which made the dispatcher hard-cut discharge during
+		// natural overshoot/correction cycles (PI's correction sign
+		// always points toward closing errW, so during a recovery from
+		// overshoot targetTotal and errW *should* disagree — pulling
+		// bat to 0 mid-recovery introduces flapping).
+		//
+		// Only constraint here: don't push targetTotal past idealTarget
+		// in the dispatch direction. If PI is well-tuned and not wound
+		// up, targetTotal stays on the right side and passes through.
 		//
 		// Deadband (state.GridToleranceW) already gated entry to this
 		// arm at the abs(errW) < dead check above; no second deadband
@@ -1042,30 +1054,16 @@ func ComputeDispatch(
 		idealTarget := currentTotal - errW
 		var allowed float64
 		switch {
-		case targetTotal > 0 && errW < 0:
-			// PI wants to charge AND grid is below target (exporting):
-			// charging soaks the export. Cap so we don't overshoot into
-			// import.
-			if targetTotal > idealTarget {
-				allowed = idealTarget
-			} else {
-				allowed = targetTotal
-			}
-		case targetTotal < 0 && errW > 0:
-			// PI wants to discharge AND grid is above target (importing):
-			// discharging covers the import. Cap so we don't overshoot
-			// into export.
-			if targetTotal < idealTarget {
-				allowed = idealTarget
-			} else {
-				allowed = targetTotal
-			}
+		case errW > 0 && targetTotal < idealTarget:
+			// Importing: discharge needed. PI wants more than will land
+			// us on target — cap so we don't punch through into export.
+			allowed = idealTarget
+		case errW < 0 && targetTotal > idealTarget:
+			// Exporting: charge needed. PI wants more than will land us
+			// on target — cap so we don't punch through into import.
+			allowed = idealTarget
 		default:
-			// PI wants to move the wrong direction relative to errW
-			// (e.g. charge while importing — usually integrator windup
-			// from a prior mode). Force battery to 0 and let the slew
-			// clamp decay it there gracefully.
-			allowed = 0
+			allowed = targetTotal
 		}
 		dead := state.GridToleranceW
 		if allowed != targetTotal {
