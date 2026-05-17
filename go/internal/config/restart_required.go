@@ -65,8 +65,8 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.Price, newCfg.Price) {
 		reasons = append(reasons, "price — spot-price service is constructed once at startup")
 	}
-	if !pointerEqual(oldCfg.Planner, newCfg.Planner) {
-		reasons = append(reasons, "planner — MPC planner is constructed once at startup")
+	if plannerNeedsRestart(oldCfg.Planner, newCfg.Planner) {
+		reasons = append(reasons, "planner (enabled / interval_min / legacy_dispatch) — toggling on/off or rewiring the dispatch path requires restart")
 	}
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
@@ -94,6 +94,39 @@ func pointerEqual(a, b any) bool {
 	// structs and one *T-nil are intentionally distinct here: an operator
 	// adding an empty `homeassistant: {}` block IS a change worth flagging.
 	return reflect.DeepEqual(a, b)
+}
+
+// plannerNeedsRestart returns true only for the planner fields the
+// reload path cannot apply live. Mode + every scalar
+// (base_load_w / horizon_hours / soc_min_pct / soc_max_pct /
+// charge_efficiency / discharge_efficiency / export_ore_per_kwh) are
+// pushed onto the running Service via UpdatePlannerScalars +
+// applyPlannerModeChange — they take effect on the next replan
+// without a restart. The three exceptions:
+//   - Enabled: toggling builds or tears down the entire mpc.Service.
+//   - IntervalMin: requires restarting the planner's ticker.
+//   - LegacyDispatch: switches the dispatch path; flipping it live
+//     would mid-tick swap between PI and energy-allocation regulators.
+//
+// Adding or removing the whole Planner block (one side nil) is
+// always a restart for the same Enabled-toggle reason.
+func plannerNeedsRestart(oldP, newP *Planner) bool {
+	if oldP == nil && newP == nil {
+		return false
+	}
+	if oldP == nil || newP == nil {
+		return true
+	}
+	if oldP.Enabled != newP.Enabled {
+		return true
+	}
+	if oldP.IntervalMin != newP.IntervalMin {
+		return true
+	}
+	if oldP.LegacyDispatch != newP.LegacyDispatch {
+		return true
+	}
+	return false
 }
 
 func weatherNeedsRestart(oldW, newW *Weather) bool {

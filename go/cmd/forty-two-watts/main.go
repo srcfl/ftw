@@ -430,6 +430,10 @@ func main() {
 				mpcSvc.UpdateCapacity(totalCap, maxChg, maxDis)
 				slog.Info("mpc: capacity updated via hot-reload",
 					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
+				if newCfg.Planner != nil {
+					mpcSvc.UpdatePlannerScalars(plannerScalarsFromCfg(newCfg.Planner))
+					slog.Info("mpc: planner scalars updated via hot-reload")
+				}
 			}
 
 			// Hot-reload EV loadpoints so operators can add / remove /
@@ -2113,45 +2117,67 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	// Legacy bare-name values are migrated by config.applyDefaults
 	// before they reach us; ModeFromPlannerCtrl handles them anyway.
 	mode := mpc.ModeFromPlannerCtrl(pl.Mode)
-	socMin := pl.SoCMinPct
-	if socMin <= 0 {
-		socMin = 10
-	}
-	socMax := pl.SoCMaxPct
-	if socMax <= 0 || socMax > 100 {
-		socMax = 95
-	}
-	chgEff := pl.ChargeEfficiency
-	if chgEff <= 0 {
-		chgEff = 0.95
-	}
-	disEff := pl.DischargeEfficiency
-	if disEff <= 0 {
-		disEff = 0.95
-	}
+	ps := plannerScalarsFromCfg(pl)
 	params := mpc.Params{
 		Mode:                mode,
 		SoCLevels:           41,
 		CapacityWh:          totalCap,
-		SoCMinPct:           socMin,
-		SoCMaxPct:           socMax,
+		SoCMinPct:           ps.SoCMinPct,
+		SoCMaxPct:           ps.SoCMaxPct,
 		InitialSoCPct:       50,
 		ActionLevels:        21,
 		MaxChargeW:          maxChg,
 		MaxDischargeW:       maxDis,
-		ChargeEfficiency:    chgEff,
-		DischargeEfficiency: disEff,
-		ExportOrePerKWh:     pl.ExportOrePerKWh,
+		ChargeEfficiency:    ps.ChargeEfficiency,
+		DischargeEfficiency: ps.DischargeEfficiency,
+		ExportOrePerKWh:     ps.ExportOrePerKWh,
 	}
 	svc := mpc.New(st, tel, zone, params)
-	svc.BaseLoad = pl.BaseLoadW
-	if pl.HorizonHours > 0 {
-		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
-	}
+	svc.BaseLoad = ps.BaseLoadW
+	svc.Horizon = time.Duration(ps.HorizonHours) * time.Hour
 	if pl.IntervalMin > 0 {
 		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	return svc
+}
+
+// plannerScalarsFromCfg applies the same defaults buildMPC uses at
+// startup so hot-reload semantics match cold-start. Centralising it
+// here keeps both paths in lockstep — if a default changes, both pick
+// it up.
+func plannerScalarsFromCfg(pl *config.Planner) mpc.PlannerScalars {
+	if pl == nil {
+		return mpc.PlannerScalars{
+			SoCMinPct: 10, SoCMaxPct: 95,
+			ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+			HorizonHours: 48,
+		}
+	}
+	ps := mpc.PlannerScalars{
+		BaseLoadW:           pl.BaseLoadW,
+		HorizonHours:        pl.HorizonHours,
+		SoCMinPct:           pl.SoCMinPct,
+		SoCMaxPct:           pl.SoCMaxPct,
+		ChargeEfficiency:    pl.ChargeEfficiency,
+		DischargeEfficiency: pl.DischargeEfficiency,
+		ExportOrePerKWh:     pl.ExportOrePerKWh,
+	}
+	if ps.HorizonHours <= 0 {
+		ps.HorizonHours = 48
+	}
+	if ps.SoCMinPct <= 0 {
+		ps.SoCMinPct = 10
+	}
+	if ps.SoCMaxPct <= 0 || ps.SoCMaxPct > 100 {
+		ps.SoCMaxPct = 95
+	}
+	if ps.ChargeEfficiency <= 0 {
+		ps.ChargeEfficiency = 0.95
+	}
+	if ps.DischargeEfficiency <= 0 {
+		ps.DischargeEfficiency = 0.95
+	}
+	return ps
 }
 
 // isConfigMissing checks whether the error from config.Load indicates the

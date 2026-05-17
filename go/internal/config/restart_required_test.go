@@ -106,6 +106,61 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 	}
 }
 
+func TestRestartRequiredFor_PlannerScalarsAreLive(t *testing.T) {
+	// Mode + every scalar field is pushed onto the running planner via
+	// UpdatePlannerScalars + applyPlannerModeChange. None should
+	// trigger the restart-required prompt anymore.
+	base := baseCfg()
+	base.Planner = &Planner{Enabled: true, Mode: "planner_self",
+		BaseLoadW: 500, HorizonHours: 48, IntervalMin: 15,
+		SoCMinPct: 10, SoCMaxPct: 90,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95}
+	cases := map[string]func(*Planner){
+		"mode":                 func(p *Planner) { p.Mode = "planner_arbitrage" },
+		"base_load_w":          func(p *Planner) { p.BaseLoadW = 750 },
+		"horizon_hours":        func(p *Planner) { p.HorizonHours = 24 },
+		"soc_min_pct":          func(p *Planner) { p.SoCMinPct = 15 },
+		"soc_max_pct":          func(p *Planner) { p.SoCMaxPct = 95 },
+		"charge_efficiency":    func(p *Planner) { p.ChargeEfficiency = 0.92 },
+		"discharge_efficiency": func(p *Planner) { p.DischargeEfficiency = 0.92 },
+		"export_ore_per_kwh":   func(p *Planner) { p.ExportOrePerKWh = 12 },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			n := *base
+			pl := *base.Planner
+			n.Planner = &pl
+			mut(n.Planner)
+			r := RestartRequiredFor(base, &n)
+			if len(r) != 0 {
+				t.Fatalf("%s should be hot-applied, got reasons %v", name, r)
+			}
+		})
+	}
+}
+
+func TestRestartRequiredFor_PlannerBootFields(t *testing.T) {
+	base := baseCfg()
+	base.Planner = &Planner{Enabled: true, Mode: "planner_self", IntervalMin: 15}
+	cases := map[string]func(*Planner){
+		"enabled toggle":  func(p *Planner) { p.Enabled = !p.Enabled },
+		"interval_min":    func(p *Planner) { p.IntervalMin = 5 },
+		"legacy_dispatch": func(p *Planner) { p.LegacyDispatch = true },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			n := *base
+			pl := *base.Planner
+			n.Planner = &pl
+			mut(n.Planner)
+			r := RestartRequiredFor(base, &n)
+			if !containsSubstring(r, "planner") {
+				t.Fatalf("%s should require restart, got reasons %v", name, r)
+			}
+		})
+	}
+}
+
 func TestRestartRequiredFor_NilInputs(t *testing.T) {
 	if r := RestartRequiredFor(nil, baseCfg()); r != nil {
 		t.Fatalf("expected nil reasons for nil old, got %v", r)

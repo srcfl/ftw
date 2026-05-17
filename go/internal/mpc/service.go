@@ -170,6 +170,46 @@ func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) 
 	s.mu.Unlock()
 }
 
+// PlannerScalars groups the live-tunable planner knobs the config
+// reload path pushes onto a running Service. Lets RestartRequiredFor
+// stop flagging these fields as "needs restart" — they take effect on
+// the next replan (≤15 min default, or immediately via ReplanWithReason).
+// Fields that need ticker/dispatch re-wiring (Enabled, Interval,
+// LegacyDispatch) are deliberately excluded.
+type PlannerScalars struct {
+	BaseLoadW           float64
+	HorizonHours        int
+	SoCMinPct           float64
+	SoCMaxPct           float64
+	ChargeEfficiency    float64
+	DischargeEfficiency float64
+	ExportOrePerKWh     float64
+}
+
+// UpdatePlannerScalars applies the live-tunable planner fields to a
+// running Service. Idempotent and safe to call when nothing changed —
+// the next replan picks the new values up from Defaults / BaseLoad /
+// Horizon. Caller is responsible for sanitising defaults (the
+// buildMPC helper in main.go applies the same fallbacks the
+// constructor used; reuse them so reload-time semantics match
+// startup-time semantics).
+func (s *Service) UpdatePlannerScalars(ps PlannerScalars) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.BaseLoad = ps.BaseLoadW
+	if ps.HorizonHours > 0 {
+		s.Horizon = time.Duration(ps.HorizonHours) * time.Hour
+	}
+	s.Defaults.SoCMinPct = ps.SoCMinPct
+	s.Defaults.SoCMaxPct = ps.SoCMaxPct
+	s.Defaults.ChargeEfficiency = ps.ChargeEfficiency
+	s.Defaults.DischargeEfficiency = ps.DischargeEfficiency
+	s.Defaults.ExportOrePerKWh = ps.ExportOrePerKWh
+	s.mu.Unlock()
+}
+
 // Latest returns the most recently computed plan (nil before first run).
 func (s *Service) Latest() *Plan {
 	if s == nil {
