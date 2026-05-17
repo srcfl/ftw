@@ -1708,6 +1708,11 @@
   // entries mean "no loadpoint for this driver" and the planet
   // falls back to legacy kW-only rendering.
   var loadpointsByDriver = null;
+  // Last successful /api/status payload — surfaced so secondary
+  // consumers (e.g. the EV modal's 5 s refresh) can read derived
+  // facts like siteHasPV() without re-fetching. `null` until the
+  // first fetch lands; consumers MUST handle null.
+  var lastStatusPayload = null;
   function fetchStatus() {
     Promise.all([
       fetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
@@ -1716,6 +1721,7 @@
       .then(function (results) {
         var data = results[0];
         var lp = results[1];
+        lastStatusPayload = data;
         if (lp && Array.isArray(lp.loadpoints)) {
           var idx = {};
           lp.loadpoints.forEach(function (l) {
@@ -2028,14 +2034,17 @@
     // to the clicked planet (multi-EV setups). Falls back to whatever
     // the backend returns when no driver filter is honored.
     var url = "/api/ev/status" + (evModalDriver ? "?driver=" + encodeURIComponent(evModalDriver) : "");
+    // siteHasPV is a static-per-config check, so we read the most
+    // recent payload cached by fetchStatus() instead of issuing a
+    // duplicate /api/status fetch on every 5 s modal tick. Falls back
+    // to "no PV" until the dashboard's own fetchStatus lands once.
     Promise.all([
       fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/status").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var d = results[0];
       var lps = results[1];
-      var status = results[2];
+      var status = lastStatusPayload;
       if (!d || d.connected === false) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
