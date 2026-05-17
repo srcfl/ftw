@@ -2140,47 +2140,38 @@
     var initSurplus = savedUnlock > 0;
     var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
 
-    var box = document.createElement("div");
-    box.style.marginTop = "0.75rem";
-    box.style.paddingTop = "0.6rem";
-    box.style.borderTop = "1px solid var(--line)";
+    // Outer wrapper holds two distinct sections:
+    //  1. PV mode (surplus-only toggle) — saves immediately on click
+    //  2. Schedule (target SoC + deadline + bat-SoC unlock) — Save button
+    // They're separated so it's obvious which controls the Save button
+    // owns. Earlier we kept the surplus toggle inside the Schedule
+    // section and operators couldn't tell whether Save covered it.
+    var wrap = document.createElement("div");
+    wrap.style.marginTop = "0.75rem";
+    wrap.style.paddingTop = "0.6rem";
+    wrap.style.borderTop = "1px solid var(--line)";
 
-    var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Schedule";
-    eyebrow.style.fontFamily = "var(--mono)";
-    eyebrow.style.fontSize = "0.7rem";
-    eyebrow.style.letterSpacing = "0.18em";
-    eyebrow.style.textTransform = "uppercase";
-    eyebrow.style.color = "var(--text-dim)";
-    eyebrow.style.marginBottom = "0.55rem";
-    box.appendChild(eyebrow);
+    // ---- Section 1: PV mode (surplus-only) ----
+    // Per-loadpoint hard flag, *independent* of any schedule. When on,
+    // dispatch refuses to import grid for this loadpoint regardless of
+    // what the MPC plans. Operators can run with this alone (no target,
+    // no deadline — just "harvest PV when there's enough") or layer a
+    // schedule on top below.
+    var soBox = document.createElement("div");
+    soBox.style.marginBottom = "0.8rem";
+    soBox.style.paddingBottom = "0.7rem";
+    soBox.style.borderBottom = "1px solid var(--line)";
 
-    // Schedule is persistent loadpoint state — operators can configure
-    // tomorrow morning's target tonight before plugging in. Show a
-    // small hint when the loadpoint isn't currently connected so saved
-    // edits don't feel inert: they'll apply at the next plug-in.
-    if (lp && !lp.plugged_in) {
-      var unpluggedHint = document.createElement("div");
-      unpluggedHint.textContent = "Car not plugged in. Edits are saved and apply at next plug-in.";
-      unpluggedHint.style.fontSize = "0.72rem";
-      unpluggedHint.style.color = "var(--text-dim)";
-      unpluggedHint.style.marginBottom = "0.5rem";
-      unpluggedHint.style.fontStyle = "italic";
-      box.appendChild(unpluggedHint);
-    }
+    var soEyebrow = document.createElement("div");
+    soEyebrow.textContent = "PV Mode";
+    soEyebrow.style.fontFamily = "var(--mono)";
+    soEyebrow.style.fontSize = "0.7rem";
+    soEyebrow.style.letterSpacing = "0.18em";
+    soEyebrow.style.textTransform = "uppercase";
+    soEyebrow.style.color = "var(--text-dim)";
+    soEyebrow.style.marginBottom = "0.45rem";
+    soBox.appendChild(soEyebrow);
 
-    // Surplus-only is a per-loadpoint hard flag that's *independent* of
-    // any schedule — when on, the dispatch refuses to import grid for
-    // this loadpoint regardless of what the MPC plans. Operators can
-    // run with surplus-only alone (no target, no deadline — just
-    // "harvest PV when there's enough") or layer a schedule on top
-    // ("opportunistic surplus, but also catch up via grid if cheap").
-    // Saved + applied immediately on every click via a dedicated POST
-    // — does not require Save to be pressed.
-    var sepRow = document.createElement("div");
-    sepRow.style.marginBottom = "0.55rem";
-    sepRow.style.paddingBottom = "0.55rem";
-    sepRow.style.borderBottom = "1px solid var(--line)";
     var soWrap = document.createElement("label");
     soWrap.style.display = "flex";
     soWrap.style.alignItems = "center";
@@ -2195,28 +2186,71 @@
     soText.textContent = "Surplus only (PV exports only — never imports grid)";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
-    var soHint = document.createElement("div");
-    soHint.style.fontSize = "0.72rem";
-    soHint.style.color = "var(--text-dim)";
-    soHint.style.marginTop = "0.25rem";
-    soHint.style.marginLeft = "1.4rem";
-    soHint.textContent = "Independent of the schedule below. Charges only when PV exports exceed your load. No deadline planning — no grid import.";
-    sepRow.appendChild(soWrap);
-    sepRow.appendChild(soHint);
-    box.appendChild(sepRow);
+
+    var soStatus = document.createElement("small");
+    soStatus.style.display = "block";
+    soStatus.style.color = "var(--text-dim)";
+    soStatus.style.marginTop = "0.25rem";
+    soStatus.style.marginLeft = "1.4rem";
+    soStatus.style.minHeight = "1em";
+    soStatus.textContent = "Saves automatically on click. Independent of the schedule below.";
+
+    soBox.appendChild(soWrap);
+    soBox.appendChild(soStatus);
+    wrap.appendChild(soBox);
+
     soCb.addEventListener("change", function () {
       soCb.disabled = true;
+      soStatus.textContent = "Saving…";
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ surplus_only: soCb.checked }),
       }).then(function () {
         soCb.disabled = false;
+        soStatus.textContent = "Saved. Independent of the schedule below.";
         // Rebuild on next poll so the schedule section reflects any
         // server-side side effects (e.g. soc_source recompute).
         schedNeedsRebuild = true;
-      }).catch(function () { soCb.disabled = false; });
+      }).catch(function () {
+        soCb.disabled = false;
+        soStatus.textContent = "Save failed — try again.";
+      });
     });
+
+    // ---- Section 2: Schedule ----
+    var box = document.createElement("div");
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Schedule (grid charging)";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.55rem";
+    box.appendChild(eyebrow);
+
+    var schedExplainer = document.createElement("div");
+    schedExplainer.textContent = "Target SoC by a deadline. The planner uses cheap grid hours to fill the gap PV can't cover.";
+    schedExplainer.style.fontSize = "0.72rem";
+    schedExplainer.style.color = "var(--text-dim)";
+    schedExplainer.style.marginBottom = "0.5rem";
+    box.appendChild(schedExplainer);
+
+    // Schedule is persistent loadpoint state — operators can configure
+    // tomorrow morning's target tonight before plugging in. Show a
+    // small hint when the loadpoint isn't currently connected so saved
+    // edits don't feel inert: they'll apply at the next plug-in.
+    if (lp && !lp.plugged_in) {
+      var unpluggedHint = document.createElement("div");
+      unpluggedHint.textContent = "Car not plugged in. Edits are saved and apply at next plug-in.";
+      unpluggedHint.style.fontSize = "0.72rem";
+      unpluggedHint.style.color = "var(--text-dim)";
+      unpluggedHint.style.marginBottom = "0.5rem";
+      unpluggedHint.style.fontStyle = "italic";
+      box.appendChild(unpluggedHint);
+    }
 
     function row(labelText, controlEl) {
       var r = document.createElement("div");
@@ -2448,7 +2482,8 @@
       });
     });
 
-    return box;
+    wrap.appendChild(box);
+    return wrap;
   }
 
   function utcMinsToLocalHHMM(min) {
