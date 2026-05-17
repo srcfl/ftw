@@ -903,6 +903,10 @@ func main() {
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.
+		// Use SetDefaultMode (no replan): the loop's first replan is
+		// already gated on real SoC and will pick up this mode.
+		// Calling SetMode here would force a pre-SoC replan with the
+		// 50% fallback.
 		if ctrl.Mode.IsPlannerMode() {
 			var mm mpc.Mode
 			switch ctrl.Mode {
@@ -913,7 +917,7 @@ func main() {
 			case control.ModePlannerArbitrage:
 				mm = mpc.ModeArbitrage
 			}
-			mpcSvc.SetMode(ctx, mm)
+			mpcSvc.SetDefaultMode(mm)
 		}
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,

@@ -350,6 +350,21 @@ func (s *Service) SetMode(ctx context.Context, mode Mode) {
 	s.replan(ctx)
 }
 
+// SetDefaultMode updates the planner's mode without triggering a
+// replan. Use at startup (before Service.Start, or before the loop's
+// first replan has fired) to override the configured mode with one
+// restored from operator state. Runtime mode flips after the planner
+// is live should go through SetMode so the new mode takes immediate
+// effect.
+func (s *Service) SetDefaultMode(mode Mode) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.Defaults.Mode = mode
+	s.mu.Unlock()
+}
+
 // Start runs the planner in a goroutine. Does an initial plan immediately.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil {
@@ -378,8 +393,7 @@ func (s *Service) loop(ctx context.Context) {
 	// integrators cross threshold (which can take much longer). The
 	// service is only constructed when at least one battery is
 	// configured (see buildMPC), so waiting is correct rather than
-	// risky. Warn periodically if the wait runs long so operators
-	// notice a stuck driver.
+	// risky.
 	if !s.waitForRealSoC(ctx) {
 		return
 	}
