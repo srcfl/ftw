@@ -276,6 +276,14 @@
       </div>
     </section>
 
+    <!-- Savings vs flat-rate — historical counterpart to the plan view's
+         "vs flat avg price" badge. Self-contained: own toggle, own fetch,
+         own data-loaded paint cycle. Empty-state when no price provider
+         is configured. -->
+    <section class="savings-row">
+      <ftw-savings-card default-range="week"></ftw-savings-card>
+    </section>
+
     <!-- Controls — two-tier: primary strategy + manual advanced -->
     <section class="controls-row">
       <div class="card control-card control-strategy">

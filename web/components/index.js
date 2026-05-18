@@ -17,6 +17,7 @@ import "./ftw-price-chart.js";
 import "./ftw-energy-cake.js";
 import "./ftw-bar-chart.js";
 import "./ftw-history-card.js";
+import "./ftw-savings-card.js";
 import "./ftw-update-check.js";
 import "./ftw-notif-status.js";
 import "./ftw-notif-test-button.js";

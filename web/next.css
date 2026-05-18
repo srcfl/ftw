@@ -496,6 +496,12 @@ body.ftw-next .fuse-fallback-value {
 body.ftw-next .history-row {
   margin-top: 12px;
 }
+/* Savings row — one card wide; web component owns its own chrome.
+   Just sets the top margin so it doesn't collide with the history
+   wrapper above. */
+body.ftw-next .savings-row {
+  margin-top: 12px;
+}
 body.ftw-next .history-group {
   background: var(--ink-raised);
   border: 1px solid var(--line);
