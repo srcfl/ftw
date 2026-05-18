@@ -459,18 +459,29 @@ register `13050` (stop forced charge/discharge) and `0` to register
 
 ### Ferroamp
 
-[`drivers/ferroamp.lua:298-301`](../drivers/ferroamp.lua) — publish
-the `auto` command over MQTT:
+[`drivers/ferroamp.lua`](../drivers/ferroamp.lua) publishes the `auto`
+command over MQTT:
 
 ```lua
+local function publish_auto(trans_id)
+    return host.mqtt_publish("extapi/control/request",
+        string.format('{"transId":"%s","cmd":{"name":"auto"}}', trans_id))
+end
+
 function driver_default_mode()
-    host.mqtt_publish("extapi/control/request",
-        '{"transId":"watchdog","cmd":{"name":"auto"}}')
+    publish_auto("watchdog")
+end
+
+function driver_cleanup()
+    pcall(publish_auto, "cleanup")
 end
 ```
 
 Same semantics: the hardware takes over and does its own
-self-consumption logic until the EMS returns.
+self-consumption logic until the EMS returns. `driver_cleanup` uses the
+same fallback so a hot-reload, driver disable, or clean service stop
+does not leave the EnergyHub in the last forced `charge` / `discharge`
+reference.
 
 Triggers for default-mode invocation:
 

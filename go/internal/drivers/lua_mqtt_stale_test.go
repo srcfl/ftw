@@ -18,6 +18,7 @@ type fakeMQTT struct {
 	mu     sync.Mutex
 	queue  []MQTTMessage
 	subs   []string
+	pubs   []MQTTMessage
 	closed bool
 }
 
@@ -28,7 +29,12 @@ func (f *fakeMQTT) Subscribe(topic string) error {
 	return nil
 }
 
-func (f *fakeMQTT) Publish(topic string, payload []byte) error { return nil }
+func (f *fakeMQTT) Publish(topic string, payload []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pubs = append(f.pubs, MQTTMessage{Topic: topic, Payload: string(payload)})
+	return nil
+}
 
 func (f *fakeMQTT) PopMessages() []MQTTMessage {
 	f.mu.Lock()
@@ -44,6 +50,14 @@ func (f *fakeMQTT) Push(topic, payload string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.queue = append(f.queue, MQTTMessage{Topic: topic, Payload: payload})
+}
+
+func (f *fakeMQTT) Published() []MQTTMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]MQTTMessage, len(f.pubs))
+	copy(out, f.pubs)
+	return out
 }
 
 // Regression: ferroamp.lua used to cache the last MQTT payload per
@@ -142,5 +156,44 @@ func TestFerroampDriverStopsEmittingWhenMQTTStalls(t *testing.T) {
 	if !h.LastSuccess.Equal(lastBefore) {
 		t.Errorf("LastSuccess advanced while cache was stale (before=%v after=%v)",
 			lastBefore, *h.LastSuccess)
+	}
+}
+
+func TestFerroampMQTTCleanupReturnsToAuto(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", "ferroamp.lua")
+	if _, err := os.Stat(luaPath); err != nil {
+		t.Fatalf("ferroamp.lua not found at %s: %v", luaPath, err)
+	}
+
+	mqtt := &fakeMQTT{}
+	env := NewHostEnv("ferroamp", telemetry.NewStore()).WithMQTT(mqtt)
+	d, err := NewLuaDriver(luaPath, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":2500}`)); err != nil {
+		t.Fatalf("command: %v", err)
+	}
+
+	d.Cleanup()
+
+	pubs := mqtt.Published()
+	if len(pubs) == 0 {
+		t.Fatal("expected cleanup to publish auto command")
+	}
+	last := pubs[len(pubs)-1]
+	if last.Topic != "extapi/control/request" {
+		t.Fatalf("last publish topic = %q, want extapi/control/request", last.Topic)
+	}
+	want := `{"transId":"cleanup","cmd":{"name":"auto"}}`
+	if last.Payload != want {
+		t.Fatalf("last publish payload = %s, want %s", last.Payload, want)
 	}
 }

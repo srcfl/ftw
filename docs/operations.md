@@ -254,6 +254,36 @@ curl -s localhost:8080/api/status | jq '{targets: .dispatch, drivers: .drivers}'
 - Saturation curve in the battery model too restrictive — check `/api/models` for a pathological gain.
 - Sign confusion: remember `bat_w > 0` = charging (load), `bat_w < 0` = discharging (source).
 
+### Ferroamp app shows odd battery power limits
+
+**Symptom:** The Ferroamp app shows values such as `8000 / 8000` under
+the battery power command, or the operator has to enter the Ferroamp app
+and toggle mode after the EMS has restarted or hot-reloaded.
+
+**Interpretation:** That app view is the EnergyHub's external power
+reference / max-min command surface, not the actual battery power. The
+actual EMS reading is `drivers.ferroamp.bat_w` in `/api/status` and the
+`battery_w` time-series metric.
+
+**Fix:** The Ferroamp MQTT driver publishes `auto` on init, watchdog
+fallback, zero battery command, deinit, and cleanup. A clean service
+stop or hot-reload should therefore release the EnergyHub back to
+autonomous self-consumption. If actual battery power still caps below
+hardware capability, set explicit per-driver limits in `config.yaml`;
+unset values fall back to the conservative 5 kW dispatcher default:
+
+```yaml
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    battery_capacity_wh: 15200
+    max_charge_w: 8000
+    max_discharge_w: 8000
+```
+
+Then save `config.yaml` and look for `config reload: applied` in the
+service log.
+
 ### PV prediction wildly off
 
 **Symptom:** `/api/pvmodel` shows huge β coefficients; the twin chart shows e.g. −13 kW for a 10 kW system.

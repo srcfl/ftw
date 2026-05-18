@@ -124,6 +124,11 @@ local function mj_to_wh(mj_val)
     return mj / 3600000
 end
 
+local function publish_auto(trans_id)
+    return host.mqtt_publish("extapi/control/request",
+        string.format('{"transId":"%s","cmd":{"name":"auto"}}', trans_id))
+end
+
 ----------------------------------------------------------------------------
 -- Driver interface
 ----------------------------------------------------------------------------
@@ -154,7 +159,7 @@ function driver_init(config)
     host.log("info", "Ferroamp: sent extapiversion query")
 
     -- Ensure we start in auto mode (clean state)
-    host.mqtt_publish("extapi/control/request", '{"transId":"init","cmd":{"name":"auto"}}')
+    publish_auto("init")
     host.log("info", "Ferroamp: set auto mode on init")
 end
 
@@ -350,8 +355,7 @@ function driver_command(action, power_w, cmd)
             return host.mqtt_publish("extapi/control/request", payload)
         else
             -- Zero: return to auto mode
-            return host.mqtt_publish("extapi/control/request",
-                string.format('{"transId":"%s","cmd":{"name":"auto"}}', tid))
+            return publish_auto(tid)
         end
     elseif action == "curtail" then
         local payload = string.format(
@@ -363,18 +367,20 @@ function driver_command(action, power_w, cmd)
         return host.mqtt_publish("extapi/control/request",
             '{"transId":"ems","cmd":{"name":"pplim","arg":0}}')
     elseif action == "deinit" then
-        return host.mqtt_publish("extapi/control/request",
-            '{"transId":"ems","cmd":{"name":"auto"}}')
+        return publish_auto("ems")
     end
     return false
 end
 
 function driver_default_mode()
-    host.mqtt_publish("extapi/control/request",
-        '{"transId":"watchdog","cmd":{"name":"auto"}}')
+    publish_auto("watchdog")
 end
 
 function driver_cleanup()
+    -- Leave the EnergyHub in autonomous self-consumption when the EMS
+    -- stops or the driver hot-reloads. Otherwise the last forced
+    -- charge/discharge reference can remain visible in the Ferroamp app.
+    pcall(publish_auto, "cleanup")
     ehub_data = nil
     eso_data = nil
     sso_data = nil
