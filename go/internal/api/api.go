@@ -157,6 +157,13 @@ type Server struct {
 	// ~30 SQL round-trips with ~500k rows shipped to Go to at most one.
 	dailyCacheMu sync.Mutex
 	dailyCache   map[string]state.DayEnergy
+
+	// savingsCache mirrors dailyCache for /api/savings/daily. Same
+	// immutable-past-day rationale. Lazily allocated on first request
+	// because the savings endpoint is opt-in (no-op without a configured
+	// price zone), so most boots never need the map.
+	savingsCacheMu sync.Mutex
+	savingsCache   map[string]daySavings
 }
 
 // New creates a new API server.
@@ -216,6 +223,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
 	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
+	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
