@@ -36,13 +36,23 @@ type Store struct {
 
 // Open initializes (or creates) the DB at path. Runs all migrations.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)")
+	// busy_timeout(5000) is mandatory once we allow >1 connection — without
+	// it, concurrent writers race for the WAL lock and SQLITE_BUSY surfaces
+	// to callers immediately. With it, contenders wait up to 5 s for the
+	// lock, which is well within HTTP request budgets and longer than any
+	// real write batch in this codebase.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	// Single connection — SQLite doesn't benefit from pooling
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// WAL mode allows many concurrent readers + one writer. With a single
+	// connection any expensive read (e.g. DailyCostBreakdown) serializes
+	// the entire app on the DB mutex, which is what produced the post-v0.76
+	// "dashboard locked up + control loop stalled" reports. A small pool
+	// lets reads run in parallel while writers still queue safely behind
+	// busy_timeout.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
 	s := &Store{db: db, ts: newInternCache()}
 	if err := s.migrate(); err != nil {
 		db.Close()
@@ -351,8 +361,11 @@ func (s *Store) SaveBatteryModel(name, json string) error {
 // device_id has no matching driver in this config are skipped silently —
 // they belong to drivers the operator has removed from the YAML.
 //
-// Deadlock note: SetMaxOpenConns(1) means we cannot run two queries at
-// once. Pull all device rows BEFORE opening the battery_models query.
+// Pulls all device rows BEFORE opening the battery_models query. Originally
+// required because the pool was capped at 1 connection (overlapping Rows on
+// the same goroutine deadlocked); now harmless under the larger pool but
+// the pattern stays — pre-resolving lookups before the main scan still
+// produces simpler, faster code.
 func (s *Store) LoadAllBatteryModels() (map[string]string, error) {
 	// Phase 1: build device_id → driver_name reverse map.
 	rev := make(map[string]string)
