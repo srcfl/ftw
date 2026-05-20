@@ -1213,14 +1213,21 @@ func TestEnergyDispatchNilPlannedGridWBypassesCap(t *testing.T) {
 	}
 }
 
-// TestEnergyDispatchPlannedGridCapBacksOffDischargeOnOverExport —
-// symmetric to the charge case. Plan: discharge slot, PlannedGridW=−200
-// (expected to export 200 W after covering load). Load drops, live
-// gridW = −3000 (exporting 3 kW), so without the cap the battery
-// would keep discharging at planned power and the extra goes to grid
-// at whatever spot price the slot has. Cap should back off discharge
-// by the gap (≈2800 W).
-func TestEnergyDispatchPlannedGridCapBacksOffDischargeOnOverExport(t *testing.T) {
+// TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge — the cap
+// is deliberately ONE-WAY (charge direction only). Plan: discharge
+// slot, PlannedGridW=−200 (expected export 200 W after covering load).
+// Load drops, live gridW = −3000 (exporting 3 kW). The battery must
+// still deliver its planned discharge — the extra export is bonus
+// revenue at the slot's chosen price, not a problem.
+//
+// Rationale (see dispatch.go cap docstring): the battery delivers
+// planned Wh either way; the extra export comes from load undershoot,
+// not over-discharge. Backing off would leave Wh in the battery for a
+// later slot the DP already evaluated and rejected, undermining the
+// plan. Economics are asymmetric vs the charge case.
+//
+// Regression guard against re-symmetrising the cap.
+func TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1245,12 +1252,12 @@ func TestEnergyDispatchPlannedGridCapBacksOffDischargeOnOverExport(t *testing.T)
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
 	got := targets[0].TargetW
-	// Raw plan: -4000 W. gridErr = -3000 - (-200) = -2800. Cap pulls
-	// target toward 0: -4000 - (-2800) = -1200 W. Tolerance ±300 W
-	// covers slew + slot-time drift.
-	if got < -1500 || got > -900 {
-		t.Errorf("TargetW = %f W — cap should pull discharge back to ~−1200 W "+
-			"(plan −4000 W minus 2800 W of unforecast extra export)", got)
+	// Battery must follow raw plan ~−4000 W (capped by per-cmd 5 kW).
+	// Anything above −3500 means the cap mistakenly fired on discharge.
+	if got > -3500 {
+		t.Errorf("TargetW = %f W — discharge cap fired (regression). "+
+			"The plan-grid cap must be charge-direction-only; extra "+
+			"export during a discharge slot is bonus revenue, not a problem.", got)
 	}
 }
 
