@@ -1053,6 +1053,207 @@ func TestEnergyDispatchHoldsPlanUnderArbitrage(t *testing.T) {
 	}
 }
 
+// ptr is a tiny helper for tests that need a *float64 on SlotDirective.
+func ptr[T any](v T) *T { return &v }
+
+// ---- planner_arbitrage PlannedGridW soft reactive cap ----
+//
+// Community report (2026-05-19, planner_arbitrage): "When the sun goes
+// behind clouds the system compensates with grid import to maintain the
+// planned battery_w. Didn't used to behave that way — battery used to
+// just absorb what surplus existed." Root cause: the energy-allocation
+// path executes BatteryEnergyWh as `remainingWh × 3600 / remainingS`
+// without consulting live gridW. When forecast PV doesn't materialise,
+// the formula still demands the planned charge power and grid fills the
+// gap until the reactive replan trigger (mpc/service.go, 500 Wh PV
+// integral + 60 s cooldown) catches up — typically 10+ minutes.
+//
+// The fix: SlotDirective.PlannedGridW (the plan's own gridW forecast)
+// gets used as a soft reactive cap. When live gridW exceeds plan in
+// the dispatch direction, back off targetTotalW by the gap.
+
+// TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops is the
+// motivating regression. Plan: arbitrage charge slot, 1200 Wh over 15
+// min ≈ 4800 W, with PV forecast 5 kW so gridW forecast ≈ 0. Cloud
+// hits, live PV drops to 1.8 kW (load 0 W), so without the cap the
+// battery would charge 4800 W against 1800 W of available PV → 3000 W
+// of grid import. With the cap the battery target should back off to
+// ~1800 W and grid stays near zero.
+func TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average
+		Strategy:        "arbitrage",
+		PlannedGridW:    ptr(0.0), // plan expected near-zero grid (PV did the work)
+	}
+	// Live: gridW = +3000 (importing 3 kW because PV dropped to 1800 W
+	// vs 5 kW planned, no other load drift). Battery at 0.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -1800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Raw plan: 4800 W. After cap: 4800 - 3000 = 1800 W. Tolerance ±200 W
+	// covers slot-time drift (a few seconds shaves remainingS).
+	if got > 2000 || got < 1500 {
+		t.Errorf("TargetW = %f W — cap should pull battery back to ~1800 W "+
+			"(plan 4800 W minus 3000 W of unforecast grid import), not chase plan against missing PV", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapAllowsPlannedImport — the cap must
+// NOT fire when the plan committed to importing (cheap-grid charge
+// during a low-price slot). PlannedGridW = +2000 (plan expected to
+// import 2 kW to charge). Live gridW = +2000 matches plan. Battery
+// must follow plan; no cap-induced back-off.
+func TestEnergyDispatchPlannedGridCapAllowsPlannedImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 500, // 2000 W average over 15 min
+		Strategy:        "cheap_charge",
+		PlannedGridW:    ptr(2000.0), // plan: import 2 kW to charge
+	}
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 1800 || got > 2200 {
+		t.Errorf("TargetW = %f W — live gridW matches plan, battery must follow plan (~2000 W) "+
+			"without any cap pull-back", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapNoFireInsideDeadband — small live
+// divergences (≤100 W) are meter noise / smoothing residue. The cap
+// must not fire there, otherwise it nibbles at every tick.
+func TestEnergyDispatchPlannedGridCapNoFireInsideDeadband(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // 4800 W average
+		Strategy:        "arbitrage",
+		PlannedGridW:    ptr(0.0),
+	}
+	// Live grid +50 W — inside the 100 W deadband.
+	store := seedStore(50, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 4700 || got > 4900 {
+		t.Errorf("TargetW = %f W — inside the 100 W deadband the cap must stay off "+
+			"and battery follows raw plan (~4800 W)", got)
+	}
+}
+
+// TestEnergyDispatchNilPlannedGridWBypassesCap — legacy callers /
+// tests construct SlotDirective without setting PlannedGridW. The
+// nil pointer is the opt-out signal; behaviour must be unchanged from
+// before the cap landed (battery chases the plan, just like the
+// pre-fix behaviour the community report identified).
+func TestEnergyDispatchNilPlannedGridWBypassesCap(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // 4800 W average
+		Strategy:        "arbitrage",
+		// PlannedGridW intentionally nil
+	}
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// No cap → battery follows plan ~4800 W (pre-fix behaviour).
+	if got < 4700 || got > 4900 {
+		t.Errorf("TargetW = %f W — with PlannedGridW=nil the cap must not fire; "+
+			"behaviour should be identical to pre-fix arbitrage (~4800 W)", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapBacksOffDischargeOnOverExport —
+// symmetric to the charge case. Plan: discharge slot, PlannedGridW=−200
+// (expected to export 200 W after covering load). Load drops, live
+// gridW = −3000 (exporting 3 kW), so without the cap the battery
+// would keep discharging at planned power and the extra goes to grid
+// at whatever spot price the slot has. Cap should back off discharge
+// by the gap (≈2800 W).
+func TestEnergyDispatchPlannedGridCapBacksOffDischargeOnOverExport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000, // -4000 W average discharge
+		Strategy:        "arbitrage",
+		PlannedGridW:    ptr(-200.0),
+	}
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -3500, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -100, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Raw plan: -4000 W. gridErr = -3000 - (-200) = -2800. Cap pulls
+	// target toward 0: -4000 - (-2800) = -1200 W. Tolerance ±300 W
+	// covers slew + slot-time drift.
+	if got < -1500 || got > -900 {
+		t.Errorf("TargetW = %f W — cap should pull discharge back to ~−1200 W "+
+			"(plan −4000 W minus 2800 W of unforecast extra export)", got)
+	}
+}
+
 // ---- planner_self reactive execution (issue #130) ----
 //
 // planner_self promises "never imports to charge, never exports via the

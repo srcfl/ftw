@@ -62,6 +62,22 @@ type SlotDirective struct {
 	SoCTargetPct    float64
 	Strategy        string  // echoed for logging / API; mirrors mpc.Mode
 	PVLimitW        float64 // 0 = no curtail; > 0 = cap aggregate PV output
+
+	// PlannedGridW is the plan's forecast of slot-average gridW given the
+	// planned battery / load / PV mix (site-signed: + = import). The
+	// energy-dispatch path uses it as a soft reactive cap: don't push
+	// live gridW past plan in the dispatch direction. When live PV / load
+	// drifts away from the plan's forecast — e.g. a cloud cuts PV mid-
+	// slot during a planner_arbitrage charge slot that expected to charge
+	// off solar — the cap pulls the battery toward "what would make
+	// live gridW match plan", preventing the energy budget from blindly
+	// driving extra grid import (or, on a discharge slot, extra export).
+	//
+	// Pointer so the zero-value SlotDirective used by existing tests
+	// (and any caller that doesn't know the plan's grid forecast) opts
+	// out of the cap by default. main.go populates it when running
+	// against a real MPC plan.
+	PlannedGridW *float64
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for
@@ -920,6 +936,55 @@ func ComputeDispatch(
 			}
 			if targetTotalW > ceiling {
 				targetTotalW = ceiling
+			}
+		}
+
+		// Plan-grid soft reactive cap. When the plan committed to a
+		// gridW forecast for this slot, don't let the energy-path
+		// target push live gridW past plan in the dispatch direction.
+		//
+		// Catches the "cloud cuts PV mid-charge-slot, energy budget
+		// chases plan via grid import" failure mode: plan thought
+		// gridW ≈ 0 with PV doing the work, PV drops 3 kW, live gridW
+		// imports — without this cap, `remainingWh × 3600 / remainingS`
+		// holds the planned charge power against real (now-grid-fed)
+		// PV deficit until the reactive replan in mpc/service.go:266–290
+		// fires (≥10 min later, gated by the 500 Wh PV-error integral
+		// and the 60 s cooldown). The cap pulls the battery target
+		// toward "what would make live gridW match plan", reducing the
+		// damage in the gap.
+		//
+		// Direction-asymmetric on purpose: only fires when the live
+		// divergence is in the SAME direction as the dispatch. Charging
+		// slot importing more than plan → back off charge. Discharging
+		// slot exporting more than plan → back off discharge. The
+		// opposite directions are handled above:
+		//   - charging slot exporting more than plan → PV surplus
+		//     absorber (line 866) opportunistically adds charge
+		//   - discharging slot importing more than plan → next replan
+		//     handles it (no clamp; the plan still wants the discharge,
+		//     it just turned out to be insufficient)
+		//
+		// 100 W deadband matches IdleGateThresholdW / evActiveThresholdW
+		// elsewhere in this package — below it, the live divergence
+		// is meter noise / smoothing residue and the energy path keeps
+		// following plan.
+		if currentDirective.PlannedGridW != nil {
+			const planGridDeadband = 100.0
+			gridErr := rawGridW - *currentDirective.PlannedGridW
+			switch {
+			case targetTotalW > 0 && gridErr > planGridDeadband:
+				adjusted := targetTotalW - gridErr
+				if adjusted < 0 {
+					adjusted = 0
+				}
+				targetTotalW = adjusted
+			case targetTotalW < 0 && gridErr < -planGridDeadband:
+				adjusted := targetTotalW - gridErr
+				if adjusted > 0 {
+					adjusted = 0
+				}
+				targetTotalW = adjusted
 			}
 		}
 

@@ -921,6 +921,7 @@ func main() {
 			if !ok {
 				return control.SlotDirective{}, false
 			}
+			plannedGridW := d.GridW
 			return control.SlotDirective{
 				SlotStart:       d.SlotStart,
 				SlotEnd:         d.SlotEnd,
@@ -928,6 +929,7 @@ func main() {
 				SoCTargetPct:    d.SoCTargetPct,
 				Strategy:        string(d.Strategy),
 				PVLimitW:        d.PVLimitW,
+				PlannedGridW:    &plannedGridW,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
