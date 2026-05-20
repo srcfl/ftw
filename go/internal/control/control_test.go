@@ -1053,6 +1053,216 @@ func TestEnergyDispatchHoldsPlanUnderArbitrage(t *testing.T) {
 	}
 }
 
+// ---- planner_arbitrage PlannedGridW soft reactive cap ----
+//
+// Community report (2026-05-19, planner_arbitrage): "When the sun goes
+// behind clouds the system compensates with grid import to maintain the
+// planned battery_w. Didn't used to behave that way — battery used to
+// just absorb what surplus existed." Root cause: the energy-allocation
+// path executes BatteryEnergyWh as `remainingWh × 3600 / remainingS`
+// without consulting live gridW. When forecast PV doesn't materialise,
+// the formula still demands the planned charge power and grid fills the
+// gap until the reactive replan trigger (mpc/service.go, 500 Wh PV
+// integral + 60 s cooldown) catches up — typically 10+ minutes.
+//
+// The fix: SlotDirective.PlannedGridW (the plan's own gridW forecast)
+// gets used as a soft reactive cap. When live gridW exceeds plan in
+// the dispatch direction, back off targetTotalW by the gap.
+
+// TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops is the
+// motivating regression. Plan: arbitrage charge slot, 1200 Wh over 15
+// min ≈ 4800 W, with PV forecast 5 kW so gridW forecast ≈ 0. Cloud
+// hits, live PV drops to 1.8 kW (load 0 W), so without the cap the
+// battery would charge 4800 W against 1800 W of available PV → 3000 W
+// of grid import. With the cap the battery target should back off to
+// ~1800 W and grid stays near zero.
+func TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average
+		Strategy:        "arbitrage",
+		PlannedGridW:    0, // plan expected near-zero grid (PV did the work)
+		HasPlannedGridW: true,
+	}
+	// Live: gridW = +3000 (importing 3 kW because PV dropped to 1800 W
+	// vs 5 kW planned, no other load drift). Battery at 0.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -1800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Raw plan: 4800 W. After cap: 4800 - 3000 = 1800 W. Tolerance ±200 W
+	// covers slot-time drift (a few seconds shaves remainingS).
+	if got > 2000 || got < 1500 {
+		t.Errorf("TargetW = %f W — cap should pull battery back to ~1800 W "+
+			"(plan 4800 W minus 3000 W of unforecast grid import), not chase plan against missing PV", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapAllowsPlannedImport — the cap must
+// NOT fire when the plan committed to importing (cheap-grid charge
+// during a low-price slot). PlannedGridW = +2000 (plan expected to
+// import 2 kW to charge). Live gridW = +2000 matches plan. Battery
+// must follow plan; no cap-induced back-off.
+func TestEnergyDispatchPlannedGridCapAllowsPlannedImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 500, // 2000 W average over 15 min
+		Strategy:        "cheap_charge",
+		PlannedGridW:    2000, // plan: import 2 kW to charge
+		HasPlannedGridW: true,
+	}
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 1800 || got > 2200 {
+		t.Errorf("TargetW = %f W — live gridW matches plan, battery must follow plan (~2000 W) "+
+			"without any cap pull-back", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapNoFireInsideDeadband — small live
+// divergences (≤100 W) are meter noise / smoothing residue. The cap
+// must not fire there, otherwise it nibbles at every tick.
+func TestEnergyDispatchPlannedGridCapNoFireInsideDeadband(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // 4800 W average
+		Strategy:        "arbitrage",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// Live grid +50 W — inside the 100 W deadband.
+	store := seedStore(50, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 4700 || got > 4900 {
+		t.Errorf("TargetW = %f W — inside the 100 W deadband the cap must stay off "+
+			"and battery follows raw plan (~4800 W)", got)
+	}
+}
+
+// TestEnergyDispatchUnsetPlannedGridWBypassesCap — legacy callers /
+// tests construct SlotDirective without setting PlannedGridW (and
+// without flipping HasPlannedGridW). HasPlannedGridW=false is the
+// opt-out signal; behaviour must be unchanged from before the cap
+// landed (battery chases the plan, just like the pre-fix behaviour
+// the community report identified).
+func TestEnergyDispatchUnsetPlannedGridWBypassesCap(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // 4800 W average
+		Strategy:        "arbitrage",
+		// PlannedGridW + HasPlannedGridW intentionally zero-valued
+	}
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// No cap → battery follows plan ~4800 W (pre-fix behaviour).
+	if got < 4700 || got > 4900 {
+		t.Errorf("TargetW = %f W — with HasPlannedGridW=false the cap must not fire; "+
+			"behaviour should be identical to pre-fix arbitrage (~4800 W)", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge — the cap
+// is deliberately ONE-WAY (charge direction only). Plan: discharge
+// slot, PlannedGridW=−200 (expected export 200 W after covering load).
+// Load drops, live gridW = −3000 (exporting 3 kW). The battery must
+// still deliver its planned discharge — the extra export is bonus
+// revenue at the slot's chosen price, not a problem.
+//
+// Rationale (see dispatch.go cap docstring): the battery delivers
+// planned Wh either way; the extra export comes from load undershoot,
+// not over-discharge. Backing off would leave Wh in the battery for a
+// later slot the DP already evaluated and rejected, undermining the
+// plan. Economics are asymmetric vs the charge case.
+//
+// Regression guard against re-symmetrising the cap.
+func TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -1000, // -4000 W average discharge
+		Strategy:        "arbitrage",
+		PlannedGridW:    -200,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(-3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -3500, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -100, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Battery must follow raw plan ~−4000 W (capped by per-cmd 5 kW).
+	// Anything above −3500 means the cap mistakenly fired on discharge.
+	if got > -3500 {
+		t.Errorf("TargetW = %f W — discharge cap fired (regression). "+
+			"The plan-grid cap must be charge-direction-only; extra "+
+			"export during a discharge slot is bonus revenue, not a problem.", got)
+	}
+}
+
 // ---- planner_self reactive execution (issue #130) ----
 //
 // planner_self promises "never imports to charge, never exports via the

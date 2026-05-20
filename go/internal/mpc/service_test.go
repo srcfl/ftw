@@ -321,6 +321,7 @@ func TestSlotDirectiveAt(t *testing.T) {
 				SlotLenMin:  slotLenMin,
 				BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
 				SoCPct:      45.5,
+				GridW:       -150, // plan expects 150 W export
 			}},
 		},
 	}
@@ -343,6 +344,12 @@ func TestSlotDirectiveAt(t *testing.T) {
 	}
 	if d.Strategy != ModeArbitrage {
 		t.Errorf("Strategy = %v, want arbitrage", d.Strategy)
+	}
+	// GridW must surface unchanged from the plan action — this is the
+	// wiring the control-layer PlannedGridW cap depends on. If it
+	// silently breaks, the cap silently never fires.
+	if d.GridW != -150 {
+		t.Errorf("GridW = %f, want −150 (must propagate from Action.GridW)", d.GridW)
 	}
 }
 

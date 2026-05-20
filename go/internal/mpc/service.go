@@ -210,6 +210,16 @@ type SlotDirective struct {
 	// site's PV-supporting drivers and sends `curtail` commands.
 	PVLimitW float64
 
+	// GridW is the plan's forecast of slot-average grid power given the
+	// planned battery / load / PV mix (site-signed: + = import). The
+	// dispatch layer treats it as a CHARGE-ONLY soft reactive cap on
+	// the energy path — on a charging slot, the battery target is
+	// pulled back when live gridW imports more than plan. Discharge
+	// slots are intentionally not clamped (extra export = bonus revenue
+	// at the slot's chosen price). See control.SlotDirective.PlannedGridW
+	// and docs/safety.md §8 for the asymmetry rationale.
+	GridW float64
+
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
 	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
 	// the plan allocated. Empty map when no loadpoints are
@@ -260,6 +270,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			SoCTargetPct:    a.SoCPct,
 			Strategy:        s.Defaults.Mode,
 			PVLimitW:        a.PVLimitW,
+			GridW:           a.GridW,
 		}
 		// EV energy budget for the slot (single-loadpoint for now —
 		// keyed under lpID snapshot so the dispatch layer routes

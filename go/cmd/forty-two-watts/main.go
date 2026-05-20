@@ -928,6 +928,8 @@ func main() {
 				SoCTargetPct:    d.SoCTargetPct,
 				Strategy:        string(d.Strategy),
 				PVLimitW:        d.PVLimitW,
+				PlannedGridW:    d.GridW,
+				HasPlannedGridW: true,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
