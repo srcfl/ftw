@@ -18,7 +18,7 @@ grid connection**.
 
 | Strategy | Grid-charge? | Battery export? | When to pick |
 |---|---|---|---|
-| **Self-consumption** | no | no | Safest. Battery only covers local load or absorbs PV surplus. |
+| **Self-consumption** | no | no | Safest. Battery covers local load and absorbs PV surplus without intentional battery export. |
 | **Cheap charging** | yes (when cheap) | no | Good when export tariffs are low. Top up overnight, use during peaks. |
 | **Arbitrage** | yes | yes | Biggest savings on volatile days. Charges cheap, discharges into expensive hours. |
 
@@ -32,20 +32,21 @@ Legacy modes (`idle` / manual `self_consumption` / `peak_shaving` /
 
 | Strategy | Dispatch layer |
 |---|---|
-| Self-consumption (Smart) | Reactive PI-on-gridW=0 + per-slot idle gate. The plan tells the EMS **whether** to participate this slot — the battery's power is still driven by the live meter, never by the plan's Wh allocation. This keeps the "never import / never export via battery" contract honest when the forecast is wrong. |
+| Self-consumption (Smart) | Reactive self-consumption + per-slot idle gate. The plan tells the EMS **whether** to participate this slot — participant slots behave like manual self-consumption, while idle/charge slots hold the battery at 0 or above. |
 | Cheap charging | Energy-allocation (default). Plan emits Wh-per-slot; EMS converts to W in real time; grid is the residual. See `docs/plan-ems-contract.md`. |
 | Arbitrage | Same as Cheap charging — energy-allocation. |
 
 When the plan is stale (> 30 min old) or absent, every strategy falls
-back to manual reactive self-consumption. Operators see `plan_stale: true`
+back to manual self-consumption. Operators see `plan_stale: true`
 in the status endpoint.
 
 Under Self-consumption, a slot where the DP allocated `|battery_energy_wh|
 / slot_hours < 100 W` (avg) is interpreted as **idle**: the EMS holds the
 battery at 0 even when live PV surplus exists, deferring absorption to a
 later slot the DP judged more profitable. Any larger allocation flips the
-slot to **participate reactively** — i.e. behave exactly like manual
-self-consumption.
+slot to **participate** — i.e. behave exactly like manual self-consumption:
+charge live surplus, or discharge to cover live import, without intentionally
+exporting via the battery.
 
 ---
 

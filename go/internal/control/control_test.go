@@ -124,7 +124,8 @@ func TestDeadbandSkipsWithinTolerance(t *testing.T) {
 }
 
 func TestSelfConsumptionDischargesOnImport(t *testing.T) {
-	// grid = +1000 (importing too much) → want battery to discharge (negative target)
+	// grid = +1000 (importing). Classic self-consumption drives the
+	// site meter toward zero, so it may discharge to cover local load.
 	store := seedStore(1000, []struct {
 		name          string
 		currentW, soc float64
@@ -139,8 +140,35 @@ func TestSelfConsumptionDischargesOnImport(t *testing.T) {
 		t.Fatalf("expected 1 target")
 	}
 	if targets[0].TargetW >= 0 {
-		t.Errorf("site convention: importing should lead to NEGATIVE (discharge) target, got %f",
-			targets[0].TargetW)
+		t.Errorf("self_consumption should discharge on import, got %f", targets[0].TargetW)
+	}
+}
+
+func TestPlannerSelfIdleGateStopsExistingDischargeInsideDeadband(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -900, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 stop target, got %d", len(targets))
+	}
+	if targets[0].TargetW != 0 {
+		t.Errorf("planner_self idle gate must stop an already-discharging battery, got %f", targets[0].TargetW)
 	}
 }
 
@@ -161,6 +189,79 @@ func TestSelfConsumptionChargesOnExport(t *testing.T) {
 	}
 	if targets[0].TargetW <= 0 {
 		t.Errorf("exporting should lead to POSITIVE (charge) target, got %f", targets[0].TargetW)
+	}
+}
+
+func TestPlannerSelfIdlePlanNeverDischargesIndividualBatteryWhileEVCharging(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	store := seedStore(2980, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 338, 0.14},
+		{"sungrow", -991, 0.23},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.EVChargingW = 9240
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{
+		"ferroamp": 15200,
+		"sungrow":  9600,
+	}), 11040)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d: %+v", len(targets), targets)
+	}
+	for _, tgt := range targets {
+		if tgt.TargetW < 0 {
+			t.Errorf("%s target = %f W — planner_self idle slots must not keep a battery discharging", tgt.Driver, tgt.TargetW)
+		}
+	}
+}
+
+func TestChargePlanNeverDischargesIndividualBatteryAfterSlew(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1000,
+		Strategy:        "cheap_charge",
+	}
+	store := seedStore(2980, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 338, 0.14},
+		{"sungrow", -991, 0.23},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerCheap
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 500
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{
+		"ferroamp": 15200,
+		"sungrow":  9600,
+	}), 11040)
+	if len(targets) != 2 {
+		t.Fatalf("expected 2 targets, got %d: %+v", len(targets), targets)
+	}
+	for _, tgt := range targets {
+		if tgt.TargetW < 0 {
+			t.Errorf("%s target = %f W — a charge/idle plan must not keep an individual battery discharging", tgt.Driver, tgt.TargetW)
+		}
 	}
 }
 
@@ -441,7 +542,7 @@ func TestFullCycleRespondsToTransient(t *testing.T) {
 		t.Fatal("should dispatch on load step")
 	}
 	if targets[0].TargetW >= 0 {
-		t.Errorf("import → discharge target (negative), got %f", targets[0].TargetW)
+		t.Errorf("self_consumption should discharge on import, got %f", targets[0].TargetW)
 	}
 }
 
@@ -585,13 +686,18 @@ func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
 	}
 }
 
-// TestBatteryCoversEV_OnIncludesEVInGrid covers the opt-in scenario:
-// high grid prices now, cheap solar later → operator flips the
-// override and the battery discharges to cover full grid load
-// including EV. The dispatch should produce a target that actively
-// pulls the battery into discharge territory for the full 3000 W
-// import, not just the 500 W house portion.
-func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
+func TestSurplusOnlyEVDoesNotAutoEnableBatteryCoversEV(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -800, // participant slot: classic self-consumption
+		Strategy:        "self_consumption",
+	}
+	// Site is importing because the EV is larger than the PV surplus:
+	// raw grid = +3 kW, EV = 9 kW, so house-side grid is -6 kW.
+	// BatteryCoversEV=false means the battery must not discharge into
+	// that EV import; reserve math may charge up to surplus headroom.
 	store := seedStore(3000, []struct {
 		name          string
 		currentW, soc float64
@@ -599,13 +705,43 @@ func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.EVChargingW = 9000
+	st.EVSurplusOnlyReserveW = 11000
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < 0 {
+		t.Errorf("surplus_only EV must not auto-enable battery-to-EV discharge, got %f", targets[0].TargetW)
+	}
+}
+
+// TestBatteryCoversEV_OnIncludesEVInPeakShaving covers the opt-in scenario
+// outside self-consumption: peak-shaving may discharge to protect an import
+// ceiling, and BatteryCoversEV=true means the full EV draw participates.
+func TestBatteryCoversEV_OnIncludesEVInPeakShaving(t *testing.T) {
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.EVChargingW = 2500
 	st.BatteryCoversEV = true // opt in — battery covers everything
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	if len(targets) == 0 {
-		t.Fatal("expected a dispatch target when grid is 3 kW over target, got none")
+		t.Fatal("expected a dispatch target when grid is 3 kW over peak limit, got none")
 	}
 	// With flag on, the full 3000 W import should drive battery toward
 	// discharge (negative target in site convention). Require at least
@@ -689,7 +825,8 @@ func TestSlewRespectsRateWhenTracking(t *testing.T) {
 		{"pixii", -1000, 0.6},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.SlewRateW = 500
 	st.PrevTargets["pixii"] = -1000
 	// PI will want a big discharge to cover the +1500 import.
@@ -1093,11 +1230,13 @@ func TestEnergyDispatchFallsBackToLegacyWhenDirectiveUnavailable(t *testing.T) {
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when both energy + legacy paths lack a plan")
 	}
-	// With grid = +1000 and target = 0, PI should command some charge-absorption
-	// (negative correction if batteries > 0, toward discharge). Just assert the
-	// path dispatched something.
+	// With grid = +1000 and target = 0, stale fallback behaves like
+	// self-consumption and discharges toward grid zero.
 	if len(targets) == 0 {
 		t.Error("expected some dispatch under legacy fallback, got nothing")
+	}
+	if len(targets) > 0 && targets[0].TargetW >= 0 {
+		t.Errorf("stale planner fallback should discharge like self_consumption, got %f", targets[0].TargetW)
 	}
 }
 
@@ -1108,9 +1247,8 @@ func TestEnergyDispatchFallsBackToLegacyWhenDirectiveUnavailable(t *testing.T) {
 // cycle, and the EMS just executes it. Live export is a legal outcome.
 //
 // Contrast: under planner_self (see TestPlannerSelf* below) the same plan
-// would be ignored in favour of reactive self-consumption — because that
-// mode's contract is "never export via battery" regardless of what the
-// forecast-based plan prescribes.
+// is treated only as idle-vs-participate. Participant slots use live
+// self-consumption instead of blindly executing the forecasted Wh.
 func TestEnergyDispatchHoldsPlanUnderArbitrage(t *testing.T) {
 	now := time.Now()
 	// Plan: discharge 552 Wh this slot. In W terms that's −2208.
@@ -1354,18 +1492,12 @@ func TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge(t *testing.T) {
 
 // ---- planner_self reactive execution (issue #130) ----
 //
-// planner_self promises "never imports to charge, never exports via the
-// battery" (UI tooltip + docs/mpc-planner.md). The DP enforces this on
-// forecast, but the energy-allocation dispatch path honours plan Wh
-// regardless of live grid flow — so when PV or load diverges from the
-// forecast the battery can cross the zero-grid invariant both ways.
-//
-// The fix: planner_self bypasses energy-allocation and uses reactive
-// self-consumption (PI → gridW=0), with the plan providing only a
-// per-slot *idle gate*. When the DP decided not to participate this
-// slot (|planned BatteryEnergyWh| < IdleGateThresholdW when averaged
-// over the slot) the EMS holds the battery at 0 and lets PV flow to
-// grid — deferring opportunity to a richer later slot.
+// planner_self promises no grid-charging and no battery export. It bypasses
+// energy-allocation and uses reactive self-consumption, with the plan
+// providing a per-slot idle/participate gate. When the DP decided not to
+// participate this slot (|planned BatteryEnergyWh| < IdleGateThresholdW when
+// averaged over the slot) the EMS holds the battery at 0 and lets the grid
+// handle the residual — deferring opportunity to a richer later slot.
 
 // Motivating scenario (operator report 2026-04-19): plan wanted to charge
 // aggressively (forecast said big PV surplus), but actual PV came in low.
@@ -1452,11 +1584,11 @@ func TestPlannerSelfIdleGateHoldsBatteryAtZero(t *testing.T) {
 	}
 }
 
-// Plan says discharge this slot (above idle threshold) and live grid is
-// importing. Reactive PI drives battery to cover live import exactly —
-// not the planned Wh magnitude (which was larger because forecast load
-// was higher than reality). Never crosses into export.
-func TestPlannerSelfParticipatesReactivelyCoveringImport(t *testing.T) {
+// Plan says participate this slot (above idle threshold) and live grid is
+// importing. planner_self then behaves like classic self-consumption: the
+// battery may discharge to pull the site meter toward zero, but it does not
+// blindly execute the planned Wh as an export command.
+func TestPlannerSelfParticipatesReactivelyDischargesOnImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1464,8 +1596,9 @@ func TestPlannerSelfParticipatesReactivelyCoveringImport(t *testing.T) {
 		BatteryEnergyWh: -800, // plan: discharge 800 Wh ≈ −3.2 kW avg
 		Strategy:        "self_consumption",
 	}
-	// Live: importing 2 kW. Reactive PI wants to kill the import —
-	// battery should discharge ~2 kW (NOT the planned −3.2 kW).
+	// Live: importing 2 kW. Reactive PI wants to reduce the import —
+	// battery should discharge from live error (not blindly at the planned
+	// −3.2 kW average).
 	store := seedStore(2000, []struct {
 		name          string
 		currentW, soc float64
@@ -1485,21 +1618,14 @@ func TestPlannerSelfParticipatesReactivelyCoveringImport(t *testing.T) {
 	}
 	got := targets[0].TargetW
 	if got >= 0 {
-		t.Errorf("TargetW = %f W — expected discharge (negative) to cover live import", got)
-	}
-	// Bounded by live import magnitude, not the plan's larger ask.
-	// PI with Kp=0.5 on 2 kW error gives ~−1000 W first cycle.
-	// Anything past −2500 W would be over-discharging toward export.
-	if got < -2500 {
-		t.Errorf("TargetW = %f W — reactive discharge should be bounded by live import (~2 kW), not the planned −3.2 kW", got)
+		t.Errorf("TargetW = %f W — planner_self participant slot should discharge on live import", got)
 	}
 }
 
-// Plan sign is not a command sign in planner_self. Once a slot is above the
-// idle threshold, live grid decides direction. This catches the regression
-// where applyPlanSignFloor treated a plan-charge slot as "may only charge",
-// so a cloudy/load-heavy tick was held at 0 instead of covering live import.
-func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
+// A charge/idle planner_self slot must not discharge just because the live
+// meter is importing. It waits for the next replan rather than spending SoC
+// against a slot the DP selected for saving or charging.
+func TestPlannerSelfPlanChargeDoesNotDischargeOnLiveImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1524,8 +1650,8 @@ func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if targets[0].TargetW >= 0 {
-		t.Errorf("TargetW = %f W — planner_self must cover live import even when the plan slot was charge", targets[0].TargetW)
+	if targets[0].TargetW < 0 {
+		t.Errorf("TargetW = %f W — planner_self must not discharge on live import even when the plan slot was charge", targets[0].TargetW)
 	}
 }
 
@@ -1646,10 +1772,10 @@ func TestPlannerSelfRespectsEVChargingSignal(t *testing.T) {
 }
 
 // When the plan is absent (SlotDirective returns false) planner_self
-// degrades to plain manual self_consumption — same behaviour as the
-// operator gets today when they pick "Self-consumption" without planner.
-func TestPlannerSelfWithoutPlanActsLikeManual(t *testing.T) {
-	// Live: importing 1 kW — same setup as TestSelfConsumptionDischargesOnImport.
+// degrades to plain manual self_consumption: reactive grid-zero control.
+func TestPlannerSelfWithoutPlanActsLikeManualSelfConsumption(t *testing.T) {
+	// Live: importing 1 kW. Stale planner_self must fall back to classic
+	// self-consumption and discharge toward grid zero.
 	store := seedStore(1000, []struct {
 		name          string
 		currentW, soc float64
@@ -1669,7 +1795,7 @@ func TestPlannerSelfWithoutPlanActsLikeManual(t *testing.T) {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
 	if targets[0].TargetW >= 0 {
-		t.Errorf("TargetW = %f W — planner_self with stale plan must still cover import (fall through to reactive self_consumption)", targets[0].TargetW)
+		t.Errorf("TargetW = %f W — planner_self with stale plan should discharge like manual self_consumption", targets[0].TargetW)
 	}
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
@@ -2401,8 +2527,9 @@ func TestPlanSignFloorIgnoresManualModes(t *testing.T) {
 
 func TestPlanSignFloorIgnoresPlannerSelf(t *testing.T) {
 	// planner_self uses the plan only for idle-vs-participate. A non-idle
-	// slot must be free to move opposite the plan sign when the live meter
-	// requires it, otherwise it is no longer self-consumption.
+	// slot is handled by the self-consumption path, not the planner sign
+	// floor. Charge/idle planner_self slots get their no-discharge floor
+	// separately; participant slots can discharge to hold grid near zero.
 	st := NewState(0, 0, "ferroamp")
 	st.Mode = ModePlannerSelf
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
@@ -2533,8 +2660,9 @@ func TestBatteryManualHoldExpiresWithTime(t *testing.T) {
 }
 
 func TestBatteryManualHoldChargesAtSetpoint(t *testing.T) {
-	// grid = +500 (some import). Without hold, self-consumption would
-	// command discharge ≈ -500. Hold installs +3000 → expect charge.
+	// grid = +500 (some import). The manual hold is an explicit operator
+	// override and should charge despite live self-consumption wanting
+	// to reduce import.
 	store := seedStore(500, []struct {
 		name          string
 		currentW, soc float64
@@ -2693,9 +2821,9 @@ func TestBatteryManualHoldExpiryRevertsToMode(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("expected 1 target after expiry, got %d", len(targets))
 	}
-	// Self-consumption with grid=+1500 should command discharge (negative).
+	// Self-consumption with grid=+1500 discharges toward grid zero.
 	if targets[0].TargetW >= 0 {
-		t.Errorf("expired hold should revert to self_consumption (discharge expected), got %f",
+		t.Errorf("expired hold should revert to self_consumption discharge, got %f",
 			targets[0].TargetW)
 	}
 }
@@ -2797,7 +2925,8 @@ func TestMeterClampStopsExportOnLoadOverPrediction(t *testing.T) {
 		{"ferroamp", 0, 0.6},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.SlewRateW = 100000 // big so slew doesn't mask the clamp
 	// Force windup that would otherwise push past idealTarget=-2000.
 	// Repeated PI.Update at gridW=2000 accumulates integral until output
@@ -2868,7 +2997,8 @@ func TestMeterClampStopsExportOnLoadOverPredictionWithBatteryAlreadyDischarging(
 		{"ferroamp", -200, 0.6},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.SlewRateW = 100000
 	// Wind up the PI hard enough that its one-tick output, added to the
 	// existing -200 W, lands well past idealTarget.
@@ -2907,7 +3037,8 @@ func TestMeterClampHoldsSteadyOnWrongDirectionWindup(t *testing.T) {
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.SlewRateW = 100000
 	// Manufacture wrong-direction windup: feed the PI a long history of
 	// negative measurements (gridW < target) so the integrator climbs
@@ -2950,7 +3081,8 @@ func TestMeterClampConvergesWithBatteryAlreadyDischarging(t *testing.T) {
 		{"ferroamp", -422, 0.8},
 	})
 	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModePeakShaving
+	st.PeakLimitW = 0
 	st.SlewRateW = 100000 // big so the convergence isn't slew-limited
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	var sum float64
@@ -2987,7 +3119,7 @@ func TestMeterClampRespectsNonZeroGridTarget(t *testing.T) {
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(-3000, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
+	st.Mode = ModeWeighted
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 	var sum float64

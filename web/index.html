@@ -289,7 +289,7 @@
       <div class="card control-card control-strategy">
         <div class="card-label">Strategy</div>
         <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
-          <button data-mode="planner_self" title="Smart self-consumption with forecast-aware planning — never grid-charge, never export via battery">Smart self-consumption (planner)</button>
+          <button data-mode="planner_self" title="Smart self-consumption with forecast-aware grid-zero control — never grid-charge, never battery-export">Smart self-consumption (planner)</button>
           <button data-mode="planner_cheap" title="Plan charges batteries when grid prices are low (still never exports via battery)">Cheap charging</button>
           <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours">Arbitrage</button>
         </div>
@@ -427,10 +427,8 @@
       <div class="drivers-grid" id="drivers-grid"></div>
     </section>
 
-    <!-- Battery Models — now embedded inline in each driver card (see
-         renderDrivers + models.js renderInlineModel). This section keeps
-         the Self-tune button accessible and acts as a fallback container
-         when a model is reported for a driver we don't render. -->
+    <!-- Calibration — model internals stay hidden from normal driver cards;
+         this keeps the manual self-tune entry point available. -->
     <section id="models-section" class="advanced-only">
       <div class="section-header">
         <h2 style="font-size:0.9rem;color:var(--text-dim)">Calibration</h2>

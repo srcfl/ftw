@@ -26,7 +26,7 @@ const (
 	// missing, we fall back to self_consumption behavior and log.
 	// The three flavors mirror mpc.Mode — the difference is only what
 	// the planner is allowed to do when it builds the plan:
-	//   - planner_self:      no grid-charging, no export discharge
+	//   - planner_self:      no grid-charging, no battery export
 	//   - planner_cheap:     grid-charge ok, no export discharge
 	//   - planner_arbitrage: full freedom within SoC + power limits
 	ModePlannerSelf      Mode = "planner_self"
@@ -492,11 +492,10 @@ func ComputeDispatch(
 	//
 	// Three execution paths, selected by the operator-picked planner mode:
 	//
-	//   * planner_self — reactive self-consumption (PI → gridW=0) with a
-	//     per-slot idle gate from the plan. Honours the mode's contract
-	//     ("never imports to charge, never exports via the battery")
-	//     against forecast error. See docs/plan-ems-contract.md §"Exception:
-	//     planner_self" and issue #130.
+	//   * planner_self — reactive self-consumption with a per-slot idle gate
+	//     from the plan. Honours the mode's contract ("never imports to
+	//     charge, never exports via the battery") against forecast error. See
+	//     docs/plan-ems-contract.md §"Exception: planner_self" and issue #130.
 	//
 	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
 	//     (default): energy-allocation. Plan returns battery energy for
@@ -680,32 +679,11 @@ func ComputeDispatch(
 	// only — a sensible default that avoids shuffling energy through the
 	// inverter twice on a normal day.
 	//
-	// BatteryCoversEV (default false) flips this: the operator opts in to
-	// have the battery discharge into the EV. Useful when grid prices are
-	// high right now but expected to drop later (e.g. solar coming up), so
-	// it's cheaper to drain the battery now and refill it off-peak. All
-	// clamps (SoC, per-driver MaxDischargeW, fuse guard) still apply —
-	// exceeding battery capacity just means the residual comes from grid.
+	// BatteryCoversEV (default false) flips this in modes where the
+	// operator wants batteries to cover EV draw. In normal self-consumption
+	// the EV import is left to the grid unless BatteryCoversEV is enabled.
 	gridW := rawGridW
-	// Surplus-only EV transient cover: when an LP is in surplus_only mode
-	// AND the EV is currently drawing AND the site is importing, the EV
-	// is drawing more than the available surplus. This typically happens
-	// during the 5–15 s window after surplus_only is freshly enabled
-	// (the EV ramps current down through Easee Cloud + the car's onboard
-	// charger — both are slow), or during a sudden cloud transient. The
-	// home battery (Pixii) responds in <1 s, so let it cover the import
-	// burst until the EV ramp-down completes. Mechanism: don't subtract
-	// EV from gridW, so the PI sees the real import and discharges
-	// battery accordingly. Self-deactivates the moment grid goes
-	// negative again — at that point EV draw matches surplus and there's
-	// no import to cover, so steady-state surplus_only behavior is
-	// unchanged. The pre-existing reserve cap on the CHARGE side still
-	// stops the battery from competing with the EV for surplus when PV
-	// exceeds load+EV.
 	coverEV := state.BatteryCoversEV
-	if !coverEV && state.EVSurplusOnlyReserveW > 0 && state.EVChargingW > 0 && rawGridW > 0 {
-		coverEV = true
-	}
 	if !coverEV {
 		gridW -= state.EVChargingW
 	}
@@ -747,6 +725,12 @@ func ComputeDispatch(
 		state.LastTargets = nil
 		return nil
 	}
+	// Planner slots that are idle/charge-only must not leave an individual
+	// battery discharging just because slew anchored from a negative live
+	// reading. Plain self_consumption remains the classic grid-zero mode:
+	// it may discharge to cover local load and charge from live surplus.
+	planNonDischargeIntent := !manualHoldActive && planHasNonDischargeIntent(state)
+	noSelfDischarge := (!manualHoldActive && plannerSelfIdleGate) || planNonDischargeIntent
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -847,14 +831,7 @@ func ComputeDispatch(
 		// TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold,
 		// TestEnergyDispatchClampsDischargeWhenEVActuallyCharging.
 		//
-		// EXCEPTION: surplus-only transient cover. Same gate as the
-		// rawGridW-subtraction path above — when a surplus_only LP is
-		// drawing more than current surplus (site importing), the battery
-		// is allowed to bridge the EV ramp-down for ~10 s while the
-		// Easee/car-side current ramp completes. The cap reverts the
-		// moment grid goes negative.
 		evActive := state.EVChargingW > evActiveThresholdW
-		surplusTransient := state.EVSurplusOnlyReserveW > 0 && evActive && rawGridW > 0
 		// CANONICAL "battery may not feed EV" accounting. The MPC's
 		// NoBatteryToEV DP feasibility rule (mpc.go, see the
 		// houseResidualW check inside the action loop) mirrors this
@@ -864,7 +841,7 @@ func ComputeDispatch(
 		// predicate into a small helper consumed by both this clamp
 		// and the DP rule, so a future change to the accounting can't
 		// drift between plan and runtime.
-		if !state.BatteryCoversEV && !surplusTransient && evActive && targetTotalW < 0 {
+		if !state.BatteryCoversEV && evActive && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW
 			if targetTotalW < reactiveTotal {
@@ -1075,13 +1052,15 @@ func ComputeDispatch(
 		// the reserve. Falling through forces a fresh dispatch that
 		// drives the battery toward 0 (or the post-PI cap below).
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
-		if !surplusActive && math.Abs(errW) < state.GridToleranceW {
+		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
+			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) {
 			return nil
 		}
 
 		// Outer PI — drives total correction we want across all batteries.
-		// Site convention: gridW positive = too much import → we want to discharge
-		// batteries (site-signed correction should be negative).
+		// Site convention: gridW positive = too much import. Modes that may
+		// discharge ask batteries for negative power; planner idle/charge
+		// slots floor that negative target to 0 below.
 		// PI setpoint = GridTargetW, measurement = gridW.
 		// For PeakShaving we feed a slightly different measurement so the same PI works.
 		var piMeasurement float64
@@ -1202,6 +1181,12 @@ func ComputeDispatch(
 				if targetTotal2 > ceiling {
 					totalCorrection = ceiling - currentTotal
 				}
+			}
+		}
+		if noSelfDischarge {
+			targetTotal2 := currentTotal + totalCorrection
+			if targetTotal2 < 0 {
+				totalCorrection = -currentTotal
 			}
 		}
 	}
@@ -1385,16 +1370,20 @@ func ComputeDispatch(
 	//
 	// Only applied in the energy planner modes. Manual modes have no plan
 	// to disagree with, and planner_self deliberately ignores plan sign:
-	// its plan contribution is only idle-vs-participate, while the live
-	// meter decides charge/discharge direction. forceFuseDischarge runs
-	// AFTER this so a fuse overflow can still drive discharge regardless
-	// of plan intent.
+	// its plan contribution is idle-vs-participate; when it participates,
+	// the live self-consumption controller may charge or discharge to
+	// hold the grid near zero. forceFuseDischarge runs AFTER this
+	// so a fuse overflow can still drive discharge regardless of plan
+	// intent.
 	//
 	// Skipped when a manual hold is active: the operator is
 	// deliberately overriding the planner, so a sign mismatch with the
 	// plan is the intended behaviour, not a bug to clamp out.
 	if !manualHoldActive {
 		raw = applyPlanSignFloor(raw, state)
+	}
+	if noSelfDischarge {
+		raw = floorNegativeTargets(raw)
 	}
 
 	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
@@ -1645,6 +1634,49 @@ func distributeByCapacity(bats []batteryInfo, desiredTotal, totalCap float64) []
 		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
 	}
 	return out
+}
+
+func anyBatteryDischarging(bats []batteryInfo) bool {
+	for _, b := range bats {
+		if b.currentW < -1 {
+			return true
+		}
+	}
+	return false
+}
+
+func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
+	for i := range targets {
+		if targets[i].TargetW < 0 {
+			targets[i].TargetW = 0
+			targets[i].Clamped = true
+		}
+	}
+	return targets
+}
+
+func planHasNonDischargeIntent(state *State) bool {
+	if state == nil || !state.Mode.IsPlannerMode() {
+		return false
+	}
+	const idleWh = 50.0
+	const idleGridW = 100.0
+	if state.SlotDirective != nil {
+		if dir, ok := state.SlotDirective(time.Now()); ok {
+			return dir.BatteryEnergyWh >= -idleWh
+		}
+	}
+	if state.PlanTarget != nil {
+		if modeStr, gridW, ok := state.PlanTarget(time.Now()); ok {
+			switch Mode(modeStr) {
+			case ModeCharge:
+				return true
+			case ModeSelfConsumption:
+				return gridW >= -idleGridW
+			}
+		}
+	}
+	return false
 }
 
 // distributePriority assigns correction to the primary battery first, falling

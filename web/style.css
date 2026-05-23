@@ -692,21 +692,6 @@ body { padding-bottom: 28px; }
   font-size: 0.75rem;
 }
 
-/* Inline model panel embedded inside each driver card */
-.driver-model-panel {
-  margin-top: 0.75rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--border);
-}
-.driver-model-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.78rem;
-}
-.driver-model-title { color: var(--text); }
-.driver-model-meta  { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-
 .driver-soc-bar {
   width: 100%;
   height: 6px;
@@ -1310,7 +1295,7 @@ footer {
   color: #3b82f6;
 }
 
-/* ---- Battery Models section ---- */
+/* ---- Calibration section ---- */
 #models-section { margin-top: 20px; }
 .section-header {
   display: flex;
@@ -1753,64 +1738,6 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   padding: 12px 0;
   font-style: italic;
 }
-.model-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 12px 14px;
-}
-.model-card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 10px;
-}
-.model-name {
-  font-weight: 600;
-  font-size: 0.95rem;
-}
-.model-confidence {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  font-family: monospace;
-}
-.model-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 10px;
-  font-size: 0.8rem;
-  margin-bottom: 10px;
-}
-.model-stat-label { color: var(--text-dim); }
-.model-stat-value {
-  font-family: monospace;
-  text-align: right;
-  font-weight: 500;
-}
-.model-bar {
-  height: 6px;
-  background: var(--surface2);
-  border-radius: 3px;
-  overflow: hidden;
-  margin-top: 4px;
-}
-.model-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #22c55e 100%);
-  transition: width 0.4s ease;
-}
-.model-health-text {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  margin-top: 4px;
-  font-family: monospace;
-  display: flex;
-  justify-content: space-between;
-}
-.health-good { color: #22c55e; }
-.health-warn { color: #f59e0b; }
-.health-bad  { color: #ef4444; }
-
 /* ---- Self-tune modal ---- */
 .self-tune-checklist {
   display: flex;

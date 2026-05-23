@@ -96,7 +96,8 @@ What the plan no longer commands directly:
 The "grid is the residual" principle assumes the planner mode *wants*
 the battery to cross the zero-grid line on purpose (arbitrage, cheap
 charge). `planner_self` doesn't — its contract is "never imports to
-charge, never exports via the battery" (UI tooltip + docs/mpc-planner.md).
+charge, never exports via the battery". It may discharge to cover local
+import when the plan says this slot should participate.
 
 Under pure energy-allocation dispatch that contract breaks as soon as
 the forecast is wrong:
@@ -105,21 +106,25 @@ the forecast is wrong:
   = +1000` for this slot. Dispatch commands +4 kW charge → grid imports
   2 kW to make up the shortfall. (Issue #130 — operator report 2026-04-19.)
 - Forecast said 3 kW load, reality is 300 W. Plan allocated `−552 Wh`.
-  Dispatch commands −2.2 kW discharge → grid exports 2 kW via the
-  battery. (Symmetric failure — same bug, other direction.)
+  Dispatch commands −2.2 kW discharge and pushes the site into battery
+  export. Reactive self-consumption would have backed off at grid zero.
+  (Symmetric failure — same bug, other direction.)
 
-The DP enforces `ModeSelfConsumption`'s grid-crossing invariant only on
+The DP enforces `ModeSelfConsumption`'s no-battery-export invariant only on
 forecast. The EMS must enforce it on the live meter.
 
-`planner_self` therefore executes as **reactive self-consumption**:
+`planner_self` therefore executes as **reactive self-consumption with an
+idle gate**:
 
-- PI loop on `gridW → 0` (identical to manual `self_consumption`).
+- Participant slots use the PI loop to hold the live meter near 0 W:
+  charge live surplus, or discharge to cover live import.
+- Idle/charge slots floor negative battery targets to 0 so a stale
+  discharging inverter is stopped instead of spending SoC.
 - The plan contributes a per-slot **idle gate**: if
   `|SlotDirective.BatteryEnergyWh| / slot_hours < mpc.IdleGateThresholdW`
   the EMS holds the battery at 0 for that slot — honouring the DP's
   decision to save SoC for a later, more profitable slot. Otherwise the
-  battery participates reactively (absorbs whatever surplus actually
-  exists, covers whatever load actually exists).
+  battery participates using live self-consumption.
 - When the plan is stale (`MaxPlanAge` exceeded) the idle gate is
   disabled and execution is indistinguishable from manual
   `self_consumption`.
@@ -137,7 +142,7 @@ states. Split into two orthogonal axes.
 
 | Strategy | Objective |
 |---|---|
-| `self_consumption` | Minimize grid flow. Store PV for own use. Export only when battery is full. |
+| `self_consumption` | Minimize grid exchange for local use: charge PV surplus and discharge to cover load, without intentional battery export. |
 | `arbitrage` | Maximize price spread. Cycle the battery when `export_price - import_price × 1/roundtrip_eff > threshold`. |
 | `cheap_charge` | Charge from grid during cheap hours; discharge whenever. For low-PV, high-base-load sites. |
 

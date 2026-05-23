@@ -12,7 +12,7 @@
 #   make clean                — remove all build artifacts
 
 .PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
-        run-sim dev fmt vet clean e2e docs
+        run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -30,6 +30,9 @@ help:
 	@echo "  run-sim              start Ferroamp + Sungrow simulators"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
+	@echo "  ci                   run local CI incl. browser smoke"
+	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
+	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
 	@echo "  fmt vet              Go format + static checks"
 	@echo "  clean                nuke build artifacts"
 
@@ -40,6 +43,15 @@ test:
 
 e2e:
 	cd go && go test ./test/e2e -v -timeout 180s
+
+ci:
+	./scripts/ci-local.sh
+
+ci-ui:
+	./scripts/ci-ui-browser.sh $${FTW_BASE_URL:-http://localhost:8080}
+
+ci-hw-pi:
+	./scripts/ci-hw-pi.sh
 
 # ---- Native builds ----
 

@@ -42,3 +42,5 @@ dev-data/
 /go/sim-sungrow
 /go/forty-two-watts
 bin/
+artifacts/
+.cache/

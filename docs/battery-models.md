@@ -254,11 +254,12 @@ Models live in `state.redb` under the `battery_models` table, keyed by driver
 name. The control loop saves all models every ~60s (every 12 cycles at 5s
 interval). On startup, models are loaded back so RLS state survives restarts.
 
-## Settings UI
+## Calibration UI
 
-Dashboard now has a **Battery Models** section showing one card per battery
-with τ, gain, deadband, sample count, confidence %, and a colored health bar
-(red → amber → green) plus drift-per-day text.
+The dashboard keeps battery model internals out of the normal driver cards.
+Most operators only need to know whether the driver is online and tracking its
+target; τ, gain, sample count, and cascade/direct state stay internal unless
+you inspect the API directly.
 
 The **Self-tune** button opens a modal with:
 - Pre-tune: checklist of batteries + a warning about ideal conditions (low PV,
