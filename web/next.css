@@ -1623,6 +1623,49 @@ body.ftw-next .btn-reset-model:focus-visible {
   outline-offset: 2px;
 }
 
+body.ftw-next .twin-profile-row {
+  align-items: center;
+}
+
+body.ftw-next .twin-profile-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(54px, 1fr));
+  width: 132px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+body.ftw-next .twin-profile-toggle button {
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+body.ftw-next .twin-profile-toggle button.active {
+  background: var(--accent-e);
+  color: #0a0a0a;
+}
+
+body.ftw-next .twin-profile-toggle button:not(.active):hover {
+  color: var(--fg);
+}
+
+body.ftw-next .twin-profile-toggle button:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
 /* ---- Fuse card — vertical bars on small screens ----
    Desktop shows each phase as a separate card with a big current
    read-out and a horizontal bar underneath; that stacks three tall
