@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,31 @@ func (f *fakeMQTT) Published() []MQTTMessage {
 	return out
 }
 
+func newTestFerroampDriver(t *testing.T, tel *telemetry.Store, mqtt *fakeMQTT) (*LuaDriver, *HostEnv) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", "ferroamp.lua")
+	if _, err := os.Stat(luaPath); err != nil {
+		t.Fatalf("ferroamp.lua not found at %s: %v", luaPath, err)
+	}
+
+	env := NewHostEnv("ferroamp", tel).WithMQTT(mqtt)
+	env.BatteryCapacityWh = 15200
+
+	d, err := NewLuaDriver(luaPath, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(d.Cleanup)
+	return d, env
+}
+
 // Regression: ferroamp.lua used to cache the last MQTT payload per
 // topic and emit from cache on every poll, regardless of how long
 // ago the last message arrived. When the EnergyHub lost power on a
@@ -80,29 +106,9 @@ func (f *fakeMQTT) Published() []MQTTMessage {
 //   - NOT advance LastSuccess (watchdog will flip it offline)
 //   - NOT push fresh meter/pv readings into the telemetry store
 func TestFerroampDriverStopsEmittingWhenMQTTStalls(t *testing.T) {
-	// Resolve drivers/ferroamp.lua relative to the repo root.
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", "ferroamp.lua")
-	if _, err := os.Stat(luaPath); err != nil {
-		t.Fatalf("ferroamp.lua not found at %s: %v", luaPath, err)
-	}
-
 	tel := telemetry.NewStore()
 	mqtt := &fakeMQTT{}
-	env := NewHostEnv("ferroamp", tel).WithMQTT(mqtt)
-	env.BatteryCapacityWh = 15200
-
-	d, err := NewLuaDriver(luaPath, env)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	defer d.Cleanup()
-	if err := d.Init(context.Background(), nil); err != nil {
-		t.Fatalf("init: %v", err)
-	}
+	d, env := newTestFerroampDriver(t, tel, mqtt)
 
 	// Feed one fresh ehub payload — keep the JSON minimal but
 	// shape-compatible with extract_val (each field wraps its value
@@ -156,6 +162,141 @@ func TestFerroampDriverStopsEmittingWhenMQTTStalls(t *testing.T) {
 	if !h.LastSuccess.Equal(lastBefore) {
 		t.Errorf("LastSuccess advanced while cache was stale (before=%v after=%v)",
 			lastBefore, *h.LastSuccess)
+	}
+}
+
+func TestFerroampDriverFallsBackToEsoPbatWhenEhubPbatIsZero(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`
+	eso := `{"pbat":{"val":1200},"soc":{"val":29},"ubat":{"val":48},"ibat":{"val":25}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil {
+		t.Fatal("expected battery reading")
+	}
+	if bat.RawW != -1200 {
+		t.Fatalf("battery RawW = %v, want -1200 from ESO pbat fallback", bat.RawW)
+	}
+	if bat.SoC == nil || *bat.SoC != 0.29 {
+		t.Fatalf("battery SoC = %v, want 0.29", bat.SoC)
+	}
+}
+
+func TestFerroampDriverFallsBackToSsoPpvWhenEhubPpvIsZero(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`
+	sso := `{"upv":{"val":400},"ipv":{"val":7.75}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/sso", sso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	pv := tel.Get("ferroamp", telemetry.DerPV)
+	if pv == nil {
+		t.Fatal("expected PV reading")
+	}
+	if pv.RawW != -3100 {
+		t.Fatalf("PV RawW = %v, want -3100 from SSO voltage/current fallback", pv.RawW)
+	}
+}
+
+func TestFerroampDriverEmitsStateRelayAndFaultDiagnostics(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0},"state":{"val":32816}}`
+	eso := `{"pbat":{"val":0},"soc":{"val":29},"ubat":{"val":649},"ibat":{"val":0},` +
+		`"udc":{"val":16},"relaystatus":{"val":1},"faultcode":{"val":0}}`
+	sso := `{"upv":{"val":496.067},"ipv":{"val":0},"udc":{"val":495.344},` +
+		`"relaystatus":{"val":1},"faultcode":{"val":2}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+	mqtt.Push("extapi/data/sso", sso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	assertMetric := func(name string, want float64) {
+		t.Helper()
+		got, _, ok := tel.LatestMetric("ferroamp", name)
+		if !ok {
+			t.Fatalf("missing metric %s", name)
+		}
+		if got != want {
+			t.Fatalf("metric %s = %v, want %v", name, got, want)
+		}
+	}
+	assertMetric("ehub_state", 32816)
+	assertMetric("eso_relaystatus", 1)
+	assertMetric("eso_faultcode", 0)
+	assertMetric("eso_dc_link_v", 16)
+	assertMetric("sso_relaystatus", 1)
+	assertMetric("sso_faultcode", 2)
+	assertMetric("sso_dc_link_v", 495.344)
+	assertMetric("sso_pv_v", 496.067)
+	assertMetric("sso_pv_a", 0)
+}
+
+func TestFerroampZeroBatteryCommandDoesNotRepublishAutoWhenAlreadyAuto(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	initial := len(mqtt.Published())
+	if initial == 0 {
+		t.Fatal("init should publish extapiversion + auto")
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("zero command: %v", err)
+	}
+	if got := len(mqtt.Published()); got != initial {
+		t.Fatalf("zero command while already auto published %d new messages, want 0", got-initial)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1200}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+	pubs := mqtt.Published()
+	if got := len(pubs); got != initial+1 {
+		t.Fatalf("discharge publish count = %d, want %d", got, initial+1)
+	}
+	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"discharge"`) {
+		t.Fatalf("last payload = %s, want discharge command", pubs[len(pubs)-1].Payload)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("release command: %v", err)
+	}
+	pubs = mqtt.Published()
+	if got := len(pubs); got != initial+2 {
+		t.Fatalf("release publish count = %d, want %d", got, initial+2)
+	}
+	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"auto"`) {
+		t.Fatalf("last payload = %s, want auto command", pubs[len(pubs)-1].Payload)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("second zero command: %v", err)
+	}
+	if got := len(mqtt.Published()); got != initial+2 {
+		t.Fatalf("second zero command published %d new messages, want 0", got-(initial+2))
 	}
 }
 

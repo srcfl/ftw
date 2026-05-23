@@ -68,6 +68,7 @@ local STALE_AFTER_MS = 30000
 -- present on the wire. Useful for dev setups that want a PV-only
 -- dashboard fed by the otherwise full-featured Ferroamp sim.
 local SKIP_BATTERY = false
+local last_control_mode = nil
 
 ----------------------------------------------------------------------------
 -- Helpers
@@ -124,9 +125,40 @@ local function mj_to_wh(mj_val)
     return mj / 3600000
 end
 
+-- Prefer the primary topic value, but fall back to the role-specific topic
+-- when the primary is missing or reports zero while the fallback has a real
+-- magnitude. Some EnergyHub payloads keep pbat/ppv useful on ESO/SSO even
+-- when ehub's summary field is zeroed.
+local function choose_power(primary, fallback)
+    local p = tonumber(primary)
+    local f = tonumber(fallback)
+    if p ~= nil and math.abs(p) > 0.5 then return p end
+    if f ~= nil and math.abs(f) > 0.5 then return f end
+    if p ~= nil then return p end
+    return f
+end
+
+local function sso_power(data)
+    if not data then return nil end
+    local ppv = extract_val(data, "ppv")
+    if ppv ~= nil then return tonumber(ppv) end
+
+    -- The SSO topic does not publish ppv in all External API versions.
+    -- It does publish string voltage/current; use their product as a
+    -- measured-string fallback. Some firmware reports PV voltage in kV
+    -- below 10, so normalize that shape back to volts.
+    local upv = tonumber(extract_val(data, "upv"))
+    local ipv = tonumber(extract_val(data, "ipv"))
+    if upv == nil or ipv == nil then return nil end
+    local scale = math.abs(upv) < 10 and 1000 or 1
+    return upv * scale * ipv
+end
+
 local function publish_auto(trans_id)
-    return host.mqtt_publish("extapi/control/request",
+    local err = host.mqtt_publish("extapi/control/request",
         string.format('{"transId":"%s","cmd":{"name":"auto"}}', trans_id))
+    if not err then last_control_mode = "auto" end
+    return err
 end
 
 ----------------------------------------------------------------------------
@@ -266,29 +298,32 @@ function driver_poll()
         if meter.l2_a then host.emit_metric("meter_l2_a", meter.l2_a) end
         if meter.l3_a then host.emit_metric("meter_l3_a", meter.l3_a) end
         if meter.hz   then host.emit_metric("grid_hz",    meter.hz)   end
+
+        local state = extract_val(ehub_data, "state")
+        if state then host.emit_metric("ehub_state", tonumber(state) or 0) end
     end
 
     --------------------------------------------------------------------------
     -- PV (solar generation)
     --------------------------------------------------------------------------
-    if ehub_data then
-        local ppv = extract_val(ehub_data, "ppv")
+    if ehub_data or sso_data then
+        local ppv = choose_power(extract_val(ehub_data, "ppv"), sso_power(sso_data))
         if ppv then
             -- Negate: Ferroamp reports PV as positive, convention requires negative
-            host.emit("pv", { w = -(tonumber(ppv) or 0) })
+            host.emit("pv", { w = -ppv })
         end
     end
 
     --------------------------------------------------------------------------
     -- Battery
     --------------------------------------------------------------------------
-    if ehub_data and not SKIP_BATTERY then
-        local pbat = extract_val(ehub_data, "pbat")
+    if (ehub_data or eso_data) and not SKIP_BATTERY then
+        local pbat = choose_power(extract_val(ehub_data, "pbat"), extract_val(eso_data, "pbat"))
         if pbat then
             local battery = {}
             -- Ferroamp: positive pbat = discharging, negate for convention
             -- Convention: positive = charging, negative = discharging
-            battery.w = -(tonumber(pbat) or 0)
+            battery.w = -pbat
 
             -- Enrich with ESO data (battery-specific telemetry)
             if eso_data then
@@ -306,6 +341,13 @@ function driver_poll()
                 local ibat = extract_val(eso_data, "ibat")
                 if ibat then battery.a = tonumber(ibat) or 0 end
 
+                local eso_udc = extract_val(eso_data, "udc")
+                if eso_udc then host.emit_metric("eso_dc_link_v", tonumber(eso_udc) or 0) end
+                local eso_relay = extract_val(eso_data, "relaystatus")
+                if eso_relay then host.emit_metric("eso_relaystatus", tonumber(eso_relay) or 0) end
+                local eso_fault = extract_val(eso_data, "faultcode")
+                if eso_fault then host.emit_metric("eso_faultcode", tonumber(eso_fault) or 0) end
+
                 -- Battery energy counters (mJ → Wh)
                 local wbatprod = extract_val(eso_data, "wbatprod")
                 local wbatcons = extract_val(eso_data, "wbatcons")
@@ -317,6 +359,19 @@ function driver_poll()
             if battery.v then host.emit_metric("battery_dc_v", battery.v) end
             if battery.a then host.emit_metric("battery_dc_a", battery.a) end
         end
+    end
+
+    if sso_data then
+        local sso_udc = extract_val(sso_data, "udc")
+        if sso_udc then host.emit_metric("sso_dc_link_v", tonumber(sso_udc) or 0) end
+        local sso_upv = extract_val(sso_data, "upv")
+        if sso_upv then host.emit_metric("sso_pv_v", tonumber(sso_upv) or 0) end
+        local sso_ipv = extract_val(sso_data, "ipv")
+        if sso_ipv then host.emit_metric("sso_pv_a", tonumber(sso_ipv) or 0) end
+        local sso_relay = extract_val(sso_data, "relaystatus")
+        if sso_relay then host.emit_metric("sso_relaystatus", tonumber(sso_relay) or 0) end
+        local sso_fault = extract_val(sso_data, "faultcode")
+        if sso_fault then host.emit_metric("sso_faultcode", tonumber(sso_fault) or 0) end
     end
 
     return 1000
@@ -345,16 +400,23 @@ function driver_command(action, power_w, cmd)
                 '{"transId":"%s","cmd":{"name":"charge","arg":%d}}',
                 tid, math.floor(power_w)
             )
-            return host.mqtt_publish("extapi/control/request", payload)
+            local err = host.mqtt_publish("extapi/control/request", payload)
+            if not err then last_control_mode = "charge" end
+            return err
         elseif power_w < 0 then
             -- Discharge: use "discharge" command with positive watts
             local payload = string.format(
                 '{"transId":"%s","cmd":{"name":"discharge","arg":%d}}',
                 tid, math.floor(math.abs(power_w))
             )
-            return host.mqtt_publish("extapi/control/request", payload)
+            local err = host.mqtt_publish("extapi/control/request", payload)
+            if not err then last_control_mode = "discharge" end
+            return err
         else
             -- Zero: return to auto mode
+            if last_control_mode == "auto" then
+                return true
+            end
             return publish_auto(tid)
         end
     elseif action == "curtail" then

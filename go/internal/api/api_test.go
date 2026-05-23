@@ -10,10 +10,12 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -106,6 +108,83 @@ func TestHandleEVStatusRejectsUnknownDriver(t *testing.T) {
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("unknown driver: got %d, want 404 (body: %s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleStatusIgnoresOfflineDERInLiveBalance(t *testing.T) {
+	tel := telemetry.NewStore()
+	ctrl := &control.State{SiteMeterDriver: "site"}
+
+	tel.Update("site", telemetry.DerMeter, 8000, nil, nil)
+	tel.DriverHealthMut("site").RecordSuccess()
+
+	tel.Update("pv-online", telemetry.DerPV, -2000, nil, nil)
+	tel.DriverHealthMut("pv-online").RecordSuccess()
+	tel.Update("pv-offline", telemetry.DerPV, -9000, nil, nil)
+	tel.DriverHealthMut("pv-offline").SetOffline()
+
+	onlineSoC := 0.8
+	offlineSoC := 0.1
+	tel.Update("bat-online", telemetry.DerBattery, -1000, &onlineSoC, nil)
+	tel.DriverHealthMut("bat-online").RecordSuccess()
+	tel.Update("bat-offline", telemetry.DerBattery, -6000, &offlineSoC, nil)
+	tel.DriverHealthMut("bat-offline").SetOffline()
+
+	tel.Update("charger", telemetry.DerEV, 1000, nil, nil)
+	tel.DriverHealthMut("charger").RecordSuccess()
+
+	srv := New(&Deps{
+		Tel:        tel,
+		Ctrl:       ctrl,
+		CtrlMu:     &sync.Mutex{},
+		CapMu:      &sync.RWMutex{},
+		Capacities: map[string]float64{"bat-online": 10_000, "bat-offline": 10_000},
+		CfgMu:      &sync.RWMutex{},
+		Cfg:        &config.Config{},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		GridW   float64                   `json:"grid_w"`
+		PVW     float64                   `json:"pv_w"`
+		BatW    float64                   `json:"bat_w"`
+		EVW     float64                   `json:"ev_w"`
+		LoadW   float64                   `json:"load_w"`
+		BatSoC  float64                   `json:"bat_soc"`
+		Drivers map[string]map[string]any `json:"drivers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	want := map[string]float64{
+		"grid_w":  8000,
+		"pv_w":    -2000,
+		"bat_w":   -1000,
+		"ev_w":    1000,
+		"load_w":  10_000,
+		"bat_soc": 0.8,
+	}
+	got := map[string]float64{
+		"grid_w":  resp.GridW,
+		"pv_w":    resp.PVW,
+		"bat_w":   resp.BatW,
+		"ev_w":    resp.EVW,
+		"load_w":  resp.LoadW,
+		"bat_soc": resp.BatSoC,
+	}
+	for k, wantV := range want {
+		if got[k] != wantV {
+			t.Fatalf("%s = %v, want %v", k, got[k], wantV)
+		}
+	}
+	if resp.Drivers["pv-offline"]["status"] != "offline" || resp.Drivers["pv-offline"]["pv_w"] != -9000.0 {
+		t.Fatalf("offline driver details not preserved: %#v", resp.Drivers["pv-offline"])
 	}
 }
 

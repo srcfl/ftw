@@ -331,6 +331,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ---- /api/status ----
 
+func statusDriverOnline(tel *telemetry.Store, name string) bool {
+	if tel == nil || name == "" {
+		return false
+	}
+	h := tel.DriverHealth(name)
+	return h != nil && h.IsOnline()
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Lock()
 	ctrl := *s.deps.Ctrl // copy for consistency
@@ -344,16 +352,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.CapMu.RUnlock()
 
-	// Aggregate readings
+	// Aggregate live readings. Offline readings stay in telemetry so detailed
+	// driver views can show the last known value, but they must not leak into
+	// the live site balance.
 	gridW := 0.0
-	if r := s.deps.Tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		gridW = r.SmoothedW
+	haveGrid := false
+	if statusDriverOnline(s.deps.Tel, ctrl.SiteMeterDriver) {
+		if r := s.deps.Tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			gridW = r.SmoothedW
+			haveGrid = true
+		}
+	}
+	if !haveGrid && ctrl.SiteMeterDriver == "" {
+		// Preserve the historical "no configured site meter" behaviour for
+		// development setups: report zero rather than treating it as stale data.
+		haveGrid = true
 	}
 	var pvW, batW float64
 	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerPV) {
+		if !statusDriverOnline(s.deps.Tel, r.Driver) {
+			continue
+		}
 		pvW += r.SmoothedW
 	}
 	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
+		if !statusDriverOnline(s.deps.Tel, r.Driver) {
+			continue
+		}
 		batW += r.SmoothedW
 	}
 
@@ -365,15 +390,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// overnight EV session would inflate every Monday-evening bucket of
 	// the weekly-pattern learner.
 	evW := s.deps.Tel.SumOnlineEVW()
-	rawLoad := gridW - batW - pvW - evW
-	loadW := s.deps.Tel.UpdateLoad(rawLoad)
-	if loadW < 0 {
-		loadW = 0
+	loadW := 0.0
+	if haveGrid {
+		rawLoad := gridW - batW - pvW - evW
+		loadW = s.deps.Tel.UpdateLoad(rawLoad)
+		if loadW < 0 {
+			loadW = 0
+		}
 	}
 
 	// Weighted average SoC by capacity
 	var totalCap, weightedSoC float64
 	for _, b := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
+		if !statusDriverOnline(s.deps.Tel, b.Driver) {
+			continue
+		}
 		cap, ok := caps[b.Driver]
 		if !ok {
 			continue

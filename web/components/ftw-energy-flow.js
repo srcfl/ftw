@@ -612,8 +612,14 @@ class FtwEnergyFlow extends FtwElement {
     });
     const maxKw = Math.max(0.5, ...edges.map(e => e.kw));
     const edgesSvg = edges.map(e => renderEdge(e, maxKw, this._particles)).join("");
-    const nodesSvg = placed.map(p =>
-      renderCircleNode({
+    const nodesSvg = placed.map(p => {
+      const aggregateMemberCount = Number(p.dailyAggregateMembers || 0);
+      const suppressAggregateDaily =
+        p.dailyScope === "aggregate" &&
+        !p.aggregated &&
+        (layerClass === "ind" || aggregateMemberCount > 1) &&
+        Math.max(p._groupSize || 1, aggregateMemberCount || 1) > 1;
+      return renderCircleNode({
         pos: p._pos,
         value: p.placeholder ? "—" : fmtKw(p.kw),
         title: p.title,
@@ -630,11 +636,11 @@ class FtwEnergyFlow extends FtwElement {
         name: p.name || "",
         id: p.id,
         aggregated: !!p.aggregated,
-        dailyKwh: p.placeholder ? null : (p.dailyKwh || null),
-        dailyKwhParts: p.placeholder ? null : (p.dailyKwhParts || null),
+        dailyKwh: p.placeholder || suppressAggregateDaily ? null : (p.dailyKwh || null),
+        dailyKwhParts: p.placeholder || suppressAggregateDaily ? null : (p.dailyKwhParts || null),
         compact: !!this._compact,
-      })
-    ).join("");
+      });
+    }).join("");
     return `<g class="ef-layer ef-layer-${layerClass}">` +
            `<g class="ef-edges">${edgesSvg}</g>${nodesSvg}</g>`;
   }
@@ -805,24 +811,25 @@ class FtwEnergyFlow extends FtwElement {
   render() {
     const { load } = this._readings;
 
-    // Self-powered % from the load's perspective — fraction of the
-    // current house demand met by on-site sources (PV direct OR
-    // battery discharge), as opposed to being pulled from the grid.
-    // Derived from the energy balance at the hub: anything not coming
-    // in via the grid is by definition coming in from PV or battery,
-    // so SP = 1 − min(grid_import, load) / load. Null when the house
-    // is essentially idle (load below threshold) so we don't render
-    // a noisy "100 %" against nothing.
+    // Self-powered % for the visible site demand — house load plus any
+    // active EV charger. When EV is excluded, a 9 kW car charge can make a
+    // PV+battery-covered house display 0 % simply because grid import exceeds
+    // the house-only load. The energy-flow diagram shows the EV as part of the
+    // live balance, so the denominator should match what is on screen.
     let selfPoweredPct = null;
     {
       let gridImport = 0;
       for (const p of (this._readings.planets || [])) {
         if (p.role === "grid" && p.toHub) gridImport += Math.max(0, p.kw || 0);
       }
-      const loadKw = Math.abs(load) || 0;
-      if (!isIdleKw(loadKw)) {
-        const fromGrid = Math.min(gridImport, loadKw);
-        selfPoweredPct = Math.max(0, Math.min(100, (1 - fromGrid / loadKw) * 100));
+      let evDemandKw = 0;
+      for (const p of (this._readings.planets || [])) {
+        if (p.role === "ev") evDemandKw += Math.max(0, p.kw || 0);
+      }
+      const consumptionKw = (Math.abs(load) || 0) + evDemandKw;
+      if (!isIdleKw(consumptionKw)) {
+        const fromGrid = Math.min(gridImport, consumptionKw);
+        selfPoweredPct = Math.max(0, Math.min(100, (1 - fromGrid / consumptionKw) * 100));
       }
     }
 

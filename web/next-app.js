@@ -443,9 +443,10 @@
     if (flowEl && typeof flowEl.setReadings === "function") {
       var planets = [];
 
-      // Today's totals (aggregate across drivers; per-driver split
-      // isn't in the API). The same string lands on every same-role
-      // planet so the aggregation layer can pick it up cleanly.
+      // Today's totals are aggregate across all drivers; per-driver kWh split
+      // is not in the API. Mark them as aggregate-only so the energy-flow
+      // component can show them on folded bubbles without duplicating the
+      // same total on every individual inverter.
       var todayE = (data.energy && data.energy.today) || {};
       var importKwh   = (todayE.import_wh || 0) / 1000;
       var exportKwh   = (todayE.export_wh || 0) / 1000;
@@ -486,8 +487,17 @@
       });
 
       var drvs = data.drivers || {};
+      var pvDailyMembers = 0;
+      var batDailyMembers = 0;
       Object.keys(drvs).forEach(function (name) {
         var d = drvs[name] || {};
+        if (d.pv_w != null) pvDailyMembers++;
+        if (d.bat_w != null) batDailyMembers++;
+      });
+      Object.keys(drvs).forEach(function (name) {
+        var d = drvs[name] || {};
+        var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+        if (!online) return;
         // Solar — display positive kW when generating (site convention
         // has pv_w negative for export into the house). All internal
         // state (chart history, math) stays on site convention; the
@@ -504,6 +514,8 @@
             // would just repeat the same fact in words.
             sub: "",
             dailyKwh: pvDailyStr,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: pvDailyMembers,
           });
         }
         // Battery — sign shows charge/discharge. Discharge flows toward
@@ -524,6 +536,8 @@
             sub: "",
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
             dailyKwhParts: batDailyParts,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: batDailyMembers,
           });
         }
         // EV — always consumes from the house side. When a loadpoint
@@ -567,12 +581,12 @@
         }
       });
 
-      // Self-powered today: share of consumption sourced from PV /
-      // battery over the whole day. Mirrors the realtime
-      // selfPoweredPct the energy-flow component computes from
-      // current planet power, so the two hub lines are directly
-      // comparable. Clamped 0..100 because metering glitches can
-      // briefly report import > load.
+      // Self-powered today: share of recorded house consumption sourced
+      // from PV/battery over the whole day. Daily EV energy is not split
+      // into this aggregate yet, while the realtime component includes
+      // active EV load because it is visible in the live balance.
+      // Clamped 0..100 because metering glitches can briefly report
+      // import > load.
       var selfPoweredPctToday = null;
       if (loadKwhTotal > 0.001) {
         selfPoweredPctToday = Math.max(0, Math.min(100,
