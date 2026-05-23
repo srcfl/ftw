@@ -568,8 +568,33 @@ func ComputeDispatch(
 				planFresh = true
 				state.PlanStale = false
 				slotH := dir.SlotEnd.Sub(dir.SlotStart).Hours()
-				if slotH > 0 && math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW {
-					plannerSelfIdleGate = true
+				// Idle decision is derived from forecast PV+load
+				// baseline (what the grid would be with battery=0),
+				// NOT from the DP's quantized battery action. The DP's
+				// action grid (currently 225 W step) rounds small
+				// baseline values to 0 — on a 200 W net surplus the
+				// plan picks battery_w=0 because no charge step fits
+				// under ModeSelfConsumption's no-export rule. Reading
+				// the plan's BatteryEnergyWh treats that quantization
+				// artefact as an idle decision, holding the battery at
+				// 0 while the same 200 W exports to grid. By looking at
+				// PlannedGridW − BatteryEnergyWh/slotH (i.e. the
+				// forecast baseline grid without battery action), we
+				// participate whenever there's meaningful surplus or
+				// deficit to absorb/cover, regardless of whether the
+				// DP's discrete action grid could express it. Falls
+				// back to the legacy BatteryEnergyWh check when
+				// PlannedGridW isn't set (older plan format, or the
+				// DP couldn't compute it for this slot).
+				if slotH > 0 {
+					if dir.HasPlannedGridW {
+						baselineW := dir.PlannedGridW - dir.BatteryEnergyWh/slotH
+						if math.Abs(baselineW) < mpc.IdleGateThresholdW {
+							plannerSelfIdleGate = true
+						}
+					} else if math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW {
+						plannerSelfIdleGate = true
+					}
 				}
 			}
 		}
