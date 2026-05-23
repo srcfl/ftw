@@ -1721,6 +1721,19 @@ func planHasNonDischargeIntent(state *State) bool {
 	if state == nil || !state.Mode.IsPlannerMode() {
 		return false
 	}
+	// planner_self is pure reactive PI on grid=0 in non-idle slots —
+	// the plannerSelfIdleGate ALONE decides whether to discharge. The
+	// plan's per-slot charge intent (BatteryEnergyWh > 0) must NOT
+	// gate discharge here: SC mode's contract is "always chase
+	// grid=0" so a forecast miss that leaves the meter importing has
+	// to be covered by the battery. Without this exemption, a slot
+	// the planner forecast as +675 W of PV absorption would refuse to
+	// discharge even when the cloud rolled in and the live meter is
+	// importing 500 W — the symptom the operator hit on v0.79.5
+	// before this carve-out.
+	if state.Mode == ModePlannerSelf {
+		return false
+	}
 	const idleWh = 50.0
 	const idleGridW = 100.0
 	if state.SlotDirective != nil {

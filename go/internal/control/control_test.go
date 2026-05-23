@@ -1623,10 +1623,17 @@ func TestPlannerSelfParticipatesReactivelyDischargesOnImport(t *testing.T) {
 	}
 }
 
-// A charge/idle planner_self slot must not discharge just because the live
-// meter is importing. It waits for the next replan rather than spending SoC
-// against a slot the DP selected for saving or charging.
-func TestPlannerSelfPlanChargeDoesNotDischargeOnLiveImport(t *testing.T) {
+// planner_self in a charge-intent slot must STILL discharge when the
+// live meter shows import — the operator's directive for SC mode is
+// "always chase grid=0", which is symmetric: charge on live export,
+// discharge on live import, regardless of which direction the plan's
+// per-slot battery_w hint pointed. The plan's charge target is a
+// forecast-based budget that gets revised by the reactive replan; the
+// live PI must not refuse to cover import while waiting for replan,
+// because the operator's stored SoC is exactly there to cover the
+// load. Inverted from v0.79.5's "plan charge wins" rule after operator
+// feedback.
+func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1651,8 +1658,8 @@ func TestPlannerSelfPlanChargeDoesNotDischargeOnLiveImport(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if targets[0].TargetW < 0 {
-		t.Errorf("TargetW = %f W — planner_self must not discharge on live import even when the plan slot was charge", targets[0].TargetW)
+	if targets[0].TargetW >= 0 {
+		t.Errorf("TargetW = %f W — planner_self must discharge to cover live import even when the plan slot was charge", targets[0].TargetW)
 	}
 }
 
