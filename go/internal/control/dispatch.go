@@ -128,9 +128,9 @@ type PowerLimits struct {
 }
 
 // DispatchTarget is one command to issue to a single battery driver.
-// `TargetW` is in site sign convention:
-//   + = charge the battery (battery becomes a load, site imports more)
-//   − = discharge the battery (battery becomes a source, site imports less)
+// `TargetW` is in site sign convention: positive charges the battery
+// (battery becomes a load, site imports more); negative discharges it
+// (battery becomes a source, site imports less).
 type DispatchTarget struct {
 	Driver  string  `json:"driver"`
 	TargetW float64 `json:"target_w"`
@@ -154,9 +154,9 @@ type CurtailTarget struct {
 // State holds all persistent state for one instance of the control loop.
 // One per site.
 type State struct {
-	Mode           Mode
-	GridTargetW    float64
-	GridToleranceW float64
+	Mode            Mode
+	GridTargetW     float64
+	GridToleranceW  float64
 	SiteMeterDriver string
 
 	// SiteFuseAmps is the per-phase trip current of the site's main
@@ -710,7 +710,7 @@ func ComputeDispatch(
 		gridW -= state.EVChargingW
 	}
 
-// ---- Gather online batteries ----
+	// ---- Gather online batteries ----
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)
@@ -1357,7 +1357,7 @@ func ComputeDispatch(
 	// ---- Fuse guard (bidirectional, #145) ----
 	raw = applyFuseGuard(raw, store, state, fuseMaxW)
 
-	// ---- Plan/exec sign-mismatch floor (planner modes only) ----
+	// ---- Plan/exec sign-mismatch floor (energy planner modes only) ----
 	// Operator-report 2026-04-28 (08:00–08:15 CEST): planner_arbitrage
 	// peak slot wanted battery_w = -2400 W (discharge to export at peak),
 	// dispatch produced +1640..+1860 W (charged from PV surplus). PV
@@ -1376,9 +1376,12 @@ func ComputeDispatch(
 	//     the planner intended to SELL it. Idling and letting PV export
 	//     naturally captures most of the lost revenue without any risk.
 	//
-	// Only applied in planner modes — manual modes have no plan to
-	// disagree with. forceFuseDischarge runs AFTER this so a fuse
-	// overflow can still drive discharge regardless of plan intent.
+	// Only applied in the energy planner modes. Manual modes have no plan
+	// to disagree with, and planner_self deliberately ignores plan sign:
+	// its plan contribution is only idle-vs-participate, while the live
+	// meter decides charge/discharge direction. forceFuseDischarge runs
+	// AFTER this so a fuse overflow can still drive discharge regardless
+	// of plan intent.
 	//
 	// Skipped when a manual hold is active: the operator is
 	// deliberately overriding the planner, so a sign mismatch with the
@@ -1671,18 +1674,26 @@ func distributeWeighted(bats []batteryInfo, totalCorrection float64, weights map
 	var totalW float64
 	for _, b := range bats {
 		w, ok := weights[b.driver]
-		if !ok { w = 1.0 }
+		if !ok {
+			w = 1.0
+		}
 		totalW += w
 	}
-	if totalW <= 0 { return nil }
+	if totalW <= 0 {
+		return nil
+	}
 	var currentTotal float64
-	for _, b := range bats { currentTotal += b.currentW }
+	for _, b := range bats {
+		currentTotal += b.currentW
+	}
 	desiredTotal := currentTotal + totalCorrection
 
 	out := make([]DispatchTarget, 0, len(bats))
 	for _, b := range bats {
 		w, ok := weights[b.driver]
-		if !ok { w = 1.0 }
+		if !ok {
+			w = 1.0
+		}
 		t := desiredTotal * (w / totalW)
 		clamped, was := clampWithSoC(t, b)
 		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: was})
@@ -2056,9 +2067,12 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 
 // applyPlanSignFloor enforces "executed battery total must agree in sign
 // with the plan's intent for this slot" — the safety rail described at
-// the call-site comment. Only active in planner modes. When the sum of
-// post-distribute, post-clamp targets has the opposite sign to the
-// active slot's plan intent, every target is forced to zero (idle).
+// the call-site comment. Only active in planner_cheap / planner_arbitrage.
+// planner_self is excluded because its non-idle slots are live-reactive
+// self-consumption: plan sign must not prevent covering live import or
+// absorbing live export. When the sum of post-distribute, post-clamp
+// targets has the opposite sign to the active slot's plan intent, every
+// target is forced to zero (idle).
 //
 // Sources of plan intent (first-non-empty wins):
 //   - state.SlotDirective(now).BatteryEnergyWh — energy-allocation path
@@ -2071,7 +2085,7 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 // against. Threshold of 100 W matches mpc.IdleGateThresholdW so a
 // near-zero plan target counts as "idle, no opinion on sign".
 func applyPlanSignFloor(targets []DispatchTarget, state *State) []DispatchTarget {
-	if len(targets) == 0 || state == nil || !state.Mode.IsPlannerMode() {
+	if len(targets) == 0 || state == nil || !state.Mode.IsPlannerMode() || state.Mode == ModePlannerSelf {
 		return targets
 	}
 	intent := planSignIntent(state)

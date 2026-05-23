@@ -53,7 +53,7 @@ func TestPIReset(t *testing.T) {
 
 // helper: build a store with one site meter + N batteries at given SoC
 func seedStore(gridW float64, batteries []struct {
-	name    string
+	name          string
 	currentW, soc float64
 }) *telemetry.Store {
 	s := telemetry.NewStore()
@@ -72,7 +72,10 @@ func caps(items map[string]float64) map[string]float64 { return items }
 func ptrF64(v float64) *float64 { return &v }
 
 func TestIdleModeReturnsNothing(t *testing.T) {
-	store := seedStore(2000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -84,7 +87,10 @@ func TestIdleModeReturnsNothing(t *testing.T) {
 }
 
 func TestChargeModeForcesAllBatteriesPositive5kW(t *testing.T) {
-	store := seedStore(0, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 		{"sungrow", 0, 0.5},
 	})
@@ -103,7 +109,10 @@ func TestChargeModeForcesAllBatteriesPositive5kW(t *testing.T) {
 }
 
 func TestDeadbandSkipsWithinTolerance(t *testing.T) {
-	store := seedStore(30, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(30, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp") // tolerance 50W, error 30W → skip
@@ -116,7 +125,10 @@ func TestDeadbandSkipsWithinTolerance(t *testing.T) {
 
 func TestSelfConsumptionDischargesOnImport(t *testing.T) {
 	// grid = +1000 (importing too much) → want battery to discharge (negative target)
-	store := seedStore(1000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -134,14 +146,19 @@ func TestSelfConsumptionDischargesOnImport(t *testing.T) {
 
 func TestSelfConsumptionChargesOnExport(t *testing.T) {
 	// grid = -2000 (exporting) → want battery to charge (positive target)
-	store := seedStore(-2000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
 	st.SlewRateW = 100000
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 1 { t.Fatal("expected 1 target") }
+	if len(targets) != 1 {
+		t.Fatal("expected 1 target")
+	}
 	if targets[0].TargetW <= 0 {
 		t.Errorf("exporting should lead to POSITIVE (charge) target, got %f", targets[0].TargetW)
 	}
@@ -155,12 +172,20 @@ func TestProportionalSplitByCapacity(t *testing.T) {
 	targets := distributeProportional(bats, -1000, nil) // want -1000W total discharge; nil groupPV → capacity-only split
 	var big, small float64
 	for _, tg := range targets {
-		if tg.Driver == "big" { big = tg.TargetW }
-		if tg.Driver == "small" { small = tg.TargetW }
+		if tg.Driver == "big" {
+			big = tg.TargetW
+		}
+		if tg.Driver == "small" {
+			small = tg.TargetW
+		}
 	}
 	// Big is 75%, small 25% → big = -750, small = -250
-	if math.Abs(big+750) > 1 { t.Errorf("big got %f, want -750", big) }
-	if math.Abs(small+250) > 1 { t.Errorf("small got %f, want -250", small) }
+	if math.Abs(big+750) > 1 {
+		t.Errorf("big got %f, want -750", big)
+	}
+	if math.Abs(small+250) > 1 {
+		t.Errorf("small got %f, want -250", small)
+	}
 }
 
 func TestProportionalUsesTotalDesired(t *testing.T) {
@@ -187,11 +212,19 @@ func TestPriorityDrainsPrimaryFirst(t *testing.T) {
 	targets := distributePriority(bats, -1000, []string{"primary", "secondary"})
 	var p, s float64
 	for _, tg := range targets {
-		if tg.Driver == "primary" { p = tg.TargetW }
-		if tg.Driver == "secondary" { s = tg.TargetW }
+		if tg.Driver == "primary" {
+			p = tg.TargetW
+		}
+		if tg.Driver == "secondary" {
+			s = tg.TargetW
+		}
 	}
-	if math.Abs(p+1000) > 1 { t.Errorf("primary: got %f, want -1000", p) }
-	if s != 0 { t.Errorf("secondary: got %f, want 0", s) }
+	if math.Abs(p+1000) > 1 {
+		t.Errorf("primary: got %f, want -1000", p)
+	}
+	if s != 0 {
+		t.Errorf("secondary: got %f, want 0", s)
+	}
 }
 
 func TestPriorityOverflowsToSecondary(t *testing.T) {
@@ -203,11 +236,19 @@ func TestPriorityOverflowsToSecondary(t *testing.T) {
 	targets := distributePriority(bats, -7000, []string{"primary", "secondary"})
 	var p, s float64
 	for _, tg := range targets {
-		if tg.Driver == "primary" { p = tg.TargetW }
-		if tg.Driver == "secondary" { s = tg.TargetW }
+		if tg.Driver == "primary" {
+			p = tg.TargetW
+		}
+		if tg.Driver == "secondary" {
+			s = tg.TargetW
+		}
 	}
-	if p != -5000 { t.Errorf("primary: got %f, want -5000", p) }
-	if math.Abs(s+2000) > 1 { t.Errorf("secondary: got %f, want -2000", s) }
+	if p != -5000 {
+		t.Errorf("primary: got %f, want -5000", p)
+	}
+	if math.Abs(s+2000) > 1 {
+		t.Errorf("secondary: got %f, want -2000", s)
+	}
 }
 
 func TestWeightedDistribution(t *testing.T) {
@@ -219,11 +260,19 @@ func TestWeightedDistribution(t *testing.T) {
 	targets := distributeWeighted(bats, 1000, weights)
 	var a, b float64
 	for _, tg := range targets {
-		if tg.Driver == "a" { a = tg.TargetW }
-		if tg.Driver == "b" { b = tg.TargetW }
+		if tg.Driver == "a" {
+			a = tg.TargetW
+		}
+		if tg.Driver == "b" {
+			b = tg.TargetW
+		}
 	}
-	if math.Abs(a-800) > 1 { t.Errorf("a: got %f, want 800", a) }
-	if math.Abs(b-200) > 1 { t.Errorf("b: got %f, want 200", b) }
+	if math.Abs(a-800) > 1 {
+		t.Errorf("a: got %f, want 800", a)
+	}
+	if math.Abs(b-200) > 1 {
+		t.Errorf("b: got %f, want 200", b)
+	}
 }
 
 // ---- Clamps ----
@@ -367,7 +416,10 @@ func TestFuseGuardNoOpWithoutMeterReading(t *testing.T) {
 // ---- Full cycle ----
 
 func TestFullCycleRespondsToTransient(t *testing.T) {
-	store := seedStore(0, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -394,7 +446,10 @@ func TestFullCycleRespondsToTransient(t *testing.T) {
 }
 
 func TestHoldoffBlocksRapidDispatch(t *testing.T) {
-	store := seedStore(2000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -411,8 +466,12 @@ func TestHoldoffBlocksRapidDispatch(t *testing.T) {
 func TestSetGridTargetUpdatesPI(t *testing.T) {
 	st := NewState(0, 50, "ferroamp")
 	st.SetGridTarget(-500)
-	if st.GridTargetW != -500 { t.Errorf("state: %f", st.GridTargetW) }
-	if st.PI.Setpoint != -500 { t.Errorf("pi setpoint: %f", st.PI.Setpoint) }
+	if st.GridTargetW != -500 {
+		t.Errorf("state: %f", st.GridTargetW)
+	}
+	if st.PI.Setpoint != -500 {
+		t.Errorf("pi setpoint: %f", st.PI.Setpoint)
+	}
 }
 
 func TestEmptyBatteriesReturnsNoTargets(t *testing.T) {
@@ -420,11 +479,16 @@ func TestEmptyBatteriesReturnsNoTargets(t *testing.T) {
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
 	targets := ComputeDispatch(store, st, caps(map[string]float64{}), 11040)
-	if len(targets) != 0 { t.Error("no batteries → no dispatch") }
+	if len(targets) != 0 {
+		t.Error("no batteries → no dispatch")
+	}
 }
 
 func TestPeakShavingNoActionInBand(t *testing.T) {
-	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -437,7 +501,10 @@ func TestPeakShavingNoActionInBand(t *testing.T) {
 }
 
 func TestPeakShavingActsWhenOverLimit(t *testing.T) {
-	store := seedStore(7000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(7000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -452,7 +519,10 @@ func TestPeakShavingActsWhenOverLimit(t *testing.T) {
 
 func TestEVChargingSignalExcludedFromGrid(t *testing.T) {
 	// Grid = +3000 includes 2500W EV charging. Effective = +500W → within tolerance.
-	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -473,7 +543,10 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	// A DerEV driver reports 4000W. EVChargingW was 0 (no manual slider).
 	// After ComputeDispatch, EVChargingW must reflect the live reading
 	// so the dispatch clamp works against real hardware.
-	store := seedStore(5000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	store.Update("easee", telemetry.DerEV, 4000, nil, nil)
@@ -495,7 +568,10 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 // the whole 3000 W. Regression guard that the new flag's default
 // preserves current behaviour.
 func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
-	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -516,7 +592,10 @@ func TestBatteryCoversEV_OffExcludesEVFromGrid(t *testing.T) {
 // pulls the battery into discharge territory for the full 3000 W
 // import, not just the 500 W house portion.
 func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
-	store := seedStore(3000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -540,7 +619,10 @@ func TestBatteryCoversEV_OnIncludesEVInGrid(t *testing.T) {
 func TestEVChargingManualPreservedWhenNoDriver(t *testing.T) {
 	// No DerEV reading. The manual slider value (1500W) must survive —
 	// we don't want an offline / stale driver to silently zero it out.
-	store := seedStore(1500, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -564,7 +646,10 @@ func TestEVChargingManualPreservedWhenNoDriver(t *testing.T) {
 func TestSlewAnchorsOnActualNotStaleCommand(t *testing.T) {
 	// Battery: previous command -5000 W, actual output 0 W (empty).
 	// Grid: -2000 W (surplus → PI wants to charge the battery).
-	store := seedStore(-2000, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"pixii", 0, 0.10}, // at SoC min, actual bat_w = 0 despite command
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -597,7 +682,10 @@ func TestSlewAnchorsOnActualNotStaleCommand(t *testing.T) {
 // PI jump more than slew_rate per cycle when the battery is tracking well.
 func TestSlewRespectsRateWhenTracking(t *testing.T) {
 	// Battery actively discharging at -1000 W, both actual and prev command.
-	store := seedStore(1500, []struct{ name string; currentW, soc float64 }{
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
 		{"pixii", -1000, 0.6},
 	})
 	st := NewState(0, 50, "ferroamp")
@@ -642,7 +730,7 @@ func TestEnergyDispatchConvertsWhToW(t *testing.T) {
 		Strategy:        "arbitrage",
 	}
 	store := seedStore(0, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -676,7 +764,7 @@ func TestEnergyDispatchDoesNotAbsorbPVSurprise(t *testing.T) {
 	// Under legacy PI with grid_target=−51 the controller would pull the
 	// battery into aggressive charging to pin grid to −51.
 	store := seedStore(-4000, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -722,13 +810,13 @@ func TestEnergyDispatchHonorsBatteryCoversEVOff(t *testing.T) {
 	}
 	// rawGridW = 4200 W (200 W house + 4000 W EV importing). Battery 0.
 	store := seedStore(4200, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
 	})
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
-	st.EVChargingW = 4000     // manual injection — no EV driver in store
+	st.EVChargingW = 4000      // manual injection — no EV driver in store
 	st.BatteryCoversEV = false // explicit; the contended toggle
 
 	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -755,7 +843,7 @@ func TestEnergyDispatchBatteryCoversEVOnLetsPlanRun(t *testing.T) {
 		Strategy:        "arbitrage",
 	}
 	store := seedStore(4200, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -785,9 +873,10 @@ func TestEnergyDispatchBatteryCoversEVOnLetsPlanRun(t *testing.T) {
 // Scenario: house 200 W, EV at 8 kW, plan wants battery +5 kW, fuse 11 kW.
 // Naive: total grid = 200+8000+5000 = 13.2 kW → fuse busts.
 // Joint allocator: scale = (11000-200-0)/(5000+8000) ≈ 0.831.
-//   battery charge → ~4150 W
-//   FuseEVMaxW    → ~6650 W
-//   sum + house    ≈ 11.0 kW. Fuse respected.
+//
+//	battery charge → ~4150 W
+//	FuseEVMaxW    → ~6650 W
+//	sum + house    ≈ 11.0 kW. Fuse respected.
 func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -801,7 +890,7 @@ func TestJointFuseAllocatorScalesBothBatteryAndEV(t *testing.T) {
 	// so right now grid is 200+8000=8200. Plan WANTS battery to add 5kW.
 	// Use 8200 to model the live state at the start of the tick.)
 	store := seedStore(8200, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -859,7 +948,7 @@ func TestJointFuseAllocatorIgnoresDischarge(t *testing.T) {
 		Strategy:        "arbitrage",
 	}
 	store := seedStore(8200, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -891,7 +980,7 @@ func TestJointFuseAllocatorNoOpWithoutEV(t *testing.T) {
 		Strategy:        "arbitrage",
 	}
 	store := seedStore(200, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -920,7 +1009,7 @@ func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
 		BatteryEnergyWh: 200,
 	}
 	store := seedStore(0, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 800, 0.5}, // battery already charging 800 W
@@ -960,7 +1049,7 @@ func TestEnergyDispatchSyncsPISetpointWithGridTarget(t *testing.T) {
 		BatteryEnergyWh: 200,
 	}
 	store := seedStore(0, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -986,7 +1075,7 @@ func TestEnergyDispatchSyncsPISetpointWithGridTarget(t *testing.T) {
 // fallback doesn't leave the path flag mis-set.
 func TestEnergyDispatchFallsBackToLegacyWhenDirectiveUnavailable(t *testing.T) {
 	store := seedStore(1000, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.5},
@@ -1403,6 +1492,73 @@ func TestPlannerSelfParticipatesReactivelyCoveringImport(t *testing.T) {
 	// Anything past −2500 W would be over-discharging toward export.
 	if got < -2500 {
 		t.Errorf("TargetW = %f W — reactive discharge should be bounded by live import (~2 kW), not the planned −3.2 kW", got)
+	}
+}
+
+// Plan sign is not a command sign in planner_self. Once a slot is above the
+// idle threshold, live grid decides direction. This catches the regression
+// where applyPlanSignFloor treated a plan-charge slot as "may only charge",
+// so a cloudy/load-heavy tick was held at 0 instead of covering live import.
+func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 800, // plan: charge 800 Wh, above idle threshold
+		Strategy:        "self_consumption",
+	}
+	store := seedStore(1200, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW >= 0 {
+		t.Errorf("TargetW = %f W — planner_self must cover live import even when the plan slot was charge", targets[0].TargetW)
+	}
+}
+
+// Symmetric case: if the plan expected discharge but the live meter says the
+// site is exporting, planner_self should absorb the live surplus. The plan
+// only says "participate this slot", not "force discharge direction".
+func TestPlannerSelfPlanDischargeStillChargesOnLiveExport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -800, // plan: discharge 800 Wh, above idle threshold
+		Strategy:        "self_consumption",
+	}
+	store := seedStore(-1200, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW <= 0 {
+		t.Errorf("TargetW = %f W — planner_self must absorb live export even when the plan slot was discharge", targets[0].TargetW)
 	}
 }
 
@@ -1945,7 +2101,7 @@ func TestFuseEVMaxWRecomputedAfterForceFuseDischarge(t *testing.T) {
 	// fuseMaxW so applyFuseGuard zeros battery charge AND
 	// forceFuseDischarge then drives it negative.
 	store := seedStore(13000, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.6},
@@ -1994,7 +2150,7 @@ func TestJointFuseAllocatorWithBatteryCoversEV(t *testing.T) {
 	}
 	mkState := func(coversEV bool) (*State, *telemetry.Store) {
 		store := seedStore(8200, []struct {
-			name    string
+			name          string
 			currentW, soc float64
 		}{
 			{"ferroamp", 0, 0.5},
@@ -2115,6 +2271,22 @@ func TestPlanSignFloorIgnoresManualModes(t *testing.T) {
 	}
 }
 
+func TestPlanSignFloorIgnoresPlannerSelf(t *testing.T) {
+	// planner_self uses the plan only for idle-vs-participate. A non-idle
+	// slot must be free to move opposite the plan sign when the live meter
+	// requires it, otherwise it is no longer self-consumption.
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		return SlotDirective{BatteryEnergyWh: -600}, true
+	}
+	in := []DispatchTarget{{Driver: "pixii", TargetW: 1700}}
+	out := applyPlanSignFloor(in, st)
+	if out[0].TargetW != 1700 {
+		t.Errorf("planner_self: TargetW = %f, want unchanged 1700", out[0].TargetW)
+	}
+}
+
 func TestPlanSignFloorIdleBandIsNoOp(t *testing.T) {
 	// An executed total inside ±100 W is "idle, no opinion on sign" —
 	// don't trigger the floor on it.
@@ -2169,7 +2341,7 @@ func TestPlanSignFloorNoOpWhenNoIntent(t *testing.T) {
 func TestComputeDispatchAppliesSignFloorOnDischargeSlot(t *testing.T) {
 	now := time.Now()
 	store := seedStore(-1700, []struct {
-		name    string
+		name          string
 		currentW, soc float64
 	}{
 		{"pixii", 0, 0.15},
