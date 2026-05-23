@@ -68,7 +68,7 @@ func TestSurplusReserveW(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := SurplusReserveW(tt.states)
+			got := SurplusReserveW(tt.states, nil)
 			if got != tt.want {
 				t.Errorf("SurplusReserveW = %.0f, want %.0f", got, tt.want)
 			}
@@ -87,12 +87,49 @@ func TestSurplusReserveWReleasesUnusedMaxToBattery(t *testing.T) {
 	states := []State{
 		{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 2500, MaxChargeW: 11000},
 	}
-	reserve := SurplusReserveW(states)
+	reserve := SurplusReserveW(states, nil)
 	current := states[0].CurrentPowerW
 	pvSurplus := 3000.0
 	ceiling := pvSurplus - (reserve - current)
 	if ceiling <= 0 {
 		t.Fatalf("ceiling = %.0f W — battery should get some of the 3 kW surplus, was 0 pre-fix", ceiling)
+	}
+}
+
+// Wake-kick active: even though CurrentPowerW is still 0 W, the
+// wallbox is actively offering current and the EV is expected to ramp
+// within the next tick. The reserve must hold the floor so the home
+// battery doesn't snatch the freed surplus during the brief gap.
+func TestSurplusReserveWHonoursWakeKickFloor(t *testing.T) {
+	states := []State{
+		{ID: "lp1", SurplusOnly: true, PluggedIn: true, CurrentPowerW: 0, MaxChargeW: 11000, MinChargeW: 1380},
+	}
+	wakeKick := map[string]bool{"lp1": true}
+	reserve := SurplusReserveW(states, wakeKick)
+	if reserve < 1380 {
+		t.Errorf("wake-kick active should reserve at least MinChargeW (1380 W), got %.0f", reserve)
+	}
+}
+
+// Boundary at the 50 W threshold: < 50 → no reserve, ≥ 50 → reserved.
+// Locks the numeric contract so a future change to the threshold
+// can't silently desync from callers reading it as documentation.
+func TestSurplusReserveWThresholdBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		power float64
+		want  float64
+	}{
+		{0, 0},
+		{49.9, 0},
+		{50.0, 50.0 + EVRampHeadroomW},   // strict-less-than gate: exactly 50 W is on the "drawing" side
+		{50.001, 50.001 + EVRampHeadroomW},
+		{1380, 1380 + EVRampHeadroomW},
+	} {
+		states := []State{{SurplusOnly: true, PluggedIn: true, CurrentPowerW: tc.power, MaxChargeW: 11000}}
+		got := SurplusReserveW(states, nil)
+		if got != tc.want {
+			t.Errorf("CurrentPowerW=%.3f: reserve=%.3f, want %.3f", tc.power, got, tc.want)
+		}
 	}
 }
 
@@ -110,7 +147,7 @@ func TestSurplusReserveWAllowsOnePhaseLadderClimb(t *testing.T) {
 	states := []State{
 		{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 1380, MaxChargeW: 11000},
 	}
-	reserve := SurplusReserveW(states)
+	reserve := SurplusReserveW(states, nil)
 	reserveRemaining := reserve - states[0].CurrentPowerW
 	const ladderClimbW = 3220 - 1380 // 1Φ × 6 A → 1Φ × 14 A ≈ 1840 W
 	if reserveRemaining < ladderClimbW {

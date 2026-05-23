@@ -3,6 +3,7 @@ package loadpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"sync"
@@ -698,6 +699,18 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	return c.send(ctx, driver, payload)
 }
 
+// ForceStart outcome sentinels. The API layer maps each to a distinct
+// HTTP status: NotReady → 503, LoadpointNotFound → 404 "lp", NoVehicle
+// → 422 "no vehicle bound", any other error → 502 "driver send".
+// Distinguishing these is what the previous (string, error) two-value
+// return tried to encode via empty strings — sentinels make it
+// type-checked.
+var (
+	ErrForceStartNotReady       = errors.New("loadpoint controller not ready (missing vehicleStatus/send wiring)")
+	ErrForceStartLoadpointGone  = errors.New("loadpoint not found")
+	ErrForceStartNoVehicleBound = errors.New("no vehicle driver bound to loadpoint")
+)
+
 // ForceStartVehicle sends a generic `charge_start` to the loadpoint's
 // bound vehicle driver immediately, bypassing the auto-wake's
 // `vehicleWakeCooldown` + `wakeBackoffCooldown` throttle. Used by the
@@ -707,7 +720,7 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 // stretched cooldown still has minutes to run, operator wants charging
 // to resume now).
 //
-// Side effects, in order:
+// Side effects on success (after the send returns nil), in order:
 //  1. Reset the wake-attempt counter so subsequent auto-wakes start
 //     from a fresh cooldown.
 //  2. Bump wakeLast so the auto-wake loop will not duplicate this
@@ -720,18 +733,29 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 //     Tesla, BMW, Audi drivers all implement it against their own
 //     back-ends).
 //
-// Returns the driver name actually targeted (empty string when no
-// driver is bound or the controller isn't wired) and any send error.
-// Empty driver + nil error means "no-op, nothing to send" — distinct
-// from a send error so the API layer can return 404 vs 502
-// appropriately.
+// If the send fails, the throttle resets and wake-kick arming still
+// stand — that's intentional: the operator's intent was to break the
+// backoff, and a failed send shouldn't punish a subsequent retry.
+//
+// Returns the driver name actually targeted plus the outcome:
+//
+//	("", ErrForceStartNotReady)        — controller missing wiring
+//	("", ErrForceStartLoadpointGone)   — no such loadpoint id
+//	("", ErrForceStartNoVehicleBound)  — loadpoint exists, no vehicle
+//	(driver, sendErr)                  — send hop returned an error
+//	(driver, nil)                      — sent
 func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string, error) {
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
-		return "", nil
+		return "", ErrForceStartNotReady
+	}
+	if c.manager != nil {
+		if _, ok := c.manager.State(lpID); !ok {
+			return "", ErrForceStartLoadpointGone
+		}
 	}
 	driver, _, ok := c.vehicleStatus(lpID)
 	if !ok || driver == "" {
-		return "", nil
+		return "", ErrForceStartNoVehicleBound
 	}
 	now := time.Now()
 	c.wakeMu.Lock()
@@ -746,10 +770,18 @@ func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string
 	c.wakeMu.Unlock()
 	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
 	if err != nil {
+		slog.Warn("loadpoint force-start: payload marshal", "lp", lpID, "err", err)
 		return driver, err
 	}
-	slog.Info("loadpoint force-start (operator)", "lp", lpID, "vehicle_driver", driver)
-	return driver, c.send(ctx, driver, payload)
+	sendErr := c.send(ctx, driver, payload)
+	if sendErr != nil {
+		slog.Warn("loadpoint force-start (operator) — send failed",
+			"lp", lpID, "vehicle_driver", driver, "err", sendErr)
+	} else {
+		slog.Info("loadpoint force-start (operator) — sent",
+			"lp", lpID, "vehicle_driver", driver)
+	}
+	return driver, sendErr
 }
 
 // wakeVehicleAuto sends a `wake_up` to the loadpoint's bound vehicle
@@ -1136,11 +1168,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		phaseMode := lpCfg.PhaseMode
 		if c.surplusLockedTo1P(lpCfg.ID) {
 			phaseMode = "1p"
-		} else if surplusOn {
-			// Honour the 30-min near-term dwell decision: pin the
-			// driver to that phase across the dwell window so a
-			// transient cmd_w=0 (pause) doesn't make the driver's
-			// "auto" snap to 1Φ and flip the contactor. Without this,
+		} else if surplusOn && (phaseMode == "" || phaseMode == "auto") {
+			// Honour the 30-min near-term dwell decision ONLY when the
+			// operator hasn't explicitly pinned a phase. Explicit "1p"
+			// or "3p" is a fixed-install contract: a 1Φ-only home or a
+			// 3Φ-only contactor preference. Overriding it via dwell
+			// would let a near-term forecast flip the install's
+			// physical configuration, exactly the wear case the dwell
+			// was meant to avoid.
+			//
+			// When phase_mode is unset or "auto", pin the driver to
+			// the dwell decision across the dwell window so a transient
+			// cmd_w=0 (pause) doesn't make the driver's "auto" snap to
+			// 1Φ and flip the contactor. Without this,
 			// pickSurplusSteps' step-list lock is silently bypassed
 			// every time the surplus clamp pauses.
 			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
@@ -1721,6 +1761,17 @@ func (c *Controller) wakeKickActive(id string, now time.Time) bool {
 	defer c.wakeMu.Unlock()
 	t, ok := c.wakeKickUntil[id]
 	return ok && now.Before(t)
+}
+
+// IsWakeKickActive is the public accessor mirroring wakeKickActive.
+// Main wires it into the per-tick reserve calc so the home battery
+// doesn't grab a freed PV surplus during the gap between the wake-kick
+// commanding the wallbox to offer current and the EV actually starting
+// to draw — the wake-kick window is the operator-correct "ramp" period
+// where the EV's share of surplus should be held even when its
+// instantaneous CurrentPowerW is still 0.
+func (c *Controller) IsWakeKickActive(id string, now time.Time) bool {
+	return c.wakeKickActive(id, now)
 }
 
 // resetSurplusSession drops the per-loadpoint rolling buffer + paused

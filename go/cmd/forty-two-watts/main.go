@@ -1171,12 +1171,19 @@ func main() {
 				// Net PV headroom for non-battery loads: positive when
 				// PV export exceeds load + planned battery charge.
 				// BatteryW is site-signed: positive = charge (import),
-				// negative = discharge (export). When discharging,
-				// subtracting a negative grows the surplus available
-				// to the EV — exactly right, because a discharging
-				// battery is contributing PV-deferred energy to the
-				// site.
-				surplus := -a.PVW - a.LoadW - a.BatteryW
+				// negative = discharge (export). Only subtract planned
+				// CHARGE — planned discharge is already earmarked to
+				// cover house load (or grid export in arbitrage), not
+				// available room for the EV to claim. Counting it would
+				// route plan-discharge → EV → re-charge cycles: the EV
+				// takes power the plan reserved for load coverage, then
+				// the dispatch has to re-import or further discharge to
+				// keep the original balance.
+				plannedChargeW := a.BatteryW
+				if plannedChargeW < 0 {
+					plannedChargeW = 0
+				}
+				surplus := -a.PVW - a.LoadW - plannedChargeW
 				if !any || surplus > peak {
 					peak = surplus
 					any = true
@@ -1767,7 +1774,28 @@ func main() {
 			// legacy/reactive paths. Computed every tick so toggling
 			// surplus_only, plugging/unplugging, or an EV ramp picks
 			// up immediately.
-			evReserveW := loadpoint.SurplusReserveW(lpMgr.States())
+			// Build the wake-kick-active set so the reserve calc can
+			// hold the floor for an LP whose wallbox is actively
+			// offering current to a still-ramping EV. Without this,
+			// the home battery would snatch the freed surplus during
+			// the brief gap before the EV's contactor settles.
+			lpStatesSnapshot := lpMgr.States()
+			var wakeKickActiveIDs map[string]bool
+			if lpController != nil {
+				now := time.Now()
+				for _, st := range lpStatesSnapshot {
+					if !st.PluggedIn || !st.SurplusOnly {
+						continue
+					}
+					if lpController.IsWakeKickActive(st.ID, now) {
+						if wakeKickActiveIDs == nil {
+							wakeKickActiveIDs = map[string]bool{}
+						}
+						wakeKickActiveIDs[st.ID] = true
+					}
+				}
+			}
+			evReserveW := loadpoint.SurplusReserveW(lpStatesSnapshot, wakeKickActiveIDs)
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW

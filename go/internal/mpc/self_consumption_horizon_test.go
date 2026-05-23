@@ -14,8 +14,9 @@ import "testing"
 //
 // With ActionLevels=21 (900 W step) the DP picked idle because the only
 // legal charge action (+900 W) didn't visibly improve V over 192 slots
-// vs. 0. ActionLevels=41 (450 W step) lets the DP land on +1350 W and
-// the math correctly favours storing for the evening peak.
+// vs. 0. Production now runs ActionLevels=81 (225 W step) — this test
+// pins that value so a future regression that drops it back to 21 or
+// 41 (or any coarser grid that re-introduces the bug) trips the test.
 func TestSelfConsumptionAbsorbsCheapPVOver48hHorizon(t *testing.T) {
 	slots := make([]Slot, 192)
 	for i := range slots {
@@ -63,7 +64,7 @@ func TestSelfConsumptionAbsorbsCheapPVOver48hHorizon(t *testing.T) {
 		SoCLevels:           41,
 		MaxChargeW:          9000,
 		MaxDischargeW:       9000,
-		ActionLevels:        41, // main.go uses this same value
+		ActionLevels:        81, // matches main.go's buildMPC default
 		ChargeEfficiency:    0.95,
 		DischargeEfficiency: 0.95,
 		TerminalSoCPrice:    163.99,

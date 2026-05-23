@@ -568,9 +568,11 @@ func ComputeDispatch(
 				planFresh = true
 				state.PlanStale = false
 				slotH := dir.SlotEnd.Sub(dir.SlotStart).Hours()
-				// Idle decision is derived from forecast PV+load
-				// baseline (what the grid would be with battery=0),
-				// NOT from the DP's quantized battery action. The DP's
+				// Idle decision is derived from the plan's forecast
+				// baseline grid (what the grid would be with the
+				// battery doing nothing — includes house load, PV,
+				// and any planned EV draw), NOT from the DP's
+				// quantized battery action. The DP's
 				// action grid (currently 225 W step) rounds small
 				// baseline values to 0 — on a 200 W net surplus the
 				// plan picks battery_w=0 because no charge step fits
