@@ -40,6 +40,19 @@ func SurplusReserveW(states []State) float64 {
 		if !st.SurplusOnly || !st.PluggedIn {
 			continue
 		}
+		// Skip the reserve when the vehicle is in a terminal non-drawing
+		// state. "Complete" means the car reached its SoC target and
+		// won't draw more without operator intervention (re-target via
+		// app, plug-cycle, force_start). Leaving 2 kW reserved for a car
+		// that's refusing the offer makes the home battery hold steady
+		// at the current SoC while the same 2 kW exports to grid — the
+		// "charging a bit but not full surplus" symptom from a session
+		// where the EV finished charging mid-afternoon. Other states
+		// ("Stopped", "Disconnected", empty) keep the reserve so the
+		// system can bootstrap a re-start.
+		if st.VehicleChargingState == "Complete" {
+			continue
+		}
 		ceiling := st.CurrentPowerW + EVRampHeadroomW
 		if ceiling > st.MaxChargeW {
 			ceiling = st.MaxChargeW
