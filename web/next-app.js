@@ -357,18 +357,40 @@
   function smoothStatusForDisplay(data) {
     var now = Date.now();
     var out = Object.assign({}, data);
-    ["grid_w", "pv_w", "bat_w", "ev_w", "ev_charging_w", "load_w"].forEach(function (field) {
+    ["grid_w", "pv_w", "bat_w", "ev_w", "ev_charging_w"].forEach(function (field) {
       if (out[field] != null) out[field] = smoothDisplayNumber("site:" + field, out[field], now);
     });
     var drivers = {};
+    var sums = { pv_w: 0, bat_w: 0, ev_w: 0 };
+    var have = { pv_w: false, bat_w: false, ev_w: false };
     Object.keys(data.drivers || {}).forEach(function (name) {
       var d = Object.assign({}, data.drivers[name] || {});
       ["meter_w", "pv_w", "bat_w", "ev_w"].forEach(function (field) {
         if (d[field] != null) d[field] = smoothDisplayNumber("driver:" + name + ":" + field, d[field], now);
       });
+      var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      if (online) {
+        ["pv_w", "bat_w", "ev_w"].forEach(function (field) {
+          if (d[field] != null) {
+            sums[field] += d[field] || 0;
+            have[field] = true;
+          }
+        });
+      }
       drivers[name] = d;
     });
     out.drivers = drivers;
+    if (have.pv_w) out.pv_w = sums.pv_w;
+    if (have.bat_w) out.bat_w = sums.bat_w;
+    if (have.ev_w) {
+      out.ev_w = sums.ev_w;
+      out.ev_charging_w = sums.ev_w;
+    }
+    if (out.grid_w != null) {
+      out.load_w = Math.max(0, (out.grid_w || 0) - (out.bat_w || 0) - (out.pv_w || 0) - (out.ev_w || 0));
+    } else if (data.load_w != null) {
+      out.load_w = smoothDisplayNumber("site:load_w", data.load_w, now);
+    }
     return out;
   }
 

@@ -441,6 +441,7 @@ const (
 	settlementMinRemainS   = 30.0
 	settlementMaxDtS       = 60.0
 	settlementTargetAlpha  = 0.35
+	settlementMinSoC       = 0.50
 )
 
 func (s *State) resetSettlementAccounting() {
@@ -501,6 +502,19 @@ func smoothSettlementTarget(prev, next float64) float64 {
 		return 0
 	}
 	return out
+}
+
+func minBatterySoC(bats []batteryInfo) float64 {
+	if len(bats) == 0 {
+		return 0
+	}
+	min := 1.0
+	for _, b := range bats {
+		if b.soc < min {
+			min = b.soc
+		}
+	}
+	return min
 }
 
 type plannerSelfDecision struct {
@@ -573,7 +587,7 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 		MinDispatchIntervalS:           5,
 		PrevTargets:                    map[string]float64{},
 		UseCascade:                     true,
-		SettlementAwareSelfConsumption: true,
+		SettlementAwareSelfConsumption: false,
 	}
 }
 
@@ -1143,7 +1157,10 @@ func ComputeDispatch(
 		}
 
 		activeGridTargetW := state.GridTargetW
-		if effectiveMode == ModeSelfConsumption && !noSelfDischarge && state.SettlementAwareSelfConsumption {
+		if effectiveMode == ModeSelfConsumption &&
+			!noSelfDischarge &&
+			state.SettlementAwareSelfConsumption &&
+			minBatterySoC(onlineBats) >= settlementMinSoC {
 			settlementTargetW := state.settlementGridTarget(time.Now(), gridW)
 			if settlementTargetW < activeGridTargetW {
 				activeGridTargetW = settlementTargetW

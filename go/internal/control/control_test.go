@@ -587,6 +587,7 @@ func TestSelfConsumptionSettlementBiasExportsToRecoverSlotImport(t *testing.T) {
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
+	st.SettlementAwareSelfConsumption = true
 	st.SlewRateW = 100000
 	st.MinDispatchIntervalS = 0
 	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
@@ -602,6 +603,51 @@ func TestSelfConsumptionSettlementBiasExportsToRecoverSlotImport(t *testing.T) {
 	}
 }
 
+func TestSelfConsumptionSettlementBiasDisabledByDefault(t *testing.T) {
+	now := time.Now()
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.8},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
+	st.settlementLastTs = now.Add(-time.Second)
+	st.settlementNetWh = 100
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Fatalf("settlement bias is unsafe as a default; got %#v", targets)
+	}
+}
+
+func TestSelfConsumptionSettlementBiasDisabledAtLowSoC(t *testing.T) {
+	now := time.Now()
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.26},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SettlementAwareSelfConsumption = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
+	st.settlementLastTs = now.Add(-time.Second)
+	st.settlementNetWh = 100
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 0 {
+		t.Fatalf("low SoC settlement recovery should not export battery, got %#v", targets)
+	}
+}
+
 func TestSelfConsumptionSettlementBiasDoesNotImportToRecoverExport(t *testing.T) {
 	now := time.Now()
 	store := seedStore(0, []struct {
@@ -612,6 +658,7 @@ func TestSelfConsumptionSettlementBiasDoesNotImportToRecoverExport(t *testing.T)
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModeSelfConsumption
+	st.SettlementAwareSelfConsumption = true
 	st.SlewRateW = 100000
 	st.MinDispatchIntervalS = 0
 	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
