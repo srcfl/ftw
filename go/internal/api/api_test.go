@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -401,6 +402,52 @@ func TestHandleEnergyDailyBucketsByLocalDay(t *testing.T) {
 	}
 	if diff := todayImport - expectedImport; diff < -tolerance || diff > tolerance {
 		t.Errorf("today import_wh = %v, want ~%v (gap=%v)", todayImport, expectedImport, gap)
+	}
+}
+
+func TestCurrentGridEnergySlotUsesFixedQuarterWindow(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Date(2026, 5, 23, 14, 7, 0, 0, time.Local)
+	slotStart := time.Date(2026, 5, 23, 14, 0, 0, 0, time.Local)
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+		t.Fatalf("RecordHistory import: %v", err)
+	}
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(4 * time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+		t.Fatalf("RecordHistory import 2: %v", err)
+	}
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(6 * time.Minute).UnixMilli(), GridW: -600}); err != nil {
+		t.Fatalf("RecordHistory export: %v", err)
+	}
+	// Previous-slot noise must not leak into the current 14:00-14:15 bucket.
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(-time.Minute).UnixMilli(), GridW: 9000}); err != nil {
+		t.Fatalf("RecordHistory previous slot: %v", err)
+	}
+
+	got, err := currentGridEnergySlot(st, now)
+	if err != nil {
+		t.Fatalf("currentGridEnergySlot: %v", err)
+	}
+	if got["slot_start_ms"].(int64) != slotStart.UnixMilli() {
+		t.Fatalf("slot_start_ms = %v, want %v", got["slot_start_ms"], slotStart.UnixMilli())
+	}
+	if got["slot_end_ms"].(int64) != slotStart.Add(15*time.Minute).UnixMilli() {
+		t.Fatalf("slot_end_ms = %v, want %v", got["slot_end_ms"], slotStart.Add(15*time.Minute).UnixMilli())
+	}
+	// DailyEnergy uses the current row's grid_w over (prev_ts, ts]:
+	// +1200 W for 3 min = 60 Wh, then -600 W for 2 min = 20 Wh export.
+	if math.Abs(got["import_wh"].(float64)-60) > 0.01 {
+		t.Fatalf("import_wh = %v, want 60", got["import_wh"])
+	}
+	if math.Abs(got["export_wh"].(float64)-20) > 0.01 {
+		t.Fatalf("export_wh = %v, want 20", got["export_wh"])
+	}
+	if math.Abs(got["net_wh"].(float64)-40) > 0.01 {
+		t.Fatalf("net_wh = %v, want 40", got["net_wh"])
 	}
 }
 

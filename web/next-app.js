@@ -25,6 +25,15 @@
     "24h": 24 * 60 * 60 * 1000,
     "3d": 3 * 24 * 60 * 60 * 1000,
   };
+  const CHART_SMOOTH_MS = {
+    "5m": 10 * 1000,
+    "15m": 20 * 1000,
+    "1h": 60 * 1000,
+    "6h": 5 * 60 * 1000,
+    "24h": 15 * 60 * 1000,
+    "3d": 30 * 60 * 1000,
+  };
+  const STATUS_DISPLAY_TAU_MS = 8 * 1000;
   let chartRange = "5m";             // current selected range
   let currentMode = null;
   let animating = true;              // 30fps redraw loop flag
@@ -59,6 +68,7 @@
   // positive = charging). One series per charger so multi-charger
   // homes see each car separately. Shape: { [driverName]: { ev: [...] } }.
   var chartEVs = {};
+  var statusDisplayState = {};
 
   // Resolve a CSS custom property off :root at call time. Lazy on
   // purpose: a runtime theme toggle rewrites the oklch values, so we
@@ -322,6 +332,65 @@
     if (kwh >= 10) return kwh.toFixed(1) + " kWh";
     return kwh.toFixed(2) + " kWh";
   }
+  function formatSignedWh(wh) {
+    var v = Number(wh) || 0;
+    var abs = Math.abs(v);
+    var sign = v > 0.5 ? "+" : v < -0.5 ? "-" : "±";
+    if (abs >= 1000) return sign + (abs / 1000).toFixed(2) + " kWh";
+    return sign + Math.round(abs) + " Wh";
+  }
+
+  function smoothDisplayNumber(key, value, now) {
+    if (value == null || !isFinite(value)) return value;
+    var prev = statusDisplayState[key];
+    if (!prev || !isFinite(prev.value)) {
+      statusDisplayState[key] = { value: value, ts: now };
+      return value;
+    }
+    var dt = Math.max(0, now - prev.ts);
+    var alpha = 1 - Math.exp(-dt / STATUS_DISPLAY_TAU_MS);
+    var next = prev.value + (value - prev.value) * alpha;
+    statusDisplayState[key] = { value: next, ts: now };
+    return next;
+  }
+
+  function smoothStatusForDisplay(data) {
+    var now = Date.now();
+    var out = Object.assign({}, data);
+    ["grid_w", "pv_w", "bat_w", "ev_w", "ev_charging_w", "load_w"].forEach(function (field) {
+      if (out[field] != null) out[field] = smoothDisplayNumber("site:" + field, out[field], now);
+    });
+    var drivers = {};
+    Object.keys(data.drivers || {}).forEach(function (name) {
+      var d = Object.assign({}, data.drivers[name] || {});
+      ["meter_w", "pv_w", "bat_w", "ev_w"].forEach(function (field) {
+        if (d[field] != null) d[field] = smoothDisplayNumber("driver:" + name + ":" + field, d[field], now);
+      });
+      drivers[name] = d;
+    });
+    out.drivers = drivers;
+    return out;
+  }
+
+  function smoothSeriesForChart(values, timestamps, windowMs) {
+    if (!windowMs || windowMs <= 0 || values.length < 3) return values;
+    var out = new Array(values.length);
+    for (var i = 0; i < values.length; i++) {
+      var t = timestamps[i];
+      var sum = 0;
+      var n = 0;
+      for (var j = i; j >= 0; j--) {
+        if (t - timestamps[j] > windowMs) break;
+        var v = values[j];
+        if (v == null || !isFinite(v)) continue;
+        sum += v;
+        n++;
+      }
+      out[i] = n > 0 ? sum / n : values[i];
+    }
+    return out;
+  }
+
   // Compact kWh — bubble lines that pack two arrows ("↓ 5.2 ↑ 12") need
   // tighter formatting than the standalone tile reading. Drops the "kWh"
   // unit (already implied by the bubble label "kWh today" elsewhere).
@@ -374,6 +443,8 @@
       pushChartData(data, targetsByDriver);
     } catch (e) { console.error("pushChartData error:", e); }
 
+    data = smoothStatusForDisplay(data);
+
     // Version (live from API — survives stale browser cache of index.html)
     if (versionEl && data.version) {
       versionEl.textContent = data.version;
@@ -394,6 +465,19 @@
     if (targetDisp) {
       var t = data.grid_target_w || 0;
       targetDisp.textContent = t === 0 ? "target 0" : "target " + formatW(t);
+    }
+    var slotBadge = document.getElementById("grid-slot-badge");
+    if (slotBadge) {
+      var slot = data.energy && data.energy.current_slot;
+      if (slot) {
+        var netWh = Number(slot.net_wh) || 0;
+        slotBadge.textContent = "15m " + formatSignedWh(netWh);
+        slotBadge.className = "grid-slot-badge" +
+          (netWh > 5 ? " slot-import" : netWh < -5 ? " slot-export" : "");
+      } else {
+        slotBadge.textContent = "";
+        slotBadge.className = "grid-slot-badge";
+      }
     }
 
     // PV — stored as negative (site convention) but displayed positive
@@ -933,6 +1017,9 @@
 
     // Build series based on view
     var series;
+    var chartSmoothMs = CHART_SMOOTH_MS[chartRange] || 0;
+    var smoothedPVSeries = null;
+    var smoothedLoadSeries = null;
     if (chartView === "energy") {
       function toKwh(arr) { return arr.map(function(x){ return x / 1000; }); }
       series = [
@@ -944,10 +1031,13 @@
         { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
+      var smoothedGridSeries = smoothSeriesForChart(chartHistory.grid, chartHistory.timestamps, chartSmoothMs);
+      smoothedPVSeries = smoothSeriesForChart(chartHistory.pv, chartHistory.timestamps, chartSmoothMs);
+      smoothedLoadSeries = smoothSeriesForChart(chartHistory.load, chartHistory.timestamps, chartSmoothMs);
       series = [
-        { data: chartHistory.grid, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
-        { data: chartHistory.pv,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: chartHistory.load, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
+        { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
+        { data: smoothedLoadSeries, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -956,7 +1046,7 @@
         var color = batteryColor(name);
         var toggle = "bat:" + name;
         var label = batteryLabel(name);
-        series.push({ data: slot.bat,    color: color, width: 2,   dash: [],     name: label,         fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.bat, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
         series.push({ data: slot.target, color: color, width: 1.5, dash: [6, 4], name: label + " tgt", fill: false, toggle: toggle });
       });
       // Append one line per EV charger. EV power is always ≥ 0 (pure
@@ -969,7 +1059,7 @@
         var color = evColor(name);
         var toggle = "ev:" + name;
         var label = evLabel(name);
-        series.push({ data: slot.ev, color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.ev, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
       });
       // Respect click-to-hide from legend.
       series = series.filter(function (s) { return !legendHidden[s.toggle]; });
@@ -1125,8 +1215,8 @@
     // current actual value so the transition is continuous.
     if (chartView === "power" && chartPlan && chartPlan.actions) {
       var lastIdx = chartHistory.timestamps.length - 1;
-      var lastActualPV = lastIdx >= 0 ? chartHistory.pv[lastIdx] : null;
-      var lastActualLoad = lastIdx >= 0 ? chartHistory.load[lastIdx] : null;
+      var lastActualPV = lastIdx >= 0 && smoothedPVSeries ? smoothedPVSeries[lastIdx] : null;
+      var lastActualLoad = lastIdx >= 0 && smoothedLoadSeries ? smoothedLoadSeries[lastIdx] : null;
 
       var drawForecast = function (field, color, lastActual) {
         var pts = [];

@@ -591,7 +591,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Energy today: integrate history points since midnight local time.
 	// Each point is ~5 s apart; multiply W × dt_hours for Wh per interval.
+	//
+	// Current slot: same integration over the fixed local 15-minute
+	// settlement window (00/15/30/45). This is deliberately observational:
+	// it lets the UI show whether second-to-second import/export is material
+	// over the billing window without changing dispatch semantics.
 	var energyToday map[string]any
+	var energyCurrentSlot map[string]any
 	if s.deps.State != nil {
 		now := time.Now()
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -622,6 +628,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				"bat_discharged_wh": dischargedWh,
 				"load_wh":           loadWh,
 			}
+		}
+		slot, err := currentGridEnergySlot(s.deps.State, now)
+		if err == nil {
+			energyCurrentSlot = slot
+		} else {
+			slog.Warn("failed to integrate current grid energy slot", "err", err)
 		}
 	}
 
@@ -672,10 +684,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"drivers":      drivers,
 		"dispatch":     dispatch,
 	}
-	if energyToday != nil {
-		resp["energy"] = map[string]any{"today": energyToday}
+	if energyToday != nil || energyCurrentSlot != nil {
+		energy := map[string]any{}
+		if energyToday != nil {
+			energy["today"] = energyToday
+		}
+		if energyCurrentSlot != nil {
+			energy["current_slot"] = energyCurrentSlot
+		}
+		resp["energy"] = energy
 	}
 	writeJSON(w, 200, resp)
+}
+
+func currentGridEnergySlot(st *state.Store, now time.Time) (map[string]any, error) {
+	slotStart := now.Truncate(15 * time.Minute)
+	slotEnd := slotStart.Add(15 * time.Minute)
+	d, err := st.DailyEnergy(slotStart.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"slot_start_ms": slotStart.UnixMilli(),
+		"slot_end_ms":   slotEnd.UnixMilli(),
+		"elapsed_s":     now.Sub(slotStart).Seconds(),
+		"import_wh":     d.ImportWh,
+		"export_wh":     d.ExportWh,
+		"net_wh":        d.ImportWh - d.ExportWh,
+	}, nil
 }
 
 // siteMeterPhaseAmps pulls per-phase L1/L2/L3 current (in amps) from the

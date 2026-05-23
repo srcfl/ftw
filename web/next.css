@@ -813,6 +813,39 @@ body.ftw-next .plan-horizon button.active {
   color: #0a0a0a;
 }
 
+body.ftw-next .chart-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+body.ftw-next .grid-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+body.ftw-next .grid-slot-badge.slot-import {
+  color: var(--red-e);
+  border-color: color-mix(in oklab, var(--red-e) 45%, var(--line));
+}
+
+body.ftw-next .grid-slot-badge.slot-export {
+  color: var(--green-e);
+  border-color: color-mix(in oklab, var(--green-e) 45%, var(--line));
+}
+
 /* Advanced-mode toggle row — sits between the live + plan charts and
    the advanced-only sections, so the affordance lands right where
    the extra UI surfaces appear when toggled on. Centered, quiet, and
