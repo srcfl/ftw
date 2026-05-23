@@ -43,13 +43,28 @@
   function horizonBounds(horizon) {
     const now = Date.now();
     if (horizon === "today") {
-      return { tMin: now - 30 * 60 * 1000, tMax: localMidnight(1) };
+      return { tMin: localMidnight(0), tMax: localMidnight(1) };
     }
     if (horizon === "tomorrow") {
       return { tMin: localMidnight(1), tMax: localMidnight(2) };
     }
     // "all" — current default: now-30 min through next 48 h.
     return { tMin: now - 30 * 60 * 1000, tMax: now + 48 * 60 * 60 * 1000 };
+  }
+  function chartTickStepMs(tMin, tMax) {
+    const span = Math.max(1, tMax - tMin);
+    if (span <= 26 * 3600 * 1000) return 6 * 3600 * 1000;
+    if (span <= 54 * 3600 * 1000) return 12 * 3600 * 1000;
+    return 24 * 3600 * 1000;
+  }
+  function firstChartTick(tMin, stepMs) {
+    const d = new Date(tMin);
+    d.setMinutes(0, 0, 0);
+    const stepHours = Math.max(1, Math.round(stepMs / 3600000));
+    const hour = d.getHours();
+    const addHours = (stepHours - (hour % stepHours)) % stepHours;
+    if (addHours > 0 || d.getTime() < tMin) d.setHours(hour + addHours, 0, 0, 0);
+    return d.getTime();
   }
 
   async function fetchAll() {
@@ -164,8 +179,8 @@
     ctx.fillStyle = 'rgba(255,255,255,0.45)';
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    for (let h = 0; h <= 48; h += 6) {
-      const t = now + h * 3600 * 1000;
+    const tickStep = chartTickStepMs(tMin, tMax);
+    for (let t = firstChartTick(tMin, tickStep); t <= tMax + 1000; t += tickStep) {
       const x = xScale(t);
       ctx.beginPath();
       ctx.moveTo(x, pad.t);
@@ -174,15 +189,17 @@
       ctx.fillText(fmtHHMM(t), x, cssH - 10);
     }
     // Now-line
-    const xNow = xScale(now);
-    ctx.strokeStyle = '#ef4444';
-    ctx.lineWidth = 1.2;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(xNow, pad.t);
-    ctx.lineTo(xNow, pad.t + plotH);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    if (now >= tMin && now <= tMax) {
+      const xNow = xScale(now);
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(xNow, pad.t);
+      ctx.lineTo(xNow, pad.t + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // ---- Predicted-zone shade + boundary ----
     // Find the first ML-forecasted action. Everything at or past that
@@ -493,8 +510,11 @@
       if (!state.enabled || !state.enabled.mpc) {
         summary.textContent = 'MPC planner disabled';
       } else if (!plan) {
-        summary.textContent = state.prices && state.prices.length
-          ? 'Waiting for first plan…'
+        const visibleInputs = [];
+        if (state.prices && state.prices.length) visibleInputs.push('prices');
+        if (state.forecast && state.forecast.length) visibleInputs.push('forecast');
+        summary.textContent = visibleInputs.length
+          ? 'Showing ' + visibleInputs.join(' + ') + ' · waiting for first plan…'
           : 'Waiting for price data…';
       } else {
         const slotMin = plan.actions[0] ? plan.actions[0].slot_len_min : 15;

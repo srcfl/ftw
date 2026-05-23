@@ -91,7 +91,7 @@
     <div class="modal-content">
       <div class="modal-header">
         <h2>Settings</h2>
-        <button id="settings-close" class="modal-close">×</button>
+        <button id="settings-close" class="modal-close" aria-label="Close settings">×</button>
       </div>
       <div class="modal-tabs" id="settings-tabs">
         <button data-tab="control" class="active">Control</button>
@@ -482,7 +482,7 @@
     <div class="modal-content" style="max-width:520px">
       <div class="modal-header">
         <h2>Battery self-tune</h2>
-        <button id="self-tune-close" class="modal-close">×</button>
+        <button id="self-tune-close" class="modal-close" aria-label="Close battery self-tune">×</button>
       </div>
       <div class="modal-body" id="self-tune-body">
         <!-- Rendered by JS: battery checklist OR live progress OR before/after diff -->
@@ -497,6 +497,7 @@
 
   <footer>
     <span id="refresh-indicator" class="refresh-dot" title="Auto-refresh active">&#9679;</span>
+    <span class="refresh-label">Auto-refresh active</span>
     <span id="last-update">Last update: --</span>
     <span class="footer-tagline">Don't Panic 🐬</span>
   </footer>

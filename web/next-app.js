@@ -1360,7 +1360,7 @@
     if (lastDataTs > 0) {
       var ageMs = now - lastDataTs;
       var ageStr;
-      if (ageMs < 1500) ageStr = "live";
+      if (ageMs < 5000) ageStr = "live";
       else if (ageMs < 60_000) ageStr = Math.round(ageMs / 1000) + "s ago";
       else ageStr = Math.round(ageMs / 60_000) + "m ago";
       var fresh = ageMs < 5000;
@@ -1629,6 +1629,7 @@
         if (window.FTWDiagnostics) window.FTWDiagnostics.open(name);
         return;
       }
+      if (action === "restart" && !window.confirm("Restart driver \"" + name + "\"? It will briefly stop reporting while it reconnects.")) return;
       if (action === "disable" && !window.confirm("Disable driver \"" + name + "\"? It will be stopped and won't auto-start until re-enabled.")) return;
       btn.disabled = true;
       btn.textContent = action + "ing…";
@@ -2970,6 +2971,7 @@
   var historyTiles = $("history-tiles");
   var historyCakeWrap = $("history-cake");
   var historyCakeEl = $("history-cake-el");
+  var historyCakeWaitingForUpgrade = false;
 
   // historyState mirrors both toggles so the Bars/Cakes view and
   // the Week/Month range stay coordinated. Only the cake re-fetches
@@ -2978,7 +2980,17 @@
   var historyState = { range: "week", view: "bars" };
 
   function fetchHistoryCake() {
-    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") return;
+    historyCakeEl = $("history-cake-el");
+    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") {
+      if (!historyCakeWaitingForUpgrade && window.customElements && customElements.whenDefined) {
+        historyCakeWaitingForUpgrade = true;
+        customElements.whenDefined("ftw-energy-cake").then(function () {
+          historyCakeWaitingForUpgrade = false;
+          if (historyState.view === "cakes") fetchHistoryCake();
+        });
+      }
+      return;
+    }
     if (historyCakeWrap) historyCakeWrap.classList.add("loading");
     var days = historyState.range === "month" ? 30 : 7;
     var clearLoading = function () {

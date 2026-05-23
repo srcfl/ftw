@@ -167,7 +167,12 @@ header h1 {
   transition: background 0.1s;
 }
 .diag-row:hover { background: rgba(255,255,255,0.03); }
-.diag-row.active { background: rgba(96,165,250,0.12); border-left: 3px solid #60a5fa; padding-left: calc(0.75rem - 3px); }
+.diag-row.active {
+  background: rgba(96,165,250,0.18);
+  border-left: 4px solid #60a5fa;
+  box-shadow: inset 0 0 0 1px rgba(96,165,250,0.25);
+  padding-left: calc(0.75rem - 4px);
+}
 .diag-row-time { font-weight: 600; }
 .diag-row-date { color: var(--text-dim); font-weight: 400; font-size: 0.7rem; }
 .diag-row-reason {
@@ -1505,7 +1510,10 @@ footer {
   font-size: 0.72rem;
   font-weight: normal;
   color: #e2e8f0;
+  font-family: var(--sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
   width: 260px;
   z-index: 100;
   pointer-events: none;

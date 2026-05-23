@@ -135,6 +135,13 @@ body.ftw-next .tab-btn.active {
   color: var(--fg);
   border-color: var(--line);
 }
+body.ftw-next button:focus-visible,
+body.ftw-next [role="button"]:focus-visible,
+body.ftw-next input:focus-visible,
+body.ftw-next select:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: 2px;
+}
 body.ftw-next .header-right {
   gap: 10px;
 }
@@ -226,19 +233,24 @@ body.ftw-next .icon-btn {
 }
 body.ftw-next .icon-btn:hover {
   background: var(--ink-raised);
-  color: var(--fg);
+  color: var(--accent-e);
+  border-color: var(--accent-e);
 }
 body.ftw-next .icon-btn[aria-pressed="true"] {
   color: var(--fg);
   background: oklch(0.3 0.1 var(--accent-hue) / 0.2);
   border-color: var(--accent-e);
 }
+body.ftw-next .icon-btn[aria-pressed="true"]:hover {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--accent-e) 24%, transparent);
+}
 
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */
 body.ftw-next .mobile-menu-btn {
-  display: none;
+  display: none !important;
   background: transparent;
   border: 1px solid var(--line);
   color: var(--fg);
@@ -759,7 +771,7 @@ body.ftw-next .strategy-hint {
   margin-top: 10px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg-dim);
+  color: var(--fg);
   line-height: 1.5;
 }
 body.ftw-next .slider-group-compact {
@@ -767,6 +779,13 @@ body.ftw-next .slider-group-compact {
 }
 body.ftw-next .slider-group-compact input[type="range"] {
   accent-color: var(--accent-e);
+}
+body.ftw-next .slider-group-compact input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+body.ftw-next .slider-group-compact:has(input[type="range"]:disabled) .slider-current {
+  color: var(--fg-muted);
 }
 body.ftw-next .slider-current {
   font-family: var(--mono);
@@ -1119,6 +1138,9 @@ body.ftw-next footer {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+body.ftw-next footer .refresh-label {
+  color: var(--fg-dim);
+}
 body.ftw-next .status-bar {
   background: oklch(0.11 0.015 250);
   border-top: 1px solid var(--line);
@@ -1440,7 +1462,7 @@ body.ftw-next .diagnose-detail {
     display: none;
   }
   body.ftw-next .mobile-menu-btn {
-    display: inline-flex;
+    display: inline-flex !important;
     align-items: center;
     justify-content: center;
     justify-self: end;
@@ -1584,6 +1606,13 @@ html[data-theme="light"] body.ftw-next .status-bar {
    tokens above re-point them but a few hex fallbacks slip through in
    inline styles — use a readable dim for neutral text on light bg. */
 html[data-theme="light"] body.ftw-next .val-neutral { color: var(--fg); }
+html[data-theme="light"] body.ftw-next .summary-card .card-sub,
+html[data-theme="light"] body.ftw-next .card-target,
+html[data-theme="light"] body.ftw-next .plan-summary,
+html[data-theme="light"] body.ftw-next .chart-legend,
+html[data-theme="light"] body.ftw-next footer {
+  color: var(--fg-dim);
+}
 
 /* ---- Battery-absence gating ----
    When no driver reports bat_w, next-app.js flips body.no-battery on
