@@ -875,19 +875,29 @@ func annotateCurtailment(plan *Plan, exportOrePerKWh float64) {
 //	actW          = battery command (+ charge, − discharge)
 func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 	const eps = 1e-6
+	// modeTolW absorbs action-grid discretization at the boundary so a
+	// 50 W overshoot doesn't disqualify an otherwise-correct action.
+	// Without it, ActionLevels=41 (450 W step) frequently can't find a
+	// legal self_consumption action when |baselineGridW| isn't a multiple
+	// of the action step — DP picks idle and the operator sees PV
+	// exporting / grid importing instead of the battery covering. The
+	// 50 W matches the surplus-only / no-battery-to-EV checks elsewhere
+	// in the DP and the dispatch-side reserve epsilon, keeping the
+	// tolerance budget consistent across the planner.
+	const modeTolW = 50.0
 	switch m {
 	case ModeSelfConsumption:
 		// Battery must only move the grid toward zero, never past it:
-		//   if baseline > 0 (import): grid must be in [0, baseline]
-		//   if baseline < 0 (export): grid must be in [baseline, 0]
-		//   if baseline == 0: battery must be 0
+		//   if baseline > 0 (import): grid must be in [-tol, baseline+tol]
+		//   if baseline < 0 (export): grid must be in [baseline-tol, +tol]
+		//   if baseline == 0: battery must be 0 (± tol)
 		if baselineGridW > eps {
-			return gridW >= -eps && gridW <= baselineGridW+eps
+			return gridW >= -modeTolW && gridW <= baselineGridW+modeTolW
 		}
 		if baselineGridW < -eps {
-			return gridW <= eps && gridW >= baselineGridW-eps
+			return gridW <= modeTolW && gridW >= baselineGridW-modeTolW
 		}
-		return math.Abs(actW) < eps
+		return math.Abs(actW) < modeTolW
 	case ModeCheapCharge:
 		// Allow charging from grid (any actW ≥ 0), but never discharge past
 		// the local load: i.e. gridW must stay ≥ 0 when we'd otherwise be
