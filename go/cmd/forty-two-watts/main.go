@@ -1767,7 +1767,27 @@ func main() {
 			// legacy/reactive paths. Computed every tick so toggling
 			// surplus_only, plugging/unplugging, or an EV ramp picks
 			// up immediately.
-			evReserveW := loadpoint.SurplusReserveW(lpMgr.States())
+			// Decorate states with VehicleChargingState before computing
+			// the reserve. lpMgr only tracks plug + power; the vehicle's
+			// charging state lives in telemetry.DerVehicle. Without this
+			// decoration, SurplusReserveW can't tell a Complete vehicle
+			// from one that's actively charging — and the dispatch
+			// continues to reserve 2 kW for a car that finished hours
+			// ago, blocking the home battery from absorbing PV that
+			// would otherwise go to grid.
+			lpStates := lpMgr.States()
+			lpNow := time.Now()
+			for i := range lpStates {
+				if !lpStates[i].PluggedIn {
+					continue
+				}
+				delivering := lpStates[i].CurrentPowerW > loadpoint.DeliveringW
+				pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, lpNow)
+				if pick.Driver != "" {
+					lpStates[i].VehicleChargingState = pick.ChargingState
+				}
+			}
+			evReserveW := loadpoint.SurplusReserveW(lpStates)
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW
