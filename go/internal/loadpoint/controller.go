@@ -1082,8 +1082,18 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		phaseMode := lpCfg.PhaseMode
 		if c.surplusLockedTo1P(lpCfg.ID) {
 			phaseMode = "1p"
-		} else if surplusOn && phaseMode == "" {
-			phaseMode = "auto"
+		} else if surplusOn {
+			// Honour the 30-min near-term dwell decision: pin the
+			// driver to that phase across the dwell window so a
+			// transient cmd_w=0 (pause) doesn't make the driver's
+			// "auto" snap to 1Φ and flip the contactor. Without this,
+			// pickSurplusSteps' step-list lock is silently bypassed
+			// every time the surplus clamp pauses.
+			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
+				phaseMode = dwell
+			} else if phaseMode == "" {
+				phaseMode = "auto"
+			}
 		}
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
@@ -1569,6 +1579,29 @@ func (c *Controller) surplusLockedTo1P(id string) bool {
 	c.phaseLockMu.Lock()
 	defer c.phaseLockMu.Unlock()
 	return c.phaseLocked1P[id]
+}
+
+// dwellSelectedPhaseMode returns the phase_mode string ("1p"/"3p")
+// implied by the near-term dwell selection for this loadpoint, or the
+// empty string when no dwell decision is on file (first-tick, fresh
+// day, no near-term peak source). Used by the dispatch command builder
+// to override the operator's "auto" so the driver doesn't auto-flip
+// phase on a transient cmd_w=0 (pause), which would defeat the
+// 30-min minimum-dwell guarantee.
+func (c *Controller) dwellSelectedPhaseMode(id string) string {
+	if c == nil {
+		return ""
+	}
+	c.phaseLockMu.Lock()
+	defer c.phaseLockMu.Unlock()
+	sel, ok := c.phaseSelected3P[id]
+	if !ok {
+		return ""
+	}
+	if sel {
+		return "3p"
+	}
+	return "1p"
 }
 
 // sameLocalDay reports whether two time.Time values fall on the
