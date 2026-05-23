@@ -126,16 +126,26 @@ type Controller struct {
 	fusePauseMu    sync.Mutex
 	fusePauseUntil map[string]time.Time
 
-	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
-	// lock is sticky for the rest of the day so a slowly recovering
+	// phaseLockMu protects phaseLocked1P + phaseLockedAt + phaseSelected3P.
+	// The 1Φ lock is sticky for the rest of the day so a slowly recovering
 	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
 	// cleared at the start of the next local day if the forecast
 	// shows we'll see enough surplus to sustain 3Φ again — that's
 	// the natural reset point that matches the operator's "look at
 	// today vs tomorrow" mental model.
-	phaseLockMu   sync.Mutex
-	phaseLocked1P map[string]bool
-	phaseLockedAt map[string]time.Time
+	// phaseSelected3P + phaseSelectedAt enforce the minimum-dwell rule
+	// on the near-term gate: once a 3Φ-only ↔ 1Φ-allowed decision is
+	// taken, hold it for at least phaseSwitchMinHold before the next
+	// switch is allowed. Without this, a forecast peak hovering around
+	// the 4140 W threshold flaps the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per 30 min.
+	// Cleared on day rollover via the same path as phaseLocked1P.
+	phaseLockMu      sync.Mutex
+	phaseLocked1P    map[string]bool
+	phaseLockedAt    map[string]time.Time
+	phaseSelected3P  map[string]bool
+	phaseSelectedAt  map[string]time.Time
 
 	// wakeMu protects the per-loadpoint last-wake timestamp used to
 	// throttle charge_start retries. Tesla rate-limits BLE commands;
@@ -245,6 +255,15 @@ const surplusMinPauseHold = 35 * time.Second
 // unreachable)" log line so a long morning with sustained low surplus
 // produces one line per 10 min per LP instead of one per 5 s tick.
 const nearTermLogCooldown = 10 * time.Minute
+
+// phaseSwitchMinHold is the minimum dwell between 1Φ↔3Φ switches on
+// the near-term gate. Operator rule: at most one switch per 30 min.
+// The Easee contactor is rated for limited switching cycles; on a
+// borderline-PV day a frequent 1Φ↔3Φ flip would burn through them
+// quickly and inject load-step transients into the battery PI loop
+// every couple of minutes. 30 min lets the forecast machinery commit
+// to a verdict before the next reconsider.
+const phaseSwitchMinHold = 30 * time.Minute
 
 // fusePauseCooldown is how long an LP stays at 0 W after a fuse-over-
 // limit force-pause. Long enough that whatever house load caused the
@@ -1404,6 +1423,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 		if peak, ok := c.peakRemainingSurplusW(); ok && peak >= minStep3 {
 			delete(c.phaseLocked1P, lpCfg.ID)
 			delete(c.phaseLockedAt, lpCfg.ID)
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
 			locked = false
 			c.phaseLockMu.Unlock()
 			slog.Info("loadpoint surplus_only unlocked: new day with sufficient PV forecast",
@@ -1427,11 +1448,61 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	// here today instead of waiting for a peak that's hours away.
 	// Day-lock NOT set here — this is a "transient cloud" not a
 	// "low-PV day" verdict, so a later 3Φ window during the same
-	// day can still trigger a contactor cycle into 3Φ (the
-	// surplusMinPauseHold ≥ 35 s hysteresis caps the cycle rate).
+	// day can still trigger a contactor cycle into 3Φ.
+	//
+	// Minimum-dwell guard: a forecast peak hovering around the 4140 W
+	// threshold would otherwise flap the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per
+	// phaseSwitchMinHold. The prior decision is held until the dwell
+	// elapses; on day rollover the selection is cleared so a fresh
+	// morning gets a fresh forecast verdict.
 	if c.nearTermPeakSurplusW != nil {
 		const nearTermWindow = 30 * time.Minute
-		if nearPeak, ok := c.nearTermPeakSurplusW(nearTermWindow); ok && nearPeak < minStep3 {
+		nearPeak, peakOK := c.nearTermPeakSurplusW(nearTermWindow)
+
+		c.phaseLockMu.Lock()
+		prevSelected3P, hasPrev := c.phaseSelected3P[lpCfg.ID]
+		prevAt := c.phaseSelectedAt[lpCfg.ID]
+		if hasPrev && !sameLocalDay(prevAt, now) {
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
+			hasPrev = false
+		}
+		var selected3P bool
+		var recordDecision bool
+		switch {
+		case !peakOK && !hasPrev:
+			// No forecast yet and no prior decision: conservative
+			// fall-through to the whole-day branch below.
+			c.phaseLockMu.Unlock()
+			goto afterNearTerm
+		case !peakOK:
+			// No forecast this tick — honour the prior decision.
+			selected3P = prevSelected3P
+		case !hasPrev:
+			// First decision today — go with the forecast verdict.
+			selected3P = nearPeak >= minStep3
+			recordDecision = true
+		case now.Sub(prevAt) < phaseSwitchMinHold:
+			// Dwell window not yet elapsed — hold the prior decision.
+			selected3P = prevSelected3P
+		default:
+			// Dwell elapsed — re-decide from the forecast.
+			selected3P = nearPeak >= minStep3
+			recordDecision = selected3P != prevSelected3P
+		}
+		if recordDecision {
+			if c.phaseSelected3P == nil {
+				c.phaseSelected3P = map[string]bool{}
+				c.phaseSelectedAt = map[string]time.Time{}
+			}
+			c.phaseSelected3P[lpCfg.ID] = selected3P
+			c.phaseSelectedAt[lpCfg.ID] = now
+		}
+		c.phaseLockMu.Unlock()
+
+		if !selected3P {
 			c.nearTermLogMu.Lock()
 			lastFor, has := c.nearTermLogLast[lpCfg.ID]
 			fireLog := !has || now.Sub(lastFor) > nearTermLogCooldown
@@ -1445,11 +1516,12 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 			if fireLog {
 				slog.Info("loadpoint surplus: 1Φ steps allowed (near-term 3Φ unreachable)",
 					"lp", lpCfg.ID, "near_term_peak_w", nearPeak, "min_3p_step_w", minStep3,
-					"window", nearTermWindow.String())
+					"window", nearTermWindow.String(), "dwell_hold", phaseSwitchMinHold.String())
 			}
 			return lpCfg.AllowedStepsW
 		}
 	}
+afterNearTerm:
 
 	if c.peakRemainingSurplusW == nil {
 		return steps3
@@ -1480,6 +1552,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	}
 	c.phaseLocked1P[lpCfg.ID] = true
 	c.phaseLockedAt[lpCfg.ID] = now
+	delete(c.phaseSelected3P, lpCfg.ID)
+	delete(c.phaseSelectedAt, lpCfg.ID)
 	c.phaseLockMu.Unlock()
 	slog.Info("loadpoint surplus_only locked to 1Φ for the day",
 		"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
