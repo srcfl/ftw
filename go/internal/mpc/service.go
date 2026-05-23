@@ -40,6 +40,16 @@ type PricePredictor func(zone string, t time.Time) float64
 // would risk a cycle if loadpoint ever needs mpc types).
 type LoadpointProbe func(slotLenMin int) *LoadpointSpec
 
+// BatteryFleetMember describes one configured home battery the MPC may plan
+// against. Service filters this list by live driver health and SoC telemetry
+// on every replan so the optimizer only sees capacity it can actually use.
+type BatteryFleetMember struct {
+	Driver        string
+	CapacityWh    float64
+	MaxChargeW    float64
+	MaxDischargeW float64
+}
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
@@ -118,7 +128,8 @@ type Service struct {
 	GridTariffOreKwh float64
 	VATPercent       float64
 
-	Defaults Params
+	Defaults     Params
+	BatteryFleet []BatteryFleetMember
 
 	mu              sync.RWMutex
 	last            *Plan
@@ -173,6 +184,28 @@ func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) 
 		return
 	}
 	s.mu.Lock()
+	s.Defaults.CapacityWh = totalCapWh
+	s.Defaults.MaxChargeW = maxChargeW
+	s.Defaults.MaxDischargeW = maxDischargeW
+	s.mu.Unlock()
+}
+
+// UpdateBatteryFleet swaps the configured battery pool and fallback aggregate
+// bounds. Replans then filter the pool to online batteries with SoC telemetry
+// before calling Optimize.
+func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, maxChargeW, maxDischargeW float64) {
+	if s == nil {
+		return
+	}
+	cp := make([]BatteryFleetMember, 0, len(fleet))
+	for _, b := range fleet {
+		if b.Driver == "" || b.CapacityWh <= 0 {
+			continue
+		}
+		cp = append(cp, b)
+	}
+	s.mu.Lock()
+	s.BatteryFleet = cp
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
@@ -606,11 +639,20 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
-	// Current SoC: average of battery readings (weighted by capacity is
-	// ideal, but for v1 we aggregate into one "mega-battery" so a mean
-	// across whatever batteries are reporting is fine).
+	s.mu.RLock()
 	p := s.Defaults
-	p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
+	fleet := append([]BatteryFleetMember(nil), s.BatteryFleet...)
+	s.mu.RUnlock()
+	if len(fleet) > 0 {
+		var ok bool
+		p, ok = s.onlineFleetParams(p, fleet)
+		if !ok {
+			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
+			return nil
+		}
+	} else {
+		p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
+	}
 
 	// Export pricing is per-slot now: pass bonus/fee into Params so
 	// the DP can compute `slot.SpotOre + bonus − fee` per slot. Leave
@@ -1131,4 +1173,44 @@ func currentSoCPct(t *telemetry.Store, fallback float64) float64 {
 		return fallback
 	}
 	return sum / float64(n) * 100.0
+}
+
+func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Params, bool) {
+	if s == nil || s.Tele == nil {
+		return p, false
+	}
+	var totalCap, sumSoCWh, maxCharge, maxDischarge float64
+	for _, b := range fleet {
+		if b.Driver == "" || b.CapacityWh <= 0 {
+			continue
+		}
+		h := s.Tele.DriverHealth(b.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		r := s.Tele.Get(b.Driver, telemetry.DerBattery)
+		if r == nil || r.SoC == nil {
+			continue
+		}
+		totalCap += b.CapacityWh
+		sumSoCWh += *r.SoC * b.CapacityWh
+		maxCharge += b.MaxChargeW
+		maxDischarge += b.MaxDischargeW
+	}
+	if totalCap <= 0 {
+		return p, false
+	}
+	p.CapacityWh = totalCap
+	p.InitialSoCPct = sumSoCWh / totalCap * 100.0
+	p.MaxChargeW = maxCharge
+	p.MaxDischargeW = maxDischarge
+	if s.FuseMaxW > 0 {
+		if p.MaxChargeW > s.FuseMaxW {
+			p.MaxChargeW = s.FuseMaxW
+		}
+		if p.MaxDischargeW > s.FuseMaxW {
+			p.MaxDischargeW = s.FuseMaxW
+		}
+	}
+	return p, true
 }

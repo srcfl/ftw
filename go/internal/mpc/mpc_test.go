@@ -218,6 +218,38 @@ func TestArbitrageDoesNotDischargeAtNegativeSpot(t *testing.T) {
 	}
 }
 
+func TestSlotGridCostOreCostsNegativeExport(t *testing.T) {
+	slot := Slot{LenMin: 60, PriceOre: 80, SpotOre: -5}
+	p := baseParams(ModeArbitrage)
+
+	got := SlotGridCostOre(slot, -1.0, p)
+	if math.Abs(got-5.0) > 1e-9 {
+		t.Fatalf("negative export should be a positive cost: got %.3f, want 5.000", got)
+	}
+}
+
+func TestOptimizeReportedCostUsesNegativeExportPrice(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 80, SpotOre: -5, LoadW: 0, PVW: -1000, Confidence: 1},
+	}
+	p := baseParams(ModeArbitrage)
+	p.MaxChargeW = 0
+	p.MaxDischargeW = 0
+	p.ActionLevels = 3
+	p.TerminalSoCPrice = 0
+
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(plan.Actions))
+	}
+	if math.Abs(plan.Actions[0].CostOre-5.0) > 1e-9 {
+		t.Fatalf("CostOre = %.3f, want 5.000 for 1 kWh export at -5 öre", plan.Actions[0].CostOre)
+	}
+	if math.Abs(plan.TotalCostOre-5.0) > 1e-9 {
+		t.Fatalf("TotalCostOre = %.3f, want 5.000", plan.TotalCostOre)
+	}
+}
+
 // With ExportFloorOreKwh set to a pointer-to-zero, the old clamp
 // behaviour returns: export at negative spot looks free again. This
 // codifies the back-compat knob for retailers that don't bill for
@@ -241,12 +273,12 @@ func TestArbitrageNegativeSpotWithExportFloorClampsAtZero(t *testing.T) {
 	p.ExportFloorOreKwh = &zero
 	p.TerminalSoCPrice = 0
 	// We don't assert a specific dispatch — the floor makes export
-	// a tie. Just sanity-check that Optimize doesn't crash and the
-	// reported plan cost isn't artificially negative.
+	// a tie. The important invariant is that negative spot is floored
+	// out of both per-slot and total reported cost.
 	plan := Optimize(slots, p)
 	for i, a := range plan.Actions {
-		if a.CostOre < -1e-6 {
-			t.Errorf("slot %d: cost %f öre went negative under export floor=0",
+		if a.GridW < 0 && math.Abs(a.CostOre) > 1e-6 {
+			t.Errorf("slot %d: exporting at floor=0 should cost exactly 0, got %f öre",
 				i, a.CostOre)
 		}
 	}
@@ -354,7 +386,7 @@ func TestImportTariffRaisesMPCImportCost(t *testing.T) {
 	p.InitialSoCPct = 30
 	p.TerminalSoCPrice = 100
 
-	cheap := Optimize(makeSlots(50), p)  // low consumer price — grid-charge
+	cheap := Optimize(makeSlots(50), p)   // low consumer price — grid-charge
 	tariff := Optimize(makeSlots(300), p) // high consumer price — hold off
 
 	var chgCheap, chgTariff float64
@@ -533,6 +565,28 @@ func TestCurtailmentSkipsWhenExportProfitable(t *testing.T) {
 	plan := Optimize(slots, p)
 	if plan.Actions[0].PVLimitW != 0 {
 		t.Errorf("profitable export should not trigger curtailment, got pv_limit_w=%f",
+			plan.Actions[0].PVLimitW)
+	}
+}
+
+func TestCurtailmentSkipsPositiveSpotExport(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 80, LoadW: 500, PVW: -8000, Confidence: 1},
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 95
+	p.MaxDischargeW = 0
+	p.ActionLevels = 3
+
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 1 {
+		t.Fatalf("got %d actions, want 1", len(plan.Actions))
+	}
+	if plan.Actions[0].GridW >= 0 {
+		t.Fatalf("test setup expected PV export, got grid_w=%f", plan.Actions[0].GridW)
+	}
+	if plan.Actions[0].PVLimitW != 0 {
+		t.Errorf("positive per-slot export price should not trigger curtailment, got pv_limit_w=%f",
 			plan.Actions[0].PVLimitW)
 	}
 }

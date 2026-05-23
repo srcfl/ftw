@@ -34,10 +34,56 @@ const EVRampHeadroomW = 2000
 //
 // Dispatch consumes the result via control.State.EVSurplusOnlyReserveW
 // in both the energy and the legacy/reactive paths.
-func SurplusReserveW(states []State) float64 {
+// SurplusReserveW takes the loadpoint states plus the set of LP IDs
+// whose wake-kick window is currently active. Wake-kick LPs get the
+// reserve floor (CurrentPowerW probably still 0 W while the EV is
+// ramping) so the home battery doesn't grab the freed surplus during
+// the brief gap between the wallbox offering current and the EV
+// actually starting to draw. Non-wake LPs that aren't drawing
+// (CurrentPowerW < 50 W) contribute nothing — they're not actively
+// claiming the surplus.
+//
+// wakeKickActiveIDs may be nil; callers without a wake-state source
+// pass nil and the reserve degrades to the actual-draw rule only.
+func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 {
 	var sum float64
 	for _, st := range states {
 		if !st.SurplusOnly || !st.PluggedIn {
+			continue
+		}
+		// Tie the reserve to the EV's ACTUAL draw, not just "plugged in
+		// + surplus_only". A car that's Complete, refusing the offer,
+		// or whose vehicle driver has gone offline (Tesla proxy flake
+		// etc.) reports CurrentPowerW≈0 — leaving 2 kW reserved for it
+		// makes the home battery hold steady at SoC while the same
+		// 2 kW exports to grid.
+		//
+		// Wake-kick override: during the kick window the wallbox is
+		// actively offering current to a not-yet-drawing EV. Holding
+		// the reserve at the LP's min charge level keeps the battery
+		// from snatching the freed surplus before the EV's contactor
+		// settles. Without this, a car slow to ramp (cold pack,
+		// settling time) would see the surplus disappear into the
+		// home battery within one tick and the wake-kick would abort.
+		if wakeKickActiveIDs[st.ID] {
+			floor := st.MinChargeW
+			if floor <= 0 {
+				floor = EVRampHeadroomW
+			}
+			if st.CurrentPowerW > floor {
+				floor = st.CurrentPowerW
+			}
+			ceiling := floor + EVRampHeadroomW
+			if ceiling > st.MaxChargeW {
+				ceiling = st.MaxChargeW
+			}
+			sum += ceiling
+			continue
+		}
+		// Threshold 50 W picks up any non-trivial draw while ignoring
+		// idle pilot / standby consumption that doesn't represent
+		// "EV is actively claiming surplus".
+		if st.CurrentPowerW < 50.0 {
 			continue
 		}
 		ceiling := st.CurrentPowerW + EVRampHeadroomW

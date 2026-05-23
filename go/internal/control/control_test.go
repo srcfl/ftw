@@ -1313,9 +1313,11 @@ func TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops(t *testing.T) {
 		PlannedGridW:    0, // plan expected near-zero grid (PV did the work)
 		HasPlannedGridW: true,
 	}
-	// Live: gridW = +3000 (importing 3 kW because PV dropped to 1800 W
-	// vs 5 kW planned, no other load drift). Battery at 0.
-	store := seedStore(3000, []struct {
+	// Live before the new command: gridW = -1800 because the battery is
+	// still at 0 W and PV is generating 1.8 kW. Executing the raw
+	// +4800 W target would project grid to +3000 W import; the cap must
+	// compute against that post-dispatch projection, not rawGridW alone.
+	store := seedStore(-1800, []struct {
 		name          string
 		currentW, soc float64
 	}{
@@ -1335,15 +1337,52 @@ func TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops(t *testing.T) {
 	// covers slot-time drift (a few seconds shaves remainingS).
 	if got > 2000 || got < 1500 {
 		t.Errorf("TargetW = %f W — cap should pull battery back to ~1800 W "+
-			"(plan 4800 W minus 3000 W of unforecast grid import), not chase plan against missing PV", got)
+			"(projected-grid cap), not chase plan against missing PV", got)
+	}
+}
+
+func TestEnergyDispatchPlannedGridCapAccountsForCurrentBatteryLag(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average
+		Strategy:        "arbitrage",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// Battery is already charging at 2 kW, so raw grid includes that
+	// current battery draw: -1800 W PV + 2000 W battery = +200 W import.
+	// Old cap math used rawGridW-planGridW and would only shave 200 W.
+	// Correct projected-grid math lands target near 1800 W:
+	// projected = 200 + (4800 - 2000) = +3000; 4800 - 3000 = 1800.
+	store := seedStore(200, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 2000, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -1800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got > 2000 || got < 1500 {
+		t.Errorf("TargetW = %f W — cap must account for current battery power and land near 1800 W", got)
 	}
 }
 
 // TestEnergyDispatchPlannedGridCapAllowsPlannedImport — the cap must
 // NOT fire when the plan committed to importing (cheap-grid charge
 // during a low-price slot). PlannedGridW = +2000 (plan expected to
-// import 2 kW to charge). Live gridW = +2000 matches plan. Battery
-// must follow plan; no cap-induced back-off.
+// import 2 kW to charge). Live grid before the command is 0 W, so
+// executing the +2 kW battery target projects exactly the planned
+// +2 kW import.
 func TestEnergyDispatchPlannedGridCapAllowsPlannedImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -1354,7 +1393,7 @@ func TestEnergyDispatchPlannedGridCapAllowsPlannedImport(t *testing.T) {
 		PlannedGridW:    2000, // plan: import 2 kW to charge
 		HasPlannedGridW: true,
 	}
-	store := seedStore(2000, []struct {
+	store := seedStore(0, []struct {
 		name          string
 		currentW, soc float64
 	}{
@@ -1373,6 +1412,37 @@ func TestEnergyDispatchPlannedGridCapAllowsPlannedImport(t *testing.T) {
 	}
 }
 
+func TestEnergyDispatchPlannedGridCapAllowsSteadyStateCharging(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 500, // 2000 W average over 15 min
+		Strategy:        "cheap_charge",
+		PlannedGridW:    2000,
+		HasPlannedGridW: true,
+	}
+	// Battery is already at the planned +2 kW charge and the meter is
+	// already at the planned +2 kW import. The cap must compare the
+	// projected post-dispatch grid, see no change, and leave target alone.
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 2000, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got < 1800 || got > 2200 {
+		t.Errorf("TargetW = %f W — steady-state planned charging should pass through (~2000 W)", got)
+	}
+}
+
 // TestEnergyDispatchPlannedGridCapNoFireInsideDeadband — small live
 // divergences (≤100 W) are meter noise / smoothing residue. The cap
 // must not fire there, otherwise it nibbles at every tick.
@@ -1386,12 +1456,13 @@ func TestEnergyDispatchPlannedGridCapNoFireInsideDeadband(t *testing.T) {
 		PlannedGridW:    0,
 		HasPlannedGridW: true,
 	}
-	// Live grid +50 W — inside the 100 W deadband.
+	// Battery is already at the planned charge level. The projected grid
+	// after keeping that target is +50 W — inside the 100 W deadband.
 	store := seedStore(50, []struct {
 		name          string
 		currentW, soc float64
 	}{
-		{"ferroamp", 0, 0.5},
+		{"ferroamp", 4800, 0.5},
 	})
 	st := newStateWithEnergyDispatch(dir, "ferroamp")
 
@@ -1623,10 +1694,17 @@ func TestPlannerSelfParticipatesReactivelyDischargesOnImport(t *testing.T) {
 	}
 }
 
-// A charge/idle planner_self slot must not discharge just because the live
-// meter is importing. It waits for the next replan rather than spending SoC
-// against a slot the DP selected for saving or charging.
-func TestPlannerSelfPlanChargeDoesNotDischargeOnLiveImport(t *testing.T) {
+// planner_self in a charge-intent slot must STILL discharge when the
+// live meter shows import — the operator's directive for SC mode is
+// "always chase grid=0", which is symmetric: charge on live export,
+// discharge on live import, regardless of which direction the plan's
+// per-slot battery_w hint pointed. The plan's charge target is a
+// forecast-based budget that gets revised by the reactive replan; the
+// live PI must not refuse to cover import while waiting for replan,
+// because the operator's stored SoC is exactly there to cover the
+// load. Inverted from v0.79.5's "plan charge wins" rule after operator
+// feedback.
+func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -1651,8 +1729,8 @@ func TestPlannerSelfPlanChargeDoesNotDischargeOnLiveImport(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if targets[0].TargetW < 0 {
-		t.Errorf("TargetW = %f W — planner_self must not discharge on live import even when the plan slot was charge", targets[0].TargetW)
+	if targets[0].TargetW >= 0 {
+		t.Errorf("TargetW = %f W — planner_self must discharge to cover live import even when the plan slot was charge", targets[0].TargetW)
 	}
 }
 

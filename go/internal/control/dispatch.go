@@ -455,7 +455,20 @@ func plannerSelfDirectiveAt(state *State, now time.Time) (SlotDirective, bool) {
 
 func plannerSelfDirectiveIsIdle(dir SlotDirective) bool {
 	slotH := dir.SlotEnd.Sub(dir.SlotStart).Hours()
-	return slotH > 0 && math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW
+	if slotH <= 0 {
+		return false
+	}
+	// Idle decision is derived from the plan's forecast baseline grid
+	// (what the grid would be with the battery doing nothing: house load,
+	// PV, and any planned EV draw), not only from the DP's quantized
+	// battery action. Small forecast surplus/deficit can quantize to
+	// BatteryEnergyWh=0; treating that as deliberate idle would hold the
+	// battery at 0 while the same surplus exports or deficit imports.
+	if dir.HasPlannedGridW {
+		baselineW := dir.PlannedGridW - dir.BatteryEnergyWh/slotH
+		return math.Abs(baselineW) < mpc.IdleGateThresholdW
+	}
+	return math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -559,12 +572,10 @@ func ComputeDispatch(
 	effectiveMode := state.Mode
 	useEnergyPath := false
 	// plannerSelfIdleGate is true when operator picked planner_self AND the
-	// plan allocated a below-threshold amount of battery action for the
-	// current slot. Idle-gated slots are charge-only: they may absorb live
-	// PV surplus that would otherwise cross the meter, but they never
-	// discharge to cover load. That keeps planner_self's "no grid-charge,
-	// no battery export" contract while avoiding stale load/PV forecasts
-	// wasting solar.
+	// plan's no-battery baseline is near zero for the current slot. A true
+	// idle slot is charge-only: it may absorb live PV surplus that would
+	// otherwise cross the meter, but it never discharges to cover load.
+	// Non-idle planner_self slots chase live grid=0 reactively.
 	plannerSelfIdleGate := false
 	var currentDirective SlotDirective
 
@@ -952,9 +963,10 @@ func ComputeDispatch(
 		// real (now-grid-fed) PV deficit until the reactive replan in
 		// mpc/service.go:266–290 fires (≥10 min later, gated by the
 		// 500 Wh PV-error integral and the 60 s cooldown). The cap
-		// pulls the battery target toward "what would make live gridW
-		// match plan", reducing the damage in the gap. Floored at 0
-		// so the cap can never flip dispatch direction.
+		// compares the POST-DISPATCH projected grid against the plan,
+		// then pulls the battery target toward "what target would make
+		// projected gridW match plan". Floored at 0 so the cap can
+		// never flip dispatch direction.
 		//
 		// CHARGE-ONLY by design. The mirror case (discharge slot,
 		// live gridW more negative than plan) is intentionally NOT
@@ -981,12 +993,13 @@ func ComputeDispatch(
 		// charge.
 		//
 		// 100 W deadband matches IdleGateThresholdW / evActiveThresholdW
-		// elsewhere in this package — below it, the live divergence
-		// is meter noise / smoothing residue and the energy path keeps
-		// following plan.
+		// elsewhere in this package — below it, the projected-grid
+		// divergence is meter noise / smoothing residue and the energy
+		// path keeps following plan.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
-			gridErr := rawGridW - currentDirective.PlannedGridW
+			projectedGridW := rawGridW + (targetTotalW - currentTotal)
+			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
 				if adjusted < 0 {
@@ -1734,6 +1747,19 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 
 func planHasNonDischargeIntent(state *State) bool {
 	if state == nil || !state.Mode.IsPlannerMode() {
+		return false
+	}
+	// planner_self is pure reactive PI on grid=0 in non-idle slots —
+	// the plannerSelfIdleGate ALONE decides whether to discharge. The
+	// plan's per-slot charge intent (BatteryEnergyWh > 0) must NOT
+	// gate discharge here: SC mode's contract is "always chase
+	// grid=0" so a forecast miss that leaves the meter importing has
+	// to be covered by the battery. Without this exemption, a slot
+	// the planner forecast as +675 W of PV absorption would refuse to
+	// discharge even when the cloud rolled in and the live meter is
+	// importing 500 W — the symptom the operator hit on v0.79.5
+	// before this carve-out.
+	if state.Mode == ModePlannerSelf {
 		return false
 	}
 	const idleWh = 50.0

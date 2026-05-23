@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
 func TestBuildSlotsFallsBackToForecastWhenTwinCollapses(t *testing.T) {
@@ -188,6 +189,59 @@ func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) 
 	}
 	if discharging == 0 {
 		t.Fatalf("expected at least one discharging slot with SoC=80%% and load>PV, got %+v", plan.Actions)
+	}
+}
+
+// ---- online battery fleet snapshot ----
+
+func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
+	tel := telemetry.NewStore()
+	socA := 0.20
+	socB := 0.80
+	socOffline := 0.95
+	tel.Update("a", telemetry.DerBattery, 0, &socA, nil)
+	tel.DriverHealthMut("a").RecordSuccess()
+	tel.Update("b", telemetry.DerBattery, 0, &socB, nil)
+	tel.DriverHealthMut("b").RecordSuccess()
+	tel.Update("offline", telemetry.DerBattery, 0, &socOffline, nil)
+	tel.DriverHealthMut("offline").SetOffline()
+
+	s := &Service{Tele: tel, FuseMaxW: 6000}
+	p, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
+		{Driver: "b", CapacityWh: 30000, MaxChargeW: 5000, MaxDischargeW: 5000},
+		{Driver: "offline", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
+	})
+	if !ok {
+		t.Fatal("onlineFleetParams returned ok=false")
+	}
+	if p.CapacityWh != 40000 {
+		t.Fatalf("CapacityWh = %.0f, want 40000", p.CapacityWh)
+	}
+	// (10 kWh * 20% + 30 kWh * 80%) / 40 kWh = 65%.
+	if math.Abs(p.InitialSoCPct-65) > 1e-9 {
+		t.Fatalf("InitialSoCPct = %.3f, want 65.000", p.InitialSoCPct)
+	}
+	if p.MaxChargeW != 6000 {
+		t.Fatalf("MaxChargeW = %.0f, want fuse-clamped 6000", p.MaxChargeW)
+	}
+	if p.MaxDischargeW != 6000 {
+		t.Fatalf("MaxDischargeW = %.0f, want fuse-clamped 6000", p.MaxDischargeW)
+	}
+}
+
+func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("no-soc", telemetry.DerBattery, 0, nil, nil)
+	tel.DriverHealthMut("no-soc").RecordSuccess()
+	s := &Service{Tele: tel}
+
+	_, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+		{Driver: "no-soc", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
+		{Driver: "missing", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
+	})
+	if ok {
+		t.Fatal("onlineFleetParams ok=true without any online battery SoC")
 	}
 }
 

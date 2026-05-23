@@ -247,6 +247,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/force_start", s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
 	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
