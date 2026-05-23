@@ -1138,6 +1138,15 @@ func main() {
 		// imminent enough to be worth waiting for. When near-term <
 		// 3Φ minimum but day-peak is, we'd rather charge 1Φ now and
 		// switch to 3Φ later than sit idle waiting.
+		//
+		// "Surplus" here is what the EV can claim, not the raw PV
+		// excess. The MPC has already allocated battery_w out of PV;
+		// the EV gets only what's left after PV - Load - Battery. A
+		// borderline-PV day where MPC reserves 4.5 kW for battery
+		// charging while raw -PV - Load = 5 kW would otherwise pin
+		// the gate to 3Φ-only based on a peak the battery is going
+		// to consume — leaving the EV stuck at 0 W in 3Φ-only step
+		// land because real-time room is below 4140 W.
 		lpController.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
 			if mpcSvc == nil {
 				return 0, false
@@ -1159,7 +1168,15 @@ func main() {
 				if time.UnixMilli(a.SlotStartMs).After(horizon) {
 					break
 				}
-				surplus := -a.PVW - a.LoadW
+				// Net PV headroom for non-battery loads: positive when
+				// PV export exceeds load + planned battery charge.
+				// BatteryW is site-signed: positive = charge (import),
+				// negative = discharge (export). When discharging,
+				// subtracting a negative grows the surplus available
+				// to the EV — exactly right, because a discharging
+				// battery is contributing PV-deferred energy to the
+				// site.
+				surplus := -a.PVW - a.LoadW - a.BatteryW
 				if !any || surplus > peak {
 					peak = surplus
 					any = true
