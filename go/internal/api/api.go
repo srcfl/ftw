@@ -234,6 +234,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/pvmodel", s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", s.handleLoadModel)
+	s.handle("POST /api/loadmodel/profile", s.handleLoadModelProfile)
 	s.handle("POST /api/loadmodel/reset", s.handleLoadModelReset)
 	s.handle("GET  /api/research/load/dump", s.handleLoadResearchDump)
 	s.handle("GET  /api/series", s.handleSeries)
@@ -1914,43 +1915,6 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.PVModel.Reset()
-	writeJSON(w, 200, map[string]string{"status": "reset"})
-}
-
-// ---- Load digital twin ----
-
-func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
-	if s.deps.LoadModel == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
-		return
-	}
-	m := s.deps.LoadModel.Model()
-	// Count warmed-up buckets (≥ MinTrustSamples).
-	warm := 0
-	for i := 0; i < loadmodel.Buckets; i++ {
-		if m.Bucket[i].Samples >= loadmodel.MinTrustSamples {
-			warm++
-		}
-	}
-	writeJSON(w, 200, map[string]any{
-		"enabled":            true,
-		"samples":            m.Samples,
-		"mae_w":              m.MAE,
-		"peak_w":             m.PeakW,
-		"quality":            m.Quality(),
-		"last_ms":            m.LastMs,
-		"heating_w_per_degc": m.HeatingW_per_degC,
-		"buckets_warm":       warm,
-		"buckets_total":      loadmodel.Buckets,
-	})
-}
-
-func (s *Server) handleLoadModelReset(w http.ResponseWriter, r *http.Request) {
-	if s.deps.LoadModel == nil {
-		writeJSON(w, 400, map[string]string{"error": "loadmodel disabled"})
-		return
-	}
-	s.deps.LoadModel.Reset()
 	writeJSON(w, 200, map[string]string{"status": "reset"})
 }
 

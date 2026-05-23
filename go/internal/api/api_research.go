@@ -126,7 +126,7 @@ func (s *Server) handleLoadResearchDump(w http.ResponseWriter, r *http.Request) 
 	addFile("timeseries_15m.csv", []byte(formatLoadResearchCSV(buckets, forecasts, prices)))
 
 	if s.deps.LoadModel != nil {
-		modelBody, _ := json.MarshalIndent(s.deps.LoadModel.Model(), "", "  ")
+		modelBody, _ := json.MarshalIndent(s.deps.LoadModel.Snapshot(), "", "  ")
 		addFile("loadmodel_state.json", modelBody)
 	} else {
 		addFile("loadmodel_state.json", []byte("{}\n"))

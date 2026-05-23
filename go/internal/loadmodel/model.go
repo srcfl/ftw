@@ -43,9 +43,34 @@ const MinTrustSamples = 8
 // relative to. Load proportional to max(setpoint − outdoor, 0).
 const HeatingReferenceC = 18.0
 
+// Profile selects which learned occupancy profile is used for training
+// and prediction.
+type Profile string
+
+const (
+	ProfileHome Profile = "home"
+	ProfileAway Profile = "away"
+)
+
+const awayPriorScale = 0.25
+
+// Profiles returns the supported load-model profiles in display order.
+func Profiles() []Profile {
+	return []Profile{ProfileHome, ProfileAway}
+}
+
+func (p Profile) valid() bool {
+	switch p {
+	case ProfileHome, ProfileAway:
+		return true
+	default:
+		return false
+	}
+}
+
 // Bucket holds one hour-of-week's learned state.
 type Bucket struct {
-	Mean    float64 `json:"mean"`     // EMA of observed load (W)
+	Mean    float64 `json:"mean"` // EMA of observed load (W)
 	Samples int64   `json:"samples"`
 }
 
@@ -58,6 +83,7 @@ type Model struct {
 	LastMs            int64           `json:"last_ms"`
 	MAE               float64         `json:"mae"`
 	Alpha             float64         `json:"alpha"` // EMA coefficient for bucket updates
+	PriorScale        float64         `json:"prior_scale,omitempty"`
 }
 
 // typicalPrior returns an approximate W load for a given hour-of-week
@@ -82,18 +108,39 @@ func typicalPrior(hourOfWeek int) float64 {
 
 // NewModel returns a model seeded with the typical prior on every bucket.
 func NewModel(peakW float64) *Model {
+	return newModel(peakW, 1)
+}
+
+func newProfileModel(peakW float64, profile Profile) *Model {
+	scale := 1.0
+	if profile == ProfileAway {
+		scale = awayPriorScale
+	}
+	return newModel(peakW, scale)
+}
+
+func newModel(peakW, priorScale float64) *Model {
 	m := &Model{
-		PeakW: peakW,
-		Alpha: 0.1, // new sample gets 10% weight in EMA
+		PeakW:      peakW,
+		Alpha:      0.1, // new sample gets 10% weight in EMA
+		PriorScale: priorScale,
 	}
 	if m.PeakW <= 0 {
 		m.PeakW = 5000
 	}
 	for i := 0; i < Buckets; i++ {
-		m.Bucket[i].Mean = typicalPrior(i)
+		m.Bucket[i].Mean = m.prior(i)
 		m.Bucket[i].Samples = 0
 	}
 	return m
+}
+
+func (m Model) prior(hourOfWeek int) float64 {
+	scale := m.PriorScale
+	if scale <= 0 {
+		scale = 1
+	}
+	return typicalPrior(hourOfWeek) * scale
 }
 
 // HourOfWeek computes 0..167 for a time. Monday = 0 through Sunday.
@@ -117,7 +164,7 @@ func (m Model) Predict(t time.Time, tempC float64) float64 {
 	if trust > 1 {
 		trust = 1
 	}
-	prior := typicalPrior(idx)
+	prior := m.prior(idx)
 	base := trust*b.Mean + (1-trust)*prior
 	heating := 0.0
 	if tempC < HeatingReferenceC {
@@ -146,7 +193,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	}
 	idx := HourOfWeek(t)
 	b := &m.Bucket[idx]
-	prior := typicalPrior(idx)
 	// Outlier filter: once we have some history, reject 10× MAE residuals.
 	predicted := m.Predict(t, tempC)
 	err := actualLoadW - predicted
@@ -176,8 +222,6 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		b.Mean = (1-m.Alpha)*b.Mean + m.Alpha*baseSample
 	}
 	b.Samples++
-	_ = prior
-
 	// Heating coefficient is operator-configured (Planner.HeatingWPerDegC
 	// in config). We don't try to identify it from data here because
 	// online fit is noisy + entangled with the bucket baseline. The

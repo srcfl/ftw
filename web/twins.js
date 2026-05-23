@@ -38,7 +38,21 @@
       '</button>';
   }
 
-  function twinCard(title, d, resetEndpoint, resetLabel) {
+  function loadProfileControl(d) {
+    if (!d || !d.enabled) return '';
+    const active = d.profile || d.active_profile || 'home';
+    function btn(profile, label) {
+      const cls = profile === active ? ' class="active"' : '';
+      return `<button type="button" data-loadmodel-profile="${profile}"${cls}>${label}</button>`;
+    }
+    return '<div class="twin-row twin-profile-row"><span>profile</span>' +
+      `<div class="twin-profile-toggle" role="tablist" data-active="${active}">` +
+      btn('home', 'Home') +
+      btn('away', 'Away') +
+      '</div></div>';
+  }
+
+  function twinCard(title, d, resetEndpoint, resetLabel, extraHtml) {
     if (!d || !d.enabled) return `<div class="twin-card"><h3>${title}</h3><div class="twin-row"><span>disabled</span></div></div>`;
     const q = Math.max(0, Math.min(1, d.quality || 0));
     const qPct = (q * 100).toFixed(0);
@@ -56,21 +70,35 @@
     rows.push(`<div class="twin-row"><span>quality</span><b>${qPct}%</b></div>`);
     rows.push(`<div class="twin-quality"><div class="twin-quality-fill" style="width:${qPct}%;background:${qColor}"></div></div>`);
     const btn = resetEndpoint ? resetButton(resetEndpoint, resetLabel) : '';
-    return `<div class="twin-card"><h3>${title}</h3>${rows.join('')}${btn}</div>`;
+    return `<div class="twin-card"><h3>${title}</h3>${extraHtml || ''}${rows.join('')}${btn}</div>`;
   }
 
   function render(pv, load) {
     const grid = document.getElementById('twins-grid');
     if (!grid) return;
     grid.innerHTML = twinCard('PV twin', pv, '/api/pvmodel/reset', 'PV twin')
-      + twinCard('Load twin', load, '/api/loadmodel/reset', 'load twin');
+      + twinCard('Load twin', load, '/api/loadmodel/reset', 'load twin', loadProfileControl(load));
     const sub = document.getElementById('twins-subtitle');
     if (sub) sub.textContent = 'self-learning digital twins — feed MPC + UI forecasts';
   }
 
   // Wired once on init — delegation off the grid so dynamically-rendered
   // buttons pick up the handler without rebinding each refresh.
-  function onResetClick(e) {
+  function onGridClick(e) {
+    const profile = e.target && e.target.dataset && e.target.dataset.loadmodelProfile;
+    if (profile) {
+      if (e.target.classList.contains('active')) return;
+      fetch('/api/loadmodel/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile })
+      })
+        .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(() => fetchAll())
+        .catch(err => alert('Load profile switch failed: ' + err.message));
+      return;
+    }
+
     const endpoint = e.target && e.target.dataset && e.target.dataset.resetTwin;
     if (!endpoint) return;
     const twinName = endpoint.indexOf('pv') >= 0 ? 'PV twin' : 'load twin';
@@ -90,7 +118,7 @@
     fetchAll();
     setInterval(fetchAll, REFRESH_MS);
     const grid = document.getElementById('twins-grid');
-    if (grid) grid.addEventListener('click', onResetClick);
+    if (grid) grid.addEventListener('click', onGridClick);
   }
 
   if (document.readyState === 'loading') {
