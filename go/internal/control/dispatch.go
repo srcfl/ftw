@@ -493,9 +493,11 @@ func ComputeDispatch(
 	// Three execution paths, selected by the operator-picked planner mode:
 	//
 	//   * planner_self — reactive self-consumption with a per-slot idle gate
-	//     from the plan. Honours the mode's contract ("never imports to
-	//     charge, never exports via the battery") against forecast error. See
-	//     docs/plan-ems-contract.md §"Exception: planner_self" and issue #130.
+	//     from the plan. Idle slots are charge-only and can absorb true live
+	//     meter surplus, but never discharge. Honours the mode's contract
+	//     ("never imports to charge, never exports via the battery") against
+	//     forecast error. See docs/plan-ems-contract.md §"Exception:
+	//     planner_self" and issue #130.
 	//
 	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
 	//     (default): energy-allocation. Plan returns battery energy for
@@ -513,9 +515,11 @@ func ComputeDispatch(
 	useEnergyPath := false
 	// plannerSelfIdleGate is true when operator picked planner_self AND the
 	// plan allocated a below-threshold amount of battery action for the
-	// current slot — the EMS holds the battery at 0 (ramping via slew)
-	// regardless of live surplus, so the DP's decision to save SoC for a
-	// later slot is honoured.
+	// current slot. Idle-gated slots are charge-only: they may absorb live
+	// PV surplus that would otherwise cross the meter, but they never
+	// discharge to cover load. That keeps planner_self's "no grid-charge,
+	// no battery export" contract while avoiding stale load/PV forecasts
+	// wasting solar.
 	plannerSelfIdleGate := false
 	var currentDirective SlotDirective
 
@@ -750,14 +754,19 @@ func ComputeDispatch(
 		// and the fuse guard still apply downstream.
 		totalCorrection = manualHold.PowerW - currentTotal
 	case plannerSelfIdleGate:
-		// planner_self + plan says idle this slot: drive the battery
-		// total toward 0 regardless of live grid flow. Slew ramps it
-		// down over several cycles; the PI stays out of it so no
-		// integral wind-up carries into the next slot.
+		// planner_self + plan says idle this slot: do not spend SoC
+		// covering import, but do absorb genuine live PV surplus. The
+		// surplus is computed from the meter with current battery power
+		// removed, so a battery that is already discharging cannot make
+		// its own "surplus" and then flip into charge. EV draw remains
+		// part of the meter residual; we only charge from surplus that
+		// would cross the site boundary after house + EV load.
 		state.PI.Reset()
-		totalCorrection = -currentTotal
+		desiredTotal := plannerSelfIdleDesiredTotal(rawGridW, currentTotal, state)
+		totalCorrection = desiredTotal - currentTotal
 		// deliberately skip the deadband — it's a gridW check and
-		// doesn't see "battery wants to be at zero but isn't yet".
+		// doesn't see "battery wants to be at zero/charge-only but
+		// isn't there yet".
 	case useEnergyPath:
 		// Energy-allocation path: plan's slot directive says "this many Wh
 		// over this slot". Derive the instantaneous power needed to hit the
@@ -1643,6 +1652,32 @@ func anyBatteryDischarging(bats []batteryInfo) bool {
 		}
 	}
 	return false
+}
+
+func plannerSelfIdleDesiredTotal(rawGridW, currentTotal float64, state *State) float64 {
+	threshold := mpc.IdleGateThresholdW
+	if state != nil && state.PVSurplusAbsorbThresholdW > 0 {
+		threshold = state.PVSurplusAbsorbThresholdW
+	}
+
+	// Remove the current battery contribution from the live meter to
+	// estimate the site residual if the battery went idle right now.
+	// Negative baseGridW means PV still exceeds house + EV load.
+	baseGridW := rawGridW - currentTotal
+
+	reserveRemaining := 0.0
+	if state != nil && state.EVSurplusOnlyReserveW > 0 {
+		reserveRemaining = state.EVSurplusOnlyReserveW - state.EVChargingW
+		if reserveRemaining < 0 {
+			reserveRemaining = 0
+		}
+	}
+
+	chargeFromSurplusW := -baseGridW - reserveRemaining
+	if chargeFromSurplusW <= threshold {
+		return 0
+	}
+	return chargeFromSurplusW
 }
 
 func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {

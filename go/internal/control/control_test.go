@@ -1496,8 +1496,9 @@ func TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge(t *testing.T) {
 // energy-allocation and uses reactive self-consumption, with the plan
 // providing a per-slot idle/participate gate. When the DP decided not to
 // participate this slot (|planned BatteryEnergyWh| < IdleGateThresholdW when
-// averaged over the slot) the EMS holds the battery at 0 and lets the grid
-// handle the residual — deferring opportunity to a richer later slot.
+// averaged over the slot) the EMS will not discharge to cover load, but it
+// may still absorb genuine live PV surplus that would otherwise cross the
+// site meter.
 
 // Motivating scenario (operator report 2026-04-19): plan wanted to charge
 // aggressively (forecast said big PV surplus), but actual PV came in low.
@@ -1545,9 +1546,10 @@ func TestPlannerSelfReactsToForecastOverestimate(t *testing.T) {
 }
 
 // Idle-gate scenario: DP decided to sit this slot out (save SoC for a
-// later, more profitable slot). Plan's Wh is below threshold → EMS holds
-// battery at 0 even when live PV surplus exists.
-func TestPlannerSelfIdleGateHoldsBatteryAtZero(t *testing.T) {
+// later, more profitable slot). Plan's Wh is below threshold, but live PV
+// surplus should still be absorbed because that never spends SoC and never
+// grid-charges the battery.
+func TestPlannerSelfIdleGateAbsorbsLivePVSurplus(t *testing.T) {
 	now := time.Now()
 	// Plan: avg ~0 W (well below IdleGateThresholdW=100).
 	dir := SlotDirective{
@@ -1557,8 +1559,9 @@ func TestPlannerSelfIdleGateHoldsBatteryAtZero(t *testing.T) {
 		Strategy:        "self_consumption",
 	}
 	// Live: grid exporting 4 kW (real surplus exists). Battery currently
-	// discharging 1 kW — should ramp toward 0, not toward absorbing
-	// the surplus.
+	// discharging 1 kW. Removing the battery contribution leaves 3 kW
+	// of true site surplus, so the idle-gated target should become a
+	// positive charge setpoint when slew is not the limiting factor.
 	store := seedStore(-4000, []struct {
 		name          string
 		currentW, soc float64
@@ -1568,7 +1571,7 @@ func TestPlannerSelfIdleGateHoldsBatteryAtZero(t *testing.T) {
 	st := NewState(0, 0, "ferroamp")
 	st.Mode = ModePlannerSelf
 	st.UseEnergyDispatch = true
-	st.SlewRateW = 500 // realistic — expect one slew step from −1000 toward 0
+	st.SlewRateW = 10000
 	st.MinDispatchIntervalS = 0
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
 
@@ -1577,10 +1580,8 @@ func TestPlannerSelfIdleGateHoldsBatteryAtZero(t *testing.T) {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
 	got := targets[0].TargetW
-	// Anchor on actual SmoothedW=-1000. Moving toward 0 by one slew
-	// step of 500 W → -500 W. Not pushing toward -4000 to absorb surplus.
-	if got < -500.001 || got > 0.001 {
-		t.Errorf("TargetW = %f W — idle-gated battery should ramp toward 0 (expected [−500, 0]), not react to live surplus", got)
+	if math.Abs(got-3000) > 1 {
+		t.Errorf("TargetW = %f W — idle-gated battery should absorb true live surplus (~3000 W)", got)
 	}
 }
 
@@ -1700,11 +1701,9 @@ func TestPlannerSelfIdleGateRampsBatteryToZeroOverCycles(t *testing.T) {
 		BatteryEnergyWh: 0, // idle-gated
 		Strategy:        "self_consumption",
 	}
-	// Battery at -2000 W (discharging), live grid exporting 500 W — under
-	// the #153 idle-gate-override threshold, so the gate truly holds and
-	// this test exercises the ramp-to-zero behaviour it was written to
-	// guard. Heavier export would correctly trigger the override and
-	// invalidate the assumption.
+	// Battery at -2000 W (discharging), live meter exporting 500 W only
+	// because of that battery discharge. Without the battery the site
+	// residual is +1500 W import, so there is no true surplus to absorb.
 	store := seedStore(-500, []struct {
 		name          string
 		currentW, soc float64
@@ -1719,7 +1718,11 @@ func TestPlannerSelfIdleGateRampsBatteryToZeroOverCycles(t *testing.T) {
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
 
 	// Simulate N cycles. Each cycle advances the battery's SmoothedW
-	// toward the prev target so the slew anchor tracks reality.
+	// toward the prev target so the slew anchor tracks reality. Keep the
+	// non-battery site residual fixed at +1500 W import; otherwise a
+	// static meter reading would incorrectly create PV surplus after the
+	// fake battery reaches zero.
+	baseGridW := 1500.0
 	var last float64
 	for i := 0; i < 10; i++ {
 		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
@@ -1729,6 +1732,8 @@ func TestPlannerSelfIdleGateRampsBatteryToZeroOverCycles(t *testing.T) {
 		last = targets[0].TargetW
 		// Fake the battery responding instantly to the new command.
 		store.Update("ferroamp", telemetry.DerBattery, last, ptrF64(0.5), nil)
+		store.DriverHealthMut("ferroamp").RecordSuccess()
+		store.Update("ferroamp", telemetry.DerMeter, baseGridW+last, nil, nil)
 		store.DriverHealthMut("ferroamp").RecordSuccess()
 	}
 	if math.Abs(last) > 1 {
@@ -2145,20 +2150,10 @@ func TestPVCurtailReleasesDriverThatWentOffline(t *testing.T) {
 	}
 }
 
-// Issue #167: planner_self has two discrete per-slot states — IDLE or
-// SELF_CONSUMPTION — both picked by the plan. The dispatch does not
-// second-guess the plan with live data. When the plan says idle, the
-// gate holds at 0 regardless of live grid direction or magnitude.
-// Forecast divergence is handled by the reactive replan trigger
-// (mpc/service.go), which re-runs the DP with fresh telemetry and
-// emits a new plan that may flip the slot to self-consumption.
-//
-// Pre-#167 this scenario (large live export during a plan-idle slot)
-// used to flip the gate off via a one-directional override. That was
-// dropped because the symmetric case (large live import) was not
-// handled and a mixed live/plan control surface made the mode's
-// mental model noisy. See issue #167.
-func TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus(t *testing.T) {
+// planner_self idle slots are charge-only. Large true live surplus should
+// be absorbed even when the plan selected idle, because charging from
+// otherwise-exported PV does not violate the self-consumption contract.
+func TestPlannerSelfIdleGateAbsorbsLargeLiveSurplus(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
 		SlotStart:       now,
@@ -2166,8 +2161,8 @@ func TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus(t *testing.T) {
 		BatteryEnergyWh: 0, // plan wants idle
 		Strategy:        "self_consumption",
 	}
-	// Live: grid exporting 3 kW — pre-#167 this would have overridden
-	// the gate. Post-#167 the gate holds; a fresh replan is the fix.
+	// Live: grid exporting 3 kW with the battery idle — all true site
+	// surplus, so smart self-consumption should soak it.
 	store := seedStore(-3000, []struct {
 		name          string
 		currentW, soc float64
@@ -2185,19 +2180,12 @@ func TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	// Idle-gate holds → totalCorrection = -currentTotal. Battery at 0,
-	// stays at 0. Operator who wants coverage switches to manual
-	// self_consumption; replanner closes the loop automatically when
-	// forecast error accumulates past the reactive-replan threshold.
-	if math.Abs(targets[0].TargetW) > 1 {
-		t.Errorf("TargetW = %f — idle-gate must hold regardless of live grid; "+
-			"forecast divergence is the replan's job, not the dispatcher's", targets[0].TargetW)
+	if math.Abs(targets[0].TargetW-3000) > 1 {
+		t.Errorf("TargetW = %f — idle-gate should charge from true live surplus, want ~3000", targets[0].TargetW)
 	}
 }
 
-// The idle gate holds on small live export (forecast and reality
-// roughly agree). Kept as a regression guard for the symmetric
-// property that the dispatch does not second-guess the plan.
+// The idle gate ignores tiny live export inside the noise threshold.
 func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -2206,8 +2194,8 @@ func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
 		BatteryEnergyWh: 0,
 		Strategy:        "self_consumption",
 	}
-	// Live: grid exporting 500 W — below the 1 kW override threshold.
-	store := seedStore(-500, []struct {
+	// Live: grid exporting 50 W — below IdleGateThresholdW.
+	store := seedStore(-50, []struct {
 		name          string
 		currentW, soc float64
 	}{
@@ -2224,18 +2212,83 @@ func TestPlannerSelfIdleGateHoldsWhenLiveSurplusUnderThreshold(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	// Idle-gate held → totalCorrection = -currentTotal. Battery at 0 →
-	// desired 0, no charge command.
 	if math.Abs(targets[0].TargetW) > 1 {
 		t.Errorf("TargetW = %f — idle-gate should hold under small export; "+
-			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
+			"want ~0", targets[0].TargetW)
 	}
 }
 
-// Idle gate holds during import too — the dispatch does not
-// second-guess the plan regardless of live grid direction. Symmetric
-// to TestPlannerSelfIdleGateHoldsEvenOnLargeLiveSurplus: one invariant,
-// two sides. See issue #167.
+func TestPlannerSelfIdleGateDoesNotTreatBatteryDischargeAsSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// The meter is exporting 500 W, but the battery itself is
+	// discharging 1000 W. Without that battery contribution the site
+	// would import 500 W, so the idle gate must stop discharge rather
+	// than flip to charge.
+	store := seedStore(-500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1000, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f — battery-created export is not PV surplus; want idle", targets[0].TargetW)
+	}
+}
+
+func TestPlannerSelfIdleGateChargesOnlyActualMeterSurplusWithEVActive(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+	}
+	// EV is drawing 3 kW and the site meter still exports 1 kW. The
+	// idle-gate absorber should charge 1 kW, not the 4 kW house-side
+	// surplus that would steal energy already going to the EV.
+	store := seedStore(-1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.EVChargingW = 3000
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW-1000) > 1 {
+		t.Errorf("TargetW = %f — idle gate should absorb only actual meter export, want ~1000", targets[0].TargetW)
+	}
+}
+
+// Idle gate holds during import: smart self-consumption may absorb live
+// surplus, but it still must not spend saved SoC covering load in a slot
+// the plan marked idle.
 func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -2268,7 +2321,7 @@ func TestPlannerSelfIdleGateHoldsDuringImport(t *testing.T) {
 	// flip this slot to self_consumption.
 	if math.Abs(targets[0].TargetW) > 1 {
 		t.Errorf("TargetW = %f — idle-gate should hold during live import; "+
-			"dispatch does not second-guess the plan, want ~0", targets[0].TargetW)
+			"want ~0", targets[0].TargetW)
 	}
 }
 
