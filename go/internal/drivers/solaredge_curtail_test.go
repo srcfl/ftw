@@ -179,13 +179,18 @@ func TestSolarEdgeCurtailWithoutNominalRejected(t *testing.T) {
 	}
 }
 
-// Both SolarEdge driver variants advertise the new pv-curtail capability.
+// All three SolarEdge driver variants advertise the new pv-curtail
+// capability now that legacy K-series is wired up too.
 func TestSolarEdgeCatalogAdvertisesCurtail(t *testing.T) {
 	entries, err := LoadCatalog("../../../drivers")
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}
-	wantIDs := map[string]bool{"solaredge": false, "solaredge-pv": false}
+	wantIDs := map[string]bool{
+		"solaredge":        false,
+		"solaredge-pv":     false,
+		"solaredge-legacy": false,
+	}
 	for _, e := range entries {
 		if _, ok := wantIDs[e.ID]; !ok {
 			continue
@@ -206,6 +211,34 @@ func TestSolarEdgeCatalogAdvertisesCurtail(t *testing.T) {
 		if !found {
 			t.Errorf("driver %q not in catalog", id)
 		}
+	}
+}
+
+// Legacy K-series driver uses the same atomic FC 0x10 write pattern.
+func TestSolarEdgeLegacyCurtail(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge_legacy.lua", 17000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 8500) // 50 % of 17 kW
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d", len(w))
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61441, Value: 50}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 50}", w[1])
+	}
+
+	mb.reset()
+	runCmd(t, d, "curtail_disable", 0)
+	w = mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots on disable, got %d", len(w))
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 0}) || w[1] != (writeOp{Addr: 61441, Value: 100}) {
+		t.Errorf("disable: got %+v, want F000=0 then F001=100", w)
 	}
 }
 
