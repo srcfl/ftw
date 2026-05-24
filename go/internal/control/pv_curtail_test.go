@@ -31,6 +31,22 @@ func emitPV(t *testing.T, s *telemetry.Store, driver string, w float64) {
 	s.Update(driver, telemetry.DerPV, w, nil, nil)
 }
 
+// emitBattery pushes a battery reading with an explicit SoC%. Used by
+// the live-curtail tests to vary absorption headroom.
+func emitBattery(t *testing.T, s *telemetry.Store, driver string, w, soc float64) {
+	t.Helper()
+	s.DriverHealthMut(driver).RecordSuccess()
+	s.Update(driver, telemetry.DerBattery, w, &soc, nil)
+}
+
+// emitMeter pushes a site-meter reading. Positive = importing, negative
+// = exporting. Used by the live-curtail tests to vary load.
+func emitMeter(t *testing.T, s *telemetry.Store, driver string, w float64) {
+	t.Helper()
+	s.DriverHealthMut(driver).RecordSuccess()
+	s.Update(driver, telemetry.DerMeter, w, nil, nil)
+}
+
 // findCurtail returns the per-driver LimitW from a CurtailTarget slice
 // for stable assertions independent of slice order.
 func findCurtail(targets []CurtailTarget) map[string]float64 {
@@ -296,6 +312,107 @@ func TestComputePVCurtail_ManualHoldOnUnsupportedDriverSkipped(t *testing.T) {
 
 	if got := ComputePVCurtail(st, store); got != nil {
 		t.Errorf("unsupported driver should be skipped, got %+v", got)
+	}
+}
+
+// ---- Live-limit behavior ----
+//
+// Planner says "curtail this slot" (PVLimitW > 0), but the limit
+// dispatch sends should track live conditions: rising load lifts the
+// cap, battery SoC headroom lifts the cap, EV PV-charging demand lifts
+// the cap.
+
+// Battery with SoC headroom suppresses curtail entirely — its
+// MaxChargeW (5 kW default) plus live load comfortably exceeds PV.
+func TestComputePVCurtail_BatteryHeadroomLiftsCap(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 800}) // planner wants curtail
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 60.0) // 60% SoC → 5 kW headroom available
+	emitMeter(t, store, "meter", -2500)     // exporting 2.5 kW (load present but PV bigger)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if len(got) != 0 {
+		t.Errorf("battery headroom should suppress curtail (limit >> PV); got %+v", got)
+	}
+}
+
+// Battery essentially full (SoC >= ceiling) and no EV reserve →
+// planner-warranted curtail goes through, capped at live load only.
+func TestComputePVCurtail_FullBatteryNoHeadroomCurtails(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 500})
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 99.5) // above ceiling — no headroom
+	emitMeter(t, store, "meter", -2500)     // exporting 2.5 kW → live load = 500 W
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["solaredge"]-500) > 1e-3 {
+		t.Errorf("want solaredge capped at live load (500 W), got %.2f", got["solaredge"])
+	}
+}
+
+// Load rising mid-slot lifts the cap — self-consumption preserved
+// even when planner's stale forecast would have throttled PV.
+func TestComputePVCurtail_RisingLoadLiftsCap(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 500}) // planner figured load ≈ 500 W
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 99.5) // full — no battery headroom
+	// Live: load actually became 2500 W (heater turned on). Meter
+	// reports import = load - pv = 2500 - 3000 = -500 W (still
+	// exporting 500 W). live_load = -500 - (-3000) - 0 = 2500 W.
+	emitMeter(t, store, "meter", -500)
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["solaredge"]-2500) > 1e-3 {
+		t.Errorf("rising load should lift cap to live load (2500 W), got %.2f", got["solaredge"])
+	}
+}
+
+// EV PV-charging demand (EVSurplusOnlyReserveW) lifts the cap too,
+// even with a full battery and no live load.
+func TestComputePVCurtail_EVReserveLiftsCap(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 500})
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	st.EVSurplusOnlyReserveW = 3500 // wallbox wants 3.5 kW from PV
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 99.5)
+	emitMeter(t, store, "meter", -3000) // all PV currently exporting
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if len(got) != 0 {
+		t.Errorf("EV PV reserve should suppress curtail (3.5 kW > 3 kW PV); got %+v", got)
+	}
+}
+
+// Manual hold ignores all the live-limit logic — operator override
+// must be verbatim, including when the limit would otherwise be lifted.
+func TestComputePVCurtail_ManualHoldBypassesLiveLimit(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 0}) // planner not curtailing
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	store := telemetry.NewStore()
+	emitPV(t, store, "solaredge", -3000)
+	emitBattery(t, store, "pixii", 0, 50.0)    // big headroom
+	emitMeter(t, store, "meter", 0)
+	st.SetPVManualHold(PVManualHold{
+		Driver:    "solaredge",
+		LimitW:    750,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+
+	got := findCurtail(ComputePVCurtail(st, store))
+	if abs(got["solaredge"]-750) > 1e-3 {
+		t.Errorf("manual hold must be verbatim, got %.2f want 750", got["solaredge"])
 	}
 }
 

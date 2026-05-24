@@ -1772,15 +1772,29 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 
 	var limit float64
 	if holdActive {
+		// Operator override — verbatim, no live recomputation.
 		limit = hold.LimitW
 		scopedDriver = hold.Driver
 	} else if state.SlotDirective != nil {
-		// Fetch the active slot directly — independent of dispatch mode,
-		// because curtailment is an economic decision that applies in
-		// any mode the operator picked. The plan's `annotateCurtailment`
-		// already gated PVLimitW on negative export revenue.
+		// The planner's PVLimitW is the GATING decision: > 0 means
+		// curtail is economically warranted (negative export price,
+		// PV exceeds planner's forecast consumption). The VALUE is a
+		// stale 15-min forecast — recompute the cap live so it follows
+		// load rises (self-consumption preserved when load grows mid-
+		// slot) and dynamic absorption opportunities (battery SoC
+		// headroom, EVs on PV charging mode). When live absorbable W
+		// covers everything PV can produce, the curtail effectively
+		// suppresses itself.
 		if dir, ok := state.SlotDirective(now); ok {
-			limit = dir.PVLimitW
+			if dir.PVLimitW > 0 {
+				if live, ok := liveCurtailLimitW(state, store); ok {
+					limit = live
+				} else {
+					// Live state incomplete (e.g. meter offline) — fall
+					// back to the planner's static cap.
+					limit = dir.PVLimitW
+				}
+			}
 		}
 	}
 
@@ -1824,7 +1838,15 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 				drivers = append(drivers, pvD{name: r.Driver, abs: abs})
 				total += abs
 			}
-			if total > 0 {
+			// If the (live) limit comfortably covers all curtail-capable
+			// PV, the cap doesn't actually bind anything — skip emitting
+			// any curtail target. The release path below will translate
+			// previously-curtailed drivers to curtail_disable. Only
+			// applies to planner-driven curtail; manual holds still go
+			// out verbatim above.
+			if !holdActive && total > 0 && limit >= total {
+				// fall through with next stays empty.
+			} else if total > 0 {
 				for _, d := range drivers {
 					next[d.name] = limit * (d.abs / total)
 				}
@@ -1853,6 +1875,124 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		state.LastCurtailedDrivers = updated
 	}
 	return out
+}
+
+// pvCurtailBatterySoCMaxPct is the SoC ceiling above which a battery
+// is treated as having no curtail-absorption headroom. Below it, the
+// battery's MaxChargeW (or MaxCommandW default) is added to the live
+// curtail limit so PV stays uncapped while the battery can still take
+// the energy. Hard-coded conservatively — the goal is to err on the
+// side of preserving PV generation when there's anywhere meaningful
+// to put it.
+const pvCurtailBatterySoCMaxPct = 99.0
+
+// liveCurtailLimitW computes the cap PV may produce *right now* given
+// the planner's decision that curtail is economically warranted for
+// this slot. It rolls together three runtime quantities the planner
+// itself doesn't see:
+//
+//  1. Live household load — load = grid - pv - battery (site sign).
+//     If load grew beyond the planner's forecast (resistive heater,
+//     midslot EV plug-in), the cap grows with it so self-consumption
+//     stays the priority.
+//
+//  2. Battery absorption headroom — for every online battery with
+//     SoC below `pvCurtailBatterySoCMaxPct`, the per-driver MaxChargeW
+//     (or MaxCommandW default) is added. PV can keep producing because
+//     the dispatch loop will route the surplus into the battery.
+//
+//  3. EV PV-charging demand — state.EVSurplusOnlyReserveW carries the
+//     aggregate W that surplus_only loadpoints are willing to take
+//     from PV. Added directly.
+//
+// Returns (limit_w, ok). ok=false means the live state was too
+// incomplete to make a decision (notably: no fresh site-meter
+// reading), so the caller should fall back to the planner's static
+// PVLimitW. When ok=true and the limit exceeds total live PV the
+// curtail dispatch upstream skips curtail entirely (the cap doesn't
+// bind anything).
+func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
+	if state == nil || store == nil {
+		return 0, false
+	}
+
+	// Require a fresh site-meter reading. Without it we can't compute
+	// live load and shouldn't be making live decisions — defer to the
+	// planner's static value instead.
+	var gridW float64
+	if state.SiteMeterDriver == "" {
+		return 0, false
+	}
+	if m := store.Get(state.SiteMeterDriver, telemetry.DerMeter); m != nil {
+		gridW = m.RawW
+	} else if m := store.Get(state.SiteMeterDriver, telemetry.DerBattery); m != nil {
+		// Some site-meter drivers (e.g. ferroamp) emit grid flow on
+		// the battery channel because the same driver also owns the
+		// battery. Accept that as the meter reading.
+		gridW = m.RawW
+	} else {
+		return 0, false
+	}
+
+	// Live PV (positive watts of generation).
+	var pvW float64
+	for _, r := range store.ReadingsByType(telemetry.DerPV) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r.RawW < 0 {
+			pvW += -r.RawW
+		}
+	}
+
+	// Live battery aggregate (charge positive, discharge negative —
+	// site sign, summed across all online batteries).
+	var batW float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		batW += r.RawW
+	}
+
+	// Power balance at the home node (all site-signed):
+	//   load = grid - pv - battery
+	// Where pv contributes generation (negative → adds to load),
+	// battery contributes either as load (charging, +) or source
+	// (discharging, −).
+	liveLoadW := gridW - (-pvW) - batW
+	if liveLoadW < 0 {
+		liveLoadW = 0
+	}
+
+	// Battery headroom: for each online battery with SoC below the
+	// ceiling, allow up to its per-driver MaxChargeW (falls back to
+	// the global MaxCommandW default when no override is configured).
+	var batHeadroomW float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMaxPct {
+			continue
+		}
+		capW := float64(MaxCommandW)
+		if lim, ok := state.DriverLimits[r.Driver]; ok && lim.MaxChargeW > 0 {
+			capW = lim.MaxChargeW
+		}
+		batHeadroomW += capW
+	}
+
+	// EV reserve: surplus_only loadpoints that want PV.
+	evReserveW := state.EVSurplusOnlyReserveW
+	if evReserveW < 0 {
+		evReserveW = 0
+	}
+
+	return liveLoadW + batHeadroomW + evReserveW, true
 }
 
 // distributeProportional splits the total desired battery power across the
