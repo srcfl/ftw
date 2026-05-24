@@ -397,6 +397,21 @@ end
 -- Control (PV curtail only — meter + PV emission is read-only)
 ----------------------------------------------------------------------------
 
+-- Atomic write of both F000 (enable) and F001 (limit) — single FC 0x10
+-- (Write Multiple Holding Registers) transaction so the inverter never
+-- sees a half-applied state (e.g. enable=1 still paired with the
+-- previous tick's old limit, briefly capping at a stale value).
+-- REG_APC_ENABLE is at 61440, REG_APC_LIMIT at 61441 → adjacent, so
+-- one multi-register write covers both.
+local function write_apc(enable, limit_pct)
+    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
+        { enable, limit_pct })
+    if (not ok) or type(err) == "string" then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
 -- Apply a curtail limit in watts. Returns true on success, false on
 -- any error (no nominal_w configured, modbus write failure).
 local function apply_curtail(power_w)
@@ -410,17 +425,9 @@ local function apply_curtail(power_w)
     if pct < 0   then pct = 0   end
     if pct > 100 then pct = 100 end
 
-    -- Write F001 first (the limit value) so the limit is in place before
-    -- F000 enables it. host.modbus_write signals errors by returning a
-    -- string; pcall returns ok=true with the string as the second value.
-    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, pct)
-    if (not ok_lim) or type(err_lim) == "string" then
-        host.log("warn", "SolarEdge: write APC_LIMIT failed: " .. tostring(err_lim))
-        return false
-    end
-    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 1)
-    if (not ok_en) or type(err_en) == "string" then
-        host.log("warn", "SolarEdge: write APC_ENABLE failed: " .. tostring(err_en))
+    local ok, err = write_apc(1, pct)
+    if not ok then
+        host.log("warn", "SolarEdge: write APC enable+limit failed: " .. err)
         return false
     end
     curtail_active = true
@@ -430,20 +437,16 @@ local function apply_curtail(power_w)
     return true
 end
 
--- Release the curtail cap. Some SolarEdge firmwares treat F001 as the
--- authoritative limit independent of F000, so we explicitly raise F001
--- back to 100 % AND disable F000. Belt and suspenders: covers both
--- enable-bit-honoring and limit-value-honoring variants without
--- assuming which one this inverter follows.
+-- Release the curtail cap. Atomically writes F000=0 and F001=100 so
+-- both enable-bit-honoring and limit-value-honoring firmwares see a
+-- coherent "no cap" state in a single transaction. We need both
+-- writes: some HD-Wave / StorEdge firmwares ignore F000 and follow
+-- F001 directly (stuck-at-3% bug if F001 isn't reset), others honor
+-- F000 alone (cap held at F001's value while enabled).
 local function release_curtail()
-    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, 100)
-    if (not ok_lim) or type(err_lim) == "string" then
-        host.log("warn", "SolarEdge: release APC_LIMIT=100 failed: " .. tostring(err_lim))
-        return false
-    end
-    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 0)
-    if (not ok_en) or type(err_en) == "string" then
-        host.log("warn", "SolarEdge: release APC_ENABLE=0 failed: " .. tostring(err_en))
+    local ok, err = write_apc(0, 100)
+    if not ok then
+        host.log("warn", "SolarEdge: release APC enable+limit failed: " .. err)
         return false
     end
     if curtail_active then

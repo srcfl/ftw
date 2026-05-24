@@ -222,6 +222,16 @@ end
 -- Control (PV curtail only — PV emission is read-only)
 ----------------------------------------------------------------------------
 
+-- See solaredge.lua write_apc for the FC 0x10 atomic-write rationale.
+local function write_apc(enable, limit_pct)
+    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
+        { enable, limit_pct })
+    if (not ok) or type(err) == "string" then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
 local function apply_curtail(power_w)
     if nominal_w <= 0 then
         host.log("warn",
@@ -233,14 +243,9 @@ local function apply_curtail(power_w)
     if pct < 0   then pct = 0   end
     if pct > 100 then pct = 100 end
 
-    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, pct)
-    if (not ok_lim) or type(err_lim) == "string" then
-        host.log("warn", "SolarEdge-PV: write APC_LIMIT failed: " .. tostring(err_lim))
-        return false
-    end
-    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 1)
-    if (not ok_en) or type(err_en) == "string" then
-        host.log("warn", "SolarEdge-PV: write APC_ENABLE failed: " .. tostring(err_en))
+    local ok, err = write_apc(1, pct)
+    if not ok then
+        host.log("warn", "SolarEdge-PV: write APC enable+limit failed: " .. err)
         return false
     end
     curtail_active = true
@@ -250,17 +255,10 @@ local function apply_curtail(power_w)
     return true
 end
 
--- See solaredge.lua release_curtail for the F001=100 + F000=0
--- two-write rationale.
 local function release_curtail()
-    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, 100)
-    if (not ok_lim) or type(err_lim) == "string" then
-        host.log("warn", "SolarEdge-PV: release APC_LIMIT=100 failed: " .. tostring(err_lim))
-        return false
-    end
-    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 0)
-    if (not ok_en) or type(err_en) == "string" then
-        host.log("warn", "SolarEdge-PV: release APC_ENABLE=0 failed: " .. tostring(err_en))
+    local ok, err = write_apc(0, 100)
+    if not ok then
+        host.log("warn", "SolarEdge-PV: release APC enable+limit failed: " .. err)
         return false
     end
     if curtail_active then

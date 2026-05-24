@@ -3,7 +3,6 @@ package drivers
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -39,7 +38,14 @@ func (m *capturingModbus) WriteSingle(addr uint16, value uint16) error {
 }
 
 func (m *capturingModbus) WriteMulti(addr uint16, values []uint16) error {
-	return errors.New("WriteMulti not used by SolarEdge driver")
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Atomic FC 0x10 write — capture each register as its own writeOp
+	// so existing assertions keyed on (Addr, Value) keep working.
+	for i, v := range values {
+		m.writes = append(m.writes, writeOp{Addr: addr + uint16(i), Value: v})
+	}
+	return nil
 }
 
 func (m *capturingModbus) Close() error { return nil }
@@ -93,8 +99,8 @@ func runCmd(t *testing.T, d *LuaDriver, action string, powerW float64) {
 	}
 }
 
-// 50% curtail on a 10 kW inverter → writes pct=50 to 61441 then
-// enable=1 to 61440, in that order.
+// 50 % curtail on a 10 kW inverter → atomic FC 0x10 starting at
+// REG_APC_ENABLE (61440), values {enable=1, limit=50}.
 func TestSolarEdgeCurtailHalfPower(t *testing.T) {
 	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 10000)
 	defer d.Cleanup()
@@ -102,13 +108,13 @@ func TestSolarEdgeCurtailHalfPower(t *testing.T) {
 
 	w := mb.snapshot()
 	if len(w) != 2 {
-		t.Fatalf("expected 2 writes, got %d: %+v", len(w), w)
+		t.Fatalf("expected 2 register slots, got %d: %+v", len(w), w)
 	}
-	if w[0] != (writeOp{Addr: 61441, Value: 50}) {
-		t.Errorf("first write: got %+v, want {61441, 50}", w[0])
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
 	}
-	if w[1] != (writeOp{Addr: 61440, Value: 1}) {
-		t.Errorf("second write: got %+v, want {61440, 1}", w[1])
+	if w[1] != (writeOp{Addr: 61441, Value: 50}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 50}", w[1])
 	}
 }
 
@@ -119,10 +125,10 @@ func TestSolarEdgeCurtailZeroPower(t *testing.T) {
 
 	w := mb.snapshot()
 	if len(w) != 2 {
-		t.Fatalf("expected 2 writes, got %d", len(w))
+		t.Fatalf("expected 2 register slots, got %d", len(w))
 	}
-	if w[0].Value != 0 || w[1].Value != 1 {
-		t.Errorf("force-off curtail: got pct=%d, ena=%d; want pct=0, ena=1",
+	if w[0].Value != 1 || w[1].Value != 0 {
+		t.Errorf("force-off curtail: got ena=%d pct=%d; want ena=1 pct=0",
 			w[0].Value, w[1].Value)
 	}
 }
@@ -134,10 +140,10 @@ func TestSolarEdgeCurtailClampsOverNominal(t *testing.T) {
 
 	w := mb.snapshot()
 	if len(w) != 2 {
-		t.Fatalf("expected 2 writes, got %d", len(w))
+		t.Fatalf("expected 2 register slots, got %d", len(w))
 	}
-	if w[0].Value != 100 {
-		t.Errorf("over-nominal pct: got %d, want 100 (clamped)", w[0].Value)
+	if w[1].Value != 100 {
+		t.Errorf("over-nominal pct: got %d, want 100 (clamped)", w[1].Value)
 	}
 }
 
@@ -149,17 +155,16 @@ func TestSolarEdgeCurtailDisable(t *testing.T) {
 
 	runCmd(t, d, "curtail_disable", 0)
 	w := mb.snapshot()
-	// Release writes BOTH the limit value back to 100 % and disables
-	// the enable bit — belt-and-suspenders for firmwares that honor
-	// only one or the other.
+	// Release writes BOTH registers in one atomic FC 0x10 transaction
+	// so the inverter never sees a half-applied state.
 	if len(w) != 2 {
-		t.Fatalf("expected 2 writes on disable, got %d: %+v", len(w), w)
+		t.Fatalf("expected 2 register slots on disable, got %d: %+v", len(w), w)
 	}
-	if w[0] != (writeOp{Addr: 61441, Value: 100}) {
-		t.Errorf("first disable write: got %+v, want {61441, 100}", w[0])
+	if w[0] != (writeOp{Addr: 61440, Value: 0}) {
+		t.Errorf("F000 disable: got %+v, want {61440, 0}", w[0])
 	}
-	if w[1] != (writeOp{Addr: 61440, Value: 0}) {
-		t.Errorf("second disable write: got %+v, want {61440, 0}", w[1])
+	if w[1] != (writeOp{Addr: 61441, Value: 100}) {
+		t.Errorf("F001 reset: got %+v, want {61441, 100}", w[1])
 	}
 }
 
@@ -212,12 +217,12 @@ func TestSolarEdgePVCurtail(t *testing.T) {
 
 	w := mb.snapshot()
 	if len(w) != 2 {
-		t.Fatalf("expected 2 writes, got %d", len(w))
+		t.Fatalf("expected 2 register slots, got %d", len(w))
 	}
-	if w[0].Addr != 61441 || w[0].Value != 25 {
-		t.Errorf("first write: got %+v, want {61441, 25}", w[0])
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
 	}
-	if w[1] != (writeOp{Addr: 61440, Value: 1}) {
-		t.Errorf("second write: got %+v, want {61440, 1}", w[1])
+	if w[1] != (writeOp{Addr: 61441, Value: 25}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 25}", w[1])
 	}
 }
