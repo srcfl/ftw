@@ -1781,6 +1781,45 @@ func TestPlannerSelfIdleGateAbsorbsLivePVSurplus(t *testing.T) {
 	}
 }
 
+// When the plan explicitly expects PV export while the battery is idle, smart
+// self-consumption must not reinterpret that export as "free surplus to store".
+// The planner may be preserving headroom for cheaper / negative PV later.
+func TestPlannerSelfPlannedPVExportDoesNotAbsorbLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0,
+		Strategy:        "self_consumption",
+		PlannedGridW:    -2500,
+		HasPlannedGridW: true,
+	}
+	// Live mirrors the production report: battery is already charging from
+	// PV and the meter is almost zero-exporting. Without the export gate,
+	// planner_self would keep charging to chase grid=0. With the gate, it
+	// should ramp the battery target back to 0 and let PV export.
+	store := seedStore(-100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1600, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f W — planned PV-export slot should stop battery charge, not absorb surplus", targets[0].TargetW)
+	}
+}
+
 // Plan says participate this slot (above idle threshold) and live grid is
 // importing. planner_self then behaves like classic self-consumption: the
 // battery may discharge to pull the site meter toward zero, but it does not

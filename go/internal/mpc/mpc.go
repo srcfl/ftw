@@ -586,38 +586,6 @@ func Optimize(slots []Slot, p Params) Plan {
 								houseKWh := houseGridW * dtH / 1000.0
 								cost += 2.0 * effPrice(slot) * houseKWh
 							}
-							// Symmetric bias on the export side: when the
-							// battery has room (battSoc2 < SoCMaxPct) and
-							// we'd be exporting PV that could be stored,
-							// penalise the wasted PV at effPrice. Without
-							// this, the DP happily exports cheap midday PV
-							// at spot (~2 öre) instead of storing it to
-							// cover the same evening / night load that
-							// would otherwise be imported at retail
-							// (150-290 öre). Operator-stated intent for
-							// SC mode: "fill up to cover nightly loads"
-							// — exporting cheap PV while SoC sits well
-							// below SoCMaxPct contradicts that.
-							//
-							// Headroom-scaled so the bias fades to 0 as
-							// SoC approaches the cap (no penalty at
-							// SoCMaxPct — exporting is the right move
-							// when the battery is full). The 1.0 ×
-							// effPrice coefficient (vs 2.0 on the import
-							// side) is intentional: import is a hard
-							// "battery should have covered this" miss;
-							// export-while-not-full is the softer "should
-							// have stored this" miss — both push the same
-							// direction without over-coupling the two.
-							if houseGridW < 0 && battSoc2 < p.SoCMaxPct {
-								headroomFrac := (p.SoCMaxPct - battSoc2) /
-									(p.SoCMaxPct - p.SoCMinPct)
-								if headroomFrac > 1 {
-									headroomFrac = 1
-								}
-								wastedKWh := -houseGridW * dtH / 1000.0
-								cost += headroomFrac * effPrice(slot) * wastedKWh
-							}
 						}
 
 						// Deadline slot: if this slot is the EV's

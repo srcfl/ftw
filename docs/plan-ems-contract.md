@@ -113,8 +113,8 @@ the forecast is wrong:
 The DP enforces `ModeSelfConsumption`'s no-battery-export invariant only on
 forecast. The EMS must enforce it on the live meter.
 
-`planner_self` therefore executes as **reactive self-consumption with a
-charge-only idle gate**:
+`planner_self` therefore executes as **reactive self-consumption with
+plan-aware export/headroom gates**:
 
 - Participant slots use the PI loop to hold the live meter near 0 W:
   charge live surplus, or discharge to cover live import.
@@ -123,12 +123,17 @@ charge-only idle gate**:
 - The plan contributes a per-slot **idle gate**: if
   `|SlotDirective.BatteryEnergyWh| / slot_hours < mpc.IdleGateThresholdW`
   the EMS refuses discharge for that slot — honouring the DP's decision
-  to save SoC for later — but still absorbs true live PV surplus that
-  would cross the site meter. "True surplus" is computed after removing
-  current battery power from the meter reading, so a battery that is
-  already discharging cannot create its own surplus and flip the slot
-  into charge. Otherwise the battery participates using live
-  self-consumption.
+  to save SoC for later. When the plan's no-battery baseline is near zero,
+  the EMS may still absorb true live PV surplus that would cross the site
+  meter. "True surplus" is computed after removing current battery power
+  from the meter reading, so a battery that is already discharging cannot
+  create its own surplus and flip the slot into charge. Otherwise the
+  battery participates using live self-consumption.
+- If the plan's no-battery baseline is forecast to export PV while the
+  planned battery action is idle, the EMS holds battery power at 0 instead
+  of absorbing the live surplus. That preserves the planner's economic
+  decision to sell current PV and keep battery headroom for cheaper /
+  negative surplus later.
 - When the plan is stale (`MaxPlanAge` exceeded) the idle gate is
   disabled and execution is indistinguishable from manual
   `self_consumption`.

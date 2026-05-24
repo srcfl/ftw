@@ -818,7 +818,7 @@
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
   const STRATEGY_DESC = {
-    planner_self: 'Smart self-consumption (planner). Forecast-aware grid-zero control: participant slots charge surplus or cover local import; idle/charge slots do not discharge. Never imports to charge, never exports via the battery.',
+    planner_self: 'Smart self-consumption (planner). Forecast-aware grid-zero control: cover local import, charge PV only when the plan wants storage, and preserve export when the plan keeps battery headroom for cheaper surplus later.',
     planner_cheap: 'Cheap charging. Plans to import during the cheapest upcoming hours to top up the battery, still never exports via the battery. Good when export tariffs are low.',
     planner_arbitrage: 'Arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots (including exporting). Biggest savings on volatile days; pays attention to battery efficiency + SoC bounds.',
     self_consumption: 'Self (manual). Simple grid-zero controller with no planner; charges surplus and discharges to cover local import.',

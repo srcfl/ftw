@@ -518,7 +518,8 @@ func minBatterySoC(bats []batteryInfo) float64 {
 }
 
 type plannerSelfDecision struct {
-	idleGate bool
+	idleGate          bool
+	exportSurplusGate bool
 }
 
 func preparePlannerSelf(state *State, now time.Time) plannerSelfDecision {
@@ -541,7 +542,10 @@ func preparePlannerSelf(state *State, now time.Time) plannerSelfDecision {
 	}
 
 	state.PlanStale = false
-	return plannerSelfDecision{idleGate: plannerSelfDirectiveIsIdle(dir)}
+	return plannerSelfDecision{
+		idleGate:          plannerSelfDirectiveIsIdle(dir),
+		exportSurplusGate: plannerSelfDirectiveExportsSurplus(dir),
+	}
 }
 
 func plannerSelfDirectiveAt(state *State, now time.Time) (SlotDirective, bool) {
@@ -567,6 +571,19 @@ func plannerSelfDirectiveIsIdle(dir SlotDirective) bool {
 		return math.Abs(baselineW) < mpc.IdleGateThresholdW
 	}
 	return math.Abs(dir.BatteryEnergyWh)/slotH < mpc.IdleGateThresholdW
+}
+
+func plannerSelfDirectiveExportsSurplus(dir SlotDirective) bool {
+	slotH := dir.SlotEnd.Sub(dir.SlotStart).Hours()
+	if slotH <= 0 || !dir.HasPlannedGridW {
+		return false
+	}
+	battW := dir.BatteryEnergyWh / slotH
+	if battW > mpc.IdleGateThresholdW {
+		return false
+	}
+	baselineW := dir.PlannedGridW - battW
+	return baselineW < -mpc.IdleGateThresholdW
 }
 
 // NewState creates default control state (port of Rust ControlState::new).
@@ -649,12 +666,14 @@ func ComputeDispatch(
 	//
 	// Three execution paths, selected by the operator-picked planner mode:
 	//
-	//   * planner_self — reactive self-consumption with a per-slot idle gate
-	//     from the plan. Idle slots are charge-only and can absorb true live
-	//     meter surplus, but never discharge. Honours the mode's contract
-	//     ("never imports to charge, never exports via the battery") against
-	//     forecast error. See docs/plan-ems-contract.md §"Exception:
-	//     planner_self" and issue #130.
+	//   * planner_self — reactive self-consumption with per-slot gates
+	//     from the plan. Idle slots are charge-only unless the plan's
+	//     no-battery baseline explicitly exports PV, in which case the EMS
+	//     holds battery power at 0 to preserve that export/headroom choice.
+	//     Honours the mode's contract ("never imports to charge, never
+	//     exports via the battery") against forecast error. See
+	//     docs/plan-ems-contract.md §"Exception: planner_self" and issue
+	//     #130.
 	//
 	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
 	//     (default): energy-allocation. Plan returns battery energy for
@@ -672,10 +691,13 @@ func ComputeDispatch(
 	useEnergyPath := false
 	// plannerSelfIdleGate is true when operator picked planner_self AND the
 	// plan's no-battery baseline is near zero for the current slot. A true
-	// idle slot is charge-only: it may absorb live PV surplus that would
-	// otherwise cross the meter, but it never discharges to cover load.
-	// Non-idle planner_self slots chase live grid=0 reactively.
+	// idle slot is charge-only: it may absorb unexpected live PV surplus
+	// that would otherwise cross the meter, but it never discharges to cover
+	// load. Non-idle planner_self slots chase live grid=0 reactively unless
+	// plannerSelfExportSurplusGate says the plan explicitly preferred PV
+	// export over storage for this slot.
 	plannerSelfIdleGate := false
+	plannerSelfExportSurplusGate := false
 	var currentDirective SlotDirective
 
 	// ---- Manual hold: highest-priority override ----
@@ -703,7 +725,9 @@ func ComputeDispatch(
 		// Already handled — leave effectiveMode at ModeSelfConsumption.
 	case state.Mode == ModePlannerSelf:
 		effectiveMode = ModeSelfConsumption
-		plannerSelfIdleGate = preparePlannerSelf(state, time.Now()).idleGate
+		decision := preparePlannerSelf(state, time.Now())
+		plannerSelfIdleGate = decision.idleGate
+		plannerSelfExportSurplusGate = decision.exportSurplusGate
 	case state.Mode.IsPlannerMode():
 		// planner_cheap / planner_arbitrage.
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
@@ -861,7 +885,7 @@ func ComputeDispatch(
 	// reading. Plain self_consumption remains the classic grid-zero mode:
 	// it may discharge to cover local load and charge from live surplus.
 	planNonDischargeIntent := !manualHoldActive && planHasNonDischargeIntent(state)
-	noSelfDischarge := (!manualHoldActive && plannerSelfIdleGate) || planNonDischargeIntent
+	noSelfDischarge := (!manualHoldActive && (plannerSelfIdleGate || plannerSelfExportSurplusGate)) || planNonDischargeIntent
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -897,6 +921,18 @@ func ComputeDispatch(
 		// deliberately skip the deadband — it's a gridW check and
 		// doesn't see "battery wants to be at zero/charge-only but
 		// isn't there yet".
+	case plannerSelfExportSurplusGate:
+		state.resetSettlementAccounting()
+		// planner_self + plan says the slot should export PV surplus:
+		// do not let the live grid-zero regulator swallow that export
+		// into the battery. This is the price-aware part of "smart"
+		// self-consumption: when the DP has reserved battery headroom for
+		// cheaper / negative PV later, runtime should stop battery motion
+		// and let the current surplus cross the meter.
+		state.PI.Reset()
+		totalCorrection = -currentTotal
+		// Skip deadband for the same reason as idleGate: this branch is
+		// about honouring a battery target of zero, not closing gridW.
 	case useEnergyPath:
 		state.resetSettlementAccounting()
 		// Energy-allocation path: plan's slot directive says "this many Wh

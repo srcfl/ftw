@@ -83,6 +83,47 @@ func TestSelfConsumptionAbsorbsPVSurplus(t *testing.T) {
 	}
 }
 
+func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
+	// Operator report 2026-05-24: early positive export price, followed by
+	// stronger PV at negative spot. Smart self-consumption should preserve
+	// battery headroom and export the early PV instead of filling the battery
+	// before the negative-price window.
+	slots := []Slot{
+		{StartMs: 0, LenMin: 15, PriceOre: 129, SpotOre: 33, LoadW: 1000, PVW: -4000, Confidence: 1},
+		{StartMs: 15 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000, Confidence: 1},
+		{StartMs: 30 * 60 * 1000, LenMin: 15, PriceOre: 75, SpotOre: -15, LoadW: 1000, PVW: -7000, Confidence: 1},
+		{StartMs: 45 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0, Confidence: 1},
+		{StartMs: 60 * 60 * 1000, LenMin: 15, PriceOre: 220, SpotOre: 100, LoadW: 2500, PVW: 0, Confidence: 1},
+	}
+	p := Params{
+		Mode:                ModeSelfConsumption,
+		SoCLevels:           41,
+		CapacityWh:          4000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       10,
+		ActionLevels:        41,
+		MaxChargeW:          4000,
+		MaxDischargeW:       4000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    0,
+	}
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != len(slots) {
+		t.Fatalf("got %d actions, want %d", len(plan.Actions), len(slots))
+	}
+	if plan.Actions[0].BatteryW > IdleGateThresholdW {
+		t.Fatalf("first slot battery_w = %.0f W (%s), want idle/export while later negative surplus is available",
+			plan.Actions[0].BatteryW, plan.Actions[0].Reason)
+	}
+	laterCharge := plan.Actions[1].BatteryW + plan.Actions[2].BatteryW
+	if laterCharge <= 0 {
+		t.Fatalf("later negative-price PV should be stored, got slot1 %.0f W and slot2 %.0f W",
+			plan.Actions[1].BatteryW, plan.Actions[2].BatteryW)
+	}
+}
+
 // ---- Mode: cheap_charge ----
 
 func TestCheapChargeUsesCheapGrid(t *testing.T) {
