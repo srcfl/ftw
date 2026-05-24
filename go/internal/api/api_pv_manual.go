@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -22,11 +23,12 @@ import (
 //                to that one driver only.
 //   - limit_w:   optional. Absolute power cap, ≥ 0. Mutually
 //                exclusive with limit_pct.
-//   - limit_pct: optional. Percent (0–100) of live |PV|. Converted
-//                to W using the driver's live reading (driver-scoped
-//                hold) or the sum of curtail-capable PV drivers'
-//                live |PV| (site-aggregate hold). Mutually exclusive
-//                with limit_w.
+//   - limit_pct: optional. Percent (0–100) of the driver's configured
+//                nominal_w (the inverter's rated AC output). Driver-
+//                scoped uses that one driver's nominal; site-aggregate
+//                uses the sum across SupportsPVCurtail drivers. Falls
+//                back to live |PV| only when nominal_w isn't set on
+//                any matching driver. Mutually exclusive with limit_w.
 //   - hold_s:    required, 1..1800.
 //
 // Sibling of api_battery_manual.go.
@@ -89,7 +91,11 @@ func (s *Server) handlePVManualHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limitW, err := resolvePVLimitW(req, supports, s.deps.Tel)
+	// Snapshot the driver config blocks too so the pct conversion can
+	// reach for nominal_w. Done outside resolvePVLimitW to keep that
+	// function pure for tests.
+	cfgDrivers := s.snapshotDriverConfigs()
+	limitW, err := resolvePVLimitW(req, supports, s.deps.Tel, cfgDrivers)
 	if err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
@@ -139,11 +145,17 @@ func (s *Server) handlePVManualHoldGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, pvManualHoldResponseFrom(h, active))
 }
 
-// resolvePVLimitW converts the request to an absolute watt cap. When
-// the operator sent limit_pct, we apply it to the live |PV| of the
-// scoped driver (or sum across SupportsPVCurtail drivers for an
-// aggregate hold).
-func resolvePVLimitW(req pvManualHoldRequest, supports map[string]bool, tel *telemetry.Store) (float64, error) {
+// resolvePVLimitW converts the request to an absolute watt cap.
+//
+// limit_pct is interpreted as a fraction of the driver's configured
+// nominal_w (the inverter's rated AC output) — that's what an operator
+// means by "100%" when they look at the planet bubble. Falls back to
+// live |PV| if no nominal_w is configured (better something than a
+// hard error, but the slider becomes effectively meaningless above
+// current production).
+//
+// `cfgDrivers` maps driver name → nominal_w in watts (0 = not set).
+func resolvePVLimitW(req pvManualHoldRequest, supports map[string]bool, tel *telemetry.Store, cfgDrivers map[string]float64) (float64, error) {
 	if req.LimitW != nil {
 		if *req.LimitW < 0 {
 			return 0, apiError("limit_w must be >= 0")
@@ -154,10 +166,26 @@ func resolvePVLimitW(req pvManualHoldRequest, supports map[string]bool, tel *tel
 	if pct < 0 || pct > 100 {
 		return 0, apiError("limit_pct must be in [0, 100]")
 	}
-	if tel == nil {
-		return 0, apiError("telemetry not available; use limit_w instead of limit_pct")
-	}
+
+	// Preferred basis: nominal_w. Driver-scoped uses that one driver's
+	// nominal; aggregate sums the nominal_w of every curtail-supporting
+	// driver.
 	var basis float64
+	if req.Driver != "" {
+		basis = cfgDrivers[req.Driver]
+	} else {
+		for d := range supports {
+			basis += cfgDrivers[d]
+		}
+	}
+	if basis > 0 {
+		return basis * pct / 100.0, nil
+	}
+
+	// Fallback: live |PV|. Same sum semantics as before.
+	if tel == nil {
+		return 0, apiError("nominal_w not configured and telemetry unavailable")
+	}
 	for _, r := range tel.ReadingsByType(telemetry.DerPV) {
 		if req.Driver != "" {
 			if r.Driver != req.Driver {
@@ -172,11 +200,44 @@ func resolvePVLimitW(req pvManualHoldRequest, supports map[string]bool, tel *tel
 		basis += -r.RawW
 	}
 	if basis <= 0 {
-		// Don't reject: 0% of 0 W is 0 W, which is a valid "force off"
-		// verification command. The pct only matters proportionally.
+		// 0 % of 0 W is 0 W — valid "force off" verification command.
 		return 0, nil
 	}
 	return basis * pct / 100.0, nil
+}
+
+// snapshotDriverConfigs walks Cfg.Drivers and pulls each driver's
+// nominal_w out of its `config:` block under the CfgMu read lock.
+// Returns name → nominal_w (0 when missing or wrong type).
+func (s *Server) snapshotDriverConfigs() map[string]float64 {
+	out := map[string]float64{}
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return out
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	for _, d := range s.deps.Cfg.Drivers {
+		out[d.Name] = readNominalW(d)
+	}
+	return out
+}
+
+// readNominalW pulls nominal_w out of the YAML map; accepts numeric
+// types (int, int64, float64) since YAML loaders are inconsistent.
+func readNominalW(d config.Driver) float64 {
+	v, ok := d.Config["nominal_w"]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	}
+	return 0
 }
 
 func pvManualHoldResponseFrom(h control.PVManualHold, active bool) pvManualHoldResponse {

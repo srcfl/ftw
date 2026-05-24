@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -193,6 +194,67 @@ func TestPVHoldLifecycle(t *testing.T) {
 	}
 	if got2.Active {
 		t.Errorf("get after delete should report inactive: %+v", got2)
+	}
+}
+
+// 100% should mean "100% of nominal_w" when configured — not 100% of
+// the live |PV| (which is typically much lower than nominal and would
+// make the slider effectively meaningless above current production).
+func TestPVHoldPctUsesNominalWhenConfigured(t *testing.T) {
+	st := control.NewState(0, 50, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
+	mu := &sync.Mutex{}
+	tel := telemetry.NewStore()
+	// Live PV is small (cloudy moment).
+	tel.DriverHealthMut("solaredge").RecordSuccess()
+	tel.Update("solaredge", telemetry.DerPV, -256, nil, nil)
+	cfgMu := &sync.RWMutex{}
+	cfg := &config.Config{Drivers: []config.Driver{{
+		Name:   "solaredge",
+		Config: map[string]any{"nominal_w": 8000},
+	}}}
+	srv := New(&Deps{Ctrl: st, CtrlMu: mu, Tel: tel, Cfg: cfg, CfgMu: cfgMu})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pv/manual_hold",
+		strings.NewReader(`{"driver":"solaredge","limit_pct":100,"hold_s":60}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := st.ManualPVHold.LimitW; got != 8000 {
+		t.Errorf("100%% with nominal=8000 W: got %.2f, want 8000", got)
+	}
+}
+
+// Site-aggregate pct sums nominal_w across curtail-supporting drivers.
+func TestPVHoldPctAggregateUsesNominalSum(t *testing.T) {
+	st := control.NewState(0, 50, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"solaredge": true, "sungrow": true}
+	mu := &sync.Mutex{}
+	tel := telemetry.NewStore()
+	cfgMu := &sync.RWMutex{}
+	cfg := &config.Config{Drivers: []config.Driver{
+		{Name: "solaredge", Config: map[string]any{"nominal_w": 8000}},
+		{Name: "sungrow", Config: map[string]any{"nominal_w": 5000}},
+	}}
+	srv := New(&Deps{Ctrl: st, CtrlMu: mu, Tel: tel, Cfg: cfg, CfgMu: cfgMu})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/pv/manual_hold",
+		strings.NewReader(`{"limit_pct":50,"hold_s":60}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := st.ManualPVHold.LimitW; got != 6500 {
+		t.Errorf("50%% of nominal sum (13000 W): got %.2f, want 6500", got)
 	}
 }
 
