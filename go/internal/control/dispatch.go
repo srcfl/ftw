@@ -521,9 +521,18 @@ func minBatterySoC(bats []batteryInfo) float64 {
 }
 
 type plannerSelfDecision struct {
-	idleGate            bool
-	exportSurplusGate   bool
-	holdBatteryZeroGate bool
+	idleGate          bool
+	exportSurplusGate bool
+	// noChargeOnStalePlan: planner_self is price-aware, so a stale plan
+	// has no opinion on whether right-now is an export slot or a charge
+	// slot. The old "fall back to plain self_consumption" path could
+	// silently absorb PV that the planner would have exported; the
+	// briefly-tried "hold at 0 W" was the opposite mistake and left the
+	// house importing through every restart. The middle path: run the
+	// reactive grid-zero regulator (cover load with discharge as usual)
+	// but block self-charge until a fresh plan exists, so unexpected
+	// PV surplus exports instead of charging blind.
+	noChargeOnStalePlan bool
 }
 
 func preparePlannerSelf(state *State, now time.Time) plannerSelfDecision {
@@ -539,17 +548,17 @@ func preparePlannerSelf(state *State, now time.Time) plannerSelfDecision {
 	dir, planFresh := plannerSelfDirectiveAt(state, now)
 	if !planFresh {
 		if !state.PlanStale {
-			slog.Warn("planner_self: plan stale — holding battery at 0 W")
+			slog.Warn("planner_self: plan stale — discharge-only self_consumption (no self-charge until fresh plan)")
 		}
 		state.PlanStale = true
-		return plannerSelfDecision{holdBatteryZeroGate: true}
+		return plannerSelfDecision{noChargeOnStalePlan: true}
 	}
 
 	state.PlanStale = false
 	return plannerSelfDecision{
 		idleGate:            plannerSelfDirectiveIsIdle(dir),
 		exportSurplusGate:   plannerSelfDirectiveExportsSurplus(dir),
-		holdBatteryZeroGate: false,
+		noChargeOnStalePlan: false,
 	}
 }
 
@@ -699,12 +708,14 @@ func ComputeDispatch(
 	// idle slot is charge-only: it may absorb unexpected live PV surplus
 	// that would otherwise cross the meter, but it never discharges to cover
 	// load. Non-idle planner_self slots chase live grid=0 reactively unless
-	// export over storage for this slot. plannerSelfHoldZeroGate is the
-	// stale/missing-plan fail-safe: when smart self-consumption cannot
-	// prove it should charge or discharge, it must not move the battery.
+	// plannerSelfExportSurplusGate says the plan explicitly preferred PV
+	// export over storage for this slot. plannerSelfNoChargeStalePlan is
+	// the missing-plan safety: discharge to cover load like classic
+	// self_consumption, but never charge from PV without a fresh plan —
+	// blind absorption stole a planned export window in the past.
 	plannerSelfIdleGate := false
 	plannerSelfExportSurplusGate := false
-	plannerSelfHoldZeroGate := false
+	plannerSelfNoChargeStalePlan := false
 	var currentDirective SlotDirective
 
 	// ---- Manual hold: highest-priority override ----
@@ -735,7 +746,7 @@ func ComputeDispatch(
 		decision := preparePlannerSelf(state, time.Now())
 		plannerSelfIdleGate = decision.idleGate
 		plannerSelfExportSurplusGate = decision.exportSurplusGate
-		plannerSelfHoldZeroGate = decision.holdBatteryZeroGate
+		plannerSelfNoChargeStalePlan = decision.noChargeOnStalePlan
 	case state.Mode.IsPlannerMode():
 		// planner_cheap / planner_arbitrage.
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
@@ -893,7 +904,12 @@ func ComputeDispatch(
 	// reading. Plain self_consumption remains the classic grid-zero mode:
 	// it may discharge to cover local load and charge from live surplus.
 	planNonDischargeIntent := !manualHoldActive && planHasNonDischargeIntent(state)
-	noSelfDischarge := (!manualHoldActive && (plannerSelfIdleGate || plannerSelfExportSurplusGate || plannerSelfHoldZeroGate)) || planNonDischargeIntent
+	noSelfDischarge := (!manualHoldActive && (plannerSelfIdleGate || plannerSelfExportSurplusGate)) || planNonDischargeIntent
+	// Stale planner_self: cover load with discharge as classic
+	// self_consumption, but block charge so PV exports rather than
+	// silently absorbing during what may have been a planned export
+	// window.
+	noSelfCharge := !manualHoldActive && plannerSelfNoChargeStalePlan
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -941,14 +957,6 @@ func ComputeDispatch(
 		totalCorrection = -currentTotal
 		// Skip deadband for the same reason as idleGate: this branch is
 		// about honouring a battery target of zero, not closing gridW.
-	case plannerSelfHoldZeroGate:
-		state.resetSettlementAccounting()
-		// planner_self but no fresh plan: fail safe to battery idle. A
-		// missing plan has no price context, so falling back to manual
-		// self-consumption can charge from PV during a slot the planner
-		// would have exported. Hold 0 W until the next successful replan.
-		state.PI.Reset()
-		totalCorrection = -currentTotal
 	case useEnergyPath:
 		state.resetSettlementAccounting()
 		// Energy-allocation path: plan's slot directive says "this many Wh
@@ -1382,6 +1390,12 @@ func ComputeDispatch(
 				totalCorrection = -currentTotal
 			}
 		}
+		if noSelfCharge {
+			targetTotal2 := currentTotal + totalCorrection
+			if targetTotal2 > 0 {
+				totalCorrection = -currentTotal
+			}
+		}
 	}
 
 	// ---- Joint fuse-budget allocator ----
@@ -1508,7 +1522,7 @@ func ComputeDispatch(
 		// A direct move to 0 W is safe here: it only removes battery load /
 		// discharge, and the fuse overflow guard below can still force
 		// discharge if the site actually needs it.
-		if (plannerSelfExportSurplusGate || plannerSelfHoldZeroGate ||
+		if (plannerSelfExportSurplusGate ||
 			(manualHoldActive && math.Abs(manualHold.PowerW) < 1)) &&
 			math.Abs(raw[i].TargetW) < 1 {
 			raw[i].TargetW = 0
