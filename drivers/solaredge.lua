@@ -430,16 +430,24 @@ local function apply_curtail(power_w)
     return true
 end
 
--- Release the curtail cap. Disables F000 (the limit value in F001 is
--- left as-is — when F000 is 0 the inverter ignores it).
+-- Release the curtail cap. Some SolarEdge firmwares treat F001 as the
+-- authoritative limit independent of F000, so we explicitly raise F001
+-- back to 100 % AND disable F000. Belt and suspenders: covers both
+-- enable-bit-honoring and limit-value-honoring variants without
+-- assuming which one this inverter follows.
 local function release_curtail()
-    local ok, err = pcall(host.modbus_write, REG_APC_ENABLE, 0)
-    if (not ok) or type(err) == "string" then
-        host.log("warn", "SolarEdge: release APC_ENABLE failed: " .. tostring(err))
+    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, 100)
+    if (not ok_lim) or type(err_lim) == "string" then
+        host.log("warn", "SolarEdge: release APC_LIMIT=100 failed: " .. tostring(err_lim))
+        return false
+    end
+    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 0)
+    if (not ok_en) or type(err_en) == "string" then
+        host.log("warn", "SolarEdge: release APC_ENABLE=0 failed: " .. tostring(err_en))
         return false
     end
     if curtail_active then
-        host.log("info", "SolarEdge: curtail released")
+        host.log("info", "SolarEdge: curtail released (APC_LIMIT=100, APC_ENABLE=0)")
     end
     curtail_active = false
     return true

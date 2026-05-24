@@ -149,11 +149,17 @@ func TestSolarEdgeCurtailDisable(t *testing.T) {
 
 	runCmd(t, d, "curtail_disable", 0)
 	w := mb.snapshot()
-	if len(w) != 1 {
-		t.Fatalf("expected 1 write on disable, got %d: %+v", len(w), w)
+	// Release writes BOTH the limit value back to 100 % and disables
+	// the enable bit — belt-and-suspenders for firmwares that honor
+	// only one or the other.
+	if len(w) != 2 {
+		t.Fatalf("expected 2 writes on disable, got %d: %+v", len(w), w)
 	}
-	if w[0] != (writeOp{Addr: 61440, Value: 0}) {
-		t.Errorf("disable write: got %+v, want {61440, 0}", w[0])
+	if w[0] != (writeOp{Addr: 61441, Value: 100}) {
+		t.Errorf("first disable write: got %+v, want {61441, 100}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61440, Value: 0}) {
+		t.Errorf("second disable write: got %+v, want {61440, 0}", w[1])
 	}
 }
 

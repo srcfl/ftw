@@ -250,14 +250,21 @@ local function apply_curtail(power_w)
     return true
 end
 
+-- See solaredge.lua release_curtail for the F001=100 + F000=0
+-- two-write rationale.
 local function release_curtail()
-    local ok, err = pcall(host.modbus_write, REG_APC_ENABLE, 0)
-    if (not ok) or type(err) == "string" then
-        host.log("warn", "SolarEdge-PV: release APC_ENABLE failed: " .. tostring(err))
+    local ok_lim, err_lim = pcall(host.modbus_write, REG_APC_LIMIT, 100)
+    if (not ok_lim) or type(err_lim) == "string" then
+        host.log("warn", "SolarEdge-PV: release APC_LIMIT=100 failed: " .. tostring(err_lim))
+        return false
+    end
+    local ok_en, err_en = pcall(host.modbus_write, REG_APC_ENABLE, 0)
+    if (not ok_en) or type(err_en) == "string" then
+        host.log("warn", "SolarEdge-PV: release APC_ENABLE=0 failed: " .. tostring(err_en))
         return false
     end
     if curtail_active then
-        host.log("info", "SolarEdge-PV: curtail released")
+        host.log("info", "SolarEdge-PV: curtail released (APC_LIMIT=100, APC_ENABLE=0)")
     end
     curtail_active = false
     return true
