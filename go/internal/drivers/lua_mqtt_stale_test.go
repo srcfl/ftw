@@ -191,6 +191,36 @@ func TestFerroampDriverFallsBackToEsoPbatWhenEhubPbatIsZero(t *testing.T) {
 	}
 }
 
+func TestFerroampDriverPrefersEsoCurrentForBatteryPower(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":-300}}`
+	eso := `{"pbat":{"val":-300},"soc":{"val":29},"ubat":{"val":308.8},"ibat":{"val":0}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil {
+		t.Fatal("expected battery reading")
+	}
+	if bat.RawW != 0 {
+		t.Fatalf("battery RawW = %v, want 0 from ESO ubat*ibat", bat.RawW)
+	}
+	gotA, _, ok := tel.LatestMetric("ferroamp", "battery_dc_a")
+	if !ok {
+		t.Fatal("missing battery_dc_a metric")
+	}
+	if gotA != 0 {
+		t.Fatalf("battery_dc_a = %v, want 0", gotA)
+	}
+}
+
 func TestFerroampDriverFallsBackToSsoPpvWhenEhubPpvIsZero(t *testing.T) {
 	tel := telemetry.NewStore()
 	mqtt := &fakeMQTT{}

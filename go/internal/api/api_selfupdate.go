@@ -4,6 +4,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 )
 
 // handleVersionCheck returns the cached self-update state. ?force=1 bypasses
@@ -105,16 +108,30 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := s.deps.SelfUpdate.Info()
+	startedAt := time.Now()
+	writeUpdateStatus := func(state, message string) {
+		_ = s.deps.SelfUpdate.WriteStatus(selfupdate.UpdateStatus{
+			State:     state,
+			Action:    "update",
+			Target:    info.Latest,
+			StartedAt: startedAt,
+			UpdatedAt: time.Now(),
+			Message:   message,
+		})
+	}
+	writeUpdateStatus("starting", "starting update")
 
 	var snap SnapshotInfo
 	snapshotSkipped := body.SkipSnapshot || s.deps.SnapshotDir == ""
 	if !snapshotSkipped {
+		writeUpdateStatus("snapshotting", "creating backup snapshot")
 		var err error
 		snap, err = s.createPreUpdateSnapshot("update", info.Current, info.Latest)
 		if err != nil {
+			writeUpdateStatus("failed", "snapshot failed: "+err.Error())
 			writeJSON(w, 500, map[string]string{
-				"error":   "snapshot failed: " + err.Error(),
-				"hint":    "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space — or re-submit with skip_snapshot=true if you accept the risk.",
+				"error":        "snapshot failed: " + err.Error(),
+				"hint":         "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space — or re-submit with skip_snapshot=true if you accept the risk.",
 				"snapshot_dir": s.deps.SnapshotDir,
 			})
 			return
@@ -122,6 +139,7 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.deps.SelfUpdate.Trigger(r.Context(), "update", info.Latest); err != nil {
+		writeUpdateStatus("failed", err.Error())
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}

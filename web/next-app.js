@@ -339,6 +339,17 @@
     if (abs >= 1000) return sign + (abs / 1000).toFixed(2) + " kWh";
     return sign + Math.round(abs) + " Wh";
   }
+  function batteryStateLabel(w) {
+    var watts = Number(w) || 0;
+    var idleW = flowIdleKw() * 1000;
+    if (watts > idleW) return "charging";
+    if (watts < -idleW) return "discharging";
+    return "idle";
+  }
+  function batteryTargetLine(targetW) {
+    if (targetW == null || !isFinite(targetW)) return "";
+    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+  }
 
   function smoothDisplayNumber(key, value, now) {
     if (value == null || !isFinite(value)) return value;
@@ -434,6 +445,17 @@
 
   // ---- Render ----
   function render(data) {
+    var batteryTargetsByDriver = {};
+    var totalBatteryTargetW = 0;
+    var hasBatteryTarget = false;
+    (data.dispatch || []).forEach(function (d) {
+      if (!d || !d.driver) return;
+      var target = Number(d.target_w) || 0;
+      batteryTargetsByDriver[d.driver] = target;
+      totalBatteryTargetW += target;
+      hasBatteryTarget = true;
+    });
+
     // Battery presence → body.no-battery toggle. Drives visibility of
     // the "Bat charged" / "Bat discharged" tiles and the Plan chart's
     // Charge / Discharge / SoC legend + drawing layers. Any driver
@@ -458,11 +480,7 @@
     try {
       // Build a {driver → target_w} index from the dispatch array so the
       // per-battery push below doesn't need an inner loop.
-      var targetsByDriver = {};
-      (data.dispatch || []).forEach(function (d) {
-        if (d && d.driver) targetsByDriver[d.driver] = d.target_w || 0;
-      });
-      pushChartData(data, targetsByDriver);
+      pushChartData(data, batteryTargetsByDriver);
     } catch (e) { console.error("pushChartData error:", e); }
 
     data = smoothStatusForDisplay(data);
@@ -536,6 +554,10 @@
     } else {
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
+    }
+    var batTargetDisp = document.getElementById("bat-target-display");
+    if (batTargetDisp) {
+      batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
     }
 
     // Hero energy-flow diagram — build a flat "planets" list where each
@@ -635,11 +657,12 @@
           // wordy charging/discharging sub-label.
           var bColor = bIdle ? "var(--cyan)" :
                        (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
+          var bTargetLine = batteryTargetLine(batteryTargetsByDriver[name]);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
             color: bColor,
-            sub: "",
+            sub: bTargetLine,
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
             dailyKwhParts: batDailyParts,
             dailyScope: "aggregate",

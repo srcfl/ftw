@@ -41,6 +41,11 @@ func (s *memStore) LoadConfig(k string) (string, bool) {
 // matches what handler tests expect to see.
 func newCheckerAgainst(t *testing.T, tag, current string) *selfupdate.Checker {
 	t.Helper()
+	return newCheckerAgainstWithStatus(t, tag, current, "")
+}
+
+func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) *selfupdate.Checker {
+	t.Helper()
 	const repo = "frahlg/forty-two-watts"
 
 	regMux := http.NewServeMux()
@@ -71,6 +76,7 @@ func newCheckerAgainst(t *testing.T, tag, current string) *selfupdate.Checker {
 		RegistryBaseURL:  regSrv.URL,
 		LatestReleaseURL: relSrv.URL,
 		CheckInterval:    time.Hour,
+		StatusPath:       statusPath,
 	}, newMemStore())
 	if _, err := c.Check(t.Context(), true); err != nil {
 		t.Fatalf("priming check: %v", err)
@@ -168,8 +174,9 @@ func TestVersionUpdate_NoSidecar502(t *testing.T) {
 // an operator who hits Update always has a rollback point — even if the
 // sidecar is missing and the trigger fails. Issue #140.
 func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-state.json")
+	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
 	st, err := state.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -212,6 +219,11 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 		t.Errorf("snapshot missing seeded mode config: %q ok=%v", v, ok)
 	}
 	snap.Close()
+
+	gotStatus := c.Status()
+	if gotStatus.State != "failed" || gotStatus.Action != "update" || gotStatus.Target != "v1.5.0" {
+		t.Errorf("trigger failure should be published to status file, got %+v", gotStatus)
+	}
 }
 
 // Operator opt-out: POST {skip_snapshot: true} skips the snapshot

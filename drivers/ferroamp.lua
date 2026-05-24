@@ -138,6 +138,14 @@ local function choose_power(primary, fallback)
     return f
 end
 
+local function eso_battery_power(data)
+    if not data then return nil end
+    local ubat = tonumber(extract_val(data, "ubat"))
+    local ibat = tonumber(extract_val(data, "ibat"))
+    if ubat == nil or ibat == nil then return nil end
+    return ubat * ibat
+end
+
 local function sso_power(data)
     if not data then return nil end
     local ppv = extract_val(data, "ppv")
@@ -318,7 +326,10 @@ function driver_poll()
     -- Battery
     --------------------------------------------------------------------------
     if (ehub_data or eso_data) and not SKIP_BATTERY then
-        local pbat = choose_power(extract_val(ehub_data, "pbat"), extract_val(eso_data, "pbat"))
+        local pbat = eso_battery_power(eso_data)
+        if pbat == nil then
+            pbat = choose_power(extract_val(ehub_data, "pbat"), extract_val(eso_data, "pbat"))
+        end
         if pbat then
             local battery = {}
             -- Ferroamp: positive pbat = discharging, negate for convention

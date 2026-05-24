@@ -28,8 +28,10 @@
       this._sidecarState = null;      // last /api/version/update/status
       this._updateStartedAt = 0;
       this._updateOriginalVersion = null;
+      this._expectedRun = null;
       this._checkTimer = null;
       this._statusTimer = null;
+      this._elapsedTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
       this._skipSnapshot = false;     // per-session opt-out toggle (#149)
       this._snapshots = null;         // last /api/version/snapshots payload (#150)
@@ -45,6 +47,7 @@
     disconnectedCallback() {
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
     }
 
     // Public: called by the header #version click handler in index.html so
@@ -93,20 +96,24 @@
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._expectedRun = { action: "rollback", target: "", snapshot: snapshotID };
       this._sidecarState = { state: "starting", action: "rollback", snapshot: snapshotID };
       this._render();
+      this._startElapsedTicker();
+      this._startStatusPolling();
 
       this._postJSON("/api/version/rollback", { snapshot_id: snapshotID })
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action: "rollback", message: (resp.body && resp.body.error) || "failed to start" };
+            this._stopUpdateTimers();
             this._render();
             return;
           }
-          this._startStatusPolling();
         })
         .catch((e) => {
           this._sidecarState = { state: "failed", action: "rollback", message: String(e) };
+          this._stopUpdateTimers();
           this._render();
         });
     }
@@ -121,6 +128,7 @@
       this._disabled = true;
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
       this._shadow.innerHTML = "";
       this.hidden = true;
       this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
@@ -183,8 +191,15 @@
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._expectedRun = {
+        action,
+        target: action === "update" && this._info ? (this._info.latest || "") : "",
+        snapshot: "",
+      };
       this._sidecarState = { state: "starting", action };
       this._render();
+      this._startElapsedTicker();
+      this._startStatusPolling();
 
       const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
       // For /update we ship a body so the operator can opt out of the
@@ -198,13 +213,14 @@
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
+            this._stopUpdateTimers();
             this._render();
             return;
           }
-          this._startStatusPolling();
         })
         .catch((e) => {
           this._sidecarState = { state: "failed", action, message: String(e) };
+          this._stopUpdateTimers();
           this._render();
         });
     }
@@ -215,12 +231,29 @@
       this._tickStatus();
     }
 
+    _startElapsedTicker() {
+      clearInterval(this._elapsedTimer);
+      this._elapsedTimer = setInterval(() => {
+        if (this._phase !== "updating") {
+          clearInterval(this._elapsedTimer);
+          return;
+        }
+        this._markSoftTimeout();
+        this._render();
+      }, 1000);
+    }
+
+    _stopUpdateTimers() {
+      clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
+    }
+
     _tickStatus() {
       // 1) Poll sidecar state.json.
       fetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
-          if (st) {
+          if (st && this._statusMatchesCurrentRun(st)) {
             this._sidecarState = st;
             this._render();
             if (st.state === "done") {
@@ -234,18 +267,38 @@
 
       // 2) If we've been updating too long with no progress, give the user
       // a manual reload escape hatch instead of spinning forever.
-      if (Date.now() - this._updateStartedAt > UPDATE_SOFT_TIMEOUT_MS) {
-        if (this._sidecarState && this._sidecarState.state !== "done") {
-          this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
-          this._render();
-        }
+      if (this._markSoftTimeout()) {
+        this._render();
       }
+    }
+
+    _statusMatchesCurrentRun(st) {
+      if (!st || !this._expectedRun) return false;
+      if (st.action && st.action !== this._expectedRun.action) return false;
+      if (this._expectedRun.target && st.target && st.target !== this._expectedRun.target) return false;
+      if (this._expectedRun.snapshot && st.snapshot && st.snapshot !== this._expectedRun.snapshot) return false;
+
+      // Polling starts before POST /update returns, so the status file can
+      // still contain an old "done" from the previous update. Never let that
+      // stale terminal state auto-reload the page for the new run.
+      const startedMs = st.started_at ? Date.parse(st.started_at) : 0;
+      if (startedMs && startedMs < this._updateStartedAt - 5000) return false;
+      if (!startedMs && (st.state === "done" || st.state === "failed" || st.state === "idle")) return false;
+      return true;
+    }
+
+    _markSoftTimeout() {
+      if (Date.now() - this._updateStartedAt <= UPDATE_SOFT_TIMEOUT_MS) return false;
+      if (!this._sidecarState || this._sidecarState.state === "done" || this._sidecarState.timedOut) return false;
+      this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
+      return true;
     }
 
     _attemptReload() {
       // Give the new container a moment to open its listener, then
       // hard-reload. Bypass cache so a new app.js version is picked up.
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
       setTimeout(() => {
         // location.reload(true) is deprecated; a cache-busting query is a
         // reliable cross-browser alternative that forces a fresh index.html.
@@ -457,6 +510,7 @@
           switch (action) {
             case "close":
               this._phase = "idle";
+              this._stopUpdateTimers();
               this._render();
               break;
             case "update":
@@ -786,6 +840,7 @@
 
   function actionLabel(state, action) {
     switch (state) {
+      case "snapshotting": return "Creating backup";
       case "pulling":    return "Pulling new image";
       case "restoring":  return "Restoring snapshot";
       case "restarting":

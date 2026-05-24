@@ -2117,11 +2117,12 @@ func TestPlannerSelfRespectsEVChargingSignal(t *testing.T) {
 	}
 }
 
-// When the plan is absent (SlotDirective returns false) planner_self
-// degrades to plain manual self_consumption: reactive grid-zero control.
-func TestPlannerSelfWithoutPlanActsLikeManualSelfConsumption(t *testing.T) {
-	// Live: importing 1 kW. Stale planner_self must fall back to classic
-	// self-consumption and discharge toward grid zero.
+// When the plan is absent (SlotDirective returns false), planner_self must
+// fail safe to battery idle. It is a price-aware mode; without a fresh plan
+// it must not silently fall back to PV absorption or discharge decisions.
+func TestPlannerSelfWithoutPlanHoldsBatteryIdle(t *testing.T) {
+	// Live: importing 1 kW. Stale planner_self should not discharge without
+	// a fresh plan proving this slot participates.
 	store := seedStore(1000, []struct {
 		name          string
 		currentW, soc float64
@@ -2140,11 +2141,46 @@ func TestPlannerSelfWithoutPlanActsLikeManualSelfConsumption(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if targets[0].TargetW >= 0 {
-		t.Errorf("TargetW = %f W — planner_self with stale plan should discharge like manual self_consumption", targets[0].TargetW)
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f W — planner_self with stale plan should hold battery idle", targets[0].TargetW)
 	}
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
+	}
+}
+
+func TestPlannerSelfWithoutPlanStopsChargingWithoutSlew(t *testing.T) {
+	// Regression from live system: after an update, /api/mpc/plan can be nil
+	// for a short time. planner_self must not keep charging from PV surplus
+	// while waiting for the first fresh plan, and the stop must bypass slew.
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1900, 0.5},
+		{"sungrow", 1800, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.MinDispatchIntervalS = 0
+	// Keep default 500 W slew. Correct behavior is direct 0 W, not a
+	// multi-cycle ramp that keeps importing/charging.
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+	st.PlanTarget = func(time.Time) (string, float64, bool) { return "", 0, false }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{
+		"ferroamp": 15200,
+		"sungrow":  9600,
+	}), 11040)
+	if len(targets) != 2 {
+		t.Fatalf("want 2 targets, got %d", len(targets))
+	}
+	for _, target := range targets {
+		if math.Abs(target.TargetW) > 1 {
+			t.Errorf("%s TargetW = %f W — stale planner_self should force battery idle immediately",
+				target.Driver, target.TargetW)
+		}
 	}
 }
 
@@ -3223,6 +3259,36 @@ func TestBatteryManualHoldOverridesPlannerMode(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW-(-3000)) > 1 {
 		t.Errorf("hold should override planner_self idle gate, got %f", targets[0].TargetW)
+	}
+}
+
+func TestBatteryManualIdleHoldStopsChargingWithoutSlew(t *testing.T) {
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1900, 0.5},
+		{"sungrow", 1800, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerSelf
+	st.UseEnergyDispatch = true
+	st.MinDispatchIntervalS = 0
+	// Keep default 500 W slew. A manual idle hold is an explicit operator
+	// stop command, so it must not ramp down over several cycles.
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 0, ExpiresAt: time.Now().Add(60 * time.Second)})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{
+		"ferroamp": 15200,
+		"sungrow":  9600,
+	}), 11040)
+	if len(targets) != 2 {
+		t.Fatalf("want 2 targets, got %d", len(targets))
+	}
+	for _, target := range targets {
+		if math.Abs(target.TargetW) > 1 {
+			t.Errorf("%s TargetW = %f — idle hold should force 0 W immediately",
+				target.Driver, target.TargetW)
+		}
 	}
 }
 

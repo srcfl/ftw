@@ -970,6 +970,9 @@ func main() {
 			}
 			mpcSvc.SetMode(ctx, mm)
 		}
+		if mpcSvc.Latest() == nil {
+			restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
+		}
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,
 			"capacity_wh", mpcSvc.Defaults.CapacityWh,
@@ -1605,6 +1608,8 @@ func main() {
 	var prevFuseSaturated bool
 	var lastFuseReplan time.Time
 	const fuseReplanCooldown = 60 * time.Second
+	var lastMissingPlanReplan time.Time
+	const missingPlanReplanCooldown = 5 * time.Second
 	// One-shot replan when the FIRST DerVehicle reading arrives. The
 	// startup replan ran with whatever fallback SoC was available; once
 	// the Tesla / vehicle driver gets ground truth from the car, the
@@ -1802,6 +1807,7 @@ func main() {
 			ctrl.EVSurplusOnlyReserveW = evReserveW
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
+			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
 			ctrlMu.Unlock()
 
 			// ---- Self-tune override: force commanded battery, hold others at 0 ----
@@ -1871,6 +1877,17 @@ func main() {
 				slog.Info("fuse-saturated → MPC replan triggered")
 			}
 			prevFuseSaturated = fuseSatNow
+
+			// Missing-plan retry: plans are in-memory only, so after an
+			// update/restart the first dispatch cycles can see nil/stale
+			// planner state. That must not wait for the normal 15 min
+			// interval; rebuild immediately, retrying briefly if prices /
+			// forecasts / telemetry were not ready during startup.
+			if mpcSvc != nil && planMissingNow && time.Since(lastMissingPlanReplan) > missingPlanReplanCooldown {
+				lastMissingPlanReplan = time.Now()
+				go mpcSvc.ReplanWithReason(ctx, "missing_plan_retry")
+				slog.Info("missing MPC plan → replan triggered")
+			}
 
 			// EV-stop edge replan trigger: when an LP's draw drops
 			// from a clearly-charging value to ~0 while still plugged,
@@ -2475,6 +2492,32 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		JSON: string(jsonBlob),
 	}); err != nil {
 		slog.Warn("failed to persist history point", "err", err)
+	}
+}
+
+func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time) {
+	if st == nil || svc == nil {
+		return
+	}
+	row, err := st.LoadDiagnosticAt(now.UnixMilli())
+	if err != nil {
+		slog.Warn("mpc: load persisted diagnostic failed", "err", err)
+		return
+	}
+	if row == nil || row.JSON == "" {
+		return
+	}
+	var d mpc.Diagnostic
+	if err := json.Unmarshal([]byte(row.JSON), &d); err != nil {
+		slog.Warn("mpc: decode persisted diagnostic failed", "ts_ms", row.TsMs, "err", err)
+		return
+	}
+	if svc.RestoreDiagnostic(&d, now, "restored_diagnostic") {
+		slog.Info("mpc: restored active plan from persisted diagnostic",
+			"ts_ms", row.TsMs,
+			"mode", d.Params.Mode,
+			"horizon", d.Horizon,
+			"reason", row.Reason)
 	}
 }
 
