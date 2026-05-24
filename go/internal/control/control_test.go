@@ -2117,12 +2117,13 @@ func TestPlannerSelfRespectsEVChargingSignal(t *testing.T) {
 	}
 }
 
-// When the plan is absent (SlotDirective returns false), planner_self must
-// fail safe to battery idle. It is a price-aware mode; without a fresh plan
-// it must not silently fall back to PV absorption or discharge decisions.
-func TestPlannerSelfWithoutPlanHoldsBatteryIdle(t *testing.T) {
-	// Live: importing 1 kW. Stale planner_self should not discharge without
-	// a fresh plan proving this slot participates.
+// Stale planner_self must cover local load with battery discharge — the
+// classic self_consumption behavior. Holding the battery idle during a
+// stale plan would force the operator to import while the planner
+// recovers, which is the regression that triggered the 2026-05-24 live
+// failure: 60 kWh PV but ~1.5 kW grid import because the fail-safe was
+// too aggressive.
+func TestPlannerSelfStalePlanDischargesToCoverLoad(t *testing.T) {
 	store := seedStore(1000, []struct {
 		name          string
 		currentW, soc float64
@@ -2141,31 +2142,32 @@ func TestPlannerSelfWithoutPlanHoldsBatteryIdle(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if math.Abs(targets[0].TargetW) > 1 {
-		t.Errorf("TargetW = %f W — planner_self with stale plan should hold battery idle", targets[0].TargetW)
+	if targets[0].TargetW >= 0 {
+		t.Errorf("TargetW = %f W — stale planner_self must discharge to cover load (classic self_consumption fallback)", targets[0].TargetW)
 	}
 	if !st.PlanStale {
 		t.Error("expected PlanStale=true when planner_self sees no directive")
 	}
 }
 
-func TestPlannerSelfWithoutPlanStopsChargingWithoutSlew(t *testing.T) {
-	// Regression from live system: after an update, /api/mpc/plan can be nil
-	// for a short time. planner_self must not keep charging from PV surplus
-	// while waiting for the first fresh plan, and the stop must bypass slew.
+// Stale planner_self must NOT absorb PV surplus. The original incident
+// (operator note 2026-05-24) was the system briefly charging during a
+// planned-export slot while the planner was rebuilding. Reactive grid-
+// zero would have charged from 2 kW of export; the noSelfCharge clamp
+// pins the post-PI target to ≤ 0 so the surplus exports instead.
+func TestPlannerSelfStalePlanBlocksPVCharging(t *testing.T) {
 	store := seedStore(-2000, []struct {
 		name          string
 		currentW, soc float64
 	}{
-		{"ferroamp", 1900, 0.5},
-		{"sungrow", 1800, 0.5},
+		{"ferroamp", 0, 0.5},
+		{"sungrow", 0, 0.5},
 	})
 	st := NewState(0, 50, "ferroamp")
 	st.Mode = ModePlannerSelf
 	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
 	st.MinDispatchIntervalS = 0
-	// Keep default 500 W slew. Correct behavior is direct 0 W, not a
-	// multi-cycle ramp that keeps importing/charging.
 	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
 	st.PlanTarget = func(time.Time) (string, float64, bool) { return "", 0, false }
 
@@ -2177,8 +2179,8 @@ func TestPlannerSelfWithoutPlanStopsChargingWithoutSlew(t *testing.T) {
 		t.Fatalf("want 2 targets, got %d", len(targets))
 	}
 	for _, target := range targets {
-		if math.Abs(target.TargetW) > 1 {
-			t.Errorf("%s TargetW = %f W — stale planner_self should force battery idle immediately",
+		if target.TargetW > 1 {
+			t.Errorf("%s TargetW = %f W — stale planner_self must NOT charge from PV (planned export gets stolen)",
 				target.Driver, target.TargetW)
 		}
 	}
