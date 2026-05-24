@@ -32,8 +32,8 @@ func TestLoadMinimalYAML(t *testing.T) {
 		t.Errorf("site name: got %q", c.Site.Name)
 	}
 	// Defaults applied
-	if c.Site.ControlIntervalS != 5 {
-		t.Errorf("default control_interval_s: got %d", c.Site.ControlIntervalS)
+	if c.Site.ControlIntervalS != 2 {
+		t.Errorf("default control_interval_s: got %d, want 2", c.Site.ControlIntervalS)
 	}
 	if c.Site.GridToleranceW != 42 {
 		t.Errorf("default grid_tolerance_w: got %f", c.Site.GridToleranceW)
