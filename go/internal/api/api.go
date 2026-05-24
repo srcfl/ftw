@@ -700,6 +700,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, resp)
 }
 
+// currentGridEnergySlot integrates per-direction grid energy across the
+// active 15-minute settlement window. Under 15-min settlement the bill is
+//
+//	import_wh × import_price  +  export_wh × export_price
+//
+// — import and export are independent accumulators, never netted.
+// `net_wh` is kept as a backwards-compat observational delta only; UI and
+// downstream consumers MUST render or price import_wh and export_wh
+// separately, never `net_wh` alone.
 func currentGridEnergySlot(st *state.Store, now time.Time) (map[string]any, error) {
 	slotStart := now.Truncate(15 * time.Minute)
 	slotEnd := slotStart.Add(15 * time.Minute)
@@ -713,7 +722,8 @@ func currentGridEnergySlot(st *state.Store, now time.Time) (map[string]any, erro
 		"elapsed_s":     now.Sub(slotStart).Seconds(),
 		"import_wh":     d.ImportWh,
 		"export_wh":     d.ExportWh,
-		"net_wh":        d.ImportWh - d.ExportWh,
+		// Observational only — see comment above. Do not bill against this.
+		"net_wh": d.ImportWh - d.ExportWh,
 	}, nil
 }
 

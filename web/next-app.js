@@ -339,6 +339,11 @@
     if (abs >= 1000) return sign + (abs / 1000).toFixed(2) + " kWh";
     return sign + Math.round(abs) + " Wh";
   }
+  function formatWhMagnitude(wh) {
+    var abs = Math.abs(Number(wh) || 0);
+    if (abs >= 1000) return (abs / 1000).toFixed(2) + " kWh";
+    return Math.round(abs) + " Wh";
+  }
   function batteryStateLabel(w) {
     var watts = Number(w) || 0;
     var idleW = flowIdleKw() * 1000;
@@ -510,10 +515,15 @@
     if (slotBadge) {
       var slot = data.energy && data.energy.current_slot;
       if (slot) {
-        var netWh = Number(slot.net_wh) || 0;
-        slotBadge.textContent = "15m " + formatSignedWh(netWh);
+        // 15-min settlement: import_wh and export_wh accumulate
+        // SEPARATELY within the slot — the bill is import × import_price
+        // plus export × export_price, never their net. Render both
+        // directions so the operator sees the slot's true exposure.
+        var impWh = Number(slot.import_wh) || 0;
+        var expWh = Number(slot.export_wh) || 0;
+        slotBadge.textContent = "15m ↑" + formatWhMagnitude(impWh) + " ↓" + formatWhMagnitude(expWh);
         slotBadge.className = "grid-slot-badge" +
-          (netWh > 5 ? " slot-import" : netWh < -5 ? " slot-export" : "");
+          (impWh > expWh + 5 ? " slot-import" : expWh > impWh + 5 ? " slot-export" : "");
       } else {
         slotBadge.textContent = "";
         slotBadge.className = "grid-slot-badge";
