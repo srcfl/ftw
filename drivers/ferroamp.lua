@@ -41,8 +41,19 @@ PROTOCOL = "mqtt"
 
 -- Cached state from each topic
 local ehub_data = nil
-local eso_data = nil
 local sso_data = nil
+
+-- ESO state is per-unit. Ferroamp publishes one extapi/data/eso message
+-- per ESO; a single-slot cache always reflected only the most-recently-
+-- published unit, halving (or worse) reported battery power in N-ESO
+-- installations. Real incident 2026-05-24 at a 2×ESO site: 42's bat_w
+-- was exactly half of ehub.pbat, the controller's grid-chase loop fed
+-- on the wrong number, and dispatch never converged on grid_target.
+-- The fix is to key each ESO by its `id` field and aggregate at emit
+-- time; messages without an `id` fall under a synthetic key so
+-- single-ESO firmware / sims keep behaving identically.
+local eso_data_by_id = {}  -- id -> payload table
+local eso_ts_by_id   = {}  -- id -> last arrival ms
 
 -- Last-arrival timestamp per topic (host.millis()). The EnergyHub
 -- normally publishes ehub at ~1 Hz; if it goes silent (power off,
@@ -54,7 +65,6 @@ local sso_data = nil
 -- pv_w=-3996.7040 / meter_w=-7294.0490 identical to four decimals
 -- for 30+ minutes while the EnergyHub itself was unpowered.
 local ehub_ts = 0
-local eso_ts  = 0
 local sso_ts  = 0
 
 -- Treat cached topic data as stale beyond this age. EnergyHub
@@ -146,6 +156,15 @@ local function eso_battery_power(data)
     return ubat * ibat
 end
 
+-- Returns the id of an ESO payload, or "_default_" when the firmware
+-- omits the `id` field. The synthetic key keeps single-ESO sims /
+-- old firmware on the same code path as a 1-entry map.
+local function eso_id_of(data)
+    local id = extract_val(data, "id")
+    if id == nil or id == "" then return "_default_" end
+    return tostring(id)
+end
+
 local function sso_power(data)
     if not data then return nil end
     local ppv = extract_val(data, "ppv")
@@ -228,7 +247,9 @@ function driver_poll()
             if msg.topic == "extapi/data/ehub" then
                 ehub_data = data; ehub_ts = now
             elseif msg.topic == "extapi/data/eso" then
-                eso_data = data; eso_ts = now
+                local eid = eso_id_of(data)
+                eso_data_by_id[eid] = data
+                eso_ts_by_id[eid]   = now
             elseif msg.topic == "extapi/data/sso" then
                 sso_data = data; sso_ts = now
             end
@@ -243,8 +264,17 @@ function driver_poll()
         host.log("warn", "Ferroamp: ehub stale (" .. (now - ehub_ts) .. " ms) — dropping cache")
         ehub_data = nil
     end
-    if eso_data and (now - eso_ts) > STALE_AFTER_MS then
-        eso_data = nil
+    -- Evict per-ESO entries individually so one silent ESO does not
+    -- drag the others' contribution out of the aggregate. The freshest
+    -- ESO timestamp is then used for the topic-level age metric.
+    local eso_ts = 0
+    for eid, ts in pairs(eso_ts_by_id) do
+        if (now - ts) > STALE_AFTER_MS then
+            eso_data_by_id[eid] = nil
+            eso_ts_by_id[eid]   = nil
+        elseif ts > eso_ts then
+            eso_ts = ts
+        end
     end
     if sso_data and (now - sso_ts) > STALE_AFTER_MS then
         sso_data = nil
@@ -336,52 +366,91 @@ function driver_poll()
     end
 
     --------------------------------------------------------------------------
-    -- Battery
+    -- Battery  (aggregated across N ESOs)
     --------------------------------------------------------------------------
-    if (ehub_data or eso_data) and not SKIP_BATTERY then
-        local pbat = eso_battery_power(eso_data)
-        if pbat == nil then
-            pbat = choose_power(extract_val(ehub_data, "pbat"), extract_val(eso_data, "pbat"))
-        end
-        if pbat then
-            local battery = {}
-            -- Ferroamp: positive pbat = discharging, negate for convention
-            -- Convention: positive = charging, negative = discharging
-            battery.w = -pbat
+    if not SKIP_BATTERY and (ehub_data or next(eso_data_by_id)) then
+        -- Walk every live ESO once and accumulate the aggregate.
+        -- Power is summed (parallel DC strings each push their own
+        -- current onto the inverter); voltage / SoC / dc-link / temp
+        -- are averaged because cells across ESOs run in lock-step in
+        -- a healthy cluster and we want a single representative number
+        -- for the dashboard. Cumulative Wh counters are summed so the
+        -- battery's lifetime production/consumption reflects all units.
+        local pbat_sum = 0
+        local pbat_has_any = false
+        local v_sum, v_n   = 0, 0
+        local a_sum, a_n   = 0, 0
+        local soc_sum, soc_n = 0, 0
+        local udc_sum, udc_n = 0, 0
+        local wprod_sum, wprod_n = 0, 0
+        local wcons_sum, wcons_n = 0, 0
+        local relay_worst, fault_worst = nil, nil
+        local n_eso = 0
 
-            -- Enrich with ESO data (battery-specific telemetry)
-            if eso_data then
-                local soc = extract_val(eso_data, "soc")
-                if soc then
-                    local soc_val = tonumber(soc) or 0
-                    -- Ferroamp reports SoC as 0-100%, convert to 0.0-1.0 fraction
-                    if soc_val > 1 then soc_val = soc_val / 100 end
-                    battery.soc = soc_val
-                end
-
-                local ubat = extract_val(eso_data, "ubat")
-                if ubat then battery.v = tonumber(ubat) or 0 end
-
-                local ibat = extract_val(eso_data, "ibat")
-                if ibat then battery.a = tonumber(ibat) or 0 end
-
-                local eso_udc = extract_val(eso_data, "udc")
-                if eso_udc then host.emit_metric("eso_dc_link_v", tonumber(eso_udc) or 0) end
-                local eso_relay = extract_val(eso_data, "relaystatus")
-                if eso_relay then host.emit_metric("eso_relaystatus", tonumber(eso_relay) or 0) end
-                local eso_fault = extract_val(eso_data, "faultcode")
-                if eso_fault then host.emit_metric("eso_faultcode", tonumber(eso_fault) or 0) end
-
-                -- Battery energy counters (mJ → Wh)
-                local wbatprod = extract_val(eso_data, "wbatprod")
-                local wbatcons = extract_val(eso_data, "wbatcons")
-                if wbatprod then battery.discharge_wh = mj_to_wh(wbatprod) end
-                if wbatcons then battery.charge_wh    = mj_to_wh(wbatcons) end
+        for _, d in pairs(eso_data_by_id) do
+            n_eso = n_eso + 1
+            local u = tonumber(extract_val(d, "ubat"))
+            local i = tonumber(extract_val(d, "ibat"))
+            if u and i then
+                pbat_sum = pbat_sum + (u * i)
+                pbat_has_any = true
             end
+            if u then v_sum = v_sum + u; v_n = v_n + 1 end
+            if i then a_sum = a_sum + i; a_n = a_n + 1 end
+
+            local soc = tonumber(extract_val(d, "soc"))
+            if soc then
+                if soc > 1 then soc = soc / 100 end
+                soc_sum = soc_sum + soc; soc_n = soc_n + 1
+            end
+            local udc = tonumber(extract_val(d, "udc"))
+            if udc then udc_sum = udc_sum + udc; udc_n = udc_n + 1 end
+            local wp = tonumber(extract_val(d, "wbatprod"))
+            if wp then wprod_sum = wprod_sum + wp; wprod_n = wprod_n + 1 end
+            local wc = tonumber(extract_val(d, "wbatcons"))
+            if wc then wcons_sum = wcons_sum + wc; wcons_n = wcons_n + 1 end
+
+            -- relaystatus + faultcode: worst-of so a single faulted
+            -- ESO surfaces in the diagnostic, instead of being averaged
+            -- away by its still-healthy peers.
+            local relay = tonumber(extract_val(d, "relaystatus"))
+            if relay then relay_worst = math.max(relay_worst or 0, relay) end
+            local fault = tonumber(extract_val(d, "faultcode"))
+            if fault then fault_worst = math.max(fault_worst or 0, fault) end
+        end
+
+        local battery = nil
+        if pbat_has_any then
+            -- Prefer per-ESO ubat*ibat because the cell-monitor numbers
+            -- update at the ESO's own publish cadence and don't get
+            -- rounded through ehub's aggregate. Ferroamp convention:
+            -- positive pbat = discharging, negate for site convention
+            -- (positive = charging).
+            battery = { w = -pbat_sum }
+        elseif ehub_data then
+            -- No live per-ESO measurement: fall back to ehub.pbat
+            -- (also positive = discharging on Ferroamp's side).
+            local ehub_pbat = tonumber(extract_val(ehub_data, "pbat"))
+            if ehub_pbat then battery = { w = -ehub_pbat } end
+        end
+
+        if battery then
+            if v_n   > 0 then battery.v = v_sum / v_n end
+            if a_n   > 0 then battery.a = a_sum end           -- sum, not avg: parallel currents add
+            if soc_n > 0 then battery.soc = soc_sum / soc_n end
+            if wprod_n > 0 then battery.discharge_wh = mj_to_wh(wprod_sum) end
+            if wcons_n > 0 then battery.charge_wh    = mj_to_wh(wcons_sum) end
 
             host.emit("battery", battery)
             if battery.v then host.emit_metric("battery_dc_v", battery.v) end
             if battery.a then host.emit_metric("battery_dc_a", battery.a) end
+
+            if n_eso > 0 then
+                host.emit_metric("eso_count", n_eso)
+                if udc_n > 0     then host.emit_metric("eso_dc_link_v",   udc_sum / udc_n) end
+                if relay_worst ~= nil then host.emit_metric("eso_relaystatus", relay_worst) end
+                if fault_worst ~= nil then host.emit_metric("eso_faultcode",   fault_worst) end
+            end
         end
     end
 
