@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -108,49 +110,76 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := s.deps.SelfUpdate.Info()
+	if !info.SidecarReady {
+		writeJSON(w, 502, map[string]string{"error": "selfupdate: sidecar socket not ready"})
+		return
+	}
+	if info.Latest == "" {
+		writeJSON(w, 409, map[string]string{"error": "no update target available"})
+		return
+	}
+	if !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+
 	startedAt := time.Now()
+	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
+		State:     "starting",
+		Action:    "update",
+		Target:    info.Latest,
+		StartedAt: startedAt,
+		UpdatedAt: time.Now(),
+		Message:   "starting update",
+	})
+
+	go s.runVersionUpdate(startedAt, info.Current, info.Latest, body.SkipSnapshot)
+
+	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
+	if body.SkipSnapshot || s.deps.SnapshotDir == "" {
+		resp["snapshot_skipped"] = true
+	}
+	writeJSON(w, 202, resp)
+}
+
+func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, skipSnapshot bool) {
+	defer s.versionUpdateMu.Unlock()
+
 	writeUpdateStatus := func(state, message string) {
-		_ = s.deps.SelfUpdate.WriteStatus(selfupdate.UpdateStatus{
+		s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 			State:     state,
 			Action:    "update",
-			Target:    info.Latest,
+			Target:    latest,
 			StartedAt: startedAt,
 			UpdatedAt: time.Now(),
 			Message:   message,
 		})
 	}
-	writeUpdateStatus("starting", "starting update")
 
-	var snap SnapshotInfo
-	snapshotSkipped := body.SkipSnapshot || s.deps.SnapshotDir == ""
+	snapshotSkipped := skipSnapshot || s.deps.SnapshotDir == ""
 	if !snapshotSkipped {
 		writeUpdateStatus("snapshotting", "creating backup snapshot")
-		var err error
-		snap, err = s.createPreUpdateSnapshot("update", info.Current, info.Latest)
-		if err != nil {
+		if _, err := s.createPreUpdateSnapshot("update", current, latest); err != nil {
 			writeUpdateStatus("failed", "snapshot failed: "+err.Error())
-			writeJSON(w, 500, map[string]string{
-				"error":        "snapshot failed: " + err.Error(),
-				"hint":         "Update aborted so you keep a rollback point. Check SnapshotDir permissions or free space — or re-submit with skip_snapshot=true if you accept the risk.",
-				"snapshot_dir": s.deps.SnapshotDir,
-			})
 			return
 		}
 	}
 
-	if err := s.deps.SelfUpdate.Trigger(r.Context(), "update", info.Latest); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := s.deps.SelfUpdate.Trigger(ctx, "update", latest); err != nil {
 		writeUpdateStatus("failed", err.Error())
-		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}
-	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if snap.ID != "" {
-		resp["snapshot"] = snap
+}
+
+func (s *Server) writeVersionUpdateStatus(st selfupdate.UpdateStatus) {
+	if s.deps.SelfUpdate == nil {
+		return
 	}
-	if snapshotSkipped {
-		resp["snapshot_skipped"] = true
+	if err := s.deps.SelfUpdate.WriteStatus(st); err != nil {
+		slog.Warn("selfupdate: write status failed", "state", st.State, "action", st.Action, "err", err)
 	}
-	writeJSON(w, 202, resp)
 }
 
 // handleVersionRollback restores a specific snapshot over the main

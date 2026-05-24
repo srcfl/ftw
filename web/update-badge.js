@@ -18,6 +18,7 @@
   const CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000; // /api/version/check cadence
   const STATUS_INTERVAL_MS = 2000;               // during updates
   const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;     // after this we stop auto-reloading
+  const SNAPSHOT_SOFT_TIMEOUT_MS = 15 * 60 * 1000; // large state.db snapshots can be slow
 
   class FtwUpdateBadge extends HTMLElement {
     constructor() {
@@ -217,6 +218,16 @@
             this._render();
             return;
           }
+          if (action === "update") {
+            const skipped = resp.body && resp.body.snapshot_skipped;
+            this._sidecarState = {
+              state: skipped ? "pulling" : "snapshotting",
+              action,
+              target: this._expectedRun.target,
+              message: skipped ? "backup snapshot skipped for this update" : "creating backup snapshot",
+            };
+            this._render();
+          }
         })
         .catch((e) => {
           this._sidecarState = { state: "failed", action, message: String(e) };
@@ -288,7 +299,10 @@
     }
 
     _markSoftTimeout() {
-      if (Date.now() - this._updateStartedAt <= UPDATE_SOFT_TIMEOUT_MS) return false;
+      const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
+        ? SNAPSHOT_SOFT_TIMEOUT_MS
+        : UPDATE_SOFT_TIMEOUT_MS;
+      if (Date.now() - this._updateStartedAt <= timeoutMs) return false;
       if (!this._sidecarState || this._sidecarState.state === "done" || this._sidecarState.timedOut) return false;
       this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
       return true;
@@ -473,6 +487,7 @@
         ? `<p>Still working after ${elapsed}s. The main container may have been slow to restart.</p>
            <p>You can reload manually if the UI keeps the overlay stuck.</p>`
         : `<p>${escapeHTML(label)}…</p>
+           ${this._operationDetailHTML(st)}
            <p class="dim">Elapsed: ${elapsed}s. The page will reload automatically.</p>`;
 
       const footer = failed || timedOut
@@ -500,6 +515,23 @@
           <footer>${footer}</footer>
         </div>
       `;
+    }
+
+    _operationDetailHTML(st) {
+      const msg = st && st.message ? `<p class="dim">${escapeHTML(st.message)}</p>` : "";
+      if (!st) return msg;
+      switch (st.state) {
+        case "snapshotting":
+          return msg + `<p class="dim">Creating a local rollback snapshot before touching the running service. Large history databases can take several minutes.</p>`;
+        case "pulling":
+          return msg + `<p class="dim">Downloading the pinned release image from GHCR.</p>`;
+        case "restarting":
+          return msg + `<p class="dim">Recreating the service. Short polling errors are expected while the container swaps.</p>`;
+        case "restoring":
+          return msg + `<p class="dim">Restoring files from the selected backup snapshot.</p>`;
+        default:
+          return msg;
+      }
     }
 
     _wireModal(modal) {

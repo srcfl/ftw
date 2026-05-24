@@ -109,12 +109,15 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("ftw-updater starting", "socket", *socket, "status", *statusPath, "compose", *compose)
 
-	// Guarantee status dir exists even if the tmpfs mount is empty.
-	if err := os.MkdirAll(filepath.Dir(*statusPath), 0o755); err != nil {
+	// Guarantee the shared status/socket dir exists even if the tmpfs mount
+	// is empty. It must be writable by the non-root main container too,
+	// because the main service publishes early states while it captures the
+	// pre-update snapshot.
+	if err := prepareSharedDir(filepath.Dir(*statusPath)); err != nil {
 		slog.Error("mkdir status dir", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(filepath.Dir(*socket), 0o755); err != nil {
+	if err := prepareSharedDir(filepath.Dir(*socket)); err != nil {
 		slog.Error("mkdir socket dir", "err", err)
 		os.Exit(1)
 	}
@@ -534,6 +537,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…(truncated)"
+}
+
+func prepareSharedDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o777)
 }
 
 func envOr(key, def string) string {

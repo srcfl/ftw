@@ -2,10 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +48,11 @@ func newCheckerAgainst(t *testing.T, tag, current string) *selfupdate.Checker {
 
 func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) *selfupdate.Checker {
 	t.Helper()
+	return newCheckerAgainstWithStatusAndSocket(t, tag, current, statusPath, "")
+}
+
+func newCheckerAgainstWithStatusAndSocket(t *testing.T, tag, current, statusPath, socketPath string) *selfupdate.Checker {
+	t.Helper()
 	const repo = "frahlg/forty-two-watts"
 
 	regMux := http.NewServeMux()
@@ -76,12 +83,47 @@ func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) 
 		RegistryBaseURL:  regSrv.URL,
 		LatestReleaseURL: relSrv.URL,
 		CheckInterval:    time.Hour,
+		SocketPath:       socketPath,
 		StatusPath:       statusPath,
 	}, newMemStore())
 	if _, err := c.Check(t.Context(), true); err != nil {
 		t.Fatalf("priming check: %v", err)
 	}
 	return c
+}
+
+func startFakeSidecar(t *testing.T, statusCode int) string {
+	t.Helper()
+	socketPath := filepath.Join("/tmp", "ftw-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen fake sidecar: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(`{"status":"stub"}`))
+	})}
+	go func() {
+		_ = srv.Serve(ln)
+	}()
+	t.Cleanup(func() {
+		_ = srv.Close()
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+	})
+	return socketPath
+}
+
+func waitUntil(t *testing.T, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not reached before timeout")
 }
 
 func TestVersionCheck_Disabled(t *testing.T) {
@@ -176,7 +218,8 @@ func TestVersionUpdate_NoSidecar502(t *testing.T) {
 func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	dir := t.TempDir()
 	statusPath := filepath.Join(dir, "update-state.json")
-	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
+	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
+	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
 	st, err := state.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -191,10 +234,12 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	// Trigger still fails (no sidecar) → 502. The snapshot must exist anyway.
-	if rr.Code != http.StatusBadGateway {
-		t.Errorf("expected 502 from missing sidecar, got %d", rr.Code)
+	// The handler returns immediately; snapshot + sidecar trigger finish in
+	// the background and publish failure via /status if the sidecar rejects.
+	if rr.Code != http.StatusAccepted {
+		t.Errorf("expected 202, got %d", rr.Code)
 	}
+	waitUntil(t, func() bool { return c.Status().State == "failed" })
 	entries, err := os.ReadDir(snapDir)
 	if err != nil {
 		t.Fatalf("snapshot dir not created: %v", err)
@@ -232,8 +277,10 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 // the operator or when they consciously want to save the ~200 MB per
 // snapshot on a constrained SD card. Issue #149.
 func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-state.json")
+	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
+	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
 	st, _ := state.Open(filepath.Join(dir, "state.db"))
 	t.Cleanup(func() { st.Close() })
 	snapDir := filepath.Join(dir, "snapshots")
@@ -245,11 +292,12 @@ func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	// Sidecar trigger still fails (no socket), but the handler must
-	// first have honoured the skip — i.e. the snapshots dir stays empty.
-	if rr.Code != http.StatusBadGateway {
-		t.Errorf("want 502 from missing sidecar, got %d body=%s", rr.Code, rr.Body.String())
+	// Sidecar trigger still fails, but the handler has already accepted
+	// the async job and must honour the skip — i.e. no snapshot appears.
+	if rr.Code != http.StatusAccepted {
+		t.Errorf("want 202, got %d body=%s", rr.Code, rr.Body.String())
 	}
+	waitUntil(t, func() bool { return c.Status().State == "failed" })
 	if entries, _ := os.ReadDir(snapDir); len(entries) != 0 {
 		t.Errorf("snapshots dir should be empty after skip_snapshot=true, found %d entries", len(entries))
 	}
@@ -258,8 +306,10 @@ func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
 // With ConfigPath set the snapshot must also copy config.yaml so a
 // rollback can restore the exact YAML the operator was running.
 func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-state.json")
+	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
+	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
 	st, _ := state.Open(filepath.Join(dir, "state.db"))
 	t.Cleanup(func() { st.Close() })
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -273,6 +323,10 @@ func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	waitUntil(t, func() bool { return c.Status().State == "failed" })
 	entries, _ := os.ReadDir(snapDir)
 	if len(entries) == 0 {
 		t.Fatal("no snapshot created")
@@ -290,8 +344,10 @@ func TestVersionUpdate_SnapshotIncludesConfigWhenPathSet(t *testing.T) {
 // Snapshot failure must abort the update with 500 — we never want to
 // pull a new image without a rollback point when the operator opted in.
 func TestVersionUpdate_SnapshotFailureAborts(t *testing.T) {
-	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-state.json")
+	socketPath := startFakeSidecar(t, http.StatusAccepted)
+	c := newCheckerAgainstWithStatusAndSocket(t, "v1.5.0", "v1.4.0", statusPath, socketPath)
 	st, _ := state.Open(filepath.Join(dir, "state.db"))
 	t.Cleanup(func() { st.Close() })
 
@@ -307,12 +363,13 @@ func TestVersionUpdate_SnapshotFailureAborts(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("want 500 when snapshot fails, got %d (body=%s)", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("want 202 when async snapshot job starts, got %d (body=%s)", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "snapshot failed") {
-		t.Errorf("expected 'snapshot failed' in body, got %s", rr.Body.String())
-	}
+	waitUntil(t, func() bool {
+		st := c.Status()
+		return st.State == "failed" && strings.Contains(st.Message, "snapshot failed")
+	})
 }
 
 // Retention keeps the N newest snapshots — older ones pruned after each

@@ -60,7 +60,8 @@ COPY --from=builder /out/forty-two-watts /app/forty-two-watts
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
-RUN mkdir -p /app/data && chown -R ftw:ftw /app
+RUN mkdir -p /app/data /run/ftw-update && \
+    chown -R ftw:ftw /app /run/ftw-update
 
 USER ftw
 WORKDIR /app/data

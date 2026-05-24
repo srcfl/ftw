@@ -164,6 +164,8 @@ type Server struct {
 	// price zone), so most boots never need the map.
 	savingsCacheMu sync.Mutex
 	savingsCache   map[string]daySavings
+
+	versionUpdateMu sync.Mutex
 }
 
 // New creates a new API server.
