@@ -100,6 +100,16 @@ type DriverHealth struct {
 	ConsecutiveErrors int
 	LastError         string
 	TickCount         uint64
+
+	// WatchdogTimeoutOverride, when > 0, replaces the site-wide
+	// timeout in WatchdogScan for this driver only. Drivers with
+	// intrinsically slow polling cadences (Tesla BLE proxy, cloud
+	// EV APIs) set this from lua via host.set_watchdog_timeout_s so
+	// the loadpoint controller doesn't see them as flapping just
+	// because their emit interval brushes the 60 s default. The
+	// dispatcher still uses LastSuccess + this override for stale
+	// detection — there is no separate "degraded" state.
+	WatchdogTimeoutOverride time.Duration
 }
 
 // RecordSuccess resets error state and marks the driver healthy. Call
@@ -493,7 +503,11 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 	now := time.Now()
 	var out []WatchdogTransition
 	for name, h := range s.health {
-		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > timeout
+		eff := timeout
+		if h.WatchdogTimeoutOverride > 0 {
+			eff = h.WatchdogTimeoutOverride
+		}
+		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > eff
 		wasOnline := h.Status != StatusOffline
 		if stale && wasOnline {
 			h.Status = StatusOffline
@@ -505,6 +519,20 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 		}
 	}
 	return out
+}
+
+// SetDriverWatchdogTimeout installs a per-driver watchdog override.
+// Zero clears it (revert to the site-wide default). Lazily creates a
+// DriverHealth entry — drivers can call this from driver_init before
+// any telemetry has flowed.
+func (s *Store) SetDriverWatchdogTimeout(name string, d time.Duration) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	h, ok := s.health[name]
+	if !ok {
+		h = &DriverHealth{Name: name}
+		s.health[name] = h
+	}
+	h.WatchdogTimeoutOverride = d
 }
 
 // WatchdogTransition describes a driver whose online state just flipped.

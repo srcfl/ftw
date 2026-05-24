@@ -326,3 +326,48 @@ func TestSumOnlineEVWFloorsSubWattReadings(t *testing.T) {
 		t.Errorf("real EV reading must pass through, got %g", got)
 	}
 }
+
+func TestWatchdogPerDriverOverride(t *testing.T) {
+	s := NewStore()
+	// Two drivers: one with the site-default tolerance, one with a
+	// 5-minute override mimicking the Tesla driver.
+	tesla := s.DriverHealthMut("tesla")
+	tesla.RecordSuccess()
+	pixii := s.DriverHealthMut("pixii")
+	pixii.RecordSuccess()
+
+	s.SetDriverWatchdogTimeout("tesla", 5*time.Minute)
+
+	// Rewind both LastSuccess to 90 s ago (>60 s site default but
+	// <5 min tesla override).
+	t90 := time.Now().Add(-90 * time.Second)
+	s.health["tesla"].LastSuccess = &t90
+	s.health["pixii"].LastSuccess = &t90
+
+	transitions := s.WatchdogScan(60 * time.Second)
+
+	// Pixii should flip offline (uses site default), tesla stays online
+	// (override is 5 min).
+	flipped := map[string]bool{}
+	for _, tr := range transitions {
+		flipped[tr.Name] = !tr.Online
+	}
+	if !flipped["pixii"] {
+		t.Errorf("pixii should be flagged stale under 60s site default, got transitions=%+v", transitions)
+	}
+	if flipped["tesla"] {
+		t.Errorf("tesla should remain online under 5-min override at 90s stale; transitions=%+v", transitions)
+	}
+
+	// Now push tesla past its 5-min override.
+	t6 := time.Now().Add(-6 * time.Minute)
+	s.health["tesla"].LastSuccess = &t6
+	transitions = s.WatchdogScan(60 * time.Second)
+	flipped = map[string]bool{}
+	for _, tr := range transitions {
+		flipped[tr.Name] = !tr.Online
+	}
+	if !flipped["tesla"] {
+		t.Errorf("tesla should flip stale at 6 min under 5-min override; transitions=%+v", transitions)
+	}
+}
