@@ -45,6 +45,33 @@ PROTOCOL = "http"
 -- operators touch only `ip` + `vin` in YAML.
 local PROXY_PORT        = 8080
 local POLL_INTERVAL_MS  = 60000
+-- Faster cadence while the car is actively charging — the loadpoint
+-- controller needs sub-watchdog-timeout resolution on amps + state to
+-- avoid spurious "EV stopped" cascades. At the steady 60 s poll cadence
+-- + HTTP RTT, every poll lands just past the 60 s site watchdog and
+-- the driver gets repeatedly flagged stale, which spams wallbox-cycle
+-- pause/resume and wake-kicks on the loadpoint side.
+local POLL_INTERVAL_CHARGING_MS = 30000
+
+-- Per-driver watchdog tolerance, registered with the host at init via
+-- host.set_watchdog_timeout_s. Vehicle telemetry runs on a slower
+-- natural cadence than mains drivers (BLE wake + cloud RTT) so 60 s
+-- (the site default) is too tight and produces frequent stale flaps
+-- that cascade into loadpoint wake-kick / wallbox-cycle spam. 5 min
+-- gives plenty of headroom for occasional BLE wake-up retries while
+-- still alerting on a truly-hung proxy.
+local WATCHDOG_TIMEOUT_S = 300
+
+-- While Charging, if no fresh telemetry has flowed for this long the
+-- driver forces a BLE wake on the next poll regardless of the normal
+-- 30/60 min wake cadence. Catches the case where the proxy returned
+-- cached "Charging" once and then the car went silent — without the
+-- forced wake we'd happily keep emitting that stale Charging reading
+-- and the loadpoint controller would never see the real state. Only
+-- fires while last.charging_state == "Charging"; parked cars don't
+-- need active recovery (and shouldn't have their 12 V battery
+-- drained by speculative wakes).
+local CHARGING_FORCE_WAKE_AFTER_MS = 150000  -- 2.5 min
 local STALE_AFTER_MS    = 900000
 -- Every WAKEUP_INTERVAL_MS we attach `wakeup=true` to ONE poll so the
 -- proxy forces a BLE wake. Without this the proxy serves cached data
@@ -131,6 +158,11 @@ function driver_init(config)
 
   host.set_make("Tesla")
   host.set_sn(tostring(vin))
+  -- Loosen the watchdog so the loadpoint controller doesn't see brief
+  -- BLE-wake stalls as "driver offline → revert to autonomous".
+  if host.set_watchdog_timeout_s then
+    host.set_watchdog_timeout_s(WATCHDOG_TIMEOUT_S)
+  end
   -- Two-phase poll cadence:
   --  1. Init pumps the interval down to 500 ms so the registry's
   --     initial timer fires almost immediately. The first poll
@@ -175,11 +207,20 @@ function driver_poll()
     return 10000
   end
 
-  -- Bump the steady-state interval back to 60 s after the (deliberately
+  -- Bump the steady-state interval back up after the (deliberately
   -- short) init interval that gets us our first reading inside a
   -- second of startup. Idempotent — running set_poll_interval with the
   -- same value every poll is a no-op cost-wise.
-  host.set_poll_interval(POLL_INTERVAL_MS)
+  --
+  -- Cadence depends on whether the car was Charging at the last
+  -- successful poll: 30 s while charging (keeps us under the 60 s
+  -- watchdog so the loadpoint controller doesn't see spurious stale
+  -- flags), 60 s otherwise (parked / disconnected — no urgency).
+  local steady_ms = POLL_INTERVAL_MS
+  if last.charging_state == "Charging" then
+    steady_ms = POLL_INTERVAL_CHARGING_MS
+  end
+  host.set_poll_interval(steady_ms)
 
   -- endpoints=charge_state narrows the response to just what we
   -- care about (SoC + limit + charging_state + time_to_full).
@@ -217,6 +258,19 @@ function driver_poll()
     host.log("info", "tesla: wake-retry firing after previous poll failure")
   elseif (last_wakeup_ms > 0) and ((now - last_wakeup_ms) >= wake_cadence_ms) then
     do_wakeup = true
+  elseif last.charging_state == "Charging" and last.ts_ms > 0 and
+         ((now - last.ts_ms) >= CHARGING_FORCE_WAKE_AFTER_MS) and
+         ((now - last_wake_attempt_ms) >= WAKE_RETRY_MIN_GAP_MS) then
+    -- Stale-while-charging recovery. The car was last seen Charging
+    -- but no fresh telemetry has flowed for >2.5 min — likely the
+    -- proxy returned cached data and the car went BLE-silent. Force
+    -- a wake on this poll rather than continuing to emit_last() the
+    -- stale "Charging" reading. Gated to Charging only so a parked
+    -- car doesn't get its 12 V drained by speculative wakes.
+    do_wakeup = true
+    host.log("info", "tesla: stale-while-charging force-wake (" ..
+                     tostring(math.floor((now - last.ts_ms) / 1000)) ..
+                     "s since last emit)")
   end
   if last_wakeup_ms == 0 then
     -- Anchor the periodic cadence at "now" so the first FORCED wake
@@ -271,19 +325,19 @@ function driver_poll()
       host.log("info", "tesla: wake-retry armed (next poll will force BLE wake)")
       return FAILURE_RETRY_INTERVAL_MS
     end
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
   if not body or body == "" then
     host.log("warn", "tesla: empty body from proxy")
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   local decoded, derr = host.json_decode(body)
   if derr or not decoded then
     host.log("warn", "tesla: json decode failed: " .. tostring(derr))
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   -- Response shapes (in the wild):
@@ -309,7 +363,7 @@ function driver_poll()
   if not charge_state then
     host.log("debug", "tesla: no charge_state in response")
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   local soc = tonumber(charge_state.battery_level)
@@ -362,7 +416,7 @@ function driver_poll()
     emit_last()
   end
 
-  return POLL_INTERVAL_MS
+  return steady_ms
 end
 
 function driver_command(action, _, _)

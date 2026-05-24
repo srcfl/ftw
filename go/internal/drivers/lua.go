@@ -260,6 +260,20 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// host.set_watchdog_timeout_s(seconds) — install a per-driver
+	// override so the site watchdog flags this driver stale only after
+	// `seconds` since the last successful emit. Used by drivers whose
+	// natural poll cadence is too slow for the site-wide 60 s default
+	// (Tesla BLE proxy, cloud EV APIs). Calling with 0 clears the
+	// override and reverts to the default.
+	host.RawSetString("set_watchdog_timeout_s", L.NewFunction(func(L *lua.LState) int {
+		secs := L.CheckInt(1)
+		if env.Telemetry != nil {
+			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, time.Duration(secs)*time.Second)
+		}
+		return 0
+	}))
+
 	host.RawSetString("set_sn", L.NewFunction(func(L *lua.LState) int {
 		env.setSN(L.CheckString(1))
 		return 0

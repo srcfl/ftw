@@ -1802,9 +1802,15 @@ func main() {
 				}
 			}
 			evReserveW := loadpoint.SurplusReserveW(lpStatesSnapshot, wakeKickActiveIDs)
+			// Parallel curtail-side reserve — more permissive than the
+			// dispatch reserve above; counts plugged-but-stopped EVs
+			// with SoC headroom so PV isn't cut when a vehicle could
+			// resume charging.
+			evCurtailHeadroomW := loadpoint.SurplusPotentialW(lpStatesSnapshot)
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW
+			ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
