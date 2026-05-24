@@ -124,6 +124,101 @@ func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
 	}
 }
 
+func TestSmartSelfConsumptionExportsMorningPVAndChargesNegativeMidday(t *testing.T) {
+	// The core "smart self-consumption" contract:
+	//   07-10: PV surplus + high export price => export, keep headroom.
+	//   10-14: PV surplus + negative spot => charge, avoid paid export.
+	//   evening: discharge stored energy into local load.
+	slots := make([]Slot, 0, 11)
+	startMs := int64(7 * 60 * 60 * 1000)
+	for h := 7; h < 10; h++ {
+		slots = append(slots, Slot{
+			StartMs:    startMs + int64(len(slots))*60*60*1000,
+			LenMin:     60,
+			PriceOre:   180,
+			SpotOre:    100,
+			LoadW:      1000,
+			PVW:        -4000,
+			Confidence: 1,
+		})
+	}
+	for h := 10; h < 14; h++ {
+		slots = append(slots, Slot{
+			StartMs:    startMs + int64(len(slots))*60*60*1000,
+			LenMin:     60,
+			PriceOre:   60,
+			SpotOre:    -20,
+			LoadW:      1000,
+			PVW:        -6000,
+			Confidence: 1,
+		})
+	}
+	for h := 18; h < 22; h++ {
+		slots = append(slots, Slot{
+			StartMs:    startMs + int64(len(slots))*60*60*1000,
+			LenMin:     60,
+			PriceOre:   260,
+			SpotOre:    100,
+			LoadW:      2000,
+			PVW:        0,
+			Confidence: 1,
+		})
+	}
+
+	p := Params{
+		Mode:                ModeSelfConsumption,
+		SoCLevels:           41,
+		CapacityWh:          10000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       10,
+		ActionLevels:        41,
+		MaxChargeW:          4000,
+		MaxDischargeW:       4000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    0,
+	}
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != len(slots) {
+		t.Fatalf("got %d actions, want %d", len(plan.Actions), len(slots))
+	}
+
+	var morningChargeW, morningExportW, middayChargeW, eveningDischargeW float64
+	for i, a := range plan.Actions {
+		switch {
+		case i < 3:
+			if a.BatteryW > 0 {
+				morningChargeW += a.BatteryW
+			}
+			if a.GridW < 0 {
+				morningExportW += -a.GridW
+			}
+		case i < 7:
+			if a.BatteryW > 0 {
+				middayChargeW += a.BatteryW
+			}
+		default:
+			if a.BatteryW < 0 {
+				eveningDischargeW += -a.BatteryW
+			}
+		}
+	}
+
+	if morningChargeW > IdleGateThresholdW*3 {
+		t.Fatalf("morning charge = %.0f W-sum, want near zero so high-price PV exports", morningChargeW)
+	}
+	if morningExportW < 8000 {
+		t.Fatalf("morning export = %.0f W-sum, want most of the 9 kW-sum surplus exported", morningExportW)
+	}
+	if middayChargeW < 7000 {
+		t.Fatalf("midday charge = %.0f W-sum, want charging shifted into negative-price PV window", middayChargeW)
+	}
+	if eveningDischargeW <= 0 {
+		t.Fatalf("evening discharge = %.0f W-sum, want stored midday energy used for local load", eveningDischargeW)
+	}
+}
+
 // ---- Mode: cheap_charge ----
 
 func TestCheapChargeUsesCheapGrid(t *testing.T) {
