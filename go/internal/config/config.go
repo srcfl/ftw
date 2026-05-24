@@ -796,7 +796,10 @@ func relToBaseDir(baseDir, p string) string {
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
 	if c.Site.ControlIntervalS == 0 {
-		c.Site.ControlIntervalS = 5
+		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
+		// dispatching twice on the same telemetry sample, and halves
+		// the perceived response lag operators saw at the original 5 s.
+		c.Site.ControlIntervalS = 2
 	}
 	if c.Site.GridToleranceW == 0 {
 		c.Site.GridToleranceW = 42 // The Answer
@@ -814,7 +817,11 @@ func applyDefaults(c *Config) {
 		c.Site.SlewRateW = 500
 	}
 	if c.Site.MinDispatchIntervalS == 0 {
-		c.Site.MinDispatchIntervalS = 5
+		// Match control_interval_s. The holdoff exists to suppress
+		// command-spam when the tick is faster than the battery's
+		// response — at 2 s ticks the natural cadence is already the
+		// minimum, so the holdoff is a no-op debouncer in practice.
+		c.Site.MinDispatchIntervalS = 2
 	}
 	if c.Fuse.Phases == 0 {
 		c.Fuse.Phases = 3

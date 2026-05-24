@@ -3,13 +3,13 @@
 
 site:
   name: "Home"
-  control_interval_s: 5
+  control_interval_s: 2         # 2 s matches Ferroamp ehub ~1 Hz; drop to 1 for snappier response
   grid_target_w: 0              # 0 = self-consumption
   grid_tolerance_w: 42          # deadband (The Answer)
   watchdog_timeout_s: 60
   smoothing_alpha: 0.3
-  slew_rate_w: 500
-  min_dispatch_interval_s: 5
+  slew_rate_w: 500              # W per cycle (≈ 250 W/s at 2 s cycle)
+  min_dispatch_interval_s: 2    # debounce; keep == control_interval_s
 
 fuse:
   max_amps: 16
