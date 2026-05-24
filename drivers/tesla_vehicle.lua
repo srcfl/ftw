@@ -45,6 +45,13 @@ PROTOCOL = "http"
 -- operators touch only `ip` + `vin` in YAML.
 local PROXY_PORT        = 8080
 local POLL_INTERVAL_MS  = 60000
+-- Faster cadence while the car is actively charging — the loadpoint
+-- controller needs sub-watchdog-timeout resolution on amps + state to
+-- avoid spurious "EV stopped" cascades. At the steady 60 s poll cadence
+-- + HTTP RTT, every poll lands just past the 60 s site watchdog and
+-- the driver gets repeatedly flagged stale, which spams wallbox-cycle
+-- pause/resume and wake-kicks on the loadpoint side.
+local POLL_INTERVAL_CHARGING_MS = 30000
 local STALE_AFTER_MS    = 900000
 -- Every WAKEUP_INTERVAL_MS we attach `wakeup=true` to ONE poll so the
 -- proxy forces a BLE wake. Without this the proxy serves cached data
@@ -175,11 +182,20 @@ function driver_poll()
     return 10000
   end
 
-  -- Bump the steady-state interval back to 60 s after the (deliberately
+  -- Bump the steady-state interval back up after the (deliberately
   -- short) init interval that gets us our first reading inside a
   -- second of startup. Idempotent — running set_poll_interval with the
   -- same value every poll is a no-op cost-wise.
-  host.set_poll_interval(POLL_INTERVAL_MS)
+  --
+  -- Cadence depends on whether the car was Charging at the last
+  -- successful poll: 30 s while charging (keeps us under the 60 s
+  -- watchdog so the loadpoint controller doesn't see spurious stale
+  -- flags), 60 s otherwise (parked / disconnected — no urgency).
+  local steady_ms = POLL_INTERVAL_MS
+  if last.charging_state == "Charging" then
+    steady_ms = POLL_INTERVAL_CHARGING_MS
+  end
+  host.set_poll_interval(steady_ms)
 
   -- endpoints=charge_state narrows the response to just what we
   -- care about (SoC + limit + charging_state + time_to_full).
@@ -271,19 +287,19 @@ function driver_poll()
       host.log("info", "tesla: wake-retry armed (next poll will force BLE wake)")
       return FAILURE_RETRY_INTERVAL_MS
     end
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
   if not body or body == "" then
     host.log("warn", "tesla: empty body from proxy")
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   local decoded, derr = host.json_decode(body)
   if derr or not decoded then
     host.log("warn", "tesla: json decode failed: " .. tostring(derr))
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   -- Response shapes (in the wild):
@@ -309,7 +325,7 @@ function driver_poll()
   if not charge_state then
     host.log("debug", "tesla: no charge_state in response")
     emit_last()
-    return POLL_INTERVAL_MS
+    return steady_ms
   end
 
   local soc = tonumber(charge_state.battery_level)
@@ -362,7 +378,7 @@ function driver_poll()
     emit_last()
   end
 
-  return POLL_INTERVAL_MS
+  return steady_ms
 end
 
 function driver_command(action, _, _)
