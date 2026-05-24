@@ -703,16 +703,24 @@ func ComputeDispatch(
 	// the deadband applies.
 	effectiveMode := state.Mode
 	useEnergyPath := false
-	// plannerSelfIdleGate is true when operator picked planner_self AND the
-	// plan's no-battery baseline is near zero for the current slot. A true
-	// idle slot is charge-only: it may absorb unexpected live PV surplus
-	// that would otherwise cross the meter, but it never discharges to cover
-	// load. Non-idle planner_self slots chase live grid=0 reactively unless
-	// plannerSelfExportSurplusGate says the plan explicitly preferred PV
-	// export over storage for this slot. plannerSelfNoChargeStalePlan is
-	// the missing-plan safety: discharge to cover load like classic
-	// self_consumption, but never charge from PV without a fresh plan —
-	// blind absorption stole a planned export window in the past.
+	// planner_self gates constrain only the CHARGE direction. "Smart
+	// self-consumption" is about WHEN to refill the battery, never
+	// about importing electricity at any price the operator can't see.
+	// Discharge to cover live load is always allowed; the operator's
+	// floor is "never import what stored energy could've covered".
+	//
+	// plannerSelfIdleGate fires when the plan modeled this slot as
+	// near-balanced (battery_w ≈ 0). Reactive PI runs as in plain
+	// self_consumption; on the charge side, only PV surplus exceeding
+	// IdleGateThresholdW is absorbed so PI noise doesn't trigger churn.
+	//
+	// plannerSelfExportSurplusGate fires when the plan modeled an
+	// explicit export this slot. Reactive PI runs; on the charge side,
+	// any charge is blocked so the surplus stays out the meter.
+	//
+	// plannerSelfNoChargeStalePlan is the missing-plan safety: identical
+	// to exportSurplusGate's charge-block, applied when no fresh plan
+	// exists.
 	plannerSelfIdleGate := false
 	plannerSelfExportSurplusGate := false
 	plannerSelfNoChargeStalePlan := false
@@ -904,12 +912,17 @@ func ComputeDispatch(
 	// reading. Plain self_consumption remains the classic grid-zero mode:
 	// it may discharge to cover local load and charge from live surplus.
 	planNonDischargeIntent := !manualHoldActive && planHasNonDischargeIntent(state)
-	noSelfDischarge := (!manualHoldActive && (plannerSelfIdleGate || plannerSelfExportSurplusGate)) || planNonDischargeIntent
-	// Stale planner_self: cover load with discharge as classic
-	// self_consumption, but block charge so PV exports rather than
-	// silently absorbing during what may have been a planned export
-	// window.
-	noSelfCharge := !manualHoldActive && plannerSelfNoChargeStalePlan
+	// planner_self gates intentionally NOT in noSelfDischarge — the
+	// operator's "never import" floor takes precedence over the
+	// planner's slot preference, so discharge to cover load is always
+	// allowed when planner_self is the active mode. The other planner
+	// modes' non-discharge intent (planner_cheap / planner_arbitrage
+	// during charging slots) remains in scope.
+	noSelfDischarge := planNonDischargeIntent
+	// CHARGE-direction safeties for planner_self. exportSurplusGate +
+	// stale-plan block charge fully; idleGate applies a soft ceiling
+	// computed from live PV surplus (handled below, not via this flag).
+	noSelfCharge := !manualHoldActive && (plannerSelfExportSurplusGate || plannerSelfNoChargeStalePlan)
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -930,33 +943,6 @@ func ComputeDispatch(
 		// so even small setpoints are honoured exactly. Slew, SoC clamps,
 		// and the fuse guard still apply downstream.
 		totalCorrection = manualHold.PowerW - currentTotal
-	case plannerSelfIdleGate:
-		state.resetSettlementAccounting()
-		// planner_self + plan says idle this slot: do not spend SoC
-		// covering import, but do absorb genuine live PV surplus. The
-		// surplus is computed from the meter with current battery power
-		// removed, so a battery that is already discharging cannot make
-		// its own "surplus" and then flip into charge. EV draw remains
-		// part of the meter residual; we only charge from surplus that
-		// would cross the site boundary after house + EV load.
-		state.PI.Reset()
-		desiredTotal := plannerSelfIdleDesiredTotal(surplus, state)
-		totalCorrection = desiredTotal - currentTotal
-		// deliberately skip the deadband — it's a gridW check and
-		// doesn't see "battery wants to be at zero/charge-only but
-		// isn't there yet".
-	case plannerSelfExportSurplusGate:
-		state.resetSettlementAccounting()
-		// planner_self + plan says the slot should export PV surplus:
-		// do not let the live grid-zero regulator swallow that export
-		// into the battery. This is the price-aware part of "smart"
-		// self-consumption: when the DP has reserved battery headroom for
-		// cheaper / negative PV later, runtime should stop battery motion
-		// and let the current surplus cross the meter.
-		state.PI.Reset()
-		totalCorrection = -currentTotal
-		// Skip deadband for the same reason as idleGate: this branch is
-		// about honouring a battery target of zero, not closing gridW.
 	case useEnergyPath:
 		state.resetSettlementAccounting()
 		// Energy-allocation path: plan's slot directive says "this many Wh
@@ -1394,6 +1380,19 @@ func ComputeDispatch(
 			targetTotal2 := currentTotal + totalCorrection
 			if targetTotal2 > 0 {
 				totalCorrection = -currentTotal
+			}
+		}
+		// planner_self idle slot: cap charge to the threshold-filtered
+		// PV surplus. Reactive PI may have commanded any positive
+		// number from live near-balanced grid noise — only allow
+		// absorption when there's genuine surplus that the planner
+		// would also have chosen to capture. Discharge stays unconstrained
+		// so live import is still covered.
+		if plannerSelfIdleGate {
+			chargeCeiling := plannerSelfIdleDesiredTotal(surplus, state)
+			targetTotal2 := currentTotal + totalCorrection
+			if targetTotal2 > chargeCeiling {
+				totalCorrection = chargeCeiling - currentTotal
 			}
 		}
 	}
