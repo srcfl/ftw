@@ -84,6 +84,38 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 		// idle pilot / standby consumption that doesn't represent
 		// "EV is actively claiming surplus".
 		if st.CurrentPowerW < 50.0 {
+			// Plugged-but-not-drawing fallback: when the vehicle's SoC
+			// is KNOWN and below its charge limit, the car is merely
+			// waiting for the wallbox to find surplus — not refusing
+			// the offer. Reserve its MinChargeW so the home battery
+			// yields enough headroom for the next wake-kick to have
+			// something to hand the EV.
+			//
+			// Without this reservation the dispatch lets the battery
+			// absorb every watt of PV surplus, then auto-wake fires,
+			// the wallbox offers current — but no surplus is left to
+			// claim because the battery already took it — so the EV
+			// times back to Stopped, the auto-wake cycle retries, and
+			// the EV never gets to charge.
+			//
+			// Gating requires BOTH soc and limit to be > 0: a vehicle
+			// driver that never reports SoC (or has gone offline)
+			// preserves the strict pre-existing behavior of "no
+			// reserve for a not-drawing EV", so a single missing
+			// vehicle driver can't hold the battery back forever.
+			hasHeadroom := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
+				st.VehicleSoCPct < st.VehicleChargeLimitPct
+			if !hasHeadroom {
+				continue
+			}
+			floor := st.MinChargeW
+			if floor <= 0 {
+				floor = EVRampHeadroomW
+			}
+			if floor > st.MaxChargeW && st.MaxChargeW > 0 {
+				floor = st.MaxChargeW
+			}
+			sum += floor
 			continue
 		}
 		ceiling := st.CurrentPowerW + EVRampHeadroomW

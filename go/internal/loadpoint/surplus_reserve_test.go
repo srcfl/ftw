@@ -155,3 +155,55 @@ func TestSurplusReserveWAllowsOnePhaseLadderClimb(t *testing.T) {
 			reserveRemaining, float64(ladderClimbW))
 	}
 }
+
+// Plugged + Stopped + SoC below limit → reserve MinChargeW so the
+// battery yields enough surplus for the next wake-kick to find.
+// Regression for "Pixii grabs all PV, EV never starts" scenario.
+func TestSurplusReserveWPluggedStoppedWithHeadroomReservesMin(t *testing.T) {
+	states := []State{{
+		ID: "garage", SurplusOnly: true, PluggedIn: true,
+		CurrentPowerW:         0, // not drawing
+		MinChargeW:            1380,
+		MaxChargeW:            11000,
+		VehicleSoCPct:         34, // below limit
+		VehicleChargeLimitPct: 60,
+	}}
+	got := SurplusReserveW(states, nil)
+	if got != 1380 {
+		t.Errorf("SurplusReserveW = %.0f, want 1380 (MinChargeW) for stopped EV with SoC headroom", got)
+	}
+}
+
+// Plugged + Stopped + SoC at limit → no reserve (Tesla taper-to-stop
+// at 59/60: don't hold back battery for a vehicle that's effectively
+// done charging).
+func TestSurplusReserveWPluggedStoppedAtLimitNoReserve(t *testing.T) {
+	states := []State{{
+		ID: "garage", SurplusOnly: true, PluggedIn: true,
+		CurrentPowerW:         0,
+		MinChargeW:            1380,
+		MaxChargeW:            11000,
+		VehicleSoCPct:         60, // at limit
+		VehicleChargeLimitPct: 60,
+	}}
+	if got := SurplusReserveW(states, nil); got != 0 {
+		t.Errorf("SurplusReserveW = %.0f, want 0 (EV at limit, no headroom)", got)
+	}
+}
+
+// Plugged + Stopped + SoC unknown (vehicle driver missing/offline)
+// → no reserve. Preserves the strict pre-existing "don't hold back
+// battery for an unknown EV" rule so a single missing/offline
+// vehicle driver can't permanently block the home battery.
+func TestSurplusReserveWPluggedStoppedSoCUnknownNoReserve(t *testing.T) {
+	states := []State{{
+		ID: "garage", SurplusOnly: true, PluggedIn: true,
+		CurrentPowerW: 0,
+		MinChargeW:    1380,
+		MaxChargeW:    11000,
+		// VehicleSoCPct + VehicleChargeLimitPct both 0 (unknown)
+	}}
+	if got := SurplusReserveW(states, nil); got != 0 {
+		t.Errorf("SurplusReserveW = %.0f, want 0 (SoC unknown, conservative)", got)
+	}
+}
