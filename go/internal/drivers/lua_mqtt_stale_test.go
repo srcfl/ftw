@@ -283,7 +283,13 @@ func TestFerroampDriverEmitsStateRelayAndFaultDiagnostics(t *testing.T) {
 	assertMetric("sso_pv_a", 0)
 }
 
-func TestFerroampZeroBatteryCommandDoesNotRepublishAutoWhenAlreadyAuto(t *testing.T) {
+// Live-system regression (2026-05-24): with power_w=0 the driver
+// used to publish `auto`, which puts the EnergyHub in autonomous
+// self-consumption. That silently overrode every planner slot that
+// wanted the battery idle so PV surplus could export — Ferroamp
+// kept covering local load and discharged ~500 W against target 0.
+// power_w=0 must mean "hold the battery at 0 W, do not delegate".
+func TestFerroampZeroBatteryCommandForcesIdleNotAuto(t *testing.T) {
 	tel := telemetry.NewStore()
 	mqtt := &fakeMQTT{}
 	d, _ := newTestFerroampDriver(t, tel, mqtt)
@@ -296,37 +302,50 @@ func TestFerroampZeroBatteryCommandDoesNotRepublishAutoWhenAlreadyAuto(t *testin
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
 		t.Fatalf("zero command: %v", err)
 	}
-	if got := len(mqtt.Published()); got != initial {
-		t.Fatalf("zero command while already auto published %d new messages, want 0", got-initial)
+	pubs := mqtt.Published()
+	if got := len(pubs); got != initial+1 {
+		t.Fatalf("zero command publish count = %d, want %d (must transition out of init auto into forced idle)", got, initial+1)
+	}
+	last := pubs[len(pubs)-1].Payload
+	if !strings.Contains(last, `"name":"discharge"`) || !strings.Contains(last, `"arg":0`) {
+		t.Fatalf("zero command payload = %s, want discharge with arg=0 (force idle, not auto)", last)
+	}
+	if strings.Contains(last, `"name":"auto"`) {
+		t.Fatalf("zero command payload = %s, must NOT publish auto (regression: auto lets EnergyHub self-consume)", last)
+	}
+
+	// Idempotent: once we're in forced idle, another power_w=0 must not
+	// republish — that would churn MQTT on every dispatch tick.
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("second zero command: %v", err)
+	}
+	if got := len(mqtt.Published()); got != initial+1 {
+		t.Fatalf("second zero command published %d new messages, want 0 (idempotent)", got-(initial+1))
 	}
 
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1200}`)); err != nil {
 		t.Fatalf("discharge command: %v", err)
 	}
-	pubs := mqtt.Published()
-	if got := len(pubs); got != initial+1 {
-		t.Fatalf("discharge publish count = %d, want %d", got, initial+1)
+	pubs = mqtt.Published()
+	if got := len(pubs); got != initial+2 {
+		t.Fatalf("discharge publish count = %d, want %d", got, initial+2)
 	}
 	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"discharge"`) {
 		t.Fatalf("last payload = %s, want discharge command", pubs[len(pubs)-1].Payload)
 	}
 
+	// Back to zero from a real discharge: must publish forced idle again
+	// (last_control_mode is now "discharge", not "idle").
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
-		t.Fatalf("release command: %v", err)
+		t.Fatalf("release-to-idle command: %v", err)
 	}
 	pubs = mqtt.Published()
-	if got := len(pubs); got != initial+2 {
-		t.Fatalf("release publish count = %d, want %d", got, initial+2)
+	if got := len(pubs); got != initial+3 {
+		t.Fatalf("release-to-idle publish count = %d, want %d", got, initial+3)
 	}
-	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"auto"`) {
-		t.Fatalf("last payload = %s, want auto command", pubs[len(pubs)-1].Payload)
-	}
-
-	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
-		t.Fatalf("second zero command: %v", err)
-	}
-	if got := len(mqtt.Published()); got != initial+2 {
-		t.Fatalf("second zero command published %d new messages, want 0", got-(initial+2))
+	last = pubs[len(pubs)-1].Payload
+	if !strings.Contains(last, `"name":"discharge"`) || !strings.Contains(last, `"arg":0`) {
+		t.Fatalf("release-to-idle payload = %s, want forced idle (discharge arg=0)", last)
 	}
 }
 

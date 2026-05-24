@@ -169,6 +169,19 @@ local function publish_auto(trans_id)
     return err
 end
 
+-- Force the EnergyHub to hold the battery at 0 W instead of handing
+-- control back to autonomous self-consumption. `auto` reads the
+-- house load and discharges to cover it, which silently overrides
+-- any planner slot that wants the battery idle so PV surplus can
+-- export. `discharge` with arg=0 keeps the inverter in forced mode
+-- but locked at zero — equivalent to Sungrow's forced-idle path.
+local function publish_idle(trans_id)
+    local err = host.mqtt_publish("extapi/control/request",
+        string.format('{"transId":"%s","cmd":{"name":"discharge","arg":0}}', trans_id))
+    if not err then last_control_mode = "idle" end
+    return err
+end
+
 ----------------------------------------------------------------------------
 -- Driver interface
 ----------------------------------------------------------------------------
@@ -424,11 +437,13 @@ function driver_command(action, power_w, cmd)
             if not err then last_control_mode = "discharge" end
             return err
         else
-            -- Zero: return to auto mode
-            if last_control_mode == "auto" then
+            -- Zero: force idle at 0 W. Do NOT fall back to autonomous
+            -- self-consumption — that would let the EnergyHub discharge
+            -- to cover load and silently override the planner.
+            if last_control_mode == "idle" then
                 return true
             end
-            return publish_auto(tid)
+            return publish_idle(tid)
         end
     elseif action == "curtail" then
         local payload = string.format(
