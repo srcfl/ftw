@@ -1388,9 +1388,18 @@ func ComputeDispatch(
 		case errW > 0 && correctionDir > wrongDirEpsW:
 			// Importing but PI wants to charge — wrong-direction windup.
 			allowed = currentTotal
+			// Actively unwind the integral. Without this the integral
+			// stays load-bearing in the wrong direction across every
+			// subsequent cycle and the controller is "stuck" until the
+			// next opposite-signed error happens to drain it naturally
+			// — that took ~3 min during the 2026-05-25 morning sunrise
+			// after the prior evening's mode-switch windup. Decay to
+			// half each cycle the clamp fires.
+			state.PI.DecayIntegral(0.5)
 		case errW < 0 && correctionDir < -wrongDirEpsW:
 			// Exporting but PI wants to discharge — wrong-direction windup.
 			allowed = currentTotal
+			state.PI.DecayIntegral(0.5)
 		case errW > 0 && targetTotal < idealTarget:
 			// Importing: discharge needed. PI wants more than will land
 			// us on target — cap so we don't punch through into export.

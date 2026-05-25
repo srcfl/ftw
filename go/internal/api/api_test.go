@@ -517,3 +517,48 @@ func TestHandleEnergyDailyDaysClamping(t *testing.T) {
 		})
 	}
 }
+
+// 2026-05-24 evening regression: PI integrator state carried across an
+// operator mode switch, so the new mode inherited a saturated integral
+// from the previous mode's stuck-import accumulation and commanded
+// wrong-direction battery moves for minutes after the switch (overnight
+// the fleet drained to 7 %). Mode change is a discrete event; the PI
+// integral has no meaning under the new control regime.
+func TestHandleSetModeResetsPIIntegral(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctrl := control.NewState(0, 50, "meter")
+	ctrl.Mode = control.ModeSelfConsumption
+	// Wind PI integral to near saturation under a sustained positive
+	// measurement (PI's internal err = setpoint - measurement = negative,
+	// so integral drives negative).
+	for i := 0; i < 200; i++ {
+		ctrl.PI.Update(700)
+	}
+	if ctrl.PI.Integral() > -2900 {
+		t.Fatalf("setup: expected integral pinned near -3000, got %f", ctrl.PI.Integral())
+	}
+
+	srv := New(&Deps{
+		Ctrl:   ctrl,
+		CtrlMu: &sync.Mutex{},
+		State:  st,
+		CfgMu:  &sync.RWMutex{},
+		Cfg:    &config.Config{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/mode",
+		strings.NewReader(`{"mode":"self_consumption"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+	if got := ctrl.PI.Integral(); got != 0 {
+		t.Errorf("PI integral after mode change = %f, want 0 (mode change must clear PI state)", got)
+	}
+}
