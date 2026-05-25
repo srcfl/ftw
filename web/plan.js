@@ -522,9 +522,22 @@
         const cost = plan.total_cost_ore / 100;
         const costLabel = cost >= 0 ? 'expected cost' : 'expected earnings';
         const parts = [];
+        // The /api/mpc/plan response carries the INTERNAL mpc.Mode (e.g.
+        // "self_consumption", "passive_arbitrage", "arbitrage"). Map to the
+        // operator-facing label so the badge matches the Strategy button
+        // the operator picked — "self_consumption" alone reads as the
+        // manual mode, not the Smart SC (legacy) planner setting that
+        // currently drives the plan.
+        const PLAN_MODE_LABEL = {
+          self_consumption: 'Smart self-consumption (legacy)',
+          cheap_charge: 'Cheap charging (legacy)',
+          passive_arbitrage: 'Passive arbitrage',
+          arbitrage: 'Active arbitrage',
+        };
+        const modeLabel = PLAN_MODE_LABEL[plan.mode] || plan.mode;
         parts.push(
-          `<span title="Active planner strategy — choose from the Mode picker above">` +
-          `<span class="s-value">${plan.mode}</span></span>`
+          `<span title="Active planner strategy — choose from the Mode picker">` +
+          `<span class="s-value">${modeLabel}</span></span>`
         );
         parts.push(
           `<span title="How far ahead the planner is optimising">` +

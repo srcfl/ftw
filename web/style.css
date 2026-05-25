@@ -1378,6 +1378,28 @@ footer {
   box-sizing: border-box;
 }
 .control-strategy { min-width: 320px; }
+
+/* Strategy block when embedded inside the Plan card. Sits between the
+ * chart-header and the plan-help paragraph; visually a thin separator
+ * rather than a full card so it reads as "configuration for the plan
+ * below", not a separate widget. */
+.plan-strategy {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  background: var(--bg-raised, rgba(255,255,255,0.02));
+}
+.plan-strategy-label {
+  display: block;
+  font-family: var(--mono, monospace);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--text-dim, #94a3b8);
+  margin-bottom: 8px;
+}
+
 .mode-buttons-primary {
   display: flex;
   gap: 6px;
