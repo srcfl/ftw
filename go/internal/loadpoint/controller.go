@@ -1546,6 +1546,40 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 		return steps3
 	}
 
+	// Live-surplus override: when live PV surplus right now already
+	// covers the 3Φ minimum AND there's no prior phase decision today
+	// (first session of the day or first start after a day rollover),
+	// pick 3Φ-only immediately. Forecast-based gating below is meant
+	// to handle the "cloudy day" case where today's PV will never
+	// reach 4 kW; it should NOT make us start in 1Φ when the sun is
+	// right here and the operator just plugged in.
+	//
+	// Gated on "no prior decision" so we don't flap mid-session: once
+	// we've committed to a phase, the dwell-hold + forecast logic
+	// downstream keep us there for the session.
+	if minStep3 > 0 && c.siteSurplusForEVW != nil {
+		c.phaseLockMu.Lock()
+		_, hasPrev := c.phaseSelected3P[lpCfg.ID]
+		c.phaseLockMu.Unlock()
+		if !hasPrev {
+			if liveSurplus, ok := c.siteSurplusForEVW(); ok &&
+				!math.IsNaN(liveSurplus) && !math.IsInf(liveSurplus, 0) &&
+				liveSurplus >= minStep3 {
+				c.phaseLockMu.Lock()
+				if c.phaseSelected3P == nil {
+					c.phaseSelected3P = map[string]bool{}
+					c.phaseSelectedAt = map[string]time.Time{}
+				}
+				c.phaseSelected3P[lpCfg.ID] = true
+				c.phaseSelectedAt[lpCfg.ID] = now
+				c.phaseLockMu.Unlock()
+				slog.Info("loadpoint surplus_only: 3Φ at session start (live surplus override)",
+					"lp", lpCfg.ID, "live_surplus_w", liveSurplus, "min_3p_step_w", minStep3)
+				return steps3
+			}
+		}
+	}
+
 	// Near-term gate: even if today's whole-day peak forecast will
 	// reach 3Φ minimum eventually, if the next 30 min won't, return
 	// 1Φ-allowed steps NOW so the LP captures the surplus that's
