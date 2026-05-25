@@ -24,10 +24,14 @@ type Tool interface {
 
 // MCPConfig holds everything StartMCP needs to wire up the server.
 type MCPConfig struct {
-	Addr    string
-	Session *Session
-	Audit   *Audit
-	Tools   []Tool
+	Addr string
+	// Stateless enables per-request sessions (no MCP initialize handshake
+	// required). Useful for testing and simple local use where the client
+	// doesn't maintain a persistent session.
+	Stateless bool
+	Session   *Session
+	Audit     *Audit
+	Tools     []Tool
 }
 
 // MCPServer wraps the net/http server and the listener so callers can
@@ -111,7 +115,11 @@ func StartMCP(ctx context.Context, cfg MCPConfig) (*MCPServer, error) {
 		fmt.Fprint(w, `{"ok":true}`)
 	})
 	// StreamableHTTPHandler serves MCP over HTTP (POST + SSE).
-	mux.Handle("/mcp", mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return mcpSrv }, nil))
+	var streamOpts *mcpsdk.StreamableHTTPOptions
+	if cfg.Stateless {
+		streamOpts = &mcpsdk.StreamableHTTPOptions{Stateless: true}
+	}
+	mux.Handle("/mcp", mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return mcpSrv }, streamOpts))
 
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {

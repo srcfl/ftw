@@ -35,6 +35,8 @@ func main() {
 	ttl := flag.Duration("ttl", 4*time.Hour, "Session TTL")
 	intent := flag.String("intent", "", "Owner-stated purpose for this session")
 	as := flag.String("as", "", "Optional friend identity (logged in audit)")
+	noWormhole := flag.Bool("no-wormhole", false, "Skip wormhole setup — MCP-only mode for testing/local use")
+	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
 	flag.Parse()
 
 	if *version {
@@ -73,7 +75,7 @@ func main() {
 	}
 
 	mcpSrv, err := StartMCP(ctx, MCPConfig{
-		Addr: *addr, Session: sess, Audit: audit, Tools: tools,
+		Addr: *addr, Stateless: *stateless, Session: sess, Audit: audit, Tools: tools,
 	})
 	if err != nil {
 		slog.Error("start mcp", "err", err)
@@ -81,17 +83,23 @@ func main() {
 	}
 	defer mcpSrv.Shutdown(context.Background())
 
-	host, err := StartWormholeHost(ctx, mcpSrv.Addr())
-	if err != nil {
-		slog.Error("wormhole host", "err", err)
-		os.Exit(1)
+	var pairCode string
+	if *noWormhole {
+		slog.Info("wormhole skipped (-no-wormhole)", "mcp_addr", mcpSrv.Addr())
+		pairCode = "local:" + mcpSrv.Addr()
+	} else {
+		host, err := StartWormholeHost(ctx, mcpSrv.Addr())
+		if err != nil {
+			slog.Error("wormhole host", "err", err)
+			os.Exit(1)
+		}
+		defer host.Close()
+		pairCode = host.Code
+		fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", host.Code)
 	}
-	defer host.Close()
-
-	fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", host.Code)
 	fmt.Fprintf(os.Stderr, "TTL: %s — sidecar will exit at expiry\n", *ttl)
 
-	if err := postPairStatus(*apiBase, host.Code, sess); err != nil {
+	if err := postPairStatus(*apiBase, pairCode, sess); err != nil {
 		slog.Warn("post pair status", "err", err)
 	}
 
@@ -134,7 +142,7 @@ func main() {
 			case <-sess.Done():
 				return
 			case <-t.C:
-				_ = postPairStatusFull(*apiBase, host.Code, sess, audit)
+				_ = postPairStatusFull(*apiBase, pairCode, sess, audit)
 			}
 		}
 	}()
