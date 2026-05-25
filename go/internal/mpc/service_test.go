@@ -324,6 +324,71 @@ func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
 	}
 }
 
+// T33 regression: open_meteo predicted 2002 W (solar_wm2=154, cloud=1%) for a
+// 13 kW site while the trained RLS twin (NowAnchor-corrected via live telemetry)
+// predicted 290 W — actual measured PV was ~290 W.  The old code produced
+// 0.7*2002 + 0.3*290 = 1488 W (5× actual).  With the forecast cap, the forecast
+// is limited to PlannerForecastCapRatio (3×) × twin before blending:
+//
+//	cappedForecast = 3 × 290 = 870
+//	result         = 0.7×870 + 0.3×290 = 696 W   (2.4× actual — still an overshoot
+//	                                                but far better than 5×)
+//
+// The residual over-prediction is expected and acceptable: the cap only activates
+// when the NWP cloud forecast was catastrophically wrong.  On a normal day (forecast
+// and twin agree within 3×) the cap is a no-op and accuracy is unchanged.
+func TestSelectPlannerPVWForecastCapActivatesOnWildForecast(t *testing.T) {
+	// Reproduce T33 inputs (scaled to round numbers).
+	forecast := 2002.0
+	twin := 290.0 // NowAnchor-corrected RLS twin value
+
+	got := selectPlannerPVW(forecast, twin, true)
+
+	// With the cap at PlannerForecastCapRatio=3: capped = 3*290 = 870.
+	cappedForecast := PlannerForecastCapRatio * twin
+	want := (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*twin
+	if math.Abs(got-want) > 0.5 {
+		t.Errorf("T33 forecast-cap: got %.1f, want %.1f (capped at %.0fx twin=%g)",
+			got, want, PlannerForecastCapRatio, twin)
+	}
+
+	// Result must be materially less than the uncapped blend.
+	uncapped := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
+	if got >= uncapped {
+		t.Errorf("capped result %.1f should be less than uncapped %.1f", got, uncapped)
+	}
+}
+
+// Cap must be a no-op when forecast and twin are within PlannerForecastCapRatio.
+// A well-trained twin slightly under-predicting because of orientation or
+// soiling should not trigger the cap.
+func TestSelectPlannerPVWForecastCapInactiveWhenRatioOK(t *testing.T) {
+	forecast := 4000.0
+	twin := 2000.0 // 2× — well below cap threshold of 3×
+
+	got := selectPlannerPVW(forecast, twin, true)
+	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("cap should be inactive when forecast/twin=2x: got %.2f, want %.2f", got, want)
+	}
+}
+
+// Cap must not activate when the twin is near-zero (< 50 W):  that means the
+// physics night gate fired and the twin result is meaningless — the forecast
+// should dominate unchanged.
+func TestSelectPlannerPVWForecastCapInactiveWhenTwinNearZero(t *testing.T) {
+	// Twin near-zero (e.g. cs < 50 W/m² after physics gate) but forecast
+	// still has some radiation signal at twilight.
+	forecast := 300.0
+	twin := 30.0 // below the 50 W threshold
+
+	got := selectPlannerPVW(forecast, twin, true)
+	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin // no cap
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("cap should be inactive when twin < 50 W: got %.2f, want %.2f", got, want)
+	}
+}
+
 // Strict self_consumption: even with a high terminal price (= mean
 // import), the DP must still discharge when battery has headroom
 // (SoC > min + 20). This used to be a guardrail documenting the
