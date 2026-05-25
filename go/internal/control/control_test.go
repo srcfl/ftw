@@ -2062,6 +2062,45 @@ func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
 	}
 }
 
+// passive_arbitrage HONOURS plan grid-charge intent (this is the
+// key difference from planner_self). When the planner deliberately
+// picked a cheap slot to refill the battery via grid, the dispatch
+// must execute that, even if the meter is currently importing more
+// than expected — the import IS the intent. Operators who want
+// strict "never grid-charge regardless of price" should keep
+// planner_self.
+func TestPlannerPassiveArbitrageHonoursPlannedGridCharge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 800, // plan: charge 800 Wh = 3200 W avg
+		Strategy:        "passive_arbitrage",
+	}
+	// Live: importing 1200 W. For passive_arbitrage this is FINE — the
+	// plan deliberately scheduled grid-charge during a cheap slot.
+	store := seedStore(1200, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW <= 0 {
+		t.Errorf("TargetW = %f W — passive_arbitrage must execute planned grid-charge (not undo it as reactive discharge)", targets[0].TargetW)
+	}
+}
+
 // Symmetric case: if the plan expected discharge but the live meter says the
 // site is exporting, planner_self should absorb the live surplus. The plan
 // only says "participate this slot", not "force discharge direction".

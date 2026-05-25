@@ -93,6 +93,122 @@ func TestSelfConsumptionAbsorbsPVSurplus(t *testing.T) {
 // per-slot penalty for every kWh-hour the SoC ends below the floor on
 // a PV-surplus slot — so deferring to a later slot costs strictly more
 // than charging in slot 0.
+// passive_arbitrage merges planner_self + planner_cheap into one mode
+// where the DP picks the cheapest charging source per slot (PV when
+// surplus exists, grid otherwise). Discharge is still confined to
+// local load — no battery export to grid. The strict-SC bias still
+// applies so house load is preferentially served from battery.
+//
+// Summer-like scenario: PV surplus throughout. DP should charge from
+// PV, never from grid.
+func TestPassiveArbitrageChargesFromPVWhenSurplusAvailable(t *testing.T) {
+	slots := make([]Slot, 8)
+	for i := range slots {
+		slots[i] = Slot{
+			StartMs:    int64(i) * 15 * 60 * 1000,
+			LenMin:     15,
+			PriceOre:   100, // would be cheap to import too
+			SpotOre:    10,
+			LoadW:      500,
+			PVW:        -3000, // PV >> load
+			Confidence: 1,
+		}
+	}
+	p := baseParams(ModePassiveArbitrage)
+	p.InitialSoCPct = 20
+	p.TerminalSoCPrice = 100
+
+	plan := Optimize(slots, p)
+	// Should charge in early slots from PV.
+	if plan.Actions[0].BatteryW <= 0 {
+		t.Errorf("slot 0: BatteryW = %f W, should charge from PV surplus", plan.Actions[0].BatteryW)
+	}
+	// Should NEVER export from battery (grid <= 0 only when PV exports it).
+	for i, a := range plan.Actions {
+		// In passive_arbitrage, gridW = baseline + battW must be >= min(0, baseline).
+		baseline := a.LoadW + a.PVW
+		minGrid := baseline
+		if minGrid > 0 {
+			minGrid = 0
+		}
+		if a.GridW < minGrid-50 {
+			t.Errorf("slot %d: gridW = %f W < minGrid = %f W — battery is exporting (forbidden in passive_arbitrage)", i, a.GridW, minGrid)
+		}
+	}
+}
+
+// Winter-like scenario: no PV, cheap night prices followed by expensive
+// morning. DP should grid-charge during the cheap window for use during
+// the expensive window. This is what differentiates passive_arbitrage
+// from planner_self (which forbids grid-charge entirely).
+func TestPassiveArbitrageGridChargesAtCheapHours(t *testing.T) {
+	// 4 cheap-night slots (spot 5 öre, retail 30) + 4 expensive-morning
+	// slots (spot 200 öre, retail 250). No PV throughout. Load 500 W.
+	slots := make([]Slot, 8)
+	for i := range slots {
+		if i < 4 {
+			slots[i] = Slot{
+				StartMs: int64(i) * 60 * 60 * 1000, LenMin: 60,
+				PriceOre: 30, SpotOre: 5, LoadW: 500, PVW: 0, Confidence: 1,
+			}
+		} else {
+			slots[i] = Slot{
+				StartMs: int64(i) * 60 * 60 * 1000, LenMin: 60,
+				PriceOre: 250, SpotOre: 200, LoadW: 500, PVW: 0, Confidence: 1,
+			}
+		}
+	}
+	p := baseParams(ModePassiveArbitrage)
+	p.InitialSoCPct = 20
+	p.TerminalSoCPrice = 50 // low so terminal credit doesn't dominate the test
+	// Big enough buffer so a charge during cheap hours fits.
+	p.SoCMinPct = 10
+	p.SoCMaxPct = 95
+
+	plan := Optimize(slots, p)
+	// Sum charge during cheap slots, sum discharge during expensive slots.
+	var chargeCheap, dischargeExpensive float64
+	for i, a := range plan.Actions {
+		if i < 4 && a.BatteryW > 0 {
+			chargeCheap += a.BatteryW
+		}
+		if i >= 4 && a.BatteryW < 0 {
+			dischargeExpensive += -a.BatteryW
+		}
+	}
+	if chargeCheap < 500 {
+		t.Errorf("expected grid-charge during cheap hours, got total %f W across cheap slots", chargeCheap)
+	}
+	if dischargeExpensive < 500 {
+		t.Errorf("expected discharge during expensive hours, got total %f W across expensive slots", dischargeExpensive)
+	}
+}
+
+// Critical invariant: passive_arbitrage must NEVER discharge into the
+// grid (no battery-export). This is what separates it from active
+// arbitrage and what the operator picked when they chose "passive".
+func TestPassiveArbitrageNeverExportsFromBattery(t *testing.T) {
+	// Battery starts charged; expensive slot with cheap export rate
+	// would tempt DP to discharge into grid for arbitrage. Mode must
+	// refuse.
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 300, LoadW: 100, PVW: 0, Confidence: 1},
+	}
+	p := baseParams(ModePassiveArbitrage)
+	p.InitialSoCPct = 80 // plenty of stored energy
+
+	plan := Optimize(slots, p)
+	a := plan.Actions[0]
+	// Battery may discharge to cover load (100 W), but no more — must
+	// not push grid into export.
+	if a.BatteryW < -150 {
+		t.Errorf("BatteryW = %f W — passive_arbitrage must not discharge beyond local load", a.BatteryW)
+	}
+	if a.GridW < -50 {
+		t.Errorf("gridW = %f W — passive_arbitrage must not push grid into export", a.GridW)
+	}
+}
+
 func TestSelfConsumptionSafetyFloorChargesEarlyWhenBelowFloor(t *testing.T) {
 	// 12 slots × 15 min = 3 hours. PV surplus throughout (PV 5 kW,
 	// load 500 W → 4.5 kW surplus). Without the safety floor, DP

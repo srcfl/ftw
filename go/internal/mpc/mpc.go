@@ -53,11 +53,36 @@ const (
 	// ModeCheapCharge: allow importing to charge when prices are low
 	// (the DP decides based on forecast). Still never export battery to
 	// grid — discharge stays ≤ local load.
+	//
+	// Superseded by ModePassiveArbitrage as of v0.82 — the merged mode
+	// covers the same use case (charge from cheapest available source,
+	// never export battery) and removes the operator-facing choice
+	// between "smart self-consumption" and "cheap charge" that the
+	// planner is already capable of making on its own. Kept here for
+	// existing-config compatibility.
 	ModeCheapCharge Mode = "cheap_charge"
+
+	// ModePassiveArbitrage: charge the battery from the cheapest
+	// available energy source — PV surplus when there's sun, grid
+	// during cheap night hours when not — for use BY THE HOUSE.
+	// Battery never exports to grid. Subsumes both self_consumption
+	// (summer behavior, PV always wins) and cheap_charge (winter
+	// behavior, grid wins during off-peak). The DP picks per slot.
+	//
+	// Uses the strict-self-consumption bias (battery prefers covering
+	// house load over letting the grid do it) and the mean-import
+	// terminal price (every stored kWh is worth a typical retail
+	// import that it'll later displace).
+	ModePassiveArbitrage Mode = "passive_arbitrage"
 
 	// ModeArbitrage: unrestricted. Charge from grid, discharge to grid —
 	// whatever minimizes total cost over the horizon, subject to SoC and
 	// power limits.
+	//
+	// "Active arbitrage" in the v0.82 UI rename. Same DP behavior;
+	// difference vs ModePassiveArbitrage is solely battery-export
+	// permission. Operator opts in here when they want full timing
+	// arbitrage on both directions.
 	ModeArbitrage Mode = "arbitrage"
 )
 
@@ -603,7 +628,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// check above (line 357), so the bias can only
 						// push discharge *toward* the floor, never
 						// past it.
-						if p.Mode == ModeSelfConsumption {
+						if p.Mode == ModeSelfConsumption || p.Mode == ModePassiveArbitrage {
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
@@ -920,11 +945,17 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 			return gridW <= modeTolW && gridW >= baselineGridW-modeTolW
 		}
 		return math.Abs(actW) < modeTolW
-	case ModeCheapCharge:
+	case ModeCheapCharge, ModePassiveArbitrage:
 		// Allow charging from grid (any actW ≥ 0), but never discharge past
 		// the local load: i.e. gridW must stay ≥ 0 when we'd otherwise be
 		// importing, OR ≥ baseline when we'd otherwise be exporting.
 		// Simpler rule: no battery-driven export, i.e. gridW ≥ min(0, baseline).
+		//
+		// ModePassiveArbitrage shares this contract with ModeCheapCharge —
+		// "charge from cheapest, never export from battery". The two
+		// constants exist for back-compat during the v0.82 deprecation
+		// window; semantically the merged mode IS cheap_charge plus the
+		// strict-SC house-import bias (handled in the DP cost above).
 		minGrid := 0.0
 		if baselineGridW < 0 {
 			minGrid = baselineGridW

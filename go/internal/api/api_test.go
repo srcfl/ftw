@@ -518,6 +518,40 @@ func TestHandleEnergyDailyDaysClamping(t *testing.T) {
 	}
 }
 
+// passive_arbitrage merges planner_self + planner_cheap into one
+// operator-facing mode. The API must accept the new value and propagate
+// the corresponding mpc.Mode to the planner service.
+func TestHandleSetModeAcceptsPassiveArbitrage(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctrl := control.NewState(0, 50, "meter")
+	srv := New(&Deps{
+		Ctrl:   ctrl,
+		CtrlMu: &sync.Mutex{},
+		State:  st,
+		CfgMu:  &sync.RWMutex{},
+		Cfg:    &config.Config{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/mode",
+		strings.NewReader(`{"mode":"planner_passive_arbitrage"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+	if ctrl.Mode != control.ModePlannerPassiveArbitrage {
+		t.Errorf("ctrl.Mode = %q, want %q", ctrl.Mode, control.ModePlannerPassiveArbitrage)
+	}
+	if !ctrl.Mode.IsPlannerMode() {
+		t.Errorf("passive_arbitrage must register as a planner mode for the dispatch energy-path")
+	}
+}
+
 // 2026-05-24 evening regression: PI integrator state carried across an
 // operator mode switch, so the new mode inherited a saturated integral
 // from the previous mode's stuck-import accumulation and commanded
