@@ -32,5 +32,11 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
 	ctrl.PVSurplusAbsorbSoCCapPct = cfg.Site.PVSurplusAbsorbSoCCapPct
 	ctrl.PVSurplusAbsorbThresholdW = cfg.Site.PVSurplusAbsorbThresholdW
+	// DC-link protective curtail — opt-in, default off. SoC threshold
+	// and margin fall back to dispatch defaults (0.80 / 1000 W) when
+	// unset, applied inside ComputePVCurtail.
+	ctrl.DCLinkProtectionEnabled = cfg.Site.DCLinkProtectionEnabled
+	ctrl.DCLinkProtectionSoCThreshold = cfg.Site.DCLinkProtectionSoCThreshold
+	ctrl.DCLinkProtectionMarginW = cfg.Site.DCLinkProtectionMarginW
 	return ctrl
 }

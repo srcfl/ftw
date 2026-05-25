@@ -344,6 +344,27 @@ type Site struct {
 	// watts after the plan's target. Defaults to 100 W when the cap is
 	// set but this isn't.
 	PVSurplusAbsorbThresholdW float64 `yaml:"pv_surplus_absorb_threshold_w,omitempty" json:"pv_surplus_absorb_threshold_w,omitempty"`
+
+	// DCLinkProtectionEnabled opts into a live-state PV curtail that
+	// fires when SoC is near full AND PV significantly exceeds load
+	// — the configuration most exposed to a load-step-triggered
+	// inverter trip (real 2026-05-25 incident: Ferroamp EnergyHub
+	// fault from a 2.7 kW load step under 6 kW PV + 85 % SoC).
+	// Engaging pre-curtails PV to live load + margin so a sudden
+	// load step inside the margin lands without DC-link stress.
+	// Disabled by default — opt-in for sites that see repeated
+	// inverter trips.
+	DCLinkProtectionEnabled bool `yaml:"dc_link_protection_enabled,omitempty" json:"dc_link_protection_enabled,omitempty"`
+
+	// DCLinkProtectionSoCThreshold (0-1) is the SoC fraction at or
+	// above which the protective curtail engages. Default 0.80.
+	DCLinkProtectionSoCThreshold float64 `yaml:"dc_link_protection_soc_threshold,omitempty" json:"dc_link_protection_soc_threshold,omitempty"`
+
+	// DCLinkProtectionMarginW is the headroom (W) kept above live
+	// load when the protection fires. Larger margin = more PV
+	// allowed through, smaller load-step capacity before re-curtail.
+	// Default 1000.
+	DCLinkProtectionMarginW float64 `yaml:"dc_link_protection_margin_w,omitempty" json:"dc_link_protection_margin_w,omitempty"`
 }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom

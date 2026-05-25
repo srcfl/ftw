@@ -145,6 +145,18 @@ func (w *Watcher) reload() {
 	if newCfg.Site.PVSurplusAbsorbThresholdW != oldCfg.Site.PVSurplusAbsorbThresholdW {
 		w.ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	}
+	if newCfg.Site.DCLinkProtectionEnabled != oldCfg.Site.DCLinkProtectionEnabled {
+		slog.Info("config reload: dc_link_protection_enabled",
+			"old", oldCfg.Site.DCLinkProtectionEnabled,
+			"new", newCfg.Site.DCLinkProtectionEnabled)
+		w.ctrl.DCLinkProtectionEnabled = newCfg.Site.DCLinkProtectionEnabled
+	}
+	if newCfg.Site.DCLinkProtectionSoCThreshold != oldCfg.Site.DCLinkProtectionSoCThreshold {
+		w.ctrl.DCLinkProtectionSoCThreshold = newCfg.Site.DCLinkProtectionSoCThreshold
+	}
+	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
+		w.ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
+	}
 	w.ctrlMu.Unlock()
 
 	// Swap global pointer
