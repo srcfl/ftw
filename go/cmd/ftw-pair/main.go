@@ -122,8 +122,49 @@ func main() {
 		}
 	}()
 
+	// Heartbeat: re-POST /api/pair/status every 5 s with live tool_count
+	// and last_tools so the dashboard <ftw-pair-card> shows real-time activity.
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sess.Done():
+				return
+			case <-t.C:
+				_ = postPairStatusFull(*apiBase, host.Code, sess, audit)
+			}
+		}
+	}()
+
 	<-sess.Done()
 	slog.Info("pair session ended", "reason", sess.ExitReason(), "tool_calls", audit.ToolCount())
+}
+
+// postPairStatusFull is the heartbeat variant of postPairStatus: it
+// includes live tool_count + last_tools so the dashboard <ftw-pair-card>
+// can show real-time activity.
+func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit) error {
+	body := map[string]any{
+		"session_id": sess.ID,
+		"code":       code,
+		"intent":     sess.Intent(),
+		"started_at": sess.StartedAt.UTC().Format(time.RFC3339),
+		"ttl_s":      int(sess.Remaining().Seconds()),
+		"tool_count": audit.ToolCount(),
+		"last_tools": audit.LastTools(5),
+	}
+	buf, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", apiBase+"/api/pair/status", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
 }
 
 // postPairStatus tells the running 42W service about the current pair
