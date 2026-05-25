@@ -30,26 +30,32 @@ how Sourceful tools install Python utilities.
 
 ## On the host
 
+Open the dashboard at `http://<pi>:8080`, scroll to the **Pair session**
+card, fill in an optional intent and pick a TTL, then click **Start pair
+session**. The card flips to active mode within a few seconds showing the
+wormhole code with a **Copy** button. Copy the code and send it to the
+friend over any channel — Signal, SMS, Slack DM.
+
+To end the session early, click **Abort** on the card.
+
+Or, if you prefer the terminal:
+
 ```bash
 forty-two-watts pair --intent "help me write a goodwe XS driver" --ttl 4h
 ```
 
-You'll see something like:
+The CLI prints the code directly:
 
 ```
 PAIR CODE: 7-crossover-clockwork
 TTL: 4h0m0s — sidecar will exit at expiry
 ```
 
-Send the code to the friend over any channel — Signal, SMS, Slack DM.
-
-To end the session early:
+To abort from the terminal:
 
 ```bash
 forty-two-watts pair --abort
 ```
-
-…or click **Abort** on the pair-session card in the web UI.
 
 ## On the friend
 
@@ -104,8 +110,8 @@ what changed on the owner's instance.
 
 | Step | Owner | Friend |
 |---|---|---|
-| Trigger pair session | `forty-two-watts pair --intent "..."` | — |
-| Share wormhole code | Send via Signal/SMS/Slack | Receive |
+| Trigger pair session | Click **Start pair session** in the dashboard (or `forty-two-watts pair --intent "..."`) | — |
+| Share wormhole code | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
 | Connect | — | `ftw-connect <code>` |
 | Develop the driver / debug | — | Drives Claude Code through the tunnel |
 | Open the PR | — | Clones repo locally, `gh pr create` from own machine |

@@ -149,6 +149,12 @@ type Deps struct {
 	// any). Nil is safe — routes are still registered; GET returns 404.
 	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
 	PairStore *PairStatusStore
+
+	// PairSelfExe overrides the binary path used by POST /api/pair/start to
+	// spawn child pair sessions. Empty means "use os.Executable()". Tests
+	// inject "/bin/true" (or a fake echo binary) here so they don't actually
+	// launch a sidecar.
+	PairSelfExe string
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -281,7 +287,13 @@ func (s *Server) routes() {
 	s.handle("POST /api/restart", s.handleRestart)
 
 	// ---- Pair sidecar endpoints ----
-	RegisterPairRoutes(s.mux, s.deps.PairStore)
+	// Pass the self-exe path so POST /api/pair/start can spawn "self pair ..."
+	// as a detached child. Tests inject a fake path via deps.PairSelfExe.
+	selfExe := s.deps.PairSelfExe
+	if selfExe == "" {
+		selfExe = resolvedSelfExe()
+	}
+	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
