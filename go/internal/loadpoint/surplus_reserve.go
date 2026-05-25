@@ -84,6 +84,38 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 		// idle pilot / standby consumption that doesn't represent
 		// "EV is actively claiming surplus".
 		if st.CurrentPowerW < 50.0 {
+			// Plugged-but-not-drawing fallback: when the vehicle's SoC
+			// is KNOWN and below its charge limit, the car is merely
+			// waiting for the wallbox to find surplus — not refusing
+			// the offer. Reserve its MinChargeW so the home battery
+			// yields enough headroom for the next wake-kick to have
+			// something to hand the EV.
+			//
+			// Without this reservation the dispatch lets the battery
+			// absorb every watt of PV surplus, then auto-wake fires,
+			// the wallbox offers current — but no surplus is left to
+			// claim because the battery already took it — so the EV
+			// times back to Stopped, the auto-wake cycle retries, and
+			// the EV never gets to charge.
+			//
+			// Gating requires BOTH soc and limit to be > 0: a vehicle
+			// driver that never reports SoC (or has gone offline)
+			// preserves the strict pre-existing behavior of "no
+			// reserve for a not-drawing EV", so a single missing
+			// vehicle driver can't hold the battery back forever.
+			hasHeadroom := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
+				st.VehicleSoCPct < st.VehicleChargeLimitPct
+			if !hasHeadroom {
+				continue
+			}
+			floor := st.MinChargeW
+			if floor <= 0 {
+				floor = EVRampHeadroomW
+			}
+			if floor > st.MaxChargeW && st.MaxChargeW > 0 {
+				floor = st.MaxChargeW
+			}
+			sum += floor
 			continue
 		}
 		ceiling := st.CurrentPowerW + EVRampHeadroomW
@@ -94,6 +126,48 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 			ceiling = 0
 		}
 		sum += ceiling
+	}
+	return sum
+}
+
+// SurplusPotentialW is the parallel reserve sized for the PV-curtail
+// decision rather than for the dispatch's battery-vs-EV split.
+//
+// SurplusReserveW intentionally returns 0 for plugged-but-not-drawing
+// EVs so the home battery can keep absorbing PV (a stopped EV refusing
+// the offer must not block the battery from claiming surplus). That
+// rule is right for dispatch but wrong for curtail: when curtail is
+// economically warranted and the home battery is full, a stopped EV
+// with SoC headroom *would* start drawing if PV were allowed to grow
+// above its min charge — so PV should not be cut.
+//
+// Rule here: every surplus_only + plugged_in loadpoint whose vehicle
+// still has SoC headroom (vehicle_soc < vehicle_charge_limit, or
+// either is unknown — be optimistic when telemetry is partial)
+// contributes its MaxChargeW. That's the upper bound on what curtail
+// must preserve PV headroom for. Drivers report "no headroom" by
+// setting VehicleSoCPct >= VehicleChargeLimitPct, which excludes
+// already-full EVs from the calculation.
+func SurplusPotentialW(states []State) float64 {
+	var sum float64
+	for _, st := range states {
+		if !st.SurplusOnly || !st.PluggedIn {
+			continue
+		}
+		// Skip when the vehicle is already at/above its charge limit
+		// — both must be > 0 for the comparison to be meaningful.
+		if st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
+			st.VehicleSoCPct >= st.VehicleChargeLimitPct {
+			continue
+		}
+		head := st.MaxChargeW
+		if head <= 0 {
+			head = st.MinChargeW
+		}
+		if head <= 0 {
+			head = EVRampHeadroomW
+		}
+		sum += head
 	}
 	return sum
 }

@@ -13,6 +13,7 @@ import "./ftw-tabs.js";
 import "./ftw-legend.js";
 import "./ftw-energy-flow.js";
 import "./ftw-battery-control.js";
+import "./ftw-pv-control.js";
 import "./ftw-price-chart.js";
 import "./ftw-energy-cake.js";
 import "./ftw-bar-chart.js";

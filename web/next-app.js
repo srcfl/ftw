@@ -2726,6 +2726,15 @@
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
+        if (d.role === "pv") {
+          var pc = document.getElementById("pv-control");
+          if (pc && typeof pc.open === "function") {
+            // d.id is the driver id when the user clicked an expanded
+            // per-driver bubble; "" / undefined opens at the aggregate
+            // scope from the merged bubble.
+            pc.open(d.id || "");
+          }
+        }
         if (d.role === "grid" && gridModal) gridModal.open();
       });
     }

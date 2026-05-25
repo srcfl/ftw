@@ -31,20 +31,47 @@ DRIVER = {
   id           = "solaredge-legacy",
   name         = "SolarEdge legacy (K-series with display)",
   manufacturer = "SolarEdge",
-  version      = "0.1.0",
+  version      = "0.2.0",
   protocols    = { "modbus" },
-  capabilities = { "pv" },
-  description  = "SolarEdge K-series (SE7K / SE10K / SE17K / SE25K) PV inverter via Modbus TCP — uses FC 0x03 holding (legacy firmware doesn't mirror under FC 0x04 input).",
+  capabilities = { "pv", "pv-curtail" },
+  description  = "SolarEdge K-series (SE7K / SE10K / SE17K / SE25K) PV inverter via Modbus TCP — reads use FC 0x03 holding; curtail writes use FC 0x10 multi-holding on the same Advanced Power Control registers (0xF000/0xF001) as HD-Wave.",
   homepage     = "https://www.solaredge.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "SE17K (display, legacy firmware)" },
   verification_status = "experimental",
-  verification_notes = "First-cut clone of solaredge.lua targeting K-series display inverters. Awaits field verification — 17K install reported can-connect / can't-read on the HD-Wave driver, this variant uses holding registers to address that.",
+  verification_notes = "First-cut clone of solaredge.lua targeting K-series display inverters. Curtail path mirrors solaredge.lua (verified there in 25/50/75% sweep on HD-Wave 8 kW). K-series support documented in SolarEdge Power Reduction Application Note but not yet verified on this firmware family.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
   },
 }
+--
+-- PV curtail (action="curtail" / "curtail_disable")
+--
+-- Identical mechanism to drivers/solaredge.lua — SolarEdge documents
+-- the same proprietary Advanced Power Control registers for K-series
+-- (SE7K..SE25K display inverters):
+--
+--   0xF000 (61440)  Advanced Power Control enable: 0=off, 1=on
+--   0xF001 (61441)  Active Power Limit:           u16, percent 0..100
+--
+-- Writes go through FC 0x10 (Write Multiple Holding Registers) so
+-- both registers update in a single atomic transaction — the
+-- inverter never sees enable=1 paired with a stale previous-tick
+-- limit value. SetApp setting "Limit Control Mode = Export Control
+-- / Production" must be enabled on the inverter; without it writes
+-- succeed at the Modbus layer but the inverter ignores them.
+--
+-- nominal_w comes from the YAML driver config block (the inverter's
+-- rated AC output in W — SE7K → 7000, SE10K → 10000, SE17K → 17000,
+-- SE25K → 25000). Without it the driver still emits PV readings but
+-- rejects curtail commands with a logged warning.
+--
+-- Failsafe: F000/F001 don't auto-revert on SolarEdge. Cleanup paths
+-- write {0, 100} on curtail_disable / deinit / driver_cleanup so a
+-- clean shutdown returns the inverter to full production. If the
+-- daemon crashes uncleanly while curtailed the cap stays applied
+-- until SetApp manually releases it.
 
 PROTOCOL = "modbus"
 
@@ -60,6 +87,12 @@ PROTOCOL = "modbus"
 -- and removes the failure-vs-zero ambiguity entirely.
 local sn_read    = false
 local sunspec_ok = nil  -- true / false / nil (= not yet probed)
+
+-- Curtail state — see header comment for the protocol.
+local nominal_w = 0
+local curtail_active = false
+local REG_APC_ENABLE = 61440  -- 0xF000
+local REG_APC_LIMIT  = 61441  -- 0xF001
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -117,6 +150,16 @@ end
 
 function driver_init(config)
     host.set_make("SolarEdge")
+    if type(config) == "table" then
+        local n = tonumber(config.nominal_w)
+        if n and n > 0 then
+            nominal_w = n
+            host.log("info", "SolarEdge-legacy: nominal_w = " .. tostring(nominal_w) .. " W (curtail enabled)")
+        end
+    end
+    if nominal_w <= 0 then
+        host.log("info", "SolarEdge-legacy: nominal_w not set in config — curtail action will be unavailable")
+    end
 end
 
 -- One-shot SunSpec ID probe. SunSpec-compliant devices place the magic
@@ -243,18 +286,69 @@ function driver_poll()
 end
 
 ----------------------------------------------------------------------------
--- Control (read-only driver — command stubs)
+-- Control (PV curtail only — PV emission is read-only)
 ----------------------------------------------------------------------------
 
+-- See solaredge.lua write_apc for the FC 0x10 atomic-write rationale.
+local function write_apc(enable, limit_pct)
+    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
+        { enable, limit_pct })
+    if (not ok) or type(err) == "string" then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+local function apply_curtail(power_w)
+    if nominal_w <= 0 then
+        host.log("warn",
+            "SolarEdge-legacy: curtail requested but nominal_w not configured; ignoring")
+        return false
+    end
+    if power_w == nil or power_w < 0 then power_w = 0 end
+    local pct = math.floor((power_w / nominal_w) * 100 + 0.5)
+    if pct < 0   then pct = 0   end
+    if pct > 100 then pct = 100 end
+
+    local ok, err = write_apc(1, pct)
+    if not ok then
+        host.log("warn", "SolarEdge-legacy: write APC enable+limit failed: " .. err)
+        return false
+    end
+    curtail_active = true
+    host.log("info",
+        "SolarEdge-legacy: curtail " .. tostring(pct) .. "% (" .. tostring(power_w) ..
+        " W of " .. tostring(nominal_w) .. " W nominal)")
+    return true
+end
+
+local function release_curtail()
+    local ok, err = write_apc(0, 100)
+    if not ok then
+        host.log("warn", "SolarEdge-legacy: release APC enable+limit failed: " .. err)
+        return false
+    end
+    if curtail_active then
+        host.log("info", "SolarEdge-legacy: curtail released (APC_LIMIT=100, APC_ENABLE=0)")
+    end
+    curtail_active = false
+    return true
+end
+
 function driver_command(action, power_w, cmd)
-    host.log("debug", "SolarEdge-legacy: read-only driver, ignoring action=" .. tostring(action))
+    if action == "curtail" then
+        return apply_curtail(power_w)
+    elseif action == "curtail_disable" or action == "deinit" then
+        return release_curtail()
+    end
+    host.log("debug", "SolarEdge-legacy: ignoring unsupported action=" .. tostring(action))
     return false
 end
 
 function driver_default_mode()
-    -- Read-only — nothing to revert.
+    release_curtail()
 end
 
 function driver_cleanup()
-    -- Read-only — nothing to clean up.
+    release_curtail()
 end

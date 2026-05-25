@@ -257,6 +257,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
 	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
 	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
+	s.handle("POST /api/pv/manual_hold", s.handlePVManualHold)
+	s.handle("DELETE /api/pv/manual_hold", s.handlePVManualHoldClear)
+	s.handle("GET  /api/pv/manual_hold", s.handlePVManualHoldGet)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
@@ -1037,6 +1040,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		// battery manual hold so the new mode takes effect on the very
 		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
 		s.deps.Ctrl.ClearBatteryManualHold()
+		// Reset the PI integrator. The integral accumulated under the
+		// previous mode's error signal is meaningless to the new mode
+		// — keeping it caused integrator windup → wrong-direction stuck
+		// output across the 2026-05-24 evening mode switch (live
+		// regression: discharged the fleet to 7 % overnight while the
+		// PI integral was pinned in the wrong direction). Mode change
+		// is a discrete event; start the new regime from a clean PI.
+		if s.deps.Ctrl.PI != nil {
+			s.deps.Ctrl.PI.Reset()
+		}
 		s.deps.CtrlMu.Unlock()
 		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 			slog.Warn("failed to persist mode", "err", err)
