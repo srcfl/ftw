@@ -58,6 +58,7 @@ ci-hw-pi:
 build:
 	@mkdir -p bin
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair ./cmd/ftw-pair
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	@ls -la bin/
@@ -66,13 +67,17 @@ build-arm64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-arm64 ./cmd/forty-two-watts
-	@ls -la bin/forty-two-watts-linux-arm64
+	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-arm64 ./cmd/ftw-pair
+	@ls -la bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64
 
 build-amd64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-amd64 ./cmd/forty-two-watts
-	@ls -la bin/forty-two-watts-linux-amd64
+	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-amd64 ./cmd/ftw-pair
+	@ls -la bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64
 
 build-windows-amd64:
 	@mkdir -p bin
@@ -84,16 +89,23 @@ build-windows-amd64:
 
 release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
+	@# Per-arch staging dirs so the tarballs ship forty-two-watts +
+	@# ftw-pair as siblings (the `forty-two-watts pair` subcommand
+	@# locates ftw-pair next to itself by default).
 	@for arch in arm64 amd64; do \
+		stage="bin/stage-linux-$$arch"; \
+		mkdir -p "$$stage"; \
+		cp "bin/forty-two-watts-linux-$$arch" "$$stage/forty-two-watts"; \
+		cp "bin/ftw-pair-linux-$$arch"        "$$stage/ftw-pair"; \
 		tar czf release/forty-two-watts-linux-$$arch.tar.gz \
-			-C bin forty-two-watts-linux-$$arch \
-			-C .. drivers web config.example.yaml; \
+			-C "$$stage" forty-two-watts ftw-pair \
+			-C ../.. drivers web config.example.yaml; \
 		printf "built release/forty-two-watts-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/forty-two-watts-linux-$$arch.tar.gz)"; \
 	done
-	@# Windows: .zip (native format on the platform) — binary from bin/ plus
-	@# bundled drivers/web/config.example.yaml from repo root. Delete first
-	@# so rerunning release doesn't keep appending to a stale archive.
+	@# Windows: .zip — pair sidecar is Linux-only (uses fowld + systemctl)
+	@# so we don't ship it on Windows. Delete first so rerunning release
+	@# doesn't keep appending to a stale archive.
 	@rm -f release/forty-two-watts-windows-amd64.zip
 	@cd bin && zip -q ../release/forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.exe
 	@zip -qr release/forty-two-watts-windows-amd64.zip drivers web config.example.yaml
