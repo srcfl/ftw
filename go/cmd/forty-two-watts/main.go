@@ -2386,6 +2386,14 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if safetyPenalty <= 0 {
 		safetyPenalty = 100
 	}
+	pvBonus := pl.PVChargeBonusOreKwh
+	if pvBonus <= 0 {
+		// 30 öre/kWh — beats typical PV-export spot prices and the
+		// round-trip efficiency cost (~20 öre/kWh against mean retail
+		// import), but small enough that genuine arbitrage spreads
+		// (>100 öre/kWh) still drive the DP.
+		pvBonus = 30
+	}
 	chgEff := pl.ChargeEfficiency
 	if chgEff <= 0 {
 		chgEff = 0.95
@@ -2402,6 +2410,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		SoCMaxPct:                    socMax,
 		SoCSafetyFloorPct:            socSafety,
 		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
+		PVChargeBonusOreKwh:          pvBonus,
 		InitialSoCPct:                50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose

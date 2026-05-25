@@ -151,6 +151,27 @@ type Params struct {
 	// economically expensive ways.
 	SafetyFloorPenaltyOreKwhHour float64
 
+	// PVChargeBonusOreKwh credits each kWh of battery charge that
+	// comes from live PV surplus. Operator preference: prefer using
+	// solar NOW (certain) over exporting cheap and refilling from
+	// grid LATER (forecast). Without this bias the DP is economically
+	// indifferent between the two when terminal credit is roughly
+	// equal — it would happily export 27 kWh at 10 öre/kWh and refill
+	// from a 30 öre/kWh cheap-night hour, losing ~10 % round-trip and
+	// dragging itself through forecast risk for no gain.
+	//
+	// Magnitude: ~30 öre/kWh by default. Large enough to dominate the
+	// typical PV-export spot price (5-30 öre/kWh) and the round-trip
+	// efficiency cost; small enough to leave the door open for
+	// genuine arbitrage (active_arbitrage paths still see spreads
+	// >100 öre/kWh).
+	//
+	// Only applies to ModePassiveArbitrage. 0 disables. The cost
+	// reduction is bounded by the live PV surplus this slot — DP
+	// can never claim a bonus larger than the surplus available, so
+	// the bias never converts to grid-charge incentive.
+	PVChargeBonusOreKwh float64
+
 	// Action grid (+charge, −discharge; site sign)
 	ActionLevels  int     // odd number preferred so 0 is represented (e.g. 21)
 	MaxChargeW    float64 // ≥ 0
@@ -658,6 +679,26 @@ func Optimize(slots []Slot, p Params) Plan {
 								deficitPct := p.SoCSafetyFloorPct - battSoc2
 								deficitKwh := deficitPct / 100.0 * p.CapacityWh / 1000.0
 								cost += deficitKwh * dtH * p.SafetyFloorPenaltyOreKwhHour
+							}
+						}
+
+						// PV-first bias: when this slot has PV surplus
+						// AND the action charges the battery, credit a
+						// bonus for the kWh that came from the surplus.
+						// Operator preference: certain PV now beats
+						// forecast grid later, even if the DP sees them
+						// as economically equivalent. The bonus is
+						// bounded by the live surplus so it never
+						// incentivises grid-charging.
+						if p.Mode == ModePassiveArbitrage && p.PVChargeBonusOreKwh > 0 && battW > 0 {
+							pvSurplusW := -slot.PVW - slot.LoadW
+							if pvSurplusW > 0 {
+								chargeFromPVW := battW
+								if chargeFromPVW > pvSurplusW {
+									chargeFromPVW = pvSurplusW
+								}
+								chargeFromPVkWh := chargeFromPVW * dtH / 1000.0
+								cost -= p.PVChargeBonusOreKwh * chargeFromPVkWh
 							}
 						}
 
