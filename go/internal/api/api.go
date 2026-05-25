@@ -68,7 +68,8 @@ type Deps struct {
 	CfgMu      *sync.RWMutex
 	Cfg        *config.Config
 	ConfigPath string
-	DriverDir  string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	DriverDir      string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir  string // persistent user-drivers overlay; searched before DriverDir
 	Models     map[string]*battery.Model
 	ModelsMu   *sync.Mutex
 	SelfTune   *selftune.Coordinator
@@ -143,6 +144,11 @@ type Deps struct {
 	Restart func(ctx context.Context) error
 
 	Version string
+
+	// PairStore holds the currently-active ftw-pair sidecar session (if
+	// any). Nil is safe — routes are still registered; GET returns 404.
+	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
+	PairStore *PairStatusStore
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -175,6 +181,9 @@ func New(deps *Deps) *Server {
 	}
 	if deps.WebDir == "" {
 		deps.WebDir = "web"
+	}
+	if deps.PairStore == nil {
+		deps.PairStore = NewPairStatusStore()
 	}
 	s := &Server{
 		deps:       deps,
@@ -270,6 +279,9 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("POST /api/restart", s.handleRestart)
+
+	// ---- Pair sidecar endpoints ----
+	RegisterPairRoutes(s.mux, s.deps.PairStore)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -837,7 +849,7 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		return nil
 	}
@@ -1206,7 +1218,8 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	// User-drivers dir (persistent volume) takes precedence over bundled dir.
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"path": dir, "entries": []any{}, "error": err.Error()})
 		return

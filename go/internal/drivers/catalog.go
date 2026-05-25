@@ -54,30 +54,58 @@ type CatalogEntry struct {
 // block are still returned — just with ID/Name empty — so operators can
 // at least see they exist.
 func LoadCatalog(dir string) ([]CatalogEntry, error) {
+	return LoadCatalogMulti(dir)
+}
+
+// LoadCatalogMulti scans one or more directories for .lua driver files and
+// merges the results. Directories are scanned in order; when the same
+// filename appears in more than one directory the first occurrence wins
+// (earlier dirs take precedence). This allows a "user" directory passed
+// first to shadow bundled drivers of the same name.
+//
+// Directories that don't exist or can't be read are silently skipped so
+// callers don't need to guard against an empty user-drivers dir.
+func LoadCatalogMulti(dirs ...string) ([]CatalogEntry, error) {
+	seen := make(map[string]struct{}) // keyed by Filename (e.g. "ferroamp.lua")
 	var out []CatalogEntry
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil // skip unreadable, don't fail the whole scan
+
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
 		}
-		if info.IsDir() {
+		if _, err := os.Stat(dir); err != nil {
+			continue // missing or inaccessible — skip silently
+		}
+		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil // skip unreadable, don't fail the whole scan
+			}
+			if info.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(path, ".lua") {
+				return nil
+			}
+			filename := filepath.Base(path)
+			if _, exists := seen[filename]; exists {
+				return nil // earlier dir already claimed this name
+			}
+			entry, err := parseCatalogEntry(path)
+			if err != nil {
+				return nil // skip malformed
+			}
+			rel, _ := filepath.Rel(dir, path)
+			entry.Path = filepath.ToSlash(filepath.Join("drivers", rel))
+			entry.Filename = filename
+			seen[filename] = struct{}{}
+			out = append(out, entry)
 			return nil
-		}
-		if !strings.HasSuffix(path, ".lua") {
-			return nil
-		}
-		entry, err := parseCatalogEntry(path)
+		})
 		if err != nil {
-			return nil // skip malformed
+			return nil, fmt.Errorf("walk %s: %w", dir, err)
 		}
-		rel, _ := filepath.Rel(dir, path)
-		entry.Path = filepath.ToSlash(filepath.Join("drivers", rel))
-		entry.Filename = filepath.Base(path)
-		out = append(out, entry)
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("walk %s: %w", dir, err)
 	}
+
 	// Stable sort by name (then filename as tiebreaker).
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i].Name, out[j].Name

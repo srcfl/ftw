@@ -34,14 +34,30 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/forty-two-watts ./cmd/forty-two-watts
+RUN cd go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-pair ./cmd/ftw-pair
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
 
 # ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
 # tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
-RUN apk add --no-cache ca-certificates tzdata && \
+# python3 + pipx: needed by fowl (magic-wormhole transport for `pair`).
+# libsodium:      NaCl crypto used by fowl/twisted/wormhole at runtime.
+RUN apk add --no-cache ca-certificates tzdata python3 pipx libsodium && \
     addgroup -S ftw && adduser -S ftw -G ftw
+
+# Install fowl into a system-wide location so it's on PATH for everyone.
+# PIPX_HOME=/opt/pipx keeps it outside the ftw home dir; PIPX_BIN_DIR
+# puts the entry-point wrappers on PATH without any per-user activation.
+# We run this before switching to USER ftw so the install lands in system
+# paths and is readable by all users (including root for debugging).
+ENV PIPX_HOME=/opt/pipx
+ENV PIPX_BIN_DIR=/usr/local/bin
+RUN PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install fowl && \
+    chown -R ftw:ftw /opt/pipx
 
 # Image layout:
 #   /app/forty-two-watts  binary (immutable, replaced on upgrade)
@@ -57,10 +73,11 @@ RUN apk add --no-cache ca-certificates tzdata && \
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/forty-two-watts /app/forty-two-watts
+COPY --from=builder /out/ftw-pair        /app/ftw-pair
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
-RUN mkdir -p /app/data /run/ftw-update && \
+RUN mkdir -p /app/data /app/data/drivers /run/ftw-update && \
     chown -R ftw:ftw /app /run/ftw-update
 
 USER ftw
@@ -87,4 +104,4 @@ EXPOSE 8080
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
 ENTRYPOINT ["/app/forty-two-watts"]
-CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers"]
+CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]
