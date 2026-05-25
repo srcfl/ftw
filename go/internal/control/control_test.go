@@ -49,6 +49,111 @@ func TestPIReset(t *testing.T) {
 	}
 }
 
+// DecayIntegral is the live-system anti-windup escape hatch — wind the
+// integral up to saturation, then call DecayIntegral a few times to verify
+// it drops geometrically toward 0 without snapping it to 0 instantly.
+func TestPIDecayIntegralUnwindsSaturation(t *testing.T) {
+	p := NewPI(0.5, 0.1, 3000, 10000)
+	p.Setpoint = 0
+	// Drive into negative saturation with a sustained positive measurement
+	// (PI's internal err = setpoint - measurement = negative).
+	for i := 0; i < 200; i++ {
+		p.Update(700)
+	}
+	if p.Integral() > -2900 {
+		t.Fatalf("setup: expected integral pinned near -3000 after 200 cycles, got %f", p.Integral())
+	}
+	p.DecayIntegral(0.5)
+	if got := p.Integral(); math.Abs(got-(-1500)) > 1 {
+		t.Errorf("after one 0.5 decay from -3000, integral = %f, want ≈ -1500", got)
+	}
+	p.DecayIntegral(0.5)
+	p.DecayIntegral(0.5)
+	if got := p.Integral(); math.Abs(got-(-375)) > 1 {
+		t.Errorf("after three 0.5 decays from -3000, integral = %f, want ≈ -375", got)
+	}
+}
+
+func TestPIDecayIntegralClampsFactor(t *testing.T) {
+	p := NewPI(0.5, 0.1, 3000, 10000)
+	p.Setpoint = 0
+	for i := 0; i < 50; i++ {
+		p.Update(500)
+	}
+	before := p.Integral()
+	p.DecayIntegral(-1.0)
+	if p.Integral() != 0 {
+		t.Errorf("DecayIntegral(-1) should clamp to factor=0 (i.e. zero the integral), got %f", p.Integral())
+	}
+	p.integral = before
+	p.DecayIntegral(5.0)
+	if p.Integral() != before {
+		t.Errorf("DecayIntegral(5) should clamp to factor=1 (no-op), got %f vs before=%f", p.Integral(), before)
+	}
+}
+
+// 2026-05-25 morning regression: yesterday's mode-switch wound the PI
+// integral to negative saturation while the system was importing under a
+// stale plan; once the morning sun flipped grid to export, the saturated
+// integral kept commanding discharge for ~3 min until natural decay
+// drained it. Dispatch already detects the wrong-direction case and
+// clamps the OUTPUT to currentTotal, but it left the integral untouched,
+// so the next cycle was just as wound up.
+//
+// Active integral decay on wrong-direction-windup means the controller
+// converges within a handful of cycles instead of minutes.
+func TestDispatchWrongDirectionWindupDecaysPIIntegral(t *testing.T) {
+	store := seedStore(-1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 60, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	// Pre-wind the integral hard negative — simulates yesterday's
+	// load-side import accumulation persisting into a now-exporting
+	// grid this morning.
+	for i := 0; i < 100; i++ {
+		st.PI.Update(800)
+	}
+	beforeI := st.PI.Integral()
+	if beforeI > -2500 {
+		t.Fatalf("setup: expected integral wound past -2500, got %f", beforeI)
+	}
+
+	// Single dispatch cycle: live grid is -1000 (exporting), errW=-1000.
+	// PI's pre-wound -3000 integral will still drag the output negative,
+	// so correctionDir would be negative → matches the "exporting but PI
+	// wants discharge" wrong-direction case → integral must decay.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	afterI := st.PI.Integral()
+	// Both numbers negative — "closer to 0" means a larger (less negative) value.
+	if math.Abs(afterI) >= math.Abs(beforeI) {
+		t.Errorf("integral after wrong-dir clamp = %f, want strictly closer to 0 than before=%f", afterI, beforeI)
+	}
+	// Behavioural assertion: a few cycles of geometric decay + normal
+	// integration should be enough that dispatch is no longer commanding
+	// the wrong direction. Without decay, the integral stays saturated
+	// at -3000 and PI keeps emitting the wrong-signed output across
+	// every subsequent cycle (that's the 2026-05-25 sunrise regression).
+	var lastTarget float64
+	for i := 0; i < 5; i++ {
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+		if len(targets) == 1 {
+			lastTarget = targets[0].TargetW
+		}
+	}
+	// grid_w = -1000 (exporting); a correctly-recovered PI must command
+	// charge, not discharge. Pre-fix this test scenario would emit
+	// target ≤ 0 for ~3 min until natural integral drain.
+	if lastTarget <= 0 {
+		t.Errorf("after 6 cycles, target = %f W — controller still stuck in wrong direction (need positive charge command against -1000 W export)", lastTarget)
+	}
+}
+
 // ---- Dispatch tests ----
 
 // helper: build a store with one site meter + N batteries at given SoC

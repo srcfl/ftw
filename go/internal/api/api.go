@@ -1040,6 +1040,16 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		// battery manual hold so the new mode takes effect on the very
 		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
 		s.deps.Ctrl.ClearBatteryManualHold()
+		// Reset the PI integrator. The integral accumulated under the
+		// previous mode's error signal is meaningless to the new mode
+		// — keeping it caused integrator windup → wrong-direction stuck
+		// output across the 2026-05-24 evening mode switch (live
+		// regression: discharged the fleet to 7 % overnight while the
+		// PI integral was pinned in the wrong direction). Mode change
+		// is a discrete event; start the new regime from a clean PI.
+		if s.deps.Ctrl.PI != nil {
+			s.deps.Ctrl.PI.Reset()
+		}
 		s.deps.CtrlMu.Unlock()
 		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 			slog.Warn("failed to persist mode", "err", err)
