@@ -2687,6 +2687,95 @@ func TestInverterAffinity_IgnoresNonGeneratingPVTelemetry(t *testing.T) {
 
 // ---- PV curtailment ----
 
+// 2026-05-25 Ferroamp fault: 2.7 kW load step under 6 kW PV + 85 % SoC
+// triggered the inverter's internal DC-link protection. Operator opted
+// into DCLinkProtection to pre-curtail PV when SoC + surplus put the
+// inverter at risk. Verify the protection engages correctly in that
+// scenario.
+func TestProtectivePVCurtailEngagesAtHighSoCWithSurplus(t *testing.T) {
+	store := telemetry.NewStore()
+	// 6 kW PV producing
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	// Battery at 85 % SoC, online
+	soc := 0.85
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	// Site meter showing 5.5 kW export (load 500 W, 5.5 kW out)
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.DCLinkProtectionMarginW = 1000
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		// Planner asks for no curtail — protection fires anyway.
+		return SlotDirective{}, true
+	}
+
+	targets := ComputePVCurtail(st, store)
+	if len(targets) != 1 || targets[0].Driver != "ferroamp" {
+		t.Fatalf("want 1 target on ferroamp, got %+v", targets)
+	}
+	// Expected limit ≈ load (500) + margin (1000) = 1500 W
+	if got := targets[0].LimitW; math.Abs(got-1500) > 50 {
+		t.Errorf("protective curtail limit = %f, want ≈ 1500", got)
+	}
+}
+
+func TestProtectivePVCurtailSkipsBelowSoCThreshold(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	soc := 0.50 // below threshold
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, true }
+
+	if got := ComputePVCurtail(st, store); len(got) != 0 {
+		t.Errorf("protection should not fire below SoC threshold, got %+v", got)
+	}
+}
+
+// Protection must NOT relax a tighter manual hold. If the operator
+// pinned a 500 W cap and protection would suggest 1500 W, the cap
+// wins. (We test against a manual hold rather than the planner
+// directive because liveCurtailLimitW already re-derives the planner
+// limit from live state, which makes the planner path's "is the limit
+// 500?" question opaque to a unit test.)
+func TestProtectivePVCurtailNeverRelaxesManualHold(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	soc := 0.85
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.DCLinkProtectionMarginW = 1000
+	// Site-wide operator hold at 500 W (tighter than protection's 1500).
+	st.SetPVManualHold(PVManualHold{LimitW: 500, ExpiresAt: time.Now().Add(time.Hour)})
+
+	targets := ComputePVCurtail(st, store)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %+v", targets)
+	}
+	if got := targets[0].LimitW; got > 600 {
+		t.Errorf("manual hold's 500 W cap got relaxed by protection to %f", got)
+	}
+}
+
 func TestPVCurtailAllocatesOnlinePVDrivers(t *testing.T) {
 	store := telemetry.NewStore()
 	store.Update("pv-a", telemetry.DerPV, -3000, nil, nil)

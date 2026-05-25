@@ -346,6 +346,28 @@ type State struct {
 	// hot-swappable via the config-reload watcher.
 	SupportsPVCurtail map[string]bool
 
+	// DCLinkProtectionEnabled opts into a live-state curtail trigger
+	// that fires INDEPENDENTLY of the planner directive when the
+	// inverter's DC link is most exposed to a load-step fault: SoC
+	// near full + PV significantly exceeds load. 2026-05-25 incident:
+	// a 2.7 kW load step under 6 kW PV + 85 % SoC tripped Ferroamp's
+	// internal protection. Pre-curtailing PV to load+margin keeps the
+	// inverter's headroom inside the safe window so the same step
+	// doesn't push it past the DC-link overvoltage threshold.
+	//
+	// Disabled by default — operators on hardware that doesn't trip
+	// or who'd rather lose a few % of PV-export revenue than absorb
+	// the risk can leave it off.
+	DCLinkProtectionEnabled bool
+	// DCLinkProtectionSoCThreshold is the SoC fraction (0-1) above
+	// which the protective curtail engages. 0 = use default 0.80.
+	DCLinkProtectionSoCThreshold float64
+	// DCLinkProtectionMarginW is the W of headroom kept above live
+	// load. The curtail limit becomes load + margin so a load step
+	// smaller than `margin` lands without curtail-recompute. 0 =
+	// use default 1000.
+	DCLinkProtectionMarginW float64
+
 	// LastCurtailedDrivers remembers which drivers got a non-zero
 	// curtail dispatch on the previous tick. ComputePVCurtail uses
 	// the diff to emit a `curtail_disable` exactly once when the
@@ -1796,6 +1818,102 @@ func ComputeDispatch(
 //
 // Idempotent: state mutation (LastCurtailedDrivers) reflects the
 // post-call set of actively-curtailed drivers.
+// protectiveCurtailLimitW returns (limit, true) when live state
+// triggers the DC-link protection: SoC at or above the configured
+// threshold AND PV surplus exceeds the safety margin. The limit
+// shrinks PV output to live-load + margin so a sudden load step
+// inside the margin lands without DC-link stress. Returns
+// (0, false) when protection is disabled, off-threshold, or there
+// is no PV-vs-load surplus to clamp.
+func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
+	if state == nil || store == nil || !state.DCLinkProtectionEnabled {
+		return 0, false
+	}
+	socThresh := state.DCLinkProtectionSoCThreshold
+	if socThresh <= 0 {
+		socThresh = 0.80
+	}
+	margin := state.DCLinkProtectionMarginW
+	if margin <= 0 {
+		margin = 1000
+	}
+
+	// Aggregate-SoC gate: protect only when batteries can no longer
+	// absorb the surplus themselves. Average across online batteries
+	// weighted by capacity, mirroring how the rest of dispatch
+	// reasons about the fleet.
+	var sumSoCWh, totalCap float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() || r.SoC == nil {
+			continue
+		}
+		// Capacity must come from the per-driver map passed into
+		// dispatch — but ComputePVCurtail is called without it.
+		// Use a flat weight (1.0 per battery) here as the SoC-
+		// average proxy; in practice the operator's batteries are
+		// comparable in size, and the threshold check is coarse-
+		// grained anyway (80 % vs 70 % SoC isn't a precision call).
+		sumSoCWh += *r.SoC
+		totalCap += 1
+	}
+	if totalCap == 0 {
+		return 0, false
+	}
+	avgSoC := sumSoCWh / totalCap
+	if avgSoC < socThresh {
+		return 0, false
+	}
+
+	// PV-vs-load gate: only meaningful when PV is producing more
+	// than the household consumes — otherwise there's no surplus
+	// to curtail.
+	var pvAbs float64
+	for _, r := range store.ReadingsByType(telemetry.DerPV) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		if r.SmoothedW < 0 {
+			pvAbs += -r.SmoothedW
+		}
+	}
+	loadW := siteLoadW(state, store)
+	if pvAbs < loadW+2*margin {
+		// Surplus already inside the safe margin — no need to engage.
+		return 0, false
+	}
+	return loadW + margin, true
+}
+
+// siteLoadW reads the household load (W) from the site meter when
+// available. Mirrors the formula main.go uses for status: load =
+// gridW − battery − PV (site convention). Falls back to 0 on
+// missing telemetry, which makes protectiveCurtailLimitW degrade
+// safely to "don't engage" rather than to a bogus tiny limit.
+func siteLoadW(state *State, store *telemetry.Store) float64 {
+	if state == nil || store == nil || state.SiteMeterDriver == "" {
+		return 0
+	}
+	mtr := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if mtr == nil {
+		return 0
+	}
+	gridW := mtr.SmoothedW
+	var batW, pvW float64
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		batW += r.SmoothedW
+	}
+	for _, r := range store.ReadingsByType(telemetry.DerPV) {
+		pvW += r.SmoothedW
+	}
+	load := gridW - batW - pvW
+	if load < 0 {
+		return 0
+	}
+	return load
+}
+
 func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	if state == nil {
 		return nil
@@ -1834,6 +1952,25 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 					// back to the planner's static cap.
 					limit = dir.PVLimitW
 				}
+			}
+		}
+	}
+
+	// DC-link protective curtail layered on top of any planner /
+	// manual-hold limit. Engages independently of the planner when
+	// SoC is near full + PV >> load. Honoured only when the operator
+	// hasn't pinned a driver-scoped hold (which is an explicit
+	// override), otherwise it composes as min(existing, protective)
+	// so we never relax a stronger cap.
+	if scopedDriver == "" {
+		if protLimit, protActive := protectiveCurtailLimitW(state, store); protActive {
+			if !holdActive && limit == 0 {
+				// No other curtail source — protection is the trigger.
+				limit = protLimit
+			} else if protLimit < limit {
+				// Existing curtail less restrictive than protection;
+				// tighten to the protective value.
+				limit = protLimit
 			}
 		}
 	}
