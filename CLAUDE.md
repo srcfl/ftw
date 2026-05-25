@@ -56,6 +56,9 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
 | `go/internal/nova` | Opt-in federation client to Sourceful Nova Core — ES256 identity, JWT signer, HTTP client (claim + provision), clean telemetry payload + boundary adapter, MQTT publisher |
 | `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |
+| `go/cmd/ftw-pair` | MCP sidecar — host side of the pair flow (`docs/ftw-pair.md`) |
+| `go/cmd/ftw-connect` | Friend-side CLI for joining a pair session |
+| `go/internal/wormhole` | fowld subprocess wrapper — wormhole TCP transport for `ftw-pair` |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
