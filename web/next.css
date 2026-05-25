@@ -954,6 +954,79 @@ body.ftw-next .chart-container {
   border: none;
   padding: 4px 0 0;
 }
+
+/* Compact variant for the secondary chart stacks (Live's 24 h battery
+ * + SoC strip below the main power chart). Plays the same role as the
+ * Plan card's battery/SoC sub-charts: same vertical footprint, same
+ * border treatment, so the two cards are visually balanced. */
+body.ftw-next .chart-container-compact {
+  padding: 0;
+}
+
+/* Live stats strip — five tile-style values inline between the chart
+ * header and the chart canvas. Mono-typed and grid-aligned so an
+ * operator's eye can scan them at a glance, mirroring the Plan card's
+ * summary line directly above its own charts. */
+body.ftw-next .live-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+body.ftw-next .live-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+body.ftw-next .live-stat-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+body.ftw-next .live-stat-value {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+body.ftw-next .live-stat-value.is-import   { color: var(--red-e); }
+body.ftw-next .live-stat-value.is-export   { color: var(--green-e); }
+body.ftw-next .live-stat-value.is-charging { color: var(--accent-e); }
+body.ftw-next .live-stat-value.is-discharging { color: var(--blue-e, #60a5fa); }
+body.ftw-next .live-stat-value.is-neutral { color: var(--fg-dim); }
+
+/* 24 h battery + SoC history block — sits below the live power chart.
+ * Section label matches the Plan card's chart-section labels. */
+body.ftw-next .live-history {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+body.ftw-next .live-history-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+@media (max-width: 720px) {
+  body.ftw-next .live-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  body.ftw-next .live-stat:nth-child(n + 4) {
+    grid-column: span 1;
+  }
+}
 body.ftw-next .range-buttons button {
   /* Ghost secondary per DESIGN.md: transparent bg, --line border,
      --fg text. Theme-aware so the buttons keep their chrome on both

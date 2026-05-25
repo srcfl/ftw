@@ -313,6 +313,34 @@
             </div>
           </div>
         </div>
+
+        <!-- Live stats strip — mirrors the Plan card's summary line so
+             the two cards have matching information density. Five
+             current values, mono-typed for at-a-glance scanning. JS
+             populates these on every /api/status poll. -->
+        <div class="live-stats" id="live-stats">
+          <div class="live-stat" data-key="grid">
+            <span class="live-stat-label">GRID</span>
+            <span class="live-stat-value" id="live-stat-grid">—</span>
+          </div>
+          <div class="live-stat" data-key="pv">
+            <span class="live-stat-label">PV</span>
+            <span class="live-stat-value" id="live-stat-pv">—</span>
+          </div>
+          <div class="live-stat" data-key="load">
+            <span class="live-stat-label">LOAD</span>
+            <span class="live-stat-value" id="live-stat-load">—</span>
+          </div>
+          <div class="live-stat" data-key="bat">
+            <span class="live-stat-label">BATTERY</span>
+            <span class="live-stat-value" id="live-stat-bat">—</span>
+          </div>
+          <div class="live-stat" data-key="soc">
+            <span class="live-stat-label">SoC</span>
+            <span class="live-stat-value" id="live-stat-soc">—</span>
+          </div>
+        </div>
+
         <div class="chart-container">
           <canvas id="power-chart" width="800" height="260"></canvas>
         </div>
@@ -325,6 +353,20 @@
           <!-- Battery driver legend items are appended dynamically by app.js
                as each battery-capable driver appears in /api/status. -->
         </div>
+
+        <!-- 24h battery + SoC stack — mirrors the Plan card's lower
+             charts. Battery-action bars show the last 24 h of
+             actual charge/discharge; SoC strip plots the trajectory.
+             Renders from /api/history every poll. Self-contained
+             canvas so it can be hidden / collapsed without touching
+             the live power chart's render path. -->
+        <div class="live-history">
+          <div class="live-history-label">LAST 24 H · BATTERY + SoC</div>
+          <div class="chart-container chart-container-compact">
+            <canvas id="live-history-chart" width="800" height="140"></canvas>
+          </div>
+        </div>
+
         <!-- Hidden view toggle kept for app.js compatibility -->
         <div id="view-buttons" style="display:none">
           <button data-view="power" class="active"></button>
