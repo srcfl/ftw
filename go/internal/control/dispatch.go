@@ -861,7 +861,22 @@ func ComputeDispatch(
 		if state.UseEnergyDispatch && state.SlotDirective != nil {
 			if dir, ok := state.SlotDirective(time.Now()); ok {
 				currentDirective = dir
-				useEnergyPath = true
+				// planner_passive_arbitrage idle slots: skip the energy path and
+				// fall through to reactive PI (same as planner_self does always).
+				// When the plan slot is idle (BatteryEnergyWh ≈ 0), the energy
+				// formula produces targetTotalW=0 and cannot react to live
+				// conditions — a PV forecast miss leaves the site importing while
+				// the battery sits at 0 W. The reactive PI path handles this
+				// correctly, and planHasNonDischargeIntent (below) permits
+				// discharge for non-charge passive_arbitrage slots.
+				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
+				// path so the DP's deliberate grid-charge intent is honoured.
+				const idleWhGate = 50.0
+				isPassiveArbitrageIdleSlot := state.Mode == ModePlannerPassiveArbitrage &&
+					dir.BatteryEnergyWh <= idleWhGate
+				if !isPassiveArbitrageIdleSlot {
+					useEnergyPath = true
+				}
 				// Distribution mode is decoupled from planner strategy in
 				// the energy path — the operator-selected strategy drives
 				// the plan's DP, distribution is always proportional across
@@ -2365,14 +2380,26 @@ func planHasNonDischargeIntent(state *State) bool {
 	// importing 500 W — the symptom the operator hit on v0.79.5
 	// before this carve-out.
 	//
-	// planner_passive_arbitrage is intentionally NOT in the carve-out.
-	// Its contract differs from planner_self: it CAN grid-charge when
-	// the DP picked cheap hours for refilling, so a plan slot of
-	// "charge X Wh" is realisable intent (not just a forecast that
-	// happened to land positive). Overriding it with reactive
-	// discharge would undo the deliberate grid-charge decision.
-	// Operators who want strict "never grid-charge regardless of
-	// price" should keep planner_self.
+	// planner_passive_arbitrage was previously NOT in the carve-out to
+	// protect deliberate grid-charge decisions: when the DP picks cheap
+	// hours for refilling, a plan slot of "charge X Wh" is realisable
+	// intent (not just a forecast that happened to land positive), and
+	// overriding it with reactive discharge would undo that decision.
+	// Operators who want strict "never grid-charge regardless of price"
+	// should keep planner_self.
+	//
+	// However, that rationale only applies when the plan slot's intent
+	// is to charge. When the slot is idle (battery_w ≈ 0, e.g. "export
+	// the PV surplus") there is no protected charge decision — reactive
+	// discharge is safe and correct. Without the carve-out for idle
+	// slots, a forecast miss (PV overestimated, load underestimated)
+	// leaves the site importing while batteries sit at 0 W. Found in
+	// production v0.87.0: PV forecast off by 7×, plan idle, site
+	// imported 648 W continuously through the slot.
+	//
+	// Fix: planner_passive_arbitrage now participates in the carve-out
+	// for non-charge slots (BatteryEnergyWh ≤ idleWh). Charge slots
+	// remain authoritative — their non-discharge block is preserved.
 	if state.Mode == ModePlannerSelf {
 		return false
 	}
@@ -2380,6 +2407,12 @@ func planHasNonDischargeIntent(state *State) bool {
 	const idleGridW = 100.0
 	if state.SlotDirective != nil {
 		if dir, ok := state.SlotDirective(time.Now()); ok {
+			// For passive_arbitrage: only block reactive discharge when the
+			// plan slot has explicit charge intent. Idle and discharge slots
+			// get no non-discharge block — reactive discharge may cover load.
+			if state.Mode == ModePlannerPassiveArbitrage {
+				return dir.BatteryEnergyWh > idleWh
+			}
 			return dir.BatteryEnergyWh >= -idleWh
 		}
 	}
@@ -2389,6 +2422,13 @@ func planHasNonDischargeIntent(state *State) bool {
 			case ModeCharge:
 				return true
 			case ModeSelfConsumption:
+				// passive_arbitrage on a self_consumption slot: only block
+				// reactive discharge when the plan's grid target is
+				// import-directed (i.e. a deliberate grid-charge). Idle
+				// export slots (gridW near zero or negative) are free.
+				if state.Mode == ModePlannerPassiveArbitrage {
+					return gridW > idleGridW
+				}
 				return gridW >= -idleGridW
 			}
 		}

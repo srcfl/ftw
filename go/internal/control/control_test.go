@@ -4381,3 +4381,90 @@ func TestPVSurplusAbsorberDoesNotReverseDischarge(t *testing.T) {
 		t.Errorf("TargetW = %.0f W — absorber must not blunt a discharge plan (want ≈ -4000 W)", got)
 	}
 }
+
+// Regression guard for the production v0.87.0 incident: PV forecast was off
+// by 7×, plan said battery idle (export the imaginary PV surplus), batteries
+// sat at 0 W while the site imported 648 W. The carve-out was only in
+// planner_self so passive_arbitrage didn't benefit.
+//
+// Fix: passive_arbitrage now participates in the reactive-discharge carve-out
+// when the plan slot is idle (non-charge). The battery should discharge to
+// cover the live import just as planner_self would.
+func TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle — plan expected PV export, battery hands-off
+		Strategy:        "self_consumption",
+	}
+	// Live: meter is importing 600 W — PV massively undershot forecast.
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000 // unbounded for single-tick test
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Reactive PI on grid=+600 W with Kp=0.5 yields ~-300 W discharge
+	// after one tick. The key assertion is that the battery discharged at
+	// all — before the fix planHasNonDischargeIntent returned true and
+	// floored the target to 0.
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage idle slot must discharge reactively when meter imports (forecast miss). Before fix: target was floored to 0.", got)
+	}
+}
+
+// When the plan slot for passive_arbitrage is a deliberate CHARGE slot
+// (e.g. the DP picked cheap grid hours to refill), live grid import is
+// expected — that's what grid-charging looks like. The carve-out must NOT
+// apply here: the charge command is the authoritative intent and reactive
+// discharge would undo it.
+func TestPlannerPassiveArbitrageChargeSlotPreservedAgainstReactiveDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1000, // deliberate grid-charge: ~4 kW over the slot
+		Strategy:        "arbitrage",
+	}
+	// Live: meter importing 600 W. In a charge slot this is expected and
+	// intentional (grid → battery). Battery is currently at 0 W.
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.4},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy-dispatch path computes targetTotalW = 1000*3600/900 ≈ 4000 W
+	// charge. Reactive discharge must NOT override this. The non-discharge
+	// block (planHasNonDischargeIntent=true) should floor to 0 at minimum —
+	// but the energy path itself drives positive, so we just verify the
+	// battery is commanded to CHARGE, not discharge.
+	if got < 0 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage charge slot must NOT discharge reactively; the grid-charge plan must remain authoritative", got)
+	}
+}
