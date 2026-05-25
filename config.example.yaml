@@ -8,7 +8,8 @@ site:
   grid_tolerance_w: 42          # deadband (The Answer)
   watchdog_timeout_s: 60
   smoothing_alpha: 0.3
-  slew_rate_w: 500              # W per cycle (≈ 250 W/s at 2 s cycle)
+  slew_rate_w: 3000             # W per cycle. Both Ferroamp and Sungrow ramp internally — this is a soft ceiling, not the primary protection
+  # slew_enabled: false         # disable the external slew limiter entirely and trust the inverter's internal ramp control (experimental)
   min_dispatch_interval_s: 2    # debounce; keep == control_interval_s
 
 fuse:

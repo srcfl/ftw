@@ -121,6 +121,18 @@ func (w *Watcher) reload() {
 	if newCfg.Site.SlewRateW != oldCfg.Site.SlewRateW {
 		w.ctrl.SlewRateW = newCfg.Site.SlewRateW
 	}
+	newEnabled := true
+	if newCfg.Site.SlewEnabled != nil {
+		newEnabled = *newCfg.Site.SlewEnabled
+	}
+	oldEnabled := true
+	if oldCfg.Site.SlewEnabled != nil {
+		oldEnabled = *oldCfg.Site.SlewEnabled
+	}
+	if newEnabled != oldEnabled {
+		slog.Info("config reload: slew_enabled", "old", oldEnabled, "new", newEnabled)
+		w.ctrl.SlewEnabled = newEnabled
+	}
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		w.ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
