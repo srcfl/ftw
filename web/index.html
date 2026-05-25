@@ -284,34 +284,15 @@
       <ftw-savings-card default-range="week"></ftw-savings-card>
     </section>
 
-    <!-- Controls — two-tier: primary strategy + manual advanced -->
-    <section class="controls-row">
-      <div class="card control-card control-strategy">
-        <div class="card-label">Strategy</div>
-        <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
-          <button data-mode="planner_passive_arbitrage" title="Charge from the cheapest available source (PV when sunny, grid during cheap hours). Never exports from battery.">Passive arbitrage</button>
-          <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours (battery may export to grid).">Active arbitrage</button>
-          <button data-mode="planner_self" title="Legacy: smart self-consumption (no grid-charge). Superseded by Passive arbitrage in v0.82.">Smart SC (legacy)</button>
-          <button data-mode="planner_cheap" title="Legacy: cheap charging. Superseded by Passive arbitrage in v0.82.">Cheap charging (legacy)</button>
-        </div>
-        <div class="strategy-hint" id="strategy-hint"></div>
-        <div class="mode-advanced-toggle advanced-only">
-          <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
-        </div>
-        <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none">
-          <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
-          <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self (manual)</button>
-          <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
-          <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
-        </div>
-      </div>
-      <!-- Grid-side knobs (peak limit, grid target) live inside the
-           Grid bubble modal — click the GRID planet in the energy-flow
-           hero to open. EV-side knob ("Let battery cover EV") lives
-           inside the EV bubble modal. Inline cards removed; the modals
-           own the markup so the JS hooks (#peak-limit-slider, etc.)
-           still resolve. -->
-    </section>
+    <!-- Strategy now lives inside the Plan card header (below) — it's
+         the operator-facing control that drives plan behaviour, so
+         visually attaching it to the Plan removes the standalone
+         "controls row" that felt disconnected from what it controlled.
+         Grid-side knobs (peak limit, grid target) live inside the Grid
+         bubble modal — click the GRID planet in the energy-flow hero.
+         EV-side knob ("Let battery cover EV") lives inside the EV
+         bubble modal. -->
+
 
     <!-- Live power + plan side-by-side -->
     <section id="live-plan-row" class="live-plan-row">
@@ -372,6 +353,32 @@
               <button type="button" data-horizon="tomorrow">Tomorrow</button>
             </div>
             <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
+          </div>
+        </div>
+
+        <!-- Strategy — the operator-facing knob that drives plan
+             behaviour. Lives inside the Plan card because that's what
+             it controls; the standalone "controls row" above
+             previously felt disconnected (operator note 2026-05-25).
+             Two-tier: planner strategies first, manual fallbacks
+             behind a "Manual…" toggle. -->
+        <div class="plan-strategy">
+          <span class="card-label plan-strategy-label">Strategy</span>
+          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
+            <button data-mode="planner_passive_arbitrage" title="Charge from the cheapest available source (PV when sunny, grid during cheap hours). Never exports from battery.">Passive arbitrage</button>
+            <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours (battery may export to grid).">Active arbitrage</button>
+            <button data-mode="planner_self" title="Legacy: smart self-consumption (no grid-charge). Superseded by Passive arbitrage in v0.82.">Smart SC (legacy)</button>
+            <button data-mode="planner_cheap" title="Legacy: cheap charging. Superseded by Passive arbitrage in v0.82.">Cheap charging (legacy)</button>
+          </div>
+          <div class="strategy-hint" id="strategy-hint"></div>
+          <div class="mode-advanced-toggle advanced-only">
+            <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
+          </div>
+          <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none">
+            <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
+            <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self (manual)</button>
+            <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
+            <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
           </div>
         </div>
         <p class="plan-help">
