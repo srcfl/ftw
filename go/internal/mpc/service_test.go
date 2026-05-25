@@ -122,26 +122,28 @@ func TestUpperHalfMeanEmptyReturnsZero(t *testing.T) {
 
 // ---- Terminal SoC valuation ----
 
-func TestSelfConsumptionTerminalPriceIsImportMinusExport(t *testing.T) {
-	// Retail 300 öre/kWh, spot 80 öre/kWh, bonus 60, fee 6.
-	// Per slot: export rate = 80 + 60 − 6 = 134. Spread = 300 − 134 = 166.
+func TestSelfConsumptionTerminalPriceIsMeanImport(t *testing.T) {
+	// Retail 300 öre/kWh average across the horizon. Spot/bonus/fee are
+	// irrelevant in self-consumption mode (operator never sells stored
+	// energy, so the export side doesn't enter the value of a kept kWh).
 	prices := []state.PricePoint{
 		{SpotOreKwh: 80, TotalOreKwh: 300},
 		{SpotOreKwh: 80, TotalOreKwh: 300},
 	}
 	got := selfConsumptionTerminalPrice(prices, 60, 6)
-	if math.Abs(got-166) > 1e-9 {
-		t.Fatalf("terminal price = %f, want 166", got)
+	if math.Abs(got-300) > 1e-9 {
+		t.Fatalf("terminal price = %f, want 300 (mean import)", got)
 	}
 }
 
-func TestSelfConsumptionTerminalPriceClampsToZero(t *testing.T) {
-	// Export rate (spot+bonus−fee) > retail → spread would be negative.
-	// Must floor at 0 so we never actively credit draining the battery.
+func TestSelfConsumptionTerminalPriceIgnoresExportRate(t *testing.T) {
+	// Even when export rate (spot+bonus−fee) exceeds retail, the
+	// terminal value of stored SoC is still mean import — self-consumption
+	// mode never sells stored energy, so the export side is moot.
 	prices := []state.PricePoint{{SpotOreKwh: 500, TotalOreKwh: 100}}
 	got := selfConsumptionTerminalPrice(prices, 0, 0)
-	if got != 0 {
-		t.Fatalf("terminal price = %f, want 0", got)
+	if math.Abs(got-100) > 1e-9 {
+		t.Fatalf("terminal price = %f, want 100 (mean import) regardless of export rate", got)
 	}
 }
 

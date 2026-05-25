@@ -362,13 +362,15 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 // actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
 // The mapping from planner-mode + action to EMS mode:
 //   - self_consumption → always self_consumption with grid_target=0
-//   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
+//   - cheap_charge / passive_arbitrage → "charge" when the plan says
+//     charge, otherwise self_consumption (no battery-export branch —
+//     both modes forbid discharge past local load)
 //   - arbitrage → "charge" / "self_consumption" (with negative grid target for export) / self_consumption
 func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 	switch plannerMode {
 	case ModeSelfConsumption:
 		return "self_consumption", 0, true
-	case ModeCheapCharge:
+	case ModeCheapCharge, ModePassiveArbitrage:
 		if a.BatteryW > 100 {
 			return "charge", 0, true
 		}
@@ -675,7 +677,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if p.TerminalSoCPrice <= 0 {
 		terminalDefaulted = true
 		switch p.Mode {
-		case ModeSelfConsumption, ModeCheapCharge:
+		case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 		default:
@@ -727,7 +729,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// applies when we just defaulted above; an explicit caller-
 	// supplied TerminalSoCPrice is respected.
 	if terminalDefaulted && p.Loadpoint != nil && p.Loadpoint.SurplusOnly &&
-		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge {
+		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge && p.Mode != ModePassiveArbitrage {
 		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 	}
@@ -955,34 +957,38 @@ const (
 )
 
 // selfConsumptionTerminalPrice is the per-kWh öre value of leftover SoC at
-// the end of the horizon, for the modes where the battery cannot export.
-// Equals the mean retail-import price minus the mean export price
-// (spot + bonus − fee, floored at 0). That's what one kWh in the battery
-// actually earns you: it displaces one kWh of future retail import
-// instead of one kWh that would otherwise have been exported.
+// the end of the horizon, for self-consumption mode. Returns the mean
+// retail-import price across the horizon — matching the mpc/CLAUDE.md
+// design intent: "every kWh kept in the battery at horizon end is worth
+// what it would have cost to import during a typical hour".
 //
-// Floored at 0 so we never credit SoC negatively; if export rates exceed
-// retail (rare, subsidy edge cases) the planner in these modes should just
-// stay SoC-neutral rather than actively drain.
+// The prior implementation returned mean(import) − mean(export) — the
+// arbitrage spread. That understates self-consumption value by ~2× on
+// realistic SE retail tariffs (210 öre/kWh import, 100 öre/kWh export;
+// spread = 110 öre, mean import = 210 öre). On 2026-05-25 the
+// understatement let the DP pick "idle — export PV surplus" over
+// "charge from PV" by a 1-öre margin in a slot where SoC was 7.5 %
+// (below operator floor) and 4 kW of PV surplus was available.
+//
+// Grid-charging is not encouraged by the larger terminal credit
+// because mpc.go's strict self-consumption bias (line 583) triples the
+// cost of HOUSE-driven grid import — including the implicit import
+// required to grid-charge. PV-fed charging stays free and dominates.
+//
+// bonus/fee are accepted for signature compatibility with the arbitrage
+// path; they don't enter the self-consumption value because the
+// operator never sells stored energy in this mode.
 func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64) float64 {
+	_ = bonus
+	_ = fee
 	if len(prices) == 0 {
 		return 0
 	}
-	var importSum, exportSum float64
+	var importSum float64
 	for _, pr := range prices {
 		importSum += pr.TotalOreKwh
-		exp := pr.SpotOreKwh + bonus - fee
-		if exp < 0 {
-			exp = 0
-		}
-		exportSum += exp
 	}
-	n := float64(len(prices))
-	spread := (importSum - exportSum) / n
-	if spread < 0 {
-		spread = 0
-	}
-	return spread
+	return importSum / float64(len(prices))
 }
 
 // upperHalfMeanPrice returns the arithmetic mean of the upper half of

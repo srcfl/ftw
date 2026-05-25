@@ -141,9 +141,8 @@
       <div class="card control-card control-strategy">
         <div class="card-label">Strategy</div>
         <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
-          <button data-mode="planner_self" title="Smart self-consumption with forecast-aware grid-zero control — never grid-charge, never battery-export">Smart self-consumption (planner)</button>
-          <button data-mode="planner_cheap" title="Plan charges batteries when grid prices are low (still never exports via battery)">Cheap charging</button>
-          <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours">Arbitrage</button>
+          <button data-mode="planner_passive_arbitrage" title="Charge from the cheapest available source (PV when sunny, grid during cheap hours). Never exports from battery.">Passive arbitrage</button>
+          <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours (battery may export to grid).">Active arbitrage</button>
         </div>
         <div class="strategy-hint" id="strategy-hint"></div>
         <div class="mode-advanced-toggle advanced-only">

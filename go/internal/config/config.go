@@ -256,6 +256,22 @@ type Planner struct {
 	IntervalMin         int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
 	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
 	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+
+	// SoCSafetyFloorPct is the operational floor above the hardware
+	// SoCMinPct. When SoC is below this AND a slot has PV surplus,
+	// the planner prefers charging up immediately rather than
+	// deferring to peak-PV hours. Gated on PV-surplus so it cannot
+	// motivate grid-charging in self-consumption mode. Defaults to
+	// 25 % when unset; set to 0 to disable.
+	SoCSafetyFloorPct float64 `yaml:"soc_safety_floor_pct,omitempty" json:"soc_safety_floor_pct,omitempty"`
+
+	// SafetyFloorPenaltyOreKwhHour is the cost per (kWh of deficit
+	// below SoCSafetyFloorPct × hour) added to slot cost when PV
+	// surplus is available. Defaults to 100 öre/kWh-hour; set to 0
+	// to disable the safety-floor mechanism while keeping a non-zero
+	// floor value visible to operators.
+	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
+
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
