@@ -122,6 +122,9 @@ func restoreModel(js string, peakW float64, profile Profile) (*Model, bool) {
 	if m.PriorScale <= 0 {
 		m.PriorScale = newProfileModel(peakW, profile).PriorScale
 	}
+	// Repair any bucket means that were poisoned by the pre-guard bug where
+	// heating-subtracted samples were clamped to 0 and stored in the EMA.
+	m.repairPoisonedBuckets()
 	return &m, true
 }
 
