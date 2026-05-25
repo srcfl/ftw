@@ -47,9 +47,11 @@ type DiagnosticSlot struct {
 type DiagnosticParams struct {
 	Mode                Mode     `json:"mode"`
 	InitialSoCPct       float64  `json:"initial_soc_pct"`
-	SoCMinPct           float64  `json:"soc_min_pct"`
-	SoCMaxPct           float64  `json:"soc_max_pct"`
-	SoCLevels           int      `json:"soc_levels"`
+	SoCMinPct                    float64 `json:"soc_min_pct"`
+	SoCMaxPct                    float64 `json:"soc_max_pct"`
+	SoCSafetyFloorPct            float64 `json:"soc_safety_floor_pct,omitempty"`
+	SafetyFloorPenaltyOreKwhHour float64 `json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
+	SoCLevels                    int     `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
 	MaxChargeW          float64  `json:"max_charge_w"`
 	MaxDischargeW       float64  `json:"max_discharge_w"`
@@ -148,21 +150,23 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		Horizon:      plan.HorizonSlots,
 		TotalCostOre: plan.TotalCostOre,
 		Params: DiagnosticParams{
-			Mode:                p.Mode,
-			InitialSoCPct:       p.InitialSoCPct,
-			SoCMinPct:           p.SoCMinPct,
-			SoCMaxPct:           p.SoCMaxPct,
-			SoCLevels:           p.SoCLevels,
-			ActionLevels:        p.ActionLevels,
-			MaxChargeW:          p.MaxChargeW,
-			MaxDischargeW:       p.MaxDischargeW,
-			ChargeEfficiency:    p.ChargeEfficiency,
-			DischargeEfficiency: p.DischargeEfficiency,
-			CapacityWh:          p.CapacityWh,
-			TerminalSoCPrice:    p.TerminalSoCPrice,
-			ExportBonusOreKwh:   p.ExportBonusOreKwh,
-			ExportFeeOreKwh:     p.ExportFeeOreKwh,
-			ExportFloorOreKwh:   p.ExportFloorOreKwh,
+			Mode:                         p.Mode,
+			InitialSoCPct:                p.InitialSoCPct,
+			SoCMinPct:                    p.SoCMinPct,
+			SoCMaxPct:                    p.SoCMaxPct,
+			SoCSafetyFloorPct:            p.SoCSafetyFloorPct,
+			SafetyFloorPenaltyOreKwhHour: p.SafetyFloorPenaltyOreKwhHour,
+			SoCLevels:                    p.SoCLevels,
+			ActionLevels:                 p.ActionLevels,
+			MaxChargeW:                   p.MaxChargeW,
+			MaxDischargeW:                p.MaxDischargeW,
+			ChargeEfficiency:             p.ChargeEfficiency,
+			DischargeEfficiency:          p.DischargeEfficiency,
+			CapacityWh:                   p.CapacityWh,
+			TerminalSoCPrice:             p.TerminalSoCPrice,
+			ExportBonusOreKwh:            p.ExportBonusOreKwh,
+			ExportFeeOreKwh:              p.ExportFeeOreKwh,
+			ExportFloorOreKwh:            p.ExportFloorOreKwh,
 		},
 		LoadpointID:    loadpointID,
 		Slots:          out,
@@ -241,21 +245,23 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		replanAtMs = generatedAtMs
 	}
 	params := Params{
-		Mode:                d.Params.Mode,
-		InitialSoCPct:       d.Params.InitialSoCPct,
-		SoCMinPct:           d.Params.SoCMinPct,
-		SoCMaxPct:           d.Params.SoCMaxPct,
-		SoCLevels:           d.Params.SoCLevels,
-		ActionLevels:        d.Params.ActionLevels,
-		MaxChargeW:          d.Params.MaxChargeW,
-		MaxDischargeW:       d.Params.MaxDischargeW,
-		ChargeEfficiency:    d.Params.ChargeEfficiency,
-		DischargeEfficiency: d.Params.DischargeEfficiency,
-		CapacityWh:          d.Params.CapacityWh,
-		TerminalSoCPrice:    d.Params.TerminalSoCPrice,
-		ExportBonusOreKwh:   d.Params.ExportBonusOreKwh,
-		ExportFeeOreKwh:     d.Params.ExportFeeOreKwh,
-		ExportFloorOreKwh:   d.Params.ExportFloorOreKwh,
+		Mode:                         d.Params.Mode,
+		InitialSoCPct:                d.Params.InitialSoCPct,
+		SoCMinPct:                    d.Params.SoCMinPct,
+		SoCMaxPct:                    d.Params.SoCMaxPct,
+		SoCSafetyFloorPct:            d.Params.SoCSafetyFloorPct,
+		SafetyFloorPenaltyOreKwhHour: d.Params.SafetyFloorPenaltyOreKwhHour,
+		SoCLevels:                    d.Params.SoCLevels,
+		ActionLevels:                 d.Params.ActionLevels,
+		MaxChargeW:                   d.Params.MaxChargeW,
+		MaxDischargeW:                d.Params.MaxDischargeW,
+		ChargeEfficiency:             d.Params.ChargeEfficiency,
+		DischargeEfficiency:          d.Params.DischargeEfficiency,
+		CapacityWh:                   d.Params.CapacityWh,
+		TerminalSoCPrice:             d.Params.TerminalSoCPrice,
+		ExportBonusOreKwh:            d.Params.ExportBonusOreKwh,
+		ExportFeeOreKwh:              d.Params.ExportFeeOreKwh,
+		ExportFloorOreKwh:            d.Params.ExportFloorOreKwh,
 	}
 	if params.Mode == "" {
 		params.Mode = ModeSelfConsumption

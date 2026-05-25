@@ -83,6 +83,82 @@ func TestSelfConsumptionAbsorbsPVSurplus(t *testing.T) {
 	}
 }
 
+// 2026-05-25 morning regression: with SoC below the operational safety
+// floor and PV surplus available NOW, the planner used to defer
+// charging to peak-PV hours because terminal credit alone gave only a
+// marginal preference for charging. Operator's mental model and risk
+// management both want "fill the battery NOW while sun is shining".
+//
+// With SoCSafetyFloorPct + SafetyFloorPenaltyOreKwhHour, the DP gets a
+// per-slot penalty for every kWh-hour the SoC ends below the floor on
+// a PV-surplus slot — so deferring to a later slot costs strictly more
+// than charging in slot 0.
+func TestSelfConsumptionSafetyFloorChargesEarlyWhenBelowFloor(t *testing.T) {
+	// 12 slots × 15 min = 3 hours. PV surplus throughout (PV 5 kW,
+	// load 500 W → 4.5 kW surplus). Without the safety floor, DP
+	// would defer charging until peak-PV slot; with it, DP must
+	// charge in slot 0.
+	slots := make([]Slot, 12)
+	for i := range slots {
+		slots[i] = Slot{
+			StartMs:    int64(i) * 15 * 60 * 1000,
+			LenMin:     15,
+			PriceOre:   200,
+			SpotOre:    20,
+			LoadW:      500,
+			PVW:        -5000,
+			Confidence: 1,
+		}
+	}
+	p := baseParams(ModeSelfConsumption)
+	p.InitialSoCPct = 10 // at hardware floor — needs to recover
+	p.SoCSafetyFloorPct = 25
+	p.SafetyFloorPenaltyOreKwhHour = 100
+	p.TerminalSoCPrice = 200 // matches the post-fix mean-import behaviour
+
+	plan := Optimize(slots, p)
+	if plan.Actions[0].BatteryW <= 0 {
+		t.Errorf("safety-floor active and SoC=10%% (below 25%% floor): slot 0 should charge, got %f W", plan.Actions[0].BatteryW)
+	}
+	// SoC must climb out of deficit fast — within ~3 slots.
+	if plan.Actions[2].SoCPct < p.SoCSafetyFloorPct-1 {
+		t.Errorf("after 3 slots of PV-surplus charging, SoC = %f%%; safety floor = %f%%",
+			plan.Actions[2].SoCPct, p.SoCSafetyFloorPct)
+	}
+}
+
+// Safety floor must NOT motivate grid-charging when there's no PV
+// surplus. Operator's "never import" contract is non-negotiable —
+// safety is a soft target, the floor is hard physics.
+func TestSelfConsumptionSafetyFloorDoesNotGridCharge(t *testing.T) {
+	// All slots: load 1000 W, PV 0. No surplus, only import covers
+	// the load. DP must NOT charge the battery even though SoC is
+	// below the safety floor; safety penalty is gated on PV surplus.
+	slots := make([]Slot, 8)
+	for i := range slots {
+		slots[i] = Slot{
+			StartMs:    int64(i) * 15 * 60 * 1000,
+			LenMin:     15,
+			PriceOre:   30, // cheap night
+			SpotOre:    5,
+			LoadW:      1000,
+			PVW:        0,
+			Confidence: 1,
+		}
+	}
+	p := baseParams(ModeSelfConsumption)
+	p.InitialSoCPct = 10
+	p.SoCSafetyFloorPct = 25
+	p.SafetyFloorPenaltyOreKwhHour = 100
+
+	plan := Optimize(slots, p)
+	for i, a := range plan.Actions {
+		if a.BatteryW > 1 {
+			t.Errorf("slot %d: BatteryW = %f W — safety floor must not trigger grid-charge", i, a.BatteryW)
+		}
+	}
+}
+
 func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
 	// Operator report 2026-05-24: early positive export price, followed by
 	// stronger PV at negative spot. Smart self-consumption should preserve

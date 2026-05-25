@@ -2369,6 +2369,20 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if socMax <= 0 || socMax > 100 {
 		socMax = 95
 	}
+	socSafety := pl.SoCSafetyFloorPct
+	if socSafety <= 0 {
+		// Default: 25 % absolute. Operational floor above the
+		// hardware min, leaves buffer against forecast risk (cloud,
+		// load surprise). Set to 0 in config to disable.
+		socSafety = 25
+	}
+	if socSafety < socMin {
+		socSafety = socMin
+	}
+	safetyPenalty := pl.SafetyFloorPenaltyOreKwhHour
+	if safetyPenalty <= 0 {
+		safetyPenalty = 100
+	}
 	chgEff := pl.ChargeEfficiency
 	if chgEff <= 0 {
 		chgEff = 0.95
@@ -2378,12 +2392,14 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		disEff = 0.95
 	}
 	params := mpc.Params{
-		Mode:          mode,
-		SoCLevels:     41,
-		CapacityWh:    totalCap,
-		SoCMinPct:     socMin,
-		SoCMaxPct:     socMax,
-		InitialSoCPct: 50,
+		Mode:                         mode,
+		SoCLevels:                    41,
+		CapacityWh:                   totalCap,
+		SoCMinPct:                    socMin,
+		SoCMaxPct:                    socMax,
+		SoCSafetyFloorPct:            socSafety,
+		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
+		InitialSoCPct:                50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose
 		// borderline-PV slots: on a 273 W net surplus the 450 W min

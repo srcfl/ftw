@@ -99,9 +99,32 @@ type Params struct {
 	// SoC grid
 	SoCLevels     int     // e.g. 41 (2.5% steps)
 	CapacityWh    float64 // aggregate battery capacity
-	SoCMinPct     float64 // e.g. 10
+	SoCMinPct     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
 	SoCMaxPct     float64 // e.g. 95
 	InitialSoCPct float64
+
+	// SoCSafetyFloorPct is the OPERATIONAL floor: a soft target above
+	// the hardware SoCMinPct. The DP applies a per-slot penalty when
+	// SoC ends a slot below this value AND that slot has PV surplus
+	// (PV magnitude > load), so the planner spends free PV refilling
+	// the battery early rather than deferring to peak-PV hours.
+	//
+	// The penalty is gated on PV-surplus so it cannot incentivise
+	// grid-charging in self-consumption mode — without surplus the
+	// planner sees no penalty and follows the normal "never import"
+	// contract.
+	//
+	// 0 = disabled (no operational floor — backward compat).
+	SoCSafetyFloorPct float64
+
+	// SafetyFloorPenaltyOreKwhHour is the per-(kWh of deficit × hour)
+	// cost added when SoC ends a PV-surplus slot below SoCSafetyFloorPct.
+	// 0 = disabled. Default 100 öre/kWh-hour: large enough to dominate
+	// typical spot export prices (5-200 öre/kWh) so the DP prefers
+	// charging from PV; small enough that the planner doesn't try to
+	// recover safety floor by manipulating downstream slots in
+	// economically expensive ways.
+	SafetyFloorPenaltyOreKwhHour float64
 
 	// Action grid (+charge, −discharge; site sign)
 	ActionLevels  int     // odd number preferred so 0 is represented (e.g. 21)
@@ -585,6 +608,31 @@ func Optimize(slots []Slot, p Params) Plan {
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
 								cost += 2.0 * effPrice(slot) * houseKWh
+							}
+						}
+
+						// Safety-floor penalty: when SoC ends this slot
+						// below the operational floor AND PV surplus is
+						// available, charge it up. Gated on surplus so
+						// the penalty cannot ever motivate grid-charging
+						// — without surplus the DP sees no penalty and
+						// follows the normal "never import" contract.
+						//
+						// Operator rationale (2026-05-25): the hardware
+						// SoCMinPct is the chemistry safety floor; the
+						// operational floor SoCSafetyFloorPct is the
+						// buffer against forecast risk (cloud event,
+						// load surprise). DP would otherwise wait for
+						// peak-PV slots to refill, leaving the battery
+						// at hardware floor across early-day surplus
+						// hours.
+						if p.SoCSafetyFloorPct > 0 && p.SafetyFloorPenaltyOreKwhHour > 0 &&
+							battSoc2 < p.SoCSafetyFloorPct {
+							pvSurplusW := -slot.PVW - slot.LoadW
+							if pvSurplusW > 0 {
+								deficitPct := p.SoCSafetyFloorPct - battSoc2
+								deficitKwh := deficitPct / 100.0 * p.CapacityWh / 1000.0
+								cost += deficitKwh * dtH * p.SafetyFloorPenaltyOreKwhHour
 							}
 						}
 
