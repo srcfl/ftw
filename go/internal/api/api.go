@@ -1033,7 +1033,8 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	switch m {
 	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
 		control.ModeCharge, control.ModePriority, control.ModeWeighted,
-		control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
+		control.ModePlannerSelf, control.ModePlannerCheap,
+		control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
 		s.deps.CtrlMu.Lock()
 		s.deps.Ctrl.Mode = m
 		// An explicit mode change is a reset signal: drop any active
@@ -1063,6 +1064,8 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 				mm = mpc.ModeSelfConsumption
 			case control.ModePlannerCheap:
 				mm = mpc.ModeCheapCharge
+			case control.ModePlannerPassiveArbitrage:
+				mm = mpc.ModePassiveArbitrage
 			case control.ModePlannerArbitrage:
 				mm = mpc.ModeArbitrage
 			}

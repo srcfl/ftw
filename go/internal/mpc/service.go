@@ -362,13 +362,15 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 // actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
 // The mapping from planner-mode + action to EMS mode:
 //   - self_consumption → always self_consumption with grid_target=0
-//   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
+//   - cheap_charge / passive_arbitrage → "charge" when the plan says
+//     charge, otherwise self_consumption (no battery-export branch —
+//     both modes forbid discharge past local load)
 //   - arbitrage → "charge" / "self_consumption" (with negative grid target for export) / self_consumption
 func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 	switch plannerMode {
 	case ModeSelfConsumption:
 		return "self_consumption", 0, true
-	case ModeCheapCharge:
+	case ModeCheapCharge, ModePassiveArbitrage:
 		if a.BatteryW > 100 {
 			return "charge", 0, true
 		}
@@ -675,7 +677,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if p.TerminalSoCPrice <= 0 {
 		terminalDefaulted = true
 		switch p.Mode {
-		case ModeSelfConsumption, ModeCheapCharge:
+		case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 		default:
@@ -727,7 +729,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// applies when we just defaulted above; an explicit caller-
 	// supplied TerminalSoCPrice is respected.
 	if terminalDefaulted && p.Loadpoint != nil && p.Loadpoint.SurplusOnly &&
-		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge {
+		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge && p.Mode != ModePassiveArbitrage {
 		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 	}
