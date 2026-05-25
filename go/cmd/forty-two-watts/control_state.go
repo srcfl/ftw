@@ -11,6 +11,10 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 		ctrl.PI.Kp = cfg.Site.Gain
 	}
 	ctrl.SlewRateW = cfg.Site.SlewRateW
+	// applyDefaults() ensures SlewEnabled is non-nil at this point.
+	if cfg.Site.SlewEnabled != nil {
+		ctrl.SlewEnabled = *cfg.Site.SlewEnabled
+	}
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)

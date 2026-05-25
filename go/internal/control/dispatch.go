@@ -252,7 +252,12 @@ type State struct {
 	PI *PIController
 
 	// Slew + holdoff
-	SlewRateW            float64
+	SlewRateW float64
+	// SlewEnabled gates the per-cycle ramp limiter. Disabled = trust
+	// the inverter's internal ramp control entirely (commands jump to
+	// the PI's computed target). See Site.SlewEnabled in config for
+	// the operator-facing rationale.
+	SlewEnabled          bool
 	MinDispatchIntervalS int
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
@@ -681,6 +686,7 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 		EVChargingW:                    0,
 		PI:                             pi,
 		SlewRateW:                      500,
+		SlewEnabled:                    true,
 		MinDispatchIntervalS:           5,
 		PrevTargets:                    map[string]float64{},
 		UseCascade:                     true,
@@ -1600,6 +1606,14 @@ func ComputeDispatch(
 			(manualHoldActive && math.Abs(manualHold.PowerW) < 1)) &&
 			math.Abs(raw[i].TargetW) < 1 {
 			raw[i].TargetW = 0
+			continue
+		}
+		// Slew limiter is opt-out. Both inverter families ramp internally;
+		// disabling the external slew lets PI's computed target reach the
+		// inverter in one cycle, which the inverter then ramps at its own
+		// safe rate. Saves the windup-recovery delay we observed on
+		// 2026-05-25.
+		if !state.SlewEnabled {
 			continue
 		}
 		delta := raw[i].TargetW - anchor

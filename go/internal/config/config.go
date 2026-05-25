@@ -288,6 +288,20 @@ type Site struct {
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
 
+	// SlewEnabled gates the external per-cycle ramp limiter. Both
+	// supported inverter families (Ferroamp, Sungrow) have their own
+	// internal power-ramp control loops; the external slew was
+	// originally added to dampen reactive-PI oscillation under noisy
+	// meter sampling, but it also slows legitimate step-response and
+	// can interact badly with PI integrator state (the 2026-05-25
+	// recovery took ~3 min of slew-bounded ramping after the integral
+	// finally unwound).
+	//
+	// Pointer so we can distinguish "unset → default true" from
+	// "explicitly false". Defaults to enabled to preserve back-compat
+	// on existing installs.
+	SlewEnabled *bool `yaml:"slew_enabled,omitempty" json:"slew_enabled,omitempty"`
+
 	// PVSurplusAbsorbSoCCapPct enables the opt-in PV-surplus absorber
 	// underlay in the energy-dispatch path (planner_cheap /
 	// planner_arbitrage). When the planner's slot allocation would still
@@ -814,7 +828,17 @@ func applyDefaults(c *Config) {
 		c.Site.Gain = 0.5
 	}
 	if c.Site.SlewRateW == 0 {
-		c.Site.SlewRateW = 500
+		// 3000 W/cycle at the 2 s default control interval = 1500 W/s
+		// ramp ceiling. Both Ferroamp and Sungrow internal EMS loops
+		// ramp slower than this naturally (Sungrow spec: ~1000 W/s),
+		// so the external slew rarely fires under normal conditions
+		// but still bounds the post-windup recovery from snapping to
+		// full output in a single cycle.
+		c.Site.SlewRateW = 3000
+	}
+	if c.Site.SlewEnabled == nil {
+		t := true
+		c.Site.SlewEnabled = &t
 	}
 	if c.Site.MinDispatchIntervalS == 0 {
 		// Match control_interval_s. The holdoff exists to suppress
