@@ -2,43 +2,65 @@ package main
 
 import (
 	"context"
-	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestRestartMainServiceCallsSystemctl(t *testing.T) {
-	var got []string
-	r := &RestartMainServiceTool{run: func(ctx context.Context, args ...string) ([]byte, error) {
-		got = args
-		return []byte("ok"), nil
-	}}
-	if _, err := r.Handle(context.Background(), nil); err != nil {
-		t.Fatalf("handle: %v", err)
+func TestRestartMainServicePostsToAPI(t *testing.T) {
+	var hit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/version/restart" {
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		hit = true
+		w.WriteHeader(202)
+		w.Write([]byte(`{"status":"restarting"}`))
+	}))
+	defer srv.Close()
+
+	tool := NewRestartMainServiceTool(srv.URL)
+	out, err := tool.Handle(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Join(got, " ") != "systemctl restart forty-two-watts" {
-		t.Fatalf("unexpected args: %v", got)
+	if !hit {
+		t.Fatal("upstream not called")
+	}
+	if !out.(map[string]any)["ok"].(bool) {
+		t.Fatal("expected ok:true")
 	}
 }
 
 func TestRestartMainServiceSurfacesError(t *testing.T) {
-	r := &RestartMainServiceTool{run: func(context.Context, ...string) ([]byte, error) {
-		return []byte("permission denied"), errors.New("exit 1")
-	}}
-	if _, err := r.Handle(context.Background(), nil); err == nil {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		w.Write([]byte("boom"))
+	}))
+	defer srv.Close()
+
+	tool := NewRestartMainServiceTool(srv.URL)
+	if _, err := tool.Handle(context.Background(), nil); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
-func TestTailServiceLogsReadsJournalctl(t *testing.T) {
-	tl := &TailServiceLogsTool{run: func(ctx context.Context, args ...string) ([]byte, error) {
-		return []byte("Jan 01 00:00:00 host ftw[1]: started\n"), nil
-	}}
-	out, err := tl.Handle(context.Background(), map[string]any{"since": "10m"})
+func TestTailServiceLogsGETsAPI(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/logs" {
+			t.Fatalf("path: %s", r.URL.Path)
+		}
+		w.Write([]byte("Jan 01 00:00:00 host ftw[1]: started\n"))
+	}))
+	defer srv.Close()
+
+	tool := NewTailServiceLogsTool(srv.URL)
+	out, err := tool.Handle(context.Background(), map[string]any{"since": "10m"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.(map[string]any)["log"].(string), "started") {
-		t.Fatalf("expected log content")
+		t.Fatal("expected log content")
 	}
 }
