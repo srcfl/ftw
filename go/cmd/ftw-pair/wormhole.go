@@ -1,242 +1,464 @@
 // Package main — wormhole.go
 //
-// # Magic-wormhole TCP port-forward shim
+// # Magic-wormhole TCP forwarding via the fowld subprocess
 //
-// wormhole-william v1.0.8 implements only file/text/directory transfer; it has
-// no TCP port-forwarding primitive (no forward sub-package, no Tunnel API).
-// This file therefore implements TCP forwarding on top of the text-transfer API:
+// Wraps `fowld` (the daemon variant of the `fowl` tool) as a subprocess.
+// fowld communicates exclusively over stdin/stdout using newline-delimited JSON.
+// Each line in is a command; each line out is an event.
 //
-//  1. StartWormholeHost:
-//     - Binds a relay TCP listener on a random port (127.0.0.1:0).
-//     - Sends that listener address as a wormhole text message; the library
-//       allocates the human-shareable code and returns it.
-//     - Runs an accept loop: for every incoming relay connection, dials
-//       remoteAddr and bidirectionally copies bytes (io.Copy pair).
+// Why subprocess: the Go magic-wormhole port (wormhole-william v1.0.8) implements
+// only file/text/directory transfer; it has no Dilation extension required for
+// bidirectional TCP streaming. The Python `fowl` tool does. Subprocess-wrapping
+// keeps us on the canonical magic-wormhole stack without porting Dilation to Go.
 //
-//  2. ConnectWormholeClient:
-//     - Calls Client.Receive to claim the wormhole code and read the text
-//       payload (the relay address).
-//     - Binds a local listener on a random port (127.0.0.1:0); exposes that
-//       address as LocalAddr.
-//     - Runs an accept loop: for every local connection, dials the relay
-//       address and bidirectionally copies bytes.
+// Install fowl: pipx install fowl  (or: pip install fowl)
+// See docs/ftw-pair.md for the full setup guide.
 //
-// Net result: bytes written to WormholeClient.LocalAddr arrive at the
-// remoteAddr that was passed to StartWormholeHost, with a single relay hop
-// over the loopback interface on each machine.  The wormhole rendezvous server
-// is used only for the initial code-exchange handshake (text message); it
-// carries no application data.
+// # Protocol overview (fowld JSON)
+//
+// Commands sent to fowld via stdin (one JSON object per line):
+//
+//	{"kind": "allocate-code"}                                    → host: allocate a fresh PAKE code
+//	{"kind": "set-code", "code": "<code>"}                      → client: join an existing session
+//	{"kind": "danger-disable-permission-check"}                  → allow any forward target
+//	{"kind": "local", "listen": "tcp:P:interface=localhost",
+//	                  "connect": "tcp:localhost:Q"}              → listen on local :P, forward to remote :Q
+//
+// Events emitted by fowld on stdout (one JSON object per line):
+//
+//	{"kind": "welcome", ...}                                     → connected to rendezvous server
+//	{"kind": "code-allocated", "code": "<code>"}                 → PAKE code ready to share
+//	{"kind": "peer-connected", ...}                              → remote peer joined the session
+//	{"kind": "listening", "listen": "tcp:P:interface=localhost", → local port P is ready
+//	                       "connect": ..., "listener_id": ...}
+//	{"kind": "error", "message": "..."}                          → unrecoverable error
+//
+// # Shared code format
+//
+// The code shared between host and client is:
+//
+//	"<fowl-wormhole-code>:<mcp-port>"
+//
+// e.g. "7-spinach-atlas:9876". The fowl wormhole code alone is the standard
+// magic-wormhole PAKE handshake code. The appended ":<port>" tells the client
+// which TCP port to forward to on the host side.
+//
+// # Data-flow once connected
+//
+//	Client machine                    Host machine (Pi)
+//	──────────────────────────        ────────────────────────────
+//	  Claude / MCP client             ftw-pair sidecar
+//	      │                               │
+//	      ▼                               ▼
+//	  localhost:NNNN  ←── fowl Dilation ──→  localhost:MCP_PORT
+//	  (pre-allocated                        (the real MCP server)
+//	   by ftw-connect)
+//
+// NNNN is chosen before Connect starts; it is passed by the client to its own
+// fowld via the `local` command after the wormhole handshake completes.
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
+	"os/exec"
+	"strings"
 	"sync"
-
-	"github.com/psanford/wormhole-william/wormhole"
 )
 
-// WormholeHost is the host-side tunnel handle.  Call Close when done.
+// fowldBinary is the name (or absolute path) of the fowld executable.
+// If it is not on PATH the functions return ErrFowlNotFound.
+const fowldBinary = "fowld"
+
+// ErrFowlNotFound is returned when fowld is not on PATH.
+type ErrFowlNotFound struct {
+	// Underlying is the exec.LookPath error, for diagnostics.
+	Underlying error
+}
+
+func (e *ErrFowlNotFound) Error() string {
+	return "fowld not found on PATH — install with `pipx install fowl` or `pip install fowl`"
+}
+
+func (e *ErrFowlNotFound) Unwrap() error { return e.Underlying }
+
+// ── fowld JSON event types ────────────────────────────────────────────────────
+
+type fowldEvent struct {
+	Kind       string `json:"kind"`
+	Code       string `json:"code,omitempty"`
+	Message    string `json:"message,omitempty"`
+	ListenEP   string `json:"listen,omitempty"`
+	ConnectEP  string `json:"connect,omitempty"`
+	ListenerID string `json:"listener_id,omitempty"`
+}
+
+// ── WormholeHost ─────────────────────────────────────────────────────────────
+
+// WormholeHost is the host-side tunnel handle.  The host runs on the Pi; it
+// advertises a magic-wormhole code that the remote peer uses to connect.
+// Call Close when done.
 type WormholeHost struct {
-	// Code is the human-shareable wormhole code to give to the remote peer.
+	// Code is the human-shareable code to hand to the remote peer.
+	// Format: "<fowl-wormhole-code>:<mcp-port>"
+	// e.g. "7-spinach-atlas:9876"
 	Code string
 
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	cancel context.CancelFunc
-	ln     net.Listener
 	wg     sync.WaitGroup
 }
 
-// Close cancels the tunnel and closes the relay listener.
+// Close terminates the fowld subprocess and waits for it to exit.
 func (h *WormholeHost) Close() {
 	h.cancel()
-	if h.ln != nil {
-		h.ln.Close()
+	if h.stdin != nil {
+		h.stdin.Close() //nolint:errcheck
 	}
 	h.wg.Wait()
 }
 
+// StartWormholeHost starts a fowld subprocess that allocates a fresh wormhole
+// code and waits for a peer to connect.  remoteAddr is the TCP address of the
+// local MCP server (e.g. "127.0.0.1:9876") that the peer will be forwarded to.
+//
+// The function blocks until the wormhole code has been allocated (i.e. the
+// first PAKE handshake message has been sent to the rendezvous server) and then
+// returns; the caller can immediately read host.Code and share it with the peer.
+//
+// A background goroutine keeps the fowld process alive and drains its output.
+// Call host.Close() to tear everything down.
+func StartWormholeHost(ctx context.Context, remoteAddr string) (*WormholeHost, error) {
+	// Resolve the MCP port from remoteAddr so we can embed it in the code.
+	_, portStr, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return nil, fmt.Errorf("wormhole host: invalid remoteAddr %q: %w", remoteAddr, err)
+	}
+
+	// Verify fowld is available before starting anything.
+	if _, err := exec.LookPath(fowldBinary); err != nil {
+		return nil, &ErrFowlNotFound{Underlying: err}
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cctx, fowldBinary)
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole host: stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole host: stdout pipe: %w", err)
+	}
+	// Discard stderr — fowld only emits diagnostics there (e.g. "Permission granted").
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole host: start fowld: %w", err)
+	}
+
+	h := &WormholeHost{
+		cmd:    cmd,
+		stdin:  stdinPipe,
+		cancel: cancel,
+	}
+
+	// Disable the connect-policy check so the peer can reach us freely.
+	if err := h.writeJSON(map[string]any{"kind": "danger-disable-permission-check"}); err != nil {
+		cancel()
+		stdinPipe.Close()
+		return nil, fmt.Errorf("wormhole host: write danger-disable: %w", err)
+	}
+
+	// Ask fowld to allocate a new wormhole code.
+	if err := h.writeJSON(map[string]any{"kind": "allocate-code", "length": 2}); err != nil {
+		cancel()
+		stdinPipe.Close()
+		return nil, fmt.Errorf("wormhole host: write allocate-code: %w", err)
+	}
+
+	// Scan stdout for the code-allocated event.  We also watch for error events.
+	codeCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	scanner := bufio.NewScanner(stdoutPipe)
+
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		defer cmd.Wait() //nolint:errcheck
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			var ev fowldEvent
+			if jsonErr := json.Unmarshal([]byte(line), &ev); jsonErr != nil {
+				// Non-JSON line — skip silently.
+				continue
+			}
+			switch ev.Kind {
+			case "code-allocated":
+				select {
+				case codeCh <- ev.Code:
+				default:
+				}
+			case "error":
+				select {
+				case errCh <- fmt.Errorf("fowld error: %s", ev.Message):
+				default:
+				}
+			}
+			// All other events (welcome, peer-connected, incoming-connection,
+			// bytes-in/out, etc.) are silently consumed; we keep the subprocess
+			// alive by continuously draining stdout.
+		}
+	}()
+
+	// Wait for code-allocated (or an error / context cancellation).
+	select {
+	case fowlCode := <-codeCh:
+		// Embed the MCP port in the shared code.
+		h.Code = fowlCode + ":" + portStr
+		return h, nil
+	case ferr := <-errCh:
+		h.Close()
+		return nil, fmt.Errorf("wormhole host: %w", ferr)
+	case <-cctx.Done():
+		h.Close()
+		return nil, fmt.Errorf("wormhole host: context cancelled before code allocated")
+	}
+}
+
+func (h *WormholeHost) writeJSON(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	_, err = h.stdin.Write(b)
+	return err
+}
+
+// ── WormholeClient ────────────────────────────────────────────────────────────
+
 // WormholeClient is the client-side tunnel handle.  Call Close when done.
 type WormholeClient struct {
-	// LocalAddr is the 127.0.0.1:NNNN address the caller should dial; bytes
-	// written to this address arrive at the remoteAddr of the host.
+	// LocalAddr is the 127.0.0.1:NNNN address the MCP client should dial;
+	// bytes are forwarded through the wormhole to the host's MCP server.
 	LocalAddr string
 
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
 	cancel context.CancelFunc
-	ln     net.Listener
 	wg     sync.WaitGroup
 }
 
-// Close cancels the tunnel and closes the local listener.
+// Close terminates the fowld subprocess and waits for it to exit.
 func (w *WormholeClient) Close() {
 	w.cancel()
-	if w.ln != nil {
-		w.ln.Close()
+	if w.stdin != nil {
+		w.stdin.Close() //nolint:errcheck
 	}
 	w.wg.Wait()
 }
 
-// StartWormholeHost starts a relay listener and advertises its address through
-// the wormhole rendezvous protocol.  remoteAddr is a TCP address (e.g.
-// "127.0.0.1:8080") that incoming relay connections will be forwarded to.
+// ConnectWormholeClient joins an existing wormhole session identified by code
+// and sets up a local TCP listener that forwards to the host's MCP server.
 //
-// The function blocks until the wormhole code has been allocated and the
-// initial handshake with the rendezvous server has completed; it then returns
-// immediately so the caller can share host.Code with the remote peer.
-func StartWormholeHost(ctx context.Context, remoteAddr string) (*WormholeHost, error) {
-	// 1. Bind the relay listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("wormhole host: bind relay listener: %w", err)
-	}
-
-	relayAddr := ln.Addr().String()
-
-	// 2. Send the relay address as a wormhole text message to obtain a code.
-	var c wormhole.Client
-	code, resultCh, err := c.SendText(ctx, relayAddr)
-	if err != nil {
-		ln.Close()
-		return nil, fmt.Errorf("wormhole host: send text: %w", err)
-	}
-
-	hostCtx, cancel := context.WithCancel(ctx)
-	h := &WormholeHost{
-		Code:   code,
-		cancel: cancel,
-		ln:     ln,
-	}
-
-	// 3. Drain the send-result channel so the library can close the mailbox.
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		select {
-		case <-resultCh:
-		case <-hostCtx.Done():
-		}
-	}()
-
-	// 4. Accept relay connections and proxy them to remoteAddr.
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		hostAcceptLoop(hostCtx, ln, remoteAddr)
-	}()
-
-	return h, nil
-}
-
-// hostAcceptLoop accepts connections on ln and proxies each to remoteAddr.
-func hostAcceptLoop(ctx context.Context, ln net.Listener, remoteAddr string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// Listener was closed — normal shutdown.
-			return
-		}
-		go func(c net.Conn) {
-			defer c.Close()
-			target, err := (&net.Dialer{}).DialContext(ctx, "tcp", remoteAddr)
-			if err != nil {
-				return
-			}
-			defer target.Close()
-			proxyBidirectional(c, target)
-		}(conn)
-	}
-}
-
-// ConnectWormholeClient claims the wormhole code, reads the relay address
-// embedded in the text payload, and starts a local listener whose accepted
-// connections are forwarded to that relay address.
+// code must be in the format produced by StartWormholeHost:
 //
-// Returns a WormholeClient whose LocalAddr can be dialled by the caller.
+//	"<fowl-wormhole-code>:<mcp-port>"
+//	e.g. "7-spinach-atlas:9876"
+//
+// The function blocks until the local forwarding listener is ready and then
+// returns a WormholeClient whose LocalAddr can be dialled by the MCP client.
+// Call client.Close() to tear everything down.
 func ConnectWormholeClient(ctx context.Context, code string) (*WormholeClient, error) {
-	// 1. Receive the wormhole text message that contains the relay address.
-	var c wormhole.Client
-	msg, err := c.Receive(ctx, code)
+	// Split the composite code into the fowl wormhole code and the host MCP port.
+	fowlCode, mcpPort, err := splitCompositeCode(code)
 	if err != nil {
-		return nil, fmt.Errorf("wormhole client: receive: %w", err)
-	}
-	if msg.Type != wormhole.TransferText {
-		return nil, fmt.Errorf("wormhole client: expected text transfer, got %v", msg.Type)
-	}
-	rawAddr, err := io.ReadAll(msg)
-	if err != nil {
-		return nil, fmt.Errorf("wormhole client: read payload: %w", err)
-	}
-	relayAddr := string(rawAddr)
-
-	// 2. Bind the local listener.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, fmt.Errorf("wormhole client: bind local listener: %w", err)
+		return nil, fmt.Errorf("wormhole client: %w", err)
 	}
 
-	clientCtx, cancel := context.WithCancel(ctx)
+	// Pre-allocate a free local port.  We open a listener to get the OS to
+	// assign a port, note the port, then close the listener.  There is a small
+	// TOCTOU race but it is acceptable in practice.
+	localPort, err := pickFreePort()
+	if err != nil {
+		return nil, fmt.Errorf("wormhole client: pick free port: %w", err)
+	}
+
+	// Verify fowld is available.
+	if _, err := exec.LookPath(fowldBinary); err != nil {
+		return nil, &ErrFowlNotFound{Underlying: err}
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cctx, fowldBinary)
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: stdin pipe: %w", err)
+	}
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: stdout pipe: %w", err)
+	}
+	cmd.Stderr = nil
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: start fowld: %w", err)
+	}
+
 	w := &WormholeClient{
-		LocalAddr: ln.Addr().String(),
+		LocalAddr: fmt.Sprintf("127.0.0.1:%d", localPort),
+		cmd:       cmd,
+		stdin:     stdinPipe,
 		cancel:    cancel,
-		ln:        ln,
 	}
 
-	// 3. Accept local connections and proxy them to the relay.
+	// Disable the listen-policy check so we can open listeners freely.
+	if err := w.writeJSON(map[string]any{"kind": "danger-disable-permission-check"}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: write danger-disable: %w", err)
+	}
+
+	// Join the existing wormhole session.
+	if err := w.writeJSON(map[string]any{"kind": "set-code", "code": fowlCode}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: write set-code: %w", err)
+	}
+
+	// We need to:
+	//   1. Wait for "peer-connected" (Dilation handshake complete).
+	//   2. Send the "local" command to open the forwarding listener.
+	//   3. Wait for "listening" to confirm the listener is ready.
+	//
+	// All of this is driven by scanning fowld's stdout.
+	listenEP := fmt.Sprintf("tcp:%d:interface=localhost", localPort)
+	connectEP := fmt.Sprintf("tcp:localhost:%s", mcpPort)
+
+	readyCh := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	scanner := bufio.NewScanner(stdoutPipe)
+
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
-		clientAcceptLoop(clientCtx, ln, relayAddr)
+		defer cmd.Wait() //nolint:errcheck
+
+		peerConnected := false
+		localSent := false
+		ready := false
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			var ev fowldEvent
+			if jsonErr := json.Unmarshal([]byte(line), &ev); jsonErr != nil {
+				continue
+			}
+			switch ev.Kind {
+			case "peer-connected":
+				if !peerConnected {
+					peerConnected = true
+					// Now that Dilation is up, request the local forwarding listener.
+					if !localSent {
+						localSent = true
+						if sendErr := w.writeJSON(map[string]any{
+							"kind":    "local",
+							"listen":  listenEP,
+							"connect": connectEP,
+						}); sendErr != nil {
+							select {
+							case errCh <- fmt.Errorf("send local command: %w", sendErr):
+							default:
+							}
+						}
+					}
+				}
+			case "listening":
+				// fowld emits this when the local listener is bound and ready.
+				// Verify it's our listener (by matching the listen endpoint).
+				if !ready && ev.ListenEP == listenEP {
+					ready = true
+					select {
+					case readyCh <- struct{}{}:
+					default:
+					}
+				}
+			case "error":
+				select {
+				case errCh <- fmt.Errorf("fowld error: %s", ev.Message):
+				default:
+				}
+			}
+			// All other events are drained to keep the subprocess alive.
+		}
 	}()
 
-	return w, nil
-}
-
-// clientAcceptLoop accepts connections on ln and proxies each to relayAddr.
-func clientAcceptLoop(ctx context.Context, ln net.Listener, relayAddr string) {
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		go func(c net.Conn) {
-			defer c.Close()
-			relay, err := (&net.Dialer{}).DialContext(ctx, "tcp", relayAddr)
-			if err != nil {
-				return
-			}
-			defer relay.Close()
-			proxyBidirectional(c, relay)
-		}(conn)
+	select {
+	case <-readyCh:
+		return w, nil
+	case ferr := <-errCh:
+		w.Close()
+		return nil, fmt.Errorf("wormhole client: %w", ferr)
+	case <-cctx.Done():
+		w.Close()
+		return nil, fmt.Errorf("wormhole client: context cancelled before tunnel ready")
 	}
 }
 
-// halfCloser is implemented by *net.TCPConn and allows a graceful half-close
-// after one direction of the copy finishes.
-type halfCloser interface {
-	CloseWrite() error
+func (w *WormholeClient) writeJSON(v any) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	_, err = w.stdin.Write(b)
+	return err
 }
 
-// proxyBidirectional copies bytes between a and b until either side closes.
-// All connections in this shim are local TCP connections so they satisfy
-// halfCloser; the type assertion is safe.  If a connection somehow doesn't
-// implement CloseWrite the deferred Close() call above still tears it down.
-func proxyBidirectional(a, b net.Conn) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		io.Copy(b, a) //nolint:errcheck
-		if hc, ok := b.(halfCloser); ok {
-			hc.CloseWrite() //nolint:errcheck
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		io.Copy(a, b) //nolint:errcheck
-		if hc, ok := a.(halfCloser); ok {
-			hc.CloseWrite() //nolint:errcheck
-		}
-	}()
-	wg.Wait()
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// splitCompositeCode splits a code of the form "<fowl-code>:<port>" into its
+// two parts.  The port is everything after the LAST colon, since the fowl code
+// itself contains hyphens but never colons.
+func splitCompositeCode(code string) (fowlCode, port string, err error) {
+	idx := strings.LastIndex(code, ":")
+	if idx < 0 {
+		return "", "", fmt.Errorf("invalid code %q: expected \"<wormhole-code>:<port>\"", code)
+	}
+	fowlCode = code[:idx]
+	port = code[idx+1:]
+	if fowlCode == "" || port == "" {
+		return "", "", fmt.Errorf("invalid code %q: both wormhole-code and port must be non-empty", code)
+	}
+	return fowlCode, port, nil
+}
+
+// pickFreePort asks the OS for a free TCP port on localhost and returns it.
+// The port is not held open; callers should use it immediately.
+func pickFreePort() (int, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port, nil
 }
