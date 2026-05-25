@@ -83,6 +83,57 @@ func TestConfigRoundtrip(t *testing.T) {
 	}
 }
 
+// 2026-05-25 performance regression: /api/energy/daily?days=30
+// cold-started at ~25 s on a 1 GB state.db because every closed day
+// re-ran a per-day DailyEnergy SQL pass. SaveDailyEnergy +
+// LoadDailyEnergy persist the aggregate so the same call after
+// restart resolves to N PK lookups instead.
+func TestDailyEnergyPersistRoundtrip(t *testing.T) {
+	s := freshStore(t)
+	de := DayEnergy{
+		ImportWh:        1234.5,
+		ExportWh:        678.9,
+		PVWh:            5000,
+		BatChargedWh:    1500,
+		BatDischargedWh: 1100,
+		LoadWh:          2222,
+	}
+	if err := s.SaveDailyEnergy("2026-05-25", de); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, ok, err := s.LoadDailyEnergy("2026-05-25")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true after save")
+	}
+	if got != de {
+		t.Errorf("roundtrip mismatch: got %+v, want %+v", got, de)
+	}
+	// Upsert with new values must overwrite, not append a duplicate.
+	de2 := de
+	de2.ImportWh = 9999
+	if err := s.SaveDailyEnergy("2026-05-25", de2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got2, _, _ := s.LoadDailyEnergy("2026-05-25")
+	if got2.ImportWh != 9999 {
+		t.Errorf("upsert did not overwrite: got %f", got2.ImportWh)
+	}
+}
+
+func TestDailyEnergyMissReturnsFalse(t *testing.T) {
+	s := freshStore(t)
+	_, ok, err := s.LoadDailyEnergy("1999-01-01")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if ok {
+		t.Error("ok should be false for a day never persisted")
+	}
+}
+
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)

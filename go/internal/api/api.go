@@ -1546,11 +1546,22 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 			}
 			de = d
 		} else {
+			// Two-tier cache: in-memory first, then the persistent
+			// energy_daily table. The persistent layer survives
+			// restarts — the 2026-05-25 baseline was 25 s for
+			// days=30 cold-start because every closed day re-ran a
+			// per-day DailyEnergy SQL pass; with the table populated
+			// the same query reduces to N PK lookups.
 			s.dailyCacheMu.Lock()
 			cached, ok := s.dailyCache[dayKey]
 			s.dailyCacheMu.Unlock()
 			if ok {
 				de = cached
+			} else if persisted, present, err := s.deps.State.LoadDailyEnergy(dayKey); err == nil && present {
+				de = persisted
+				s.dailyCacheMu.Lock()
+				s.dailyCache[dayKey] = de
+				s.dailyCacheMu.Unlock()
 			} else {
 				dayEnd := dayStart.AddDate(0, 0, 1)
 				d, err := s.deps.State.DailyEnergy(dayStart.UnixMilli(), dayEnd.UnixMilli())
@@ -1563,6 +1574,14 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 				s.dailyCacheMu.Lock()
 				s.dailyCache[dayKey] = de
 				s.dailyCacheMu.Unlock()
+				// Persist for next restart. Closed days only —
+				// today is excluded via the isToday branch above.
+				// Best-effort: a write failure is logged but not
+				// surfaced to the operator since the in-memory
+				// cache still serves this request.
+				if err := s.deps.State.SaveDailyEnergy(dayKey, de); err != nil {
+					slog.Warn("handleEnergyDaily: persist daily aggregate failed", "err", err, "day", dayKey)
+				}
 			}
 		}
 

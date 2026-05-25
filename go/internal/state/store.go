@@ -259,6 +259,35 @@ func (s *Store) migrate() error {
 			synced_ms   INTEGER NOT NULL,
 			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
+
+		// Persistent daily-energy aggregate cache.
+		//
+		// 2026-05-25 measurement: /api/energy/daily?days=30 took ~25 s
+		// on the live Pi cold-start because the handler did one
+		// DailyEnergy SQL call per day and the in-memory cache was
+		// empty after every restart. Each call walked history_hot +
+		// warm + cold for that day's window — slow on a 1 GB state.db.
+		//
+		// This table stores the integration result so closed days never
+		// have to be re-computed. The handler writes a row on first
+		// compute and reads it back forever — days are immutable once
+		// past the local-midnight rollover, so cache invalidation is
+		// trivially "always valid".
+		//
+		// Today's row is never persisted (the day is in progress); the
+		// handler still computes it on every request. Tomorrow's
+		// midnight rollover the previous day's final value lands here
+		// once, lazily, on the next /api/energy/daily request.
+		`CREATE TABLE IF NOT EXISTS energy_daily (
+			day               TEXT PRIMARY KEY,
+			import_wh         REAL NOT NULL,
+			export_wh         REAL NOT NULL,
+			pv_wh             REAL NOT NULL,
+			bat_charged_wh    REAL NOT NULL,
+			bat_discharged_wh REAL NOT NULL,
+			load_wh           REAL NOT NULL,
+			computed_at_ms    INTEGER NOT NULL
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -580,6 +609,57 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 		return DayEnergy{}, err
 	}
 	return d, nil
+}
+
+// LoadDailyEnergy returns the persisted aggregate for `day` (YYYY-MM-DD).
+// Second return is false when the day isn't cached yet. The caller
+// recomputes via DailyEnergy on miss and writes back via SaveDailyEnergy.
+//
+// Closed days are immutable, so callers can treat hit-rows as
+// authoritative — no TTL, no staleness check needed.
+func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
+	const q = `
+		SELECT import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh
+		FROM energy_daily WHERE day = ?
+	`
+	var d DayEnergy
+	err := s.db.QueryRow(q, day).Scan(
+		&d.ImportWh, &d.ExportWh, &d.PVWh,
+		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
+	)
+	if err == sql.ErrNoRows {
+		return DayEnergy{}, false, nil
+	}
+	if err != nil {
+		return DayEnergy{}, false, err
+	}
+	return d, true, nil
+}
+
+// SaveDailyEnergy persists `de` for `day`. Upserts on conflict — the
+// row is the latest authoritative aggregate. Today's row should NOT be
+// persisted via this method (the day is still accumulating); callers
+// should gate on "is closed day" before saving.
+func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
+	const q = `
+		INSERT INTO energy_daily(
+			day, import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh, computed_at_ms
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(day) DO UPDATE SET
+			import_wh         = excluded.import_wh,
+			export_wh         = excluded.export_wh,
+			pv_wh             = excluded.pv_wh,
+			bat_charged_wh    = excluded.bat_charged_wh,
+			bat_discharged_wh = excluded.bat_discharged_wh,
+			load_wh           = excluded.load_wh,
+			computed_at_ms    = excluded.computed_at_ms
+	`
+	_, err := s.db.Exec(q, day,
+		de.ImportWh, de.ExportWh, de.PVWh,
+		de.BatChargedWh, de.BatDischargedWh, de.LoadWh,
+		time.Now().UnixMilli(),
+	)
+	return err
 }
 
 // CountNonSyntheticHistory returns the number of history rows across all
