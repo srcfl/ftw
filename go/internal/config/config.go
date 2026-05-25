@@ -272,6 +272,15 @@ type Planner struct {
 	// floor value visible to operators.
 	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
 
+	// PVChargeBonusOreKwh credits each kWh of battery charge fed from
+	// live PV surplus, in passive_arbitrage mode. Operator preference
+	// "always prefer PV first" — certain PV now beats forecast
+	// grid-charging later, even at economic parity. Default 30
+	// öre/kWh; set to 0 to disable the bias and let the DP optimise
+	// purely on price (which on flat-price days lets cheap PV export
+	// and refills from cheap grid later, losing efficiency).
+	PVChargeBonusOreKwh float64 `yaml:"pv_charge_bonus_ore_kwh,omitempty" json:"pv_charge_bonus_ore_kwh,omitempty"`
+
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot

@@ -51,6 +51,7 @@ type DiagnosticParams struct {
 	SoCMaxPct                    float64 `json:"soc_max_pct"`
 	SoCSafetyFloorPct            float64 `json:"soc_safety_floor_pct,omitempty"`
 	SafetyFloorPenaltyOreKwhHour float64 `json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
+	PVChargeBonusOreKwh          float64 `json:"pv_charge_bonus_ore_kwh,omitempty"`
 	SoCLevels                    int     `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
 	MaxChargeW          float64  `json:"max_charge_w"`
@@ -156,6 +157,7 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			SoCMaxPct:                    p.SoCMaxPct,
 			SoCSafetyFloorPct:            p.SoCSafetyFloorPct,
 			SafetyFloorPenaltyOreKwhHour: p.SafetyFloorPenaltyOreKwhHour,
+			PVChargeBonusOreKwh:          p.PVChargeBonusOreKwh,
 			SoCLevels:                    p.SoCLevels,
 			ActionLevels:                 p.ActionLevels,
 			MaxChargeW:                   p.MaxChargeW,
@@ -238,6 +240,9 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	if params.SafetyFloorPenaltyOreKwhHour == 0 && s.Defaults.SafetyFloorPenaltyOreKwhHour > 0 {
 		params.SafetyFloorPenaltyOreKwhHour = s.Defaults.SafetyFloorPenaltyOreKwhHour
 	}
+	if params.PVChargeBonusOreKwh == 0 && s.Defaults.PVChargeBonusOreKwh > 0 {
+		params.PVChargeBonusOreKwh = s.Defaults.PVChargeBonusOreKwh
+	}
 	s.last = plan
 	s.lastSlots = slots
 	s.lastParams = params
@@ -266,6 +271,7 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		SoCMaxPct:                    d.Params.SoCMaxPct,
 		SoCSafetyFloorPct:            d.Params.SoCSafetyFloorPct,
 		SafetyFloorPenaltyOreKwhHour: d.Params.SafetyFloorPenaltyOreKwhHour,
+		PVChargeBonusOreKwh:          d.Params.PVChargeBonusOreKwh,
 		SoCLevels:                    d.Params.SoCLevels,
 		ActionLevels:                 d.Params.ActionLevels,
 		MaxChargeW:                   d.Params.MaxChargeW,
