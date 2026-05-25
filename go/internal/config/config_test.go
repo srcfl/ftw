@@ -457,6 +457,26 @@ func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSlewDefaults(t *testing.T) {
+	c := &Config{}
+	applyDefaults(c)
+	if c.Site.SlewRateW != 3000 {
+		t.Errorf("default slew_rate_w: got %f, want 3000", c.Site.SlewRateW)
+	}
+	if c.Site.SlewEnabled == nil || *c.Site.SlewEnabled != true {
+		t.Errorf("default slew_enabled: got %v, want *true", c.Site.SlewEnabled)
+	}
+}
+
+func TestSlewExplicitDisablePreserved(t *testing.T) {
+	f := false
+	c := &Config{Site: Site{SlewEnabled: &f}}
+	applyDefaults(c)
+	if c.Site.SlewEnabled == nil || *c.Site.SlewEnabled != false {
+		t.Errorf("explicit slew_enabled=false must survive applyDefaults, got %v", c.Site.SlewEnabled)
+	}
+}
+
 func TestNotificationsDefaults(t *testing.T) {
 	c := &Config{Notifications: &Notifications{Enabled: false}}
 	applyDefaults(c)

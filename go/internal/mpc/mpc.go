@@ -53,11 +53,36 @@ const (
 	// ModeCheapCharge: allow importing to charge when prices are low
 	// (the DP decides based on forecast). Still never export battery to
 	// grid — discharge stays ≤ local load.
+	//
+	// Superseded by ModePassiveArbitrage as of v0.82 — the merged mode
+	// covers the same use case (charge from cheapest available source,
+	// never export battery) and removes the operator-facing choice
+	// between "smart self-consumption" and "cheap charge" that the
+	// planner is already capable of making on its own. Kept here for
+	// existing-config compatibility.
 	ModeCheapCharge Mode = "cheap_charge"
+
+	// ModePassiveArbitrage: charge the battery from the cheapest
+	// available energy source — PV surplus when there's sun, grid
+	// during cheap night hours when not — for use BY THE HOUSE.
+	// Battery never exports to grid. Subsumes both self_consumption
+	// (summer behavior, PV always wins) and cheap_charge (winter
+	// behavior, grid wins during off-peak). The DP picks per slot.
+	//
+	// Uses the strict-self-consumption bias (battery prefers covering
+	// house load over letting the grid do it) and the mean-import
+	// terminal price (every stored kWh is worth a typical retail
+	// import that it'll later displace).
+	ModePassiveArbitrage Mode = "passive_arbitrage"
 
 	// ModeArbitrage: unrestricted. Charge from grid, discharge to grid —
 	// whatever minimizes total cost over the horizon, subject to SoC and
 	// power limits.
+	//
+	// "Active arbitrage" in the v0.82 UI rename. Same DP behavior;
+	// difference vs ModePassiveArbitrage is solely battery-export
+	// permission. Operator opts in here when they want full timing
+	// arbitrage on both directions.
 	ModeArbitrage Mode = "arbitrage"
 )
 
@@ -99,9 +124,32 @@ type Params struct {
 	// SoC grid
 	SoCLevels     int     // e.g. 41 (2.5% steps)
 	CapacityWh    float64 // aggregate battery capacity
-	SoCMinPct     float64 // e.g. 10
+	SoCMinPct     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
 	SoCMaxPct     float64 // e.g. 95
 	InitialSoCPct float64
+
+	// SoCSafetyFloorPct is the OPERATIONAL floor: a soft target above
+	// the hardware SoCMinPct. The DP applies a per-slot penalty when
+	// SoC ends a slot below this value AND that slot has PV surplus
+	// (PV magnitude > load), so the planner spends free PV refilling
+	// the battery early rather than deferring to peak-PV hours.
+	//
+	// The penalty is gated on PV-surplus so it cannot incentivise
+	// grid-charging in self-consumption mode — without surplus the
+	// planner sees no penalty and follows the normal "never import"
+	// contract.
+	//
+	// 0 = disabled (no operational floor — backward compat).
+	SoCSafetyFloorPct float64
+
+	// SafetyFloorPenaltyOreKwhHour is the per-(kWh of deficit × hour)
+	// cost added when SoC ends a PV-surplus slot below SoCSafetyFloorPct.
+	// 0 = disabled. Default 100 öre/kWh-hour: large enough to dominate
+	// typical spot export prices (5-200 öre/kWh) so the DP prefers
+	// charging from PV; small enough that the planner doesn't try to
+	// recover safety floor by manipulating downstream slots in
+	// economically expensive ways.
+	SafetyFloorPenaltyOreKwhHour float64
 
 	// Action grid (+charge, −discharge; site sign)
 	ActionLevels  int     // odd number preferred so 0 is represented (e.g. 21)
@@ -580,11 +628,36 @@ func Optimize(slots []Slot, p Params) Plan {
 						// check above (line 357), so the bias can only
 						// push discharge *toward* the floor, never
 						// past it.
-						if p.Mode == ModeSelfConsumption {
+						if p.Mode == ModeSelfConsumption || p.Mode == ModePassiveArbitrage {
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
 								cost += 2.0 * effPrice(slot) * houseKWh
+							}
+						}
+
+						// Safety-floor penalty: when SoC ends this slot
+						// below the operational floor AND PV surplus is
+						// available, charge it up. Gated on surplus so
+						// the penalty cannot ever motivate grid-charging
+						// — without surplus the DP sees no penalty and
+						// follows the normal "never import" contract.
+						//
+						// Operator rationale (2026-05-25): the hardware
+						// SoCMinPct is the chemistry safety floor; the
+						// operational floor SoCSafetyFloorPct is the
+						// buffer against forecast risk (cloud event,
+						// load surprise). DP would otherwise wait for
+						// peak-PV slots to refill, leaving the battery
+						// at hardware floor across early-day surplus
+						// hours.
+						if p.SoCSafetyFloorPct > 0 && p.SafetyFloorPenaltyOreKwhHour > 0 &&
+							battSoc2 < p.SoCSafetyFloorPct {
+							pvSurplusW := -slot.PVW - slot.LoadW
+							if pvSurplusW > 0 {
+								deficitPct := p.SoCSafetyFloorPct - battSoc2
+								deficitKwh := deficitPct / 100.0 * p.CapacityWh / 1000.0
+								cost += deficitKwh * dtH * p.SafetyFloorPenaltyOreKwhHour
 							}
 						}
 
@@ -872,11 +945,17 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 			return gridW <= modeTolW && gridW >= baselineGridW-modeTolW
 		}
 		return math.Abs(actW) < modeTolW
-	case ModeCheapCharge:
+	case ModeCheapCharge, ModePassiveArbitrage:
 		// Allow charging from grid (any actW ≥ 0), but never discharge past
 		// the local load: i.e. gridW must stay ≥ 0 when we'd otherwise be
 		// importing, OR ≥ baseline when we'd otherwise be exporting.
 		// Simpler rule: no battery-driven export, i.e. gridW ≥ min(0, baseline).
+		//
+		// ModePassiveArbitrage shares this contract with ModeCheapCharge —
+		// "charge from cheapest, never export from battery". The two
+		// constants exist for back-compat during the v0.82 deprecation
+		// window; semantically the merged mode IS cheap_charge plus the
+		// strict-SC house-import bias (handled in the DP cost above).
 		minGrid := 0.0
 		if baselineGridW < 0 {
 			minGrid = baselineGridW

@@ -522,9 +522,22 @@
         const cost = plan.total_cost_ore / 100;
         const costLabel = cost >= 0 ? 'expected cost' : 'expected earnings';
         const parts = [];
+        // The /api/mpc/plan response carries the INTERNAL mpc.Mode (e.g.
+        // "self_consumption", "passive_arbitrage", "arbitrage"). Map to the
+        // operator-facing label so the badge matches the Strategy button
+        // the operator picked — "self_consumption" alone reads as the
+        // manual mode, not the Smart SC (legacy) planner setting that
+        // currently drives the plan.
+        const PLAN_MODE_LABEL = {
+          self_consumption: 'Smart self-consumption (legacy)',
+          cheap_charge: 'Cheap charging (legacy)',
+          passive_arbitrage: 'Passive arbitrage',
+          arbitrage: 'Active arbitrage',
+        };
+        const modeLabel = PLAN_MODE_LABEL[plan.mode] || plan.mode;
         parts.push(
-          `<span title="Active planner strategy — choose from the Mode picker above">` +
-          `<span class="s-value">${plan.mode}</span></span>`
+          `<span title="Active planner strategy — choose from the Mode picker">` +
+          `<span class="s-value">${modeLabel}</span></span>`
         );
         parts.push(
           `<span title="How far ahead the planner is optimising">` +
@@ -818,9 +831,10 @@
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
   const STRATEGY_DESC = {
-    planner_self: 'Smart self-consumption (planner). Forecast-aware grid-zero control: cover local import, charge PV only when the plan wants storage, and preserve export when the plan keeps battery headroom for cheaper surplus later.',
-    planner_cheap: 'Cheap charging. Plans to import during the cheapest upcoming hours to top up the battery, still never exports via the battery. Good when export tariffs are low.',
-    planner_arbitrage: 'Arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots (including exporting). Biggest savings on volatile days; pays attention to battery efficiency + SoC bounds.',
+    planner_passive_arbitrage: 'Passive arbitrage. Charges the battery from the cheapest available energy each slot — PV when sunny, grid during cheap night hours — for your own use. Never exports from the battery. Subsumes smart self-consumption (summer behavior) and cheap charging (winter behavior); the planner picks per slot.',
+    planner_arbitrage: 'Active arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots including export to grid. Biggest savings on volatile days; respects battery efficiency + SoC bounds.',
+    planner_self: 'Legacy: smart self-consumption. Forecast-aware grid-zero control with no grid-charge. Superseded by Passive arbitrage as of v0.82.',
+    planner_cheap: 'Legacy: cheap charging. Imports during cheap hours; never exports via battery. Superseded by Passive arbitrage as of v0.82.',
     self_consumption: 'Self (manual). Simple grid-zero controller with no planner; charges surplus and discharges to cover local import.',
     peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
     charge: 'Manual full charge — forces the battery to charge regardless of price.',

@@ -29,17 +29,24 @@ const (
 	// Other planner modes fall back to self_consumption behavior and log.
 	// The three flavors mirror mpc.Mode — the difference is only what
 	// the planner is allowed to do when it builds the plan:
-	//   - planner_self:      no grid-charging, no battery export
-	//   - planner_cheap:     grid-charge ok, no export discharge
-	//   - planner_arbitrage: full freedom within SoC + power limits
-	ModePlannerSelf      Mode = "planner_self"
-	ModePlannerCheap     Mode = "planner_cheap"
-	ModePlannerArbitrage Mode = "planner_arbitrage"
+	//   - planner_self:        no grid-charging, no battery export
+	//   - planner_cheap:       grid-charge ok, no export discharge
+	//   - planner_passive_arb: charge from cheapest (PV or grid), no
+	//                          export discharge (merges planner_self
+	//                          and planner_cheap as of v0.82)
+	//   - planner_arbitrage:   full freedom within SoC + power limits
+	ModePlannerSelf             Mode = "planner_self"
+	ModePlannerCheap            Mode = "planner_cheap"
+	ModePlannerPassiveArbitrage Mode = "planner_passive_arbitrage"
+	ModePlannerArbitrage        Mode = "planner_arbitrage"
 )
 
 // IsPlannerMode reports whether the mode is one of the planner modes.
 func (m Mode) IsPlannerMode() bool {
-	return m == ModePlannerSelf || m == ModePlannerCheap || m == ModePlannerArbitrage
+	return m == ModePlannerSelf ||
+		m == ModePlannerCheap ||
+		m == ModePlannerPassiveArbitrage ||
+		m == ModePlannerArbitrage
 }
 
 // PlanTargetFunc is injected by main.go: given the current time, returns
@@ -252,7 +259,12 @@ type State struct {
 	PI *PIController
 
 	// Slew + holdoff
-	SlewRateW            float64
+	SlewRateW float64
+	// SlewEnabled gates the per-cycle ramp limiter. Disabled = trust
+	// the inverter's internal ramp control entirely (commands jump to
+	// the PI's computed target). See Site.SlewEnabled in config for
+	// the operator-facing rationale.
+	SlewEnabled          bool
 	MinDispatchIntervalS int
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
@@ -681,6 +693,7 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 		EVChargingW:                    0,
 		PI:                             pi,
 		SlewRateW:                      500,
+		SlewEnabled:                    true,
 		MinDispatchIntervalS:           5,
 		PrevTargets:                    map[string]float64{},
 		UseCascade:                     true,
@@ -1602,6 +1615,14 @@ func ComputeDispatch(
 			raw[i].TargetW = 0
 			continue
 		}
+		// Slew limiter is opt-out. Both inverter families ramp internally;
+		// disabling the external slew lets PI's computed target reach the
+		// inverter in one cycle, which the inverter then ramps at its own
+		// safe rate. Saves the windup-recovery delay we observed on
+		// 2026-05-25.
+		if !state.SlewEnabled {
+			continue
+		}
 		delta := raw[i].TargetW - anchor
 		if math.Abs(delta) > state.SlewRateW {
 			sign := 1.0
@@ -2206,6 +2227,15 @@ func planHasNonDischargeIntent(state *State) bool {
 	// discharge even when the cloud rolled in and the live meter is
 	// importing 500 W — the symptom the operator hit on v0.79.5
 	// before this carve-out.
+	//
+	// planner_passive_arbitrage is intentionally NOT in the carve-out.
+	// Its contract differs from planner_self: it CAN grid-charge when
+	// the DP picked cheap hours for refilling, so a plan slot of
+	// "charge X Wh" is realisable intent (not just a forecast that
+	// happened to land positive). Overriding it with reactive
+	// discharge would undo the deliberate grid-charge decision.
+	// Operators who want strict "never grid-charge regardless of
+	// price" should keep planner_self.
 	if state.Mode == ModePlannerSelf {
 		return false
 	}
@@ -2678,7 +2708,8 @@ func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
 // against. Threshold of 100 W matches mpc.IdleGateThresholdW so a
 // near-zero plan target counts as "idle, no opinion on sign".
 func applyPlanSignFloor(targets []DispatchTarget, state *State) []DispatchTarget {
-	if len(targets) == 0 || state == nil || !state.Mode.IsPlannerMode() || state.Mode == ModePlannerSelf {
+	if len(targets) == 0 || state == nil || !state.Mode.IsPlannerMode() ||
+		state.Mode == ModePlannerSelf {
 		return targets
 	}
 	intent := planSignIntent(state)

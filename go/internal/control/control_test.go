@@ -375,6 +375,61 @@ func TestChargePlanNeverDischargesIndividualBatteryAfterSlew(t *testing.T) {
 	}
 }
 
+// SlewEnabled=false: PI's computed target reaches the inverter in one
+// cycle. Both supported inverter families ramp internally, so the
+// external slew was double-limiting on top of their own protection.
+// Smoke test that a large step (battery 0 → -3000 over a single cycle)
+// passes through without the slew clamp.
+func TestSlewDisabledPassesLargeStepThrough(t *testing.T) {
+	// Grid importing 3 kW — PI wants to discharge heavily.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500  // intentionally tight — if SlewEnabled wins, target lands at -500
+	st.SlewEnabled = false
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) <= 500 {
+		t.Errorf("TargetW = %f W — slew_enabled=false must let PI exceed the 500 W slew step in a single cycle", targets[0].TargetW)
+	}
+	if targets[0].Clamped {
+		t.Errorf("Clamped=true with slew_enabled=false — only fuse/SoC/per-driver caps should clamp now")
+	}
+}
+
+// SlewEnabled=true (default) still rate-limits step responses to the
+// configured ramp.
+func TestSlewEnabledClampsLargeStep(t *testing.T) {
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500
+	st.SlewEnabled = true
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 510 {
+		t.Errorf("TargetW = %f W — slew_enabled=true should cap step at ~500 W", targets[0].TargetW)
+	}
+}
+
 func TestProportionalSplitByCapacity(t *testing.T) {
 	bats := []batteryInfo{
 		{driver: "big", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
@@ -2059,6 +2114,45 @@ func TestPlannerSelfPlanChargeStillDischargesOnLiveImport(t *testing.T) {
 	}
 	if targets[0].TargetW >= 0 {
 		t.Errorf("TargetW = %f W — planner_self must discharge to cover live import even when the plan slot was charge", targets[0].TargetW)
+	}
+}
+
+// passive_arbitrage HONOURS plan grid-charge intent (this is the
+// key difference from planner_self). When the planner deliberately
+// picked a cheap slot to refill the battery via grid, the dispatch
+// must execute that, even if the meter is currently importing more
+// than expected — the import IS the intent. Operators who want
+// strict "never grid-charge regardless of price" should keep
+// planner_self.
+func TestPlannerPassiveArbitrageHonoursPlannedGridCharge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 800, // plan: charge 800 Wh = 3200 W avg
+		Strategy:        "passive_arbitrage",
+	}
+	// Live: importing 1200 W. For passive_arbitrage this is FINE — the
+	// plan deliberately scheduled grid-charge during a cheap slot.
+	store := seedStore(1200, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW <= 0 {
+		t.Errorf("TargetW = %f W — passive_arbitrage must execute planned grid-charge (not undo it as reactive discharge)", targets[0].TargetW)
 	}
 }
 

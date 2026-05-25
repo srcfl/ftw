@@ -256,6 +256,22 @@ type Planner struct {
 	IntervalMin         int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
 	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
 	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+
+	// SoCSafetyFloorPct is the operational floor above the hardware
+	// SoCMinPct. When SoC is below this AND a slot has PV surplus,
+	// the planner prefers charging up immediately rather than
+	// deferring to peak-PV hours. Gated on PV-surplus so it cannot
+	// motivate grid-charging in self-consumption mode. Defaults to
+	// 25 % when unset; set to 0 to disable.
+	SoCSafetyFloorPct float64 `yaml:"soc_safety_floor_pct,omitempty" json:"soc_safety_floor_pct,omitempty"`
+
+	// SafetyFloorPenaltyOreKwhHour is the cost per (kWh of deficit
+	// below SoCSafetyFloorPct × hour) added to slot cost when PV
+	// surplus is available. Defaults to 100 öre/kWh-hour; set to 0
+	// to disable the safety-floor mechanism while keeping a non-zero
+	// floor value visible to operators.
+	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
+
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
@@ -287,6 +303,20 @@ type Site struct {
 	Gain                 float64 `yaml:"gain" json:"gain"`
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
+
+	// SlewEnabled gates the external per-cycle ramp limiter. Both
+	// supported inverter families (Ferroamp, Sungrow) have their own
+	// internal power-ramp control loops; the external slew was
+	// originally added to dampen reactive-PI oscillation under noisy
+	// meter sampling, but it also slows legitimate step-response and
+	// can interact badly with PI integrator state (the 2026-05-25
+	// recovery took ~3 min of slew-bounded ramping after the integral
+	// finally unwound).
+	//
+	// Pointer so we can distinguish "unset → default true" from
+	// "explicitly false". Defaults to enabled to preserve back-compat
+	// on existing installs.
+	SlewEnabled *bool `yaml:"slew_enabled,omitempty" json:"slew_enabled,omitempty"`
 
 	// PVSurplusAbsorbSoCCapPct enables the opt-in PV-surplus absorber
 	// underlay in the energy-dispatch path (planner_cheap /
@@ -814,7 +844,17 @@ func applyDefaults(c *Config) {
 		c.Site.Gain = 0.5
 	}
 	if c.Site.SlewRateW == 0 {
-		c.Site.SlewRateW = 500
+		// 3000 W/cycle at the 2 s default control interval = 1500 W/s
+		// ramp ceiling. Both Ferroamp and Sungrow internal EMS loops
+		// ramp slower than this naturally (Sungrow spec: ~1000 W/s),
+		// so the external slew rarely fires under normal conditions
+		// but still bounds the post-windup recovery from snapping to
+		// full output in a single cycle.
+		c.Site.SlewRateW = 3000
+	}
+	if c.Site.SlewEnabled == nil {
+		t := true
+		c.Site.SlewEnabled = &t
 	}
 	if c.Site.MinDispatchIntervalS == 0 {
 		// Match control_interval_s. The holdoff exists to suppress
