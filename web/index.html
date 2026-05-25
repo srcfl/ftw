@@ -144,6 +144,11 @@
   </div>
 
   <main id="view-live">
+    <!-- Pair session banner — self-hides when no pair session is active.
+         Polls /api/pair/status every 5 s and surfaces the wormhole code,
+         intent, TTL, and tool counter while ftw-pair is connected. -->
+    <ftw-pair-card></ftw-pair-card>
+
     <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
          EV bottom. next-app.js calls el.setReadings(...) each status tick. -->
     <section class="flow-hero">
