@@ -1010,12 +1010,33 @@ body.ftw-next .plan-help {
   max-width: 68ch;
 }
 body.ftw-next .plan-savings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   margin: 6px 0 10px;
 }
 body.ftw-next .plan-savings:empty { display: none; }
+/* Forecast outlook block — own bordered surface so operators see it
+ * as "extra analysis", not part of the running plan summary. The
+ * "48 h outlook" label disambiguates from realised savings (which
+ * live in the Savings card above). */
+body.ftw-next .plan-outlook {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.015);
+}
+body.ftw-next .plan-outlook-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.85;
+  margin-right: 4px;
+  cursor: help;
+}
 body.ftw-next .saving-badge {
   font-family: var(--mono);
   font-size: 11px;

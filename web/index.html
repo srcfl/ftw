@@ -558,16 +558,16 @@
         Hover any bar for the exact split (spot / grid / VAT) plus PV, load, battery and SoC for that slot.
       </p>
 
-      <h3>Savings badges</h3>
-      <p>Each badge compares the plan's expected cost against an alternative scenario over the same horizon. All three numbers are computed by the same cost model, so they're directly comparable.</p>
+      <h3>48 h outlook badges</h3>
+      <p><b>Projections, not realised savings.</b> Each badge compares the plan's expected cost over the next 48 h against an alternative scenario, using the same cost model. For what the system <em>actually</em> saved, look at the Savings card above the chart.</p>
       <ul>
         <li><b>vs no battery</b> — what this horizon would cost with no battery at all (grid flow = load + PV each slot, priced normally). Captures the combined value of battery + planner.</li>
         <li><b>vs self-consumption</b> — what plain self-consumption mode would cost over the same forecast (same battery, same constraints, no arbitrage). Captures the extra value the planner adds on top of passive SC.</li>
         <li><b>vs flat avg price</b> — what no-battery import would cost if every kWh were priced at the horizon's average price. Captures the value of <em>timing</em> — shifting consumption into cheap hours — independently of the battery.</li>
       </ul>
       <p class="plan-help-note">
-        <span class="saving-pos-inline">Green +</span> means the plan saves vs that baseline.
-        <span class="saving-neg-inline">Red −</span> means it costs more (rare, usually a sign the baseline benefits from a lucky forecast).
+        <span class="saving-pos-inline">Green +</span> means the plan is better than that baseline (cheaper, or more revenue).
+        <span class="saving-neg-inline">Red −</span> means it would be worse than the baseline — typical on flat-price days where the battery's round-trip loss isn't recovered by timing arbitrage.
       </p>
     </div>
   </ftw-modal>
