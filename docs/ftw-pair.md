@@ -128,6 +128,29 @@ ordinary HTTP MCP server. End-to-end encryption (SPAKE2 key from the
 one-time code) protects all traffic; the public wormhole rendezvous
 server only ferries the PAKE handshake.
 
+## When the work is done — driver persistence
+
+When the friend calls `deploy_driver` during a session, the Lua file is
+written to `/app/data/drivers/` (the persistent volume) rather than the
+image-bundled `/app/drivers/`. This means:
+
+- **The driver survives `docker compose pull` / image updates.** The
+  `/app/data/` volume bind-mount (`./data:/app/data` in
+  docker-compose.yml) persists across every image upgrade. Drivers added
+  during pair sessions stay loaded without any extra action from the
+  owner.
+
+- **User drivers shadow bundled drivers by name.** If a file named
+  `ferroamp.lua` exists in `/app/data/drivers/`, it takes precedence
+  over the same-named file in `/app/drivers/`. This lets an operator
+  test a patched version of a bundled driver without waiting for an
+  upstream release.
+
+The PR that the friend opens after the session is for sharing the driver
+with the broader user base so it ships in future image builds. The
+owner's running instance already has the local copy and keeps it
+regardless of whether the PR is merged.
+
 ## Limits
 
 - One session at a time.

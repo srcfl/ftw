@@ -33,7 +33,7 @@ func TestDeployDriverHappyPath(t *testing.T) {
 
 	sc := NewScope(repo, t.TempDir())
 	a := NewAudit()
-	tool := NewDeployDriverTool(sc, a, upstream.URL, cfgPath)
+	tool := NewDeployDriverTool(sc, a, upstream.URL, cfgPath, "")
 	out, err := tool.Handle(context.Background(), map[string]any{
 		"name":       "goodwe_xs",
 		"lua_source": "-- minimal driver\nfunction driver_init() end\nfunction driver_poll() end\n",

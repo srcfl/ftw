@@ -77,7 +77,7 @@ COPY --from=builder /out/ftw-pair        /app/ftw-pair
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
-RUN mkdir -p /app/data /run/ftw-update && \
+RUN mkdir -p /app/data /app/data/drivers /run/ftw-update && \
     chown -R ftw:ftw /app /run/ftw-update
 
 USER ftw
@@ -104,4 +104,4 @@ EXPOSE 8080
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
 ENTRYPOINT ["/app/forty-two-watts"]
-CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers"]
+CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]

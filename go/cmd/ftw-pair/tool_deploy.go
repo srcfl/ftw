@@ -23,22 +23,28 @@ var _ Tool = (*DeployDriverTool)(nil)
 //  2. Patches the config.yaml drivers list (upsert by name).
 //  3. Polls GET <apiBase>/api/drivers/<name> until tick_count > 0 (up to 10 s).
 type DeployDriverTool struct {
-	scope      *Scope
-	audit      *Audit
-	apiBase    string
-	configPath string
-	client     *http.Client
+	scope          *Scope
+	audit          *Audit
+	apiBase        string
+	configPath     string
+	userDriversDir string // persistent overlay dir; written here when set
+	client         *http.Client
 }
 
 // NewDeployDriverTool constructs a DeployDriverTool. apiBase is the base URL of
 // the running forty-two-watts service (e.g. "http://localhost:8080").
-func NewDeployDriverTool(sc *Scope, a *Audit, apiBase, configPath string) *DeployDriverTool {
+// userDriversDir is the persistent user-drivers directory (e.g. /app/data/drivers
+// in the docker deploy). When non-empty, Lua files are written there so they
+// survive docker image updates. When empty, the old behaviour (sibling of configPath)
+// is preserved.
+func NewDeployDriverTool(sc *Scope, a *Audit, apiBase, configPath, userDriversDir string) *DeployDriverTool {
 	return &DeployDriverTool{
-		scope:      sc,
-		audit:      a,
-		apiBase:    strings.TrimRight(apiBase, "/"),
-		configPath: configPath,
-		client:     &http.Client{Timeout: 5 * time.Second},
+		scope:          sc,
+		audit:          a,
+		apiBase:        strings.TrimRight(apiBase, "/"),
+		configPath:     configPath,
+		userDriversDir: userDriversDir,
+		client:         &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -90,7 +96,13 @@ func (t *DeployDriverTool) Handle(ctx context.Context, args map[string]any) (any
 	}
 
 	// 2. Write the Lua source file.
+	// When a persistent user-drivers directory is configured (docker deploy),
+	// write there so the file survives image updates. Fall back to the
+	// config-sibling drivers/ for non-docker setups.
 	driverDir := filepath.Join(filepath.Dir(t.configPath), "drivers")
+	if t.userDriversDir != "" {
+		driverDir = t.userDriversDir
+	}
 	luaPath := filepath.Join(driverDir, name+".lua")
 
 	resolvedLua, err := t.scope.Resolve(luaPath)

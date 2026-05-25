@@ -31,6 +31,7 @@ func main() {
 	repoDir := flag.String("repo", "/opt/forty-two-watts", "Path to the 42W repo / install dir")
 	stateDir := flag.String("state", "/var/lib/forty-two-watts", "Path to the configured state dir")
 	configPath := flag.String("config", "/etc/forty-two-watts/config.yaml", "Path to config.yaml")
+	userDriversDir := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory. deploy_driver writes Lua files here so they survive docker image updates. Defaults to sibling-of-config drivers/ when empty.")
 	addr := flag.String("addr", "127.0.0.1:9999", "Local MCP server bind address")
 	ttl := flag.Duration("ttl", 4*time.Hour, "Session TTL")
 	intent := flag.String("intent", "", "Owner-stated purpose for this session")
@@ -68,7 +69,7 @@ func main() {
 		NewModbusWriteTool(),
 		NewMQTTObserveTool(),
 		NewPCapCaptureTool(),
-		NewDeployDriverTool(scope, audit, *apiBase, *configPath),
+		NewDeployDriverTool(scope, audit, *apiBase, *configPath, *userDriversDir),
 		NewSessionLogTool(sess, audit),
 		NewSessionRemainingTool(sess),
 		NewSessionEndTool(sess),

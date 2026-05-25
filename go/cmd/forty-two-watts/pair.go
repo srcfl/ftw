@@ -24,6 +24,7 @@ func runPair(args []string) {
 	as := fs.String("as", "", "Optional friend identity")
 	abort := fs.Bool("abort", false, "Abort the active session and exit")
 	bin := fs.String("bin", "", "Path to ftw-pair binary (default: sibling of forty-two-watts)")
+	userDriversDir := fs.String("user-drivers", "", "Path to persistent user-drivers directory (forwarded to ftw-pair)")
 	_ = fs.Parse(args)
 
 	if *abort {
@@ -51,6 +52,9 @@ func runPair(args []string) {
 		"-ttl", *ttl,
 		"-intent", *intent,
 		"-as", *as,
+	}
+	if *userDriversDir != "" {
+		cmdArgs = append(cmdArgs, "-user-drivers", *userDriversDir)
 	}
 	cmd := exec.Command(pairBin, cmdArgs...)
 	cmd.Stdout = os.Stdout

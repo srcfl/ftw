@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -645,5 +646,79 @@ func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
 	}
 	if incoming.Notifications.Ntfy.Password != "real_pw" {
 		t.Errorf("password not restored")
+	}
+}
+
+// --- UserDriversDirOverride tests ---
+
+func TestResolveDriverPathsPrefersUserDir(t *testing.T) {
+	bundledDir := t.TempDir()
+	userDir := t.TempDir()
+
+	// Write the driver only in userDir.
+	if err := os.WriteFile(filepath.Join(userDir, "mydrv.lua"), []byte("--"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = userDir
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(userDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
+	}
+}
+
+func TestResolveDriverPathsFallsBackToBundled(t *testing.T) {
+	bundledDir := t.TempDir()
+	userDir := t.TempDir()
+
+	// Write the driver only in bundledDir — NOT in userDir.
+	if err := os.WriteFile(filepath.Join(bundledDir, "mydrv.lua"), []byte("--"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = userDir
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(bundledDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
+	}
+}
+
+func TestResolveDriverPathsUserEmptyBackCompat(t *testing.T) {
+	bundledDir := t.TempDir()
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = ""
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(bundledDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
 	}
 }

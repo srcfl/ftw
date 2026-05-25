@@ -74,6 +74,7 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
+	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")
 	// Developer utility — seeds state.db with N days of synthetic history
 	// so /api/energy/daily has something to render locally. Refuses to run
 	// if the target DB already holds non-synthetic rows (prod-safety gate);
@@ -113,6 +114,9 @@ func main() {
 	// (from -drivers). Picked up by both the initial Load below and every
 	// subsequent reload via the file watcher.
 	config.DriversDirOverride = resolveDriverDir()
+	// UserDriversDirOverride is the persistent overlay — probed first.
+	// Empty when -user-drivers is not supplied (back-compat).
+	config.UserDriversDirOverride = *userDriversDirFlag
 
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
@@ -1355,6 +1359,7 @@ func main() {
 		CapMu: capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
+		UserDriverDir:       *userDriversDirFlag,
 		DriverMQTTFactory:   reg.MQTTFactory,
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
