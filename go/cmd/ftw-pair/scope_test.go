@@ -28,15 +28,11 @@ func TestScopeRejectsTraversal(t *testing.T) {
 	state := t.TempDir()
 	sc := NewScope(repo, state)
 
-	// Build a traversal path that actually escapes past os.TempDir() by
-	// climbing above every component of the resolved TempDir root.
-	// t.TempDir() nests as T/TestName.../NNN so we need enough ".." to
-	// reach above the entire TempDir base (which on macOS is 6+ levels deep).
-	escapingTraversal := repo
-	for range strings.Split(strings.TrimPrefix(filepath.Clean(os.TempDir()), string(filepath.Separator)), string(filepath.Separator)) {
-		escapingTraversal = filepath.Join(escapingTraversal, "..")
-	}
-	escapingTraversal = filepath.Join(escapingTraversal, "etc", "passwd")
+	// Build a traversal path that escapes both `repo` AND `os.TempDir()`
+	// on any OS by going up 20 levels (POSIX clamps further `..` at root).
+	// Linux: `/tmp/TestX/NNN` is 3 deep, macOS `/var/folders/.../T/TestX/NNN`
+	// is ~7 deep; 20 covers either.
+	escapingTraversal := filepath.Join(repo, strings.Repeat("../", 20)+"etc/passwd")
 
 	cases := []string{
 		"/etc/passwd",
