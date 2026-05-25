@@ -1,19 +1,23 @@
-// <ftw-pair-card> — surfaces an active pair session on the dashboard.
+// <ftw-pair-card> — surfaces an active pair session on the dashboard, and
+// lets the owner start a new session without touching the CLI.
 //
-// Polls /api/pair/status every 5 s. Renders the wormhole code, the
-// owner-supplied intent, a TTL countdown, the running tool counter,
-// and an Abort button that POSTs /api/pair/abort. When the endpoint
-// returns 404 (no active session) the card hides itself entirely via
-// :host(.hidden) { display:none } — identical pattern to ftw-update-check.
+// When no session is active (GET /api/pair/status → 404) the card renders a
+// start form (intent textarea + TTL select + Start button). POST /api/pair/start
+// spawns the sidecar; three fast 1 s polls flip the card to active-mode as
+// soon as the sidecar registers itself via POST /api/pair/status.
+//
+// When a session is active the card renders the wormhole code (with a Copy
+// button), intent, TTL countdown, tool counter, and an Abort button.
 
 import { FtwElement } from "./ftw-element.js";
 
 const POLL_MS = 5000;
+const FAST_POLL_MS = 1000;
+const FAST_POLL_ROUNDS = 3;
 
 class FtwPairCard extends FtwElement {
   static styles = `
     :host { display: block; }
-    :host(.hidden) { display: none; }
 
     .pair-card {
       border: 1px solid var(--line);
@@ -41,6 +45,12 @@ class FtwPairCard extends FtwElement {
       margin: 0 0 8px;
       color: var(--fg);
       letter-spacing: 0.06em;
+    }
+    .code-row {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      margin-bottom: 8px;
     }
     .intent {
       font-family: var(--sans);
@@ -78,12 +88,83 @@ class FtwPairCard extends FtwElement {
     button.abort:hover {
       opacity: 0.85;
     }
+    button.copy {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line);
+      padding: 2px 8px;
+      font-family: var(--mono);
+      cursor: pointer;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    button.copy:hover {
+      border-color: var(--accent-e);
+      color: var(--accent-e);
+    }
+    /* Start form */
+    .start-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .field label {
+      display: block;
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-raised2, var(--fg-dim, var(--fg)));
+      opacity: 0.6;
+      margin-bottom: 4px;
+    }
+    .field textarea,
+    .field select {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--bg, #111);
+      color: var(--fg);
+      border: 1px solid var(--line);
+      font-family: var(--sans);
+      font-size: 0.85rem;
+      padding: 6px 8px;
+    }
+    .field textarea {
+      resize: vertical;
+      min-height: 52px;
+    }
+    .field select {
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+    }
+    button.start {
+      align-self: flex-start;
+      background: var(--accent-e);
+      color: #0a0a0a;
+      border: 0;
+      padding: 6px 14px;
+      font-family: var(--mono);
+      cursor: pointer;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    button.start:hover {
+      opacity: 0.85;
+    }
+    button.start:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
   `;
 
   constructor() {
     super();
     this._state = null;
     this._tick = null;
+    this._fastRounds = 0;
   }
 
   connectedCallback() {
@@ -108,6 +189,50 @@ class FtwPairCard extends FtwElement {
     this.update();
   }
 
+  // _startFastPolls switches to 1 s polling for FAST_POLL_ROUNDS iterations,
+  // then reverts to the normal cadence. Call immediately after POST /api/pair/start
+  // so the card flips to active-mode as soon as the sidecar registers itself.
+  _startFastPolls() {
+    this._fastRounds = FAST_POLL_ROUNDS;
+    clearInterval(this._tick);
+    const fast = setInterval(() => {
+      this._refresh();
+      this._fastRounds--;
+      if (this._fastRounds <= 0) {
+        clearInterval(fast);
+        this._tick = setInterval(() => this._refresh(), POLL_MS);
+      }
+    }, FAST_POLL_MS);
+  }
+
+  async _start() {
+    const root = this.shadowRoot;
+    const intentEl = root.getElementById("intent-input");
+    const ttlEl = root.getElementById("ttl-select");
+    const btn = root.getElementById("start-btn");
+    if (!intentEl || !ttlEl || !btn) return;
+
+    btn.disabled = true;
+    try {
+      const resp = await fetch("/api/pair/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ intent: intentEl.value.trim(), ttl: ttlEl.value }),
+      });
+      if (!resp.ok) {
+        const txt = await resp.text();
+        alert("Failed to start pair session: " + txt);
+        btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      alert("Failed to start pair session: " + e.message);
+      btn.disabled = false;
+      return;
+    }
+    this._startFastPolls();
+  }
+
   async _abort() {
     if (!confirm("End the pair session now?")) return;
     await fetch("/api/pair/abort", { method: "POST" });
@@ -115,13 +240,39 @@ class FtwPairCard extends FtwElement {
     this.update();
   }
 
+  _copyCode() {
+    if (!this._state) return;
+    navigator.clipboard.writeText(this._state.code).catch(() => {});
+  }
+
   render() {
     if (!this._state) {
-      this.classList.add("hidden");
-      return "";
+      // No active session — show the start form.
+      return `
+        <div class="pair-card">
+          <header>
+            <span class="eyebrow">Pair session</span>
+          </header>
+          <div class="start-form">
+            <div class="field">
+              <label for="intent-input">Intent (optional)</label>
+              <textarea id="intent-input" rows="2" placeholder="e.g. help me write a GoodWe XS driver"></textarea>
+            </div>
+            <div class="field">
+              <label for="ttl-select">Session length</label>
+              <select id="ttl-select">
+                <option value="1h">1 hour</option>
+                <option value="4h" selected>4 hours</option>
+                <option value="12h">12 hours</option>
+              </select>
+            </div>
+            <button class="start" id="start-btn">Start pair session</button>
+          </div>
+        </div>
+      `;
     }
-    this.classList.remove("hidden");
 
+    // Active session — show code, intent, countdown, tools, abort + copy.
     const remaining = this._computeRemaining();
     const lastTools = (this._state.last_tools || [])
       .map((t) => escapeHTML(t))
@@ -133,7 +284,10 @@ class FtwPairCard extends FtwElement {
           <span class="eyebrow">Pair session active</span>
           <button class="abort" id="abort-btn">Abort</button>
         </header>
-        <p class="code">${escapeHTML(this._state.code)}</p>
+        <div class="code-row">
+          <p class="code">${escapeHTML(this._state.code)}</p>
+          <button class="copy" id="copy-btn">Copy</button>
+        </div>
         <p class="intent">${escapeHTML(this._state.intent || "(no intent set)")}</p>
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
@@ -145,8 +299,14 @@ class FtwPairCard extends FtwElement {
   }
 
   afterRender() {
-    const btn = this.shadowRoot.getElementById("abort-btn");
-    if (btn) btn.addEventListener("click", () => this._abort());
+    const abortBtn = this.shadowRoot.getElementById("abort-btn");
+    if (abortBtn) abortBtn.addEventListener("click", () => this._abort());
+
+    const copyBtn = this.shadowRoot.getElementById("copy-btn");
+    if (copyBtn) copyBtn.addEventListener("click", () => this._copyCode());
+
+    const startBtn = this.shadowRoot.getElementById("start-btn");
+    if (startBtn) startBtn.addEventListener("click", () => this._start());
   }
 
   _computeRemaining() {

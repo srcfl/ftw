@@ -2,9 +2,27 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"sync"
+	"time"
 )
+
+// resolvedSelfExe returns os.Executable() with symlinks resolved, or
+// os.Args[0] on error. Used as the default selfExe for spawning child
+// pair sessions; tests inject a fake path via Deps.PairSelfExe.
+func resolvedSelfExe() string {
+	if exe, err := os.Executable(); err == nil {
+		return exe
+	}
+	if len(os.Args) > 0 {
+		return os.Args[0]
+	}
+	return ""
+}
 
 // PairStatus is the metadata the ftw-pair sidecar POSTs to
 // /api/pair/status so the dashboard can render the active session.
@@ -59,7 +77,11 @@ func (s *PairStatusStore) Clear() {
 //	GET  /api/pair/status  — returns the active session or 404
 //	POST /api/pair/status  — sidecar registers/updates its session
 //	POST /api/pair/abort   — operator clears the session; sidecar exits on next poll
-func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore) {
+//	POST /api/pair/start   — owner starts a new pair session from the web UI
+//
+// selfExe is the path to the running binary (os.Executable() result), used
+// to spawn "self pair --ttl <t> [--intent <i>]" as a detached child.
+func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe string) {
 	mux.HandleFunc("GET /api/pair/status", func(w http.ResponseWriter, r *http.Request) {
 		p, ok := store.Get()
 		if !ok {
@@ -85,4 +107,45 @@ func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore) {
 		store.Clear()
 		w.WriteHeader(http.StatusOK)
 	})
+	mux.HandleFunc("POST /api/pair/start", handlePairStart(store, selfExe))
+}
+
+// handlePairStart returns an http.HandlerFunc that spawns
+// "<selfExe> pair --ttl <ttl> [--intent <intent>]" as a detached child
+// process. The child will register itself via POST /api/pair/status once
+// the wormhole tunnel is up; the card's fast-poll loop picks that up.
+func handlePairStart(store *PairStatusStore, selfExe string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Intent string `json:"intent"`
+			TTL    string `json:"ttl"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err != io.EOF {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.TTL == "" {
+			body.TTL = "4h"
+		}
+		if _, err := time.ParseDuration(body.TTL); err != nil {
+			http.Error(w, fmt.Sprintf("invalid ttl: %v", err), http.StatusBadRequest)
+			return
+		}
+		if _, ok := store.Get(); ok {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"pair session already active"}`, http.StatusConflict)
+			return
+		}
+		args := []string{"pair", "--ttl", body.TTL}
+		if body.Intent != "" {
+			args = append(args, "--intent", body.Intent)
+		}
+		go func() {
+			cmd := exec.Command(selfExe, args...)
+			_ = cmd.Run() // child writes to /api/pair/status itself
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{"status": "starting", "ttl": body.TTL})
+	}
 }
