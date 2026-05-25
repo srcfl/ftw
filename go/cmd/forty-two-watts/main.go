@@ -182,7 +182,8 @@ func main() {
 		switch control.Mode(v) {
 		case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
 			control.ModeCharge, control.ModePriority, control.ModeWeighted,
-			control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
+			control.ModePlannerSelf, control.ModePlannerCheap,
+			control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
 			ctrl.Mode = control.Mode(v)
 		}
 	}
@@ -965,6 +966,8 @@ func main() {
 				mm = mpc.ModeSelfConsumption
 			case control.ModePlannerCheap:
 				mm = mpc.ModeCheapCharge
+			case control.ModePlannerPassiveArbitrage:
+				mm = mpc.ModePassiveArbitrage
 			case control.ModePlannerArbitrage:
 				mm = mpc.ModeArbitrage
 			}
