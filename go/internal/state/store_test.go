@@ -406,6 +406,67 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	}
 }
 
+// 2026-05-25 performance fix: snapshots now skip the bulky time-series
+// tables (history_hot/warm/cold + ts_samples) which are recoverable
+// from cold parquet roll-off anyway. Verify that essential tables
+// (config, telemetry, devices, prices, etc.) ARE preserved AND the
+// excluded tables exist but are empty in the snapshot.
+func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
+	s := freshStore(t)
+	// Essential row that MUST survive the snapshot.
+	if err := s.SaveConfig("mode", "passive_arbitrage"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a history_hot row so we can verify exclusion. RecordHistory
+	// writes into history_hot directly.
+	if err := s.RecordHistory(HistoryPoint{
+		TsMs: time.Now().UnixMilli(),
+		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a long-format TS sample so ts_samples has rows too.
+	if err := s.RecordSamples([]Sample{
+		{Driver: "ferroamp", Metric: "pv_w", TsMs: time.Now().UnixMilli(), Value: -3000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: source DB has the rows we just wrote.
+	if hot, _, _, err := s.HistoryCounts(); err != nil || hot == 0 {
+		t.Fatalf("seed: history_hot rows = %d (err=%v) — want > 0", hot, err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+	snap, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+
+	// Essentials preserved.
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "passive_arbitrage" {
+		t.Errorf("snapshot dropped config row: got %q ok=%v", v, ok)
+	}
+	// Time-series excluded — tables exist (Open runs migrate()) but
+	// rows must NOT be present.
+	if hot, warm, cold, err := snap.HistoryCounts(); err != nil {
+		t.Errorf("HistoryCounts on snap: %v", err)
+	} else if hot+warm+cold != 0 {
+		t.Errorf("snapshot history rows = %d+%d+%d — want 0 (excluded)", hot, warm, cold)
+	}
+	// ts_samples: query directly since there's no public counter.
+	var nSamples int
+	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&nSamples); err != nil {
+		t.Errorf("count ts_samples: %v", err)
+	} else if nSamples != 0 {
+		t.Errorf("snapshot ts_samples rows = %d — want 0 (excluded)", nSamples)
+	}
+}
+
 func TestSnapshotToRefusesExistingFile(t *testing.T) {
 	s := freshStore(t)
 	dst := filepath.Join(t.TempDir(), "snap.db")
