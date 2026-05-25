@@ -68,7 +68,8 @@ type Deps struct {
 	CfgMu      *sync.RWMutex
 	Cfg        *config.Config
 	ConfigPath string
-	DriverDir  string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	DriverDir      string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir  string // persistent user-drivers overlay; searched before DriverDir
 	Models     map[string]*battery.Model
 	ModelsMu   *sync.Mutex
 	SelfTune   *selftune.Coordinator
@@ -848,7 +849,7 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		return nil
 	}
@@ -1217,7 +1218,8 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	// User-drivers dir (persistent volume) takes precedence over bundled dir.
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"path": dir, "entries": []any{}, "error": err.Error()})
 		return
