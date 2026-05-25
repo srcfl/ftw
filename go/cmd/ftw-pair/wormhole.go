@@ -11,7 +11,7 @@
 // bidirectional TCP streaming. The Python `fowl` tool does. Subprocess-wrapping
 // keeps us on the canonical magic-wormhole stack without porting Dilation to Go.
 //
-// Install fowl: pipx install fowl  (or: pip install fowl)
+// Install fowl: uv tool install fowl  (sourceful's preferred path)
 // See docs/ftw-pair.md for the full setup guide.
 //
 // # Protocol overview (fowld JSON)
@@ -81,7 +81,7 @@ type ErrFowlNotFound struct {
 }
 
 func (e *ErrFowlNotFound) Error() string {
-	return "fowld not found on PATH — install with `pipx install fowl` or `pip install fowl`"
+	return "fowld not found on PATH — install with `uv tool install fowl`"
 }
 
 func (e *ErrFowlNotFound) Unwrap() error { return e.Underlying }
