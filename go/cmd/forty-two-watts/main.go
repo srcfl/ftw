@@ -65,6 +65,9 @@ func main() {
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
 			return
+		case "pair":
+			runPair(os.Args[2:])
+			return
 		}
 	}
 

@@ -143,6 +143,11 @@ type Deps struct {
 	Restart func(ctx context.Context) error
 
 	Version string
+
+	// PairStore holds the currently-active ftw-pair sidecar session (if
+	// any). Nil is safe — routes are still registered; GET returns 404.
+	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
+	PairStore *PairStatusStore
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -175,6 +180,9 @@ func New(deps *Deps) *Server {
 	}
 	if deps.WebDir == "" {
 		deps.WebDir = "web"
+	}
+	if deps.PairStore == nil {
+		deps.PairStore = NewPairStatusStore()
 	}
 	s := &Server{
 		deps:       deps,
@@ -270,6 +278,9 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("POST /api/restart", s.handleRestart)
+
+	// ---- Pair sidecar endpoints ----
+	RegisterPairRoutes(s.mux, s.deps.PairStore)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

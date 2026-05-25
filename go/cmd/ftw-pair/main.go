@@ -95,6 +95,33 @@ func main() {
 		slog.Warn("post pair status", "err", err)
 	}
 
+	// Abort-poller: the owner can run `forty-two-watts pair --abort` which
+	// POSTs /api/pair/abort on the main service, clearing the session store.
+	// We poll GET /api/pair/status here; a 404 means the store was cleared
+	// (abort was requested) and we end the session gracefully.
+	go func() {
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sess.Done():
+				return
+			case <-t.C:
+				resp, err := http.Get(*apiBase + "/api/pair/status")
+				if err != nil {
+					continue
+				}
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusNotFound {
+					sess.End("aborted_by_owner")
+					return
+				}
+			}
+		}
+	}()
+
 	<-sess.Done()
 	slog.Info("pair session ended", "reason", sess.ExitReason(), "tool_calls", audit.ToolCount())
 }
