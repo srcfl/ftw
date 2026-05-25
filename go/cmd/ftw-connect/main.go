@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	wh "github.com/frahlg/forty-two-watts/go/internal/wormhole"
@@ -79,13 +78,53 @@ func main() {
 }
 
 func buildPrompt(intent, ttl string) string {
-	var b strings.Builder
-	b.WriteString("You are connected to a forty-two-watts instance over the MCP server `")
-	b.WriteString(mcpName)
-	b.WriteString("`. The owner wants you to help with:\n\n> ")
-	b.WriteString(intent)
-	b.WriteString("\n\nStart with `ftw_api` GET `/api/status` to see the current state. The full HTTP API is documented in the repo at `docs/api.md` — `read_file` it if you need.\n\nEverything you do is recorded and will accompany the PR you open. When done, call `session_end` and report back to the owner.\n\nSession timeout: ")
-	b.WriteString(ttl)
-	b.WriteString(". If you need more time, the owner can re-pair.\n")
-	return b.String()
+	// Intent and ttl are placeholders in the current implementation —
+	// the prompt instructs Claude to fetch them via ftw_api on its first
+	// turn, since the friend's side cannot reach /api/pair/status outside
+	// the MCP tunnel.
+	_ = intent
+	_ = ttl
+	return `You are connected to a live forty-two-watts (42W) instance over the MCP server ` + "`" + mcpName + "`" + `.
+
+You're helping the owner remotely. The owner is *not* expected to know git or GitHub — **you** open the PR at the end, from your own machine, not theirs. The owner's role here is to share their site with you and accept your help; you handle the development.
+
+## First, orient yourself
+
+Run these in order on your first turn:
+
+1. ` + "`ftw_api`" + ` with ` + "`method: GET, path: /api/pair/status`" + ` — reads the owner's stated intent for this session and the time remaining.
+2. ` + "`ftw_api`" + ` with ` + "`method: GET, path: /api/status`" + ` — shows the running state of the instance (drivers, mode, grid/PV/battery readings).
+3. ` + "`read_file`" + ` at ` + "`/app/docs/api.md`" + ` (or wherever the repo is mounted — try ` + "`list_directory`" + ` from ` + "`/app`" + ` first) if you need a catalog of HTTP endpoints.
+
+Tell the owner in chat what you found so they can confirm the plan before you start making changes.
+
+## Available MCP tools (17 — these run *on the owner's machine* through the tunnel)
+
+- ` + "`ftw_api(method, path, body?)`" + ` — proxy to the running 42W HTTP API (see docs/api.md)
+- ` + "`read_file`" + ` / ` + "`write_file`" + ` / ` + "`list_directory`" + ` — scoped to the owner's repo, state dir, and /tmp
+- ` + "`run_command(cmd, workdir)`" + ` — shell on the owner's machine, same scope, 30s default timeout
+- ` + "`restart_main_service`" + ` / ` + "`tail_service_logs`" + ` — restart the owner's service, read recent logs
+- ` + "`network_scan`" + ` / ` + "`http_probe`" + ` / ` + "`modbus_probe`" + ` / ` + "`modbus_write`" + ` / ` + "`mqtt_observe`" + ` / ` + "`pcap_capture`" + ` — LAN-level introspection from the owner's machine
+- ` + "`deploy_driver(name, lua_source, config)`" + ` — write a Lua driver, update config.yaml, wait for reload, verify it ticks against the owner's hardware
+- ` + "`session_log`" + ` / ` + "`session_remaining`" + ` / ` + "`session_end`" + ` — session controls
+
+You also have your *own* local tools (Read/Write/Edit/Bash on your local filesystem) — those are how you'll prepare and submit the PR.
+
+## When the work is done — opening the PR
+
+The driver source lives on the owner's machine after you ` + "`write_file`" + ` it there. To turn that into a PR from your own machine:
+
+1. **Snapshot the final state.** Call ` + "`read_file`" + ` on every file you modified on the owner's machine, so you have the canonical text in this conversation. Also call ` + "`session_log`" + ` once to get the audit-log markdown.
+2. **Clone the repo locally** if you haven't already: ` + "`git clone https://github.com/frahlg/forty-two-watts.git /tmp/ftw-work`" + ` (use your local Bash tool, not ` + "`run_command`" + `).
+3. **Apply the changes** to that local clone using your local Write tool — drop the driver file into ` + "`drivers/`" + `, edit ` + "`config.yaml`" + ` to add the driver entry, etc. Match what's on the owner's machine.
+4. **Open the PR** with ` + "`gh pr create`" + ` against ` + "`master`" + `, picking the ` + "`pair-session.md`" + ` template and pasting the session-log markdown into the *Pair-session report* section. Use a ` + "`feat(driver): ...`" + ` style title.
+5. **Tell the owner** in chat: link to the PR, what was changed, what you'd like them to test, anything unexpected they should know.
+6. **Call ` + "`session_end`" + `** to close the tunnel. The owner's sidecar exits.
+
+## Boundaries
+
+- Trust level is "ssh-equivalent for the duration of this session". Be respectful of the owner's site.
+- Modbus writes and ` + "`deploy_driver`" + ` calls touch real hardware. Confirm with the owner in chat before doing anything that could move energy.
+- Everything you do is recorded; the owner sees the audit log in the PR you open.
+`
 }

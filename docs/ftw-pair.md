@@ -72,8 +72,14 @@ That:
 2. Registers an MCP server named `ftw-remote` with Claude Code.
 3. Copies a context-priming prompt to the clipboard.
 
-Open Claude Code, paste the prompt, work. When done, the friend calls
-`session_end` and opens a PR using the `pair-session.md` template.
+Open Claude Code, paste the prompt, work. When done, **the friend
+opens the PR from their own machine** — they clone the 42W repo
+locally (Claude does this for them via its own `Bash` tool), apply
+the changes they wrote on the owner's instance, and run `gh pr
+create` with the `pair-session.md` template.
+
+The owner doesn't touch git or GitHub. They share the wormhole code,
+let the friend work, and get a PR link back.
 
 ## What the friend gets
 
@@ -90,8 +96,25 @@ A 17-tool MCP surface:
 ## What gets recorded
 
 Every tool call lands in an audit log. `session_log()` renders the log
-as markdown for the PR template. Friends should paste it into the PR
-body; reviewers use it to confirm what changed on your instance.
+as markdown for the PR template. The friend pastes it into the PR body
+under the *Pair-session report* section; reviewers use it to confirm
+what changed on the owner's instance.
+
+## Who does what (owner vs. friend)
+
+| Step | Owner | Friend |
+|---|---|---|
+| Trigger pair session | `forty-two-watts pair --intent "..."` | — |
+| Share wormhole code | Send via Signal/SMS/Slack | Receive |
+| Connect | — | `ftw-connect <code>` |
+| Develop the driver / debug | — | Drives Claude Code through the tunnel |
+| Open the PR | — | Clones repo locally, `gh pr create` from own machine |
+| Review the PR | Reviews via GitHub web UI | — |
+
+The owner stays out of git entirely. They don't need a GitHub account,
+don't need `gh` installed, don't need to know what a fork is. Their
+only job is starting the pair session and (optionally) reviewing the
+PR the friend opens.
 
 ## Architecture in one paragraph
 
