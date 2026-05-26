@@ -382,9 +382,7 @@ session — please join with this code:
 
   ${code}
 
-One-time setup on your Mac/Linux:
-  brew install uv     (skip if already installed)
-  uv tool install 'fowl==25.4.0'
+One-time setup (Mac/Linux):
   curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
 
 Then run:

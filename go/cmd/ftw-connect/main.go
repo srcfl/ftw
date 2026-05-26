@@ -1,13 +1,18 @@
-// ftw-connect is the friend-side CLI that turns a magic-wormhole code
-// into a live MCP endpoint Claude Code can talk to.
+// ftw-connect is the friend-side CLI that turns a 6-word relay token into
+// a live MCP endpoint Claude Code can talk to.
 //
 // Usage:
 //
-//	ftw-connect 7-crossover-clockwork
+//	ftw-connect [flags] <token>
+//
+// Example:
+//
+//	ftw-connect garage-coffee-river-bicycle-window-cat
 //
 // On success it:
-//  1. opens the wormhole tunnel via the fowl subprocess wrapper,
-//  2. exposes a local TCP port forwarded to the host's MCP server,
+//  1. connects to the Sourceful relay with the given token,
+//  2. exposes a local TCP port forwarded to the host's MCP server
+//     through the end-to-end encrypted relay tunnel,
 //  3. registers that port with Claude Code (`claude mcp add ...`),
 //  4. copies a context prompt to the clipboard,
 //  5. blocks until the tunnel closes (TTL, owner abort, ^C).
@@ -31,13 +36,18 @@ const mcpName = "ftw-remote"
 
 func main() {
 	version := flag.Bool("version", false, "print version and exit")
+	relayAddr := flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.sourceful.energy:7777)")
 	flag.Parse()
+
 	if *version {
 		fmt.Printf("ftw-connect %s\n", Version)
 		os.Exit(0)
 	}
 	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ftw-connect <wormhole-code>")
+		fmt.Fprintln(os.Stderr, "usage: ftw-connect [flags] <token>")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "flags:")
+		flag.PrintDefaults()
 		os.Exit(2)
 	}
 	code := flag.Arg(0)
@@ -45,10 +55,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	fmt.Printf("Connecting to %s...\n", code)
-	client, err := wh.Connect(ctx, code)
+	effectiveRelay := wh.RelayAddr(*relayAddr)
+	fmt.Printf("Connecting to relay (%s)...\n", effectiveRelay)
+
+	client, err := wh.Connect(ctx, code, wh.WithRelayAddr(*relayAddr))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "wormhole connect: %v\n", err)
+		fmt.Fprintf(os.Stderr, "relay connect: %v\n", err)
 		os.Exit(1)
 	}
 	defer client.Close()
@@ -78,10 +90,8 @@ func main() {
 }
 
 func buildPrompt(intent, ttl string) string {
-	// Intent and ttl are placeholders in the current implementation —
-	// the prompt instructs Claude to fetch them via ftw_api on its first
-	// turn, since the friend's side cannot reach /api/pair/status outside
-	// the MCP tunnel.
+	// Intent and ttl are placeholders — the prompt instructs Claude to fetch
+	// them via ftw_api on its first turn.
 	_ = intent
 	_ = ttl
 	return `You are connected to a live forty-two-watts (42W) instance over the MCP server ` + "`" + mcpName + "`" + `.
