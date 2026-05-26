@@ -68,9 +68,19 @@ func main() {
 	mcpURL := "http://" + client.LocalAddr + "/mcp"
 	fmt.Printf("Tunnel ready: %s\n", mcpURL)
 
-	// Best-effort registration with Claude Code.
-	if err := exec.Command("claude", "mcp", "add", mcpName, mcpURL, "--transport", "http").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude mcp add failed: %v — register manually with:\n  claude mcp add %s %s\n", err, mcpName, mcpURL)
+	// Drop any stale `ftw-remote` entry from a previous (possibly broken)
+	// run — e.g. one that got registered as stdio because of flag-order
+	// confusion. Ignored if it doesn't exist.
+	_ = exec.Command("claude", "mcp", "remove", mcpName).Run()
+
+	// Best-effort registration with Claude Code. Flag order matters: newer
+	// `claude` CLI versions parse positional args strictly and treat a URL
+	// that follows `mcp add <name>` without `--transport` as a stdio command
+	// (which then silently fails to come online). Put `--transport http`
+	// *before* the name so it binds correctly.
+	manualCmd := fmt.Sprintf("claude mcp add --transport http %s %s", mcpName, mcpURL)
+	if err := exec.Command("claude", "mcp", "add", "--transport", "http", mcpName, mcpURL).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "claude mcp add failed: %v — register manually with:\n  %s\n", err, manualCmd)
 	} else {
 		fmt.Printf("Registered MCP server '%s' with Claude Code.\n", mcpName)
 	}
@@ -79,10 +89,19 @@ func main() {
 	}()
 
 	prompt := buildPrompt("(see owner's message)", "(see session_remaining)")
-	if err := copyClipboard(prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "clipboard copy failed: %v — paste manually:\n\n%s\n", err, prompt)
+	clipboardOK := copyClipboard(prompt) == nil
+	// Always print the prompt to stderr inside fenced markers so the user can
+	// scroll up and copy-paste manually if the clipboard didn't take (e.g.
+	// terminal-multiplexer focus issues, headless/SSH sessions, OS quirks).
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "──────────────────── BEGIN CLAUDE CODE PROMPT ────────────────────")
+	fmt.Fprintln(os.Stderr, prompt)
+	fmt.Fprintln(os.Stderr, "───────────────────── END CLAUDE CODE PROMPT ─────────────────────")
+	fmt.Fprintln(os.Stderr, "")
+	if clipboardOK {
+		fmt.Println("Context prompt above is also copied to your clipboard. Paste it into Claude Code now.")
 	} else {
-		fmt.Printf("Context prompt copied to clipboard. Paste it into Claude Code now.\n")
+		fmt.Println("Clipboard copy failed — copy the prompt above manually and paste it into Claude Code.")
 	}
 
 	fmt.Println("Tunnel open. Ctrl-C to disconnect.")
