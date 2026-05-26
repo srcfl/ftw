@@ -59,6 +59,22 @@ local pending_amp_resend = false
 local pending_amp_resend_at_ms = 0
 local last_amps_set = nil
 
+-- paused_state tracks whether the LAST command we successfully sent was
+-- ev_pause. Easee's REST API has no way to query "are you currently
+-- in user-pause" — op_mode 2 ("awaiting start") covers both "paused"
+-- and "plugged in but car hasn't started a session yet". Without this
+-- flag, after a controller pause + re-offer, we'd write
+-- dynamicChargerCurrent=6 successfully but the contactor stays open
+-- because we never sent resume_charging. We saw this in the field as
+-- "easee_a=6, easee_chg=false, ev_w=0, reason=100/52" stuck states.
+local paused_state = false
+
+-- command_stalled_since_ms tracks when we last wrote a non-zero amps
+-- offer that did NOT translate into actual charging. Used to surface
+-- a derived diagnostic for the controller / UI so a stuck Easee
+-- (firmware error, EV-side reject) is observable rather than silent.
+local command_stalled_since_ms = 0
+
 -- Easee charger physical limits. These are the manufacturer's hard
 -- bounds, not operator preferences — `dynamicChargerCurrent` written
 -- below the minimum is silently rejected by the unit (returns success
@@ -303,7 +319,13 @@ local REASON_LABELS = {
     [79]  = "car not drawing current",
     [80]  = "current ramping",
     [81]  = "limited by car",
-    [100] = "undefined error",
+    -- Easee's public enumeration doesn't define 100. Field observation:
+    -- we see it when the EV is the side rejecting the offer (Tesla
+    -- charge-on-solar window, charge limit reached, scheduled charging
+    -- still active, transient handshake hiccup). Labelling it
+    -- "undefined error" misleads operators into chasing a charger
+    -- problem when the wallbox is fine.
+    [100] = "EV not accepting current",
 }
 
 local email, password, configured_max_a
@@ -473,6 +495,26 @@ function driver_poll()
         actual_amps_per_phase = power_w / vv / phases
     end
 
+    -- command_stalled: true when we've been offering >0 A for >30 s but
+    -- the charger isn't drawing AND Easee is reporting an EV-side or
+    -- "max dynamic too low" reason. Lets the controller / UI tell the
+    -- difference between "EV declined" (legitimate, e.g. Tesla SoC
+    -- limit reached) and "wallbox accepted but contactor stuck"
+    -- (needs operator attention). Note: connected==true is required so
+    -- a disconnected cable doesn't latch the flag.
+    local command_stalled = false
+    local now = host.millis()
+    local stalled_reason = (reason_code == 52) or (reason_code == 53) or (reason_code == 100)
+    if connected and (last_amps_set or 0) > 0 and not charging and stalled_reason then
+        if command_stalled_since_ms == 0 then
+            command_stalled_since_ms = now
+        elseif (now - command_stalled_since_ms) >= 30000 then
+            command_stalled = true
+        end
+    else
+        command_stalled_since_ms = 0
+    end
+
     host.emit("ev", {
         w                       = power_w,
         connected               = connected,
@@ -487,6 +529,7 @@ function driver_poll()
         max_a                   = dyn_current,                 -- last-set dynamic limit (echoes our write, may lag)
         actual_amps_per_phase   = actual_amps_per_phase,       -- live per-phase A derived from totalPower
         phases                  = phases,                      -- our committed phase count (1 or 3)
+        command_stalled         = command_stalled,             -- offer>0 but contactor open >30s on stall reason
     })
 
     -- Defense against Easee's post-phaseMode reset of dynamicChargerCurrent
@@ -540,11 +583,17 @@ function driver_command(action, power_w, cmd)
     if not charger_serial or not ensure_auth(email, password) then return false end
 
     if action == "ev_start" then
-        return post_command("/commands/start_charging")
+        local ok = post_command("/commands/start_charging")
+        if ok then paused_state = false end
+        return ok
     elseif action == "ev_pause" then
-        return post_command("/commands/pause_charging")
+        local ok = post_command("/commands/pause_charging")
+        if ok then paused_state = true end
+        return ok
     elseif action == "ev_resume" then
-        return post_command("/commands/resume_charging")
+        local ok = post_command("/commands/resume_charging")
+        if ok then paused_state = false end
+        return ok
     elseif action == "ev_set_current" then
         -- Driver-level phase decision: read the operator's preferences
         -- + site fuse from the cmd, decide 1Φ vs 3Φ here based on
@@ -596,6 +645,25 @@ function driver_command(action, power_w, cmd)
             if phase_changed then
                 pending_amp_resend = true
                 pending_amp_resend_at_ms = now_ms + 5000
+            end
+            -- Auto-resume after pause. The controller's contract used
+            -- to be: ev_pause → (later) ev_resume → ev_set_current.
+            -- In practice the controller drops ev_resume in some
+            -- transitions and just re-issues ev_set_current with a
+            -- non-zero offer — Easee accepts the new
+            -- dynamicChargerCurrent but the contactor stays open
+            -- because pause is still active (op_mode=2,
+            -- reason_no_current=52 or 100, ev_w=0). Defensively
+            -- send resume_charging when we know we're paused and
+            -- the new offer is > 0. Idempotent on the Easee side;
+            -- a failure here doesn't fail the command (the offer
+            -- itself succeeded, controller will retry next tick).
+            if amps > 0 and paused_state then
+                if post_command("/commands/resume_charging") then
+                    paused_state = false
+                    host.log("info", "Easee: auto-resumed after pause (offer=" ..
+                        tostring(amps) .. " A)")
+                end
             end
         end
         return err == nil

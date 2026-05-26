@@ -274,3 +274,71 @@ func (c *Controller) surplusPausedFor(id string) bool {
 	paused, _ := c.getSurplusPause(id)
 	return paused
 }
+
+// TestPickSurplusSteps_NearTermDwell verifies the 30-min minimum-dwell
+// on the near-term 1Φ↔3Φ gate. The fix is operator-stated: at most one
+// switch per phaseSwitchMinHold so a forecast peak hovering around the
+// 4140 W threshold doesn't flap the Easee contactor every couple of
+// minutes (the symptom from the May 2026 borderline-PV trace).
+func TestPickSurplusSteps_NearTermDwell(t *testing.T) {
+	c := NewController(NewManager(), nil, nil, nil)
+	cfg := surplusTestConfig()
+
+	// Day peak always comfortable (above 3Φ min) so we exercise the
+	// near-term gate, not the day-long lock.
+	c.SetPeakRemainingSurplusW(func() (float64, bool) { return 9000, true })
+
+	var nearPeak float64
+	c.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
+		return nearPeak, true
+	})
+
+	day1 := time.Date(2026, 5, 3, 9, 0, 0, 0, time.Local)
+	steps3 := surplus3PhaseSteps(cfg)
+	minStep3 := smallestNonZero(steps3)
+
+	// First call — near-term forecast comfortably above minStep3 → 3Φ-only.
+	nearPeak = minStep3 + 1000
+	if got := c.pickSurplusSteps(day1, cfg); len(got) != len(steps3) {
+		t.Fatalf("expected 3Φ-only on first call with sufficient near-term peak, got %d steps", len(got))
+	}
+
+	// Two seconds later, forecast dips below threshold. Dwell must
+	// hold the prior 3Φ decision — no flap-down.
+	nearPeak = minStep3 - 500
+	if got := c.pickSurplusSteps(day1.Add(2*time.Second), cfg); len(got) != len(steps3) {
+		t.Fatalf("dwell must hold 3Φ within phaseSwitchMinHold even when near-term peak dips, got %d steps", len(got))
+	}
+
+	// 29 min later — still inside dwell window — same 3Φ verdict held.
+	if got := c.pickSurplusSteps(day1.Add(29*time.Minute), cfg); len(got) != len(steps3) {
+		t.Fatalf("dwell must hold 3Φ until phaseSwitchMinHold elapses, got %d steps", len(got))
+	}
+
+	// Past the dwell with low forecast — switch DOWN to 1Φ-allowed.
+	afterDwell := day1.Add(phaseSwitchMinHold + time.Second)
+	if got := c.pickSurplusSteps(afterDwell, cfg); len(got) != len(cfg.AllowedStepsW) {
+		t.Fatalf("expected 1Φ-allowed after dwell elapses with low near-term peak, got %d steps", len(got))
+	}
+
+	// Two seconds later, forecast recovers ABOVE minStep3. Dwell now
+	// guards the 1Φ→3Φ direction too — must NOT flap back up.
+	nearPeak = minStep3 + 1000
+	if got := c.pickSurplusSteps(afterDwell.Add(2*time.Second), cfg); len(got) != len(cfg.AllowedStepsW) {
+		t.Fatalf("dwell must hold 1Φ-allowed within phaseSwitchMinHold even on forecast recovery, got %d steps", len(got))
+	}
+
+	// Past the second dwell window — switch UP allowed again.
+	afterSecondDwell := afterDwell.Add(phaseSwitchMinHold + time.Second)
+	if got := c.pickSurplusSteps(afterSecondDwell, cfg); len(got) != len(steps3) {
+		t.Fatalf("expected 3Φ-only after second dwell elapses with high near-term peak, got %d steps", len(got))
+	}
+
+	// Day rollover with high forecast clears the selection so a fresh
+	// morning gets a fresh verdict, not a stale-from-yesterday state.
+	day2 := day1.Add(24 * time.Hour)
+	nearPeak = minStep3 + 1000
+	if got := c.pickSurplusSteps(day2, cfg); len(got) != len(steps3) {
+		t.Fatalf("expected 3Φ-only on day 2 with sufficient forecast, got %d steps", len(got))
+	}
+}

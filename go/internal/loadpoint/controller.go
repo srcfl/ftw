@@ -3,6 +3,7 @@ package loadpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"sync"
@@ -99,17 +100,53 @@ type Controller struct {
 	// shifts. nil disables this — the loadpoint then stays on 3Φ-
 	// only forever (matching the conservative original behaviour).
 	peakRemainingSurplusW func() (float64, bool)
+	// nearTermPeakSurplusW returns the peak PV-minus-load surplus
+	// over the next `window` from now (in plan slot resolution).
+	// pickSurplusSteps consults this *before* the whole-day peak so
+	// the LP can fall back to 1Φ when 3Φ isn't imminent — captures
+	// "we have 3 kW now and won't see 4.1 kW for the next 30 min,
+	// start charging at 1Φ instead of waiting." The day-peak gate
+	// still applies for the longer-term "lock 1Φ for the whole day"
+	// decision so a passing cloud doesn't commit the LP to 1Φ for
+	// the entire afternoon. Optional; nil means no near-term gate.
+	nearTermPeakSurplusW func(window time.Duration) (float64, bool)
 
-	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
-	// lock is sticky for the rest of the day so a slowly recovering
+	// nearTermLogLast throttles the "1Φ allowed (near-term 3Φ
+	// unreachable)" log line to once per nearTermLogCooldown per
+	// loadpoint so it doesn't spam every 5 s when the condition
+	// holds for hours. Reset on day rollover via the existing
+	// phase-lock release path.
+	nearTermLogMu   sync.Mutex
+	nearTermLogLast map[string]time.Time
+
+	// fusePauseUntil holds the wall-clock time before which an LP must
+	// stay paused after a fuse-clamp-induced full pause. Operator-stated
+	// behaviour: ramp down if possible, pause if the fuse cap is below
+	// the LP's min step, and keep paused for fusePauseCooldown so a
+	// transient doesn't flap. Cleared lazily when the cooldown expires.
+	fusePauseMu    sync.Mutex
+	fusePauseUntil map[string]time.Time
+
+	// phaseLockMu protects phaseLocked1P + phaseLockedAt + phaseSelected3P.
+	// The 1Φ lock is sticky for the rest of the day so a slowly recovering
 	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
 	// cleared at the start of the next local day if the forecast
 	// shows we'll see enough surplus to sustain 3Φ again — that's
 	// the natural reset point that matches the operator's "look at
 	// today vs tomorrow" mental model.
-	phaseLockMu   sync.Mutex
-	phaseLocked1P map[string]bool
-	phaseLockedAt map[string]time.Time
+	// phaseSelected3P + phaseSelectedAt enforce the minimum-dwell rule
+	// on the near-term gate: once a 3Φ-only ↔ 1Φ-allowed decision is
+	// taken, hold it for at least phaseSwitchMinHold before the next
+	// switch is allowed. Without this, a forecast peak hovering around
+	// the 4140 W threshold flaps the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per 30 min.
+	// Cleared on day rollover via the same path as phaseLocked1P.
+	phaseLockMu     sync.Mutex
+	phaseLocked1P   map[string]bool
+	phaseLockedAt   map[string]time.Time
+	phaseSelected3P map[string]bool
+	phaseSelectedAt map[string]time.Time
 
 	// wakeMu protects the per-loadpoint last-wake timestamp used to
 	// throttle charge_start retries. Tesla rate-limits BLE commands;
@@ -118,7 +155,38 @@ type Controller struct {
 	wakeLast      map[string]time.Time
 	wakeKickUntil map[string]time.Time
 	wakeAttempts  map[string]int
+
+	// batSoC reports the home battery's current state-of-charge (0..1
+	// fraction) for the bat-SoC surplus-unlock feature. nil disables
+	// the feature entirely — the LP behaves exactly as today.
+	batSoC func() (float64, bool)
+
+	// gridDeferredMu protects gridDeferred. The map is set by main.go's
+	// MPC spec builder when it decides to suppress grid-funded EV
+	// planning (because the deadline lies past the last published price
+	// slot). Runtime dispatch reads it to ALSO enforce surplus-only
+	// behaviour at the tick — so when forecast PV undershoots reality
+	// the EV pauses rather than silently importing from grid against a
+	// plan budget that assumed sun.
+	gridDeferredMu sync.Mutex
+	gridDeferred   map[string]bool
+
+	// batSoCArmed tracks the per-LP arm/release state for the bat-SoC
+	// hysteresis. batSoCNoPV counts consecutive ticks where the live
+	// site surplus dropped to zero — a sustained no-PV run releases
+	// the arm even when the home battery is still above the SoC
+	// threshold, because battery discharge isn't surplus and we don't
+	// want to ride a high-SoC arm through the night kicking the EV.
+	batSoCArmedMu sync.Mutex
+	batSoCArmed   map[string]bool
+	batSoCNoPV    map[string]int
 }
+
+// batSoCPVGoneTicks is the consecutive-tick threshold (at the 5 s
+// dispatch cadence ≈ 30 s) of zero/negative live surplus before the
+// bat-SoC unlock disarms. Long enough to swallow a passing cloud
+// without flap; short enough that evening transition releases promptly.
+const batSoCPVGoneTicks = 6
 
 // wakeKickDuration is how long a wake-kick forces the EV charger to
 // signal min 3Φ current after a charge_start fires. The wallbox must
@@ -156,6 +224,15 @@ const wakeBackoffCooldown = 10 * time.Minute
 // detached sessions; charge_start is the secondary signal.
 const vehicleWakeCooldown = 5 * time.Minute
 
+// vehicleWakeTimeout caps the wake-send roundtrip when wakeVehicleAuto
+// is invoked fire-and-forget on a background goroutine (e.g. from the
+// wallbox-delivering rising edge in tickOne). Without it a stuck
+// vehicle-proxy HTTP call would leak the goroutine until the process
+// exits. 30 s is comfortably longer than the Tesla proxy's own ~15 s
+// host timeout while still bounded enough that a leaked routine per
+// cooldown window is the worst case.
+const vehicleWakeTimeout = 30 * time.Second
+
 // surplusWindowSize is the length of the rolling-average buffer used
 // for surplus_only pause/resume decisions. At a 5 s tick this is ~20 s
 // of smoothing — long enough to ride out single-tick cloud transients
@@ -174,6 +251,29 @@ const surplusResumeMarginW = 200.0
 // rolling-avg already smooths transients; this is a hard contactor-
 // protection backstop on top.
 const surplusMinPauseHold = 35 * time.Second
+
+// nearTermLogCooldown caps the rate of the "1Φ allowed (near-term 3Φ
+// unreachable)" log line so a long morning with sustained low surplus
+// produces one line per 10 min per LP instead of one per 5 s tick.
+const nearTermLogCooldown = 10 * time.Minute
+
+// phaseSwitchMinHold is the minimum dwell between 1Φ↔3Φ switches on
+// the near-term gate. Operator rule: at most one switch per 30 min.
+// The Easee contactor is rated for limited switching cycles; on a
+// borderline-PV day a frequent 1Φ↔3Φ flip would burn through them
+// quickly and inject load-step transients into the battery PI loop
+// every couple of minutes. 30 min lets the forecast machinery commit
+// to a verdict before the next reconsider.
+const phaseSwitchMinHold = 30 * time.Minute
+
+// fusePauseCooldown is how long an LP stays at 0 W after a fuse-over-
+// limit force-pause. Long enough that whatever house load caused the
+// overload (oven, EV from another LP, sauna…) has time to clear or for
+// the operator to notice; short enough that a transient inrush doesn't
+// stop charging for the rest of the day. 5 min is the operator-stated
+// preference; chosen vs. e.g. 1 min because the typical "did the oven
+// kick on?" disturbance lasts longer than a minute.
+const fusePauseCooldown = 5 * time.Minute
 
 // defaultPhaseSplitW mirrors loadpoint.Config.PhaseSplitW's default —
 // 3680 W is a 16 A 1Φ ceiling at 230 V. Kept in sync with the comment
@@ -317,6 +417,443 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 	c.peakRemainingSurplusW = f
 }
 
+// applyFuseClampAndCooldown enforces the joint fuse allocator's
+// FuseEVMax cap on a requested wattage and tracks the operator-stated
+// pause-cooldown semantics:
+//
+//   - In cooldown: force 0 regardless of wantW.
+//   - cap unset / cap >= wantW: pass-through.
+//   - cap < wantW but a snap-step exists at ≤ cap: ramp down to that step.
+//   - cap < min step (or snap returns 0): force 0 AND arm
+//     fusePauseUntil[lpID] = now + fusePauseCooldown.
+//
+// Both tickOne branches (manual hold + normal MPC dispatch) call this
+// just before writing cmd["power_w"] so the protection is uniform:
+// neither a sticky operator hold nor a stale MPC budget can drive
+// the fuse over limit, and the cooldown prevents fuse flap when a
+// transient overload clears momentarily.
+func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) float64 {
+	if c == nil {
+		return wantW
+	}
+	c.fusePauseMu.Lock()
+	until, has := c.fusePauseUntil[lpCfg.ID]
+	if has && !now.Before(until) {
+		// Cooldown elapsed; release lazily so subsequent ticks see no
+		// hold and can re-attempt charging.
+		delete(c.fusePauseUntil, lpCfg.ID)
+		has = false
+	}
+	c.fusePauseMu.Unlock()
+	if has {
+		return 0
+	}
+	if c.fuseEVMax == nil {
+		return wantW
+	}
+	cap, ok := c.fuseEVMax()
+	if !ok || cap < 0 {
+		return wantW
+	}
+	if wantW <= cap {
+		return wantW
+	}
+	// Need to ramp down. Snap to the largest allowed step ≤ cap.
+	snapped := SnapChargeW(cap, lpCfg.MinChargeW, lpCfg.MaxChargeW, lpCfg.AllowedStepsW)
+	if snapped > 0 && snapped >= lpCfg.MinChargeW {
+		slog.Info("loadpoint fuse-clamp: ramped down",
+			"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap, "snapped_w", snapped)
+		return snapped
+	}
+	// Cap is below the LP's min step → pause + arm cooldown.
+	c.fusePauseMu.Lock()
+	if c.fusePauseUntil == nil {
+		c.fusePauseUntil = map[string]time.Time{}
+	}
+	c.fusePauseUntil[lpCfg.ID] = now.Add(fusePauseCooldown)
+	c.fusePauseMu.Unlock()
+	slog.Warn("loadpoint fuse-clamp: paused for cooldown",
+		"lp", lpCfg.ID, "want_w", wantW, "fuse_cap_w", cap,
+		"min_step_w", lpCfg.MinChargeW,
+		"cooldown_s", int(fusePauseCooldown.Seconds()))
+	return 0
+}
+
+// SetNearTermPeakSurplusW wires the short-horizon "peak surplus over
+// the next window" reader used by pickSurplusSteps to decide whether
+// a 3Φ start is imminent. Typical implementation iterates the MPC
+// plan's slots starting now and walks until `now + window`, returning
+// the max(−pvW − loadW) seen. Pass nil to keep the original "wait for
+// today's day-peak forecast" behaviour.
+func (c *Controller) SetNearTermPeakSurplusW(f func(window time.Duration) (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.nearTermPeakSurplusW = f
+}
+
+// SetBatSoCProvider wires the home-battery SoC reader used by the
+// bat-SoC surplus-unlock feature. The function returns the current
+// SoC as a 0..1 fraction. (_, false) disables the feature for this
+// tick; nil disables it permanently. Called once at startup from
+// main.go.
+func (c *Controller) SetBatSoCProvider(f func() (float64, bool)) {
+	if c == nil {
+		return
+	}
+	c.batSoC = f
+}
+
+// evalBatSoCArm decides whether the bat-SoC surplus unlock is armed
+// for the given loadpoint this tick. Arms when SoC is at/above the
+// threshold AND there's live PV to grab (battery discharge alone is
+// not surplus — that's just self-consumption or arbitrage the planner
+// is already orchestrating). Releases when SoC drops below
+// (threshold − BatSoCUnlockHystPp), or after a sustained run of
+// zero/negative live surplus (batSoCPVGoneTicks).
+//
+// Returns false when no threshold is configured or the bat_soc reader
+// is missing.
+func (c *Controller) evalBatSoCArm(lpID string, threshold float64) bool {
+	if c == nil || c.batSoC == nil || threshold <= 0 {
+		return false
+	}
+	// Read the live inputs (bat SoC + site surplus) OUTSIDE the arm
+	// mutex — siteSurplusForEVW is a closure wired in main.go that
+	// itself calls back into AnyLoadpointSurplusActive, which needs
+	// to acquire batSoCArmedMu. Calling it under that lock would
+	// recursively self-deadlock the dispatch loop (debugged: every
+	// tickOne hung on the first LP after we shipped this feature).
+	// Order: gather facts → take lock → mutate the small state map.
+	soc, socOK := c.batSoC()
+	pvGone := true
+	if c.siteSurplusForEVW != nil {
+		if s, ok := c.siteSurplusForEVW(); ok && s > 0 {
+			pvGone = false
+		}
+	}
+
+	c.batSoCArmedMu.Lock()
+	defer c.batSoCArmedMu.Unlock()
+	if c.batSoCArmed == nil {
+		c.batSoCArmed = map[string]bool{}
+		c.batSoCNoPV = map[string]int{}
+	}
+	prev := c.batSoCArmed[lpID]
+	if !socOK {
+		// Stale telemetry: don't change the arm state. A momentary
+		// blip shouldn't release the unlock during peak surplus.
+		return prev
+	}
+	if pvGone {
+		c.batSoCNoPV[lpID]++
+	} else {
+		c.batSoCNoPV[lpID] = 0
+	}
+	socPct := soc * 100
+	armed := prev
+	switch {
+	case socPct < threshold-BatSoCUnlockHystPp:
+		armed = false
+	case socPct >= threshold && !pvGone:
+		armed = true
+	case c.batSoCNoPV[lpID] >= batSoCPVGoneTicks:
+		// SoC may still be high but PV has been gone long enough that
+		// staying armed would just trickle from battery/grid via the
+		// surplus path's auto-wake. Release.
+		armed = false
+	}
+	c.batSoCArmed[lpID] = armed
+	return armed
+}
+
+// SetGridDeferred records that MPC has suppressed grid-funded EV
+// planning for this LP (because the deadline lies past published
+// prices). Surplus dispatch semantics apply at runtime too: the EV's
+// commanded W is snapped to live surplus only, with no grid import,
+// regardless of what the cached MPC plan budget says. Cleared when
+// MPC's next replan finds prices for the deadline window. Safe to
+// call concurrently with the dispatch tick.
+func (c *Controller) SetGridDeferred(lpID string, deferred bool) {
+	if c == nil {
+		return
+	}
+	c.gridDeferredMu.Lock()
+	defer c.gridDeferredMu.Unlock()
+	if c.gridDeferred == nil {
+		c.gridDeferred = map[string]bool{}
+	}
+	if deferred {
+		c.gridDeferred[lpID] = true
+	} else {
+		delete(c.gridDeferred, lpID)
+	}
+}
+
+// gridDeferredFor reads the per-LP deferral flag set by main.go's MPC
+// spec builder. Read-only accessor used inside surplusActive.
+func (c *Controller) gridDeferredFor(lpID string) bool {
+	if c == nil {
+		return false
+	}
+	c.gridDeferredMu.Lock()
+	defer c.gridDeferredMu.Unlock()
+	return c.gridDeferred[lpID]
+}
+
+// surplusActive reports whether surplus-only dispatch semantics apply
+// to this loadpoint right now. True when ANY of:
+//   - the operator's configured SurplusOnly flag is on
+//   - MPC has deferred grid-funded planning (forecast-vs-real divergence
+//     guard: even if the cached plan said "charge 2 kW now", live PV
+//     might have collapsed since the last replan)
+//   - the bat-SoC unlock is armed for this LP
+//
+// The caller passes the loadpoint's schedule so we read the threshold
+// without re-locking the Manager.
+func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
+	if lpCfg.SurplusOnly {
+		return true
+	}
+	if c.gridDeferredFor(lpCfg.ID) {
+		return true
+	}
+	return c.evalBatSoCArm(lpCfg.ID, sched.SurplusUnlockBatSoCPct)
+}
+
+// AnyLoadpointSurplusActive reports whether any configured loadpoint
+// is currently treating PV surplus as priority — via the configured
+// SurplusOnly flag, the MPC grid-deferral flag, or a runtime-armed
+// bat-SoC unlock. main.go's siteSurplusForEVW reader uses this to
+// zero out the home-battery's PV-charge contribution from the EV's
+// apparent surplus, which prevents the EV from stealing PV that the
+// planner already routed to the home battery (the flap-avoidance rule).
+//
+// Safe to call before Tick has ever run — returns false in that case.
+func (c *Controller) AnyLoadpointSurplusActive() bool {
+	if c == nil || c.manager == nil {
+		return false
+	}
+	for _, cfg := range c.manager.Configs() {
+		if cfg.SurplusOnly {
+			return true
+		}
+		if c.gridDeferredFor(cfg.ID) {
+			return true
+		}
+		sched, _ := c.manager.GetSchedule(cfg.ID)
+		if sched.SurplusUnlockBatSoCPct > 0 {
+			c.batSoCArmedMu.Lock()
+			armed := c.batSoCArmed[cfg.ID]
+			c.batSoCArmedMu.Unlock()
+			if armed {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RefreshVehicle sends a one-off wake command to the vehicle driver
+// bound to the given loadpoint, bypassing the auto-wake cooldown.
+// Used by the API when the operator edits the schedule — wakes
+// Tesla / BMW / whichever vehicle driver is bound so the next poll
+// surfaces any vehicle-side limit / SoC / connection changes
+// immediately rather than waiting up to the next natural wake
+// window.
+//
+// Sends the generic `wake_up` action (cross-driver protocol — any
+// vehicle driver implements it against its own back-end). Distinct
+// from `charge_start` (still used by the auto-wake loop when it's
+// trying to convince a detached car to actually start drawing
+// current) — `wake_up` is purely a telemetry refresh, no charge
+// side effects. Returns nil if no vehicle driver is bound or the
+// controller isn't fully wired (no-op). Errors from the send hop
+// are returned for the caller to surface to the operator.
+func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return nil
+	}
+	driver, _, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return nil
+	}
+	payload, err := json.Marshal(map[string]any{"action": "wake_up"})
+	if err != nil {
+		return err
+	}
+	// Reset the auto-wake throttle so a manual refresh doesn't leave
+	// the LP in a long backoff afterwards — the operator just told us
+	// they want a fresh read, no reason to apply 90s cooldown to the
+	// next legitimate auto-wake.
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	delete(c.wakeAttempts, lpID)
+	c.wakeLast[lpID] = time.Now()
+	c.wakeMu.Unlock()
+	slog.Info("loadpoint manual wake (schedule edit)", "lp", lpID, "vehicle_driver", driver)
+	return c.send(ctx, driver, payload)
+}
+
+// ForceStart outcome sentinels. The API layer maps each to a distinct
+// HTTP status: NotReady → 503, LoadpointNotFound → 404 "lp", NoVehicle
+// → 422 "no vehicle bound", any other error → 502 "driver send".
+// Distinguishing these is what the previous (string, error) two-value
+// return tried to encode via empty strings — sentinels make it
+// type-checked.
+var (
+	ErrForceStartNotReady       = errors.New("loadpoint controller not ready (missing vehicleStatus/send wiring)")
+	ErrForceStartLoadpointGone  = errors.New("loadpoint not found")
+	ErrForceStartNoVehicleBound = errors.New("no vehicle driver bound to loadpoint")
+)
+
+// ForceStartVehicle sends a generic `charge_start` to the loadpoint's
+// bound vehicle driver immediately, bypassing the auto-wake's
+// `vehicleWakeCooldown` + `wakeBackoffCooldown` throttle. Used by the
+// operator-driven "force start" API path when the auto-wake has
+// backed off and the operator wants to break the backoff (typical case:
+// car was unresponsive earlier, has since become reachable, the 10-min
+// stretched cooldown still has minutes to run, operator wants charging
+// to resume now).
+//
+// Side effects on success (after the send returns nil), in order:
+//  1. Reset the wake-attempt counter so subsequent auto-wakes start
+//     from a fresh cooldown.
+//  2. Bump wakeLast so the auto-wake loop will not duplicate this
+//     send on the same tick.
+//  3. Arm the wake-kick window so the next few dispatch ticks force
+//     the wallbox to signal at least min current — without it a
+//     successful charge_start lands on a 0 A wallbox and the car has
+//     nothing to negotiate with.
+//  4. Send the generic `charge_start` action (cross-driver protocol —
+//     Tesla, BMW, Audi drivers all implement it against their own
+//     back-ends).
+//
+// If the send fails, the throttle resets and wake-kick arming still
+// stand — that's intentional: the operator's intent was to break the
+// backoff, and a failed send shouldn't punish a subsequent retry.
+//
+// Returns the driver name actually targeted plus the outcome:
+//
+//	("", ErrForceStartNotReady)        — controller missing wiring
+//	("", ErrForceStartLoadpointGone)   — no such loadpoint id
+//	("", ErrForceStartNoVehicleBound)  — loadpoint exists, no vehicle
+//	(driver, sendErr)                  — send hop returned an error
+//	(driver, nil)                      — sent
+func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string, error) {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return "", ErrForceStartNotReady
+	}
+	if c.manager != nil {
+		if _, ok := c.manager.State(lpID); !ok {
+			return "", ErrForceStartLoadpointGone
+		}
+	}
+	driver, _, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return "", ErrForceStartNoVehicleBound
+	}
+	now := time.Now()
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	delete(c.wakeAttempts, lpID)
+	c.wakeLast[lpID] = now
+	c.wakeKickUntil[lpID] = now.Add(wakeKickDuration)
+	c.wakeMu.Unlock()
+	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
+	if err != nil {
+		slog.Warn("loadpoint force-start: payload marshal", "lp", lpID, "err", err)
+		return driver, err
+	}
+	sendErr := c.send(ctx, driver, payload)
+	if sendErr != nil {
+		slog.Warn("loadpoint force-start (operator) — send failed",
+			"lp", lpID, "vehicle_driver", driver, "err", sendErr)
+	} else {
+		slog.Info("loadpoint force-start (operator) — sent",
+			"lp", lpID, "vehicle_driver", driver)
+	}
+	return driver, sendErr
+}
+
+// wakeVehicleAuto sends a `wake_up` to the loadpoint's bound vehicle
+// driver, gated by the same `vehicleWakeCooldown` (5 min) the
+// charge_start auto-wake loop uses. Used for event-triggered wakes
+// (e.g. the wallbox-delivering rising edge) where we want fresh
+// vehicle state but the trigger can flap — don't storm the BLE radio.
+// No-op when no vehicle is bound; logs but does not return errors
+// (the trigger is opportunistic; failure is fine).
+//
+// Callers commonly invoke this as `go wakeVehicleAuto(...)` with a
+// background context, so the send is bounded internally by
+// `vehicleWakeTimeout` to keep a stuck HTTP roundtrip from leaking the
+// goroutine. The driver's own HTTP client also has a timeout — this is
+// just a belt-and-braces ceiling at the caller boundary.
+func (c *Controller) wakeVehicleAuto(ctx context.Context, lpID string, reason string) {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return
+	}
+	driver, _, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return
+	}
+	now := time.Now()
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	if last, has := c.wakeLast[lpID]; has && now.Sub(last) < vehicleWakeCooldown {
+		c.wakeMu.Unlock()
+		return
+	}
+	c.wakeLast[lpID] = now
+	c.wakeMu.Unlock()
+	payload, err := json.Marshal(map[string]any{"action": "wake_up"})
+	if err != nil {
+		return
+	}
+	slog.Info("loadpoint auto-wake (vehicle telemetry refresh)",
+		"lp", lpID, "vehicle_driver", driver, "reason", reason)
+	sendCtx, cancel := context.WithTimeout(ctx, vehicleWakeTimeout)
+	defer cancel()
+	if err := c.send(sendCtx, driver, payload); err != nil {
+		slog.Warn("loadpoint auto-wake send failed",
+			"lp", lpID, "vehicle_driver", driver, "err", err)
+	}
+}
+
+// IsBatSoCArmed reports whether the bat-SoC surplus unlock is
+// currently armed for the given loadpoint. Surfaced so main.go can
+// thread this runtime state into the MPC LoadpointSpec.SurplusOnly
+// — without it, MPC plans battery→EV transfers freely while the
+// dispatch layer's bat-SoC arming refuses to execute them, producing
+// misleading "battery discharges to feed EV" entries in the plan UI
+// that never actually happen.
+//
+// Returns false if the controller is nil, no arm map yet exists, or
+// the LP id isn't tracked. Safe to call concurrently with Tick.
+func (c *Controller) IsBatSoCArmed(lpID string) bool {
+	if c == nil {
+		return false
+	}
+	c.batSoCArmedMu.Lock()
+	defer c.batSoCArmedMu.Unlock()
+	if c.batSoCArmed == nil {
+		return false
+	}
+	return c.batSoCArmed[lpID]
+}
+
 // SetSiteFuse installs the grid-boundary fuse so the controller can
 // pass voltage + per-phase amperage to drivers in every command.
 // Called once at startup from main.go after config load. A zero-value
@@ -421,14 +958,31 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
 	}
+	// Resolve the schedule once per tick — used for bat-SoC unlock
+	// (surplusActive) below. Zero value when no schedule is set,
+	// which makes evalBatSoCArm a no-op.
+	var sched Schedule
+	if c.manager != nil {
+		sched, _ = c.manager.GetSchedule(lpCfg.ID)
+	}
+	surplusOn := c.surplusActive(lpCfg, sched)
 	// Detect the disconnected→connected edge (state.PluggedIn flips
 	// from false to true) so we can reset session-scoped state
 	// before the new session's first dispatch tick. Without this
 	// the rolling-avg buffer keeps stale samples from the previous
 	// session, biasing the first ~20 s of pause/resume decisions.
+	// Also detect the not-delivering→delivering edge separately so
+	// we can wake the bound vehicle for fresh telemetry the moment
+	// the wallbox actually starts pushing current — the planner
+	// otherwise has to wait for the next periodic vehicle poll
+	// (or the proxy's cache to refresh on its own) to learn the
+	// car's current charge_limit_pct + SoC, which costs accuracy
+	// on the first ~15 min of a new charging session.
 	wasPlugged := false
+	wasDelivering := false
 	if st, ok := c.manager.State(lpCfg.ID); ok {
 		wasPlugged = st.PluggedIn
+		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
 	if !sample.Connected {
@@ -437,6 +991,16 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 	if !wasPlugged {
 		c.resetSurplusSession(lpCfg.ID)
+	}
+	// Wallbox just started delivering current: fire a wake at the
+	// bound vehicle so the next vehicle-driver poll comes back with
+	// fresh charging_state / charge_limit_pct / SoC. Gated by
+	// vehicleWakeCooldown inside wakeVehicleAuto so a flapping
+	// pause/resume cycle can't storm the BLE radio. Fire-and-forget
+	// on a background goroutine so the dispatch tick isn't blocked
+	// by the wake HTTP roundtrip.
+	if sample.PowerW >= DeliveringW && !wasDelivering {
+		go c.wakeVehicleAuto(context.Background(), lpCfg.ID, "delivering_edge")
 	}
 
 	cmd := map[string]any{"action": "ev_set_current"}
@@ -453,7 +1017,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// The hold's other fields (phase mode, hold time) are still
 		// honoured — only the W setpoint is clamped, and we log it so
 		// the operator notices the conflict.
-		if lpCfg.SurplusOnly && holdW > 0 {
+		if surplusOn && holdW > 0 {
 			clamped := c.computeSurplusCmd(now, lpCfg, holdW, sample.PowerW)
 			if clamped < holdW {
 				slog.Warn("loadpoint manual hold clamped by surplus_only",
@@ -461,12 +1025,25 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 				holdW = clamped
 			}
 		}
+		// Fuse protection: even an operator-pinned hold must not bust
+		// the fuse. Apply the joint allocator's FuseEVMax cap and the
+		// pause-cooldown guard before sending. A sticky 11 kW Start
+		// hold + house drawing 7 A on one phase = fuse trip without
+		// this clamp.
+		holdW = c.applyFuseClampAndCooldown(now, lpCfg, holdW)
 		cmd["power_w"] = holdW
+		// Phase mode: explicit hold > explicit LP config > surplus
+		// default ("auto") > driver default. Same surplus-active fallback
+		// as the non-hold branch so a sticky Start hold on a 1380 W
+		// surplus slot actually delivers instead of dying at the Easee
+		// driver's unset → "3p" interpretation.
 		switch {
 		case hold.PhaseMode != "":
 			cmd["phase_mode"] = hold.PhaseMode
 		case lpCfg.PhaseMode != "":
 			cmd["phase_mode"] = lpCfg.PhaseMode
+		case surplusOn:
+			cmd["phase_mode"] = "auto"
 		}
 		switch {
 		case hold.PhaseSplitW > 0:
@@ -517,8 +1094,28 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// PV is naturally absorbed by the home battery via the
 		// reactive self_consumption PI in dispatch.go — that's the
 		// "battery smooths PV transients for ~1-2 min" path.
-		if lpCfg.SurplusOnly && cmdW > 0 {
-			cmdW = c.computeSurplusCmd(now, lpCfg, cmdW, sample.PowerW)
+		//
+		// Opportunistic start: when surplus_only is on but the MPC
+		// has no plan budget for this LP (cmdW = 0) — typical when
+		// the LP isn't in the planner's view because the vehicle
+		// driver is offline / has no SoC, or the user has no
+		// deadline set — fall through to the surplus clamp anyway
+		// with the LP's MaxChargeW as the requested ceiling. The
+		// clamp returns 0 if there's no PV surplus, or a snapped
+		// step otherwise. Without this, surplus_only LPs without an
+		// active vehicle telemetry source (Easee + no Tesla, or
+		// any third-party EV without a Go-side vehicle driver)
+		// would never start because (a) MPC won't allocate without
+		// a target, (b) auto-wake requires vehicleStatus, (c) the
+		// surplus clamp was previously gated on cmdW > 0. The
+		// wallbox will silently report what the EV does (op_mode
+		// stays at 2 if the car declines) without grid import.
+		if surplusOn {
+			wantW := cmdW
+			if wantW <= 0 {
+				wantW = lpCfg.MaxChargeW
+			}
+			cmdW = c.computeSurplusCmd(now, lpCfg, wantW, sample.PowerW)
 		}
 		// Wake-kick AFTER the surplus clamp: when an auto-wake just
 		// fired and the surplus clamp paused us to 0, force the
@@ -542,6 +1139,13 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 				cmdW = minKick
 			}
 		}
+		// Fuse protection: applied LAST (after MPC budget, surplus
+		// clamp, wake-kick) so all upstream sources see their nominal
+		// wantW; only the actual ceiling we send to the wallbox is
+		// reduced when the fuse demands it. Partial ramp-downs are
+		// immediate; only "cap below min step → must pause" arms the
+		// 5-min cooldown.
+		cmdW = c.applyFuseClampAndCooldown(now, lpCfg, cmdW)
 		cmd["power_w"] = cmdW
 		// Pass operator's phase preferences through verbatim. The driver
 		// reads these and decides 1Φ vs 3Φ based on its own knowledge of
@@ -552,9 +1156,38 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// pick_phases respects an operator-set "3p" lock over the
 		// dispatch's wantW. The 1Φ lock IS the operator's intent for
 		// this day.
+		//
+		// Default to "auto" when surplus is active and the operator
+		// didn't explicitly pick a phase mode. The Easee driver
+		// (drivers/easee_cloud.lua:105) interprets an UNSET phase_mode
+		// as "3p" — silently locking the wallbox to 3Φ and rejecting
+		// any 1Φ-eligible step the near-term branch passes through.
+		// Operators who picked surplus_only have clearly opted into
+		// "react to PV"; dynamic phase switching is the only way to
+		// actually deliver low-power surplus to the EV.
 		phaseMode := lpCfg.PhaseMode
 		if c.surplusLockedTo1P(lpCfg.ID) {
 			phaseMode = "1p"
+		} else if surplusOn && (phaseMode == "" || phaseMode == "auto") {
+			// Honour the 30-min near-term dwell decision ONLY when the
+			// operator hasn't explicitly pinned a phase. Explicit "1p"
+			// or "3p" is a fixed-install contract: a 1Φ-only home or a
+			// 3Φ-only contactor preference. Overriding it via dwell
+			// would let a near-term forecast flip the install's
+			// physical configuration, exactly the wear case the dwell
+			// was meant to avoid.
+			//
+			// When phase_mode is unset or "auto", pin the driver to
+			// the dwell decision across the dwell window so a transient
+			// cmd_w=0 (pause) doesn't make the driver's "auto" snap to
+			// 1Φ and flip the contactor. Without this,
+			// pickSurplusSteps' step-list lock is silently bypassed
+			// every time the surplus clamp pauses.
+			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
+				phaseMode = dwell
+			} else if phaseMode == "" {
+				phaseMode = "auto"
+			}
 		}
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
@@ -612,16 +1245,23 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	//      The 90 s cooldown caps Tesla BLE wear; if the car is
 	//      genuinely asleep at night the proxy returns 503 and we
 	//      back off.
-	c.maybeWakeVehicle(ctx, now, lpCfg.ID, lpCfg, cmd)
+	// Forced-wake belongs to the configured surplus_only contract — the
+	// "kick the EV periodically so the car negotiates with the wallbox
+	// even when the surplus clamp paused us" behaviour. The bat-SoC
+	// unlock is opportunistic and tick-level; it must not poke a sleeping
+	// car at night just because the bat is full. Pass the configured flag,
+	// not the runtime-armed one.
+	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, cmd)
 }
 
-func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpID string, lpCfg Config, cmd map[string]any) {
+func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn bool, cmd map[string]any) {
+	lpID := lpCfg.ID
 	if c == nil || c.vehicleStatus == nil || c.send == nil {
 		return
 	}
 	pw, _ := cmd["power_w"].(float64)
 	wantWake := pw > 0
-	if lpCfg.SurplusOnly {
+	if surplusOn {
 		wantWake = true
 	}
 	if !wantWake {
@@ -887,6 +1527,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 		if peak, ok := c.peakRemainingSurplusW(); ok && peak >= minStep3 {
 			delete(c.phaseLocked1P, lpCfg.ID)
 			delete(c.phaseLockedAt, lpCfg.ID)
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
 			locked = false
 			c.phaseLockMu.Unlock()
 			slog.Info("loadpoint surplus_only unlocked: new day with sufficient PV forecast",
@@ -900,6 +1542,91 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 		// All allowed steps — driver picks the phase.
 		return lpCfg.AllowedStepsW
 	}
+	if minStep3 <= 0 {
+		return steps3
+	}
+
+	// Near-term gate: even if today's whole-day peak forecast will
+	// reach 3Φ minimum eventually, if the next 30 min won't, return
+	// 1Φ-allowed steps NOW so the LP captures the surplus that's
+	// here today instead of waiting for a peak that's hours away.
+	// Day-lock NOT set here — this is a "transient cloud" not a
+	// "low-PV day" verdict, so a later 3Φ window during the same
+	// day can still trigger a contactor cycle into 3Φ.
+	//
+	// Minimum-dwell guard: a forecast peak hovering around the 4140 W
+	// threshold would otherwise flap the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per
+	// phaseSwitchMinHold. The prior decision is held until the dwell
+	// elapses; on day rollover the selection is cleared so a fresh
+	// morning gets a fresh forecast verdict.
+	if c.nearTermPeakSurplusW != nil {
+		const nearTermWindow = 30 * time.Minute
+		nearPeak, peakOK := c.nearTermPeakSurplusW(nearTermWindow)
+
+		c.phaseLockMu.Lock()
+		prevSelected3P, hasPrev := c.phaseSelected3P[lpCfg.ID]
+		prevAt := c.phaseSelectedAt[lpCfg.ID]
+		if hasPrev && !sameLocalDay(prevAt, now) {
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
+			hasPrev = false
+		}
+		var selected3P bool
+		var recordDecision bool
+		switch {
+		case !peakOK && !hasPrev:
+			// No forecast yet and no prior decision: conservative
+			// fall-through to the whole-day branch below.
+			c.phaseLockMu.Unlock()
+			goto afterNearTerm
+		case !peakOK:
+			// No forecast this tick — honour the prior decision.
+			selected3P = prevSelected3P
+		case !hasPrev:
+			// First decision today — go with the forecast verdict.
+			selected3P = nearPeak >= minStep3
+			recordDecision = true
+		case now.Sub(prevAt) < phaseSwitchMinHold:
+			// Dwell window not yet elapsed — hold the prior decision.
+			selected3P = prevSelected3P
+		default:
+			// Dwell elapsed — re-decide from the forecast.
+			selected3P = nearPeak >= minStep3
+			recordDecision = selected3P != prevSelected3P
+		}
+		if recordDecision {
+			if c.phaseSelected3P == nil {
+				c.phaseSelected3P = map[string]bool{}
+				c.phaseSelectedAt = map[string]time.Time{}
+			}
+			c.phaseSelected3P[lpCfg.ID] = selected3P
+			c.phaseSelectedAt[lpCfg.ID] = now
+		}
+		c.phaseLockMu.Unlock()
+
+		if !selected3P {
+			c.nearTermLogMu.Lock()
+			lastFor, has := c.nearTermLogLast[lpCfg.ID]
+			fireLog := !has || now.Sub(lastFor) > nearTermLogCooldown
+			if fireLog {
+				if c.nearTermLogLast == nil {
+					c.nearTermLogLast = map[string]time.Time{}
+				}
+				c.nearTermLogLast[lpCfg.ID] = now
+			}
+			c.nearTermLogMu.Unlock()
+			if fireLog {
+				slog.Info("loadpoint surplus: 1Φ steps allowed (near-term 3Φ unreachable)",
+					"lp", lpCfg.ID, "near_term_peak_w", nearPeak, "min_3p_step_w", minStep3,
+					"window", nearTermWindow.String(), "dwell_hold", phaseSwitchMinHold.String())
+			}
+			return lpCfg.AllowedStepsW
+		}
+	}
+afterNearTerm:
+
 	if c.peakRemainingSurplusW == nil {
 		return steps3
 	}
@@ -907,11 +1634,19 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	if !ok {
 		return steps3
 	}
-	if minStep3 <= 0 {
-		return steps3
-	}
 	if peak >= minStep3 {
 		return steps3
+	}
+	// The day-long 1Φ lock is a commitment that belongs to *configured*
+	// surplus_only operators: they've opted into "no grid import for this
+	// LP", and a low-PV day means trickle-charge instead of pausing.
+	// The bat-SoC unlock is opportunistic and tick-level — it should not
+	// inherit a day-long phase lock just because it was armed once. Skip
+	// the lock-set when SurplusOnly isn't actually configured; return all
+	// allowed steps so the driver can pick whichever phase the live
+	// surplus suits this tick.
+	if !lpCfg.SurplusOnly {
+		return lpCfg.AllowedStepsW
 	}
 	// Lock to 1Φ for the rest of the day.
 	c.phaseLockMu.Lock()
@@ -921,6 +1656,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	}
 	c.phaseLocked1P[lpCfg.ID] = true
 	c.phaseLockedAt[lpCfg.ID] = now
+	delete(c.phaseSelected3P, lpCfg.ID)
+	delete(c.phaseSelectedAt, lpCfg.ID)
 	c.phaseLockMu.Unlock()
 	slog.Info("loadpoint surplus_only locked to 1Φ for the day",
 		"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
@@ -936,6 +1673,29 @@ func (c *Controller) surplusLockedTo1P(id string) bool {
 	c.phaseLockMu.Lock()
 	defer c.phaseLockMu.Unlock()
 	return c.phaseLocked1P[id]
+}
+
+// dwellSelectedPhaseMode returns the phase_mode string ("1p"/"3p")
+// implied by the near-term dwell selection for this loadpoint, or the
+// empty string when no dwell decision is on file (first-tick, fresh
+// day, no near-term peak source). Used by the dispatch command builder
+// to override the operator's "auto" so the driver doesn't auto-flip
+// phase on a transient cmd_w=0 (pause), which would defeat the
+// 30-min minimum-dwell guarantee.
+func (c *Controller) dwellSelectedPhaseMode(id string) string {
+	if c == nil {
+		return ""
+	}
+	c.phaseLockMu.Lock()
+	defer c.phaseLockMu.Unlock()
+	sel, ok := c.phaseSelected3P[id]
+	if !ok {
+		return ""
+	}
+	if sel {
+		return "3p"
+	}
+	return "1p"
 }
 
 // sameLocalDay reports whether two time.Time values fall on the
@@ -1001,6 +1761,17 @@ func (c *Controller) wakeKickActive(id string, now time.Time) bool {
 	defer c.wakeMu.Unlock()
 	t, ok := c.wakeKickUntil[id]
 	return ok && now.Before(t)
+}
+
+// IsWakeKickActive is the public accessor mirroring wakeKickActive.
+// Main wires it into the per-tick reserve calc so the home battery
+// doesn't grab a freed PV surplus during the gap between the wake-kick
+// commanding the wallbox to offer current and the EV actually starting
+// to draw — the wake-kick window is the operator-correct "ramp" period
+// where the EV's share of surplus should be held even when its
+// instantaneous CurrentPowerW is still 0.
+func (c *Controller) IsWakeKickActive(id string, now time.Time) bool {
+	return c.wakeKickActive(id, now)
 }
 
 // resetSurplusSession drops the per-loadpoint rolling buffer + paused

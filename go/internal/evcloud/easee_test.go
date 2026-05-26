@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
 
 // TestEaseeListChargers covers the happy path end-to-end against an
@@ -41,7 +43,11 @@ func TestEaseeListChargers(t *testing.T) {
 	defer srv.Close()
 
 	e := NewEasee().WithHTTPClient(srv.Client()).WithBaseURL(srv.URL)
-	got, err := e.ListChargers("user@example.com", "hunter2")
+	got, err := e.ListChargers(&config.EVCharger{
+		Provider: "easee",
+		Username: "user@example.com",
+		Password: "hunter2",
+	})
 	if err != nil {
 		t.Fatalf("ListChargers: %v", err)
 	}
@@ -72,7 +78,11 @@ func TestEaseeLoginRejectsBadCreds(t *testing.T) {
 	defer srv.Close()
 
 	e := NewEasee().WithHTTPClient(srv.Client()).WithBaseURL(srv.URL)
-	_, err := e.ListChargers("user@example.com", "supersecret")
+	_, err := e.ListChargers(&config.EVCharger{
+		Provider: "easee",
+		Username: "user@example.com",
+		Password: "supersecret",
+	})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -106,7 +116,11 @@ func TestEaseeTimeoutBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := e.ListChargers("a@b", "c")
+		_, err := e.ListChargers(&config.EVCharger{
+			Provider: "easee",
+			Username: "a@b",
+			Password: "c",
+		})
 		done <- err
 	}()
 	select {

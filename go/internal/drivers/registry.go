@@ -131,6 +131,12 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			env.WithHTTPAllowedHosts(hosts)
 		}
 	}
+	if cfg.Capabilities.WebSocket != nil {
+		env.WithWS(NewGorillaWS(cfg.Name))
+		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
+			env.WithWSAllowedHosts(hosts)
+		}
+	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
 	if err != nil {
@@ -199,6 +205,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.Modbus != nil {
 				_ = rd.env.Modbus.Close()
+			}
+			if rd.env.WS != nil {
+				_ = rd.env.WS.Close()
 			}
 			return
 		case cmd := <-rd.cmdCh:
@@ -288,14 +297,23 @@ func (r *Registry) Send(ctx context.Context, name string, payload []byte) error 
 	}
 }
 
-// SendDefault sends the default/watchdog command to a driver.
+// SendDefault sends the default/watchdog command to a driver. Symmetric
+// with Send: both the channel-push and the result-wait honour ctx. A
+// driver whose cmdCh is full (because its goroutine is slow / stuck mid
+// I/O) would otherwise block the caller forever; the watchdog-fallback
+// path runs on every dispatch tick, so an unblocked send into a wedged
+// driver deadlocks the entire control loop.
 func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	r.mu.Unlock()
 	if !ok { return fmt.Errorf("driver %q not found", name) }
 	resCh := make(chan error, 1)
-	rd.cmdCh <- driverCmd{kind: "default", result: resCh}
+	select {
+	case rd.cmdCh <- driverCmd{kind: "default", result: resCh}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	select {
 	case err := <-resCh: return err
 	case <-ctx.Done(): return ctx.Err()

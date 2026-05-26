@@ -40,6 +40,22 @@
         field("Watchdog timeout (s)", "site.watchdog_timeout_s", "number", 60) +
         '</div></div>' +
         '</fieldset>' +
+        '<fieldset><legend>PV surplus absorber</legend>' +
+        '<p style="color:var(--ink-dim);font-size:0.85rem;margin:0 0 8px">' +
+        'Opt-in underlay for planner_cheap / planner_arbitrage. ' +
+        'When the plan would still leave the grid exporting beyond the threshold AND ' +
+        'average battery SoC is below the cap, the leftover export is redirected into the battery ' +
+        'instead of crossing the meter. Never reverses a discharge plan. ' +
+        'Set SoC cap to 0 to disable (default).' +
+        '</p>' +
+        '<div class="field-row"><div>' +
+        field("SoC cap (%)", "site.pv_surplus_absorb_soc_cap_pct", "number", 0,
+          "Stop absorbing once average battery SoC reaches this percentage. 0 disables the absorber entirely. Suggested 88 — leaves 2 pp below a typical planner soc_max_pct of 90 so the absorber doesn't slam into the wall.") +
+        '</div><div>' +
+        field("Export threshold (W)", "site.pv_surplus_absorb_threshold_w", "number", 100,
+          "Trigger when projected grid export exceeds this many watts after the plan's target. Defaults to 100 W when the cap is set but this isn't.") +
+        '</div></div>' +
+        '</fieldset>' +
         '<fieldset><legend>Fuse</legend>' +
         '<div class="field-row"><div>' +
         field("Max amps (A)", "fuse.max_amps", "number", 16) +

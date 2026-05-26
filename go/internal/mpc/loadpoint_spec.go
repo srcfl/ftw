@@ -65,6 +65,24 @@ type LoadpointSpec struct {
 	// lexicographic "miss target rather than break constraint"
 	// preference.
 	SurplusOnly bool
+
+	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
+	// true (operator's default), the home battery's discharge MUST NOT
+	// end up at the EV. The DP feasibility check enforces this by
+	// rejecting any (battW, evW) combination where battery discharge
+	// exceeds the PV-residual house demand — i.e. where some of the
+	// battery's energy must, by conservation, have flowed into the EV
+	// or out to grid (and the existing battery-export-vs-EV rule
+	// already covers the export case). The runtime dispatch in
+	// control/dispatch.go has the canonical clamp using identical
+	// accounting (search "CANONICAL \"battery may not feed EV\""); the
+	// DP rule here stops the planner from emitting infeasible
+	// allocations that dispatch then has to censor, removing the
+	// plan↔reality divergence operators were seeing on
+	// planner_arbitrage slots. A future refactor should extract the
+	// shared houseResidualW + feasibility predicate into a helper so
+	// the two sites can't drift.
+	NoBatteryToEV bool
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

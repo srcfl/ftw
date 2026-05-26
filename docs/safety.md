@@ -433,7 +433,102 @@ enough samples tamed β. Returning the prior instead means the
 forecast degrades to "as good as before we had a twin" during the
 bad period, and recovers when β does.
 
-## 8. Default mode (`driver_default_mode`)
+## 8. Plan-grid soft reactive cap (energy-dispatch path)
+
+The `planner_cheap` / `planner_arbitrage` dispatch path (`useEnergyPath`
+in [`dispatch.go`](../go/internal/control/dispatch.go)) executes the
+plan's per-slot battery Wh budget as instantaneous power:
+
+```
+targetTotalW = remainingWh × 3600 / remainingS
+```
+
+This is the right behaviour when the forecast holds: the battery
+delivers exactly the energy the MPC scheduled, and grid is the
+residual. It is the wrong behaviour when the forecast breaks during
+the slot. Concretely: the MPC planned to charge 4.8 kW from
+forecast 5 kW PV (gridW ≈ 0). A cloud passes, live PV drops to
+1.8 kW. The formula still demands 4.8 kW of battery charge, and the
+3 kW gap is pulled from the grid — at whatever import price the slot
+has — until the reactive replan (`mpc/service.go:266-290`) catches up.
+That trigger is gated by a 500 Wh PV-error integral and a 60 s
+cooldown; in practice it can take 10+ minutes of unintended grid
+import before the next plan re-decides. Originating field report:
+2026-05-19, `planner_arbitrage`.
+
+### How the cap works
+
+`mpc.Action.GridW` is the plan's own forecast of slot-average grid
+power (site-signed: + = import). It is plumbed through
+`mpc.SlotDirective.GridW` → `control.SlotDirective.PlannedGridW` (a
+pointer, so nil opts out for tests / legacy callers).
+
+Every tick on the energy path, after the EV / PV-absorber clamps but
+before `totalCorrection` is set, the cap computes
+
+```
+gridErr := rawGridW − *PlannedGridW
+```
+
+and, **only when `targetTotalW > 0`** (charging slot) and
+`gridErr > 100 W`, backs the target off by the gap:
+
+```
+targetTotalW = max(0, targetTotalW − gridErr)
+```
+
+The 100 W deadband matches `IdleGateThresholdW` / `evActiveThresholdW`
+used elsewhere in the package — below it the divergence is meter
+noise. The floor at 0 prevents the cap from flipping dispatch
+direction.
+
+### Charge-only by design
+
+The mirror case (discharge slot, live gridW more negative than plan)
+is intentionally **not** clamped. Three reasons:
+
+1. **The Wh budget gets delivered either way.** Extra export during
+   a discharge slot comes from load undershooting forecast, not from
+   over-discharging the battery. Backing off would leave Wh sitting
+   in the battery for a future slot the DP already evaluated against
+   the current slot and chose to skip — undermining the plan.
+
+2. **Economics are asymmetric.** Extra import during a charge slot
+   costs the operator real money (paying for energy the plan assumed
+   PV would supply, often at peak prices the DP would never have
+   chosen for charging). Extra export during a discharge slot is
+   bonus revenue at the slot's chosen export price, which the DP
+   picked precisely because it's good.
+
+3. **The discharge-side divergence has other handlers.** Live import
+   > plan during a discharge slot means load surged; the reactive
+   replan picks it up, and the fuse guard / SoC floor / EV-discharge
+   cap protect against the dangerous edges.
+
+Regression guards against re-symmetrising the cap:
+`TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops` (charge
+case fires correctly), `TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge`
+(discharge case must not fire). Allowed-import case:
+`TestEnergyDispatchPlannedGridCapAllowsPlannedImport` (cheap-grid
+charge slot follows plan when live gridW matches plan's import).
+
+### Interaction with the PV surplus absorber
+
+The PV surplus absorber (same code path, ~30 lines earlier) handles
+the opposite-direction case for charge slots: live gridW *more*
+negative than plan (PV came in higher than forecast). It
+opportunistically *adds* charge to soak up the extra surplus. The
+two clamps are direction-orthogonal and do not interact.
+
+### When to revisit
+
+If a future planner mode wants to honour planned discharge Wh more
+loosely (e.g. let discharge back off when grid is exporting beyond
+some operator-set ceiling), that's a separate clamp — do not
+re-enable the discharge branch here without a field-validated reason
+and a regression test that captures the specific motivating scenario.
+
+## 9. Default mode (`driver_default_mode`)
 
 Every Lua driver exposes a `driver_default_mode()` function invoked
 by `reg.SendDefault` ([`registry.go:255-267`](../go/internal/drivers/registry.go)).
@@ -459,18 +554,29 @@ register `13050` (stop forced charge/discharge) and `0` to register
 
 ### Ferroamp
 
-[`drivers/ferroamp.lua:298-301`](../drivers/ferroamp.lua) — publish
-the `auto` command over MQTT:
+[`drivers/ferroamp.lua`](../drivers/ferroamp.lua) publishes the `auto`
+command over MQTT:
 
 ```lua
+local function publish_auto(trans_id)
+    return host.mqtt_publish("extapi/control/request",
+        string.format('{"transId":"%s","cmd":{"name":"auto"}}', trans_id))
+end
+
 function driver_default_mode()
-    host.mqtt_publish("extapi/control/request",
-        '{"transId":"watchdog","cmd":{"name":"auto"}}')
+    publish_auto("watchdog")
+end
+
+function driver_cleanup()
+    pcall(publish_auto, "cleanup")
 end
 ```
 
 Same semantics: the hardware takes over and does its own
-self-consumption logic until the EMS returns.
+self-consumption logic until the EMS returns. `driver_cleanup` uses the
+same fallback so a hot-reload, driver disable, or clean service stop
+does not leave the EnergyHub in the last forced `charge` / `discharge`
+reference.
 
 Triggers for default-mode invocation:
 
@@ -478,7 +584,7 @@ Triggers for default-mode invocation:
 - Site-meter stale short-circuit (every driver, see section 2)
 - Driver shutdown / hot-reload
 
-## 9. Failure-mode catalog
+## 10. Failure-mode catalog
 
 | Failure | Detection | Response |
 |---|---|---|

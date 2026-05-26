@@ -22,23 +22,23 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/api"
+	"github.com/frahlg/forty-two-watts/go/internal/arp"
 	"github.com/frahlg/forty-two-watts/go/internal/battery"
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/configreload"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/currency"
-	"github.com/frahlg/forty-two-watts/go/internal/events"
-	"github.com/frahlg/forty-two-watts/go/internal/notifications"
-	"github.com/frahlg/forty-two-watts/go/internal/arp"
 	"github.com/frahlg/forty-two-watts/go/internal/devtools"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/frahlg/forty-two-watts/go/internal/events"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
-	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
@@ -65,12 +65,16 @@ func main() {
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
 			return
+		case "pair":
+			runPair(os.Args[2:])
+			return
 		}
 	}
 
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
+	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")
 	// Developer utility — seeds state.db with N days of synthetic history
 	// so /api/energy/daily has something to render locally. Refuses to run
 	// if the target DB already holds non-synthetic rows (prod-safety gate);
@@ -110,6 +114,9 @@ func main() {
 	// (from -drivers). Picked up by both the initial Load below and every
 	// subsequent reload via the file watcher.
 	config.DriversDirOverride = resolveDriverDir()
+	// UserDriversDirOverride is the persistent overlay — probed first.
+	// Empty when -user-drivers is not supplied (back-compat).
+	config.UserDriversDirOverride = *userDriversDirFlag
 
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
@@ -127,8 +134,18 @@ func main() {
 	statePath := "state.db"
 	coldDir := "cold"
 	if cfg.State != nil {
-		if cfg.State.Path != "" { statePath = cfg.State.Path }
-		if cfg.State.ColdDir != "" { coldDir = cfg.State.ColdDir }
+		if cfg.State.Path != "" {
+			statePath = cfg.State.Path
+		}
+		if cfg.State.ColdDir != "" {
+			coldDir = cfg.State.ColdDir
+		}
+	}
+	// Resolve to absolute so paths derived via filepath.Dir(statePath)
+	// (SnapshotDir, nova.key) don't end up cwd-relative on native installs
+	// where the working directory may differ from the data volume.
+	if abs, err := filepath.Abs(statePath); err == nil {
+		statePath = abs
 	}
 	st, err := state.Open(statePath)
 	if err != nil {
@@ -178,7 +195,8 @@ func main() {
 		switch control.Mode(v) {
 		case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
 			control.ModeCharge, control.ModePriority, control.ModeWeighted,
-			control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
+			control.ModePlannerSelf, control.ModePlannerCheap,
+			control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
 			ctrl.Mode = control.Mode(v)
 		}
 	}
@@ -313,6 +331,68 @@ func main() {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
 		slog.Info("loadpoints configured", "count", len(cfg.Loadpoints))
 	}
+	// Persist operator schedules in the existing state.config k/v.
+	// One row per LP keyed `loadpoint_schedule:<id>`. Clearing a
+	// schedule writes the empty JSON ("{}"), which HydrateSchedules
+	// treats as no-config so a future reload doesn't resurrect it.
+	const lpSchedKeyPrefix = "loadpoint_schedule:"
+	lpMgr.SetScheduleSaver(func(id string, s loadpoint.Schedule) {
+		key := lpSchedKeyPrefix + id
+		if s.Empty() {
+			if err := st.SaveConfig(key, "{}"); err != nil {
+				slog.Warn("failed to clear loadpoint schedule", "lp", id, "err", err)
+			}
+			return
+		}
+		b, err := json.Marshal(s)
+		if err != nil {
+			slog.Warn("failed to marshal loadpoint schedule", "lp", id, "err", err)
+			return
+		}
+		if err := st.SaveConfig(key, string(b)); err != nil {
+			slog.Warn("failed to persist loadpoint schedule", "lp", id, "err", err)
+		}
+	})
+	lpMgr.HydrateSchedules(func(id string) (loadpoint.Schedule, bool) {
+		v, ok := st.LoadConfig(lpSchedKeyPrefix + id)
+		if !ok || v == "" || v == "{}" {
+			return loadpoint.Schedule{}, false
+		}
+		var s loadpoint.Schedule
+		if err := json.Unmarshal([]byte(v), &s); err != nil {
+			slog.Warn("failed to parse persisted loadpoint schedule",
+				"lp", id, "err", err)
+			return loadpoint.Schedule{}, false
+		}
+		return s, !s.Empty()
+	})
+	// Persist surplus_only toggles the same way schedules persist —
+	// state.config key `loadpoint_surplus_only:<id>` stores "true" or
+	// "false". Operators toggle this from the dashboard EV modal, not
+	// YAML, so the previous in-memory-only behaviour reverted the
+	// flag on every restart.
+	const lpSurplusKeyPrefix = "loadpoint_surplus_only:"
+	lpMgr.SetSurplusOnlySaver(func(id string, v bool) {
+		key := lpSurplusKeyPrefix + id
+		val := "false"
+		if v {
+			val = "true"
+		}
+		if err := st.SaveConfig(key, val); err != nil {
+			slog.Warn("failed to persist loadpoint surplus_only", "lp", id, "err", err)
+		}
+	})
+	lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
+		v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
+		if !ok || v == "" {
+			return false, false
+		}
+		return v == "true", true
+	})
+	// Seed any recurring deadlines from boot — without this the first
+	// dispatch tick would race with an empty target_time and might
+	// miss the deadline penalty for ~5 s.
+	lpMgr.RollSchedules(time.Now().UTC())
 
 	// Forward-declared so the hot-reload closure below can push
 	// capacity changes into the running planner. Assigned at line
@@ -353,7 +433,9 @@ func main() {
 			// update. Rebinding the local variable would orphan the
 			// reference the api server still holds.
 			capMu.Lock()
-			for k := range capacities { delete(capacities, k) }
+			for k := range capacities {
+				delete(capacities, k)
+			}
 			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints) {
 				capacities[k] = v
 			}
@@ -387,8 +469,9 @@ func main() {
 			// stale after an EV loadpoint is added/removed. Codex P1
 			// on PR #121.
 			if mpcSvc != nil {
-				totalCap, maxChg, maxDis := aggregateBatteryLimits(newCfg, capacities)
-				mpcSvc.UpdateCapacity(totalCap, maxChg, maxDis)
+				fleet := mpcBatteryFleetFromConfig(newCfg, capacities)
+				totalCap, maxChg, maxDis := aggregateBatteryFleetLimits(newCfg, fleet)
+				mpcSvc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 				slog.Info("mpc: capacity updated via hot-reload",
 					"capacity_wh", totalCap, "max_charge_w", maxChg, "max_discharge_w", maxDis)
 			}
@@ -586,13 +669,10 @@ func main() {
 		loadPeakW = 5000
 	}
 	loadSvc := loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
-	if cfg.Weather != nil && cfg.Weather.HeatingWPerDegC > 0 {
-		m := loadSvc.Model()
-		m.HeatingW_per_degC = cfg.Weather.HeatingWPerDegC
-		// Apply without persisting raw overwrite — model is behind a sync,
-		// so use the exposed setter. Simpler: push via reset+restore.
-		// Just update the live field directly through a small helper.
+	if cfg.Weather != nil {
 		loadSvc.SetHeatingCoef(cfg.Weather.HeatingWPerDegC)
+	} else {
+		loadSvc.SetHeatingCoef(0)
 	}
 	// Temperature source for heating-gain fit: same forecast cache.
 	loadSvc.Temp = func(t time.Time) (float64, bool) {
@@ -616,6 +696,12 @@ func main() {
 	loadSvc.Start(ctx)
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
+
+	// Forward-declared so the MPC spec builder closure (set below) can
+	// push grid-deferred state into the runtime controller. The
+	// controller itself is constructed further down once its
+	// dependencies (planAdapter, telAdapter, registry) are wired.
+	var lpController *loadpoint.Controller
 
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
@@ -704,6 +790,22 @@ func main() {
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
 					maxPct = vehicleChargeLimit
 				}
+				// Effective deadline target: when the operator asked
+				// for 100% but the vehicle (Tesla via TeslaBLEProxy
+				// etc.) is hard-capped at, say, 60%, the DP must plan
+				// against the cap — otherwise the deadline-shortfall
+				// penalty stays elevated forever (the SoC grid maxes
+				// at the cap, can never reach the operator target),
+				// and MPC keeps committing grid charging chasing an
+				// unreachable goal. Cap target_pct to whatever the
+				// car will physically accept.
+				targetPct := st.TargetSoCPct
+				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetPct {
+					targetPct = vehicleChargeLimit
+					slog.Info("mpc: target capped to vehicle charge limit",
+						"lp", st.ID, "operator_target_pct", st.TargetSoCPct,
+						"vehicle_limit_pct", vehicleChargeLimit)
+				}
 				// Guard against degenerate grids: if current SoC > maxPct
 				// (already over target), grow the ceiling to current so
 				// the DP can at least represent it (no charging will be
@@ -711,24 +813,97 @@ func main() {
 				if initSoC > maxPct {
 					maxPct = initSoC
 				}
+				// Defer grid-funded EV planning when the deadline lies
+				// past the last published price slot AND is more than ~3 h
+				// out. Without this, MPC commits today's afternoon grid
+				// (today's prices are confirmed) instead of waiting for
+				// tomorrow's pre-dawn slots (typically published ~13:00 UTC
+				// for next-day Nordpool). The user-facing intent is "burn
+				// surplus PV during day, only plan grid at night when the
+				// real cheap window is known". Setting LoadpointSpec.SurplusOnly
+				// makes MPC's DP refuse grid-import EV actions; the runtime
+				// loadpoint controller still grabs PV via the bat-SoC unlock
+				// path. Once tomorrow's prices land, MPC's next replan
+				// rebuilds the spec without this guard and proper grid
+				// planning kicks in.
+				deferGridPlan := false
+				if priceSvc != nil {
+					end := time.Now().Add(72 * time.Hour)
+					pts, _ := priceSvc.Load(time.Now().UnixMilli(), end.UnixMilli())
+					var latestEnd time.Time
+					for _, p := range pts {
+						slotEnd := time.UnixMilli(p.SlotTsMs).Add(time.Duration(p.SlotLenMin) * time.Minute)
+						if slotEnd.After(latestEnd) {
+							latestEnd = slotEnd
+						}
+					}
+					if !latestEnd.IsZero() &&
+						st.TargetTime.After(latestEnd) &&
+						time.Until(st.TargetTime) > 3*time.Hour {
+						deferGridPlan = true
+					}
+				}
 				slog.Debug("mpc: loadpoint spec",
 					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
 					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
-					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit)
+					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit,
+					"defer_grid_plan", deferGridPlan)
+				if deferGridPlan {
+					slog.Info("mpc: LP grid-funded planning deferred — target past published prices",
+						"lp", st.ID, "target", st.TargetTime, "hours_to_target", time.Until(st.TargetTime).Hours())
+				}
+				// Mirror the deferral into the runtime controller so live
+				// dispatch enforces "no grid import" too. Without this,
+				// MPC's plan would still record a small EV budget per slot
+				// (snapped to forecast surplus); when forecast PV
+				// undershoots reality, the runtime controller would
+				// happily import grid to fulfil the cached plan budget.
+				if lpController != nil {
+					lpController.SetGridDeferred(st.ID, deferGridPlan)
+				}
+				// Surplus-only sources, in order of precedence:
+				//   1. Operator's explicit surplus_only flag on the LP
+				//   2. MPC grid-funded planning deferral (target past
+				//      published prices)
+				//   3. Runtime bat-SoC unlock arming — when the home
+				//      battery is at/above the schedule's threshold AND
+				//      live PV surplus is available, the dispatch layer
+				//      already treats the LP as surplus-only. Without
+				//      threading it into the MPC spec here, the plan
+				//      would prescribe battery→EV transfers that
+				//      dispatch then has to censor — producing
+				//      misleading slot entries the operator sees in
+				//      /api/mpc/plan that never actually execute.
+				batSoCArmed := false
+				if lpController != nil {
+					batSoCArmed = lpController.IsBatSoCArmed(st.ID)
+				}
+				// NoBatteryToEV mirrors the site-wide ctrl.BatteryCoversEV
+				// flag (inverted). Plumbing the constraint into the DP
+				// here means the planner stops scheduling battery→EV
+				// transfers that dispatch's safety net would just clamp
+				// at runtime; this closes the plan↔reality divergence
+				// where operators saw "plan: 7 kW discharge + 11 kW EV"
+				// while live execution held the battery at house-only
+				// levels. Take ctrlMu for the bool read.
+				ctrlMu.Lock()
+				noBatteryToEV := !ctrl.BatteryCoversEV
+				ctrlMu.Unlock()
 				return &mpc.LoadpointSpec{
-					ID:              st.ID,
-					CapacityWh:      capWh,
-					Levels:          11,
-					MinPct:          0,
-					MaxPct:          maxPct,
-					InitialSoCPct:   initSoC,
-					PluggedIn:       true,
-					TargetSoCPct:    st.TargetSoCPct,
-					TargetSlotIdx:   targetSlot,
-					MaxChargeW:      st.MaxChargeW,
-					AllowedStepsW:   st.AllowedStepsW,
+					ID:               st.ID,
+					CapacityWh:       capWh,
+					Levels:           11,
+					MinPct:           0,
+					MaxPct:           maxPct,
+					InitialSoCPct:    initSoC,
+					PluggedIn:        true,
+					TargetSoCPct:     targetPct,
+					TargetSlotIdx:    targetSlot,
+					MaxChargeW:       st.MaxChargeW,
+					AllowedStepsW:    st.AllowedStepsW,
 					ChargeEfficiency: 0.9,
-					SurplusOnly:     st.SurplusOnly,
+					SurplusOnly:      st.SurplusOnly || deferGridPlan || batSoCArmed,
+					NoBatteryToEV:    noBatteryToEV,
 				}
 			}
 			return nil
@@ -771,6 +946,8 @@ func main() {
 				SoCTargetPct:    d.SoCTargetPct,
 				Strategy:        string(d.Strategy),
 				PVLimitW:        d.PVLimitW,
+				PlannedGridW:    d.GridW,
+				HasPlannedGridW: true,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
@@ -802,10 +979,15 @@ func main() {
 				mm = mpc.ModeSelfConsumption
 			case control.ModePlannerCheap:
 				mm = mpc.ModeCheapCharge
+			case control.ModePlannerPassiveArbitrage:
+				mm = mpc.ModePassiveArbitrage
 			case control.ModePlannerArbitrage:
 				mm = mpc.ModeArbitrage
 			}
 			mpcSvc.SetMode(ctx, mm)
+		}
+		if mpcSvc.Latest() == nil {
+			restoreLatestMPCDiagnostic(st, mpcSvc, time.Now())
 		}
 		slog.Info("mpc planner started",
 			"mode", mpcSvc.Defaults.Mode,
@@ -845,7 +1027,8 @@ func main() {
 	//
 	// Adapters here keep loadpoint independent of mpc/telemetry
 	// (mpc already imports loadpoint — the cycle must go this way).
-	var lpController *loadpoint.Controller
+	// lpController is forward-declared earlier so the MPC spec builder
+	// closure can push grid-deferred state into it.
 	if mpcSvc != nil {
 		planAdapter := func(now time.Time) (loadpoint.Directive, bool) {
 			d, ok := mpcSvc.SlotDirectiveAt(now)
@@ -970,6 +1153,68 @@ func main() {
 			return peak, true
 		})
 
+		// Near-term peak surplus: same scan but capped at now + window.
+		// pickSurplusSteps consults this to decide if a 3Φ window is
+		// imminent enough to be worth waiting for. When near-term <
+		// 3Φ minimum but day-peak is, we'd rather charge 1Φ now and
+		// switch to 3Φ later than sit idle waiting.
+		//
+		// "Surplus" here is what the EV can claim, not the raw PV
+		// excess. The MPC has already allocated battery_w out of PV;
+		// the EV gets only what's left after PV - Load - Battery. A
+		// borderline-PV day where MPC reserves 4.5 kW for battery
+		// charging while raw -PV - Load = 5 kW would otherwise pin
+		// the gate to 3Φ-only based on a peak the battery is going
+		// to consume — leaving the EV stuck at 0 W in 3Φ-only step
+		// land because real-time room is below 4140 W.
+		lpController.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
+			if mpcSvc == nil {
+				return 0, false
+			}
+			plan := mpcSvc.Latest()
+			if plan == nil || len(plan.Actions) == 0 {
+				return 0, false
+			}
+			now := time.Now()
+			horizon := now.Add(window)
+			var peak float64
+			any := false
+			for _, a := range plan.Actions {
+				slotEnd := time.UnixMilli(a.SlotStartMs).Add(
+					time.Duration(a.SlotLenMin) * time.Minute)
+				if slotEnd.Before(now) {
+					continue
+				}
+				if time.UnixMilli(a.SlotStartMs).After(horizon) {
+					break
+				}
+				// Net PV headroom for non-battery loads: positive when
+				// PV export exceeds load + planned battery charge.
+				// BatteryW is site-signed: positive = charge (import),
+				// negative = discharge (export). Only subtract planned
+				// CHARGE — planned discharge is already earmarked to
+				// cover house load (or grid export in arbitrage), not
+				// available room for the EV to claim. Counting it would
+				// route plan-discharge → EV → re-charge cycles: the EV
+				// takes power the plan reserved for load coverage, then
+				// the dispatch has to re-import or further discharge to
+				// keep the original balance.
+				plannedChargeW := a.BatteryW
+				if plannedChargeW < 0 {
+					plannedChargeW = 0
+				}
+				surplus := -a.PVW - a.LoadW - plannedChargeW
+				if !any || surplus > peak {
+					peak = surplus
+					any = true
+				}
+			}
+			if !any {
+				return 0, false
+			}
+			return peak, true
+		})
+
 		lpController.SetSiteSurplusForEV(func() (float64, bool) {
 			meterDriver := cfg.SiteMeterDriver()
 			if meterDriver == "" {
@@ -1005,7 +1250,66 @@ func main() {
 				batW += r.SmoothedW
 			}
 			evW := tel.SumOnlineEVW()
+			// Surplus-only EV priority: when any loadpoint is in
+			// surplus-only mode, battery charging power is NOT
+			// available for the EV. The original formula assumed
+			// "if I told the battery to stop, that surplus would
+			// free up for the EV" — but the MPC, even with the
+			// grid-charge ban now in place, may still legitimately
+			// charge the battery from PV surplus. If we hand that
+			// power back to the EV, the controller commands the EV
+			// on, the battery loses its share, the planner re-budgets
+			// the EV down → flap. The truthful surplus for an EV
+			// under surplus-only is what's left AFTER the battery
+			// has taken its share: -gridW + max(0, -batW) (battery
+			// counts only if it's discharging, contributing to
+			// site supply).
+			// A bat-SoC-armed loadpoint is just as much a "PV-priority"
+			// claimant as a configured surplus_only LP — both want PV
+			// routed to the EV ahead of the home battery. Counting
+			// either via the controller's combined view (configured OR
+			// armed) keeps the flap-avoidance protection symmetric and
+			// closes the loophole where an armed LP would inflate the
+			// apparent surplus by the battery's PV-charge rate.
+			surplusOnlyActive := false
+			if lpController != nil && lpController.AnyLoadpointSurplusActive() {
+				surplusOnlyActive = true
+			}
+			if surplusOnlyActive && batW > 0 {
+				batW = 0
+			}
+			// Open follow-up: in self-consumption / planner_self mode,
+			// the dispatch PI absorbs PV into the battery before the
+			// EV controller sees it, defeating surplus-only priority.
+			// The MPC arbitrage path is covered by the new mpc.go
+			// feasibility constraint; the self-consumption fallback
+			// needs a battery-charge cap in control/dispatch.go to
+			// match. Tracked separately to keep this change focused.
 			return -gridW + batW + evW, true
+		})
+
+		// Bat-SoC surplus-unlock: feed the controller a live home-battery
+		// SoC reading so a loadpoint with a `surplus_unlock_bat_soc_pct`
+		// schedule can flip into surplus-snap mode when the battery is
+		// already comfortable. Sums online battery readings; (_, false)
+		// when no battery driver is online so the controller leaves the
+		// arm state untouched (hysteresis preserved across blips).
+		lpController.SetBatSoCProvider(func() (float64, bool) {
+			var total, count float64
+			for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+				if h := tel.DriverHealth(r.Driver); h == nil || h.Status == telemetry.StatusOffline {
+					continue
+				}
+				if r.SoC == nil || *r.SoC <= 0 {
+					continue
+				}
+				total += *r.SoC
+				count++
+			}
+			if count == 0 {
+				return 0, false
+			}
+			return total / count, true
 		})
 	}
 
@@ -1060,12 +1364,13 @@ func main() {
 		State: st,
 		CapMu: capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
-		DriverDir: resolveDriverDir(),
+		DriverDir:           resolveDriverDir(),
+		UserDriverDir:       *userDriversDirFlag,
 		DriverMQTTFactory:   reg.MQTTFactory,
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
-		Models: models, ModelsMu: modelsMu,
-		SelfTune: selfTune,
+		Models:              models, ModelsMu: modelsMu,
+		SelfTune:   selfTune,
 		DtS:        float64(cfg.Site.ControlIntervalS),
 		SaveConfig: config.SaveAtomic,
 		WebDir:     *webDir,
@@ -1075,19 +1380,19 @@ func main() {
 		// from the state.db path rather than the config path because
 		// `state.db` is always in the main data volume; the config
 		// can legitimately live elsewhere (e.g. mounted RO from /etc).
-		SnapshotDir: filepath.Join(filepath.Dir(statePath), "snapshots"),
-		Prices:     priceSvc,
-		Forecast:   forecastSvc,
-		MPC:        mpcSvc,
-		PVModel:    pvSvc,
-		LoadModel:  loadSvc,
+		SnapshotDir:   filepath.Join(filepath.Dir(statePath), "snapshots"),
+		Prices:        priceSvc,
+		Forecast:      forecastSvc,
+		MPC:           mpcSvc,
+		PVModel:       pvSvc,
+		LoadModel:     loadSvc,
 		Loadpoints:    lpMgr,
 		LoadpointCtrl: lpController,
 		HA:            haBridge,
-		Registry:   reg,
-		Events:     bus,
+		Registry:      reg,
+		Events:        bus,
 		Notifications: notifSvc,
-		SelfUpdate: selfUpdater,
+		SelfUpdate:    selfUpdater,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -1112,7 +1417,7 @@ func main() {
 			})
 			return nil
 		},
-		Version:    Version,
+		Version: Version,
 	}
 	srv := api.New(deps)
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
@@ -1320,11 +1625,25 @@ func main() {
 	var prevFuseSaturated bool
 	var lastFuseReplan time.Time
 	const fuseReplanCooldown = 60 * time.Second
+	var lastMissingPlanReplan time.Time
+	const missingPlanReplanCooldown = 5 * time.Second
 	// One-shot replan when the FIRST DerVehicle reading arrives. The
 	// startup replan ran with whatever fallback SoC was available; once
 	// the Tesla / vehicle driver gets ground truth from the car, the
 	// plan should incorporate it (especially for EV target deadlines).
 	var vehicleReplanFired bool
+	// Per-loadpoint last observed draw for the EV-stop edge replan.
+	// A falling edge (was >100 W, now <50 W while still plugged in)
+	// signals the EV finished or paused itself — the slot's plan no
+	// longer reflects reality (battery may have been held at 0 to leave
+	// room for the EV; with EV gone the freed PV should be re-allocated).
+	// Cooldown shares the fuse-replan cooldown to keep per-second flap
+	// from spamming the optimizer.
+	evDrawPrev := map[string]float64{}
+	var lastEVStopReplan time.Time
+	const evStopReplanCooldown = 60 * time.Second
+	const evStopHigh = 100.0 // W — "was actually drawing"
+	const evStopLow = 50.0   // W — "now essentially zero"
 	for {
 		select {
 		case <-sigc:
@@ -1351,11 +1670,17 @@ func main() {
 				ctrlMu.Unlock()
 				for _, t := range lastTargets {
 					r := tel.Get(t.Driver, telemetry.DerBattery)
-					if r == nil { continue }
+					if r == nil {
+						continue
+					}
 					m, ok := models[t.Driver]
-					if !ok { continue }
+					if !ok {
+						continue
+					}
 					soc := 0.5
-					if r.SoC != nil { soc = *r.SoC }
+					if r.SoC != nil {
+						soc = *r.SoC
+					}
 					m.Update(t.TargetW, r.SmoothedW, soc, dtS, nowMs)
 				}
 				modelsMu.Unlock()
@@ -1366,9 +1691,13 @@ func main() {
 				modelsMu.Lock()
 				selfTune.Tick(func(name string) (float64, float64, bool) {
 					r := tel.Get(name, telemetry.DerBattery)
-					if r == nil { return 0, 0, false }
+					if r == nil {
+						return 0, 0, false
+					}
 					soc := 0.5
-					if r.SoC != nil { soc = *r.SoC }
+					if r.SoC != nil {
+						soc = *r.SoC
+					}
 					return r.SmoothedW, soc, true
 				}, models, dtS, nowMs)
 				modelsMu.Unlock()
@@ -1376,7 +1705,9 @@ func main() {
 
 			// ---- Watchdog: mark stale drivers offline, revert them to autonomous ----
 			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
-			if watchdogTimeout <= 0 { watchdogTimeout = 60 * time.Second }
+			if watchdogTimeout <= 0 {
+				watchdogTimeout = 60 * time.Second
+			}
 			for _, tr := range tel.WatchdogScan(watchdogTimeout) {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
@@ -1393,11 +1724,35 @@ func main() {
 			// rules without the control loop knowing about them.
 			bus.Publish(events.HealthTick{Health: tel.AllHealth(), Now: time.Now()})
 
+			// ---- EV dispatch first — independent of the site meter ----
+			// Loadpoint Observe() reads its own telemetry (the EV
+			// charger driver), so it MUST run before the site-meter
+			// staleness guard below — otherwise a missing/stale site
+			// meter silently freezes the LP manager's plugged_in
+			// state, MPC never extends the DP with the EV dimension,
+			// and the operator sees "schedule set but EV never
+			// charges". The surplus-only clamp inside the LP controller
+			// already returns 0 when site surplus is unknown, so this
+			// is safe: bad grid signal → LP paused, but at least the
+			// LP state machine is alive.
+			lpMgr.RollSchedules(time.Now().UTC())
+			lpController.Tick(ctx, time.Now())
+
 			// ---- Safety: site meter stale → idle everything this cycle ----
 			// Otherwise stale grid readings cause one battery to charge another.
+			// Only meaningful when a site meter is actually configured;
+			// without one, IsStale("", DerMeter) is permanently true and
+			// the SendDefault loop below would fire on every tick — and
+			// SendDefault is a blocking send into each driver's cmdCh,
+			// which deadlocks the dispatch loop the first time any
+			// driver's channel buffer fills.
 			ctrlMu.Lock()
-			siteMeterStale := tel.IsStale(ctrl.SiteMeterDriver, telemetry.DerMeter, watchdogTimeout)
+			siteMeterDriver := ctrl.SiteMeterDriver
 			ctrlMu.Unlock()
+			siteMeterStale := false
+			if siteMeterDriver != "" {
+				siteMeterStale = tel.IsStale(siteMeterDriver, telemetry.DerMeter, watchdogTimeout)
+			}
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
@@ -1423,12 +1778,59 @@ func main() {
 			// ---- Compute dispatch ----
 			capMu.RLock()
 			capsSnap := make(map[string]float64, len(capacities))
-			for k, v := range capacities { capsSnap[k] = v }
+			for k, v := range capacities {
+				capsSnap[k] = v
+			}
 			capMu.RUnlock()
 
+			// Surplus-only EV reserve: aggregate PV headroom to leave
+			// for surplus_only loadpoints. Per LP, reserves
+			// min(MaxChargeW, CurrentPowerW + EVRampHeadroomW) so the
+			// figure tracks the EV's actual draw rather than its
+			// theoretical max — when an EV is physically holding at
+			// e.g. 2.5 kW (1Φ × 11 A under phase hysteresis), the prior
+			// "reserve = MaxChargeW = 11 kW" form ate ~8.5 kW of the
+			// available surplus and starved the battery on
+			// over-forecast PV slots even when the plan said charge.
+			// Result is injected into ctrl.EVSurplusOnlyReserveW and
+			// consumed by dispatch.go in both the energy and the
+			// legacy/reactive paths. Computed every tick so toggling
+			// surplus_only, plugging/unplugging, or an EV ramp picks
+			// up immediately.
+			// Build the wake-kick-active set so the reserve calc can
+			// hold the floor for an LP whose wallbox is actively
+			// offering current to a still-ramping EV. Without this,
+			// the home battery would snatch the freed surplus during
+			// the brief gap before the EV's contactor settles.
+			lpStatesSnapshot := lpMgr.States()
+			var wakeKickActiveIDs map[string]bool
+			if lpController != nil {
+				now := time.Now()
+				for _, st := range lpStatesSnapshot {
+					if !st.PluggedIn || !st.SurplusOnly {
+						continue
+					}
+					if lpController.IsWakeKickActive(st.ID, now) {
+						if wakeKickActiveIDs == nil {
+							wakeKickActiveIDs = map[string]bool{}
+						}
+						wakeKickActiveIDs[st.ID] = true
+					}
+				}
+			}
+			evReserveW := loadpoint.SurplusReserveW(lpStatesSnapshot, wakeKickActiveIDs)
+			// Parallel curtail-side reserve — more permissive than the
+			// dispatch reserve above; counts plugged-but-stopped EVs
+			// with SoC headroom so PV isn't cut when a vehicle could
+			// resume charging.
+			evCurtailHeadroomW := loadpoint.SurplusPotentialW(lpStatesSnapshot)
+
 			ctrlMu.Lock()
+			ctrl.EVSurplusOnlyReserveW = evReserveW
+			ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
+			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
 			ctrlMu.Unlock()
 
 			// ---- Self-tune override: force commanded battery, hold others at 0 ----
@@ -1480,11 +1882,8 @@ func main() {
 				}
 			}
 
-			// ---- EV dispatch: per-loadpoint observe + command ----
-			// The per-loadpoint state machine (observe → plan lookup
-			// → snap → send) is owned by loadpoint.Controller so the
-			// main tick stays a thin orchestrator. See issue #172.
-			lpController.Tick(ctx, time.Now())
+			// LP dispatch ran at the top of this tick — see the
+			// "EV dispatch first" block above.
 
 			// ---- Trigger MPC replan on fuse-saturation rising edge ----
 			// The joint allocator (control.dispatch) just throttled
@@ -1501,6 +1900,44 @@ func main() {
 				slog.Info("fuse-saturated → MPC replan triggered")
 			}
 			prevFuseSaturated = fuseSatNow
+
+			// Missing-plan retry: plans are in-memory only, so after an
+			// update/restart the first dispatch cycles can see nil/stale
+			// planner state. That must not wait for the normal 15 min
+			// interval; rebuild immediately, retrying briefly if prices /
+			// forecasts / telemetry were not ready during startup.
+			if mpcSvc != nil && planMissingNow && time.Since(lastMissingPlanReplan) > missingPlanReplanCooldown {
+				lastMissingPlanReplan = time.Now()
+				go mpcSvc.ReplanWithReason(ctx, "missing_plan_retry")
+				slog.Info("missing MPC plan → replan triggered")
+			}
+
+			// EV-stop edge replan trigger: when an LP's draw drops
+			// from a clearly-charging value to ~0 while still plugged,
+			// the current plan slot's allocation (e.g. "idle, the EV
+			// takes the surplus") is stale — fire a replan so the DP
+			// re-routes the freed PV. Unplug edges are NOT a trigger:
+			// the plug-out itself toggles plugged_in→false which the
+			// scheduled replan path picks up, and chaining a replan
+			// there would race with the LP manager. Cooldown bounded
+			// to one replan per evStopReplanCooldown so a hardware
+			// flap doesn't storm the optimizer.
+			if mpcSvc != nil {
+				fired := false
+				for _, lp := range lpMgr.States() {
+					prev := evDrawPrev[lp.ID]
+					curr := lp.CurrentPowerW
+					if lp.PluggedIn && prev >= evStopHigh && curr < evStopLow &&
+						time.Since(lastEVStopReplan) > evStopReplanCooldown && !fired {
+						lastEVStopReplan = time.Now()
+						fired = true
+						go mpcSvc.ReplanWithReason(ctx, "loadpoint_ev_stopped")
+						slog.Info("loadpoint EV stopped → MPC replan triggered",
+							"lp", lp.ID, "prev_w", prev, "curr_w", curr)
+					}
+					evDrawPrev[lp.ID] = curr
+				}
+			}
 
 			// First-vehicle-SoC replan trigger: as soon as any
 			// DerVehicle driver is online and reporting SoC, redo the
@@ -1543,8 +1980,8 @@ func main() {
 				for name, m := range models {
 					if data, err := json.Marshal(m); err == nil {
 						if err := st.SaveBatteryModel(name, string(data)); err != nil {
-						slog.Warn("failed to persist battery model", "battery", name, "err", err)
-					}
+							slog.Warn("failed to persist battery model", "battery", name, "err", err)
+						}
 					}
 				}
 				modelsMu.Unlock()
@@ -1563,8 +2000,10 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string) {
 	doRolloff(ctx, st, coldDir)
 	for {
 		select {
-		case <-ctx.Done(): return
-		case <-tick.C: doRolloff(ctx, st, coldDir)
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			doRolloff(ctx, st, coldDir)
 		}
 	}
 }
@@ -1599,7 +2038,9 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 	for _, name := range reg.Names() {
 		env := reg.Env(name)
-		if env == nil { continue }
+		if env == nil {
+			continue
+		}
 		make, sn, mac, ep := env.FullIdentity()
 		dev := state.Device{
 			DriverName: name,
@@ -1823,18 +2264,13 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 	return out
 }
 
-// aggregateBatteryLimits sums capacity + max charge/discharge across
-// battery drivers the MPC should plan for, applying fuse-capacity
-// clamps. Returned values are what buildMPC used to compute inline at
-// startup — hoisted into a helper so the config-reload path can call
-// it and push the new totals into an already-running mpc.Service.
-func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (totalCap, maxChg, maxDis float64) {
+func mpcBatteryFleetFromConfig(cfg *config.Config, capacities map[string]float64) []mpc.BatteryFleetMember {
+	fleet := make([]mpc.BatteryFleetMember, 0, len(capacities))
 	for _, d := range cfg.Drivers {
 		cap := capacities[d.Name]
 		if cap <= 0 {
 			continue
 		}
-		totalCap += cap
 		// Default max (de)charge = 0.5C unless overridden. Zero is a
 		// legitimate one-sided constraint — `max_charge_w: 0` means
 		// "forbid charging, allow discharge only" and mpc.Optimize's
@@ -1869,8 +2305,30 @@ func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (
 				}
 			}
 		}
-		maxChg += chg
-		maxDis += dis
+		fleet = append(fleet, mpc.BatteryFleetMember{
+			Driver:        d.Name,
+			CapacityWh:    cap,
+			MaxChargeW:    chg,
+			MaxDischargeW: dis,
+		})
+	}
+	return fleet
+}
+
+// aggregateBatteryLimits sums capacity + max charge/discharge across
+// battery drivers the MPC should plan for, applying fuse-capacity
+// clamps. Returned values are what buildMPC used to compute inline at
+// startup — hoisted into a helper so the config-reload path can call
+// it and push the new totals into an already-running mpc.Service.
+func aggregateBatteryLimits(cfg *config.Config, capacities map[string]float64) (totalCap, maxChg, maxDis float64) {
+	return aggregateBatteryFleetLimits(cfg, mpcBatteryFleetFromConfig(cfg, capacities))
+}
+
+func aggregateBatteryFleetLimits(cfg *config.Config, fleet []mpc.BatteryFleetMember) (totalCap, maxChg, maxDis float64) {
+	for _, b := range fleet {
+		totalCap += b.CapacityWh
+		maxChg += b.MaxChargeW
+		maxDis += b.MaxDischargeW
 	}
 	// Clamp aggregate charge/discharge to the grid fuse capacity. The
 	// control loop's fuse guard enforces this per-tick anyway, but a
@@ -1905,7 +2363,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		slog.Warn("mpc requires price provider — skipping")
 		return nil
 	}
-	totalCap, maxChg, maxDis := aggregateBatteryLimits(cfg, capacities)
+	fleet := mpcBatteryFleetFromConfig(cfg, capacities)
+	totalCap, maxChg, maxDis := aggregateBatteryFleetLimits(cfg, fleet)
 	if totalCap <= 0 {
 		slog.Warn("mpc: no battery capacity — skipping")
 		return nil
@@ -1927,6 +2386,28 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if socMax <= 0 || socMax > 100 {
 		socMax = 95
 	}
+	socSafety := pl.SoCSafetyFloorPct
+	if socSafety <= 0 {
+		// Default: 25 % absolute. Operational floor above the
+		// hardware min, leaves buffer against forecast risk (cloud,
+		// load surprise). Set to 0 in config to disable.
+		socSafety = 25
+	}
+	if socSafety < socMin {
+		socSafety = socMin
+	}
+	safetyPenalty := pl.SafetyFloorPenaltyOreKwhHour
+	if safetyPenalty <= 0 {
+		safetyPenalty = 100
+	}
+	pvBonus := pl.PVChargeBonusOreKwh
+	if pvBonus <= 0 {
+		// 30 öre/kWh — beats typical PV-export spot prices and the
+		// round-trip efficiency cost (~20 öre/kWh against mean retail
+		// import), but small enough that genuine arbitrage spreads
+		// (>100 öre/kWh) still drive the DP.
+		pvBonus = 30
+	}
 	chgEff := pl.ChargeEfficiency
 	if chgEff <= 0 {
 		chgEff = 0.95
@@ -1936,13 +2417,26 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		disEff = 0.95
 	}
 	params := mpc.Params{
-		Mode:                mode,
-		SoCLevels:           41,
-		CapacityWh:          totalCap,
-		SoCMinPct:           socMin,
-		SoCMaxPct:           socMax,
-		InitialSoCPct:       50,
-		ActionLevels:        21,
+		Mode:                         mode,
+		SoCLevels:                    41,
+		CapacityWh:                   totalCap,
+		SoCMinPct:                    socMin,
+		SoCMaxPct:                    socMax,
+		SoCSafetyFloorPct:            socSafety,
+		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
+		PVChargeBonusOreKwh:          pvBonus,
+		InitialSoCPct:                50,
+		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
+		// action range. Coarser values (21=900 W, 41=450 W) lose
+		// borderline-PV slots: on a 273 W net surplus the 450 W min
+		// charge action overshoots ModeSelfConsumption's no-battery-
+		// export rule (gridW ends up positive past tolerance) and the
+		// DP falls back to idle/export the surplus. 81 levels lets the
+		// DP land on +225 W and absorb the surplus into the battery.
+		// DP complexity is O(N×S×A×EL×EA) — at the production 192-slot
+		// × 41-SoC × 1-EV grid, 81 actions is ~636k evaluations,
+		// still ~5 ms per replan on the Pi.
+		ActionLevels:        81,
 		MaxChargeW:          maxChg,
 		MaxDischargeW:       maxDis,
 		ChargeEfficiency:    chgEff,
@@ -1950,6 +2444,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		ExportOrePerKWh:     pl.ExportOrePerKWh,
 	}
 	svc := mpc.New(st, tel, zone, params)
+	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
 	svc.BaseLoad = pl.BaseLoadW
 	if pl.HorizonHours > 0 {
 		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
@@ -1981,7 +2476,9 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 	}
 	var pvW, batW, sumSoC float64
 	var socCount int
-	for _, r := range tel.ReadingsByType(telemetry.DerPV) { pvW += r.SmoothedW }
+	for _, r := range tel.ReadingsByType(telemetry.DerPV) {
+		pvW += r.SmoothedW
+	}
 	for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
 		batW += r.SmoothedW
 		if r.SoC != nil {
@@ -1990,9 +2487,14 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		}
 	}
 	avgSoC := 0.0
-	if socCount > 0 { avgSoC = sumSoC / float64(socCount) }
-	loadW := gridW - batW - pvW
-	if loadW < 0 { loadW = 0 }
+	if socCount > 0 {
+		avgSoC = sumSoC / float64(socCount)
+	}
+	evW := tel.SumOnlineEVW()
+	loadW := gridW - batW - pvW - evW
+	if loadW < 0 {
+		loadW = 0
+	}
 
 	// Per-driver detail packed into the JSON column. The schema is
 	// schema-less by design — UI code reads what it understands and
@@ -2002,7 +2504,9 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		row := map[string]float64{}
 		if r := tel.Get(name, telemetry.DerBattery); r != nil {
 			row["bat_w"] = r.SmoothedW
-			if r.SoC != nil { row["soc"] = *r.SoC }
+			if r.SoC != nil {
+				row["soc"] = *r.SoC
+			}
 		}
 		if r := tel.Get(name, telemetry.DerPV); r != nil {
 			row["pv_w"] = r.SmoothedW
@@ -2026,14 +2530,42 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		targets[t.Driver] = t.TargetW
 	}
 	jsonBlob, _ := json.Marshal(map[string]any{
-		"drivers": perDriver,
-		"targets": targets,
+		"drivers":      perDriver,
+		"targets":      targets,
+		"ev_w":         evW,
+		"load_house_w": loadW,
 	})
 	if err := st.RecordHistory(state.HistoryPoint{
 		TsMs: nowMs, GridW: gridW, PVW: pvW, BatW: batW, LoadW: loadW, BatSoC: avgSoC,
 		JSON: string(jsonBlob),
 	}); err != nil {
 		slog.Warn("failed to persist history point", "err", err)
+	}
+}
+
+func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time) {
+	if st == nil || svc == nil {
+		return
+	}
+	row, err := st.LoadDiagnosticAt(now.UnixMilli())
+	if err != nil {
+		slog.Warn("mpc: load persisted diagnostic failed", "err", err)
+		return
+	}
+	if row == nil || row.JSON == "" {
+		return
+	}
+	var d mpc.Diagnostic
+	if err := json.Unmarshal([]byte(row.JSON), &d); err != nil {
+		slog.Warn("mpc: decode persisted diagnostic failed", "ts_ms", row.TsMs, "err", err)
+		return
+	}
+	if svc.RestoreDiagnostic(&d, now, "restored_diagnostic") {
+		slog.Info("mpc: restored active plan from persisted diagnostic",
+			"ts_ms", row.TsMs,
+			"mode", d.Params.Mode,
+			"horizon", d.Horizon,
+			"reason", row.Reason)
 	}
 }
 
