@@ -66,8 +66,12 @@ func Dial(host string, port int, username, password, clientID string) (*Capabili
 			})
 			cap.mu.Unlock()
 		})
-	if username != "" { opts.SetUsername(username) }
-	if password != "" { opts.SetPassword(password) }
+	if username != "" {
+		opts.SetUsername(username)
+	}
+	if password != "" {
+		opts.SetPassword(password)
+	}
 	cap.client = paho.NewClient(opts)
 	if tok := cap.client.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
 		return nil, tok.Error()
@@ -151,14 +155,18 @@ func (c *Capability) Subscribe(topic string) error {
 	c.subs[topic] = struct{}{}
 	c.subsMu.Unlock()
 	tok := c.client.Subscribe(topic, 0, nil)
-	tok.WaitTimeout(5 * time.Second)
+	if !tok.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("mqtt: subscribe timed out: topic=%q", topic)
+	}
 	return tok.Error()
 }
 
 // Publish — implements drivers.MQTTCap.
 func (c *Capability) Publish(topic string, payload []byte) error {
 	tok := c.client.Publish(topic, 0, false, payload)
-	tok.WaitTimeout(5 * time.Second)
+	if !tok.WaitTimeout(5 * time.Second) {
+		return fmt.Errorf("mqtt: publish timed out: topic=%q", topic)
+	}
 	return tok.Error()
 }
 

@@ -112,6 +112,54 @@ func TestHandleEVStatusRejectsUnknownDriver(t *testing.T) {
 	}
 }
 
+func TestHandlePostConfigDoesNotPersistEVPasswordOnInvalidConfig(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfig(evPasswordKey, "old-secret"); err != nil {
+		t.Fatalf("seed password: %v", err)
+	}
+
+	cfg := &config.Config{
+		Site:      config.Site{SmoothingAlpha: 0.3},
+		Fuse:      config.Fuse{MaxAmps: 16},
+		EVCharger: &config.EVCharger{Provider: "easee", Username: "old@example.com", Password: "old-secret"},
+	}
+	srv := New(&Deps{
+		State:  st,
+		CfgMu:  &sync.RWMutex{},
+		Cfg:    cfg,
+		CtrlMu: &sync.Mutex{},
+		Ctrl:   control.NewState(0, 50, ""),
+	})
+
+	body, err := json.Marshal(config.Config{
+		Site:      config.Site{SmoothingAlpha: 2},
+		Fuse:      config.Fuse{MaxAmps: 16},
+		EVCharger: &config.EVCharger{Provider: "easee", Username: "new@example.com", Password: "new-secret"},
+	})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", rr.Code, rr.Body.String())
+	}
+	got, ok := st.LoadConfig(evPasswordKey)
+	if !ok {
+		t.Fatalf("password key missing after invalid config")
+	}
+	if got != "old-secret" {
+		t.Fatalf("persisted password = %q, want old-secret", got)
+	}
+}
+
 func TestHandleStatusIgnoresOfflineDERInLiveBalance(t *testing.T) {
 	tel := telemetry.NewStore()
 	ctrl := &control.State{SiteMeterDriver: "site"}
