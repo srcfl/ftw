@@ -78,7 +78,21 @@ func TestPairFlow(t *testing.T) {
 		t.Fatalf("expected /api/status body in ftw_api response, got: %s", resp)
 	}
 
-	// Render session_log and confirm it captured ftw_api + intent.
+	// Same call via the REST surface — this is the path agents will actually use.
+	restResp := callREST(t, "http://127.0.0.1:19999/tools/ftw_api", map[string]any{
+		"method": "GET", "path": "/api/status",
+	})
+	if !strings.Contains(restResp, "mode") {
+		t.Fatalf("REST: expected /api/status body, got: %s", restResp)
+	}
+
+	// REST catalog must list ftw_api.
+	catalog := getREST(t, "http://127.0.0.1:19999/tools")
+	if !strings.Contains(catalog, `"name":"ftw_api"`) {
+		t.Fatalf("REST: /tools missing ftw_api entry:\n%s", catalog)
+	}
+
+	// Render session_log and confirm it captured both calls + intent.
 	log := callMCP(t, "http://127.0.0.1:19999/mcp", "session_log", map[string]any{})
 	if !strings.Contains(log, "ftw_api") {
 		t.Fatalf("session_log missing ftw_api entry:\n%s", log)
@@ -139,6 +153,42 @@ func callMCP(t *testing.T, url, tool string, args map[string]any) string {
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
+	return string(out)
+}
+
+func callREST(t *testing.T, url string, args map[string]any) string {
+	t.Helper()
+	body, _ := json.Marshal(args)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("REST call: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("REST call %s: status %d body %s", url, resp.StatusCode, out)
+	}
+	return string(out)
+}
+
+func getREST(t *testing.T, url string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("REST get: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("REST get %s: status %d body %s", url, resp.StatusCode, out)
+	}
 	return string(out)
 }
 

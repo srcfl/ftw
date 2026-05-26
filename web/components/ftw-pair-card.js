@@ -462,9 +462,10 @@ One-time setup (Mac/Linux):
 Then run:
   ftw-connect ${code}
 
-It'll open a tunnel, register an MCP server with your Claude Code,
-and copy a context prompt to your clipboard. Paste it into Claude
-Code and we're connected.
+It opens an end-to-end-encrypted tunnel and prints a local URL.
+It also copies a ready-to-paste agent prompt to your clipboard —
+paste it into Claude Code, Codex, or whatever agent you use, and
+we're connected. No config files touched on your side.
 
 Session expires in ${remaining} or when I click Abort.`;
   }

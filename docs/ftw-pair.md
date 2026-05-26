@@ -73,12 +73,19 @@ ftw-connect garage-coffee-river-bicycle-window-cat
 That:
 
 1. Connects to the Sourceful relay with the given token.
-2. Registers an MCP server named `ftw-remote` with Claude Code.
-3. Copies a context-priming prompt to the clipboard.
+2. Prints a local URL — the sidecar's HTTP API, tunnelled to the
+   friend's machine.
+3. Copies a ready-to-paste agent prompt to the clipboard (the prompt
+   teaches the agent to talk to the local URL with `curl`).
 
-Open Claude Code, paste the prompt, work. When done, **the friend
-opens the PR from their own machine** — they clone the 42W repo
-locally (Claude does this for them via its own `Bash` tool), apply
+`ftw-connect` writes **nothing** to disk on the friend's side — no
+config files, no MCP entries, no agent CLI mutations. The agent
+(Claude Code, Codex, Gemini Code, anything with Bash + curl) just
+follows the prompt and reaches the tools through the local URL.
+
+Open your agent of choice, paste the prompt, work. When done, **the
+friend opens the PR from their own machine** — they clone the 42W
+repo locally (the agent does this for them via its own shell), apply
 the changes they wrote on the owner's instance, and run `gh pr
 create` with the `pair-session.md` template.
 
@@ -117,7 +124,16 @@ local testing.
 
 ## What the friend gets
 
-A 17-tool MCP surface:
+A 17-tool HTTP surface (REST; MCP is also served at `/mcp` for
+agents that prefer it). All tool calls run on the **owner's** machine
+through the encrypted relay tunnel.
+
+```bash
+curl <local-url>/tools                                  # list tools + schemas
+curl -X POST <local-url>/tools/<name> -d '<json args>'  # invoke a tool
+```
+
+The 17 tools:
 
 - `ftw_api(method, path, body)` — full 42W HTTP API
 - `read_file` / `write_file` / `list_directory` — repo, state dir, /tmp
@@ -141,7 +157,7 @@ what changed on the owner's instance.
 | Trigger pair session | Click **Start pair session** in the dashboard (or `forty-two-watts pair --intent "..."`) | — |
 | Share token | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
 | Connect | — | `ftw-connect <token>` |
-| Develop the driver / debug | — | Drives Claude Code through the tunnel |
+| Develop the driver / debug | — | Drives their agent (Claude Code, Codex, …) through the tunnel |
 | Open the PR | — | Clones repo locally, `gh pr create` from own machine |
 | Review the PR | Reviews via GitHub web UI | — |
 
@@ -153,14 +169,16 @@ PR the friend opens.
 ## Architecture in one paragraph
 
 `forty-two-watts pair` spawns the `ftw-pair` sidecar. The sidecar runs
-the 17-tool MCP server on `localhost:9999`, then connects to the
-Sourceful relay (`subetha.fortytwowatts.com:7777`) using a randomly
-generated 6-word token. The relay holds the connection until the
-friend connects with the same token, then splices the two TCP streams.
-All bytes are ChaCha20-Poly1305 encrypted end-to-end using HKDF-derived
-keys from the shared token — the relay sees only ciphertext. The friend
-runs `ftw-connect <token>` which opens a local port on their machine;
-their Claude Code talks to that port as an ordinary HTTP MCP server.
+a 17-tool HTTP surface on `localhost:9999` (REST at `/tools/<name>` +
+MCP at `/mcp`, sharing the same Tool[] and audit log), then connects
+to the Sourceful relay (`subetha.fortytwowatts.com:7777`) using a
+randomly generated 6-word token. The relay holds the connection until
+the friend connects with the same token, then splices the two TCP
+streams. All bytes are ChaCha20-Poly1305 encrypted end-to-end using
+HKDF-derived keys from the shared token — the relay sees only
+ciphertext. The friend runs `ftw-connect <token>` which opens a local
+port on their machine; their agent of choice talks to that port over
+plain HTTP via `curl`. The friend's CLI config is never touched.
 
 ## When the work is done — driver persistence
 
@@ -199,8 +217,9 @@ regardless of whether the PR is merged.
 the relay is not yet deployed in this environment, or network access is
 blocked. Use `-relay-addr` to point at a local relay for testing.
 
-**`claude mcp add failed`** — the Claude Code CLI isn't on PATH or
-isn't logged in. `ftw-connect` prints the manual command to run.
+**Agent can't reach the local URL** — confirm the tunnel is still up
+(`ftw-connect` should be running in its terminal). `curl <local-url>/tools`
+from any shell to test directly; you should get a JSON tool catalog.
 
 **Card doesn't appear on the dashboard** — the sidecar posts to
 `/api/pair/status` every 5 s; check the main service is reachable on
