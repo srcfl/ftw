@@ -79,10 +79,19 @@ func main() {
 	}()
 
 	prompt := buildPrompt("(see owner's message)", "(see session_remaining)")
-	if err := copyClipboard(prompt); err != nil {
-		fmt.Fprintf(os.Stderr, "clipboard copy failed: %v — paste manually:\n\n%s\n", err, prompt)
+	clipboardOK := copyClipboard(prompt) == nil
+	// Always print the prompt to stderr inside fenced markers so the user can
+	// scroll up and copy-paste manually if the clipboard didn't take (e.g.
+	// terminal-multiplexer focus issues, headless/SSH sessions, OS quirks).
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "──────────────────── BEGIN CLAUDE CODE PROMPT ────────────────────")
+	fmt.Fprintln(os.Stderr, prompt)
+	fmt.Fprintln(os.Stderr, "───────────────────── END CLAUDE CODE PROMPT ─────────────────────")
+	fmt.Fprintln(os.Stderr, "")
+	if clipboardOK {
+		fmt.Println("Context prompt above is also copied to your clipboard. Paste it into Claude Code now.")
 	} else {
-		fmt.Printf("Context prompt copied to clipboard. Paste it into Claude Code now.\n")
+		fmt.Println("Clipboard copy failed — copy the prompt above manually and paste it into Claude Code.")
 	}
 
 	fmt.Println("Tunnel open. Ctrl-C to disconnect.")

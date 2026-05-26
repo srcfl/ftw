@@ -192,6 +192,12 @@ class FtwPairCard extends FtwElement {
     button.copy-msg:hover {
       opacity: 0.85;
     }
+    .hint {
+      margin: 6px 0 0;
+      font-size: 0.7rem;
+      color: var(--ink-raised);
+      font-family: var(--sans, var(--mono));
+    }
   `;
 
   constructor() {
@@ -319,6 +325,7 @@ class FtwPairCard extends FtwElement {
       .join(", ") || "—";
 
     const friendMsg = this._friendMessage(remaining);
+    const aiPrompt = this._aiPrompt();
 
     return `
       <div class="pair-card">
@@ -335,6 +342,13 @@ class FtwPairCard extends FtwElement {
           <span class="eyebrow">SHARE WITH YOUR FRIEND</span>
           <pre class="message" id="friend-msg-pre">${escapeHTML(friendMsg)}</pre>
           <button class="copy-msg" id="copy-msg-btn">Copy this message</button>
+        </section>
+        <section class="friend-message">
+          <span class="eyebrow">AI PROMPT (FOR FRIEND'S CLAUDE CODE)</span>
+          <pre class="message" id="ai-prompt-pre">${escapeHTML(aiPrompt)}</pre>
+          <button class="copy-msg" id="copy-ai-prompt-btn">Copy AI prompt</button>
+          <p class="hint">ftw-connect auto-copies this to the friend's clipboard, but the
+            full text is here so you can paste it manually (e.g. if clipboard sync fails).</p>
         </section>
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
@@ -359,6 +373,11 @@ class FtwPairCard extends FtwElement {
     if (copyMsgBtn) {
       copyMsgBtn.addEventListener("click", () => this._copyFriendMessage(copyMsgBtn));
     }
+
+    const copyAiBtn = this.shadowRoot.getElementById("copy-ai-prompt-btn");
+    if (copyAiBtn) {
+      copyAiBtn.addEventListener("click", () => this._copyAiPrompt(copyAiBtn));
+    }
   }
 
   async _copyFriendMessage(btn) {
@@ -371,6 +390,65 @@ class FtwPairCard extends FtwElement {
       btn.textContent = "Copied!";
       setTimeout(() => { btn.textContent = original; }, 1500);
     }
+  }
+
+  async _copyAiPrompt(btn) {
+    const ok = await copyToClipboard(this._aiPrompt());
+    if (ok) {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }
+  }
+
+  // _aiPrompt MUST stay in sync with buildPrompt() in
+  // go/cmd/ftw-connect/main.go — that's what ftw-connect auto-copies to the
+  // friend's clipboard. The dashboard renders the same text so the owner can
+  // paste it manually if clipboard sync fails on the friend side.
+  _aiPrompt() {
+    return `You are connected to a live forty-two-watts (42W) instance over the MCP server \`ftw-remote\`.
+
+You're helping the owner remotely. The owner is *not* expected to know git or GitHub — **you** open the PR at the end, from your own machine, not theirs. The owner's role here is to share their site with you and accept your help; you handle the development.
+
+## First, orient yourself
+
+Run these in order on your first turn:
+
+1. \`ftw_api\` with \`method: GET, path: /api/pair/status\` — reads the owner's stated intent for this session and the time remaining.
+2. \`ftw_api\` with \`method: GET, path: /api/status\` — shows the running state of the instance (drivers, mode, grid/PV/battery readings).
+3. \`read_file\` at \`/app/docs/api.md\` (or wherever the repo is mounted — try \`list_directory\` from \`/app\` first) if you need a catalog of HTTP endpoints.
+
+Tell the owner in chat what you found so they can confirm the plan before you start making changes.
+
+## Available MCP tools (17 — these run *on the owner's machine* through the tunnel)
+
+- \`ftw_api(method, path, body?)\` — proxy to the running 42W HTTP API (see docs/api.md)
+- \`read_file\` / \`write_file\` / \`list_directory\` — scoped to the owner's repo, state dir, and /tmp
+- \`run_command(cmd, workdir)\` — shell on the owner's machine, same scope, 30s default timeout
+- \`restart_main_service\` / \`tail_service_logs\` — restart the owner's service, read recent logs
+- \`network_scan\` / \`http_probe\` / \`modbus_probe\` / \`modbus_write\` / \`mqtt_observe\` / \`pcap_capture\` — LAN-level introspection from the owner's machine
+- \`deploy_driver(name, lua_source, config)\` — write a Lua driver, update config.yaml, wait for reload, verify it ticks against the owner's hardware
+- \`session_log\` / \`session_remaining\` / \`session_end\` — session controls
+
+You also have your *own* local tools (Read/Write/Edit/Bash on your local filesystem) — those are how you'll prepare and submit the PR.
+
+## When the work is done — opening the PR
+
+The driver source lives on the owner's machine after you \`write_file\` it there. To turn that into a PR from your own machine:
+
+1. **Snapshot the final state.** Call \`read_file\` on every file you modified on the owner's machine, so you have the canonical text in this conversation. Also call \`session_log\` once to get the audit-log markdown.
+2. **Clone the repo locally** if you haven't already: \`git clone https://github.com/frahlg/forty-two-watts.git /tmp/ftw-work\` (use your local Bash tool, not \`run_command\`).
+3. **Apply the changes** to that local clone using your local Write tool — drop the driver file into \`drivers/\`, edit \`config.yaml\` to add the driver entry, etc. Match what's on the owner's machine.
+4. **Open the PR** with \`gh pr create\` against \`master\`, picking the \`pair-session.md\` template and pasting the session-log markdown into the *Pair-session report* section. Use a \`feat(driver): ...\` style title.
+5. **Tell the owner** in chat: link to the PR, what was changed, what you'd like them to test, anything unexpected they should know.
+6. **Call \`session_end\`** to close the tunnel. The owner's sidecar exits.
+
+## Boundaries
+
+- Trust level is "ssh-equivalent for the duration of this session". Be respectful of the owner's site.
+- Modbus writes and \`deploy_driver\` calls touch real hardware. Confirm with the owner in chat before doing anything that could move energy.
+- Everything you do is recorded; the owner sees the audit log in the PR you open.
+`;
   }
 
   _friendMessage(remaining) {
