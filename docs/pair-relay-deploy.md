@@ -11,7 +11,7 @@ Current deployment:
 
 - **Host:** AWS Lightsail nano in `eu-north-1` (Stockholm)
 - **Static IP:** `16.170.137.95`
-- **DNS:** `pair-relay.fortytwowatts.com` → `16.170.137.95` (Cloudflare, free tier)
+- **DNS:** `subetha.fortytwowatts.com` → `16.170.137.95` (Cloudflare, free tier)
 - **Cost:** $3.50/mo (nano bundle) + $0.005/h elastic IP (~$0 while attached)
 - **systemd unit:** `ftw-pair-relay.service`, auto-restarts on failure
 
@@ -96,7 +96,7 @@ echo "Now add A-record: pair-relay → $STATIC at Cloudflare (DNS only, grey clo
 **Update the relay binary:**
 
 ```bash
-ssh ubuntu@pair-relay.fortytwowatts.com \
+ssh ubuntu@subetha.fortytwowatts.com \
   'sudo systemctl stop ftw-pair-relay; \
    sudo install -m 755 /tmp/ftw-pair-relay-new /usr/local/bin/ftw-pair-relay; \
    sudo systemctl start ftw-pair-relay'
@@ -108,7 +108,7 @@ re-paired. No state persists across restarts.
 **Monitor:**
 
 ```bash
-ssh ubuntu@pair-relay.fortytwowatts.com 'sudo journalctl -u ftw-pair-relay -f'
+ssh ubuntu@subetha.fortytwowatts.com 'sudo journalctl -u ftw-pair-relay -f'
 ```
 
 Look for `relay: matched pair` events (= a session connected end-to-end)
