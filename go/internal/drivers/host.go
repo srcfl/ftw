@@ -81,6 +81,12 @@ type HostEnv struct {
 	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
 	// passed to host.ws_open. Same matching semantics; empty = any host.
 	WSAllowedHosts  []string
+	TCP             TCPCap   // nil → tcp_* calls return ErrNoCapability
+	// TCPAllowedHosts gates host.tcp_open(addr) the same way
+	// HTTPAllowedHosts gates HTTP. Empty = any host:port. The cap impl
+	// holds its own copy at construction; this field is informational so
+	// callers / tests can inspect what was granted.
+	TCPAllowedHosts []string
 	Start      time.Time  // monotonic start; host.millis() computed from here
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
@@ -140,6 +146,17 @@ func (h *HostEnv) WithWS(w WSCap) *HostEnv { h.WS = w; return h }
 // WithWSAllowedHosts restricts which URLs the driver can ws_open to.
 func (h *HostEnv) WithWSAllowedHosts(hosts []string) *HostEnv {
 	h.WSAllowedHosts = hosts
+	return h
+}
+
+// WithTCP binds a raw TCP socket capability.
+func (h *HostEnv) WithTCP(t TCPCap) *HostEnv { h.TCP = t; return h }
+
+// WithTCPAllowedHosts records which addresses the driver is permitted to
+// host.tcp_open. The cap impl owns the authoritative copy; this field
+// just exposes the same list for inspection.
+func (h *HostEnv) WithTCPAllowedHosts(hosts []string) *HostEnv {
+	h.TCPAllowedHosts = hosts
 	return h
 }
 
