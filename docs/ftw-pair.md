@@ -1,7 +1,7 @@
 # `ftw-pair` — handing over a 42W instance temporarily
 
 `ftw-pair` lets you grant time-bound MCP access to a running
-forty-two-watts instance over a magic-wormhole tunnel. The recipient's
+forty-two-watts instance over an encrypted relay tunnel. The recipient's
 Claude Code gets a curated tool surface for driver development, model
 tuning, or live debugging.
 
@@ -15,26 +15,14 @@ tuning, or live debugging.
 The trust level is "ssh-equivalent for the session duration". Only
 pair with people you'd already give shell to.
 
-## Prerequisites
-
-Both sides need `fowl` (Forward Over Wormhole Locally) on `PATH`. It
-provides the actual wormhole-based TCP tunnel that `ftw-pair` wraps:
-
-```bash
-uv tool install 'fowl==25.4.0'
-```
-
-`fowl` is the canonical Python implementation of magic-wormhole TCP
-forwarding (Dilation protocol). The Pi already has Python; `uv` is
-how Sourceful tools install Python utilities.
-
 ## On the host
 
 Open the dashboard at `http://<pi>:8080`, scroll to the **Pair session**
 card, fill in an optional intent and pick a TTL, then click **Start pair
-session**. The card flips to active mode within a few seconds showing the
-wormhole code with a **Copy** button. Copy the code and send it to the
-friend over any channel — Signal, SMS, Slack DM.
+session**. The card flips to active mode within a few seconds showing a
+**6-word token** (e.g. `garage-coffee-river-bicycle-window-cat`) with a
+**Copy** button. Copy the token and send it to the friend over any channel
+— Signal, SMS, Slack DM.
 
 To end the session early, click **Abort** on the card.
 
@@ -44,10 +32,10 @@ Or, if you prefer the terminal:
 forty-two-watts pair --intent "help me write a goodwe XS driver" --ttl 4h
 ```
 
-The CLI prints the code directly:
+The CLI prints the token directly:
 
 ```
-PAIR CODE: 7-crossover-clockwork
+PAIR CODE: garage-coffee-river-bicycle-window-cat
 TTL: 4h0m0s — sidecar will exit at expiry
 ```
 
@@ -62,8 +50,6 @@ forty-two-watts pair --abort
 One-time install (Mac or Linux):
 
 ```bash
-brew install uv                  # skip if already installed
-uv tool install 'fowl==25.4.0'             # the wormhole transport
 curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
 ```
 
@@ -81,12 +67,12 @@ go install github.com/frahlg/forty-two-watts/go/cmd/ftw-connect@latest
 Per session:
 
 ```bash
-ftw-connect 7-crossover-clockwork
+ftw-connect garage-coffee-river-bicycle-window-cat
 ```
 
 That:
 
-1. Opens the wormhole tunnel via `fowl`.
+1. Connects to the Sourceful relay with the given token.
 2. Registers an MCP server named `ftw-remote` with Claude Code.
 3. Copies a context-priming prompt to the clipboard.
 
@@ -96,8 +82,38 @@ locally (Claude does this for them via its own `Bash` tool), apply
 the changes they wrote on the owner's instance, and run `gh pr
 create` with the `pair-session.md` template.
 
-The owner doesn't touch git or GitHub. They share the wormhole code,
+The owner doesn't touch git or GitHub. They share the token,
 let the friend work, and get a PR link back.
+
+## Relay
+
+The transport uses a Sourceful-operated relay server at
+`pair-relay.sourceful.energy:7777`. Both the host (Pi) and the friend
+connect outbound to the relay; the relay matches them by their shared
+6-word token and splices the TCP streams bidirectionally.
+
+```
+       pair-relay.sourceful.energy:7777
+                      |
+          +-----------+-----------+
+          |                       |
+       outbound                outbound
+          |                       |
+    OWNER's Pi              FRIEND's Mac
+  (ftw-pair sidecar)       (ftw-connect)
+```
+
+All traffic is end-to-end encrypted with **ChaCha20-Poly1305 AEAD**
+keyed from the token via HKDF-SHA256. The relay sees only ciphertext and
+token-match strings; it cannot read or modify the MCP payload.
+
+**Token format:** 6 random words from the BIP39 English wordlist
+(2048 words, ~66 bits of entropy). Example:
+`garage-coffee-river-bicycle-window-cat`.
+
+The relay address can be overridden with the `-relay-addr` flag or the
+`FTW_PAIR_RELAY` environment variable — useful for self-hosted relays or
+local testing.
 
 ## What the friend gets
 
@@ -123,8 +139,8 @@ what changed on the owner's instance.
 | Step | Owner | Friend |
 |---|---|---|
 | Trigger pair session | Click **Start pair session** in the dashboard (or `forty-two-watts pair --intent "..."`) | — |
-| Share wormhole code | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
-| Connect | — | `ftw-connect <code>` |
+| Share token | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
+| Connect | — | `ftw-connect <token>` |
 | Develop the driver / debug | — | Drives Claude Code through the tunnel |
 | Open the PR | — | Clones repo locally, `gh pr create` from own machine |
 | Review the PR | Reviews via GitHub web UI | — |
@@ -137,14 +153,14 @@ PR the friend opens.
 ## Architecture in one paragraph
 
 `forty-two-watts pair` spawns the `ftw-pair` sidecar. The sidecar runs
-the 17-tool MCP server on `localhost:9999`, then spawns a `fowld`
-subprocess that opens a wormhole tunnel exposing that local port over
-the internet. The friend runs `ftw-connect <code>` which spawns another
-`fowld` that joins the same tunnel and exposes the other end on the
-friend's localhost. Their Claude Code talks to that local port as an
-ordinary HTTP MCP server. End-to-end encryption (SPAKE2 key from the
-one-time code) protects all traffic; the public wormhole rendezvous
-server only ferries the PAKE handshake.
+the 17-tool MCP server on `localhost:9999`, then connects to the
+Sourceful relay (`pair-relay.sourceful.energy:7777`) using a randomly
+generated 6-word token. The relay holds the connection until the
+friend connects with the same token, then splices the two TCP streams.
+All bytes are ChaCha20-Poly1305 encrypted end-to-end using HKDF-derived
+keys from the shared token — the relay sees only ciphertext. The friend
+runs `ftw-connect <token>` which opens a local port on their machine;
+their Claude Code talks to that port as an ordinary HTTP MCP server.
 
 ## When the work is done — driver persistence
 
@@ -173,14 +189,15 @@ regardless of whether the PR is merged.
 
 - One session at a time.
 - 4 h default TTL, configurable, hard kill at expiry.
-- Wormhole rendezvous is the upstream public relay
-  (`relay.magic-wormhole.io`). Override at sidecar level if you run
-  your own.
+- Relay: `pair-relay.sourceful.energy:7777` (Sourceful-operated). Override
+  with `-relay-addr` flag or `FTW_PAIR_RELAY` env var for self-hosted relays.
 - No per-call approval. Pairing = full trust for the session.
 
 ## Troubleshooting
 
-**`fowld not found on PATH`** — install with `uv tool install 'fowl==25.4.0'`.
+**`relay connect: dial relay pair-relay.sourceful.energy:7777: ...`** —
+the relay is not yet deployed in this environment, or network access is
+blocked. Use `-relay-addr` to point at a local relay for testing.
 
 **`claude mcp add failed`** — the Claude Code CLI isn't on PATH or
 isn't logged in. `ftw-connect` prints the manual command to run.
@@ -188,3 +205,21 @@ isn't logged in. `ftw-connect` prints the manual command to run.
 **Card doesn't appear on the dashboard** — the sidecar posts to
 `/api/pair/status` every 5 s; check the main service is reachable on
 `localhost:8080` (the sidecar default `-api` flag).
+
+## Self-hosting the relay
+
+The `ftw-pair-relay` binary is published as a release asset alongside
+`ftw-connect`. To run your own relay:
+
+```bash
+# Download from the latest release
+curl -fsSL .../ftw-pair-relay-linux-amd64 -o ftw-pair-relay
+chmod +x ftw-pair-relay
+
+# Run (plain TCP; add -tls-cert / -tls-key for TLS)
+./ftw-pair-relay -addr :7777
+
+# Point host + friend at your relay
+FTW_PAIR_RELAY=myrelay.example.com:7777 forty-two-watts pair --intent "..."
+FTW_PAIR_RELAY=myrelay.example.com:7777 ftw-connect <token>
+```

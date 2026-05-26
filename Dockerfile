@@ -38,30 +38,21 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-pair ./cmd/ftw-pair
+# ftw-pair-relay is the standalone relay server (deployed separately — built
+# here so operators can extract the binary with `docker cp` if needed).
+RUN cd go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-pair-relay ./cmd/ftw-pair-relay
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
 
 # ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
 # tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
-# python3 + pipx: needed by fowl (magic-wormhole transport for `pair`).
-# libsodium:      NaCl crypto used by fowl/twisted/wormhole at runtime.
-RUN apk add --no-cache ca-certificates tzdata python3 pipx libsodium && \
+# Python, fowl, libsodium no longer needed — the pair transport is now pure Go.
+RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S ftw && adduser -S ftw -G ftw
-
-# Install fowl into a system-wide location so it's on PATH for everyone.
-# PIPX_HOME=/opt/pipx keeps it outside the ftw home dir; PIPX_BIN_DIR
-# puts the entry-point wrappers on PATH without any per-user activation.
-# We run this before switching to USER ftw so the install lands in system
-# paths and is readable by all users (including root for debugging).
-ENV PIPX_HOME=/opt/pipx
-ENV PIPX_BIN_DIR=/usr/local/bin
-# Pinned to 25.4.0 — later versions (25.10+) removed the
-# `danger-disable-permission-check` fowld command our Go wrapper depends on.
-# Upgrading requires refactoring go/internal/wormhole to use `grant-permission`
-# with explicit port lists.
-RUN PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install 'fowl==25.4.0' && \
-    chown -R ftw:ftw /opt/pipx
 
 # Image layout:
 #   /app/forty-two-watts  binary (immutable, replaced on upgrade)

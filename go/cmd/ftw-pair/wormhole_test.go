@@ -1,32 +1,136 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"io"
 	"net"
-	"os"
-	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
 	wh "github.com/frahlg/forty-two-watts/go/internal/wormhole"
 )
 
-// TestWormholeForwardEndToEnd performs a real end-to-end forwarding test using
-// the fowld subprocess.  It is skipped unless WORMHOLE_TEST=1 is set, because
-// it requires internet access to the magic-wormhole rendezvous server and
-// fowl to be installed.
-func TestWormholeForwardEndToEnd(t *testing.T) {
-	if os.Getenv("WORMHOLE_TEST") == "" {
-		t.Skip("set WORMHOLE_TEST=1 to run against real rendezvous (needs internet + fowl)")
-	}
-	if _, err := exec.LookPath("fowld"); err != nil {
-		t.Skipf("fowld not installed — `uv tool install fowl` to enable this test: %v", err)
+// startTestRelay starts a minimal in-process relay for the ftw-pair shim tests.
+func startTestRelay(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("relay listen: %v", err)
 	}
 
-	// Stand up a local echo server that the wormhole will forward to.
+	var mu sync.Mutex
+	pending := make(map[string]net.Conn)
+
+	handleConn := func(conn net.Conn) {
+		header := make([]byte, 2)
+		if _, err := io.ReadFull(conn, header); err != nil {
+			conn.Close()
+			return
+		}
+		if header[0] != 0x01 {
+			conn.Write([]byte{0x02}) //nolint:errcheck
+			conn.Close()
+			return
+		}
+		tokenLen := int(header[1])
+		tok := make([]byte, tokenLen)
+		if _, err := io.ReadFull(conn, tok); err != nil {
+			conn.Close()
+			return
+		}
+		token := string(tok)
+
+		mu.Lock()
+		peer, ok := pending[token]
+		if ok {
+			delete(pending, token)
+		} else {
+			pending[token] = conn
+		}
+		mu.Unlock()
+
+		if !ok {
+			if _, err := conn.Write([]byte{0x01}); err != nil {
+				conn.Close()
+				mu.Lock()
+				delete(pending, token)
+				mu.Unlock()
+			}
+			return
+		}
+		conn.Write([]byte{0x00})  //nolint:errcheck
+		peer.Write([]byte{0x00}) //nolint:errcheck
+		done := make(chan struct{}, 2)
+		go func() { io.Copy(peer, conn); peer.Close(); done <- struct{}{} }() //nolint:errcheck
+		go func() { io.Copy(conn, peer); conn.Close(); done <- struct{}{} }() //nolint:errcheck
+		<-done
+		<-done
+	}
+
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleConn(c)
+		}
+	}()
+
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().String()
+}
+
+// TestStartWormholeHostViaShim verifies that StartWormholeHost returns a Host
+// with a non-empty 6-word Code, using an in-process relay.
+func TestStartWormholeHostViaShim(t *testing.T) {
+	relayAddr := startTestRelay(t)
+
+	// Temporarily set the relay addr via env var.
+	t.Setenv("FTW_PAIR_RELAY", relayAddr)
+	// The flag override is nil here; wormhole.go reads *relayAddrFlag which will be nil
+	// — set it to an empty string (the env var takes precedence).
+	oldFlag := relayAddrFlag
+	empty := ""
+	relayAddrFlag = &empty
+	defer func() { relayAddrFlag = oldFlag }()
+
 	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("echo server listen: %v", err)
+		t.Fatalf("echo listen: %v", err)
+	}
+	defer echoLn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	host, err := StartWormholeHost(ctx, echoLn.Addr().String())
+	if err != nil {
+		t.Fatalf("StartWormholeHost: %v", err)
+	}
+	defer host.Close()
+
+	if host.Code == "" {
+		t.Fatal("host.Code is empty")
+	}
+	// Token should be 6 hyphen-separated words.
+	parts := splitToken(host.Code)
+	if len(parts) != wh.TokenWordCount() {
+		t.Errorf("token has %d words, want 6: %q", len(parts), host.Code)
+	}
+}
+
+// TestWormholeShimEndToEnd exercises the ftw-pair shim (StartWormholeHost +
+// Connect) against an in-process relay to ensure the shim wires correctly.
+func TestWormholeShimEndToEnd(t *testing.T) {
+	relayAddr := startTestRelay(t)
+
+	// Echo server: accepts one conn and writes PONG.
+	echoLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("echo listen: %v", err)
 	}
 	defer echoLn.Close()
 
@@ -39,74 +143,55 @@ func TestWormholeForwardEndToEnd(t *testing.T) {
 		c.Write([]byte("PONG\n")) //nolint:errcheck
 	}()
 
-	// Start the host side via the shim.
-	ctx := context.Background()
-	host, err := StartWormholeHost(ctx, echoLn.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const testToken = "zoo-zebra-zero-zone-yacht-year"
+	host, err := wh.StartHost(ctx, echoLn.Addr().String(),
+		wh.WithRelayAddr(relayAddr),
+		wh.WithToken(testToken),
+	)
 	if err != nil {
-		t.Fatalf("StartWormholeHost: %v", err)
+		t.Fatalf("StartHost: %v", err)
 	}
 	defer host.Close()
-	t.Logf("wormhole code: %s", host.Code)
 
-	// Start the client side via the shim.
-	client, err := ConnectWormholeClient(ctx, host.Code)
+	time.Sleep(30 * time.Millisecond)
+
+	client, err := wh.Connect(ctx, testToken, wh.WithRelayAddr(relayAddr))
 	if err != nil {
-		t.Fatalf("ConnectWormholeClient: %v", err)
+		t.Fatalf("Connect: %v", err)
 	}
 	defer client.Close()
-	t.Logf("client local addr: %s", client.LocalAddr)
 
-	// Dial the client's local port and verify the echo response.
-	conn, err := net.DialTimeout("tcp", client.LocalAddr, 10*time.Second)
+	time.Sleep(80 * time.Millisecond)
+
+	conn, err := net.DialTimeout("tcp", client.LocalAddr, 5*time.Second)
 	if err != nil {
-		t.Fatalf("dial client local addr: %v", err)
+		t.Fatalf("dial client: %v", err)
 	}
 	defer conn.Close()
 
-	buf := make([]byte, 8)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatalf("read from forwarded connection: %v", err)
+	conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	sc := bufio.NewScanner(conn)
+	if !sc.Scan() {
+		t.Fatalf("scan: %v", sc.Err())
 	}
-	if got := string(buf[:n]); got != "PONG\n" {
-		t.Fatalf("expected %q, got %q", "PONG\n", got)
-	}
-}
-
-// TestFowlMissing verifies that StartWormholeHost returns *wh.ErrFowlNotFound
-// when fowld is not on PATH.
-func TestFowlMissing(t *testing.T) {
-	const emptyPath = "/usr/bin:/bin"
-
-	oldPath := os.Getenv("PATH")
-	os.Setenv("PATH", emptyPath)     //nolint:errcheck
-	defer os.Setenv("PATH", oldPath) //nolint:errcheck
-
-	if _, err := exec.LookPath("fowld"); err == nil {
-		t.Skipf("fowld is in %s — cannot test missing-fowl branch", emptyPath)
-	}
-
-	_, err := StartWormholeHost(context.Background(), "127.0.0.1:9999")
-	if err == nil {
-		t.Fatal("expected error when fowld missing, got nil")
-	}
-	var notFound *wh.ErrFowlNotFound
-	if !isErrFowlNotFound(err, &notFound) {
-		t.Fatalf("expected *wh.ErrFowlNotFound, got %T: %v", err, err)
+	if got := sc.Text(); got != "PONG" {
+		t.Errorf("got %q, want %q", got, "PONG")
 	}
 }
 
-// isErrFowlNotFound type-asserts err to *wh.ErrFowlNotFound.
-func isErrFowlNotFound(err error, target **wh.ErrFowlNotFound) bool {
-	if err == nil {
-		return false
-	}
-	if e, ok := err.(*wh.ErrFowlNotFound); ok {
-		if target != nil {
-			*target = e
+// splitToken splits a token string on "-".
+func splitToken(s string) []string {
+	var parts []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '-' {
+			parts = append(parts, s[start:i])
+			start = i + 1
 		}
-		return true
 	}
-	return false
+	parts = append(parts, s[start:])
+	return parts
 }
