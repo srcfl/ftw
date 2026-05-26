@@ -33,6 +33,28 @@
 //	                       "connect": ..., "listener_id": ...}
 //	{"kind": "error", "message": "..."}                          → unrecoverable error
 //
+// # Error reporting notes
+//
+// fowld (the Twisted/Python daemon) can emit error information in two ways:
+//
+//  1. As a JSON event: {"kind":"error","message":"<reason>"}
+//     Captured in fowldEvent.Message.
+//
+//  2. As a raw non-JSON stdout line, e.g.:
+//     b'{"kind":"bad-command"}': failed: 'bad-command'
+//     This is emitted by the LocalCommandDispatch.lineReceived handler when
+//     parse_fowld_command raises. The line is not JSON — our scanner catches
+//     it as a "non-JSON diagnostic" and includes it verbatim in the error.
+//
+//  3. Via stderr: Python deprecation warnings, policy log lines
+//     ("DANGER. All connect / listen endpoints allowed."), and tracebacks.
+//     Captured in a ring buffer and appended to any error message.
+//
+// The combination of (2) and (3) is why a bare "fowld error: " with no body
+// was previously seen: we decoded ev.Message from a JSON event that had an
+// empty or missing "message" field, discarded the non-JSON diagnostics, and
+// discarded stderr entirely.
+//
 // # Shared code format
 //
 // The code shared between host and client is:
@@ -74,6 +96,10 @@ import (
 // If it is not on PATH the functions return ErrFowlNotFound.
 const fowldBinary = "fowld"
 
+// stderrRingSize is the number of recent stderr lines retained per subprocess.
+// These are appended to any error message to provide context when fowld fails.
+const stderrRingSize = 50
+
 // ErrFowlNotFound is returned when fowld is not on PATH.
 type ErrFowlNotFound struct {
 	// Underlying is the exec.LookPath error, for diagnostics.
@@ -88,13 +114,74 @@ func (e *ErrFowlNotFound) Unwrap() error { return e.Underlying }
 
 // ── fowld JSON event types ────────────────────────────────────────────────────
 
+// fowldEvent represents a single JSON event emitted by fowld on stdout.
+//
+// Normal structured fields (Message, Summary, Detail) cover the documented
+// {"kind":"error","message":"..."} shape.  The raw field captures the original
+// line so callers always see what fowld actually sent, even when the message
+// field is empty or when fowld uses an undocumented key name.
 type fowldEvent struct {
 	Kind       string `json:"kind"`
 	Code       string `json:"code,omitempty"`
 	Message    string `json:"message,omitempty"`
+	Summary    string `json:"summary,omitempty"` // alternate error field used by some fowld versions
+	Detail     string `json:"detail,omitempty"`  // alternate error field used by some fowld versions
 	ListenEP   string `json:"listen,omitempty"`
 	ConnectEP  string `json:"connect,omitempty"`
 	ListenerID string `json:"listener_id,omitempty"`
+
+	// raw is the original JSON line, set before the struct is used.
+	// Not a JSON field — populated by the reader loop.
+	raw string
+}
+
+// errorText returns the best human-readable error description from the event.
+// It concatenates non-empty structured fields and falls back to the raw line
+// when all named fields are empty.
+func (ev *fowldEvent) errorText() string {
+	parts := make([]string, 0, 3)
+	for _, s := range []string{ev.Message, ev.Summary, ev.Detail} {
+		if t := strings.TrimSpace(s); t != "" {
+			parts = append(parts, t)
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, "; ")
+	}
+	// Fall back to the verbatim JSON — at minimum the caller sees the raw event.
+	return "(no message field — raw event: " + ev.raw + ")"
+}
+
+// ── stderr ring buffer ────────────────────────────────────────────────────────
+
+// stderrRing is a fixed-capacity ring buffer for recent stderr lines.
+type stderrRing struct {
+	mu   sync.Mutex
+	buf  []string
+	size int
+}
+
+func newStderrRing(n int) *stderrRing { return &stderrRing{buf: make([]string, 0, n), size: n} }
+
+func (r *stderrRing) add(line string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.buf) >= r.size {
+		copy(r.buf, r.buf[1:])
+		r.buf = r.buf[:r.size-1]
+	}
+	r.buf = append(r.buf, line)
+}
+
+// tail returns the buffered lines joined by newlines.
+// Returns an empty string when the buffer is empty.
+func (r *stderrRing) tail() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.buf) == 0 {
+		return ""
+	}
+	return strings.Join(r.buf, "\n")
 }
 
 // ── Host ──────────────────────────────────────────────────────────────────────
@@ -158,13 +245,20 @@ func StartHost(ctx context.Context, remoteAddr string) (*Host, error) {
 		cancel()
 		return nil, fmt.Errorf("wormhole host: stdout pipe: %w", err)
 	}
-	// Discard stderr — fowld only emits diagnostics there (e.g. "Permission granted").
-	cmd.Stderr = nil
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole host: stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("wormhole host: start fowld: %w", err)
 	}
+
+	// Drain stderr into a ring buffer for diagnostics.
+	stderrBuf := newStderrRing(stderrRingSize)
+	go drainStderr(stderrPipe, stderrBuf)
 
 	h := &Host{
 		cmd:    cmd,
@@ -202,9 +296,17 @@ func StartHost(ctx context.Context, remoteAddr string) (*Host, error) {
 			}
 			var ev fowldEvent
 			if jsonErr := json.Unmarshal([]byte(line), &ev); jsonErr != nil {
-				// Non-JSON line — skip silently.
+				// Non-JSON line from fowld stdout — this is how fowld reports
+				// command-parse failures (e.g. "b'...': failed: 'bad-command'").
+				// Treat any non-JSON stdout line as a fatal error so it surfaces
+				// to the caller rather than being silently discarded.
+				select {
+				case errCh <- buildFowldError("non-JSON stdout", line, stderrBuf):
+				default:
+				}
 				continue
 			}
+			ev.raw = line
 			switch ev.Kind {
 			case "code-allocated":
 				select {
@@ -213,7 +315,7 @@ func StartHost(ctx context.Context, remoteAddr string) (*Host, error) {
 				}
 			case "error":
 				select {
-				case errCh <- fmt.Errorf("fowld error: %s", ev.Message):
+				case errCh <- buildFowldError(ev.errorText(), "", stderrBuf):
 				default:
 				}
 			}
@@ -315,12 +417,20 @@ func Connect(ctx context.Context, code string) (*Client, error) {
 		cancel()
 		return nil, fmt.Errorf("wormhole client: stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("wormhole client: stderr pipe: %w", err)
+	}
 
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, fmt.Errorf("wormhole client: start fowld: %w", err)
 	}
+
+	// Drain stderr into a ring buffer for diagnostics.
+	stderrBuf := newStderrRing(stderrRingSize)
+	go drainStderr(stderrPipe, stderrBuf)
 
 	w := &Client{
 		LocalAddr: fmt.Sprintf("127.0.0.1:%d", localPort),
@@ -370,8 +480,14 @@ func Connect(ctx context.Context, code string) (*Client, error) {
 			}
 			var ev fowldEvent
 			if jsonErr := json.Unmarshal([]byte(line), &ev); jsonErr != nil {
+				// Non-JSON diagnostic line (e.g. command-parse failure from fowld).
+				select {
+				case errCh <- buildFowldError("non-JSON stdout", line, stderrBuf):
+				default:
+				}
 				continue
 			}
+			ev.raw = line
 			switch ev.Kind {
 			case "peer-connected":
 				if !peerConnected {
@@ -403,7 +519,7 @@ func Connect(ctx context.Context, code string) (*Client, error) {
 				}
 			case "error":
 				select {
-				case errCh <- fmt.Errorf("fowld error: %s", ev.Message):
+				case errCh <- buildFowldError(ev.errorText(), "", stderrBuf):
 				default:
 				}
 			}
@@ -434,6 +550,33 @@ func (w *Client) writeJSON(v any) error {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// buildFowldError constructs a diagnostic error that includes both the primary
+// message and any stderr lines captured in ring.  If there are no stderr lines
+// the error is just "fowld error: <msg>".
+func buildFowldError(msg, nonJSONLine string, ring *stderrRing) error {
+	var sb strings.Builder
+	sb.WriteString("fowld error: ")
+	sb.WriteString(msg)
+	if nonJSONLine != "" {
+		sb.WriteString(" (raw: ")
+		sb.WriteString(nonJSONLine)
+		sb.WriteString(")")
+	}
+	if tail := ring.tail(); tail != "" {
+		sb.WriteString("\nfowld stderr:\n")
+		sb.WriteString(tail)
+	}
+	return fmt.Errorf("%s", sb.String()) //nolint:err113
+}
+
+// drainStderr reads all lines from r into ring until EOF.
+func drainStderr(r io.Reader, ring *stderrRing) {
+	sc := bufio.NewScanner(r)
+	for sc.Scan() {
+		ring.add(sc.Text())
+	}
+}
 
 // splitCompositeCode splits a code of the form "<fowl-code>:<port>" into its
 // two parts.  The port is everything after the LAST colon, since the fowl code

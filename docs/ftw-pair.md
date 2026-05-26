@@ -59,10 +59,22 @@ forty-two-watts pair --abort
 
 ## On the friend
 
-One-time install:
+One-time install (Mac or Linux):
 
 ```bash
-uv tool install fowl                              # the wormhole transport
+brew install uv                  # skip if already installed
+uv tool install fowl             # the wormhole transport
+curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
+```
+
+The curl installer detects your OS and CPU architecture, downloads the
+right binary from the latest GitHub release, and installs it to
+`/usr/local/bin` (or `~/.local/bin` as a fallback when `/usr/local/bin`
+requires elevated permissions).
+
+Developer / Go toolchain alternative:
+
+```bash
 go install github.com/frahlg/forty-two-watts/go/cmd/ftw-connect@latest
 ```
 
