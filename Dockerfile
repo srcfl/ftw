@@ -46,7 +46,10 @@ FROM alpine:3.20
 # tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
 # python3 + pipx: needed by fowl (magic-wormhole transport for `pair`).
 # libsodium:      NaCl crypto used by fowl/twisted/wormhole at runtime.
-RUN apk add --no-cache ca-certificates tzdata python3 pipx libsodium && \
+# py3-setuptools is needed because fowl 25.4.0's cli.py imports pkg_resources,
+# which is no longer bundled with Python 3.12's stdlib. Without setuptools the
+# `fowld` entrypoint fails with ModuleNotFoundError on first run.
+RUN apk add --no-cache ca-certificates tzdata python3 py3-setuptools pipx libsodium && \
     addgroup -S ftw && adduser -S ftw -G ftw
 
 # Install fowl into a system-wide location so it's on PATH for everyone.
