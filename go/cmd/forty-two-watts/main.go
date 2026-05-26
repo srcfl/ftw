@@ -65,12 +65,16 @@ func main() {
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
 			return
+		case "pair":
+			runPair(os.Args[2:])
+			return
 		}
 	}
 
 	configPath := flag.String("config", "config.yaml", "Path to config.yaml")
 	webDir := flag.String("web", "web", "Path to static web UI directory")
 	driverDirFlag := flag.String("drivers", "", "Path to drivers directory (default: <config-dir>/drivers)")
+	userDriversDirFlag := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory (overlay on top of -drivers). Searched first; falls back to -drivers when a file isn't found here. Designed for docker deploys.")
 	// Developer utility — seeds state.db with N days of synthetic history
 	// so /api/energy/daily has something to render locally. Refuses to run
 	// if the target DB already holds non-synthetic rows (prod-safety gate);
@@ -110,6 +114,9 @@ func main() {
 	// (from -drivers). Picked up by both the initial Load below and every
 	// subsequent reload via the file watcher.
 	config.DriversDirOverride = resolveDriverDir()
+	// UserDriversDirOverride is the persistent overlay — probed first.
+	// Empty when -user-drivers is not supplied (back-compat).
+	config.UserDriversDirOverride = *userDriversDirFlag
 
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
@@ -133,6 +140,12 @@ func main() {
 		if cfg.State.ColdDir != "" {
 			coldDir = cfg.State.ColdDir
 		}
+	}
+	// Resolve to absolute so paths derived via filepath.Dir(statePath)
+	// (SnapshotDir, nova.key) don't end up cwd-relative on native installs
+	// where the working directory may differ from the data volume.
+	if abs, err := filepath.Abs(statePath); err == nil {
+		statePath = abs
 	}
 	st, err := state.Open(statePath)
 	if err != nil {
@@ -1352,6 +1365,7 @@ func main() {
 		CapMu: capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
+		UserDriverDir:       *userDriversDirFlag,
 		DriverMQTTFactory:   reg.MQTTFactory,
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
@@ -2386,6 +2400,14 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if safetyPenalty <= 0 {
 		safetyPenalty = 100
 	}
+	pvBonus := pl.PVChargeBonusOreKwh
+	if pvBonus <= 0 {
+		// 30 öre/kWh — beats typical PV-export spot prices and the
+		// round-trip efficiency cost (~20 öre/kWh against mean retail
+		// import), but small enough that genuine arbitrage spreads
+		// (>100 öre/kWh) still drive the DP.
+		pvBonus = 30
+	}
 	chgEff := pl.ChargeEfficiency
 	if chgEff <= 0 {
 		chgEff = 0.95
@@ -2402,6 +2424,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		SoCMaxPct:                    socMax,
 		SoCSafetyFloorPct:            socSafety,
 		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
+		PVChargeBonusOreKwh:          pvBonus,
 		InitialSoCPct:                50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose

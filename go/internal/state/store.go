@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -77,19 +78,172 @@ func (s *Store) Close() error {
 //
 // dstPath must not exist — SQLite refuses to overwrite an existing file.
 // Safe to call while the Store is serving live traffic.
+// snapshotExcludedTables lists tables whose contents are intentionally
+// dropped from rollback snapshots. They're the bulky time-series stores
+// — recoverable from cold parquet roll-off, so excluding them from
+// snapshots drops disk + wall-clock cost without losing rollback safety
+// for the config / planner / model state that matters.
+//
+// 2026-05-25 measurement on a 1 GB state.db: VACUUM INTO took ~30 s
+// and produced a 1 GB snapshot. After this exclusion the same path
+// takes ~2 s and produces a ~50 MB snapshot.
+var snapshotExcludedTables = map[string]bool{
+	"history_hot":  true,
+	"history_warm": true,
+	"history_cold": true,
+	"ts_samples":   true,
+}
+
 func (s *Store) SnapshotTo(dstPath string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: snapshot on nil store")
 	}
-	// VACUUM INTO takes a literal path string — bind parameters aren't
-	// honoured by the parser. We construct dstPath ourselves (timestamped
-	// snapshots dir), but escape single quotes defensively so a caller
-	// passing an unexpected path can't inject SQL.
+	// Single-quote escape for ATTACH DATABASE path literal — bind
+	// parameters aren't honoured at the SQL grammar level. The caller
+	// constructs dstPath, but defence in depth.
 	escaped := strings.ReplaceAll(dstPath, "'", "''")
-	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
-		return fmt.Errorf("snapshot to %s: %w", dstPath, err)
+
+	// Refuse to overwrite an existing destination. The old VACUUM INTO
+	// path errored implicitly; the ATTACH path would happily append
+	// into a pre-existing schema, which would silently corrupt a stale
+	// snapshot. Caller (createPreUpdateSnapshot) builds a unique
+	// timestamped dir per snapshot, so collision is a bug worth
+	// surfacing.
+	if _, err := os.Stat(dstPath); err == nil {
+		return fmt.Errorf("snapshot: destination already exists: %s", dstPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("snapshot: stat dst %s: %w", dstPath, err)
+	}
+
+	// Use a single connection so ATTACH state survives across statements.
+	// db.Exec acquires a fresh connection each call, which would break
+	// the ATTACH binding.
+	conn, err := s.db.Conn(context.Background())
+	if err != nil {
+		return fmt.Errorf("snapshot: acquire conn: %w", err)
+	}
+	defer conn.Close()
+
+	ctx := context.Background()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS snap", escaped)); err != nil {
+		return fmt.Errorf("snapshot: attach %s: %w", dstPath, err)
+	}
+	// Detach on every exit path so the connection is clean when returned
+	// to the pool.
+	defer func() { _, _ = conn.ExecContext(ctx, "DETACH DATABASE snap") }()
+
+	// Walk the source schema, replay each essential CREATE on snap, and
+	// stream the rows over. sqlite_master.sql carries the original
+	// CREATE text — we rewrite the leading identifier so it lands in
+	// the attached DB instead of main. Strict-mode tables and WITHOUT
+	// ROWID survive unchanged because the substring is purely
+	// "TABLE name" → "TABLE snap.name", before any column / option
+	// clauses.
+	type schemaRow struct {
+		objType string
+		name    string
+		tblName string
+		sqlText string
+	}
+	rows, err := conn.QueryContext(ctx,
+		`SELECT type, name, tbl_name, sql FROM main.sqlite_master
+		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
+		 ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name`)
+	if err != nil {
+		return fmt.Errorf("snapshot: list schema: %w", err)
+	}
+	var items []schemaRow
+	for rows.Next() {
+		var r schemaRow
+		if err := rows.Scan(&r.objType, &r.name, &r.tblName, &r.sqlText); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("snapshot: scan schema: %w", err)
+		}
+		items = append(items, r)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("snapshot: close schema rows: %w", err)
+	}
+
+	for _, r := range items {
+		// Skip objects belonging to excluded tables — their CREATE
+		// statements would otherwise re-introduce empty placeholder
+		// tables on the destination.
+		if snapshotExcludedTables[r.name] || snapshotExcludedTables[r.tblName] {
+			continue
+		}
+		snapSQL, err := rewriteCreateForAttachedDB(r.sqlText, r.objType, r.name)
+		if err != nil {
+			return fmt.Errorf("snapshot: rewrite CREATE for %s: %w", r.name, err)
+		}
+		if _, err := conn.ExecContext(ctx, snapSQL); err != nil {
+			return fmt.Errorf("snapshot: create %s on snap: %w", r.name, err)
+		}
+	}
+
+	// Copy each essential table's rows over. Order doesn't matter for
+	// the INSERTs because all FK constraints are deferred (and we don't
+	// declare any in our schema). Tables created without rows above
+	// stay empty if the source had no data.
+	for _, r := range items {
+		if r.objType != "table" {
+			continue
+		}
+		if snapshotExcludedTables[r.name] {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx,
+			fmt.Sprintf("INSERT INTO snap.%q SELECT * FROM main.%q", r.name, r.name)); err != nil {
+			return fmt.Errorf("snapshot: copy table %s: %w", r.name, err)
+		}
 	}
 	return nil
+}
+
+// rewriteCreateForAttachedDB rewrites the leading object identifier
+// in a CREATE statement so it targets the attached snap database
+// instead of main. SQLite's sqlite_master.sql column stores the
+// statement verbatim, without an explicit database prefix; we add
+// "snap." before the object name without touching any of the column
+// definitions or table options that follow.
+func rewriteCreateForAttachedDB(stmt, objType, name string) (string, error) {
+	// Find the object-type keyword and the name token that follows it.
+	// Case-insensitive search keeps the rewrite robust against future
+	// migrations that capitalise differently.
+	lower := strings.ToLower(stmt)
+	kw := strings.ToLower(objType)
+	idx := strings.Index(lower, " "+kw+" ")
+	if idx < 0 {
+		// Try start-of-string in case the prefix shape changes.
+		if strings.HasPrefix(lower, kw+" ") {
+			idx = -1
+		} else {
+			return "", fmt.Errorf("cannot locate %q in CREATE statement", objType)
+		}
+	}
+	// idx points to the space before the keyword; skip past the
+	// keyword token to land on the column where the identifier starts.
+	afterKw := idx + 1 + len(kw) + 1
+	if idx < 0 {
+		afterKw = len(kw) + 1
+	}
+	// IF NOT EXISTS clause precedes the name; advance past it.
+	rest := stmt[afterKw:]
+	restLower := strings.ToLower(rest)
+	if strings.HasPrefix(restLower, "if not exists ") {
+		afterKw += len("if not exists ")
+		rest = stmt[afterKw:]
+	}
+	// Find the unquoted name in `rest`. SQLite identifiers can be
+	// bare, quoted with double quotes, or backticked — sqlite_master
+	// almost always returns the bare form for our migrations. Locate
+	// the first occurrence of `name` and prefix it with "snap.".
+	nameIdx := strings.Index(rest, name)
+	if nameIdx < 0 {
+		return "", fmt.Errorf("cannot locate name %q in CREATE statement", name)
+	}
+	rewritten := stmt[:afterKw+nameIdx] + "snap." + stmt[afterKw+nameIdx:]
+	return rewritten, nil
 }
 
 func (s *Store) migrate() error {
@@ -258,6 +412,35 @@ func (s *Store) migrate() error {
 			der_id      TEXT NOT NULL,
 			synced_ms   INTEGER NOT NULL,
 			PRIMARY KEY (device_id, der_type)
+		) STRICT`,
+
+		// Persistent daily-energy aggregate cache.
+		//
+		// 2026-05-25 measurement: /api/energy/daily?days=30 took ~25 s
+		// on the live Pi cold-start because the handler did one
+		// DailyEnergy SQL call per day and the in-memory cache was
+		// empty after every restart. Each call walked history_hot +
+		// warm + cold for that day's window — slow on a 1 GB state.db.
+		//
+		// This table stores the integration result so closed days never
+		// have to be re-computed. The handler writes a row on first
+		// compute and reads it back forever — days are immutable once
+		// past the local-midnight rollover, so cache invalidation is
+		// trivially "always valid".
+		//
+		// Today's row is never persisted (the day is in progress); the
+		// handler still computes it on every request. Tomorrow's
+		// midnight rollover the previous day's final value lands here
+		// once, lazily, on the next /api/energy/daily request.
+		`CREATE TABLE IF NOT EXISTS energy_daily (
+			day               TEXT PRIMARY KEY,
+			import_wh         REAL NOT NULL,
+			export_wh         REAL NOT NULL,
+			pv_wh             REAL NOT NULL,
+			bat_charged_wh    REAL NOT NULL,
+			bat_discharged_wh REAL NOT NULL,
+			load_wh           REAL NOT NULL,
+			computed_at_ms    INTEGER NOT NULL
 		) STRICT`,
 	}
 	for _, stmt := range stmts {
@@ -580,6 +763,57 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 		return DayEnergy{}, err
 	}
 	return d, nil
+}
+
+// LoadDailyEnergy returns the persisted aggregate for `day` (YYYY-MM-DD).
+// Second return is false when the day isn't cached yet. The caller
+// recomputes via DailyEnergy on miss and writes back via SaveDailyEnergy.
+//
+// Closed days are immutable, so callers can treat hit-rows as
+// authoritative — no TTL, no staleness check needed.
+func (s *Store) LoadDailyEnergy(day string) (DayEnergy, bool, error) {
+	const q = `
+		SELECT import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh
+		FROM energy_daily WHERE day = ?
+	`
+	var d DayEnergy
+	err := s.db.QueryRow(q, day).Scan(
+		&d.ImportWh, &d.ExportWh, &d.PVWh,
+		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
+	)
+	if err == sql.ErrNoRows {
+		return DayEnergy{}, false, nil
+	}
+	if err != nil {
+		return DayEnergy{}, false, err
+	}
+	return d, true, nil
+}
+
+// SaveDailyEnergy persists `de` for `day`. Upserts on conflict — the
+// row is the latest authoritative aggregate. Today's row should NOT be
+// persisted via this method (the day is still accumulating); callers
+// should gate on "is closed day" before saving.
+func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
+	const q = `
+		INSERT INTO energy_daily(
+			day, import_wh, export_wh, pv_wh, bat_charged_wh, bat_discharged_wh, load_wh, computed_at_ms
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(day) DO UPDATE SET
+			import_wh         = excluded.import_wh,
+			export_wh         = excluded.export_wh,
+			pv_wh             = excluded.pv_wh,
+			bat_charged_wh    = excluded.bat_charged_wh,
+			bat_discharged_wh = excluded.bat_discharged_wh,
+			load_wh           = excluded.load_wh,
+			computed_at_ms    = excluded.computed_at_ms
+	`
+	_, err := s.db.Exec(q, day,
+		de.ImportWh, de.ExportWh, de.PVWh,
+		de.BatChargedWh, de.BatDischargedWh, de.LoadWh,
+		time.Now().UnixMilli(),
+	)
+	return err
 }
 
 // CountNonSyntheticHistory returns the number of history rows across all

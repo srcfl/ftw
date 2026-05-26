@@ -83,6 +83,100 @@ func TestSelfConsumptionAbsorbsPVSurplus(t *testing.T) {
 	}
 }
 
+// Operator preference (2026-05-25): when PV surplus is available AND
+// the battery has room, the planner must prefer charging from the live
+// PV over exporting it and refilling from a forecast cheap-grid slot
+// later. Without the PVChargeBonus the DP saw the two as economically
+// equivalent on flat-price days and routinely exported 27+ kWh of
+// cheap-spot PV (10 öre/kWh) while leaving the battery half-empty —
+// then planned to refill from a 30 öre/kWh night slot, eating the
+// round-trip loss and forecast risk for no gain.
+func TestPassiveArbitragePVChargeBonusPrefersPVOverExport(t *testing.T) {
+	// Single slot with PV surplus. Terminal == export rate so the
+	// economic value of charging-and-holding exactly equals exporting.
+	// Without bonus, charging loses by the round-trip efficiency hit
+	// (0.95 vs 1.0) — DP picks export. With bonus, charging strictly
+	// wins by the bonus magnitude.
+	slots := []Slot{{
+		StartMs:    0,
+		LenMin:     60,
+		PriceOre:   100,
+		SpotOre:    20,
+		LoadW:      500,
+		PVW:        -5000,
+		Confidence: 1,
+	}}
+	pNoBonus := baseParams(ModePassiveArbitrage)
+	pNoBonus.InitialSoCPct = 60
+	pNoBonus.SoCSafetyFloorPct = 0 // disable safety floor — focus the test on the bonus
+	pNoBonus.TerminalSoCPrice = 20 // matches export revenue → DP indifferent without bonus
+	pNoBonus.PVChargeBonusOreKwh = 0
+	planNoBonus := Optimize(slots, pNoBonus)
+
+	// With PV bonus: DP strictly prefers charging from PV in every
+	// PV-surplus slot, even at parity terminal credit.
+	pBonus := pNoBonus
+	pBonus.PVChargeBonusOreKwh = 30
+	planBonus := Optimize(slots, pBonus)
+
+	sumCharge := func(actions []Action) float64 {
+		var s float64
+		for _, a := range actions {
+			if a.BatteryW > 0 {
+				s += a.BatteryW
+			}
+		}
+		return s
+	}
+	noBonusCharge := sumCharge(planNoBonus.Actions)
+	bonusCharge := sumCharge(planBonus.Actions)
+
+	if bonusCharge <= noBonusCharge {
+		t.Errorf("PV bonus should drive MORE charge: no-bonus=%fW, bonus=%fW", noBonusCharge, bonusCharge)
+	}
+	// Quantitative check: with 4.5 kW surplus per slot over 4 slots and
+	// the bonus active, the planner should grab a meaningful share of
+	// the available surplus.
+	if bonusCharge < 2000 {
+		t.Errorf("PV bonus drove only %fW total charge across 4 surplus slots — expected substantial absorption", bonusCharge)
+	}
+}
+
+// PV bonus must NOT motivate grid-charge during PV-less slots.
+// Bonus is bounded by live surplus; in a no-PV slot surplus=0 → no
+// bonus → no extra incentive to grid-charge.
+func TestPassiveArbitragePVChargeBonusDoesNotMotivateGridCharge(t *testing.T) {
+	slots := make([]Slot, 4)
+	for i := range slots {
+		slots[i] = Slot{
+			StartMs:    int64(i) * 15 * 60 * 1000,
+			LenMin:     15,
+			PriceOre:   30, // cheap-ish import
+			SpotOre:    5,
+			LoadW:      500,
+			PVW:        0, // no PV
+			Confidence: 1,
+		}
+	}
+	p := baseParams(ModePassiveArbitrage)
+	p.InitialSoCPct = 50
+	p.SoCSafetyFloorPct = 0 // disable safety floor — focus the test on the bonus
+	p.TerminalSoCPrice = 50 // moderate — SC bias must be what blocks grid-charge
+	p.PVChargeBonusOreKwh = 30
+
+	plan := Optimize(slots, p)
+	// No slot should command a grid-charge (battW must not exceed
+	// what could be PV-supplied, which is 0 here). The SC bias
+	// (3× house-import cost) makes grid-charging unprofitable at
+	// terminal=50 / import=30; the PV bonus does not change that
+	// because it is bounded by live PV surplus (= 0 here).
+	for i, a := range plan.Actions {
+		if a.BatteryW > 100 {
+			t.Errorf("slot %d: BatteryW = %fW — PV bonus must not motivate grid-charge", i, a.BatteryW)
+		}
+	}
+}
+
 // 2026-05-25 morning regression: with SoC below the operational safety
 // floor and PV surplus available NOW, the planner used to defer
 // charging to peak-PV hours because terminal credit alone gave only a

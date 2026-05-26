@@ -344,6 +344,32 @@
     if (abs >= 1000) return (abs / 1000).toFixed(2) + " kWh";
     return Math.round(abs) + " Wh";
   }
+
+  // Live-stats strip helpers. signClass picks a colour class based on
+  // direction (import/export for grid, charging/discharging for
+  // battery). Used by the stats strip just above the live power
+  // chart. Threshold matches the live chart's idle band (±10 W) so
+  // tiny noise doesn't flip the colour every poll.
+  function signClass(kind, w) {
+    var v = Number(w) || 0;
+    if (Math.abs(v) <= 10) return "is-neutral";
+    if (kind === "grid") return v > 0 ? "is-import" : "is-export";
+    if (kind === "bat") return v > 0 ? "is-charging" : "is-discharging";
+    return "is-neutral";
+  }
+  function updateLiveStat(key, w, cls) {
+    var el = document.getElementById("live-stat-" + key);
+    if (!el) return;
+    el.textContent = formatW(w);
+    el.className = "live-stat-value " + (cls || "is-neutral");
+  }
+  function updateLiveSocStat(soc) {
+    var el = document.getElementById("live-stat-soc");
+    if (!el) return;
+    if (soc == null || !isFinite(soc)) { el.textContent = "—"; return; }
+    el.textContent = (soc * 100).toFixed(1) + " %";
+    el.className = "live-stat-value is-neutral";
+  }
   function batteryStateLabel(w) {
     var watts = Number(w) || 0;
     var idleW = flowIdleKw() * 1000;
@@ -569,6 +595,17 @@
     if (batTargetDisp) {
       batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
     }
+
+    // Live stats strip — mirrors the per-tile values up top but in one
+    // mono-typed line above the live chart, so the Live card matches
+    // the Plan card's information density. Each cell colours by sign
+    // / direction so an operator scans the row and immediately sees
+    // who's importing, exporting, charging, or idle.
+    updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
+    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("load", data.load_w, "is-neutral");
+    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
+    updateLiveSocStat(data.bat_soc);
 
     // Hero energy-flow diagram — build a flat "planets" list where each
     // entry declares which corner it orbits (top-left=PV, top-right=
@@ -2390,6 +2427,12 @@
     wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
+      // Surface the surplus-only ↔ schedule interaction immediately on
+      // toggle, before the network save returns — operators get instant
+      // feedback that flipping surplus on turns the deadline soft.
+      if (typeof surplusBestEffortHint !== "undefined" && surplusBestEffortHint) {
+        surplusBestEffortHint.style.display = soCb.checked ? "" : "none";
+      }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
@@ -2441,6 +2484,32 @@
       unpluggedHint.style.fontStyle = "italic";
       box.appendChild(unpluggedHint);
     }
+
+    // Surplus-only ↔ schedule interaction. The schedule's explainer
+    // promises "the planner uses cheap grid hours to fill the gap PV
+    // can't cover" — but that promise is conditional on grid charging
+    // being allowed in the first place. Surplus only is a hard
+    // constraint in the MPC (mpc.go:474): EV actions that would import
+    // grid are rejected outright, regardless of how close the deadline
+    // is. So if both are on, the deadline becomes best-effort against
+    // whatever PV happens to land. Flag that clearly to the operator
+    // so they don't set a 05:00 deadline + surplus-only and expect
+    // overnight grid charging to make it happen.
+    //
+    // The hint's visibility is wired live to the surplus-only checkbox
+    // above, so toggling it gives instant feedback without waiting on
+    // the network save round-trip.
+    var surplusBestEffortHint = document.createElement("div");
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.style.fontSize = "0.72rem";
+    surplusBestEffortHint.style.color = "var(--fg)";
+    surplusBestEffortHint.style.fontStyle = "italic";
+    surplusBestEffortHint.style.marginBottom = "0.5rem";
+    surplusBestEffortHint.style.padding = "0.4rem 0.55rem";
+    surplusBestEffortHint.style.borderLeft = "2px solid var(--accent-e)";
+    surplusBestEffortHint.style.background = "var(--ink-raised)";
+    surplusBestEffortHint.style.display = (lp && lp.surplus_only) ? "" : "none";
+    box.appendChild(surplusBestEffortHint);
 
     function row(labelText, controlEl) {
       var r = document.createElement("div");
@@ -3098,9 +3167,154 @@
     });
   }
 
+  // ---- Live 24h history (battery + SoC) ----
+  // Self-contained: fetches /api/history once a minute, draws a
+  // compact stacked canvas of (battery action bars, SoC line) over
+  // the last 24 h. Mirrors the Plan card's lower charts so the two
+  // cards have matching visual weight. Read-only — no interaction.
+  function renderLiveHistory(items) {
+    var canvas = document.getElementById("live-history-chart");
+    if (!canvas || !items || !items.length) return;
+    // Normalise the /api/history payload: `ts` for the timestamp and
+    // `bat_soc` (0–1 fraction) for the SoC field, plus `bat_w` from
+    // the row blob. Skip rows with no battery sample so the chart
+    // doesn't draw spurious zero bars.
+    var points = items
+      .filter(function (it) { return it.bat_w != null || it.bat_soc != null; })
+      .map(function (it) {
+        return {
+          ts_ms: it.ts || it.ts_ms,
+          bat_w: it.bat_w || 0,
+          soc_pct: (it.bat_soc != null) ? it.bat_soc * 100 : null,
+        };
+      });
+    if (!points.length) return;
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = canvas.parentElement.clientWidth || canvas.width;
+    var cssH = 140;
+    if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+    }
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var pad = { left: 36, right: 36, top: 8, bottom: 18 };
+    var plotW = cssW - pad.left - pad.right;
+    var plotH = cssH - pad.top - pad.bottom;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    // x: time. Use first/last point timestamps for the window.
+    var t0 = points[0].ts_ms;
+    var t1 = points[points.length - 1].ts_ms;
+    var span = Math.max(1, t1 - t0);
+    var xOf = function (ts) { return pad.left + (ts - t0) / span * plotW; };
+
+    // Battery action axis: symmetric around 0. Find absmax for bat_w.
+    var batMax = 0;
+    for (var i = 0; i < points.length; i++) {
+      var b = Math.abs(points[i].bat_w || 0);
+      if (b > batMax) batMax = b;
+    }
+    if (batMax < 1000) batMax = 1000; // sane minimum
+    var batMid = pad.top + plotH * 0.55;
+    var batH = plotH * 0.55;
+    var yOfBat = function (w) {
+      var frac = (w || 0) / batMax;
+      return batMid - frac * (batH / 2);
+    };
+
+    // Zero baseline for battery
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, batMid);
+    ctx.lineTo(pad.left + plotW, batMid);
+    ctx.stroke();
+
+    // Battery action bars. Charge (positive) above zero in amber-ish
+    // (matches Plan's "charge" colour), discharge in violet-ish.
+    var barW = Math.max(1, plotW / points.length - 0.5);
+    for (var j = 0; j < points.length; j++) {
+      var p = points[j];
+      var bw = p.bat_w || 0;
+      if (Math.abs(bw) < 50) continue; // suppress noise
+      var x = xOf(p.ts_ms);
+      var y = yOfBat(bw);
+      ctx.fillStyle = bw > 0 ? "rgba(251,191,36,0.85)" : "rgba(167,139,250,0.85)";
+      var h = Math.abs(y - batMid);
+      var top = bw > 0 ? y : batMid;
+      ctx.fillRect(x - barW / 2, top, barW, h);
+    }
+
+    // SoC line. Plotted in a dedicated bottom strip with its own
+    // 0-100% scale and right-axis labels.
+    var socTop = pad.top + plotH * 0.62;
+    var socH = plotH * 0.38;
+    var socOf = function (pct) {
+      var v = Math.max(0, Math.min(100, pct || 0));
+      return socTop + socH - (v / 100) * socH;
+    };
+    ctx.strokeStyle = "rgba(34,211,238,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    var started = false;
+    for (var k = 0; k < points.length; k++) {
+      var sp = points[k];
+      if (sp.soc_pct == null) continue;
+      var sx = xOf(sp.ts_ms);
+      var sy = socOf(sp.soc_pct);
+      if (!started) { ctx.moveTo(sx, sy); started = true; }
+      else { ctx.lineTo(sx, sy); }
+    }
+    ctx.stroke();
+
+    // Axis labels — small, mono, dim.
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    // battery: max charge / max discharge labels at the edges
+    ctx.fillText((batMax / 1000).toFixed(1) + "kW", pad.left - 4, pad.top + 6);
+    ctx.fillText("-" + (batMax / 1000).toFixed(1) + "kW", pad.left - 4, batMid + (batH / 2) - 6);
+    // SoC: 100% / 0% on the right
+    ctx.textAlign = "left";
+    ctx.fillText("100%", pad.left + plotW + 4, socTop + 6);
+    ctx.fillText("0%", pad.left + plotW + 4, socTop + socH - 6);
+    // time axis: 24h ago / now
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.textAlign = "left";
+    ctx.fillText("24h ago", pad.left, cssH - 4);
+    ctx.textAlign = "right";
+    ctx.fillText("now", pad.left + plotW, cssH - 4);
+  }
+
+  var lastLiveHistFetch = 0;
+  function fetchLiveHistory() {
+    lastLiveHistFetch = Date.now();
+    return fetch("/api/history?range=24h&points=288") // 5-min cadence
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.items) return;
+        renderLiveHistory(d.items);
+      })
+      .catch(function () { /* silent — chart just shows last state */ });
+  }
+
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
+  fetchLiveHistory();
   setInterval(fetchStatus, POLL_INTERVAL);
+  setInterval(fetchLiveHistory, 60_000); // 1-min refresh
+  window.addEventListener("resize", function () {
+    // Last fetched points are not cached separately; trigger a fetch.
+    // 24h history is small (~288 points × ~50 bytes), zero-cost on
+    // every resize.
+    fetchLiveHistory();
+  });
   requestAnimationFrame(animationFrame);
 })();

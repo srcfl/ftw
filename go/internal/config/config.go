@@ -272,6 +272,15 @@ type Planner struct {
 	// floor value visible to operators.
 	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
 
+	// PVChargeBonusOreKwh credits each kWh of battery charge fed from
+	// live PV surplus, in passive_arbitrage mode. Operator preference
+	// "always prefer PV first" — certain PV now beats forecast
+	// grid-charging later, even at economic parity. Default 30
+	// öre/kWh; set to 0 to disable the bias and let the DP optimise
+	// purely on price (which on flat-price days lets cheap PV export
+	// and refills from cheap grid later, losing efficiency).
+	PVChargeBonusOreKwh float64 `yaml:"pv_charge_bonus_ore_kwh,omitempty" json:"pv_charge_bonus_ore_kwh,omitempty"`
+
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
@@ -304,6 +313,20 @@ type Site struct {
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
 
+	// SlewEnabled gates the external per-cycle ramp limiter. Both
+	// supported inverter families (Ferroamp, Sungrow) have their own
+	// internal power-ramp control loops; the external slew was
+	// originally added to dampen reactive-PI oscillation under noisy
+	// meter sampling, but it also slows legitimate step-response and
+	// can interact badly with PI integrator state (the 2026-05-25
+	// recovery took ~3 min of slew-bounded ramping after the integral
+	// finally unwound).
+	//
+	// Pointer so we can distinguish "unset → default true" from
+	// "explicitly false". Defaults to enabled to preserve back-compat
+	// on existing installs.
+	SlewEnabled *bool `yaml:"slew_enabled,omitempty" json:"slew_enabled,omitempty"`
+
 	// PVSurplusAbsorbSoCCapPct enables the opt-in PV-surplus absorber
 	// underlay in the energy-dispatch path (planner_cheap /
 	// planner_arbitrage). When the planner's slot allocation would still
@@ -321,6 +344,27 @@ type Site struct {
 	// watts after the plan's target. Defaults to 100 W when the cap is
 	// set but this isn't.
 	PVSurplusAbsorbThresholdW float64 `yaml:"pv_surplus_absorb_threshold_w,omitempty" json:"pv_surplus_absorb_threshold_w,omitempty"`
+
+	// DCLinkProtectionEnabled opts into a live-state PV curtail that
+	// fires when SoC is near full AND PV significantly exceeds load
+	// — the configuration most exposed to a load-step-triggered
+	// inverter trip (real 2026-05-25 incident: Ferroamp EnergyHub
+	// fault from a 2.7 kW load step under 6 kW PV + 85 % SoC).
+	// Engaging pre-curtails PV to live load + margin so a sudden
+	// load step inside the margin lands without DC-link stress.
+	// Disabled by default — opt-in for sites that see repeated
+	// inverter trips.
+	DCLinkProtectionEnabled bool `yaml:"dc_link_protection_enabled,omitempty" json:"dc_link_protection_enabled,omitempty"`
+
+	// DCLinkProtectionSoCThreshold (0-1) is the SoC fraction at or
+	// above which the protective curtail engages. Default 0.80.
+	DCLinkProtectionSoCThreshold float64 `yaml:"dc_link_protection_soc_threshold,omitempty" json:"dc_link_protection_soc_threshold,omitempty"`
+
+	// DCLinkProtectionMarginW is the headroom (W) kept above live
+	// load when the protection fires. Larger margin = more PV
+	// allowed through, smaller load-step capacity before re-curtail.
+	// Default 1000.
+	DCLinkProtectionMarginW float64 `yaml:"dc_link_protection_margin_w,omitempty" json:"dc_link_protection_margin_w,omitempty"`
 }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
@@ -424,9 +468,10 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP   *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	MQTT      *MQTTConfig      `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus    *ModbusConfig    `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	HTTP      *HTTPCapability  `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket *WSCapability    `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -446,6 +491,12 @@ type ModbusConfig struct {
 
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// WSCapability grants WebSocket (ws://, wss://) access. Same allowlist
+// semantics as HTTPCapability — bare host = any port; "host:port" = exact.
+type WSCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 }
 
@@ -749,8 +800,20 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 // Empty string preserves the historical "sibling-of-config" behaviour.
 var DriversDirOverride string
 
+// UserDriversDirOverride is the second lookup path tried before
+// DriversDirOverride. Designed for persistent user-supplied drivers in
+// the docker deploy where DriversDirOverride lives in the immutable
+// image layer. When set, ResolveDriverPaths checks whether a file
+// exists in this directory first and uses it when found; otherwise
+// falls back to DriversDirOverride. Empty = single-dir behaviour
+// (back-compat).
+var UserDriversDirOverride string
+
 // ResolveDriverPaths joins relative Lua driver paths with baseDir, or
 // with DriversDirOverride when the relative path starts with "drivers/".
+// When UserDriversDirOverride is also set, paths starting with "drivers/"
+// are first probed in UserDriversDirOverride; only if the file is absent
+// there do they fall through to DriversDirOverride.
 func (c *Config) ResolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
 		c.Drivers[i].Lua = stripLeadingDotDot(c.Drivers[i].Lua)
@@ -758,9 +821,19 @@ func (c *Config) ResolveDriverPaths(baseDir string) {
 		if p == "" || filepath.IsAbs(p) {
 			continue
 		}
-		if DriversDirOverride != "" && strings.HasPrefix(p, "drivers/") {
-			c.Drivers[i].Lua = filepath.Join(DriversDirOverride, strings.TrimPrefix(p, "drivers/"))
-			continue
+		if strings.HasPrefix(p, "drivers/") {
+			rel := strings.TrimPrefix(p, "drivers/")
+			if UserDriversDirOverride != "" {
+				candidate := filepath.Join(UserDriversDirOverride, rel)
+				if _, err := os.Stat(candidate); err == nil {
+					c.Drivers[i].Lua = candidate
+					continue
+				}
+			}
+			if DriversDirOverride != "" {
+				c.Drivers[i].Lua = filepath.Join(DriversDirOverride, rel)
+				continue
+			}
 		}
 		c.Drivers[i].Lua = filepath.Join(baseDir, p)
 	}
@@ -784,11 +857,22 @@ func stripLeadingDotDot(p string) string {
 func (c *Config) UnresolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
 		p := c.Drivers[i].Lua
-		if DriversDirOverride != "" && p != "" {
-			rel, err := filepath.Rel(DriversDirOverride, p)
-			if err == nil && !strings.HasPrefix(rel, "..") {
-				c.Drivers[i].Lua = filepath.ToSlash(filepath.Join("drivers", rel))
-				continue
+		if p != "" {
+			// Check UserDriversDirOverride first so that user-dir paths are
+			// re-serialised as portable "drivers/<rel>" just like bundled paths.
+			if UserDriversDirOverride != "" {
+				rel, err := filepath.Rel(UserDriversDirOverride, p)
+				if err == nil && !strings.HasPrefix(rel, "..") {
+					c.Drivers[i].Lua = filepath.ToSlash(filepath.Join("drivers", rel))
+					continue
+				}
+			}
+			if DriversDirOverride != "" {
+				rel, err := filepath.Rel(DriversDirOverride, p)
+				if err == nil && !strings.HasPrefix(rel, "..") {
+					c.Drivers[i].Lua = filepath.ToSlash(filepath.Join("drivers", rel))
+					continue
+				}
 			}
 		}
 		c.Drivers[i].Lua = relToBaseDir(baseDir, p)
@@ -830,7 +914,17 @@ func applyDefaults(c *Config) {
 		c.Site.Gain = 0.5
 	}
 	if c.Site.SlewRateW == 0 {
-		c.Site.SlewRateW = 500
+		// 3000 W/cycle at the 2 s default control interval = 1500 W/s
+		// ramp ceiling. Both Ferroamp and Sungrow internal EMS loops
+		// ramp slower than this naturally (Sungrow spec: ~1000 W/s),
+		// so the external slew rarely fires under normal conditions
+		// but still bounds the post-windup recovery from snapping to
+		// full output in a single cycle.
+		c.Site.SlewRateW = 3000
+	}
+	if c.Site.SlewEnabled == nil {
+		t := true
+		c.Site.SlewEnabled = &t
 	}
 	if c.Site.MinDispatchIntervalS == 0 {
 		// Match control_interval_s. The holdoff exists to suppress
@@ -1123,10 +1217,15 @@ func relDriverPath(baseDir, p string) string {
 	if p == "" {
 		return ""
 	}
-	// Paths resolved through DriversDirOverride land outside baseDir, so a
-	// straight Rel would emit "../drivers/<name>.lua" — preserved across
-	// saves via stripLeadingDotDot but ugly. Rewrite them as a clean
-	// "drivers/<basename>" to keep YAML portable between hosts.
+	// Paths resolved through UserDriversDirOverride or DriversDirOverride
+	// land outside baseDir, so a straight Rel would emit "../drivers/<name>.lua".
+	// Rewrite them as a clean "drivers/<rel>" to keep YAML portable between hosts.
+	if UserDriversDirOverride != "" {
+		rel, err := filepath.Rel(UserDriversDirOverride, p)
+		if err == nil && !strings.HasPrefix(rel, "..") {
+			return filepath.ToSlash(filepath.Join("drivers", rel))
+		}
+	}
 	if DriversDirOverride != "" {
 		rel, err := filepath.Rel(DriversDirOverride, p)
 		if err == nil && !strings.HasPrefix(rel, "..") {

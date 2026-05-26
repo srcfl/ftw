@@ -143,6 +143,35 @@ func (m Model) prior(hourOfWeek int) float64 {
 	return typicalPrior(hourOfWeek) * scale
 }
 
+// repairPoisonedBuckets resets bucket.Mean back to the prior for any bucket
+// whose stored mean has drifted below a floor of prior*poisonFloor. This
+// repairs models that were trained before the heating-subtraction guard was
+// in place: when heatEst exceeded actualLoad the code clamped baseSample to
+// 0, causing the EMA to decay toward zero over many cold-weather samples even
+// though a real baseline load (fridge, server, standby) always exists.
+//
+// Samples count is left intact — the data was genuinely observed, we just
+// can't trust the mean it produced. Setting Samples=0 would reset trust to 0
+// and re-expose the prior, but would also trigger the exact-running-mean path
+// for the next 10 samples on warm days which is acceptable. Either way the
+// repaired model quickly re-learns from warm-season observations.
+//
+// Floor is conservative (25% of prior) so we only touch buckets that are
+// clearly below any plausible real consumption — a house at 75 W overnight
+// would be unusual but possible, so we preserve those. A mean of 15 W for an
+// overnight bucket that has prior=300 W is unambiguously poisoned.
+const poisonFloor = 0.25
+
+func (m *Model) repairPoisonedBuckets() {
+	for i := 0; i < Buckets; i++ {
+		p := m.prior(i)
+		if m.Bucket[i].Mean < p*poisonFloor {
+			m.Bucket[i].Mean = p
+			m.Bucket[i].Samples = 0
+		}
+	}
+}
+
 // HourOfWeek computes 0..167 for a time. Monday = 0 through Sunday.
 // Coerces to UTC so the bucket index stays stable across DST
 // transitions (wall-clock 19:00 maps to a different bucket in summer
@@ -208,20 +237,26 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	// Subtract the current heating-gain estimate so the bucket learns
 	// the "base" load — heating varies day-to-day and shouldn't smear
 	// into the hour-of-week signature.
+	//
+	// Guard: when the heating estimate exceeds the measured load we
+	// cannot cleanly isolate the base load from the heating component.
+	// Storing 0 would poison the bucket (the EMA decays toward 0 even
+	// though a real baseline — fridge, server, standby — always exists).
+	// Instead, skip the bucket update entirely for this sample and let
+	// existing Samples + Mean stand. Global Samples and MAE still update.
 	heatEst := 0.0
 	if tempC < HeatingReferenceC {
 		heatEst = m.HeatingW_per_degC * (HeatingReferenceC - tempC)
 	}
-	baseSample := actualLoadW - heatEst
-	if baseSample < 0 {
-		baseSample = 0
+	if heatEst < actualLoadW {
+		baseSample := actualLoadW - heatEst
+		if b.Samples < 10 {
+			b.Mean = (b.Mean*float64(b.Samples) + baseSample) / float64(b.Samples+1)
+		} else {
+			b.Mean = (1-m.Alpha)*b.Mean + m.Alpha*baseSample
+		}
+		b.Samples++
 	}
-	if b.Samples < 10 {
-		b.Mean = (b.Mean*float64(b.Samples) + baseSample) / float64(b.Samples+1)
-	} else {
-		b.Mean = (1-m.Alpha)*b.Mean + m.Alpha*baseSample
-	}
-	b.Samples++
 	// Heating coefficient is operator-configured (Planner.HeatingWPerDegC
 	// in config). We don't try to identify it from data here because
 	// online fit is noisy + entangled with the bucket baseline. The

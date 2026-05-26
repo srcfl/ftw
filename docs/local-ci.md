@@ -4,6 +4,36 @@ This repo has a local CI path for fast confidence before deploy, plus a
 Raspberry Pi candidate slot for checking the real served UI against live
 read-only data.
 
+## Inner-loop verification (recommended for every commit)
+
+`make verify` runs the same `go vet ./...` + `go test ./...` + `go build ./...`
+that GitHub Actions runs as the `go test + vet` workflow
+(`.github/workflows/test.yml`). Use it before every `git commit` — passing
+locally means the workflow on the PR will pass too.
+
+```bash
+make verify
+```
+
+`make verify-all` adds cross-compile builds (linux/arm64, linux/amd64,
+windows/amd64) so you catch platform-specific issues — wrong syscall fields,
+OS-gated imports, missing build tags — before pushing. Use it before every
+`git push` on a feature branch.
+
+```bash
+make verify-all
+```
+
+`make install-hooks` installs git pre-commit + pre-push hooks that run these
+automatically. **Opt-in** — never auto-installed.
+
+```bash
+make install-hooks   # opt-in; uninstall: rm .git/hooks/pre-commit .git/hooks/pre-push
+```
+
+The pre-push hook also warns when your branch is behind `origin/master` so
+you know to rebase before the PR review.
+
 ## Local full pass
 
 ```bash

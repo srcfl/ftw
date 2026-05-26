@@ -375,6 +375,61 @@ func TestChargePlanNeverDischargesIndividualBatteryAfterSlew(t *testing.T) {
 	}
 }
 
+// SlewEnabled=false: PI's computed target reaches the inverter in one
+// cycle. Both supported inverter families ramp internally, so the
+// external slew was double-limiting on top of their own protection.
+// Smoke test that a large step (battery 0 → -3000 over a single cycle)
+// passes through without the slew clamp.
+func TestSlewDisabledPassesLargeStepThrough(t *testing.T) {
+	// Grid importing 3 kW — PI wants to discharge heavily.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500  // intentionally tight — if SlewEnabled wins, target lands at -500
+	st.SlewEnabled = false
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) <= 500 {
+		t.Errorf("TargetW = %f W — slew_enabled=false must let PI exceed the 500 W slew step in a single cycle", targets[0].TargetW)
+	}
+	if targets[0].Clamped {
+		t.Errorf("Clamped=true with slew_enabled=false — only fuse/SoC/per-driver caps should clamp now")
+	}
+}
+
+// SlewEnabled=true (default) still rate-limits step responses to the
+// configured ramp.
+func TestSlewEnabledClampsLargeStep(t *testing.T) {
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 500
+	st.SlewEnabled = true
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 510 {
+		t.Errorf("TargetW = %f W — slew_enabled=true should cap step at ~500 W", targets[0].TargetW)
+	}
+}
+
 func TestProportionalSplitByCapacity(t *testing.T) {
 	bats := []batteryInfo{
 		{driver: "big", capacityWh: 15000, currentW: 0, soc: 0.5, online: true},
@@ -1406,6 +1461,64 @@ func TestEnergyDispatchResetsOnSlotRollover(t *testing.T) {
 	}
 	if !st.currentDirective.SlotStart.Equal(dir2.SlotStart) {
 		t.Errorf("currentDirective.SlotStart = %v, want %v", st.currentDirective.SlotStart, dir2.SlotStart)
+	}
+}
+
+// Mid-slot replan that GROWS the slot budget must not trigger a
+// catastrophic catch-up demand near slot-end.
+//
+// Production incident on .139 (2026-05-17): planner_arbitrage with a
+// −900 W slot plan. A reactive replan late in the slot grew the slot's
+// BatteryEnergyWh by ~5×. With slotDelivered still tracking the old
+// (smaller) directive's pace, remainingWh × 3600 / remainingS demanded
+// >30 kW for the last ~80 s; battery clamped to MaxDischargeW (−9000 W)
+// and stayed there until slot rollover. The "shrink budget" branch
+// (line 784) handled the symmetric case but the grow case was
+// unprotected — fix rebases slotDelivered to the new pace.
+func TestEnergyDispatchRebasesSlotDeliveredOnBudgetGrow(t *testing.T) {
+	now := time.Now()
+	// Slot is 15 min total; we're 12 min in (80% elapsed). Old plan was
+	// for −225 Wh (−900 W avg). Actual delivered tracks the old pace:
+	// 0.8 × −225 ≈ −180 Wh.
+	slotStart := now.Add(-12 * time.Minute)
+	slotEnd := now.Add(3 * time.Minute)
+	dir1 := SlotDirective{
+		SlotStart:       slotStart,
+		SlotEnd:         slotEnd,
+		BatteryEnergyWh: -225, // −900 W × 0.25 h
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -900, 0.6}, // currently delivering at old pace
+	})
+	st := newStateWithEnergyDispatch(dir1, "ferroamp")
+	// Seed the accumulator to mimic 12 min of −900 W delivery.
+	st.currentDirective = dir1
+	st.slotDelivered = -180
+	st.lastTickTs = now.Add(-5 * time.Second)
+
+	// Replan: same slot, but budget grows 5× (BatteryEnergyWh = −1125 Wh,
+	// avg −4500 W). On the old code, remainingWh = −1125 − (−180) =
+	// −945 Wh over 180 s → −18.9 kW. Even after clamping to driver max,
+	// that's a ~5× overshoot of the new slot avg of −4500 W.
+	dir2 := SlotDirective{
+		SlotStart:       slotStart,
+		SlotEnd:         slotEnd,
+		BatteryEnergyWh: -1125,
+	}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir2, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// New slot avg is −4500 W. After rebase, targetTotalW should be close
+	// to slot avg, not a 4× catch-up. Allow ~10% margin for time drift.
+	if got < -5000-100 || got > -4000+100 {
+		t.Errorf("targetTotalW = %f; expected ≈ slot-avg (−4500 W) after rebase, not catastrophic catch-up", got)
 	}
 }
 
@@ -2631,6 +2744,95 @@ func TestInverterAffinity_IgnoresNonGeneratingPVTelemetry(t *testing.T) {
 }
 
 // ---- PV curtailment ----
+
+// 2026-05-25 Ferroamp fault: 2.7 kW load step under 6 kW PV + 85 % SoC
+// triggered the inverter's internal DC-link protection. Operator opted
+// into DCLinkProtection to pre-curtail PV when SoC + surplus put the
+// inverter at risk. Verify the protection engages correctly in that
+// scenario.
+func TestProtectivePVCurtailEngagesAtHighSoCWithSurplus(t *testing.T) {
+	store := telemetry.NewStore()
+	// 6 kW PV producing
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	// Battery at 85 % SoC, online
+	soc := 0.85
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	// Site meter showing 5.5 kW export (load 500 W, 5.5 kW out)
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.DCLinkProtectionMarginW = 1000
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) {
+		// Planner asks for no curtail — protection fires anyway.
+		return SlotDirective{}, true
+	}
+
+	targets := ComputePVCurtail(st, store)
+	if len(targets) != 1 || targets[0].Driver != "ferroamp" {
+		t.Fatalf("want 1 target on ferroamp, got %+v", targets)
+	}
+	// Expected limit ≈ load (500) + margin (1000) = 1500 W
+	if got := targets[0].LimitW; math.Abs(got-1500) > 50 {
+		t.Errorf("protective curtail limit = %f, want ≈ 1500", got)
+	}
+}
+
+func TestProtectivePVCurtailSkipsBelowSoCThreshold(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	soc := 0.50 // below threshold
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, true }
+
+	if got := ComputePVCurtail(st, store); len(got) != 0 {
+		t.Errorf("protection should not fire below SoC threshold, got %+v", got)
+	}
+}
+
+// Protection must NOT relax a tighter manual hold. If the operator
+// pinned a 500 W cap and protection would suggest 1500 W, the cap
+// wins. (We test against a manual hold rather than the planner
+// directive because liveCurtailLimitW already re-derives the planner
+// limit from live state, which makes the planner path's "is the limit
+// 500?" question opaque to a unit test.)
+func TestProtectivePVCurtailNeverRelaxesManualHold(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("ferroamp", telemetry.DerPV, -6000, nil, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	soc := 0.85
+	store.Update("ferroamp", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("ferroamp").RecordSuccess()
+	store.Update("ferroamp", telemetry.DerMeter, -5500, nil, nil)
+
+	st := NewState(0, 0, "ferroamp")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.DCLinkProtectionEnabled = true
+	st.DCLinkProtectionSoCThreshold = 0.80
+	st.DCLinkProtectionMarginW = 1000
+	// Site-wide operator hold at 500 W (tighter than protection's 1500).
+	st.SetPVManualHold(PVManualHold{LimitW: 500, ExpiresAt: time.Now().Add(time.Hour)})
+
+	targets := ComputePVCurtail(st, store)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %+v", targets)
+	}
+	if got := targets[0].LimitW; got > 600 {
+		t.Errorf("manual hold's 500 W cap got relaxed by protection to %f", got)
+	}
+}
 
 func TestPVCurtailAllocatesOnlinePVDrivers(t *testing.T) {
 	store := telemetry.NewStore()
@@ -4235,5 +4437,92 @@ func TestPVSurplusAbsorberDoesNotReverseDischarge(t *testing.T) {
 	got := targets[0].TargetW
 	if got > -1500 {
 		t.Errorf("TargetW = %.0f W — absorber must not blunt a discharge plan (want ≈ -4000 W)", got)
+	}
+}
+
+// Regression guard for the production v0.87.0 incident: PV forecast was off
+// by 7×, plan said battery idle (export the imaginary PV surplus), batteries
+// sat at 0 W while the site imported 648 W. The carve-out was only in
+// planner_self so passive_arbitrage didn't benefit.
+//
+// Fix: passive_arbitrage now participates in the reactive-discharge carve-out
+// when the plan slot is idle (non-charge). The battery should discharge to
+// cover the live import just as planner_self would.
+func TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle — plan expected PV export, battery hands-off
+		Strategy:        "self_consumption",
+	}
+	// Live: meter is importing 600 W — PV massively undershot forecast.
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000 // unbounded for single-tick test
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Reactive PI on grid=+600 W with Kp=0.5 yields ~-300 W discharge
+	// after one tick. The key assertion is that the battery discharged at
+	// all — before the fix planHasNonDischargeIntent returned true and
+	// floored the target to 0.
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage idle slot must discharge reactively when meter imports (forecast miss). Before fix: target was floored to 0.", got)
+	}
+}
+
+// When the plan slot for passive_arbitrage is a deliberate CHARGE slot
+// (e.g. the DP picked cheap grid hours to refill), live grid import is
+// expected — that's what grid-charging looks like. The carve-out must NOT
+// apply here: the charge command is the authoritative intent and reactive
+// discharge would undo it.
+func TestPlannerPassiveArbitrageChargeSlotPreservedAgainstReactiveDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1000, // deliberate grid-charge: ~4 kW over the slot
+		Strategy:        "arbitrage",
+	}
+	// Live: meter importing 600 W. In a charge slot this is expected and
+	// intentional (grid → battery). Battery is currently at 0 W.
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.4},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy-dispatch path computes targetTotalW = 1000*3600/900 ≈ 4000 W
+	// charge. Reactive discharge must NOT override this. The non-discharge
+	// block (planHasNonDischargeIntent=true) should floor to 0 at minimum —
+	// but the energy path itself drives positive, so we just verify the
+	// battery is commanded to CHARGE, not discharge.
+	if got < 0 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage charge slot must NOT discharge reactively; the grid-charge plan must remain authoritative", got)
 	}
 }

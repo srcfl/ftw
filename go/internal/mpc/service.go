@@ -1038,6 +1038,26 @@ func upperHalfMeanPrice(prices []state.PricePoint) float64 {
 // non-representative training data).
 const PlannerRadiationWeight = 0.3
 
+// PlannerForecastCapRatio caps how much the radiation-backed forecast may
+// exceed the twin's prediction before it's treated as a NWP error rather
+// than a calibration gap.
+//
+// When the NWP model is confidently wrong (e.g. predicts 1% cloud while
+// the site measures 300 W from a 13 kW array), the forecast can be 5–10×
+// higher than reality. The RLS twin — especially when its NowAnchor
+// correction has pulled it close to the live reading — is a more reliable
+// signal in those moments. Capping the forecast at this multiple prevents
+// the 70 % NWP weight from swamping the calibrated twin.
+//
+// 3× is chosen empirically: it covers a 2–3 string orientation difference
+// and a heavy soiling scenario, which are legitimate reasons for the twin
+// to under-predict relative to the NWP GHI × rated-kWp estimate. Beyond
+// 3× the NWP forecast is more likely wrong (cloud/shading mis-model) than
+// the twin is. This constant is intentionally conservative — tightening
+// it below ~2 risks degrading performance on normal sunny days where the
+// forecast is right and the twin is under-trained.
+const PlannerForecastCapRatio = 3.0
+
 func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
 	// Invalid predicted → fall back to forecast (unchanged).
 	switch {
@@ -1055,8 +1075,23 @@ func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) f
 	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
 	// twin still spits random spikes from overfit feature vectors — and
 	// we want the smooth curve.
+	//
+	// Guard: if the forecast exceeds PlannerForecastCapRatio × the twin's
+	// prediction, and the twin has a meaningful signal (> 50 W — i.e. it
+	// is not night-gated or collapsed), cap the forecast before blending.
+	// This prevents a confidently-wrong NWP cloud-cover forecast from
+	// dominating the plan — the twin's NowAnchor-corrected value already
+	// reflects live irradiance conditions, and a 3–10× divergence between
+	// forecast and twin is a stronger signal of NWP error than calibration
+	// gap. See investigation in docs/pvmodel-overprediction-investigation.md
+	// (T33, 2026-05-25, open_meteo predicted 154 W/m2 / 1% cloud while
+	// site measured ~22 W/m2 effective irradiance → 7× blend over-shoot).
 	if radiationBacked && forecastPVW > 0 {
-		return (1-PlannerRadiationWeight)*forecastPVW + PlannerRadiationWeight*predictedPVW
+		cappedForecast := forecastPVW
+		if predictedPVW > 50 && forecastPVW > PlannerForecastCapRatio*predictedPVW {
+			cappedForecast = PlannerForecastCapRatio * predictedPVW
+		}
+		return (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*predictedPVW
 	}
 
 	// Cloud-only legacy path: prefer the twin when forecast is near zero
