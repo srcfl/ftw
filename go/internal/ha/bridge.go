@@ -34,39 +34,69 @@ type CommandCallbacks struct {
 }
 
 // Bridge is an instance of the HA MQTT bridge.
+//
+// Lifecycle invariants:
+//   - lifecycleMu serializes Reload + Stop so the connect/disconnect
+//     dance never races with a second config-reload tick.
+//   - mu guards every data field a diagnostic reader (IsConnected,
+//     BrokerAddr, LastPublishMs, SensorsAnnounced) might touch.
+//     publishLoop / publishState briefly acquire mu when bumping the
+//     diagnostics counters; Reload deliberately does NOT hold mu while
+//     waiting on the old loop's done channel — the loop needs mu to
+//     update lastPublishMs on its way out and would otherwise deadlock.
 type Bridge struct {
-	cfg         *config.HomeAssistant
-	client      paho.Client
-	tel         *telemetry.Store
-	ctrl        *control.State
-	ctrlMu      *sync.Mutex
-	cb          CommandCallbacks
-	driverNames []string
-
-	stop chan struct{}
-	done chan struct{}
+	tel    *telemetry.Store
+	ctrl   *control.State
+	ctrlMu *sync.Mutex
+	cb     CommandCallbacks
 
 	topicPrefix string // e.g. "forty-two-watts"
 	discoPrefix string // e.g. "homeassistant"
 	deviceID    string
 
+	lifecycleMu sync.Mutex // serializes Reload + Stop
+
 	mu               sync.Mutex
+	cfg              *config.HomeAssistant
+	client           paho.Client
+	driverNames      []string
+	stop             chan struct{}
+	done             chan struct{}
 	lastPublishMs    int64
 	sensorsAnnounced int
+	stopped          bool
+
+	// connectTimeout is the WaitTimeout passed to paho's Connect token.
+	// 0 means "use defaultConnectTimeout"; tests override to keep the
+	// refused-broker path fast.
+	connectTimeout time.Duration
 }
+
+const defaultConnectTimeout = 10 * time.Second
 
 // IsConnected returns true if the Paho MQTT client currently has an
 // active connection to the broker.
 func (b *Bridge) IsConnected() bool {
-	if b == nil || b.client == nil {
+	if b == nil {
 		return false
 	}
-	return b.client.IsConnected()
+	b.mu.Lock()
+	cli := b.client
+	b.mu.Unlock()
+	if cli == nil {
+		return false
+	}
+	return cli.IsConnected()
 }
 
 // BrokerAddr returns the configured "host:port" string for diagnostics.
 func (b *Bridge) BrokerAddr() string {
-	if b == nil || b.cfg == nil {
+	if b == nil {
+		return ""
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cfg == nil {
 		return ""
 	}
 	return fmt.Sprintf("%s:%d", b.cfg.Broker, b.cfg.Port)
@@ -105,18 +135,61 @@ func Start(
 	cb CommandCallbacks,
 ) (*Bridge, error) {
 	b := &Bridge{
-		cfg:         cfg,
 		tel:         tel,
 		ctrl:        ctrl,
 		ctrlMu:      ctrlMu,
 		cb:          cb,
-		driverNames: driverNames,
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
 		topicPrefix: "forty-two-watts",
 		discoPrefix: "homeassistant",
 		deviceID:    "forty_two_watts",
 	}
+	if err := b.connectAndStart(cfg, driverNames); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// Reload swaps the bridge's broker / credentials / driver list without
+// requiring a process restart. The current MQTT client is disconnected,
+// the publish loop drained, then a fresh paho client is built from
+// newCfg and a new loop is started. Diagnostic counters reset because
+// the new connection is its own thing — operators reading
+// LastPublishMs / SensorsAnnounced after a reload should see "fresh
+// connection" semantics, not stale figures from the previous broker.
+//
+// driverNames is the current driver registry as of reload time. The
+// applier in cmd/forty-two-watts/main.go passes in reg.Names() so a
+// driver added or removed in the same config-reload tick is reflected
+// in HA discovery without a second round-trip.
+func (b *Bridge) Reload(newCfg *config.HomeAssistant, driverNames []string) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+
+	if b.stopped {
+		return fmt.Errorf("ha: bridge stopped, cannot reload")
+	}
+	b.teardown()
+	return b.connectAndStart(newCfg, driverNames)
+}
+
+// connectAndStart wires a paho client from cfg, opens the connection,
+// then starts the publish loop. Shared by Start (first-time wiring)
+// and Reload (after a teardown). Caller is responsible for serializing
+// access via lifecycleMu.
+func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string) error {
+	// Swap data fields BEFORE Connect: paho fires OnConnectHandler from
+	// inside Connect() and that handler calls publishDiscovery, which
+	// reads b.driverNames. Updating after Connect would publish discovery
+	// for the previous driver list.
+	b.mu.Lock()
+	b.cfg = cfg
+	b.driverNames = driverNames
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	b.lastPublishMs = 0
+	b.sensorsAnnounced = 0
+	b.mu.Unlock()
+
 	opts := paho.NewClientOptions().
 		AddBroker(fmt.Sprintf("tcp://%s:%d", cfg.Broker, cfg.Port)).
 		SetClientID("forty-two-watts-ha").
@@ -128,22 +201,79 @@ func Start(
 			b.publishDiscovery()
 			b.subscribeCommands()
 		})
-	if cfg.Username != "" { opts.SetUsername(cfg.Username) }
-	if cfg.Password != "" { opts.SetPassword(cfg.Password) }
-	b.client = paho.NewClient(opts)
-	if tok := b.client.Connect(); tok.WaitTimeout(10*time.Second) && tok.Error() != nil {
-		return nil, tok.Error()
+	if cfg.Username != "" {
+		opts.SetUsername(cfg.Username)
+	}
+	if cfg.Password != "" {
+		opts.SetPassword(cfg.Password)
+	}
+	cli := paho.NewClient(opts)
+
+	b.mu.Lock()
+	b.client = cli
+	b.mu.Unlock()
+
+	// We own b.done until publishLoop takes over — close it on any
+	// early return so the next teardown() doesn't block on <-doneCh.
+	started := false
+	defer func() {
+		if !started {
+			b.mu.Lock()
+			close(b.done)
+			b.mu.Unlock()
+		}
+	}()
+
+	timeout := b.connectTimeout
+	if timeout == 0 {
+		timeout = defaultConnectTimeout
+	}
+	tok := cli.Connect()
+	if !tok.WaitTimeout(timeout) {
+		return fmt.Errorf("ha: connect timeout after %s", timeout)
+	}
+	if err := tok.Error(); err != nil {
+		return err
 	}
 
 	go b.publishLoop()
-	return b, nil
+	started = true
+	return nil
 }
 
-// Stop disconnects and waits for the publish loop to exit.
+// teardown drops the current MQTT client + publish loop. Mirrors Stop()
+// but doesn't flip the stopped flag, so it can be followed by another
+// connectAndStart. Caller must hold lifecycleMu.
+func (b *Bridge) teardown() {
+	b.mu.Lock()
+	stopCh := b.stop
+	doneCh := b.done
+	cli := b.client
+	b.mu.Unlock()
+
+	if stopCh != nil {
+		close(stopCh)
+	}
+	if doneCh != nil {
+		<-doneCh
+	}
+	if cli != nil {
+		cli.Disconnect(500)
+	}
+}
+
+// Stop disconnects and waits for the publish loop to exit. Idempotent.
 func (b *Bridge) Stop() {
-	close(b.stop)
-	<-b.done
-	b.client.Disconnect(500)
+	if b == nil {
+		return
+	}
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+	if b.stopped {
+		return
+	}
+	b.teardown()
+	b.stopped = true
 }
 
 // ---- Autodiscovery ----

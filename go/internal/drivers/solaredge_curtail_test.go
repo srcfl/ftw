@@ -1,0 +1,261 @@
+package drivers
+
+import (
+	"context"
+	"encoding/json"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+)
+
+// capturingModbus is a tiny in-memory Modbus capability for driver tests. It
+// records every WriteSingle call so the test can assert that the driver
+// issued the right register writes, and returns zero registers for any
+// Read (the SolarEdge poll path tolerates this because every pcall is
+// guarded — it just emits zeros for the missing fields).
+type capturingModbus struct {
+	mu     sync.Mutex
+	writes []writeOp
+}
+
+type writeOp struct {
+	Addr  uint16
+	Value uint16
+}
+
+func (m *capturingModbus) Read(addr uint16, count uint16, kind int32) ([]uint16, error) {
+	out := make([]uint16, count)
+	return out, nil
+}
+
+func (m *capturingModbus) WriteSingle(addr uint16, value uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.writes = append(m.writes, writeOp{Addr: addr, Value: value})
+	return nil
+}
+
+func (m *capturingModbus) WriteMulti(addr uint16, values []uint16) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Atomic FC 0x10 write — capture each register as its own writeOp
+	// so existing assertions keyed on (Addr, Value) keep working.
+	for i, v := range values {
+		m.writes = append(m.writes, writeOp{Addr: addr + uint16(i), Value: v})
+	}
+	return nil
+}
+
+func (m *capturingModbus) Close() error { return nil }
+
+func (m *capturingModbus) snapshot() []writeOp {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]writeOp, len(m.writes))
+	copy(out, m.writes)
+	return out
+}
+
+func (m *capturingModbus) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.writes = nil
+}
+
+func loadSolarEdgeDriver(t *testing.T, path string, nominalW float64) (*LuaDriver, *capturingModbus) {
+	t.Helper()
+	tel := telemetry.NewStore()
+	mb := &capturingModbus{}
+	env := NewHostEnv("solaredge", tel).WithModbus(mb)
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cfg := map[string]any{}
+	if nominalW > 0 {
+		cfg["nominal_w"] = nominalW
+	}
+	if err := d.Init(ctx, cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	// Reset captured writes so init-side reads don't pollute the
+	// curtail assertions below. (Init currently doesn't write anything,
+	// but be defensive.)
+	mb.reset()
+	return d, mb
+}
+
+func runCmd(t *testing.T, d *LuaDriver, action string, powerW float64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, _ := json.Marshal(map[string]any{"action": action, "power_w": powerW})
+	if err := d.Command(ctx, cmd); err != nil {
+		t.Fatalf("%s: %v", action, err)
+	}
+}
+
+// 50 % curtail on a 10 kW inverter → atomic FC 0x10 starting at
+// REG_APC_ENABLE (61440), values {enable=1, limit=50}.
+func TestSolarEdgeCurtailHalfPower(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 10000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 5000)
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d: %+v", len(w), w)
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61441, Value: 50}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 50}", w[1])
+	}
+}
+
+func TestSolarEdgeCurtailZeroPower(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 10000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 0)
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d", len(w))
+	}
+	if w[0].Value != 1 || w[1].Value != 0 {
+		t.Errorf("force-off curtail: got ena=%d pct=%d; want ena=1 pct=0",
+			w[0].Value, w[1].Value)
+	}
+}
+
+func TestSolarEdgeCurtailClampsOverNominal(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 10000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 20000) // > nominal
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d", len(w))
+	}
+	if w[1].Value != 100 {
+		t.Errorf("over-nominal pct: got %d, want 100 (clamped)", w[1].Value)
+	}
+}
+
+func TestSolarEdgeCurtailDisable(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 10000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 5000)
+	mb.reset()
+
+	runCmd(t, d, "curtail_disable", 0)
+	w := mb.snapshot()
+	// Release writes BOTH registers in one atomic FC 0x10 transaction
+	// so the inverter never sees a half-applied state.
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots on disable, got %d: %+v", len(w), w)
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 0}) {
+		t.Errorf("F000 disable: got %+v, want {61440, 0}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61441, Value: 100}) {
+		t.Errorf("F001 reset: got %+v, want {61441, 100}", w[1])
+	}
+}
+
+// Without nominal_w in config, curtail must refuse to write anything —
+// otherwise the driver would compute meaningless percentages.
+func TestSolarEdgeCurtailWithoutNominalRejected(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 0)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 5000)
+	if len(mb.snapshot()) != 0 {
+		t.Errorf("curtail without nominal_w should write nothing, got %+v", mb.snapshot())
+	}
+}
+
+// All three SolarEdge driver variants advertise the new pv-curtail
+// capability now that legacy K-series is wired up too.
+func TestSolarEdgeCatalogAdvertisesCurtail(t *testing.T) {
+	entries, err := LoadCatalog("../../../drivers")
+	if err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	wantIDs := map[string]bool{
+		"solaredge":        false,
+		"solaredge-pv":     false,
+		"solaredge-legacy": false,
+	}
+	for _, e := range entries {
+		if _, ok := wantIDs[e.ID]; !ok {
+			continue
+		}
+		hasCurtail := false
+		for _, c := range e.Capabilities {
+			if c == "pv-curtail" {
+				hasCurtail = true
+				break
+			}
+		}
+		if !hasCurtail {
+			t.Errorf("driver %q missing pv-curtail capability: %v", e.ID, e.Capabilities)
+		}
+		wantIDs[e.ID] = true
+	}
+	for id, found := range wantIDs {
+		if !found {
+			t.Errorf("driver %q not in catalog", id)
+		}
+	}
+}
+
+// Legacy K-series driver uses the same atomic FC 0x10 write pattern.
+func TestSolarEdgeLegacyCurtail(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge_legacy.lua", 17000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 8500) // 50 % of 17 kW
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d", len(w))
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61441, Value: 50}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 50}", w[1])
+	}
+
+	mb.reset()
+	runCmd(t, d, "curtail_disable", 0)
+	w = mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots on disable, got %d", len(w))
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 0}) || w[1] != (writeOp{Addr: 61441, Value: 100}) {
+		t.Errorf("disable: got %+v, want F000=0 then F001=100", w)
+	}
+}
+
+// Same writes path applies to the PV-only variant.
+func TestSolarEdgePVCurtail(t *testing.T) {
+	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge_pv.lua", 8000)
+	defer d.Cleanup()
+	runCmd(t, d, "curtail", 2000)
+
+	w := mb.snapshot()
+	if len(w) != 2 {
+		t.Fatalf("expected 2 register slots, got %d", len(w))
+	}
+	if w[0] != (writeOp{Addr: 61440, Value: 1}) {
+		t.Errorf("F000 (enable): got %+v, want {61440, 1}", w[0])
+	}
+	if w[1] != (writeOp{Addr: 61441, Value: 25}) {
+		t.Errorf("F001 (limit): got %+v, want {61441, 25}", w[1])
+	}
+}

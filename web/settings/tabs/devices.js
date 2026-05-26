@@ -5,6 +5,16 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function catalogEntryForLua(lua) {
+    return lua ? (S.catalogByLua || {})[lua] : null;
+  }
+
+  function catalogHasCapability(lua, capability) {
+    var entry = catalogEntryForLua(lua);
+    var caps = (entry && entry.capabilities) || [];
+    return caps.indexOf(capability) >= 0;
+  }
+
   S.tabs.devices = {
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
@@ -31,16 +41,17 @@
         var modbus = cap.modbus || d.modbus;
         var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
         var driverFile = d.lua || "(none)";
+        var supportsBattery = catalogHasCapability(d.lua, "battery");
         html += '<div class="device-item">' +
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
-          '<span style="color:var(--text-dim);font-size:0.75rem">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
+          '<span class="device-meta">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
-          '<div class="field-row"><div>' +
+          '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
-          '</div><div>' +
+          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
           '</div></div>' +
@@ -127,6 +138,9 @@
             '</label>' +
             '</fieldset>';
         }
+        // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
+        // Filled by the after() pass once /api/drivers/catalog has resolved.
+        html += '<div class="drv-secrets-slot" data-driver-idx="' + idx + '"></div>';
         if (isCloudDriver) {
           var cfg = d.config || {};
           var hasPw = d.has_password === true;
@@ -155,6 +169,11 @@
             '<span id="ev-connect-status-' + idx + '" style="font-size:0.8rem;color:var(--text-dim)"></span>' +
             '</fieldset>';
         }
+        html += '<div class="driver-test-panel">' +
+          '<button class="btn-add driver-test-btn" type="button" data-driver-idx="' + idx + '">Test connection</button>' +
+          '<span class="driver-test-status" data-driver-idx="' + idx + '"></span>' +
+          '<div class="driver-test-output" data-driver-idx="' + idx + '" hidden></div>' +
+          '</div>';
         html += '</div>';
       });
       html += '</div>' +
@@ -166,6 +185,66 @@
     after: function (ctx) {
       var config = ctx.config;
       var bodyEl = ctx.bodyEl;
+      var escHtml = ctx.escHtml;
+
+      function fmtW(v) {
+        if (!Number.isFinite(v)) return "—";
+        return Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " kW" : v.toFixed(0) + " W";
+      }
+
+      function fmtNum(v) {
+        if (!Number.isFinite(v)) return "—";
+        return Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2);
+      }
+
+      function fmtAge(ms) {
+        if (!Number.isFinite(ms) || ms < 0) return "—";
+        var s = Math.floor(ms / 1000);
+        return s < 60 ? s + "s ago" : Math.floor(s / 60) + "m ago";
+      }
+
+      function renderProbeOutput(res) {
+        var readings = res.readings || res.Readings || [];
+        var metrics = res.metrics || res.Metrics || [];
+        var health = res.health || res.Health || {};
+        var identity = res.identity || res.Identity || {};
+        var html = '<div class="driver-test-kv">';
+        html += '<span>status</span><strong>' + escHtml(res.ok ? "connected" : "failed") + '</strong>';
+        html += '<span>elapsed</span><strong>' + escHtml(String(res.elapsed_ms || res.ElapsedMs || 0)) + ' ms</strong>';
+        if (health.TickCount != null) {
+          html += '<span>ticks</span><strong>' + escHtml(String(health.TickCount)) + '</strong>';
+        }
+        if (identity.make || identity.sn || identity.endpoint) {
+          html += '<span>identity</span><strong>' + escHtml([identity.make, identity.sn, identity.endpoint].filter(Boolean).join(" · ")) + '</strong>';
+        }
+        html += '</div>';
+        if (res.error) {
+          html += '<div class="driver-test-error">' + escHtml(res.error) + '</div>';
+        }
+        if (readings.length) {
+          html += '<div class="driver-test-values">';
+          readings.forEach(function (r) {
+            var soc = r.soc != null ? " · SoC " + (r.soc * 100).toFixed(1) + "%" : "";
+            var age = r.updated_at_ms ? " · " + fmtAge(Date.now() - r.updated_at_ms) : "";
+            html += '<div><span>' + escHtml(r.type) + '</span><strong>' + escHtml(fmtW(r.smoothed_w)) + '</strong><small>raw ' + escHtml(fmtW(r.raw_w)) + soc + age + '</small></div>';
+          });
+          html += '</div>';
+        }
+        if (metrics.length) {
+          html += '<div class="driver-test-metrics">';
+          metrics.slice(0, 12).forEach(function (m) {
+            html += '<span>' + escHtml(m.name) + '</span><strong>' + escHtml(fmtNum(m.value)) + '</strong>';
+          });
+          if (metrics.length > 12) {
+            html += '<span>more</span><strong>' + escHtml(String(metrics.length - 12)) + '</strong>';
+          }
+          html += '</div>';
+        }
+        if (!readings.length && !metrics.length && !res.error) {
+          html += '<div class="driver-test-empty">No values returned.</div>';
+        }
+        return html;
+      }
 
       // Driver catalog picker — fetch async, render into select.
       fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -181,6 +260,55 @@
         // catalog-driven driver kinds (e.g. "vehicle") on re-renders
         // without waiting for the fetch to resolve again.
         S.catalogByLua = byLua;
+        // Populate per-driver secret inputs (api_token, etc.) using the
+        // catalog's config_secrets list. Each input uses the standard
+        // data-path="drivers.<idx>.config.<key>" so the settings shell
+        // saves it back into config.drivers[idx].config[key] like any
+        // other form field. Empty existing values render as empty
+        // password inputs; the `has_<key>` mirror for masked-saved
+        // semantics is intentionally not modeled here — operators can
+        // re-enter the token if they need to rotate it.
+        bodyEl.querySelectorAll(".drv-secrets-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          var entry = byLua[d.lua];
+          var secrets = (entry && entry.config_secrets) || [];
+          if (secrets.length === 0) return;
+          var dcfg = d.config || {};
+          var fs = '<fieldset><legend>Secrets</legend>';
+          secrets.forEach(function (key) {
+            // Title-case, keep the raw key for the data-path attribute.
+            // BOTH go through ctx.escHtml — config_secrets ultimately
+            // comes from driver-authored Lua and a hostile/malformed
+            // key containing < or > would otherwise be parsed as
+            // markup when we innerHTML this fieldset. Same for the
+            // value-readback branch (paranoia: the masked placeholder
+            // is server-controlled, but a downstream change might
+            // make this user-controlled).
+            var label = key.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+            // Render the input EMPTY regardless of stored value — the
+            // value coming back from /api/config is the masked
+            // placeholder anyway (api masks driver config_secrets on
+            // GET), but inserting any value into a `value=""` attribute
+            // exposes it in the DOM/HTML. Mirror the cloud-password
+            // pattern instead: empty input + saved/missing badge.
+            var saved = typeof dcfg[key] === "string" && dcfg[key] !== "";
+            var badge = saved
+              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+            var placeholder = saved
+              ? "•••••••• (leave empty to keep)"
+              : "Paste from device web UI";
+            fs +=
+              '<label>' + escHtml(label) + ' ' + badge + '</label>' +
+              '<input type="password" autocomplete="off" ' +
+              'data-path="drivers.' + dIdx + '.config.' + escHtml(key) + '" ' +
+              'value="" placeholder="' + escHtml(placeholder) + '">';
+          });
+          fs += '</fieldset>';
+          slot.innerHTML = fs;
+        });
         bodyEl.querySelectorAll(".drv-disable-pv").forEach(function (lbl) {
           var lua = lbl.getAttribute("data-drv-lua");
           var entry = lua && byLua[lua];
@@ -189,6 +317,15 @@
           if (caps.indexOf("meter") >= 0 && caps.indexOf("pv") >= 0) {
             lbl.style.display = "flex";
           }
+        });
+        bodyEl.querySelectorAll(".driver-battery-capacity").forEach(function (wrap) {
+          var lua = wrap.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          var row = wrap.closest(".device-core-row");
+          var caps = (entry && entry.capabilities) || [];
+          var show = caps.indexOf("battery") >= 0;
+          wrap.hidden = !show;
+          if (row) row.classList.toggle("field-row-single", !show);
         });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
@@ -332,7 +469,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ip: ip, vin: vin }),
           }).then(function (r) {
-            return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+            return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
           }).then(function (res) {
             if (!statusEl) return;
             if (res.ok && res.body && res.body.ok) {
@@ -352,6 +489,60 @@
             }
           }).finally(function () {
             vbtn.disabled = false;
+          });
+        });
+      });
+
+      // Generic driver probe. Runs the current row's unsaved config through a
+      // short-lived backend driver instance and dumps live readings/metrics
+      // inline so the operator can verify host, credentials, and protocol.
+      bodyEl.querySelectorAll(".driver-test-btn").forEach(function (testBtn) {
+        testBtn.addEventListener("click", function () {
+          var dIdx = testBtn.dataset.driverIdx;
+          var statusEl = bodyEl.querySelector('.driver-test-status[data-driver-idx="' + dIdx + '"]');
+          var outputEl = bodyEl.querySelector('.driver-test-output[data-driver-idx="' + dIdx + '"]');
+          ctx.captureCurrentTab();
+          var driver = config.drivers && config.drivers[dIdx];
+          if (!driver) return;
+          if (statusEl) {
+            statusEl.textContent = "Testing...";
+            statusEl.className = "driver-test-status";
+          }
+          if (outputEl) {
+            outputEl.hidden = false;
+            outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
+          }
+          testBtn.disabled = true;
+          fetch("/api/drivers/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(driver),
+          }).then(function (r) {
+            return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+          }).then(function (res) {
+            var body = res.body || {};
+            if (!res.ok) {
+              body = { ok: false, error: body.error || ("HTTP " + res.status) };
+            }
+            if (statusEl) {
+              statusEl.textContent = body.ok ? "Connected" : "Failed";
+              statusEl.className = "driver-test-status " + (body.ok ? "ok" : "error");
+            }
+            if (outputEl) {
+              outputEl.hidden = false;
+              outputEl.innerHTML = renderProbeOutput(body);
+            }
+          }).catch(function (e) {
+            if (statusEl) {
+              statusEl.textContent = "Failed";
+              statusEl.className = "driver-test-status error";
+            }
+            if (outputEl) {
+              outputEl.hidden = false;
+              outputEl.innerHTML = '<div class="driver-test-error">' + escHtml(e.message) + '</div>';
+            }
+          }).finally(function () {
+            testBtn.disabled = false;
           });
         });
       });

@@ -160,6 +160,7 @@ No cloud dependency for core operation. Everything runs locally on the Pi. Weath
 - [Setup guide](docs/setup-guide/) — first-time wizard explained step by step
 - [Configuration reference](docs/configuration.md) — every YAML key, with examples
 - [Driver catalog](docs/driver-catalog.md) — supported devices and their config blocks
+- [Device repository plan](docs/device-repository.md) — non-breaking driver repository rollout
 
 **Run it**
 - [Operations](docs/operations.md) — deploy, backup, upgrade, logs

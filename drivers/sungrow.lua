@@ -389,7 +389,8 @@ end
 -- Set battery to a specific charge/discharge power
 -- power_w > 0: charge at power_w watts
 -- power_w < 0: discharge at |power_w| watts
--- power_w = 0: return to self-consumption
+-- power_w = 0: forced idle at 0W. Default/watchdog mode is the only
+-- path that returns the inverter to autonomous self-consumption.
 -- Write order matters. SH-series ignores the force_cmd (13050) and
 -- force_power (13051) registers while EMS mode (13049) is still 0
 -- (self-consumption). Writing power + cmd FIRST and mode LAST means
@@ -408,7 +409,7 @@ function set_battery_power(power_w)
         watts    = math.floor(math.min(math.abs(power_w), 5000))
         want_cmd = 0xBB -- force discharge
     else
-        return set_self_consumption()
+        return set_battery_idle()
     end
 
     -- Order: mode first (so the inverter is ready to latch cmd/power),
@@ -439,6 +440,30 @@ function set_battery_power(power_w)
     if math.abs(ems[3] - watts) > 1 then -- 1W rounding tolerance
         host.log("warn", string.format("Sungrow: force_power not latched (got %dW want %dW)",
             ems[3], watts))
+        return false
+    end
+    return true
+end
+
+-- Hold the battery at 0W without handing control back to the inverter's
+-- autonomous self-consumption mode. Otherwise a 0W planner target can still
+-- let Sungrow charge from PV surplus on its own.
+function set_battery_idle()
+    host.modbus_write(13049, 2)     -- forced mode
+    host.modbus_write(13050, 0xCC)  -- stop forced charge/discharge
+    host.modbus_write(13051, 0)     -- zero power setpoint
+    host.log("debug", "Sungrow: force idle 0W")
+
+    local ok, ems = pcall(host.modbus_read, 13049, 3, "holding")
+    if not ok or not ems then
+        return true -- transient read failure; assume writes are good
+    end
+    if ems[1] ~= 2 then
+        host.log("warn", "Sungrow: EMS idle mode not latched (got " .. tostring(ems[1]) .. " want 2)")
+        return false
+    end
+    if math.abs(ems[3]) > 1 then -- 1W rounding tolerance
+        host.log("warn", string.format("Sungrow: idle force_power not latched (got %dW want 0W)", ems[3]))
         return false
     end
     return true

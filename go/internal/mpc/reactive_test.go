@@ -20,6 +20,8 @@ func buildTestService(t *testing.T, planPV, planLoad float64) (*Service, *teleme
 	}
 	t.Cleanup(func() { st.Close() })
 	tel := telemetry.NewStore()
+	tel.DriverHealthMut("site").RecordSuccess()
+	tel.DriverHealthMut("inverter").RecordSuccess()
 
 	s := &Service{
 		Store:            st,
@@ -50,7 +52,7 @@ func buildTestService(t *testing.T, planPV, planLoad float64) (*Service, *teleme
 // energy. Each tick reuses current telemetry; caller sets it first.
 func driveTicks(s *Service, n int, tickS float64) {
 	// Prime lastTickMs so the first call has a non-zero dt.
-	s.lastTickMs = time.Now().Add(-time.Duration(tickS*float64(time.Second))).UnixMilli()
+	s.lastTickMs = time.Now().Add(-time.Duration(tickS * float64(time.Second))).UnixMilli()
 	for i := 0; i < n; i++ {
 		s.checkDivergence(context.Background())
 		if s.lastReason == "reactive-pv" || s.lastReason == "reactive-load" {
@@ -115,6 +117,50 @@ func TestReactiveRespectsCooldown(t *testing.T) {
 	driveTicks(s, 60, 10)
 	if s.lastReason != "scheduled" {
 		t.Errorf("cooldown should suppress replan; got %q", s.lastReason)
+	}
+}
+
+func TestReactivePVDivergenceIgnoresOfflinePVReading(t *testing.T) {
+	s, tel := buildTestService(t, 0, 500)
+	s.LoadDivergenceWh = 0 // isolate the PV signal
+	s.lastReason = "scheduled"
+
+	tel.Update("inverter", telemetry.DerPV, -8000, nil, nil)
+	tel.DriverHealthMut("inverter").SetOffline()
+	tel.Update("site", telemetry.DerMeter, 500, nil, nil)
+	driveTicks(s, 60, 10)
+
+	if s.lastReason != "scheduled" {
+		t.Errorf("offline PV reading must not trigger reactive replan, got %q", s.lastReason)
+	}
+}
+
+func TestReactiveLoadDivergenceIgnoresOfflineBatteryReading(t *testing.T) {
+	s, tel := buildTestService(t, 0, 500)
+	s.PVDivergenceWh = 0 // isolate the load signal
+	s.lastReason = "scheduled"
+
+	tel.Update("site", telemetry.DerMeter, 500, nil, nil)
+	tel.Update("bat-offline", telemetry.DerBattery, -4000, nil, nil)
+	tel.DriverHealthMut("bat-offline").SetOffline()
+	driveTicks(s, 60, 10)
+
+	if s.lastReason != "scheduled" {
+		t.Errorf("offline battery reading must not inflate load divergence, got %q", s.lastReason)
+	}
+}
+
+func TestReactiveLoadDivergenceSkipsOfflineSiteMeter(t *testing.T) {
+	s, tel := buildTestService(t, 0, 500)
+	s.PVDivergenceWh = 0
+	s.lastReason = "scheduled"
+
+	tel.Update("site", telemetry.DerMeter, 5000, nil, nil)
+	tel.DriverHealthMut("site").SetOffline()
+	driveTicks(s, 60, 10)
+
+	if s.lastReason != "scheduled" {
+		t.Errorf("offline site meter must not drive load divergence, got %q", s.lastReason)
 	}
 }
 

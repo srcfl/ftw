@@ -8,8 +8,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -61,6 +63,62 @@ var errRedirectsForbidden = errors.New("redirects disabled")
 // vehicle_data responses are typically 5-15 KB; 1 MB is pessimistic
 // headroom. Prevents a malicious proxy from stalling the handler.
 const maxVerifyBody = 1 << 20
+
+// verifyMinInterval is the minimum gap between consecutive
+// /api/drivers/verify_tesla calls for the SAME vin. Anything closer
+// gets a 429. The aim is to make this endpoint useless as a "keep my
+// car awake" pump for a same-origin XSS or a tab the operator left
+// open: each call costs the vehicle's 12 V battery a measurable amount
+// of energy when wakeup=true is attached.
+const verifyMinInterval = 30 * time.Second
+
+// verifyWakeupCooldown gates the `wakeup=true` query parameter. The
+// first call (or one issued ≥ this far after the previous) wakes the
+// car over BLE; calls inside the window omit wakeup=true and the
+// proxy serves cached data. The user-facing flow ("press Verify")
+// works either way — the proxy cache is fresh enough to confirm
+// reachability + correct VIN — but the BLE radio doesn't get hammered.
+const verifyWakeupCooldown = 5 * time.Minute
+
+// verifyTracker is a small per-vin rate-limit + last-wakeup tracker.
+// Persists for the process lifetime; resets on restart, which is fine
+// because operators can always wait 30 s if they really need to retry.
+var verifyTracker = struct {
+	mu          sync.Mutex
+	lastCall    map[string]time.Time
+	lastWakeup  map[string]time.Time
+}{
+	lastCall:   map[string]time.Time{},
+	lastWakeup: map[string]time.Time{},
+}
+
+// shouldWakeup returns true if this verify call should attach
+// wakeup=true. Updates lastWakeup as a side effect when it returns
+// true. Holds the tracker lock briefly.
+func shouldWakeup(vin string, now time.Time) bool {
+	verifyTracker.mu.Lock()
+	defer verifyTracker.mu.Unlock()
+	prev, ok := verifyTracker.lastWakeup[vin]
+	if !ok || now.Sub(prev) >= verifyWakeupCooldown {
+		verifyTracker.lastWakeup[vin] = now
+		return true
+	}
+	return false
+}
+
+// rateLimitVerify returns a non-nil time.Duration when the call is too
+// soon and should be rejected; the duration is how long the caller
+// must wait. Updates lastCall on success.
+func rateLimitVerify(vin string, now time.Time) (time.Duration, bool) {
+	verifyTracker.mu.Lock()
+	defer verifyTracker.mu.Unlock()
+	prev, ok := verifyTracker.lastCall[vin]
+	if ok && now.Sub(prev) < verifyMinInterval {
+		return verifyMinInterval - now.Sub(prev), false
+	}
+	verifyTracker.lastCall[vin] = now
+	return 0, true
+}
 
 // validateProxyIP accepts "host" or "host:port" where host is an IPv4
 // literal in RFC1918 space. Hostnames are rejected — we want no DNS
@@ -137,14 +195,27 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := fmt.Sprintf("http://%s:%d/api/1/vehicles/%s/vehicle_data?endpoints=charge_state&wakeup=true",
+	now := time.Now()
+	if wait, ok := rateLimitVerify(vin, now); !ok {
+		writeJSON(w, 429, verifyTeslaResponse{
+			Error: fmt.Sprintf("too many verify attempts — wait %d s before retrying",
+				int(wait.Seconds())+1),
+		})
+		return
+	}
+
+	wakeup := shouldWakeup(vin, now)
+	urlStr := fmt.Sprintf("http://%s:%d/api/1/vehicles/%s/vehicle_data?endpoints=charge_state",
 		host, port, vin)
+	if wakeup {
+		urlStr += "&wakeup=true"
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
-		writeJSON(w, 500, verifyTeslaResponse{Error: "build request: " + err.Error(), URL: url})
+		writeJSON(w, 500, verifyTeslaResponse{Error: "build request: " + err.Error(), URL: urlStr})
 		return
 	}
 	httpReq.Header.Set("Accept", "application/json")
@@ -160,7 +231,21 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		writeJSON(w, 200, verifyTeslaResponse{Error: "request failed: " + err.Error(), URL: url})
+		// CheckRedirect rejection wraps errRedirectsForbidden in a
+		// *url.Error whose .Err carries the upstream Location header —
+		// reflecting that back to the caller would leak the redirect
+		// target. Detect the wrapped sentinel and replace with a fixed
+		// message. All other transport errors (timeout, conn refused,
+		// TLS) are safe to surface verbatim — they don't carry
+		// upstream-controlled content.
+		if isRedirectError(err) {
+			writeJSON(w, 200, verifyTeslaResponse{
+				Error: "proxy attempted a redirect (refused) — TeslaBLEProxy should respond directly",
+				URL:   urlStr,
+			})
+			return
+		}
+		writeJSON(w, 200, verifyTeslaResponse{Error: "request failed: " + err.Error(), URL: urlStr})
 		return
 	}
 	defer resp.Body.Close()
@@ -168,7 +253,7 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode == http.StatusRequestTimeout { // 408: car asleep
 		writeJSON(w, 200, verifyTeslaResponse{
 			Error:  "vehicle asleep (408) — the proxy reached your car but it did not wake in time. Try again in a few seconds.",
-			URL:    url,
+			URL:    urlStr,
 			Status: resp.StatusCode,
 		})
 		return
@@ -179,7 +264,7 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 		// metadata-service tokens on a successful SSRF hop. Fixed message.
 		writeJSON(w, 200, verifyTeslaResponse{
 			Error:  fmt.Sprintf("HTTP %d from proxy", resp.StatusCode),
-			URL:    url,
+			URL:    urlStr,
 			Status: resp.StatusCode,
 		})
 		return
@@ -212,7 +297,7 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxVerifyBody)).Decode(&parsed); err != nil {
 		writeJSON(w, 200, verifyTeslaResponse{
-			Error: "decode failed (upstream response not recognizable JSON)", URL: url, Status: resp.StatusCode,
+			Error: "decode failed (upstream response not recognizable JSON)", URL: urlStr, Status: resp.StatusCode,
 		})
 		return
 	}
@@ -226,13 +311,13 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 	if cs.BatteryLevel == 0 && cs.ChargeLimitSoC == 0 && cs.ChargingState == "" {
 		writeJSON(w, 200, verifyTeslaResponse{
 			Error: "proxy returned 200 but no charge_state fields — VIN may not be paired",
-			URL:   url, Status: resp.StatusCode,
+			URL:   urlStr, Status: resp.StatusCode,
 		})
 		return
 	}
 	writeJSON(w, 200, verifyTeslaResponse{
 		OK:             true,
-		URL:            url,
+		URL:            urlStr,
 		Status:         resp.StatusCode,
 		SoCPct:         cs.BatteryLevel,
 		ChargeLimitPct: cs.ChargeLimitSoC,
@@ -241,27 +326,52 @@ func (s *Server) handleVerifyTesla(w http.ResponseWriter, r *http.Request) {
 }
 
 // splitHostPort parses "host" or "host:port" and returns the port
-// defaulting to `def` when absent. Copes with IPv4 and bracketed
-// IPv6 (though brackets aren't expected in the typical config).
+// defaulting to `def` when no port is present. Uses net.SplitHostPort
+// so bracketed IPv6 + edge cases behave like the rest of the stdlib.
+// An explicit ":0", non-numeric, or out-of-range port falls back to
+// def — there's no use case for port 0 in this endpoint and the
+// operator probably meant the default.
 func splitHostPort(s string, def int) (string, int) {
-	// Only split on the LAST colon that's followed by digits — avoids
-	// eating a port out of an IPv6 without brackets. Good enough for
-	// the LAN-only case this endpoint serves.
-	i := strings.LastIndex(s, ":")
-	if i < 0 {
+	if !strings.Contains(s, ":") {
 		return s, def
 	}
-	host := s[:i]
-	portStr := s[i+1:]
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return s, def
+	}
+	if portStr == "" {
+		return host, def
+	}
 	var port int
 	for _, r := range portStr {
 		if r < '0' || r > '9' {
-			return s, def
+			return host, def
 		}
 		port = port*10 + int(r-'0')
+		if port > 65535 {
+			return host, def
+		}
 	}
 	if port == 0 {
-		return s, def
+		return host, def
 	}
 	return host, port
+}
+
+// isRedirectError reports whether the error returned by http.Client.Do
+// originated from our CheckRedirect rejection (vs a transport-level
+// failure). The stdlib wraps the rejection in *url.Error whose Unwrap
+// returns errRedirectsForbidden.
+func isRedirectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errRedirectsForbidden) {
+		return true
+	}
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return errors.Is(ue.Err, errRedirectsForbidden)
+	}
+	return false
 }

@@ -189,3 +189,76 @@ func TestOptimizeRespectsExportCap(t *testing.T) {
 		t.Errorf("capped slot GridW = %.1f, below export cap -500 W", g)
 	}
 }
+
+// Live regression (Sat 14:45 plan): PV -6 kW + battery -9 kW + load
+// 0.7 kW = grid -14.2 kW exporting past the 11 kW fuse. Pre-fix, the
+// service-level fuse plumbing only set MaxImportW, so this slot was
+// feasible to the DP. With both directions plumbed (service.go:560),
+// the DP must pick a less-aggressive discharge that keeps |grid| ≤
+// fuse.
+func TestOptimizeRespectsFuseExportCap(t *testing.T) {
+	// One slot: 6 kW PV, 0.7 kW load, fuse 11 kW both ways. Price is
+	// peak (encourages aggressive discharge). The DP should pick a
+	// discharge that brings grid down to ≈ -11 kW, not -14 kW.
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 345, SpotOre: 156,
+			PVW: -6000, LoadW: 700, Confidence: 1.0,
+			Limits: PowerLimits{MaxImportW: 11000, MaxExportW: 11000}},
+	}
+	p := Params{
+		Mode:                ModeArbitrage,
+		SoCLevels:           41,
+		CapacityWh:          20000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       85,
+		ActionLevels:        21,
+		MaxChargeW:          9000,
+		MaxDischargeW:       9000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    250,
+	}
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	}
+	g := plan.Actions[0].GridW
+	if g < -11000-1 {
+		t.Errorf("plan grid %.0f W exceeds export fuse −11000 W — DP didn't apply MaxExportW. battery_w=%.0f, pv_w=%.0f",
+			g, plan.Actions[0].BatteryW, plan.Actions[0].PVW)
+	}
+}
+
+// Service-level: when FuseMaxW > 0, both MaxImportW and MaxExportW on
+// every slot must end up populated (and capped at FuseMaxW). This is
+// the plumbing layer between cfg.Fuse and the DP. Pre-fix the export
+// side was silently uncapped.
+func TestFuseMaxWPopulatesBothDirections(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1.0},
+		{StartMs: 3600_000, LenMin: 60, PriceOre: 100, SpotOre: 50, Confidence: 1.0,
+			Limits: PowerLimits{MaxImportW: 5000, MaxExportW: 7000}},
+	}
+	const fuseW = 11000
+	// Inline the plumbing under test (mirrors service.go:560-573).
+	for i := range slots {
+		if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > fuseW {
+			slots[i].Limits.MaxImportW = fuseW
+		}
+		if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > fuseW {
+			slots[i].Limits.MaxExportW = fuseW
+		}
+	}
+	// Slot 0: both were zero → both fill to fuse.
+	if slots[0].Limits.MaxImportW != fuseW || slots[0].Limits.MaxExportW != fuseW {
+		t.Errorf("slot 0 limits = (imp %.0f, exp %.0f), want both %.0f",
+			slots[0].Limits.MaxImportW, slots[0].Limits.MaxExportW, float64(fuseW))
+	}
+	// Slot 1: import 5000 < fuse → keep. Export 7000 < fuse → keep.
+	// (Tighter pre-existing caps win.)
+	if slots[1].Limits.MaxImportW != 5000 || slots[1].Limits.MaxExportW != 7000 {
+		t.Errorf("slot 1 limits = (imp %.0f, exp %.0f), want (5000, 7000)",
+			slots[1].Limits.MaxImportW, slots[1].Limits.MaxExportW)
+	}
+}

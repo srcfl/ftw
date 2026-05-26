@@ -14,7 +14,8 @@ One-shot autodiscovery publisher + periodic state pump + command subscriber, all
 ## Public API surface
 
 - `Start(cfg, tel, ctrl, ctrlMu, driverNames, cb) (*Bridge, error)` — connects, publishes discovery, starts the publish loop.
-- `(*Bridge).Stop()` — closes the stop channel, waits for the loop, disconnects with 500 ms quiesce.
+- `(*Bridge).Reload(newCfg, driverNames) error` — tears down the current paho client + publish loop, swaps `cfg`/`driverNames` under `mu`, and re-connects. Diagnostic counters reset because the new connection is its own thing — operators reading `LastPublishMs` / `SensorsAnnounced` after a reload should see "fresh connection" semantics. Errors if the bridge has been Stop'd (lifecycle is one-shot — the configreload applier resurrects HA by calling `ha.Start` instead, see `cmd/forty-two-watts/main.go`).
+- `(*Bridge).Stop()` — closes the stop channel, waits for the loop, disconnects with 500 ms quiesce. Idempotent (`stopped` flag).
 - `(*Bridge).IsConnected() bool` / `BrokerAddr() string` / `LastPublishMs() int64` / `SensorsAnnounced() int` — diagnostics consumed by `/api/ha/status` in `../api`.
 
 ## How it talks to neighbors
@@ -34,4 +35,5 @@ Reads `../telemetry.Store` via `Get(driver, DerMeter/PV/Battery)` and `ReadingsB
 - **Do NOT block in a subscribe callback.** The callbacks in `subscribeCommands` must return fast; if a callback needs heavy work, dispatch it onto a goroutine (current callbacks are atomic control-state setters, which is fine).
 - **Do NOT drop the site sign convention when adding a sensor.** `publishState` pulls `SmoothedW` values that are already signed per the convention; HA's `device_class: power` expects those signs. Flipping here would confuse every existing dashboard.
 - **Do NOT change `deviceID` or `topicPrefix` casually.** HA devices and retained discovery topics are keyed on them; a rename orphans every existing HA entity. Migrate with intention.
+- **Do NOT bypass `lifecycleMu` from inside Reload / Stop.** The applier in `cmd/forty-two-watts/main.go` can fire Reload twice in rapid succession (debounced editor save followed by an API POST, say). `lifecycleMu` is what prevents the second tick from interleaving its `teardown()` with the first one's `connectAndStart()`. Touching it requires keeping that ordering invariant.
 - **Do NOT add QoS > 0 for telemetry.** Publish at QoS 0; the 5 s cadence makes QoS 1 storage-of-unacked messages an unnecessary memory hazard on long reconnects. Retained discovery is the exception (line 189).

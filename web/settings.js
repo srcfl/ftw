@@ -83,14 +83,111 @@
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
         return r.json();
       })
-      .then(function () {
+      .then(function (res) {
         setStatus("Saved ✓", "success");
         setTimeout(function () { setStatus(""); }, 2000);
+        // Server tells us when the change touched a section that the
+        // configreload watcher can't apply in flight (state.path,
+        // api.port, …). Surface that as a dialog so the operator
+        // doesn't walk away thinking their change took effect when
+        // it didn't. Almost every field is hot-reloaded; the dialog
+        // is meant to fire rarely.
+        if (res && res.restart_required) {
+          showRestartModal(res.restart_reasons || []);
+        }
       })
       .catch(function (e) {
         setStatus("Save failed: " + e.message, "error");
       });
   });
+
+  // ---- Restart-required modal ----
+
+  function showRestartModal(reasons) {
+    var modalEl = document.getElementById("restart-modal");
+    var listEl = document.getElementById("restart-reasons");
+    var laterBtn = document.getElementById("restart-later");
+    var nowBtn = document.getElementById("restart-now");
+    var progressEl = document.getElementById("restart-progress");
+    var progressTextEl = document.getElementById("restart-progress-text");
+    if (!modalEl || !listEl || !laterBtn || !nowBtn) return;
+
+    listEl.innerHTML = "";
+    if (reasons.length === 0) {
+      var li = document.createElement("li");
+      li.textContent = "(no specific reason reported)";
+      li.style.color = "var(--text-dim)";
+      listEl.appendChild(li);
+    } else {
+      reasons.forEach(function (reason) {
+        var li = document.createElement("li");
+        li.textContent = reason;
+        listEl.appendChild(li);
+      });
+    }
+
+    progressEl.classList.add("hidden");
+    progressTextEl.textContent = "Restarting…";
+    nowBtn.disabled = false;
+    laterBtn.disabled = false;
+    modalEl.classList.remove("hidden");
+
+    laterBtn.onclick = function () { modalEl.classList.add("hidden"); };
+    nowBtn.onclick = function () { triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl); };
+  }
+
+  function triggerRestart(modalEl, nowBtn, laterBtn, progressEl, progressTextEl) {
+    nowBtn.disabled = true;
+    laterBtn.disabled = true;
+    progressEl.classList.remove("hidden");
+    progressTextEl.textContent = "Restarting…";
+
+    fetch("/api/restart", { method: "POST" })
+      .then(function (r) {
+        if (!r.ok) {
+          return r.json()
+            .catch(function () { return {}; })
+            .then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
+        }
+        // Server is on its way down. Wait a moment for the process to
+        // exit, then poll /api/health until it answers again.
+        progressTextEl.textContent = "Waiting for service…";
+        setTimeout(function () { pollHealth(progressTextEl); }, 1500);
+      })
+      .catch(function (e) {
+        nowBtn.disabled = false;
+        laterBtn.disabled = false;
+        progressEl.classList.add("hidden");
+        alert("Restart failed: " + e.message);
+      });
+  }
+
+  function pollHealth(progressTextEl) {
+    var startedAt = Date.now();
+    var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
+    function tick() {
+      // Cache-bust so an intermediate proxy can't lie about reachability.
+      fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
+        .then(function (r) {
+          if (r.ok) {
+            progressTextEl.textContent = "Reloading…";
+            // Hard reload so any new static assets (post-update) are
+            // picked up — same dance ftw-update-check.js does.
+            setTimeout(function () { window.location.reload(); }, 400);
+            return;
+          }
+          throw new Error("HTTP " + r.status);
+        })
+        .catch(function () {
+          if (Date.now() - startedAt > TIMEOUT_MS) {
+            progressTextEl.textContent = "Service is taking longer than usual — reload manually when it's back.";
+            return;
+          }
+          setTimeout(tick, 1000);
+        });
+    }
+    tick();
+  }
 
   function setStatus(msg, kind) {
     statusEl.textContent = msg || "";

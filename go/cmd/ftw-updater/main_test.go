@@ -69,7 +69,18 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		statusPath:  filepath.Join(dir, "state.json"),
 		runner:      runner.run,
 	}
+	writeCompose(t, s.composeFile, `services:
+  forty-two-watts:
+    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
+`)
 	return s, runner
+}
+
+func writeCompose(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSkipPull_BypassesPullStep(t *testing.T) {
@@ -218,6 +229,28 @@ func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
 		if !found {
 			t.Errorf("call %d missing FTW_IMAGE_TAG=v0.44.0; env=%v", i, env)
 		}
+	}
+}
+
+func TestHandleUpdate_FailsWhenComposeDoesNotReadImageTag(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  forty-two-watts:
+    image: ghcr.io/frahlg/forty-two-watts:latest
+`)
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != 202 {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	st := waitForState(t, s, "failed")
+	if !strings.Contains(st.Message, "FTW_IMAGE_TAG") {
+		t.Fatalf("failure should explain stale compose image pinning, got %+v", st)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("preflight failure should not call docker, got %v", calls)
 	}
 }
 

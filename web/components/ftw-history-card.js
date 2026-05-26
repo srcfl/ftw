@@ -46,6 +46,41 @@ const DEFAULT_ACCENT = {
   bat_discharged:"var(--cyan-dim, var(--cyan))",
 };
 
+// Several history cards often flip Week/Month together. Share the
+// expensive daily-energy request across siblings so Month does not fan
+// out into four identical 30-day queries and leave tiles painting at
+// different times.
+const DAILY_CACHE_TTL_MS = 15000;
+const dailyFetchCache = new Map(); // days -> { at, data?, promise? }
+
+function fetchDailyEnergy(days) {
+  const now = Date.now();
+  const cached = dailyFetchCache.get(days);
+  if (cached && cached.data && now - cached.at < DAILY_CACHE_TTL_MS) {
+    return Promise.resolve(cached.data);
+  }
+  if (cached && cached.promise && now - cached.at < DAILY_CACHE_TTL_MS) {
+    return cached.promise;
+  }
+
+  const promise = fetch("/api/energy/daily?days=" + days)
+    .then((r) => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then((resp) => {
+      dailyFetchCache.set(days, { at: Date.now(), data: resp });
+      return resp;
+    })
+    .catch((err) => {
+      const cur = dailyFetchCache.get(days);
+      if (cur && cur.promise === promise) dailyFetchCache.delete(days);
+      throw err;
+    });
+  dailyFetchCache.set(days, { at: now, promise });
+  return promise;
+}
+
 class FtwHistoryCard extends FtwElement {
   static styles = `
     :host { display: block; }
@@ -186,7 +221,6 @@ class FtwHistoryCard extends FtwElement {
     this._totalEl = null;
     this._toggleEl = null;
     this._reqSeq = 0;
-    this._abort = null;
   }
 
   connectedCallback() {
@@ -196,7 +230,6 @@ class FtwHistoryCard extends FtwElement {
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
-    if (this._abort) { this._abort.abort(); this._abort = null; }
   }
 
   attributeChangedCallback(name) {
@@ -308,19 +341,14 @@ class FtwHistoryCard extends FtwElement {
     const field  = FIELD_BY_METRIC[metric] || "import_wh";
     const days   = this._daysFor(this._range);
 
-    // Cancel any in-flight request and bump the sequence so stale
-    // responses arriving after a Week/Month toggle don't overwrite the
-    // newer chart. Both guards matter: AbortController stops the older
-    // network request, and the seq check stops a response that resolved
-    // just before we aborted.
-    if (this._abort) this._abort.abort();
-    this._abort = new AbortController();
+    // Bump the sequence so stale responses arriving after a Week/Month
+    // toggle don't overwrite the newer chart. The shared request cache
+    // intentionally keeps the underlying fetch alive for sibling cards;
+    // the per-card seq guard decides whether a response still applies.
     const seq = ++this._reqSeq;
-    const signal = this._abort.signal;
 
     this._chart.setAttribute("loading", "true");
-    fetch("/api/energy/daily?days=" + days, { signal })
-      .then((r) => r.json())
+    fetchDailyEnergy(days)
       .then((resp) => {
         if (seq !== this._reqSeq) return;
         const buckets = (resp && resp.days) || [];

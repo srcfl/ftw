@@ -142,6 +142,8 @@ function driver_poll()
     local meter_v_sf     = read_sf(40249)
     local meter_hz_sf    = read_sf(40251)
     local meter_w_sf     = read_sf(40256)
+    local meter_va_sf    = read_sf(40261) -- SunSpec model 213 offset 27
+    local meter_var_sf   = read_sf(40266) -- SunSpec model 213 offset 32
     local meter_energy_sf = read_sf(40288)
 
     -- ---- Battery Values ----
@@ -221,13 +223,25 @@ function driver_poll()
 
     -- ---- Meter Values ----
 
-    -- Per-phase current: 40237-40239, I16 each
+    -- Per-phase current: 40237-40239, I16 each. Pixii's amperage
+    -- registers are magnitude-only (the firmware reports the absolute
+    -- value regardless of direction), so we derive the SIGN from the
+    -- signed per-phase power read in the same atomic poll below
+    -- (l1_w / l2_w / l3_w decode immediately after this block from
+    -- contiguous registers — same Modbus snapshot, same instant).
+    -- Final emit is `sign(l*_w) * |l*_a|`, giving the UI the
+    -- direction it needs without the Pixii's own missing sign bit.
+    --
+    -- Fuse safety: dispatch.go:1561 takes math.Abs() before clamping,
+    -- so signed amps here do NOT weaken the per-phase fuse guard —
+    -- the guard fires on magnitude regardless of direction, exactly
+    -- as before.
     local ok_la, la_regs = pcall(host.modbus_read, 40237, 3, "holding")
-    local l1_a, l2_a, l3_a = 0, 0, 0
+    local l1_a_mag, l2_a_mag, l3_a_mag = 0, 0, 0
     if ok_la and la_regs then
-        l1_a = scale(host.decode_i16(la_regs[1]), meter_a_sf)
-        l2_a = scale(host.decode_i16(la_regs[2]), meter_a_sf)
-        l3_a = scale(host.decode_i16(la_regs[3]), meter_a_sf)
+        l1_a_mag = math.abs(scale(host.decode_i16(la_regs[1]), meter_a_sf))
+        l2_a_mag = math.abs(scale(host.decode_i16(la_regs[2]), meter_a_sf))
+        l3_a_mag = math.abs(scale(host.decode_i16(la_regs[3]), meter_a_sf))
     end
 
     -- Per-phase voltage: 40242-40244, I16 each
@@ -261,6 +275,47 @@ function driver_poll()
         l2_w = scale(host.decode_i16(lpw_regs[2]), meter_w_sf)
         l3_w = scale(host.decode_i16(lpw_regs[3]), meter_w_sf)
     end
+
+    -- Reactive-power diagnostics: total VA and total VAR (model 213
+    -- offsets 23 + 28 → 40257 / 40262, both I16). Per-phase variants
+    -- (offsets 24-26 / 29-31) are the SunSpec "not implemented" sentinel
+    -- 0x8000 on Pixii — confirmed live 2026-05-06 — so we don't bother
+    -- reading them. Total registers usually ARE populated.
+    --
+    -- Sentinel-aware: SunSpec uses 0x8000 (= -32768 i16) for "register
+    -- not implemented". Filter before emit so the TS DB doesn't get
+    -- polluted with constant `-32768 × 10^sf` rows that look like real
+    -- measurements.
+    local function i16_present(reg)
+        return reg ~= 0x8000
+    end
+    local ok_va, va_regs = pcall(host.modbus_read, 40257, 1, "holding")
+    local meter_va, meter_va_ok = 0, false
+    if ok_va and va_regs and i16_present(va_regs[1]) then
+        meter_va = scale(host.decode_i16(va_regs[1]), meter_va_sf)
+        meter_va_ok = true
+    end
+    local ok_var, var_regs = pcall(host.modbus_read, 40262, 1, "holding")
+    local meter_var, meter_var_ok = 0, false
+    if ok_var and var_regs and i16_present(var_regs[1]) then
+        meter_var = scale(host.decode_i16(var_regs[1]), meter_var_sf)
+        meter_var_ok = true
+    end
+
+    -- Compose signed per-phase current = sign(power) × |amperage|.
+    -- A small dead-band around 0 W avoids flipping the sign when a
+    -- near-zero phase reads as +0.4 W vs -0.4 W between polls. With
+    -- |W| < 1, treat the phase as zero-amp regardless of magnitude
+    -- (consumer current at <1 W on 230 V is 4 mA — below register
+    -- resolution anyway).
+    local function signed_a(mag, w)
+        if math.abs(w) < 1 then return 0 end
+        if w < 0 then return -mag end
+        return mag
+    end
+    local l1_a = signed_a(l1_a_mag, l1_w)
+    local l2_a = signed_a(l2_a_mag, l2_w)
+    local l3_a = signed_a(l3_a_mag, l3_w)
 
     -- Export energy: 40272-40275, U32 BE (two regs consumed for the value)
     local ok_exp, exp_regs = pcall(host.modbus_read, 40272, 4, "holding")
@@ -302,6 +357,8 @@ function driver_poll()
     host.emit_metric("meter_l1_a", l1_a)
     host.emit_metric("meter_l2_a", l2_a)
     host.emit_metric("meter_l3_a", l3_a)
+    if meter_va_ok  then host.emit_metric("meter_va",  meter_va)  end
+    if meter_var_ok then host.emit_metric("meter_var", meter_var) end
     host.emit_metric("grid_hz",    meter_hz)
 
     return 5000
@@ -330,6 +387,9 @@ end
 
 local function write_setpoint_w(pixii_w)
     local hi, lo = encode_i32_be(pixii_w)
+    host.log("info", "Pixii: modbus_write_multi addr=" .. REG_SETPOINT_HI
+        .. " hi=" .. tostring(hi) .. " lo=" .. tostring(lo)
+        .. " (pixii_w=" .. tostring(pixii_w) .. ")")
     local err = host.modbus_write_multi(REG_SETPOINT_HI, { hi, lo })
     if err ~= nil and err ~= "" then
         host.log("warn", "Pixii: setpoint write failed: " .. tostring(err))
@@ -346,7 +406,7 @@ end
 local function set_battery_power(power_w)
     -- Flip EMS → generator frame.
     local pixii_w = -power_w
-    host.log("debug", "Pixii: setpoint ems_w=" .. tostring(power_w)
+    host.log("info", "Pixii: setpoint ems_w=" .. tostring(power_w)
         .. " pixii_w=" .. tostring(pixii_w))
     return write_setpoint_w(pixii_w)
 end

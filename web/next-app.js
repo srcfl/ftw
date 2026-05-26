@@ -4,6 +4,18 @@
   "use strict";
 
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
+
+  // FLOW_IDLE_KW — magnitude below which a planet is treated as
+  // "idle / balanced" for label + colour purposes. Mirror of
+  // ftw-energy-flow.js's FLOW_IDLE_W (which sets window.FTW_FLOW_IDLE_W
+  // when its module loads). Read at use-time so the module-set value
+  // wins; literal `42` is the no-modules fallback. Inclusive
+  // comparison everywhere: |kW| <= threshold ⇒ idle.
+  function flowIdleKw() {
+    const w = (typeof window !== "undefined" && window.FTW_FLOW_IDLE_W) || 42;
+    return w / 1000;
+  }
+  function isFlowIdle(kw) { return Math.abs(kw) <= flowIdleKw(); }
   const CHART_POINTS = 360;          // up to 30 min of points (server pushes every ~5s)
   const CHART_RANGE_MS = {           // visible time window per range option
     "5m": 5 * 60 * 1000,
@@ -13,6 +25,15 @@
     "24h": 24 * 60 * 60 * 1000,
     "3d": 3 * 24 * 60 * 60 * 1000,
   };
+  const CHART_SMOOTH_MS = {
+    "5m": 10 * 1000,
+    "15m": 20 * 1000,
+    "1h": 60 * 1000,
+    "6h": 5 * 60 * 1000,
+    "24h": 15 * 60 * 1000,
+    "3d": 30 * 60 * 1000,
+  };
+  const STATUS_DISPLAY_TAU_MS = 8 * 1000;
   let chartRange = "5m";             // current selected range
   let currentMode = null;
   let animating = true;              // 30fps redraw loop flag
@@ -47,6 +68,20 @@
   // positive = charging). One series per charger so multi-charger
   // homes see each car separately. Shape: { [driverName]: { ev: [...] } }.
   var chartEVs = {};
+  var statusDisplayState = {};
+
+  // Resolve a CSS custom property off :root at call time. Lazy on
+  // purpose: a runtime theme toggle rewrites the oklch values, so we
+  // re-read every paint rather than caching at module load.
+  function cssVar(name) {
+    try {
+      var v = getComputedStyle(document.documentElement)
+        .getPropertyValue(name).trim();
+      return v || null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   // Deterministic color palette for battery series — each driver gets a
   // stable color based on name hash so reload is consistent.
@@ -55,6 +90,10 @@
     "#eab308", "#14b8a6", "#f43f5e", "#a855f7",
   ];
   function batteryColor(name) {
+    // Route the "pixii" driver through the theme's --violet token so
+    // it visibly separates from "laddning bil" (which hashes to the
+    // same purple slot in EV_PALETTE). Other names fall through.
+    if (name === "pixii") return cssVar('--violet') || BATTERY_PALETTE[7];
     var h = 0;
     for (var i = 0; i < name.length; i++) {
       h = ((h << 5) - h + name.charCodeAt(i)) | 0;
@@ -110,6 +149,10 @@
     "#84cc16", "#f43f5e", "#a855f7", "#14b8a6",
   ];
   function evColor(name) {
+    // Route "laddning bil" through the theme's --cyan token so it
+    // doesn't collide with the Pixii battery purple (both hash to
+    // the same purple slot in their respective palettes).
+    if (name === "laddning bil") return cssVar('--cyan') || EV_PALETTE[6];
     var h = 0;
     for (var i = 0; i < name.length; i++) {
       h = ((h << 5) - h + name.charCodeAt(i)) | 0;
@@ -189,6 +232,27 @@
   const peakLimitSlider = $("peak-limit-slider");
   const peakLimitValue = $("peak-limit-value");
   const peakLimitSend = $("peak-limit-send");
+  const peakLimitEnableToggle = $("peak-limit-enabled-toggle");
+  const peakLimitEnableLabel = $("peak-limit-enabled-label");
+  // Dirty-tracking for sliders that POST on click. The poll handler
+  // skips overwrite while dirty so the user's pending edit isn't
+  // silently reverted; the Save button mirrors `dirty` so users get a
+  // visual cue that there's work to commit. Cleared on successful POST.
+  let peakLimitDirty = false;
+  let gridTargetDirty = false;
+  // Last non-zero peak ceiling, remembered so unchecking + rechecking
+  // the enable toggle restores the previous value instead of resetting
+  // to the default. Keyed by localStorage so it survives reloads.
+  function readLastPeakLimitW() {
+    try {
+      const v = localStorage.getItem("ftw-peak-import-ceiling-w");
+      const n = v == null ? null : Number(v);
+      return Number.isFinite(n) && n > 0 ? n : 5000;
+    } catch (e) { return 5000; }
+  }
+  function writeLastPeakLimitW(w) {
+    try { localStorage.setItem("ftw-peak-import-ceiling-w", String(w)); } catch (e) {}
+  }
   const evSlider = $("ev-slider");
   const evValue = $("ev-value");
   const evSend = $("ev-send");
@@ -268,6 +332,139 @@
     if (kwh >= 10) return kwh.toFixed(1) + " kWh";
     return kwh.toFixed(2) + " kWh";
   }
+  function formatSignedWh(wh) {
+    var v = Number(wh) || 0;
+    var abs = Math.abs(v);
+    var sign = v > 0.5 ? "+" : v < -0.5 ? "-" : "±";
+    if (abs >= 1000) return sign + (abs / 1000).toFixed(2) + " kWh";
+    return sign + Math.round(abs) + " Wh";
+  }
+  function formatWhMagnitude(wh) {
+    var abs = Math.abs(Number(wh) || 0);
+    if (abs >= 1000) return (abs / 1000).toFixed(2) + " kWh";
+    return Math.round(abs) + " Wh";
+  }
+
+  // Live-stats strip helpers. signClass picks a colour class based on
+  // direction (import/export for grid, charging/discharging for
+  // battery). Used by the stats strip just above the live power
+  // chart. Threshold matches the live chart's idle band (±10 W) so
+  // tiny noise doesn't flip the colour every poll.
+  function signClass(kind, w) {
+    var v = Number(w) || 0;
+    if (Math.abs(v) <= 10) return "is-neutral";
+    if (kind === "grid") return v > 0 ? "is-import" : "is-export";
+    if (kind === "bat") return v > 0 ? "is-charging" : "is-discharging";
+    return "is-neutral";
+  }
+  function updateLiveStat(key, w, cls) {
+    var el = document.getElementById("live-stat-" + key);
+    if (!el) return;
+    el.textContent = formatW(w);
+    el.className = "live-stat-value " + (cls || "is-neutral");
+  }
+  function updateLiveSocStat(soc) {
+    var el = document.getElementById("live-stat-soc");
+    if (!el) return;
+    if (soc == null || !isFinite(soc)) { el.textContent = "—"; return; }
+    el.textContent = (soc * 100).toFixed(1) + " %";
+    el.className = "live-stat-value is-neutral";
+  }
+  function batteryStateLabel(w) {
+    var watts = Number(w) || 0;
+    var idleW = flowIdleKw() * 1000;
+    if (watts > idleW) return "charging";
+    if (watts < -idleW) return "discharging";
+    return "idle";
+  }
+  function batteryTargetLine(targetW) {
+    if (targetW == null || !isFinite(targetW)) return "";
+    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+  }
+
+  function smoothDisplayNumber(key, value, now) {
+    if (value == null || !isFinite(value)) return value;
+    var prev = statusDisplayState[key];
+    if (!prev || !isFinite(prev.value)) {
+      statusDisplayState[key] = { value: value, ts: now };
+      return value;
+    }
+    var dt = Math.max(0, now - prev.ts);
+    var alpha = 1 - Math.exp(-dt / STATUS_DISPLAY_TAU_MS);
+    var next = prev.value + (value - prev.value) * alpha;
+    statusDisplayState[key] = { value: next, ts: now };
+    return next;
+  }
+
+  function smoothStatusForDisplay(data) {
+    var now = Date.now();
+    var out = Object.assign({}, data);
+    ["grid_w", "pv_w", "bat_w", "ev_w", "ev_charging_w"].forEach(function (field) {
+      if (out[field] != null) out[field] = smoothDisplayNumber("site:" + field, out[field], now);
+    });
+    var drivers = {};
+    var sums = { pv_w: 0, bat_w: 0, ev_w: 0 };
+    var have = { pv_w: false, bat_w: false, ev_w: false };
+    Object.keys(data.drivers || {}).forEach(function (name) {
+      var d = Object.assign({}, data.drivers[name] || {});
+      ["meter_w", "pv_w", "bat_w", "ev_w"].forEach(function (field) {
+        if (d[field] != null) d[field] = smoothDisplayNumber("driver:" + name + ":" + field, d[field], now);
+      });
+      var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      if (online) {
+        ["pv_w", "bat_w", "ev_w"].forEach(function (field) {
+          if (d[field] != null) {
+            sums[field] += d[field] || 0;
+            have[field] = true;
+          }
+        });
+      }
+      drivers[name] = d;
+    });
+    out.drivers = drivers;
+    if (have.pv_w) out.pv_w = sums.pv_w;
+    if (have.bat_w) out.bat_w = sums.bat_w;
+    if (have.ev_w) {
+      out.ev_w = sums.ev_w;
+      out.ev_charging_w = sums.ev_w;
+    }
+    if (out.grid_w != null) {
+      out.load_w = Math.max(0, (out.grid_w || 0) - (out.bat_w || 0) - (out.pv_w || 0) - (out.ev_w || 0));
+    } else if (data.load_w != null) {
+      out.load_w = smoothDisplayNumber("site:load_w", data.load_w, now);
+    }
+    return out;
+  }
+
+  function smoothSeriesForChart(values, timestamps, windowMs) {
+    if (!windowMs || windowMs <= 0 || values.length < 3) return values;
+    var out = new Array(values.length);
+    for (var i = 0; i < values.length; i++) {
+      var t = timestamps[i];
+      var sum = 0;
+      var n = 0;
+      for (var j = i; j >= 0; j--) {
+        if (t - timestamps[j] > windowMs) break;
+        var v = values[j];
+        if (v == null || !isFinite(v)) continue;
+        sum += v;
+        n++;
+      }
+      out[i] = n > 0 ? sum / n : values[i];
+    }
+    return out;
+  }
+
+  // Compact kWh — bubble lines that pack two arrows ("↓ 5.2 ↑ 12") need
+  // tighter formatting than the standalone tile reading. Drops the "kWh"
+  // unit (already implied by the bubble label "kWh today" elsewhere).
+  function fmtKwhShort(kwh) {
+    if (kwh == null || !isFinite(kwh)) return "—";
+    var v = Math.abs(kwh);
+    if (v >= 100) return kwh.toFixed(0);
+    if (v >= 10)  return kwh.toFixed(1);
+    return kwh.toFixed(2);
+  }
 
   function statusClass(status) {
     if (!status) return "status-offline";
@@ -279,6 +476,17 @@
 
   // ---- Render ----
   function render(data) {
+    var batteryTargetsByDriver = {};
+    var totalBatteryTargetW = 0;
+    var hasBatteryTarget = false;
+    (data.dispatch || []).forEach(function (d) {
+      if (!d || !d.driver) return;
+      var target = Number(d.target_w) || 0;
+      batteryTargetsByDriver[d.driver] = target;
+      totalBatteryTargetW += target;
+      hasBatteryTarget = true;
+    });
+
     // Battery presence → body.no-battery toggle. Drives visibility of
     // the "Bat charged" / "Bat discharged" tiles and the Plan chart's
     // Charge / Discharge / SoC legend + drawing layers. Any driver
@@ -303,12 +511,10 @@
     try {
       // Build a {driver → target_w} index from the dispatch array so the
       // per-battery push below doesn't need an inner loop.
-      var targetsByDriver = {};
-      (data.dispatch || []).forEach(function (d) {
-        if (d && d.driver) targetsByDriver[d.driver] = d.target_w || 0;
-      });
-      pushChartData(data, targetsByDriver);
+      pushChartData(data, batteryTargetsByDriver);
     } catch (e) { console.error("pushChartData error:", e); }
+
+    data = smoothStatusForDisplay(data);
 
     // Version (live from API — survives stale browser cache of index.html)
     if (versionEl && data.version) {
@@ -331,6 +537,24 @@
       var t = data.grid_target_w || 0;
       targetDisp.textContent = t === 0 ? "target 0" : "target " + formatW(t);
     }
+    var slotBadge = document.getElementById("grid-slot-badge");
+    if (slotBadge) {
+      var slot = data.energy && data.energy.current_slot;
+      if (slot) {
+        // 15-min settlement: import_wh and export_wh accumulate
+        // SEPARATELY within the slot — the bill is import × import_price
+        // plus export × export_price, never their net. Render both
+        // directions so the operator sees the slot's true exposure.
+        var impWh = Number(slot.import_wh) || 0;
+        var expWh = Number(slot.export_wh) || 0;
+        slotBadge.textContent = "15m ↑" + formatWhMagnitude(impWh) + " ↓" + formatWhMagnitude(expWh);
+        slotBadge.className = "grid-slot-badge" +
+          (impWh > expWh + 5 ? " slot-import" : expWh > impWh + 5 ? " slot-export" : "");
+      } else {
+        slotBadge.textContent = "";
+        slotBadge.className = "grid-slot-badge";
+      }
+    }
 
     // PV — stored as negative (site convention) but displayed positive
     // so "SOLAR 5.3 kW" reads as generation magnitude without the minus.
@@ -341,6 +565,19 @@
 
     // Load
     loadW.textContent = formatW(data.load_w || 0);
+
+    // EV tile (tile-mode parity with the energy-flow's EV planet).
+    // Reads ev_charging_w (post sub-watt floor in /api/status); the
+    // sub-card label flips to "charging" when active so the tile reads
+    // the same way the planet does.
+    var cardEvWEl   = document.getElementById("card-ev-w");
+    var cardEvSubEl = document.getElementById("card-ev-sub");
+    if (cardEvWEl) {
+      var evWNow = data.ev_charging_w || 0;
+      cardEvWEl.textContent = formatW(evWNow);
+      cardEvWEl.className = evWNow > 1 ? "card-value val-load" : "card-value val-neutral";
+      if (cardEvSubEl) cardEvSubEl.textContent = evWNow > 1 ? "charging" : "charger";
+    }
 
     // Battery — positive=charge, negative=discharge
     batW.textContent = formatW(data.bat_w);
@@ -354,6 +591,21 @@
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
     }
+    var batTargetDisp = document.getElementById("bat-target-display");
+    if (batTargetDisp) {
+      batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
+    }
+
+    // Live stats strip — mirrors the per-tile values up top but in one
+    // mono-typed line above the live chart, so the Live card matches
+    // the Plan card's information density. Each cell colours by sign
+    // / direction so an operator scans the row and immediately sees
+    // who's importing, exporting, charging, or idle.
+    updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
+    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("load", data.load_w, "is-neutral");
+    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
+    updateLiveSocStat(data.bat_soc);
 
     // Hero energy-flow diagram — build a flat "planets" list where each
     // entry declares which corner it orbits (top-left=PV, top-right=
@@ -366,47 +618,102 @@
     if (flowEl && typeof flowEl.setReadings === "function") {
       var planets = [];
 
+      // Today's totals are aggregate across all drivers; per-driver kWh split
+      // is not in the API. Mark them as aggregate-only so the energy-flow
+      // component can show them on folded bubbles without duplicating the
+      // same total on every individual inverter.
+      var todayE = (data.energy && data.energy.today) || {};
+      var importKwh   = (todayE.import_wh || 0) / 1000;
+      var exportKwh   = (todayE.export_wh || 0) / 1000;
+      var pvKwhTotal  = (todayE.pv_wh || 0) / 1000;
+      var loadKwhTotal = (todayE.load_wh || 0) / 1000;
+      var batChargedKwh    = (todayE.bat_charged_wh || 0) / 1000;
+      var batDischargedKwh = (todayE.bat_discharged_wh || 0) / 1000;
+      // Solar only flows one direction (production); the arrow would
+      // be redundant. Use the kWh unit instead so the line reads as
+      // a standalone total.
+      var pvDailyStr   = fmtKwhShort(pvKwhTotal) + " kWh";
+      // Grid daily totals are colour-coded: import red, export green,
+      // both bold so the polarity reads at a glance against the dark
+      // bubble. Other planets stay on the plain dimmed text style.
+      var gridDailyParts = [
+        { text: "↓ " + fmtKwhShort(importKwh), color: "var(--red-e)",   bold: true },
+        { text: "↑ " + fmtKwhShort(exportKwh), color: "var(--green-e)", bold: true },
+      ];
+      // Battery daily totals share the grid's colour discipline:
+      // charge (energy stored) green, discharge (energy spent) red.
+      // Reads at a glance whether the day was a net-fill or net-drain.
+      var batDailyParts = [
+        { text: "↑ " + fmtKwhShort(batChargedKwh),    color: "var(--green-e)", bold: true },
+        { text: "↓ " + fmtKwhShort(batDischargedKwh), color: "var(--red-e)",   bold: true },
+      ];
+
       // Grid — single utility, bottom-left corner. Import = toward house.
       var gkw = (data.grid_w || 0) / 1000;
-      var gAbs = Math.abs(gkw);
+      var gIdle = isFlowIdle(gkw);
       planets.push({
         id: "grid", corner: "bottom-left", title: "GRID", role: "grid",
         kw: gkw, toHub: gkw >= 0,
-        color: gAbs < 0.05 ? "var(--fg-muted)" :
+        color: gIdle ? "var(--fg-muted)" :
                (gkw >= 0 ? "var(--red-e)" : "var(--green-e)"),
-        sub: gAbs < 0.05 ? "balanced" :
+        sub: gIdle ? "balanced" :
              (gkw >= 0 ? "importing" : "exporting"),
+        dailyKwhParts: gridDailyParts,
       });
 
       var drvs = data.drivers || {};
+      var pvDailyMembers = 0;
+      var batDailyMembers = 0;
       Object.keys(drvs).forEach(function (name) {
         var d = drvs[name] || {};
+        if (d.pv_w != null) pvDailyMembers++;
+        if (d.bat_w != null) batDailyMembers++;
+      });
+      Object.keys(drvs).forEach(function (name) {
+        var d = drvs[name] || {};
+        var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+        if (!online) return;
         // Solar — display positive kW when generating (site convention
         // has pv_w negative for export into the house). All internal
         // state (chart history, math) stays on site convention; the
         // sign flip is display-only and lives in this function.
         if (d.pv_w != null) {
           var pvKw = -d.pv_w / 1000;
-          var pvGen = pvKw > 0.05;
+          var pvGen = !isFlowIdle(pvKw);
           planets.push({
             id: "pv-" + name, corner: "top-left", title: "SOLAR", name: name, role: "pv",
             kw: pvKw, toHub: true,
             color: pvGen ? "var(--amber)" : "var(--fg-muted)",
-            sub: pvGen ? "generating" : "idle",
+            // Solar is one-directional: the power value alone already
+            // shows whether it's generating or idle. The sub-label
+            // would just repeat the same fact in words.
+            sub: "",
+            dailyKwh: pvDailyStr,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: pvDailyMembers,
           });
         }
         // Battery — sign shows charge/discharge. Discharge flows toward
         // the house; charge flows away from it.
         if (d.bat_w != null) {
           var bKw = d.bat_w / 1000;
-          var bAbs = Math.abs(bKw);
+          var bIdle = isFlowIdle(bKw);
+          // Direction conveyed by colour of the power value: charge
+          // green (filling), discharge red (draining), idle stays
+          // neutral cyan (the battery's identity hue). Drops the
+          // wordy charging/discharging sub-label.
+          var bColor = bIdle ? "var(--cyan)" :
+                       (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
+          var bTargetLine = batteryTargetLine(batteryTargetsByDriver[name]);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
-            color: "var(--cyan)",
-            sub: bAbs < 0.05 ? "idle" :
-                 (bKw >= 0 ? "charging" : "discharging"),
+            color: bColor,
+            sub: bTargetLine,
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
+            dailyKwhParts: batDailyParts,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: batDailyMembers,
           });
         }
         // EV — always consumes from the house side. When a loadpoint
@@ -416,7 +723,7 @@
         // truth instead of session-Wh estimate.
         if (d.ev_w != null) {
           var eKw = d.ev_w / 1000;
-          var eActive = eKw > 0.05;
+          var eActive = !isFlowIdle(eKw);
           var lpEv = loadpointsByDriver && loadpointsByDriver[name];
           var evSoc = null;
           var evLimit = null;
@@ -450,9 +757,21 @@
         }
       });
 
+      // Self-powered today: share of recorded house consumption sourced
+      // from PV/battery over the whole day. Daily EV energy is not split
+      // into this aggregate yet, while the realtime component includes
+      // active EV load because it is visible in the live balance.
+      // Clamped 0..100 because metering glitches can briefly report
+      // import > load.
+      var selfPoweredPctToday = null;
+      if (loadKwhTotal > 0.001) {
+        selfPoweredPctToday = Math.max(0, Math.min(100,
+          (1 - importKwh / loadKwhTotal) * 100));
+      }
       flowEl.setReadings({
         load:    (data.load_w || 0) / 1000,
         planets: planets,
+        selfPoweredPctToday: selfPoweredPctToday,
       });
     }
 
@@ -470,24 +789,55 @@
     var gridHint = document.getElementById("grid-target-hint");
     if (gridSlider) gridSlider.disabled = plannerActive;
     if (gridSend) gridSend.disabled = plannerActive;
-    if (gridHint) gridHint.style.display = plannerActive ? "block" : "none";
+    if (gridHint) {
+      // Always show the hint inside the modal — when planner is
+      // driving, the hint *is* the explanation for the disabled
+      // control, so it takes a brighter style (card-hint-active);
+      // when the operator can edit the slider, it stays as quiet
+      // small print.
+      gridHint.style.display = "block";
+      gridHint.classList.toggle("card-hint-active", plannerActive);
+    }
     // Plan-stale banner
     if (data.plan_stale && plannerActive && gridHint) {
       gridHint.textContent = "⚠ Plan stale — falling back to self_consumption.";
       gridHint.classList.add("card-hint-warn");
     } else if (gridHint) {
-      gridHint.textContent = "Planner controls this when a strategy is active.";
+      gridHint.textContent = plannerActive
+        ? "Planner is driving — set strategy to Manual to edit grid target."
+        : "Planner controls this when a strategy is active.";
       gridHint.classList.remove("card-hint-warn");
     }
 
-    // Grid target — only update slider if user is not actively dragging
-    if (gridTargetSlider && document.activeElement !== gridTargetSlider) {
+    // Grid target — only update slider if user has no pending edit. We
+    // check `dirty` rather than activeElement so a value that was
+    // dragged then mouse-released doesn't revert before Save is clicked.
+    if (gridTargetSlider && !gridTargetDirty) {
       gridTargetSlider.value = data.grid_target_w;
       gridTargetValue.textContent = formatW(data.grid_target_w);
     }
-    if (peakLimitSlider && document.activeElement !== peakLimitSlider && data.peak_limit_w != null) {
-      peakLimitSlider.value = data.peak_limit_w;
-      peakLimitValue.textContent = formatW(data.peak_limit_w);
+    // Peak import ceiling. Backed by the new peak_import_ceiling_w
+    // (hard rule across modes); 0 = disabled. Falls back to the legacy
+    // peak_limit_w field for older backends so the UI doesn't go blank
+    // during a partial-deploy window.
+    const peakSrcW = data.peak_import_ceiling_w != null
+      ? data.peak_import_ceiling_w
+      : data.peak_limit_w;
+    if (peakLimitSlider && !peakLimitDirty && peakSrcW != null) {
+      const enabled = peakSrcW > 0;
+      if (peakLimitEnableToggle) {
+        peakLimitEnableToggle.checked = enabled;
+        if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      }
+      peakLimitSlider.disabled = !enabled;
+      const display = enabled ? peakSrcW : readLastPeakLimitW();
+      peakLimitSlider.value = display;
+      // Don't decorate the value with " (off)" — the toggle is the
+      // single source of truth for enabled/disabled, doubling that
+      // signal is the kind of redundancy DESIGN.md warns about.
+      peakLimitValue.textContent = formatW(display);
+      if (enabled) writeLastPeakLimitW(peakSrcW);
+      if (peakLimitSend) peakLimitSend.disabled = true; // pristine
     }
     if (evSlider && document.activeElement !== evSlider && data.ev_charging_w != null) {
       evSlider.value = data.ev_charging_w;
@@ -521,6 +871,7 @@
       var voltage = fuseCfg.voltage  || 230;
 
       var phaseI = Array.isArray(data.phase_amps) ? data.phase_amps : [];
+      var phaseW = Array.isArray(data.phase_powers) ? data.phase_powers : [];
       var hasPhaseData = phaseI.length > 0;
 
       // Hide the per-phase box row entirely when no phase data, otherwise
@@ -547,6 +898,14 @@
         if (fusePhases.childElementCount !== phases) {
           fusePhases.innerHTML = "";
           for (var p = 0; p < phases; p++) {
+            // Each grid column is a wrapper: the boxed fuse tile on
+            // top, the signed-W readout BELOW the box (outside it),
+            // smaller font, dimmed. Keeps the box clean and lets the
+            // W label sit right under the bar without padding/border
+            // around it.
+            var col = document.createElement("div");
+            col.className = "fuse-phase-col";
+
             var box = document.createElement("div");
             box.className = "fuse-phase-box";
             var lab = document.createElement("div");
@@ -563,30 +922,41 @@
             box.appendChild(lab);
             box.appendChild(v);
             box.appendChild(bar);
-            fusePhases.appendChild(box);
+
+            var vw = document.createElement("div");
+            vw.className = "fuse-phase-w";
+            vw.textContent = "-- W";
+
+            col.appendChild(box);
+            col.appendChild(vw);
+            fusePhases.appendChild(col);
           }
         }
-        var boxes = fusePhases.querySelectorAll(".fuse-phase-box");
-        for (var rb = 0; rb < boxes.length; rb++) {
+        var cols = fusePhases.querySelectorAll(".fuse-phase-col");
+        for (var rb = 0; rb < cols.length; rb++) {
           var rawA = rb < phaseI.length ? phaseI[rb] : 0;
+          var rawW = rb < phaseW.length ? phaseW[rb] : 0;
           var magA = Math.abs(rawA);
           var pct = Math.min(100, (magA / maxAmps) * 100);
-          var bf = boxes[rb].querySelector(".fuse-phase-fill");
-          var bv = boxes[rb].querySelector(".fuse-phase-val");
-          // CSS custom property so the same value drives both the
-          // horizontal bar (desktop) and the vertical bar (mobile)
-          // without the inline width overriding the mobile media
-          // query. The two orientations are pure CSS flips below.
+          var bf = cols[rb].querySelector(".fuse-phase-fill");
+          var bv = cols[rb].querySelector(".fuse-phase-val");
+          var bvw = cols[rb].querySelector(".fuse-phase-w");
           bf.style.setProperty("--fill-pct", pct + "%");
-          // Smooth gradient instead of the old .warn/.crit buckets:
-          // fuseFillColor() interpolates green→yellow→orange→red
-          // across 50%/75%/90% knees so a bar at 45 % already leans
-          // yellow, 55 % is clearly yellow, 82 % is firmly orange, etc.
-          // Export (negative current, PV backfeed) keeps its own cool
-          // cyan via the .export class.
           bf.style.backgroundColor = (rawA < -0.1) ? "" : fuseFillColor(pct);
           bf.className = "fuse-phase-fill" + (rawA < -0.1 ? " export" : "");
-          bv.textContent = magA.toFixed(1) + " A";
+          // Display SIGNED current (operator-requested): the bar still
+          // sizes by magnitude so the fuse-fraction is visually honest,
+          // but the number shows direction so an exporting phase reads
+          // "-7.3 A" rather than the same "7.3 A" as an importing one.
+          var signedA = rawA;
+          if (Math.abs(signedA) < 0.05) signedA = 0;
+          bv.textContent = signedA.toFixed(1) + " A";
+          if (bvw) {
+            var sw = rawW;
+            if (Math.abs(sw) < 1) sw = 0;
+            bvw.textContent = Math.round(sw) + " W";
+            bvw.classList.toggle("export", rawW < -1);
+          }
         }
       }
     }
@@ -701,6 +1071,19 @@
     var dpr = window.devicePixelRatio || 1;
     var w = canvas.parentElement.clientWidth - 32;
     var h = 300;
+    // Small-screen sizing for canvas-rendered axes + the NOW marker.
+    // Canvas text doesn't honour CSS @media queries, so we branch in
+    // JS — same threshold as ftw-price-chart (600 px) for consistency.
+    // Fonts scale ~50 % up; the now-line stroke doubles. The values
+    // below are read by every ctx.font / ctx.lineWidth assignment in
+    // this function via the chartFont* / chartLine* variables.
+    var smallScreen = window.matchMedia &&
+      window.matchMedia("(max-width: 600px)").matches;
+    var chartFontAxis     = smallScreen ? "16px monospace" : "11px monospace";
+    var chartFontWaiting  = smallScreen ? "18px monospace" : "12px monospace";
+    var chartFontTooltip  = smallScreen ? "14px monospace" : "10px monospace";
+    var chartFontTooltipS = smallScreen ? "13px monospace" : "9px monospace";
+    var chartNowStrokeW   = smallScreen ? 2 : 1;
     if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
       canvas.width = w * dpr;
       canvas.height = h * dpr;
@@ -726,6 +1109,9 @@
 
     // Build series based on view
     var series;
+    var chartSmoothMs = CHART_SMOOTH_MS[chartRange] || 0;
+    var smoothedPVSeries = null;
+    var smoothedLoadSeries = null;
     if (chartView === "energy") {
       function toKwh(arr) { return arr.map(function(x){ return x / 1000; }); }
       series = [
@@ -737,10 +1123,13 @@
         { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
+      var smoothedGridSeries = smoothSeriesForChart(chartHistory.grid, chartHistory.timestamps, chartSmoothMs);
+      smoothedPVSeries = smoothSeriesForChart(chartHistory.pv, chartHistory.timestamps, chartSmoothMs);
+      smoothedLoadSeries = smoothSeriesForChart(chartHistory.load, chartHistory.timestamps, chartSmoothMs);
       series = [
-        { data: chartHistory.grid, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
-        { data: chartHistory.pv,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: chartHistory.load, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
+        { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
+        { data: smoothedLoadSeries, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -749,7 +1138,7 @@
         var color = batteryColor(name);
         var toggle = "bat:" + name;
         var label = batteryLabel(name);
-        series.push({ data: slot.bat,    color: color, width: 2,   dash: [],     name: label,         fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.bat, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
         series.push({ data: slot.target, color: color, width: 1.5, dash: [6, 4], name: label + " tgt", fill: false, toggle: toggle });
       });
       // Append one line per EV charger. EV power is always ≥ 0 (pure
@@ -762,7 +1151,7 @@
         var color = evColor(name);
         var toggle = "ev:" + name;
         var label = evLabel(name);
-        series.push({ data: slot.ev, color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.ev, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
       });
       // Respect click-to-hide from legend.
       series = series.filter(function (s) { return !legendHidden[s.toggle]; });
@@ -785,7 +1174,7 @@
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#666";
-      ctx.font = "12px monospace";
+      ctx.font = chartFontWaiting;
       ctx.textAlign = "center";
       ctx.fillText("waiting for data...", w / 2, h / 2);
       ctx.textAlign = "left";
@@ -834,7 +1223,7 @@
     // number — that's what lets the y-axis labels stay readable.
     ctx.strokeStyle = "#2a2a2a";
     ctx.lineWidth = 0.5;
-    ctx.font = "11px monospace";
+    ctx.font = chartFontAxis;
     var steps = Math.round(yRange / yStep);
     for (var i = 0; i <= steps; i++) {
       var y = pad.top + plotH - (plotH * i / steps);
@@ -918,8 +1307,8 @@
     // current actual value so the transition is continuous.
     if (chartView === "power" && chartPlan && chartPlan.actions) {
       var lastIdx = chartHistory.timestamps.length - 1;
-      var lastActualPV = lastIdx >= 0 ? chartHistory.pv[lastIdx] : null;
-      var lastActualLoad = lastIdx >= 0 ? chartHistory.load[lastIdx] : null;
+      var lastActualPV = lastIdx >= 0 && smoothedPVSeries ? smoothedPVSeries[lastIdx] : null;
+      var lastActualLoad = lastIdx >= 0 && smoothedLoadSeries ? smoothedLoadSeries[lastIdx] : null;
 
       var drawForecast = function (field, color, lastActual) {
         var pts = [];
@@ -1010,10 +1399,12 @@
     });
     ctx.globalAlpha = 1;
 
-    // Subtle vertical "now" line — anchor point so the eye knows where present is
+    // Subtle vertical "now" line — anchor point so the eye knows
+    // where present is. Stroke width bumps on small screens so the
+    // marker stays visible alongside the larger axis labels.
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = smallScreen ? "rgba(255,255,255,0.30)" : "rgba(255,255,255,0.12)";
+    ctx.lineWidth = chartNowStrokeW;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
     ctx.lineTo(nowX, pad.top + plotH);
@@ -1021,7 +1412,7 @@
 
     // Y-axis labels (outside clip so they're fully visible)
     ctx.fillStyle = "#888";
-    ctx.font = "11px monospace";
+    ctx.font = chartFontAxis;
     for (var i2 = 0; i2 <= steps; i2++) {
       var yVal = yMin + (yRange * i2 / steps);
       var ly = pad.top + plotH - (plotH * i2 / steps);
@@ -1039,7 +1430,7 @@
     if (lastDataTs > 0) {
       var ageMs = now - lastDataTs;
       var ageStr;
-      if (ageMs < 1500) ageStr = "live";
+      if (ageMs < 5000) ageStr = "live";
       else if (ageMs < 60_000) ageStr = Math.round(ageMs / 1000) + "s ago";
       else ageStr = Math.round(ageMs / 60_000) + "m ago";
       var fresh = ageMs < 5000;
@@ -1054,7 +1445,7 @@
       ctx.beginPath();
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
-      ctx.font = "10px monospace";
+      ctx.font = chartFontTooltip;
       ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
@@ -1067,7 +1458,9 @@
       windowEnd: windowEnd, totalMs: totalMs, now: now,
       plan: chartPlan,
       series: series,
-      pointCount: chartHistory.timestamps.length
+      pointCount: chartHistory.timestamps.length,
+      fontTooltip: chartFontTooltip,
+      fontTooltipS: chartFontTooltipS
     };
 
     if (hoverIndex >= 0 && hoverIndex < chartLayout.pointCount) {
@@ -1091,6 +1484,8 @@
     if (!chartLayout) return;
     var l = chartLayout;
     var i = hoverIndex;
+    var fontTooltip = l.fontTooltip || "10px monospace";
+    var fontTooltipS = l.fontTooltipS || "9px monospace";
     // Map by timestamp (matches the time-anchored line drawing)
     var ts = chartHistory.timestamps[i];
     if (ts == null) return;
@@ -1161,7 +1556,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = "10px monospace";
+    ctx.font = fontTooltip;
     ctx.fillStyle = "#888";
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
@@ -1185,9 +1580,9 @@
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
           ctx.fillStyle = "#888";
-          ctx.font = "9px monospace";
+          ctx.font = fontTooltipS;
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
-          ctx.font = "10px monospace";
+          ctx.font = fontTooltip;
         }
       }
       ctx.textAlign = "left";
@@ -1199,6 +1594,7 @@
     var l = chartLayout;
     var a = hoverForecast.action;
     var ts = hoverForecast.ts;
+    var fontTooltip = l.fontTooltip || "10px monospace";
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
@@ -1234,7 +1630,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = "10px monospace";
+    ctx.font = fontTooltip;
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
     ctx.fillStyle = "#fbbf24";
@@ -1277,6 +1673,7 @@
     // .btn-send style from index.html.
     var isDisabled = d.disabled === true || d.status === "disabled";
     var actions = '<div class="driver-actions" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">';
+    actions += '<button class="btn-send" data-drv-action="diagnose" data-drv="' + escHtml(name) + '">Diagnose</button>';
     if (isDisabled) {
       actions += '<button class="btn-send" data-drv-action="enable" data-drv="' + escHtml(name) + '">Enable</button>';
     } else {
@@ -1296,6 +1693,13 @@
       var name = btn.getAttribute("data-drv");
       var action = btn.getAttribute("data-drv-action");
       if (!name || !action) return;
+      // Diagnose is a UI-only action: no API mutation, just open the
+      // modal and let it poll /api/drivers/{name} on its own cadence.
+      if (action === "diagnose") {
+        if (window.FTWDiagnostics) window.FTWDiagnostics.open(name);
+        return;
+      }
+      if (action === "restart" && !window.confirm("Restart driver \"" + name + "\"? It will briefly stop reporting while it reconnects.")) return;
       if (action === "disable" && !window.confirm("Disable driver \"" + name + "\"? It will be stopped and won't auto-start until re-enabled.")) return;
       btn.disabled = true;
       btn.textContent = action + "ing…";
@@ -1339,7 +1743,7 @@
         var socDisplay = (vSoc != null && vLimit != null)
           ? vSoc + " / " + vLimit + " %"
           : (vSoc != null ? vSoc + " %" : "—");
-        if (vStale) socDisplay += " ★";
+        if (vStale) socDisplay = "⚠ " + socDisplay;
         var stateClassV = (vState === "Charging") ? "stat-ok" : (vState === "Disconnected" ? "stat-dim" : "stat-warn");
         var ttfStr = (vTtf != null && vTtf > 0)
           ? (vTtf >= 60 ? Math.floor(vTtf / 60) + "h " + (vTtf % 60) + "m" : vTtf + " min")
@@ -1460,11 +1864,7 @@
         '  <span class="status-dot ' + statusClass(d.status) + '" title="' + escHtml(d.status || "unknown") + '"></span>' +
         "</div>" +
         body +
-        renderDriverActions(name, d) +
-        // Inline battery model — rendered from models.js's cached payload.
-        // Drawing it here in the same pass as the driver card avoids the
-        // earlier race where two independent polls fought over the slot.
-        (!isEV && !isVehicle && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        renderDriverActions(name, d);
 
       driversGrid.appendChild(card);
     });
@@ -1506,6 +1906,11 @@
   // entries mean "no loadpoint for this driver" and the planet
   // falls back to legacy kW-only rendering.
   var loadpointsByDriver = null;
+  // Last successful /api/status payload — surfaced so secondary
+  // consumers (e.g. the EV modal's 5 s refresh) can read derived
+  // facts like siteHasPV() without re-fetching. `null` until the
+  // first fetch lands; consumers MUST handle null.
+  var lastStatusPayload = null;
   function fetchStatus() {
     Promise.all([
       fetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
@@ -1514,6 +1919,7 @@
       .then(function (results) {
         var data = results[0];
         var lp = results[1];
+        lastStatusPayload = data;
         if (lp && Array.isArray(lp.loadpoints)) {
           var idx = {};
           lp.loadpoints.forEach(function (l) {
@@ -1603,6 +2009,14 @@
     postJson("/api/peak_limit", { peak_limit_w: w }).catch(function () {});
   }
 
+  // POST the new hard-rule peak ceiling. 0 = disabled (operator opted
+  // out of tariff protection — only the physical fuse applies).
+  // Returns the postJson promise so callers can clear dirty + show
+  // success on resolution.
+  function setPeakImportCeiling(w) {
+    return postJson("/api/peak_import_ceiling", { peak_import_ceiling_w: w });
+  }
+
   function setEvCharging(w) {
     postJson("/api/ev_charging", { power_w: w, active: w > 0 }).catch(function () {});
   }
@@ -1667,20 +2081,68 @@
     });
   }
 
-  gridTargetSlider.addEventListener("input", function () {
-    gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
-  });
+  // Grid target slider: dirty on input, Save enabled while dirty,
+  // poll skips overwrite while dirty. Mirrors the peak slider pattern.
+  if (gridTargetSlider) {
+    gridTargetSlider.addEventListener("input", function () {
+      gridTargetValue.textContent = formatW(Number(gridTargetSlider.value));
+      gridTargetDirty = true;
+      if (gridTargetSend) gridTargetSend.disabled = false;
+    });
+  }
+  if (gridTargetSend) {
+    gridTargetSend.addEventListener("click", function () {
+      const w = Number(gridTargetSlider.value);
+      gridTargetSend.disabled = true;
+      postJson("/api/target", { grid_target_w: w })
+        .then(function () { gridTargetDirty = false; })
+        .catch(function () { gridTargetSend.disabled = false; /* keep dirty so user can retry */ });
+    });
+  }
 
-  gridTargetSend.addEventListener("click", function () {
-    setTarget(Number(gridTargetSlider.value));
-  });
-
-  peakLimitSlider.addEventListener("input", function () {
-    peakLimitValue.textContent = formatW(Number(peakLimitSlider.value));
-  });
-  peakLimitSend.addEventListener("click", function () {
-    setPeakLimit(Number(peakLimitSlider.value));
-  });
+  // Peak slider: same dirty pattern, plus an enable/disable checkbox.
+  // Off → POST 0 (backend reads 0 = disabled). On → POST slider value.
+  // The slider is disabled when the toggle is off so the operator can't
+  // accidentally drag a dead control.
+  if (peakLimitSlider) {
+    peakLimitSlider.addEventListener("input", function () {
+      const w = Number(peakLimitSlider.value);
+      peakLimitValue.textContent = formatW(w);
+      peakLimitDirty = true;
+      if (peakLimitSend) peakLimitSend.disabled = false;
+    });
+  }
+  if (peakLimitEnableToggle) {
+    peakLimitEnableToggle.addEventListener("change", function () {
+      const enabled = peakLimitEnableToggle.checked;
+      if (peakLimitEnableLabel) peakLimitEnableLabel.textContent = enabled ? "On" : "Off";
+      if (peakLimitSlider) peakLimitSlider.disabled = !enabled;
+      // Show the value the toggle is about to enable (last known)
+      // without committing — the operator still has to press Save
+      // unless the toggle is being switched OFF, which is a destructive
+      // change worth one extra click confirmation. Wait — the spec
+      // calls for the toggle itself to be the on/off control, so flip
+      // straight through: post immediately on toggle change.
+      const w = enabled ? Number(peakLimitSlider.value) || readLastPeakLimitW() : 0;
+      if (enabled && peakLimitSlider) peakLimitSlider.value = w;
+      if (peakLimitValue) peakLimitValue.textContent = formatW(w);
+      peakLimitEnableToggle.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; if (peakLimitSend) peakLimitSend.disabled = true; })
+        .catch(function () { /* leave dirty so user can retry */ })
+        .finally(function () { peakLimitEnableToggle.disabled = false; });
+    });
+  }
+  if (peakLimitSend) {
+    peakLimitSend.addEventListener("click", function () {
+      const w = Number(peakLimitSlider.value);
+      writeLastPeakLimitW(w);
+      peakLimitSend.disabled = true;
+      setPeakImportCeiling(w)
+        .then(function () { peakLimitDirty = false; })
+        .catch(function () { peakLimitSend.disabled = false; /* keep dirty */ });
+    });
+  }
 
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
@@ -1739,21 +2201,531 @@
     evModalBody.appendChild(p);
   }
 
+  // EV modal sub-elements held across refreshes. The status table is
+  // updated in place on every poll. The schedule section is mounted
+  // exactly once per (modal-open × LP) and is NEVER detached on a poll
+  // — detaching+reattaching a focused <input> blurs it mid-keystroke
+  // and resets caret position. After Save/Clear we set
+  // schedNeedsRebuild=true so the next poll picks up the new
+  // authoritative server state.
+  var statusTableEl = null;
+  var schedSectionEl = null;
+  var schedLpId = null;
+  var schedNeedsRebuild = false;
+
+  // Detect whether the site has any PV driver configured. Used to hide
+  // the "surplus charge from PV" option on PV-less sites where the
+  // bat-SoC unlock wouldn't have anything to grab anyway.
+  function siteHasPV(status) {
+    if (!status || !status.drivers) return false;
+    for (var k in status.drivers) {
+      if (Object.prototype.hasOwnProperty.call(status.drivers, k)) {
+        var dr = status.drivers[k];
+        if (dr && typeof dr.pv_w === "number") return true;
+      }
+    }
+    return false;
+  }
+
   function refreshEvModal() {
     // Pass driver query if known so the backend can scope the response
     // to the clicked planet (multi-EV setups). Falls back to whatever
     // the backend returns when no driver filter is honored.
     var url = "/api/ev/status" + (evModalDriver ? "?driver=" + encodeURIComponent(evModalDriver) : "");
-    fetch(url).then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || d.connected === false) {
+    // siteHasPV is a static-per-config check, so we read the most
+    // recent payload cached by fetchStatus() instead of issuing a
+    // duplicate /api/status fetch on every 5 s modal tick. Falls back
+    // to "no PV" until the dashboard's own fetchStatus lands once.
+    Promise.all([
+      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+    ]).then(function (results) {
+      var d = results[0];
+      var lps = results[1];
+      var status = lastStatusPayload;
+      var hasLoadpoints = lps && Array.isArray(lps.loadpoints) && lps.loadpoints.length > 0;
+      var carConnected = d && d.connected !== false;
+      // Hard short-circuit only when there's NOTHING to show: no
+      // active EV AND no configured loadpoint. Otherwise we fall
+      // through so the schedule editor stays reachable — operators
+      // routinely want to set tomorrow morning's target before
+      // plugging in tonight, and the schedule is LP state (persisted
+      // across restarts), not driver state.
+      if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
+        statusTableEl = null;
+        schedSectionEl = null;
+        schedLpId = null;
         return;
       }
-      evModalBody.textContent = "";
-      evModalBody.appendChild(renderEvStatusTable(d));
+      // Status table: replace in place so the rest of the modal body
+      // (including any mounted schedule section) is untouched. On the
+      // very first call evModalBody may still contain the placeholder
+      // from setEvModalMessage; wipe only when we have no anchor yet.
+      // When no car is connected but loadpoints exist, render a
+      // dim placeholder note in place of the live status table so
+      // the modal still has a header before the schedule editor.
+      var freshStatus;
+      if (carConnected) {
+        freshStatus = renderEvStatusTable(d);
+      } else {
+        freshStatus = document.createElement("p");
+        freshStatus.style.color = "var(--text-dim)";
+        freshStatus.style.fontStyle = "italic";
+        freshStatus.style.margin = "0 0 0.6rem 0";
+        freshStatus.textContent = "No car connected — schedule below is saved to the loadpoint and applies on next plug-in.";
+      }
+      if (statusTableEl && statusTableEl.parentNode === evModalBody) {
+        evModalBody.replaceChild(freshStatus, statusTableEl);
+      } else {
+        evModalBody.textContent = "";
+        evModalBody.appendChild(freshStatus);
+      }
+      statusTableEl = freshStatus;
+
+      // Match the modal's driver to a configured loadpoint; the
+      // surplus-only control only makes sense when the driver is
+      // wired to one. With no driver filter we pick the first
+      // plugged-in loadpoint as a best-effort fallback.
+      var matched = null;
+      if (lps && Array.isArray(lps.loadpoints) && lps.loadpoints.length > 0) {
+        if (evModalDriver) {
+          for (var i = 0; i < lps.loadpoints.length; i++) {
+            if (lps.loadpoints[i].driver_name === evModalDriver) {
+              matched = lps.loadpoints[i];
+              break;
+            }
+          }
+        }
+        // Prefer a plugged-in loadpoint when no driver filter is active —
+        // that's the one the operator is most likely thinking about. Fall
+        // back to the first configured loadpoint so the schedule editor
+        // is still reachable when no car is currently connected (the
+        // schedule is persistent loadpoint state, not driver state, and
+        // operators routinely want to set tomorrow morning's target
+        // before plugging in tonight).
+        if (!matched) {
+          for (var j = 0; j < lps.loadpoints.length; j++) {
+            if (lps.loadpoints[j].plugged_in) { matched = lps.loadpoints[j]; break; }
+          }
+        }
+        if (!matched) {
+          matched = lps.loadpoints[0];
+        }
+      }
+      if (matched) {
+        // Build schedule exactly once per LP. Polling never rebuilds
+        // it — inputs keep their focus, value and caret position. Only
+        // a Save / Clear (which sets schedNeedsRebuild) or switching
+        // to a different LP (planet) triggers a fresh build.
+        var lpChanged = schedSectionEl == null || schedLpId !== matched.id;
+        if (lpChanged || schedNeedsRebuild) {
+          if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
+            evModalBody.removeChild(schedSectionEl);
+          }
+          schedSectionEl = buildScheduleControl(matched, siteHasPV(status));
+          schedLpId = matched.id;
+          schedNeedsRebuild = false;
+          evModalBody.appendChild(schedSectionEl);
+        } else if (schedSectionEl.parentNode !== evModalBody) {
+          // Modal was previously closed: body got wiped but our
+          // cached section is still valid — re-attach.
+          evModalBody.appendChild(schedSectionEl);
+        }
+      } else {
+        if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
+          evModalBody.removeChild(schedSectionEl);
+        }
+        schedSectionEl = null;
+        schedLpId = null;
+      }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
+  }
+
+  // buildScheduleControl renders the persistent charging schedule
+  // section: target SoC + time (local; converted to UTC for the wire),
+  // recurring checkbox, and the bat-SoC surplus-unlock threshold.
+  // The backend persists this across restarts (state.config), rolls the
+  // deadline forward each day when Recurring is set, and arms the
+  // surplus-grab whenever the home battery sits at or above the
+  // threshold (with 5 pp release hysteresis).
+  function buildScheduleControl(lp, hasPV) {
+    var sched = (lp && lp.schedule) || {};
+    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the
+    // browser's local zone. The UI shows local time everywhere;
+    // we marshal back to UTC minutes on save.
+    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
+    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var initRec = !!sched.recurring;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
+    // The threshold input retains the last-used value (or defaults to 50)
+    // so unchecking + re-checking doesn't wipe the user's pick.
+    var initSurplus = savedUnlock > 0;
+    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+
+    // Outer wrapper holds two distinct sections:
+    //  1. PV mode (surplus-only toggle) — saves immediately on click
+    //  2. Schedule (target SoC + deadline + bat-SoC unlock) — Save button
+    // They're separated so it's obvious which controls the Save button
+    // owns. Earlier we kept the surplus toggle inside the Schedule
+    // section and operators couldn't tell whether Save covered it.
+    var wrap = document.createElement("div");
+    wrap.style.marginTop = "0.75rem";
+    wrap.style.paddingTop = "0.6rem";
+    wrap.style.borderTop = "1px solid var(--line)";
+
+    // ---- Section 1: PV mode (surplus-only) ----
+    // Per-loadpoint hard flag, *independent* of any schedule. When on,
+    // dispatch refuses to import grid for this loadpoint regardless of
+    // what the MPC plans. Operators can run with this alone (no target,
+    // no deadline — just "harvest PV when there's enough") or layer a
+    // schedule on top below.
+    var soBox = document.createElement("div");
+    soBox.style.marginBottom = "0.8rem";
+    soBox.style.paddingBottom = "0.7rem";
+    soBox.style.borderBottom = "1px solid var(--line)";
+
+    var soEyebrow = document.createElement("div");
+    soEyebrow.textContent = "PV Mode";
+    soEyebrow.style.fontFamily = "var(--mono)";
+    soEyebrow.style.fontSize = "0.7rem";
+    soEyebrow.style.letterSpacing = "0.18em";
+    soEyebrow.style.textTransform = "uppercase";
+    soEyebrow.style.color = "var(--text-dim)";
+    soEyebrow.style.marginBottom = "0.45rem";
+    soBox.appendChild(soEyebrow);
+
+    var soWrap = document.createElement("label");
+    soWrap.style.display = "flex";
+    soWrap.style.alignItems = "center";
+    soWrap.style.gap = "0.4rem";
+    soWrap.style.fontSize = "0.85rem";
+    soWrap.style.cursor = "pointer";
+    var soCb = document.createElement("input");
+    soCb.type = "checkbox";
+    soCb.checked = !!(lp && lp.surplus_only);
+    soCb.style.accentColor = "var(--accent-e)";
+    var soText = document.createElement("span");
+    soText.textContent = "Surplus only (PV exports only — never imports grid)";
+    soWrap.appendChild(soCb);
+    soWrap.appendChild(soText);
+
+    var soStatus = document.createElement("small");
+    soStatus.style.display = "block";
+    soStatus.style.color = "var(--text-dim)";
+    soStatus.style.marginTop = "0.25rem";
+    soStatus.style.marginLeft = "1.4rem";
+    soStatus.style.minHeight = "1em";
+    soStatus.textContent = "Saves automatically on click. Independent of the schedule below.";
+
+    soBox.appendChild(soWrap);
+    soBox.appendChild(soStatus);
+    wrap.appendChild(soBox);
+
+    soCb.addEventListener("change", function () {
+      soCb.disabled = true;
+      soStatus.textContent = "Saving…";
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ surplus_only: soCb.checked }),
+      }).then(function () {
+        soCb.disabled = false;
+        soStatus.textContent = "Saved. Independent of the schedule below.";
+        // Rebuild on next poll so the schedule section reflects any
+        // server-side side effects (e.g. soc_source recompute).
+        schedNeedsRebuild = true;
+      }).catch(function () {
+        soCb.disabled = false;
+        soStatus.textContent = "Save failed — try again.";
+      });
+    });
+
+    // ---- Section 2: Schedule ----
+    var box = document.createElement("div");
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Schedule (grid charging)";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.55rem";
+    box.appendChild(eyebrow);
+
+    var schedExplainer = document.createElement("div");
+    schedExplainer.textContent = "Target SoC by a deadline. The planner uses cheap grid hours to fill the gap PV can't cover.";
+    schedExplainer.style.fontSize = "0.72rem";
+    schedExplainer.style.color = "var(--text-dim)";
+    schedExplainer.style.marginBottom = "0.5rem";
+    box.appendChild(schedExplainer);
+
+    // Schedule is persistent loadpoint state — operators can configure
+    // tomorrow morning's target tonight before plugging in. Show a
+    // small hint when the loadpoint isn't currently connected so saved
+    // edits don't feel inert: they'll apply at the next plug-in.
+    if (lp && !lp.plugged_in) {
+      var unpluggedHint = document.createElement("div");
+      unpluggedHint.textContent = "Car not plugged in. Edits are saved and apply at next plug-in.";
+      unpluggedHint.style.fontSize = "0.72rem";
+      unpluggedHint.style.color = "var(--text-dim)";
+      unpluggedHint.style.marginBottom = "0.5rem";
+      unpluggedHint.style.fontStyle = "italic";
+      box.appendChild(unpluggedHint);
+    }
+
+    function row(labelText, controlEl) {
+      var r = document.createElement("div");
+      r.style.display = "flex";
+      r.style.alignItems = "center";
+      r.style.justifyContent = "space-between";
+      r.style.gap = "0.5rem";
+      r.style.marginBottom = "0.4rem";
+      var l = document.createElement("label");
+      l.textContent = labelText;
+      l.style.fontSize = "0.85rem";
+      l.style.color = "var(--fg)";
+      r.appendChild(l);
+      r.appendChild(controlEl);
+      return r;
+    }
+
+    function numInput(value, min, max, step, suffix) {
+      var wrap = document.createElement("div");
+      wrap.style.display = "inline-flex";
+      wrap.style.alignItems = "baseline";
+      wrap.style.gap = "0.25rem";
+      var inp = document.createElement("input");
+      inp.type = "number";
+      inp.value = String(value);
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.step = String(step);
+      inp.style.width = "4.5rem";
+      inp.style.padding = "0.25rem 0.4rem";
+      inp.style.background = "var(--ink-raised)";
+      inp.style.color = "var(--fg)";
+      inp.style.border = "1px solid var(--line)";
+      inp.style.borderRadius = "3px";
+      inp.style.fontFamily = "var(--mono)";
+      inp.style.fontSize = "0.85rem";
+      inp.style.textAlign = "right";
+      wrap.appendChild(inp);
+      if (suffix) {
+        var s = document.createElement("span");
+        s.textContent = suffix;
+        s.style.color = "var(--text-dim)";
+        s.style.fontSize = "0.8rem";
+        wrap.appendChild(s);
+      }
+      wrap.input = inp;
+      return wrap;
+    }
+
+    var socWrap = numInput(initSoC, 0, 100, 5, "%");
+    var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
+
+    var timeInp = document.createElement("input");
+    timeInp.type = "time";
+    timeInp.value = initLocalHHMM;
+    timeInp.style.padding = "0.25rem 0.4rem";
+    timeInp.style.background = "var(--ink-raised)";
+    timeInp.style.color = "var(--fg)";
+    timeInp.style.border = "1px solid var(--line)";
+    timeInp.style.borderRadius = "3px";
+    timeInp.style.fontFamily = "var(--mono)";
+    timeInp.style.fontSize = "0.85rem";
+
+    function checkbox(checked, labelText) {
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = checked;
+      cb.style.accentColor = "var(--accent-e)";
+      var wrap = document.createElement("label");
+      wrap.style.display = "inline-flex";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "0.4rem";
+      wrap.style.cursor = "pointer";
+      wrap.style.fontSize = "0.85rem";
+      wrap.appendChild(cb);
+      var txt = document.createElement("span");
+      txt.textContent = labelText;
+      wrap.appendChild(txt);
+      wrap.input = cb;
+      return wrap;
+    }
+
+    var recWrap = checkbox(initRec, "Recurring (every day)");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Surplus charge from PV");
+    var recCb = recWrap.input;
+    var surCb = surWrap.input;
+
+    box.appendChild(row("Target SoC", socWrap));
+    box.appendChild(row("By", timeInp));
+
+    var checkRow = document.createElement("div");
+    checkRow.style.display = "flex";
+    checkRow.style.flexDirection = "column";
+    checkRow.style.gap = "0.35rem";
+    checkRow.style.marginBottom = "0.55rem";
+    checkRow.appendChild(recWrap);
+    // Surplus-from-PV only makes sense on sites with a PV driver — the
+    // bat-SoC unlock would have no surplus to grab otherwise. Omit the
+    // checkbox + threshold entirely on PV-less sites.
+    if (hasPV) {
+      checkRow.appendChild(surWrap);
+    }
+    box.appendChild(checkRow);
+
+    var unlockHint = document.createElement("small");
+    unlockHint.style.display = "block";
+    unlockHint.style.color = "var(--text-dim)";
+    unlockHint.style.marginTop = "0.2rem";
+    unlockHint.style.marginBottom = "0.3rem";
+    unlockHint.textContent = "Always grab PV surplus when home battery ≥ threshold.";
+
+    var thresholdRow = row("Threshold", unlockWrap);
+
+    if (hasPV) {
+      box.appendChild(unlockHint);
+      box.appendChild(thresholdRow);
+    }
+
+    function applySurplusGate() {
+      var on = surCb.checked;
+      unlockWrap.input.disabled = !on;
+      thresholdRow.style.opacity = on ? "1" : "0.4";
+      thresholdRow.style.pointerEvents = on ? "auto" : "none";
+      unlockHint.style.opacity = on ? "1" : "0.55";
+    }
+    if (hasPV) {
+      applySurplusGate();
+      surCb.addEventListener("change", applySurplusGate);
+    }
+
+    // Actions
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.marginTop = "0.55rem";
+    btnRow.style.justifyContent = "flex-end";
+
+    function mkBtn(label, primary) {
+      var b = document.createElement("button");
+      b.textContent = label;
+      b.style.padding = "0.3rem 0.8rem";
+      b.style.fontSize = "0.8rem";
+      b.style.fontFamily = "var(--mono)";
+      b.style.letterSpacing = "0.06em";
+      b.style.textTransform = "uppercase";
+      b.style.borderRadius = "3px";
+      b.style.cursor = "pointer";
+      b.style.border = "1px solid var(--line)";
+      if (primary) {
+        b.style.background = "var(--accent-e)";
+        b.style.color = "#0a0a0a";
+        b.style.borderColor = "var(--accent-e)";
+      } else {
+        b.style.background = "transparent";
+        b.style.color = "var(--fg)";
+      }
+      return b;
+    }
+    var clearBtn = mkBtn("Clear", false);
+    var saveBtn = mkBtn(hasSched ? "Update schedule" : "Set schedule", true);
+    clearBtn.disabled = !hasSched;
+    if (!hasSched) clearBtn.style.opacity = "0.4";
+    btnRow.appendChild(clearBtn);
+    btnRow.appendChild(saveBtn);
+    box.appendChild(btnRow);
+
+    var status = document.createElement("small");
+    status.style.display = "block";
+    status.style.color = "var(--text-dim)";
+    status.style.marginTop = "0.4rem";
+    status.style.minHeight = "1em";
+    box.appendChild(status);
+
+    // Save and Clear both flag schedNeedsRebuild so the next poll
+    // rebuilds the section from the new authoritative server state
+    // (e.g. so the button label flips from "Save" → "Update" once a
+    // schedule exists). Polling never rebuilds otherwise — the cached
+    // schedSectionEl stays mounted and inputs keep focus.
+    saveBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      status.textContent = "Saving…";
+      var localHHMM = timeInp.value || initLocalHHMM;
+      var minUTC = localHHMMToUtcMins(localHHMM);
+      // Surplus checkbox gates the threshold: when off (or hidden on
+      // PV-less sites), the threshold is sent as 0 — the backend
+      // interprets 0 as "feature disabled".
+      var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
+      var body = {
+        schedule: {
+          soc_pct: Number(socWrap.input.value),
+          time_of_day_min_utc: minUTC,
+          recurring: !!recCb.checked,
+          surplus_unlock_bat_soc_pct: unlockVal,
+        },
+      };
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        status.textContent = "Saved.";
+        schedNeedsRebuild = true;
+        refreshEvModal();
+      }).catch(function (e) {
+        status.textContent = "Save failed: " + e.message;
+        saveBtn.disabled = false;
+        clearBtn.disabled = false;
+      });
+    });
+
+    clearBtn.addEventListener("click", function () {
+      saveBtn.disabled = true;
+      clearBtn.disabled = true;
+      status.textContent = "Clearing…";
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule: null }),
+      }).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        status.textContent = "Cleared.";
+        schedNeedsRebuild = true;
+        refreshEvModal();
+      }).catch(function (e) {
+        status.textContent = "Clear failed: " + e.message;
+        saveBtn.disabled = false;
+      });
+    });
+
+    wrap.appendChild(box);
+    return wrap;
+  }
+
+  function utcMinsToLocalHHMM(min) {
+    var d = new Date();
+    d.setUTCHours(Math.floor(min / 60), min % 60, 0, 0);
+    return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  function localHHMMToUtcMins(hhmm) {
+    var parts = String(hhmm).split(":");
+    if (parts.length !== 2) return 360;
+    var h = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    if (isNaN(h) || isNaN(m)) return 360;
+    var d = new Date();
+    d.setHours(h, m, 0, 0);
+    return d.getUTCHours() * 60 + d.getUTCMinutes();
   }
 
   var evRefreshTimer = null;
@@ -1777,11 +2749,78 @@
       evModalDriver = null;
     });
 
-    // EV planet click → open modal scoped to that driver.
+    // Planet click routing. EV → EV modal scoped to driver. Battery →
+    // <ftw-battery-control> manual-hold modal (no driver scoping; the
+    // hold applies to the aggregate battery setpoint). Grid → grid
+    // modal hosting the peak-import ceiling and the (legacy) grid
+    // target setpoint.
+    var gridModal = document.getElementById("grid-modal");
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
         var d = (e && e.detail) || {};
         if (d.role === "ev") openEvModal(d.name || null);
+        if (d.role === "battery") {
+          var bc = document.getElementById("battery-control");
+          if (bc && typeof bc.open === "function") bc.open();
+        }
+        if (d.role === "pv") {
+          var pc = document.getElementById("pv-control");
+          if (pc && typeof pc.open === "function") {
+            // d.id is the driver id when the user clicked an expanded
+            // per-driver bubble; "" / undefined opens at the aggregate
+            // scope from the merged bubble.
+            pc.open(d.id || "");
+          }
+        }
+        if (d.role === "grid" && gridModal) gridModal.open();
+      });
+    }
+
+    // Tile-mode (numeric cards) parity: when the operator toggles the
+    // hero off, the energy-flow planets aren't on screen, so the
+    // modal triggers need a second home. Binding click on the matching
+    // .summary-card opens the same modal, with a `.clickable` class
+    // that gives the card a pointer cursor + hover lift to advertise
+    // the affordance. EV has no tile-mode card today (loadpoints are
+    // listed separately) — leave that one to the planet for now.
+    var cardBat = document.getElementById("card-bat");
+    if (cardGrid && gridModal) {
+      cardGrid.classList.add("clickable");
+      cardGrid.setAttribute("role", "button");
+      cardGrid.setAttribute("tabindex", "0");
+      cardGrid.setAttribute("aria-label", "Open grid controls");
+      cardGrid.addEventListener("click", function () { gridModal.open(); });
+      cardGrid.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); gridModal.open(); }
+      });
+    }
+    if (cardBat) {
+      cardBat.classList.add("clickable");
+      cardBat.setAttribute("role", "button");
+      cardBat.setAttribute("tabindex", "0");
+      cardBat.setAttribute("aria-label", "Open battery controls");
+      var openBat = function () {
+        var bc = document.getElementById("battery-control");
+        if (bc && typeof bc.open === "function") bc.open();
+      };
+      cardBat.addEventListener("click", openBat);
+      cardBat.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openBat(); }
+      });
+    }
+    var cardEv = document.getElementById("card-ev");
+    if (cardEv && typeof openEvModal === "function") {
+      cardEv.classList.add("clickable");
+      cardEv.setAttribute("role", "button");
+      cardEv.setAttribute("tabindex", "0");
+      cardEv.setAttribute("aria-label", "Open EV charger");
+      // Pass null so openEvModal aggregates across all EV drivers —
+      // matches the no-driver-scoping fallback the planet click uses
+      // when the operator hasn't picked a specific charger.
+      var openEv = function () { openEvModal(null); };
+      cardEv.addEventListener("click", openEv);
+      cardEv.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openEv(); }
       });
     }
 
@@ -1800,6 +2839,7 @@
     evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
     evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
   }
+
 
   // Click-to-toggle legend items. Each item has data-toggle with a
   // key; clicking toggles visibility of the matching series and
@@ -2006,6 +3046,52 @@
   // `range=week|month` onto every child — the component observes that
   // attribute and re-fetches, so the three charts stay in lock-step.
   var historyToggle = $("history-toggle");
+  var historyViewToggle = $("history-view-toggle");
+  var historyTiles = $("history-tiles");
+  var historyCakeWrap = $("history-cake");
+  var historyCakeEl = $("history-cake-el");
+  var historyCakeWaitingForUpgrade = false;
+
+  // historyState mirrors both toggles so the Bars/Cakes view and
+  // the Week/Month range stay coordinated. Only the cake re-fetches
+  // /api/energy/daily on a range change; the bar tiles each
+  // re-fetch themselves when their range= attribute is updated.
+  var historyState = { range: "week", view: "bars" };
+
+  function fetchHistoryCake() {
+    historyCakeEl = $("history-cake-el");
+    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") {
+      if (!historyCakeWaitingForUpgrade && window.customElements && customElements.whenDefined) {
+        historyCakeWaitingForUpgrade = true;
+        customElements.whenDefined("ftw-energy-cake").then(function () {
+          historyCakeWaitingForUpgrade = false;
+          if (historyState.view === "cakes") fetchHistoryCake();
+        });
+      }
+      return;
+    }
+    if (historyCakeWrap) historyCakeWrap.classList.add("loading");
+    var days = historyState.range === "month" ? 30 : 7;
+    var clearLoading = function () {
+      if (historyCakeWrap) historyCakeWrap.classList.remove("loading");
+    };
+    fetch("/api/energy/daily?days=" + days)
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        var arr = (j && j.days) || [];
+        var totals = { import_wh: 0, load_wh: 0, export_wh: 0, pv_wh: 0 };
+        for (var i = 0; i < arr.length; i++) {
+          totals.import_wh += arr[i].import_wh || 0;
+          totals.load_wh   += arr[i].load_wh   || 0;
+          totals.export_wh += arr[i].export_wh || 0;
+          totals.pv_wh     += arr[i].pv_wh     || 0;
+        }
+        historyCakeEl.setTotals(totals);
+      })
+      .catch(function () { /* network blip — leave the previous render */ })
+      .then(clearLoading, clearLoading);
+  }
+
   if (historyToggle) {
     historyToggle.addEventListener("click", function (e) {
       var btn = e.target.closest("button[data-range]");
@@ -2013,6 +3099,7 @@
       var next = btn.getAttribute("data-range");
       if (!next || next === historyToggle.getAttribute("data-active")) return;
       historyToggle.setAttribute("data-active", next);
+      historyState.range = next;
       var buttons = historyToggle.querySelectorAll("button[data-range]");
       for (var i = 0; i < buttons.length; i++) {
         var on = buttons[i].getAttribute("data-range") === next;
@@ -2023,12 +3110,179 @@
       for (var j = 0; j < tiles.length; j++) {
         tiles[j].setAttribute("range", next);
       }
+      // Cake: refresh only when it's the active view.
+      if (historyState.view === "cakes") fetchHistoryCake();
     });
+  }
+
+  if (historyViewToggle) {
+    historyViewToggle.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      var next = btn.getAttribute("data-view");
+      if (!next || next === historyViewToggle.getAttribute("data-active")) return;
+      historyViewToggle.setAttribute("data-active", next);
+      historyState.view = next;
+      var buttons = historyViewToggle.querySelectorAll("button[data-view]");
+      for (var i = 0; i < buttons.length; i++) {
+        var on = buttons[i].getAttribute("data-view") === next;
+        buttons[i].classList.toggle("active", on);
+        buttons[i].setAttribute("aria-selected", on ? "true" : "false");
+      }
+      if (historyTiles) historyTiles.classList.toggle("hidden", next !== "bars");
+      if (historyCakeWrap) historyCakeWrap.classList.toggle("hidden", next !== "cakes");
+      if (next === "cakes") fetchHistoryCake();
+    });
+  }
+
+  // ---- Live 24h history (battery + SoC) ----
+  // Self-contained: fetches /api/history once a minute, draws a
+  // compact stacked canvas of (battery action bars, SoC line) over
+  // the last 24 h. Mirrors the Plan card's lower charts so the two
+  // cards have matching visual weight. Read-only — no interaction.
+  function renderLiveHistory(items) {
+    var canvas = document.getElementById("live-history-chart");
+    if (!canvas || !items || !items.length) return;
+    // Normalise the /api/history payload: `ts` for the timestamp and
+    // `bat_soc` (0–1 fraction) for the SoC field, plus `bat_w` from
+    // the row blob. Skip rows with no battery sample so the chart
+    // doesn't draw spurious zero bars.
+    var points = items
+      .filter(function (it) { return it.bat_w != null || it.bat_soc != null; })
+      .map(function (it) {
+        return {
+          ts_ms: it.ts || it.ts_ms,
+          bat_w: it.bat_w || 0,
+          soc_pct: (it.bat_soc != null) ? it.bat_soc * 100 : null,
+        };
+      });
+    if (!points.length) return;
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = canvas.parentElement.clientWidth || canvas.width;
+    var cssH = 140;
+    if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+    }
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var pad = { left: 36, right: 36, top: 8, bottom: 18 };
+    var plotW = cssW - pad.left - pad.right;
+    var plotH = cssH - pad.top - pad.bottom;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    // x: time. Use first/last point timestamps for the window.
+    var t0 = points[0].ts_ms;
+    var t1 = points[points.length - 1].ts_ms;
+    var span = Math.max(1, t1 - t0);
+    var xOf = function (ts) { return pad.left + (ts - t0) / span * plotW; };
+
+    // Battery action axis: symmetric around 0. Find absmax for bat_w.
+    var batMax = 0;
+    for (var i = 0; i < points.length; i++) {
+      var b = Math.abs(points[i].bat_w || 0);
+      if (b > batMax) batMax = b;
+    }
+    if (batMax < 1000) batMax = 1000; // sane minimum
+    var batMid = pad.top + plotH * 0.55;
+    var batH = plotH * 0.55;
+    var yOfBat = function (w) {
+      var frac = (w || 0) / batMax;
+      return batMid - frac * (batH / 2);
+    };
+
+    // Zero baseline for battery
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, batMid);
+    ctx.lineTo(pad.left + plotW, batMid);
+    ctx.stroke();
+
+    // Battery action bars. Charge (positive) above zero in amber-ish
+    // (matches Plan's "charge" colour), discharge in violet-ish.
+    var barW = Math.max(1, plotW / points.length - 0.5);
+    for (var j = 0; j < points.length; j++) {
+      var p = points[j];
+      var bw = p.bat_w || 0;
+      if (Math.abs(bw) < 50) continue; // suppress noise
+      var x = xOf(p.ts_ms);
+      var y = yOfBat(bw);
+      ctx.fillStyle = bw > 0 ? "rgba(251,191,36,0.85)" : "rgba(167,139,250,0.85)";
+      var h = Math.abs(y - batMid);
+      var top = bw > 0 ? y : batMid;
+      ctx.fillRect(x - barW / 2, top, barW, h);
+    }
+
+    // SoC line. Plotted in a dedicated bottom strip with its own
+    // 0-100% scale and right-axis labels.
+    var socTop = pad.top + plotH * 0.62;
+    var socH = plotH * 0.38;
+    var socOf = function (pct) {
+      var v = Math.max(0, Math.min(100, pct || 0));
+      return socTop + socH - (v / 100) * socH;
+    };
+    ctx.strokeStyle = "rgba(34,211,238,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    var started = false;
+    for (var k = 0; k < points.length; k++) {
+      var sp = points[k];
+      if (sp.soc_pct == null) continue;
+      var sx = xOf(sp.ts_ms);
+      var sy = socOf(sp.soc_pct);
+      if (!started) { ctx.moveTo(sx, sy); started = true; }
+      else { ctx.lineTo(sx, sy); }
+    }
+    ctx.stroke();
+
+    // Axis labels — small, mono, dim.
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    // battery: max charge / max discharge labels at the edges
+    ctx.fillText((batMax / 1000).toFixed(1) + "kW", pad.left - 4, pad.top + 6);
+    ctx.fillText("-" + (batMax / 1000).toFixed(1) + "kW", pad.left - 4, batMid + (batH / 2) - 6);
+    // SoC: 100% / 0% on the right
+    ctx.textAlign = "left";
+    ctx.fillText("100%", pad.left + plotW + 4, socTop + 6);
+    ctx.fillText("0%", pad.left + plotW + 4, socTop + socH - 6);
+    // time axis: 24h ago / now
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.textAlign = "left";
+    ctx.fillText("24h ago", pad.left, cssH - 4);
+    ctx.textAlign = "right";
+    ctx.fillText("now", pad.left + plotW, cssH - 4);
+  }
+
+  var lastLiveHistFetch = 0;
+  function fetchLiveHistory() {
+    lastLiveHistFetch = Date.now();
+    return fetch("/api/history?range=24h&points=288") // 5-min cadence
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.items) return;
+        renderLiveHistory(d.items);
+      })
+      .catch(function () { /* silent — chart just shows last state */ });
   }
 
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
+  fetchLiveHistory();
   setInterval(fetchStatus, POLL_INTERVAL);
+  setInterval(fetchLiveHistory, 60_000); // 1-min refresh
+  window.addEventListener("resize", function () {
+    // Last fetched points are not cached separately; trigger a fetch.
+    // 24h history is small (~288 points × ~50 bytes), zero-cost on
+    // every resize.
+    fetchLiveHistory();
+  });
   requestAnimationFrame(animationFrame);
 })();

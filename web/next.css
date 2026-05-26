@@ -135,6 +135,13 @@ body.ftw-next .tab-btn.active {
   color: var(--fg);
   border-color: var(--line);
 }
+body.ftw-next button:focus-visible,
+body.ftw-next [role="button"]:focus-visible,
+body.ftw-next input:focus-visible,
+body.ftw-next select:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: 2px;
+}
 body.ftw-next .header-right {
   gap: 10px;
 }
@@ -226,19 +233,24 @@ body.ftw-next .icon-btn {
 }
 body.ftw-next .icon-btn:hover {
   background: var(--ink-raised);
-  color: var(--fg);
+  color: var(--accent-e);
+  border-color: var(--accent-e);
 }
 body.ftw-next .icon-btn[aria-pressed="true"] {
   color: var(--fg);
   background: oklch(0.3 0.1 var(--accent-hue) / 0.2);
   border-color: var(--accent-e);
 }
+body.ftw-next .icon-btn[aria-pressed="true"]:hover {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--accent-e) 24%, transparent);
+}
 
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */
 body.ftw-next .mobile-menu-btn {
-  display: none;
+  display: none !important;
   background: transparent;
   border: 1px solid var(--line);
   color: var(--fg);
@@ -375,8 +387,21 @@ body.ftw-next .fuse-card .card-label {
 }
 body.ftw-next .fuse-phase-boxes {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  /* Always 3 equal columns so the per-phase tiles line up vertically
+     with the phase-power row below, regardless of viewport. The
+     previous auto-fit minmax(140px, 1fr) collapsed to fewer columns
+     on narrow screens and the two rows stopped aligning. */
+  grid-template-columns: repeat(3, 1fr);
   gap: 10px;
+}
+body.ftw-next .fuse-phase-col {
+  /* Wrapper for one phase column: the boxed tile sits on top, the
+     signed-W readout sits OUTSIDE the box just below it. Keeps the
+     box visually clean (label + A val + bar) while still carrying
+     the W diagnostic in the same column position. */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 body.ftw-next .fuse-phase-box {
   /* Sub-card sits INSIDE the fuse card, so pick --ink-sunken (the
@@ -392,6 +417,23 @@ body.ftw-next .fuse-phase-box {
   display: grid;
   grid-template-rows: auto auto auto;
   gap: 6px;
+}
+body.ftw-next .fuse-phase-col .fuse-phase-w {
+  /* Smaller, dimmer than the A reading — diagnostic, not primary.
+     Lives outside the box so it doesn't take padding/border real
+     estate. Sign convention matches the bar's export class. */
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--fg-label);
+  text-align: left;
+  line-height: 1.1;
+  padding: 0 4px;
+}
+body.ftw-next .fuse-phase-col .fuse-phase-w.export {
+  color: var(--cyan);
 }
 body.ftw-next .fuse-phase-box .fuse-phase-label {
   font-family: var(--mono);
@@ -466,6 +508,12 @@ body.ftw-next .fuse-fallback-value {
 body.ftw-next .history-row {
   margin-top: 12px;
 }
+/* Savings row — one card wide; web component owns its own chrome.
+   Just sets the top margin so it doesn't collide with the history
+   wrapper above. */
+body.ftw-next .savings-row {
+  margin-top: 12px;
+}
 body.ftw-next .history-group {
   background: var(--ink-raised);
   border: 1px solid var(--line);
@@ -477,6 +525,36 @@ body.ftw-next .history-head {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Two stacked toggle pills (Numbers/Cakes + Week/Month) ride to the
+   right of the panel label. Wrap onto a new line on narrow viewports
+   instead of squashing the label. */
+body.ftw-next .history-toggles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* History view-mode swap: tiles vs cake. Both children of the panel
+   stay in the DOM so swapping is a CSS class flip, no fetch round-trip. */
+body.ftw-next .history-tiles.hidden,
+body.ftw-next .history-cake.hidden { display: none; }
+body.ftw-next .history-cake {
+  padding: 4px 0 6px;
+  transition: opacity 200ms ease;
+}
+/* Loading state — fired while /api/energy/daily resolves on a
+   Week/Month flip. Dims + pulses the existing cake (so the layout
+   stays put) instead of swapping in a skeleton. Pointer-events off
+   prevents stale interactions during the in-flight request. */
+body.ftw-next .history-cake.loading {
+  pointer-events: none;
+  animation: ftw-cake-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ftw-cake-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.7; }
 }
 /* Shared Week/Month segmented pill — same visual as the per-card
    toggle that used to live inside the shadow DOM so the brand
@@ -506,7 +584,13 @@ body.ftw-next .history-toggle::before {
   transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
   z-index: 0;
 }
-body.ftw-next .history-toggle[data-active="month"]::before {
+/* Slide the amber pill to the right side of the toggle when the
+   second option is active. Generalised so both Week/Month
+   (data-active="month") and Bars/Cakes (data-active="cakes") share
+   the same pill animation — the toggle markup is otherwise
+   identical and shouldn't need a special CSS branch per option set. */
+body.ftw-next .history-toggle[data-active="month"]::before,
+body.ftw-next .history-toggle[data-active="cakes"]::before {
   transform: translateX(100%);
 }
 body.ftw-next .history-toggle button {
@@ -541,6 +625,20 @@ body.ftw-next .history-tiles {
 }
 @media (max-width: 900px) {
   body.ftw-next .history-tiles { grid-template-columns: 1fr; }
+}
+
+/* ---- Electricity prices — full-width chart between fuse and energy
+   sections. Section height ≈ 2× fuse-card height per spec; the
+   <ftw-price-chart> component owns its own SVG geometry inside. */
+body.ftw-next .prices-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-next .prices-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
 }
 
 /* ---- Energy today — one outer card with sub-tiles, mirrors fuse-card ---- */
@@ -673,7 +771,7 @@ body.ftw-next .strategy-hint {
   margin-top: 10px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg-dim);
+  color: var(--fg);
   line-height: 1.5;
 }
 body.ftw-next .slider-group-compact {
@@ -681,6 +779,13 @@ body.ftw-next .slider-group-compact {
 }
 body.ftw-next .slider-group-compact input[type="range"] {
   accent-color: var(--accent-e);
+}
+body.ftw-next .slider-group-compact input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+body.ftw-next .slider-group-compact:has(input[type="range"]:disabled) .slider-current {
+  color: var(--fg-muted);
 }
 body.ftw-next .slider-current {
   font-family: var(--mono);
@@ -693,6 +798,104 @@ body.ftw-next .card-hint {
   font-size: 10px;
   color: var(--fg-muted);
   margin-top: 8px;
+}
+/* Plan-chart horizon pill (Today / +Tomorrow / Tomorrow). Mirrors the
+   shadow-DOM .toggle inside <ftw-price-chart> so the affordance reads
+   as the same control across both charts. Lives in document scope
+   because the plan chart isn't a custom element. */
+body.ftw-next .plan-horizon {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 999px);
+  padding: 2px;
+  background: var(--ink-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-right: 0.5rem;
+}
+body.ftw-next .plan-horizon button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-xs, 999px);
+  font: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+body.ftw-next .plan-horizon button:hover { color: var(--fg); }
+body.ftw-next .plan-horizon button.active {
+  background: var(--accent-e);
+  /* On-accent text is near-black per DESIGN.md, never white. */
+  color: #0a0a0a;
+}
+
+body.ftw-next .chart-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+body.ftw-next .grid-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+body.ftw-next .grid-slot-badge.slot-import {
+  color: var(--red-e);
+  border-color: color-mix(in oklab, var(--red-e) 45%, var(--line));
+}
+
+body.ftw-next .grid-slot-badge.slot-export {
+  color: var(--green-e);
+  border-color: color-mix(in oklab, var(--green-e) 45%, var(--line));
+}
+
+/* Advanced-mode toggle row — sits between the live + plan charts and
+   the advanced-only sections, so the affordance lands right where
+   the extra UI surfaces appear when toggled on. Centered, quiet, and
+   only as wide as it needs to be. */
+body.ftw-next .ui-mode-row {
+  display: flex;
+  justify-content: center;
+  margin: 1.25rem 0 1.5rem;
+}
+
+/* Tile-mode cards that open a modal advertise their clickability —
+   pointer cursor + a subtle hover lift. Hero mode still uses the
+   energy-flow planets, so this only matters in tiles mode. */
+body.ftw-next .summary-card.clickable {
+  cursor: pointer;
+  transition: transform 80ms ease, border-color 120ms ease;
+}
+body.ftw-next .summary-card.clickable:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-e);
+}
+
+body.ftw-next .card-hint.card-hint-active {
+  /* Used when the hint is the *active* explanation of a disabled
+     control (e.g. grid-target slider greyed out because the MPC
+     planner is driving). Lifts the colour from --fg-muted to --fg
+     and bumps size a hair so the reason for the disabled state
+     reads at the same weight as the control's label, not as quiet
+     small print. */
+  color: var(--fg);
+  font-size: 11px;
 }
 
 body.ftw-next .btn-send {
@@ -751,6 +954,79 @@ body.ftw-next .chart-container {
   border: none;
   padding: 4px 0 0;
 }
+
+/* Compact variant for the secondary chart stacks (Live's 24 h battery
+ * + SoC strip below the main power chart). Plays the same role as the
+ * Plan card's battery/SoC sub-charts: same vertical footprint, same
+ * border treatment, so the two cards are visually balanced. */
+body.ftw-next .chart-container-compact {
+  padding: 0;
+}
+
+/* Live stats strip — five tile-style values inline between the chart
+ * header and the chart canvas. Mono-typed and grid-aligned so an
+ * operator's eye can scan them at a glance, mirroring the Plan card's
+ * summary line directly above its own charts. */
+body.ftw-next .live-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+body.ftw-next .live-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+body.ftw-next .live-stat-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+body.ftw-next .live-stat-value {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+body.ftw-next .live-stat-value.is-import   { color: var(--red-e); }
+body.ftw-next .live-stat-value.is-export   { color: var(--green-e); }
+body.ftw-next .live-stat-value.is-charging { color: var(--accent-e); }
+body.ftw-next .live-stat-value.is-discharging { color: var(--blue-e, #60a5fa); }
+body.ftw-next .live-stat-value.is-neutral { color: var(--fg-dim); }
+
+/* 24 h battery + SoC history block — sits below the live power chart.
+ * Section label matches the Plan card's chart-section labels. */
+body.ftw-next .live-history {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+body.ftw-next .live-history-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+@media (max-width: 720px) {
+  body.ftw-next .live-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  body.ftw-next .live-stat:nth-child(n + 4) {
+    grid-column: span 1;
+  }
+}
 body.ftw-next .range-buttons button {
   /* Ghost secondary per DESIGN.md: transparent bg, --line border,
      --fg text. Theme-aware so the buttons keep their chrome on both
@@ -807,12 +1083,33 @@ body.ftw-next .plan-help {
   max-width: 68ch;
 }
 body.ftw-next .plan-savings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   margin: 6px 0 10px;
 }
 body.ftw-next .plan-savings:empty { display: none; }
+/* Forecast outlook block — own bordered surface so operators see it
+ * as "extra analysis", not part of the running plan summary. The
+ * "48 h outlook" label disambiguates from realised savings (which
+ * live in the Savings card above). */
+body.ftw-next .plan-outlook {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.015);
+}
+body.ftw-next .plan-outlook-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.85;
+  margin-right: 4px;
+  cursor: help;
+}
 body.ftw-next .saving-badge {
   font-family: var(--mono);
   font-size: 11px;
@@ -832,6 +1129,74 @@ body.ftw-next .saving-badge .saving-pct { opacity: 0.6; }
 body.ftw-next .saving-badge.saving-pos { border-color: rgba(34,197,94,0.45); color: #4ade80; }
 body.ftw-next .saving-badge.saving-neg { border-color: rgba(239,68,68,0.45); color: #f87171; }
 body.ftw-next .plan-actions { gap: 10px; display: flex; align-items: center; }
+
+/* ---- Plan "?" help button + explanation modal ---- */
+body.ftw-next .plan-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+body.ftw-next .plan-help-btn {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-next .plan-help-btn:hover {
+  color: var(--accent-e);
+  border-color: var(--accent-e);
+}
+body.ftw-next .plan-help-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent-e);
+  color: var(--accent-e);
+}
+body.ftw-next .plan-help-body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+}
+body.ftw-next .plan-help-body p { margin: 0 0 10px; }
+body.ftw-next .plan-help-body h3 {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 14px 0 6px;
+  letter-spacing: -0.005em;
+}
+body.ftw-next .plan-help-body ul {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}
+body.ftw-next .plan-help-body li { margin: 0 0 6px; }
+body.ftw-next .plan-help-body b { color: var(--fg); font-weight: 600; }
+body.ftw-next .plan-help-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+body.ftw-next .plan-help-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+body.ftw-next .plan-help-body .saving-pos-inline { color: #4ade80; font-weight: 600; }
+body.ftw-next .plan-help-body .saving-neg-inline { color: #f87171; font-weight: 600; }
 
 /* ---- ML twins / drivers / calibration sections ---- */
 body.ftw-next .section-header h2,
@@ -867,6 +1232,9 @@ body.ftw-next footer {
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
+body.ftw-next footer .refresh-label {
+  color: var(--fg-dim);
+}
 body.ftw-next .status-bar {
   background: oklch(0.11 0.015 250);
   border-top: 1px solid var(--line);
@@ -879,6 +1247,268 @@ body.ftw-next .modal-content {
   background: var(--ink-raised);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
+}
+body.ftw-next .modal-header,
+body.ftw-next .modal-footer,
+body.ftw-next .modal-tabs {
+  border-color: var(--line);
+}
+body.ftw-next .modal-header,
+body.ftw-next .modal-tabs {
+  background: var(--ink);
+}
+body.ftw-next .modal-header h2 {
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+body.ftw-next .modal-close {
+  color: var(--fg-muted);
+}
+body.ftw-next .modal-close:hover {
+  color: var(--fg);
+}
+body.ftw-next .modal-tabs {
+  gap: 0;
+  padding: 8px 16px 0;
+}
+body.ftw-next .modal-tabs button {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-bottom-color: transparent;
+}
+body.ftw-next .modal-tabs button.active {
+  color: var(--accent-e);
+  border-bottom-color: var(--accent-e);
+}
+body.ftw-next .modal-body {
+  background: var(--ink-raised);
+}
+body.ftw-next .modal-body label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+body.ftw-next .modal-body label:has(input[type="checkbox"]) {
+  color: var(--fg-label);
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+body.ftw-next .modal-body input[type="text"],
+body.ftw-next .modal-body input[type="number"],
+body.ftw-next .modal-body input[type="password"],
+body.ftw-next .modal-body select {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  min-height: 38px;
+  padding: 10px 12px;
+}
+body.ftw-next .modal-body input:focus,
+body.ftw-next .modal-body select:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-next .modal-body input::placeholder {
+  color: var(--fg-muted);
+}
+body.ftw-next .modal-body fieldset,
+body.ftw-next .device-item {
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+body.ftw-next .modal-body fieldset {
+  padding: 14px 16px 16px;
+}
+body.ftw-next .modal-body fieldset legend {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  padding: 0 8px;
+  text-transform: uppercase;
+}
+body.ftw-next .field-row.field-row-single {
+  grid-template-columns: 1fr;
+}
+body.ftw-next .device-item {
+  padding: 14px;
+}
+body.ftw-next .device-item-header {
+  gap: 12px;
+}
+body.ftw-next .device-item-header strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.94rem;
+  font-weight: 600;
+}
+body.ftw-next .device-meta {
+  color: var(--fg-dim);
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+body.ftw-next .btn-add,
+body.ftw-next .btn-remove {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+body.ftw-next .btn-add:hover {
+  border-color: var(--fg-dim);
+  color: var(--fg);
+}
+body.ftw-next .btn-add:disabled {
+  color: var(--fg-muted);
+  cursor: wait;
+  opacity: 0.75;
+}
+body.ftw-next .btn-remove {
+  color: var(--red-e);
+  flex: 0 0 auto;
+}
+body.ftw-next .btn-remove:hover {
+  background: transparent;
+  border-color: var(--red-e);
+}
+body.ftw-next .settings-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+body.ftw-next .settings-status.success { color: var(--green-e); }
+body.ftw-next .settings-status.error { color: var(--red-e); }
+body.ftw-next .creds-badge {
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+body.ftw-next .creds-badge.creds-saved {
+  background: color-mix(in srgb, var(--green-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green-e) 35%, transparent);
+  color: var(--green-e);
+}
+body.ftw-next .creds-badge.creds-missing {
+  background: color-mix(in srgb, var(--accent-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent-e) 35%, transparent);
+  color: var(--accent-e);
+}
+body.ftw-next .driver-test-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+body.ftw-next .driver-test-btn {
+  margin-top: 0;
+  width: auto;
+}
+body.ftw-next .driver-test-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+body.ftw-next .driver-test-status.ok {
+  color: var(--green-e);
+}
+body.ftw-next .driver-test-status.error {
+  color: var(--red-e);
+}
+body.ftw-next .driver-test-output {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-basis: 100%;
+  padding: 10px 12px;
+}
+body.ftw-next .driver-test-kv,
+body.ftw-next .driver-test-metrics {
+  display: grid;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  gap: 5px 12px;
+  grid-template-columns: max-content 1fr;
+}
+body.ftw-next .driver-test-kv span,
+body.ftw-next .driver-test-metrics span {
+  color: var(--fg-label);
+}
+body.ftw-next .driver-test-kv strong,
+body.ftw-next .driver-test-metrics strong {
+  color: var(--fg);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+body.ftw-next .driver-test-values {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+body.ftw-next .driver-test-values div {
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 3px 10px;
+  grid-template-columns: 72px 1fr;
+  padding-top: 6px;
+}
+body.ftw-next .driver-test-values span {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-next .driver-test-values strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+body.ftw-next .driver-test-values small {
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 2;
+}
+body.ftw-next .driver-test-metrics {
+  border-top: 1px solid var(--line-soft);
+  grid-template-columns: 1fr auto;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+body.ftw-next .driver-test-error,
+body.ftw-next .driver-test-empty {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+body.ftw-next .driver-test-error {
+  color: var(--red-e);
+  margin-top: 8px;
 }
 
 /* ---- Diagnose ---- */
@@ -926,7 +1556,7 @@ body.ftw-next .diagnose-detail {
     display: none;
   }
   body.ftw-next .mobile-menu-btn {
-    display: inline-flex;
+    display: inline-flex !important;
     align-items: center;
     justify-content: center;
     justify-self: end;
@@ -1070,6 +1700,13 @@ html[data-theme="light"] body.ftw-next .status-bar {
    tokens above re-point them but a few hex fallbacks slip through in
    inline styles — use a readable dim for neutral text on light bg. */
 html[data-theme="light"] body.ftw-next .val-neutral { color: var(--fg); }
+html[data-theme="light"] body.ftw-next .summary-card .card-sub,
+html[data-theme="light"] body.ftw-next .card-target,
+html[data-theme="light"] body.ftw-next .plan-summary,
+html[data-theme="light"] body.ftw-next .chart-legend,
+html[data-theme="light"] body.ftw-next footer {
+  color: var(--fg-dim);
+}
 
 /* ---- Battery-absence gating ----
    When no driver reports bat_w, next-app.js flips body.no-battery on
@@ -1105,6 +1742,49 @@ body.ftw-next .btn-reset-model:hover {
   border-color: var(--fg-dim);
 }
 body.ftw-next .btn-reset-model:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
+body.ftw-next .twin-profile-row {
+  align-items: center;
+}
+
+body.ftw-next .twin-profile-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(54px, 1fr));
+  width: 132px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+body.ftw-next .twin-profile-toggle button {
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+body.ftw-next .twin-profile-toggle button.active {
+  background: var(--accent-e);
+  color: #0a0a0a;
+}
+
+body.ftw-next .twin-profile-toggle button:not(.active):hover {
+  color: var(--fg);
+}
+
+body.ftw-next .twin-profile-toggle button:focus-visible {
   outline: 1px solid var(--accent-e);
   outline-offset: 2px;
 }

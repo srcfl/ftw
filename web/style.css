@@ -167,7 +167,12 @@ header h1 {
   transition: background 0.1s;
 }
 .diag-row:hover { background: rgba(255,255,255,0.03); }
-.diag-row.active { background: rgba(96,165,250,0.12); border-left: 3px solid #60a5fa; padding-left: calc(0.75rem - 3px); }
+.diag-row.active {
+  background: rgba(96,165,250,0.18);
+  border-left: 4px solid #60a5fa;
+  box-shadow: inset 0 0 0 1px rgba(96,165,250,0.25);
+  padding-left: calc(0.75rem - 4px);
+}
 .diag-row-time { font-weight: 600; }
 .diag-row-date { color: var(--text-dim); font-weight: 400; font-size: 0.7rem; }
 .diag-row-reason {
@@ -208,12 +213,18 @@ header h1 {
 }
 .diag-ev { background: rgba(6,182,212,0.18); color: #67e8f9; }
 
-/* Detail pane */
+/* Detail pane — single scroll container so the chart can roll out
+   of view on short viewports (small laptops); the sticky thead still
+   pins to the top of the pane once the table starts scrolling under
+   it. The inner .diagnose-table-wrap previously owned the scrollbar
+   with `flex: 1; overflow: auto`, which forced the chart to keep its
+   full 320 px regardless of remaining height — leaving < 100 px for
+   the table on a 720p laptop. */
 .diagnose-detail {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  overflow: hidden;
+  overflow: auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -247,9 +258,10 @@ header h1 {
 .diag-chart-highlight.hidden { display: none; }
 
 .diagnose-table-wrap {
-  flex: 1;
-  overflow: auto;
   padding: 0 0.5rem 1rem 0.5rem;
+  /* No own overflow / flex grow — the parent .diagnose-detail is the
+     single scroll container; the sticky `thead th { top: 0 }` pins
+     against it when the chart scrolls out of view. */
 }
 .diag-table {
   width: 100%;
@@ -394,6 +406,23 @@ main {
   font-family: monospace;
 }
 .status-bar-item { white-space: nowrap; }
+/* Driver list overrides .status-bar-item's nowrap so chips wrap onto
+   additional rows when there are too many to fit. The bar itself
+   grows in height; the page width never expands past the viewport.
+   Each chip keeps nowrap so a driver name like "solaredge-pv" never
+   breaks across lines. */
+#sb-drivers {
+  white-space: normal;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 2px;
+  min-width: 0;
+}
+#sb-drivers > span {
+  white-space: nowrap;
+}
 .sb-ok { color: #22c55e; }
 .sb-warn { color: #f59e0b; }
 .sb-err { color: #ef4444; }
@@ -547,6 +576,41 @@ body { padding-bottom: 28px; }
   opacity: 0.85;
 }
 
+.btn-ghost {
+  margin-top: 0.5rem;
+  padding: 0.4rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.8rem;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.btn-ghost:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+/* Tiny inline spinner for "restart in progress" / similar transient
+ * states. Uses currentColor so it adopts the surrounding text colour. */
+.spinner {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.1em;
+  margin-right: 0.4em;
+  animation: ftw-spin 0.8s linear infinite;
+}
+
+@keyframes ftw-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ---- Drivers ---- */
 #drivers-section h2,
 #dispatch-section h2 {
@@ -632,21 +696,6 @@ body { padding-bottom: 28px; }
   color: #f59e0b;
   font-size: 0.75rem;
 }
-
-/* Inline model panel embedded inside each driver card */
-.driver-model-panel {
-  margin-top: 0.75rem;
-  padding-top: 0.6rem;
-  border-top: 1px solid var(--border);
-}
-.driver-model-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.78rem;
-}
-.driver-model-title { color: var(--text); }
-.driver-model-meta  { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
 .driver-soc-bar {
   width: 100%;
@@ -1251,7 +1300,7 @@ footer {
   color: #3b82f6;
 }
 
-/* ---- Battery Models section ---- */
+/* ---- Calibration section ---- */
 #models-section { margin-top: 20px; }
 .section-header {
   display: flex;
@@ -1329,6 +1378,28 @@ footer {
   box-sizing: border-box;
 }
 .control-strategy { min-width: 320px; }
+
+/* Strategy block when embedded inside the Plan card. Sits between the
+ * chart-header and the plan-help paragraph; visually a thin separator
+ * rather than a full card so it reads as "configuration for the plan
+ * below", not a separate widget. */
+.plan-strategy {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
+  border-radius: 6px;
+  background: var(--bg-raised, rgba(255,255,255,0.02));
+}
+.plan-strategy-label {
+  display: block;
+  font-family: var(--mono, monospace);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--text-dim, #94a3b8);
+  margin-bottom: 8px;
+}
+
 .mode-buttons-primary {
   display: flex;
   gap: 6px;
@@ -1461,7 +1532,10 @@ footer {
   font-size: 0.72rem;
   font-weight: normal;
   color: #e2e8f0;
+  font-family: var(--sans, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   white-space: normal;
+  text-transform: none;
+  letter-spacing: 0;
   width: 260px;
   z-index: 100;
   pointer-events: none;
@@ -1588,64 +1662,112 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
 }
-.model-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
+
+/* Loadpoints section — match the inter-section spacing other advanced
+   sections use (#models-section: margin-top 20px). Without this the
+   .lp-card sits flush against the drivers-section below, which the
+   user reported as "loadpoints overlaps the devices". Add bottom
+   margin too so the model section after drivers stays readable. */
+#loadpoints-section { margin-top: 20px; margin-bottom: 20px; }
+
+/* Loadpoints — advanced-mode panel. Mirrors .twin-card visual language
+   (1 px hairline border via --line where the modern theme is loaded,
+   subtle raised surface) but lays the body out as config-on-the-left,
+   schedule-table-on-the-right so an operator can read state + plan
+   side by side without scrolling. Wraps to a single column under
+   720 px so it stays readable on a tablet. */
+.lp-card {
+  background: var(--ink-raised, rgba(255,255,255,0.03));
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
   border-radius: 6px;
-  padding: 12px 14px;
+  padding: 12px;
+  margin-top: 10px;
 }
-.model-card-header {
+.lp-card-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0 0 10px 0;
+}
+.lp-card-header h3 {
+  font-family: var(--mono, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 0.78rem;
+  margin: 0;
+  color: var(--fg-label, var(--text, #e2e8f0));
+}
+.lp-card-body {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .lp-card-body { grid-template-columns: 1fr; }
+}
+.lp-cfg {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lp-cfg-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 10px;
+  font-size: 0.78rem;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line-soft, rgba(255,255,255,0.04));
 }
-.model-name {
-  font-weight: 600;
-  font-size: 0.95rem;
+.lp-cfg-row:last-child { border-bottom: 0; }
+.lp-cfg-key {
+  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  font-family: var(--mono, monospace);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.68rem;
 }
-.model-confidence {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  font-family: monospace;
+.lp-cfg-val {
+  color: var(--fg, var(--text, #e2e8f0));
+  font-variant-numeric: tabular-nums;
 }
-.model-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 10px;
-  font-size: 0.8rem;
-  margin-bottom: 10px;
-}
-.model-stat-label { color: var(--text-dim); }
-.model-stat-value {
-  font-family: monospace;
-  text-align: right;
-  font-weight: 500;
-}
-.model-bar {
-  height: 6px;
-  background: var(--surface2);
+.lp-badge {
+  display: inline-block;
+  font-family: var(--mono, monospace);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
   border-radius: 3px;
-  overflow: hidden;
-  margin-top: 4px;
+  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  background: transparent;
 }
-.model-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 50%, #22c55e 100%);
-  transition: width 0.4s ease;
+.lp-badge-on {
+  /* On-accent text MUST be near-black per DESIGN.md, not white. */
+  color: #0a0a0a;
+  background: var(--amber, var(--accent, #5566ff));
+  border-color: transparent;
 }
-.model-health-text {
-  font-size: 0.7rem;
-  color: var(--text-dim);
-  margin-top: 4px;
-  font-family: monospace;
-  display: flex;
-  justify-content: space-between;
+.lp-schedule-wrap {
+  /* Bound the table height so a 16-row plan doesn't push the card
+     off-screen on a small viewport. The diag-table inherits a sticky
+     thead so column headers stay visible while the operator scrolls. */
+  max-height: 360px;
+  overflow: auto;
 }
-.health-good { color: #22c55e; }
-.health-warn { color: #f59e0b; }
-.health-bad  { color: #ef4444; }
-
+.lp-schedule { font-size: 0.74rem; }
+.lp-schedule tbody tr.lp-row-charging td {
+  /* Highlight slots where the EV is actively scheduled. Subtle amber
+     wash so it reads as "this is the action" without screaming over
+     the rest of the schedule. */
+  background: color-mix(in oklch, var(--amber, #fbbf24) 14%, transparent);
+}
+.lp-empty {
+  color: var(--fg-muted, var(--text-dim, #94a3b8));
+  font-size: 0.78rem;
+  padding: 12px 0;
+  font-style: italic;
+}
 /* ---- Self-tune modal ---- */
 .self-tune-checklist {
   display: flex;

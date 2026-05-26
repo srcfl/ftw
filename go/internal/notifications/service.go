@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -36,7 +37,28 @@ const (
 	EventDriverRecovered = "driver_recovered"
 	EventUpdateAvailable = "update_available"
 	EventFuseOverLimit   = "fuse_over_limit"
+
+	// EventConcurrentDriversOffline fires when ≥ ThresholdN drivers
+	// are simultaneously stale beyond ThresholdS — the typical
+	// signature of a fuse blow / breaker trip / power outage that
+	// took out multiple inverters at once. A single flaky driver
+	// uses driver_offline; this catches the multi-driver
+	// "something bigger just happened" pattern that motivated
+	// the 2026-05-02 incident: house fuse blew, both ferroamp +
+	// sungrow went silent, the dashboard kept rendering stale
+	// numbers and nobody noticed for 2+ hours.
+	//
+	// Default ThresholdN = 2. Configure via the rule's
+	// `threshold_n` field. ThresholdS reuses the same per-driver
+	// staleness threshold semantics — a driver is "stale" when its
+	// LastSuccess is older than ThresholdS (default DefaultThresholdS).
+	EventConcurrentDriversOffline = "concurrent_drivers_offline"
 )
+
+// DefaultConcurrentThresholdN is the count of drivers that must be
+// concurrently offline before EventConcurrentDriversOffline fires,
+// when the rule doesn't override.
+const DefaultConcurrentThresholdN = 2
 
 // Defaults for a freshly-seeded rule.
 const (
@@ -54,6 +76,14 @@ func DefaultRules() []config.NotificationRule {
 		// Default threshold 30 s — brief inrush / dryer starts shouldn't
 		// page the operator. Cooldown 15 min per phase.
 		{Type: EventFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+		// Concurrent-drivers-offline: the fuse-blow signature. Default
+		// thresholds: 2 drivers offline for 5 minutes, 30 min cooldown
+		// (it's an "infrastructure" alert, you don't want it pinging
+		// every minute while the operator is on the way home to fix
+		// the breaker).
+		{Type: EventConcurrentDriversOffline, Enabled: false,
+			ThresholdS: 300, ThresholdN: DefaultConcurrentThresholdN,
+			Priority: 5, CooldownS: 1800},
 	}
 }
 
@@ -527,6 +557,64 @@ func (s *Service) observeAt(health map[string]telemetry.DriverHealth, now time.T
 			}
 		}
 	}
+	// Per-rule (post per-driver loop): concurrent drivers offline.
+	// This rule is ABOUT the fleet, not a single driver, so it can't
+	// be evaluated inside the per-driver inner loop. We collect the
+	// stale set once and decide whether the count crosses threshold.
+	for _, rule := range rules {
+		if !rule.Enabled || rule.Type != EventConcurrentDriversOffline {
+			continue
+		}
+		threshS := time.Duration(rule.ThresholdS) * time.Second
+		if threshS == 0 {
+			threshS = time.Duration(DefaultThresholdS) * time.Second
+		}
+		threshN := rule.ThresholdN
+		if threshN <= 0 {
+			threshN = DefaultConcurrentThresholdN
+		}
+		var stale []string
+		for d, h := range health {
+			// Cold-start drivers don't count — same exception as
+			// driver_offline. A driver that's never emitted yet
+			// shouldn't pull the fleet into a fuse-blow alert.
+			if h.LastSuccess == nil && h.TickCount == 0 {
+				continue
+			}
+			var since time.Duration
+			if h.LastSuccess != nil {
+				since = now.Sub(*h.LastSuccess)
+			}
+			if h.LastSuccess == nil || since >= threshS {
+				stale = append(stale, d)
+			}
+		}
+		sort.Strings(stale)
+		key := rule.Type + "|fleet"
+		if len(stale) < threshN {
+			// Healthy / partial outage — clear the latch so the
+			// next concurrent failure can fire.
+			delete(s.alreadyFired, key)
+			continue
+		}
+		if s.alreadyFired[key] {
+			continue
+		}
+		if rule.CooldownS > 0 {
+			if last, ok := s.lastFired[key]; ok && now.Sub(last) < time.Duration(rule.CooldownS)*time.Second {
+				continue
+			}
+		}
+		s.alreadyFired[key] = true
+		s.lastFired[key] = now
+		td := templateData{
+			Device:    strings.Join(stale, ", "),
+			Devices:   stale,
+			EventType: rule.Type,
+			Timestamp: now.UTC().Format(time.RFC3339),
+		}
+		pending = append(pending, dispatch{rule, td})
+	}
 	// Post-pass: if no enabled driver_recovered rule exists, nothing
 	// above ever clears activeAlert when a driver goes healthy again,
 	// and Status().ActiveAlert would leak upward forever. Clean up
@@ -617,6 +705,10 @@ type templateData struct {
 	Phase  string  // "L1" | "L2" | "L3"
 	Amps   float64 // current reading on that phase
 	LimitA float64 // fuse rating (site.fuse.max_amps)
+	// Populated for concurrent_drivers_offline only. Devices is the
+	// sorted list of stale drivers; Device contains the same names
+	// joined by ", " for the default body template.
+	Devices []string
 }
 
 func (s *Service) buildData(driver, eventType string, since time.Duration, now time.Time) templateData {
@@ -768,6 +860,8 @@ func defaultTitleFor(eventType string) string {
 		return "forty-two-watts: update {{.Version}} available"
 	case EventFuseOverLimit:
 		return "forty-two-watts: {{.Phase}} over fuse limit"
+	case EventConcurrentDriversOffline:
+		return "forty-two-watts: {{len .Devices}} drivers offline (likely fuse / outage)"
 	}
 	return "forty-two-watts: {{.EventType}}"
 }
@@ -782,6 +876,8 @@ func defaultBodyFor(eventType string) string {
 		return "Version {{.Version}} is available (running {{.PreviousVersion}}). {{.ReleaseURL}}"
 	case EventFuseOverLimit:
 		return "{{.Phase}} draw {{printf \"%.1f\" .Amps}} A exceeded the {{printf \"%.0f\" .LimitA}} A fuse for {{.Duration}}."
+	case EventConcurrentDriversOffline:
+		return "{{len .Devices}} drivers went silent at once: {{.Device}}. Check the fuse / breaker / wifi."
 	}
 	return "{{.EventType}} for {{.Device}}"
 }

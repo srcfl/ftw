@@ -573,3 +573,131 @@ func TestFuseOverLimitFiresAfterThresholdAndResets(t *testing.T) {
 		t.Fatalf("cooldown did not block refire: got %d msgs", n)
 	}
 }
+
+// ---- concurrent_drivers_offline ----
+
+func concurrentCfg() *config.Notifications {
+	return &config.Notifications{
+		Enabled:         true,
+		Provider:        "ntfy",
+		DefaultPriority: 3,
+		Ntfy:            &config.NtfyConfig{Server: "https://example", Topic: "test"},
+		Events: []config.NotificationRule{
+			{Type: EventConcurrentDriversOffline, Enabled: true,
+				ThresholdS: 300, ThresholdN: 2,
+				Priority: 5, CooldownS: 1800},
+		},
+	}
+}
+
+func TestConcurrentOffline_FiresOnFleetOutage(t *testing.T) {
+	pub := &fakePub{}
+	svc, clk := newSvc(concurrentCfg(), pub)
+	// Both drivers were healthy 10 minutes ago; rule threshold is 5
+	// minutes. Now, both have gone stale at the same time — the
+	// fuse-blow signature.
+	last := clk.now().Add(-10 * time.Minute)
+	health := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: &last, TickCount: 100,
+			Status: telemetry.StatusOffline},
+		"sungrow": {Name: "sungrow", LastSuccess: &last, TickCount: 100,
+			Status: telemetry.StatusOffline},
+		"easee": {Name: "easee", LastSuccess: addr(clk.now()), TickCount: 100,
+			Status: telemetry.StatusOk},
+	}
+	svc.Observe(health)
+	msgs := pub.Messages()
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 fire, got %d", len(msgs))
+	}
+	body := msgs[0].Body
+	if !strings.Contains(body, "ferroamp") || !strings.Contains(body, "sungrow") {
+		t.Errorf("body should list both stale drivers; got %q", body)
+	}
+	if strings.Contains(body, "easee") {
+		t.Errorf("healthy driver should NOT appear in body; got %q", body)
+	}
+}
+
+func TestConcurrentOffline_DoesNotFireForSingleStale(t *testing.T) {
+	// Single stale driver below ThresholdN — driver_offline's job,
+	// not concurrent's.
+	pub := &fakePub{}
+	svc, clk := newSvc(concurrentCfg(), pub)
+	last := clk.now().Add(-10 * time.Minute)
+	health := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: &last, TickCount: 100,
+			Status: telemetry.StatusOffline},
+		"sungrow": {Name: "sungrow", LastSuccess: addr(clk.now()), TickCount: 100,
+			Status: telemetry.StatusOk},
+	}
+	svc.Observe(health)
+	if n := len(pub.Messages()); n != 0 {
+		t.Errorf("single stale should not fire concurrent rule; got %d msgs", n)
+	}
+}
+
+func TestConcurrentOffline_FiresOnceUntilRecovery(t *testing.T) {
+	pub := &fakePub{}
+	svc, clk := newSvc(concurrentCfg(), pub)
+	last := clk.now().Add(-10 * time.Minute)
+	stale := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: &last, TickCount: 100,
+			Status: telemetry.StatusOffline},
+		"sungrow": {Name: "sungrow", LastSuccess: &last, TickCount: 100,
+			Status: telemetry.StatusOffline},
+	}
+	// Fire once.
+	svc.Observe(stale)
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("first observe: want 1, got %d", n)
+	}
+	// Re-observing while still stale must NOT refire (the latch).
+	for i := 0; i < 5; i++ {
+		clk.advance(60 * time.Second)
+		svc.Observe(stale)
+	}
+	if n := len(pub.Messages()); n != 1 {
+		t.Fatalf("repeat-stale: want still 1, got %d", n)
+	}
+	// Recovery — both back to healthy. Latch clears.
+	now := clk.now()
+	healthy := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: &now, TickCount: 200,
+			Status: telemetry.StatusOk},
+		"sungrow": {Name: "sungrow", LastSuccess: &now, TickCount: 200,
+			Status: telemetry.StatusOk},
+	}
+	svc.Observe(healthy)
+	// New outage triggers a NEW fire (after cooldown).
+	clk.advance(40 * time.Minute) // > CooldownS (1800)
+	last2 := clk.now().Add(-10 * time.Minute)
+	stale2 := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: &last2, TickCount: 300,
+			Status: telemetry.StatusOffline},
+		"sungrow": {Name: "sungrow", LastSuccess: &last2, TickCount: 300,
+			Status: telemetry.StatusOffline},
+	}
+	svc.Observe(stale2)
+	if n := len(pub.Messages()); n != 2 {
+		t.Fatalf("after recovery + cooldown: want 2 fires, got %d", n)
+	}
+}
+
+func TestConcurrentOffline_IgnoresColdStartDrivers(t *testing.T) {
+	// A driver that never emitted (cold start) shouldn't pull the
+	// fleet into a concurrent-offline alert. Only previously-healthy-
+	// now-silent drivers count, mirroring driver_offline's exception.
+	pub := &fakePub{}
+	svc, _ := newSvc(concurrentCfg(), pub)
+	health := map[string]telemetry.DriverHealth{
+		"ferroamp": {Name: "ferroamp", LastSuccess: nil, TickCount: 0}, // cold start
+		"sungrow":  {Name: "sungrow", LastSuccess: nil, TickCount: 0},  // cold start
+	}
+	svc.Observe(health)
+	if n := len(pub.Messages()); n != 0 {
+		t.Errorf("cold-start drivers should be excluded; got %d msgs", n)
+	}
+}
+
+func addr(t time.Time) *time.Time { return &t }
