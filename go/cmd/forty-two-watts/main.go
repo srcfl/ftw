@@ -141,6 +141,12 @@ func main() {
 			coldDir = cfg.State.ColdDir
 		}
 	}
+	// Resolve to absolute so paths derived via filepath.Dir(statePath)
+	// (SnapshotDir, nova.key) don't end up cwd-relative on native installs
+	// where the working directory may differ from the data volume.
+	if abs, err := filepath.Abs(statePath); err == nil {
+		statePath = abs
+	}
 	st, err := state.Open(statePath)
 	if err != nil {
 		slog.Error("open state", "err", err)

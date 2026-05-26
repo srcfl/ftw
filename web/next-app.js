@@ -2427,6 +2427,12 @@
     wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
+      // Surface the surplus-only ↔ schedule interaction immediately on
+      // toggle, before the network save returns — operators get instant
+      // feedback that flipping surplus on turns the deadline soft.
+      if (typeof surplusBestEffortHint !== "undefined" && surplusBestEffortHint) {
+        surplusBestEffortHint.style.display = soCb.checked ? "" : "none";
+      }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
@@ -2478,6 +2484,32 @@
       unpluggedHint.style.fontStyle = "italic";
       box.appendChild(unpluggedHint);
     }
+
+    // Surplus-only ↔ schedule interaction. The schedule's explainer
+    // promises "the planner uses cheap grid hours to fill the gap PV
+    // can't cover" — but that promise is conditional on grid charging
+    // being allowed in the first place. Surplus only is a hard
+    // constraint in the MPC (mpc.go:474): EV actions that would import
+    // grid are rejected outright, regardless of how close the deadline
+    // is. So if both are on, the deadline becomes best-effort against
+    // whatever PV happens to land. Flag that clearly to the operator
+    // so they don't set a 05:00 deadline + surplus-only and expect
+    // overnight grid charging to make it happen.
+    //
+    // The hint's visibility is wired live to the surplus-only checkbox
+    // above, so toggling it gives instant feedback without waiting on
+    // the network save round-trip.
+    var surplusBestEffortHint = document.createElement("div");
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.style.fontSize = "0.72rem";
+    surplusBestEffortHint.style.color = "var(--fg)";
+    surplusBestEffortHint.style.fontStyle = "italic";
+    surplusBestEffortHint.style.marginBottom = "0.5rem";
+    surplusBestEffortHint.style.padding = "0.4rem 0.55rem";
+    surplusBestEffortHint.style.borderLeft = "2px solid var(--accent-e)";
+    surplusBestEffortHint.style.background = "var(--ink-raised)";
+    surplusBestEffortHint.style.display = (lp && lp.surplus_only) ? "" : "none";
+    box.appendChild(surplusBestEffortHint);
 
     function row(labelText, controlEl) {
       var r = document.createElement("div");

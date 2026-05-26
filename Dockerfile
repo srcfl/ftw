@@ -38,12 +38,11 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-pair ./cmd/ftw-pair
-# ftw-pair-relay is the standalone relay server (deployed separately — built
-# here so operators can extract the binary with `docker cp` if needed).
-RUN cd go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/ftw-pair-relay ./cmd/ftw-pair-relay
+
+# Note: the standalone relay (ftw-subetha) is NOT bundled in this image.
+# It's deployed separately on a Lightsail nano — see docs/subetha-deploy.md.
+# The cross-platform binaries are published as GitHub release assets
+# (ftw-subetha-linux-{amd64,arm64}) for operators who self-host.
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
