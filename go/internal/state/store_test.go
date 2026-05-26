@@ -221,6 +221,47 @@ func TestLoadSeriesDownsamplingIncludesLatestSample(t *testing.T) {
 	}
 }
 
+func TestRolloffToParquetPreservesExistingDayRows(t *testing.T) {
+	s := freshStore(t)
+	coldDir := t.TempDir()
+	day := time.Now().Add(-RecentRetention - 48*time.Hour).UTC().Truncate(24 * time.Hour)
+	first := day.Add(10 * time.Hour).UnixMilli()
+	second := day.Add(11 * time.Hour).UnixMilli()
+
+	if err := s.RecordSamples([]Sample{
+		{Driver: "meter", Metric: "grid_w", TsMs: first, Value: 100},
+	}); err != nil {
+		t.Fatalf("record first sample: %v", err)
+	}
+	if rows, _, err := s.RolloffToParquet(context.Background(), coldDir); err != nil {
+		t.Fatalf("first rolloff: %v", err)
+	} else if rows != 1 {
+		t.Fatalf("first rolloff rows = %d, want 1", rows)
+	}
+
+	if err := s.RecordSamples([]Sample{
+		{Driver: "meter", Metric: "grid_w", TsMs: second, Value: 200},
+	}); err != nil {
+		t.Fatalf("record second sample: %v", err)
+	}
+	if rows, _, err := s.RolloffToParquet(context.Background(), coldDir); err != nil {
+		t.Fatalf("second rolloff: %v", err)
+	} else if rows != 1 {
+		t.Fatalf("second rolloff rows = %d, want 1", rows)
+	}
+
+	got, err := s.LoadSeriesFromParquet(coldDir, "meter", "grid_w", first, second)
+	if err != nil {
+		t.Fatalf("LoadSeriesFromParquet: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("cold series len = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].TsMs != first || got[0].Value != 100 || got[1].TsMs != second || got[1].Value != 200 {
+		t.Fatalf("cold series = %+v, want first+second preserved", got)
+	}
+}
+
 func TestBatteryModelStore(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveBatteryModel("ferroamp", `{"a":0.7,"b":0.3}`); err != nil {
