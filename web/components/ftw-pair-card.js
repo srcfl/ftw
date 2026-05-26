@@ -274,9 +274,15 @@ class FtwPairCard extends FtwElement {
     this.update();
   }
 
-  _copyCode() {
+  async _copyCode() {
     if (!this._state) return;
-    navigator.clipboard.writeText(this._state.code).catch(() => {});
+    const btn = this.shadowRoot.getElementById("copy-btn");
+    const ok = await copyToClipboard(this._state.code);
+    if (ok && btn) {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }
   }
 
   render() {
@@ -355,15 +361,16 @@ class FtwPairCard extends FtwElement {
     }
   }
 
-  _copyFriendMessage(btn) {
+  async _copyFriendMessage(btn) {
     if (!this._state) return;
     const remaining = this._computeRemaining();
     const msg = this._friendMessage(remaining);
-    navigator.clipboard.writeText(msg).then(() => {
+    const ok = await copyToClipboard(msg);
+    if (ok) {
       const original = btn.textContent;
       btn.textContent = "Copied!";
       setTimeout(() => { btn.textContent = original; }, 1500);
-    }).catch(() => {});
+    }
   }
 
   _friendMessage(remaining) {
@@ -408,6 +415,33 @@ function escapeHTML(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// copyToClipboard — works in both secure (HTTPS/localhost) and insecure
+// (plain HTTP LAN) contexts. Tries the modern Clipboard API first; falls
+// back to the legacy textarea+execCommand path when the secure-context
+// gate blocks the primary path.
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (_) {
+    // fall through to legacy path
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.top = "-9999px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
 }
 
 customElements.define("ftw-pair-card", FtwPairCard);

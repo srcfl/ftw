@@ -13,6 +13,11 @@
 //
 // The launcher polls independently of the modal. Closing the modal while
 // a session is still active keeps the "active" label in the footer.
+//
+// Modal lifecycle: the <ftw-modal> element is created ONCE in
+// connectedCallback and appended to the shadow root directly. Poll
+// cycles only update the label text — they never touch or recreate the
+// modal element, so an open modal is not destroyed by a background poll.
 
 import { FtwElement } from "./ftw-element.js";
 import "./ftw-pair-card.js";
@@ -63,16 +68,48 @@ class FtwPairLauncher extends FtwElement {
     super();
     this._session = null;
     this._tick = null;
+    // Stable modal reference — created once, never destroyed by a poll cycle.
+    this._modal = null;
   }
 
   connectedCallback() {
+    // Perform the initial render (lays down the launcher-row button).
     super.connectedCallback();
+
+    // Create the modal element once and attach it to the shadow root.
+    // We do this here rather than in render() so that polling never
+    // destroys and recreates it. The modal stays alive for the lifetime
+    // of the launcher element.
+    if (!this._modal) {
+      this._modal = document.createElement("ftw-modal");
+      this._modal.id = "pair-modal";
+      this._modal.style.setProperty("--ftw-modal-max-width", "520px");
+
+      const titleSlot = document.createElement("span");
+      titleSlot.slot = "title";
+      titleSlot.textContent = "Pair session";
+      this._modal.appendChild(titleSlot);
+
+      const card = document.createElement("ftw-pair-card");
+      this._modal.appendChild(card);
+
+      this._modal.addEventListener("ftw-modal-close", () => {
+        // Re-poll after the modal closes so the label reflects any state
+        // change that happened while the card was open (e.g. session started
+        // or aborted). Short delay lets the card's abort/start call settle.
+        setTimeout(() => this._poll(), 500);
+      });
+
+      this.shadowRoot.appendChild(this._modal);
+    }
+
     this._poll();
     this._tick = setInterval(() => this._poll(), POLL_MS);
   }
 
   disconnectedCallback() {
     if (this._tick) clearInterval(this._tick);
+    this._modal = null;
   }
 
   async _poll() {
@@ -82,7 +119,24 @@ class FtwPairLauncher extends FtwElement {
     } catch (_) {
       this._session = null;
     }
-    this.update();
+    // Update only the label button — do NOT call this.update() here as that
+    // would wipe the shadow root and destroy the stable modal element.
+    this._updateLabel();
+  }
+
+  // _updateLabel refreshes only the launcher button text and active class.
+  // This is the surgical alternative to a full this.update() call so that
+  // the modal DOM is never touched by a background poll cycle.
+  _updateLabel() {
+    const btn = this.shadowRoot.getElementById("launcher-btn");
+    if (!btn) return;
+    const active = !!this._session;
+    btn.textContent = this._label();
+    if (active) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
   }
 
   _label() {
@@ -106,40 +160,26 @@ class FtwPairLauncher extends FtwElement {
   }
 
   _openModal() {
-    const modal = this.shadowRoot.getElementById("pair-modal");
-    if (modal) modal.setAttribute("open", "");
+    if (this._modal) this._modal.setAttribute("open", "");
   }
 
   render() {
     const active = !!this._session;
+    // render() only produces the launcher button row. The modal is managed
+    // separately as a stable element in connectedCallback — it is not
+    // included here so that update() calls never affect it.
     return `
       <div class="launcher-row">
         <button class="launcher-btn${active ? " active" : ""}" id="launcher-btn">
           ${escapeHTML(this._label())}
         </button>
       </div>
-
-      <ftw-modal id="pair-modal" style="--ftw-modal-max-width:520px">
-        <span slot="title">Pair session</span>
-        <ftw-pair-card></ftw-pair-card>
-      </ftw-modal>
     `;
   }
 
   afterRender() {
     const btn = this.shadowRoot.getElementById("launcher-btn");
     if (btn) btn.addEventListener("click", () => this._openModal());
-
-    // When the modal closes, re-poll so the label reflects any state
-    // change that happened while the card was open (e.g. session started
-    // or aborted). Debounce: poll once with a short delay to let the
-    // card's own abort/start call settle on the server.
-    const modal = this.shadowRoot.getElementById("pair-modal");
-    if (modal) {
-      modal.addEventListener("ftw-modal-close", () => {
-        setTimeout(() => this._poll(), 500);
-      });
-    }
   }
 }
 
