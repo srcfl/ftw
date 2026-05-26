@@ -1095,6 +1095,12 @@ func (c *Config) Validate() error {
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
 	}
+	if c.Fuse.Phases <= 0 {
+		return errors.New("fuse.phases must be > 0")
+	}
+	if c.Fuse.Voltage <= 0 {
+		return errors.New("fuse.voltage must be > 0")
+	}
 	// safety_margin_a must be in [0, max_amps) when explicitly set.
 	// Negative would *raise* the per-phase threshold above the breaker
 	// rating (defeating the guard); >= max_amps zeroes the headroom

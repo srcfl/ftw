@@ -2581,10 +2581,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		return targets
 	}
 	siteMeter := state.SiteMeterDriver
-	// Aggregate live battery power so we can hold load+pv constant.
+	// Aggregate live battery power for the batteries this dispatch is
+	// about to control so we can hold load+pv+uncontrolled-batteries
+	// constant. Offline or otherwise untargeted batteries are already
+	// reflected in currentGrid; subtracting them here without adding a
+	// replacement target would double-remove their contribution and miss
+	// fuse overages.
+	seenBat := make(map[string]struct{}, len(targets))
 	var currentBat float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		currentBat += r.SmoothedW
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
 	}
 	var currentGrid float64
 	if siteMeter != "" {

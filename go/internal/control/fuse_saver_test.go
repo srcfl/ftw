@@ -363,6 +363,36 @@ func TestPerPhaseClampFiresOnExportImbalance(t *testing.T) {
 	}
 }
 
+func TestFuseGuardPredictsAgainstControlledBatteriesOnly(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("meter", telemetry.DerMeter, -8000, nil, nil)
+	store.DriverHealthMut("meter").RecordSuccess()
+
+	soc := 0.6
+	store.Update("online", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("online").RecordSuccess()
+
+	// Stale/offline battery readings can still exist in the store and
+	// are already included in the live meter reading. applyFuseGuard must
+	// not subtract them unless it is also replacing them with a target.
+	store.Update("offline", telemetry.DerBattery, -3000, &soc, nil)
+	store.DriverHealthMut("offline").SetOffline()
+
+	state := NewState(0, 50, "meter")
+	targets := []DispatchTarget{{Driver: "online", TargetW: -3000}}
+	guarded := applyFuseGuard(targets, store, state, 10000)
+	if !guarded[0].Clamped {
+		t.Fatalf("expected export-side fuse guard to clamp controlled discharge")
+	}
+	// True post-dispatch grid is -8000 - current_online(0) + target(-3000)
+	// = -11000 W, so the 10 kW export fuse is exceeded by 1000 W.
+	expected := -2000.0
+	if math.Abs(guarded[0].TargetW-expected) > 1 {
+		t.Errorf("controlled discharge after fuse guard = %.0f W, want %.0f W",
+			guarded[0].TargetW, expected)
+	}
+}
+
 // forceFuseDischarge must NOT fire on export-side per-phase overage.
 // Its job is to relieve IMPORT — commanding more discharge during
 // export-side per-phase trip would push the over-current phase
