@@ -605,9 +605,6 @@ func TestScenario_D21_LoadModel_AboveFloor_NotRepaired(t *testing.T) {
 // E22. Site never imports above fuse limit. Checked across planner modes and
 // several adversarial grid + battery states from the matrix above.
 //
-// NOTE: ModeCharge (chargeAll) returns before applyFuseGuard by design — it is
-// a manual operator override that trusts the operator to have checked the fuse.
-// The fuse guard only applies to the PI-driven and energy-dispatch paths.
 func TestScenario_E22_FuseNeverExceeded(t *testing.T) {
 	const fuseMaxW = 11040.0
 
@@ -645,6 +642,12 @@ func TestScenario_E22_FuseNeverExceeded(t *testing.T) {
 			name:  "peak_shaving_over_limit",
 			gridW: 9000, pvW: 0,
 			mode: ModePeakShaving, dir: nil,
+			battW: 0, soc: 0.60,
+		},
+		{
+			name:  "manual_charge_high_import",
+			gridW: 10000, pvW: 0,
+			mode: ModeCharge, dir: nil,
 			battW: 0, soc: 0.60,
 		},
 	}
