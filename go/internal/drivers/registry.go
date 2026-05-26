@@ -138,11 +138,14 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		}
 	}
 	if cfg.Capabilities.TCP != nil {
-		// Merge allowed_hosts with the driver's own `host`/`address` keys
-		// so the operator doesn't have to list the same endpoint twice.
-		// "host:port" entries pass through unchanged; bare "host" entries
-		// allow any port on that host.
-		hosts := mergeAllowedHosts(cfg.Capabilities.TCP.AllowedHosts, cfg.Config)
+		// Start with the explicit allowlist from YAML, then layer the
+		// driver's own (host, port) on top as a TIGHT host:port entry —
+		// not a bare host the way HTTP/WS do it. Raw TCP can hit any
+		// service listening on the device (SSH, web UI, ...), so the
+		// safe default is "exactly the port the driver was wired to";
+		// the operator can still loosen this by listing bare hosts in
+		// capabilities.tcp.allowed_hosts when they want any-port access.
+		hosts := tcpAllowedHostsFor(cfg)
 		env.WithTCP(NewNetTCP(cfg.Name, hosts))
 		if len(hosts) > 0 {
 			env.WithTCPAllowedHosts(hosts)
@@ -436,6 +439,51 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 	}
 	cfg := rd.cfg
 	return r.Restart(ctx, cfg)
+}
+
+// tcpAllowedHostsFor builds the effective allowlist for a TCP-capable
+// driver. Explicit `capabilities.tcp.allowed_hosts` entries come first
+// (verbatim — operator can write either "host" or "host:port"). The
+// driver's own `config.host` is then auto-added as a tight `host:port`
+// entry when `config.port` is also set, falling back to bare host
+// otherwise. The tight default is deliberate: raw TCP can poke any
+// service on the same IP, so "P1 reader on :23" should not also grant
+// access to SSH on :22 of the same device.
+func tcpAllowedHostsFor(cfg config.Driver) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, h := range cfg.Capabilities.TCP.AllowedHosts {
+		add(h)
+	}
+	if cfg.Config != nil {
+		host, _ := cfg.Config["host"].(string)
+		var port int
+		switch p := cfg.Config["port"].(type) {
+		case int:
+			port = p
+		case int64:
+			port = int(p)
+		case float64:
+			port = int(p)
+		}
+		if host != "" && port > 0 {
+			add(fmt.Sprintf("%s:%d", host, port))
+		} else if host != "" {
+			add(host)
+		}
+	}
+	return out
 }
 
 // mergeAllowedHosts returns the explicit allowlist plus any host implied

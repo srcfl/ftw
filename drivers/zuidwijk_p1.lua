@@ -43,6 +43,7 @@ local PORT    = 23
 local ADDR    = nil
 local buffer  = ""
 local last_telegram_ms = -1
+local sn_set = false
 local crc_errors = 0
 
 -- Cap on retained buffer size between polls so a stuck framer (meter spewing
@@ -170,12 +171,14 @@ local function take_frame(buf)
 end
 
 -- Verify the wire CRC matches a CRC computed over '/' .. body .. '!'.
--- Returns true on match OR when no CRC is supplied (DSMR 4 / encrypted-
--- passthrough fallback) — better to accept an unverifiable frame than to
--- silently starve the dispatch loop. The empty/"0000" case is treated as
--- "not supplied" because old firmware emits zero when CRC isn't computed.
+-- Returns true only when the CRC matches OR when no CRC bytes were on
+-- the wire at all (the DSMR 4 / encrypted-passthrough '!\r\n' fallback,
+-- which take_frame surfaces as crc_hex == ""). The literal hex "0000" is
+-- treated as a real CRC value — a frame that genuinely computes to 0x0000
+-- must round-trip cleanly, and we mustn't blanket-accept any "!0000\r\n"
+-- trailer regardless of body content.
 local function crc_ok(body, crc_hex)
-    if crc_hex == "" or crc_hex == "0000" then
+    if crc_hex == "" then
         return true
     end
     local want = tonumber(crc_hex, 16)
@@ -292,12 +295,21 @@ function driver_poll()
 
     local o = parse_obis(latest)
 
-    -- Meter serial (hex-ASCII) — anchor hardware identity.
-    if last_telegram_ms < 0 then
+    -- Meter serial (hex-ASCII) — anchor hardware identity. Retry on every
+    -- telegram until 96.1.1 actually decodes: if the first frame we see
+    -- happens to be missing the SN line (truncated, partial buffer, or a
+    -- meter that publishes the long form only every Nth telegram) we'd
+    -- otherwise spend the whole process lifetime without a make:serial
+    -- anchor, falling back to MAC/endpoint and orphaning the persistent
+    -- battery model on the next driver rename.
+    if not sn_set then
         local sn_hex = obis_str(o, "0-0:96.1.1")
         if sn_hex and sn_hex ~= "" then
             local sn = hex_to_ascii(sn_hex)
-            if sn ~= "" then host.set_sn(sn) end
+            if sn ~= "" then
+                host.set_sn(sn)
+                sn_set = true
+            end
         end
     end
     last_telegram_ms = host.millis()
@@ -399,5 +411,6 @@ function driver_cleanup()
     pcall(host.tcp_close)
     buffer = ""
     last_telegram_ms = -1
+    sn_set = false
     crc_errors = 0
 end

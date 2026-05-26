@@ -132,21 +132,34 @@ func (n *netTCP) readPump() {
 		nRead, err := c.Read(scratch)
 		if nRead > 0 {
 			n.mu.Lock()
-			// Cap the inbound buffer at 64 KiB so a stalled driver poll
-			// can't blow memory. Drop oldest on overflow — keeps the most
-			// recent telegram which is what the driver actually wants.
-			if len(n.buf)+nRead > 65536 {
-				keep := 32768
-				if len(n.buf) > keep {
-					n.buf = n.buf[len(n.buf)-keep:]
+			// Only mutate shared state if this pump is still the current
+			// one. A stale pump woken after Close+Open must NOT mix bytes
+			// from the dead connection into the live buffer.
+			if n.conn == c {
+				// Cap the inbound buffer at 64 KiB so a stalled driver poll
+				// can't blow memory. Drop oldest on overflow — keeps the most
+				// recent telegram which is what the driver actually wants.
+				if len(n.buf)+nRead > 65536 {
+					keep := 32768
+					if len(n.buf) > keep {
+						n.buf = n.buf[len(n.buf)-keep:]
+					}
 				}
+				n.buf = append(n.buf, scratch[:nRead]...)
 			}
-			n.buf = append(n.buf, scratch[:nRead]...)
 			n.mu.Unlock()
 		}
 		if err != nil {
 			n.mu.Lock()
-			n.open = false
+			// Same staleness check: a stale pump's read-error must NOT
+			// clobber n.open after a fresh Close+Open has installed a
+			// new connection. Otherwise the driver sees IsOpen() flip
+			// false, calls Open() again, and leaks a connection per
+			// flap cycle — would exhaust local sockets on a P1 reader
+			// that flaps every few seconds.
+			if n.conn == c {
+				n.open = false
+			}
 			n.mu.Unlock()
 			select {
 			case <-stop:

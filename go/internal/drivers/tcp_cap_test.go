@@ -97,6 +97,94 @@ func TestTCPCap_AllowedHosts(t *testing.T) {
 	}
 }
 
+// TestTCPCap_StalePumpDoesNotClobberLiveState exercises the readPump→Close
+// race. We open against listener A, close, open against listener B, then
+// force A's accepted connection to drop. The stale pump for A wakes from
+// its read-error and must NOT mutate n.open or n.buf for the live B
+// connection. Without the staleness guard the driver would see IsOpen()
+// flip false and Open() a third socket on the next poll — leaking a
+// connection per flap cycle.
+func TestTCPCap_StalePumpDoesNotClobberLiveState(t *testing.T) {
+	lnA, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lnA.Close()
+	lnB, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lnB.Close()
+
+	// Listener A: accept, hand the conn back to the test so we can drop
+	// it at the precise moment after Close+Open below. Read pump is
+	// already blocked on c.Read().
+	connACh := make(chan net.Conn, 1)
+	go func() {
+		c, err := lnA.Accept()
+		if err == nil {
+			connACh <- c
+		}
+	}()
+
+	// Listener B: accept, push a byte payload so the test can verify the
+	// live cap is reading from B (not A).
+	livePayload := []byte("LIVE\r\n")
+	go func() {
+		c, err := lnB.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write(livePayload)
+		// Hold the conn open until the test ends.
+		buf := make([]byte, 16)
+		_, _ = c.Read(buf)
+		_ = c.Close()
+	}()
+
+	cap := NewNetTCP("test", nil)
+	if err := cap.Open(lnA.Addr().String()); err != nil {
+		t.Fatalf("open A: %v", err)
+	}
+	// Wait for A's server-side conn to be accepted.
+	var sideA net.Conn
+	select {
+	case sideA = <-connACh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener A did not accept in time")
+	}
+
+	// Close the cap (tears down the client side of A), then immediately
+	// Open against B. The stale pump for A is still blocked on c.Read().
+	_ = cap.Close()
+	if err := cap.Open(lnB.Addr().String()); err != nil {
+		t.Fatalf("open B: %v", err)
+	}
+
+	// Now force A's read pump to error out, AFTER the new conn is live.
+	_ = sideA.Close()
+
+	// Give the stale pump a beat to wake from its read error and try to
+	// mutate state. The live cap must remain open and B's bytes must
+	// land in the buffer.
+	deadline := time.Now().Add(2 * time.Second)
+	var got []byte
+	for time.Now().Before(deadline) {
+		got = append(got, cap.PopBytes()...)
+		if len(got) >= len(livePayload) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cap.IsOpen() {
+		t.Error("IsOpen() flipped false — stale pump clobbered live state")
+	}
+	if string(got) != string(livePayload) {
+		t.Errorf("live payload corrupted by stale pump: got %q want %q", got, livePayload)
+	}
+	_ = cap.Close()
+}
+
 // ---- Driver-level test: feed a canned DSMR telegram through host.tcp_recv
 
 // fakeTCPCap is a TCPCap that returns a pre-loaded byte payload once and
@@ -313,6 +401,83 @@ func TestZuidwijkP1Driver_AcceptsLegacyNoCRC(t *testing.T) {
 	}
 	if !nearly(meter.RawW, 734, 0.5) {
 		t.Errorf("meter.w: got %v want ~734", meter.RawW)
+	}
+}
+
+func TestZuidwijkP1Driver_RetriesSNWhenFirstTelegramMissesIt(t *testing.T) {
+	// If the first telegram we see lacks 96.1.1 (truncated, partial buffer,
+	// firmware that publishes the long form only every N frames), the
+	// driver must keep trying — never giving up on the make:serial anchor
+	// for the rest of the process lifetime.
+	driverPath := repoDriverPath(t, "zuidwijk_p1.lua")
+
+	// Build a "first frame without SN" by stripping the 96.1.1 line.
+	bodyNoSN := strings.Replace(dsmrBody,
+		"0-0:96.1.1(4530303834303031383239353439393137)\r\n", "", 1)
+	firstFrame := dsmrWrap(bodyNoSN, "")
+	secondFrame := dsmrWrap(dsmrBody, "")
+
+	cap := &fakeTCPCap{}
+	tel := telemetry.NewStore()
+	env := NewHostEnv("zuidwijk-p1", tel)
+	env.WithTCP(cap)
+
+	d, err := NewLuaDriver(driverPath, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	if err := d.Init(context.Background(), map[string]any{"host": "127.0.0.1"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Poll #1: only the SN-less telegram is available.
+	cap.bytes = []byte(firstFrame)
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll 1: %v", err)
+	}
+	if _, sn := env.Identity(); sn != "" {
+		t.Fatalf("SN should still be unset after frame without 96.1.1, got %q", sn)
+	}
+
+	// Poll #2: a follow-up telegram WITH the SN line. The driver must
+	// pick it up — previously the `last_telegram_ms < 0` guard prevented
+	// any retry, locking in the missing identity for the process lifetime.
+	cap.bytes = []byte(secondFrame)
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll 2: %v", err)
+	}
+	if _, sn := env.Identity(); sn != "E0084001829549917" {
+		t.Errorf("SN should be picked up on the 2nd telegram, got %q", sn)
+	}
+}
+
+func TestZuidwijkP1Driver_RejectsZeroLiteralCRCWhenBodyDoesNotMatch(t *testing.T) {
+	// A telegram with a real body but wire CRC literally "0000". The
+	// previous implementation treated "0000" as "no CRC supplied" and
+	// passed the frame through unverified. With the shortcut removed,
+	// "0000" is just a normal hex CRC value: it has to match the
+	// computed CRC, and it won't for our non-trivial body.
+	driverPath := repoDriverPath(t, "zuidwijk_p1.lua")
+	cap := &fakeTCPCap{bytes: []byte(dsmrWrap(dsmrBody, "0000"))}
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("zuidwijk-p1", tel)
+	env.WithTCP(cap)
+
+	d, err := NewLuaDriver(driverPath, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	if err := d.Init(context.Background(), map[string]any{"host": "127.0.0.1"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if got := tel.Get("zuidwijk-p1", telemetry.DerMeter); got != nil {
+		t.Errorf("wire CRC of 0000 with non-matching body must be rejected, got reading %+v", got)
 	}
 }
 
