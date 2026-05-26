@@ -1,11 +1,13 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -100,6 +102,172 @@ func TestPairFlow(t *testing.T) {
 	if !strings.Contains(log, "e2e smoke") {
 		t.Fatalf("session_log missing intent:\n%s", log)
 	}
+}
+
+// TestPairFlowThroughRelay is the full-stack regression for the host-pool
+// starvation bug. It runs a real ftw-subetha relay in-process, points
+// ftw-pair (host) and ftw-connect (client) at it, then issues N sequential
+// GET /healthz requests through the tunnel — every one MUST return 200.
+//
+// Before the relay-splice fix, the 5th request would return 000 because
+// the host's worker pool was deadlocked in pipeConns (the relay's splice
+// never closed the host side when the client closed, so the host's read
+// from the keep-alive HTTP conn blocked forever).
+func TestPairFlowThroughRelay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("e2e: skipped in short mode")
+	}
+
+	repo := repoRoot(t)
+	pairBin := buildBinary(t, repo, "ftw-pair")
+	relayBin := buildBinary(t, repo, "ftw-subetha")
+	connectBin := buildBinary(t, repo, "ftw-connect")
+	mainBin := buildBinary(t, repo, "forty-two-watts")
+
+	work := t.TempDir()
+	stateDir := filepath.Join(work, "state")
+	_ = os.MkdirAll(stateDir, 0o755)
+	cfgPath := writeMinimalConfig(t, work, stateDir)
+
+	// 1. Relay on a random localhost port.
+	relayCmd := exec.Command(relayBin, "-addr", "127.0.0.1:27777")
+	relayCmd.Stdout = os.Stdout
+	relayCmd.Stderr = os.Stderr
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	defer relayCmd.Process.Kill()
+
+	// Wait until the relay's TCP listener is up.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:27777", 200*time.Millisecond)
+		if err == nil {
+			c.Close()
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 2. 42W main service so ftw-pair has something to report to.
+	mainCmd := exec.Command(mainBin, "-config", cfgPath, "-web", filepath.Join(repo, "web"))
+	mainCmd.Stdout = os.Stdout
+	mainCmd.Stderr = os.Stderr
+	if err := mainCmd.Start(); err != nil {
+		t.Fatalf("start main: %v", err)
+	}
+	defer mainCmd.Process.Kill()
+	waitForAPI(t, "http://127.0.0.1:8080/api/status")
+
+	// 3. ftw-pair pointed at the in-process relay. Capture stderr to a pipe
+	//    so we can extract the PAIR CODE the sidecar prints.
+	pairCmd := exec.Command(pairBin,
+		"-addr", "127.0.0.1:29998",
+		"-api", "http://127.0.0.1:8080",
+		"-repo", repo,
+		"-state", stateDir,
+		"-config", cfgPath,
+		"-ttl", "2m",
+		"-intent", "relay e2e",
+		"-relay-addr", "127.0.0.1:27777",
+		"-stateless",
+	)
+	pairStderr, err := pairCmd.StderrPipe()
+	if err != nil {
+		t.Fatalf("pair stderr pipe: %v", err)
+	}
+	pairCmd.Stdout = os.Stdout
+	if err := pairCmd.Start(); err != nil {
+		t.Fatalf("start pair: %v", err)
+	}
+	defer pairCmd.Process.Kill()
+
+	pairCode := readPairCode(t, pairStderr)
+
+	// 4. ftw-connect — picks its own random localhost port for the tunnel.
+	connectCmd := exec.Command(connectBin,
+		"-relay-addr", "127.0.0.1:27777",
+		pairCode,
+	)
+	connectStdout, err := connectCmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("connect stdout pipe: %v", err)
+	}
+	connectCmd.Stderr = os.Stderr
+	if err := connectCmd.Start(); err != nil {
+		t.Fatalf("start connect: %v", err)
+	}
+	defer connectCmd.Process.Kill()
+
+	tunnelURL := readTunnelURL(t, connectStdout)
+
+	// Give the connect listener a beat to bind before we hammer it.
+	time.Sleep(200 * time.Millisecond)
+
+	// 5. The actual regression assertion — N sequential requests through the tunnel.
+	const N = 10
+	for i := 0; i < N; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, "GET", tunnelURL+"/healthz", nil)
+		resp, err := http.DefaultClient.Do(req)
+		cancel()
+		if err != nil {
+			t.Fatalf("req %d/%d failed: %v", i+1, N, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("req %d/%d: status %d body %q", i+1, N, resp.StatusCode, body)
+		}
+	}
+}
+
+// readPairCode scans the ftw-pair stderr for the "PAIR CODE: …" line.
+func readPairCode(t *testing.T, r io.Reader) string {
+	t.Helper()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && scanner.Scan() {
+		line := scanner.Text()
+		os.Stderr.WriteString(line + "\n")
+		if strings.HasPrefix(line, "PAIR CODE: ") {
+			code := strings.TrimPrefix(line, "PAIR CODE: ")
+			// Drain remaining ftw-pair stderr in a background goroutine so the
+			// pipe doesn't fill up.
+			go func() {
+				for scanner.Scan() {
+					os.Stderr.WriteString(scanner.Text() + "\n")
+				}
+			}()
+			return code
+		}
+	}
+	t.Fatal("pair code not seen on ftw-pair stderr")
+	return ""
+}
+
+// readTunnelURL scans ftw-connect stdout for "Tunnel ready: …".
+func readTunnelURL(t *testing.T, r io.Reader) string {
+	t.Helper()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && scanner.Scan() {
+		line := scanner.Text()
+		os.Stdout.WriteString(line + "\n")
+		if strings.HasPrefix(line, "Tunnel ready: ") {
+			url := strings.TrimPrefix(line, "Tunnel ready: ")
+			go func() {
+				for scanner.Scan() {
+					os.Stdout.WriteString(scanner.Text() + "\n")
+				}
+			}()
+			return url
+		}
+	}
+	t.Fatal("tunnel URL not seen on ftw-connect stdout")
+	return ""
 }
 
 func buildBinary(t *testing.T, repo, name string) string {
