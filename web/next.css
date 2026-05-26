@@ -135,6 +135,13 @@ body.ftw-next .tab-btn.active {
   color: var(--fg);
   border-color: var(--line);
 }
+body.ftw-next button:focus-visible,
+body.ftw-next [role="button"]:focus-visible,
+body.ftw-next input:focus-visible,
+body.ftw-next select:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: 2px;
+}
 body.ftw-next .header-right {
   gap: 10px;
 }
@@ -226,19 +233,24 @@ body.ftw-next .icon-btn {
 }
 body.ftw-next .icon-btn:hover {
   background: var(--ink-raised);
-  color: var(--fg);
+  color: var(--accent-e);
+  border-color: var(--accent-e);
 }
 body.ftw-next .icon-btn[aria-pressed="true"] {
   color: var(--fg);
   background: oklch(0.3 0.1 var(--accent-hue) / 0.2);
   border-color: var(--accent-e);
 }
+body.ftw-next .icon-btn[aria-pressed="true"]:hover {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--accent-e) 24%, transparent);
+}
 
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */
 body.ftw-next .mobile-menu-btn {
-  display: none;
+  display: none !important;
   background: transparent;
   border: 1px solid var(--line);
   color: var(--fg);
@@ -494,6 +506,12 @@ body.ftw-next .fuse-fallback-value {
    `range="week"|"month"` attribute onto every child tile so the
    pill drives all three charts in lock-step. */
 body.ftw-next .history-row {
+  margin-top: 12px;
+}
+/* Savings row — one card wide; web component owns its own chrome.
+   Just sets the top margin so it doesn't collide with the history
+   wrapper above. */
+body.ftw-next .savings-row {
   margin-top: 12px;
 }
 body.ftw-next .history-group {
@@ -753,7 +771,7 @@ body.ftw-next .strategy-hint {
   margin-top: 10px;
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--fg-dim);
+  color: var(--fg);
   line-height: 1.5;
 }
 body.ftw-next .slider-group-compact {
@@ -761,6 +779,13 @@ body.ftw-next .slider-group-compact {
 }
 body.ftw-next .slider-group-compact input[type="range"] {
   accent-color: var(--accent-e);
+}
+body.ftw-next .slider-group-compact input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+body.ftw-next .slider-group-compact:has(input[type="range"]:disabled) .slider-current {
+  color: var(--fg-muted);
 }
 body.ftw-next .slider-current {
   font-family: var(--mono);
@@ -805,6 +830,39 @@ body.ftw-next .plan-horizon button.active {
   background: var(--accent-e);
   /* On-accent text is near-black per DESIGN.md, never white. */
   color: #0a0a0a;
+}
+
+body.ftw-next .chart-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+body.ftw-next .grid-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+body.ftw-next .grid-slot-badge.slot-import {
+  color: var(--red-e);
+  border-color: color-mix(in oklab, var(--red-e) 45%, var(--line));
+}
+
+body.ftw-next .grid-slot-badge.slot-export {
+  color: var(--green-e);
+  border-color: color-mix(in oklab, var(--green-e) 45%, var(--line));
 }
 
 /* Advanced-mode toggle row — sits between the live + plan charts and
@@ -896,6 +954,79 @@ body.ftw-next .chart-container {
   border: none;
   padding: 4px 0 0;
 }
+
+/* Compact variant for the secondary chart stacks (Live's 24 h battery
+ * + SoC strip below the main power chart). Plays the same role as the
+ * Plan card's battery/SoC sub-charts: same vertical footprint, same
+ * border treatment, so the two cards are visually balanced. */
+body.ftw-next .chart-container-compact {
+  padding: 0;
+}
+
+/* Live stats strip — five tile-style values inline between the chart
+ * header and the chart canvas. Mono-typed and grid-aligned so an
+ * operator's eye can scan them at a glance, mirroring the Plan card's
+ * summary line directly above its own charts. */
+body.ftw-next .live-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+body.ftw-next .live-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+body.ftw-next .live-stat-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+body.ftw-next .live-stat-value {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+body.ftw-next .live-stat-value.is-import   { color: var(--red-e); }
+body.ftw-next .live-stat-value.is-export   { color: var(--green-e); }
+body.ftw-next .live-stat-value.is-charging { color: var(--accent-e); }
+body.ftw-next .live-stat-value.is-discharging { color: var(--blue-e, #60a5fa); }
+body.ftw-next .live-stat-value.is-neutral { color: var(--fg-dim); }
+
+/* 24 h battery + SoC history block — sits below the live power chart.
+ * Section label matches the Plan card's chart-section labels. */
+body.ftw-next .live-history {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+body.ftw-next .live-history-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+@media (max-width: 720px) {
+  body.ftw-next .live-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  body.ftw-next .live-stat:nth-child(n + 4) {
+    grid-column: span 1;
+  }
+}
 body.ftw-next .range-buttons button {
   /* Ghost secondary per DESIGN.md: transparent bg, --line border,
      --fg text. Theme-aware so the buttons keep their chrome on both
@@ -952,12 +1083,33 @@ body.ftw-next .plan-help {
   max-width: 68ch;
 }
 body.ftw-next .plan-savings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
   margin: 6px 0 10px;
 }
 body.ftw-next .plan-savings:empty { display: none; }
+/* Forecast outlook block — own bordered surface so operators see it
+ * as "extra analysis", not part of the running plan summary. The
+ * "48 h outlook" label disambiguates from realised savings (which
+ * live in the Savings card above). */
+body.ftw-next .plan-outlook {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.015);
+}
+body.ftw-next .plan-outlook-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.85;
+  margin-right: 4px;
+  cursor: help;
+}
 body.ftw-next .saving-badge {
   font-family: var(--mono);
   font-size: 11px;
@@ -1079,6 +1231,9 @@ body.ftw-next footer {
   color: var(--fg-muted);
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+body.ftw-next footer .refresh-label {
+  color: var(--fg-dim);
 }
 body.ftw-next .status-bar {
   background: oklch(0.11 0.015 250);
@@ -1401,7 +1556,7 @@ body.ftw-next .diagnose-detail {
     display: none;
   }
   body.ftw-next .mobile-menu-btn {
-    display: inline-flex;
+    display: inline-flex !important;
     align-items: center;
     justify-content: center;
     justify-self: end;
@@ -1545,6 +1700,13 @@ html[data-theme="light"] body.ftw-next .status-bar {
    tokens above re-point them but a few hex fallbacks slip through in
    inline styles — use a readable dim for neutral text on light bg. */
 html[data-theme="light"] body.ftw-next .val-neutral { color: var(--fg); }
+html[data-theme="light"] body.ftw-next .summary-card .card-sub,
+html[data-theme="light"] body.ftw-next .card-target,
+html[data-theme="light"] body.ftw-next .plan-summary,
+html[data-theme="light"] body.ftw-next .chart-legend,
+html[data-theme="light"] body.ftw-next footer {
+  color: var(--fg-dim);
+}
 
 /* ---- Battery-absence gating ----
    When no driver reports bat_w, next-app.js flips body.no-battery on
@@ -1580,6 +1742,49 @@ body.ftw-next .btn-reset-model:hover {
   border-color: var(--fg-dim);
 }
 body.ftw-next .btn-reset-model:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
+body.ftw-next .twin-profile-row {
+  align-items: center;
+}
+
+body.ftw-next .twin-profile-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(54px, 1fr));
+  width: 132px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+body.ftw-next .twin-profile-toggle button {
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+body.ftw-next .twin-profile-toggle button.active {
+  background: var(--accent-e);
+  color: #0a0a0a;
+}
+
+body.ftw-next .twin-profile-toggle button:not(.active):hover {
+  color: var(--fg);
+}
+
+body.ftw-next .twin-profile-toggle button:focus-visible {
   outline: 1px solid var(--accent-e);
   outline-offset: 2px;
 }

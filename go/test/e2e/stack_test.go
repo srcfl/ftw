@@ -36,8 +36,8 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
-	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
+	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	"github.com/frahlg/forty-two-watts/go/internal/selftune"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
@@ -70,7 +70,9 @@ func findLuaDriver(t *testing.T, name string) string {
 
 func freePort(t *testing.T) int {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	port := l.Addr().(*net.TCPAddr).Port
 	l.Close()
 	return port
@@ -133,9 +135,13 @@ func setupStack(t *testing.T) *stack {
 
 	// ---- Start MQTT broker + Ferroamp sim ----
 	mb := mqttserver.New(&mqttserver.Options{InlineClient: true})
-	if err := mb.AddHook(new(auth.AllowHook), nil); err != nil { t.Fatal(err) }
+	if err := mb.AddHook(new(auth.AllowHook), nil); err != nil {
+		t.Fatal(err)
+	}
 	tcp := listeners.NewTCP(listeners.Config{ID: "broker", Address: fmt.Sprintf("127.0.0.1:%d", s.mqttPort)})
-	if err := mb.AddListener(tcp); err != nil { t.Fatal(err) }
+	if err := mb.AddListener(tcp); err != nil {
+		t.Fatal(err)
+	}
 	go func() { _ = mb.Serve() }()
 	s.mqttBroker = mb
 
@@ -154,11 +160,16 @@ func setupStack(t *testing.T) *stack {
 				Arg  float64 `json:"arg"`
 			} `json:"cmd"`
 		}
-		if err := json.Unmarshal(pk.Payload, &msg); err != nil { return }
+		if err := json.Unmarshal(pk.Payload, &msg); err != nil {
+			return
+		}
 		switch msg.Cmd.Name {
-		case "charge":    s.ferroSim.SetMode(ferroamp.ModeCharge, msg.Cmd.Arg)
-		case "discharge": s.ferroSim.SetMode(ferroamp.ModeDischarge, msg.Cmd.Arg)
-		case "auto":      s.ferroSim.SetMode(ferroamp.ModeAuto, 0)
+		case "charge":
+			s.ferroSim.SetMode(ferroamp.ModeCharge, msg.Cmd.Arg)
+		case "discharge":
+			s.ferroSim.SetMode(ferroamp.ModeDischarge, msg.Cmd.Arg)
+		case "auto":
+			s.ferroSim.SetMode(ferroamp.ModeAuto, 0)
 		}
 		result := []byte(fmt.Sprintf(`{"transId":"%s","status":"ack"}`, msg.TransID))
 		_ = mb.Publish("extapi/result", result, false, 0)
@@ -178,8 +189,12 @@ func setupStack(t *testing.T) *stack {
 		Timeout:    5 * time.Second,
 		MaxClients: 4,
 	}, &sungrowHandler{bank: bank})
-	if err != nil { t.Fatal(err) }
-	if err := msrv.Start(); err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := msrv.Start(); err != nil {
+		t.Fatal(err)
+	}
 	s.modbusSrv = msrv
 
 	// Physics tickers for both
@@ -191,9 +206,11 @@ func setupStack(t *testing.T) *stack {
 		last := time.Now()
 		for {
 			select {
-			case <-s.stopSim: return
+			case <-s.stopSim:
+				return
 			case now := <-tk.C:
-				dt := now.Sub(last); last = now
+				dt := now.Sub(last)
+				last = now
 				snap := s.ferroSim.Tick(dt)
 				publishFerroamp(mb, snap)
 				bank.Refresh(s.sungSim.Tick(dt))
@@ -205,9 +222,9 @@ func setupStack(t *testing.T) *stack {
 
 	// ---- Build cfg + open state + start drivers ----
 	s.cfg = &config.Config{
-		Site:  config.Site{Name: "e2e", ControlIntervalS: 1, GridTargetW: 0, GridToleranceW: 42, SmoothingAlpha: 0.3, SlewRateW: 2000, MinDispatchIntervalS: 1},
-		Fuse:  config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230},
-		API:   config.API{Port: s.apiPort},
+		Site: config.Site{Name: "e2e", ControlIntervalS: 1, GridTargetW: 0, GridToleranceW: 42, SmoothingAlpha: 0.3, SlewRateW: 2000, MinDispatchIntervalS: 1},
+		Fuse: config.Fuse{MaxAmps: 16, Phases: 3, Voltage: 230},
+		API:  config.API{Port: s.apiPort},
 		Drivers: []config.Driver{
 			{
 				Name: "ferroamp", Lua: findLuaDriver(t, "ferroamp"),
@@ -228,7 +245,9 @@ func setupStack(t *testing.T) *stack {
 
 	tmpDB := filepath.Join(t.TempDir(), "state.db")
 	s.st, err = state.Open(tmpDB)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	s.tel = telemetry.NewStore()
 	s.ctrl = control.NewState(0, 42, "ferroamp")
@@ -248,7 +267,9 @@ func setupStack(t *testing.T) *stack {
 		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
 	}
 	for _, d := range s.cfg.Drivers {
-		if err := s.reg.Add(ctx, d); err != nil { t.Fatal(err) }
+		if err := s.reg.Add(ctx, d); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// ---- HTTP ----
@@ -274,7 +295,8 @@ func setupStack(t *testing.T) *stack {
 		fuseMaxW := s.cfg.Fuse.MaxPowerW()
 		for {
 			select {
-			case <-s.stopCtl: return
+			case <-s.stopCtl:
+				return
 			case <-tk.C:
 				nowMs := time.Now().UnixMilli()
 				// Continuous RLS learning (skip during self-tune)
@@ -285,11 +307,17 @@ func setupStack(t *testing.T) *stack {
 					s.ctrlMu.Unlock()
 					for _, t := range last {
 						r := s.tel.Get(t.Driver, telemetry.DerBattery)
-						if r == nil { continue }
+						if r == nil {
+							continue
+						}
 						m := s.models[t.Driver]
-						if m == nil { continue }
+						if m == nil {
+							continue
+						}
 						soc := 0.5
-						if r.SoC != nil { soc = *r.SoC }
+						if r.SoC != nil {
+							soc = *r.SoC
+						}
 						m.Update(t.TargetW, r.SmoothedW, soc, 1.0, nowMs)
 					}
 					s.modelsMu.Unlock()
@@ -299,9 +327,13 @@ func setupStack(t *testing.T) *stack {
 					s.modelsMu.Lock()
 					s.selfTune.Tick(func(name string) (float64, float64, bool) {
 						r := s.tel.Get(name, telemetry.DerBattery)
-						if r == nil { return 0, 0, false }
+						if r == nil {
+							return 0, 0, false
+						}
 						soc := 0.5
-						if r.SoC != nil { soc = *r.SoC }
+						if r.SoC != nil {
+							soc = *r.SoC
+						}
 						return r.SmoothedW, soc, true
 					}, s.models, 1.0, nowMs)
 					s.modelsMu.Unlock()
@@ -366,21 +398,33 @@ func (s *stack) Close() {
 		defer c()
 		_ = s.httpSrv.Shutdown(ctx)
 	}
-	if s.reg != nil { s.reg.ShutdownAll() }
+	if s.reg != nil {
+		s.reg.ShutdownAll()
+	}
 	close(s.stopSim)
 	s.simWg.Wait()
-	if s.modbusSrv != nil { s.modbusSrv.Stop() }
-	if s.mqttBroker != nil { _ = s.mqttBroker.Close() }
-	if s.st != nil { s.st.Close() }
+	if s.modbusSrv != nil {
+		s.modbusSrv.Stop()
+	}
+	if s.mqttBroker != nil {
+		_ = s.mqttBroker.Close()
+	}
+	if s.st != nil {
+		s.st.Close()
+	}
 }
 
 func (s *stack) baseURL() string { return fmt.Sprintf("http://127.0.0.1:%d", s.apiPort) }
 
 func (s *stack) getJSON(path string, v any) {
 	resp, err := http.Get(s.baseURL() + path)
-	if err != nil { s.t.Fatal(err) }
+	if err != nil {
+		s.t.Fatal(err)
+	}
 	defer resp.Body.Close()
-	if err := json.NewDecoder(resp.Body).Decode(v); err != nil { s.t.Fatal(err) }
+	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+		s.t.Fatal(err)
+	}
 }
 
 func (s *stack) postJSON(path string, body, out any) int {
@@ -392,9 +436,13 @@ func (s *stack) postJSON(path string, body, out any) int {
 		rdr = strings.NewReader("")
 	}
 	resp, err := http.Post(s.baseURL()+path, "application/json", rdr)
-	if err != nil { s.t.Fatal(err) }
+	if err != nil {
+		s.t.Fatal(err)
+	}
 	defer resp.Body.Close()
-	if out != nil { _ = json.NewDecoder(resp.Body).Decode(out) }
+	if out != nil {
+		_ = json.NewDecoder(resp.Body).Decode(out)
+	}
 	return resp.StatusCode
 }
 
@@ -425,8 +473,12 @@ func TestE2E_FullStack(t *testing.T) {
 		t.Errorf("expected 2 drivers, got %+v", status["drivers"])
 	}
 
-	// 3. Set a positive grid target (import more) — batteries should CHARGE
-	// (site convention: + = charge = load that adds to grid import).
+	// 3. In a manual target-following mode, set a positive grid target
+	// (import more) — batteries should CHARGE (site convention:
+	// + = charge = load that adds to grid import).
+	if code := s.postJSON("/api/mode", map[string]any{"mode": "weighted"}, nil); code != 200 {
+		t.Errorf("mode weighted POST: %d", code)
+	}
 	if code := s.postJSON("/api/target", map[string]any{"grid_target_w": 3000}, nil); code != 200 {
 		t.Errorf("target POST: %d", code)
 	}
@@ -490,7 +542,9 @@ func TestE2E_FullStack(t *testing.T) {
 	// (the standalone main.go records history but our e2e setup doesn't —
 	// just verify the endpoint doesn't error)
 	resp, err := http.Get(s.baseURL() + "/api/history?range=5m&points=10")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
 		t.Errorf("history: got %d", resp.StatusCode)
@@ -498,7 +552,9 @@ func TestE2E_FullStack(t *testing.T) {
 
 	// 8. Static file serving
 	resp, err = http.Get(s.baseURL() + "/index.html")
-	if err == nil { resp.Body.Close() }
+	if err == nil {
+		resp.Body.Close()
+	}
 	// Don't require index.html to exist — just verify cache header is set
 	// by hitting a known path; 200 or 404 both valid here
 

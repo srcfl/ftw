@@ -27,13 +27,13 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
-	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/events"
+	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
@@ -56,7 +56,7 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
-	Tel        *telemetry.Store
+	Tel *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
 	LogRing    *telemetry.LogRing
@@ -68,7 +68,8 @@ type Deps struct {
 	CfgMu      *sync.RWMutex
 	Cfg        *config.Config
 	ConfigPath string
-	DriverDir  string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	DriverDir      string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir  string // persistent user-drivers overlay; searched before DriverDir
 	Models     map[string]*battery.Model
 	ModelsMu   *sync.Mutex
 	SelfTune   *selftune.Coordinator
@@ -143,6 +144,17 @@ type Deps struct {
 	Restart func(ctx context.Context) error
 
 	Version string
+
+	// PairStore holds the currently-active ftw-pair sidecar session (if
+	// any). Nil is safe — routes are still registered; GET returns 404.
+	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
+	PairStore *PairStatusStore
+
+	// PairSelfExe overrides the binary path used by POST /api/pair/start to
+	// spawn child pair sessions. Empty means "use os.Executable()". Tests
+	// inject "/bin/true" (or a fake echo binary) here so they don't actually
+	// launch a sidecar.
+	PairSelfExe string
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -157,6 +169,15 @@ type Server struct {
 	// ~30 SQL round-trips with ~500k rows shipped to Go to at most one.
 	dailyCacheMu sync.Mutex
 	dailyCache   map[string]state.DayEnergy
+
+	// savingsCache mirrors dailyCache for /api/savings/daily. Same
+	// immutable-past-day rationale. Lazily allocated on first request
+	// because the savings endpoint is opt-in (no-op without a configured
+	// price zone), so most boots never need the map.
+	savingsCacheMu sync.Mutex
+	savingsCache   map[string]daySavings
+
+	versionUpdateMu sync.Mutex
 }
 
 // New creates a new API server.
@@ -166,6 +187,9 @@ func New(deps *Deps) *Server {
 	}
 	if deps.WebDir == "" {
 		deps.WebDir = "web"
+	}
+	if deps.PairStore == nil {
+		deps.PairStore = NewPairStatusStore()
 	}
 	s := &Server{
 		deps:       deps,
@@ -216,6 +240,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/self_tune/cancel", s.handleSelfTuneCancel)
 	s.handle("GET  /api/history", s.handleHistory)
 	s.handle("GET  /api/energy/daily", s.handleEnergyDaily)
+	s.handle("GET  /api/savings/daily", s.handleSavingsDaily)
 	s.handle("GET  /api/prices", s.handlePrices)
 	s.handle("GET  /api/forecast", s.handleForecast)
 	s.handle("GET  /api/mpc/plan", s.handleMPCPlan)
@@ -226,7 +251,9 @@ func (s *Server) routes() {
 	s.handle("GET  /api/pvmodel", s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", s.handleLoadModel)
+	s.handle("POST /api/loadmodel/profile", s.handleLoadModelProfile)
 	s.handle("POST /api/loadmodel/reset", s.handleLoadModelReset)
+	s.handle("GET  /api/research/load/dump", s.handleLoadResearchDump)
 	s.handle("GET  /api/series", s.handleSeries)
 	s.handle("GET  /api/series/catalog", s.handleSeriesCatalog)
 	s.handle("GET  /api/devices", s.handleDevices)
@@ -238,12 +265,16 @@ func (s *Server) routes() {
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
 	s.handle("POST /api/loadpoints/{id}/target", s.handleLoadpointTarget)
 	s.handle("POST /api/loadpoints/{id}/soc", s.handleLoadpointSoC)
+	s.handle("POST /api/loadpoints/{id}/force_start", s.handleLoadpointForceStart)
 	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
 	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
 	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
 	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
 	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
+	s.handle("POST /api/pv/manual_hold", s.handlePVManualHold)
+	s.handle("DELETE /api/pv/manual_hold", s.handlePVManualHoldClear)
+	s.handle("GET  /api/pv/manual_hold", s.handlePVManualHoldGet)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
@@ -254,6 +285,15 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("POST /api/restart", s.handleRestart)
+
+	// ---- Pair sidecar endpoints ----
+	// Pass the self-exe path so POST /api/pair/start can spawn "self pair ..."
+	// as a detached child. Tests inject a fake path via deps.PairSelfExe.
+	selfExe := s.deps.PairSelfExe
+	if selfExe == "" {
+		selfExe = resolvedSelfExe()
+	}
+	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -322,6 +362,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ---- /api/status ----
 
+func statusDriverOnline(tel *telemetry.Store, name string) bool {
+	if tel == nil || name == "" {
+		return false
+	}
+	h := tel.DriverHealth(name)
+	return h != nil && h.IsOnline()
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Lock()
 	ctrl := *s.deps.Ctrl // copy for consistency
@@ -335,16 +383,33 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.CapMu.RUnlock()
 
-	// Aggregate readings
+	// Aggregate live readings. Offline readings stay in telemetry so detailed
+	// driver views can show the last known value, but they must not leak into
+	// the live site balance.
 	gridW := 0.0
-	if r := s.deps.Tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		gridW = r.SmoothedW
+	haveGrid := false
+	if statusDriverOnline(s.deps.Tel, ctrl.SiteMeterDriver) {
+		if r := s.deps.Tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
+			gridW = r.SmoothedW
+			haveGrid = true
+		}
+	}
+	if !haveGrid && ctrl.SiteMeterDriver == "" {
+		// Preserve the historical "no configured site meter" behaviour for
+		// development setups: report zero rather than treating it as stale data.
+		haveGrid = true
 	}
 	var pvW, batW float64
 	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerPV) {
+		if !statusDriverOnline(s.deps.Tel, r.Driver) {
+			continue
+		}
 		pvW += r.SmoothedW
 	}
 	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
+		if !statusDriverOnline(s.deps.Tel, r.Driver) {
+			continue
+		}
 		batW += r.SmoothedW
 	}
 
@@ -356,15 +421,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// overnight EV session would inflate every Monday-evening bucket of
 	// the weekly-pattern learner.
 	evW := s.deps.Tel.SumOnlineEVW()
-	rawLoad := gridW - batW - pvW - evW
-	loadW := s.deps.Tel.UpdateLoad(rawLoad)
-	if loadW < 0 {
-		loadW = 0
+	loadW := 0.0
+	if haveGrid {
+		rawLoad := gridW - batW - pvW - evW
+		loadW = s.deps.Tel.UpdateLoad(rawLoad)
+		if loadW < 0 {
+			loadW = 0
+		}
 	}
 
 	// Weighted average SoC by capacity
 	var totalCap, weightedSoC float64
 	for _, b := range s.deps.Tel.ReadingsByType(telemetry.DerBattery) {
+		if !statusDriverOnline(s.deps.Tel, b.Driver) {
+			continue
+		}
 		cap, ok := caps[b.Driver]
 		if !ok {
 			continue
@@ -464,18 +535,42 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				ActualAmpsPerPhase   *float64 `json:"actual_amps_per_phase"`
 			}
 			if r.Data != nil && json.Unmarshal(r.Data, &ev) == nil {
-				if ev.Connected != nil            { d["ev_connected"] = *ev.Connected }
-				if ev.Charging != nil             { d["ev_charging"] = *ev.Charging }
-				if ev.SessionWh != nil            { d["ev_session_wh"] = *ev.SessionWh }
-				if ev.OpMode != nil               { d["ev_op_mode"] = *ev.OpMode }
-				if ev.StateLabel != nil           { d["ev_state_label"] = *ev.StateLabel }
-				if ev.ReasonNoCurrent != nil      { d["ev_reason_no_current"] = *ev.ReasonNoCurrent }
-				if ev.ReasonNoCurrentLabel != nil { d["ev_reason_no_current_label"] = *ev.ReasonNoCurrentLabel }
-				if ev.IsOnline != nil             { d["ev_is_online"] = *ev.IsOnline }
-				if ev.CableLocked != nil          { d["ev_cable_locked"] = *ev.CableLocked }
-				if ev.MaxA != nil                 { d["ev_max_a"] = *ev.MaxA }
-				if ev.Phases != nil               { d["ev_phases"] = *ev.Phases }
-				if ev.ActualAmpsPerPhase != nil   { d["ev_actual_amps_per_phase"] = *ev.ActualAmpsPerPhase }
+				if ev.Connected != nil {
+					d["ev_connected"] = *ev.Connected
+				}
+				if ev.Charging != nil {
+					d["ev_charging"] = *ev.Charging
+				}
+				if ev.SessionWh != nil {
+					d["ev_session_wh"] = *ev.SessionWh
+				}
+				if ev.OpMode != nil {
+					d["ev_op_mode"] = *ev.OpMode
+				}
+				if ev.StateLabel != nil {
+					d["ev_state_label"] = *ev.StateLabel
+				}
+				if ev.ReasonNoCurrent != nil {
+					d["ev_reason_no_current"] = *ev.ReasonNoCurrent
+				}
+				if ev.ReasonNoCurrentLabel != nil {
+					d["ev_reason_no_current_label"] = *ev.ReasonNoCurrentLabel
+				}
+				if ev.IsOnline != nil {
+					d["ev_is_online"] = *ev.IsOnline
+				}
+				if ev.CableLocked != nil {
+					d["ev_cable_locked"] = *ev.CableLocked
+				}
+				if ev.MaxA != nil {
+					d["ev_max_a"] = *ev.MaxA
+				}
+				if ev.Phases != nil {
+					d["ev_phases"] = *ev.Phases
+				}
+				if ev.ActualAmpsPerPhase != nil {
+					d["ev_actual_amps_per_phase"] = *ev.ActualAmpsPerPhase
+				}
 			}
 		}
 		drivers[name] = d
@@ -526,7 +621,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Energy today: integrate history points since midnight local time.
 	// Each point is ~5 s apart; multiply W × dt_hours for Wh per interval.
+	//
+	// Current slot: same integration over the fixed local 15-minute
+	// settlement window (00/15/30/45). This is deliberately observational:
+	// it lets the UI show whether second-to-second import/export is material
+	// over the billing window without changing dispatch semantics.
 	var energyToday map[string]any
+	var energyCurrentSlot map[string]any
 	if s.deps.State != nil {
 		now := time.Now()
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
@@ -550,13 +651,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				loadWh += pts[i].LoadW * dtH
 			}
 			energyToday = map[string]any{
-				"import_wh":       importWh,
-				"export_wh":       exportWh,
-				"pv_wh":           pvWh,
-				"bat_charged_wh":  chargedWh,
+				"import_wh":         importWh,
+				"export_wh":         exportWh,
+				"pv_wh":             pvWh,
+				"bat_charged_wh":    chargedWh,
 				"bat_discharged_wh": dischargedWh,
-				"load_wh":         loadWh,
+				"load_wh":           loadWh,
 			}
+		}
+		slot, err := currentGridEnergySlot(s.deps.State, now)
+		if err == nil {
+			energyCurrentSlot = slot
+		} else {
+			slog.Warn("failed to integrate current grid energy slot", "err", err)
 		}
 	}
 
@@ -575,22 +682,22 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
 
 	resp := map[string]any{
-		"version":          s.deps.Version,
-		"mode":             ctrl.Mode,
-		"plan_stale":       ctrl.PlanStale,
-		"grid_w":           gridW,
-		"pv_w":             pvW,
-		"pv_w_predicted":   pvPredictW,
-		"bat_w":            batW,
-		"ev_w":             evW,
-		"load_w":           loadW,
-		"load_w_predicted": loadPredictW,
-		"bat_soc":          avgSoC,
-		"grid_target_w":    ctrl.GridTargetW,
-		"peak_limit_w":     ctrl.PeakLimitW,
+		"version":               s.deps.Version,
+		"mode":                  ctrl.Mode,
+		"plan_stale":            ctrl.PlanStale,
+		"grid_w":                gridW,
+		"pv_w":                  pvW,
+		"pv_w_predicted":        pvPredictW,
+		"bat_w":                 batW,
+		"ev_w":                  evW,
+		"load_w":                loadW,
+		"load_w_predicted":      loadPredictW,
+		"bat_soc":               avgSoC,
+		"grid_target_w":         ctrl.GridTargetW,
+		"peak_limit_w":          ctrl.PeakLimitW,
 		"peak_import_ceiling_w": ctrl.PeakImportCeilingW,
-		"ev_charging_w":    ctrl.EVChargingW,
-		"battery_covers_ev": ctrl.BatteryCoversEV,
+		"ev_charging_w":         ctrl.EVChargingW,
+		"battery_covers_ev":     ctrl.BatteryCoversEV,
 		// True when an EV charger password is persisted in state.db. The
 		// Settings UI uses this to show a "credentials saved" badge so the
 		// operator can tell apart "never entered" from "saved but masked".
@@ -601,16 +708,50 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			pw, ok := s.deps.State.LoadConfig(evPasswordKey)
 			return ok && pw != ""
 		}(),
-		"fuse":             fuseCfg,
-		"phase_amps":       phaseAmps,
-		"phase_powers":     siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
-		"drivers":          drivers,
-		"dispatch":         dispatch,
+		"fuse":         fuseCfg,
+		"phase_amps":   phaseAmps,
+		"phase_powers": siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
+		"drivers":      drivers,
+		"dispatch":     dispatch,
 	}
-	if energyToday != nil {
-		resp["energy"] = map[string]any{"today": energyToday}
+	if energyToday != nil || energyCurrentSlot != nil {
+		energy := map[string]any{}
+		if energyToday != nil {
+			energy["today"] = energyToday
+		}
+		if energyCurrentSlot != nil {
+			energy["current_slot"] = energyCurrentSlot
+		}
+		resp["energy"] = energy
 	}
 	writeJSON(w, 200, resp)
+}
+
+// currentGridEnergySlot integrates per-direction grid energy across the
+// active 15-minute settlement window. Under 15-min settlement the bill is
+//
+//	import_wh × import_price  +  export_wh × export_price
+//
+// — import and export are independent accumulators, never netted.
+// `net_wh` is kept as a backwards-compat observational delta only; UI and
+// downstream consumers MUST render or price import_wh and export_wh
+// separately, never `net_wh` alone.
+func currentGridEnergySlot(st *state.Store, now time.Time) (map[string]any, error) {
+	slotStart := now.Truncate(15 * time.Minute)
+	slotEnd := slotStart.Add(15 * time.Minute)
+	d, err := st.DailyEnergy(slotStart.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"slot_start_ms": slotStart.UnixMilli(),
+		"slot_end_ms":   slotEnd.UnixMilli(),
+		"elapsed_s":     now.Sub(slotStart).Seconds(),
+		"import_wh":     d.ImportWh,
+		"export_wh":     d.ExportWh,
+		// Observational only — see comment above. Do not bill against this.
+		"net_wh": d.ImportWh - d.ExportWh,
+	}, nil
 }
 
 // siteMeterPhaseAmps pulls per-phase L1/L2/L3 current (in amps) from the
@@ -618,19 +759,31 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // meter isn't reporting per-phase data — the frontend falls back to a
 // total-amps bar in that case. Signed: negative = export on that phase.
 func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
-	if siteMeter == "" { return nil }
+	if siteMeter == "" {
+		return nil
+	}
 	r := tel.Get(siteMeter, telemetry.DerMeter)
-	if r == nil || len(r.Data) == 0 { return nil }
+	if r == nil || len(r.Data) == 0 {
+		return nil
+	}
 	var payload struct {
 		L1A *float64 `json:"l1_a"`
 		L2A *float64 `json:"l2_a"`
 		L3A *float64 `json:"l3_a"`
 	}
-	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	if err := json.Unmarshal(r.Data, &payload); err != nil {
+		return nil
+	}
 	out := make([]float64, 0, 3)
-	if payload.L1A != nil { out = append(out, *payload.L1A) }
-	if payload.L2A != nil { out = append(out, *payload.L2A) }
-	if payload.L3A != nil { out = append(out, *payload.L3A) }
+	if payload.L1A != nil {
+		out = append(out, *payload.L1A)
+	}
+	if payload.L2A != nil {
+		out = append(out, *payload.L2A)
+	}
+	if payload.L3A != nil {
+		out = append(out, *payload.L3A)
+	}
 	return out
 }
 
@@ -641,19 +794,31 @@ func siteMeterPhaseAmps(tel *telemetry.Store, siteMeter string) []float64 {
 // operator can see one phase importing while another exports
 // (typical when a 1Φ EV is on L1 and PV is balanced across L2/L3).
 func siteMeterPhasePowers(tel *telemetry.Store, siteMeter string) []float64 {
-	if siteMeter == "" { return nil }
+	if siteMeter == "" {
+		return nil
+	}
 	r := tel.Get(siteMeter, telemetry.DerMeter)
-	if r == nil || len(r.Data) == 0 { return nil }
+	if r == nil || len(r.Data) == 0 {
+		return nil
+	}
 	var payload struct {
 		L1W *float64 `json:"l1_w"`
 		L2W *float64 `json:"l2_w"`
 		L3W *float64 `json:"l3_w"`
 	}
-	if err := json.Unmarshal(r.Data, &payload); err != nil { return nil }
+	if err := json.Unmarshal(r.Data, &payload); err != nil {
+		return nil
+	}
 	out := make([]float64, 0, 3)
-	if payload.L1W != nil { out = append(out, *payload.L1W) }
-	if payload.L2W != nil { out = append(out, *payload.L2W) }
-	if payload.L3W != nil { out = append(out, *payload.L3W) }
+	if payload.L1W != nil {
+		out = append(out, *payload.L1W)
+	}
+	if payload.L2W != nil {
+		out = append(out, *payload.L2W)
+	}
+	if payload.L3W != nil {
+		out = append(out, *payload.L3W)
+	}
 	return out
 }
 
@@ -696,7 +861,7 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		return nil
 	}
@@ -892,13 +1057,24 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 	switch m {
 	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
 		control.ModeCharge, control.ModePriority, control.ModeWeighted,
-		control.ModePlannerSelf, control.ModePlannerCheap, control.ModePlannerArbitrage:
+		control.ModePlannerSelf, control.ModePlannerCheap,
+		control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
 		s.deps.CtrlMu.Lock()
 		s.deps.Ctrl.Mode = m
 		// An explicit mode change is a reset signal: drop any active
 		// battery manual hold so the new mode takes effect on the very
 		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
 		s.deps.Ctrl.ClearBatteryManualHold()
+		// Reset the PI integrator. The integral accumulated under the
+		// previous mode's error signal is meaningless to the new mode
+		// — keeping it caused integrator windup → wrong-direction stuck
+		// output across the 2026-05-24 evening mode switch (live
+		// regression: discharged the fleet to 7 % overnight while the
+		// PI integral was pinned in the wrong direction). Mode change
+		// is a discrete event; start the new regime from a clean PI.
+		if s.deps.Ctrl.PI != nil {
+			s.deps.Ctrl.PI.Reset()
+		}
 		s.deps.CtrlMu.Unlock()
 		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
 			slog.Warn("failed to persist mode", "err", err)
@@ -912,6 +1088,8 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 				mm = mpc.ModeSelfConsumption
 			case control.ModePlannerCheap:
 				mm = mpc.ModeCheapCharge
+			case control.ModePlannerPassiveArbitrage:
+				mm = mpc.ModePassiveArbitrage
 			case control.ModePlannerArbitrage:
 				mm = mpc.ModeArbitrage
 			}
@@ -1052,7 +1230,8 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalog(dir)
+	// User-drivers dir (persistent volume) takes precedence over bundled dir.
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"path": dir, "entries": []any{}, "error": err.Error()})
 		return
@@ -1236,8 +1415,8 @@ func (s *Server) handleResetModel(w http.ResponseWriter, r *http.Request) {
 		if m, ok := s.deps.Models[name]; ok {
 			if data, err := json.Marshal(m); err == nil {
 				if err := s.deps.State.SaveBatteryModel(name, string(data)); err != nil {
-				slog.Warn("failed to persist battery model", "battery", name, "err", err)
-			}
+					slog.Warn("failed to persist battery model", "battery", name, "err", err)
+				}
 			}
 		}
 	}
@@ -1346,8 +1525,9 @@ func parseRange(s string) int64 {
 //
 // Query params: days=N (default 7, capped at 90)
 // Response: {"days": [{"day":"YYYY-MM-DD","import_wh":..., "export_wh":...,
-//                      "pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
-//                      "load_wh":...}], "tz": "Local"}
+//
+//	"pv_wh":..., "bat_charged_wh":..., "bat_discharged_wh":...,
+//	"load_wh":...}], "tz": "Local"}
 //
 // Buckets are local-day. Today is the last entry. Mirrors the integration
 // loop in handleStatus's energy-today block — same site convention, same
@@ -1391,11 +1571,22 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 			}
 			de = d
 		} else {
+			// Two-tier cache: in-memory first, then the persistent
+			// energy_daily table. The persistent layer survives
+			// restarts — the 2026-05-25 baseline was 25 s for
+			// days=30 cold-start because every closed day re-ran a
+			// per-day DailyEnergy SQL pass; with the table populated
+			// the same query reduces to N PK lookups.
 			s.dailyCacheMu.Lock()
 			cached, ok := s.dailyCache[dayKey]
 			s.dailyCacheMu.Unlock()
 			if ok {
 				de = cached
+			} else if persisted, present, err := s.deps.State.LoadDailyEnergy(dayKey); err == nil && present {
+				de = persisted
+				s.dailyCacheMu.Lock()
+				s.dailyCache[dayKey] = de
+				s.dailyCacheMu.Unlock()
 			} else {
 				dayEnd := dayStart.AddDate(0, 0, 1)
 				d, err := s.deps.State.DailyEnergy(dayStart.UnixMilli(), dayEnd.UnixMilli())
@@ -1408,6 +1599,14 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 				s.dailyCacheMu.Lock()
 				s.dailyCache[dayKey] = de
 				s.dailyCacheMu.Unlock()
+				// Persist for next restart. Closed days only —
+				// today is excluded via the isToday branch above.
+				// Best-effort: a write failure is logged but not
+				// surfaced to the operator since the in-memory
+				// cache still serves this request.
+				if err := s.deps.State.SaveDailyEnergy(dayKey, de); err != nil {
+					slog.Warn("handleEnergyDaily: persist daily aggregate failed", "err", err, "day", dayKey)
+				}
 			}
 		}
 
@@ -1788,43 +1987,6 @@ func (s *Server) handlePVModelReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.PVModel.Reset()
-	writeJSON(w, 200, map[string]string{"status": "reset"})
-}
-
-// ---- Load digital twin ----
-
-func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
-	if s.deps.LoadModel == nil {
-		writeJSON(w, 200, map[string]any{"enabled": false})
-		return
-	}
-	m := s.deps.LoadModel.Model()
-	// Count warmed-up buckets (≥ MinTrustSamples).
-	warm := 0
-	for i := 0; i < loadmodel.Buckets; i++ {
-		if m.Bucket[i].Samples >= loadmodel.MinTrustSamples {
-			warm++
-		}
-	}
-	writeJSON(w, 200, map[string]any{
-		"enabled":            true,
-		"samples":            m.Samples,
-		"mae_w":              m.MAE,
-		"peak_w":             m.PeakW,
-		"quality":            m.Quality(),
-		"last_ms":            m.LastMs,
-		"heating_w_per_degc": m.HeatingW_per_degC,
-		"buckets_warm":       warm,
-		"buckets_total":      loadmodel.Buckets,
-	})
-}
-
-func (s *Server) handleLoadModelReset(w http.ResponseWriter, r *http.Request) {
-	if s.deps.LoadModel == nil {
-		writeJSON(w, 400, map[string]string{"error": "loadmodel disabled"})
-		return
-	}
-	s.deps.LoadModel.Reset()
 	writeJSON(w, 200, map[string]string{"status": "reset"})
 }
 

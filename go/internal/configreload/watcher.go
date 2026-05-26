@@ -121,6 +121,18 @@ func (w *Watcher) reload() {
 	if newCfg.Site.SlewRateW != oldCfg.Site.SlewRateW {
 		w.ctrl.SlewRateW = newCfg.Site.SlewRateW
 	}
+	newEnabled := true
+	if newCfg.Site.SlewEnabled != nil {
+		newEnabled = *newCfg.Site.SlewEnabled
+	}
+	oldEnabled := true
+	if oldCfg.Site.SlewEnabled != nil {
+		oldEnabled = *oldCfg.Site.SlewEnabled
+	}
+	if newEnabled != oldEnabled {
+		slog.Info("config reload: slew_enabled", "old", oldEnabled, "new", newEnabled)
+		w.ctrl.SlewEnabled = newEnabled
+	}
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		w.ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
@@ -132,6 +144,18 @@ func (w *Watcher) reload() {
 	}
 	if newCfg.Site.PVSurplusAbsorbThresholdW != oldCfg.Site.PVSurplusAbsorbThresholdW {
 		w.ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
+	}
+	if newCfg.Site.DCLinkProtectionEnabled != oldCfg.Site.DCLinkProtectionEnabled {
+		slog.Info("config reload: dc_link_protection_enabled",
+			"old", oldCfg.Site.DCLinkProtectionEnabled,
+			"new", newCfg.Site.DCLinkProtectionEnabled)
+		w.ctrl.DCLinkProtectionEnabled = newCfg.Site.DCLinkProtectionEnabled
+	}
+	if newCfg.Site.DCLinkProtectionSoCThreshold != oldCfg.Site.DCLinkProtectionSoCThreshold {
+		w.ctrl.DCLinkProtectionSoCThreshold = newCfg.Site.DCLinkProtectionSoCThreshold
+	}
+	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
+		w.ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
 	}
 	w.ctrlMu.Unlock()
 

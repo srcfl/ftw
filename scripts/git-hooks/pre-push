@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# pre-push — runs `make verify-all` and checks whether the branch is behind
+# master before every push.
+#
+# Install: make install-hooks
+# Bypass:  git push --no-verify
+#
+# Cross-compile check catches platform-specific build breakage (e.g. a Linux
+# syscall field that doesn't exist on Windows) before it lands in CI.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+REMOTE="${1:-origin}"
+
+echo "[pre-push] running make verify-all (vet + test + cross-compile)..."
+if ! make -C "$REPO_ROOT" verify-all; then
+    echo ""
+    echo "[pre-push] FAILED — push blocked."
+    echo "  Fix the errors above and retry, or bypass with: git push --no-verify"
+    exit 1
+fi
+
+# Check if the current branch is behind master on the remote. A behind
+# branch means the PR will not be immediately mergeable — better to know
+# before push than after CI green.
+echo "[pre-push] checking if branch is behind origin/master..."
+git fetch "$REMOTE" master --quiet 2>/dev/null || true
+
+BEHIND="$(git rev-list --count HEAD..origin/master 2>/dev/null || echo 0)"
+if [ "$BEHIND" -gt 0 ]; then
+    echo ""
+    echo "[pre-push] WARNING: '$CURRENT_BRANCH' is $BEHIND commit(s) behind origin/master."
+    echo "  The PR will need to be rebased before merge."
+    echo "  Rebase now:  git rebase origin/master"
+    echo "  (push continues — this is a warning, not a block)"
+fi
+
+echo "[pre-push] passed."

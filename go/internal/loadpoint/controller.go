@@ -3,6 +3,7 @@ package loadpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
 	"sync"
@@ -126,16 +127,26 @@ type Controller struct {
 	fusePauseMu    sync.Mutex
 	fusePauseUntil map[string]time.Time
 
-	// phaseLockMu protects phaseLocked1P + phaseLockedAt. The 1Φ
-	// lock is sticky for the rest of the day so a slowly recovering
+	// phaseLockMu protects phaseLocked1P + phaseLockedAt + phaseSelected3P.
+	// The 1Φ lock is sticky for the rest of the day so a slowly recovering
 	// PV doesn't flip 1Φ ↔ 3Φ as clouds shift. It's automatically
 	// cleared at the start of the next local day if the forecast
 	// shows we'll see enough surplus to sustain 3Φ again — that's
 	// the natural reset point that matches the operator's "look at
 	// today vs tomorrow" mental model.
-	phaseLockMu   sync.Mutex
-	phaseLocked1P map[string]bool
-	phaseLockedAt map[string]time.Time
+	// phaseSelected3P + phaseSelectedAt enforce the minimum-dwell rule
+	// on the near-term gate: once a 3Φ-only ↔ 1Φ-allowed decision is
+	// taken, hold it for at least phaseSwitchMinHold before the next
+	// switch is allowed. Without this, a forecast peak hovering around
+	// the 4140 W threshold flaps the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per 30 min.
+	// Cleared on day rollover via the same path as phaseLocked1P.
+	phaseLockMu     sync.Mutex
+	phaseLocked1P   map[string]bool
+	phaseLockedAt   map[string]time.Time
+	phaseSelected3P map[string]bool
+	phaseSelectedAt map[string]time.Time
 
 	// wakeMu protects the per-loadpoint last-wake timestamp used to
 	// throttle charge_start retries. Tesla rate-limits BLE commands;
@@ -245,6 +256,15 @@ const surplusMinPauseHold = 35 * time.Second
 // unreachable)" log line so a long morning with sustained low surplus
 // produces one line per 10 min per LP instead of one per 5 s tick.
 const nearTermLogCooldown = 10 * time.Minute
+
+// phaseSwitchMinHold is the minimum dwell between 1Φ↔3Φ switches on
+// the near-term gate. Operator rule: at most one switch per 30 min.
+// The Easee contactor is rated for limited switching cycles; on a
+// borderline-PV day a frequent 1Φ↔3Φ flip would burn through them
+// quickly and inject load-step transients into the battery PI loop
+// every couple of minutes. 30 min lets the forecast machinery commit
+// to a verdict before the next reconsider.
+const phaseSwitchMinHold = 30 * time.Minute
 
 // fusePauseCooldown is how long an LP stays at 0 W after a fuse-over-
 // limit force-pause. Long enough that whatever house load caused the
@@ -679,6 +699,91 @@ func (c *Controller) RefreshVehicle(ctx context.Context, lpID string) error {
 	return c.send(ctx, driver, payload)
 }
 
+// ForceStart outcome sentinels. The API layer maps each to a distinct
+// HTTP status: NotReady → 503, LoadpointNotFound → 404 "lp", NoVehicle
+// → 422 "no vehicle bound", any other error → 502 "driver send".
+// Distinguishing these is what the previous (string, error) two-value
+// return tried to encode via empty strings — sentinels make it
+// type-checked.
+var (
+	ErrForceStartNotReady       = errors.New("loadpoint controller not ready (missing vehicleStatus/send wiring)")
+	ErrForceStartLoadpointGone  = errors.New("loadpoint not found")
+	ErrForceStartNoVehicleBound = errors.New("no vehicle driver bound to loadpoint")
+)
+
+// ForceStartVehicle sends a generic `charge_start` to the loadpoint's
+// bound vehicle driver immediately, bypassing the auto-wake's
+// `vehicleWakeCooldown` + `wakeBackoffCooldown` throttle. Used by the
+// operator-driven "force start" API path when the auto-wake has
+// backed off and the operator wants to break the backoff (typical case:
+// car was unresponsive earlier, has since become reachable, the 10-min
+// stretched cooldown still has minutes to run, operator wants charging
+// to resume now).
+//
+// Side effects on success (after the send returns nil), in order:
+//  1. Reset the wake-attempt counter so subsequent auto-wakes start
+//     from a fresh cooldown.
+//  2. Bump wakeLast so the auto-wake loop will not duplicate this
+//     send on the same tick.
+//  3. Arm the wake-kick window so the next few dispatch ticks force
+//     the wallbox to signal at least min current — without it a
+//     successful charge_start lands on a 0 A wallbox and the car has
+//     nothing to negotiate with.
+//  4. Send the generic `charge_start` action (cross-driver protocol —
+//     Tesla, BMW, Audi drivers all implement it against their own
+//     back-ends).
+//
+// If the send fails, the throttle resets and wake-kick arming still
+// stand — that's intentional: the operator's intent was to break the
+// backoff, and a failed send shouldn't punish a subsequent retry.
+//
+// Returns the driver name actually targeted plus the outcome:
+//
+//	("", ErrForceStartNotReady)        — controller missing wiring
+//	("", ErrForceStartLoadpointGone)   — no such loadpoint id
+//	("", ErrForceStartNoVehicleBound)  — loadpoint exists, no vehicle
+//	(driver, sendErr)                  — send hop returned an error
+//	(driver, nil)                      — sent
+func (c *Controller) ForceStartVehicle(ctx context.Context, lpID string) (string, error) {
+	if c == nil || c.vehicleStatus == nil || c.send == nil {
+		return "", ErrForceStartNotReady
+	}
+	if c.manager != nil {
+		if _, ok := c.manager.State(lpID); !ok {
+			return "", ErrForceStartLoadpointGone
+		}
+	}
+	driver, _, ok := c.vehicleStatus(lpID)
+	if !ok || driver == "" {
+		return "", ErrForceStartNoVehicleBound
+	}
+	now := time.Now()
+	c.wakeMu.Lock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	delete(c.wakeAttempts, lpID)
+	c.wakeLast[lpID] = now
+	c.wakeKickUntil[lpID] = now.Add(wakeKickDuration)
+	c.wakeMu.Unlock()
+	payload, err := json.Marshal(map[string]any{"action": "charge_start"})
+	if err != nil {
+		slog.Warn("loadpoint force-start: payload marshal", "lp", lpID, "err", err)
+		return driver, err
+	}
+	sendErr := c.send(ctx, driver, payload)
+	if sendErr != nil {
+		slog.Warn("loadpoint force-start (operator) — send failed",
+			"lp", lpID, "vehicle_driver", driver, "err", sendErr)
+	} else {
+		slog.Info("loadpoint force-start (operator) — sent",
+			"lp", lpID, "vehicle_driver", driver)
+	}
+	return driver, sendErr
+}
+
 // wakeVehicleAuto sends a `wake_up` to the loadpoint's bound vehicle
 // driver, gated by the same `vehicleWakeCooldown` (5 min) the
 // charge_start auto-wake loop uses. Used for event-triggered wakes
@@ -1063,8 +1168,26 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		phaseMode := lpCfg.PhaseMode
 		if c.surplusLockedTo1P(lpCfg.ID) {
 			phaseMode = "1p"
-		} else if surplusOn && phaseMode == "" {
-			phaseMode = "auto"
+		} else if surplusOn && (phaseMode == "" || phaseMode == "auto") {
+			// Honour the 30-min near-term dwell decision ONLY when the
+			// operator hasn't explicitly pinned a phase. Explicit "1p"
+			// or "3p" is a fixed-install contract: a 1Φ-only home or a
+			// 3Φ-only contactor preference. Overriding it via dwell
+			// would let a near-term forecast flip the install's
+			// physical configuration, exactly the wear case the dwell
+			// was meant to avoid.
+			//
+			// When phase_mode is unset or "auto", pin the driver to
+			// the dwell decision across the dwell window so a transient
+			// cmd_w=0 (pause) doesn't make the driver's "auto" snap to
+			// 1Φ and flip the contactor. Without this,
+			// pickSurplusSteps' step-list lock is silently bypassed
+			// every time the surplus clamp pauses.
+			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
+				phaseMode = dwell
+			} else if phaseMode == "" {
+				phaseMode = "auto"
+			}
 		}
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
@@ -1404,6 +1527,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 		if peak, ok := c.peakRemainingSurplusW(); ok && peak >= minStep3 {
 			delete(c.phaseLocked1P, lpCfg.ID)
 			delete(c.phaseLockedAt, lpCfg.ID)
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
 			locked = false
 			c.phaseLockMu.Unlock()
 			slog.Info("loadpoint surplus_only unlocked: new day with sufficient PV forecast",
@@ -1427,11 +1552,61 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	// here today instead of waiting for a peak that's hours away.
 	// Day-lock NOT set here — this is a "transient cloud" not a
 	// "low-PV day" verdict, so a later 3Φ window during the same
-	// day can still trigger a contactor cycle into 3Φ (the
-	// surplusMinPauseHold ≥ 35 s hysteresis caps the cycle rate).
+	// day can still trigger a contactor cycle into 3Φ.
+	//
+	// Minimum-dwell guard: a forecast peak hovering around the 4140 W
+	// threshold would otherwise flap the step set every tick, which
+	// cascades into Easee phaseMode flips + contactor cycles + battery
+	// PI windup. Operator rule: at most one 1Φ↔3Φ switch per
+	// phaseSwitchMinHold. The prior decision is held until the dwell
+	// elapses; on day rollover the selection is cleared so a fresh
+	// morning gets a fresh forecast verdict.
 	if c.nearTermPeakSurplusW != nil {
 		const nearTermWindow = 30 * time.Minute
-		if nearPeak, ok := c.nearTermPeakSurplusW(nearTermWindow); ok && nearPeak < minStep3 {
+		nearPeak, peakOK := c.nearTermPeakSurplusW(nearTermWindow)
+
+		c.phaseLockMu.Lock()
+		prevSelected3P, hasPrev := c.phaseSelected3P[lpCfg.ID]
+		prevAt := c.phaseSelectedAt[lpCfg.ID]
+		if hasPrev && !sameLocalDay(prevAt, now) {
+			delete(c.phaseSelected3P, lpCfg.ID)
+			delete(c.phaseSelectedAt, lpCfg.ID)
+			hasPrev = false
+		}
+		var selected3P bool
+		var recordDecision bool
+		switch {
+		case !peakOK && !hasPrev:
+			// No forecast yet and no prior decision: conservative
+			// fall-through to the whole-day branch below.
+			c.phaseLockMu.Unlock()
+			goto afterNearTerm
+		case !peakOK:
+			// No forecast this tick — honour the prior decision.
+			selected3P = prevSelected3P
+		case !hasPrev:
+			// First decision today — go with the forecast verdict.
+			selected3P = nearPeak >= minStep3
+			recordDecision = true
+		case now.Sub(prevAt) < phaseSwitchMinHold:
+			// Dwell window not yet elapsed — hold the prior decision.
+			selected3P = prevSelected3P
+		default:
+			// Dwell elapsed — re-decide from the forecast.
+			selected3P = nearPeak >= minStep3
+			recordDecision = selected3P != prevSelected3P
+		}
+		if recordDecision {
+			if c.phaseSelected3P == nil {
+				c.phaseSelected3P = map[string]bool{}
+				c.phaseSelectedAt = map[string]time.Time{}
+			}
+			c.phaseSelected3P[lpCfg.ID] = selected3P
+			c.phaseSelectedAt[lpCfg.ID] = now
+		}
+		c.phaseLockMu.Unlock()
+
+		if !selected3P {
 			c.nearTermLogMu.Lock()
 			lastFor, has := c.nearTermLogLast[lpCfg.ID]
 			fireLog := !has || now.Sub(lastFor) > nearTermLogCooldown
@@ -1445,11 +1620,12 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 			if fireLog {
 				slog.Info("loadpoint surplus: 1Φ steps allowed (near-term 3Φ unreachable)",
 					"lp", lpCfg.ID, "near_term_peak_w", nearPeak, "min_3p_step_w", minStep3,
-					"window", nearTermWindow.String())
+					"window", nearTermWindow.String(), "dwell_hold", phaseSwitchMinHold.String())
 			}
 			return lpCfg.AllowedStepsW
 		}
 	}
+afterNearTerm:
 
 	if c.peakRemainingSurplusW == nil {
 		return steps3
@@ -1480,6 +1656,8 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	}
 	c.phaseLocked1P[lpCfg.ID] = true
 	c.phaseLockedAt[lpCfg.ID] = now
+	delete(c.phaseSelected3P, lpCfg.ID)
+	delete(c.phaseSelectedAt, lpCfg.ID)
 	c.phaseLockMu.Unlock()
 	slog.Info("loadpoint surplus_only locked to 1Φ for the day",
 		"lp", lpCfg.ID, "peak_remaining_surplus_w", peak, "min_3p_step_w", minStep3)
@@ -1495,6 +1673,29 @@ func (c *Controller) surplusLockedTo1P(id string) bool {
 	c.phaseLockMu.Lock()
 	defer c.phaseLockMu.Unlock()
 	return c.phaseLocked1P[id]
+}
+
+// dwellSelectedPhaseMode returns the phase_mode string ("1p"/"3p")
+// implied by the near-term dwell selection for this loadpoint, or the
+// empty string when no dwell decision is on file (first-tick, fresh
+// day, no near-term peak source). Used by the dispatch command builder
+// to override the operator's "auto" so the driver doesn't auto-flip
+// phase on a transient cmd_w=0 (pause), which would defeat the
+// 30-min minimum-dwell guarantee.
+func (c *Controller) dwellSelectedPhaseMode(id string) string {
+	if c == nil {
+		return ""
+	}
+	c.phaseLockMu.Lock()
+	defer c.phaseLockMu.Unlock()
+	sel, ok := c.phaseSelected3P[id]
+	if !ok {
+		return ""
+	}
+	if sel {
+		return "3p"
+	}
+	return "1p"
 }
 
 // sameLocalDay reports whether two time.Time values fall on the
@@ -1560,6 +1761,17 @@ func (c *Controller) wakeKickActive(id string, now time.Time) bool {
 	defer c.wakeMu.Unlock()
 	t, ok := c.wakeKickUntil[id]
 	return ok && now.Before(t)
+}
+
+// IsWakeKickActive is the public accessor mirroring wakeKickActive.
+// Main wires it into the per-tick reserve calc so the home battery
+// doesn't grab a freed PV surplus during the gap between the wake-kick
+// commanding the wallbox to offer current and the EV actually starting
+// to draw — the wake-kick window is the operator-correct "ramp" period
+// where the EV's share of surplus should be held even when its
+// instantaneous CurrentPowerW is still 0.
+func (c *Controller) IsWakeKickActive(id string, now time.Time) bool {
+	return c.wakeKickActive(id, now)
 }
 
 // resetSurplusSession drops the per-loadpoint rolling buffer + paused

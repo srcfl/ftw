@@ -40,16 +40,26 @@ type PricePredictor func(zone string, t time.Time) float64
 // would risk a cycle if loadpoint ever needs mpc types).
 type LoadpointProbe func(slotLenMin int) *LoadpointSpec
 
+// BatteryFleetMember describes one configured home battery the MPC may plan
+// against. Service filters this list by live driver health and SoC telemetry
+// on every replan so the optimizer only sees capacity it can actually use.
+type BatteryFleetMember struct {
+	Driver        string
+	CapacityWh    float64
+	MaxChargeW    float64
+	MaxDischargeW float64
+}
+
 // Service wires the optimizer to the rest of the stack: pulls prices +
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	Store    *state.Store
-	Tele     *telemetry.Store
-	Zone     string
-	BaseLoad float64 // baseline household load (W). 0 disables load assumption.
-	Horizon  time.Duration
-	Interval time.Duration
+	Store     *state.Store
+	Tele      *telemetry.Store
+	Zone      string
+	BaseLoad  float64 // baseline household load (W). 0 disables load assumption.
+	Horizon   time.Duration
+	Interval  time.Duration
 	PV        PVPredictor    // optional — overrides stored pv_w_estimated
 	Load      LoadPredictor  // optional — overrides flat BaseLoad
 	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
@@ -118,7 +128,8 @@ type Service struct {
 	GridTariffOreKwh float64
 	VATPercent       float64
 
-	Defaults Params
+	Defaults     Params
+	BatteryFleet []BatteryFleetMember
 
 	mu              sync.RWMutex
 	last            *Plan
@@ -128,6 +139,14 @@ type Service struct {
 
 	stop chan struct{}
 	done chan struct{}
+}
+
+func (s *Service) driverOnline(name string) bool {
+	if s == nil || s.Tele == nil {
+		return false
+	}
+	h := s.Tele.DriverHealth(name)
+	return h != nil && h.IsOnline()
 }
 
 // New constructs a service. Caller wires it in main.go after store + telemetry.
@@ -165,6 +184,28 @@ func (s *Service) UpdateCapacity(totalCapWh, maxChargeW, maxDischargeW float64) 
 		return
 	}
 	s.mu.Lock()
+	s.Defaults.CapacityWh = totalCapWh
+	s.Defaults.MaxChargeW = maxChargeW
+	s.Defaults.MaxDischargeW = maxDischargeW
+	s.mu.Unlock()
+}
+
+// UpdateBatteryFleet swaps the configured battery pool and fallback aggregate
+// bounds. Replans then filter the pool to online batteries with SoC telemetry
+// before calling Optimize.
+func (s *Service) UpdateBatteryFleet(fleet []BatteryFleetMember, totalCapWh, maxChargeW, maxDischargeW float64) {
+	if s == nil {
+		return
+	}
+	cp := make([]BatteryFleetMember, 0, len(fleet))
+	for _, b := range fleet {
+		if b.Driver == "" || b.CapacityWh <= 0 {
+			continue
+		}
+		cp = append(cp, b)
+	}
+	s.mu.Lock()
+	s.BatteryFleet = cp
 	s.Defaults.CapacityWh = totalCapWh
 	s.Defaults.MaxChargeW = maxChargeW
 	s.Defaults.MaxDischargeW = maxDischargeW
@@ -209,6 +250,16 @@ type SlotDirective struct {
 	// would lose money — the dispatch layer divides this across the
 	// site's PV-supporting drivers and sends `curtail` commands.
 	PVLimitW float64
+
+	// GridW is the plan's forecast of slot-average grid power given the
+	// planned battery / load / PV mix (site-signed: + = import). The
+	// dispatch layer treats it as a CHARGE-ONLY soft reactive cap on
+	// the energy path — on a charging slot, the battery target is
+	// pulled back when live gridW imports more than plan. Discharge
+	// slots are intentionally not clamped (extra export = bonus revenue
+	// at the slot's chosen price). See control.SlotDirective.PlannedGridW
+	// and docs/safety.md §8 for the asymmetry rationale.
+	GridW float64
 
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
 	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
@@ -260,6 +311,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			SoCTargetPct:    a.SoCPct,
 			Strategy:        s.Defaults.Mode,
 			PVLimitW:        a.PVLimitW,
+			GridW:           a.GridW,
 		}
 		// EV energy budget for the slot (single-loadpoint for now —
 		// keyed under lpID snapshot so the dispatch layer routes
@@ -310,13 +362,15 @@ func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 // actionToSlot translates an MPC action into (mode_string, grid_target_w, true).
 // The mapping from planner-mode + action to EMS mode:
 //   - self_consumption → always self_consumption with grid_target=0
-//   - cheap_charge → "charge" when the plan says charge, otherwise self_consumption
+//   - cheap_charge / passive_arbitrage → "charge" when the plan says
+//     charge, otherwise self_consumption (no battery-export branch —
+//     both modes forbid discharge past local load)
 //   - arbitrage → "charge" / "self_consumption" (with negative grid target for export) / self_consumption
 func actionToSlot(a Action, plannerMode Mode) (string, float64, bool) {
 	switch plannerMode {
 	case ModeSelfConsumption:
 		return "self_consumption", 0, true
-	case ModeCheapCharge:
+	case ModeCheapCharge, ModePassiveArbitrage:
 		if a.BatteryW > 100 {
 			return "charge", 0, true
 		}
@@ -424,19 +478,27 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	if slot == nil {
 		return
 	}
-	// Live PV — sum all DerPV readings (site sign: negative = generating).
+	// Live PV — sum online DerPV readings only (site sign: negative =
+	// generating). Offline/stale DER readings stay cached in telemetry for UI
+	// continuity, but must not drive reactive replans.
 	var pvW float64
 	for _, r := range s.Tele.ReadingsByType(telemetry.DerPV) {
+		if !s.driverOnline(r.Driver) {
+			continue
+		}
 		pvW += r.SmoothedW
 	}
 
 	// Live load = grid − pv − bat when we have a site meter wired.
 	var loadW float64
 	haveLoad := false
-	if s.SiteMeter != "" {
+	if s.SiteMeter != "" && s.driverOnline(s.SiteMeter) {
 		if m := s.Tele.Get(s.SiteMeter, telemetry.DerMeter); m != nil {
 			var batW float64
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
+				if !s.driverOnline(r.Driver) {
+					continue
+				}
 				batW += r.SmoothedW
 			}
 			evW := s.Tele.SumOnlineEVW()
@@ -579,11 +641,20 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
-	// Current SoC: average of battery readings (weighted by capacity is
-	// ideal, but for v1 we aggregate into one "mega-battery" so a mean
-	// across whatever batteries are reporting is fine).
+	s.mu.RLock()
 	p := s.Defaults
-	p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
+	fleet := append([]BatteryFleetMember(nil), s.BatteryFleet...)
+	s.mu.RUnlock()
+	if len(fleet) > 0 {
+		var ok bool
+		p, ok = s.onlineFleetParams(p, fleet)
+		if !ok {
+			slog.Warn("mpc: no online battery capacity with SoC — keeping previous plan")
+			return nil
+		}
+	} else {
+		p.InitialSoCPct = currentSoCPct(s.Tele, p.InitialSoCPct)
+	}
 
 	// Export pricing is per-slot now: pass bonus/fee into Params so
 	// the DP can compute `slot.SpotOre + bonus − fee` per slot. Leave
@@ -606,7 +677,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if p.TerminalSoCPrice <= 0 {
 		terminalDefaulted = true
 		switch p.Mode {
-		case ModeSelfConsumption, ModeCheapCharge:
+		case ModeSelfConsumption, ModeCheapCharge, ModePassiveArbitrage:
 			p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 				s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 		default:
@@ -658,7 +729,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// applies when we just defaulted above; an explicit caller-
 	// supplied TerminalSoCPrice is respected.
 	if terminalDefaulted && p.Loadpoint != nil && p.Loadpoint.SurplusOnly &&
-		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge {
+		p.Mode != ModeSelfConsumption && p.Mode != ModeCheapCharge && p.Mode != ModePassiveArbitrage {
 		p.TerminalSoCPrice = selfConsumptionTerminalPrice(prices,
 			s.ExportBonusOreKwh, s.ExportFeeOreKwh)
 	}
@@ -886,34 +957,38 @@ const (
 )
 
 // selfConsumptionTerminalPrice is the per-kWh öre value of leftover SoC at
-// the end of the horizon, for the modes where the battery cannot export.
-// Equals the mean retail-import price minus the mean export price
-// (spot + bonus − fee, floored at 0). That's what one kWh in the battery
-// actually earns you: it displaces one kWh of future retail import
-// instead of one kWh that would otherwise have been exported.
+// the end of the horizon, for self-consumption mode. Returns the mean
+// retail-import price across the horizon — matching the mpc/CLAUDE.md
+// design intent: "every kWh kept in the battery at horizon end is worth
+// what it would have cost to import during a typical hour".
 //
-// Floored at 0 so we never credit SoC negatively; if export rates exceed
-// retail (rare, subsidy edge cases) the planner in these modes should just
-// stay SoC-neutral rather than actively drain.
+// The prior implementation returned mean(import) − mean(export) — the
+// arbitrage spread. That understates self-consumption value by ~2× on
+// realistic SE retail tariffs (210 öre/kWh import, 100 öre/kWh export;
+// spread = 110 öre, mean import = 210 öre). On 2026-05-25 the
+// understatement let the DP pick "idle — export PV surplus" over
+// "charge from PV" by a 1-öre margin in a slot where SoC was 7.5 %
+// (below operator floor) and 4 kW of PV surplus was available.
+//
+// Grid-charging is not encouraged by the larger terminal credit
+// because mpc.go's strict self-consumption bias (line 583) triples the
+// cost of HOUSE-driven grid import — including the implicit import
+// required to grid-charge. PV-fed charging stays free and dominates.
+//
+// bonus/fee are accepted for signature compatibility with the arbitrage
+// path; they don't enter the self-consumption value because the
+// operator never sells stored energy in this mode.
 func selfConsumptionTerminalPrice(prices []state.PricePoint, bonus, fee float64) float64 {
+	_ = bonus
+	_ = fee
 	if len(prices) == 0 {
 		return 0
 	}
-	var importSum, exportSum float64
+	var importSum float64
 	for _, pr := range prices {
 		importSum += pr.TotalOreKwh
-		exp := pr.SpotOreKwh + bonus - fee
-		if exp < 0 {
-			exp = 0
-		}
-		exportSum += exp
 	}
-	n := float64(len(prices))
-	spread := (importSum - exportSum) / n
-	if spread < 0 {
-		spread = 0
-	}
-	return spread
+	return importSum / float64(len(prices))
 }
 
 // upperHalfMeanPrice returns the arithmetic mean of the upper half of
@@ -963,6 +1038,26 @@ func upperHalfMeanPrice(prices []state.PricePoint) float64 {
 // non-representative training data).
 const PlannerRadiationWeight = 0.3
 
+// PlannerForecastCapRatio caps how much the radiation-backed forecast may
+// exceed the twin's prediction before it's treated as a NWP error rather
+// than a calibration gap.
+//
+// When the NWP model is confidently wrong (e.g. predicts 1% cloud while
+// the site measures 300 W from a 13 kW array), the forecast can be 5–10×
+// higher than reality. The RLS twin — especially when its NowAnchor
+// correction has pulled it close to the live reading — is a more reliable
+// signal in those moments. Capping the forecast at this multiple prevents
+// the 70 % NWP weight from swamping the calibrated twin.
+//
+// 3× is chosen empirically: it covers a 2–3 string orientation difference
+// and a heavy soiling scenario, which are legitimate reasons for the twin
+// to under-predict relative to the NWP GHI × rated-kWp estimate. Beyond
+// 3× the NWP forecast is more likely wrong (cloud/shading mis-model) than
+// the twin is. This constant is intentionally conservative — tightening
+// it below ~2 risks degrading performance on normal sunny days where the
+// forecast is right and the twin is under-trained.
+const PlannerForecastCapRatio = 3.0
+
 func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) float64 {
 	// Invalid predicted → fall back to forecast (unchanged).
 	switch {
@@ -980,8 +1075,23 @@ func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) f
 	// switch: forecast shows smooth bell curve 0–8 kW, an under-trained
 	// twin still spits random spikes from overfit feature vectors — and
 	// we want the smooth curve.
+	//
+	// Guard: if the forecast exceeds PlannerForecastCapRatio × the twin's
+	// prediction, and the twin has a meaningful signal (> 50 W — i.e. it
+	// is not night-gated or collapsed), cap the forecast before blending.
+	// This prevents a confidently-wrong NWP cloud-cover forecast from
+	// dominating the plan — the twin's NowAnchor-corrected value already
+	// reflects live irradiance conditions, and a 3–10× divergence between
+	// forecast and twin is a stronger signal of NWP error than calibration
+	// gap. See investigation in docs/pvmodel-overprediction-investigation.md
+	// (T33, 2026-05-25, open_meteo predicted 154 W/m2 / 1% cloud while
+	// site measured ~22 W/m2 effective irradiance → 7× blend over-shoot).
 	if radiationBacked && forecastPVW > 0 {
-		return (1-PlannerRadiationWeight)*forecastPVW + PlannerRadiationWeight*predictedPVW
+		cappedForecast := forecastPVW
+		if predictedPVW > 50 && forecastPVW > PlannerForecastCapRatio*predictedPVW {
+			cappedForecast = PlannerForecastCapRatio * predictedPVW
+		}
+		return (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*predictedPVW
 	}
 
 	// Cloud-only legacy path: prefer the twin when forecast is near zero
@@ -1104,4 +1214,44 @@ func currentSoCPct(t *telemetry.Store, fallback float64) float64 {
 		return fallback
 	}
 	return sum / float64(n) * 100.0
+}
+
+func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Params, bool) {
+	if s == nil || s.Tele == nil {
+		return p, false
+	}
+	var totalCap, sumSoCWh, maxCharge, maxDischarge float64
+	for _, b := range fleet {
+		if b.Driver == "" || b.CapacityWh <= 0 {
+			continue
+		}
+		h := s.Tele.DriverHealth(b.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		r := s.Tele.Get(b.Driver, telemetry.DerBattery)
+		if r == nil || r.SoC == nil {
+			continue
+		}
+		totalCap += b.CapacityWh
+		sumSoCWh += *r.SoC * b.CapacityWh
+		maxCharge += b.MaxChargeW
+		maxDischarge += b.MaxDischargeW
+	}
+	if totalCap <= 0 {
+		return p, false
+	}
+	p.CapacityWh = totalCap
+	p.InitialSoCPct = sumSoCWh / totalCap * 100.0
+	p.MaxChargeW = maxCharge
+	p.MaxDischargeW = maxDischarge
+	if s.FuseMaxW > 0 {
+		if p.MaxChargeW > s.FuseMaxW {
+			p.MaxChargeW = s.FuseMaxW
+		}
+		if p.MaxDischargeW > s.FuseMaxW {
+			p.MaxDischargeW = s.FuseMaxW
+		}
+	}
+	return p, true
 }

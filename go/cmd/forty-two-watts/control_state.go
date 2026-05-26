@@ -11,6 +11,10 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 		ctrl.PI.Kp = cfg.Site.Gain
 	}
 	ctrl.SlewRateW = cfg.Site.SlewRateW
+	// applyDefaults() ensures SlewEnabled is non-nil at this point.
+	if cfg.Site.SlewEnabled != nil {
+		ctrl.SlewEnabled = *cfg.Site.SlewEnabled
+	}
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
@@ -28,5 +32,11 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
 	ctrl.PVSurplusAbsorbSoCCapPct = cfg.Site.PVSurplusAbsorbSoCCapPct
 	ctrl.PVSurplusAbsorbThresholdW = cfg.Site.PVSurplusAbsorbThresholdW
+	// DC-link protective curtail — opt-in, default off. SoC threshold
+	// and margin fall back to dispatch defaults (0.80 / 1000 W) when
+	// unset, applied inside ComputePVCurtail.
+	ctrl.DCLinkProtectionEnabled = cfg.Site.DCLinkProtectionEnabled
+	ctrl.DCLinkProtectionSoCThreshold = cfg.Site.DCLinkProtectionSoCThreshold
+	ctrl.DCLinkProtectionMarginW = cfg.Site.DCLinkProtectionMarginW
 	return ctrl
 }

@@ -1,6 +1,5 @@
-// Battery Models panel + self-tune modal — fetches /api/battery_models, renders
-// per-battery cards with τ, gain, deadband, confidence, health bar. Self-tune
-// modal manages the calibration flow.
+// Battery calibration flow. Fetches /api/battery_models so self-tune has
+// current data, but keeps model internals out of the normal driver cards.
 
 (function () {
   "use strict";
@@ -22,14 +21,11 @@
   let lastModels = {};
   let tunePollHandle = null;
 
-  // Expose the latest models payload globally so app.js renderDrivers can
-  // inline the model panel in the same pass it renders the driver card.
-  // This prevents the model from "blinking" between the two polls (which
-  // each owned a different DOM element on different intervals).
+  // Keep the latest models payload available for advanced diagnostics and
+  // self-tune, but do not render model internals on normal driver cards.
   window._lastBatteryModels = lastModels;
-  window.renderInlineBatteryModel = function () { return ""; };
 
-  // ---- Models grid: rendered once per /api/battery_models poll ----
+  // ---- Model cache: refreshed once per /api/battery_models poll ----
 
   function fetchModels() {
     fetch("/api/battery_models")
@@ -44,194 +40,16 @@
   }
 
   function renderModels(models) {
-    // Models are now drawn by app.js inside each driver card (via
-    // renderInlineBatteryModel exposed below). We just keep #models-grid
-    // empty — it stays in the DOM only as the home for the Self-tune
-    // button + as a fallback for orphan models without a matching driver.
+    // Keep #models-grid empty. The visible surface here is only the
+    // Self-tune entry point; raw model internals stay out of the dashboard.
     if (grid) grid.innerHTML = '';
   }
 
-  // Exposed to app.js: returns the model HTML for a driver name (or "" if
-  // we don't have a model for it yet). Called inside renderDrivers so the
-  // driver card and model are always rendered together — no race.
+  // Driver cards stay operator-focused. Battery model internals are still
+  // fetched for calibration and API diagnostics, but hidden from the main UI.
   window.renderInlineBatteryModel = function (name) {
-    var m = lastModels[name];
-    if (!m) return "";
-    return renderInlineModel(name, m);
+    return "";
   };
-
-  // Minimal CSS.escape polyfill — only need it to escape driver names that
-  // happen to contain characters CSS doesn't allow in attribute selectors.
-  function cssEscape(s) {
-    if (window.CSS && window.CSS.escape) return window.CSS.escape(s);
-    return s.replace(/[^a-zA-Z0-9_-]/g, function (c) { return "\\" + c; });
-  }
-
-  // Inline model panel rendered inside a driver-card. Compact summary
-  // always shown; details unfold on click.
-  function renderInlineModel(name, m) {
-    var conf = (m.confidence * 100).toFixed(0) + "%";
-    var cascadeBadge = m.confidence >= 0.5
-      ? '<span style="color:#22c55e;font-size:0.7rem">● cascade</span>'
-      : '<span style="color:#f59e0b;font-size:0.7rem">○ direct</span>';
-    var health = m.health_score;
-    var healthPct = (health * 100).toFixed(0);
-    var healthClass = health >= 0.8 ? "health-good" : health >= 0.5 ? "health-warn" : "health-bad";
-    var driftPerDay = m.health_drift_per_day || 0;
-    var driftStr = driftPerDay === 0
-      ? "stable"
-      : (driftPerDay > 0 ? "+" : "") + (driftPerDay * 100).toFixed(2) + "%/day";
-    var driftClass = Math.abs(driftPerDay) < 0.001 ? "tune-delta-neutral"
-      : driftPerDay < 0 ? "tune-delta-negative" : "tune-delta-positive";
-
-    var expandKey = "model-expanded:" + name;
-    var expanded = localStorage.getItem(expandKey) === "1";
-    var caret = expanded ? "▾" : "▸";
-
-    var details = !expanded ? "" :
-      '<div class="model-stats" style="margin-top:6px">' +
-      '<span class="model-stat-label">τ (response)</span>' +
-      '<span class="model-stat-value">' + m.tau_s.toFixed(2) + ' s</span>' +
-      '<span class="model-stat-label">gain</span>' +
-      '<span class="model-stat-value">' + m.gain.toFixed(3) + '</span>' +
-      '<span class="model-stat-label">deadband</span>' +
-      '<span class="model-stat-value">' + (m.deadband_w || 0).toFixed(0) + ' W</span>' +
-      '<span class="model-stat-label">calibrated</span>' +
-      '<span class="model-stat-value">' + (m.last_calibrated_ts_ms ? humanAge((Date.now() - m.last_calibrated_ts_ms) / 1000) : "never") + '</span>' +
-      '</div>' +
-      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '">' +
-      '↻ Reset model' +
-      '</button>';
-
-    return '<div class="driver-model-panel">' +
-      '<div class="driver-model-header" data-expand="' + esc(name) + '" style="cursor:pointer">' +
-      '<span class="driver-model-title">' + caret + ' Model · ' + cascadeBadge + '</span>' +
-      '<span class="driver-model-meta">' + m.n_samples + ' samples · ' + conf + '</span>' +
-      '</div>' +
-      '<div class="model-bar" style="margin-top:4px"><div class="model-bar-fill" style="width:' + healthPct + '%"></div></div>' +
-      '<div class="model-health-text">' +
-      '<span class="' + healthClass + '">health ' + healthPct + '%</span>' +
-      '<span class="' + driftClass + '">' + driftStr + '</span>' +
-      '</div>' +
-      details +
-      '</div>';
-  }
-
-  function renderCard(name, m) {
-    var conf = (m.confidence * 100).toFixed(0) + "%";
-    var cascadeActive = m.confidence >= 0.5;
-    var cascadeBadge = cascadeActive
-      ? '<span style="color:#22c55e;font-size:0.7rem">● cascade</span>'
-      : '<span style="color:#f59e0b;font-size:0.7rem">○ direct</span>';
-    var health = m.health_score;
-    var healthPct = (health * 100).toFixed(0);
-    var healthClass = health >= 0.8 ? "health-good" : health >= 0.5 ? "health-warn" : "health-bad";
-    var tau = m.tau_s.toFixed(2);
-    var gain = m.gain.toFixed(3);
-    var calibratedAgo = m.last_calibrated_ts_ms
-      ? humanAge((Date.now() - m.last_calibrated_ts_ms) / 1000)
-      : "never";
-    var driftPerDay = m.health_drift_per_day || 0;
-    var driftStr = driftPerDay === 0
-      ? "stable"
-      : (driftPerDay > 0 ? "+" : "") + (driftPerDay * 100).toFixed(2) + "%/day";
-    var driftClass = Math.abs(driftPerDay) < 0.001 ? "tune-delta-neutral"
-      : driftPerDay < 0 ? "tune-delta-negative" : "tune-delta-positive";
-
-    // Persist expanded state per battery name across re-renders.
-    var expandKey = "model-expanded:" + name;
-    var expanded = localStorage.getItem(expandKey) === "1";
-    var caret = expanded ? "▾" : "▸";
-
-    var headerLine =
-      '<div class="model-card-header" data-expand="' + esc(name) + '" style="cursor:pointer">' +
-      '<span class="model-name">' + caret + ' ' + esc(name) + ' ' + cascadeBadge + '</span>' +
-      '<span class="model-confidence">' + m.n_samples + ' samples · ' + conf + '</span>' +
-      '</div>';
-
-    // Compact summary always visible: health bar + drift.
-    var summary =
-      '<div class="model-bar"><div class="model-bar-fill" style="width:' + healthPct + '%"></div></div>' +
-      '<div class="model-health-text">' +
-      '<span class="' + healthClass + '">health ' + healthPct + '%</span>' +
-      '<span class="' + driftClass + '">' + driftStr + '</span>' +
-      '</div>';
-
-    // Details only rendered when expanded — keeps the section quiet.
-    var details = !expanded ? "" :
-      '<div class="model-stats" style="margin-top:8px">' +
-      '<span class="model-stat-label">τ (response)</span>' +
-      '<span class="model-stat-value">' + tau + ' s</span>' +
-      '<span class="model-stat-label">gain</span>' +
-      '<span class="model-stat-value">' + gain + '</span>' +
-      '<span class="model-stat-label">deadband</span>' +
-      '<span class="model-stat-value">' + (m.deadband_w || 0).toFixed(0) + ' W</span>' +
-      '<span class="model-stat-label">calibrated</span>' +
-      '<span class="model-stat-value">' + calibratedAgo + '</span>' +
-      '</div>' +
-      '<button class="btn-reset-model" data-reset-battery="' + esc(name) + '">' +
-      '↻ Reset model' +
-      '</button>';
-
-    return '<div class="model-card">' + headerLine + summary + details + '</div>';
-  }
-
-  // Expand/collapse on header click. Listen on document because the model
-  // panel now lives inside each driver card (rendered by app.js), not
-  // inside #models-grid. Use closest() so clicks on inner spans still
-  // toggle the card. State persisted to localStorage so it survives the
-  // 3s re-render cycle.
-  document.addEventListener("click", function (e) {
-    var hdr = e.target.closest && e.target.closest("[data-expand]");
-    if (hdr && !e.target.dataset.resetBattery) {
-      var name = hdr.dataset.expand;
-      var key = "model-expanded:" + name;
-      if (localStorage.getItem(key) === "1") {
-        localStorage.removeItem(key);
-      } else {
-        localStorage.setItem(key, "1");
-      }
-      // Re-render this panel in place using cached data so the click is
-      // instant. Previously we waited for fetchModels → /api/battery_models
-      // → next /api/status poll (app.js renderDrivers), which added up to
-      // a 3s lag before the section visibly unfolded.
-      var m = lastModels[name];
-      if (m) {
-        var panel = hdr.closest(".driver-model-panel");
-        if (panel) {
-          // renderInlineModel returns the full panel wrapper; strip it so
-          // we replace panel's inner HTML, preserving the outer element
-          // and any click-state the browser has on it.
-          var html = renderInlineModel(name, m);
-          var tmp = document.createElement("div");
-          tmp.innerHTML = html;
-          var newPanel = tmp.firstChild;
-          if (newPanel) panel.innerHTML = newPanel.innerHTML;
-        }
-      }
-      // Still kick off a background refresh so we see the latest numbers.
-      fetchModels();
-      return;
-    }
-    if (!e.target.dataset || !e.target.dataset.resetBattery) return;
-    var name = e.target.dataset.resetBattery;
-    if (!confirm("Reset " + name + " model to fresh defaults?\\n\\nRLS will re-learn from scratch. Baseline (if set by self-tune) will be cleared.")) return;
-    fetch("/api/battery_models/reset", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ battery: name }),
-    })
-      .then(function (r) { return r.ok ? r.json() : r.json().then(function (e) { throw new Error(e.error); }); })
-      .then(function () { fetchModels(); })
-      .catch(function (e) { alert("Reset failed: " + e.message); });
-  });
-
-  function humanAge(s) {
-    if (s < 60) return Math.round(s) + "s ago";
-    if (s < 3600) return Math.round(s / 60) + "m ago";
-    if (s < 86400) return Math.round(s / 3600) + "h ago";
-    return Math.round(s / 86400) + "d ago";
-  }
 
   // ---- Self-tune modal ----
 

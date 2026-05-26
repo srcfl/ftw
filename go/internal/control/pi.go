@@ -60,6 +60,31 @@ func (p *PIController) Update(measurement float64) PIOutput {
 // Reset zeroes the integral. Use when retuning or after a long idle.
 func (p *PIController) Reset() { p.integral = 0 }
 
+// DecayIntegral multiplies the integral by factor (0 ≤ factor ≤ 1).
+// Use when the controller is observed to be commanding the wrong
+// direction relative to live error sign — the accumulated integral is
+// load-bearing in the wrong direction and clamping the output alone
+// leaves it stuck. A factor in the 0.3–0.6 range unwinds saturation
+// over a few cycles without dropping memory of legitimate offsets.
+//
+// Conditional integration (skip-on-clamp) would be cleaner in theory
+// but doesn't help our specific case: the dispatch wrong-direction
+// clamp only catches the IS-wrong condition after the integral has
+// already saturated. Active decay is what gets us out.
+func (p *PIController) DecayIntegral(factor float64) {
+	if factor < 0 {
+		factor = 0
+	}
+	if factor > 1 {
+		factor = 1
+	}
+	p.integral *= factor
+}
+
+// Integral exposes the current integral term. Read-only outside the
+// controller — set/reset through Reset / DecayIntegral.
+func (p *PIController) Integral() float64 { return p.integral }
+
 // PIOutput is one update's full breakdown.
 type PIOutput struct {
 	P, I, Output, Error float64
