@@ -158,6 +158,40 @@ class FtwPairCard extends FtwElement {
       opacity: 0.4;
       cursor: default;
     }
+    /* Friend-message block (active session only) */
+    .friend-message {
+      margin: 12px 0;
+    }
+    .friend-message .eyebrow {
+      display: block;
+      margin-bottom: 6px;
+    }
+    .message {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.55;
+      background: var(--surface, var(--bg, #111));
+      border: 1px solid var(--line);
+      padding: 10px 12px;
+      margin: 0 0 8px;
+      white-space: pre;
+      overflow-x: auto;
+      color: var(--fg);
+    }
+    button.copy-msg {
+      background: var(--accent-e);
+      color: #0a0a0a;
+      border: 0;
+      padding: 4px 10px;
+      font-family: var(--mono);
+      cursor: pointer;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    button.copy-msg:hover {
+      opacity: 0.85;
+    }
   `;
 
   constructor() {
@@ -278,6 +312,8 @@ class FtwPairCard extends FtwElement {
       .map((t) => escapeHTML(t))
       .join(", ") || "—";
 
+    const friendMsg = this._friendMessage(remaining);
+
     return `
       <div class="pair-card">
         <header>
@@ -289,6 +325,11 @@ class FtwPairCard extends FtwElement {
           <button class="copy" id="copy-btn">Copy</button>
         </div>
         <p class="intent">${escapeHTML(this._state.intent || "(no intent set)")}</p>
+        <section class="friend-message">
+          <span class="eyebrow">SHARE WITH YOUR FRIEND</span>
+          <pre class="message" id="friend-msg-pre">${escapeHTML(friendMsg)}</pre>
+          <button class="copy-msg" id="copy-msg-btn">Copy this message</button>
+        </section>
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
           <dt>Tool calls</dt><dd>${this._state.tool_count ?? 0}</dd>
@@ -307,6 +348,46 @@ class FtwPairCard extends FtwElement {
 
     const startBtn = this.shadowRoot.getElementById("start-btn");
     if (startBtn) startBtn.addEventListener("click", () => this._start());
+
+    const copyMsgBtn = this.shadowRoot.getElementById("copy-msg-btn");
+    if (copyMsgBtn) {
+      copyMsgBtn.addEventListener("click", () => this._copyFriendMessage(copyMsgBtn));
+    }
+  }
+
+  _copyFriendMessage(btn) {
+    if (!this._state) return;
+    const remaining = this._computeRemaining();
+    const msg = this._friendMessage(remaining);
+    navigator.clipboard.writeText(msg).then(() => {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }).catch(() => {});
+  }
+
+  _friendMessage(remaining) {
+    const code = this._state ? this._state.code : "";
+    return `Send this in Signal/SMS/Slack to your friend:
+
+I need help with my home energy system. I've started a pair
+session — please join with this code:
+
+  ${code}
+
+One-time setup on your Mac/Linux:
+  brew install uv     (skip if already installed)
+  uv tool install fowl
+  go install github.com/frahlg/forty-two-watts/go/cmd/ftw-connect@latest
+
+Then run:
+  ftw-connect ${code}
+
+It'll open a tunnel, register an MCP server with your Claude Code,
+and copy a context prompt to your clipboard. Paste it into Claude
+Code and we're connected.
+
+Session expires in ${remaining} or when I click Abort.`;
   }
 
   _computeRemaining() {
