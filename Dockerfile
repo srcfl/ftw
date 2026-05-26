@@ -38,12 +38,12 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-pair ./cmd/ftw-pair
-# ftw-pair-relay is the standalone relay server (deployed separately — built
+# ftw-subetha is the standalone relay server (deployed separately — built
 # here so operators can extract the binary with `docker cp` if needed).
 RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/ftw-pair-relay ./cmd/ftw-pair-relay
+    -o /out/ftw-subetha ./cmd/ftw-subetha
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
