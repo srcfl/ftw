@@ -32,7 +32,7 @@ Legacy modes (`idle` / manual `self_consumption` / `peak_shaving` /
 
 | Strategy | Dispatch layer |
 |---|---|
-| Self-consumption (Smart) | Reactive self-consumption + per-slot idle gate. The plan tells the EMS **whether** to participate this slot — participant slots behave like manual self-consumption, while idle/charge slots hold the battery at 0 or above. |
+| Self-consumption (Smart) | Reactive self-consumption + per-slot idle gate. The plan tells the EMS **whether** to spend SoC this slot — participant slots behave like manual self-consumption, while idle slots are charge-only and may absorb live meter surplus. |
 | Cheap charging | Energy-allocation (default). Plan emits Wh-per-slot; EMS converts to W in real time; grid is the residual. See `docs/plan-ems-contract.md`. |
 | Arbitrage | Same as Cheap charging — energy-allocation. |
 
@@ -41,12 +41,12 @@ back to manual self-consumption. Operators see `plan_stale: true`
 in the status endpoint.
 
 Under Self-consumption, a slot where the DP allocated `|battery_energy_wh|
-/ slot_hours < 100 W` (avg) is interpreted as **idle**: the EMS holds the
-battery at 0 even when live PV surplus exists, deferring absorption to a
-later slot the DP judged more profitable. Any larger allocation flips the
-slot to **participate** — i.e. behave exactly like manual self-consumption:
-charge live surplus, or discharge to cover live import, without intentionally
-exporting via the battery.
+/ slot_hours < 100 W` (avg) is interpreted as **idle**: the EMS will not
+discharge to cover live import, but it still charges from true live PV
+surplus that would otherwise cross the site meter. Any larger allocation
+flips the slot to **participate** — i.e. behave exactly like manual
+self-consumption: charge live surplus, or discharge to cover live import,
+without intentionally exporting via the battery.
 
 ---
 

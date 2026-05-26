@@ -83,6 +83,57 @@ func TestConfigRoundtrip(t *testing.T) {
 	}
 }
 
+// 2026-05-25 performance regression: /api/energy/daily?days=30
+// cold-started at ~25 s on a 1 GB state.db because every closed day
+// re-ran a per-day DailyEnergy SQL pass. SaveDailyEnergy +
+// LoadDailyEnergy persist the aggregate so the same call after
+// restart resolves to N PK lookups instead.
+func TestDailyEnergyPersistRoundtrip(t *testing.T) {
+	s := freshStore(t)
+	de := DayEnergy{
+		ImportWh:        1234.5,
+		ExportWh:        678.9,
+		PVWh:            5000,
+		BatChargedWh:    1500,
+		BatDischargedWh: 1100,
+		LoadWh:          2222,
+	}
+	if err := s.SaveDailyEnergy("2026-05-25", de); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, ok, err := s.LoadDailyEnergy("2026-05-25")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true after save")
+	}
+	if got != de {
+		t.Errorf("roundtrip mismatch: got %+v, want %+v", got, de)
+	}
+	// Upsert with new values must overwrite, not append a duplicate.
+	de2 := de
+	de2.ImportWh = 9999
+	if err := s.SaveDailyEnergy("2026-05-25", de2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got2, _, _ := s.LoadDailyEnergy("2026-05-25")
+	if got2.ImportWh != 9999 {
+		t.Errorf("upsert did not overwrite: got %f", got2.ImportWh)
+	}
+}
+
+func TestDailyEnergyMissReturnsFalse(t *testing.T) {
+	s := freshStore(t)
+	_, ok, err := s.LoadDailyEnergy("1999-01-01")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if ok {
+		t.Error("ok should be false for a day never persisted")
+	}
+}
+
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)
@@ -352,6 +403,67 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	// present, proving the snapshot is point-in-time.
 	if _, ok := snap.LoadConfig("post_snap"); ok {
 		t.Error("snapshot contains row written after snapshot — VACUUM INTO isn't point-in-time as assumed")
+	}
+}
+
+// 2026-05-25 performance fix: snapshots now skip the bulky time-series
+// tables (history_hot/warm/cold + ts_samples) which are recoverable
+// from cold parquet roll-off anyway. Verify that essential tables
+// (config, telemetry, devices, prices, etc.) ARE preserved AND the
+// excluded tables exist but are empty in the snapshot.
+func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
+	s := freshStore(t)
+	// Essential row that MUST survive the snapshot.
+	if err := s.SaveConfig("mode", "passive_arbitrage"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a history_hot row so we can verify exclusion. RecordHistory
+	// writes into history_hot directly.
+	if err := s.RecordHistory(HistoryPoint{
+		TsMs: time.Now().UnixMilli(),
+		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a long-format TS sample so ts_samples has rows too.
+	if err := s.RecordSamples([]Sample{
+		{Driver: "ferroamp", Metric: "pv_w", TsMs: time.Now().UnixMilli(), Value: -3000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: source DB has the rows we just wrote.
+	if hot, _, _, err := s.HistoryCounts(); err != nil || hot == 0 {
+		t.Fatalf("seed: history_hot rows = %d (err=%v) — want > 0", hot, err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+	snap, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+
+	// Essentials preserved.
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "passive_arbitrage" {
+		t.Errorf("snapshot dropped config row: got %q ok=%v", v, ok)
+	}
+	// Time-series excluded — tables exist (Open runs migrate()) but
+	// rows must NOT be present.
+	if hot, warm, cold, err := snap.HistoryCounts(); err != nil {
+		t.Errorf("HistoryCounts on snap: %v", err)
+	} else if hot+warm+cold != 0 {
+		t.Errorf("snapshot history rows = %d+%d+%d — want 0 (excluded)", hot, warm, cold)
+	}
+	// ts_samples: query directly since there's no public counter.
+	var nSamples int
+	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&nSamples); err != nil {
+		t.Errorf("count ts_samples: %v", err)
+	} else if nSamples != 0 {
+		t.Errorf("snapshot ts_samples rows = %d — want 0 (excluded)", nSamples)
 	}
 }
 

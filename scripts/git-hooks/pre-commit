@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# pre-commit — runs `make verify` before every commit.
+#
+# Install: make install-hooks
+# Bypass:  git commit --no-verify
+#
+# This hook mirrors the GitHub Actions "go test + vet" workflow
+# (.github/workflows/test.yml). If it passes here it will pass in CI.
+
+set -euo pipefail
+
+# Resolve repo root regardless of the working directory from which git was called.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+echo "[pre-commit] running make verify..."
+if ! make -C "$REPO_ROOT" verify; then
+    echo ""
+    echo "[pre-commit] FAILED — commit blocked."
+    echo "  Fix the errors above and retry, or bypass with: git commit --no-verify"
+    exit 1
+fi
+
+echo "[pre-commit] passed."

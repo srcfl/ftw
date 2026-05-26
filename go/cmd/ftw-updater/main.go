@@ -28,6 +28,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const mainServiceName = "forty-two-watts"
@@ -35,7 +37,7 @@ const mainServiceName = "forty-two-watts"
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State     string    `json:"state"` // idle, pulling, restarting, restoring, done, failed
+	State     string    `json:"state"`            // idle, pulling, restarting, restoring, done, failed
 	Action    string    `json:"action,omitempty"` // update, restart, rollback (#152)
 	Target    string    `json:"target,omitempty"`
 	Snapshot  string    `json:"snapshot,omitempty"` // snapshot id (rollback only, #152)
@@ -107,12 +109,15 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("ftw-updater starting", "socket", *socket, "status", *statusPath, "compose", *compose)
 
-	// Guarantee status dir exists even if the tmpfs mount is empty.
-	if err := os.MkdirAll(filepath.Dir(*statusPath), 0o755); err != nil {
+	// Guarantee the shared status/socket dir exists even if the tmpfs mount
+	// is empty. It must be writable by the non-root main container too,
+	// because the main service publishes early states while it captures the
+	// pre-update snapshot.
+	if err := prepareSharedDir(filepath.Dir(*statusPath)); err != nil {
 		slog.Error("mkdir status dir", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(filepath.Dir(*socket), 0o755); err != nil {
+	if err := prepareSharedDir(filepath.Dir(*socket)); err != nil {
 		slog.Error("mkdir socket dir", "err", err)
 		os.Exit(1)
 	}
@@ -269,6 +274,14 @@ func (s *server) runJob(action, target string) {
 	if target != "" {
 		env = []string{"FTW_IMAGE_TAG=" + target}
 	}
+	if action == "update" {
+		if err := s.validateComposeImagePin(); err != nil {
+			msg := "compose preflight failed: " + err.Error()
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
+			slog.Error("compose preflight failed", "err", err)
+			return
+		}
+	}
 
 	if !s.skipPull {
 		pullArgs := s.composeArgs("pull", mainServiceName)
@@ -300,6 +313,64 @@ func (s *server) runJob(action, target string) {
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
 	s.writeState(State{State: "done", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed"})
+}
+
+// validateComposeImagePin catches old host-side compose files that hard-code
+// :latest. In that layout FTW_IMAGE_TAG is passed to docker compose but never
+// read, so the sidecar can report "done" while the main service stays on the
+// previous image.
+func (s *server) validateComposeImagePin() error {
+	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), mainServiceName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("service %q is missing an image entry in compose files", mainServiceName)
+	}
+	if !strings.Contains(image, "FTW_IMAGE_TAG") {
+		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG; update docker-compose.yml from the latest install script", mainServiceName, image)
+	}
+	return nil
+}
+
+func serviceImageFromComposeFiles(files []string, service string) (string, bool, error) {
+	var image string
+	for _, file := range files {
+		img, ok, err := serviceImageFromComposeFile(file, service)
+		if err != nil {
+			return "", false, err
+		}
+		if ok {
+			image = img
+		}
+	}
+	if image == "" {
+		return "", false, nil
+	}
+	return image, true, nil
+}
+
+func serviceImageFromComposeFile(path, service string) (string, bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, fmt.Errorf("read %s: %w", path, err)
+	}
+	var doc struct {
+		Services map[string]struct {
+			Image string `yaml:"image"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return "", false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if doc.Services == nil {
+		return "", false, nil
+	}
+	svc, ok := doc.Services[service]
+	if !ok || svc.Image == "" {
+		return "", false, nil
+	}
+	return svc.Image, true, nil
 }
 
 // runRollback restores a snapshot's files over the main container's data
@@ -466,6 +537,13 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…(truncated)"
+}
+
+func prepareSharedDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		return err
+	}
+	return os.Chmod(dir, 0o777)
 }
 
 func envOr(key, def string) string {

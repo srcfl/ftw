@@ -158,3 +158,87 @@ func TestPredictRespectsTrust(t *testing.T) {
 		t.Errorf("trained bucket should be ~1000W, got %f", predAfter)
 	}
 }
+
+// TestNightBucketNotPoisonedByHeatingSubtraction is a regression test for
+// the bug reported in T32: night-hour buckets trained during cold Swedish
+// winters ended up near 0 W because the code clamped (actualLoad − heatEst)
+// to 0 when the heating estimate exceeded the measured load. The EMA then
+// decayed toward 0, so summer-night predictions (when heating=0) returned
+// ~0 W instead of the real ~300–600 W standby baseline.
+//
+// Expected behaviour after the fix:
+//   - The bucket update is skipped when heatEst >= actualLoad; the bucket
+//     mean (and thus the prediction) must remain ≥ the prior-based minimum.
+//   - A warm-weather prediction for the same hour must reflect the actual
+//     learned baseline, not a ghost 0.
+func TestNightBucketNotPoisonedByHeatingSubtraction(t *testing.T) {
+	m := NewModel(5520)
+	m.HeatingW_per_degC = 300 // as configured on the production instance
+
+	// Monday 03:00 UTC (typical overnight low-load hour).
+	t0 := time.Date(2026, 1, 5, 3, 0, 0, 0, time.UTC)
+
+	// Feed a full Swedish winter: 300 samples at 350 W actual load,
+	// outdoor temp = 2°C → heatEst = 300*(18−2) = 4800 W >> actual load.
+	// Before the fix: baseSample would be clamped to 0, poisoning bucket.Mean.
+	// After the fix: the bucket update is skipped entirely.
+	coldTemp := 2.0
+	for i := 0; i < 300; i++ {
+		m.Update(t0.Add(time.Duration(i)*24*time.Hour), 350, coldTemp)
+	}
+
+	// In summer the heating term is zero; prediction must reflect real standby.
+	// With the old code bucket.Mean ≈ 0 (300 × 0.9^n decay) → prediction ≈ 0.
+	// With the fix bucket.Mean was never updated by cold samples → stays at prior.
+	warmPred := m.Predict(t0, 22.0) // outdoor temp 22°C — no heating contribution
+	priorW := typicalPrior(HourOfWeek(t0))
+	if warmPred < priorW*poisonFloor {
+		t.Errorf("night bucket poisoned: warm prediction = %.0f W, prior = %.0f W (floor = %.0f W)",
+			warmPred, priorW, priorW*poisonFloor)
+	}
+
+	// Feed 30 warm-weather samples at the real baseline (350 W, temp 20°C).
+	// The model should now learn the actual overnight load.
+	for i := 0; i < 30; i++ {
+		m.Update(t0.Add(time.Duration(300+i*7)*24*time.Hour), 350, 20.0)
+	}
+	trainedPred := m.Predict(t0, 20.0)
+	if math.Abs(trainedPred-350) > 100 {
+		t.Errorf("trained overnight bucket should be ~350 W, got %.0f W", trainedPred)
+	}
+}
+
+// TestRepairPoisonedBuckets verifies that repairPoisonedBuckets resets bucket
+// means that are clearly below the prior floor while leaving healthy buckets
+// untouched.
+func TestRepairPoisonedBuckets(t *testing.T) {
+	m := NewModel(5520)
+	m.HeatingW_per_degC = 300
+
+	// Artificially poison night bucket (3:00 UTC Monday) the old way:
+	// drain it to ~0 with many zero-valued EMA updates.
+	nightIdx := HourOfWeek(time.Date(2026, 1, 5, 3, 0, 0, 0, time.UTC))
+	m.Bucket[nightIdx].Mean = 5.0
+	m.Bucket[nightIdx].Samples = 260
+
+	// Set a healthy evening bucket (19:00 UTC Monday) to its proper value.
+	eveningIdx := HourOfWeek(time.Date(2026, 1, 5, 19, 0, 0, 0, time.UTC))
+	m.Bucket[eveningIdx].Mean = 2200
+	m.Bucket[eveningIdx].Samples = 260
+
+	m.repairPoisonedBuckets()
+
+	nightPrior := typicalPrior(nightIdx)
+	if m.Bucket[nightIdx].Mean < nightPrior*poisonFloor {
+		t.Errorf("poisoned bucket not repaired: got %.0f W, want >= %.0f W",
+			m.Bucket[nightIdx].Mean, nightPrior*poisonFloor)
+	}
+	if m.Bucket[nightIdx].Samples != 0 {
+		t.Errorf("repaired bucket samples should be reset to 0, got %d", m.Bucket[nightIdx].Samples)
+	}
+
+	// Evening bucket must be preserved — 2200 W is above floor.
+	if m.Bucket[eveningIdx].Mean != 2200 {
+		t.Errorf("healthy bucket should be untouched: got %.0f W, want 2200 W", m.Bucket[eveningIdx].Mean)
+	}
+}

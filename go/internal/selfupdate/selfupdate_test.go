@@ -423,6 +423,31 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 	}
 }
 
+func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	c := New(Config{StatusPath: path}, newMemStore())
+
+	started := time.Now().Add(-time.Second)
+	if err := c.WriteStatus(UpdateStatus{
+		State:     "snapshotting",
+		Action:    "update",
+		Target:    "v1.5.0",
+		StartedAt: started,
+		Message:   "creating backup snapshot",
+	}); err != nil {
+		t.Fatalf("write status: %v", err)
+	}
+
+	got := c.Status()
+	if got.State != "snapshotting" || got.Action != "update" || got.Target != "v1.5.0" {
+		t.Fatalf("status = %+v, want snapshotting update v1.5.0", got)
+	}
+	if got.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt should be filled")
+	}
+}
+
 func writeJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	f, err := os.Create(path)

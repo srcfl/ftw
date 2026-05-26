@@ -1,6 +1,10 @@
 package state
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/frahlg/forty-two-watts/go/internal/gridcost"
+)
 
 // DayCostBreakdown decomposes grid traffic over a time range into actual cost
 // (slot-weighted against the prices table) and the data needed to compute a
@@ -16,7 +20,7 @@ type DayCostBreakdown struct {
 	ImportCostOre    float64 // Σ slot ( import_wh × total_ore_kwh ) / 1000
 	ExportRevenueOre float64 // Σ slot ( export_wh × export_price_ore ) / 1000
 	AvgImportOreKwh  float64 // unweighted mean of total_ore_kwh over slots in range
-	AvgExportOreKwh  float64 // unweighted mean of clamped export price over slots in range
+	AvgExportOreKwh  float64 // unweighted mean of effective export price over slots in range
 }
 
 // ActualCostOre is the net cost the household actually paid: import cost minus
@@ -39,27 +43,9 @@ func (b DayCostBreakdown) SavedOre() float64 {
 	return b.FlatCostOre() - b.ActualCostOre()
 }
 
-// ExportPricing captures the runtime knobs that turn a slot's raw spot price
-// into the öre/kWh the household actually earns when exporting. Mirrors the
-// three relevant fields on mpc.Params so a single source of truth for the
-// export model is used across plan-vs-actual and historical reporting.
-type ExportPricing struct {
-	BonusOreKwh float64 // added to spot before clamp
-	FeeOreKwh   float64 // subtracted from spot before clamp
-	FlatOreKwh  float64 // if > 0, overrides spot+bonus−fee entirely
-}
-
-// effectiveExportOre applies the same model as mpc.SlotExportPriceOre:
-// flat override wins; otherwise spot+bonus−fee, clamped to ≥ 0.
-func (ep ExportPricing) effectiveExportOre(spotOreKwh float64) float64 {
-	if ep.FlatOreKwh > 0 {
-		return ep.FlatOreKwh
-	}
-	if v := spotOreKwh + ep.BonusOreKwh - ep.FeeOreKwh; v > 0 {
-		return v
-	}
-	return 0
-}
+// ExportPricing aliases the shared export pricing knobs used by the planner
+// and historical cost reporting.
+type ExportPricing = gridcost.ExportPricing
 
 // priceSlot is the in-memory shape of one price row used for cost-breakdown
 // integration. EndMs is precomputed (slot_ts_ms + slot_len_min*60000) so the
@@ -223,7 +209,7 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 		case gridW < 0:
 			out.ExportWh += -wh
 			if covering != nil {
-				out.ExportRevenueOre += -wh * ep.effectiveExportOre(covering.SpotOreKwh) / 1000.0
+				out.ExportRevenueOre += -wh * gridcost.ExportPriceOre(covering.SpotOreKwh, ep) / 1000.0
 			}
 		}
 	}
@@ -246,7 +232,7 @@ func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep Ex
 	defer rows.Close()
 
 	var (
-		n           int
+		n              int
 		sumImp, sumExp float64
 	)
 	for rows.Next() {
@@ -256,7 +242,7 @@ func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep Ex
 		}
 		n++
 		sumImp += total
-		sumExp += ep.effectiveExportOre(spot)
+		sumExp += gridcost.ExportPriceOre(spot, ep)
 	}
 	if err := rows.Err(); err != nil {
 		return 0, 0, err

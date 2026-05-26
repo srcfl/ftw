@@ -137,7 +137,7 @@ Trust-weighted blend with the baked prior at prediction time:
 
 ```go
 trust := bucket.Samples / MinTrustSamples    // capped at 1
-base  := trust*bucket.Mean + (1-trust)*typicalPrior(idx)
+base  := trust*bucket.Mean + (1-trust)*profilePrior(idx)
 heat  := HeatingW_per_degC * max(18 - tempC, 0)
 return base + heat
 ```
@@ -178,11 +178,27 @@ Baked single-family Swedish-home prior at `model.go:67`:
 Every bucket starts at that prior, so day-0 MPC gets a plausible load
 curve.
 
+### Occupancy profiles
+
+The service maintains two independent profiles:
+
+- `home` — default profile, seeded with the normal household prior.
+- `away` — manual away profile, seeded with a lower unoccupied-house
+  prior and trained only while selected.
+
+The active profile controls both online training and MPC predictions.
+Switching profile through `POST /api/loadmodel/profile` persists the
+selection and triggers an immediate MPC replan so the next dispatch cycle
+uses the matching load forecast.
+
 ### Persistence + reset
 
-- Config key: `loadmodel/state_utc` (`service.go:19`).
-- `POST /api/loadmodel/reset` (`go/internal/api/api.go:122`) — reseeds
-  via `NewModel(peakW)` while preserving the configured peak and heating
+- Config keys: `loadmodel/profile` and
+  `loadmodel/state_utc:<profile>` (`service.go`).
+- Legacy `loadmodel/state_utc` migrates into the `home` profile when no
+  profile-specific home model has been stored yet.
+- `POST /api/loadmodel/reset` (`go/internal/api/api_loadmodel.go`) — reseeds
+  the active profile while preserving the configured peak and heating
   coefficient.
 
 ---

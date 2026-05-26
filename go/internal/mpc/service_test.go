@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
 
 func TestBuildSlotsFallsBackToForecastWhenTwinCollapses(t *testing.T) {
@@ -121,26 +122,28 @@ func TestUpperHalfMeanEmptyReturnsZero(t *testing.T) {
 
 // ---- Terminal SoC valuation ----
 
-func TestSelfConsumptionTerminalPriceIsImportMinusExport(t *testing.T) {
-	// Retail 300 öre/kWh, spot 80 öre/kWh, bonus 60, fee 6.
-	// Per slot: export rate = 80 + 60 − 6 = 134. Spread = 300 − 134 = 166.
+func TestSelfConsumptionTerminalPriceIsMeanImport(t *testing.T) {
+	// Retail 300 öre/kWh average across the horizon. Spot/bonus/fee are
+	// irrelevant in self-consumption mode (operator never sells stored
+	// energy, so the export side doesn't enter the value of a kept kWh).
 	prices := []state.PricePoint{
 		{SpotOreKwh: 80, TotalOreKwh: 300},
 		{SpotOreKwh: 80, TotalOreKwh: 300},
 	}
 	got := selfConsumptionTerminalPrice(prices, 60, 6)
-	if math.Abs(got-166) > 1e-9 {
-		t.Fatalf("terminal price = %f, want 166", got)
+	if math.Abs(got-300) > 1e-9 {
+		t.Fatalf("terminal price = %f, want 300 (mean import)", got)
 	}
 }
 
-func TestSelfConsumptionTerminalPriceClampsToZero(t *testing.T) {
-	// Export rate (spot+bonus−fee) > retail → spread would be negative.
-	// Must floor at 0 so we never actively credit draining the battery.
+func TestSelfConsumptionTerminalPriceIgnoresExportRate(t *testing.T) {
+	// Even when export rate (spot+bonus−fee) exceeds retail, the
+	// terminal value of stored SoC is still mean import — self-consumption
+	// mode never sells stored energy, so the export side is moot.
 	prices := []state.PricePoint{{SpotOreKwh: 500, TotalOreKwh: 100}}
 	got := selfConsumptionTerminalPrice(prices, 0, 0)
-	if got != 0 {
-		t.Fatalf("terminal price = %f, want 0", got)
+	if math.Abs(got-100) > 1e-9 {
+		t.Fatalf("terminal price = %f, want 100 (mean import) regardless of export rate", got)
 	}
 }
 
@@ -188,6 +191,59 @@ func TestOptimizeSelfConsumptionDischargesWithSpreadTerminalPrice(t *testing.T) 
 	}
 	if discharging == 0 {
 		t.Fatalf("expected at least one discharging slot with SoC=80%% and load>PV, got %+v", plan.Actions)
+	}
+}
+
+// ---- online battery fleet snapshot ----
+
+func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
+	tel := telemetry.NewStore()
+	socA := 0.20
+	socB := 0.80
+	socOffline := 0.95
+	tel.Update("a", telemetry.DerBattery, 0, &socA, nil)
+	tel.DriverHealthMut("a").RecordSuccess()
+	tel.Update("b", telemetry.DerBattery, 0, &socB, nil)
+	tel.DriverHealthMut("b").RecordSuccess()
+	tel.Update("offline", telemetry.DerBattery, 0, &socOffline, nil)
+	tel.DriverHealthMut("offline").SetOffline()
+
+	s := &Service{Tele: tel, FuseMaxW: 6000}
+	p, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+		{Driver: "a", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 4000},
+		{Driver: "b", CapacityWh: 30000, MaxChargeW: 5000, MaxDischargeW: 5000},
+		{Driver: "offline", CapacityWh: 50000, MaxChargeW: 9000, MaxDischargeW: 9000},
+	})
+	if !ok {
+		t.Fatal("onlineFleetParams returned ok=false")
+	}
+	if p.CapacityWh != 40000 {
+		t.Fatalf("CapacityWh = %.0f, want 40000", p.CapacityWh)
+	}
+	// (10 kWh * 20% + 30 kWh * 80%) / 40 kWh = 65%.
+	if math.Abs(p.InitialSoCPct-65) > 1e-9 {
+		t.Fatalf("InitialSoCPct = %.3f, want 65.000", p.InitialSoCPct)
+	}
+	if p.MaxChargeW != 6000 {
+		t.Fatalf("MaxChargeW = %.0f, want fuse-clamped 6000", p.MaxChargeW)
+	}
+	if p.MaxDischargeW != 6000 {
+		t.Fatalf("MaxDischargeW = %.0f, want fuse-clamped 6000", p.MaxDischargeW)
+	}
+}
+
+func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("no-soc", telemetry.DerBattery, 0, nil, nil)
+	tel.DriverHealthMut("no-soc").RecordSuccess()
+	s := &Service{Tele: tel}
+
+	_, ok := s.onlineFleetParams(Params{InitialSoCPct: 50}, []BatteryFleetMember{
+		{Driver: "no-soc", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
+		{Driver: "missing", CapacityWh: 10000, MaxChargeW: 3000, MaxDischargeW: 3000},
+	})
+	if ok {
+		t.Fatal("onlineFleetParams ok=true without any online battery SoC")
 	}
 }
 
@@ -265,6 +321,71 @@ func TestSelectPlannerPVWRadiationZeroForecastIgnoresBlend(t *testing.T) {
 	got := selectPlannerPVW(0, 300, true)
 	if got != 300 {
 		t.Errorf("zero-forecast with radiation flag should fall through, got %f", got)
+	}
+}
+
+// T33 regression: open_meteo predicted 2002 W (solar_wm2=154, cloud=1%) for a
+// 13 kW site while the trained RLS twin (NowAnchor-corrected via live telemetry)
+// predicted 290 W — actual measured PV was ~290 W.  The old code produced
+// 0.7*2002 + 0.3*290 = 1488 W (5× actual).  With the forecast cap, the forecast
+// is limited to PlannerForecastCapRatio (3×) × twin before blending:
+//
+//	cappedForecast = 3 × 290 = 870
+//	result         = 0.7×870 + 0.3×290 = 696 W   (2.4× actual — still an overshoot
+//	                                                but far better than 5×)
+//
+// The residual over-prediction is expected and acceptable: the cap only activates
+// when the NWP cloud forecast was catastrophically wrong.  On a normal day (forecast
+// and twin agree within 3×) the cap is a no-op and accuracy is unchanged.
+func TestSelectPlannerPVWForecastCapActivatesOnWildForecast(t *testing.T) {
+	// Reproduce T33 inputs (scaled to round numbers).
+	forecast := 2002.0
+	twin := 290.0 // NowAnchor-corrected RLS twin value
+
+	got := selectPlannerPVW(forecast, twin, true)
+
+	// With the cap at PlannerForecastCapRatio=3: capped = 3*290 = 870.
+	cappedForecast := PlannerForecastCapRatio * twin
+	want := (1-PlannerRadiationWeight)*cappedForecast + PlannerRadiationWeight*twin
+	if math.Abs(got-want) > 0.5 {
+		t.Errorf("T33 forecast-cap: got %.1f, want %.1f (capped at %.0fx twin=%g)",
+			got, want, PlannerForecastCapRatio, twin)
+	}
+
+	// Result must be materially less than the uncapped blend.
+	uncapped := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
+	if got >= uncapped {
+		t.Errorf("capped result %.1f should be less than uncapped %.1f", got, uncapped)
+	}
+}
+
+// Cap must be a no-op when forecast and twin are within PlannerForecastCapRatio.
+// A well-trained twin slightly under-predicting because of orientation or
+// soiling should not trigger the cap.
+func TestSelectPlannerPVWForecastCapInactiveWhenRatioOK(t *testing.T) {
+	forecast := 4000.0
+	twin := 2000.0 // 2× — well below cap threshold of 3×
+
+	got := selectPlannerPVW(forecast, twin, true)
+	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("cap should be inactive when forecast/twin=2x: got %.2f, want %.2f", got, want)
+	}
+}
+
+// Cap must not activate when the twin is near-zero (< 50 W):  that means the
+// physics night gate fired and the twin result is meaningless — the forecast
+// should dominate unchanged.
+func TestSelectPlannerPVWForecastCapInactiveWhenTwinNearZero(t *testing.T) {
+	// Twin near-zero (e.g. cs < 50 W/m² after physics gate) but forecast
+	// still has some radiation signal at twilight.
+	forecast := 300.0
+	twin := 30.0 // below the 50 W threshold
+
+	got := selectPlannerPVW(forecast, twin, true)
+	want := (1-PlannerRadiationWeight)*forecast + PlannerRadiationWeight*twin // no cap
+	if math.Abs(got-want) > 0.01 {
+		t.Errorf("cap should be inactive when twin < 50 W: got %.2f, want %.2f", got, want)
 	}
 }
 

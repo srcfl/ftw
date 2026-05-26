@@ -3,7 +3,9 @@ package loadmodel
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,10 +18,29 @@ import (
 // package from the forecast module.
 type TempFunc func(t time.Time) (float64, bool)
 
-// Bumped from "loadmodel/state" after HourOfWeek switched to UTC
-// coercion: pre-switch buckets were indexed in local zone and would
-// silently misalign if restored. Fresh init retrains from telemetry.
-const stateKey = "loadmodel/state_utc"
+// legacyStateKey was bumped from "loadmodel/state" after HourOfWeek
+// switched to UTC coercion. It remains as the one-time migration source
+// for the default home profile.
+const legacyStateKey = "loadmodel/state_utc"
+
+const (
+	stateKeyPrefix  = "loadmodel/state_utc:"
+	profileStateKey = "loadmodel/profile"
+)
+
+func stateKey(profile Profile) string { return stateKeyPrefix + string(profile) }
+
+// ParseProfile normalizes a user/API supplied load-model profile.
+func ParseProfile(v string) (Profile, bool) {
+	p := Profile(strings.ToLower(strings.TrimSpace(v)))
+	return p, p.valid()
+}
+
+// Snapshot is a concurrency-safe copy of the service state.
+type Snapshot struct {
+	ActiveProfile Profile           `json:"active_profile"`
+	Profiles      map[Profile]Model `json:"profiles"`
+}
 
 // Service trains the load model online from telemetry. Mirrors
 // pvmodel.Service so operators + future code have one pattern.
@@ -31,8 +52,9 @@ type Service struct {
 	SampleInterval time.Duration
 	PersistEvery   int64
 
-	mu    sync.RWMutex
-	model *Model
+	mu     sync.RWMutex
+	active Profile
+	models map[Profile]*Model
 
 	stop chan struct{}
 	done chan struct{}
@@ -48,28 +70,129 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 		PersistEvery:   10,
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
+		active:         ProfileHome,
+		models:         make(map[Profile]*Model),
+	}
+	for _, profile := range Profiles() {
+		s.models[profile] = newProfileModel(peakW, profile)
 	}
 	if st != nil {
-		if js, ok := st.LoadConfig(stateKey); ok && js != "" {
-			var m Model
-			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Alpha > 0 {
-				m.PeakW = peakW // config may have changed
-				s.model = &m
-				slog.Info("loadmodel restored", "samples", m.Samples, "mae_w", m.MAE, "quality", m.Quality())
+		loadedProfiles := make(map[Profile]bool)
+		if v, ok := st.LoadConfig(profileStateKey); ok {
+			if profile, valid := ParseProfile(v); valid {
+				s.active = profile
 			}
 		}
-	}
-	if s.model == nil {
-		s.model = NewModel(peakW)
+		for _, profile := range Profiles() {
+			if js, ok := st.LoadConfig(stateKey(profile)); ok && js != "" {
+				if m, ok := restoreModel(js, peakW, profile); ok {
+					s.models[profile] = m
+					loadedProfiles[profile] = true
+					slog.Info("loadmodel restored",
+						"profile", profile, "samples", m.Samples,
+						"mae_w", m.MAE, "quality", m.Quality())
+				}
+			}
+		}
+		if js, ok := st.LoadConfig(legacyStateKey); ok && js != "" {
+			var m Model
+			if err := json.Unmarshal([]byte(js), &m); err == nil && m.Alpha > 0 {
+				if !loadedProfiles[ProfileHome] {
+					m.PeakW = peakW // config may have changed
+					if m.PriorScale <= 0 {
+						m.PriorScale = 1
+					}
+					s.models[ProfileHome] = &m
+					slog.Info("loadmodel migrated legacy state",
+						"profile", ProfileHome, "samples", m.Samples,
+						"mae_w", m.MAE, "quality", m.Quality())
+				}
+			}
+		}
 	}
 	return s
 }
 
+func restoreModel(js string, peakW float64, profile Profile) (*Model, bool) {
+	var m Model
+	if err := json.Unmarshal([]byte(js), &m); err != nil || m.Alpha <= 0 {
+		return nil, false
+	}
+	m.PeakW = peakW // config may have changed
+	if m.PriorScale <= 0 {
+		m.PriorScale = newProfileModel(peakW, profile).PriorScale
+	}
+	// Repair any bucket means that were poisoned by the pre-guard bug where
+	// heating-subtracted samples were clamped to 0 and stored in the EMA.
+	m.repairPoisonedBuckets()
+	return &m, true
+}
+
 // Model returns a snapshot.
 func (s *Service) Model() Model {
+	if s == nil {
+		return Model{}
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return *s.model
+	return *s.activeModelLocked()
+}
+
+// Snapshot returns all profile models plus the active profile.
+func (s *Service) Snapshot() Snapshot {
+	if s == nil {
+		return Snapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := Snapshot{
+		ActiveProfile: s.active,
+		Profiles:      make(map[Profile]Model, len(s.models)),
+	}
+	for _, profile := range Profiles() {
+		if m := s.models[profile]; m != nil {
+			out.Profiles[profile] = *m
+		}
+	}
+	return out
+}
+
+// Profile returns the currently active load-model profile.
+func (s *Service) Profile() Profile {
+	if s == nil {
+		return ProfileHome
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.active
+}
+
+// SetProfile changes which profile trains and predicts from now on.
+func (s *Service) SetProfile(profile Profile) error {
+	if s == nil {
+		return nil
+	}
+	if !profile.valid() {
+		return fmt.Errorf("unknown load profile: %s", profile)
+	}
+	s.mu.Lock()
+	if _, ok := s.models[profile]; !ok {
+		peak := s.activeModelLocked().PeakW
+		s.models[profile] = newProfileModel(peak, profile)
+	}
+	s.active = profile
+	s.mu.Unlock()
+	return s.persistProfile(profile)
+}
+
+func (s *Service) activeModelLocked() *Model {
+	if m := s.models[s.active]; m != nil {
+		return m
+	}
+	if m := s.models[ProfileHome]; m != nil {
+		return m
+	}
+	return NewModel(5000)
 }
 
 // Predict is the MPC's integration point — expected load at time t.
@@ -87,7 +210,7 @@ func (s *Service) Predict(t time.Time) float64 {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.model.Predict(t, temp)
+	return s.activeModelLocked().Predict(t, temp)
 }
 
 // Start kicks off the online-learning goroutine.
@@ -115,10 +238,14 @@ func (s *Service) loop(ctx context.Context) {
 	for {
 		select {
 		case <-s.stop:
-			s.persist()
+			if err := s.persist(); err != nil {
+				slog.Warn("loadmodel persist", "err", err)
+			}
 			return
 		case <-ctx.Done():
-			s.persist()
+			if err := s.persist(); err != nil {
+				slog.Warn("loadmodel persist", "err", err)
+			}
 			return
 		case <-t.C:
 			s.sample()
@@ -187,32 +314,63 @@ func (s *Service) sampleAt(now time.Time) {
 	}
 
 	s.mu.Lock()
-	updated := s.model.Update(now, loadW, temp)
-	samples := s.model.Samples
-	mae := s.model.MAE
-	heating := s.model.HeatingW_per_degC
+	profile := s.active
+	model := s.activeModelLocked()
+	updated := model.Update(now, loadW, temp)
+	samples := model.Samples
+	mae := model.MAE
+	heating := model.HeatingW_per_degC
 	s.mu.Unlock()
 
-	slog.Info("loadmodel: sample", "load_w", loadW, "temp_c", temp, "samples", samples, "mae_w", mae, "heat_w_per_c", heating, "updated", updated)
+	slog.Info("loadmodel: sample",
+		"profile", profile, "load_w", loadW, "temp_c", temp,
+		"samples", samples, "mae_w", mae,
+		"heat_w_per_c", heating, "updated", updated)
 
 	if updated && samples%s.PersistEvery == 0 {
-		s.persist()
+		if err := s.persist(); err != nil {
+			slog.Warn("loadmodel persist", "err", err)
+		}
 	}
 }
 
-func (s *Service) persist() {
+func (s *Service) persistProfile(profile Profile) error {
 	if s.Store == nil {
-		return
+		return nil
+	}
+	return s.Store.SaveConfig(profileStateKey, string(profile))
+}
+
+func (s *Service) persist() error {
+	if s.Store == nil {
+		return nil
 	}
 	s.mu.RLock()
-	js, err := json.Marshal(s.model)
+	active := s.active
+	models := make(map[Profile]string, len(s.models))
+	for _, profile := range Profiles() {
+		if s.models[profile] == nil {
+			continue
+		}
+		js, err := json.Marshal(s.models[profile])
+		if err != nil {
+			s.mu.RUnlock()
+			return err
+		}
+		models[profile] = string(js)
+	}
 	s.mu.RUnlock()
-	if err != nil {
-		return
+	if err := s.Store.SaveConfig(profileStateKey, string(active)); err != nil {
+		return err
 	}
-	if err := s.Store.SaveConfig(stateKey, string(js)); err != nil {
-		slog.Warn("loadmodel persist", "err", err)
+	for _, profile := range Profiles() {
+		if js, ok := models[profile]; ok {
+			if err := s.Store.SaveConfig(stateKey(profile), js); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
 }
 
 // SetHeatingCoef lets the operator declare heating-load sensitivity
@@ -222,20 +380,27 @@ func (s *Service) SetHeatingCoef(w float64) {
 		return
 	}
 	s.mu.Lock()
-	s.model.HeatingW_per_degC = w
+	for _, model := range s.models {
+		model.HeatingW_per_degC = w
+	}
 	s.mu.Unlock()
 }
 
-// Reset clears the model (e.g. after a big appliance change).
+// Reset clears the active profile model (e.g. after a big appliance
+// or occupancy-pattern change).
 func (s *Service) Reset() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	peak := s.model.PeakW
-	heating := s.model.HeatingW_per_degC
-	s.model = NewModel(peak)
-	s.model.HeatingW_per_degC = heating
+	profile := s.active
+	old := s.activeModelLocked()
+	peak := old.PeakW
+	heating := old.HeatingW_per_degC
+	s.models[profile] = newProfileModel(peak, profile)
+	s.models[profile].HeatingW_per_degC = heating
 	s.mu.Unlock()
-	s.persist()
+	if err := s.persist(); err != nil {
+		slog.Warn("loadmodel persist", "err", err)
+	}
 }

@@ -106,6 +106,7 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 			zone = s.deps.Cfg.Price.Zone
 			ep.BonusOreKwh = s.deps.Cfg.Price.ExportBonusOreKwh
 			ep.FeeOreKwh = s.deps.Cfg.Price.ExportFeeOreKwh
+			ep.FloorOreKwh = s.deps.Cfg.Price.ExportFloorOreKwh
 		}
 		if s.deps.Cfg.Planner != nil {
 			ep.FlatOreKwh = s.deps.Cfg.Planner.ExportOrePerKWh

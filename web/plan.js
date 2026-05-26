@@ -43,13 +43,28 @@
   function horizonBounds(horizon) {
     const now = Date.now();
     if (horizon === "today") {
-      return { tMin: now - 30 * 60 * 1000, tMax: localMidnight(1) };
+      return { tMin: localMidnight(0), tMax: localMidnight(1) };
     }
     if (horizon === "tomorrow") {
       return { tMin: localMidnight(1), tMax: localMidnight(2) };
     }
     // "all" — current default: now-30 min through next 48 h.
     return { tMin: now - 30 * 60 * 1000, tMax: now + 48 * 60 * 60 * 1000 };
+  }
+  function chartTickStepMs(tMin, tMax) {
+    const span = Math.max(1, tMax - tMin);
+    if (span <= 26 * 3600 * 1000) return 6 * 3600 * 1000;
+    if (span <= 54 * 3600 * 1000) return 12 * 3600 * 1000;
+    return 24 * 3600 * 1000;
+  }
+  function firstChartTick(tMin, stepMs) {
+    const d = new Date(tMin);
+    d.setMinutes(0, 0, 0);
+    const stepHours = Math.max(1, Math.round(stepMs / 3600000));
+    const hour = d.getHours();
+    const addHours = (stepHours - (hour % stepHours)) % stepHours;
+    if (addHours > 0 || d.getTime() < tMin) d.setHours(hour + addHours, 0, 0, 0);
+    return d.getTime();
   }
 
   async function fetchAll() {
@@ -164,8 +179,8 @@
     ctx.fillStyle = 'rgba(255,255,255,0.45)';
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    for (let h = 0; h <= 48; h += 6) {
-      const t = now + h * 3600 * 1000;
+    const tickStep = chartTickStepMs(tMin, tMax);
+    for (let t = firstChartTick(tMin, tickStep); t <= tMax + 1000; t += tickStep) {
       const x = xScale(t);
       ctx.beginPath();
       ctx.moveTo(x, pad.t);
@@ -174,15 +189,17 @@
       ctx.fillText(fmtHHMM(t), x, cssH - 10);
     }
     // Now-line
-    const xNow = xScale(now);
-    ctx.strokeStyle = '#ef4444';
-    ctx.lineWidth = 1.2;
-    ctx.setLineDash([3, 3]);
-    ctx.beginPath();
-    ctx.moveTo(xNow, pad.t);
-    ctx.lineTo(xNow, pad.t + plotH);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    if (now >= tMin && now <= tMax) {
+      const xNow = xScale(now);
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(xNow, pad.t);
+      ctx.lineTo(xNow, pad.t + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
     // ---- Predicted-zone shade + boundary ----
     // Find the first ML-forecasted action. Everything at or past that
@@ -493,8 +510,11 @@
       if (!state.enabled || !state.enabled.mpc) {
         summary.textContent = 'MPC planner disabled';
       } else if (!plan) {
-        summary.textContent = state.prices && state.prices.length
-          ? 'Waiting for first plan…'
+        const visibleInputs = [];
+        if (state.prices && state.prices.length) visibleInputs.push('prices');
+        if (state.forecast && state.forecast.length) visibleInputs.push('forecast');
+        summary.textContent = visibleInputs.length
+          ? 'Showing ' + visibleInputs.join(' + ') + ' · waiting for first plan…'
           : 'Waiting for price data…';
       } else {
         const slotMin = plan.actions[0] ? plan.actions[0].slot_len_min : 15;
@@ -502,9 +522,22 @@
         const cost = plan.total_cost_ore / 100;
         const costLabel = cost >= 0 ? 'expected cost' : 'expected earnings';
         const parts = [];
+        // The /api/mpc/plan response carries the INTERNAL mpc.Mode (e.g.
+        // "self_consumption", "passive_arbitrage", "arbitrage"). Map to the
+        // operator-facing label so the badge matches the Strategy button
+        // the operator picked — "self_consumption" alone reads as the
+        // manual mode, not the Smart SC (legacy) planner setting that
+        // currently drives the plan.
+        const PLAN_MODE_LABEL = {
+          self_consumption: 'Smart self-consumption (legacy)',
+          cheap_charge: 'Cheap charging (legacy)',
+          passive_arbitrage: 'Passive arbitrage',
+          arbitrage: 'Active arbitrage',
+        };
+        const modeLabel = PLAN_MODE_LABEL[plan.mode] || plan.mode;
         parts.push(
-          `<span title="Active planner strategy — choose from the Mode picker above">` +
-          `<span class="s-value">${plan.mode}</span></span>`
+          `<span title="Active planner strategy — choose from the Mode picker">` +
+          `<span class="s-value">${modeLabel}</span></span>`
         );
         parts.push(
           `<span title="How far ahead the planner is optimising">` +
@@ -539,14 +572,24 @@
       }
     }
 
-    // ---- Savings badges ----
-    // Three baselines computed server-side in mpc.ComputeBaselines so the
-    // numbers are guaranteed apples-to-apples with plan.total_cost_ore
-    // (same cost model, including export pricing, and a real SC
-    // dispatch from the DP itself rather than a client-side
-    // approximation). Absent in self-consumption mode — the backend
-    // skips the extra Optimize call since the SC baseline would equal
-    // the plan itself.
+    // ---- Forecast outlook badges ----
+    // Three counter-factual costs over the planning horizon, computed
+    // server-side in mpc.ComputeBaselines. These are PROJECTIONS over
+    // the next 48 h — not historical savings. The historical
+    // counterpart is the Savings card above. We label this clearly so
+    // operators don't mistake the badges for "money saved already".
+    //
+    // Sign convention (fixed 2026-05-25):
+    //   saved = baseline_cost − plan_cost
+    //   saved > 0 → plan is cheaper (or earns more) → GREEN (positive
+    //               for the operator) → "+X.XX SEK better"
+    //   saved < 0 → plan is more expensive → RED → "-X.XX SEK worse"
+    //
+    // The percentage uses |base| as the denominator so the sign
+    // tracks `saved`. Previously `saved / base` flipped sign whenever
+    // the baseline was a net-revenue (negative öre) horizon — typical
+    // for a sunny summer day with export — so an operator saw
+    // "+10.52 SEK (-15%)" and reasonably read it as a contradiction.
     const savingsEl = document.getElementById('plan-savings');
     if (savingsEl) {
       const b = plan && plan.baselines;
@@ -560,35 +603,42 @@
         const savedFlat = sekFlat - sekPlan;
         const savedSC = sekSC - sekPlan;
         const savedNoBat = sekNoBat - sekPlan;
-        const pct = (saved, base) => Math.abs(base) > 0.01 ? (saved / base) * 100 : 0;
+        // Denominator: |base|. The sign of the percentage now always
+        // matches the sign of `saved`, so "+X.XX SEK (+Y%)" is internally
+        // consistent and an operator can read it at a glance.
+        const pct = (saved, base) => Math.abs(base) > 0.01 ? (saved / Math.abs(base)) * 100 : 0;
         const cls = v => v >= 0 ? 'saving-pos' : 'saving-neg';
         const sign = v => (v >= 0 ? '+' : '−');
         const fmt = v => Math.abs(v).toFixed(2);
+        const verbFor = (saved) => saved >= 0 ? 'better' : 'worse';
         const badge = (label, saved, base, title) => {
           const p = pct(saved, base);
           return `<span class="saving-badge ${cls(saved)}" title="${title}">` +
             `<span class="saving-label">${label}</span> ` +
-            `<b>${sign(saved)}${fmt(saved)} SEK</b>` +
+            `<b>${sign(saved)}${fmt(saved)} SEK ${verbFor(saved)}</b>` +
             (Math.abs(p) > 0.1 ? ` <span class="saving-pct">(${sign(p)}${Math.abs(p).toFixed(0)}%)</span>` : '') +
             `</span>`;
         };
-        savingsEl.innerHTML = [
+        const headerTitle = 'These compare the current plan against three counter-factual dispatches over the SAME 48 h horizon. They are projections, not realised savings — for what actually happened, scroll up to the Savings card.';
+        savingsEl.innerHTML =
+          `<div class="plan-outlook">` +
+          `<span class="plan-outlook-label" title="${headerTitle}">48 h outlook</span>` +
           badge(
             'vs no battery',
             savedNoBat, sekNoBat,
-            `What this horizon would cost with no battery at all — grid flow = load + PV each slot, priced at the actual spot + consumer tariffs. Captures the combined value of battery + planner.`
-          ),
+            `What this horizon would cost with no battery at all — grid flow = load + PV each slot, priced at the actual spot + consumer tariffs. Positive = battery + planner save vs going batteryless.`
+          ) +
           badge(
             'vs self-consumption',
             savedSC, sekSC,
-            `Cost of running self-consumption mode over the same forecast (re-computed by the planner with Mode=SelfConsumption — same battery, efficiency, and power constraints). Captures the extra value from arbitrage / cheap-charge on top of passive SC.`
-          ),
+            `Cost of running classic self_consumption mode over the same forecast (re-computed by the planner with Mode=SelfConsumption — same battery, efficiency, power constraints). Positive = current strategy beats passive SC.`
+          ) +
           badge(
             'vs flat avg price',
             savedFlat, sekFlat,
-            `No-battery imports priced at the horizon mean import price (${b.avg_price_ore.toFixed(1)} öre/kWh) and exports at the horizon mean export revenue, separately. Net no-battery flow is ${b.net_kwh.toFixed(1)} kWh. Captures the value of *timing* — shifting consumption into cheap hours — independently of battery.`
-          ),
-        ].join('');
+            `No-battery imports priced at the horizon mean import price (${b.avg_price_ore.toFixed(1)} öre/kWh) and exports at the horizon mean export revenue, separately. Net no-battery flow is ${b.net_kwh.toFixed(1)} kWh. Captures the value of timing — shifting consumption into cheap hours — independently of the battery.`
+          ) +
+          `</div>`;
       }
     }
   }
@@ -798,9 +848,10 @@
 
   // Strategy explanation — surfaces one-sentence logic for the current mode.
   const STRATEGY_DESC = {
-    planner_self: 'Smart self-consumption (planner). Forecast-aware grid-zero control: participant slots charge surplus or cover local import; idle/charge slots do not discharge. Never imports to charge, never exports via the battery.',
-    planner_cheap: 'Cheap charging. Plans to import during the cheapest upcoming hours to top up the battery, still never exports via the battery. Good when export tariffs are low.',
-    planner_arbitrage: 'Arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots (including exporting). Biggest savings on volatile days; pays attention to battery efficiency + SoC bounds.',
+    planner_passive_arbitrage: 'Passive arbitrage. Charges the battery from the cheapest available energy each slot — PV when sunny, grid during cheap night hours — for your own use. Never exports from the battery. Subsumes smart self-consumption (summer behavior) and cheap charging (winter behavior); the planner picks per slot.',
+    planner_arbitrage: 'Active arbitrage. Full freedom: charges in the cheapest slots, discharges into the most expensive slots including export to grid. Biggest savings on volatile days; respects battery efficiency + SoC bounds.',
+    planner_self: 'Legacy: smart self-consumption. Forecast-aware grid-zero control with no grid-charge. Superseded by Passive arbitrage as of v0.82.',
+    planner_cheap: 'Legacy: cheap charging. Imports during cheap hours; never exports via battery. Superseded by Passive arbitrage as of v0.82.',
     self_consumption: 'Self (manual). Simple grid-zero controller with no planner; charges surplus and discharges to cover local import.',
     peak_shaving: 'Manual peak shaving. Limits grid import to the peak-limit setting.',
     charge: 'Manual full charge — forces the battery to charge regardless of price.',

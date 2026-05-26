@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -404,6 +405,52 @@ func TestHandleEnergyDailyBucketsByLocalDay(t *testing.T) {
 	}
 }
 
+func TestCurrentGridEnergySlotUsesFixedQuarterWindow(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	now := time.Date(2026, 5, 23, 14, 7, 0, 0, time.Local)
+	slotStart := time.Date(2026, 5, 23, 14, 0, 0, 0, time.Local)
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+		t.Fatalf("RecordHistory import: %v", err)
+	}
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(4 * time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+		t.Fatalf("RecordHistory import 2: %v", err)
+	}
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(6 * time.Minute).UnixMilli(), GridW: -600}); err != nil {
+		t.Fatalf("RecordHistory export: %v", err)
+	}
+	// Previous-slot noise must not leak into the current 14:00-14:15 bucket.
+	if err := st.RecordHistory(state.HistoryPoint{TsMs: slotStart.Add(-time.Minute).UnixMilli(), GridW: 9000}); err != nil {
+		t.Fatalf("RecordHistory previous slot: %v", err)
+	}
+
+	got, err := currentGridEnergySlot(st, now)
+	if err != nil {
+		t.Fatalf("currentGridEnergySlot: %v", err)
+	}
+	if got["slot_start_ms"].(int64) != slotStart.UnixMilli() {
+		t.Fatalf("slot_start_ms = %v, want %v", got["slot_start_ms"], slotStart.UnixMilli())
+	}
+	if got["slot_end_ms"].(int64) != slotStart.Add(15*time.Minute).UnixMilli() {
+		t.Fatalf("slot_end_ms = %v, want %v", got["slot_end_ms"], slotStart.Add(15*time.Minute).UnixMilli())
+	}
+	// DailyEnergy uses the current row's grid_w over (prev_ts, ts]:
+	// +1200 W for 3 min = 60 Wh, then -600 W for 2 min = 20 Wh export.
+	if math.Abs(got["import_wh"].(float64)-60) > 0.01 {
+		t.Fatalf("import_wh = %v, want 60", got["import_wh"])
+	}
+	if math.Abs(got["export_wh"].(float64)-20) > 0.01 {
+		t.Fatalf("export_wh = %v, want 20", got["export_wh"])
+	}
+	if math.Abs(got["net_wh"].(float64)-40) > 0.01 {
+		t.Fatalf("net_wh = %v, want 40", got["net_wh"])
+	}
+}
+
 // Closing the state store mid-flight turns LoadHistory into an error
 // path. The old handler silently returned zeroed days (indistinguishable
 // from a real 0 kWh day); the new handler returns 500 so operators see
@@ -468,5 +515,84 @@ func TestHandleEnergyDailyDaysClamping(t *testing.T) {
 				t.Fatalf("q=%q: got %d days, want %d", tc.q, len(body.Days), tc.want)
 			}
 		})
+	}
+}
+
+// passive_arbitrage merges planner_self + planner_cheap into one
+// operator-facing mode. The API must accept the new value and propagate
+// the corresponding mpc.Mode to the planner service.
+func TestHandleSetModeAcceptsPassiveArbitrage(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctrl := control.NewState(0, 50, "meter")
+	srv := New(&Deps{
+		Ctrl:   ctrl,
+		CtrlMu: &sync.Mutex{},
+		State:  st,
+		CfgMu:  &sync.RWMutex{},
+		Cfg:    &config.Config{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/mode",
+		strings.NewReader(`{"mode":"planner_passive_arbitrage"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+	if ctrl.Mode != control.ModePlannerPassiveArbitrage {
+		t.Errorf("ctrl.Mode = %q, want %q", ctrl.Mode, control.ModePlannerPassiveArbitrage)
+	}
+	if !ctrl.Mode.IsPlannerMode() {
+		t.Errorf("passive_arbitrage must register as a planner mode for the dispatch energy-path")
+	}
+}
+
+// 2026-05-24 evening regression: PI integrator state carried across an
+// operator mode switch, so the new mode inherited a saturated integral
+// from the previous mode's stuck-import accumulation and commanded
+// wrong-direction battery moves for minutes after the switch (overnight
+// the fleet drained to 7 %). Mode change is a discrete event; the PI
+// integral has no meaning under the new control regime.
+func TestHandleSetModeResetsPIIntegral(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ctrl := control.NewState(0, 50, "meter")
+	ctrl.Mode = control.ModeSelfConsumption
+	// Wind PI integral to near saturation under a sustained positive
+	// measurement (PI's internal err = setpoint - measurement = negative,
+	// so integral drives negative).
+	for i := 0; i < 200; i++ {
+		ctrl.PI.Update(700)
+	}
+	if ctrl.PI.Integral() > -2900 {
+		t.Fatalf("setup: expected integral pinned near -3000, got %f", ctrl.PI.Integral())
+	}
+
+	srv := New(&Deps{
+		Ctrl:   ctrl,
+		CtrlMu: &sync.Mutex{},
+		State:  st,
+		CfgMu:  &sync.RWMutex{},
+		Cfg:    &config.Config{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/mode",
+		strings.NewReader(`{"mode":"self_consumption"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+	if got := ctrl.PI.Integral(); got != 0 {
+		t.Errorf("PI integral after mode change = %f, want 0 (mode change must clear PI state)", got)
 	}
 }

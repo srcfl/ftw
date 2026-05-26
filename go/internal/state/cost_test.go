@@ -44,7 +44,7 @@ func TestDailyCostBreakdown_SlotWeightedAgainstFlat(t *testing.T) {
 		t.Fatalf("record history: %v", err)
 	}
 
-	ep := ExportPricing{} // no bonus/fee/flat → export = spot, clamped at 0
+	ep := ExportPricing{} // no bonus/fee/flat/floor -> export = spot
 
 	b, err := s.DailyCostBreakdown(0, 7_200_000, "SE3", ep)
 	if err != nil {
@@ -114,11 +114,11 @@ func TestDailyCostBreakdown_SlotWeightedAgainstFlat(t *testing.T) {
 	}
 }
 
-func TestDailyCostBreakdown_ExportClampedAtZero(t *testing.T) {
+func TestDailyCostBreakdown_NegativeExportCostsByDefault(t *testing.T) {
 	s := freshStore(t)
 
-	// Single slot with NEGATIVE spot price — export should earn 0 (clamped),
-	// not pay-to-export.
+	// Single slot with NEGATIVE spot price. Without an explicit floor,
+	// export is negative revenue: pay-to-export.
 	if err := s.SavePrices([]PricePoint{
 		{Zone: "SE3", SlotTsMs: 0, SlotLenMin: 60, SpotOreKwh: -50, TotalOreKwh: 30, Source: "test", FetchedAtMs: 0},
 	}); err != nil {
@@ -140,10 +140,44 @@ func TestDailyCostBreakdown_ExportClampedAtZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("breakdown: %v", err)
 	}
-	if b.ExportRevenueOre != 0 {
-		t.Errorf("ExportRevenueOre = %.4f, want 0 (clamped on negative net export price)", b.ExportRevenueOre)
+	wantWh := 5.0 * 1000.0 / 6.0 // first sample seeds LAG and is dropped
+	wantRev := wantWh * -55.0 / 1000.0
+	if !approxEq(b.ExportRevenueOre, wantRev, 0.01) {
+		t.Errorf("ExportRevenueOre = %.4f, want %.4f (negative export revenue)", b.ExportRevenueOre, wantRev)
 	}
-	// AvgExportOreKwh should also be the clamped value (0) for the one slot.
+	if !approxEq(b.ActualCostOre(), -wantRev, 0.01) {
+		t.Errorf("ActualCostOre = %.4f, want %.4f", b.ActualCostOre(), -wantRev)
+	}
+	if !approxEq(b.AvgExportOreKwh, -55, 0.001) {
+		t.Errorf("AvgExportOreKwh = %.4f, want -55", b.AvgExportOreKwh)
+	}
+}
+
+func TestDailyCostBreakdown_ExportFloorClampsAtZero(t *testing.T) {
+	s := freshStore(t)
+
+	if err := s.SavePrices([]PricePoint{
+		{Zone: "SE3", SlotTsMs: 0, SlotLenMin: 60, SpotOreKwh: -50, TotalOreKwh: 30, Source: "test", FetchedAtMs: 0},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+	pts := []HistoryPoint{}
+	for i := 1; i <= 6; i++ {
+		pts = append(pts, HistoryPoint{TsMs: int64(i) * 600_000, GridW: -1000})
+	}
+	if err := s.BulkRecordHistory(pts); err != nil {
+		t.Fatalf("record history: %v", err)
+	}
+
+	zero := 0.0
+	ep := ExportPricing{BonusOreKwh: 5, FeeOreKwh: 10, FloorOreKwh: &zero}
+	b, err := s.DailyCostBreakdown(0, 3_600_000, "SE3", ep)
+	if err != nil {
+		t.Fatalf("breakdown: %v", err)
+	}
+	if b.ExportRevenueOre != 0 {
+		t.Errorf("ExportRevenueOre = %.4f, want 0 under export floor", b.ExportRevenueOre)
+	}
 	if !approxEq(b.AvgExportOreKwh, 0, 0.001) {
 		t.Errorf("AvgExportOreKwh = %.4f, want 0", b.AvgExportOreKwh)
 	}

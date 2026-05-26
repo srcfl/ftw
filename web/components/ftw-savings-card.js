@@ -132,8 +132,30 @@ class FtwSavingsCard extends FtwElement {
        cleanly. The baseline is a 1 px var(--line) hairline. */
     .spark-wrap {
       display: grid;
-      grid-template-rows: auto auto;
       gap: 6px;
+      position: relative;
+    }
+    .spark-grid,
+    .labels-grid {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .spark-stage {
+      position: relative;
+      min-width: 0;
+    }
+    .spark-scale {
+      height: 72px;
+      display: grid;
+      grid-template-rows: 1fr auto 1fr;
+      align-items: center;
+      justify-items: end;
+      font-family: var(--mono);
+      font-size: 9px;
+      color: var(--fg-muted);
+      font-variant-numeric: tabular-nums;
     }
     svg.spark {
       width: 100%;
@@ -157,6 +179,32 @@ class FtwSavingsCard extends FtwElement {
       color: var(--fg-muted);
       text-transform: uppercase;
       text-align: center;
+    }
+    .spark-tip {
+      position: absolute;
+      display: none;
+      min-width: 170px;
+      max-width: 220px;
+      z-index: 5;
+      pointer-events: none;
+      background: rgba(15,23,42,0.97);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 6px;
+      padding: 7px 9px;
+      color: #e2e8f0;
+      font-family: var(--sans);
+      font-size: 11px;
+      line-height: 1.35;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    }
+    .spark-tip b {
+      color: #fff;
+      font-family: var(--mono);
+      font-weight: 600;
+    }
+    .spark-tip .muted {
+      color: #94a3b8;
+      margin-top: 2px;
     }
     .day-labels span {
       overflow: hidden;
@@ -260,8 +308,21 @@ class FtwSavingsCard extends FtwElement {
         </div>
         <div class="sub" data-role="sub"></div>
         <div class="spark-wrap" data-role="spark-wrap">
-          <svg class="spark" data-role="spark" viewBox="0 0 100 72" preserveAspectRatio="none"></svg>
-          <div class="day-labels" data-role="labels"></div>
+          <div class="spark-grid">
+            <div class="spark-scale" aria-hidden="true">
+              <span data-role="axis-max"></span>
+              <span>0</span>
+              <span data-role="axis-min"></span>
+            </div>
+            <div class="spark-stage">
+              <svg class="spark" data-role="spark" viewBox="0 0 100 72" preserveAspectRatio="none"></svg>
+              <div class="spark-tip" data-role="spark-tip"></div>
+            </div>
+          </div>
+          <div class="labels-grid">
+            <span aria-hidden="true"></span>
+            <div class="day-labels" data-role="labels"></div>
+          </div>
         </div>
       </div>
     `;
@@ -283,6 +344,11 @@ class FtwSavingsCard extends FtwElement {
           bubbles: true, composed: true,
         }));
       });
+    }
+    const spark = this.shadowRoot.querySelector('[data-role="spark"]');
+    if (spark) {
+      spark.addEventListener('mousemove', (e) => this._showSparkTip(e));
+      spark.addEventListener('mouseleave', () => this._hideSparkTip());
     }
     this._paint();
   }
@@ -330,6 +396,44 @@ class FtwSavingsCard extends FtwElement {
   // _paint redraws the dynamic parts of the card from this._payload
   // without re-rendering the whole shadow DOM. Cheap on every fetch tick
   // — no toggle blip, no event listener re-bind.
+  _showSparkTip(e) {
+    if (this._state !== "ready" || !this._payload || !Array.isArray(this._payload.days)) return;
+    const days = this._payload.days;
+    if (!days.length) return;
+    const root = this.shadowRoot;
+    const tip = root.querySelector('[data-role="spark-tip"]');
+    const stage = root.querySelector('.spark-stage');
+    if (!tip || !stage) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const idx = Math.max(0, Math.min(days.length - 1,
+      Math.floor(((e.clientX - rect.left) / rect.width) * days.length)));
+    const d = days[idx];
+    const savedOre = Number(d.saved_ore) || 0;
+    const actualOre = Number(d.actual_cost_ore) || 0;
+    const flatOre = Number(d.flat_cost_ore) || 0;
+    tip.innerHTML =
+      `<div><b>${escapeHtml(fmtDayShort(d.day))}</b> ${escapeHtml(fmtSignedSekOre(savedOre))}</div>` +
+      `<div class="muted">Actual ${escapeHtml(fmtSekOre(actualOre))} · flat-rate ${escapeHtml(fmtSekOre(flatOre))}</div>`;
+    tip.style.display = 'block';
+
+    const stageRect = stage.getBoundingClientRect();
+    const tipW = tip.offsetWidth || 190;
+    const tipH = tip.offsetHeight || 44;
+    const maxLeft = Math.max(4, stageRect.width - tipW - 4);
+    const maxTop = Math.max(4, stageRect.height - tipH - 4);
+    const left = Math.min(maxLeft, Math.max(4, e.clientX - stageRect.left + 10));
+    const top = Math.min(maxTop, Math.max(4, e.clientY - stageRect.top + 10));
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  }
+
+  _hideSparkTip() {
+    const tip = this.shadowRoot && this.shadowRoot.querySelector('[data-role="spark-tip"]');
+    if (tip) tip.style.display = 'none';
+  }
+
   _paint() {
     const root = this.shadowRoot;
     if (!root) return;
@@ -339,6 +443,8 @@ class FtwSavingsCard extends FtwElement {
     const sparkWrap = root.querySelector('[data-role="spark-wrap"]');
     const sparkEl  = root.querySelector('[data-role="spark"]');
     const labelsEl = root.querySelector('[data-role="labels"]');
+    const axisMaxEl = root.querySelector('[data-role="axis-max"]');
+    const axisMinEl = root.querySelector('[data-role="axis-min"]');
     if (!totalEl || !pctEl || !subEl || !sparkEl || !labelsEl || !sparkWrap) return;
 
     if (this._state === "loading") {
@@ -346,6 +452,8 @@ class FtwSavingsCard extends FtwElement {
       pctEl.textContent = "";
       subEl.textContent = "";
       sparkWrap.style.display = "none";
+      if (axisMaxEl) axisMaxEl.textContent = "";
+      if (axisMinEl) axisMinEl.textContent = "";
       return;
     }
     if (this._state === "error") {
@@ -353,6 +461,8 @@ class FtwSavingsCard extends FtwElement {
       pctEl.textContent = "";
       subEl.textContent = "";
       sparkWrap.style.display = "none";
+      if (axisMaxEl) axisMaxEl.textContent = "";
+      if (axisMinEl) axisMinEl.textContent = "";
       this.style.setProperty('--ftw-savings-color', 'var(--fg-muted)');
       return;
     }
@@ -361,6 +471,8 @@ class FtwSavingsCard extends FtwElement {
       pctEl.textContent = "";
       subEl.innerHTML = 'No price provider configured — set <b>price.zone</b> in config to enable historical savings.';
       sparkWrap.style.display = "none";
+      if (axisMaxEl) axisMaxEl.textContent = "";
+      if (axisMinEl) axisMinEl.textContent = "";
       this.style.setProperty('--ftw-savings-color', 'var(--fg-muted)');
       return;
     }
@@ -369,6 +481,8 @@ class FtwSavingsCard extends FtwElement {
       pctEl.textContent = "";
       subEl.innerHTML = 'Awaiting price data for the selected range — savings will appear once the price provider catches up.';
       sparkWrap.style.display = "none";
+      if (axisMaxEl) axisMaxEl.textContent = "";
+      if (axisMinEl) axisMinEl.textContent = "";
       this.style.setProperty('--ftw-savings-color', 'var(--fg-muted)');
       return;
     }
@@ -432,11 +546,16 @@ class FtwSavingsCard extends FtwElement {
     const barW = Math.max(1, slot - gutter);
 
     let maxAbs = 0;
+    let hasNegative = false;
     for (const d of days) {
       const v = Math.abs(Number(d.saved_ore) || 0);
       if (v > maxAbs) maxAbs = v;
+      if ((Number(d.saved_ore) || 0) < 0) hasNegative = true;
     }
+    const axisAbs = maxAbs;
     if (maxAbs === 0) maxAbs = 1;
+    if (axisMaxEl) axisMaxEl.textContent = axisAbs > 0 ? '+' + fmtSekOre(axisAbs) : '0 SEK';
+    if (axisMinEl) axisMinEl.textContent = hasNegative ? '−' + fmtSekOre(axisAbs) : '';
     const maxBarH = baselineY - 4; // 4 px headroom
 
     const parts = [];
@@ -480,6 +599,16 @@ function fmtDayShort(iso) {
   if (parts.length !== 3) return iso || "";
   const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
   return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+function fmtSekOre(ore) {
+  const sek = Math.abs(Number(ore) || 0) / 100;
+  if (sek >= 100) return sek.toFixed(0) + " SEK";
+  if (sek >= 10) return sek.toFixed(1) + " SEK";
+  return sek.toFixed(2) + " SEK";
+}
+function fmtSignedSekOre(ore) {
+  const v = Number(ore) || 0;
+  return (v >= 0 ? "+" : "−") + fmtSekOre(v);
 }
 function escapeHtml(s) {
   return String(s).replace(/[<>&"']/g, (c) =>
