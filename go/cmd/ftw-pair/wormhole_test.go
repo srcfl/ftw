@@ -21,20 +21,22 @@ func startTestRelay(t *testing.T) string {
 	}
 
 	var mu sync.Mutex
-	pending := make(map[string]net.Conn)
+	hosts := make(map[string][]net.Conn) // FIFO queue of host conns per token
 
 	handleConn := func(conn net.Conn) {
-		header := make([]byte, 2)
+		// v0x02 handshake: version(1) + role(1) + tokenLen(1) + token(N)
+		header := make([]byte, 3)
 		if _, err := io.ReadFull(conn, header); err != nil {
 			conn.Close()
 			return
 		}
-		if header[0] != 0x01 {
+		if header[0] != 0x02 {
 			conn.Write([]byte{0x02}) //nolint:errcheck
 			conn.Close()
 			return
 		}
-		tokenLen := int(header[1])
+		role := header[1]
+		tokenLen := int(header[2])
 		tok := make([]byte, tokenLen)
 		if _, err := io.ReadFull(conn, tok); err != nil {
 			conn.Close()
@@ -42,31 +44,37 @@ func startTestRelay(t *testing.T) string {
 		}
 		token := string(tok)
 
-		mu.Lock()
-		peer, ok := pending[token]
-		if ok {
-			delete(pending, token)
-		} else {
-			pending[token] = conn
-		}
-		mu.Unlock()
-
-		if !ok {
+		switch role {
+		case 0x00: // host
+			mu.Lock()
+			hosts[token] = append(hosts[token], conn)
+			mu.Unlock()
 			if _, err := conn.Write([]byte{0x01}); err != nil {
 				conn.Close()
-				mu.Lock()
-				delete(pending, token)
-				mu.Unlock()
 			}
-			return
+		case 0x01: // client
+			mu.Lock()
+			q := hosts[token]
+			if len(q) == 0 {
+				mu.Unlock()
+				conn.Write([]byte{0x04}) //nolint:errcheck
+				conn.Close()
+				return
+			}
+			host := q[0]
+			hosts[token] = q[1:]
+			mu.Unlock()
+			conn.Write([]byte{0x00}) //nolint:errcheck
+			host.Write([]byte{0x00}) //nolint:errcheck
+			done := make(chan struct{}, 2)
+			go func() { io.Copy(host, conn); host.Close(); done <- struct{}{} }() //nolint:errcheck
+			go func() { io.Copy(conn, host); conn.Close(); done <- struct{}{} }() //nolint:errcheck
+			<-done
+			<-done
+		default:
+			conn.Write([]byte{0x02}) //nolint:errcheck
+			conn.Close()
 		}
-		conn.Write([]byte{0x00})  //nolint:errcheck
-		peer.Write([]byte{0x00}) //nolint:errcheck
-		done := make(chan struct{}, 2)
-		go func() { io.Copy(peer, conn); peer.Close(); done <- struct{}{} }() //nolint:errcheck
-		go func() { io.Copy(conn, peer); conn.Close(); done <- struct{}{} }() //nolint:errcheck
-		<-done
-		<-done
 	}
 
 	go func() {

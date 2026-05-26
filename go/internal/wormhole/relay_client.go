@@ -5,17 +5,19 @@
 // bytes bidirectionally. Traffic is AEAD-encrypted end-to-end using keys
 // derived from the token — the relay sees only ciphertext.
 //
-// Protocol handshake (client → relay):
+// Protocol handshake (peer → relay):
 //
-//	[1 byte]  version = 0x01
+//	[1 byte]  version = 0x02
+//	[1 byte]  role    (0x00 = host, 0x01 = client)
 //	[1 byte]  token length N
 //	[N bytes] token (UTF-8)
 //
 // Relay responses:
 //
-//	0x00 = matched immediately (you are the second peer; piping starts)
-//	0x01 = waiting (you are the first peer; a second 0x00 follows when matched)
+//	0x00 = matched (both sides receive this; piping starts)
+//	0x01 = waiting (host only — a second 0x00 follows when matched)
 //	0x02 = error
+//	0x04 = no host ready (client only — retry after backoff)
 //
 // AEAD direction labels:
 //
@@ -49,7 +51,11 @@ const (
 	DefaultRelayAddr = "pair-relay.fortytwowatts.com:7777"
 
 	// relayProtoVersion is the handshake version byte sent to the relay.
-	relayProtoVersion = 0x01
+	relayProtoVersion = 0x02
+
+	// Role tags in the handshake.
+	roleHost   byte = 0x00
+	roleClient byte = 0x01
 
 	// tokenWordCount is the number of BIP39 words in a generated token.
 	tokenWordCount = 6
@@ -98,11 +104,12 @@ type relayConn struct {
 	conn net.Conn
 }
 
-// connectToRelay dials the relay, sends the handshake, reads the first ack, and
-// returns the raw connection. If the relay says "waiting" (0x01), the caller is
-// responsible for reading the second 0x00 ack before sending application data.
+// connectToRelay dials the relay, sends the handshake (with role), reads the
+// first ack, and returns the raw connection. Hosts get isWaiting=true if no
+// client is queued yet; the caller must then call waitForPeer before sending
+// application data. Clients always get matched-immediately or an error.
 // Returns (conn, isWaiting, error).
-func connectToRelay(ctx context.Context, relayAddr, token string) (net.Conn, bool, error) {
+func connectToRelay(ctx context.Context, relayAddr, token string, role byte) (net.Conn, bool, error) {
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
@@ -112,20 +119,19 @@ func connectToRelay(ctx context.Context, relayAddr, token string) (net.Conn, boo
 		return nil, false, fmt.Errorf("dial relay %s: %w", relayAddr, err)
 	}
 
-	// Send handshake: version byte + token length byte + token bytes.
+	// Send handshake: version + role + tokenLen + token.
 	tok := []byte(token)
 	if len(tok) > 255 {
 		conn.Close()
 		return nil, false, fmt.Errorf("token too long (%d bytes, max 255)", len(tok))
 	}
-	hdr := []byte{relayProtoVersion, byte(len(tok))}
+	hdr := []byte{relayProtoVersion, role, byte(len(tok))}
 	hdr = append(hdr, tok...)
 	if _, err := conn.Write(hdr); err != nil {
 		conn.Close()
 		return nil, false, fmt.Errorf("send relay handshake: %w", err)
 	}
 
-	// Read the first ack byte (with a short deadline — the relay should respond fast).
 	conn.SetDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
 	var ack [1]byte
 	if _, err := io.ReadFull(conn, ack[:]); err != nil {
@@ -136,14 +142,17 @@ func connectToRelay(ctx context.Context, relayAddr, token string) (net.Conn, boo
 
 	switch ack[0] {
 	case 0x00:
-		// Matched immediately.
+		// Matched immediately (client side, or host that landed on a queued client — rare).
 		return conn, false, nil
 	case 0x01:
-		// Waiting for second peer.
+		// Host is queued and waiting for a client.
 		return conn, true, nil
 	case 0x02:
 		conn.Close()
 		return nil, false, errors.New("relay returned error — token may be in use or malformed")
+	case 0x04:
+		conn.Close()
+		return nil, false, errors.New("no host ready — owner's pair session may not be running")
 	default:
 		conn.Close()
 		return nil, false, fmt.Errorf("unexpected relay ack byte: 0x%02x", ack[0])
@@ -286,7 +295,10 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 
 	cctx, cancel := context.WithCancel(ctx)
 
-	rawConn, isWaiting, err := connectToRelay(cctx, addr, token)
+	// Establish the FIRST relay connection synchronously so the caller knows
+	// the relay is reachable before StartHost returns. Subsequent connections
+	// are pre-warmed by the worker pool.
+	firstRaw, firstWaiting, err := connectToRelay(cctx, addr, token, roleHost)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("wormhole host: relay connect: %w", err)
@@ -294,56 +306,109 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 
 	h := &Host{Code: token, cancel: cancel}
 
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-		defer rawConn.Close()
+	// Worker pool: MCP's streamable HTTP transport keeps an SSE response open
+	// while sending parallel POSTs (e.g. notifications/initialized arrives
+	// before initialize's SSE stream is closed). The host must therefore be
+	// able to match SEVERAL concurrent peers for the same token, not one at
+	// a time. Each worker maintains exactly one pre-warmed relay connection;
+	// when its current pair finishes, it loops and grabs the next one.
+	const hostPoolSize = 4
 
-		// If the relay said "waiting", block until the peer arrives.
-		if isWaiting {
-			if err := waitForPeer(cctx, rawConn); err != nil {
-				if cctx.Err() == nil {
-					slog.Error("wormhole host: peer wait failed", "err", err)
+	// Worker 0 uses the connection we already opened (firstRaw).
+	h.wg.Add(1)
+	go hostWorker(cctx, &h.wg, addr, token, remoteAddr, firstRaw, firstWaiting)
+
+	// Remaining workers open their own first connection lazily.
+	for i := 1; i < hostPoolSize; i++ {
+		h.wg.Add(1)
+		go hostWorker(cctx, &h.wg, addr, token, remoteAddr, nil, false)
+	}
+
+	return h, nil
+}
+
+// hostWorker runs the host-side "wait for peer → pipe → loop" cycle. With a
+// pool of workers, the relay can match several concurrent peers for the same
+// token (required for MCP's streamable HTTP transport where SSE-response and
+// follow-up POSTs are concurrent).
+func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr string, initialRaw net.Conn, initialWaiting bool) {
+	defer wg.Done()
+	raw, waiting := initialRaw, initialWaiting
+
+	for {
+		select {
+		case <-ctx.Done():
+			if raw != nil {
+				_ = raw.Close()
+			}
+			return
+		default:
+		}
+
+		// Grab a relay connection if this worker doesn't already hold one.
+		if raw == nil {
+			var dErr error
+			raw, waiting, dErr = connectToRelay(ctx, addr, token, roleHost)
+			if dErr != nil {
+				if ctx.Err() == nil {
+					slog.Warn("wormhole host: relay (re)connect failed", "err", dErr)
 				}
 				return
 			}
 		}
 
-		// Wrap the connection with AEAD framing.
-		relayConn, err := wrapRelayConn(rawConn, token, "host")
-		if err != nil {
-			slog.Error("wormhole host: wrap relay conn", "err", err)
-			return
-		}
-
-		// Dial the local MCP server with retry.
-		var localConn net.Conn
-		for attempt := 0; attempt < 10; attempt++ {
-			select {
-			case <-cctx.Done():
-				return
-			default:
+		if err := hostHandleOnePair(ctx, raw, waiting, token, remoteAddr); err != nil {
+			if ctx.Err() == nil {
+				slog.Debug("wormhole host: pair iteration ended", "err", err)
 			}
-			var dialErr error
-			localConn, dialErr = net.DialTimeout("tcp", remoteAddr, 2*time.Second)
-			if dialErr == nil {
-				break
-			}
-			slog.Debug("wormhole host: waiting for local MCP server", "addr", remoteAddr, "attempt", attempt+1, "err", dialErr)
-			time.Sleep(300 * time.Millisecond)
 		}
-		if localConn == nil {
-			slog.Error("wormhole host: could not connect to local MCP server", "addr", remoteAddr)
-			return
+
+		// Next iteration acquires a fresh connection.
+		raw, waiting = nil, false
+	}
+}
+
+// hostHandleOnePair waits for a peer (if needed), wraps with AEAD, dials the
+// local MCP server, and pipes both directions until either side closes.
+// Returns when the pair is torn down. The host loop calls this repeatedly.
+func hostHandleOnePair(ctx context.Context, rawConn net.Conn, isWaiting bool, token, remoteAddr string) error {
+	defer rawConn.Close()
+
+	if isWaiting {
+		if err := waitForPeer(ctx, rawConn); err != nil {
+			return fmt.Errorf("wait peer: %w", err)
 		}
-		defer localConn.Close()
+	}
 
-		slog.Info("wormhole host: tunnel established", "relay", addr, "remote", remoteAddr)
-		pipeConns(cctx, relayConn, localConn)
-		slog.Info("wormhole host: tunnel closed")
-	}()
+	relayConn, err := wrapRelayConn(rawConn, token, "host")
+	if err != nil {
+		return fmt.Errorf("wrap relay conn: %w", err)
+	}
 
-	return h, nil
+	var localConn net.Conn
+	for attempt := 0; attempt < 10; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		var dialErr error
+		localConn, dialErr = net.DialTimeout("tcp", remoteAddr, 2*time.Second)
+		if dialErr == nil {
+			break
+		}
+		slog.Debug("wormhole host: waiting for local MCP server", "addr", remoteAddr, "attempt", attempt+1, "err", dialErr)
+		time.Sleep(300 * time.Millisecond)
+	}
+	if localConn == nil {
+		return fmt.Errorf("could not connect to local MCP server %s", remoteAddr)
+	}
+	defer localConn.Close()
+
+	slog.Info("wormhole host: tunnel established", "remote", remoteAddr)
+	pipeConns(ctx, relayConn, localConn)
+	slog.Info("wormhole host: tunnel closed")
+	return nil
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -416,7 +481,7 @@ func Connect(ctx context.Context, code string, opts ...Option) (*Client, error) 
 			go func(lc net.Conn) {
 				defer lc.Close()
 
-				rawConn, isWaiting, err := connectToRelay(cctx, addr, token)
+				rawConn, isWaiting, err := connectToRelay(cctx, addr, token, roleClient)
 				if err != nil {
 					slog.Error("wormhole client: relay connect", "err", err)
 					return
