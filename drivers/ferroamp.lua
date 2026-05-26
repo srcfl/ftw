@@ -80,6 +80,26 @@ local STALE_AFTER_MS = 30000
 local SKIP_BATTERY = false
 local last_control_mode = nil
 
+-- Multi-ESO dispatch scaling. The EnergyHub divides a discharge/charge
+-- setpoint evenly across ALL ESOs it knows about, including units pinned
+-- at their SoC floor/ceiling that physically refuse to respond. On a
+-- 4×ESO site with 2 units floored at min SoC, asking for 1.3 kW resulted
+-- in only ~0.66 kW delivered — the EHub commanded ~330 W per ESO, the
+-- two active units honored it, the two floored ones produced 0. Verified
+-- live on 2026-05-26 (Stefan's site). To compensate we count how many
+-- ESOs are *currently capable* of the requested direction and pre-scale
+-- the outgoing command by N_total / N_capable.
+--
+-- Margins are 5% inside the typical Ferroamp floor (10%) / ceiling (100%)
+-- to avoid oscillating at the edge — within ~2% of its limit an ESO
+-- already refuses dispatch, so a 5% margin is comfortably outside the
+-- "willing but limited" band.
+local DISCHARGE_FLOOR_SOC = 0.15
+local CHARGE_CEIL_SOC     = 0.95
+local last_eso_count             = 0
+local last_eso_discharge_capable = 0
+local last_eso_charge_capable    = 0
+
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
@@ -386,6 +406,7 @@ function driver_poll()
         local wcons_sum, wcons_n = 0, 0
         local relay_worst, fault_worst = nil, nil
         local n_eso = 0
+        local n_discharge_capable, n_charge_capable = 0, 0
 
         for _, d in pairs(eso_data_by_id) do
             n_eso = n_eso + 1
@@ -402,6 +423,12 @@ function driver_poll()
             if soc then
                 if soc > 1 then soc = soc / 100 end
                 soc_sum = soc_sum + soc; soc_n = soc_n + 1
+                if soc >= DISCHARGE_FLOOR_SOC then
+                    n_discharge_capable = n_discharge_capable + 1
+                end
+                if soc <= CHARGE_CEIL_SOC then
+                    n_charge_capable = n_charge_capable + 1
+                end
             end
             local udc = tonumber(extract_val(d, "udc"))
             if udc then udc_sum = udc_sum + udc; udc_n = udc_n + 1 end
@@ -447,11 +474,18 @@ function driver_poll()
 
             if n_eso > 0 then
                 host.emit_metric("eso_count", n_eso)
+                host.emit_metric("eso_discharge_capable", n_discharge_capable)
+                host.emit_metric("eso_charge_capable",    n_charge_capable)
                 if udc_n > 0     then host.emit_metric("eso_dc_link_v",   udc_sum / udc_n) end
                 if relay_worst ~= nil then host.emit_metric("eso_relaystatus", relay_worst) end
                 if fault_worst ~= nil then host.emit_metric("eso_faultcode",   fault_worst) end
             end
         end
+
+        -- Publish counts to module state so driver_command can scale.
+        last_eso_count             = n_eso
+        last_eso_discharge_capable = n_discharge_capable
+        last_eso_charge_capable    = n_charge_capable
     end
 
     if sso_data then
@@ -487,11 +521,28 @@ function driver_command(action, power_w, cmd)
         return true
     elseif action == "battery" then
         local tid = "ems-" .. tostring(host.millis())
+        -- Scale outgoing power to compensate for the EHub dividing the
+        -- setpoint across ALL ESOs (including the floored ones, which
+        -- contribute 0). See the multi-ESO comment near the top of the
+        -- file. We only scale when we have fresh per-ESO data AND a
+        -- subset of units is capable of the requested direction.
+        local on_wire_w = power_w
+        local scale = 1.0
+        if last_eso_count > 0 and power_w ~= 0 then
+            local capable
+            if power_w > 0 then capable = last_eso_charge_capable
+            else                 capable = last_eso_discharge_capable end
+            if capable > 0 and capable < last_eso_count then
+                scale = last_eso_count / capable
+                on_wire_w = power_w * scale
+            end
+        end
+        host.emit_metric("eso_dispatch_scale_x1000", math.floor(scale * 1000 + 0.5))
         if power_w > 0 then
             -- Charge: use "charge" command with positive watts
             local payload = string.format(
                 '{"transId":"%s","cmd":{"name":"charge","arg":%d}}',
-                tid, math.floor(power_w)
+                tid, math.floor(on_wire_w)
             )
             local err = host.mqtt_publish("extapi/control/request", payload)
             if not err then last_control_mode = "charge" end
@@ -500,7 +551,7 @@ function driver_command(action, power_w, cmd)
             -- Discharge: use "discharge" command with positive watts
             local payload = string.format(
                 '{"transId":"%s","cmd":{"name":"discharge","arg":%d}}',
-                tid, math.floor(math.abs(power_w))
+                tid, math.floor(math.abs(on_wire_w))
             )
             local err = host.mqtt_publish("extapi/control/request", payload)
             if not err then last_control_mode = "discharge" end
