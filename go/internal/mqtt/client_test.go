@@ -3,6 +3,7 @@ package mqtt
 import (
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,27 +17,27 @@ import (
 // the WaitTimeout return path.
 type fakeToken struct{}
 
-func (fakeToken) Wait() bool                         { return true }
-func (fakeToken) WaitTimeout(time.Duration) bool     { return true }
-func (fakeToken) Done() <-chan struct{}              { c := make(chan struct{}); close(c); return c }
-func (fakeToken) Error() error                       { return nil }
+func (fakeToken) Wait() bool                     { return true }
+func (fakeToken) WaitTimeout(time.Duration) bool { return true }
+func (fakeToken) Done() <-chan struct{}          { c := make(chan struct{}); close(c); return c }
+func (fakeToken) Error() error                   { return nil }
 
 // errToken simulates a SUBSCRIBE that completes within timeout but
 // reports a broker-side error.
 type errToken struct{ err error }
 
-func (errToken) Wait() bool                       { return true }
-func (errToken) WaitTimeout(time.Duration) bool   { return true }
-func (errToken) Done() <-chan struct{}            { c := make(chan struct{}); close(c); return c }
-func (e errToken) Error() error                   { return e.err }
+func (errToken) Wait() bool                     { return true }
+func (errToken) WaitTimeout(time.Duration) bool { return true }
+func (errToken) Done() <-chan struct{}          { c := make(chan struct{}); close(c); return c }
+func (e errToken) Error() error                 { return e.err }
 
 // timeoutToken simulates a SUBSCRIBE that never confirms.
 type timeoutToken struct{}
 
-func (timeoutToken) Wait() bool                       { return false }
-func (timeoutToken) WaitTimeout(time.Duration) bool   { return false }
-func (timeoutToken) Done() <-chan struct{}            { return make(chan struct{}) }
-func (timeoutToken) Error() error                     { return nil }
+func (timeoutToken) Wait() bool                     { return false }
+func (timeoutToken) WaitTimeout(time.Duration) bool { return false }
+func (timeoutToken) Done() <-chan struct{}          { return make(chan struct{}) }
+func (timeoutToken) Error() error                   { return nil }
 
 // fakeClient embeds paho.Client (nil) so we get any unused method via
 // the interface — they'll panic if called, which is fine: this test
@@ -47,12 +48,24 @@ type fakeClient struct {
 	paho.Client
 	mu         sync.Mutex
 	subscribed []string
+	published  []string
 	tokenFor   func(topic string) paho.Token
 }
 
 func (f *fakeClient) Subscribe(topic string, qos byte, _ paho.MessageHandler) paho.Token {
 	f.mu.Lock()
 	f.subscribed = append(f.subscribed, topic)
+	tf := f.tokenFor
+	f.mu.Unlock()
+	if tf != nil {
+		return tf(topic)
+	}
+	return fakeToken{}
+}
+
+func (f *fakeClient) Publish(topic string, _ byte, _ bool, _ interface{}) paho.Token {
+	f.mu.Lock()
+	f.published = append(f.published, topic)
 	tf := f.tokenFor
 	f.mu.Unlock()
 	if tf != nil {
@@ -179,5 +192,34 @@ func TestSubscribeRecordsTopicForReplay(t *testing.T) {
 	defer fc.mu.Unlock()
 	if len(fc.subscribed) != 3 {
 		t.Errorf("expected 3 wire SUBSCRIBE calls, got %d (%v)", len(fc.subscribed), fc.subscribed)
+	}
+}
+
+func TestSubscribeReturnsErrorOnTokenTimeout(t *testing.T) {
+	fc := &fakeClient{tokenFor: func(string) paho.Token { return timeoutToken{} }}
+	cap := &Capability{
+		client: fc,
+		subs:   make(map[string]struct{}),
+	}
+
+	err := cap.Subscribe("timeout/topic")
+	if err == nil {
+		t.Fatal("Subscribe returned nil error for token timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Subscribe error = %q, want timeout error", err)
+	}
+}
+
+func TestPublishReturnsErrorOnTokenTimeout(t *testing.T) {
+	fc := &fakeClient{tokenFor: func(string) paho.Token { return timeoutToken{} }}
+	cap := &Capability{client: fc}
+
+	err := cap.Publish("timeout/topic", []byte("payload"))
+	if err == nil {
+		t.Fatal("Publish returned nil error for token timeout")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("Publish error = %q, want timeout error", err)
 	}
 }
