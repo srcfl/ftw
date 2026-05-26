@@ -67,6 +67,18 @@ local eso_ts_by_id   = {}  -- id -> last arrival ms
 local ehub_ts = 0
 local sso_ts  = 0
 
+-- ehub.soc cache. Ferroamp's ehub topic emits the system SoC field
+-- on a coarser cadence than the other ehub fields (~1 in 9 messages
+-- on the firmware we tested 2026-05-26, ~once every ~9s). If we read
+-- it directly off the latest ehub_data cache we'd see it only when
+-- the most recent message happened to include it, otherwise nil —
+-- and battery.soc would flap between the ehub value and the fallback
+-- every poll. Cache the last-observed soc and its timestamp so it
+-- stays the authoritative reading until it ages out.
+local last_ehub_soc    = nil
+local last_ehub_soc_ts = 0
+local EHUB_SOC_STALE_MS = 60000  -- ~6× the observed publish interval
+
 -- Treat cached topic data as stale beyond this age. EnergyHub
 -- publishes ehub at ~1 Hz and eso/sso slightly slower; 30 s gives
 -- generous slack for a WiFi blip or broker reconnect without
@@ -321,6 +333,20 @@ function driver_poll()
         if ok and data then
             if msg.topic == "extapi/data/ehub" then
                 ehub_data = data; ehub_ts = now
+                -- Latch ehub.soc whenever it's present (it's only emitted
+                -- on a slow cadence, ~1 in 9 messages on the firmware we
+                -- tested). Once latched, it stays the authoritative SoC
+                -- until EHUB_SOC_STALE_MS elapses without a refresh.
+                local soc_field = data["soc"]
+                if soc_field then
+                    local v = type(soc_field) == "table" and soc_field.val or soc_field
+                    local n = tonumber(v)
+                    if n then
+                        if n > 1 then n = n / 100 end
+                        last_ehub_soc    = n
+                        last_ehub_soc_ts = now
+                    end
+                end
             elseif msg.topic == "extapi/data/eso" then
                 local eid = eso_id_of(data)
                 eso_data_by_id[eid] = data
@@ -338,6 +364,8 @@ function driver_poll()
     if ehub_data and (now - ehub_ts) > STALE_AFTER_MS then
         host.log("warn", "Ferroamp: ehub stale (" .. (now - ehub_ts) .. " ms) — dropping cache")
         ehub_data = nil
+        last_ehub_soc    = nil
+        last_ehub_soc_ts = 0
     end
     -- Evict per-ESO entries individually so one silent ESO does not
     -- drag the others' contribution out of the aggregate. The freshest
@@ -548,31 +576,30 @@ function driver_poll()
             if a_n   > 0 then battery.a = a_sum end           -- sum, not avg: parallel currents add
 
             -- SoC selection on multi-ESO sites. Priority:
-            --   1. Capacity-weighted mean — when the user has configured
-            --      per-ESO capacities (eso_capacity_kwh in YAML). On
-            --      heterogeneous clusters this is the only number that
-            --      tracks Ferroamp's own app, because flat means hide
-            --      the fact that a 15 kWh unit at 87% contributes 4× the
-            --      usable energy of a 7.7 kWh unit at 38.6%.
-            --   2. ehub.soc — kept as a fallback in case some Ferroamp
-            --      firmware publishes it (verified absent on the
-            --      Stefan-site firmware 2026-05-26 but cheap to leave in).
-            --   3. Arithmetic mean of per-ESO soc — the historical
-            --      behaviour. Always emitted as bat_soc_eso_mean for
-            --      observability even when one of the others wins.
+            --   1. ehub.soc — Ferroamp's own system SoC, the same number
+            --      their mobile app shows. Cached because it's only
+            --      published on a slow cadence (~1 in 9 ehub messages on
+            --      the firmware we tested). When fresh this is the
+            --      authoritative reading; matches the app to within
+            --      rounding on heterogeneous clusters.
+            --   2. Capacity-weighted mean — when ehub.soc is stale or
+            --      absent and the user has configured per-ESO capacities
+            --      (eso_capacity_kwh in YAML). The physically-correct
+            --      total-stored / total-capacity number.
+            --   3. Arithmetic mean of per-ESO soc — historical behaviour,
+            --      always emitted as bat_soc_eso_mean for observability.
             local soc_eso_mean
             if soc_n > 0 then soc_eso_mean = soc_sum / soc_n end
             local soc_weighted
             if cap_sum > 0 then soc_weighted = soc_wsum / cap_sum end
             local soc_ehub
-            if ehub_data then
-                soc_ehub = tonumber(extract_val(ehub_data, "soc"))
-                if soc_ehub and soc_ehub > 1 then soc_ehub = soc_ehub / 100 end
+            if last_ehub_soc ~= nil and (now - last_ehub_soc_ts) <= EHUB_SOC_STALE_MS then
+                soc_ehub = last_ehub_soc
             end
-            if soc_weighted then
-                battery.soc = soc_weighted
-            elseif soc_ehub then
+            if soc_ehub then
                 battery.soc = soc_ehub
+            elseif soc_weighted then
+                battery.soc = soc_weighted
             elseif soc_eso_mean then
                 battery.soc = soc_eso_mean
             end
@@ -743,6 +770,8 @@ function driver_cleanup()
     -- charge/discharge reference can remain visible in the Ferroamp app.
     pcall(publish_auto, "cleanup")
     ehub_data = nil
+    last_ehub_soc    = nil
+    last_ehub_soc_ts = 0
     eso_data = nil
     sso_data = nil
     last_eso_count             = 0
