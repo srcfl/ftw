@@ -1,4 +1,4 @@
-// ftw-pair-relay is the Sourceful-operated relay server for the ftw-pair
+// ftw-subetha is the Sourceful-operated relay server for the ftw-pair
 // transport. It listens for TCP connections, reads a token from each, and
 // splices matching pairs of connections together.
 //
@@ -7,7 +7,7 @@
 //
 // Usage:
 //
-//	ftw-pair-relay [flags]
+//	ftw-subetha [flags]
 //
 // Flags:
 //
@@ -45,7 +45,7 @@ func main() {
 	flag.Parse()
 
 	if *version {
-		fmt.Printf("ftw-pair-relay %s\n", Version)
+		fmt.Printf("ftw-subetha %s\n", Version)
 		os.Exit(0)
 	}
 
@@ -75,14 +75,14 @@ func main() {
 			slog.Error("TLS listen", "addr", *addr, "err", err)
 			os.Exit(1)
 		}
-		slog.Info("ftw-pair-relay listening (TLS)", "addr", *addr, "version", Version)
+		slog.Info("ftw-subetha listening (TLS)", "addr", *addr, "version", Version)
 	} else {
 		ln, err = net.Listen("tcp", *addr)
 		if err != nil {
 			slog.Error("listen", "addr", *addr, "err", err)
 			os.Exit(1)
 		}
-		slog.Info("ftw-pair-relay listening", "addr", *addr, "version", Version)
+		slog.Info("ftw-subetha listening", "addr", *addr, "version", Version)
 	}
 	defer ln.Close()
 
@@ -110,7 +110,7 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	slog.Info("ftw-pair-relay shutting down")
+	slog.Info("ftw-subetha shutting down")
 	ln.Close()
 }
 

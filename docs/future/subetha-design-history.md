@@ -1,6 +1,6 @@
 # Subetha — design history
 
-**Status:** **implemented** as `go/internal/subetha` + `go/cmd/ftw-pair-relay`.
+**Status:** **implemented** as `go/internal/subetha` + `go/cmd/ftw-subetha`.
 This doc captures the original proposal and trade-off analysis that led to
 adopting this transport over the fowl/magic-wormhole approach. Kept for
 historical context. Live implementation details live in

@@ -208,16 +208,16 @@ isn't logged in. `ftw-connect` prints the manual command to run.
 
 ## Self-hosting the relay
 
-The `ftw-pair-relay` binary is published as a release asset alongside
+The `ftw-subetha` binary is published as a release asset alongside
 `ftw-connect`. To run your own relay:
 
 ```bash
 # Download from the latest release
-curl -fsSL .../ftw-pair-relay-linux-amd64 -o ftw-pair-relay
-chmod +x ftw-pair-relay
+curl -fsSL .../ftw-subetha-linux-amd64 -o ftw-subetha
+chmod +x ftw-subetha
 
 # Run (plain TCP; add -tls-cert / -tls-key for TLS)
-./ftw-pair-relay -addr :7777
+./ftw-subetha -addr :7777
 
 # Point host + friend at your relay
 FTW_PAIR_RELAY=myrelay.example.com:7777 forty-two-watts pair --intent "..."
