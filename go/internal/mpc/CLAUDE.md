@@ -93,9 +93,10 @@ Service (`service.go`):
   them each cycle; falls back to self-consumption when `(_, false)` is
   returned. For `planner_self` the dispatch reads `BatteryEnergyWh` out of
   `SlotDirective` only as an "idle-gate" signal (below `IdleGateThresholdW`
-  average power ⇒ hold battery at 0); actual power is still driven by
-  reactive PI-on-gridW=0. For `planner_cheap` / `planner_arbitrage` the
-  dispatch follows the Wh allocation directly. See issue #130 +
+  average power ⇒ do not discharge, but absorb true live meter surplus);
+  participant-slot power is still driven by reactive PI-on-gridW=0. For
+  `planner_cheap` / `planner_arbitrage` the dispatch follows the Wh
+  allocation directly. See issue #130 +
   `docs/plan-ems-contract.md`.
 - Reads price history via `state.Store.LoadPrices` and forecast via
   `LoadForecasts` (`service.go:324,343`).

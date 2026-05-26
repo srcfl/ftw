@@ -118,6 +118,15 @@
       ".ftw-diag-log-ERROR{color:var(--red-e);}",
       ".ftw-diag-empty{color:var(--fg-muted);font-family:var(--mono);font-size:0.84rem;padding:14px 0;text-align:center;}",
       ".ftw-diag-error{color:var(--red-e);font-family:var(--mono);font-size:0.82rem;}",
+      ".ftw-diag-job{position:fixed;inset:0;background:rgba(0,0,0,0.62);z-index:9100;display:flex;align-items:center;justify-content:center;}",
+      ".ftw-diag-job-card{width:min(420px,90vw);background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;padding:18px;text-align:center;color:var(--fg);}",
+      ".ftw-diag-job-spinner{display:inline-block;width:22px;height:22px;border:2px solid var(--line);border-top-color:var(--accent-e);border-radius:50%;animation:ftwDiagSpin 0.9s linear infinite;margin-bottom:10px;}",
+      "@keyframes ftwDiagSpin{to{transform:rotate(360deg);}}",
+      ".ftw-diag-job-title{font-family:var(--mono);font-size:0.85rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--accent-e);margin-bottom:8px;}",
+      ".ftw-diag-job-msg{font-family:var(--sans);font-size:0.9rem;color:var(--fg);margin-bottom:6px;}",
+      ".ftw-diag-job-meta{font-family:var(--mono);font-size:0.78rem;color:var(--fg-dim);}",
+      ".ftw-diag-job-error{color:var(--red-e);font-family:var(--mono);font-size:0.82rem;margin-top:10px;}",
+      ".ftw-diag-job-actions{display:flex;justify-content:center;gap:8px;margin-top:14px;}",
     ].join("");
     document.head.appendChild(style);
   }
@@ -129,6 +138,8 @@
     statusPillEl: null,
     timer: null,
     keyHandler: null,
+    jobOverlay: null,
+    jobTimer: null,
   };
 
   function close() {
@@ -144,6 +155,89 @@
     state.bodyEl = null;
     state.statusPillEl = null;
     state.name = null;
+  }
+
+  function startJobOverlay(title, message) {
+    ensureStyles();
+    stopJobOverlay();
+    var started = Date.now();
+    var overlay = document.createElement("div");
+    overlay.className = "ftw-diag-job";
+    overlay.innerHTML =
+      '<div class="ftw-diag-job-card" role="dialog" aria-modal="true" aria-live="polite">' +
+      '  <span class="ftw-diag-job-spinner"></span>' +
+      '  <div class="ftw-diag-job-title">' + escHtml(title) + '</div>' +
+      '  <div class="ftw-diag-job-msg">' + escHtml(message) + '</div>' +
+      '  <div class="ftw-diag-job-meta" data-role="meta">Elapsed: 0s</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    state.jobOverlay = overlay;
+    state.jobTimer = setInterval(function () {
+      var meta = overlay.querySelector('[data-role="meta"]');
+      if (meta) meta.textContent = "Elapsed: " + Math.round((Date.now() - started) / 1000) + "s";
+    }, 1000);
+  }
+
+  function stopJobOverlay() {
+    if (state.jobTimer) {
+      clearInterval(state.jobTimer);
+      state.jobTimer = null;
+    }
+    if (state.jobOverlay && state.jobOverlay.parentNode) {
+      state.jobOverlay.parentNode.removeChild(state.jobOverlay);
+    }
+    state.jobOverlay = null;
+  }
+
+  function failJobOverlay(message) {
+    if (!state.jobOverlay) return;
+    if (state.jobTimer) {
+      clearInterval(state.jobTimer);
+      state.jobTimer = null;
+    }
+    var card = state.jobOverlay.querySelector(".ftw-diag-job-card");
+    if (!card) return;
+    card.innerHTML =
+      '<div class="ftw-diag-job-title">Download failed</div>' +
+      '<div class="ftw-diag-job-error">' + escHtml(message || "Request failed") + '</div>' +
+      '<div class="ftw-diag-job-actions"><button class="ftw-diag-btn ftw-diag-btn-primary" data-role="close-job">Close</button></div>';
+    card.querySelector('[data-role="close-job"]').addEventListener("click", stopJobOverlay);
+  }
+
+  function filenameFromResponse(resp, fallback) {
+    var cd = resp.headers.get("Content-Disposition") || resp.headers.get("content-disposition") || "";
+    var m = cd.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    if (m) {
+      try { return decodeURIComponent(m[1] || m[2]); } catch (_) { return m[1] || m[2]; }
+    }
+    return fallback;
+  }
+
+  function downloadWithFeedback(url, title, message, fallbackName) {
+    startJobOverlay(title, message);
+    fetch(url)
+      .then(function (resp) {
+        if (!resp.ok) {
+          return resp.text().then(function (txt) {
+            throw new Error(txt || ("HTTP " + resp.status));
+          });
+        }
+        var filename = filenameFromResponse(resp, fallbackName);
+        return resp.blob().then(function (blob) {
+          var objectURL = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = objectURL;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(function () { URL.revokeObjectURL(objectURL); }, 30000);
+          stopJobOverlay();
+        });
+      })
+      .catch(function (err) {
+        failJobOverlay(err && err.message ? err.message : String(err));
+      });
   }
 
   function renderBody(d, logs, isFirstPaint) {
@@ -269,6 +363,7 @@
       '    </div>' +
       '    <div class="ftw-diag-actions">' +
       '      <button class="ftw-diag-btn" data-role="dump" title="Download a gzipped tarball with recent logs, redacted config, driver health, and 1 h of telemetry — small enough to email a developer.">Download recent logs</button>' +
+      '      <button class="ftw-diag-btn" data-role="research" title="Download an anonymized 120-day load research bundle with 15-minute site aggregates, EV split out, weather, prices, and load-model state.">Download load research</button>' +
       '      <button class="ftw-diag-close" data-role="close" aria-label="Close">×</button>' +
       '    </div>' +
       '  </div>' +
@@ -286,7 +381,20 @@
     });
     backdrop.querySelector('[data-role="close"]').addEventListener("click", close);
     backdrop.querySelector('[data-role="dump"]').addEventListener("click", function () {
-      window.location.href = "/api/support/dump";
+      downloadWithFeedback(
+        "/api/support/dump",
+        "Preparing support bundle",
+        "Collecting logs, redacted config, driver health, and recent telemetry.",
+        "forty-two-watts-support.tar.gz"
+      );
+    });
+    backdrop.querySelector('[data-role="research"]').addEventListener("click", function () {
+      downloadWithFeedback(
+        "/api/research/load/dump?days=120",
+        "Preparing load research",
+        "Building the anonymized 120-day research bundle. This can take a while on large databases.",
+        "forty-two-watts-load-research.tar.gz"
+      );
     });
 
     state.keyHandler = function (ev) { if (ev.key === "Escape") close(); };

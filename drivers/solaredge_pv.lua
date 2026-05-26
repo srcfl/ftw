@@ -11,20 +11,26 @@ DRIVER = {
   id           = "solaredge-pv",
   name         = "SolarEdge inverter (PV only)",
   manufacturer = "SolarEdge",
-  version      = "1.0.0",
+  version      = "1.1.0",
   protocols    = { "modbus" },
-  capabilities = { "pv" },
-  description  = "SolarEdge HD-Wave / StorEdge PV-only via Modbus TCP (SunSpec).",
+  capabilities = { "pv", "pv-curtail" },
+  description  = "SolarEdge HD-Wave / StorEdge PV-only via Modbus TCP (SunSpec) with PV active-power-limit curtail.",
   homepage     = "https://www.solaredge.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "HD-Wave", "StorEdge" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Curtail path (F000/F001 registers) not yet verified against live hardware on a 42W site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
   },
 }
+--
+-- PV curtail — see drivers/solaredge.lua header comment. Uses the same
+-- SolarEdge proprietary registers (0xF000 enable + 0xF001 percent
+-- 0..100). nominal_w must be set in the YAML driver config block for
+-- curtail to function; without it the driver still emits PV readings
+-- but rejects curtail commands with a logged warning.
 --
 -- SunSpec register map. This SolarEdge gateway serves FC 0x03 (holding)
 -- only; FC 0x04 (input) times out, so every read uses "holding".
@@ -57,6 +63,12 @@ PROTOCOL = "modbus"
 -- they scale — never cached. We do one big batch read of the Model 103
 -- block every poll so values + SFs come from a consistent snapshot.
 local sn_read = false
+
+-- Curtail state — see solaredge.lua header for the protocol.
+local nominal_w = 0
+local curtail_active = false
+local REG_APC_ENABLE = 61440  -- 0xF000
+local REG_APC_LIMIT  = 61441  -- 0xF001
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -116,6 +128,16 @@ end
 
 function driver_init(config)
     host.set_make("SolarEdge")
+    if type(config) == "table" then
+        local n = tonumber(config.nominal_w)
+        if n and n > 0 then
+            nominal_w = n
+            host.log("info", "SolarEdge-PV: nominal_w = " .. tostring(nominal_w) .. " W (curtail enabled)")
+        end
+    end
+    if nominal_w <= 0 then
+        host.log("info", "SolarEdge-PV: nominal_w not set in config — curtail action will be unavailable")
+    end
 end
 
 function driver_poll()
@@ -197,16 +219,69 @@ function driver_poll()
 end
 
 ----------------------------------------------------------------------------
--- Control (read-only driver — command stubs)
+-- Control (PV curtail only — PV emission is read-only)
 ----------------------------------------------------------------------------
 
+-- See solaredge.lua write_apc for the FC 0x10 atomic-write rationale.
+local function write_apc(enable, limit_pct)
+    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
+        { enable, limit_pct })
+    if (not ok) or type(err) == "string" then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+local function apply_curtail(power_w)
+    if nominal_w <= 0 then
+        host.log("warn",
+            "SolarEdge-PV: curtail requested but nominal_w not configured; ignoring")
+        return false
+    end
+    if power_w == nil or power_w < 0 then power_w = 0 end
+    local pct = math.floor((power_w / nominal_w) * 100 + 0.5)
+    if pct < 0   then pct = 0   end
+    if pct > 100 then pct = 100 end
+
+    local ok, err = write_apc(1, pct)
+    if not ok then
+        host.log("warn", "SolarEdge-PV: write APC enable+limit failed: " .. err)
+        return false
+    end
+    curtail_active = true
+    host.log("info",
+        "SolarEdge-PV: curtail " .. tostring(pct) .. "% (" .. tostring(power_w) ..
+        " W of " .. tostring(nominal_w) .. " W nominal)")
+    return true
+end
+
+local function release_curtail()
+    local ok, err = write_apc(0, 100)
+    if not ok then
+        host.log("warn", "SolarEdge-PV: release APC enable+limit failed: " .. err)
+        return false
+    end
+    if curtail_active then
+        host.log("info", "SolarEdge-PV: curtail released (APC_LIMIT=100, APC_ENABLE=0)")
+    end
+    curtail_active = false
+    return true
+end
+
 function driver_command(action, power_w, cmd)
-    host.log("debug", "SolarEdge: read-only driver, ignoring action=" .. tostring(action))
+    if action == "curtail" then
+        return apply_curtail(power_w)
+    elseif action == "curtail_disable" or action == "deinit" then
+        return release_curtail()
+    end
+    host.log("debug", "SolarEdge-PV: ignoring unsupported action=" .. tostring(action))
     return false
 end
 
 function driver_default_mode()
+    release_curtail()
 end
 
 function driver_cleanup()
+    release_curtail()
 end

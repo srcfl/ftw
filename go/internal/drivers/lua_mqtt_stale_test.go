@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +62,31 @@ func (f *fakeMQTT) Published() []MQTTMessage {
 	return out
 }
 
+func newTestFerroampDriver(t *testing.T, tel *telemetry.Store, mqtt *fakeMQTT) (*LuaDriver, *HostEnv) {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", "ferroamp.lua")
+	if _, err := os.Stat(luaPath); err != nil {
+		t.Fatalf("ferroamp.lua not found at %s: %v", luaPath, err)
+	}
+
+	env := NewHostEnv("ferroamp", tel).WithMQTT(mqtt)
+	env.BatteryCapacityWh = 15200
+
+	d, err := NewLuaDriver(luaPath, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	t.Cleanup(d.Cleanup)
+	return d, env
+}
+
 // Regression: ferroamp.lua used to cache the last MQTT payload per
 // topic and emit from cache on every poll, regardless of how long
 // ago the last message arrived. When the EnergyHub lost power on a
@@ -80,29 +107,9 @@ func (f *fakeMQTT) Published() []MQTTMessage {
 //   - NOT advance LastSuccess (watchdog will flip it offline)
 //   - NOT push fresh meter/pv readings into the telemetry store
 func TestFerroampDriverStopsEmittingWhenMQTTStalls(t *testing.T) {
-	// Resolve drivers/ferroamp.lua relative to the repo root.
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", "ferroamp.lua")
-	if _, err := os.Stat(luaPath); err != nil {
-		t.Fatalf("ferroamp.lua not found at %s: %v", luaPath, err)
-	}
-
 	tel := telemetry.NewStore()
 	mqtt := &fakeMQTT{}
-	env := NewHostEnv("ferroamp", tel).WithMQTT(mqtt)
-	env.BatteryCapacityWh = 15200
-
-	d, err := NewLuaDriver(luaPath, env)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	defer d.Cleanup()
-	if err := d.Init(context.Background(), nil); err != nil {
-		t.Fatalf("init: %v", err)
-	}
+	d, env := newTestFerroampDriver(t, tel, mqtt)
 
 	// Feed one fresh ehub payload — keep the JSON minimal but
 	// shape-compatible with extract_val (each field wraps its value
@@ -156,6 +163,510 @@ func TestFerroampDriverStopsEmittingWhenMQTTStalls(t *testing.T) {
 	if !h.LastSuccess.Equal(lastBefore) {
 		t.Errorf("LastSuccess advanced while cache was stale (before=%v after=%v)",
 			lastBefore, *h.LastSuccess)
+	}
+}
+
+func TestFerroampDriverFallsBackToEsoPbatWhenEhubPbatIsZero(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`
+	eso := `{"pbat":{"val":1200},"soc":{"val":29},"ubat":{"val":48},"ibat":{"val":25}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil {
+		t.Fatal("expected battery reading")
+	}
+	if bat.RawW != -1200 {
+		t.Fatalf("battery RawW = %v, want -1200 from ESO pbat fallback", bat.RawW)
+	}
+	if bat.SoC == nil || *bat.SoC != 0.29 {
+		t.Fatalf("battery SoC = %v, want 0.29", bat.SoC)
+	}
+}
+
+func TestFerroampDriverPrefersEsoCurrentForBatteryPower(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":-300}}`
+	eso := `{"pbat":{"val":-300},"soc":{"val":29},"ubat":{"val":308.8},"ibat":{"val":0}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil {
+		t.Fatal("expected battery reading")
+	}
+	if bat.RawW != 0 {
+		t.Fatalf("battery RawW = %v, want 0 from ESO ubat*ibat", bat.RawW)
+	}
+	gotA, _, ok := tel.LatestMetric("ferroamp", "battery_dc_a")
+	if !ok {
+		t.Fatal("missing battery_dc_a metric")
+	}
+	if gotA != 0 {
+		t.Fatalf("battery_dc_a = %v, want 0", gotA)
+	}
+}
+
+func TestFerroampDriverFallsBackToSsoPpvWhenEhubPpvIsZero(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`
+	sso := `{"upv":{"val":400},"ipv":{"val":7.75}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/sso", sso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	pv := tel.Get("ferroamp", telemetry.DerPV)
+	if pv == nil {
+		t.Fatal("expected PV reading")
+	}
+	if pv.RawW != -3100 {
+		t.Fatalf("PV RawW = %v, want -3100 from SSO voltage/current fallback", pv.RawW)
+	}
+}
+
+func TestFerroampDriverEmitsStateRelayAndFaultDiagnostics(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0},"state":{"val":32816}}`
+	eso := `{"pbat":{"val":0},"soc":{"val":29},"ubat":{"val":649},"ibat":{"val":0},` +
+		`"udc":{"val":16},"relaystatus":{"val":1},"faultcode":{"val":0}}`
+	sso := `{"upv":{"val":496.067},"ipv":{"val":0},"udc":{"val":495.344},` +
+		`"relaystatus":{"val":1},"faultcode":{"val":2}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso)
+	mqtt.Push("extapi/data/sso", sso)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	assertMetric := func(name string, want float64) {
+		t.Helper()
+		got, _, ok := tel.LatestMetric("ferroamp", name)
+		if !ok {
+			t.Fatalf("missing metric %s", name)
+		}
+		if got != want {
+			t.Fatalf("metric %s = %v, want %v", name, got, want)
+		}
+	}
+	assertMetric("ehub_state", 32816)
+	assertMetric("eso_relaystatus", 1)
+	assertMetric("eso_faultcode", 0)
+	assertMetric("eso_dc_link_v", 16)
+	assertMetric("sso_relaystatus", 1)
+	assertMetric("sso_faultcode", 2)
+	assertMetric("sso_dc_link_v", 495.344)
+	assertMetric("sso_pv_v", 496.067)
+	assertMetric("sso_pv_a", 0)
+}
+
+// Live-system regression (2026-05-24, 2×ESO site): a single-slot
+// `eso_data` cache made the driver report ONLY the most-recently-
+// published ESO's ubat*ibat as battery power. With two ESOs publishing
+// on extapi/data/eso the driver halved bat_w, the controller's grid-
+// chase loop fed on the wrong number, and dispatch stuck ~190 W of
+// grid import against a 0 W target. ehub.pbat aggregated correctly
+// (~306 W) but the driver preferred ESO ubat*ibat (~153 W).
+func TestFerroampDriverSumsBatteryPowerAcrossMultipleESOs(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	// Two ESOs each at 400 V × 0.375 A = 150 W → aggregate 300 W
+	// discharging. ehub.pbat is intentionally inconsistent to prove
+	// we prefer the summed per-ESO measurement.
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":999}}`
+	eso1 := `{"id":{"val":"21030026"},"soc":{"val":50},"ubat":{"val":400},"ibat":{"val":0.375},` +
+		`"wbatprod":{"val":3600000000},"wbatcons":{"val":7200000000},` +
+		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
+	eso2 := `{"id":{"val":"23010216"},"soc":{"val":50},"ubat":{"val":400},"ibat":{"val":0.375},` +
+		`"wbatprod":{"val":3600000000},"wbatcons":{"val":7200000000},` +
+		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", eso1)
+	mqtt.Push("extapi/data/eso", eso2)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil {
+		t.Fatal("expected battery reading")
+	}
+	if bat.RawW != -300 {
+		t.Fatalf("battery RawW = %v, want -300 (sum 150+150 across both ESOs, discharging)", bat.RawW)
+	}
+	// Current sums (parallel strings), voltage averages.
+	gotA, _, ok := tel.LatestMetric("ferroamp", "battery_dc_a")
+	if !ok {
+		t.Fatal("missing battery_dc_a metric")
+	}
+	if gotA != 0.75 {
+		t.Fatalf("battery_dc_a = %v, want 0.75 (sum of both ibat)", gotA)
+	}
+	gotV, _, ok := tel.LatestMetric("ferroamp", "battery_dc_v")
+	if !ok {
+		t.Fatal("missing battery_dc_v metric")
+	}
+	if gotV != 400 {
+		t.Fatalf("battery_dc_v = %v, want 400 (avg of equal ubats)", gotV)
+	}
+	// Wh counters sum across ESOs (Data carries the per-emit raw JSON).
+	// Each ESO publishes 3.6e9 mJ produced + 7.2e9 mJ consumed; summing
+	// over 2 ESOs and converting mJ → Wh gives 2 Wh produced + 4 Wh
+	// consumed.
+	if !strings.Contains(string(bat.Data), `"discharge_wh":2`) {
+		t.Fatalf("battery Data missing discharge_wh=2: %s", string(bat.Data))
+	}
+	if !strings.Contains(string(bat.Data), `"charge_wh":4`) {
+		t.Fatalf("battery Data missing charge_wh=4: %s", string(bat.Data))
+	}
+	// Diagnostic: operators must see how many ESOs the driver is summing.
+	gotCount, _, ok := tel.LatestMetric("ferroamp", "eso_count")
+	if !ok {
+		t.Fatal("missing eso_count metric")
+	}
+	if gotCount != 2 {
+		t.Fatalf("eso_count = %v, want 2", gotCount)
+	}
+}
+
+// One ESO faulted in a 2-ESO cluster: the worst-of relay/fault metric
+// must surface the fault rather than be averaged away by the healthy
+// peer, and the aggregate must still include the healthy ESO's power.
+func TestFerroampDriverSurfacesPerESOFaultsWorstOf(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	ehub := `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`
+	healthy := `{"id":{"val":"AAA"},"soc":{"val":80},"ubat":{"val":400},"ibat":{"val":1.0},` +
+		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
+	faulted := `{"id":{"val":"BBB"},"soc":{"val":80},"ubat":{"val":400},"ibat":{"val":0},` +
+		`"relaystatus":{"val":1},"faultcode":{"val":42},"udc":{"val":760}}`
+	mqtt.Push("extapi/data/ehub", ehub)
+	mqtt.Push("extapi/data/eso", healthy)
+	mqtt.Push("extapi/data/eso", faulted)
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	gotFault, _, ok := tel.LatestMetric("ferroamp", "eso_faultcode")
+	if !ok {
+		t.Fatal("missing eso_faultcode")
+	}
+	if gotFault != 42 {
+		t.Fatalf("eso_faultcode = %v, want 42 (worst-of so a single faulted ESO is visible)", gotFault)
+	}
+	gotRelay, _, ok := tel.LatestMetric("ferroamp", "eso_relaystatus")
+	if !ok {
+		t.Fatal("missing eso_relaystatus")
+	}
+	if gotRelay != 1 {
+		t.Fatalf("eso_relaystatus = %v, want 1 (worst-of)", gotRelay)
+	}
+	// Healthy ESO still contributes its 400 W of discharge.
+	bat := tel.Get("ferroamp", telemetry.DerBattery)
+	if bat == nil || bat.RawW != -400 {
+		t.Fatalf("battery RawW = %v, want -400 (healthy ESO 400×1.0 + faulted 400×0)", bat.RawW)
+	}
+}
+
+// Live-system regression (2026-05-24): with power_w=0 the driver
+// used to publish `auto`, which puts the EnergyHub in autonomous
+// self-consumption. That silently overrode every planner slot that
+// wanted the battery idle so PV surplus could export — Ferroamp
+// kept covering local load and discharged ~500 W against target 0.
+// power_w=0 must mean "hold the battery at 0 W, do not delegate".
+func TestFerroampZeroBatteryCommandForcesIdleNotAuto(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	initial := len(mqtt.Published())
+	if initial == 0 {
+		t.Fatal("init should publish extapiversion + auto")
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("zero command: %v", err)
+	}
+	pubs := mqtt.Published()
+	if got := len(pubs); got != initial+1 {
+		t.Fatalf("zero command publish count = %d, want %d (must transition out of init auto into forced idle)", got, initial+1)
+	}
+	last := pubs[len(pubs)-1].Payload
+	if !strings.Contains(last, `"name":"discharge"`) || !strings.Contains(last, `"arg":0`) {
+		t.Fatalf("zero command payload = %s, want discharge with arg=0 (force idle, not auto)", last)
+	}
+	if strings.Contains(last, `"name":"auto"`) {
+		t.Fatalf("zero command payload = %s, must NOT publish auto (regression: auto lets EnergyHub self-consume)", last)
+	}
+
+	// Idempotent: once we're in forced idle, another power_w=0 must not
+	// republish — that would churn MQTT on every dispatch tick.
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("second zero command: %v", err)
+	}
+	if got := len(mqtt.Published()); got != initial+1 {
+		t.Fatalf("second zero command published %d new messages, want 0 (idempotent)", got-(initial+1))
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1200}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+	pubs = mqtt.Published()
+	if got := len(pubs); got != initial+2 {
+		t.Fatalf("discharge publish count = %d, want %d", got, initial+2)
+	}
+	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"discharge"`) {
+		t.Fatalf("last payload = %s, want discharge command", pubs[len(pubs)-1].Payload)
+	}
+
+	// Back to zero from a real discharge: must publish forced idle again
+	// (last_control_mode is now "discharge", not "idle").
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
+		t.Fatalf("release-to-idle command: %v", err)
+	}
+	pubs = mqtt.Published()
+	if got := len(pubs); got != initial+3 {
+		t.Fatalf("release-to-idle publish count = %d, want %d", got, initial+3)
+	}
+	last = pubs[len(pubs)-1].Payload
+	if !strings.Contains(last, `"name":"discharge"`) || !strings.Contains(last, `"arg":0`) {
+		t.Fatalf("release-to-idle payload = %s, want forced idle (discharge arg=0)", last)
+	}
+}
+
+// Helpers for the multi-ESO scaling tests below.
+
+// lastBatteryDispatch returns the most-recent control-request payload
+// that targets the battery (charge/discharge/idle), skipping the init
+// `auto` / `extapiversion` traffic.
+func lastBatteryDispatch(t *testing.T, mqtt *fakeMQTT) string {
+	t.Helper()
+	pubs := mqtt.Published()
+	for i := len(pubs) - 1; i >= 0; i-- {
+		p := pubs[i].Payload
+		if strings.Contains(p, `"name":"charge"`) ||
+			strings.Contains(p, `"name":"discharge"`) {
+			return p
+		}
+	}
+	t.Fatalf("no battery dispatch payload in %d published messages", len(pubs))
+	return ""
+}
+
+// esoPayload builds a minimal eso/data payload at the given SoC. udc /
+// ubat / ibat are kept consistent with the existing multi-ESO tests so
+// the battery emit path stays happy (otherwise n_eso never advances).
+func esoPayload(id string, soc float64) string {
+	return `{"id":{"val":"` + id + `"},"soc":{"val":` +
+		strconv.FormatFloat(soc, 'f', -1, 64) +
+		`},"ubat":{"val":400},"ibat":{"val":0.5},` +
+		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
+}
+
+func esoPayloadNoSoC(id string) string {
+	return `{"id":{"val":"` + id + `"},"ubat":{"val":400},"ibat":{"val":0.5},` +
+		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
+}
+
+// Live-system regression (Stefan's 4-ESO site, 2026-05-26): the
+// EnergyHub divides a dispatch setpoint evenly across all ESOs it knows
+// about, including units pinned at their SoC floor that physically
+// refuse to respond. Asking for 1.3 kW with 2 of 4 ESOs floored at min
+// SoC delivered ~0.66 kW. The driver now pre-scales by N_total/N_capable.
+func TestFerroampMultiESOScalingDoublesWhenHalfFloored(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	// 4 ESOs: two floored at 10% (below the 15% discharge floor), two
+	// active at 50%. ehub.pbat is irrelevant — n_eso comes from the per-
+	// ESO map.
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("C", 50))
+	mqtt.Push("extapi/data/eso", esoPayload("D", 50))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1300}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	if !strings.Contains(got, `"name":"discharge"`) || !strings.Contains(got, `"arg":2600`) {
+		t.Fatalf("dispatch payload = %s, want discharge arg=2600 (1300 * 4/2)", got)
+	}
+
+	// Diagnostic metric must reflect the 2.0x scale.
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 2000 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 2000", v)
+	}
+	// Commanded target (pre-scale, site convention) must be the planner's request.
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_commanded_w"); !ok || v != -1300 {
+		t.Fatalf("eso_dispatch_commanded_w = %v, want -1300", v)
+	}
+}
+
+// The scale is capped to MAX_DISPATCH_SCALE (2.0×) so a transient "only
+// 1 of 4 capable" snapshot can't quadruple the on-wire setpoint past
+// the per-driver MaxChargeW / fuse-guard ceiling enforced upstream in
+// dispatch.go. Deeper imbalance is left under-delivered (safe failure).
+func TestFerroampMultiESOScalingCappedAtMax(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("C", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("D", 50))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	// 4/1 = 4.0× uncapped; clamped to 2.0× → arg=2000.
+	if !strings.Contains(got, `"arg":2000`) {
+		t.Fatalf("dispatch payload = %s, want discharge arg=2000 (cap at 2.0x, not 4.0x)", got)
+	}
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 2000 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 2000 (clamped)", v)
+	}
+}
+
+// Freshness gate: between polls a partial broker stall could leave
+// last_eso_count high but last_eso_*_capable low, scaling all later
+// commands. driver_command must refuse to scale when the per-ESO
+// snapshot is older than STALE_AFTER_MS (30 s).
+func TestFerroampMultiESOScalingRefusesStaleSnapshot(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, env := newTestFerroampDriver(t, tel, mqtt)
+
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 50))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	// Rewind the host clock by > STALE_AFTER_MS so the snapshot from
+	// the poll above looks stale to driver_command.
+	env.Start = env.Start.Add(-31 * time.Second)
+
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	if !strings.Contains(got, `"arg":1000`) {
+		t.Fatalf("dispatch payload = %s, want raw arg=1000 (stale snapshot must not scale)", got)
+	}
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 1000 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 1000 (no scaling on stale data)", v)
+	}
+}
+
+// All ESOs floored: capable==0 in the requested direction. We must
+// idle instead of publishing a non-zero command nothing can fulfil —
+// otherwise the planner sees no SoC progress, the loop sets a higher
+// target, and we keep churning MQTT for nothing.
+func TestFerroampMultiESOAllFlooredIdles(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("C", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("D", 10))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1500}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	if !strings.Contains(got, `"name":"discharge"`) || !strings.Contains(got, `"arg":0`) {
+		t.Fatalf("dispatch payload = %s, want forced idle (discharge arg=0) when all ESOs floored", got)
+	}
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 0 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 0 (no dispatch attempted)", v)
+	}
+}
+
+// ESOs with a missing `soc` field must count as capable in both
+// directions. The alternative (skip from capable counts but keep in
+// n_eso) inflates the scale on partial telemetry and overdelivers.
+func TestFerroampMultiESOMissingSocCountsCapable(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	mqtt.Push("extapi/data/eso", esoPayload("A", 50))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 50))
+	mqtt.Push("extapi/data/eso", esoPayloadNoSoC("C"))
+	mqtt.Push("extapi/data/eso", esoPayloadNoSoC("D"))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	if !strings.Contains(got, `"arg":1000`) {
+		t.Fatalf("dispatch payload = %s, want raw arg=1000 (missing-soc ESOs must count as capable)", got)
+	}
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 1000 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 1000 (no scaling when all 4 are capable)", v)
 	}
 }
 

@@ -276,7 +276,7 @@
     try {
       html = (def.render ? def.render(ctx) : "") || "";
     } catch (e) {
-      html = '<p style="color:#e57373">Render error: ' + escHtml(e.message) + '</p>';
+      html = '<p style="color:var(--red-e)">Render error: ' + escHtml(e.message) + '</p>';
       console.error("tab render:", tab, e);
     }
     bodyEl.innerHTML = html;

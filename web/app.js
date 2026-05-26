@@ -1189,11 +1189,7 @@
         '  <span class="status-dot ' + statusClass(d.status) + '" title="' + escHtml(d.status || "unknown") + '"></span>' +
         "</div>" +
         body +
-        renderDriverActions(name, d) +
-        // Inline battery model — rendered from models.js's cached payload.
-        // Drawing it here in the same pass as the driver card avoids the
-        // earlier race where two independent polls fought over the slot.
-        (!isEV && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        renderDriverActions(name, d);
 
       driversGrid.appendChild(card);
     });

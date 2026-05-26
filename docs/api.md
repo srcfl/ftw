@@ -604,7 +604,7 @@ PV digital-twin self-learner status. See `docs/ml-twins.md`
   "samples": 4320,
   "mae_w": 85.2,
   "rated_w": 8500,
-  "quality": "good",
+  "quality": 0.84,
   "last_ms": 1744579200000,
   "forgetting": 0.999,
   "beta": [0.8, 0.1, -0.05]
@@ -644,30 +644,87 @@ Load digital-twin self-learner status. Buckets are per-hour-of-week;
 ```json
 {
   "enabled": true,
+  "profile": "home",
   "samples": 10800,
   "mae_w": 140.0,
   "peak_w": 6800,
-  "quality": "good",
+  "quality": 0.84,
   "last_ms": 1744579200000,
   "heating_w_per_degc": 45.0,
   "buckets_warm": 98,
-  "buckets_total": 168
+  "buckets_total": 168,
+  "profiles": {
+    "home": { "samples": 10800, "quality": 0.84 },
+    "away": { "samples": 1440, "quality": 0.42 }
+  }
 }
 ```
 
 **Response (200), disabled:** `{ "enabled": false }`
 
-Handler: `go/internal/api/api.go:830`
+Handler: `go/internal/api/api_loadmodel.go`
+
+### POST /api/loadmodel/profile
+
+Switch the active load profile. The active profile is the one that trains
+from live telemetry and feeds MPC predictions. The choice is persisted in
+the state DB and triggers an immediate MPC replan when MPC is enabled.
+
+**Request body:**
+
+```json
+{ "profile": "away" }
+```
+
+Allowed values: `home`, `away`.
+
+**Response (200):** `{ "status": "ok", "profile": "away" }`
+
+**Errors:** `400` `{ "error": "unknown load profile: …" }`
+
+Handler: `go/internal/api/api_loadmodel.go`
 
 ### POST /api/loadmodel/reset
 
-Clear the load twin. Same semantics as `/api/pvmodel/reset`
+Clear the active load profile while preserving the configured
+`heating_w_per_degc`. Same semantics as `/api/pvmodel/reset`.
 
-**Response (200):** `{ "status": "reset" }`
+**Response (200):** `{ "status": "reset", "profile": "away" }`
 
 **Errors:** `400` `{ "error": "loadmodel disabled" }`
 
-Handler: `go/internal/api/api.go:856`
+Handler: `go/internal/api/api_loadmodel.go`
+
+### GET /api/research/load/dump
+
+Download an explicit opt-in load-research bundle as a gzipped tarball.
+The bundle contains no raw config, logs, hostnames, driver names, device
+serials, or endpoints. It is intended for offline model analysis across
+real installations.
+
+**Query params:**
+
+- `days` — history window in days, `1..365`, default `120`.
+
+**Contents:**
+
+- `manifest.json` — format version, generated timestamp, stable random
+  research `site_id`, window, bucket size, privacy statement, and load
+  sign convention.
+- `site.json` — non-identifying site shape: fuse size, price zone,
+  provider names, total battery capacity, PV rated W, loadpoint count,
+  EV presence, and heating coefficient.
+- `timeseries_15m.csv` — 15-minute aggregates:
+  `grid_w,pv_w,bat_w,ev_w,house_load_w,recorded_load_w,bat_soc,temp_c,cloud_pct,total_ore_kwh,spot_ore_kwh`.
+- `loadmodel_state.json` — current load twin state, or `{}` if disabled.
+
+`house_load_w = max(grid_w - pv_w - bat_w - ev_w, 0)` using the site sign
+convention. `recorded_load_w` is included separately so older bundles can
+be audited across changes in history semantics.
+
+**Response (200):** `application/gzip`
+
+**Errors:** `400` invalid `days`, `503` state store unavailable.
 
 ---
 

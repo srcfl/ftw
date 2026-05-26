@@ -2,7 +2,7 @@
 
 ## What it does
 
-Opens one SQLite file (WAL journal, single connection) and runs all migrations on `Open`. Owns the tiered history (hot → warm → cold via pure SQL aggregation in `Prune`), the long-format time-series tables (`ts_drivers` / `ts_metrics` / `ts_samples`), the `devices` table that anchors hardware identity, and daily Parquet roll-off to `<dataDir>/cold/YYYY/MM/DD.parquet`. Every stored W follows the site convention (see `../../../docs/site-convention.md`).
+Opens one SQLite file (WAL journal, small connection pool with `busy_timeout=5000`) and runs all migrations on `Open`. Owns the tiered history (hot → warm → cold via pure SQL aggregation in `Prune`), the long-format time-series tables (`ts_drivers` / `ts_metrics` / `ts_samples`), the `devices` table that anchors hardware identity, and daily Parquet roll-off to `<dataDir>/cold/YYYY/MM/DD.parquet`. Every stored W follows the site convention (see `../../../docs/site-convention.md`).
 
 ## Key types
 
@@ -39,7 +39,7 @@ Opens one SQLite file (WAL journal, single connection) and runs all migrations o
 
 ## What NOT to do
 
-- **Do NOT run two overlapping queries on the DB.** `SetMaxOpenConns(1)` (store.go:43) means two open `Rows` on the same goroutine deadlocks forever. `LoadAllBatteryModels` (store.go:279) and `RecordSamples` (store_ts.go:114) both pre-resolve everything they need before opening their main query for this reason. Replicate that pattern in new queries.
+- **Do NOT run multi-second read queries on the same path as writers without thinking.** The pool is small (`SetMaxOpenConns(4)`, `busy_timeout=5000` in store.go:39) — multiple readers run in parallel under WAL, but writes still serialize and a long-running write blocks every other writer for up to 5 s before SQLITE_BUSY surfaces. New analytical queries (the savings/cost-breakdown family) belong in read-only paths that don't sit behind the control-loop's `RecordHistory`/`RecordSamples` writers; `LoadAllBatteryModels` (store.go:286+) shows the pattern of pre-resolving lookups before opening the main scan, which keeps each query short.
 - **Do NOT key battery models on driver name in new code.** Keys go through `batteryModelKey` (store.go:317) which prefers `device_id`; a driver rename would otherwise orphan the trained state.
 - **Do NOT bypass the interner.** New TS writers must call `RecordSamples`, not insert into `ts_samples` directly — the `(driver_id, metric_id, ts_ms)` PK depends on the intern tables.
 - **Do NOT forget site convention.** `HistoryPoint.BatW` is + for charge, − for discharge; same for every W column. If a sign flip is needed, it happens at the driver boundary, never here.

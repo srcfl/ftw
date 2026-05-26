@@ -17,20 +17,42 @@ DRIVER = {
   id           = "solaredge",
   name         = "SolarEdge inverter + meter",
   manufacturer = "SolarEdge",
-  version      = "1.0.0",
+  version      = "1.1.0",
   protocols    = { "modbus" },
-  capabilities = { "meter", "pv" },
-  description  = "SolarEdge HD-Wave / StorEdge via Modbus TCP (SunSpec).",
+  capabilities = { "meter", "pv", "pv-curtail" },
+  description  = "SolarEdge HD-Wave / StorEdge via Modbus TCP (SunSpec) with PV active-power-limit curtail.",
   homepage     = "https://www.solaredge.com",
   authors      = { "forty-two-watts contributors" },
   tested_models = { "HD-Wave", "StorEdge" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Curtail path (F000/F001 registers) not yet verified against live hardware on a 42W site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
   },
 }
+--
+-- PV curtail (action="curtail" / "curtail_disable")
+--
+-- Uses SolarEdge's proprietary "Advanced Power Control" registers
+-- (Application Note: Power Reduction Interface):
+--   0xF000 (61440)  Advanced Power Control enable: 0 = off, 1 = on
+--   0xF001 (61441)  Active Power Limit:           u16, percent 0..100
+-- Writes go to FC 0x06 (single-register holding write) via
+-- host.modbus_write. SetApp setting "Limit Control Mode = Export
+-- Control / Production" must be enabled on the inverter — without it,
+-- writes succeed but the inverter ignores the limit.
+--
+-- power_w → percent conversion uses `nominal_w` from the YAML driver
+-- config block (the inverter's rated active power output in W). If
+-- nominal_w isn't set, curtail logs a warning and returns false so the
+-- operator notices the missing config rather than silently producing
+-- bogus limits.
+--
+-- Failsafe: F000/F001 do NOT auto-revert on SolarEdge. The driver
+-- writes F000=0 on `curtail_disable`, `deinit`, and `driver_cleanup`.
+-- If the daemon dies unexpectedly while curtailed, the inverter stays
+-- capped until SetApp manually clears it.
 --
 -- SunSpec register map (FC 0x04 / "input" on SolarEdge; they intentionally
 -- mirror the SunSpec common + inverter + meter blocks there):
@@ -82,6 +104,16 @@ local sn_read = false
 local sf_cache = nil
 local sf_retries = 0
 local SF_MAX_RETRIES = 5
+
+-- Curtail state. nominal_w comes from the YAML driver config block.
+-- curtail_active tracks whether F000 is currently set to 1, so we
+-- don't redundantly re-enable on every refresh tick.
+local nominal_w = 0
+local curtail_active = false
+
+-- SolarEdge "Advanced Power Control" register addresses (proprietary).
+local REG_APC_ENABLE = 61440  -- 0xF000  u16  0 = disabled, 1 = enabled
+local REG_APC_LIMIT  = 61441  -- 0xF001  u16  percent 0..100
 
 ----------------------------------------------------------------------------
 -- SunSpec helpers
@@ -162,6 +194,16 @@ end
 
 function driver_init(config)
     host.set_make("SolarEdge")
+    if type(config) == "table" then
+        local n = tonumber(config.nominal_w)
+        if n and n > 0 then
+            nominal_w = n
+            host.log("info", "SolarEdge: nominal_w = " .. tostring(nominal_w) .. " W (curtail enabled)")
+        end
+    end
+    if nominal_w <= 0 then
+        host.log("info", "SolarEdge: nominal_w not set in config — curtail action will be unavailable")
+    end
 end
 
 function driver_poll()
@@ -352,19 +394,89 @@ function driver_poll()
 end
 
 ----------------------------------------------------------------------------
--- Control (read-only driver — command stubs)
+-- Control (PV curtail only — meter + PV emission is read-only)
 ----------------------------------------------------------------------------
 
+-- Atomic write of both F000 (enable) and F001 (limit) — single FC 0x10
+-- (Write Multiple Holding Registers) transaction so the inverter never
+-- sees a half-applied state (e.g. enable=1 still paired with the
+-- previous tick's old limit, briefly capping at a stale value).
+-- REG_APC_ENABLE is at 61440, REG_APC_LIMIT at 61441 → adjacent, so
+-- one multi-register write covers both.
+local function write_apc(enable, limit_pct)
+    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
+        { enable, limit_pct })
+    if (not ok) or type(err) == "string" then
+        return false, tostring(err)
+    end
+    return true, nil
+end
+
+-- Apply a curtail limit in watts. Returns true on success, false on
+-- any error (no nominal_w configured, modbus write failure).
+local function apply_curtail(power_w)
+    if nominal_w <= 0 then
+        host.log("warn",
+            "SolarEdge: curtail requested but nominal_w not configured; ignoring")
+        return false
+    end
+    if power_w == nil or power_w < 0 then power_w = 0 end
+    local pct = math.floor((power_w / nominal_w) * 100 + 0.5)
+    if pct < 0   then pct = 0   end
+    if pct > 100 then pct = 100 end
+
+    local ok, err = write_apc(1, pct)
+    if not ok then
+        host.log("warn", "SolarEdge: write APC enable+limit failed: " .. err)
+        return false
+    end
+    curtail_active = true
+    host.log("info",
+        "SolarEdge: curtail " .. tostring(pct) .. "% (" .. tostring(power_w) ..
+        " W of " .. tostring(nominal_w) .. " W nominal)")
+    return true
+end
+
+-- Release the curtail cap. Atomically writes F000=0 and F001=100 so
+-- both enable-bit-honoring and limit-value-honoring firmwares see a
+-- coherent "no cap" state in a single transaction. We need both
+-- writes: some HD-Wave / StorEdge firmwares ignore F000 and follow
+-- F001 directly (stuck-at-3% bug if F001 isn't reset), others honor
+-- F000 alone (cap held at F001's value while enabled).
+local function release_curtail()
+    local ok, err = write_apc(0, 100)
+    if not ok then
+        host.log("warn", "SolarEdge: release APC enable+limit failed: " .. err)
+        return false
+    end
+    if curtail_active then
+        host.log("info", "SolarEdge: curtail released (APC_LIMIT=100, APC_ENABLE=0)")
+    end
+    curtail_active = false
+    return true
+end
+
 function driver_command(action, power_w, cmd)
-    -- debug level on purpose: the controller may probe every cycle.
-    host.log("debug", "SolarEdge: read-only driver, ignoring action=" .. tostring(action))
+    if action == "curtail" then
+        return apply_curtail(power_w)
+    elseif action == "curtail_disable" or action == "deinit" then
+        return release_curtail()
+    end
+    host.log("debug", "SolarEdge: ignoring unsupported action=" .. tostring(action))
     return false
 end
 
 function driver_default_mode()
-    -- Read-only — nothing to revert.
+    -- "Default mode" on the watchdog path means "drop back to the
+    -- safe autonomous behavior". For a PV inverter that's just
+    -- releasing any curtail cap so the panels can produce normally.
+    release_curtail()
 end
 
 function driver_cleanup()
-    -- Read-only — nothing to clean up.
+    -- Best-effort: leave the inverter at full production when the
+    -- driver is unloaded or the process shuts down cleanly. If this
+    -- write fails (e.g. modbus connection already torn down), the
+    -- operator must clear the cap manually via SetApp.
+    release_curtail()
 end

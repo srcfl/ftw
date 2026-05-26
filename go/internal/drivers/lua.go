@@ -28,6 +28,11 @@
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
+//	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
+//	host.ws_messages()              -- drain inbound frames; "" entry = EOF
+//	host.ws_is_open()               -- boolean
+//	host.ws_close()                 -- close + free
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -257,6 +262,20 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("set_poll_interval", L.NewFunction(func(L *lua.LState) int {
 		ms := L.CheckInt(1)
 		env.setPollInterval(int32(ms))
+		return 0
+	}))
+
+	// host.set_watchdog_timeout_s(seconds) — install a per-driver
+	// override so the site watchdog flags this driver stale only after
+	// `seconds` since the last successful emit. Used by drivers whose
+	// natural poll cadence is too slow for the site-wide 60 s default
+	// (Tesla BLE proxy, cloud EV APIs). Calling with 0 clears the
+	// override and reverts to the default.
+	host.RawSetString("set_watchdog_timeout_s", L.NewFunction(func(L *lua.LState) int {
+		secs := L.CheckInt(1)
+		if env.Telemetry != nil {
+			env.Telemetry.SetDriverWatchdogTimeout(env.DriverName, time.Duration(secs)*time.Second)
+		}
 		return 0
 	}))
 
@@ -603,6 +622,95 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 		L.Push(lua.LString(string(body)))
 		return 1
+	}))
+
+	// ---- WebSocket capability ----
+	// host.ws_open(url, headers?)      → (true, nil) or (nil, error_string)
+	// host.ws_send(text)               → (true, nil) or (nil, error_string)
+	// host.ws_messages()               → table of inbound text frames (oldest first).
+	//                                    Drained on each call; empty table when idle.
+	//                                    An empty-string entry "" is the EOF sentinel:
+	//                                    the read pump exited and the driver should
+	//                                    ws_close + ws_open again on the next tick.
+	// host.ws_is_open()                → boolean
+	// host.ws_close()                  → nil
+	host.RawSetString("ws_open", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: capability not granted"))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := wsHostAllowed(url, env.WSAllowedHosts); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: " + reason))
+			return 2
+		}
+		// Optional headers table {"Header-Name"="value", ...}
+		headers := map[string]string{}
+		if tbl := L.OptTable(2, nil); tbl != nil {
+			tbl.ForEach(func(k, v lua.LValue) {
+				if ks, ok := k.(lua.LString); ok {
+					headers[string(ks)] = v.String()
+				}
+			})
+		}
+		if err := env.WS.Open(url, headers); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("ws_send", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: capability not granted"))
+			return 2
+		}
+		text := L.CheckString(1)
+		if err := env.WS.Send(text); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("ws_messages", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			// Match mqtt_messages contract: return an empty table rather
+			// than nil so drivers can iterate without a nil check.
+			L.Push(L.NewTable())
+			return 1
+		}
+		msgs := env.WS.PopMessages()
+		tbl := L.NewTable()
+		for i, m := range msgs {
+			tbl.RawSetInt(i+1, lua.LString(m))
+		}
+		L.Push(tbl)
+		return 1
+	}))
+
+	host.RawSetString("ws_is_open", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LBool(false))
+			return 1
+		}
+		L.Push(lua.LBool(env.WS.IsOpen()))
+		return 1
+	}))
+
+	host.RawSetString("ws_close", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			return 0
+		}
+		_ = env.WS.Close()
+		return 0
 	}))
 
 	L.SetGlobal("host", host)

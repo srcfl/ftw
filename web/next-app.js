@@ -25,6 +25,15 @@
     "24h": 24 * 60 * 60 * 1000,
     "3d": 3 * 24 * 60 * 60 * 1000,
   };
+  const CHART_SMOOTH_MS = {
+    "5m": 10 * 1000,
+    "15m": 20 * 1000,
+    "1h": 60 * 1000,
+    "6h": 5 * 60 * 1000,
+    "24h": 15 * 60 * 1000,
+    "3d": 30 * 60 * 1000,
+  };
+  const STATUS_DISPLAY_TAU_MS = 8 * 1000;
   let chartRange = "5m";             // current selected range
   let currentMode = null;
   let animating = true;              // 30fps redraw loop flag
@@ -59,6 +68,7 @@
   // positive = charging). One series per charger so multi-charger
   // homes see each car separately. Shape: { [driverName]: { ev: [...] } }.
   var chartEVs = {};
+  var statusDisplayState = {};
 
   // Resolve a CSS custom property off :root at call time. Lazy on
   // purpose: a runtime theme toggle rewrites the oklch values, so we
@@ -322,6 +332,129 @@
     if (kwh >= 10) return kwh.toFixed(1) + " kWh";
     return kwh.toFixed(2) + " kWh";
   }
+  function formatSignedWh(wh) {
+    var v = Number(wh) || 0;
+    var abs = Math.abs(v);
+    var sign = v > 0.5 ? "+" : v < -0.5 ? "-" : "±";
+    if (abs >= 1000) return sign + (abs / 1000).toFixed(2) + " kWh";
+    return sign + Math.round(abs) + " Wh";
+  }
+  function formatWhMagnitude(wh) {
+    var abs = Math.abs(Number(wh) || 0);
+    if (abs >= 1000) return (abs / 1000).toFixed(2) + " kWh";
+    return Math.round(abs) + " Wh";
+  }
+
+  // Live-stats strip helpers. signClass picks a colour class based on
+  // direction (import/export for grid, charging/discharging for
+  // battery). Used by the stats strip just above the live power
+  // chart. Threshold matches the live chart's idle band (±10 W) so
+  // tiny noise doesn't flip the colour every poll.
+  function signClass(kind, w) {
+    var v = Number(w) || 0;
+    if (Math.abs(v) <= 10) return "is-neutral";
+    if (kind === "grid") return v > 0 ? "is-import" : "is-export";
+    if (kind === "bat") return v > 0 ? "is-charging" : "is-discharging";
+    return "is-neutral";
+  }
+  function updateLiveStat(key, w, cls) {
+    var el = document.getElementById("live-stat-" + key);
+    if (!el) return;
+    el.textContent = formatW(w);
+    el.className = "live-stat-value " + (cls || "is-neutral");
+  }
+  function updateLiveSocStat(soc) {
+    var el = document.getElementById("live-stat-soc");
+    if (!el) return;
+    if (soc == null || !isFinite(soc)) { el.textContent = "—"; return; }
+    el.textContent = (soc * 100).toFixed(1) + " %";
+    el.className = "live-stat-value is-neutral";
+  }
+  function batteryStateLabel(w) {
+    var watts = Number(w) || 0;
+    var idleW = flowIdleKw() * 1000;
+    if (watts > idleW) return "charging";
+    if (watts < -idleW) return "discharging";
+    return "idle";
+  }
+  function batteryTargetLine(targetW) {
+    if (targetW == null || !isFinite(targetW)) return "";
+    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+  }
+
+  function smoothDisplayNumber(key, value, now) {
+    if (value == null || !isFinite(value)) return value;
+    var prev = statusDisplayState[key];
+    if (!prev || !isFinite(prev.value)) {
+      statusDisplayState[key] = { value: value, ts: now };
+      return value;
+    }
+    var dt = Math.max(0, now - prev.ts);
+    var alpha = 1 - Math.exp(-dt / STATUS_DISPLAY_TAU_MS);
+    var next = prev.value + (value - prev.value) * alpha;
+    statusDisplayState[key] = { value: next, ts: now };
+    return next;
+  }
+
+  function smoothStatusForDisplay(data) {
+    var now = Date.now();
+    var out = Object.assign({}, data);
+    ["grid_w", "pv_w", "bat_w", "ev_w", "ev_charging_w"].forEach(function (field) {
+      if (out[field] != null) out[field] = smoothDisplayNumber("site:" + field, out[field], now);
+    });
+    var drivers = {};
+    var sums = { pv_w: 0, bat_w: 0, ev_w: 0 };
+    var have = { pv_w: false, bat_w: false, ev_w: false };
+    Object.keys(data.drivers || {}).forEach(function (name) {
+      var d = Object.assign({}, data.drivers[name] || {});
+      ["meter_w", "pv_w", "bat_w", "ev_w"].forEach(function (field) {
+        if (d[field] != null) d[field] = smoothDisplayNumber("driver:" + name + ":" + field, d[field], now);
+      });
+      var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+      if (online) {
+        ["pv_w", "bat_w", "ev_w"].forEach(function (field) {
+          if (d[field] != null) {
+            sums[field] += d[field] || 0;
+            have[field] = true;
+          }
+        });
+      }
+      drivers[name] = d;
+    });
+    out.drivers = drivers;
+    if (have.pv_w) out.pv_w = sums.pv_w;
+    if (have.bat_w) out.bat_w = sums.bat_w;
+    if (have.ev_w) {
+      out.ev_w = sums.ev_w;
+      out.ev_charging_w = sums.ev_w;
+    }
+    if (out.grid_w != null) {
+      out.load_w = Math.max(0, (out.grid_w || 0) - (out.bat_w || 0) - (out.pv_w || 0) - (out.ev_w || 0));
+    } else if (data.load_w != null) {
+      out.load_w = smoothDisplayNumber("site:load_w", data.load_w, now);
+    }
+    return out;
+  }
+
+  function smoothSeriesForChart(values, timestamps, windowMs) {
+    if (!windowMs || windowMs <= 0 || values.length < 3) return values;
+    var out = new Array(values.length);
+    for (var i = 0; i < values.length; i++) {
+      var t = timestamps[i];
+      var sum = 0;
+      var n = 0;
+      for (var j = i; j >= 0; j--) {
+        if (t - timestamps[j] > windowMs) break;
+        var v = values[j];
+        if (v == null || !isFinite(v)) continue;
+        sum += v;
+        n++;
+      }
+      out[i] = n > 0 ? sum / n : values[i];
+    }
+    return out;
+  }
+
   // Compact kWh — bubble lines that pack two arrows ("↓ 5.2 ↑ 12") need
   // tighter formatting than the standalone tile reading. Drops the "kWh"
   // unit (already implied by the bubble label "kWh today" elsewhere).
@@ -343,6 +476,17 @@
 
   // ---- Render ----
   function render(data) {
+    var batteryTargetsByDriver = {};
+    var totalBatteryTargetW = 0;
+    var hasBatteryTarget = false;
+    (data.dispatch || []).forEach(function (d) {
+      if (!d || !d.driver) return;
+      var target = Number(d.target_w) || 0;
+      batteryTargetsByDriver[d.driver] = target;
+      totalBatteryTargetW += target;
+      hasBatteryTarget = true;
+    });
+
     // Battery presence → body.no-battery toggle. Drives visibility of
     // the "Bat charged" / "Bat discharged" tiles and the Plan chart's
     // Charge / Discharge / SoC legend + drawing layers. Any driver
@@ -367,12 +511,10 @@
     try {
       // Build a {driver → target_w} index from the dispatch array so the
       // per-battery push below doesn't need an inner loop.
-      var targetsByDriver = {};
-      (data.dispatch || []).forEach(function (d) {
-        if (d && d.driver) targetsByDriver[d.driver] = d.target_w || 0;
-      });
-      pushChartData(data, targetsByDriver);
+      pushChartData(data, batteryTargetsByDriver);
     } catch (e) { console.error("pushChartData error:", e); }
+
+    data = smoothStatusForDisplay(data);
 
     // Version (live from API — survives stale browser cache of index.html)
     if (versionEl && data.version) {
@@ -394,6 +536,24 @@
     if (targetDisp) {
       var t = data.grid_target_w || 0;
       targetDisp.textContent = t === 0 ? "target 0" : "target " + formatW(t);
+    }
+    var slotBadge = document.getElementById("grid-slot-badge");
+    if (slotBadge) {
+      var slot = data.energy && data.energy.current_slot;
+      if (slot) {
+        // 15-min settlement: import_wh and export_wh accumulate
+        // SEPARATELY within the slot — the bill is import × import_price
+        // plus export × export_price, never their net. Render both
+        // directions so the operator sees the slot's true exposure.
+        var impWh = Number(slot.import_wh) || 0;
+        var expWh = Number(slot.export_wh) || 0;
+        slotBadge.textContent = "15m ↑" + formatWhMagnitude(impWh) + " ↓" + formatWhMagnitude(expWh);
+        slotBadge.className = "grid-slot-badge" +
+          (impWh > expWh + 5 ? " slot-import" : expWh > impWh + 5 ? " slot-export" : "");
+      } else {
+        slotBadge.textContent = "";
+        slotBadge.className = "grid-slot-badge";
+      }
     }
 
     // PV — stored as negative (site convention) but displayed positive
@@ -431,6 +591,21 @@
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
     }
+    var batTargetDisp = document.getElementById("bat-target-display");
+    if (batTargetDisp) {
+      batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
+    }
+
+    // Live stats strip — mirrors the per-tile values up top but in one
+    // mono-typed line above the live chart, so the Live card matches
+    // the Plan card's information density. Each cell colours by sign
+    // / direction so an operator scans the row and immediately sees
+    // who's importing, exporting, charging, or idle.
+    updateLiveStat("grid", data.grid_w, signClass("grid", data.grid_w));
+    updateLiveStat("pv", -data.pv_w, "is-export"); // PV is site-signed negative; show as positive generation
+    updateLiveStat("load", data.load_w, "is-neutral");
+    updateLiveStat("bat", data.bat_w, signClass("bat", data.bat_w));
+    updateLiveSocStat(data.bat_soc);
 
     // Hero energy-flow diagram — build a flat "planets" list where each
     // entry declares which corner it orbits (top-left=PV, top-right=
@@ -443,9 +618,10 @@
     if (flowEl && typeof flowEl.setReadings === "function") {
       var planets = [];
 
-      // Today's totals (aggregate across drivers; per-driver split
-      // isn't in the API). The same string lands on every same-role
-      // planet so the aggregation layer can pick it up cleanly.
+      // Today's totals are aggregate across all drivers; per-driver kWh split
+      // is not in the API. Mark them as aggregate-only so the energy-flow
+      // component can show them on folded bubbles without duplicating the
+      // same total on every individual inverter.
       var todayE = (data.energy && data.energy.today) || {};
       var importKwh   = (todayE.import_wh || 0) / 1000;
       var exportKwh   = (todayE.export_wh || 0) / 1000;
@@ -486,8 +662,17 @@
       });
 
       var drvs = data.drivers || {};
+      var pvDailyMembers = 0;
+      var batDailyMembers = 0;
       Object.keys(drvs).forEach(function (name) {
         var d = drvs[name] || {};
+        if (d.pv_w != null) pvDailyMembers++;
+        if (d.bat_w != null) batDailyMembers++;
+      });
+      Object.keys(drvs).forEach(function (name) {
+        var d = drvs[name] || {};
+        var online = d.status !== "offline" && d.status !== "disabled" && !d.not_running;
+        if (!online) return;
         // Solar — display positive kW when generating (site convention
         // has pv_w negative for export into the house). All internal
         // state (chart history, math) stays on site convention; the
@@ -504,6 +689,8 @@
             // would just repeat the same fact in words.
             sub: "",
             dailyKwh: pvDailyStr,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: pvDailyMembers,
           });
         }
         // Battery — sign shows charge/discharge. Discharge flows toward
@@ -517,13 +704,16 @@
           // wordy charging/discharging sub-label.
           var bColor = bIdle ? "var(--cyan)" :
                        (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
+          var bTargetLine = batteryTargetLine(batteryTargetsByDriver[name]);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
             color: bColor,
-            sub: "",
+            sub: bTargetLine,
             soc: d.bat_soc != null ? Math.round(d.bat_soc * 100) : null,
             dailyKwhParts: batDailyParts,
+            dailyScope: "aggregate",
+            dailyAggregateMembers: batDailyMembers,
           });
         }
         // EV — always consumes from the house side. When a loadpoint
@@ -567,12 +757,12 @@
         }
       });
 
-      // Self-powered today: share of consumption sourced from PV /
-      // battery over the whole day. Mirrors the realtime
-      // selfPoweredPct the energy-flow component computes from
-      // current planet power, so the two hub lines are directly
-      // comparable. Clamped 0..100 because metering glitches can
-      // briefly report import > load.
+      // Self-powered today: share of recorded house consumption sourced
+      // from PV/battery over the whole day. Daily EV energy is not split
+      // into this aggregate yet, while the realtime component includes
+      // active EV load because it is visible in the live balance.
+      // Clamped 0..100 because metering glitches can briefly report
+      // import > load.
       var selfPoweredPctToday = null;
       if (loadKwhTotal > 0.001) {
         selfPoweredPctToday = Math.max(0, Math.min(100,
@@ -919,6 +1109,9 @@
 
     // Build series based on view
     var series;
+    var chartSmoothMs = CHART_SMOOTH_MS[chartRange] || 0;
+    var smoothedPVSeries = null;
+    var smoothedLoadSeries = null;
     if (chartView === "energy") {
       function toKwh(arr) { return arr.map(function(x){ return x / 1000; }); }
       series = [
@@ -930,10 +1123,13 @@
         { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
+      var smoothedGridSeries = smoothSeriesForChart(chartHistory.grid, chartHistory.timestamps, chartSmoothMs);
+      smoothedPVSeries = smoothSeriesForChart(chartHistory.pv, chartHistory.timestamps, chartSmoothMs);
+      smoothedLoadSeries = smoothSeriesForChart(chartHistory.load, chartHistory.timestamps, chartSmoothMs);
       series = [
-        { data: chartHistory.grid, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
-        { data: chartHistory.pv,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: chartHistory.load, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
+        { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
+        { data: smoothedLoadSeries, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -942,7 +1138,7 @@
         var color = batteryColor(name);
         var toggle = "bat:" + name;
         var label = batteryLabel(name);
-        series.push({ data: slot.bat,    color: color, width: 2,   dash: [],     name: label,         fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.bat, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
         series.push({ data: slot.target, color: color, width: 1.5, dash: [6, 4], name: label + " tgt", fill: false, toggle: toggle });
       });
       // Append one line per EV charger. EV power is always ≥ 0 (pure
@@ -955,7 +1151,7 @@
         var color = evColor(name);
         var toggle = "ev:" + name;
         var label = evLabel(name);
-        series.push({ data: slot.ev, color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
+        series.push({ data: smoothSeriesForChart(slot.ev, chartHistory.timestamps, chartSmoothMs), color: color, width: 2, dash: [], name: label, fill: false, toggle: toggle });
       });
       // Respect click-to-hide from legend.
       series = series.filter(function (s) { return !legendHidden[s.toggle]; });
@@ -1111,8 +1307,8 @@
     // current actual value so the transition is continuous.
     if (chartView === "power" && chartPlan && chartPlan.actions) {
       var lastIdx = chartHistory.timestamps.length - 1;
-      var lastActualPV = lastIdx >= 0 ? chartHistory.pv[lastIdx] : null;
-      var lastActualLoad = lastIdx >= 0 ? chartHistory.load[lastIdx] : null;
+      var lastActualPV = lastIdx >= 0 && smoothedPVSeries ? smoothedPVSeries[lastIdx] : null;
+      var lastActualLoad = lastIdx >= 0 && smoothedLoadSeries ? smoothedLoadSeries[lastIdx] : null;
 
       var drawForecast = function (field, color, lastActual) {
         var pts = [];
@@ -1234,7 +1430,7 @@
     if (lastDataTs > 0) {
       var ageMs = now - lastDataTs;
       var ageStr;
-      if (ageMs < 1500) ageStr = "live";
+      if (ageMs < 5000) ageStr = "live";
       else if (ageMs < 60_000) ageStr = Math.round(ageMs / 1000) + "s ago";
       else ageStr = Math.round(ageMs / 60_000) + "m ago";
       var fresh = ageMs < 5000;
@@ -1262,7 +1458,9 @@
       windowEnd: windowEnd, totalMs: totalMs, now: now,
       plan: chartPlan,
       series: series,
-      pointCount: chartHistory.timestamps.length
+      pointCount: chartHistory.timestamps.length,
+      fontTooltip: chartFontTooltip,
+      fontTooltipS: chartFontTooltipS
     };
 
     if (hoverIndex >= 0 && hoverIndex < chartLayout.pointCount) {
@@ -1286,6 +1484,8 @@
     if (!chartLayout) return;
     var l = chartLayout;
     var i = hoverIndex;
+    var fontTooltip = l.fontTooltip || "10px monospace";
+    var fontTooltipS = l.fontTooltipS || "9px monospace";
     // Map by timestamp (matches the time-anchored line drawing)
     var ts = chartHistory.timestamps[i];
     if (ts == null) return;
@@ -1356,7 +1556,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = chartFontTooltip;
+    ctx.font = fontTooltip;
     ctx.fillStyle = "#888";
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
@@ -1380,9 +1580,9 @@
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
           ctx.fillStyle = "#888";
-          ctx.font = chartFontTooltipS;
+          ctx.font = fontTooltipS;
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
-          ctx.font = chartFontTooltip;
+          ctx.font = fontTooltip;
         }
       }
       ctx.textAlign = "left";
@@ -1394,6 +1594,7 @@
     var l = chartLayout;
     var a = hoverForecast.action;
     var ts = hoverForecast.ts;
+    var fontTooltip = l.fontTooltip || "10px monospace";
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
@@ -1429,7 +1630,7 @@
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
-    ctx.font = chartFontTooltip;
+    ctx.font = fontTooltip;
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
     ctx.fillStyle = "#fbbf24";
@@ -1498,6 +1699,7 @@
         if (window.FTWDiagnostics) window.FTWDiagnostics.open(name);
         return;
       }
+      if (action === "restart" && !window.confirm("Restart driver \"" + name + "\"? It will briefly stop reporting while it reconnects.")) return;
       if (action === "disable" && !window.confirm("Disable driver \"" + name + "\"? It will be stopped and won't auto-start until re-enabled.")) return;
       btn.disabled = true;
       btn.textContent = action + "ing…";
@@ -1662,11 +1864,7 @@
         '  <span class="status-dot ' + statusClass(d.status) + '" title="' + escHtml(d.status || "unknown") + '"></span>' +
         "</div>" +
         body +
-        renderDriverActions(name, d) +
-        // Inline battery model — rendered from models.js's cached payload.
-        // Drawing it here in the same pass as the driver card avoids the
-        // earlier race where two independent polls fought over the slot.
-        (!isEV && !isVehicle && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        renderDriverActions(name, d);
 
       driversGrid.appendChild(card);
     });
@@ -2229,6 +2427,12 @@
     wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
+      // Surface the surplus-only ↔ schedule interaction immediately on
+      // toggle, before the network save returns — operators get instant
+      // feedback that flipping surplus on turns the deadline soft.
+      if (typeof surplusBestEffortHint !== "undefined" && surplusBestEffortHint) {
+        surplusBestEffortHint.style.display = soCb.checked ? "" : "none";
+      }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
       fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
@@ -2280,6 +2484,32 @@
       unpluggedHint.style.fontStyle = "italic";
       box.appendChild(unpluggedHint);
     }
+
+    // Surplus-only ↔ schedule interaction. The schedule's explainer
+    // promises "the planner uses cheap grid hours to fill the gap PV
+    // can't cover" — but that promise is conditional on grid charging
+    // being allowed in the first place. Surplus only is a hard
+    // constraint in the MPC (mpc.go:474): EV actions that would import
+    // grid are rejected outright, regardless of how close the deadline
+    // is. So if both are on, the deadline becomes best-effort against
+    // whatever PV happens to land. Flag that clearly to the operator
+    // so they don't set a 05:00 deadline + surplus-only and expect
+    // overnight grid charging to make it happen.
+    //
+    // The hint's visibility is wired live to the surplus-only checkbox
+    // above, so toggling it gives instant feedback without waiting on
+    // the network save round-trip.
+    var surplusBestEffortHint = document.createElement("div");
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.style.fontSize = "0.72rem";
+    surplusBestEffortHint.style.color = "var(--fg)";
+    surplusBestEffortHint.style.fontStyle = "italic";
+    surplusBestEffortHint.style.marginBottom = "0.5rem";
+    surplusBestEffortHint.style.padding = "0.4rem 0.55rem";
+    surplusBestEffortHint.style.borderLeft = "2px solid var(--accent-e)";
+    surplusBestEffortHint.style.background = "var(--ink-raised)";
+    surplusBestEffortHint.style.display = (lp && lp.surplus_only) ? "" : "none";
+    box.appendChild(surplusBestEffortHint);
 
     function row(labelText, controlEl) {
       var r = document.createElement("div");
@@ -2565,6 +2795,15 @@
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
+        if (d.role === "pv") {
+          var pc = document.getElementById("pv-control");
+          if (pc && typeof pc.open === "function") {
+            // d.id is the driver id when the user clicked an expanded
+            // per-driver bubble; "" / undefined opens at the aggregate
+            // scope from the merged bubble.
+            pc.open(d.id || "");
+          }
+        }
         if (d.role === "grid" && gridModal) gridModal.open();
       });
     }
@@ -2843,6 +3082,7 @@
   var historyTiles = $("history-tiles");
   var historyCakeWrap = $("history-cake");
   var historyCakeEl = $("history-cake-el");
+  var historyCakeWaitingForUpgrade = false;
 
   // historyState mirrors both toggles so the Bars/Cakes view and
   // the Week/Month range stay coordinated. Only the cake re-fetches
@@ -2851,7 +3091,17 @@
   var historyState = { range: "week", view: "bars" };
 
   function fetchHistoryCake() {
-    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") return;
+    historyCakeEl = $("history-cake-el");
+    if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") {
+      if (!historyCakeWaitingForUpgrade && window.customElements && customElements.whenDefined) {
+        historyCakeWaitingForUpgrade = true;
+        customElements.whenDefined("ftw-energy-cake").then(function () {
+          historyCakeWaitingForUpgrade = false;
+          if (historyState.view === "cakes") fetchHistoryCake();
+        });
+      }
+      return;
+    }
     if (historyCakeWrap) historyCakeWrap.classList.add("loading");
     var days = historyState.range === "month" ? 30 : 7;
     var clearLoading = function () {
@@ -2917,9 +3167,154 @@
     });
   }
 
+  // ---- Live 24h history (battery + SoC) ----
+  // Self-contained: fetches /api/history once a minute, draws a
+  // compact stacked canvas of (battery action bars, SoC line) over
+  // the last 24 h. Mirrors the Plan card's lower charts so the two
+  // cards have matching visual weight. Read-only — no interaction.
+  function renderLiveHistory(items) {
+    var canvas = document.getElementById("live-history-chart");
+    if (!canvas || !items || !items.length) return;
+    // Normalise the /api/history payload: `ts` for the timestamp and
+    // `bat_soc` (0–1 fraction) for the SoC field, plus `bat_w` from
+    // the row blob. Skip rows with no battery sample so the chart
+    // doesn't draw spurious zero bars.
+    var points = items
+      .filter(function (it) { return it.bat_w != null || it.bat_soc != null; })
+      .map(function (it) {
+        return {
+          ts_ms: it.ts || it.ts_ms,
+          bat_w: it.bat_w || 0,
+          soc_pct: (it.bat_soc != null) ? it.bat_soc * 100 : null,
+        };
+      });
+    if (!points.length) return;
+    var dpr = window.devicePixelRatio || 1;
+    var cssW = canvas.parentElement.clientWidth || canvas.width;
+    var cssH = 140;
+    if (canvas.width !== Math.round(cssW * dpr) || canvas.height !== Math.round(cssH * dpr)) {
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+    }
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    var pad = { left: 36, right: 36, top: 8, bottom: 18 };
+    var plotW = cssW - pad.left - pad.right;
+    var plotH = cssH - pad.top - pad.bottom;
+    if (plotW <= 0 || plotH <= 0) return;
+
+    // x: time. Use first/last point timestamps for the window.
+    var t0 = points[0].ts_ms;
+    var t1 = points[points.length - 1].ts_ms;
+    var span = Math.max(1, t1 - t0);
+    var xOf = function (ts) { return pad.left + (ts - t0) / span * plotW; };
+
+    // Battery action axis: symmetric around 0. Find absmax for bat_w.
+    var batMax = 0;
+    for (var i = 0; i < points.length; i++) {
+      var b = Math.abs(points[i].bat_w || 0);
+      if (b > batMax) batMax = b;
+    }
+    if (batMax < 1000) batMax = 1000; // sane minimum
+    var batMid = pad.top + plotH * 0.55;
+    var batH = plotH * 0.55;
+    var yOfBat = function (w) {
+      var frac = (w || 0) / batMax;
+      return batMid - frac * (batH / 2);
+    };
+
+    // Zero baseline for battery
+    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, batMid);
+    ctx.lineTo(pad.left + plotW, batMid);
+    ctx.stroke();
+
+    // Battery action bars. Charge (positive) above zero in amber-ish
+    // (matches Plan's "charge" colour), discharge in violet-ish.
+    var barW = Math.max(1, plotW / points.length - 0.5);
+    for (var j = 0; j < points.length; j++) {
+      var p = points[j];
+      var bw = p.bat_w || 0;
+      if (Math.abs(bw) < 50) continue; // suppress noise
+      var x = xOf(p.ts_ms);
+      var y = yOfBat(bw);
+      ctx.fillStyle = bw > 0 ? "rgba(251,191,36,0.85)" : "rgba(167,139,250,0.85)";
+      var h = Math.abs(y - batMid);
+      var top = bw > 0 ? y : batMid;
+      ctx.fillRect(x - barW / 2, top, barW, h);
+    }
+
+    // SoC line. Plotted in a dedicated bottom strip with its own
+    // 0-100% scale and right-axis labels.
+    var socTop = pad.top + plotH * 0.62;
+    var socH = plotH * 0.38;
+    var socOf = function (pct) {
+      var v = Math.max(0, Math.min(100, pct || 0));
+      return socTop + socH - (v / 100) * socH;
+    };
+    ctx.strokeStyle = "rgba(34,211,238,0.95)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    var started = false;
+    for (var k = 0; k < points.length; k++) {
+      var sp = points[k];
+      if (sp.soc_pct == null) continue;
+      var sx = xOf(sp.ts_ms);
+      var sy = socOf(sp.soc_pct);
+      if (!started) { ctx.moveTo(sx, sy); started = true; }
+      else { ctx.lineTo(sx, sy); }
+    }
+    ctx.stroke();
+
+    // Axis labels — small, mono, dim.
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    // battery: max charge / max discharge labels at the edges
+    ctx.fillText((batMax / 1000).toFixed(1) + "kW", pad.left - 4, pad.top + 6);
+    ctx.fillText("-" + (batMax / 1000).toFixed(1) + "kW", pad.left - 4, batMid + (batH / 2) - 6);
+    // SoC: 100% / 0% on the right
+    ctx.textAlign = "left";
+    ctx.fillText("100%", pad.left + plotW + 4, socTop + 6);
+    ctx.fillText("0%", pad.left + plotW + 4, socTop + socH - 6);
+    // time axis: 24h ago / now
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.textAlign = "left";
+    ctx.fillText("24h ago", pad.left, cssH - 4);
+    ctx.textAlign = "right";
+    ctx.fillText("now", pad.left + plotW, cssH - 4);
+  }
+
+  var lastLiveHistFetch = 0;
+  function fetchLiveHistory() {
+    lastLiveHistFetch = Date.now();
+    return fetch("/api/history?range=24h&points=288") // 5-min cadence
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.items) return;
+        renderLiveHistory(d.items);
+      })
+      .catch(function () { /* silent — chart just shows last state */ });
+  }
+
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
+  fetchLiveHistory();
   setInterval(fetchStatus, POLL_INTERVAL);
+  setInterval(fetchLiveHistory, 60_000); // 1-min refresh
+  window.addEventListener("resize", function () {
+    // Last fetched points are not cached separately; trigger a fetch.
+    // 24h history is small (~288 points × ~50 bytes), zero-cost on
+    // every resize.
+    fetchLiveHistory();
+  });
   requestAnimationFrame(animationFrame);
 })();

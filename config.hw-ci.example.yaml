@@ -1,0 +1,37 @@
+# Safe Raspberry Pi CI candidate config.
+#
+# This is for serving a candidate binary/web bundle on a separate port while
+# read-only proxying /api/* to the live instance via FTW_PROXY_UPSTREAM.
+# It deliberately has no drivers, so it does not open hardware sessions and
+# cannot send battery, PV curtailment, or loadpoint commands.
+
+site:
+  name: "Pi CI candidate"
+  control_interval_s: 30
+  grid_target_w: 0
+  grid_tolerance_w: 42
+  watchdog_timeout_s: 60
+  smoothing_alpha: 0.3
+  gain: 0.5
+  slew_rate_w: 500
+  min_dispatch_interval_s: 30
+
+fuse:
+  max_amps: 16
+  phases: 3
+  voltage: 230
+
+drivers: []
+
+api:
+  port: 18080
+
+state:
+  path: state.hw-ci.db
+  cold_dir: cold.hw-ci
+
+homeassistant:
+  enabled: false
+
+planner:
+  enabled: false
