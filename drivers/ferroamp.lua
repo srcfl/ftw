@@ -94,11 +94,32 @@ local last_control_mode = nil
 -- to avoid oscillating at the edge — within ~2% of its limit an ESO
 -- already refuses dispatch, so a 5% margin is comfortably outside the
 -- "willing but limited" band.
+--
+-- Caveats this scaling has and does NOT solve:
+--   * Behaviour is empirical (single live observation, firmware vintage
+--     unknown). If EHub firmware ever rebalances to active units the
+--     scaling double-compensates — diff `eso_dispatch_commanded_w` vs
+--     the next tick's `battery.w` to spot that.
+--   * The upstream dispatch clamp (config.Driver.max_charge_w / fuse
+--     guard, dispatch.go ~1685) caps the *target* power, then we
+--     multiply on the wire by up to MAX_DISPATCH_SCALE. That bound
+--     protects fuse + inverter rating; if you raise it, also revisit
+--     the per-driver caps in config.yaml.
 local DISCHARGE_FLOOR_SOC = 0.15
 local CHARGE_CEIL_SOC     = 0.95
+-- Cap on the N_total/N_capable multiplier so a transient "only 1 of 4
+-- capable" snapshot can't quadruple the on-wire setpoint past inverter
+-- rating before the next poll corrects it. 2.0 covers the common
+-- 2-of-4 / 1-of-2 cases; deeper imbalance is left under-delivered (a
+-- safe failure mode — planner sees the gap and re-plans).
+local MAX_DISPATCH_SCALE  = 2.0
 local last_eso_count             = 0
 local last_eso_discharge_capable = 0
 local last_eso_charge_capable    = 0
+-- -1 = "no snapshot yet" sentinel. host.millis() can legitimately
+-- return 0 on the very first poll (sub-millisecond since startup), so
+-- we can't use 0 to mean "never set".
+local last_eso_counts_ms         = -1
 
 ----------------------------------------------------------------------------
 -- Helpers
@@ -429,6 +450,15 @@ function driver_poll()
                 if soc <= CHARGE_CEIL_SOC then
                     n_charge_capable = n_charge_capable + 1
                 end
+            else
+                -- Missing SoC: treat as capable in both directions. The
+                -- alternative (skip from capable counts but keep in
+                -- n_eso) inflates scale and overdelivers; counting as
+                -- capable only under-scales by one slot in the rare
+                -- transient where an ESO is genuinely floored AND its
+                -- soc field went missing in the same payload.
+                n_discharge_capable = n_discharge_capable + 1
+                n_charge_capable    = n_charge_capable    + 1
             end
             local udc = tonumber(extract_val(d, "udc"))
             if udc then udc_sum = udc_sum + udc; udc_n = udc_n + 1 end
@@ -483,9 +513,14 @@ function driver_poll()
         end
 
         -- Publish counts to module state so driver_command can scale.
+        -- Stamp the timestamp too — driver_command must refuse to scale
+        -- on stale data, otherwise a partial broker stall (some ESOs
+        -- evicted, others not) leaves an inflated scale persisting
+        -- between polls.
         last_eso_count             = n_eso
         last_eso_discharge_capable = n_discharge_capable
         last_eso_charge_capable    = n_charge_capable
+        last_eso_counts_ms         = now
     end
 
     if sso_data then
@@ -520,24 +555,57 @@ function driver_command(action, power_w, cmd)
     if action == "init" then
         return true
     elseif action == "battery" then
-        local tid = "ems-" .. tostring(host.millis())
+        local now = host.millis()
+        local tid = "ems-" .. tostring(now)
         -- Scale outgoing power to compensate for the EHub dividing the
         -- setpoint across ALL ESOs (including the floored ones, which
         -- contribute 0). See the multi-ESO comment near the top of the
-        -- file. We only scale when we have fresh per-ESO data AND a
-        -- subset of units is capable of the requested direction.
+        -- file. We only scale when:
+        --   1. per-ESO counts are fresh (<= STALE_AFTER_MS old) —
+        --      partial broker stalls between polls would otherwise
+        --      leave an inflated last_eso_count scaling later commands;
+        --   2. a strict subset of units is capable of the requested
+        --      direction;
+        --   3. capable > 0 — if EVERY unit is floored we deliberately
+        --      idle instead of publishing a non-zero command nothing
+        --      can honour.
+        -- The scale is capped at MAX_DISPATCH_SCALE so a transient
+        -- "only 1 of 4 capable" snapshot can't quadruple the on-wire
+        -- setpoint past inverter rating / fuse guard before the next
+        -- poll corrects.
         local on_wire_w = power_w
-        local scale = 1.0
-        if last_eso_count > 0 and power_w ~= 0 then
+        local scale     = 1.0
+        local fresh     = last_eso_counts_ms >= 0
+                          and (now - last_eso_counts_ms) <= STALE_AFTER_MS
+        if fresh and last_eso_count > 0 and power_w ~= 0 then
             local capable
             if power_w > 0 then capable = last_eso_charge_capable
             else                 capable = last_eso_discharge_capable end
-            if capable > 0 and capable < last_eso_count then
+            if capable == 0 then
+                -- All units refuse this direction — publish idle so we
+                -- don't waste an EHub round-trip on a command nothing
+                -- can fulfil, and surface the condition to the operator.
+                host.log("warn", string.format(
+                    "Ferroamp: all %d ESOs at SoC limit for requested %d W — idling",
+                    last_eso_count, math.floor(power_w)))
+                host.emit_metric("eso_dispatch_scale_x1000", 0)
+                host.emit_metric("eso_dispatch_commanded_w", 0)
+                if last_control_mode == "idle" then return true end
+                return publish_idle(tid)
+            end
+            if capable < last_eso_count then
                 scale = last_eso_count / capable
+                if scale > MAX_DISPATCH_SCALE then
+                    host.log("warn", string.format(
+                        "Ferroamp: dispatch scale %.2fx clamped to %.1fx (%d of %d ESOs capable)",
+                        scale, MAX_DISPATCH_SCALE, capable, last_eso_count))
+                    scale = MAX_DISPATCH_SCALE
+                end
                 on_wire_w = power_w * scale
             end
         end
-        host.emit_metric("eso_dispatch_scale_x1000", math.floor(scale * 1000 + 0.5))
+        host.emit_metric("eso_dispatch_scale_x1000",  math.floor(scale * 1000 + 0.5))
+        host.emit_metric("eso_dispatch_commanded_w",  math.floor(power_w))
         if power_w > 0 then
             -- Charge: use "charge" command with positive watts
             local payload = string.format(
@@ -592,4 +660,8 @@ function driver_cleanup()
     ehub_data = nil
     eso_data = nil
     sso_data = nil
+    last_eso_count             = 0
+    last_eso_discharge_capable = 0
+    last_eso_charge_capable    = 0
+    last_eso_counts_ms         = -1
 end
