@@ -56,7 +56,11 @@ RUN apk add --no-cache ca-certificates tzdata python3 pipx libsodium && \
 # paths and is readable by all users (including root for debugging).
 ENV PIPX_HOME=/opt/pipx
 ENV PIPX_BIN_DIR=/usr/local/bin
-RUN PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install fowl && \
+# Pinned to 25.4.0 — later versions (25.10+) removed the
+# `danger-disable-permission-check` fowld command our Go wrapper depends on.
+# Upgrading requires refactoring go/internal/wormhole to use `grant-permission`
+# with explicit port lists.
+RUN PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install 'fowl==25.4.0' && \
     chown -R ftw:ftw /opt/pipx
 
 # Image layout:
