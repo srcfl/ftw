@@ -344,11 +344,9 @@ class FtwPairCard extends FtwElement {
           <button class="copy-msg" id="copy-msg-btn">Copy this message</button>
         </section>
         <section class="friend-message">
-          <span class="eyebrow">AI PROMPT (FOR FRIEND'S CLAUDE CODE)</span>
+          <span class="eyebrow">Claude Code prompt</span>
           <pre class="message" id="ai-prompt-pre">${escapeHTML(aiPrompt)}</pre>
-          <button class="copy-msg" id="copy-ai-prompt-btn">Copy AI prompt</button>
-          <p class="hint">ftw-connect auto-copies this to the friend's clipboard, but the
-            full text is here so you can paste it manually (e.g. if clipboard sync fails).</p>
+          <button class="copy-msg" id="copy-ai-prompt-btn">Copy</button>
         </section>
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
@@ -453,9 +451,7 @@ The driver source lives on the owner's machine after you \`write_file\` it there
 
   _friendMessage(remaining) {
     const code = this._state ? this._state.code : "";
-    return `Send this in Signal/SMS/Slack to your friend:
-
-I need help with my home energy system. I've started a pair
+    return `I need help with my home energy system. I've started a pair
 session — please join with this code:
 
   ${code}
