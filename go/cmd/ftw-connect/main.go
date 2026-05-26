@@ -68,9 +68,19 @@ func main() {
 	mcpURL := "http://" + client.LocalAddr + "/mcp"
 	fmt.Printf("Tunnel ready: %s\n", mcpURL)
 
-	// Best-effort registration with Claude Code.
-	if err := exec.Command("claude", "mcp", "add", mcpName, mcpURL, "--transport", "http").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "claude mcp add failed: %v — register manually with:\n  claude mcp add %s %s\n", err, mcpName, mcpURL)
+	// Drop any stale `ftw-remote` entry from a previous (possibly broken)
+	// run — e.g. one that got registered as stdio because of flag-order
+	// confusion. Ignored if it doesn't exist.
+	_ = exec.Command("claude", "mcp", "remove", mcpName).Run()
+
+	// Best-effort registration with Claude Code. Flag order matters: newer
+	// `claude` CLI versions parse positional args strictly and treat a URL
+	// that follows `mcp add <name>` without `--transport` as a stdio command
+	// (which then silently fails to come online). Put `--transport http`
+	// *before* the name so it binds correctly.
+	manualCmd := fmt.Sprintf("claude mcp add --transport http %s %s", mcpName, mcpURL)
+	if err := exec.Command("claude", "mcp", "add", "--transport", "http", mcpName, mcpURL).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "claude mcp add failed: %v — register manually with:\n  %s\n", err, manualCmd)
 	} else {
 		fmt.Printf("Registered MCP server '%s' with Claude Code.\n", mcpName)
 	}
