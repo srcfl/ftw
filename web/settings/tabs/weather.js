@@ -175,7 +175,7 @@
         '</div><div>' +
         field("Longitude", "weather.longitude", "number", 18.0686) +
         '</div></div>' +
-        '<div id="weather-map" style="height:260px;border-radius:6px;margin:6px 0;background:#1e293b"></div>' +
+        '<div id="weather-map" style="height:260px;border-radius:6px;margin:6px 0;background:var(--ink-sunken)"></div>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:-2px 0 8px">Click or drag the marker to set your location.</p>' +
         field("PV rated (W)", "weather.pv_rated_w", "number", 10000) +
         field("API key (OpenWeather only)", "weather.api_key", "text", "") +

@@ -468,9 +468,10 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP   *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	MQTT      *MQTTConfig      `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus    *ModbusConfig    `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	HTTP      *HTTPCapability  `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket *WSCapability    `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -490,6 +491,12 @@ type ModbusConfig struct {
 
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// WSCapability grants WebSocket (ws://, wss://) access. Same allowlist
+// semantics as HTTPCapability — bare host = any port; "host:port" = exact.
+type WSCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 }
 

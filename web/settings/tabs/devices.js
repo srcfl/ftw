@@ -476,15 +476,15 @@
               var soc = res.body.soc_pct != null ? Math.round(res.body.soc_pct) + "%" : "?";
               var lim = res.body.charge_limit_pct != null ? Math.round(res.body.charge_limit_pct) + "%" : "?";
               var st = res.body.charging_state || "";
-              statusEl.style.color = "#2a7";
+              statusEl.style.color = "var(--green-e)";
               statusEl.textContent = "✓ SoC " + soc + " · limit " + lim + (st ? " · " + st : "");
             } else {
-              statusEl.style.color = "#c44";
+              statusEl.style.color = "var(--red-e)";
               statusEl.textContent = "✗ " + ((res.body && res.body.error) || "verification failed");
             }
           }).catch(function (e) {
             if (statusEl) {
-              statusEl.style.color = "#c44";
+              statusEl.style.color = "var(--red-e)";
               statusEl.textContent = "✗ " + e.message;
             }
           }).finally(function () {
