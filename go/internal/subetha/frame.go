@@ -1,4 +1,4 @@
-// Package wormhole — AEAD framing layer.
+// Package subetha — AEAD framing layer.
 //
 // Wire format: uint32 (big-endian) length prefix followed by ciphertext.
 // Each frame is independently sealed with chacha20-poly1305 using a per-direction
@@ -15,7 +15,7 @@
 //
 // Max frame payload (before encryption): 64 KB.
 // Max frame on the wire: 64 KB + 16 bytes AEAD tag + 4 bytes length prefix.
-package wormhole
+package subetha
 
 import (
 	"crypto/sha256"

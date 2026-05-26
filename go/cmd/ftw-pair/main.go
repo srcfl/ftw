@@ -1,9 +1,9 @@
 // ftw-pair is the host-side sidecar that exposes a forty-two-watts
-// instance as an MCP server over a magic-wormhole tunnel.
+// instance as an MCP server over the subetha relay tunnel.
 //
 // Spawned by `forty-two-watts pair`. Talks to the running main
 // service via http://localhost:8080. Exposes MCP on :9999, forwarded
-// through wormhole to the friend's laptop.
+// through the subetha relay to the friend's laptop.
 //
 // Lifecycle: TTL-bound (default 4h). Hard kill at expiry. One active
 // session per host.
@@ -25,7 +25,7 @@ import (
 
 var Version = "dev"
 
-// relayAddrFlag is a package-level flag so wormhole.go can read it.
+// relayAddrFlag is a package-level flag so subetha.go can read it.
 // Default: FTW_PAIR_RELAY env var, then pair-relay.fortytwowatts.com:7777.
 var relayAddrFlag *string
 
@@ -40,7 +40,11 @@ func main() {
 	ttl := flag.Duration("ttl", 4*time.Hour, "Session TTL")
 	intent := flag.String("intent", "", "Owner-stated purpose for this session")
 	as := flag.String("as", "", "Optional friend identity (logged in audit)")
-	noWormhole := flag.Bool("no-wormhole", false, "Skip wormhole setup — MCP-only mode for testing/local use")
+	// -no-subetha (alias: -no-wormhole) skips the relay tunnel for local /
+	// e2e testing — exposes MCP only on the local addr. The old name is kept
+	// as a hidden alias so existing test scripts and the e2e harness don't break.
+	noSubetha := flag.Bool("no-subetha", false, "Skip subetha relay setup — MCP-only mode for testing/local use")
+	noWormhole := flag.Bool("no-wormhole", false, "deprecated alias for -no-subetha")
 	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
 	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.fortytwowatts.com:7777)")
 	flag.Parse()
@@ -90,13 +94,13 @@ func main() {
 	defer mcpSrv.Shutdown(context.Background())
 
 	var pairCode string
-	if *noWormhole {
-		slog.Info("wormhole skipped (-no-wormhole)", "mcp_addr", mcpSrv.Addr())
+	if *noSubetha || *noWormhole {
+		slog.Info("subetha relay skipped", "mcp_addr", mcpSrv.Addr())
 		pairCode = "local:" + mcpSrv.Addr()
 	} else {
-		host, err := StartWormholeHost(ctx, mcpSrv.Addr())
+		host, err := StartSubethaHost(ctx, mcpSrv.Addr())
 		if err != nil {
-			slog.Error("wormhole host", "err", err)
+			slog.Error("subetha host", "err", err)
 			os.Exit(1)
 		}
 		defer host.Close()

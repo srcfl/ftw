@@ -6,8 +6,8 @@
 // spawns the sidecar; three fast 1 s polls flip the card to active-mode as
 // soon as the sidecar registers itself via POST /api/pair/status.
 //
-// When a session is active the card renders the wormhole code (with a Copy
-// button), intent, TTL countdown, tool counter, and an Abort button.
+// When a session is active the card renders the subetha pair code (with a
+// Copy button), intent, TTL countdown, tool counter, and an Abort button.
 
 import { FtwElement } from "./ftw-element.js";
 

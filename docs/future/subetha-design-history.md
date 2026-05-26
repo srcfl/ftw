@@ -1,7 +1,10 @@
-# Future option: own relay transport (replacing fowl/magic-wormhole)
+# Subetha — design history
 
-**Status:** documented option, not on the current roadmap. Recorded for future
-revisit if the Python `fowl` dependency becomes a meaningful pain point.
+**Status:** **implemented** as `go/internal/subetha` + `go/cmd/ftw-pair-relay`.
+This doc captures the original proposal and trade-off analysis that led to
+adopting this transport over the fowl/magic-wormhole approach. Kept for
+historical context. Live implementation details live in
+`go/internal/subetha/` and `docs/pair-relay-deploy.md`.
 
 ## Context
 

@@ -19,9 +19,9 @@ import (
 // a live main service, exposes a working MCP endpoint and that the
 // session report eventually contains the tool calls we made.
 //
-// The wormhole hop is skipped — we talk directly to the sidecar's
-// localhost MCP listener. The real wormhole transport is exercised by
-// its own test in go/internal/wormhole, gated on WORMHOLE_TEST=1.
+// The subetha relay hop is skipped — we talk directly to the sidecar's
+// localhost MCP listener. The real subetha transport is exercised by
+// its own test in go/internal/subetha.
 func TestPairFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped in short mode")
@@ -50,7 +50,7 @@ func TestPairFlow(t *testing.T) {
 	waitForAPI(t, "http://127.0.0.1:8080/api/status")
 
 	// Start the sidecar on a fixed high port (the sidecar doesn't accept :0).
-	// -no-wormhole skips the fowld subprocess so the test doesn't need fowl installed.
+	// -no-subetha skips the relay handshake so the test doesn't need a live relay.
 	pairCmd := exec.Command(pairBin,
 		"-addr", "127.0.0.1:19999",
 		"-api", "http://127.0.0.1:8080",
@@ -59,7 +59,7 @@ func TestPairFlow(t *testing.T) {
 		"-config", cfgPath,
 		"-ttl", "1m",
 		"-intent", "e2e smoke",
-		"-no-wormhole",
+		"-no-subetha",
 		"-stateless",
 	)
 	pairCmd.Stdout = os.Stdout

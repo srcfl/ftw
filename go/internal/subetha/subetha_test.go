@@ -1,4 +1,4 @@
-package wormhole
+package subetha
 
 import (
 	"bufio"
@@ -31,7 +31,7 @@ func TestFrameRoundTrip(t *testing.T) {
 		t.Fatalf("newFrameReader: %v", err)
 	}
 
-	want := []byte("hello wormhole")
+	want := []byte("hello subetha")
 	go func() {
 		if err := fw.WriteFrame(want); err != nil {
 			t.Errorf("WriteFrame: %v", err)

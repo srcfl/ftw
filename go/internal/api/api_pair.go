@@ -127,7 +127,7 @@ func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe stri
 // handlePairStart returns an http.HandlerFunc that spawns
 // "<selfExe> pair --ttl <ttl> [--intent <intent>]" as a detached child
 // process. The child will register itself via POST /api/pair/status once
-// the wormhole tunnel is up; the card's fast-poll loop picks that up.
+// the subetha relay tunnel is up; the card's fast-poll loop picks that up.
 func handlePairStart(store *PairStatusStore, selfExe string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {

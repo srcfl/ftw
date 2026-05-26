@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	wh "github.com/frahlg/forty-two-watts/go/internal/wormhole"
+	"github.com/frahlg/forty-two-watts/go/internal/subetha"
 )
 
 // startTestRelay starts a minimal in-process relay for the ftw-pair shim tests.
@@ -91,14 +91,14 @@ func startTestRelay(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// TestStartWormholeHostViaShim verifies that StartWormholeHost returns a Host
+// TestStartSubethaHostViaShim verifies that StartSubethaHost returns a Host
 // with a non-empty 6-word Code, using an in-process relay.
-func TestStartWormholeHostViaShim(t *testing.T) {
+func TestStartSubethaHostViaShim(t *testing.T) {
 	relayAddr := startTestRelay(t)
 
 	// Temporarily set the relay addr via env var.
 	t.Setenv("FTW_PAIR_RELAY", relayAddr)
-	// The flag override is nil here; wormhole.go reads *relayAddrFlag which will be nil
+	// The flag override is nil here; subetha.go reads *relayAddrFlag which will be nil
 	// — set it to an empty string (the env var takes precedence).
 	oldFlag := relayAddrFlag
 	empty := ""
@@ -114,9 +114,9 @@ func TestStartWormholeHostViaShim(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	host, err := StartWormholeHost(ctx, echoLn.Addr().String())
+	host, err := StartSubethaHost(ctx, echoLn.Addr().String())
 	if err != nil {
-		t.Fatalf("StartWormholeHost: %v", err)
+		t.Fatalf("StartSubethaHost: %v", err)
 	}
 	defer host.Close()
 
@@ -125,12 +125,12 @@ func TestStartWormholeHostViaShim(t *testing.T) {
 	}
 	// Token should be 6 hyphen-separated words.
 	parts := splitToken(host.Code)
-	if len(parts) != wh.TokenWordCount() {
+	if len(parts) != subetha.TokenWordCount() {
 		t.Errorf("token has %d words, want 6: %q", len(parts), host.Code)
 	}
 }
 
-// TestWormholeShimEndToEnd exercises the ftw-pair shim (StartWormholeHost +
+// TestWormholeShimEndToEnd exercises the ftw-pair shim (StartSubethaHost +
 // Connect) against an in-process relay to ensure the shim wires correctly.
 func TestWormholeShimEndToEnd(t *testing.T) {
 	relayAddr := startTestRelay(t)
@@ -155,9 +155,9 @@ func TestWormholeShimEndToEnd(t *testing.T) {
 	defer cancel()
 
 	const testToken = "zoo-zebra-zero-zone-yacht-year"
-	host, err := wh.StartHost(ctx, echoLn.Addr().String(),
-		wh.WithRelayAddr(relayAddr),
-		wh.WithToken(testToken),
+	host, err := subetha.StartHost(ctx, echoLn.Addr().String(),
+		subetha.WithRelayAddr(relayAddr),
+		subetha.WithToken(testToken),
 	)
 	if err != nil {
 		t.Fatalf("StartHost: %v", err)
@@ -166,7 +166,7 @@ func TestWormholeShimEndToEnd(t *testing.T) {
 
 	time.Sleep(30 * time.Millisecond)
 
-	client, err := wh.Connect(ctx, testToken, wh.WithRelayAddr(relayAddr))
+	client, err := subetha.Connect(ctx, testToken, subetha.WithRelayAddr(relayAddr))
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

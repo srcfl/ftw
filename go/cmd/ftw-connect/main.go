@@ -27,7 +27,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	wh "github.com/frahlg/forty-two-watts/go/internal/wormhole"
+	"github.com/frahlg/forty-two-watts/go/internal/subetha"
 )
 
 var Version = "dev"
@@ -55,10 +55,10 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	effectiveRelay := wh.RelayAddr(*relayAddr)
+	effectiveRelay := subetha.RelayAddr(*relayAddr)
 	fmt.Printf("Connecting to relay (%s)...\n", effectiveRelay)
 
-	client, err := wh.Connect(ctx, code, wh.WithRelayAddr(*relayAddr))
+	client, err := subetha.Connect(ctx, code, subetha.WithRelayAddr(*relayAddr))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "relay connect: %v\n", err)
 		os.Exit(1)

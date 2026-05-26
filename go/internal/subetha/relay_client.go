@@ -1,4 +1,4 @@
-// Package wormhole — relay client (replaces fowld subprocess wrapper).
+// Package subetha — relay client (replaces fowld subprocess wrapper).
 //
 // Pure-Go TCP relay transport. Both host and client connect to a Sourceful-
 // operated relay over TCP; the relay matches them by shared token and pipes
@@ -28,7 +28,7 @@
 //
 // Default relay address: pair-relay.fortytwowatts.com:7777
 // Override: FTW_PAIR_RELAY env var or -relay-addr flag (passed by callers).
-package wormhole
+package subetha
 
 import (
 	"context"
@@ -289,7 +289,7 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 		var err error
 		token, err = generateToken()
 		if err != nil {
-			return nil, fmt.Errorf("wormhole host: %w", err)
+			return nil, fmt.Errorf("subetha host: %w", err)
 		}
 	}
 
@@ -301,7 +301,7 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 	firstRaw, firstWaiting, err := connectToRelay(cctx, addr, token, roleHost)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("wormhole host: relay connect: %w", err)
+		return nil, fmt.Errorf("subetha host: relay connect: %w", err)
 	}
 
 	h := &Host{Code: token, cancel: cancel}
@@ -351,7 +351,7 @@ func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr
 			raw, waiting, dErr = connectToRelay(ctx, addr, token, roleHost)
 			if dErr != nil {
 				if ctx.Err() == nil {
-					slog.Warn("wormhole host: relay (re)connect failed", "err", dErr)
+					slog.Warn("subetha host: relay (re)connect failed", "err", dErr)
 				}
 				return
 			}
@@ -359,7 +359,7 @@ func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr
 
 		if err := hostHandleOnePair(ctx, raw, waiting, token, remoteAddr); err != nil {
 			if ctx.Err() == nil {
-				slog.Debug("wormhole host: pair iteration ended", "err", err)
+				slog.Debug("subetha host: pair iteration ended", "err", err)
 			}
 		}
 
@@ -397,7 +397,7 @@ func hostHandleOnePair(ctx context.Context, rawConn net.Conn, isWaiting bool, to
 		if dialErr == nil {
 			break
 		}
-		slog.Debug("wormhole host: waiting for local MCP server", "addr", remoteAddr, "attempt", attempt+1, "err", dialErr)
+		slog.Debug("subetha host: waiting for local MCP server", "addr", remoteAddr, "attempt", attempt+1, "err", dialErr)
 		time.Sleep(300 * time.Millisecond)
 	}
 	if localConn == nil {
@@ -405,9 +405,9 @@ func hostHandleOnePair(ctx context.Context, rawConn net.Conn, isWaiting bool, to
 	}
 	defer localConn.Close()
 
-	slog.Info("wormhole host: tunnel established", "remote", remoteAddr)
+	slog.Info("subetha host: tunnel established", "remote", remoteAddr)
 	pipeConns(ctx, relayConn, localConn)
-	slog.Info("wormhole host: tunnel closed")
+	slog.Info("subetha host: tunnel closed")
 	return nil
 }
 
@@ -444,13 +444,13 @@ func Connect(ctx context.Context, code string, opts ...Option) (*Client, error) 
 
 	localPort, err := pickFreePort()
 	if err != nil {
-		return nil, fmt.Errorf("wormhole client: pick free port: %w", err)
+		return nil, fmt.Errorf("subetha client: pick free port: %w", err)
 	}
 	localAddr := fmt.Sprintf("127.0.0.1:%d", localPort)
 
 	ln, err := net.Listen("tcp", localAddr)
 	if err != nil {
-		return nil, fmt.Errorf("wormhole client: local listen %s: %w", localAddr, err)
+		return nil, fmt.Errorf("subetha client: local listen %s: %w", localAddr, err)
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
@@ -483,14 +483,14 @@ func Connect(ctx context.Context, code string, opts ...Option) (*Client, error) 
 
 				rawConn, isWaiting, err := connectToRelay(cctx, addr, token, roleClient)
 				if err != nil {
-					slog.Error("wormhole client: relay connect", "err", err)
+					slog.Error("subetha client: relay connect", "err", err)
 					return
 				}
 
 				if isWaiting {
 					if err := waitForPeer(cctx, rawConn); err != nil {
 						if cctx.Err() == nil {
-							slog.Error("wormhole client: peer wait failed", "err", err)
+							slog.Error("subetha client: peer wait failed", "err", err)
 						}
 						rawConn.Close()
 						return
@@ -499,13 +499,13 @@ func Connect(ctx context.Context, code string, opts ...Option) (*Client, error) 
 
 				relayConn, err := wrapRelayConn(rawConn, token, "client")
 				if err != nil {
-					slog.Error("wormhole client: wrap relay conn", "err", err)
+					slog.Error("subetha client: wrap relay conn", "err", err)
 					rawConn.Close()
 					return
 				}
 				defer relayConn.Close()
 
-				slog.Debug("wormhole client: piping connection", "relay", addr, "local", lc.RemoteAddr())
+				slog.Debug("subetha client: piping connection", "relay", addr, "local", lc.RemoteAddr())
 				pipeConns(cctx, lc, relayConn)
 			}(localConn)
 		}

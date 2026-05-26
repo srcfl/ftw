@@ -1,4 +1,4 @@
-// Package wormhole — BIP39 English wordlist for token generation.
+// Package subetha — BIP39 English wordlist for token generation.
 //
 // Source: https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
 // SHA-256: 2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda
@@ -6,7 +6,7 @@
 // The list contains exactly 2048 words. Six random words drawn from this list
 // yield log2(2048^6) ≈ 66 bits of entropy — sufficient for the token-as-key
 // design where the relay never authenticates beyond token match.
-package wormhole
+package subetha
 
 // bip39Words is the canonical BIP39 English wordlist (2048 entries).
 // Words are all lower-case, 3–8 characters, uniquely identifiable by
