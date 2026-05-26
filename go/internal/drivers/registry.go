@@ -131,6 +131,12 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			env.WithHTTPAllowedHosts(hosts)
 		}
 	}
+	if cfg.Capabilities.WebSocket != nil {
+		env.WithWS(NewGorillaWS(cfg.Name))
+		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
+			env.WithWSAllowedHosts(hosts)
+		}
+	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
 	if err != nil {
@@ -199,6 +205,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.Modbus != nil {
 				_ = rd.env.Modbus.Close()
+			}
+			if rd.env.WS != nil {
+				_ = rd.env.WS.Close()
 			}
 			return
 		case cmd := <-rd.cmdCh:

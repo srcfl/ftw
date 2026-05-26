@@ -44,6 +44,22 @@ type ModbusCap interface {
 	Close() error
 }
 
+// WSCap is the host's WebSocket capability. One driver = one upstream
+// connection (matches MQTTCap's single-broker shape) — drivers that
+// need multiple streams can multiplex via GraphQL subscriptions or
+// equivalent. The host exposes Open as a Lua-callable so the driver
+// chooses when to connect (its init may need to fetch IDs over HTTP
+// first); Send + PopMessages drive the inbound/outbound traffic; the
+// implementation's background goroutine buffers inbound frames so
+// PopMessages is non-blocking.
+type WSCap interface {
+	Open(url string, headers map[string]string) error
+	Send(text string) error
+	PopMessages() []string
+	IsOpen() bool
+	Close() error
+}
+
 // HostEnv is the per-driver runtime context. Captures capabilities (potentially
 // nil if not granted), the shared telemetry store, and identifying info.
 type HostEnv struct {
@@ -61,6 +77,10 @@ type HostEnv struct {
 	// backward compat with existing drivers that didn't declare a list.
 	// Populated from driver config `capabilities.http.allowed_hosts`.
 	HTTPAllowedHosts []string
+	WS              WSCap    // nil → ws_* calls return ErrNoCapability
+	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
+	// passed to host.ws_open. Same matching semantics; empty = any host.
+	WSAllowedHosts  []string
 	Start      time.Time  // monotonic start; host.millis() computed from here
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
@@ -111,6 +131,15 @@ func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
 // means "any host" (backward compatible). Matched against URL host.
 func (h *HostEnv) WithHTTPAllowedHosts(hosts []string) *HostEnv {
 	h.HTTPAllowedHosts = hosts
+	return h
+}
+
+// WithWS binds a WebSocket capability.
+func (h *HostEnv) WithWS(w WSCap) *HostEnv { h.WS = w; return h }
+
+// WithWSAllowedHosts restricts which URLs the driver can ws_open to.
+func (h *HostEnv) WithWSAllowedHosts(hosts []string) *HostEnv {
+	h.WSAllowedHosts = hosts
 	return h
 }
 
