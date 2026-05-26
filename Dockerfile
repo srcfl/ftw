@@ -40,7 +40,8 @@ RUN cd go && \
     -o /out/ftw-pair ./cmd/ftw-pair
 
 # Note: the standalone relay (ftw-subetha) is NOT bundled in this image.
-# It's deployed separately on a Lightsail nano — see docs/subetha-deploy.md.
+# It's deployed separately — see docs/subetha-deploy.md for the "run your
+# own relay" guide.
 # The cross-platform binaries are published as GitHub release assets
 # (ftw-subetha-linux-{amd64,arm64}) for operators who self-host.
 
