@@ -1,8 +1,10 @@
 package configreload
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -36,6 +38,24 @@ func writeConfig(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func watcherLoopCount() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return bytes.Count(buf[:n], []byte("configreload.(*Watcher).loop"))
+}
+
+func waitForWatcherLoop(t *testing.T, baseline int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if watcherLoopCount() > baseline {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("watcher loop did not start")
 }
 
 // newTestWatcher creates a Watcher wired to track applier invocations.
@@ -154,5 +174,66 @@ func TestWatcherStopIsIdempotent(t *testing.T) {
 	w.Stop()
 
 	// Second Stop must not panic (guarded by sync.Once).
+	w.Stop()
+}
+
+func TestWatcherStartIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	writeConfig(t, cfgPath, minimalYAML)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, calls, applyCh := newTestWatcher(t, cfgPath, cfg)
+	baselineLoops := watcherLoopCount()
+	w.Start()
+	waitForWatcherLoop(t, baselineLoops)
+	w.Start()
+	defer w.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+	if loops := watcherLoopCount() - baselineLoops; loops != 1 {
+		t.Errorf("Start launched %d watcher loops; expected exactly 1", loops)
+	}
+
+	updatedYAML := `
+site:
+  name: Test
+  grid_target_w: 100
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+api:
+  port: 8080
+`
+
+	time.Sleep(100 * time.Millisecond)
+	writeConfig(t, cfgPath, updatedYAML)
+
+	select {
+	case pair := <-applyCh:
+		newCfg := pair[0]
+		if newCfg.Site.GridTargetW != 100 {
+			t.Errorf("expected grid_target_w=100, got %f", newCfg.Site.GridTargetW)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("applier not called within 3 s after config change")
+	}
+
+	time.Sleep(1500 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("applier called %d times after duplicate Start; expected exactly 1", n)
+	}
+
+	w.Stop()
 	w.Stop()
 }

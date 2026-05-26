@@ -18,6 +18,49 @@ func freshStore(t *testing.T) *Store {
 	return s
 }
 
+func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
+	dir := t.TempDir()
+	s1, err := Open(filepath.Join(dir, "one.db"))
+	if err != nil { t.Fatal(err) }
+	if err := s1.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 1, Value: 10}}); err != nil {
+		t.Fatalf("record first store: %v", err)
+	}
+	if err := s1.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	secondPath := filepath.Join(dir, "two.db")
+	s2, err := Open(secondPath)
+	if err != nil { t.Fatal(err) }
+	if err := s2.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 2, Value: 20}}); err != nil {
+		t.Fatalf("record second store: %v", err)
+	}
+	var driverRows, metricRows int
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_drivers`).Scan(&driverRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.db.QueryRow(`SELECT COUNT(*) FROM ts_metrics`).Scan(&metricRows); err != nil {
+		t.Fatal(err)
+	}
+	if driverRows != 1 || metricRows != 1 {
+		t.Fatalf("second store intern rows: drivers=%d metrics=%d, want 1/1", driverRows, metricRows)
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatalf("close second store: %v", err)
+	}
+
+	reopened, err := Open(secondPath)
+	if err != nil { t.Fatal(err) }
+	t.Cleanup(func() { reopened.Close() })
+	series, err := reopened.LoadSeries("driver", "metric_w", 0, 10, 0)
+	if err != nil {
+		t.Fatalf("load reopened series: %v", err)
+	}
+	if len(series) != 1 || series[0].TsMs != 2 || series[0].Value != 20 {
+		t.Fatalf("reopened series = %+v, want one persisted sample", series)
+	}
+}
+
 func TestConfigRoundtrip(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveConfig("mode", "self_consumption"); err != nil {
@@ -37,6 +80,57 @@ func TestConfigRoundtrip(t *testing.T) {
 	}
 	if _, ok := s.LoadConfig("missing"); ok {
 		t.Error("missing key should not return ok")
+	}
+}
+
+// 2026-05-25 performance regression: /api/energy/daily?days=30
+// cold-started at ~25 s on a 1 GB state.db because every closed day
+// re-ran a per-day DailyEnergy SQL pass. SaveDailyEnergy +
+// LoadDailyEnergy persist the aggregate so the same call after
+// restart resolves to N PK lookups instead.
+func TestDailyEnergyPersistRoundtrip(t *testing.T) {
+	s := freshStore(t)
+	de := DayEnergy{
+		ImportWh:        1234.5,
+		ExportWh:        678.9,
+		PVWh:            5000,
+		BatChargedWh:    1500,
+		BatDischargedWh: 1100,
+		LoadWh:          2222,
+	}
+	if err := s.SaveDailyEnergy("2026-05-25", de); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, ok, err := s.LoadDailyEnergy("2026-05-25")
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected ok=true after save")
+	}
+	if got != de {
+		t.Errorf("roundtrip mismatch: got %+v, want %+v", got, de)
+	}
+	// Upsert with new values must overwrite, not append a duplicate.
+	de2 := de
+	de2.ImportWh = 9999
+	if err := s.SaveDailyEnergy("2026-05-25", de2); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got2, _, _ := s.LoadDailyEnergy("2026-05-25")
+	if got2.ImportWh != 9999 {
+		t.Errorf("upsert did not overwrite: got %f", got2.ImportWh)
+	}
+}
+
+func TestDailyEnergyMissReturnsFalse(t *testing.T) {
+	s := freshStore(t)
+	_, ok, err := s.LoadDailyEnergy("1999-01-01")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if ok {
+		t.Error("ok should be false for a day never persisted")
 	}
 }
 
@@ -65,6 +159,65 @@ func TestEventsRecorded(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(events) < 1 {
 		t.Errorf("expected ≥1 events, got %d", len(events))
+	}
+}
+
+func TestSamplesBeforeKeepsSameTimestampAcrossBatches(t *testing.T) {
+	s := freshStore(t)
+	samples := []Sample{
+		{Driver: "a", Metric: "power_w", TsMs: 10, Value: 1},
+		{Driver: "b", Metric: "power_w", TsMs: 10, Value: 2},
+		{Driver: "c", Metric: "power_w", TsMs: 10, Value: 3},
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+
+	var got []Sample
+	err := s.SamplesBefore(context.Background(), 11, 2, func(batch []Sample) error {
+		got = append(got, batch...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("SamplesBefore: %v", err)
+	}
+	if len(got) != len(samples) {
+		t.Fatalf("SamplesBefore returned %d samples, want %d: %+v", len(got), len(samples), got)
+	}
+	seen := map[string]bool{}
+	for _, sm := range got {
+		seen[sm.Driver] = true
+	}
+	for _, driver := range []string{"a", "b", "c"} {
+		if !seen[driver] {
+			t.Fatalf("SamplesBefore skipped driver %q from shared timestamp batch: %+v", driver, got)
+		}
+	}
+}
+
+func TestLoadSeriesDownsamplingIncludesLatestSample(t *testing.T) {
+	s := freshStore(t)
+	samples := make([]Sample, 0, 10)
+	for i := 0; i < 10; i++ {
+		samples = append(samples, Sample{
+			Driver: "meter",
+			Metric: "power_w",
+			TsMs:   int64(i),
+			Value:  float64(i),
+		})
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+	got, err := s.LoadSeries("meter", "power_w", 0, 9, 3)
+	if err != nil {
+		t.Fatalf("LoadSeries: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("LoadSeries returned %d points, want 3: %+v", len(got), got)
+	}
+	if got[0].TsMs != 0 || got[len(got)-1].TsMs != 9 {
+		t.Fatalf("downsampled series endpoints = %d..%d, want 0..9: %+v", got[0].TsMs, got[len(got)-1].TsMs, got)
 	}
 }
 
@@ -130,6 +283,10 @@ func TestHistoryDownsampling(t *testing.T) {
 	if err != nil { t.Fatal(err) }
 	if len(pts) != 10 {
 		t.Errorf("expected 10 downsampled points, got %d", len(pts))
+	}
+	if pts[0].TsMs != now || pts[len(pts)-1].TsMs != now+99 {
+		t.Errorf("downsampled history endpoints = %d..%d, want %d..%d",
+			pts[0].TsMs, pts[len(pts)-1].TsMs, now, now+99)
 	}
 }
 
@@ -246,6 +403,67 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	// present, proving the snapshot is point-in-time.
 	if _, ok := snap.LoadConfig("post_snap"); ok {
 		t.Error("snapshot contains row written after snapshot — VACUUM INTO isn't point-in-time as assumed")
+	}
+}
+
+// 2026-05-25 performance fix: snapshots now skip the bulky time-series
+// tables (history_hot/warm/cold + ts_samples) which are recoverable
+// from cold parquet roll-off anyway. Verify that essential tables
+// (config, telemetry, devices, prices, etc.) ARE preserved AND the
+// excluded tables exist but are empty in the snapshot.
+func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
+	s := freshStore(t)
+	// Essential row that MUST survive the snapshot.
+	if err := s.SaveConfig("mode", "passive_arbitrage"); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a history_hot row so we can verify exclusion. RecordHistory
+	// writes into history_hot directly.
+	if err := s.RecordHistory(HistoryPoint{
+		TsMs: time.Now().UnixMilli(),
+		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a long-format TS sample so ts_samples has rows too.
+	if err := s.RecordSamples([]Sample{
+		{Driver: "ferroamp", Metric: "pv_w", TsMs: time.Now().UnixMilli(), Value: -3000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sanity: source DB has the rows we just wrote.
+	if hot, _, _, err := s.HistoryCounts(); err != nil || hot == 0 {
+		t.Fatalf("seed: history_hot rows = %d (err=%v) — want > 0", hot, err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("SnapshotTo: %v", err)
+	}
+	snap, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+
+	// Essentials preserved.
+	if v, ok := snap.LoadConfig("mode"); !ok || v != "passive_arbitrage" {
+		t.Errorf("snapshot dropped config row: got %q ok=%v", v, ok)
+	}
+	// Time-series excluded — tables exist (Open runs migrate()) but
+	// rows must NOT be present.
+	if hot, warm, cold, err := snap.HistoryCounts(); err != nil {
+		t.Errorf("HistoryCounts on snap: %v", err)
+	} else if hot+warm+cold != 0 {
+		t.Errorf("snapshot history rows = %d+%d+%d — want 0 (excluded)", hot, warm, cold)
+	}
+	// ts_samples: query directly since there's no public counter.
+	var nSamples int
+	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&nSamples); err != nil {
+		t.Errorf("count ts_samples: %v", err)
+	} else if nSamples != 0 {
+		t.Errorf("snapshot ts_samples rows = %d — want 0 (excluded)", nSamples)
 	}
 }
 

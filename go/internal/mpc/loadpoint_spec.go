@@ -53,6 +53,36 @@ type LoadpointSpec struct {
 	// Charge-side efficiency (AC → battery). Typical 0.90 for a
 	// modern 3-phase EV charger. 0 defaults to 0.90.
 	ChargeEfficiency float64
+
+	// SurplusOnly forbids EV actions that would turn the site into a
+	// net importer. Hard constraint in the DP feasibility loop: any
+	// (battW, evW) combination with gridW > 50 AND evW > 0 is rejected
+	// (mpc.go:474). The 50 W epsilon absorbs grid-discretisation and
+	// FP dither so we don't reject solutions that are zero-import in
+	// every operationally meaningful sense. evW = 0 is always
+	// feasible, so the DP degrades gracefully when no PV surplus
+	// exists — the deadline shortfall penalty handles the
+	// lexicographic "miss target rather than break constraint"
+	// preference.
+	SurplusOnly bool
+
+	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
+	// true (operator's default), the home battery's discharge MUST NOT
+	// end up at the EV. The DP feasibility check enforces this by
+	// rejecting any (battW, evW) combination where battery discharge
+	// exceeds the PV-residual house demand — i.e. where some of the
+	// battery's energy must, by conservation, have flowed into the EV
+	// or out to grid (and the existing battery-export-vs-EV rule
+	// already covers the export case). The runtime dispatch in
+	// control/dispatch.go has the canonical clamp using identical
+	// accounting (search "CANONICAL \"battery may not feed EV\""); the
+	// DP rule here stops the planner from emitting infeasible
+	// allocations that dispatch then has to censor, removing the
+	// plan↔reality divergence operators were seeing on
+	// planner_arbitrage slots. A future refactor should extract the
+	// shared houseResidualW + feasibility predicate into a helper so
+	// the two sites can't drift.
+	NoBatteryToEV bool
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

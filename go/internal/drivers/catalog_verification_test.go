@@ -31,6 +31,8 @@ func TestCatalogVerificationStatus(t *testing.T) {
 		{"sourceful-zap", "beta"},
 		{"deye", "experimental"},
 		{"solis", "experimental"},
+		{"solis-string", "experimental"},
+		{"tibber", "experimental"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
@@ -73,18 +75,50 @@ func TestCatalogProductionDriversHaveVerifier(t *testing.T) {
 // "experimental" rather than propagate an invalid label to the UI.
 func TestNormalizeVerificationStatus(t *testing.T) {
 	cases := map[string]string{
-		"production":     "production",
-		"PRODUCTION":     "production",
-		"Beta":           "beta",
-		"experimental":   "experimental",
-		"":               "experimental",
-		"  ":             "experimental",
-		"prod":           "experimental", // typo → safest default
-		"alpha":          "experimental", // non-canonical → safest default
+		"production":   "production",
+		"PRODUCTION":   "production",
+		"Beta":         "beta",
+		"experimental": "experimental",
+		"":             "experimental",
+		"  ":           "experimental",
+		"prod":         "experimental", // typo → safest default
+		"alpha":        "experimental", // non-canonical → safest default
 	}
 	for in, want := range cases {
 		if got := normalizeVerificationStatus(in); got != want {
 			t.Errorf("normalize(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestCatalogConfigSecrets verifies the regex-based parser surfaces
+// `config_secrets = { ... }` from a driver's DRIVER block end-to-end.
+// Sonnen is the canonical user — its api_token has to land in the
+// catalog so the Settings UI can render the password input.
+func TestCatalogConfigSecrets(t *testing.T) {
+	entries, err := LoadCatalog("../../../drivers")
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	byID := make(map[string]CatalogEntry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+
+	sonnen, ok := byID["sonnen"]
+	if !ok {
+		t.Fatalf("sonnen driver missing from catalog (got %d entries)", len(entries))
+	}
+	if got, want := sonnen.ConfigSecrets, []string{"api_token"}; len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("sonnen ConfigSecrets = %v, want %v", got, want)
+	}
+
+	// Drivers that don't declare config_secrets must come back with a
+	// nil/empty slice — never a phantom entry from a regex over-match.
+	if len(byID["pixii"].ConfigSecrets) != 0 {
+		t.Errorf("pixii unexpectedly has ConfigSecrets=%v", byID["pixii"].ConfigSecrets)
+	}
+	if len(byID["ferroamp"].ConfigSecrets) != 0 {
+		t.Errorf("ferroamp unexpectedly has ConfigSecrets=%v", byID["ferroamp"].ConfigSecrets)
 	}
 }

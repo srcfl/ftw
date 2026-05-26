@@ -18,6 +18,7 @@
   const CHECK_INTERVAL_MS = 3 * 60 * 60 * 1000; // /api/version/check cadence
   const STATUS_INTERVAL_MS = 2000;               // during updates
   const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;     // after this we stop auto-reloading
+  const SNAPSHOT_SOFT_TIMEOUT_MS = 15 * 60 * 1000; // large state.db snapshots can be slow
 
   class FtwUpdateBadge extends HTMLElement {
     constructor() {
@@ -28,8 +29,10 @@
       this._sidecarState = null;      // last /api/version/update/status
       this._updateStartedAt = 0;
       this._updateOriginalVersion = null;
+      this._expectedRun = null;
       this._checkTimer = null;
       this._statusTimer = null;
+      this._elapsedTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
       this._skipSnapshot = false;     // per-session opt-out toggle (#149)
       this._snapshots = null;         // last /api/version/snapshots payload (#150)
@@ -45,6 +48,7 @@
     disconnectedCallback() {
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
     }
 
     // Public: called by the header #version click handler in index.html so
@@ -93,20 +97,24 @@
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._expectedRun = { action: "rollback", target: "", snapshot: snapshotID };
       this._sidecarState = { state: "starting", action: "rollback", snapshot: snapshotID };
       this._render();
+      this._startElapsedTicker();
+      this._startStatusPolling();
 
       this._postJSON("/api/version/rollback", { snapshot_id: snapshotID })
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action: "rollback", message: (resp.body && resp.body.error) || "failed to start" };
+            this._stopUpdateTimers();
             this._render();
             return;
           }
-          this._startStatusPolling();
         })
         .catch((e) => {
           this._sidecarState = { state: "failed", action: "rollback", message: String(e) };
+          this._stopUpdateTimers();
           this._render();
         });
     }
@@ -121,6 +129,7 @@
       this._disabled = true;
       clearInterval(this._checkTimer);
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
       this._shadow.innerHTML = "";
       this.hidden = true;
       this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
@@ -183,8 +192,15 @@
       this._phase = "updating";
       this._updateStartedAt = Date.now();
       this._updateOriginalVersion = this._info ? this._info.current : null;
+      this._expectedRun = {
+        action,
+        target: action === "update" && this._info ? (this._info.latest || "") : "",
+        snapshot: "",
+      };
       this._sidecarState = { state: "starting", action };
       this._render();
+      this._startElapsedTicker();
+      this._startStatusPolling();
 
       const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
       // For /update we ship a body so the operator can opt out of the
@@ -198,13 +214,24 @@
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
+            this._stopUpdateTimers();
             this._render();
             return;
           }
-          this._startStatusPolling();
+          if (action === "update") {
+            const skipped = resp.body && resp.body.snapshot_skipped;
+            this._sidecarState = {
+              state: skipped ? "pulling" : "snapshotting",
+              action,
+              target: this._expectedRun.target,
+              message: skipped ? "backup snapshot skipped for this update" : "creating backup snapshot",
+            };
+            this._render();
+          }
         })
         .catch((e) => {
           this._sidecarState = { state: "failed", action, message: String(e) };
+          this._stopUpdateTimers();
           this._render();
         });
     }
@@ -215,12 +242,29 @@
       this._tickStatus();
     }
 
+    _startElapsedTicker() {
+      clearInterval(this._elapsedTimer);
+      this._elapsedTimer = setInterval(() => {
+        if (this._phase !== "updating") {
+          clearInterval(this._elapsedTimer);
+          return;
+        }
+        this._markSoftTimeout();
+        this._render();
+      }, 1000);
+    }
+
+    _stopUpdateTimers() {
+      clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
+    }
+
     _tickStatus() {
       // 1) Poll sidecar state.json.
       fetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
-          if (st) {
+          if (st && this._statusMatchesCurrentRun(st)) {
             this._sidecarState = st;
             this._render();
             if (st.state === "done") {
@@ -234,18 +278,41 @@
 
       // 2) If we've been updating too long with no progress, give the user
       // a manual reload escape hatch instead of spinning forever.
-      if (Date.now() - this._updateStartedAt > UPDATE_SOFT_TIMEOUT_MS) {
-        if (this._sidecarState && this._sidecarState.state !== "done") {
-          this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
-          this._render();
-        }
+      if (this._markSoftTimeout()) {
+        this._render();
       }
+    }
+
+    _statusMatchesCurrentRun(st) {
+      if (!st || !this._expectedRun) return false;
+      if (st.action && st.action !== this._expectedRun.action) return false;
+      if (this._expectedRun.target && st.target && st.target !== this._expectedRun.target) return false;
+      if (this._expectedRun.snapshot && st.snapshot && st.snapshot !== this._expectedRun.snapshot) return false;
+
+      // Polling starts before POST /update returns, so the status file can
+      // still contain an old "done" from the previous update. Never let that
+      // stale terminal state auto-reload the page for the new run.
+      const startedMs = st.started_at ? Date.parse(st.started_at) : 0;
+      if (startedMs && startedMs < this._updateStartedAt - 5000) return false;
+      if (!startedMs && (st.state === "done" || st.state === "failed" || st.state === "idle")) return false;
+      return true;
+    }
+
+    _markSoftTimeout() {
+      const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
+        ? SNAPSHOT_SOFT_TIMEOUT_MS
+        : UPDATE_SOFT_TIMEOUT_MS;
+      if (Date.now() - this._updateStartedAt <= timeoutMs) return false;
+      if (!this._sidecarState || this._sidecarState.state === "done" || this._sidecarState.timedOut) return false;
+      this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
+      return true;
     }
 
     _attemptReload() {
       // Give the new container a moment to open its listener, then
       // hard-reload. Bypass cache so a new app.js version is picked up.
       clearInterval(this._statusTimer);
+      clearInterval(this._elapsedTimer);
       setTimeout(() => {
         // location.reload(true) is deprecated; a cache-busting query is a
         // reliable cross-browser alternative that forces a fresh index.html.
@@ -420,6 +487,7 @@
         ? `<p>Still working after ${elapsed}s. The main container may have been slow to restart.</p>
            <p>You can reload manually if the UI keeps the overlay stuck.</p>`
         : `<p>${escapeHTML(label)}…</p>
+           ${this._operationDetailHTML(st)}
            <p class="dim">Elapsed: ${elapsed}s. The page will reload automatically.</p>`;
 
       const footer = failed || timedOut
@@ -449,6 +517,23 @@
       `;
     }
 
+    _operationDetailHTML(st) {
+      const msg = st && st.message ? `<p class="dim">${escapeHTML(st.message)}</p>` : "";
+      if (!st) return msg;
+      switch (st.state) {
+        case "snapshotting":
+          return msg + `<p class="dim">Creating a local rollback snapshot before touching the running service. Large history databases can take several minutes.</p>`;
+        case "pulling":
+          return msg + `<p class="dim">Downloading the pinned release image from GHCR.</p>`;
+        case "restarting":
+          return msg + `<p class="dim">Recreating the service. Short polling errors are expected while the container swaps.</p>`;
+        case "restoring":
+          return msg + `<p class="dim">Restoring files from the selected backup snapshot.</p>`;
+        default:
+          return msg;
+      }
+    }
+
     _wireModal(modal) {
       // Delegate: one listener on the shadow root, dispatch by data-action.
       this._shadow.querySelectorAll("[data-action]").forEach((el) => {
@@ -457,6 +542,7 @@
           switch (action) {
             case "close":
               this._phase = "idle";
+              this._stopUpdateTimers();
               this._render();
               break;
             case "update":
@@ -518,13 +604,14 @@
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
         .badge {
-          /* Blue blinking dot so it's unmistakably "this is the
-             update indicator" and not confused with the green
-             connection dot next door. Pulsing animation stays so
-             it reads as actionable, not a static state. */
+          /* Amber pulse — the system's single accent (DESIGN.md). The
+             green connection dot next door is reserved for liveness
+             state; the amber dot is an actionable affordance ("update
+             available, open me"). Pulsing animation stays so it reads
+             as actionable, not a static state. */
           appearance: none;
           background: transparent;
-          color: #3b82f6;
+          color: var(--accent-e, #f59e0b);
           border: none;
           cursor: pointer;
           font-size: 1.1rem;
@@ -554,38 +641,38 @@
              laptop-height browser running the /next dashboard. */
           max-height: 85vh;
           overflow-y: auto;
-          background: var(--surface, #1e293b);
-          color: var(--text, #e2e8f0);
-          border: 1px solid var(--border, #334155);
-          border-radius: 8px;
+          background: var(--ink-raised, #1e293b);
+          color: var(--fg, #e2e8f0);
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-sm, 8px);
           z-index: 1001;
           display: flex; flex-direction: column;
-          font-family: system-ui, -apple-system, sans-serif;
+          font-family: var(--sans, system-ui, -apple-system, sans-serif);
           font-size: 0.9rem;
         }
         .modal header {
           display: flex; align-items: center; justify-content: space-between;
           padding: 0.9rem 1rem;
-          border-bottom: 1px solid var(--border, #334155);
+          border-bottom: 1px solid var(--line, #334155);
         }
         .modal h3 { margin: 0; font-size: 1rem; }
         .modal .x {
           appearance: none; background: transparent;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           border: none; cursor: pointer;
           font-size: 1.25rem; line-height: 1;
         }
         .modal .body { padding: 1rem; }
         .modal .body.center { text-align: center; padding: 1.4rem 1rem; }
-        .subtitle { margin: 0 0 0.75rem; color: var(--text-dim, #94a3b8); }
+        .subtitle { margin: 0 0 0.75rem; color: var(--fg-dim, #94a3b8); }
         dl { margin: 0; display: grid; gap: 0.35rem; grid-template-columns: auto 1fr; }
         dl > div { display: contents; }
-        dt { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
+        dt { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
         dd { margin: 0; font-variant-numeric: tabular-nums; }
         .changelog {
           margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(255,255,255,0.02);
         }
         .changelog > summary {
@@ -593,7 +680,7 @@
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           list-style: none;
         }
         .changelog > summary::-webkit-details-marker { display: none; }
@@ -614,12 +701,12 @@
         .changelog-body h4 {
           margin: 0.75rem 0 0.3rem;
           font-size: 0.9rem;
-          color: var(--text, #e2e8f0);
+          color: var(--fg, #e2e8f0);
         }
         .changelog-body h5 {
           margin: 0.6rem 0 0.25rem;
           font-size: 0.8rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           text-transform: uppercase;
           letter-spacing: 0.03em;
         }
@@ -636,7 +723,7 @@
           font-size: 0.82rem;
         }
         .changelog-body a {
-          color: var(--accent, #f59e0b);
+          color: var(--accent-e, #f59e0b);
           text-decoration: none;
         }
         .changelog-body a:hover { text-decoration: underline; }
@@ -645,17 +732,17 @@
           font-size: 0.8rem;
         }
         .notes-link {
-          color: var(--accent, #f59e0b);
+          color: var(--accent-e, #f59e0b);
           text-decoration: none;
         }
         .notes-link:hover { text-decoration: underline; }
         .snapshot-hint {
           margin-top: 0.75rem;
           padding: 0.5rem 0.7rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(148, 163, 184, 0.06);
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           font-size: 0.78rem;
           line-height: 1.4;
         }
@@ -666,7 +753,7 @@
           gap: 0.4rem;
           margin-top: 0.4rem;
           font-size: 0.76rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           cursor: pointer;
           user-select: none;
         }
@@ -676,8 +763,8 @@
         }
         .snapshots {
           margin-top: 0.75rem;
-          border: 1px solid var(--border, #334155);
-          border-radius: 4px;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
           background: rgba(255,255,255,0.02);
         }
         .snapshots > summary {
@@ -685,7 +772,7 @@
           cursor: pointer;
           font-weight: 600;
           font-size: 0.85rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
           list-style: none;
         }
         .snapshots > summary::-webkit-details-marker { display: none; }
@@ -704,21 +791,21 @@
           width: 100%;
           border-collapse: collapse;
           font-size: 0.78rem;
-          color: var(--text-dim, #94a3b8);
+          color: var(--fg-dim, #94a3b8);
         }
         .snapshots-table th,
         .snapshots-table td {
           padding: 0.3rem 0.75rem;
           text-align: left;
-          border-top: 1px solid var(--border, #334155);
+          border-top: 1px solid var(--line, #334155);
         }
         .snapshots-table th {
           font-weight: 600;
           border-top: none;
-          color: var(--text, #e2e8f0);
+          color: var(--fg, #e2e8f0);
         }
         .snapshots-table .nowrap { white-space: nowrap; }
-        .snapshots-table .mono { font-family: ui-monospace, monospace; }
+        .snapshots-table .mono { font-family: var(--mono, ui-monospace, monospace); }
         .snapshot-actions {
           display: flex;
           gap: 0.3rem;
@@ -731,45 +818,49 @@
         }
         .err {
           margin-top: 0.75rem;
-          color: #f87171; font-size: 0.85rem;
+          color: var(--red-e, #f87171); font-size: 0.85rem;
         }
-        .dim { color: var(--text-dim, #94a3b8); font-size: 0.8rem; }
+        .dim { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
         .modal footer {
           display: flex; gap: 0.5rem; justify-content: flex-end;
           padding: 0.75rem 1rem;
-          border-top: 1px solid var(--border, #334155);
+          border-top: 1px solid var(--line, #334155);
           flex-wrap: wrap;
           /* Stick to the bottom of the modal while body scrolls so
              the primary action (Update / Restart) remains visible
              however long the release-notes body grows. */
           position: sticky;
           bottom: 0;
-          background: var(--surface, #1e293b);
+          background: var(--ink-raised, #1e293b);
         }
         .btn {
           appearance: none;
           padding: 0.4rem 0.9rem;
-          border: 1px solid var(--border, #334155);
+          border: 1px solid var(--line, #334155);
           background: transparent;
-          color: var(--text, #e2e8f0);
-          border-radius: 4px;
+          color: var(--fg, #e2e8f0);
+          border-radius: var(--radius-xs, 4px);
           cursor: pointer;
           font-size: 0.85rem;
           font-family: inherit;
         }
         .btn:hover { background: rgba(255,255,255,0.04); }
         .btn-primary {
-          background: var(--accent, #f59e0b);
-          border-color: var(--accent, #f59e0b);
-          color: #0f172a;
+          background: var(--accent-e, #f59e0b);
+          border-color: var(--accent-e, #f59e0b);
+          /* DESIGN.md: on-accent text is near-black (#0a0a0a), never
+             white — keeps the amber legible without halation in dark
+             mode and stays correct when the theme flips to light. */
+          color: #0a0a0a;
+          font-weight: 600;
         }
-        .btn-primary:hover { opacity: 0.9; background: var(--accent, #f59e0b); }
-        .btn-ghost { color: var(--text-dim, #94a3b8); border-color: transparent; }
+        .btn-primary:hover { opacity: 0.9; background: var(--accent-e, #f59e0b); }
+        .btn-ghost { color: var(--fg-dim, #94a3b8); border-color: transparent; }
         .spinner {
           display: inline-block;
           width: 20px; height: 20px;
-          border: 2px solid var(--border, #334155);
-          border-top-color: var(--accent, #f59e0b);
+          border: 2px solid var(--line, #334155);
+          border-top-color: var(--accent-e, #f59e0b);
           border-radius: 50%;
           animation: spin 0.9s linear infinite;
           margin-bottom: 0.6rem;
@@ -781,6 +872,7 @@
 
   function actionLabel(state, action) {
     switch (state) {
+      case "snapshotting": return "Creating backup";
       case "pulling":    return "Pulling new image";
       case "restoring":  return "Restoring snapshot";
       case "restarting":

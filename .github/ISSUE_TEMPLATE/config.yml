@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/frahlg/forty-two-watts/discussions
+    about: Questions, ideas, and open-ended conversation belong here. Issues are for concrete bugs and feature requests.

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +74,7 @@ type runningDriver struct {
 	cfg    config.Driver
 	// Poll loop coordination
 	cmdCh chan driverCmd
-	stop  chan struct{}
+	stop  chan bool
 	done  chan struct{}
 }
 
@@ -97,6 +99,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 
 	env := NewHostEnv(cfg.Name, r.tel)
+	env.BatteryCapacityWh = cfg.BatteryCapacityWh
 	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
 		cap, err := r.MQTTFactory(cfg.Name, mq)
 		if err != nil {
@@ -123,6 +126,16 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	if cfg.Capabilities.HTTP != nil {
 		env.WithHTTP()
+		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
+		if len(hosts) > 0 {
+			env.WithHTTPAllowedHosts(hosts)
+		}
+	}
+	if cfg.Capabilities.WebSocket != nil {
+		env.WithWS(NewGorillaWS(cfg.Name))
+		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
+			env.WithWSAllowedHosts(hosts)
+		}
 	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
@@ -146,7 +159,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		env:    env,
 		cfg:    cfg,
 		cmdCh:  make(chan driverCmd, 8),
-		stop:   make(chan struct{}),
+		stop:   make(chan bool, 1),
 		done:   make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -160,7 +173,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	// arrived (which can be 30+ s for slow telemetry topics), and
 	// mis-presented an alive-but-waiting driver as a failed one.
 	if r.tel != nil {
-		r.tel.DriverHealthMut(cfg.Name)
+		r.tel.EnsureDriverHealth(cfg.Name)
 	}
 	go r.runLoop(rd)
 	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
@@ -176,8 +189,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	defer timer.Stop()
 	for {
 		select {
-		case <-rd.stop:
-			_ = rd.driver.DefaultMode(ctx)
+		case skipDefault := <-rd.stop:
+			if !skipDefault {
+				_ = rd.driver.DefaultMode(ctx)
+			}
 			_ = rd.driver.Cleanup(ctx)
 			// Tear down capability connections so a subsequent Add
 			// with the same driver name doesn't race an old MQTT
@@ -190,6 +205,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.Modbus != nil {
 				_ = rd.env.Modbus.Close()
+			}
+			if rd.env.WS != nil {
+				_ = rd.env.WS.Close()
 			}
 			return
 		case cmd := <-rd.cmdCh:
@@ -206,15 +224,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		case <-timer.C:
 			if _, err := rd.driver.Poll(ctx); err != nil {
 				slog.Warn("driver poll failed", "name", rd.cfg.Name, "err", err)
-				r.tel.DriverHealthMut(rd.cfg.Name).RecordError(err.Error())
+				r.tel.RecordDriverError(rd.cfg.Name, err.Error())
 			} else if r.tel != nil {
-				// Record the successful tick so driver_poll bumps the
-				// health record's TickCount even when the driver itself
-				// has nothing to emit yet (e.g. ferroamp between MQTT
-				// subscribe and the first inbound message). Without
-				// this, drivers that wait on slow telemetry topics
-				// are indistinguishable from ones that crashed.
-				r.tel.DriverHealthMut(rd.cfg.Name).RecordSuccess()
+				// Bump TickCount so the loop is visibly alive in
+				// /api/status, but DON'T touch LastSuccess — that
+				// happens inside host.emit when the driver actually
+				// delivers telemetry. A driver that polls without
+				// emitting (waiting for first MQTT message, or feeding
+				// stale cache after upstream death) needs to surface
+				// as stale to the watchdog; otherwise a dead ferroamp
+				// re-stamps LastSuccess every tick from cached values.
+				r.tel.RecordDriverTick(rd.cfg.Name)
 			}
 			// Re-arm timer at driver's requested interval
 			interval = rd.env.PollInterval()
@@ -227,6 +247,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 // driver's entry from the telemetry store so the API status + UI stop
 // showing a stale card for a driver that's no longer in config.
 func (r *Registry) Remove(name string) {
+	r.remove(name, false)
+}
+
+// RemoveProbe stops a short-lived probe driver without sending
+// driver_default_mode. Test-connection probes must not change device
+// operating mode as a side effect of cleanup.
+func (r *Registry) RemoveProbe(name string) {
+	r.remove(name, true)
+}
+
+func (r *Registry) remove(name string, skipDefault bool) {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	if !ok {
@@ -235,7 +266,7 @@ func (r *Registry) Remove(name string) {
 	}
 	delete(r.rec, name)
 	r.mu.Unlock()
-	close(rd.stop)
+	rd.stop <- skipDefault
 	<-rd.done
 	if r.tel != nil {
 		r.tel.Remove(name)
@@ -266,14 +297,23 @@ func (r *Registry) Send(ctx context.Context, name string, payload []byte) error 
 	}
 }
 
-// SendDefault sends the default/watchdog command to a driver.
+// SendDefault sends the default/watchdog command to a driver. Symmetric
+// with Send: both the channel-push and the result-wait honour ctx. A
+// driver whose cmdCh is full (because its goroutine is slow / stuck mid
+// I/O) would otherwise block the caller forever; the watchdog-fallback
+// path runs on every dispatch tick, so an unblocked send into a wedged
+// driver deadlocks the entire control loop.
 func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	r.mu.Unlock()
 	if !ok { return fmt.Errorf("driver %q not found", name) }
 	resCh := make(chan error, 1)
-	rd.cmdCh <- driverCmd{kind: "default", result: resCh}
+	select {
+	case rd.cmdCh <- driverCmd{kind: "default", result: resCh}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	select {
 	case err := <-resCh: return err
 	case <-ctx.Done(): return ctx.Err()
@@ -382,6 +422,41 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 	}
 	cfg := rd.cfg
 	return r.Restart(ctx, cfg)
+}
+
+// mergeAllowedHosts returns the explicit allowlist plus any host implied
+// by the driver's free-form config (`host` or `url` keys), deduplicated.
+// Saves the user from listing the same IP under both `config.host` and
+// `capabilities.http.allowed_hosts` — the common foot-gun when a driver
+// only talks to one device.
+func mergeAllowedHosts(explicit []string, drvCfg map[string]any) []string {
+	seen := make(map[string]struct{}, len(explicit)+2)
+	out := make([]string, 0, len(explicit)+2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, h := range explicit {
+		add(h)
+	}
+	if drvCfg != nil {
+		if v, ok := drvCfg["host"].(string); ok {
+			add(v)
+		}
+		if v, ok := drvCfg["url"].(string); ok {
+			if u, err := url.Parse(v); err == nil && u.Host != "" {
+				add(u.Host)
+			}
+		}
+	}
+	return out
 }
 
 func findDriver(list []config.Driver, name string) (config.Driver, bool) {

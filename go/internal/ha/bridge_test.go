@@ -2,6 +2,7 @@ package ha
 
 import (
 	"testing"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
@@ -116,5 +117,74 @@ func TestLastPublishMsRoundTrip(t *testing.T) {
 
 	if got := b.LastPublishMs(); got != 1713200000000 {
 		t.Errorf("LastPublishMs = %d, want 1713200000000", got)
+	}
+}
+
+// TestStopIdempotent verifies the lifecycle Stop is safe to call multiple
+// times. main.go's defer-stack and the configreload "running → disabled"
+// path can both wind up calling Stop on the same bridge; a second call
+// must be a no-op rather than a panic-inducing double-close-of-channel.
+func TestStopIdempotent(t *testing.T) {
+	b := &Bridge{}
+	// Pretend Start ran and gave us channels to close.
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	close(b.done) // simulate publishLoop having already exited
+
+	b.Stop()
+	b.Stop() // second call must be a no-op
+
+	if !b.stopped {
+		t.Error("Stop should mark bridge stopped")
+	}
+}
+
+// TestReloadAfterStopRejected guards the invariant that a Stop'd bridge
+// is terminal — operators must construct a fresh bridge, not resurrect
+// the dead one. The configreload applier in main.go relies on this: it
+// nulls haBridge after Stop and calls ha.Start on a re-enable, so a
+// Reload-on-stopped path that silently succeeded would mask wiring bugs.
+func TestReloadAfterStopRejected(t *testing.T) {
+	b := &Bridge{}
+	b.stop = make(chan struct{})
+	b.done = make(chan struct{})
+	close(b.done)
+	b.Stop()
+
+	err := b.Reload(&config.HomeAssistant{Broker: "x", Port: 1883}, nil)
+	if err == nil {
+		t.Fatal("Reload after Stop must error, got nil")
+	}
+}
+
+// TestStopAfterFailedConnectDoesNotDeadlock drives connectAndStart's
+// error path against a guaranteed-refused broker (127.0.0.1:1, with a
+// short connectTimeout to keep the test fast) and asserts the next
+// Stop() returns instead of blocking forever in teardown's <-doneCh.
+// Reverting the deferred close(b.done) rollback in connectAndStart
+// makes this test deadlock — that's the regression it guards.
+func TestStopAfterFailedConnectDoesNotDeadlock(t *testing.T) {
+	b := &Bridge{
+		topicPrefix:    "forty-two-watts",
+		discoPrefix:    "homeassistant",
+		deviceID:       "forty_two_watts",
+		connectTimeout: 100 * time.Millisecond,
+	}
+	cfg := &config.HomeAssistant{Broker: "127.0.0.1", Port: 1}
+
+	if err := b.connectAndStart(cfg, nil); err == nil {
+		t.Fatal("connectAndStart against a refused broker must return an error")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		b.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		// Stop returned — rollback closed b.done, teardown didn't block.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop blocked after a failed Connect — teardown is stuck on <-doneCh; the connectAndStart rollback regressed")
 	}
 }

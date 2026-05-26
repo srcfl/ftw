@@ -37,6 +37,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/gridcost"
 )
 
 // Mode selects how aggressively the planner uses the battery.
@@ -51,11 +53,36 @@ const (
 	// ModeCheapCharge: allow importing to charge when prices are low
 	// (the DP decides based on forecast). Still never export battery to
 	// grid — discharge stays ≤ local load.
+	//
+	// Superseded by ModePassiveArbitrage as of v0.82 — the merged mode
+	// covers the same use case (charge from cheapest available source,
+	// never export battery) and removes the operator-facing choice
+	// between "smart self-consumption" and "cheap charge" that the
+	// planner is already capable of making on its own. Kept here for
+	// existing-config compatibility.
 	ModeCheapCharge Mode = "cheap_charge"
+
+	// ModePassiveArbitrage: charge the battery from the cheapest
+	// available energy source — PV surplus when there's sun, grid
+	// during cheap night hours when not — for use BY THE HOUSE.
+	// Battery never exports to grid. Subsumes both self_consumption
+	// (summer behavior, PV always wins) and cheap_charge (winter
+	// behavior, grid wins during off-peak). The DP picks per slot.
+	//
+	// Uses the strict-self-consumption bias (battery prefers covering
+	// house load over letting the grid do it) and the mean-import
+	// terminal price (every stored kWh is worth a typical retail
+	// import that it'll later displace).
+	ModePassiveArbitrage Mode = "passive_arbitrage"
 
 	// ModeArbitrage: unrestricted. Charge from grid, discharge to grid —
 	// whatever minimizes total cost over the horizon, subject to SoC and
 	// power limits.
+	//
+	// "Active arbitrage" in the v0.82 UI rename. Same DP behavior;
+	// difference vs ModePassiveArbitrage is solely battery-export
+	// permission. Operator opts in here when they want full timing
+	// arbitrage on both directions.
 	ModeArbitrage Mode = "arbitrage"
 )
 
@@ -97,9 +124,53 @@ type Params struct {
 	// SoC grid
 	SoCLevels     int     // e.g. 41 (2.5% steps)
 	CapacityWh    float64 // aggregate battery capacity
-	SoCMinPct     float64 // e.g. 10
+	SoCMinPct     float64 // hardware/chemistry floor — DP feasibility check refuses to land below this
 	SoCMaxPct     float64 // e.g. 95
 	InitialSoCPct float64
+
+	// SoCSafetyFloorPct is the OPERATIONAL floor: a soft target above
+	// the hardware SoCMinPct. The DP applies a per-slot penalty when
+	// SoC ends a slot below this value AND that slot has PV surplus
+	// (PV magnitude > load), so the planner spends free PV refilling
+	// the battery early rather than deferring to peak-PV hours.
+	//
+	// The penalty is gated on PV-surplus so it cannot incentivise
+	// grid-charging in self-consumption mode — without surplus the
+	// planner sees no penalty and follows the normal "never import"
+	// contract.
+	//
+	// 0 = disabled (no operational floor — backward compat).
+	SoCSafetyFloorPct float64
+
+	// SafetyFloorPenaltyOreKwhHour is the per-(kWh of deficit × hour)
+	// cost added when SoC ends a PV-surplus slot below SoCSafetyFloorPct.
+	// 0 = disabled. Default 100 öre/kWh-hour: large enough to dominate
+	// typical spot export prices (5-200 öre/kWh) so the DP prefers
+	// charging from PV; small enough that the planner doesn't try to
+	// recover safety floor by manipulating downstream slots in
+	// economically expensive ways.
+	SafetyFloorPenaltyOreKwhHour float64
+
+	// PVChargeBonusOreKwh credits each kWh of battery charge that
+	// comes from live PV surplus. Operator preference: prefer using
+	// solar NOW (certain) over exporting cheap and refilling from
+	// grid LATER (forecast). Without this bias the DP is economically
+	// indifferent between the two when terminal credit is roughly
+	// equal — it would happily export 27 kWh at 10 öre/kWh and refill
+	// from a 30 öre/kWh cheap-night hour, losing ~10 % round-trip and
+	// dragging itself through forecast risk for no gain.
+	//
+	// Magnitude: ~30 öre/kWh by default. Large enough to dominate the
+	// typical PV-export spot price (5-30 öre/kWh) and the round-trip
+	// efficiency cost; small enough to leave the door open for
+	// genuine arbitrage (active_arbitrage paths still see spreads
+	// >100 öre/kWh).
+	//
+	// Only applies to ModePassiveArbitrage. 0 disables. The cost
+	// reduction is bounded by the live PV surplus this slot — DP
+	// can never claim a bonus larger than the surplus available, so
+	// the bias never converts to grid-charge incentive.
+	PVChargeBonusOreKwh float64
 
 	// Action grid (+charge, −discharge; site sign)
 	ActionLevels  int     // odd number preferred so 0 is represented (e.g. 21)
@@ -121,11 +192,20 @@ type Params struct {
 	//     export. Useful for operators with a fixed feed-in tariff.
 	//   - If ExportOrePerKWh == 0, each slot earns
 	//         slot.SpotOre + ExportBonusOreKwh − ExportFeeOreKwh
-	//     (clamped to zero) — per-slot pricing, which the DP needs to
-	//     see morning-vs-midday arbitrage opportunities.
-	ExportOrePerKWh    float64
-	ExportBonusOreKwh  float64
-	ExportFeeOreKwh    float64
+	//     i.e. raw spot pricing. The value can go negative when spot
+	//     is negative (Sweden + Nordic markets, increasingly common
+	//     during midday solar peaks). The DP treats a negative export
+	//     ore as a positive cost — exactly right when most retailers
+	//     pass the negative spot through to the customer.
+	//
+	//     ExportFloorOreKwh, if non-nil, clamps the per-slot export
+	//     ore at the given floor. Set to a pointer-to-zero for
+	//     retailers that cap export at 0 öre (no negative-spot
+	//     billing). nil = no clamp (default; matches the physics).
+	ExportOrePerKWh   float64
+	ExportBonusOreKwh float64
+	ExportFeeOreKwh   float64
+	ExportFloorOreKwh *float64
 
 	// Loadpoint extends the DP state space with one EV charge point.
 	// Nil (default) keeps the battery-only optimization path. See
@@ -142,16 +222,16 @@ type Action struct {
 	// and VAT). Surfaced so the UI can break the price bar into
 	// components (spot + grid tariff + VAT) — pedagogical view of
 	// where the kr/kWh actually goes. Mirrors Slot.SpotOre.
-	SpotOre     float64 `json:"spot_ore"`
-	PVW         float64 `json:"pv_w"`
-	LoadW       float64 `json:"load_w"`
-	BatteryW    float64 `json:"battery_w"`  // decision (site sign, AC terminals)
-	GridW       float64 `json:"grid_w"`     // resulting grid power
-	SoCPct      float64 `json:"soc_pct"`    // SoC at END of slot
-	CostOre     float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
-	Confidence  float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
-	Reason      string  `json:"reason"`     // short human-readable explanation
-	EMSMode     string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
+	SpotOre    float64 `json:"spot_ore"`
+	PVW        float64 `json:"pv_w"`
+	LoadW      float64 `json:"load_w"`
+	BatteryW   float64 `json:"battery_w"`  // decision (site sign, AC terminals)
+	GridW      float64 `json:"grid_w"`     // resulting grid power
+	SoCPct     float64 `json:"soc_pct"`    // SoC at END of slot
+	CostOre    float64 `json:"cost_ore"`   // this slot's cost (öre). Negative = revenue.
+	Confidence float64 `json:"confidence"` // 1.0 real, <1.0 forecasted (UI uses this to style)
+	Reason     string  `json:"reason"`     // short human-readable explanation
+	EMSMode    string  `json:"ems_mode"`   // effective EMS mode for this slot (set by SlotAt post-processing)
 
 	// PVLimitW is the recommended cap on PV inverter output (W, positive).
 	// 0 = no curtailment. Set by post-processing when exporting would
@@ -178,10 +258,12 @@ type Action struct {
 // load + pv each slot, priced with the same import/export model the DP
 // uses). SelfConsumptionOre comes from re-running Optimize with
 // ModeSelfConsumption — so it uses the real efficiency, power, and SoC
-// constraints, not a simplified simulation. FlatAvgOre is net
-// consumption priced at the horizon's mean — shows the value of
-// *timing* (shifting load to cheap hours), separate from the value of
-// having a battery.
+// constraints, not a simplified simulation. FlatAvgOre re-prices the
+// no-battery flows at horizon-mean prices (import and export each at
+// their own mean) — shows the value of *timing* (shifting load to
+// cheap hours), separate from the value of having a battery.
+// AvgPriceOre is the time-weighted mean import price over the horizon;
+// NetKWh is import minus export volume.
 type Baselines struct {
 	NoBatteryOre       float64 `json:"no_battery_ore"`
 	SelfConsumptionOre float64 `json:"self_consumption_ore"`
@@ -202,28 +284,35 @@ type Plan struct {
 	Baselines     *Baselines `json:"baselines,omitempty"`
 }
 
-// SlotGridCostOre returns the öre cost of flowing gridKWh across the
-// meter during a slot, using the same import/export model the DP loop
-// uses (see Optimize). Positive gridKWh = importing at consumer price;
-// negative = exporting, revenue = spot + bonus − fee (or a flat rate
-// if p.ExportOrePerKWh > 0). Clamped so a negative export price never
-// becomes a reward for not exporting.
+// SlotGridCostOre returns the raw öre cost of flowing gridKWh across the
+// meter during a slot. Positive gridKWh = importing at consumer price;
+// negative = exporting, revenue = spot + bonus − fee (or a flat rate if
+// p.ExportOrePerKWh > 0). Export revenue is allowed to go negative unless
+// p.ExportFloorOreKwh explicitly floors it.
 //
-// Shared between the DP and ComputeBaselines so they agree on the cost
-// model exactly — baselines must use the same formula as the plan
-// they're compared against, otherwise "savings" are misleading.
+// Shared by plan reporting, baselines, diagnostics reconstruction, and
+// curtailment. The DP decision path applies confidence blending on top of
+// this same raw export-price model.
 func SlotGridCostOre(slot Slot, gridKWh float64, p Params) float64 {
-	if gridKWh > 0 {
-		return slot.PriceOre * gridKWh
+	return gridcost.GridCostOre(slot.PriceOre, slot.SpotOre, gridKWh, exportPricingFromParams(p))
+}
+
+// SlotExportPriceOre returns the öre/kWh a slot's export earns, using the
+// same model SlotGridCostOre uses on the export side: a flat
+// ExportOrePerKWh wins if set, otherwise spot + bonus − fee, optionally
+// floored by ExportFloorOreKwh. Negative values are intentional: under
+// pass-through retail agreements, exporting during negative spot is a cost.
+func SlotExportPriceOre(slot Slot, p Params) float64 {
+	return gridcost.ExportPriceOre(slot.SpotOre, exportPricingFromParams(p))
+}
+
+func exportPricingFromParams(p Params) gridcost.ExportPricing {
+	return gridcost.ExportPricing{
+		BonusOreKwh: p.ExportBonusOreKwh,
+		FeeOreKwh:   p.ExportFeeOreKwh,
+		FlatOreKwh:  p.ExportOrePerKWh,
+		FloorOreKwh: p.ExportFloorOreKwh,
 	}
-	rawExport := p.ExportOrePerKWh
-	if rawExport <= 0 {
-		rawExport = slot.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
-		if rawExport < 0 {
-			rawExport = 0
-		}
-	}
-	return -rawExport * (-gridKWh)
 }
 
 // Optimize runs DP and returns the cost-minimizing plan.
@@ -275,23 +364,16 @@ func Optimize(slots []Slot, p Params) Plan {
 	effPrice := func(s Slot) float64 {
 		return s.Confidence*s.PriceOre + (1-s.Confidence)*meanPrice
 	}
-	// slotExportOre: per-slot export revenue. When Params.ExportOrePerKWh
-	// is set, it wins (fixed feed-in tariff). Otherwise each slot earns
-	// spot + bonus − fee, clamped at zero. Without this, the DP saw
-	// flat export revenue across the day and couldn't prefer "export
-	// at high-price morning, charge at cheap midday".
-	slotExportOre := func(s Slot) float64 {
-		if p.ExportOrePerKWh > 0 {
-			return p.ExportOrePerKWh
-		}
-		v := s.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
-		// Confidence blend on the same principle as import price.
-		mean := meanPrice * 0.7 // rough: spot ≈ 70% of consumer total
-		v = s.Confidence*v + (1-s.Confidence)*mean
-		if v < 0 {
-			v = 0
-		}
-		return v
+	// Export decision lens mirrors import price confidence handling, but
+	// starts from the same raw per-slot export model used everywhere else.
+	var sumExport float64
+	for _, s := range slots {
+		sumExport += SlotExportPriceOre(s, p)
+	}
+	meanExport := sumExport / float64(N)
+	effExportOre := func(s Slot) float64 {
+		raw := SlotExportPriceOre(s, p)
+		return s.Confidence*raw + (1-s.Confidence)*meanExport
 	}
 
 	// Action grid spans −MaxDischargeW … +MaxChargeW. Forcing an odd
@@ -426,6 +508,92 @@ func Optimize(slots []Slot, p Params) Plan {
 						// GridW = load + PV + battery + EV.
 						gridW := slot.LoadW + slot.PVW + battW + evW
 
+						// Surplus-only EV: forbid any non-zero EV
+						// action that turns the site into a net
+						// importer. evW = 0 is always feasible (the
+						// constraint short-circuits), so the DP
+						// degrades gracefully on low-PV days — the
+						// deadline shortfall penalty then makes the
+						// "miss target" outcome expensive but legal.
+						// 50 W epsilon absorbs floating-point dither
+						// from the discretized PV/load grid so the
+						// constraint isn't artificially tight against
+						// an action that's effectively zero net.
+						if evActive && lp.SurplusOnly && evW > 0 && gridW > 50 {
+							continue
+						}
+
+						// Surplus-only EV: the battery must not steal
+						// PV that the EV could use, and must not
+						// grid-charge for arbitrage while the EV is
+						// connected. Without this rule the planner
+						// "launders" cheap grid through the battery:
+						// import in slot N to charge battery, discharge
+						// to EV in slot N+1 — gridW in N+1 looks ~0,
+						// the EV-only constraint above doesn't catch
+						// it, and the EV ends up grid-fed at retail
+						// import price + roundtrip loss. Forbidding
+						// (battW > 0 AND gridW > 50) when a surplus-
+						// only LP is plugged in closes that loophole.
+						// Battery charging from genuine PV surplus
+						// (gridW ≤ 50) stays allowed — that just
+						// means PV exceeds load+EV+battery and the
+						// battery soaks up what would otherwise
+						// export. Discharge (battW < 0) is always
+						// allowed (peak shaving, fuse guard, self-
+						// consumption when EV not drawing).
+						if evActive && lp.SurplusOnly && battW > 0 && gridW > 50 {
+							continue
+						}
+
+						// Don't simultaneously discharge the home battery
+						// for grid export AND charge the EV. Either the
+						// battery is being sold for arbitrage profit (and
+						// EV charging would erode the export), or it's a
+						// roundtrip-laundering loop (battery → AC → EV at
+						// 2× round-trip loss vs. just charging the EV
+						// from grid in a different slot). Letting both
+						// happen at once is strictly worse than picking a
+						// slot that does one or the other. The deadline
+						// shortfall penalty handles "but the EV needs to
+						// charge eventually" — the DP will move EV
+						// charging to a slot where battery isn't
+						// exporting. 50 W epsilon mirrors the surplus-
+						// only constraints above.
+						if evActive && evW > 0 && battW < 0 && gridW < -50 {
+							continue
+						}
+
+						// NoBatteryToEV: operator has BatteryCoversEV=false
+						// (the default), meaning the home battery's energy
+						// is allowed to cover house load but never the EV.
+						// Reject any allocation where the battery's
+						// discharge exceeds the PV-residual house demand
+						// — i.e. where, by conservation, some of the
+						// battery's energy must have flowed into the EV.
+						// houseResidualW = max(0, load - pv_gen) is how
+						// much house demand is left after PV has covered
+						// what it can; the battery can supply up to that
+						// much and still be claimed as "house only".
+						// Anything beyond it must go to EV (illegal here)
+						// or grid (covered by the rule above).
+						// Matches the canonical runtime safety clamp in
+						// control/dispatch.go (search "CANONICAL
+						// \"battery may not feed EV\"") — keep them
+						// aligned. 50 W epsilon mirrors the surrounding
+						// constraints. TODO(refactor): the
+						// houseResidualW math + feasibility predicate
+						// is duplicated; extract a shared helper.
+						if evActive && lp.NoBatteryToEV && evW > 0 && battW < 0 {
+							houseResidualW := slot.LoadW + slot.PVW // PVW is negative
+							if houseResidualW < 0 {
+								houseResidualW = 0
+							}
+							if (-battW) > houseResidualW+50 {
+								continue
+							}
+						}
+
 						// Mode-based feasibility. Baseline includes
 						// EV so the mode check asks "is the extra
 						// battery action pulling the grid further
@@ -445,7 +613,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						if gridKWh > 0 {
 							cost = effPrice(slot) * gridKWh
 						} else {
-							cost = -slotExportOre(slot) * (-gridKWh)
+							cost = -effExportOre(slot) * (-gridKWh)
 						}
 
 						// Strict self-consumption bias. When the mode
@@ -481,11 +649,56 @@ func Optimize(slots []Slot, p Params) Plan {
 						// check above (line 357), so the bias can only
 						// push discharge *toward* the floor, never
 						// past it.
-						if p.Mode == ModeSelfConsumption {
+						if p.Mode == ModeSelfConsumption || p.Mode == ModePassiveArbitrage {
 							houseGridW := slot.LoadW + slot.PVW + battW
 							if houseGridW > 0 {
 								houseKWh := houseGridW * dtH / 1000.0
 								cost += 2.0 * effPrice(slot) * houseKWh
+							}
+						}
+
+						// Safety-floor penalty: when SoC ends this slot
+						// below the operational floor AND PV surplus is
+						// available, charge it up. Gated on surplus so
+						// the penalty cannot ever motivate grid-charging
+						// — without surplus the DP sees no penalty and
+						// follows the normal "never import" contract.
+						//
+						// Operator rationale (2026-05-25): the hardware
+						// SoCMinPct is the chemistry safety floor; the
+						// operational floor SoCSafetyFloorPct is the
+						// buffer against forecast risk (cloud event,
+						// load surprise). DP would otherwise wait for
+						// peak-PV slots to refill, leaving the battery
+						// at hardware floor across early-day surplus
+						// hours.
+						if p.SoCSafetyFloorPct > 0 && p.SafetyFloorPenaltyOreKwhHour > 0 &&
+							battSoc2 < p.SoCSafetyFloorPct {
+							pvSurplusW := -slot.PVW - slot.LoadW
+							if pvSurplusW > 0 {
+								deficitPct := p.SoCSafetyFloorPct - battSoc2
+								deficitKwh := deficitPct / 100.0 * p.CapacityWh / 1000.0
+								cost += deficitKwh * dtH * p.SafetyFloorPenaltyOreKwhHour
+							}
+						}
+
+						// PV-first bias: when this slot has PV surplus
+						// AND the action charges the battery, credit a
+						// bonus for the kWh that came from the surplus.
+						// Operator preference: certain PV now beats
+						// forecast grid later, even if the DP sees them
+						// as economically equivalent. The bonus is
+						// bounded by the live surplus so it never
+						// incentivises grid-charging.
+						if p.Mode == ModePassiveArbitrage && p.PVChargeBonusOreKwh > 0 && battW > 0 {
+							pvSurplusW := -slot.PVW - slot.LoadW
+							if pvSurplusW > 0 {
+								chargeFromPVW := battW
+								if chargeFromPVW > pvSurplusW {
+									chargeFromPVW = pvSurplusW
+								}
+								chargeFromPVkWh := chargeFromPVW * dtH / 1000.0
+								cost -= p.PVChargeBonusOreKwh * chargeFromPVkWh
 							}
 						}
 
@@ -643,19 +856,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		// Report the ACTUAL expected cost using the raw (un-blended)
 		// prices so the UI summary reflects "what we'd actually pay
 		// if prices hold". Blending is a decision lens only.
-		var cost float64
-		if gridKWh > 0 {
-			cost = slot.PriceOre * gridKWh
-		} else {
-			rawExport := p.ExportOrePerKWh
-			if rawExport <= 0 {
-				rawExport = slot.SpotOre + p.ExportBonusOreKwh - p.ExportFeeOreKwh
-				if rawExport < 0 {
-					rawExport = 0
-				}
-			}
-			cost = -rawExport * (-gridKWh)
-		}
+		cost := SlotGridCostOre(slot, gridKWh, p)
 		totalCost += cost
 		a := Action{
 			SlotStartMs: slot.StartMs,
@@ -698,7 +899,7 @@ func Optimize(slots []Slot, p Params) Plan {
 		}
 	}
 	plan.TotalCostOre = totalCost
-	annotateCurtailment(&plan, p.ExportOrePerKWh)
+	annotateCurtailment(&plan, p)
 	return plan
 }
 
@@ -715,16 +916,23 @@ func Optimize(slots []Slot, p Params) Plan {
 // advertises PV-curtailment support. The CostOre doesn't change — the
 // DP already priced this slot as-is; curtailment is a mitigation
 // applied at dispatch time.
-func annotateCurtailment(plan *Plan, exportOrePerKWh float64) {
-	if exportOrePerKWh > 0 {
-		// Positive export price → exporting is always better than
-		// curtailing. Nothing to do.
-		return
-	}
+func annotateCurtailment(plan *Plan, p Params) {
 	for i := range plan.Actions {
 		a := &plan.Actions[i]
 		if a.GridW >= 0 {
 			continue // importing, not exporting
+		}
+		slot := Slot{
+			StartMs:    a.SlotStartMs,
+			LenMin:     a.SlotLenMin,
+			PriceOre:   a.PriceOre,
+			SpotOre:    a.SpotOre,
+			PVW:        a.PVW,
+			LoadW:      a.LoadW,
+			Confidence: a.Confidence,
+		}
+		if SlotExportPriceOre(slot, p) > 0 {
+			continue // profitable export; curtailing would discard revenue
 		}
 		// Slot is exporting. If we can't earn on export, cap PV to
 		// what's being consumed locally + stored.
@@ -755,24 +963,40 @@ func annotateCurtailment(plan *Plan, exportOrePerKWh float64) {
 //	actW          = battery command (+ charge, − discharge)
 func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 	const eps = 1e-6
+	// modeTolW absorbs action-grid discretization at the boundary so a
+	// 50 W overshoot doesn't disqualify an otherwise-correct action.
+	// Without it, ActionLevels=41 (450 W step) frequently can't find a
+	// legal self_consumption action when |baselineGridW| isn't a multiple
+	// of the action step — DP picks idle and the operator sees PV
+	// exporting / grid importing instead of the battery covering. The
+	// 50 W matches the surplus-only / no-battery-to-EV checks elsewhere
+	// in the DP and the dispatch-side reserve epsilon, keeping the
+	// tolerance budget consistent across the planner.
+	const modeTolW = 50.0
 	switch m {
 	case ModeSelfConsumption:
 		// Battery must only move the grid toward zero, never past it:
-		//   if baseline > 0 (import): grid must be in [0, baseline]
-		//   if baseline < 0 (export): grid must be in [baseline, 0]
-		//   if baseline == 0: battery must be 0
+		//   if baseline > 0 (import): grid must be in [-tol, baseline+tol]
+		//   if baseline < 0 (export): grid must be in [baseline-tol, +tol]
+		//   if baseline == 0: battery must be 0 (± tol)
 		if baselineGridW > eps {
-			return gridW >= -eps && gridW <= baselineGridW+eps
+			return gridW >= -modeTolW && gridW <= baselineGridW+modeTolW
 		}
 		if baselineGridW < -eps {
-			return gridW <= eps && gridW >= baselineGridW-eps
+			return gridW <= modeTolW && gridW >= baselineGridW-modeTolW
 		}
-		return math.Abs(actW) < eps
-	case ModeCheapCharge:
+		return math.Abs(actW) < modeTolW
+	case ModeCheapCharge, ModePassiveArbitrage:
 		// Allow charging from grid (any actW ≥ 0), but never discharge past
 		// the local load: i.e. gridW must stay ≥ 0 when we'd otherwise be
 		// importing, OR ≥ baseline when we'd otherwise be exporting.
 		// Simpler rule: no battery-driven export, i.e. gridW ≥ min(0, baseline).
+		//
+		// ModePassiveArbitrage shares this contract with ModeCheapCharge —
+		// "charge from cheapest, never export from battery". The two
+		// constants exist for back-compat during the v0.82 deprecation
+		// window; semantically the merged mode IS cheap_charge plus the
+		// strict-SC house-import bias (handled in the DP cost above).
 		minGrid := 0.0
 		if baselineGridW < 0 {
 			minGrid = baselineGridW

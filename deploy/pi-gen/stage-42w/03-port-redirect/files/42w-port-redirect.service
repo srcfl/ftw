@@ -1,0 +1,20 @@
+[Unit]
+Description=42w port 80 -> 8080 redirect (nftables)
+Documentation=https://github.com/frahlg/forty-two-watts/blob/master/docs/rpi-image.md
+# Land before the network is generally available so the redirect is
+# in place when Docker brings the dashboard up. After local-fs so
+# /etc/42w-port-redirect.nft exists.
+After=local-fs.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/42w-port-redirect.nft
+# Idempotent — the rules file flushes the 42w_redirect table at the
+# top before re-installing, so a manual `systemctl restart` doesn't
+# stack duplicates.
+ExecReload=/usr/sbin/nft -f /etc/42w-port-redirect.nft
+
+[Install]
+WantedBy=multi-user.target

@@ -16,11 +16,19 @@ package mpc
 //     computed by the DP's own per-slot loop, so it's directly
 //     comparable to plan.TotalCostOre.
 //
-//   - FlatAvgOre: total net consumption × the horizon's mean import
-//     price. Shows the value of *when* energy is moved — if the
-//     optimizer saves more vs FlatAvg than vs NoBattery, most of the
-//     win is timing (shifting load into cheap hours) rather than PV
+//   - FlatAvgOre: no-battery import volume × horizon mean import price,
+//     minus no-battery export volume × horizon mean export revenue.
+//     Shows the value of *when* energy is moved — if the optimizer
+//     saves more vs FlatAvg than vs NoBattery, most of the win is
+//     timing (shifting load into cheap hours) rather than PV
 //     self-consumption. A diagnostic, not an operational baseline.
+//
+//     Import and export are priced separately (and at their respective
+//     means) because the consumer total PriceOre includes grid tariffs
+//     that aren't earned on export. Netting energy at a single mean
+//     would credit each exported kWh at the import-tariff price — and
+//     so any horizon with even partial export would show an artificially
+//     low FlatAvg, hiding timing value behind the asymmetry.
 //
 // Cheap to call — the SC re-optimize is one extra Optimize pass
 // (~10ms for the default 193 slots × 51 SoC × 21 actions).
@@ -31,26 +39,38 @@ func ComputeBaselines(slots []Slot, p Params) Baselines {
 	}
 
 	// ---- No-battery baseline + flat-average inputs ----
-	// Both can be computed in one pass over the slots.
-	var netKWh float64
-	var priceWtMin float64
+	// One pass: integrate no-battery grid flow per slot, bucket into
+	// import / export volumes, and accumulate time-weighted means of
+	// the import price and the export revenue (using the same per-slot
+	// formula SlotGridCostOre uses). FlatAvgOre then re-scores the
+	// no-battery flows at those flat means.
+	var importKWh, exportKWh float64
+	var importPriceWtMin, exportPriceWtMin float64
 	var lenMinSum float64
 	for _, s := range slots {
 		dt := float64(s.LenMin) / 60.0
 		gridKWh := (s.LoadW + s.PVW) * dt / 1000.0
 		b.NoBatteryOre += SlotGridCostOre(s, gridKWh, p)
-		netKWh += gridKWh
-		priceWtMin += s.PriceOre * float64(s.LenMin)
-		lenMinSum += float64(s.LenMin)
+		if gridKWh > 0 {
+			importKWh += gridKWh
+		} else {
+			exportKWh += -gridKWh
+		}
+		lm := float64(s.LenMin)
+		importPriceWtMin += s.PriceOre * lm
+		exportPriceWtMin += SlotExportPriceOre(s, p) * lm
+		lenMinSum += lm
 	}
+	var avgImportOre, avgExportOre float64
 	if lenMinSum > 0 {
-		b.AvgPriceOre = priceWtMin / lenMinSum
+		avgImportOre = importPriceWtMin / lenMinSum
+		avgExportOre = exportPriceWtMin / lenMinSum
 	}
-	b.NetKWh = netKWh
-	// Flat-avg: charge the net consumption at the mean price. If net is
-	// negative (export-dominated horizon), the sign is kept — consistent
-	// with the NoBattery cost model where export shows up as negative.
-	b.FlatAvgOre = netKWh * b.AvgPriceOre
+	// AvgPriceOre keeps its meaning as the horizon's mean import price —
+	// that's what the planner UI's "vs flat avg" tooltip references.
+	b.AvgPriceOre = avgImportOre
+	b.NetKWh = importKWh - exportKWh
+	b.FlatAvgOre = importKWh*avgImportOre - exportKWh*avgExportOre
 
 	// ---- Self-consumption baseline ----
 	// Re-run Optimize with the SC policy. Drop the loadpoint from the

@@ -30,7 +30,7 @@
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=lp2">
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
   <link rel="stylesheet" href="/next.css?v=next2">
@@ -74,7 +74,10 @@
       <button data-view="diagnose" class="drawer-nav-btn" data-menu-label="Diagnose">&#9202;</button>
       <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
-      <button id="ui-mode-toggle" class="btn-link" title="Show advanced controls + diagnostics">Advanced</button>
+      <!-- Advanced toggle moved below the Plan chart so it's visually
+           colocated with the controls + diagnostics it reveals (twins,
+           drivers, models, manual mode buttons). The button still
+           lives in the DOM as #ui-mode-toggle, just rendered there. -->
       <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
@@ -88,11 +91,12 @@
     <div class="modal-content">
       <div class="modal-header">
         <h2>Settings</h2>
-        <button id="settings-close" class="modal-close">×</button>
+        <button id="settings-close" class="modal-close" aria-label="Close settings">×</button>
       </div>
       <div class="modal-tabs" id="settings-tabs">
         <button data-tab="control" class="active">Control</button>
         <button data-tab="devices">Devices</button>
+        <button data-tab="loadpoints">Loadpoints</button>
         <button data-tab="price">Price</button>
         <button data-tab="weather">Weather</button>
         <button data-tab="batteries">Batteries</button>
@@ -107,6 +111,35 @@
       <div class="modal-footer">
         <span id="settings-status" class="settings-status"></span>
         <button id="settings-save" class="btn-send">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Restart-required Dialog -->
+  <!--
+    Shown after a Settings save when the server reports that one or more
+    config sections can't be hot-reloaded (state.path, api.port, …). The
+    full list of "still needs a restart" reasons is the diminishing tail
+    in go/internal/config/restart_required.go — the long-term goal is
+    that this modal essentially never fires.
+  -->
+  <div id="restart-modal" class="modal hidden">
+    <div class="modal-content" style="max-width:480px">
+      <div class="modal-header">
+        <h2>Restart required</h2>
+      </div>
+      <div class="modal-body">
+        <p style="margin-top:0">Saved. Some changes can't be applied while the service is running:</p>
+        <ul id="restart-reasons" style="margin:8px 0 16px 18px;color:var(--text);font-size:0.9rem"></ul>
+        <p style="color:var(--text-dim);font-size:0.85rem;margin:0">Restart now to pick them up — the service comes back automatically (typically &lt;10 s).</p>
+        <div id="restart-progress" class="hidden" style="margin-top:14px;color:var(--text-dim);font-size:0.85rem">
+          <span class="spinner" aria-hidden="true"></span>
+          <span id="restart-progress-text">Restarting…</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="restart-later" class="btn-ghost">Restart later</button>
+        <button id="restart-now" class="btn-send">Restart now</button>
       </div>
     </div>
   </div>
@@ -134,7 +167,7 @@
         <div class="card-sub">gen</div>
       </div>
       <div class="card summary-card ftw-hide-in-hero" id="card-bat">
-        <div class="card-label">Battery</div>
+        <div class="card-label">Battery <span class="card-target" id="bat-target-display"></span></div>
         <div class="card-value" id="bat-w">-- W</div>
         <div class="card-sub" id="bat-dir">--</div>
       </div>
@@ -142,6 +175,15 @@
         <div class="card-label">Load</div>
         <div class="card-value val-neutral" id="load-w">-- W</div>
         <div class="card-sub">house</div>
+      </div>
+      <!-- EV tile — mirrors the energy-flow's EV planet so tile-mode
+           operators can reach the EV charging modal too. Click opens
+           #ev-modal (same modal the planet click opens). When no EV
+           is connected the value reads "—" and the click is a no-op. -->
+      <div class="card summary-card ftw-hide-in-hero" id="card-ev">
+        <div class="card-label">EV</div>
+        <div class="card-value val-neutral" id="card-ev-w">-- W</div>
+        <div class="card-sub" id="card-ev-sub">charger</div>
       </div>
     </section>
 
@@ -154,6 +196,15 @@
         <div class="fuse-phase-boxes" id="fuse-phases"></div>
         <div class="fuse-bar" id="fuse-bar-fallback"><div class="fuse-fill" id="fuse-fill"></div></div>
         <div class="card-value fuse-fallback-value" id="fuse-use">-- A</div>
+      </div>
+    </section>
+
+    <!-- Electricity prices — full-width chart of upcoming spot prices
+         with a VAT-on/off toggle, peak/low markers, and a hover
+         tooltip. Self-fetching: hits /api/prices on connect. -->
+    <section class="prices-row">
+      <div class="card prices-group">
+        <ftw-price-chart></ftw-price-chart>
       </div>
     </section>
 
@@ -203,82 +254,56 @@
       <div class="card history-group">
         <div class="history-head">
           <div class="card-label">History in numbers</div>
-          <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
-            <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
-            <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+          <div class="history-toggles">
+            <div class="history-toggle" id="history-view-toggle" role="tablist" data-active="bars">
+              <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
+              <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
+            </div>
+            <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
+              <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
+              <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+            </div>
           </div>
         </div>
-        <div class="history-tiles">
+        <div class="history-tiles" id="history-tiles">
           <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="pv"     label="Produced" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
           <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
         </div>
+        <div class="history-cake hidden" id="history-cake">
+          <ftw-energy-cake id="history-cake-el"></ftw-energy-cake>
+        </div>
       </div>
     </section>
 
-    <!-- Controls — two-tier: primary strategy + manual advanced -->
-    <section class="controls-row">
-      <div class="card control-card control-strategy">
-        <div class="card-label">Strategy</div>
-        <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
-          <button data-mode="planner_self" title="Smart self-consumption with forecast-aware planning — never grid-charge, never export via battery">Smart self-consumption (planner)</button>
-          <button data-mode="planner_cheap" title="Plan charges batteries when grid prices are low (still never exports via battery)">Cheap charging</button>
-          <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours">Arbitrage</button>
-        </div>
-        <div class="strategy-hint" id="strategy-hint"></div>
-        <div class="mode-advanced-toggle advanced-only">
-          <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
-        </div>
-        <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none">
-          <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
-          <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self (manual)</button>
-          <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
-          <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
-        </div>
-      </div>
-      <div class="card control-card advanced-only">
-        <div class="card-label" id="target-label">Grid target</div>
-        <div class="slider-group-compact">
-          <input type="range" id="grid-target-slider" min="-5000" max="5000" step="50" value="0">
-          <span id="grid-target-value" class="slider-current">0 W</span>
-          <button id="grid-target-send" class="btn-send">Set</button>
-        </div>
-        <div class="card-sub card-hint" id="grid-target-hint">Planner controls this when a strategy is active.</div>
-      </div>
-      <div class="card control-card advanced-only">
-        <div class="card-label">Peak limit</div>
-        <div class="slider-group-compact">
-          <input type="range" id="peak-limit-slider" min="0" max="11000" step="100" value="5000">
-          <span id="peak-limit-value" class="slider-current">5000 W</span>
-          <button id="peak-limit-send" class="btn-send">Set</button>
-        </div>
-      </div>
-      <!-- EV charging slider removed — ev_charging_w is now set
-           automatically by the Easee Cloud driver (or any DerEV driver).
-           The manual /api/ev_charging endpoint stays as a debug override. -->
-
-      <!-- Battery-covers-EV toggle. When ON, self-consumption lets the
-           home battery discharge into the EV — useful when grid prices
-           are high now and cheap PV/off-peak is expected later. OFF
-           (default) keeps the battery from draining to feed the car. -->
-      <div class="card control-card">
-        <div class="card-label">Let battery cover EV</div>
-        <label class="ftw-toggle">
-          <input type="checkbox" id="battery-covers-ev-toggle">
-          <span class="ftw-toggle-slider"></span>
-          <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
-        </label>
-        <div class="card-sub card-hint">On = home battery discharges into the EV (e.g. expensive grid now, cheap solar later). Off = battery stays out of EV charging.</div>
-      </div>
+    <!-- Savings vs flat-rate — historical counterpart to the plan view's
+         "vs flat avg price" badge. Self-contained: own toggle, own fetch,
+         own data-loaded paint cycle. Empty-state when no price provider
+         is configured. -->
+    <section class="savings-row">
+      <ftw-savings-card default-range="week"></ftw-savings-card>
     </section>
+
+    <!-- Strategy now lives inside the Plan card header (below) — it's
+         the operator-facing control that drives plan behaviour, so
+         visually attaching it to the Plan removes the standalone
+         "controls row" that felt disconnected from what it controlled.
+         Grid-side knobs (peak limit, grid target) live inside the Grid
+         bubble modal — click the GRID planet in the energy-flow hero.
+         EV-side knob ("Let battery cover EV") lives inside the EV
+         bubble modal. -->
+
 
     <!-- Live power + plan side-by-side -->
     <section id="live-plan-row" class="live-plan-row">
       <!-- Power Chart (left) -->
       <section id="chart-section">
         <div class="chart-header">
-          <h2 id="chart-title">Live</h2>
+          <div class="chart-title-row">
+            <h2 id="chart-title">Live</h2>
+            <span id="grid-slot-badge" class="grid-slot-badge"></span>
+          </div>
           <div class="chart-controls">
             <div class="range-buttons" id="range-buttons">
               <button data-range="5m" class="active">5m</button>
@@ -289,6 +314,34 @@
             </div>
           </div>
         </div>
+
+        <!-- Live stats strip — mirrors the Plan card's summary line so
+             the two cards have matching information density. Five
+             current values, mono-typed for at-a-glance scanning. JS
+             populates these on every /api/status poll. -->
+        <div class="live-stats" id="live-stats">
+          <div class="live-stat" data-key="grid">
+            <span class="live-stat-label">GRID</span>
+            <span class="live-stat-value" id="live-stat-grid">—</span>
+          </div>
+          <div class="live-stat" data-key="pv">
+            <span class="live-stat-label">PV</span>
+            <span class="live-stat-value" id="live-stat-pv">—</span>
+          </div>
+          <div class="live-stat" data-key="load">
+            <span class="live-stat-label">LOAD</span>
+            <span class="live-stat-value" id="live-stat-load">—</span>
+          </div>
+          <div class="live-stat" data-key="bat">
+            <span class="live-stat-label">BATTERY</span>
+            <span class="live-stat-value" id="live-stat-bat">—</span>
+          </div>
+          <div class="live-stat" data-key="soc">
+            <span class="live-stat-label">SoC</span>
+            <span class="live-stat-value" id="live-stat-soc">—</span>
+          </div>
+        </div>
+
         <div class="chart-container">
           <canvas id="power-chart" width="800" height="260"></canvas>
         </div>
@@ -301,6 +354,20 @@
           <!-- Battery driver legend items are appended dynamically by app.js
                as each battery-capable driver appears in /api/status. -->
         </div>
+
+        <!-- 24h battery + SoC stack — mirrors the Plan card's lower
+             charts. Battery-action bars show the last 24 h of
+             actual charge/discharge; SoC strip plots the trajectory.
+             Renders from /api/history every poll. Self-contained
+             canvas so it can be hidden / collapsed without touching
+             the live power chart's render path. -->
+        <div class="live-history">
+          <div class="live-history-label">LAST 24 H · BATTERY + SoC</div>
+          <div class="chart-container chart-container-compact">
+            <canvas id="live-history-chart" width="800" height="140"></canvas>
+          </div>
+        </div>
+
         <!-- Hidden view toggle kept for app.js compatibility -->
         <div id="view-buttons" style="display:none">
           <button data-view="power" class="active"></button>
@@ -311,10 +378,48 @@
       <!-- MPC Plan (right) -->
       <section id="plan-section">
         <div class="chart-header">
-          <h2>Plan</h2>
+          <div class="plan-title">
+            <h2>Plan</h2>
+            <button id="plan-help-btn" class="plan-help-btn" type="button"
+                    aria-label="Explain the numbers shown in the Plan section"
+                    title="What do these numbers mean?">?</button>
+          </div>
           <div class="plan-actions">
             <span id="plan-summary" class="plan-summary">…</span>
+            <!-- Horizon toggle. Mirrors the price chart's 3-position
+                 pill so operators have a consistent affordance across
+                 both charts. Today / +Tomorrow / Tomorrow. Persisted
+                 to localStorage in plan.js. -->
+            <div id="plan-horizon" class="toggle plan-horizon" role="tablist" data-horizon="all">
+              <button type="button" data-horizon="today">Today</button>
+              <button type="button" data-horizon="all" class="active" aria-selected="true">+ Tomorrow</button>
+              <button type="button" data-horizon="tomorrow">Tomorrow</button>
+            </div>
             <button id="plan-replan" class="btn-send" title="Force a fresh plan">Replan</button>
+          </div>
+        </div>
+
+        <!-- Strategy — the operator-facing knob that drives plan
+             behaviour. Lives inside the Plan card because that's what
+             it controls; the standalone "controls row" above
+             previously felt disconnected (operator note 2026-05-25).
+             Two-tier: planner strategies first, manual fallbacks
+             behind a "Manual…" toggle. -->
+        <div class="plan-strategy">
+          <span class="card-label plan-strategy-label">Strategy</span>
+          <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary">
+            <button data-mode="planner_passive_arbitrage" title="Charge from the cheapest available source (PV when sunny, grid during cheap hours). Never exports from battery.">Passive arbitrage</button>
+            <button data-mode="planner_arbitrage" title="Full price arbitrage — charge cheap, discharge into expensive hours (battery may export to grid).">Active arbitrage</button>
+          </div>
+          <div class="strategy-hint" id="strategy-hint"></div>
+          <div class="mode-advanced-toggle advanced-only">
+            <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
+          </div>
+          <div class="mode-buttons mode-buttons-advanced advanced-only" id="mode-buttons" style="display:none">
+            <button data-mode="idle" title="Do nothing — no dispatch">Idle</button>
+            <button data-mode="self_consumption" title="Manual self-consumption — PI chases grid_target, no plan">Self (manual)</button>
+            <button data-mode="peak_shaving" title="Limit import to peak-limit">Peak</button>
+            <button data-mode="charge" title="Force full charge regardless of price">Charge</button>
           </div>
         </div>
         <p class="plan-help">
@@ -341,6 +446,16 @@
       </section>
     </section>
 
+    <!-- Advanced-mode toggle row. Sits between the Plan chart and the
+         advanced-only sections so the affordance lands right where the
+         extra UI surfaces appear. Same id as the previously-header
+         button so the existing click handler in next-app.js still
+         binds; the previous .btn-link styling stays intact. -->
+    <section id="ui-mode-row" class="ui-mode-row">
+      <button id="ui-mode-toggle" class="btn-link"
+              title="Show advanced controls + diagnostics">Advanced</button>
+    </section>
+
     <!-- ML twin diagnostics — PV / load / price forecasters -->
     <section id="twins-section" class="advanced-only">
       <div class="section-header">
@@ -350,15 +465,22 @@
       <div class="twins-grid" id="twins-grid"></div>
     </section>
 
+    <!-- Loadpoints — EV charger configuration + planned schedule -->
+    <section id="loadpoints-section" class="advanced-only">
+      <div class="section-header">
+        <h2>Loadpoints</h2>
+        <span id="loadpoints-subtitle" class="plan-summary"></span>
+      </div>
+      <div id="loadpoints-grid"></div>
+    </section>
+
     <!-- Drivers — compact -->
     <section id="drivers-section" class="advanced-only">
       <div class="drivers-grid" id="drivers-grid"></div>
     </section>
 
-    <!-- Battery Models — now embedded inline in each driver card (see
-         renderDrivers + models.js renderInlineModel). This section keeps
-         the Self-tune button accessible and acts as a fallback container
-         when a model is reported for a driver we don't render. -->
+    <!-- Calibration — model internals stay hidden from normal driver cards;
+         this keeps the manual self-tune entry point available. -->
     <section id="models-section" class="advanced-only">
       <div class="section-header">
         <h2 style="font-size:0.9rem;color:var(--text-dim)">Calibration</h2>
@@ -366,6 +488,11 @@
       </div>
       <div class="models-grid" id="models-grid"></div>
     </section>
+
+    <!-- Pair session launcher — footer-mounted entry point for the rare
+         pair-session feature. Idle: small dotted link. Active: accent
+         chip with remaining time. Click opens <ftw-pair-card> in a modal. -->
+    <ftw-pair-launcher></ftw-pair-launcher>
   </main>
 
   <!-- Diagnose view — time-travel through persisted planner snapshots -->
@@ -409,7 +536,7 @@
     <div class="modal-content" style="max-width:520px">
       <div class="modal-header">
         <h2>Battery self-tune</h2>
-        <button id="self-tune-close" class="modal-close">×</button>
+        <button id="self-tune-close" class="modal-close" aria-label="Close battery self-tune">×</button>
       </div>
       <div class="modal-body" id="self-tune-body">
         <!-- Rendered by JS: battery checklist OR live progress OR before/after diff -->
@@ -424,15 +551,93 @@
 
   <footer>
     <span id="refresh-indicator" class="refresh-dot" title="Auto-refresh active">&#9679;</span>
+    <span class="refresh-label">Auto-refresh active</span>
     <span id="last-update">Last update: --</span>
     <span class="footer-tagline">Don't Panic 🐬</span>
   </footer>
+
+  <!-- Battery manual-hold popup — opened from the battery planet click. -->
+  <ftw-battery-control id="battery-control"></ftw-battery-control>
+
+  <!-- PV curtail manual-hold popup — opened from the solar planet click,
+       only meaningful when a PV driver advertises pv-curtail support. -->
+  <ftw-pv-control id="pv-control"></ftw-pv-control>
+
+  <!-- Plan numbers — what they mean -->
+  <ftw-modal id="plan-help-modal" style="--ftw-modal-max-width:560px">
+    <span slot="title">What do these numbers mean?</span>
+    <div class="plan-help-body">
+      <p>
+        Everything the planner shows is in two units:
+        <b>öre/kWh</b> for prices (1 SEK = 100 öre) and
+        <b>SEK</b> for whole-horizon totals.
+      </p>
+
+      <h3>Header line</h3>
+      <ul>
+        <li><b>start SoC</b> — battery state of charge right now. The plan starts from this point.</li>
+        <li>
+          <b>expected cost / earnings</b> — total grid spend over the
+          full horizon (e.g. <code>48h</code>) at the planner's chosen schedule,
+          using real spot prices, grid tariff and VAT.
+          A <em>negative</em> number means the plan expects to <em>earn</em>
+          money (net export over the horizon).
+        </li>
+        <li><b>replanned … ago</b> — time since the last optimisation pass; the reason it ran is shown next to it.</li>
+      </ul>
+
+      <h3>Price bars (top of the chart)</h3>
+      <p>Each bar is one 15-minute slot, stacked as the three pieces of your real consumer price:</p>
+      <ul>
+        <li>
+          <span class="legend-color" style="background:rgba(148,163,184,0.72);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <b>spot</b> — raw Nord Pool wholesale price. Colours green / slate / red by tercile across the horizon (cheap / mid / expensive). This is the part the planner actually optimises against.
+        </li>
+        <li>
+          <span class="legend-color" style="background:rgba(100,116,139,0.45);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <b>grid tariff</b> — fixed transport / network fee from the grid operator (öre/kWh). Same value every slot.
+        </li>
+        <li>
+          <span class="legend-color" style="background:rgba(100,116,139,0.25);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <b>VAT</b> — moms applied to spot + grid tariff. Set in <em>Settings → Price</em>.
+        </li>
+      </ul>
+      <p class="plan-help-note">
+        Hover any bar for the exact split (spot / grid / VAT) plus PV, load, battery and SoC for that slot.
+      </p>
+
+      <h3>48 h outlook badges</h3>
+      <p><b>Projections, not realised savings.</b> Each badge compares the plan's expected cost over the next 48 h against an alternative scenario, using the same cost model. For what the system <em>actually</em> saved, look at the Savings card above the chart.</p>
+      <ul>
+        <li><b>vs no battery</b> — what this horizon would cost with no battery at all (grid flow = load + PV each slot, priced normally). Captures the combined value of battery + planner.</li>
+        <li><b>vs self-consumption</b> — what plain self-consumption mode would cost over the same forecast (same battery, same constraints, no arbitrage). Captures the extra value the planner adds on top of passive SC.</li>
+        <li><b>vs flat avg price</b> — what no-battery import would cost if every kWh were priced at the horizon's average price. Captures the value of <em>timing</em> — shifting consumption into cheap hours — independently of the battery.</li>
+      </ul>
+      <p class="plan-help-note">
+        <span class="saving-pos-inline">Green +</span> means the plan is better than that baseline (cheaper, or more revenue).
+        <span class="saving-neg-inline">Red −</span> means it would be worse than the baseline — typical on flat-price days where the battery's round-trip loss isn't recovered by timing arbitrage.
+      </p>
+    </div>
+  </ftw-modal>
 
   <!-- EV detail popup -->
   <ftw-modal id="ev-modal" style="--ftw-modal-max-width:380px">
     <span slot="title">EV Charger</span>
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
+    </div>
+    <!-- Battery-covers-EV toggle lives in the EV modal (operator opens
+         it from the EV planet click). When ON, self-consumption lets
+         the home battery discharge into the EV — useful when grid
+         prices are high now and cheap PV/off-peak is expected later. -->
+    <div class="control-card" style="margin-top:1rem">
+      <div class="card-label">Let battery cover EV</div>
+      <label class="ftw-toggle">
+        <input type="checkbox" id="battery-covers-ev-toggle">
+        <span class="ftw-toggle-slider"></span>
+        <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
+      </label>
+      <div class="card-sub card-hint">On = home battery discharges into the EV. Off = battery stays out of EV charging.</div>
     </div>
     <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
       <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
@@ -441,10 +646,48 @@
     </div>
   </ftw-modal>
 
+  <!-- Grid detail popup — peak import ceiling + grid target. Open from
+       the GRID planet in the energy-flow hero. -->
+  <ftw-modal id="grid-modal" style="--ftw-modal-max-width:420px">
+    <span slot="title">Grid</span>
+    <div id="grid-modal-body">
+      <!-- Peak import ceiling (tariff cap, hard rule across all modes).
+           Default off — operator opts in via the checkbox. When on, the
+           slider value caps grid import; battery briefly bridges while
+           EV throttles. See PR for the full enforcement matrix. -->
+      <div class="control-card">
+        <div class="card-label">Peak import limit</div>
+        <label class="ftw-toggle">
+          <input type="checkbox" id="peak-limit-enabled-toggle">
+          <span class="ftw-toggle-slider"></span>
+          <span class="ftw-toggle-label" id="peak-limit-enabled-label">Off</span>
+        </label>
+        <div class="slider-group-compact">
+          <input type="range" id="peak-limit-slider" min="500" max="11000" step="100" value="5000" disabled>
+          <span id="peak-limit-value" class="slider-current">5000 W</span>
+          <button id="peak-limit-send" class="btn-send" disabled>Save</button>
+        </div>
+        <div class="card-sub card-hint">Hard cap on grid import (tariff peak). Off = no cap; only the physical fuse applies.</div>
+      </div>
+
+      <!-- Grid target (legacy PI setpoint for manual modes). -->
+      <div class="control-card" style="margin-top:1rem">
+        <div class="card-label" id="target-label">Grid target</div>
+        <div class="slider-group-compact">
+          <input type="range" id="grid-target-slider" min="-5000" max="5000" step="50" value="0">
+          <span id="grid-target-value" class="slider-current">0 W</span>
+          <button id="grid-target-send" class="btn-send" disabled>Save</button>
+        </div>
+        <div class="card-sub card-hint" id="grid-target-hint">Planner controls this when a strategy is active.</div>
+      </div>
+    </div>
+  </ftw-modal>
+
   <script src="/next-app.js?v=next1"></script>
   <script src="/settings.js?v=diag1"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/loadpoints.js?v=lp1"></script>
   <script src="/settings/tabs/price.js?v=tabsplit1"></script>
   <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
@@ -453,9 +696,11 @@
   <script src="/settings/tabs/notifications.js?v=tabsplit1"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit1"></script>
   <script src="/settings/tabs/system.js?v=tabsplit1"></script>
+  <script src="/diagnostics-modal.js?v=diag2"></script>
   <script src="/models.js?v=diag1"></script>
   <script src="/plan.js?v=diag1"></script>
   <script src="/twins.js?v=diag1"></script>
+  <script src="/loadpoints.js?v=lp1"></script>
   <script src="/diagnose.js?v=diag1"></script>
   <script src="/update-badge.js?v=modal1" defer></script>
   <script>

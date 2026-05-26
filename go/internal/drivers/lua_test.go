@@ -41,6 +41,7 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	}
 	tel := telemetry.NewStore()
 	env := NewHostEnv("test", tel)
+	env.BatteryCapacityWh = 9600 // declared physical battery — emits flow through
 
 	d, err := NewLuaDriver(path, env)
 	if err != nil {
@@ -82,6 +83,97 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	err = d.Command(context.Background(), []byte(`{"action":"set","w":-1500}`))
 	if err != nil {
 		t.Fatalf("command: %v", err)
+	}
+}
+
+// A hybrid inverter without a physical battery (operator-declared via
+// battery_capacity_wh = 0) still polls battery registers and emits via
+// host.emit("battery", …). The host must drop those emits so phantom
+// SoC readings never reach the telemetry store, the /api/status drivers
+// map, or the frontend's Combined view (which would otherwise mean-
+// average a real battery's SoC with the phantom 0 %).
+func TestEmitBatteryDroppedWhenCapacityZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.lua")
+	src := `
+function driver_init(config) end
+function driver_poll()
+    host.emit("meter", { w = 1000 })
+    host.emit("battery", { w = 0, soc = 0.0 })
+    host.emit("pv", { w = -500 })
+    return 1000
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	env := NewHostEnv("hybrid-no-batt", tel)
+	env.BatteryCapacityWh = 0
+
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if got := tel.Get("hybrid-no-batt", telemetry.DerBattery); got != nil {
+		t.Errorf("battery reading should be dropped for capacity-0 driver; got %+v", got)
+	}
+	if got := tel.Get("hybrid-no-batt", telemetry.DerMeter); got == nil || got.RawW != 1000 {
+		t.Errorf("meter still expected; got %+v", got)
+	}
+	if got := tel.Get("hybrid-no-batt", telemetry.DerPV); got == nil || got.RawW != -500 {
+		t.Errorf("pv still expected; got %+v", got)
+	}
+	// Driver is alive — health success must still be recorded so the
+	// watchdog doesn't flip it offline.
+	h := tel.DriverHealthMut("hybrid-no-batt")
+	if h == nil || h.TickCount == 0 {
+		t.Errorf("expected health tick recorded; got %+v", h)
+	}
+}
+
+func TestEmitBatteryPassesWhenCapacitySet(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.lua")
+	src := `
+function driver_init(config) end
+function driver_poll()
+    host.emit("battery", { w = -500, soc = 0.42 })
+    return 1000
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	env := NewHostEnv("real-batt", tel)
+	env.BatteryCapacityWh = 9600
+
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	bat := tel.Get("real-batt", telemetry.DerBattery)
+	if bat == nil || bat.SoC == nil || *bat.SoC != 0.42 {
+		t.Errorf("battery reading should pass through; got %+v", bat)
 	}
 }
 

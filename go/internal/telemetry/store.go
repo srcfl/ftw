@@ -3,6 +3,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 )
@@ -15,9 +16,17 @@ const (
 	DerPV
 	DerBattery
 	DerEV
+	// DerVehicle is a read-only reading from the connected vehicle
+	// itself (e.g. via TeslaBLEProxy), distinct from DerEV which is
+	// the charger. Carries SoC + `charge_limit_pct`/`charging_state`/
+	// `time_to_full_min`/`stale` in Data. RawW is always 0 — vehicle
+	// readings don't conflict with dispatch math, they only inform
+	// the loadpoint manager's SoC-source selection and the UI.
+	DerVehicle
 )
 
-// String returns the canonical string form ("meter", "pv", "battery", "ev").
+// String returns the canonical string form ("meter", "pv", "battery",
+// "ev", "vehicle").
 func (d DerType) String() string {
 	switch d {
 	case DerMeter:
@@ -28,6 +37,8 @@ func (d DerType) String() string {
 		return "battery"
 	case DerEV:
 		return "ev"
+	case DerVehicle:
+		return "vehicle"
 	}
 	return "unknown"
 }
@@ -43,6 +54,8 @@ func ParseDerType(s string) (DerType, error) {
 		return DerBattery, nil
 	case "ev":
 		return DerEV, nil
+	case "vehicle":
+		return DerVehicle, nil
 	}
 	return 0, fmt.Errorf("unknown der type %q", s)
 }
@@ -87,15 +100,46 @@ type DriverHealth struct {
 	ConsecutiveErrors int
 	LastError         string
 	TickCount         uint64
+
+	// WatchdogTimeoutOverride, when > 0, replaces the site-wide
+	// timeout in WatchdogScan for this driver only. Drivers with
+	// intrinsically slow polling cadences (Tesla BLE proxy, cloud
+	// EV APIs) set this from lua via host.set_watchdog_timeout_s so
+	// the loadpoint controller doesn't see them as flapping just
+	// because their emit interval brushes the 60 s default. The
+	// dispatcher still uses LastSuccess + this override for stale
+	// detection — there is no separate "degraded" state.
+	WatchdogTimeoutOverride time.Duration
 }
 
-// RecordSuccess resets error state and marks the driver healthy.
+// RecordSuccess resets error state and marks the driver healthy. Call
+// this when the driver actually delivered fresh telemetry (i.e. on
+// host.emit), not just when its poll loop returned without error.
+// LastSuccess is the timestamp the watchdog uses to decide stale-
+// ness, so it must only advance when real data flowed.
 func (h *DriverHealth) RecordSuccess() {
 	now := time.Now()
 	h.LastSuccess = &now
 	h.ConsecutiveErrors = 0
 	h.LastError = ""
 	h.Status = StatusOk
+	h.TickCount++
+}
+
+// RecordTick marks one poll cycle as completed without error, but
+// without claiming fresh data flowed. Bumps TickCount so the loop is
+// visibly alive in /api/status, but leaves LastSuccess untouched so
+// the watchdog correctly flips the driver offline when emits stop.
+//
+// Why split this from RecordSuccess: an MQTT-fed driver (ferroamp)
+// caches the last payload per topic and emits from cache on every
+// poll. If the upstream stops publishing — e.g. the EnergyHub loses
+// power on a fuse blow — the cache stays populated, the lua poll
+// returns nil, and without this split the registry's per-poll
+// RecordSuccess would re-stamp LastSuccess forever. Issue: real-world
+// outage on 2026-05-02 where ferroamp showed pv_w=-3996.7040 to four
+// decimals identical for 30+ minutes after the inverter died.
+func (h *DriverHealth) RecordTick() {
 	h.TickCount++
 }
 
@@ -241,6 +285,35 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 	s.latestMu.Unlock()
 }
 
+// MetricSnapshot is a snapshot of one (driver, metric) latest value.
+type MetricSnapshot struct {
+	Name      string    `json:"name"`
+	Value     float64   `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// LatestMetricsByDriver returns the latest live cache entries for one
+// driver, sorted by metric name. Used by /api/drivers/{name} to render
+// the "what's it actually emitting right now" panel without spinning
+// up a TS-DB query per metric.
+func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
+	prefix := driver + ":"
+	s.latestMu.RLock()
+	defer s.latestMu.RUnlock()
+	out := make([]MetricSnapshot, 0)
+	for k, v := range s.latestMetric {
+		if len(k) <= len(prefix) || k[:len(prefix)] != prefix {
+			continue
+		}
+		out = append(out, MetricSnapshot{
+			Name:      k[len(prefix):],
+			Value:     v.Value,
+			UpdatedAt: v.UpdatedAt,
+		})
+	}
+	return out
+}
+
 // LatestMetric returns the most recent value for a given (driver, metric).
 // ok=false when nothing has been emitted yet. Used by consumers that need
 // live values (e.g. fuse-over-limit rule reading meter_l1_a) without
@@ -295,6 +368,16 @@ func (s *Store) ReadingsByType(t DerType) []*DerReading {
 // Offline drivers (stale telemetry, watchdog tripped) are skipped so a
 // dangling 3.6 kW last-known reading can't sneak into load or grid
 // accounting after the driver has actually stopped reporting.
+//
+// Sub-watt floor: when the Kalman residual decays toward zero (driver
+// reports a real 0 W), the smoothed value asymptotes to denormals like
+// 1e-77. Those leak through any `> 0` guard and corrupt downstream
+// arithmetic — most acutely the BatteryCoversEV cap in control/dispatch.go,
+// which on a non-zero EVChargingW flips a planned discharge target into
+// a charge command and trips applyPlanSignFloor for the whole tick.
+// Floor at 1 W: real EV chargers draw kW or zero; nothing in between
+// matters here, and forcing exact 0 keeps every consumer's `> 0` guard
+// honest.
 func (s *Store) SumOnlineEVW() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -308,6 +391,9 @@ func (s *Store) SumOnlineEVW() float64 {
 			continue
 		}
 		sum += r.SmoothedW
+	}
+	if math.Abs(sum) < 1.0 {
+		return 0
 	}
 	return sum
 }
@@ -333,22 +419,52 @@ func (s *Store) IsStale(driver string, t DerType, timeout time.Duration) bool {
 	return time.Since(r.UpdatedAt) > timeout
 }
 
-// DriverHealth returns the health record for a driver (or nil if unknown).
+// DriverHealth returns a snapshot of the health record for a driver
+// (or nil if unknown). Mutations must go through Store methods or
+// DriverHealthMut in single-threaded test setup.
 func (s *Store) DriverHealth(name string) *DriverHealth {
 	s.mu.RLock(); defer s.mu.RUnlock()
-	return s.health[name]
+	h := s.health[name]
+	if h == nil { return nil }
+	cp := *h
+	return &cp
 }
 
 // DriverHealthMut returns the (mutable) health record, creating if missing.
-// Holds no lock after return — callers shouldn't share the pointer across goroutines.
+// Holds no lock after return — callers must not share the pointer across
+// goroutines. Runtime code should use the Store RecordDriver* helpers.
 func (s *Store) DriverHealthMut(name string) *DriverHealth {
 	s.mu.Lock(); defer s.mu.Unlock()
+	return s.driverHealthLocked(name)
+}
+
+func (s *Store) driverHealthLocked(name string) *DriverHealth {
 	h, ok := s.health[name]
 	if !ok {
 		h = &DriverHealth{Name: name}
 		s.health[name] = h
 	}
 	return h
+}
+
+func (s *Store) EnsureDriverHealth(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name)
+}
+
+func (s *Store) RecordDriverSuccess(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordSuccess()
+}
+
+func (s *Store) RecordDriverTick(name string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordTick()
+}
+
+func (s *Store) RecordDriverError(name, err string) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	s.driverHealthLocked(name).RecordError(err)
 }
 
 // Remove drops all in-memory state for a driver: readings, Kalman
@@ -359,7 +475,7 @@ func (s *Store) DriverHealthMut(name string) *DriverHealth {
 func (s *Store) Remove(driver string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV} {
+	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV, DerVehicle} {
 		k := key(driver, t)
 		delete(s.readings, k)
 		delete(s.filters, k)
@@ -387,7 +503,11 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 	now := time.Now()
 	var out []WatchdogTransition
 	for name, h := range s.health {
-		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > timeout
+		eff := timeout
+		if h.WatchdogTimeoutOverride > 0 {
+			eff = h.WatchdogTimeoutOverride
+		}
+		stale := h.LastSuccess == nil || now.Sub(*h.LastSuccess) > eff
 		wasOnline := h.Status != StatusOffline
 		if stale && wasOnline {
 			h.Status = StatusOffline
@@ -399,6 +519,20 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 		}
 	}
 	return out
+}
+
+// SetDriverWatchdogTimeout installs a per-driver watchdog override.
+// Zero clears it (revert to the site-wide default). Lazily creates a
+// DriverHealth entry — drivers can call this from driver_init before
+// any telemetry has flowed.
+func (s *Store) SetDriverWatchdogTimeout(name string, d time.Duration) {
+	s.mu.Lock(); defer s.mu.Unlock()
+	h, ok := s.health[name]
+	if !ok {
+		h = &DriverHealth{Name: name}
+		s.health[name] = h
+	}
+	h.WatchdogTimeoutOverride = d
 }
 
 // WatchdogTransition describes a driver whose online state just flipped.

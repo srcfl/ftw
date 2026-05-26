@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a bug in forty-two-watts
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill in the
+        details below so we can reproduce and fix it quickly.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: When I do X, Y happens instead of Z.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug.
+      placeholder: |
+        1. Configure '...'
+        2. Run '...'
+        3. Observe '...'
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `forty-two-watts --version` or release tag / commit.
+      placeholder: e.g. v0.42.0 or commit 65aaf18
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Raspberry Pi (official image)
+        - Raspberry Pi (dev binary)
+        - Docker compose
+        - Local dev (`make dev`)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware / drivers in use
+      description: Inverter / battery / meter brands and which Lua drivers are loaded.
+      placeholder: e.g. Sungrow SH10RT, Ferroamp EnergyHub, P1 meter
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste relevant `slog` output. Redact secrets / IPs as needed.
+      render: shell
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Config snippets, screenshots, network topology, etc.

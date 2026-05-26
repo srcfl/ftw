@@ -36,7 +36,7 @@ A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with every release.
 Flash it to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
 or [balenaEtcher](https://etcher.balena.io/) (both handle `.img.xz`
 natively — no need to decompress first), boot the Pi, and open
-`http://42w.local:8080/`. No terminal work required.
+`http://42w.local/`. No terminal work required.
 
 If you don't pre-configure WiFi in Imager's advanced options, the Pi
 exposes a `42w-setup` captive portal for phone-based onboarding.
@@ -55,7 +55,14 @@ curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scrip
 
 Then open `http://<your-pi>:8080/setup` to run the first-time wizard.
 
-### Option C — build from source
+### Option C — Home Assistant OS add-on
+
+If you already run Home Assistant OS or HA Supervised, install
+forty-two-watts as an add-on directly from the supervisor — no
+separate Pi or Docker host needed. Maintained at
+[erikarenhill/ha-addon-forty-two-watts](https://github.com/erikarenhill/ha-addon-forty-two-watts).
+
+### Option D — build from source
 
 **Prerequisites:** Go 1.25+, a Raspberry Pi (or any `linux/arm64` machine), and at least one supported inverter/battery on your LAN.
 
@@ -146,6 +153,35 @@ config.yaml
 
 No cloud dependency for core operation. Everything runs locally on the Pi. Weather forecasts (met.no) and electricity prices (Elpriset Just Nu / ENTSO-E) are fetched periodically but the system degrades gracefully without them.
 
+## Documentation
+
+**Get started**
+- [SD-card image walkthrough](docs/rpi-image.md) — flash, boot, WiFi onboarding, troubleshoot
+- [Setup guide](docs/setup-guide/) — first-time wizard explained step by step
+- [Configuration reference](docs/configuration.md) — every YAML key, with examples
+- [Driver catalog](docs/driver-catalog.md) — supported devices and their config blocks
+- [Device repository plan](docs/device-repository.md) — non-breaking driver repository rollout
+
+**Run it**
+- [Operations](docs/operations.md) — deploy, backup, upgrade, logs
+- [In-app updates](docs/self-update.md) — how the `ftw-updater` sidecar works
+- [Home Assistant integration](docs/ha-integration.md) — MQTT autodiscovery setup
+- [Safety model](docs/safety.md) — watchdog, clamps, fuse guard, stale-meter guard
+
+**Understand it**
+- [Architecture overview](docs/architecture.md) — layers, data flow, why each piece exists
+- [Site sign convention](docs/site-convention.md) — must-read before touching power-math code
+- [ML models](docs/ml-models.md) — PV / load / price twins
+- [MPC planner](docs/mpc-planner.md) — DP strategy details
+- [Battery models](docs/battery-models.md) — ARX(1), RLS, cascade, self-tune
+- [API reference](docs/api.md) — HTTP endpoints
+
+**Build with it**
+- [Writing a Lua driver](docs/writing-a-driver.md) — full walkthrough
+- [Using Claude Code](docs/writing-a-driver-with-claude-code.md) — AI-assisted driver generation
+- [Testing drivers live](docs/testing-drivers-live.md) — sim + Pi workflow
+- [Lua host API](docs/host-api.md) — every `host.*` capability the Lua side can call
+
 ## Development
 
 ```bash
@@ -155,10 +191,7 @@ make dev          # live dev with hot-reload
 make build-arm64  # cross-compile for Pi
 ```
 
-Driver development:
-- [Writing a Lua driver](docs/writing-a-driver.md) — full walkthrough
-- [Using Claude Code](docs/writing-a-driver-with-claude-code.md) — AI-assisted driver generation
-- [Testing drivers live](docs/testing-drivers-live.md) — sim + Pi workflow
+See [docs/development.md](docs/development.md) and [docs/testing.md](docs/testing.md) for the full dev loop, sim setup, and e2e recipes.
 
 ## Community
 

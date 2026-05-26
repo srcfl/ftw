@@ -1189,11 +1189,7 @@
         '  <span class="status-dot ' + statusClass(d.status) + '" title="' + escHtml(d.status || "unknown") + '"></span>' +
         "</div>" +
         body +
-        renderDriverActions(name, d) +
-        // Inline battery model — rendered from models.js's cached payload.
-        // Drawing it here in the same pass as the driver card avoids the
-        // earlier race where two independent polls fought over the slot.
-        (!isEV && !(d.disabled === true || d.status === "disabled") && window.renderInlineBatteryModel ? window.renderInlineBatteryModel(name) : "");
+        renderDriverActions(name, d);
 
       driversGrid.appendChild(card);
     });
@@ -1508,8 +1504,62 @@
     block.appendChild(header);
 
     block.appendChild(buildSoCRow(lp));
+    block.appendChild(buildSurplusOnlyRow(lp));
     block.appendChild(buildTargetRow(lp));
     return block;
+  }
+
+  // buildSurplusOnlyRow renders a single checkbox: when ticked, the
+  // loadpoint is configured for "charge only from PV surplus". The
+  // toggle is independent of any schedule — the controller's surplus
+  // clamp harvests live export opportunistically with or without a
+  // target+deadline. Adding a schedule on top is optional: it tells
+  // the MPC the operator wants the car to reach X% by Y, which may
+  // grid-import during cheap slots. Without a schedule the MPC simply
+  // sits this loadpoint out and the runtime dispatch chases surplus.
+  //
+  // Patch semantics: both directions send only `{ surplus_only: ... }`
+  // so the operator's existing target/deadline (if any) is preserved.
+  function buildSurplusOnlyRow(lp) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.flexDirection = "column";
+    row.style.gap = "0.25rem";
+    row.style.marginBottom = "0.3rem";
+    var label = document.createElement("label");
+    label.style.display = "flex";
+    label.style.alignItems = "center";
+    label.style.gap = "0.4rem";
+    label.style.fontSize = "0.8rem";
+    label.style.cursor = "pointer";
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!lp.surplus_only;
+    cb.title = "Charge only when PV exports exceed local load. No deadline planning, no grid import. Add a schedule below to also catch up via grid when prices are cheap.";
+    var text = document.createElement("span");
+    text.textContent = "Surplus only (PV exports only — never imports grid)";
+    var hint = document.createElement("div");
+    hint.style.fontSize = "0.72rem";
+    hint.style.color = "var(--text-dim)";
+    hint.style.marginLeft = "1.4rem";
+    hint.textContent = "Charges only when PV exports exceed your load. No deadline planning — no grid import. Optional: add a schedule below to also catch up via grid when cheap.";
+    cb.addEventListener("change", function () {
+      cb.disabled = true;
+      var body = { surplus_only: cb.checked };
+      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).then(function () {
+        cb.disabled = false;
+        refreshEvModal();
+      }).catch(function () { cb.disabled = false; });
+    });
+    label.appendChild(cb);
+    label.appendChild(text);
+    row.appendChild(label);
+    row.appendChild(hint);
+    return row;
   }
 
   function buildSoCRow(lp) {

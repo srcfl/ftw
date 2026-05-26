@@ -4,6 +4,8 @@
 
 Wraps one `paho.Client` per driver so each driver has its own broker connection, its own subscription set, and its own inbound message buffer. Implements `drivers.MQTTCap` (`Subscribe`, `Publish`, `PopMessages`). Auto-reconnect + 5 s connect-retry are on by default; inbound messages are buffered in a slice by the default publish handler and drained when the driver calls `host.mqtt_messages()`.
 
+`Subscribe()` does two things: (a) records the topic in `cap.subs`, and (b) issues SUBSCRIBE directly. Initial bindings flow through (b) — same as before this fix. `OnConnectHandler` calls `replaySubscriptions` on every (re)connect: at the very first connect cap.subs is still empty (driver_init hasn't run yet) so the loop is a no-op; from the second connect onward it re-issues SUBSCRIBE for every recorded topic. This is the fix for a real Pixii MQTT outage (2026-05): default `CleanSession=true` + `AutoReconnect=true` means paho transparently reconnects but the broker has dropped the session, so without re-subscribe the link looks healthy while no messages flow. Drivers only call `host.mqtt_subscribe` from `driver_init`, which never re-runs after a transparent reconnect — restarting the driver in 42W was the only recovery before this fix.
+
 ## Key types
 
 | Type | Purpose |
@@ -24,7 +26,9 @@ The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/forty-tw
 
 ## What to read first
 
-`client.go` — the whole package is a single file. Pay attention to `SetDefaultPublishHandler` (`client.go:32`): every inbound message lands in `cap.incoming` regardless of topic, so make sure your driver only subscribes to topics it actually wants.
+`client.go` — the whole package is a single file. Pay attention to:
+- `SetDefaultPublishHandler`: every inbound message lands in `cap.incoming` regardless of topic, so make sure your driver only subscribes to topics it actually wants.
+- `SetOnConnectHandler` → `replaySubscriptions`: re-issues SUBSCRIBE for every recorded topic on every (re)connect. Without this paho's auto-reconnect produces a "healthy link, zero messages" zombie state.
 
 ## What NOT to do
 
@@ -33,3 +37,4 @@ The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/forty-tw
 - **Do NOT add per-topic callbacks.** Messages are delivered through the default handler into the buffer, then pulled by the driver's poll loop — that's what keeps the Lua VM single-threaded (no callbacks into gopher-lua from paho goroutines).
 - **Do NOT assume messages survive restarts.** QoS is 0 and publish is non-retained; if a driver needs persistence it has to publish retained or use QoS 1/2 itself.
 - **Do NOT block the default publish handler.** It holds `cap.mu` while appending — keep the callback the cheap append it already is.
+- **Do NOT bypass `Subscribe()` to call `cap.client.Subscribe()` directly.** Topics issued that way aren't recorded in `cap.subs`, so they evaporate on the next reconnect — the exact regression `replaySubscriptions` was added to prevent.

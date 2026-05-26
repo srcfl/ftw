@@ -44,6 +44,22 @@ type ModbusCap interface {
 	Close() error
 }
 
+// WSCap is the host's WebSocket capability. One driver = one upstream
+// connection (matches MQTTCap's single-broker shape) — drivers that
+// need multiple streams can multiplex via GraphQL subscriptions or
+// equivalent. The host exposes Open as a Lua-callable so the driver
+// chooses when to connect (its init may need to fetch IDs over HTTP
+// first); Send + PopMessages drive the inbound/outbound traffic; the
+// implementation's background goroutine buffers inbound frames so
+// PopMessages is non-blocking.
+type WSCap interface {
+	Open(url string, headers map[string]string) error
+	Send(text string) error
+	PopMessages() []string
+	IsOpen() bool
+	Close() error
+}
+
 // HostEnv is the per-driver runtime context. Captures capabilities (potentially
 // nil if not granted), the shared telemetry store, and identifying info.
 type HostEnv struct {
@@ -53,7 +69,29 @@ type HostEnv struct {
 	MQTT       MQTTCap    // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap  // nil → modbus_* calls return ErrNoCapability
 	HTTP       bool       // false → http_* calls return ErrNoCapability
+	// HTTPAllowedHosts, when non-empty, restricts which hosts this
+	// driver can reach via host.http_get / host.http_post. Each entry
+	// is matched case-insensitively against the URL's host component
+	// (not the port) — so "192.168.1.50" matches both port 80 and 8080
+	// on that host. Empty list (nil or len==0) = any host allowed, for
+	// backward compat with existing drivers that didn't declare a list.
+	// Populated from driver config `capabilities.http.allowed_hosts`.
+	HTTPAllowedHosts []string
+	WS              WSCap    // nil → ws_* calls return ErrNoCapability
+	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
+	// passed to host.ws_open. Same matching semantics; empty = any host.
+	WSAllowedHosts  []string
 	Start      time.Time  // monotonic start; host.millis() computed from here
+
+	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
+	// declaration for this driver. Zero means "no physical battery
+	// wired here" — typical for a hybrid inverter used PV-only. When
+	// zero, emitTelemetry drops `host.emit("battery", …)` calls so
+	// phantom SoC readings never reach the telemetry store, the
+	// /api/status drivers map, or the frontend's Combined view (which
+	// would otherwise mean-average a real battery's 24 % SoC with the
+	// phantom 0 % from a no-battery hybrid, halving the displayed SoC).
+	BatteryCapacityWh float64
 
 	mu sync.Mutex
 	// Desired poll interval — driver can set via host.set_poll_interval OR
@@ -88,6 +126,22 @@ func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
 
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
+
+// WithHTTPAllowedHosts installs an allowlist. An empty / nil slice
+// means "any host" (backward compatible). Matched against URL host.
+func (h *HostEnv) WithHTTPAllowedHosts(hosts []string) *HostEnv {
+	h.HTTPAllowedHosts = hosts
+	return h
+}
+
+// WithWS binds a WebSocket capability.
+func (h *HostEnv) WithWS(w WSCap) *HostEnv { h.WS = w; return h }
+
+// WithWSAllowedHosts restricts which URLs the driver can ws_open to.
+func (h *HostEnv) WithWSAllowedHosts(hosts []string) *HostEnv {
+	h.WSAllowedHosts = hosts
+	return h
+}
 
 // millis returns monotonic milliseconds since host startup.
 func (h *HostEnv) millis() int64 {
@@ -150,12 +204,26 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	if err != nil {
 		return err
 	}
+	// Drop battery emits from drivers the operator declared as no-battery
+	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
+	// battery registers in firmware, and the driver dutifully emits whatever
+	// it reads — but without a physical pack those readings are phantom
+	// (typically w=0, soc=0). Letting them through pollutes the telemetry
+	// store, /api/status drivers map, and the frontend's Combined view.
+	// Health success is still recorded — the driver IS alive, just emitting
+	// data the operator told us to ignore.
+	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 {
+		if h.Telemetry != nil {
+			h.Telemetry.RecordDriverSuccess(h.DriverName)
+		}
+		return nil
+	}
 	if h.Telemetry != nil {
 		h.Telemetry.Update(h.DriverName, t, env.W, env.SoC, rawJSON)
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
-		h.Telemetry.DriverHealthMut(h.DriverName).RecordSuccess()
+		h.Telemetry.RecordDriverSuccess(h.DriverName)
 	}
 	return nil
 }

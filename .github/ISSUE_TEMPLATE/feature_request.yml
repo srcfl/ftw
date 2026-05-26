@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest a new feature or enhancement
+title: "[feat] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea? Great. For open-ended discussion, consider starting
+        a thread in [Discussions](../../discussions) first — issues are
+        best for concrete, actionable proposals.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do? What's missing or painful today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work? Sketch the API / UX / config.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds or other approaches you've tried or thought about.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Driver (new hardware support)
+        - Control / dispatch
+        - Battery model / self-tune
+        - MPC / planner
+        - PV / load / price twins
+        - HTTP API
+        - Web UI
+        - Home Assistant integration
+        - Nova federation
+        - Self-update / deploy
+        - Docs
+        - Other
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Hardware datasheets, protocol docs, screenshots, links.

@@ -4,10 +4,14 @@ forty-two-watts' driver library at a glance. Each driver is a Lua file
 in `drivers/` that follows the v2.1 host API (see
 [`docs/writing-a-driver.md`](writing-a-driver.md)).
 
+For the planned non-breaking move from bundled-only drivers to a
+default external device repository, see
+[`docs/device-repository.md`](device-repository.md).
+
 ## At a glance
 
-19 drivers covering 16 manufacturers across 3 protocols (Modbus TCP,
-MQTT, HTTP/REST). Read-only: 12. With control: 7.
+23 drivers covering 17 manufacturers across 3 protocols (Modbus TCP,
+MQTT, HTTP/REST). Read-only: 14. With control: 9.
 
 Protocols in use: Modbus TCP, MQTT, HTTP/REST.
 
@@ -19,6 +23,9 @@ back to the device; read-only drivers only emit telemetry.
 
 | Driver | Manufacturer | Protocol | Capabilities | Control | Tested models | File |
 |---|---|---|---|---|---|---|
+| CTEK Chargestorm (API v1) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek.lua` |
+| CTEK Chargestorm (API v2) | CTEK | Modbus | ev | yes | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) | `drivers/ctek_v2.lua` |
+| CTEK Chargestorm (Modbus + MQTT) | CTEK | Modbus + MQTT | ev | yes (alpha) | Chargestorm Connected 2/3 (CSOS ≥ 4.9.3) with Local MQTT publisher | `drivers/ctek_hybrid.lua` |
 | Deye hybrid inverter | Deye | Modbus | battery, meter, pv | yes | SUN-5K-SG03LP1-EU, SUN-8K-SG04LP3-EU, SUN-12K-SG04LP3-EU | `drivers/deye.lua` |
 | Easee Cloud | Easee | HTTP | ev | yes | Home, Charge | `drivers/easee_cloud.lua` |
 | Eastron SDM630 / SDM72D-M | Eastron | Modbus | meter | no | SDM630-Modbus, SDM72D-M | `drivers/sdm630.lua` |
@@ -35,7 +42,9 @@ back to the device; read-only drivers only emit telemetry.
 | Sofar HYD-ES / HYD-EP | Sofar | Modbus | battery, meter, pv | no | HYD 6000-ES, HYD 20KTL-3PH | `drivers/sofar.lua` |
 | SolarEdge HD-Wave / StorEdge | SolarEdge | Modbus | meter, pv | no | SE10K, StorEdge SE7600A-US | `drivers/solaredge.lua` |
 | SolarEdge inverter (PV only) | SolarEdge | Modbus | pv | no | HD-Wave, StorEdge | `drivers/solaredge_pv.lua` |
+| SolarEdge legacy K-series (display) | SolarEdge | Modbus | pv | no | SE7K, SE10K, SE17K, SE25K | `drivers/solaredge_legacy.lua` |
 | Solis hybrid inverter | Solis | Modbus | battery, meter, pv | yes | RHI-6K-48ES-5G, S6-EH3P10K-H | `drivers/solis.lua` |
+| Solis string inverter | Solis | Modbus | pv | no | S5-GC, S6-GR1P, 3P-G4, 1P-G4 | `drivers/solis_string.lua` |
 | Sungrow SH Hybrid Inverter | Sungrow | Modbus | battery, meter, pv | yes | SH5.0RT, SH6.0RT, SH8.0RT, SH10RT | `drivers/sungrow.lua` |
 | Victron Cerbo GX / Venus GX | Victron | Modbus | battery, meter, pv | no | Cerbo GX, Venus GX | `drivers/victron.lua` |
 

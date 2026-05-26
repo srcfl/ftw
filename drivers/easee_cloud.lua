@@ -45,6 +45,117 @@ local refresh_token = nil
 local token_expires_at = 0   -- millis
 local charger_serial = nil
 local phases = 3   -- populated from config.phases (if present) in driver_init
+local last_sent_phases = nil   -- tracks the last phaseMode posted to Easee
+local last_phase_change_ms = 0 -- monotonic ms of the last phase flip (hysteresis)
+
+-- After every phaseMode change, Easee resets dynamicChargerCurrent to
+-- the static maxChargerCurrent value (16 A on a typical 16 A install).
+-- That resets sticks for ~5–10 s on the cloud side before our follow-
+-- up dynamicChargerCurrent write propagates back. To bound that
+-- window, we (a) re-write dynamicChargerCurrent on the next driver_poll
+-- after a phaseMode change, and (b) clamp maxChargerCurrent at init
+-- when an operator config field requests it (see driver_init below).
+local pending_amp_resend = false
+local pending_amp_resend_at_ms = 0
+local last_amps_set = nil
+
+-- paused_state tracks whether the LAST command we successfully sent was
+-- ev_pause. Easee's REST API has no way to query "are you currently
+-- in user-pause" — op_mode 2 ("awaiting start") covers both "paused"
+-- and "plugged in but car hasn't started a session yet". Without this
+-- flag, after a controller pause + re-offer, we'd write
+-- dynamicChargerCurrent=6 successfully but the contactor stays open
+-- because we never sent resume_charging. We saw this in the field as
+-- "easee_a=6, easee_chg=false, ev_w=0, reason=100/52" stuck states.
+local paused_state = false
+
+-- command_stalled_since_ms tracks when we last wrote a non-zero amps
+-- offer that did NOT translate into actual charging. Used to surface
+-- a derived diagnostic for the controller / UI so a stuck Easee
+-- (firmware error, EV-side reject) is observable rather than silent.
+local command_stalled_since_ms = 0
+
+-- Easee charger physical limits. These are the manufacturer's hard
+-- bounds, not operator preferences — `dynamicChargerCurrent` written
+-- below the minimum is silently rejected by the unit (returns success
+-- but no current actually flows), and above the max the cloud returns
+-- a 4xx. The min applies when amps > 0; commanding exactly 0 always
+-- pauses cleanly.
+local EASEE_MIN_A = 6
+local EASEE_MAX_A = 32
+
+-- pick_phases is the driver-level phase decision: given the requested
+-- charging power, the per-phase fuse ceiling, the operator's mode
+-- preference, and the time since the last flip, return how many
+-- phases (1 or 3) to actually commit to this command.
+--
+--   * mode "1p" / "3p": locked, no hysteresis
+--   * mode "auto" or empty + missing fuse data: legacy 3Φ fallback
+--     (preserves pre-switching behaviour for sites that don't pass
+--     fuse data in the cmd)
+--   * mode "auto" with fuse data: pick 1Φ when wantW fits below the
+--     1Φ ceiling (= max_a × voltage), else 3Φ. Hysteresis suppresses
+--     a flip when less than `hold_s` seconds have passed since the
+--     last change — Easee's contactor + cloud-API round-trip is
+--     ~5-10 s, so flapping at every controller tick would burn the
+--     contactor and never deliver useful power.
+local function pick_phases(mode, want_w, voltage, max_a_per_phase, split_w, hold_s, now_ms)
+    local locked = mode
+    if locked == "1p" then return 1 end
+    if locked ~= "auto" then return 3 end -- "" / "3p" / unknown
+
+    -- Effective split: operator override → site fuse → 230 V × 16 A default.
+    local s = split_w
+    if (s == nil) or (s <= 0) then
+        if voltage and voltage > 0 and max_a_per_phase and max_a_per_phase > 0 then
+            s = voltage * max_a_per_phase
+        else
+            s = 3680
+        end
+    end
+
+    local desired = (want_w < s) and 1 or 3
+
+    -- Hysteresis: once we've committed to a phase count, hold it for
+    -- at least `hold_s` seconds before flipping the other way.
+    if last_sent_phases == nil then
+        return desired
+    end
+    if desired == last_sent_phases then
+        return desired
+    end
+    -- Default hold = 90 s. Field-measured against an Easee Home: a full
+    -- phaseMode flip + EV ramp to steady state takes 60–90 s; a 60 s
+    -- hold could let a flap-prone wantW trigger another transition
+    -- mid-ramp. 90 s gives one full ramp cycle before another flip.
+    local hold = (hold_s and hold_s > 0) and hold_s or 90
+    if (now_ms - last_phase_change_ms) < (hold * 1000) then
+        return last_sent_phases
+    end
+    return desired
+end
+
+-- per_phase_amps converts the requested W into the dynamicChargerCurrent
+-- value Easee expects. Voltage and per-phase fuse ceiling come from
+-- the cmd (controller-supplied) so a 240 V or 220 V mains is handled
+-- without hard-coding 230. The result is rounded (not floored) and
+-- clamped to [0, EASEE_MAX_A] AND to the per-phase fuse ceiling so
+-- the breaker stays safe even if the controller sent a value above
+-- what the fuse tolerates.
+local function per_phase_amps(power_w, voltage, p, max_a_per_phase)
+    local v = (voltage and voltage > 0) and voltage or 230
+    local raw = ((power_w or 0) / v / p) + 0.5
+    local amps = math.floor(raw)
+    if amps < 0 then amps = 0 end
+    if amps > EASEE_MAX_A then amps = EASEE_MAX_A end
+    if max_a_per_phase and max_a_per_phase > 0 and amps > max_a_per_phase then
+        amps = math.floor(max_a_per_phase) -- never breach the fuse
+    end
+    -- Below Easee's hardware minimum, pause cleanly instead of leaving
+    -- the charger in "I requested 4 A but nothing flows" limbo.
+    if amps > 0 and amps < EASEE_MIN_A then amps = 0 end
+    return amps
+end
 
 -- Easee error bodies have historically echoed submitted form data
 -- (credentials, tokens). Strip the body and keep only the status prefix
@@ -208,10 +319,44 @@ local REASON_LABELS = {
     [79]  = "car not drawing current",
     [80]  = "current ramping",
     [81]  = "limited by car",
-    [100] = "undefined error",
+    -- Easee's public enumeration doesn't define 100. Field observation:
+    -- we see it when the EV is the side rejecting the offer (Tesla
+    -- charge-on-solar window, charge limit reached, scheduled charging
+    -- still active, transient handshake hiccup). Labelling it
+    -- "undefined error" misleads operators into chasing a charger
+    -- problem when the wallbox is fine.
+    [100] = "EV not accepting current",
 }
 
-local email, password
+local email, password, configured_max_a
+
+-- read_settings GETs the charger's static config block (phaseMode,
+-- maxChargerCurrent, etc.) and surfaces it via the init log so the
+-- operator can spot a firmware-locked phaseMode that would silently
+-- ignore our writes. Easee's API uses `/config` for reads and
+-- `/settings` for writes — they're not symmetric. Returns the
+-- decoded table or nil + err string. Active firmware-lock detection
+-- (compare requested phaseMode after a write) is a follow-up; this
+-- driver's contribution is the diagnostic logging at init.
+local function read_settings(serial)
+    local resp, err = host.http_get(BASE_URL .. "/chargers/" .. serial .. "/config", auth_headers())
+    if err then return nil, redact_http_err(err) end
+    local decoded = host.json_decode(resp)
+    if decoded == nil then
+        return nil, "decode failed (non-JSON response)"
+    end
+    return decoded, nil
+end
+
+-- write_setting POSTs a single key:value into the charger's settings
+-- endpoint. Used at init for maxChargerCurrent (one-shot install
+-- clamp) and for phaseMode / dynamicChargerCurrent on every command.
+local function write_setting(serial, body_table)
+    local _, err = host.http_post(
+        BASE_URL .. "/chargers/" .. serial .. "/settings",
+        host.json_encode(body_table), auth_headers())
+    return err
+end
 
 function driver_init(config)
     host.set_make("Easee")
@@ -233,6 +378,20 @@ function driver_init(config)
     if config and tonumber(config.phases) then
         local p = math.floor(tonumber(config.phases))
         if p == 1 or p == 2 or p == 3 then phases = p end
+    end
+
+    -- Optional `max_charger_current` config: clamps the charger's
+    -- static maxChargerCurrent to this value via the settings API at
+    -- init. Bounds the post-phaseMode-reset window (Easee resets
+    -- dynamicChargerCurrent → maxChargerCurrent on every phase flip;
+    -- if the install's maxChargerCurrent is higher than the per-phase
+    -- fuse can sustain, the post-reset window can briefly exceed
+    -- safe bounds before the next 5 s controller tick claws it back).
+    if config and tonumber(config.max_charger_current) then
+        local m = tonumber(config.max_charger_current)
+        if m > 0 and m <= EASEE_MAX_A then
+            configured_max_a = m
+        end
     end
 
     if not email or not password then
@@ -257,6 +416,32 @@ function driver_init(config)
     end
 
     host.set_sn(charger_serial)
+
+    -- Probe firmware-side settings so operators know what the charger
+    -- itself is committed to BEFORE our first phaseMode write goes out
+    -- (silent overrides got us 30 minutes of confusion in the field —
+    -- see the PR description for the test session).
+    local settings, serr = read_settings(charger_serial)
+    if settings then
+        local fw_pm = tonumber(settings.phaseMode)
+        local fw_max = tonumber(settings.maxChargerCurrent)
+        host.log("info", "Easee: firmware settings — phaseMode=" .. tostring(fw_pm) ..
+            " (1=1p,2=auto,3=3p), maxChargerCurrent=" .. tostring(fw_max) .. "A")
+        -- Apply the operator's max_charger_current clamp if it differs.
+        if configured_max_a and fw_max ~= configured_max_a then
+            local werr = write_setting(charger_serial, {maxChargerCurrent = configured_max_a})
+            if werr == nil then
+                host.log("info", "Easee: maxChargerCurrent clamped to " ..
+                    tostring(configured_max_a) .. " A (was " .. tostring(fw_max) .. " A)")
+            else
+                host.log("warn", "Easee: maxChargerCurrent write failed: " ..
+                    redact_http_err(werr))
+            end
+        end
+    elseif serr then
+        host.log("warn", "Easee: could not read firmware settings: " .. serr)
+    end
+
     host.log("info", "Easee: driver initialized for " .. charger_serial)
 end
 
@@ -291,6 +476,45 @@ function driver_poll()
     if cable_locked ~= nil then cable_locked = (cable_locked == 1 or cable_locked == true) end
     local dyn_current = obs[OBS_DYN_CURRENT]
 
+    -- Derive actual per-phase amps from the live total power +
+    -- per-phase voltage (when available) — diagnostic counterpart to
+    -- the `max_a` field which only echoes whatever we last wrote.
+    -- Operators wanting "is the EV actually drawing what we asked
+    -- for?" should compare actual_amps_per_phase against max_a.
+    --
+    -- Only computed for the canonical 1Φ / 3Φ configurations. Earlier
+    -- driver_init permitted config.phases=2 (a misconfigured site,
+    -- or a transitional state before the first successful phaseMode
+    -- write). Dividing by 2 there would yield a "per-phase" number
+    -- that doesn't correspond to any real cabling — better to omit
+    -- the field than mislead the operator with a fictitious value.
+    local actual_amps_per_phase = nil
+    local v_obs = obs[OBS_VOLTAGE]
+    if power_w > 0 and (phases == 1 or phases == 3) then
+        local vv = (v_obs and v_obs > 0) and v_obs or 230
+        actual_amps_per_phase = power_w / vv / phases
+    end
+
+    -- command_stalled: true when we've been offering >0 A for >30 s but
+    -- the charger isn't drawing AND Easee is reporting an EV-side or
+    -- "max dynamic too low" reason. Lets the controller / UI tell the
+    -- difference between "EV declined" (legitimate, e.g. Tesla SoC
+    -- limit reached) and "wallbox accepted but contactor stuck"
+    -- (needs operator attention). Note: connected==true is required so
+    -- a disconnected cable doesn't latch the flag.
+    local command_stalled = false
+    local now = host.millis()
+    local stalled_reason = (reason_code == 52) or (reason_code == 53) or (reason_code == 100)
+    if connected and (last_amps_set or 0) > 0 and not charging and stalled_reason then
+        if command_stalled_since_ms == 0 then
+            command_stalled_since_ms = now
+        elseif (now - command_stalled_since_ms) >= 30000 then
+            command_stalled = true
+        end
+    else
+        command_stalled_since_ms = 0
+    end
+
     host.emit("ev", {
         w                       = power_w,
         connected               = connected,
@@ -302,9 +526,35 @@ function driver_poll()
         reason_no_current_label = reason_code and REASON_LABELS[reason_code], -- nil if 0/ok, string otherwise
         is_online               = is_online,
         cable_locked            = cable_locked,
-        max_a                   = dyn_current,                 -- current dynamic limit (A)
-        phases                  = phases,                      -- from config.phases; default 3
+        max_a                   = dyn_current,                 -- last-set dynamic limit (echoes our write, may lag)
+        actual_amps_per_phase   = actual_amps_per_phase,       -- live per-phase A derived from totalPower
+        phases                  = phases,                      -- our committed phase count (1 or 3)
+        command_stalled         = command_stalled,             -- offer>0 but contactor open >30s on stall reason
     })
+
+    -- Defense against Easee's post-phaseMode reset of dynamicChargerCurrent
+    -- → maxChargerCurrent. driver_command sets pending_amp_resend=true
+    -- right after a successful phaseMode write; on the next poll
+    -- (≥ ~5 s later, by which time the cloud has settled) we re-write
+    -- our intended amps to overcome the reset. Idempotent — same write
+    -- as the controller would issue on its next 5 s tick, just earlier.
+    --
+    -- Only clear the flag on success. A transient network failure or
+    -- 5xx leaves it pending so the NEXT poll retries instead of
+    -- silently leaving the charger pinned at maxChargerCurrent. The
+    -- controller's own 5 s tick is the safety floor; this just
+    -- accelerates convergence in the common case.
+    if pending_amp_resend and last_amps_set ~= nil and host.millis() >= pending_amp_resend_at_ms then
+        local werr = write_setting(charger_serial, {dynamicChargerCurrent = last_amps_set})
+        if werr == nil then
+            host.log("info", "Easee: re-asserted dynamicChargerCurrent=" .. tostring(last_amps_set) ..
+                " A after phaseMode reset")
+            pending_amp_resend = false
+        else
+            host.log("warn", "Easee: dynamicChargerCurrent re-assert failed (will retry next poll): " ..
+                redact_http_err(werr))
+        end
+    end
 
     if obs[OBS_VOLTAGE] then
         host.emit_metric("ev_voltage_v", obs[OBS_VOLTAGE])
@@ -333,26 +583,89 @@ function driver_command(action, power_w, cmd)
     if not charger_serial or not ensure_auth(email, password) then return false end
 
     if action == "ev_start" then
-        return post_command("/commands/start_charging")
+        local ok = post_command("/commands/start_charging")
+        if ok then paused_state = false end
+        return ok
     elseif action == "ev_pause" then
-        return post_command("/commands/pause_charging")
+        local ok = post_command("/commands/pause_charging")
+        if ok then paused_state = true end
+        return ok
     elseif action == "ev_resume" then
-        return post_command("/commands/resume_charging")
+        local ok = post_command("/commands/resume_charging")
+        if ok then paused_state = false end
+        return ok
     elseif action == "ev_set_current" then
-        -- Easee dynamicChargerCurrent is per-phase amps, so divide by the
-        -- configured phase count. Round (not floor) so a request like
-        -- 4000 W on 3φ produces 6 A (4000/3/230≈5.8) rather than 5 A
-        -- which the charger would reject as below its 6 A minimum.
-        local amps = math.floor(((power_w or 0) / 230 / phases) + 0.5)
-        -- Clamp to the Easee 0..32 A permitted band. 0 pauses the session
-        -- cleanly; anything <6 A the charger rejects as below minimum, so
-        -- normalise those to 0 to avoid a silent "no current" state.
-        if amps > 0 and amps < 6 then amps = 0 end
-        if amps > 32 then amps = 32 end
-        local body = host.json_encode({dynamicChargerCurrent = amps})
-        local _, err = host.http_post(
-            BASE_URL .. "/chargers/" .. charger_serial .. "/settings",
-            body, auth_headers())
+        -- Driver-level phase decision: read the operator's preferences
+        -- + site fuse from the cmd, decide 1Φ vs 3Φ here based on
+        -- the requested W and the voltage we know about. The Go
+        -- controller does NOT pick phases; it just allocates power.
+        local mode    = (cmd and type(cmd.phase_mode)       == "string") and cmd.phase_mode       or ""
+        local split   = (cmd and type(cmd.phase_split_w)    == "number") and cmd.phase_split_w    or 0
+        local hold_s  = (cmd and type(cmd.min_phase_hold_s) == "number") and cmd.min_phase_hold_s or 0
+        local voltage = (cmd and type(cmd.voltage)          == "number" and cmd.voltage > 0)          and cmd.voltage          or 230
+        local max_a   = (cmd and type(cmd.max_amps_per_phase) == "number" and cmd.max_amps_per_phase > 0) and cmd.max_amps_per_phase or nil
+
+        local now_ms = host.millis()
+        local requested_phases = pick_phases(mode, power_w or 0, voltage, max_a, split, hold_s, now_ms)
+
+        -- POST phaseMode FIRST when it differs. Easee's settings
+        -- endpoint accepts phaseMode = 1 (locked-1p), 2 (auto), 3
+        -- (locked-3p). We only ever lock — "auto" is our concern, not
+        -- the charger's.
+        local phase_changed = false
+        if last_sent_phases ~= requested_phases then
+            local pm_err = write_setting(charger_serial, {phaseMode = requested_phases})
+            if pm_err == nil then
+                phases = requested_phases
+                last_sent_phases = requested_phases
+                last_phase_change_ms = now_ms
+                phase_changed = true
+                host.log("info", "Easee: phaseMode → " .. tostring(requested_phases))
+            else
+                host.log("warn", "Easee: phaseMode write failed; skipping current write to avoid overcurrent on stale phase: " ..
+                    redact_http_err(pm_err))
+                -- CRITICAL: power_w was budgeted against requested_phases
+                -- (e.g. 7400 W with the intent of 3Φ → 32 A/phase).
+                -- Computing amps against the unchanged phase count would
+                -- command 32 A on a single phase — tripping a 16 A
+                -- breaker. Fail the command; controller retries next tick.
+                return false
+            end
+        end
+
+        local amps = per_phase_amps(power_w, voltage, phases, max_a)
+        local err = write_setting(charger_serial, {dynamicChargerCurrent = amps})
+        if err == nil then
+            last_amps_set = amps
+            -- After a phaseMode change, schedule one re-write of
+            -- dynamicChargerCurrent on the next driver_poll. Easee's
+            -- cloud resets it to maxChargerCurrent during the phase
+            -- transition; this defends against the reset window
+            -- without waiting for the controller's 5 s tick.
+            if phase_changed then
+                pending_amp_resend = true
+                pending_amp_resend_at_ms = now_ms + 5000
+            end
+            -- Auto-resume after pause. The controller's contract used
+            -- to be: ev_pause → (later) ev_resume → ev_set_current.
+            -- In practice the controller drops ev_resume in some
+            -- transitions and just re-issues ev_set_current with a
+            -- non-zero offer — Easee accepts the new
+            -- dynamicChargerCurrent but the contactor stays open
+            -- because pause is still active (op_mode=2,
+            -- reason_no_current=52 or 100, ev_w=0). Defensively
+            -- send resume_charging when we know we're paused and
+            -- the new offer is > 0. Idempotent on the Easee side;
+            -- a failure here doesn't fail the command (the offer
+            -- itself succeeded, controller will retry next tick).
+            if amps > 0 and paused_state then
+                if post_command("/commands/resume_charging") then
+                    paused_state = false
+                    host.log("info", "Easee: auto-resumed after pause (offer=" ..
+                        tostring(amps) .. " A)")
+                end
+            end
+        end
         return err == nil
     end
 

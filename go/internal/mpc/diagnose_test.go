@@ -134,6 +134,227 @@ func TestDiagnoseHandlesLengthMismatch(t *testing.T) {
 	}
 }
 
+func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
+	now := time.Now()
+	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
+	d := &Diagnostic{
+		ComputedAtMs:   now.Add(-1 * time.Minute).UnixMilli(),
+		Zone:           "SE4",
+		Horizon:        2,
+		TotalCostOre:   -12.3,
+		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
+		LastReason:     "scheduled",
+		Params: DiagnosticParams{
+			Mode:                ModeSelfConsumption,
+			InitialSoCPct:       42,
+			SoCMinPct:           10,
+			SoCMaxPct:           90,
+			SoCLevels:           41,
+			ActionLevels:        81,
+			MaxChargeW:          5000,
+			MaxDischargeW:       5000,
+			ChargeEfficiency:    0.95,
+			DischargeEfficiency: 0.95,
+			CapacityWh:          16000,
+			TerminalSoCPrice:    25,
+		},
+		Slots: []DiagnosticSlot{
+			{
+				Idx:         0,
+				SlotStartMs: start.UnixMilli(),
+				SlotEndMs:   start.Add(15 * time.Minute).UnixMilli(),
+				LenMin:      15,
+				PriceOre:    120,
+				SpotOre:     80,
+				Confidence:  1,
+				PVW:         -4500,
+				LoadW:       900,
+				BatteryW:    0,
+				GridW:       -3600,
+				SoCPct:      42,
+				CostOre:     -72,
+				Reason:      "export surplus",
+				EMSMode:     "self_consumption",
+				PVLimitW:    4100,
+			},
+			{
+				Idx:         1,
+				SlotStartMs: start.Add(15 * time.Minute).UnixMilli(),
+				SlotEndMs:   start.Add(30 * time.Minute).UnixMilli(),
+				LenMin:      15,
+				PriceOre:    -10,
+				SpotOre:     -20,
+				Confidence:  1,
+				PVW:         -5000,
+				LoadW:       900,
+				BatteryW:    1200,
+				GridW:       -2900,
+				SoCPct:      44,
+				CostOre:     9,
+				Reason:      "avoid negative export",
+				EMSMode:     "self_consumption",
+			},
+		},
+	}
+	svc := &Service{
+		Zone:     "SE4",
+		Defaults: Params{Mode: ModeSelfConsumption},
+	}
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
+		t.Fatal("RestoreDiagnostic returned false")
+	}
+	latest := svc.Latest()
+	if latest == nil {
+		t.Fatal("Latest returned nil after restore")
+	}
+	if latest.GeneratedAtMs != d.ComputedAtMs {
+		t.Fatalf("GeneratedAtMs = %d, want %d", latest.GeneratedAtMs, d.ComputedAtMs)
+	}
+	dir, ok := svc.SlotDirectiveAt(now)
+	if !ok {
+		t.Fatal("SlotDirectiveAt returned ok=false after restore")
+	}
+	if dir.BatteryEnergyWh != 0 {
+		t.Fatalf("BatteryEnergyWh = %v, want 0", dir.BatteryEnergyWh)
+	}
+	if dir.GridW != -3600 {
+		t.Fatalf("GridW = %v, want -3600", dir.GridW)
+	}
+	if dir.PVLimitW != 4100 {
+		t.Fatalf("PVLimitW = %v, want 4100", dir.PVLimitW)
+	}
+	at, reason := svc.LastReplanInfo()
+	if reason != "restored_diagnostic" {
+		t.Fatalf("reason = %q, want restored_diagnostic", reason)
+	}
+	if at.UnixMilli() != d.LastReplanAtMs {
+		t.Fatalf("lastReplanAt = %d, want %d", at.UnixMilli(), d.LastReplanAtMs)
+	}
+	diag := svc.Diagnose()
+	if diag == nil || len(diag.Slots) != 2 {
+		t.Fatalf("Diagnose after restore = %+v, want 2 slots", diag)
+	}
+}
+
+// 2026-05-25 live regression: deploy of v0.82 added SoCSafetyFloorPct
+// to Params but persisted snapshots from v0.81 had no field for it.
+// RestoreDiagnostic re-hydrated lastParams from the old snapshot
+// (SoCSafetyFloorPct=0), so the safety-floor gate sat inactive until
+// the next scheduled replan (15 min later). Fix: when restoring,
+// merge fields that are zero-in-snapshot but non-zero-in-Defaults
+// with the current Defaults value.
+func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
+	now := time.Now()
+	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
+	// Snapshot WITHOUT SoCSafetyFloorPct (simulates an older binary).
+	d := &Diagnostic{
+		ComputedAtMs:   now.Add(-1 * time.Minute).UnixMilli(),
+		Zone:           "SE4",
+		Horizon:        1,
+		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
+		Params: DiagnosticParams{
+			Mode:                ModeSelfConsumption,
+			InitialSoCPct:       8,
+			SoCMinPct:           10,
+			SoCMaxPct:           95,
+			SoCLevels:           41,
+			ActionLevels:        81,
+			MaxChargeW:          5000,
+			MaxDischargeW:       5000,
+			ChargeEfficiency:    0.95,
+			DischargeEfficiency: 0.95,
+			CapacityWh:          16000,
+			TerminalSoCPrice:    100,
+			// SoCSafetyFloorPct: 0 (field didn't exist when snapshot was written)
+			// SafetyFloorPenaltyOreKwhHour: 0
+		},
+		Slots: []DiagnosticSlot{{
+			Idx: 0, SlotStartMs: start.UnixMilli(),
+			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
+			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
+			BatteryW: 0, GridW: -2500, SoCPct: 8,
+			EMSMode: "self_consumption",
+		}},
+	}
+	// Service has the newer defaults — operator picked 25% safety floor.
+	svc := &Service{
+		Zone: "SE4",
+		Defaults: Params{
+			Mode:                         ModeSelfConsumption,
+			SoCSafetyFloorPct:            25,
+			SafetyFloorPenaltyOreKwhHour: 100,
+		},
+	}
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
+		t.Fatal("RestoreDiagnostic returned false")
+	}
+	diag := svc.Diagnose()
+	if diag == nil {
+		t.Fatal("Diagnose returned nil after restore")
+	}
+	if diag.Params.SoCSafetyFloorPct != 25 {
+		t.Errorf("SoCSafetyFloorPct after restore = %v, want 25 (merged from Defaults; snapshot had 0)", diag.Params.SoCSafetyFloorPct)
+	}
+	if diag.Params.SafetyFloorPenaltyOreKwhHour != 100 {
+		t.Errorf("SafetyFloorPenaltyOreKwhHour after restore = %v, want 100 (merged from Defaults)", diag.Params.SafetyFloorPenaltyOreKwhHour)
+	}
+}
+
+// If the snapshot DOES have explicit values (operator persisted a
+// non-zero choice), restore must preserve them — not overwrite with
+// Defaults. Only zero-in-snapshot fields get the merge.
+func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
+	now := time.Now()
+	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
+	d := &Diagnostic{
+		ComputedAtMs:   now.Add(-1 * time.Minute).UnixMilli(),
+		Zone:           "SE4",
+		Horizon:        1,
+		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
+		Params: DiagnosticParams{
+			Mode:                         ModeSelfConsumption,
+			InitialSoCPct:                30,
+			SoCMinPct:                    10,
+			SoCMaxPct:                    95,
+			SoCLevels:                    41,
+			ActionLevels:                 81,
+			MaxChargeW:                   5000,
+			MaxDischargeW:                5000,
+			ChargeEfficiency:             0.95,
+			DischargeEfficiency:          0.95,
+			CapacityWh:                   16000,
+			TerminalSoCPrice:             100,
+			SoCSafetyFloorPct:            15, // operator picked a different value
+			SafetyFloorPenaltyOreKwhHour: 50,
+		},
+		Slots: []DiagnosticSlot{{
+			Idx: 0, SlotStartMs: start.UnixMilli(),
+			SlotEndMs: start.Add(15 * time.Minute).UnixMilli(),
+			LenMin:    15, PriceOre: 100, Confidence: 1, PVW: -3000, LoadW: 500,
+			BatteryW: 0, GridW: -2500, SoCPct: 30,
+			EMSMode: "self_consumption",
+		}},
+	}
+	svc := &Service{
+		Zone: "SE4",
+		Defaults: Params{
+			Mode:                         ModeSelfConsumption,
+			SoCSafetyFloorPct:            25, // Defaults would say 25 but snapshot has 15
+			SafetyFloorPenaltyOreKwhHour: 100,
+		},
+	}
+	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
+		t.Fatal("RestoreDiagnostic returned false")
+	}
+	diag := svc.Diagnose()
+	if diag.Params.SoCSafetyFloorPct != 15 {
+		t.Errorf("SoCSafetyFloorPct = %v, want 15 (snapshot value must win over Defaults)", diag.Params.SoCSafetyFloorPct)
+	}
+	if diag.Params.SafetyFloorPenaltyOreKwhHour != 50 {
+		t.Errorf("SafetyFloorPenaltyOreKwhHour = %v, want 50 (snapshot value must win)", diag.Params.SafetyFloorPenaltyOreKwhHour)
+	}
+}
+
 // TestDiagnoseCarriesLoadpointFields — without this the plan table
 // hides EV columns because its `lpActive` gate is
 // `slots.some(x => x.loadpoint_w || x.loadpoint_soc_pct)`. Plumbing
@@ -196,6 +417,9 @@ func TestDiagnoseCarriesLoadpointFields(t *testing.T) {
 	d := svc.Diagnose()
 	if d == nil {
 		t.Fatal("Diagnose returned nil with a loadpoint-enabled plan")
+	}
+	if d.LoadpointID != "garage" {
+		t.Fatalf("LoadpointID = %q, want garage", d.LoadpointID)
 	}
 
 	// At least one slot must report the EV charging that the DP

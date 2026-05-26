@@ -16,20 +16,38 @@ type fakeSender struct {
 }
 
 type sentCommand struct {
-	driver string
-	power  float64
-	action string
+	driver          string
+	power           float64
+	action          string
+	phaseMode       string
+	phaseSplitW     float64
+	minPhaseHoldS   int
+	voltage         float64
+	maxAmpsPerPhase float64
+	sitePhases      int
 }
 
 func (f *fakeSender) Send(ctx context.Context, driver string, payload []byte) error {
 	var d struct {
-		Action string  `json:"action"`
-		PowerW float64 `json:"power_w"`
+		Action          string  `json:"action"`
+		PowerW          float64 `json:"power_w"`
+		PhaseMode       string  `json:"phase_mode"`
+		PhaseSplitW     float64 `json:"phase_split_w"`
+		MinPhaseHoldS   int     `json:"min_phase_hold_s"`
+		Voltage         float64 `json:"voltage"`
+		MaxAmpsPerPhase float64 `json:"max_amps_per_phase"`
+		SitePhases      int     `json:"site_phases"`
 	}
 	if err := json.Unmarshal(payload, &d); err != nil {
 		return err
 	}
-	f.calls = append(f.calls, sentCommand{driver: driver, power: d.PowerW, action: d.Action})
+	f.calls = append(f.calls, sentCommand{
+		driver: driver, power: d.PowerW, action: d.Action,
+		phaseMode: d.PhaseMode, phaseSplitW: d.PhaseSplitW,
+		minPhaseHoldS: d.MinPhaseHoldS,
+		voltage:       d.Voltage, maxAmpsPerPhase: d.MaxAmpsPerPhase,
+		sitePhases:    d.SitePhases,
+	})
 	return f.err
 }
 

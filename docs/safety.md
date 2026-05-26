@@ -141,6 +141,119 @@ Sungrow and Ferroamp both emit per-phase data into
 JSON blob. The aggregate three-phase guard is the floor; per-phase
 logic is opt-in on top.
 
+### 3a. Reactive fuse-saver (PR #208)
+
+`applyFuseGuard` only scales POSITIVE (charge) targets DOWN — it
+prevents the EMS from making an existing overflow worse, but doesn't
+help in the common "battery idle, surprise load" case because there's
+no charge to shrink.
+
+The reactive fuse-saver (`forceFuseDischarge`) closes that gap:
+
+```go
+// go/internal/control/dispatch.go
+func forceFuseDischarge(
+    targets []DispatchTarget,
+    store *telemetry.Store,
+    state *State,
+    capacities map[string]float64,
+    fuseMaxW float64,
+) []DispatchTarget
+```
+
+Runs **after** `applyFuseGuard` on every dispatch cycle, in **every**
+mode (idle, self_consumption, planner_*, holdoff window). Behaviour:
+
+1. Recompute `predicted = currentGrid − currentBat + sumTarget` against
+   the post-`applyFuseGuard` targets. `currentGrid` is the live meter
+   and reflects ALL loads — planned, off-plan, manual_hold-injected,
+   and unplanned spikes.
+2. If `predicted > fuseMaxW`, allocate `overage = predicted − fuseMaxW`
+   of additional discharge across online batteries proportionally to
+   each battery's remaining headroom (`MaxDischargeW − current target
+   magnitude`, gated on `SoC ≥ 5 %`).
+3. Mark every modified target `Clamped = true` so the dispatch trace
+   shows the fuse-saver fired.
+
+Coverage extends to every code path that would normally short-circuit
+`ComputeDispatch` to `nil`:
+
+- **`ModeIdle`**: zeros are generated for every online battery, run
+  through `forceFuseDischarge`. Idle mode + grid spike → battery is
+  overridden to discharge.
+- **Holdoff window**: same — fuse-saver overrides the 5 s holdoff
+  because overflow can't wait.
+
+Edge cases:
+
+- All batteries empty (SoC < 5 %) → fuse-saver returns targets
+  unchanged. Hardware breaker remains the next layer.
+- All batteries already at `MaxDischargeW` → fuse-saver no-op (already
+  doing all it can).
+- `fuseMaxW = 0` → disabled (matches `applyFuseGuard`'s convention).
+
+The 5 s control-tick is the floor. Sub-tick spikes (an oven turning
+on between ticks) still rely on the hardware fuse for protection;
+going faster requires pushing the dispatch loop down to ~1 s.
+
+Surfaced by the manual_hold ramp test in PR #206's session: the EV
+was pinned at ~5.5 kW while the home battery sat at 0 W per the
+planner's idle slot, and `gridW` exceeded `fuseSafeMaxW` until the
+operator stopped the test. The reactive fuse-saver eliminates that
+class of incident at the dispatch level.
+
+### 3b. Per-phase clamp (PR #208 follow-up)
+
+The aggregate fuse-guard above (sections 3 + 3a) protects against
+total grid power exceeding the breaker's combined rating. It does
+**not** see per-phase imbalance: a 16 A 3Φ fuse has each phase trip
+at 16 A, and a single phase can blow even when the three-phase
+aggregate is well below `fuseMaxW`. This was the failure mode the
+operator hit in PR #208's hardware test — the EV was at ~16 A 3Φ
+balanced (3.6 kW per phase), but a single-phase Pixii battery
+charging at 4.4 kW on L1 pushed that one phase past 16 A while the
+aggregate stayed under fuse.
+
+Both `applyFuseGuard` and `forceFuseDischarge` consult an additional
+`perPhaseImportOverageW(store, state)` helper:
+
+```go
+// go/internal/control/dispatch.go
+func perPhaseImportOverageW(store *telemetry.Store, state *State) float64
+```
+
+Reads `l1_a` / `l2_a` / `l3_a` from the meter driver's
+`DerReading.Data` (Pixii, Ferroamp, Sungrow all emit these). Returns
+the wattage by which the worst single phase exceeds
+`state.SiteFuseAmps`, or 0 when within limits / data unavailable /
+clamp disabled.
+
+The dispatch logic then takes the larger of:
+
+- aggregate overage = `predicted_grid − fuseMaxW`
+- per-phase overage = `worst_phase_watts × 3` (balanced-3Φ assumption
+  for the battery — total reduction needed to bring the worst phase
+  back, accepting over-correction on the other phases)
+
+…and uses that as the reduction/discharge target. The existing
+charge-scaling and force-discharge code paths do not change; only
+the input number is now per-phase aware.
+
+**Configuration.** `state.SiteFuseAmps` and `state.SiteFuseVoltage`
+are wired from `cfg.Fuse.MaxAmps` + `cfg.Fuse.Voltage` in `main.go`.
+`SiteFuseAmps == 0` disables the per-phase clamp (back-compat for
+sites without per-phase meter data and the test suite).
+
+**Conservatism for 1Φ batteries.** A balanced 3Φ battery reduces
+each phase by 1/3 of its total output, so `× 3` is exact. A
+single-phase battery (Pixii Home, OCPP single-phase) on the
+overloaded phase reduces it 1:1 — `× 3` over-corrects 3×, but that
+direction is safe (less import on the overloaded phase, slight
+over-export elsewhere that the aggregate guard catches next cycle).
+A single-phase battery on a *different* phase from the overload
+cannot help; this is a real limitation. Per-battery `phase`
+configuration is a follow-up.
+
 ## 4. Dispatch min interval
 
 `cfg.Site.MinDispatchIntervalS` (default **5s**, set in
@@ -320,7 +433,102 @@ enough samples tamed β. Returning the prior instead means the
 forecast degrades to "as good as before we had a twin" during the
 bad period, and recovers when β does.
 
-## 8. Default mode (`driver_default_mode`)
+## 8. Plan-grid soft reactive cap (energy-dispatch path)
+
+The `planner_cheap` / `planner_arbitrage` dispatch path (`useEnergyPath`
+in [`dispatch.go`](../go/internal/control/dispatch.go)) executes the
+plan's per-slot battery Wh budget as instantaneous power:
+
+```
+targetTotalW = remainingWh × 3600 / remainingS
+```
+
+This is the right behaviour when the forecast holds: the battery
+delivers exactly the energy the MPC scheduled, and grid is the
+residual. It is the wrong behaviour when the forecast breaks during
+the slot. Concretely: the MPC planned to charge 4.8 kW from
+forecast 5 kW PV (gridW ≈ 0). A cloud passes, live PV drops to
+1.8 kW. The formula still demands 4.8 kW of battery charge, and the
+3 kW gap is pulled from the grid — at whatever import price the slot
+has — until the reactive replan (`mpc/service.go:266-290`) catches up.
+That trigger is gated by a 500 Wh PV-error integral and a 60 s
+cooldown; in practice it can take 10+ minutes of unintended grid
+import before the next plan re-decides. Originating field report:
+2026-05-19, `planner_arbitrage`.
+
+### How the cap works
+
+`mpc.Action.GridW` is the plan's own forecast of slot-average grid
+power (site-signed: + = import). It is plumbed through
+`mpc.SlotDirective.GridW` → `control.SlotDirective.PlannedGridW` (a
+pointer, so nil opts out for tests / legacy callers).
+
+Every tick on the energy path, after the EV / PV-absorber clamps but
+before `totalCorrection` is set, the cap computes
+
+```
+gridErr := rawGridW − *PlannedGridW
+```
+
+and, **only when `targetTotalW > 0`** (charging slot) and
+`gridErr > 100 W`, backs the target off by the gap:
+
+```
+targetTotalW = max(0, targetTotalW − gridErr)
+```
+
+The 100 W deadband matches `IdleGateThresholdW` / `evActiveThresholdW`
+used elsewhere in the package — below it the divergence is meter
+noise. The floor at 0 prevents the cap from flipping dispatch
+direction.
+
+### Charge-only by design
+
+The mirror case (discharge slot, live gridW more negative than plan)
+is intentionally **not** clamped. Three reasons:
+
+1. **The Wh budget gets delivered either way.** Extra export during
+   a discharge slot comes from load undershooting forecast, not from
+   over-discharging the battery. Backing off would leave Wh sitting
+   in the battery for a future slot the DP already evaluated against
+   the current slot and chose to skip — undermining the plan.
+
+2. **Economics are asymmetric.** Extra import during a charge slot
+   costs the operator real money (paying for energy the plan assumed
+   PV would supply, often at peak prices the DP would never have
+   chosen for charging). Extra export during a discharge slot is
+   bonus revenue at the slot's chosen export price, which the DP
+   picked precisely because it's good.
+
+3. **The discharge-side divergence has other handlers.** Live import
+   > plan during a discharge slot means load surged; the reactive
+   replan picks it up, and the fuse guard / SoC floor / EV-discharge
+   cap protect against the dangerous edges.
+
+Regression guards against re-symmetrising the cap:
+`TestEnergyDispatchPlannedGridCapBacksOffChargeWhenPVDrops` (charge
+case fires correctly), `TestEnergyDispatchPlannedGridCapDoesNotFireOnDischarge`
+(discharge case must not fire). Allowed-import case:
+`TestEnergyDispatchPlannedGridCapAllowsPlannedImport` (cheap-grid
+charge slot follows plan when live gridW matches plan's import).
+
+### Interaction with the PV surplus absorber
+
+The PV surplus absorber (same code path, ~30 lines earlier) handles
+the opposite-direction case for charge slots: live gridW *more*
+negative than plan (PV came in higher than forecast). It
+opportunistically *adds* charge to soak up the extra surplus. The
+two clamps are direction-orthogonal and do not interact.
+
+### When to revisit
+
+If a future planner mode wants to honour planned discharge Wh more
+loosely (e.g. let discharge back off when grid is exporting beyond
+some operator-set ceiling), that's a separate clamp — do not
+re-enable the discharge branch here without a field-validated reason
+and a regression test that captures the specific motivating scenario.
+
+## 9. Default mode (`driver_default_mode`)
 
 Every Lua driver exposes a `driver_default_mode()` function invoked
 by `reg.SendDefault` ([`registry.go:255-267`](../go/internal/drivers/registry.go)).
@@ -346,18 +554,29 @@ register `13050` (stop forced charge/discharge) and `0` to register
 
 ### Ferroamp
 
-[`drivers/ferroamp.lua:298-301`](../drivers/ferroamp.lua) — publish
-the `auto` command over MQTT:
+[`drivers/ferroamp.lua`](../drivers/ferroamp.lua) publishes the `auto`
+command over MQTT:
 
 ```lua
+local function publish_auto(trans_id)
+    return host.mqtt_publish("extapi/control/request",
+        string.format('{"transId":"%s","cmd":{"name":"auto"}}', trans_id))
+end
+
 function driver_default_mode()
-    host.mqtt_publish("extapi/control/request",
-        '{"transId":"watchdog","cmd":{"name":"auto"}}')
+    publish_auto("watchdog")
+end
+
+function driver_cleanup()
+    pcall(publish_auto, "cleanup")
 end
 ```
 
 Same semantics: the hardware takes over and does its own
-self-consumption logic until the EMS returns.
+self-consumption logic until the EMS returns. `driver_cleanup` uses the
+same fallback so a hot-reload, driver disable, or clean service stop
+does not leave the EnergyHub in the last forced `charge` / `discharge`
+reference.
 
 Triggers for default-mode invocation:
 
@@ -365,7 +584,7 @@ Triggers for default-mode invocation:
 - Site-meter stale short-circuit (every driver, see section 2)
 - Driver shutdown / hot-reload
 
-## 9. Failure-mode catalog
+## 10. Failure-mode catalog
 
 | Failure | Detection | Response |
 |---|---|---|

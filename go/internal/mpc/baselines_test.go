@@ -98,3 +98,70 @@ func TestBaselinesEmpty(t *testing.T) {
 		t.Errorf("expected zero Baselines for empty slots, got %+v", b)
 	}
 }
+
+// FlatAvg must price imports and exports separately. The consumer total
+// PriceOre includes grid tariffs that are not earned on export, so
+// netting energy at one mean would credit each exported kWh at the
+// import-tariff price and silently shrink the apparent timing value.
+//
+// Setup: 4 slots, 60 min each, SpotOre = PriceOre/2 (export earns half
+// of consumer price, no bonus/fee). Load = 0 in slots 0..1, PV = -2 kW
+// in slots 0..1; load = 2 kW in slots 2..3, no PV. So the no-battery
+// flows are exactly: slot 0,1 export 2 kWh each; slot 2,3 import 2 kWh
+// each. Symmetric volumes, asymmetric prices.
+func TestBaselinesFlatAvgPricesImportExportSeparately(t *testing.T) {
+	prices := []float64{100, 200, 300, 400} // consumer total, öre/kWh
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: prices[0], SpotOre: prices[0] / 2, LoadW: 0, PVW: -2000},
+		{StartMs: 3_600_000, LenMin: 60, PriceOre: prices[1], SpotOre: prices[1] / 2, LoadW: 0, PVW: -2000},
+		{StartMs: 7_200_000, LenMin: 60, PriceOre: prices[2], SpotOre: prices[2] / 2, LoadW: 2000, PVW: 0},
+		{StartMs: 10_800_000, LenMin: 60, PriceOre: prices[3], SpotOre: prices[3] / 2, LoadW: 2000, PVW: 0},
+	}
+	p := baseParams(ModeArbitrage)
+
+	b := ComputeBaselines(slots, p)
+
+	// AvgPriceOre is the mean *import* price (consumer total).
+	wantAvgImport := (100.0 + 200 + 300 + 400) / 4.0 // 250
+	if math.Abs(b.AvgPriceOre-wantAvgImport) > 1e-6 {
+		t.Errorf("avg import price: got %.3f, want %.3f", b.AvgPriceOre, wantAvgImport)
+	}
+	// NetKWh is import minus export. Both are 4 kWh ⇒ 0.
+	if math.Abs(b.NetKWh) > 1e-9 {
+		t.Errorf("net kWh: got %.6f, want 0 (4 in, 4 out)", b.NetKWh)
+	}
+	// FlatAvg priced separately: 4 kWh × 250 import − 4 kWh × 125 export
+	// = 1000 − 500 = 500 öre. The old (buggy) implementation returned
+	// netKWh × avgImport = 0 × 250 = 0 — i.e., it would tell the user
+	// timing was worth nothing, which is exactly the case Erik flagged.
+	wantFlat := 4.0*250.0 - 4.0*125.0
+	if math.Abs(b.FlatAvgOre-wantFlat) > 1e-6 {
+		t.Errorf("flat-avg cost: got %.3f, want %.3f", b.FlatAvgOre, wantFlat)
+	}
+	// Sanity: NoBattery on the same flows uses the same per-slot model,
+	// just with the actual per-slot prices. Imports cost slot.PriceOre,
+	// exports earn slot.SpotOre (no flat fee/bonus in baseParams).
+	wantNoBat := 2.0*300.0 + 2.0*400.0 - 2.0*50.0 - 2.0*100.0 // 1400 − 300 = 1100
+	if math.Abs(b.NoBatteryOre-wantNoBat) > 1e-6 {
+		t.Errorf("no-battery cost: got %.3f, want %.3f", b.NoBatteryOre, wantNoBat)
+	}
+}
+
+// Honor a flat ExportOrePerKWh feed-in tariff: every exported kWh in
+// FlatAvgOre is credited at exactly that rate, regardless of slot spot.
+func TestBaselinesFlatAvgHonorsFlatExportTariff(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 200, SpotOre: 50, LoadW: 0, PVW: -1000},
+		{StartMs: 3_600_000, LenMin: 60, PriceOre: 200, SpotOre: 50, LoadW: 1000, PVW: 0},
+	}
+	p := baseParams(ModeArbitrage)
+	p.ExportOrePerKWh = 60 // flat feed-in beats spot=50
+
+	b := ComputeBaselines(slots, p)
+
+	// Import: 1 kWh × 200 = 200. Export: 1 kWh × 60 = 60. FlatAvg = 140.
+	wantFlat := 1.0*200.0 - 1.0*60.0
+	if math.Abs(b.FlatAvgOre-wantFlat) > 1e-6 {
+		t.Errorf("flat-avg with flat export tariff: got %.3f, want %.3f", b.FlatAvgOre, wantFlat)
+	}
+}

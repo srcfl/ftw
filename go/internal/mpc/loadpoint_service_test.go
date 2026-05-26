@@ -121,3 +121,93 @@ func TestSlotDirectiveEmptyWhenNoLoadpoint(t *testing.T) {
 		t.Errorf("expected nil LoadpointEnergyWh, got %+v", d.LoadpointEnergyWh)
 	}
 }
+
+// TestNoBatteryToEVForbidsBatteryFeedingEV asserts the DP refuses to
+// schedule battery discharge that would, by energy conservation, flow
+// into the EV when LoadpointSpec.NoBatteryToEV is true. The scenario
+// is constructed so the cost-optimal allocation WITHOUT the constraint
+// is "battery discharges to cover EV" (expensive grid + free battery
+// energy + EV demand). With the constraint, the DP must keep the
+// battery at most at house-residual-after-PV.
+func TestNoBatteryToEVForbidsBatteryFeedingEV(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	start := now.Truncate(15 * time.Minute)
+	// Two slots. First slot: very expensive grid, low PV (1 kW), modest
+	// house (1 kW), high battery SoC. Without the constraint the DP
+	// would happily discharge battery 5+ kW to cover house + EV; with
+	// it, battery must stay ≤ house_residual = max(0, 1000 - 1000) = 0.
+	slots := []Slot{
+		{
+			StartMs:    start.UnixMilli(),
+			LenMin:     60,
+			PriceOre:   500,
+			SpotOre:    500,
+			LoadW:      1000,
+			PVW:        -1000,
+			Confidence: 1.0,
+		},
+		{
+			StartMs:    start.Add(time.Hour).UnixMilli(),
+			LenMin:     60,
+			PriceOre:   500,
+			SpotOre:    500,
+			LoadW:      1000,
+			PVW:        -1000,
+			Confidence: 1.0,
+		},
+	}
+	mkParams := func(noBatToEV bool) Params {
+		return Params{
+			Mode:                ModeArbitrage,
+			SoCLevels:           11,
+			CapacityWh:          20000,
+			SoCMinPct:           10,
+			SoCMaxPct:           95,
+			InitialSoCPct:       90,
+			ActionLevels:        11,
+			MaxChargeW:          5000,
+			MaxDischargeW:       5000,
+			ChargeEfficiency:    0.95,
+			DischargeEfficiency: 0.95,
+			TerminalSoCPrice:    400,
+			Loadpoint: &LoadpointSpec{
+				ID:               "garage",
+				CapacityWh:       60000,
+				Levels:           11,
+				InitialSoCPct:    20,
+				PluggedIn:        true,
+				TargetSoCPct:     30,
+				TargetSlotIdx:    1,
+				MaxChargeW:       11000,
+				AllowedStepsW:    []float64{0, 11000},
+				ChargeEfficiency: 0.9,
+				NoBatteryToEV:    noBatToEV,
+			},
+		}
+	}
+
+	// Baseline (constraint off): DP is allowed to over-discharge.
+	planOff := Optimize(slots, mkParams(false))
+	// Find a slot where both EV charges AND battery discharges past
+	// house-residual. With house=1000, PV=-1000, residual is 0, so
+	// any battW < -50 simultaneous with evW > 0 is "feeding EV".
+	violationOff := false
+	for _, a := range planOff.Actions {
+		if a.LoadpointW > 100 && a.BatteryW < -50 {
+			violationOff = true
+			break
+		}
+	}
+	if !violationOff {
+		t.Skip("baseline never picked battery-to-EV — scenario didn't exercise the rule (price model / SoC grid changed?)")
+	}
+
+	// Constraint on: same scenario, DP must NOT pick that allocation.
+	planOn := Optimize(slots, mkParams(true))
+	for i, a := range planOn.Actions {
+		if a.LoadpointW > 100 && a.BatteryW < -50 {
+			t.Errorf("slot %d: NoBatteryToEV violated — battW=%.0f loadpointW=%.0f (PV=%.0f load=%.0f)",
+				i, a.BatteryW, a.LoadpointW, slots[i].PVW, slots[i].LoadW)
+		}
+	}
+}

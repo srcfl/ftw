@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,8 +33,8 @@ func TestLoadMinimalYAML(t *testing.T) {
 		t.Errorf("site name: got %q", c.Site.Name)
 	}
 	// Defaults applied
-	if c.Site.ControlIntervalS != 5 {
-		t.Errorf("default control_interval_s: got %d", c.Site.ControlIntervalS)
+	if c.Site.ControlIntervalS != 2 {
+		t.Errorf("default control_interval_s: got %d, want 2", c.Site.ControlIntervalS)
 	}
 	if c.Site.GridToleranceW != 42 {
 		t.Errorf("default grid_tolerance_w: got %f", c.Site.GridToleranceW)
@@ -210,6 +212,34 @@ func TestFuseMaxPower(t *testing.T) {
 	}
 }
 
+func TestRejectsInvalidFusePowerInputs(t *testing.T) {
+	cases := []struct {
+		field string
+		value string
+	}{
+		{"max_amps", "-16"},
+		{"phases", "-3"},
+		{"voltage", "-230"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+site: { name: x }
+fuse: { max_amps: 16, phases: 3, voltage: 230, %s: %s }
+drivers:
+  - name: a
+    lua: a.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`, tc.field, tc.value)
+			if _, err := Parse([]byte(yaml), "."); err == nil {
+				t.Fatalf("expected validation error for fuse.%s=%s", tc.field, tc.value)
+			}
+		})
+	}
+}
+
 func TestSmoothingAlphaValidation(t *testing.T) {
 	// alpha=0 means "use default" via applyDefaults, so only test truly invalid values
 	for _, bad := range []float64{-0.1, 1.1, 2.0} {
@@ -226,6 +256,37 @@ api: { port: 8080 }
 		if _, err := Parse([]byte(yaml), "."); err == nil {
 			t.Errorf("alpha=%v should fail validation", bad)
 		}
+	}
+}
+
+func TestRejectsNegativeSiteControlValues(t *testing.T) {
+	cases := []struct {
+		field string
+		value string
+	}{
+		{"control_interval_s", "-1"},
+		{"grid_tolerance_w", "-1"},
+		{"watchdog_timeout_s", "-1"},
+		{"gain", "-0.1"},
+		{"slew_rate_w", "-500"},
+		{"min_dispatch_interval_s", "-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+site: { name: x, %s: %s }
+fuse: { max_amps: 16 }
+drivers:
+  - name: a
+    lua: a.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`, tc.field, tc.value)
+			if _, err := Parse([]byte(yaml), "."); err == nil {
+				t.Fatalf("expected validation error for site.%s=%s", tc.field, tc.value)
+			}
+		})
 	}
 }
 
@@ -298,6 +359,27 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 	if c2.Site.Name != c.Site.Name {
 		t.Errorf("roundtrip site.name: got %q", c2.Site.Name)
+	}
+}
+
+func TestSaveAtomicKeepsOutOfTreeDriverPathAbsolute(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "external.lua")
+	c.Drivers[0].Lua = outside
+	if err := SaveAtomic(path, c); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Drivers[0].Lua != outside {
+		t.Fatalf("driver path after save/load = %q, want original absolute %q", loaded.Drivers[0].Lua, outside)
 	}
 }
 
@@ -404,6 +486,26 @@ func TestUnresolveDriverPathsRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSlewDefaults(t *testing.T) {
+	c := &Config{}
+	applyDefaults(c)
+	if c.Site.SlewRateW != 3000 {
+		t.Errorf("default slew_rate_w: got %f, want 3000", c.Site.SlewRateW)
+	}
+	if c.Site.SlewEnabled == nil || *c.Site.SlewEnabled != true {
+		t.Errorf("default slew_enabled: got %v, want *true", c.Site.SlewEnabled)
+	}
+}
+
+func TestSlewExplicitDisablePreserved(t *testing.T) {
+	f := false
+	c := &Config{Site: Site{SlewEnabled: &f}}
+	applyDefaults(c)
+	if c.Site.SlewEnabled == nil || *c.Site.SlewEnabled != false {
+		t.Errorf("explicit slew_enabled=false must survive applyDefaults, got %v", c.Site.SlewEnabled)
+	}
+}
+
 func TestNotificationsDefaults(t *testing.T) {
 	c := &Config{Notifications: &Notifications{Enabled: false}}
 	applyDefaults(c)
@@ -480,6 +582,89 @@ func TestNotificationsMaskSecrets(t *testing.T) {
 	}
 }
 
+func TestFuseSafetyMarginNilUsesDefault(t *testing.T) {
+	// Field omitted in YAML → nil pointer → default 0.5 A.
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3}
+	if got := f.EffectiveSafetyMarginA(); got != DefaultFuseSafetyMarginA {
+		t.Errorf("nil margin: got %v, want %v (DefaultFuseSafetyMarginA)",
+			got, DefaultFuseSafetyMarginA)
+	}
+}
+
+func TestFuseSafetyMarginExplicitZeroDisables(t *testing.T) {
+	// The whole point of switching to *float64: explicit 0 is a real
+	// operator choice ("no margin") and must NOT be silently upgraded
+	// to the default. Regression for PR #219 review #1/#2/#3.
+	zero := 0.0
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3, SafetyMarginA: &zero}
+	if got := f.EffectiveSafetyMarginA(); got != 0 {
+		t.Errorf("explicit 0 must disable margin, got %v", got)
+	}
+}
+
+func TestFuseSafetyMarginExplicitValuePassesThrough(t *testing.T) {
+	v := 1.5
+	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3, SafetyMarginA: &v}
+	if got := f.EffectiveSafetyMarginA(); got != 1.5 {
+		t.Errorf("got %v, want 1.5", got)
+	}
+}
+
+func TestValidateRejectsNegativeSafetyMargin(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: -0.1 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	_, err := Parse([]byte(yaml), ".")
+	if err == nil || !strings.Contains(err.Error(), "safety_margin_a") {
+		t.Errorf("expected safety_margin_a >= 0 rejection, got %v", err)
+	}
+}
+
+func TestValidateRejectsSafetyMarginAtOrAboveMaxAmps(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: 16.0 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	_, err := Parse([]byte(yaml), ".")
+	if err == nil || !strings.Contains(err.Error(), "< fuse.max_amps") {
+		t.Errorf("expected safety_margin_a < max_amps rejection, got %v", err)
+	}
+}
+
+func TestValidateAcceptsExplicitZeroSafetyMargin(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230, safety_margin_a: 0.0 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`
+	c, err := Parse([]byte(yaml), ".")
+	if err != nil {
+		t.Fatalf("explicit 0 must validate (operator-disabled margin), got %v", err)
+	}
+	// And the resolved value must be 0, not the default.
+	if got := c.Fuse.EffectiveSafetyMarginA(); got != 0 {
+		t.Errorf("EffectiveSafetyMarginA after explicit 0: got %v, want 0", got)
+	}
+}
+
 func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
 	existing := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{AccessToken: "real_tok", Password: "real_pw"}}}
 	incoming := &Config{Notifications: &Notifications{Provider: "ntfy", Ntfy: &NtfyConfig{}}}
@@ -489,5 +674,79 @@ func TestNotificationsPreserveMaskedSecrets(t *testing.T) {
 	}
 	if incoming.Notifications.Ntfy.Password != "real_pw" {
 		t.Errorf("password not restored")
+	}
+}
+
+// --- UserDriversDirOverride tests ---
+
+func TestResolveDriverPathsPrefersUserDir(t *testing.T) {
+	bundledDir := t.TempDir()
+	userDir := t.TempDir()
+
+	// Write the driver only in userDir.
+	if err := os.WriteFile(filepath.Join(userDir, "mydrv.lua"), []byte("--"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = userDir
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(userDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
+	}
+}
+
+func TestResolveDriverPathsFallsBackToBundled(t *testing.T) {
+	bundledDir := t.TempDir()
+	userDir := t.TempDir()
+
+	// Write the driver only in bundledDir — NOT in userDir.
+	if err := os.WriteFile(filepath.Join(bundledDir, "mydrv.lua"), []byte("--"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = userDir
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(bundledDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
+	}
+}
+
+func TestResolveDriverPathsUserEmptyBackCompat(t *testing.T) {
+	bundledDir := t.TempDir()
+
+	orig, origUser := DriversDirOverride, UserDriversDirOverride
+	DriversDirOverride = bundledDir
+	UserDriversDirOverride = ""
+	t.Cleanup(func() {
+		DriversDirOverride = orig
+		UserDriversDirOverride = origUser
+	})
+
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+
+	want := filepath.Join(bundledDir, "mydrv.lua")
+	if c.Drivers[0].Lua != want {
+		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
 	}
 }

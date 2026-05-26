@@ -56,6 +56,10 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
 | `go/internal/nova` | Opt-in federation client to Sourceful Nova Core — ES256 identity, JWT signer, HTTP client (claim + provision), clean telemetry payload + boundary adapter, MQTT publisher |
 | `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |
+| `go/cmd/ftw-pair` | MCP sidecar — host side of the pair flow (`docs/ftw-pair.md`) |
+| `go/cmd/ftw-connect` | Friend-side CLI for joining a pair session |
+| `go/cmd/ftw-subetha` | Standalone relay server — matches two peers on a token and pipes encrypted bytes (`docs/pair-relay-deploy.md`) |
+| `go/internal/subetha` | Subetha — pure-Go relay client: BIP39 token, HKDF-derived ChaCha20-Poly1305 AEAD, length-prefixed frames over TCP |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
@@ -67,6 +71,9 @@ make e2e          # full-stack end-to-end test
 make dev          # start sims + main app locally
 make build-arm64  # cross-compile for RPi
 make release      # tarballs for deploy
+make verify       # pre-commit: vet + test + build (mirrors CI `go test + vet` workflow)
+make verify-all   # pre-push: verify + cross-compile for linux/arm64, linux/amd64, windows
+make install-hooks  # install git pre-commit + pre-push hooks (opt-in)
 ```
 
 Lua drivers need no build step — `drivers/*.lua` ships verbatim with the
@@ -139,6 +146,33 @@ every driver means "drop into autonomous self-consumption". The host
 also short-circuits the dispatch cycle when the configured site-meter
 driver is stale, because a stale grid reading causes one battery to
 charge another.
+
+## UI / web work
+
+**Always follow `DESIGN.md`** for any work under `web/` — colour
+tokens, typography, component vocabulary, and "what NOT to do" rules.
+The short version:
+
+- Read tokens from `web/components/theme.css`. Never hard-code hex
+  colours (e.g. `#6cf`, `#ffb020`); reach for `var(--accent-e)`,
+  `var(--fg)`, `var(--ink-raised)`, `var(--line)`, etc.
+- One amber accent only. On-accent text is near-black `#0a0a0a`,
+  never white.
+- Mono (`var(--mono)`) for eyebrow labels (UPPERCASE, `0.18em`
+  letter-spacing) and tabular numerics; sans (`var(--sans)`) for
+  prose.
+- 1 px hairline borders (`var(--line)`); no drop-shadows on cards or
+  modals (the only sanctioned shadow is the accent glow on 6 px status
+  dots).
+- Light theme support is automatic when you use the tokens — do not
+  branch on `data-theme`.
+- Do not reintroduce Google Fonts; fresh-Pi deploys must boot without
+  WAN.
+
+When extending an existing component, match its existing token usage
+rather than adding new local colour rules. If a new component needs a
+component-specific hue, follow the `--*-e` naming convention so the
+light theme can flip it cleanly.
 
 ## Code conventions
 

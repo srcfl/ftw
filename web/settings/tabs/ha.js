@@ -23,8 +23,7 @@
         '</div></div>' +
         field("Publish interval (s)", "homeassistant.publish_interval_s", "number", 5,
           "How often state topics are pushed to HA. 5 s is a good default.") +
-        '</fieldset>' +
-        '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">Changes to HA config require a restart to take effect.</p>';
+        '</fieldset>';
     },
     after: function () {
       var el = document.getElementById("ha-status-indicator");

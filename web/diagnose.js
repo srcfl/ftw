@@ -141,6 +141,8 @@
         location.hash = '#diagnose/' + ts;
       });
     });
+    const activeRow = el.querySelector('.diag-row.active');
+    if (activeRow) activeRow.scrollIntoView({ block: 'nearest' });
   }
 
   function reasonClass(r) {

@@ -3,10 +3,13 @@ package evcloud
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
 
 // easeeDefaultBaseURL is the Easee cloud API base URL. Split out so
@@ -56,14 +59,42 @@ func (e *Easee) WithBaseURL(u string) *Easee {
 	return &cp
 }
 
-// ListChargers logs in with the given credentials and returns the
-// chargers on the account.
-func (e *Easee) ListChargers(email, password string) ([]Charger, error) {
-	token, err := e.login(email, password)
+// Describe is the wizard's hook for rendering an Easee-flavored form
+// (HTTP transport, "Email" as the username label).
+func (e *Easee) Describe() Descriptor {
+	return Descriptor{
+		Name:          "easee",
+		Label:         "Easee",
+		Transport:     TransportHTTP,
+		NeedsAuth:     true,
+		UsernameLabel: "Email",
+		LuaDriver:     "drivers/easee_cloud.lua",
+	}
+}
+
+// ListChargers logs in with the credentials from cfg and returns the
+// chargers on the account. cfg.HTTP.BaseURL overrides the default base
+// URL when set, which is mostly useful for staging or self-hosted
+// reverse proxies.
+func (e *Easee) ListChargers(cfg *config.EVCharger) ([]Charger, error) {
+	if cfg == nil {
+		return nil, errors.New("easee: nil config")
+	}
+	if cfg.Username == "" {
+		return nil, errors.New("easee: username required")
+	}
+	if cfg.Password == "" {
+		return nil, errors.New("easee: password required")
+	}
+	client := e
+	if cfg.HTTP != nil && cfg.HTTP.BaseURL != "" {
+		client = e.WithBaseURL(cfg.HTTP.BaseURL)
+	}
+	token, err := client.login(cfg.Username, cfg.Password)
 	if err != nil {
 		return nil, err
 	}
-	return e.listChargers(token)
+	return client.listChargers(token)
 }
 
 func (e *Easee) login(email, password string) (string, error) {

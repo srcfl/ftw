@@ -1,0 +1,23 @@
+#!/usr/sbin/nft -f
+# Redirect TCP port 80 to 8080 so the dashboard is reachable at the
+# bare hostname (http://42w.local/) without users having to remember
+# the :8080 suffix.
+#
+# We can't use Docker's port mapping (80:8080) because docker-compose.yml
+# runs the stack with network_mode: host — required for Modbus TCP
+# discovery, LAN MQTT brokers, and mDNS-based drivers like Sourceful
+# Zap. The Go app binds 8080 directly on the host's network namespace.
+#
+# Own table (`42w_redirect`) to stay isolated from any other nftables
+# config a future image stage might add. `flush table` at the top
+# makes the load idempotent: re-running `nft -f` doesn't stack
+# duplicate rules.
+table ip 42w_redirect
+flush table ip 42w_redirect
+
+table ip 42w_redirect {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+        tcp dport 80 redirect to :8080
+    }
+}

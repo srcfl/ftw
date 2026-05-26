@@ -224,12 +224,13 @@ func TestAddCreatesHealthRecordImmediately(t *testing.T) {
 	}
 }
 
-// runLoop should record a successful tick even when the driver poll
-// returns nil error AND doesn't emit any telemetry — so a Lua driver
-// waiting for its first MQTT message is visibly alive. Previously
-// the tick only bumped on RecordError (failure path) or a successful
-// emit, leaving a healthy-but-waiting driver indistinguishable from
-// a crashed one.
+// runLoop should bump TickCount on every poll-return-without-error so
+// a Lua driver that is alive but hasn't emitted yet (e.g. between
+// MQTT subscribe and the first inbound message) is visibly running
+// in /api/status. The tick is intentionally lighter than a full
+// RecordSuccess: LastSuccess is NOT advanced, because the watchdog
+// uses LastSuccess to flip stale drivers offline. host.emit (in the
+// hot path) is the only thing that should advance LastSuccess.
 func TestRunLoopRecordsSuccessEvenWithoutEmits(t *testing.T) {
 	r := NewRegistry(telemetry.NewStore())
 	// Driver polls every 50 ms but emits nothing.
@@ -252,5 +253,12 @@ function driver_command(action, w, cmd) end
 	}
 	if h.TickCount < 2 {
 		t.Errorf("TickCount = %d after 350ms of 50ms polls, want >= 2", h.TickCount)
+	}
+	// LastSuccess must remain nil — only host.emit advances it. A
+	// driver that polls for hours without emitting is, from the
+	// watchdog's perspective, stale; that's the correct signal so
+	// the operator (and notification rules) see the outage.
+	if h.LastSuccess != nil {
+		t.Errorf("LastSuccess advanced without any host.emit call: %v", h.LastSuccess)
 	}
 }

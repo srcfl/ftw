@@ -68,7 +68,7 @@ drivers:
   - name: ferroamp                # unique key, used in API + HA topics
     lua: drivers/ferroamp.lua     # path to driver script
     is_site_meter: true           # exactly one driver must have this
-    battery_capacity_wh: 15200    # 0 if not a battery
+    battery_capacity_wh: 15200    # 0 (or unset) → driver's battery emits are dropped
     max_charge_w: 10000           # per-driver cap; 0/unset → 5 kW default
     max_discharge_w: 10000
     inverter_group: ferroamp      # optional — see "Inverter affinity" below

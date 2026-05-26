@@ -48,8 +48,13 @@ Balance equation (all signed):
 grid_w = load_w + bat_w + pv_w
 ```
 
-At `grid_target_w = 0` (self-consumption mode), the controller works to
-make `load_w + bat_w + pv_w = 0`.
+In self-consumption mode, the controller drives the site meter toward the
+grid target (normally 0 W): it charges from live surplus and may discharge
+to cover local load. It must not intentionally export via the battery; export
+should come from PV unless an explicit export-capable strategy is selected.
+Other modes such as peak-shaving, weighted target-following, and arbitrage
+may still issue negative battery targets when their contract calls for
+discharge.
 
 ## SI units everywhere
 
@@ -85,10 +90,10 @@ driver layer uses the site convention. No mental gymnastics.
 
 ## Dispatch examples
 
-### Grid importing, want to reduce import
+### Grid importing, mode allows reducing import
 
 - Observed: `grid_w = +2000` (importing 2 kW)
-- Target: `grid_target_w = 0`
+- Target: reduce import in a mode that may discharge, such as peak-shaving
 - Controller PI produces correction → battery should DISCHARGE
 - Controller issues `driver_command({"action":"battery","power_w":-1500})`
 - Driver translates:
@@ -131,8 +136,9 @@ So we pick: **grid-meter-positive, view the site from the boundary**.
   (e.g., `emit_pv` always produces `w <= 0`)
 - Integration tests between the driver, WASM runtime, and a simulator verify
   that a `+N` charge command produces an actual reading with `bat_w > 0`
-- The control loop's own tests assert: grid importing → battery discharge
-  target (`bat_target < 0`)
+- The control loop's own tests assert both sides of the contract:
+  self-consumption discharges on import to hold grid near zero, while planner
+  idle/charge slots do not keep individual batteries discharging
 
 Any driver that violates the convention breaks a test. The convention is
 enforced, not just documented.

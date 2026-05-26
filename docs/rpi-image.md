@@ -3,7 +3,7 @@
 A pre-built `.img.xz` ships with every release. Flash it to an SD
 card, drop the card into a Raspberry Pi 4, plug in power + Ethernet
 (or follow the WiFi-onboarding flow below), and the dashboard is at
-`http://42w.local:8080/` within ~90 s of first boot. No terminal, no
+`http://42w.local/` within ~90 s of first boot. No terminal, no
 manual install.
 
 This is the recommended path for new users.
@@ -15,7 +15,7 @@ This is the recommended path for new users.
 1. Download `42w-rpi4-arm64-vX.Y.Z.img.xz` from [Releases](https://github.com/frahlg/forty-two-watts/releases/latest).
 2. Flash to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (recommended) or [balenaEtcher](https://etcher.balena.io/). Both handle `.img.xz` natively — no need to decompress first.
 3. Insert SD card → power on the Pi → wait ~90 s.
-4. Open `http://42w.local:8080/` in any browser on the same network.
+4. Open `http://42w.local/` in any browser on the same network. (`:8080` also works — the image runs an nftables redirect from 80 to 8080 so the bare hostname is enough.)
 
 If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 
@@ -31,6 +31,7 @@ If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 | Container engine | Docker CE + compose plugin (from Docker's official apt repo) |
 | Network | NetworkManager + Avahi (mDNS) |
 | WiFi onboarding | [`wifi-connect`](https://github.com/balena-os/wifi-connect) captive portal |
+| Port redirect | nftables maps 80 -> 8080 so `http://42w.local/` works without `:8080` |
 | Stack | `forty-two-watts`, `mosquitto`, `ftw-updater` (pulled from GHCR on first boot) |
 
 Image size: ~410 MB compressed, ~2.4 GB written to SD card. Any 8 GB
@@ -159,7 +160,7 @@ From a phone or laptop:
    `http://192.168.42.1/` in a browser.
 3. Pick your home network → enter the password → submit.
 4. The Pi joins the network, the AP disappears, the dashboard comes
-   up at `http://42w.local:8080/` within 30–60 s.
+   up at `http://42w.local/` within 30–60 s.
 
 iOS 17 and later occasionally suppress captive-portal popups —
 manually open Safari to any `http://` (not `https://`) URL like
@@ -170,8 +171,11 @@ manually open Safari to any `http://` (not `https://`) URL like
 ## Open the dashboard
 
 ```
-http://42w.local:8080/
+http://42w.local/
 ```
+
+(`http://42w.local:8080/` also works — the image runs an nftables
+redirect at boot so port 80 lands on the same dashboard.)
 
 First time you visit, you land in the setup wizard at `/setup`. Walk
 through: location (for solar forecast), price zone, drivers (your
@@ -180,7 +184,7 @@ over once you click "Finish".
 
 If `42w.local` doesn't resolve (some routers block mDNS, especially
 mesh systems): find the Pi in your router's client list and use the
-IP directly — `http://192.168.x.y:8080/`.
+IP directly — `http://192.168.x.y/` (or `:8080`).
 
 ---
 
@@ -201,7 +205,7 @@ when you flash for real use.
 
 ## Troubleshooting
 
-### Dashboard doesn't load at `42w.local:8080`
+### Dashboard doesn't load at `42w.local`
 
 SSH in:
 
