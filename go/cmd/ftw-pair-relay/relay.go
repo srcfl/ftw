@@ -1,24 +1,35 @@
-// Package main — relay.go
+// Package main — relay server for ftw-pair.
 //
-// Token match table and per-connection handling for the ftw-pair relay server.
+// Protocol (v0x02):
 //
-// Each incoming connection:
-//  1. Sends the relay handshake (version + token).
-//  2. The relay looks up the token in the pending table.
-//  3. First peer with a given token: stored in pending, ack 0x01 sent, goroutine
-//     holds the connection until the matching peer arrives (or idle timeout fires).
-//  4. Second peer with same token: both conns popped from pending, acked 0x00,
-//     and spliced with io.Copy in both directions.
+//  1. Each peer connects via TCP and sends the handshake:
 //
-// Rate limiting: max 10 new connection attempts per minute per source IP.
-// Idle timeout: 60 s for unmatched connections; no limit once matched.
+//        [1 byte] version = 0x02
+//        [1 byte] role    = 0x00 (host) | 0x01 (client)
+//        [1 byte] tokenLen N
+//        [N bytes] token (UTF-8)
+//
+//  2. Hosts (role 0x00) are queued in pendingHosts[token]. The relay acks
+//     them with 0x01 ("waiting") and blocks until a client pops them or
+//     the idle timeout fires.
+//
+//  3. Clients (role 0x01) pop the head of pendingHosts[token] and the relay
+//     acks both peers with 0x00 ("matched"). If no host is queued the
+//     client is acked with 0x04 ("no host waiting") and disconnected — the
+//     client is expected to retry. The host pool on the sidecar side keeps
+//     several hosts pre-warmed so clients usually pop immediately.
+//
+//  4. After matching, the relay splices the two connections with bidirectional
+//     io.Copy. Either side closing tears down the pair.
+//
+//  Role-tagging fixes a bug in v0x01 where two hosts spawned by the worker
+//  pool would match with each other, leaving real clients with no peer.
 //
 // The relay is byte-transparent — it never inspects or modifies the payload.
 // AEAD encryption is handled end-to-end by the ftw-pair / ftw-connect clients.
 package main
 
 import (
-	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -28,9 +39,19 @@ import (
 
 const (
 	// relayProtoVersion is the expected first byte of the handshake.
-	relayProtoVersion = 0x01
+	relayProtoVersion = 0x02
 
-	// idleTimeout is the maximum time an unmatched connection is held.
+	// Roles.
+	roleHost   byte = 0x00
+	roleClient byte = 0x01
+
+	// Ack codes.
+	ackMatched      byte = 0x00
+	ackWaiting      byte = 0x01
+	ackError        byte = 0x02
+	ackNoHostReady  byte = 0x04
+
+	// idleTimeout is the maximum time an unmatched host is held.
 	idleTimeout = 60 * time.Second
 
 	// maxTokenBytes is the maximum token length we accept.
@@ -40,51 +61,57 @@ const (
 	rateLimitWindow = time.Minute
 
 	// rateLimitMax is the maximum new connections per IP per window.
-	rateLimitMax = 10
+	rateLimitMax = 60
 )
 
 // Relay is the token match table. Safe for concurrent use.
 type Relay struct {
-	mu      sync.Mutex
-	pending map[string]*pendingConn // token → first peer waiting
+	mu           sync.Mutex
+	pendingHosts map[string][]*pendingConn // token → FIFO queue of host conns
 
-	rateMu  sync.Mutex
-	ipHits  map[string][]time.Time // IP → connection timestamps
+	rateMu sync.Mutex
+	ipHits map[string][]time.Time // IP → connection timestamps
 }
 
 type pendingConn struct {
 	conn      net.Conn
 	token     string
 	arrivedAt time.Time
-	// matched is closed when the second peer arrives (or timeout fires).
+	// matched is closed when a client arrives (or timeout fires).
 	matched chan struct{}
 }
 
-// NewRelay creates an empty relay.
+// NewRelay returns a Relay with empty state. Call Serve(ln) to start.
 func NewRelay() *Relay {
-	r := &Relay{
-		pending: make(map[string]*pendingConn),
-		ipHits:  make(map[string][]time.Time),
+	return &Relay{
+		pendingHosts: make(map[string][]*pendingConn),
+		ipHits:       make(map[string][]time.Time),
 	}
-	go r.idleReaper()
-	return r
 }
 
-// Handle handles a new inbound connection through the relay protocol.
-func (r *Relay) Handle(conn net.Conn) {
-	addr := conn.RemoteAddr().String()
-	ip, _, _ := net.SplitHostPort(addr)
+// StartReaper kicks off the idle-host reaper goroutine. Call once at startup.
+func (r *Relay) StartReaper() {
+	go r.idleReaper()
+}
 
-	if !r.allowIP(ip) {
-		slog.Warn("relay: rate-limited connection dropped", "ip", ip)
-		conn.Write([]byte{0x02}) //nolint:errcheck
+// Handle reads the protocol handshake from conn and either queues the peer
+// (host) or matches it with a queued host (client). Spawn as a goroutine.
+func (r *Relay) Handle(conn net.Conn) {
+	ip := conn.RemoteAddr().String()
+	if h, _, err := net.SplitHostPort(ip); err == nil {
+		ip = h
+	}
+
+	if !r.allow(ip) {
+		slog.Warn("relay: rate-limit", "ip", ip)
+		conn.Write([]byte{ackError}) //nolint:errcheck
 		conn.Close()
 		return
 	}
 
-	// Read handshake: version(1) + tokenLen(1) + token(N).
+	// Read handshake: version(1) + role(1) + tokenLen(1) + token(N).
 	conn.SetDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	header := make([]byte, 2)
+	header := make([]byte, 3)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		slog.Debug("relay: handshake read error", "ip", ip, "err", err)
 		conn.Close()
@@ -92,14 +119,21 @@ func (r *Relay) Handle(conn net.Conn) {
 	}
 	if header[0] != relayProtoVersion {
 		slog.Debug("relay: unknown protocol version", "ip", ip, "version", header[0])
-		conn.Write([]byte{0x02}) //nolint:errcheck
+		conn.Write([]byte{ackError}) //nolint:errcheck
 		conn.Close()
 		return
 	}
-	tokenLen := int(header[1])
+	role := header[1]
+	if role != roleHost && role != roleClient {
+		slog.Debug("relay: unknown role", "ip", ip, "role", role)
+		conn.Write([]byte{ackError}) //nolint:errcheck
+		conn.Close()
+		return
+	}
+	tokenLen := int(header[2])
 	if tokenLen == 0 || tokenLen > maxTokenBytes {
 		slog.Debug("relay: invalid token length", "ip", ip, "len", tokenLen)
-		conn.Write([]byte{0x02}) //nolint:errcheck
+		conn.Write([]byte{ackError}) //nolint:errcheck
 		conn.Close()
 		return
 	}
@@ -112,137 +146,170 @@ func (r *Relay) Handle(conn net.Conn) {
 	conn.SetDeadline(time.Time{}) //nolint:errcheck
 	token := string(tokenBuf)
 
-	slog.Debug("relay: connection", "ip", ip, "token_prefix", tokenPrefix(token))
-
-	r.mu.Lock()
-	pc, ok := r.pending[token]
-	if ok {
-		// Second peer: pop the pending entry and match.
-		delete(r.pending, token)
+	if role == roleHost {
+		r.handleHost(conn, ip, token)
 	} else {
-		// First peer: register as pending.
-		pc = &pendingConn{
-			conn:      conn,
-			token:     token,
-			arrivedAt: time.Now(),
-			matched:   make(chan struct{}),
-		}
-		r.pending[token] = pc
+		r.handleClient(conn, ip, token)
+	}
+}
+
+func (r *Relay) handleHost(conn net.Conn, ip, token string) {
+	pc := &pendingConn{
+		conn:      conn,
+		token:     token,
+		arrivedAt: time.Now(),
+		matched:   make(chan struct{}),
+	}
+	r.mu.Lock()
+	r.pendingHosts[token] = append(r.pendingHosts[token], pc)
+	r.mu.Unlock()
+
+	if _, err := conn.Write([]byte{ackWaiting}); err != nil {
+		slog.Debug("relay: host waiting-ack write error", "ip", ip, "err", err)
+		r.removeHost(token, pc)
+		conn.Close()
+		return
+	}
+
+	select {
+	case <-pc.matched:
+		// Matched by handleClient; splicing happens there.
+	case <-time.After(idleTimeout + 5*time.Second):
+		// Should have been reaped before this fires; defensive.
+		r.removeHost(token, pc)
+		conn.Close()
+	}
+}
+
+func (r *Relay) handleClient(conn net.Conn, ip, token string) {
+	r.mu.Lock()
+	queue := r.pendingHosts[token]
+	if len(queue) == 0 {
+		r.mu.Unlock()
+		slog.Debug("relay: client arrived but no host queued", "ip", ip, "token_prefix", tokenPrefix(token))
+		conn.Write([]byte{ackNoHostReady}) //nolint:errcheck
+		conn.Close()
+		return
+	}
+	host := queue[0]
+	r.pendingHosts[token] = queue[1:]
+	if len(r.pendingHosts[token]) == 0 {
+		delete(r.pendingHosts, token)
 	}
 	r.mu.Unlock()
 
-	if !ok {
-		// This is the first peer. Ack "waiting" and hold until matched or timeout.
-		if _, err := conn.Write([]byte{0x01}); err != nil {
-			slog.Debug("relay: first-peer ack write error", "ip", ip, "err", err)
-			conn.Close()
-			r.mu.Lock()
-			delete(r.pending, token)
-			r.mu.Unlock()
-			return
-		}
-		// Block until matched (or idle timeout kicks us out via idleReaper).
-		select {
-		case <-pc.matched:
-			// Matched by second peer; the second-peer goroutine handles piping.
-		case <-time.After(idleTimeout + 5*time.Second):
-			// Should have been reaped by idleReaper before this fires; defensive.
-			conn.Close()
-		}
-		return
-	}
-
-	// This is the second peer. Ack both peers and splice.
-	peerConn := pc.conn
-
-	// Ack the second peer (us).
-	if _, err := conn.Write([]byte{0x00}); err != nil {
-		slog.Debug("relay: second-peer ack write error", "ip", ip, "err", err)
+	if _, err := conn.Write([]byte{ackMatched}); err != nil {
+		slog.Debug("relay: client matched-ack write error", "ip", ip, "err", err)
 		conn.Close()
-		close(pc.matched)
-		peerConn.Close()
+		close(host.matched)
+		host.conn.Close()
 		return
 	}
-	// Ack the first peer.
-	if _, err := peerConn.Write([]byte{0x00}); err != nil {
-		slog.Debug("relay: first-peer matched-ack write error", "ip", ip, "err", err)
+	if _, err := host.conn.Write([]byte{ackMatched}); err != nil {
+		slog.Debug("relay: host matched-ack write error", "ip", ip, "err", err)
 		conn.Close()
-		close(pc.matched)
-		peerConn.Close()
+		close(host.matched)
+		host.conn.Close()
 		return
 	}
-	// Signal the first-peer goroutine that it was matched (so it can exit cleanly).
-	close(pc.matched)
 
+	close(host.matched)
 	slog.Info("relay: matched pair", "token_prefix", tokenPrefix(token))
-	splice(peerConn, conn)
+
+	// Splice — bidirectional io.Copy.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(host.conn, conn) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(conn, host.conn) }()
+	wg.Wait()
+
+	conn.Close()
+	host.conn.Close()
 	slog.Info("relay: pair disconnected", "token_prefix", tokenPrefix(token))
 }
 
-// splice copies bidirectionally between a and b until both sides close.
-func splice(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(a, b) //nolint:errcheck
-		a.Close()
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(b, a) //nolint:errcheck
-		b.Close()
-		done <- struct{}{}
-	}()
-	<-done
-	<-done
+// removeHost drops a specific pending host from the queue (used on error or
+// reap). Safe if the host is already gone.
+func (r *Relay) removeHost(token string, pc *pendingConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	q := r.pendingHosts[token]
+	for i, p := range q {
+		if p == pc {
+			r.pendingHosts[token] = append(q[:i], q[i+1:]...)
+			if len(r.pendingHosts[token]) == 0 {
+				delete(r.pendingHosts, token)
+			}
+			return
+		}
+	}
 }
 
-// idleReaper runs periodically and closes/removes unmatched connections that
-// have been idle for longer than idleTimeout.
+// idleReaper runs periodically and closes hosts that have been queued longer
+// than idleTimeout.
 func (r *Relay) idleReaper() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		r.mu.Lock()
+	t := time.NewTicker(idleTimeout / 2)
+	defer t.Stop()
+	for range t.C {
 		now := time.Now()
-		for token, pc := range r.pending {
-			if now.Sub(pc.arrivedAt) > idleTimeout {
-				delete(r.pending, token)
-				pc.conn.Close()
-				slog.Debug("relay: idle timeout — closed unmatched connection", "token_prefix", tokenPrefix(token))
+		r.mu.Lock()
+		for token, queue := range r.pendingHosts {
+			fresh := queue[:0]
+			for _, pc := range queue {
+				if now.Sub(pc.arrivedAt) > idleTimeout {
+					slog.Debug("relay: idle reap", "token_prefix", tokenPrefix(token))
+					pc.conn.Close()
+					continue
+				}
+				fresh = append(fresh, pc)
+			}
+			if len(fresh) == 0 {
+				delete(r.pendingHosts, token)
+			} else {
+				r.pendingHosts[token] = fresh
 			}
 		}
 		r.mu.Unlock()
 	}
 }
 
-// allowIP returns true if the source IP is within rate limits.
-func (r *Relay) allowIP(ip string) bool {
-	r.rateMu.Lock()
-	defer r.rateMu.Unlock()
-
+// allow returns true if `ip` is below the rate-limit threshold.
+func (r *Relay) allow(ip string) bool {
 	now := time.Now()
 	cutoff := now.Add(-rateLimitWindow)
-
+	r.rateMu.Lock()
+	defer r.rateMu.Unlock()
 	hits := r.ipHits[ip]
-	// Filter out timestamps older than the window.
-	recent := hits[:0]
+	fresh := hits[:0]
 	for _, t := range hits {
 		if t.After(cutoff) {
-			recent = append(recent, t)
+			fresh = append(fresh, t)
 		}
 	}
-	recent = append(recent, now)
-	r.ipHits[ip] = recent
-
-	return len(recent) <= rateLimitMax
+	if len(fresh) >= rateLimitMax {
+		r.ipHits[ip] = fresh
+		return false
+	}
+	fresh = append(fresh, now)
+	r.ipHits[ip] = fresh
+	return true
 }
 
-// tokenPrefix returns the first word of a token (for log scrubbing).
-func tokenPrefix(token string) string {
-	for i, c := range token {
-		if c == '-' {
-			return token[:i] + "-…"
+func tokenPrefix(t string) string {
+	if i := indexByte(t, '-'); i > 0 {
+		return t[:i] + "-…"
+	}
+	if len(t) > 6 {
+		return t[:6] + "…"
+	}
+	return t
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
 		}
 	}
-	return fmt.Sprintf("%.8s…", token)
+	return -1
 }

@@ -87,6 +87,7 @@ func main() {
 	defer ln.Close()
 
 	relay := NewRelay()
+	relay.StartReaper()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

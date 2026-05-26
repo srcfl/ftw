@@ -295,17 +295,19 @@ func startInProcessRelay(t *testing.T) *net.TCPListener {
 	return ln.(*net.TCPListener)
 }
 
-// inProcessRelay holds a pending unmatched connection.
+// inProcessRelay holds a FIFO queue of waiting hosts per token. Matches the
+// production relay's role-aware semantics: clients pop hosts; if no host is
+// queued the client gets 0x04 and disconnects.
 type inProcessRelay struct {
-	mu      sync.Mutex
-	pending map[string]net.Conn
+	mu    sync.Mutex
+	hosts map[string][]net.Conn
 }
 
-var globalRelay = &inProcessRelay{pending: make(map[string]net.Conn)}
+var globalRelay = &inProcessRelay{hosts: make(map[string][]net.Conn)}
 
 func handleRelayConn(conn net.Conn) {
-	// Read handshake: version(1) + tokenLen(1) + token(N)
-	header := make([]byte, 2)
+	// Read handshake: version(1) + role(1) + tokenLen(1) + token(N)
+	header := make([]byte, 3)
 	if _, err := io.ReadFull(conn, header); err != nil {
 		conn.Close()
 		return
@@ -315,7 +317,8 @@ func handleRelayConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	tokenLen := int(header[1])
+	role := header[1]
+	tokenLen := int(header[2])
 	tokenBuf := make([]byte, tokenLen)
 	if _, err := io.ReadFull(conn, tokenBuf); err != nil {
 		conn.Close()
@@ -323,42 +326,51 @@ func handleRelayConn(conn net.Conn) {
 	}
 	token := string(tokenBuf)
 
-	globalRelay.mu.Lock()
-	peer, ok := globalRelay.pending[token]
-	if ok {
-		delete(globalRelay.pending, token)
-	} else {
-		globalRelay.pending[token] = conn
-	}
-	globalRelay.mu.Unlock()
+	switch role {
+	case roleHost:
+		globalRelay.mu.Lock()
+		globalRelay.hosts[token] = append(globalRelay.hosts[token], conn)
+		globalRelay.mu.Unlock()
+		if _, err := conn.Write([]byte{0x01}); err != nil {
+			conn.Close()
+		}
+		// Host waits for a client to pop and ack — handled below in the
+		// client branch. This goroutine just returns; the conn is now held
+		// in the hosts map until matched.
+	case roleClient:
+		globalRelay.mu.Lock()
+		q := globalRelay.hosts[token]
+		if len(q) == 0 {
+			globalRelay.mu.Unlock()
+			conn.Write([]byte{0x04}) //nolint:errcheck
+			conn.Close()
+			return
+		}
+		host := q[0]
+		globalRelay.hosts[token] = q[1:]
+		if len(globalRelay.hosts[token]) == 0 {
+			delete(globalRelay.hosts, token)
+		}
+		globalRelay.mu.Unlock()
 
-	if ok {
-		// Second peer: ack both and splice.
-		conn.Write([]byte{0x00})  //nolint:errcheck
-		peer.Write([]byte{0x00}) //nolint:errcheck
+		conn.Write([]byte{0x00}) //nolint:errcheck
+		host.Write([]byte{0x00}) //nolint:errcheck
 
 		done := make(chan struct{}, 2)
-		go func() { io.Copy(peer, conn); peer.Close(); done <- struct{}{} }() //nolint:errcheck
-		go func() { io.Copy(conn, peer); conn.Close(); done <- struct{}{} }() //nolint:errcheck
+		go func() { io.Copy(host, conn); host.Close(); done <- struct{}{} }() //nolint:errcheck
+		go func() { io.Copy(conn, host); conn.Close(); done <- struct{}{} }() //nolint:errcheck
 		<-done
 		<-done
-		return
-	}
-
-	// First peer: ack "waiting", hold the connection.
-	if _, err := conn.Write([]byte{0x01}); err != nil {
+	default:
+		conn.Write([]byte{0x02}) //nolint:errcheck
 		conn.Close()
-		globalRelay.mu.Lock()
-		delete(globalRelay.pending, token)
-		globalRelay.mu.Unlock()
 	}
-	// The conn is now held in globalRelay.pending; the goroutine above will splice when matched.
 }
 
 // TestRelayEndToEnd spins up an in-process relay and verifies that a host
 // and client can exchange bytes through the encrypted tunnel.
 func TestRelayEndToEnd(t *testing.T) {
-	globalRelay = &inProcessRelay{pending: make(map[string]net.Conn)}
+	globalRelay = &inProcessRelay{hosts: make(map[string][]net.Conn)}
 	relayLn := startInProcessRelay(t)
 	relayAddr := relayLn.Addr().String()
 
@@ -433,7 +445,7 @@ func TestRelayEndToEnd(t *testing.T) {
 // not implement idle timeout itself — the assertion is that the relay
 // does not hold the connection forever when the client context is cancelled.
 func TestRelayContextCancel(t *testing.T) {
-	globalRelay = &inProcessRelay{pending: make(map[string]net.Conn)}
+	globalRelay = &inProcessRelay{hosts: make(map[string][]net.Conn)}
 	relayLn := startInProcessRelay(t)
 	relayAddr := relayLn.Addr().String()
 
