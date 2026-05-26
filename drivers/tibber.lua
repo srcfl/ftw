@@ -12,6 +12,12 @@
 --     api_key: <Tibber personal access token>
 --     home_id: <optional — auto-resolved from /viewer/homes on first poll>
 --
+-- Getting an API key:
+--   Generate a personal access token at
+--     https://developer.tibber.com/settings/access-token
+--   Grant at least the `homes` and `liveMeasurement` scopes. The token is
+--   tied to your Tibber account; revoke it from the same page to rotate.
+--
 -- Protocol references:
 --   https://developer.tibber.com/docs/guides/calling-api
 --   https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md
@@ -34,13 +40,17 @@ DRIVER = {
   authors      = { "forty-two-watts contributors" },
   tested_models = { "Pulse IR", "Pulse HAN", "Pulse P1" },
   verification_status = "experimental",
+  -- Settings UI: the api_key field gets rendered as a password input in the
+  -- per-driver "secrets" slot. home_id is left out of config_secrets because
+  -- it's optional and auto-resolved from /viewer/homes on first poll.
+  config_secrets = { "api_key" },
   config_schema = {
     api_key = {
       label = "Tibber API key",
       type  = "string",
       secret = true,
       required = true,
-      help = "Personal access token from developer.tibber.com. Needs at least read access to home + liveMeasurement.",
+      help = "Personal access token from https://developer.tibber.com/settings/access-token. Needs at least read access to home + liveMeasurement.",
     },
     home_id = {
       label = "Home ID (optional)",
