@@ -1,15 +1,29 @@
 package api
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
 )
+
+// pipeToLog scans the given reader line-by-line and emits each line at the
+// given level with the given source attr. Used to surface the ftw-pair
+// sidecar's stdout + stderr into the main service's log ring so silent
+// failures are visible via GET /api/logs.
+func pipeToLog(r io.Reader, source string, level slog.Level) {
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 64*1024), 1024*1024)
+	for s.Scan() {
+		slog.Log(nil, level, s.Text(), "source", source) //nolint:contextcheck
+	}
+}
 
 // resolvedSelfExe returns os.Executable() with symlinks resolved, or
 // os.Args[0] on error. Used as the default selfExe for spawning child
@@ -113,7 +127,7 @@ func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe stri
 // handlePairStart returns an http.HandlerFunc that spawns
 // "<selfExe> pair --ttl <ttl> [--intent <intent>]" as a detached child
 // process. The child will register itself via POST /api/pair/status once
-// the wormhole tunnel is up; the card's fast-poll loop picks that up.
+// the subetha relay tunnel is up; the card's fast-poll loop picks that up.
 func handlePairStart(store *PairStatusStore, selfExe string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -142,7 +156,23 @@ func handlePairStart(store *PairStatusStore, selfExe string) http.HandlerFunc {
 		}
 		go func() {
 			cmd := exec.Command(selfExe, args...)
-			_ = cmd.Run() // child writes to /api/pair/status itself
+			// Pipe child stdout + stderr into our slog. Previously these were
+			// discarded, which made silent fowld failures (e.g. unsupported
+			// command on a different fowl version) effectively invisible:
+			// /api/pair/status would stay at 404 forever and the operator
+			// had no way to see why. Now each child line lands in the log
+			// ring and surfaces via GET /api/logs.
+			stdout, _ := cmd.StdoutPipe()
+			stderr, _ := cmd.StderrPipe()
+			if err := cmd.Start(); err != nil {
+				slog.Error("pair: spawn sidecar", "err", err)
+				return
+			}
+			go pipeToLog(stdout, "pair.stdout", slog.LevelInfo)
+			go pipeToLog(stderr, "pair.stderr", slog.LevelWarn)
+			if err := cmd.Wait(); err != nil {
+				slog.Warn("pair: sidecar exited", "err", err)
+			}
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)

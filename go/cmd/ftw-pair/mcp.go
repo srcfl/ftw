@@ -121,6 +121,11 @@ func StartMCP(ctx context.Context, cfg MCPConfig) (*MCPServer, error) {
 	}
 	mux.Handle("/mcp", mcpsdk.NewStreamableHTTPHandler(func(*http.Request) *mcpsdk.Server { return mcpSrv }, streamOpts))
 
+	// REST surface — sibling of /mcp, shares the same Tool[] and Audit.
+	// This is the primary path: any agent with Bash + curl can drive the
+	// sidecar without us touching their CLI config (no `claude mcp add`).
+	registerRESTHandlers(mux, cfg.Tools, cfg.Audit)
+
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("listen: %w", err)

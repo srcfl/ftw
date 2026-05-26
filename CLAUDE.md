@@ -58,7 +58,8 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |
 | `go/cmd/ftw-pair` | MCP sidecar — host side of the pair flow (`docs/ftw-pair.md`) |
 | `go/cmd/ftw-connect` | Friend-side CLI for joining a pair session |
-| `go/internal/wormhole` | fowld subprocess wrapper — wormhole TCP transport for `ftw-pair` |
+| `go/cmd/ftw-subetha` | Standalone relay server — matches two peers on a token and pipes encrypted bytes (`docs/pair-relay-deploy.md`) |
+| `go/internal/subetha` | Subetha — pure-Go relay client: BIP39 token, HKDF-derived ChaCha20-Poly1305 AEAD, length-prefixed frames over TCP |
 | `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
 | `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
 
