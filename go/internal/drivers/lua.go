@@ -134,8 +134,13 @@ func (d *LuaDriver) Command(ctx context.Context, cmdJSON []byte) error {
 		power, _ = cmd["w"].(float64)
 	}
 	t := goToLua(d.L, cmd)
-	return d.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true},
-		lua.LString(action), lua.LNumber(power), t)
+	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true},
+		lua.LString(action), lua.LNumber(power), t); err != nil {
+		return err
+	}
+	ret := d.L.Get(-1)
+	d.L.Pop(1)
+	return luaReturnError("driver_command", ret)
 }
 
 // Cleanup calls driver_cleanup() and closes the VM.
@@ -160,7 +165,26 @@ func (d *LuaDriver) call(name string) error {
 	if fn == lua.LNil {
 		return nil
 	}
-	return d.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true})
+	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
+		return err
+	}
+	ret := d.L.Get(-1)
+	d.L.Pop(1)
+	return luaReturnError(name, ret)
+}
+
+func luaReturnError(name string, ret lua.LValue) error {
+	switch v := ret.(type) {
+	case lua.LBool:
+		if !bool(v) {
+			return fmt.Errorf("%s returned false", name)
+		}
+	case lua.LString:
+		if s := string(v); s != "" {
+			return fmt.Errorf("%s: %s", name, s)
+		}
+	}
+	return nil
 }
 
 // ---- host.* API exposed to Lua ----
@@ -341,7 +365,12 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("no modbus capability"))
 			return 2
 		}
-		kind := modbusKindFromString(kindS)
+		kind, ok := modbusKindFromString(kindS)
+		if !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("unknown modbus kind: " + kindS))
+			return 2
+		}
 		regs, err := env.Modbus.Read(uint16(addr), uint16(count), kind)
 		if err != nil {
 			L.Push(lua.LNil)
@@ -662,18 +691,18 @@ func splitHostPortLower(s string) (host, port string, hasPort bool) {
 	return s[:i], maybePort, true
 }
 
-func modbusKindFromString(s string) int32 {
+func modbusKindFromString(s string) (int32, bool) {
 	switch s {
 	case "coil":
-		return 0
+		return 0, true
 	case "discrete":
-		return 1
+		return 1, true
 	case "holding":
-		return 2
+		return 2, true
 	case "input":
-		return 3
+		return 3, true
 	}
-	return 2 // default holding
+	return 0, false
 }
 
 // goToLua / luaToGo — minimal JSON-shaped bridge (string, number, bool,
