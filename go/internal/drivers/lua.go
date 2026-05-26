@@ -33,6 +33,10 @@
 //	host.ws_messages()              -- drain inbound frames; "" entry = EOF
 //	host.ws_is_open()               -- boolean
 //	host.ws_close()                 -- close + free
+//	host.tcp_open(addr)             -- open raw TCP socket "host:port"; (true, nil) or (nil, err)
+//	host.tcp_recv()                 -- drain inbound bytes as a Lua string ("" if nothing)
+//	host.tcp_is_open()              -- boolean
+//	host.tcp_close()                -- close + free
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -710,6 +714,62 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 0
 		}
 		_ = env.WS.Close()
+		return 0
+	}))
+
+	// host.tcp_open("host:port")      → (true, nil) or (nil, error_string)
+	// host.tcp_recv()                 → string of buffered bytes since last
+	//                                   call ("" when nothing arrived). The
+	//                                   driver does its own framing (P1
+	//                                   telegrams use ! as the end-of-frame
+	//                                   marker, for instance).
+	// host.tcp_is_open()              → boolean — read pump alive. Flips to
+	//                                   false on EOF / read error; the
+	//                                   driver re-opens on the next poll.
+	// host.tcp_close()                → nil
+	host.RawSetString("tcp_open", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("tcp: capability not granted"))
+			return 2
+		}
+		addr := L.CheckString(1)
+		if err := env.TCP.Open(addr); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("tcp_recv", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			// Mirror ws_messages / mqtt_messages contract: return an empty
+			// value rather than nil so drivers can concatenate without a
+			// nil guard.
+			L.Push(lua.LString(""))
+			return 1
+		}
+		b := env.TCP.PopBytes()
+		L.Push(lua.LString(string(b)))
+		return 1
+	}))
+
+	host.RawSetString("tcp_is_open", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			L.Push(lua.LBool(false))
+			return 1
+		}
+		L.Push(lua.LBool(env.TCP.IsOpen()))
+		return 1
+	}))
+
+	host.RawSetString("tcp_close", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			return 0
+		}
+		_ = env.TCP.Close()
 		return 0
 	}))
 

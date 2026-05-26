@@ -137,6 +137,17 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			env.WithWSAllowedHosts(hosts)
 		}
 	}
+	if cfg.Capabilities.TCP != nil {
+		// Merge allowed_hosts with the driver's own `host`/`address` keys
+		// so the operator doesn't have to list the same endpoint twice.
+		// "host:port" entries pass through unchanged; bare "host" entries
+		// allow any port on that host.
+		hosts := mergeAllowedHosts(cfg.Capabilities.TCP.AllowedHosts, cfg.Config)
+		env.WithTCP(NewNetTCP(cfg.Name, hosts))
+		if len(hosts) > 0 {
+			env.WithTCPAllowedHosts(hosts)
+		}
+	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
 	if err != nil {
@@ -208,6 +219,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.WS != nil {
 				_ = rd.env.WS.Close()
+			}
+			if rd.env.TCP != nil {
+				_ = rd.env.TCP.Close()
 			}
 			return
 		case cmd := <-rd.cmdCh:
@@ -482,6 +496,11 @@ func sameDriverConfig(a, b config.Driver) bool {
 	aMb, bMb := a.EffectiveModbus(), b.EffectiveModbus()
 	if (aMb == nil) != (bMb == nil) { return false }
 	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
+		return false
+	}
+	aTCP, bTCP := a.Capabilities.TCP, b.Capabilities.TCP
+	if (aTCP == nil) != (bTCP == nil) { return false }
+	if aTCP != nil && !reflect.DeepEqual(aTCP.AllowedHosts, bTCP.AllowedHosts) {
 		return false
 	}
 	// Compare the free-form Config map. Previously omitted, so a changed
