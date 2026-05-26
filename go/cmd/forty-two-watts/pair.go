@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 )
 
 // runPair is the entry point for `forty-two-watts pair`.
@@ -59,7 +58,12 @@ func runPair(args []string) {
 	cmd := exec.Command(pairBin, cmdArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// setpgid puts ftw-pair in its own process group so a Ctrl-C that
+	// kills the parent (forty-two-watts pair) doesn't also SIGINT the
+	// sidecar — the sidecar should keep running until the session TTL
+	// expires or an explicit --abort is sent. Platform-specific: only
+	// available on unix; the windows stub is a no-op.
+	setPairSysProcAttr(cmd)
 	if err := cmd.Run(); err != nil {
 		os.Exit(1)
 	}

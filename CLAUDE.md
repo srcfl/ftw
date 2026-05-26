@@ -70,6 +70,9 @@ make e2e          # full-stack end-to-end test
 make dev          # start sims + main app locally
 make build-arm64  # cross-compile for RPi
 make release      # tarballs for deploy
+make verify       # pre-commit: vet + test + build (mirrors CI `go test + vet` workflow)
+make verify-all   # pre-push: verify + cross-compile for linux/arm64, linux/amd64, windows
+make install-hooks  # install git pre-commit + pre-push hooks (opt-in)
 ```
 
 Lua drivers need no build step — `drivers/*.lua` ships verbatim with the

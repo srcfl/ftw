@@ -12,7 +12,8 @@
 #   make clean                — remove all build artifacts
 
 .PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
-        run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs
+        run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
+        verify verify-all install-hooks
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -30,6 +31,9 @@ help:
 	@echo "  run-sim              start Ferroamp + Sungrow simulators"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
+	@echo "  verify               pre-commit: vet + test + build (mirrors CI 'go test + vet' workflow)"
+	@echo "  verify-all           pre-push: verify + cross-compile linux/arm64, linux/amd64, windows"
+	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
 	@echo "  ci                   run local CI incl. browser smoke"
 	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
 	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
@@ -52,6 +56,33 @@ ci-ui:
 
 ci-hw-pi:
 	./scripts/ci-hw-pi.sh
+
+# ---- Fast local verification (mirrors GitHub Actions) ----
+#
+# verify mirrors the "go test + vet" workflow in .github/workflows/test.yml.
+# When this passes, that CI workflow is guaranteed to pass (modulo network
+# deps or flakes). Keep the commands here in sync with that workflow file.
+#
+# verify-all adds cross-compile checks for all release targets, catching
+# platform-specific syscall/import mistakes before push.
+
+verify:
+	cd go && go vet ./...
+	cd go && go test ./...
+	cd go && go build ./...
+	@echo "verify: vet + test + build clean"
+
+verify-all: verify
+	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
+	cd go && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
+	@echo "verify-all: cross-compile clean (linux/arm64, linux/amd64, windows/amd64)"
+
+install-hooks:
+	@cp scripts/git-hooks/pre-commit .git/hooks/pre-commit
+	@cp scripts/git-hooks/pre-push   .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-commit .git/hooks/pre-push
+	@echo "git hooks installed — uninstall with: rm .git/hooks/pre-commit .git/hooks/pre-push"
 
 # ---- Native builds ----
 
