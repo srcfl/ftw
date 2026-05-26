@@ -21,7 +21,7 @@ Both sides need `fowl` (Forward Over Wormhole Locally) on `PATH`. It
 provides the actual wormhole-based TCP tunnel that `ftw-pair` wraps:
 
 ```bash
-uv tool install fowl
+uv tool install 'fowl==25.4.0'
 ```
 
 `fowl` is the canonical Python implementation of magic-wormhole TCP
@@ -63,7 +63,7 @@ One-time install (Mac or Linux):
 
 ```bash
 brew install uv                  # skip if already installed
-uv tool install fowl             # the wormhole transport
+uv tool install 'fowl==25.4.0'             # the wormhole transport
 curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
 ```
 
@@ -180,7 +180,7 @@ regardless of whether the PR is merged.
 
 ## Troubleshooting
 
-**`fowld not found on PATH`** — install with `uv tool install fowl`.
+**`fowld not found on PATH`** — install with `uv tool install 'fowl==25.4.0'`.
 
 **`claude mcp add failed`** — the Claude Code CLI isn't on PATH or
 isn't logged in. `ftw-connect` prints the manual command to run.
