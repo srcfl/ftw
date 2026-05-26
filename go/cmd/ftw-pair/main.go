@@ -26,7 +26,7 @@ import (
 var Version = "dev"
 
 // relayAddrFlag is a package-level flag so wormhole.go can read it.
-// Default: FTW_PAIR_RELAY env var, then pair-relay.sourceful.energy:7777.
+// Default: FTW_PAIR_RELAY env var, then pair-relay.fortytwowatts.com:7777.
 var relayAddrFlag *string
 
 func main() {
@@ -42,7 +42,7 @@ func main() {
 	as := flag.String("as", "", "Optional friend identity (logged in audit)")
 	noWormhole := flag.Bool("no-wormhole", false, "Skip wormhole setup — MCP-only mode for testing/local use")
 	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
-	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.sourceful.energy:7777)")
+	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.fortytwowatts.com:7777)")
 	flag.Parse()
 
 	if *version {
