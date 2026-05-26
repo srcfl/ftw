@@ -88,12 +88,12 @@ let the friend work, and get a PR link back.
 ## Relay
 
 The transport uses a Sourceful-operated relay server at
-`pair-relay.sourceful.energy:7777`. Both the host (Pi) and the friend
+`subetha.fortytwowatts.com:7777`. Both the host (Pi) and the friend
 connect outbound to the relay; the relay matches them by their shared
 6-word token and splices the TCP streams bidirectionally.
 
 ```
-       pair-relay.sourceful.energy:7777
+       subetha.fortytwowatts.com:7777
                       |
           +-----------+-----------+
           |                       |
@@ -154,7 +154,7 @@ PR the friend opens.
 
 `forty-two-watts pair` spawns the `ftw-pair` sidecar. The sidecar runs
 the 17-tool MCP server on `localhost:9999`, then connects to the
-Sourceful relay (`pair-relay.sourceful.energy:7777`) using a randomly
+Sourceful relay (`subetha.fortytwowatts.com:7777`) using a randomly
 generated 6-word token. The relay holds the connection until the
 friend connects with the same token, then splices the two TCP streams.
 All bytes are ChaCha20-Poly1305 encrypted end-to-end using HKDF-derived
@@ -189,13 +189,13 @@ regardless of whether the PR is merged.
 
 - One session at a time.
 - 4 h default TTL, configurable, hard kill at expiry.
-- Relay: `pair-relay.sourceful.energy:7777` (Sourceful-operated). Override
+- Relay: `subetha.fortytwowatts.com:7777` (Sourceful-operated). Override
   with `-relay-addr` flag or `FTW_PAIR_RELAY` env var for self-hosted relays.
 - No per-call approval. Pairing = full trust for the session.
 
 ## Troubleshooting
 
-**`relay connect: dial relay pair-relay.sourceful.energy:7777: ...`** —
+**`relay connect: dial relay subetha.fortytwowatts.com:7777: ...`** —
 the relay is not yet deployed in this environment, or network access is
 blocked. Use `-relay-addr` to point at a local relay for testing.
 
@@ -208,16 +208,16 @@ isn't logged in. `ftw-connect` prints the manual command to run.
 
 ## Self-hosting the relay
 
-The `ftw-pair-relay` binary is published as a release asset alongside
+The `ftw-subetha` binary is published as a release asset alongside
 `ftw-connect`. To run your own relay:
 
 ```bash
 # Download from the latest release
-curl -fsSL .../ftw-pair-relay-linux-amd64 -o ftw-pair-relay
-chmod +x ftw-pair-relay
+curl -fsSL .../ftw-subetha-linux-amd64 -o ftw-subetha
+chmod +x ftw-subetha
 
 # Run (plain TCP; add -tls-cert / -tls-key for TLS)
-./ftw-pair-relay -addr :7777
+./ftw-subetha -addr :7777
 
 # Point host + friend at your relay
 FTW_PAIR_RELAY=myrelay.example.com:7777 forty-two-watts pair --intent "..."

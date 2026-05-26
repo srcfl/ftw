@@ -26,7 +26,7 @@ import (
 var Version = "dev"
 
 // relayAddrFlag is a package-level flag so subetha.go can read it.
-// Default: FTW_PAIR_RELAY env var, then pair-relay.fortytwowatts.com:7777.
+// Default: FTW_PAIR_RELAY env var, then subetha.fortytwowatts.com:7777.
 var relayAddrFlag *string
 
 func main() {
@@ -46,7 +46,7 @@ func main() {
 	noSubetha := flag.Bool("no-subetha", false, "Skip subetha relay setup — MCP-only mode for testing/local use")
 	noWormhole := flag.Bool("no-wormhole", false, "deprecated alias for -no-subetha")
 	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
-	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.fortytwowatts.com:7777)")
+	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default subetha.fortytwowatts.com:7777)")
 	flag.Parse()
 
 	if *version {

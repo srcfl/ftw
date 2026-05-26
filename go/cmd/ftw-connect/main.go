@@ -36,7 +36,7 @@ const mcpName = "ftw-remote"
 
 func main() {
 	version := flag.Bool("version", false, "print version and exit")
-	relayAddr := flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default pair-relay.fortytwowatts.com:7777)")
+	relayAddr := flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default subetha.fortytwowatts.com:7777)")
 	flag.Parse()
 
 	if *version {

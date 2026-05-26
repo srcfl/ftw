@@ -217,8 +217,8 @@ jobs:
           ASSET: bin/ftw-connect-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
-  ftw-pair-relay:
-    name: build + upload ftw-pair-relay binaries
+  ftw-subetha:
+    name: build + upload ftw-subetha binaries
     runs-on: ubuntu-latest
     needs: release
     # Publish standalone relay binaries for linux/amd64 + linux/arm64.
@@ -248,7 +248,7 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
-      - name: Build ftw-pair-relay
+      - name: Build ftw-subetha
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -258,15 +258,15 @@ jobs:
         run: |
           mkdir -p ../bin
           go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-pair-relay-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw-pair-relay
-          ls -la "../bin/ftw-pair-relay-${GOOS}-${GOARCH}${{ matrix.ext }}"
+            -o "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-subetha
+          ls -la "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}"
 
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.release.outputs.new_release_version }}
-          ASSET: bin/ftw-pair-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          ASSET: bin/ftw-subetha-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
   docker:
@@ -439,7 +439,7 @@ jobs:
     # release being useful (disk-space eviction regressions, pi-gen
     # upstream breakage). The announcement should still go out with
     # the binary + image links when that happens.
-    needs: [release, binaries, ftw-connect, ftw-pair-relay, docker]
+    needs: [release, binaries, ftw-connect, ftw-subetha, docker]
     if: needs.release.outputs.new_release_published == 'true'
     permissions:
       contents: read   # gh release view needs read access

@@ -26,7 +26,7 @@
 //	Client sends    with: "ftw-pair v1 relay→host"
 //	Client receives with: "ftw-pair v1 host→relay"
 //
-// Default relay address: pair-relay.fortytwowatts.com:7777
+// Default relay address: subetha.fortytwowatts.com:7777
 // Override: FTW_PAIR_RELAY env var or -relay-addr flag (passed by callers).
 package subetha
 
@@ -48,7 +48,7 @@ import (
 const (
 	// DefaultRelayAddr is the default relay server address.
 	// This host is not yet deployed at time of writing; tests use an in-process relay.
-	DefaultRelayAddr = "pair-relay.fortytwowatts.com:7777"
+	DefaultRelayAddr = "subetha.fortytwowatts.com:7777"
 
 	// relayProtoVersion is the handshake version byte sent to the relay.
 	relayProtoVersion = 0x02
