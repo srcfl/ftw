@@ -12,7 +12,8 @@ vs what isn't. Everything below can be pasted into a terminal.
 | End-to-end (full stack) | All green | `cd go && go test -timeout 180s ./test/e2e -v` |
 | Drivers (Lua + WASM) | All green | `cd go && go test ./internal/drivers/` |
 | Code coverage | Not tracked yet (manual `go test ./... -cover`) | — |
-| CI/CD | Not configured (no `.github/workflows/`) | — |
+| Local CI | Configured | `make ci` |
+| Pi UI smoke | Configured | `make ci-hw-pi` |
 
 Run the full suite:
 
@@ -24,6 +25,23 @@ go test -timeout 120s -count=1 ./...
 The suite finishes in under a minute on a modern laptop. The e2e package
 (`go/test/e2e`) is the slowest single package (~24s) because it spins up a
 real MQTT broker and Modbus TCP server in-process.
+
+For the repo-native local CI, including browser smoke and linux/arm64 build:
+
+```bash
+cd /Users/fredde/repositories/forty-two-watts
+make ci
+```
+
+For the Raspberry Pi candidate slot that serves the new UI on a separate
+port and read-only proxies live API data:
+
+```bash
+make ci-hw-pi
+```
+
+See [`local-ci.md`](local-ci.md) for the safety model, environment
+variables, and artifact locations.
 
 ## 2. Test layout
 
@@ -122,7 +140,7 @@ And verifies:
 - `/api/health` responds with status ok and two drivers alive
 - `/api/status` fuses telemetry from both drivers correctly (PV negative per site convention)
 - PI controller responds to a positive step in `grid_target_w` (batteries charge)
-- PI controller reverses on a negative step (batteries move toward discharge)
+- Target-following mode reverses on a negative step (batteries move toward discharge)
 - Mode switches persist via `/api/mode`
 - Battery models accumulate samples from the control loop
 - `/api/battery_models/reset` clears sample count

@@ -71,9 +71,9 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		http.ServeFile(w, r, path)
 	})
 
-	// GET /api/drivers/catalog → scan Lua drivers
+	// GET /api/drivers/catalog → scan Lua drivers (user dir takes precedence)
 	mux.HandleFunc("GET /api/drivers/catalog", func(w http.ResponseWriter, r *http.Request) {
-		entries, err := drivers.LoadCatalog(driverDir)
+		entries, err := drivers.LoadCatalogMulti(config.UserDriversDirOverride, driverDir)
 		if err != nil {
 			writeBootstrapJSON(w, 200, map[string]any{
 				"path":    driverDir,

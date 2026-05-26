@@ -44,10 +44,10 @@ weekends, with softened morning). `HeatingReferenceC = 18 °C`.
 ## Inputs / outputs
 
 Per sample: `(t, actualLoadW, tempC)` where actualLoadW is derived in
-`Service.sample` (`service.go:144`):
+`Service.sample` from online telemetry only:
 
 ```
-loadW = grid_w - pv_w - bat_w     (site sign, negative skipped)
+loadW = grid_w - pv_w - bat_w - ev_w     (site sign, negative skipped)
 ```
 
 `Predict(t) float64` returns expected W. Uses `TempFunc` if wired, else
@@ -59,10 +59,11 @@ Sample every `SampleInterval = 60s` (`service.go:44`). Skips when the site
 meter reading isn't available or `loadW < 0` (driver transient,
 `service.go:131-150`).
 
-Persistence: `state.Store.SaveConfig("loadmodel/state", …)` — constant at
+Persistence: `state.Store.SaveConfig("loadmodel/state_utc", …)` — constant at
 `service.go:19`. Persists every `PersistEvery = 10` samples and on stop.
 
-Reset: `POST /api/loadmodel/reset`.
+Reset: `POST /api/loadmodel/reset` preserves the configured heating
+coefficient.
 
 `HeatingW_per_degC` is operator-set via `Service.SetHeatingCoef` (called
 from config reload). Not fit online — too noisy and entangled with bucket

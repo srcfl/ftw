@@ -34,12 +34,22 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/forty-two-watts ./cmd/forty-two-watts
+RUN cd go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-pair ./cmd/ftw-pair
+
+# Note: the standalone relay (ftw-subetha) is NOT bundled in this image.
+# It's deployed separately on a Lightsail nano — see docs/subetha-deploy.md.
+# The cross-platform binaries are published as GitHub release assets
+# (ftw-subetha-linux-{amd64,arm64}) for operators who self-host.
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
 
 # ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
 # tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
+# Python, fowl, libsodium no longer needed — the pair transport is now pure Go.
 RUN apk add --no-cache ca-certificates tzdata && \
     addgroup -S ftw && adduser -S ftw -G ftw
 
@@ -57,10 +67,12 @@ RUN apk add --no-cache ca-certificates tzdata && \
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/forty-two-watts /app/forty-two-watts
+COPY --from=builder /out/ftw-pair        /app/ftw-pair
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
-RUN mkdir -p /app/data && chown -R ftw:ftw /app
+RUN mkdir -p /app/data /app/data/drivers /run/ftw-update && \
+    chown -R ftw:ftw /app /run/ftw-update
 
 USER ftw
 WORKDIR /app/data
@@ -86,4 +98,4 @@ EXPOSE 8080
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
 ENTRYPOINT ["/app/forty-two-watts"]
-CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers"]
+CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]

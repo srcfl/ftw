@@ -154,6 +154,121 @@ jobs:
         # failing — useful when semantic-release is re-triggered manually.
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
+  ftw-connect:
+    name: build + upload ftw-connect binaries
+    runs-on: ubuntu-latest
+    needs: release
+    # Publish standalone ftw-connect binaries for every major platform so
+    # the curl installer has assets to download.  These are separate from
+    # the main tarball because ftw-connect is a client-side tool (runs on
+    # Mac/Windows/Linux laptops) while the main tarball targets the Pi.
+    if: needs.release.outputs.new_release_published == 'true'
+    permissions:
+      contents: write  # upload assets to the release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: v${{ needs.release.outputs.new_release_version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Build ftw-connect
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: v${{ needs.release.outputs.new_release_version }}
+        working-directory: go
+        run: |
+          mkdir -p ../bin
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/ftw-connect-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-connect
+          ls -la "../bin/ftw-connect-${GOOS}-${GOARCH}${{ matrix.ext }}"
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.release.outputs.new_release_version }}
+          ASSET: bin/ftw-connect-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
+  ftw-subetha:
+    name: build + upload ftw-subetha binaries
+    runs-on: ubuntu-latest
+    needs: release
+    # Publish standalone relay binaries for linux/amd64 + linux/arm64.
+    # Operators deploying their own relay can grab these from releases.
+    if: needs.release.outputs.new_release_published == 'true'
+    permissions:
+      contents: write  # upload assets to the release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: v${{ needs.release.outputs.new_release_version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Build ftw-subetha
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: v${{ needs.release.outputs.new_release_version }}
+        working-directory: go
+        run: |
+          mkdir -p ../bin
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-subetha
+          ls -la "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}"
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.release.outputs.new_release_version }}
+          ASSET: bin/ftw-subetha-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
   docker:
     name: docker build + push (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -324,7 +439,7 @@ jobs:
     # release being useful (disk-space eviction regressions, pi-gen
     # upstream breakage). The announcement should still go out with
     # the binary + image links when that happens.
-    needs: [release, binaries, docker]
+    needs: [release, binaries, ftw-connect, ftw-subetha, docker]
     if: needs.release.outputs.new_release_published == 'true'
     permissions:
       contents: read   # gh release view needs read access

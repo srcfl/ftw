@@ -4,21 +4,21 @@
 //
 // Two signals are required, both for safety reasons:
 //
-//   1. The GitHub Releases API's "latest release" endpoint identifies
-//      the *semantic* current release — the most recently published
-//      non-prerelease, per release-please's ordering. We can't use
-//      raw semver descending over GHCR tags because the repo's tag
-//      history isn't monotonic (e.g. an older `2.x.y` tag scheme
-//      still in the registry would outrank the current `v0.X.Y` line
-//      numerically).
+//  1. The GitHub Releases API's "latest release" endpoint identifies
+//     the *semantic* current release — the most recently published
+//     non-prerelease, per release-please's ordering. We can't use
+//     raw semver descending over GHCR tags because the repo's tag
+//     history isn't monotonic (e.g. an older `2.x.y` tag scheme
+//     still in the registry would outrank the current `v0.X.Y` line
+//     numerically).
 //
-//   2. The OCI registry's /tags/list confirms the image for that tag
-//      has actually been pushed. A GH Release is published the moment
-//      release-please's PR merges, but the build workflow that pushes
-//      the image runs after that. Without this verification we'd
-//      dispatch a pull whose only guaranteed-resolvable target is
-//      :latest — still aliased to the previous image, no digest
-//      change, sidecar writes state=done with the version unmoved.
+//  2. The OCI registry's /tags/list confirms the image for that tag
+//     has actually been pushed. A GH Release is published the moment
+//     release-please's PR merges, but the build workflow that pushes
+//     the image runs after that. Without this verification we'd
+//     dispatch a pull whose only guaranteed-resolvable target is
+//     :latest — still aliased to the previous image, no digest
+//     change, sidecar writes state=done with the version unmoved.
 //
 // Both signals required: GH Releases tells us *what's released*, GHCR
 // tells us *is it deployable yet*. When the registry doesn't have the
@@ -143,9 +143,10 @@ type Info struct {
 const MaxReleaseBodyBytes = 16 * 1024
 
 // UpdateStatus mirrors the sidecar's state.json so handlers can pass it
-// through unchanged.
+// through unchanged. The main service may also write early states before
+// handing off to the sidecar, e.g. starting/snapshotting.
 type UpdateStatus struct {
-	State     string    `json:"state"` // idle, pulling, restarting, done, failed
+	State     string    `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
 	Action    string    `json:"action,omitempty"`
 	Target    string    `json:"target,omitempty"`
 	StartedAt time.Time `json:"started_at,omitempty"`
@@ -158,9 +159,9 @@ type Checker struct {
 	cfg   Config
 	store Store
 
-	mu                 sync.RWMutex
-	info               Info
-	lastAnnouncedTag   string // dedupe: last tag we emitted UpdateAvailable for
+	mu               sync.RWMutex
+	info             Info
+	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -514,7 +515,7 @@ func (c *Checker) Status() UpdateStatus {
 	if err := json.NewDecoder(f).Decode(&st); err != nil || st.State == "" {
 		return UpdateStatus{State: "idle"}
 	}
-	if (st.State == "pulling" || st.State == "restarting") && !st.UpdatedAt.IsZero() {
+	if isInFlightState(st.State) && !st.UpdatedAt.IsZero() {
 		if c.cfg.Now().Sub(st.UpdatedAt) > staleThreshold {
 			st.State = "failed"
 			if st.Message == "" {
@@ -523,6 +524,44 @@ func (c *Checker) Status() UpdateStatus {
 		}
 	}
 	return st
+}
+
+// WriteStatus publishes a local update status. This is used by the main
+// service for pre-sidecar work such as snapshot creation, so the UI is not
+// stuck at "Starting update" while a large state.db is being copied.
+func (c *Checker) WriteStatus(st UpdateStatus) error {
+	if c.cfg.StatusPath == "" {
+		return nil
+	}
+	if st.UpdatedAt.IsZero() {
+		st.UpdatedAt = c.cfg.Now()
+	}
+	tmp := c.cfg.StatusPath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(st); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, c.cfg.StatusPath)
+}
+
+func isInFlightState(state string) bool {
+	switch state {
+	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+		return true
+	default:
+		return false
+	}
 }
 
 // isNewer returns true if latest is strictly greater than current in

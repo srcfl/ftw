@@ -80,7 +80,9 @@ line 445) calling `go/internal/control/`.
 Runs every `site.control_interval_s` seconds (default 5). Modes:
 
 - `idle` — emit nothing
-- `self_consumption` — PI-chase `grid_target_w` (usually 0)
+- `self_consumption` — drive the site meter toward 0 W: charge from PV
+  surplus and discharge to cover local load, without intentionally exporting
+  via the battery
 - `peak_shaving` — cap grid import at `PeakLimitW`
 - `charge` — force all batteries to max charge
 - `priority` — fill one battery first, then the next
