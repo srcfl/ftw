@@ -198,6 +198,22 @@ The 2026-05-27 incident: dispatching `pplim arg=0` during a stale
 curtail-allocation cycle locked the SSO at 0 W PV for 30+ minutes
 and triggered a fault state on the EnergyHub.
 
+#### Ferroamp stuck-pplim self-healing watchdog
+
+The same `pplim_release_w` value (when set > 0) also arms a self-
+healing watchdog in the Ferroamp driver. If the SSO reports the
+sticky-pplim signature — DC bus voltage above 200 V, zero PV current,
+no fault, relay closed — continuously for ten minutes, the driver
+auto-publishes `pplim arg=<pplim_release_w>` to release the lock.
+A five-minute cooldown prevents command-spam if the recovery doesn't
+take. Operators who leave `pplim_release_w` unset see a per-incident
+warning log instead — no MQTT publish, because we don't have a safe
+release value to send.
+
+The `stuck_pv_recovery_count` metric tracks how many auto-recoveries
+the driver has issued since startup; alert on any non-zero rate to
+catch a chronic sticky-pplim condition that needs operator attention.
+
 ### `api` — REST + web UI
 
 ```yaml

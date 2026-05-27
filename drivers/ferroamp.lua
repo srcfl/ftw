@@ -147,6 +147,21 @@ local CHARGE_CEIL_SOC     = 0.95
 -- the live SE4 site for 30+ minutes; recovery required a Ferroamp
 -- portal reset.
 local PPLIM_RELEASE_W     = 0
+
+-- Stuck-pplim self-healing watchdog. If the SSO reports DC bus voltage
+-- (paneler aktiva) AND zero PV current AND no fault for STUCK_PV_AFTER_MS
+-- continuous, we treat that as the sticky-pplim trap signature and
+-- auto-publish `pplim arg=PPLIM_RELEASE_W` to recover. Operator opts in
+-- by setting PPLIM_RELEASE_W > 0 — without that we just log a warning
+-- because we have no safe release value. The recovery has a cooldown
+-- (STUCK_PV_RECOVERY_COOLDOWN_MS) so a persistent issue can't loop us
+-- into command-spam. 2026-05-27 incident background: PR #367 + #372.
+local STUCK_PV_AFTER_MS              = 10 * 60 * 1000  -- 10 minutes
+local STUCK_PV_RECOVERY_COOLDOWN_MS  = 5 * 60 * 1000   -- 5 minutes
+local STUCK_PV_DC_V_THRESHOLD        = 200             -- volts on the DC bus
+local stuck_pv_since_ms              = -1              -- -1 = not stuck
+local stuck_pv_last_recovery_ms      = -1              -- -1 = never recovered
+local stuck_pv_recovery_count        = 0
 -- Cap on the N_total/N_capable multiplier so a transient "only 1 of 4
 -- capable" snapshot can't quadruple the on-wire setpoint past inverter
 -- rating before the next poll corrects it. 2.0 covers the common
@@ -742,13 +757,62 @@ function driver_poll()
         local sso_udc = extract_val(sso_data, "udc")
         if sso_udc then host.emit_metric("sso_dc_link_v", tonumber(sso_udc) or 0) end
         local sso_upv = extract_val(sso_data, "upv")
-        if sso_upv then host.emit_metric("sso_pv_v", tonumber(sso_upv) or 0) end
+        local upv_n = tonumber(sso_upv) or 0
+        if sso_upv then host.emit_metric("sso_pv_v", upv_n) end
         local sso_ipv = extract_val(sso_data, "ipv")
-        if sso_ipv then host.emit_metric("sso_pv_a", tonumber(sso_ipv) or 0) end
+        local ipv_n = tonumber(sso_ipv) or 0
+        if sso_ipv then host.emit_metric("sso_pv_a", ipv_n) end
         local sso_relay = extract_val(sso_data, "relaystatus")
-        if sso_relay then host.emit_metric("sso_relaystatus", tonumber(sso_relay) or 0) end
+        local relay_n = tonumber(sso_relay) or 0
+        if sso_relay then host.emit_metric("sso_relaystatus", relay_n) end
         local sso_fault = extract_val(sso_data, "faultcode")
-        if sso_fault then host.emit_metric("sso_faultcode", tonumber(sso_fault) or 0) end
+        local fault_n = tonumber(sso_fault) or 0
+        if sso_fault then host.emit_metric("sso_faultcode", fault_n) end
+
+        -- Stuck-pplim self-healing watchdog. The 2026-05-27 incident
+        -- left the SSO at upv≈500V + ipv=0 + faultcode=0 + relay=1
+        -- (paneler aktiva, ingen MPPT, ingen hårdvarufel) — the
+        -- signature of a sticky `pplim arg=0` lock. Recovery via portal
+        -- took 30+ minutes. If the operator has opted in by setting
+        -- `pplim_release_w`, the driver now detects the signature and
+        -- auto-publishes a release (`pplim arg=PPLIM_RELEASE_W`) after
+        -- STUCK_PV_AFTER_MS continuous, throttled by a cooldown so a
+        -- persistent issue can't loop us into command-spam.
+        local stuck = (upv_n > STUCK_PV_DC_V_THRESHOLD)
+                  and (ipv_n == 0)
+                  and (fault_n == 0)
+                  and (relay_n == 1)
+        if stuck then
+            if stuck_pv_since_ms < 0 then
+                stuck_pv_since_ms = now
+            elseif (now - stuck_pv_since_ms) > STUCK_PV_AFTER_MS then
+                local cool_ok = stuck_pv_last_recovery_ms < 0
+                            or (now - stuck_pv_last_recovery_ms) > STUCK_PV_RECOVERY_COOLDOWN_MS
+                if PPLIM_RELEASE_W > 0 and cool_ok then
+                    local payload = string.format(
+                        '{"transId":"stuck-pv-recover","cmd":{"name":"pplim","arg":%d}}',
+                        PPLIM_RELEASE_W)
+                    local err = host.mqtt_publish("extapi/control/request", payload)
+                    if not err then
+                        stuck_pv_last_recovery_ms = now
+                        stuck_pv_recovery_count   = stuck_pv_recovery_count + 1
+                        host.log("warn", string.format(
+                            "Ferroamp: stuck-pplim detected (upv=%.1fV, ipv=0A for %d min) — auto-published pplim arg=%d to recover",
+                            upv_n, math.floor((now - stuck_pv_since_ms) / 60000), PPLIM_RELEASE_W))
+                    end
+                elseif PPLIM_RELEASE_W <= 0 and cool_ok then
+                    -- Log-only path: operator hasn't opted in. Reuse the
+                    -- cooldown so we don't spam every poll.
+                    stuck_pv_last_recovery_ms = now
+                    host.log("warn", string.format(
+                        "Ferroamp: stuck-pplim signature for %d min (upv=%.1fV, ipv=0A) — set config.pplim_release_w to enable auto-recovery",
+                        math.floor((now - stuck_pv_since_ms) / 60000), upv_n))
+                end
+            end
+        else
+            stuck_pv_since_ms = -1
+        end
+        host.emit_metric("stuck_pv_recovery_count", stuck_pv_recovery_count)
     end
 
     return 1000
