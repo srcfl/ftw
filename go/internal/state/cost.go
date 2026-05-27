@@ -6,21 +6,23 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/gridcost"
 )
 
-// DayCostBreakdown decomposes grid traffic over a time range into actual cost
-// (slot-weighted against the prices table) and the data needed to compute a
-// flat-rate baseline (unweighted mean prices). All monetary values are in öre.
+// DayCostBreakdown decomposes a historical range into actual net grid cost and
+// a no-PV/no-battery baseline. All monetary values are in öre.
 //
-// The shape mirrors how mpc.ComputeBaselines computes "vs flat avg price" for
-// the planner horizon: separate import / export means, applied to import /
-// export volumes. Keeping the math identical means the historical answer for
-// a finished day matches what the live badge said when that day was the plan.
+// BaselineCostOre prices recorded house load as if every Wh had been bought
+// from the grid. ActualCostOre prices the real grid-boundary import/export.
+// Their difference is the operator-facing savings from PV self-consumption,
+// battery shifting, and export revenue.
 type DayCostBreakdown struct {
 	ImportWh         float64
 	ExportWh         float64
+	LoadWh           float64
 	ImportCostOre    float64 // Σ slot ( import_wh × total_ore_kwh ) / 1000
 	ExportRevenueOre float64 // Σ slot ( export_wh × export_price_ore ) / 1000
-	AvgImportOreKwh  float64 // unweighted mean of total_ore_kwh over slots in range
-	AvgExportOreKwh  float64 // unweighted mean of effective export price over slots in range
+	BaselineCostOre  float64 // Σ slot ( load_wh × total_ore_kwh ) / 1000
+	AvgImportOreKwh  float64 // time-weighted mean of total_ore_kwh over slots in range
+	AvgExportOreKwh  float64 // time-weighted mean of effective export price over slots in range
+	PriceSlotCount   int     // overlapping price slots used for the cost model
 }
 
 // ActualCostOre is the net cost the household actually paid: import cost minus
@@ -29,18 +31,18 @@ func (b DayCostBreakdown) ActualCostOre() float64 {
 	return b.ImportCostOre - b.ExportRevenueOre
 }
 
-// FlatCostOre is the no-timing baseline — same kWh volumes priced at the
-// range's mean import / export prices. Matches mpc.ComputeBaselines'
-// FlatAvgOre formula.
+// FlatCostOre returns the legacy field name's value. The savings endpoint used
+// to expose a flat-average timing baseline; callers now get the load-only
+// no-PV/no-battery baseline through the same field for compatibility.
 func (b DayCostBreakdown) FlatCostOre() float64 {
-	return (b.ImportWh*b.AvgImportOreKwh - b.ExportWh*b.AvgExportOreKwh) / 1000.0
+	return b.BaselineCostOre
 }
 
-// SavedOre is FlatCostOre − ActualCostOre. Positive means the system spent
-// less than flat-rate would have; negative means timing lost money relative
-// to flat-rate.
+// SavedOre is baseline load cost minus actual net cost. Positive means PV,
+// battery dispatch, and export reduced cost relative to buying the recorded
+// load from the grid.
 func (b DayCostBreakdown) SavedOre() float64 {
-	return b.FlatCostOre() - b.ActualCostOre()
+	return b.BaselineCostOre - b.ActualCostOre()
 }
 
 // ExportPricing aliases the shared export pricing knobs used by the planner
@@ -92,12 +94,13 @@ func (s *Store) DailyCostBreakdown(sinceMs, untilMs int64, zone string, ep Expor
 		return DayCostBreakdown{}, fmt.Errorf("DailyCostBreakdown: integrate: %w", err)
 	}
 
-	avgImp, avgExp, err := s.avgSlotPricesForRange(zone, sinceMs, untilMs, ep)
+	avgImp, avgExp, priceSlots, err := s.avgSlotPricesForRange(zone, sinceMs, untilMs, ep)
 	if err != nil {
 		return DayCostBreakdown{}, fmt.Errorf("DailyCostBreakdown: avg slots: %w", err)
 	}
 	out.AvgImportOreKwh = avgImp
 	out.AvgExportOreKwh = avgExp
+	out.PriceSlotCount = priceSlots
 	return out, nil
 }
 
@@ -144,18 +147,18 @@ func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]p
 //
 // Slots are walked with a sliding pointer: both sides are ascending, so for
 // each midpoint we advance until the slot's EndMs is past the midpoint.
-// Samples whose midpoint has no covering slot still count toward ImportWh /
-// ExportWh but contribute zero to cost / revenue.
+// Samples whose midpoint has no covering slot still count toward ImportWh,
+// ExportWh, and LoadWh but contribute zero to cost / revenue.
 func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
 	rows, err := s.db.Query(`
 		WITH all_rows AS (
-			SELECT ts_ms, COALESCE(grid_w, 0) AS grid_w FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms, COALESCE(grid_w, 0) AS grid_w, COALESCE(load_w, 0) AS load_w FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, COALESCE(grid_w, 0)            FROM history_warm WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms, COALESCE(grid_w, 0),           COALESCE(load_w, 0)           FROM history_warm WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, COALESCE(grid_w, 0)            FROM history_cold WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms, COALESCE(grid_w, 0),           COALESCE(load_w, 0)           FROM history_cold WHERE ts_ms BETWEEN ? AND ?
 		)
-		SELECT ts_ms, grid_w FROM all_rows ORDER BY ts_ms ASC
+		SELECT ts_ms, grid_w, load_w FROM all_rows ORDER BY ts_ms ASC
 	`,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
@@ -174,8 +177,8 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 	)
 	for rows.Next() {
 		var ts int64
-		var gridW float64
-		if err := rows.Scan(&ts, &gridW); err != nil {
+		var gridW, loadW float64
+		if err := rows.Scan(&ts, &gridW, &loadW); err != nil {
 			return DayCostBreakdown{}, err
 		}
 		if !havePrev {
@@ -199,6 +202,14 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 			covering = &slots[slotIdx]
 		}
 
+		if loadW > 0 {
+			loadWh := loadW * float64(dtMs) / 3600000.0
+			out.LoadWh += loadWh
+			if covering != nil {
+				out.BaselineCostOre += loadWh * covering.TotalOre / 1000.0
+			}
+		}
+
 		wh := gridW * float64(dtMs) / 3600000.0
 		switch {
 		case gridW > 0:
@@ -216,39 +227,68 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 	return out, rows.Err()
 }
 
-// avgSlotPricesForRange computes the unweighted mean import / export öre/kWh
-// over slots whose StartMs falls in [sinceMs, untilMs]. Matches the original
-// SQL: this is the flat-rate baseline mpc.ComputeBaselines uses for the
-// "vs flat avg price" comparison.
-func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep ExportPricing) (avgImport, avgExport float64, err error) {
+// avgSlotPricesForRange computes time-weighted import / export price metadata
+// over price slots overlapping [sinceMs, untilMs), including variable slot
+// lengths and partial edge slots.
+func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep ExportPricing) (avgImport, avgExport float64, count int, err error) {
 	rows, err := s.db.Query(`
-		SELECT spot_ore_kwh, total_ore_kwh
+		SELECT slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh
 		FROM prices
-		WHERE zone = ? AND slot_ts_ms BETWEEN ? AND ?
-	`, zone, sinceMs, untilMs)
+		WHERE zone = ?
+		  AND slot_ts_ms < ?
+		  AND slot_ts_ms + slot_len_min * 60000 > ?
+		ORDER BY slot_ts_ms ASC
+	`, zone, untilMs, sinceMs)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer rows.Close()
 
 	var (
-		n              int
+		weightMs       float64
 		sumImp, sumExp float64
 	)
 	for rows.Next() {
+		var start int64
+		var lenMin int
 		var spot, total float64
-		if err := rows.Scan(&spot, &total); err != nil {
-			return 0, 0, err
+		if err := rows.Scan(&start, &lenMin, &spot, &total); err != nil {
+			return 0, 0, 0, err
 		}
-		n++
-		sumImp += total
-		sumExp += gridcost.ExportPriceOre(spot, ep)
+		if lenMin <= 0 {
+			lenMin = 60
+		}
+		end := start + int64(lenMin)*60000
+		overlapStart := maxInt64(start, sinceMs)
+		overlapEnd := minInt64(end, untilMs)
+		if overlapEnd <= overlapStart {
+			continue
+		}
+		w := float64(overlapEnd - overlapStart)
+		count++
+		weightMs += w
+		sumImp += total * w
+		sumExp += gridcost.ExportPriceOre(spot, ep) * w
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	if n == 0 {
-		return 0, 0, nil
+	if weightMs == 0 {
+		return 0, 0, 0, nil
 	}
-	return sumImp / float64(n), sumExp / float64(n), nil
+	return sumImp / weightMs, sumExp / weightMs, count, nil
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

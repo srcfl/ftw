@@ -10,13 +10,10 @@ func approxEq(a, b, tol float64) bool {
 	return math.Abs(a-b) <= tol
 }
 
-func TestDailyCostBreakdown_SlotWeightedAgainstFlat(t *testing.T) {
+func TestDailyCostBreakdown_LoadBaselineCountsAvoidedImportAndExport(t *testing.T) {
 	s := freshStore(t)
 
 	// Two 1-hour price slots covering [0, 7200000) ms.
-	// Slot 0 is cheap, slot 1 is expensive — so importing in slot 0 and
-	// exporting in slot 1 is the *timing-winning* scenario; the planner
-	// should look better than flat-rate.
 	if err := s.SavePrices([]PricePoint{
 		{Zone: "SE3", SlotTsMs: 0, SlotLenMin: 60, SpotOreKwh: 80, TotalOreKwh: 100, Source: "test", FetchedAtMs: 0},
 		{Zone: "SE3", SlotTsMs: 3600000, SlotLenMin: 60, SpotOreKwh: 150, TotalOreKwh: 200, Source: "test", FetchedAtMs: 0},
@@ -24,93 +21,85 @@ func TestDailyCostBreakdown_SlotWeightedAgainstFlat(t *testing.T) {
 		t.Fatalf("save prices: %v", err)
 	}
 
-	// History samples every 10 min = 600_000 ms.
-	// Slot 0 (mid-times 300k..3300k all inside [0, 3600000)):
-	//   ts 600k, 1200k, 1800k, 2400k, 3000k, 3600k — grid_w = +1000 W (import 1 kW)
-	// Slot 1 (mid-times 3900k..6900k all inside [3600000, 7200000)):
-	//   ts 4200k, 4800k, 5400k, 6000k, 6600k, 7200k — grid_w = -2000 W (export 2 kW)
-	//
-	// Each integration step covers dt = 600_000 ms = 1/6 h.
-	// Slot 0: 6 steps × 1000 W × 1/6 h = 1000 Wh import.
-	// Slot 1: 6 steps × 2000 W × 1/6 h = 2000 Wh export.
-	pts := []HistoryPoint{}
-	for i := 1; i <= 6; i++ {
-		pts = append(pts, HistoryPoint{TsMs: int64(i) * 600_000, GridW: 1000})
-	}
-	for i := 7; i <= 12; i++ {
-		pts = append(pts, HistoryPoint{TsMs: int64(i) * 600_000, GridW: -2000})
-	}
-	if err := s.BulkRecordHistory(pts); err != nil {
+	// The house uses 1 kW for both hours. In hour 1 PV covers the load
+	// exactly, so actual grid is zero. In hour 2 PV exceeds load and exports
+	// 0.5 kW. The no-PV/no-battery baseline is still the full 2 kWh house
+	// load bought from the grid.
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 0, GridW: 0, LoadW: 1000},
+		{TsMs: 3_600_000, GridW: 0, LoadW: 1000},
+		{TsMs: 7_200_000, GridW: -500, LoadW: 1000},
+	}); err != nil {
 		t.Fatalf("record history: %v", err)
 	}
 
-	ep := ExportPricing{} // no bonus/fee/flat/floor -> export = spot
-
-	b, err := s.DailyCostBreakdown(0, 7_200_000, "SE3", ep)
+	b, err := s.DailyCostBreakdown(0, 7_200_000, "SE3", ExportPricing{})
 	if err != nil {
 		t.Fatalf("breakdown: %v", err)
 	}
 
-	// Volumes: the first sample (ts=600k) has prev_ts=NULL after LAG and
-	// is dropped; integration starts at the second sample. So we lose one
-	// 10-min step of slot-0 import → 5 steps × 1 kW × 1/6 h = 833.33 Wh.
-	// All 6 export samples have a previous sample (the last import sample
-	// at ts=3600k is their predecessor) → 6 steps × 2 kW × 1/6 h = 2000 Wh.
-	wantImpWh := 5.0 * 1000.0 / 6.0
-	wantExpWh := 6.0 * 2000.0 / 6.0
-	if !approxEq(b.ImportWh, wantImpWh, 0.01) {
-		t.Errorf("ImportWh = %.4f, want %.4f", b.ImportWh, wantImpWh)
+	if !approxEq(b.LoadWh, 2000, 0.01) {
+		t.Errorf("LoadWh = %.4f, want 2000", b.LoadWh)
 	}
-	if !approxEq(b.ExportWh, wantExpWh, 0.01) {
-		t.Errorf("ExportWh = %.4f, want %.4f", b.ExportWh, wantExpWh)
+	if !approxEq(b.ImportWh, 0, 0.01) {
+		t.Errorf("ImportWh = %.4f, want 0", b.ImportWh)
+	}
+	if !approxEq(b.ExportWh, 500, 0.01) {
+		t.Errorf("ExportWh = %.4f, want 500", b.ExportWh)
 	}
 
-	// First export sample (ts=4200k, prev=3600k) midpoint = 3900k → slot 1.
-	// All export samples are priced at slot 1 (spot=150, no bonus/fee).
-	// First import-after-NULL sample drops out; remaining import samples are
-	// all priced at slot 0 (total=100). One step crosses the slot boundary:
-	// sample at ts=3600k, prev=3000k, mid=3300k → slot 0. Good.
-	//
-	// import_cost = 833.33 Wh × 100 öre/kWh / 1000 = 83.333 öre
-	// export_rev  = 2000 Wh × 150 öre/kWh / 1000   = 300 öre
-	wantImpCost := wantImpWh * 100.0 / 1000.0
-	wantExpRev := wantExpWh * 150.0 / 1000.0
-	if !approxEq(b.ImportCostOre, wantImpCost, 0.01) {
-		t.Errorf("ImportCostOre = %.4f, want %.4f", b.ImportCostOre, wantImpCost)
+	if !approxEq(b.ImportCostOre, 0, 0.01) {
+		t.Errorf("ImportCostOre = %.4f, want 0", b.ImportCostOre)
 	}
-	if !approxEq(b.ExportRevenueOre, wantExpRev, 0.01) {
-		t.Errorf("ExportRevenueOre = %.4f, want %.4f", b.ExportRevenueOre, wantExpRev)
+	if !approxEq(b.ExportRevenueOre, 75, 0.01) {
+		t.Errorf("ExportRevenueOre = %.4f, want 75", b.ExportRevenueOre)
+	}
+	if !approxEq(b.BaselineCostOre, 300, 0.01) {
+		t.Errorf("BaselineCostOre = %.4f, want 300", b.BaselineCostOre)
+	}
+	if !approxEq(b.ActualCostOre(), -75, 0.01) {
+		t.Errorf("ActualCostOre = %.4f, want -75", b.ActualCostOre())
+	}
+	if !approxEq(b.SavedOre(), 375, 0.01) {
+		t.Errorf("SavedOre = %.4f, want 375", b.SavedOre())
+	}
+	if !approxEq(b.FlatCostOre(), b.BaselineCostOre, 0.01) {
+		t.Errorf("FlatCostOre compatibility = %.4f, want baseline %.4f", b.FlatCostOre(), b.BaselineCostOre)
+	}
+	if b.PriceSlotCount != 2 {
+		t.Errorf("PriceSlotCount = %d, want 2", b.PriceSlotCount)
+	}
+}
+
+func TestDailyCostBreakdown_NoPVBatteryBaselineMatchesActualImport(t *testing.T) {
+	s := freshStore(t)
+
+	if err := s.SavePrices([]PricePoint{
+		{Zone: "SE3", SlotTsMs: 0, SlotLenMin: 60, SpotOreKwh: 80, TotalOreKwh: 100, Source: "test", FetchedAtMs: 0},
+		{Zone: "SE3", SlotTsMs: 3600000, SlotLenMin: 60, SpotOreKwh: 150, TotalOreKwh: 200, Source: "test", FetchedAtMs: 0},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 0, GridW: 1000, LoadW: 1000},
+		{TsMs: 3_600_000, GridW: 1000, LoadW: 1000},
+		{TsMs: 7_200_000, GridW: 1000, LoadW: 1000},
+	}); err != nil {
+		t.Fatalf("record history: %v", err)
 	}
 
-	// Avg prices are unweighted means over slots in range — mirrors
-	// mpc.ComputeBaselines' flat-avg pricing.
-	// avg_import = (100 + 200) / 2 = 150
-	// avg_export = (80 + 150) / 2 = 115
-	if !approxEq(b.AvgImportOreKwh, 150, 0.01) {
-		t.Errorf("AvgImportOreKwh = %.4f, want 150", b.AvgImportOreKwh)
+	b, err := s.DailyCostBreakdown(0, 7_200_000, "SE3", ExportPricing{})
+	if err != nil {
+		t.Fatalf("breakdown: %v", err)
 	}
-	if !approxEq(b.AvgExportOreKwh, 115, 0.01) {
-		t.Errorf("AvgExportOreKwh = %.4f, want 115", b.AvgExportOreKwh)
+	if !approxEq(b.BaselineCostOre, 300, 0.01) {
+		t.Errorf("BaselineCostOre = %.4f, want 300", b.BaselineCostOre)
 	}
-
-	// Derived ergonomics:
-	//   actual = 83.333 - 300 = -216.667 (net earned 216.667 öre)
-	//   flat   = (833.33 * 150 - 2000 * 115) / 1000 = (125000 - 230000) / 1000 = -105 öre
-	//   saved  = flat - actual = -105 - (-216.667) = 111.667 öre  (timing won)
-	wantActual := wantImpCost - wantExpRev
-	wantFlat := (wantImpWh*150.0 - wantExpWh*115.0) / 1000.0
-	wantSaved := wantFlat - wantActual
-	if !approxEq(b.ActualCostOre(), wantActual, 0.01) {
-		t.Errorf("ActualCostOre = %.4f, want %.4f", b.ActualCostOre(), wantActual)
+	if !approxEq(b.ActualCostOre(), 300, 0.01) {
+		t.Errorf("ActualCostOre = %.4f, want 300", b.ActualCostOre())
 	}
-	if !approxEq(b.FlatCostOre(), wantFlat, 0.01) {
-		t.Errorf("FlatCostOre = %.4f, want %.4f", b.FlatCostOre(), wantFlat)
-	}
-	if !approxEq(b.SavedOre(), wantSaved, 0.01) {
-		t.Errorf("SavedOre = %.4f, want %.4f", b.SavedOre(), wantSaved)
-	}
-	if wantSaved <= 0 {
-		t.Fatalf("test scenario malformed — flat should beat actual by a positive margin, got %.2f", wantSaved)
+	if !approxEq(b.SavedOre(), 0, 0.01) {
+		t.Errorf("SavedOre = %.4f, want 0", b.SavedOre())
 	}
 }
 
@@ -217,13 +206,53 @@ func TestDailyCostBreakdown_FlatExportOverride(t *testing.T) {
 	}
 }
 
+func TestDailyCostBreakdown_FlatAverageIsHalfOpenAndTimeWeighted(t *testing.T) {
+	s := freshStore(t)
+
+	if err := s.SavePrices([]PricePoint{
+		// Overlaps the first 30 min of the query range.
+		{Zone: "SE3", SlotTsMs: -1_800_000, SlotLenMin: 60, SpotOreKwh: 80, TotalOreKwh: 100, Source: "test", FetchedAtMs: 0},
+		// Overlaps the second 30 min of the query range.
+		{Zone: "SE3", SlotTsMs: 1_800_000, SlotLenMin: 60, SpotOreKwh: 160, TotalOreKwh: 300, Source: "test", FetchedAtMs: 0},
+		// Starts exactly at untilMs; must not leak into the half-open range.
+		{Zone: "SE3", SlotTsMs: 3_600_000, SlotLenMin: 60, SpotOreKwh: 9000, TotalOreKwh: 9000, Source: "test", FetchedAtMs: 0},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 0, GridW: 1000},
+		{TsMs: 600_000, GridW: 1000},
+	}); err != nil {
+		t.Fatalf("record history: %v", err)
+	}
+
+	b, err := s.DailyCostBreakdown(0, 3_600_000, "SE3", ExportPricing{})
+	if err != nil {
+		t.Fatalf("breakdown: %v", err)
+	}
+
+	if !approxEq(b.AvgImportOreKwh, 200, 0.01) {
+		t.Errorf("AvgImportOreKwh = %.4f, want 200", b.AvgImportOreKwh)
+	}
+	if !approxEq(b.AvgExportOreKwh, 120, 0.01) {
+		t.Errorf("AvgExportOreKwh = %.4f, want 120", b.AvgExportOreKwh)
+	}
+	if b.PriceSlotCount != 2 {
+		t.Errorf("PriceSlotCount = %d, want 2", b.PriceSlotCount)
+	}
+}
+
 func TestDailyCostBreakdown_EmptyRange(t *testing.T) {
 	s := freshStore(t)
 	b, err := s.DailyCostBreakdown(0, 1_000_000, "SE3", ExportPricing{})
 	if err != nil {
 		t.Fatalf("breakdown empty: %v", err)
 	}
-	if b.ImportWh != 0 || b.ExportWh != 0 || b.ImportCostOre != 0 || b.ExportRevenueOre != 0 {
+	if b.ImportWh != 0 || b.ExportWh != 0 || b.LoadWh != 0 ||
+		b.ImportCostOre != 0 || b.ExportRevenueOre != 0 || b.BaselineCostOre != 0 {
 		t.Errorf("empty range returned non-zero breakdown: %+v", b)
+	}
+	if b.PriceSlotCount != 0 {
+		t.Errorf("PriceSlotCount = %d, want 0", b.PriceSlotCount)
 	}
 }

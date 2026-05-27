@@ -35,7 +35,7 @@ func TestHandleSavingsDailyNoState(t *testing.T) {
 }
 
 // State present but cfg.Price.Zone empty → endpoint short-circuits with
-// empty days. There's nothing to flat-baseline against without prices.
+// empty days. There's nothing to price the load baseline against without prices.
 func TestHandleSavingsDailyNoZone(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
@@ -44,9 +44,9 @@ func TestHandleSavingsDailyNoZone(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	srv := New(&Deps{
-		State:  st,
-		Cfg:    &config.Config{Price: &config.Price{Zone: ""}},
-		CfgMu:  &sync.RWMutex{},
+		State: st,
+		Cfg:   &config.Config{Price: &config.Price{Zone: ""}},
+		CfgMu: &sync.RWMutex{},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/savings/daily?days=3", nil)
@@ -65,8 +65,8 @@ func TestHandleSavingsDailyNoZone(t *testing.T) {
 }
 
 // End-to-end with real history + prices: seed a known cheap/expensive
-// slot pair within today, confirm the handler returns the slot-weighted
-// vs flat-rate savings the underlying state.DailyCostBreakdown produced.
+// slot pair within today, confirm the handler returns the load-baseline
+// savings the underlying state.DailyCostBreakdown produced.
 // This is the cross-layer integration check — if either the SQL changes
 // or the handler stops applying export pricing, the math comes out
 // wrong and this fails.
@@ -107,10 +107,10 @@ func TestHandleSavingsDailyEndToEnd(t *testing.T) {
 	}
 
 	for _, p := range []state.HistoryPoint{
-		{TsMs: t0.UnixMilli(), GridW: 1000},
-		{TsMs: t1.UnixMilli(), GridW: 1000},
-		{TsMs: t2.UnixMilli(), GridW: -2000},
-		{TsMs: t3.UnixMilli(), GridW: -2000},
+		{TsMs: t0.UnixMilli(), GridW: 1000, LoadW: 1000},
+		{TsMs: t1.UnixMilli(), GridW: 1000, LoadW: 1000},
+		{TsMs: t2.UnixMilli(), GridW: -2000, LoadW: 1000},
+		{TsMs: t3.UnixMilli(), GridW: -2000, LoadW: 1000},
 	} {
 		if err := st.RecordHistory(p); err != nil {
 			t.Fatalf("RecordHistory: %v", err)
@@ -142,7 +142,7 @@ func TestHandleSavingsDailyEndToEnd(t *testing.T) {
 	}
 	// Today is the last entry; the prior day should be all-zero.
 	yesterday := body.Days[0]
-	for _, k := range []string{"import_wh", "export_wh", "actual_cost_ore", "flat_cost_ore", "saved_ore"} {
+	for _, k := range []string{"import_wh", "export_wh", "load_wh", "actual_cost_ore", "baseline_cost_ore", "flat_cost_ore", "saved_ore"} {
 		if v, _ := yesterday[k].(float64); v != 0 {
 			t.Errorf("yesterday.%s = %v, want 0", k, v)
 		}
@@ -154,8 +154,14 @@ func TestHandleSavingsDailyEndToEnd(t *testing.T) {
 	if v, _ := today["export_wh"].(float64); v <= 0 {
 		t.Errorf("today.export_wh = %v, want > 0", v)
 	}
-	if v, _ := today["saved_ore"].(float64); v == 0 {
-		t.Errorf("today.saved_ore = 0 — expected non-zero timing benefit, body: %s", rr.Body.String())
+	if v, _ := today["load_wh"].(float64); v <= 0 {
+		t.Errorf("today.load_wh = %v, want > 0", v)
+	}
+	if v, _ := today["baseline_cost_ore"].(float64); v <= 0 {
+		t.Errorf("today.baseline_cost_ore = %v, want > 0", v)
+	}
+	if v, _ := today["saved_ore"].(float64); v <= 0 {
+		t.Errorf("today.saved_ore = %v — expected positive savings vs load baseline, body: %s", v, rr.Body.String())
 	}
 	if r, _ := today["resolution"].(string); r != "slot" {
 		t.Errorf("today.resolution = %q, want \"slot\"", r)
@@ -217,6 +223,15 @@ func TestHandleSavingsDailyDaysClamping(t *testing.T) {
 				t.Errorf("days=%q → %d days, want %d", tc.q, len(body.Days), tc.want)
 			}
 		})
+	}
+}
+
+func TestSavingsResolutionUsesPriceSlotPresence(t *testing.T) {
+	if got := resolutionFor(state.DayCostBreakdown{PriceSlotCount: 1}); got != "slot" {
+		t.Fatalf("zero-priced slot should still count as priced, got %q", got)
+	}
+	if got := resolutionFor(state.DayCostBreakdown{}); got != "no_prices" {
+		t.Fatalf("missing prices should be no_prices, got %q", got)
 	}
 }
 

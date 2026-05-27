@@ -276,10 +276,8 @@
       </div>
     </section>
 
-    <!-- Savings vs flat-rate — historical counterpart to the plan view's
-         "vs flat avg price" badge. Self-contained: own toggle, own fetch,
-         own data-loaded paint cycle. Empty-state when no price provider
-         is configured. -->
+    <!-- Actual historical savings compared with buying recorded house
+         load from the grid with no PV and no battery. -->
     <section class="savings-row">
       <ftw-savings-card default-range="week"></ftw-savings-card>
     </section>
@@ -426,7 +424,6 @@
           Each bar is a 15-minute slot. Prices after the day-ahead publication window are filled in by the ML price twin.
           Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
         </p>
-        <div id="plan-savings" class="plan-savings"></div>
         <div class="chart-container">
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
@@ -605,17 +602,6 @@
         Hover any bar for the exact split (spot / grid / VAT) plus PV, load, battery and SoC for that slot.
       </p>
 
-      <h3>48 h outlook badges</h3>
-      <p><b>Projections, not realised savings.</b> Each badge compares the plan's expected cost over the next 48 h against an alternative scenario, using the same cost model. For what the system <em>actually</em> saved, look at the Savings card above the chart.</p>
-      <ul>
-        <li><b>vs no battery</b> — what this horizon would cost with no battery at all (grid flow = load + PV each slot, priced normally). Captures the combined value of battery + planner.</li>
-        <li><b>vs self-consumption</b> — what plain self-consumption mode would cost over the same forecast (same battery, same constraints, no arbitrage). Captures the extra value the planner adds on top of passive SC.</li>
-        <li><b>vs flat avg price</b> — what no-battery import would cost if every kWh were priced at the horizon's average price. Captures the value of <em>timing</em> — shifting consumption into cheap hours — independently of the battery.</li>
-      </ul>
-      <p class="plan-help-note">
-        <span class="saving-pos-inline">Green +</span> means the plan is better than that baseline (cheaper, or more revenue).
-        <span class="saving-neg-inline">Red −</span> means it would be worse than the baseline — typical on flat-price days where the battery's round-trip loss isn't recovered by timing arbitrage.
-      </p>
     </div>
   </ftw-modal>
 
