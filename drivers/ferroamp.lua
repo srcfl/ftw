@@ -134,6 +134,19 @@ local ESO_CAPACITY_KWH = {}
 --     the per-driver caps in config.yaml.
 local DISCHARGE_FLOOR_SOC = 0.15
 local CHARGE_CEIL_SOC     = 0.95
+-- PV-curtail release power (watts). When ComputePVCurtail releases this
+-- driver (curtail_disable action), the dispatcher historically wanted us
+-- to send `pplim arg=0`. Ferroamp's extapi treats that as "limit PV to
+-- 0 W" — same wire bytes as a release would have, opposite semantics —
+-- and the inverter sticks at 0 W PV until a portal reset. So we publish
+-- pplim arg=PPLIM_RELEASE_W instead, which the operator sets to the
+-- inverter's nominal max (e.g. 15000 for a 15 kW SSO). Default 0 means
+-- "do not publish a release at all", which preserves whatever pplim
+-- Ferroamp last received. Override via config.pplim_release_w in
+-- config.yaml. 2026-05-27 incident: dispatching `pplim arg=0` bricked
+-- the live SE4 site for 30+ minutes; recovery required a Ferroamp
+-- portal reset.
+local PPLIM_RELEASE_W     = 0
 -- Cap on the N_total/N_capable multiplier so a transient "only 1 of 4
 -- capable" snapshot can't quadruple the on-wire setpoint past inverter
 -- rating before the next poll corrects it. 2.0 covers the common
@@ -340,6 +353,25 @@ function driver_init(config)
         host.log("warn", string.format(
             "Ferroamp: CHARGE_CEIL_SOC (%.3f) <= DISCHARGE_FLOOR_SOC (%.3f) — usable charge window is empty",
             CHARGE_CEIL_SOC, DISCHARGE_FLOOR_SOC))
+    end
+
+    -- pplim release watts: see the file-scope PPLIM_RELEASE_W comment for
+    -- why this matters (the 2026-05-27 sticky-pplim incident). Operators
+    -- who use supports_pv_curtail=true SHOULD set this to the SSO nominal
+    -- max so curtail_disable safely publishes a release. Leaving it 0
+    -- means "no release published" — safe default, but the operator must
+    -- manually clear pplim from the Ferroamp portal after curtail ends.
+    if config and config.pplim_release_w ~= nil then
+        local v = tonumber(config.pplim_release_w)
+        if v and v > 0 then
+            PPLIM_RELEASE_W = math.floor(v)
+            host.log("info", string.format(
+                "Ferroamp: PPLIM_RELEASE_W = %d (from config)", PPLIM_RELEASE_W))
+        else
+            host.log("warn", string.format(
+                "Ferroamp: pplim_release_w=%s ignored (must be > 0)",
+                tostring(config.pplim_release_w)))
+        end
     end
 
     -- Subscribe to telemetry topics
@@ -784,14 +816,45 @@ function driver_command(action, power_w, cmd)
             return publish_idle(tid)
         end
     elseif action == "curtail" then
+        -- Ferroamp's extapi treats `pplim arg=0` as "limit PV output to
+        -- 0 W" — same wire bytes as a release would have, opposite
+        -- semantics. A curtail request that resolves to ≤ 0 W therefore
+        -- locks the inverter at zero PV until the operator manually
+        -- clears pplim from the Ferroamp portal or power-cycles the
+        -- EnergyHub. Refuse the dangerous request — log a warning so
+        -- the operator sees the regression upstream (dispatch sent a
+        -- zero target for a curtail-capable driver, which shouldn't
+        -- happen because the dispatcher filters out drivers with
+        -- |PV| == 0 before allocating). 2026-05-27 incident: a 0-share
+        -- allocation through this path bricked the live SE4 site for
+        -- 30+ minutes; needed a Ferroamp portal reset to recover.
+        local watts = math.floor(math.abs(power_w))
+        if watts <= 0 then
+            host.log("warn", string.format(
+                "Ferroamp: refusing pplim=0 (sticky lock on this firmware); upstream wanted curtail to %d W",
+                math.floor(power_w)))
+            return nil
+        end
         local payload = string.format(
-            '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}',
-            math.floor(math.abs(power_w))
-        )
+            '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}', watts)
         return host.mqtt_publish("extapi/control/request", payload)
     elseif action == "curtail_disable" then
-        return host.mqtt_publish("extapi/control/request",
-            '{"transId":"ems","cmd":{"name":"pplim","arg":0}}')
+        -- DO NOT send `pplim arg=0` here. On Ferroamp's extapi that is
+        -- "limit to 0 W", not "release the limit", and it sticks until
+        -- portal reset. The safe release is to publish a pplim equal
+        -- to the operator-declared maximum (or skip the publish when
+        -- no max is configured, leaving whatever pplim Ferroamp last
+        -- received in place — operator can clear it from the portal).
+        -- See drivers/ferroamp.lua docs section for pplim_release_w.
+        if PPLIM_RELEASE_W > 0 then
+            local payload = string.format(
+                '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}',
+                PPLIM_RELEASE_W)
+            return host.mqtt_publish("extapi/control/request", payload)
+        end
+        host.log("info",
+            "Ferroamp: curtail_disable skipped (set config.pplim_release_w to enable; default behaviour avoids the sticky pplim=0 trap)")
+        return nil
     elseif action == "deinit" then
         return publish_auto("ems")
     end
