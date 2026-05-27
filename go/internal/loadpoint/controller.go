@@ -341,10 +341,10 @@ type Directive struct {
 //
 // RequestActive is true when the vehicle is (or could imminently be)
 // drawing current. Drivers that can distinguish "throttled to 0" from
-// "the car has explicitly refused" set this to false on the latter
-// (e.g. CTEK NCRQ state). Drivers without that signal leave it true.
-// The loadpoint manager uses it to detect car-side completion via the
-// NCRQCompletionThreshold timer.
+// "the vehicle has explicitly stopped requesting current" set this to
+// false on the latter. Drivers without that distinction leave it
+// true. The loadpoint manager uses it to detect vehicle-side
+// completion via the SessionCompletionTimeout timer.
 type EVSample struct {
 	PowerW        float64
 	SessionWh     float64

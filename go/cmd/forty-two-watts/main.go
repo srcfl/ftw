@@ -1046,11 +1046,11 @@ func main() {
 			if r == nil {
 				return loadpoint.EVSample{}, false
 			}
-			// RequestActive defaults to true so legacy drivers
-			// (those that don't emit the field) keep their
-			// existing behaviour — only drivers that explicitly
-			// emit request_active=false will trip the
-			// NCRQ-completion detector.
+			// RequestActive defaults to true so drivers that
+			// don't emit the field keep their pre-existing
+			// behaviour — only drivers that explicitly emit
+			// request_active=false will trip the
+			// session-completion detector.
 			d := struct {
 				Connected     bool    `json:"connected"`
 				SessionWh     float64 `json:"session_wh"`
