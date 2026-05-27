@@ -42,6 +42,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -244,6 +245,7 @@ type Host struct {
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	active atomic.Int64 // live client tunnel pairs (incremented on match, decremented on tear-down)
 }
 
 // Close shuts down the host tunnel.
@@ -251,6 +253,13 @@ func (h *Host) Close() {
 	h.cancel()
 	h.wg.Wait()
 }
+
+// ActiveTunnels returns the number of client peers currently piped through this
+// host. Each value reflects one in-flight HTTP-like exchange — short bursts of
+// concurrent reads/writes during MCP's streaming transport will spike the count
+// for a few hundred ms; idle sessions sit at 0. The dashboard's pair-card uses
+// this to show "a friend is currently connected" alongside the tool-call count.
+func (h *Host) ActiveTunnels() int { return int(h.active.Load()) }
 
 // Option configures StartHost or Connect behaviour.
 type Option func(*relayOptions)
@@ -316,12 +325,12 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 
 	// Worker 0 uses the connection we already opened (firstRaw).
 	h.wg.Add(1)
-	go hostWorker(cctx, &h.wg, addr, token, remoteAddr, firstRaw, firstWaiting)
+	go hostWorker(cctx, h, addr, token, remoteAddr, firstRaw, firstWaiting)
 
 	// Remaining workers open their own first connection lazily.
 	for i := 1; i < hostPoolSize; i++ {
 		h.wg.Add(1)
-		go hostWorker(cctx, &h.wg, addr, token, remoteAddr, nil, false)
+		go hostWorker(cctx, h, addr, token, remoteAddr, nil, false)
 	}
 
 	return h, nil
@@ -331,8 +340,8 @@ func StartHost(ctx context.Context, remoteAddr string, opts ...Option) (*Host, e
 // pool of workers, the relay can match several concurrent peers for the same
 // token (required for MCP's streamable HTTP transport where SSE-response and
 // follow-up POSTs are concurrent).
-func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr string, initialRaw net.Conn, initialWaiting bool) {
-	defer wg.Done()
+func hostWorker(ctx context.Context, h *Host, addr, token, remoteAddr string, initialRaw net.Conn, initialWaiting bool) {
+	defer h.wg.Done()
 	raw, waiting := initialRaw, initialWaiting
 
 	for {
@@ -357,7 +366,7 @@ func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr
 			}
 		}
 
-		if err := hostHandleOnePair(ctx, raw, waiting, token, remoteAddr); err != nil {
+		if err := hostHandleOnePair(ctx, h, raw, waiting, token, remoteAddr); err != nil {
 			if ctx.Err() == nil {
 				slog.Debug("subetha host: pair iteration ended", "err", err)
 			}
@@ -371,7 +380,7 @@ func hostWorker(ctx context.Context, wg *sync.WaitGroup, addr, token, remoteAddr
 // hostHandleOnePair waits for a peer (if needed), wraps with AEAD, dials the
 // local MCP server, and pipes both directions until either side closes.
 // Returns when the pair is torn down. The host loop calls this repeatedly.
-func hostHandleOnePair(ctx context.Context, rawConn net.Conn, isWaiting bool, token, remoteAddr string) error {
+func hostHandleOnePair(ctx context.Context, h *Host, rawConn net.Conn, isWaiting bool, token, remoteAddr string) error {
 	defer rawConn.Close()
 
 	if isWaiting {
@@ -405,9 +414,11 @@ func hostHandleOnePair(ctx context.Context, rawConn net.Conn, isWaiting bool, to
 	}
 	defer localConn.Close()
 
-	slog.Info("subetha host: tunnel established", "remote", remoteAddr)
+	h.active.Add(1)
+	slog.Info("subetha host: tunnel established", "remote", remoteAddr, "active", h.active.Load())
 	pipeConns(ctx, relayConn, localConn)
-	slog.Info("subetha host: tunnel closed")
+	h.active.Add(-1)
+	slog.Info("subetha host: tunnel closed", "active", h.active.Load())
 	return nil
 }
 

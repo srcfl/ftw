@@ -94,6 +94,7 @@ func main() {
 	defer mcpSrv.Shutdown(context.Background())
 
 	var pairCode string
+	var subHost *SubethaHost // nil in -no-subetha mode; ActiveTunnels() reads through this
 	if *noSubetha || *noWormhole {
 		slog.Info("subetha relay skipped", "mcp_addr", mcpSrv.Addr())
 		pairCode = "local:" + mcpSrv.Addr()
@@ -104,6 +105,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer host.Close()
+		subHost = host
 		pairCode = host.Code
 		fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", host.Code)
 	}
@@ -152,7 +154,11 @@ func main() {
 			case <-sess.Done():
 				return
 			case <-t.C:
-				_ = postPairStatusFull(*apiBase, pairCode, sess, audit)
+				clients := 0
+				if subHost != nil {
+					clients = subHost.ActiveTunnels()
+				}
+				_ = postPairStatusFull(*apiBase, pairCode, sess, audit, clients)
 			}
 		}
 	}()
@@ -176,17 +182,18 @@ func main() {
 }
 
 // postPairStatusFull is the heartbeat variant of postPairStatus: it
-// includes live tool_count + last_tools so the dashboard <ftw-pair-card>
-// can show real-time activity.
-func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit) error {
+// includes live tool_count + last_tools + clients_connected so the
+// dashboard <ftw-pair-card> can show real-time activity.
+func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, clients int) error {
 	body := map[string]any{
-		"session_id": sess.ID,
-		"code":       code,
-		"intent":     sess.Intent(),
-		"started_at": sess.StartedAt.UTC().Format(time.RFC3339),
-		"ttl_s":      int(sess.Remaining().Seconds()),
-		"tool_count": audit.ToolCount(),
-		"last_tools": audit.LastTools(5),
+		"session_id":        sess.ID,
+		"code":              code,
+		"intent":            sess.Intent(),
+		"started_at":        sess.StartedAt.UTC().Format(time.RFC3339),
+		"ttl_s":             int(sess.Remaining().Seconds()),
+		"tool_count":        audit.ToolCount(),
+		"last_tools":        audit.LastTools(5),
+		"clients_connected": clients,
 	}
 	buf, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", apiBase+"/api/pair/status", bytes.NewReader(buf))
