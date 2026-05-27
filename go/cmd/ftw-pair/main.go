@@ -25,8 +25,8 @@ import (
 
 var Version = "dev"
 
-// relayAddrFlag is a package-level flag so subetha.go can read it.
-// Default: FTW_PAIR_RELAY env var, then subetha.fortytwowatts.com:7777.
+// relayAddrFlag is a package-level flag so tunnel.go can read it.
+// Default: FTW_PAIR_RELAY env var, then relay.fortytwowatts.com.
 var relayAddrFlag *string
 
 func main() {
@@ -43,10 +43,17 @@ func main() {
 	// -no-subetha (alias: -no-wormhole) skips the relay tunnel for local /
 	// e2e testing — exposes MCP only on the local addr. The old name is kept
 	// as a hidden alias so existing test scripts and the e2e harness don't break.
-	noSubetha := flag.Bool("no-subetha", false, "Skip subetha relay setup — MCP-only mode for testing/local use")
-	noWormhole := flag.Bool("no-wormhole", false, "deprecated alias for -no-subetha")
+	noRelay := flag.Bool("no-relay", false, "Skip relay tunnel setup — MCP-only mode for testing/local use")
+	// -no-subetha + -no-wormhole are kept as hidden aliases so existing
+	// test scripts and the e2e harness continue to work.
+	noSubetha := flag.Bool("no-subetha", false, "deprecated alias for -no-relay")
+	noWormhole := flag.Bool("no-wormhole", false, "deprecated alias for -no-relay")
 	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
-	relayAddrFlag = flag.String("relay-addr", "", "Relay server address (overrides FTW_PAIR_RELAY env var and default subetha.fortytwowatts.com:7777)")
+	relayDefault := "https://relay.fortytwowatts.com"
+	if env := os.Getenv("FTW_PAIR_RELAY"); env != "" {
+		relayDefault = env
+	}
+	relayAddrFlag = flag.String("relay", relayDefault, "Relay base URL (e.g. http://localhost:7378 for local dev)")
 	flag.Parse()
 
 	if *version {
@@ -94,20 +101,22 @@ func main() {
 	defer mcpSrv.Shutdown(context.Background())
 
 	var pairCode string
-	var subHost *SubethaHost // nil in -no-subetha mode; ActiveTunnels() reads through this
-	if *noSubetha || *noWormhole {
-		slog.Info("subetha relay skipped", "mcp_addr", mcpSrv.Addr())
+	var tunHandle *TunnelHandle // nil in -no-relay mode
+	if *noRelay || *noSubetha || *noWormhole {
+		slog.Info("relay tunnel skipped", "mcp_addr", mcpSrv.Addr())
 		pairCode = "local:" + mcpSrv.Addr()
 	} else {
-		host, err := StartSubethaHost(ctx, mcpSrv.Addr())
+		handle, err := StartTunnelHost(ctx, mcpSrv.Addr(), *apiBase, *ttl, *intent, *as)
 		if err != nil {
-			slog.Error("subetha host", "err", err)
+			slog.Error("start tunnel host", "err", err)
 			os.Exit(1)
 		}
-		defer host.Close()
-		subHost = host
-		pairCode = host.Code
-		fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", host.Code)
+		tunHandle = handle
+		pairCode = handle.Token
+		go handle.Host.Run(ctx)
+		fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", handle.Token)
+		fmt.Fprintf(os.Stderr, "PAIR URL:  %s\n", handle.PublicURL)
+		fmt.Fprintf(os.Stderr, "APPROVAL CODE (tell host on voice): %s\n", handle.ApprovalCode)
 	}
 	fmt.Fprintf(os.Stderr, "TTL: %s — sidecar will exit at expiry\n", *ttl)
 
@@ -154,11 +163,13 @@ func main() {
 			case <-sess.Done():
 				return
 			case <-t.C:
-				clients := 0
-				if subHost != nil {
-					clients = subHost.ActiveTunnels()
-				}
-				_ = postPairStatusFull(*apiBase, pairCode, sess, audit, clients)
+				// TODO(relay-as-tunnel): the new request-response relay
+				// doesn't track "active tunnels" the way subetha did.
+				// Wire a relay-side /sessions/<token>/info endpoint or
+				// derive presence from recent activity timestamps. For
+				// now the dashboard always sees 0 clients.
+				_ = tunHandle
+				_ = postPairStatusFull(*apiBase, pairCode, sess, audit, 0)
 			}
 		}
 	}()
@@ -169,9 +180,9 @@ func main() {
 	// Clear the dashboard's pair-status entry so the UI doesn't keep showing
 	// the session as active after the sidecar has exited. Without this, a
 	// session that ends on its own (TTL expiry, abort-poller, etc.) leaves a
-	// stale entry — the dashboard says "active" while ftw-connect on the
-	// friend side gets "no host ready" from the relay (the host workers are
-	// already dead). Use a fresh context since ctx is likely cancelled.
+	// stale entry — the dashboard says "active" while a friend hitting the
+	// relay URL gets a 502 (the long-poll loop is already dead). Use a fresh
+	// context since ctx is likely cancelled.
 	cleanupReq, _ := http.NewRequest("POST", *apiBase+"/api/pair/abort", nil)
 	cleanupReq.Header.Set("Content-Type", "application/json")
 	cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)

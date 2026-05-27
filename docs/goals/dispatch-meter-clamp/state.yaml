@@ -1,0 +1,337 @@
+version: 2
+
+goal:
+  title: "Clamp battery dispatch against the live meter"
+  slug: "dispatch-meter-clamp"
+  kind: existing_plan
+  tranche: "Validate the proposed real-time meter clamp against actual dispatch code, implement it behind tests, audit interaction with existing clamps / PI / slew / fuse / stale-meter guard."
+  status: done
+  intake:
+    original_request: "Discharges battery into grid — Load twin predicted 5.4 kW, actual was 2.1 kW. Battery discharged at -5 kW, exported ~3 kW. Root cause: dispatch loop uses plan's battery target as a setpoint without clamping against the live meter. Proposed fix: after the plan target is read, before dispatch: if target > 0 cap at current export, if target < 0 cap at current import. Plan decides whether; meter decides how much. Deadband = GridToleranceW. applyPlanSignFloor already uses 100 W idle threshold."
+    interpreted_outcome: "Battery cannot export to the grid (or import to charge) beyond GridToleranceW when the load twin is wrong; plan still decides sign, meter decides magnitude."
+    input_shape: existing_plan
+    audience: "Site operators / field testers seeing unintended grid export."
+    authority: approved
+    proof_type: test
+    completion_proof: "Test for load over-prediction (no grid export beyond tolerance), test for load under-prediction (no grid import beyond tolerance), existing dispatch/PI/slew/fuse/stale-meter tests still pass, final Judge audit confirms the clamp is a new quantifiable-risk clamp and does not interact badly with PI saturation curves."
+    likely_misfire: "Duplicating one of the seven existing clamps in docs/clamping.md, wrong sign at the clamp boundary, bypassing the stale-meter guard, or creating a feedback loop with PI saturation curves."
+    blind_spots_considered:
+      - "Exact insertion point: control/ vs cmd/forty-two-watts/main.go ticker — Scout to confirm."
+      - "applyPlanSignFloor: is it the right hook, where does it live, where does GridToleranceW come from?"
+      - "Multi-battery dispatch: aggregate or per-battery clamp?"
+      - "PV term: PV is uncontrollable, must appear as a fixed term in the clamp math."
+      - "Interaction with PI saturation curves (the saturation-curve feedback bug already shipped and fixed)."
+    existing_plan_facts:
+      - "Add the clamp after the plan target is read, before dispatch."
+      - "Use GridToleranceW as the deadband."
+      - "applyPlanSignFloor uses 100 W idle threshold — keep interaction sensible."
+      - "if target > 0 (charge): cap at current export."
+      - "if target < 0 (discharge): cap at current import."
+
+rules:
+  pm_owns_state: true
+  one_active_task: true
+  max_write_workers: 1
+  no_implementation_without_worker_or_pm_task: true
+  no_completion_without_judge_or_pm_audit: true
+  planning_is_not_completion: true
+  queued_required_worker_blocks_completion: true
+  continuous_until_full_outcome: true
+  missing_input_or_credentials_do_not_stop_goal: true
+  preserve_and_validate_existing_plan: true
+  intake_misfire_must_be_audited: true
+
+agents:
+  scout: bundled_not_installed
+  worker: bundled_not_installed
+  judge: bundled_not_installed
+
+visual_board:
+  selected: local
+  local:
+    status: live
+    url: "http://127.0.0.1:41737/"
+    command: "npx goalbuddy board docs/goals/dispatch-meter-clamp"
+  github_projects:
+    status: not_requested
+    url: null
+    command: "npx goalbuddy extend github-projects"
+    missing: []
+
+active_task: null
+
+tasks:
+  - id: T001
+    type: scout
+    assignee: Scout
+    status: done
+    reasoning_hint: medium
+    objective: "Map the dispatch path: where the plan's battery target is read, where it becomes a setpoint, where applyPlanSignFloor / GridToleranceW / PI / slew / fuse / stale-meter guard sit, and where the live meter value is available with site-convention sign."
+    inputs:
+      - go/internal/control/
+      - go/internal/state/
+      - go/internal/telemetry/
+      - go/cmd/forty-two-watts/main.go
+      - docs/clamping.md
+      - docs/site-convention.md
+      - docs/safety.md
+    constraints:
+      - "Read-only."
+      - "Cite exact file:line for every step in the dispatch flow."
+      - "Confirm sign convention at every read/write boundary."
+    expected_output:
+      - "Dispatch flow trace from plan to dispatch with file:line for every hop."
+      - "Location and signature of applyPlanSignFloor and the source of its 100 W threshold."
+      - "Location of GridToleranceW (config-driven vs constant) with file:line."
+      - "How and where the live grid meter reading enters dispatch, sign confirmed against docs/site-convention.md."
+      - "List of the seven clamps in docs/clamping.md and whether any already covers this risk."
+      - "Whether dispatch is per-battery, aggregate, or both."
+      - "Verification commands (make test path + specific test files)."
+      - "Open questions for Judge."
+    receipt:
+      result: done
+      note: notes/T001-dispatch-map.md
+      summary: "Confirmed insertion point after applyPlanSignFloor (line 953) before forceFuseDischarge (line 963), or pre-distribute on totalCorrection (~line 780). rawGridW already site-signed (positive=import) at dispatch.go:574. GridToleranceW default 42W (not 100W; 100W is the local idleBand in applyPlanSignFloor). Stale-meter guard short-circuits dispatch from main.go:1383-1391 — new clamp auto-protected. None of the seven existing clamps cover load-twin-over-prediction grid export — new quantifiable risk confirmed."
+      evidence:
+        - "go/internal/control/dispatch.go:391,574,758,778,850,876,924,953,963"
+        - "go/internal/control/dispatch.go:1290-1338 (applyFuseGuard)"
+        - "go/internal/control/dispatch.go:1596-1665 (applyPlanSignFloor + planSignIntent)"
+        - "go/internal/control/dispatch.go:1750+ (forceFuseDischarge)"
+        - "go/internal/config/config.go:199,698-699,857-858 (GridToleranceW)"
+        - "go/cmd/forty-two-watts/main.go:1383-1391 (stale-meter guard) / 1402 / 1419-1424"
+        - "go/internal/telemetry/store.go:216-244,302-309,360-361"
+        - "go/internal/control/control_test.go:54-72 (seedStore), 117-148 (SelfConsumption template), 1830-1947 (planSignFloor tests)"
+        - "go/internal/battery/model.go:339-357,28 (saturation-curve bug + MinSatSeedW guard)"
+      open_questions:
+        - "Insertion point: pre-distribute on totalCorrection vs post-applyPlanSignFloor on sumTargets."
+        - "PI integral windup on persistent clamp activation — accept / reset PI / anti-windup feedback?"
+        - "manualHold bypass? Scout recommends NO (mirror applyFuseGuard)."
+        - "BatteryCoversEV: use rawGridW (Scout recommends), not gridW-EV."
+
+  - id: T002
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Validate the user's proposed clamp against Scout findings. Decide insertion point, exact math (signs), interaction with existing clamps / PI / slew / fuse / stale-meter, deadband details, and whether the clamp is per-battery or aggregate. Issue a Worker brief."
+    inputs:
+      - "T001 receipt"
+      - docs/clamping.md
+      - docs/site-convention.md
+      - docs/safety.md
+    constraints:
+      - "Do not implement."
+      - "Reject the proposed fix if it duplicates an existing clamp."
+      - "Reject any sign math that contradicts site convention."
+      - "Confirm the new clamp protects against a quantifiable risk (the load-twin-over-prediction grid-export incident)."
+    expected_output:
+      - "Decision: approve / refine / reject"
+      - "Exact insertion point and exact formula in site-convention signs."
+      - "Worker objective."
+      - "allowed_files."
+      - "verify (test command + target test name)."
+      - "stop_if."
+      - "Blocked or deferred tasks."
+    receipt:
+      result: done
+      note: notes/T002-judge-brief.md
+      decision: approve
+      insertion_point: A_pre_distribute
+      pi_windup_handling: accept
+      manual_hold_bypass: false
+      ev_uses_raw_grid_w: true
+      saturation_safety: "Safe. PI consumes live gridW, not clamped command; slew anchors on SmoothedW; saturation curves observe SmoothedW with MinSatSeedW=1000 guard."
+      next_allowed_task: T003
+
+  - id: T003
+    type: worker
+    assignee: Worker
+    status: blocked
+    reasoning_hint: low
+    objective: "Add aggregate live-meter clamp on totalCorrection in ComputeDispatch (pre-distribute, post-PI), bounding charge to current export and discharge to current import via GridToleranceW deadband; slog.Warn on activation; two unit tests mirroring control_test.go:117-148 seedStore pattern."
+    allowed_files:
+      - go/internal/control/dispatch.go
+      - go/internal/control/control_test.go
+    verify:
+      - "cd go && go test ./internal/control/... -run MeterClamp -count=1"
+      - "cd go && go test ./internal/control/... -count=1"
+      - "cd go && go vet ./..."
+    stop_if:
+      - "Existing control tests regress (FuseGuard, PlanSignFloor, SelfConsumption, FuseSaverBypassesSlew, JointFuseAllocatorWithBatteryCoversEV, PlannerSelfIdleGate*)."
+      - "Clamp changes sign of totalCorrection (must only reduce magnitude, never flip)."
+      - "Clamp fires when state.SiteMeterDriver empty or meter reading absent (must noop, do not zero)."
+      - "Worker reaches for any file outside allowed_files."
+      - "Hot path adds I/O, locks, or new goroutines."
+      - "applyPlanSignFloor or forceFuseDischarge ordering modified."
+      - "EV-subtracted gridW used instead of rawGridW."
+    receipt:
+      result: blocked
+      changed_files: []
+      commands:
+        - cmd: "cd go && go test ./internal/control/... -run MeterClamp -count=1"
+          status: pass
+          detail: "Both new tests pass against the implemented universal clamp."
+        - cmd: "cd go && go test ./internal/control/... -count=1"
+          status: fail
+          detail: "14 existing tests regress — ManualHold suite, EnergyDispatch suite, JointFuseAllocator suite, SlewRespectsRateWhenTracking."
+        - cmd: "cd go && go vet ./..."
+          status: pass
+      summary: "Universal clamp contradicts existing contracts: manualHold (operator override), energy-dispatch (Wh-driven planned arbitrage that intentionally crosses the zero-grid line per CLAUDE.md), and the joint fuse allocator each have their own safety story and the new clamp defeats them. Reverted to clean tree (111 pass / 0 fail). Original incident was in the legacy PI / self-consumption path only — scope needs to be narrowed."
+      blocked_reason: "Scope conflict between Judge brief ('manualHold no bypass; mirror applyFuseGuard') and existing test contracts. Requires Judge re-scope before Worker can proceed."
+      regressing_tests:
+        - "TestBatteryManualHoldChargesAtSetpoint (control_test.go:2025)"
+        - "TestBatteryManualHoldDischargesAtSetpoint (control_test.go:2047)"
+        - "TestBatteryManualHoldOverridesIdleMode (control_test.go:2069)"
+        - "TestBatteryManualHoldOverridesPlannerMode (control_test.go:2087+)"
+        - "TestBatteryManualHoldRespectsSoCFloor / FuseGuard / BypassesPlanSignFloor / BypassesHoldoff"
+        - "TestEnergyDispatchConvertsWhToW (control_test.go:636)"
+        - "TestEnergyDispatchHoldsPlanUnderArbitrage (control_test.go:1052+)"
+        - "TestJointFuseAllocator* (832, 905, 1805)"
+        - "TestSlewRespectsRateWhenTracking (control_test.go:615) — geometry collision, minor"
+      next_action: "Spawn T005 Judge re-scope: clamp the legacy PI / self-consumption path only (where the incident occurred), keep manualHold / energy-dispatch / planner_self contracts intact."
+
+  - id: T005
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Re-scope the clamp after T003 surfaced 14 regressions: choose between (1) clamp ONLY the legacy PI / self-consumption path where the incident occurred, (2) keep universal clamp and rewrite the regressing tests with explicit contract changes, (3) widen the deadband. Issue a refined Worker brief."
+    inputs:
+      - "T003 blocked receipt"
+      - "go/internal/control/CLAUDE.md (Planner execution paths table)"
+      - "control_test.go regressing tests (ManualHold suite, EnergyDispatch, JointFuseAllocator)"
+    constraints:
+      - "Do not implement."
+      - "Reject any decision that re-opens the load-twin over-prediction → grid export incident."
+      - "Reject any decision that breaks the planner_arbitrage / planner_cheap zero-grid-crossing contract documented in CLAUDE.md."
+      - "Reject any decision that makes manualHold ignore an explicit operator setpoint."
+    expected_output:
+      - "Decision: scoped_path | universal_with_test_rewrites | wider_deadband"
+      - "Exact branches/conditions where the clamp applies and where it doesn't."
+      - "Refined Worker brief (objective, allowed_files, verify, test_names, stop_if)."
+      - "Rationale linking the choice to the original incident and the CLAUDE.md execution-paths contract."
+    receipt:
+      result: done
+      note: notes/T005-judge-rescope.md
+      decision: scoped_path
+      scope_summary: "Clamp lives inside the default arm of the totalCorrection switch (dispatch.go:739-780); structural placement scopes it — no extra boolean. manualHold / plannerSelfIdleGate / useEnergyPath each have their own arm and never reach default."
+      insertion_point: "go/internal/control/dispatch.go:779 — immediately after `totalCorrection = out.Output`."
+      expected_zero_regressions: true
+      next_allowed_task: T006
+
+  - id: T006
+    type: worker
+    assignee: Worker
+    status: done
+    reasoning_hint: low
+    objective: "Implement the scoped meter clamp inside the legacy PI `default:` arm at dispatch.go:779, plus the two ModeSelfConsumption tests. Zero regressions expected."
+    allowed_files:
+      - go/internal/control/dispatch.go
+      - go/internal/control/control_test.go
+    verify:
+      - "cd go && go test ./internal/control/... -run MeterClamp -count=1"
+      - "cd go && go test ./internal/control/... -count=1"
+      - "cd go && go vet ./..."
+    stop_if:
+      - "Any existing test in go/internal/control/... regresses."
+      - "Clamp placed outside the `default:` arm or guarded by a boolean instead of branch placement."
+      - "Clamp changes the sign of totalCorrection."
+      - "Clamp uses gridW (EV-subtracted) instead of rawGridW."
+      - "applyPlanSignFloor or forceFuseDischarge ordering modified."
+      - "Hot path adds I/O, locks, or goroutines."
+      - "Files outside allowed_files."
+    receipt:
+      result: done
+      changed_files:
+        - go/internal/control/dispatch.go
+        - go/internal/control/control_test.go
+      commands:
+        - cmd: "cd go && go test ./internal/control/... -run MeterClamp -count=1"
+          status: pass
+        - cmd: "cd go && go test ./internal/control/... -count=1"
+          status: pass
+          detail: "113/113 control-package tests (was 111 + 2 new), zero regressions including TestSlewRespectsRateWhenTracking."
+        - cmd: "cd go && go vet ./..."
+          status: pass
+      summary: "Added live-meter clamp on totalCorrection inside the default arm of the legacy PI dispatch path. Deadband as threshold (not haircut). Two ModeSelfConsumption tests cover over- and under-prediction. 49 lines added to dispatch.go, 75 lines added to control_test.go, no other files touched."
+      formula_correction_from_t002: "PM amendment: do NOT subtract dead from headroom — deadband already gates entry at line 763. Use `if headroom < dead { headroom = 0 }` as a threshold, not subtraction."
+
+  - id: T004
+    type: pm
+    assignee: PM
+    status: done
+    reasoning_hint: medium
+    objective: "Run make test (full suite) and capture the diff summary. Optionally run go/test/e2e if cheap."
+    inputs:
+      - "T003 receipt"
+    expected_output:
+      - "make test result (pass/fail, durations)."
+      - "Diff stat."
+      - "Any tests skipped or newly added — names and locations."
+    receipt:
+      result: done
+      command: "make test"
+      packages_pass: 29
+      packages_fail: 0
+      e2e_pass: true
+      e2e_duration_s: 26.947
+      control_duration_s: 2.077
+      diff_stat: "go/internal/control/control_test.go +75; go/internal/control/dispatch.go +49; 124 insertions total"
+      new_tests:
+        - "TestMeterClampStopsExportOnLoadOverPrediction (go/internal/control/control_test.go)"
+        - "TestMeterClampStopsImportOnLoadUnderPrediction (go/internal/control/control_test.go)"
+
+  - id: T999
+    type: judge
+    assignee: Judge
+    status: done
+    reasoning_hint: high
+    objective: "Final audit: does the implemented clamp prevent the original incident, does it not duplicate an existing clamp, does it not interact badly with PI / slew / fuse / stale-meter, and do the tests prove both halves?"
+    inputs:
+      - "All done task receipts"
+      - "Last verification"
+      - "Current dirty diff"
+    constraints:
+      - "Do not implement."
+      - "Reject completion if the clamp is the wrong sign anywhere."
+      - "Reject completion if either the over- or under-prediction test is missing or insufficient."
+      - "Reject completion if the clamp can deactivate the stale-meter guard."
+    expected_output:
+      - "result: done"
+      - "decision: complete | not_complete"
+      - "full_outcome_complete: true | false"
+      - "missing evidence"
+      - "next task if not complete"
+    receipt:
+      result: done
+      decision: complete
+      full_outcome_complete: true
+      maps_to_original_outcome: "Inside the legacy PI default arm, when reactive PI commands a discharge larger than live import, the clamp caps total discharge to -|rawGridW|; mirror case caps charge to zero when importing. Plan decides sign, meter decides magnitude."
+      proven_by:
+        - "TestMeterClampStopsExportOnLoadOverPrediction"
+        - "TestMeterClampStopsImportOnLoadUnderPrediction"
+        - "make test 29/29 packages pass, e2e 26.9 s, control 113/113 (was 111 + 2 new)"
+        - "TestSlewRespectsRateWhenTracking still passes after threshold-not-haircut correction"
+      audits:
+        sign_math: pass
+        scope: "pass — clamp in `default:` arm only; manualHold / useEnergyPath / plannerSelfIdleGate intact"
+        saturation_feedback: "pass — PI consumes gridW before clamp; slew anchors on SmoothedW; saturation curves observe SmoothedW with MinSatSeedW guard"
+        duplicate_clamp: "pass — new quantifiable risk not covered by any of the seven existing clamps"
+        stale_meter_guard: "pass — main.go:1383-1391 short-circuits before ComputeDispatch is entered"
+        logging: "pass — slog.Warn with requested/clamped/raw/current/deadband/mode"
+      missing_evidence: []
+      next_task: null
+      followups:
+        - "Extend go/internal/control/CLAUDE.md 'What NOT to do' with a 'Do NOT hoist the meter clamp out of the default branch' note."
+        - "Add eighth clamp entry to docs/safety.md / docs/clamping.md."
+        - "Operational watch: PI integral windup under persistent clamp activation (IntegralLimit=3000) is accepted; flag if field telemetry shows slow unwind."
+
+checks:
+  dirty_fingerprint: clean+diff
+  last_verification:
+    result: pass
+    task: T004
+    commands:
+      - "make test (29/29 packages pass, e2e 26.9 s)"
+      - "go test ./internal/control/... (113/113)"
+      - "go vet ./..."
