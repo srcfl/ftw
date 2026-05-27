@@ -1,17 +1,12 @@
 name: release
 
-# Gated on the `test` workflow — triggering on `push:master` directly
-# would race: semantic-release pushes a changelog commit + tag before
-# `go test + vet` finishes, and master's branch protection rejects it
-# with GH006 ("Required status check ... is expected"). `workflow_run`
-# fires once test.yml completes; the `if:` on each job filters to
-# successful test runs so a broken master still blocks the release.
-# Manual dispatch stays available for emergency re-runs.
+# Manual-only trigger. We merge to master many times a day during
+# fast-iteration; auto-cutting a release per conventional commit spammed
+# Discord and burned ~30 min/release on the pi-gen image build.
+# Run `gh workflow run release.yml` (or click "Run workflow" in Actions)
+# when it's time to cut a real release — semantic-release will batch
+# every `fix:`/`feat:` since the last tag into one changelog + bump.
 on:
-  workflow_run:
-    workflows: [test]
-    types: [completed]
-    branches: [master]
   workflow_dispatch:
 
 # semantic-release needs to push a tag + the changelog commit.
@@ -26,10 +21,6 @@ jobs:
   release:
     name: semantic-release
     runs-on: ubuntu-latest
-    # Only proceed when tests succeeded (workflow_run path) or when
-    # manually re-triggered (workflow_dispatch has no workflow_run event
-    # attached — conclusion would be empty, so gate on the trigger too).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version:   ${{ steps.semantic.outputs.new_release_version }}
