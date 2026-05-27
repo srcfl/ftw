@@ -300,6 +300,66 @@ local ok = host.modbus_write_multiple(40000, {1000, 2000, 3000})
 
 ---
 
+## TCP
+
+Raw TCP socket access. Available when the driver's config grants `capabilities.tcp` with an optional `allowed_hosts` allowlist. Used by drivers that talk to serial-to-Ethernet passthrough bridges or other protocols that stream unsolicited bytes over a long-lived TCP connection — Dutch P1 smart-meter readers streaming DSMR telegrams on port 23 being the canonical example. See `drivers/zuidwijk_p1.lua` for a full DSMR 5 parser built on this capability.
+
+The host runs a background read pump per driver that buffers incoming bytes in a 64 KiB ring. The driver drains the buffer at its own poll cadence and does its own framing — TCP is byte-stream, not message-framed. Read-only by design today: the supported targets never need driver-initiated writes, and arbitrary outbound TCP would dramatically widen the blast radius if a driver ever ran untrusted code.
+
+**Config:**
+```yaml
+- name: house-meter
+  lua: drivers/zuidwijk_p1.lua
+  capabilities:
+    tcp:
+      allowed_hosts: ["192.168.1.40:23"]   # bare "host" allows any port
+  config:
+    host: "192.168.1.40"
+    port: 23
+```
+
+### `host.tcp_open(addr)`
+
+Open a TCP connection to `"host:port"`. Idempotent — calling on an already-open socket is a no-op, so this is also the reconnect path.
+
+**Parameters:**
+- `addr` (string) -- `"host:port"`, e.g. `"192.168.1.40:23"`
+
+**Returns:**
+- On success: `(true, nil)`
+- On failure: `(nil, error_string)` — bad allowlist, dial error, etc.
+
+---
+
+### `host.tcp_recv()`
+
+Drain bytes received since the last call. Non-blocking. Returns an empty string when nothing has arrived; the driver does its own framing on the accumulated buffer.
+
+**Returns:** string -- raw bytes since the last call (Lua strings are 8-bit clean, so binary payloads work)
+
+**Example:**
+```lua
+local chunk = host.tcp_recv()
+if chunk ~= "" then
+    buffer = buffer .. chunk
+    -- ...split into frames, parse, emit
+end
+```
+
+---
+
+### `host.tcp_is_open()`
+
+Returns `true` while the read pump is alive. Flips to `false` on EOF or read error; the driver should `tcp_close` and `tcp_open` again on the next poll to recover.
+
+---
+
+### `host.tcp_close()`
+
+Close the socket and release the read pump. Safe to call on an already-closed cap.
+
+---
+
 ## Decode Helpers
 
 Always available regardless of protocol. Used to interpret raw register values from Modbus devices.

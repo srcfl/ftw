@@ -1098,6 +1098,35 @@ func ComputeDispatch(
 			if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered > currentDirective.BatteryEnergyWh {
 				state.slotDelivered = currentDirective.BatteryEnergyWh
 			}
+			// Mirror cap for the GROW-budget case: a mid-slot replan that
+			// raises the slot's energy budget (e.g. peak-price reactive
+			// replan late in a low-discharge slot) makes the old
+			// slotDelivered look "behind" by a large margin, and
+			// remainingWh × 3600 / remainingS demands catastrophic
+			// catch-up power (>> slot avg, clamped to MaxDischargeW).
+			// Observed on .139 2026-05-17: slot avg in plan was −900 W
+			// but dispatch held −9000 W for 70 s near slot-end after a
+			// mid-slot replan; battery hit its inverter limit.
+			//
+			// Rebase slotDelivered toward "expected at new pace" so the
+			// catch-up rate stays close to slot average. The new plan is
+			// treated as if it had been active since slot start, scaled
+			// by elapsed fraction. Only applied when the actual delivery
+			// is BEHIND the expected pace (catch-up direction); when
+			// ahead, the asymmetric cap above already handles it.
+			slotH := currentDirective.SlotEnd.Sub(currentDirective.SlotStart).Seconds() / 3600.0
+			if slotH > 0 {
+				elapsedH := now.Sub(currentDirective.SlotStart).Seconds() / 3600.0
+				if elapsedH > 0 && elapsedH < slotH {
+					expectedDelivered := (elapsedH / slotH) * currentDirective.BatteryEnergyWh
+					if currentDirective.BatteryEnergyWh < 0 && state.slotDelivered > expectedDelivered {
+						state.slotDelivered = expectedDelivered
+					}
+					if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered < expectedDelivered {
+						state.slotDelivered = expectedDelivered
+					}
+				}
+			}
 		}
 		remainingWh := currentDirective.BatteryEnergyWh - state.slotDelivered
 		remainingS := currentDirective.SlotEnd.Sub(now).Seconds()
@@ -2581,10 +2610,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		return targets
 	}
 	siteMeter := state.SiteMeterDriver
-	// Aggregate live battery power so we can hold load+pv constant.
+	// Aggregate live battery power for the batteries this dispatch is
+	// about to control so we can hold load+pv+uncontrolled-batteries
+	// constant. Offline or otherwise untargeted batteries are already
+	// reflected in currentGrid; subtracting them here without adding a
+	// replacement target would double-remove their contribution and miss
+	// fuse overages.
+	seenBat := make(map[string]struct{}, len(targets))
 	var currentBat float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		currentBat += r.SmoothedW
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
 	}
 	var currentGrid float64
 	if siteMeter != "" {

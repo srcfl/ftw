@@ -212,6 +212,34 @@ func TestFuseMaxPower(t *testing.T) {
 	}
 }
 
+func TestRejectsInvalidFusePowerInputs(t *testing.T) {
+	cases := []struct {
+		field string
+		value string
+	}{
+		{"max_amps", "-16"},
+		{"phases", "-3"},
+		{"voltage", "-230"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			yaml := fmt.Sprintf(`
+site: { name: x }
+fuse: { max_amps: 16, phases: 3, voltage: 230, %s: %s }
+drivers:
+  - name: a
+    lua: a.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+`, tc.field, tc.value)
+			if _, err := Parse([]byte(yaml), "."); err == nil {
+				t.Fatalf("expected validation error for fuse.%s=%s", tc.field, tc.value)
+			}
+		})
+	}
+}
+
 func TestSmoothingAlphaValidation(t *testing.T) {
 	// alpha=0 means "use default" via applyDefaults, so only test truly invalid values
 	for _, bad := range []float64{-0.1, 1.1, 2.0} {

@@ -125,3 +125,57 @@ func TestPowerWStillReachesDriver(t *testing.T) {
 		t.Errorf("power_w = %.0f, want > 0", cmd.power)
 	}
 }
+
+// At session start, a live surplus that comfortably covers the 3Φ
+// minimum must override a pessimistic forecast and lock the step set
+// to 3Φ-only. Regression for the user-observed case: forecast said
+// next-30 min would peak around 3 kW so steps included 1Φ (kick=1380 W
+// = 1p min), but live surplus was ~5 kW and the EV should have started
+// in 3Φ directly.
+func TestPickSurplusSteps_LiveSurplusOverridesForecastAtSessionStart(t *testing.T) {
+	cfg := phaseLoadpoint("auto", 0, 0)
+	dir := &Directive{SlotStart: time.Now(), SlotEnd: time.Now().Add(15 * time.Minute)}
+	sender := &fakeSender{}
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0}}
+	c := newTestController(t, []Config{cfg}, dir, samples, sender)
+
+	// Pessimistic forecast: near-term peak below 3Φ minimum (4140 W).
+	c.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
+		return 3000, true
+	})
+	// But live surplus is plenty.
+	c.SetSiteSurplusForEV(func() (float64, bool) { return 5500, true })
+
+	steps := c.pickSurplusSteps(time.Now(), cfg)
+	// Expect 3Φ-only step set (smallest non-zero == 4140).
+	minStep := smallestNonZero(steps)
+	if minStep != 4140 {
+		t.Errorf("smallest step = %.0f, want 4140 (3Φ min). Steps: %v", minStep, steps)
+	}
+	// All steps should be ≥ 4140.
+	for _, s := range steps {
+		if s > 0 && s < 4140 {
+			t.Errorf("step %.0f is below 3Φ min — expected 3Φ-only set", s)
+		}
+	}
+}
+
+// Same forecast, but live surplus is also too low → keep the 1Φ-
+// inclusive step set (current behaviour preserved).
+func TestPickSurplusSteps_LowLiveSurplusKeeps1PSteps(t *testing.T) {
+	cfg := phaseLoadpoint("auto", 0, 0)
+	dir := &Directive{SlotStart: time.Now(), SlotEnd: time.Now().Add(15 * time.Minute)}
+	sender := &fakeSender{}
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 0}}
+	c := newTestController(t, []Config{cfg}, dir, samples, sender)
+	c.SetNearTermPeakSurplusW(func(window time.Duration) (float64, bool) {
+		return 3000, true
+	})
+	c.SetSiteSurplusForEV(func() (float64, bool) { return 2500, true })
+
+	steps := c.pickSurplusSteps(time.Now(), cfg)
+	if smallestNonZero(steps) != 1380 {
+		t.Errorf("smallest step = %.0f, want 1380 (1Φ min — live + forecast both below 3Φ)",
+			smallestNonZero(steps))
+	}
+}

@@ -21,16 +21,17 @@ type Applier func(new, old *config.Config)
 
 // Watcher watches a config file and re-applies on change.
 type Watcher struct {
-	path     string
-	cfgMu    *sync.RWMutex
-	cfg      *config.Config
-	ctrlMu   *sync.Mutex
-	ctrl     *control.State
-	applier  Applier
+	path    string
+	cfgMu   *sync.RWMutex
+	cfg     *config.Config
+	ctrlMu  *sync.Mutex
+	ctrl    *control.State
+	applier Applier
 
-	fsw      *fsnotify.Watcher
-	stop     chan struct{}
-	stopOnce sync.Once
+	fsw       *fsnotify.Watcher
+	stop      chan struct{}
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 // New creates a watcher. `applier` is called with (new, old) after a
@@ -59,7 +60,9 @@ func New(
 
 // Start runs the watcher loop (goroutine).
 func (w *Watcher) Start() {
-	go w.loop()
+	w.startOnce.Do(func() {
+		go w.loop()
+	})
 }
 
 // Stop terminates the watcher. It is safe to call multiple times.

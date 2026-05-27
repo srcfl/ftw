@@ -232,7 +232,24 @@ Always wrap reads in `pcall` — a single failed register read should not
 crash the whole poll cycle. See `drivers/sungrow.lua:127-129` for the
 pattern.
 
-### 3.5 Decoders
+### 3.5 Raw TCP (granted only if the driver has `capabilities.tcp:` in its config)
+
+| Call | Purpose |
+|---|---|
+| `host.tcp_open(addr)` | Open a long-lived TCP socket to `"host:port"`. Idempotent — doubles as the reconnect path. |
+| `host.tcp_recv()` | Drain any bytes received since the last call (non-blocking, empty string when idle). |
+| `host.tcp_is_open()` | Boolean — false after EOF / read error. Re-open on the next poll. |
+| `host.tcp_close()` | Tear down the socket. |
+
+For passthrough Serial-to-Ethernet bridges (Dutch P1 smart-meter readers,
+some Modbus-RTU-to-TCP devices in raw mode) that stream unsolicited bytes
+on a fixed port. TCP is byte-stream — the driver does its own framing on
+the accumulated buffer. Read-only today: there's no `tcp_send`, because
+the supported targets don't expect input. See `drivers/zuidwijk_p1.lua`
+for a full DSMR 5 parser (frame detection + CRC16 + OBIS decode) built on
+this capability.
+
+### 3.6 Decoders
 
 Modbus returns raw uint16s. These helpers combine pairs back into the
 integer you actually want. Parameter order matters — `_le` takes
@@ -246,7 +263,7 @@ integer you actually want. Parameter order matters — `_le` takes
 | `host.decode_i32_be(hi, lo)` | Signed 32-bit, big-endian. |
 | `host.decode_i16(reg)` | Sign-extend a single uint16 to int16. |
 
-### 3.6 JSON
+### 3.7 JSON
 
 | Call | Purpose |
 |---|---|
