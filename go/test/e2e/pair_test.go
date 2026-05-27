@@ -20,9 +20,9 @@ import (
 // a live main service, exposes a working MCP endpoint and that the
 // session report eventually contains the tool calls we made.
 //
-// The subetha relay hop is skipped — we talk directly to the sidecar's
-// localhost MCP listener. The real subetha transport is exercised by
-// its own test in go/internal/subetha.
+// The relay hop is skipped — we talk directly to the sidecar's
+// localhost MCP listener. The real relay transport is exercised by
+// TestPairFlowThroughRelay below.
 func TestPairFlow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped in short mode")
@@ -261,29 +261,6 @@ func readPairCodeAndApproval(t *testing.T, r io.Reader) (pair, approval string) 
 	}
 	t.Fatal("pair code + approval not seen on ftw-pair stderr")
 	return "", ""
-}
-
-// readTunnelURL scans ftw-connect stdout for "Tunnel ready: …".
-func readTunnelURL(t *testing.T, r io.Reader) string {
-	t.Helper()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) && scanner.Scan() {
-		line := scanner.Text()
-		os.Stdout.WriteString(line + "\n")
-		if strings.HasPrefix(line, "Tunnel ready: ") {
-			url := strings.TrimPrefix(line, "Tunnel ready: ")
-			go func() {
-				for scanner.Scan() {
-					os.Stdout.WriteString(scanner.Text() + "\n")
-				}
-			}()
-			return url
-		}
-	}
-	t.Fatal("tunnel URL not seen on ftw-connect stdout")
-	return ""
 }
 
 func buildBinary(t *testing.T, repo, name string) string {

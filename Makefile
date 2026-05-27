@@ -90,7 +90,7 @@ build:
 	@mkdir -p bin
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair ./cmd/ftw-pair
-	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-subetha ./cmd/ftw-subetha
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay ./cmd/ftw-relay
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	@ls -la bin/
@@ -102,8 +102,8 @@ build-arm64:
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-arm64 ./cmd/ftw-pair
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-subetha-linux-arm64 ./cmd/ftw-subetha
-	@ls -la bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64 bin/ftw-subetha-linux-arm64
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-arm64 ./cmd/ftw-relay
+	@ls -la bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64 bin/ftw-relay-linux-arm64
 
 build-amd64:
 	@mkdir -p bin
@@ -112,8 +112,8 @@ build-amd64:
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-amd64 ./cmd/ftw-pair
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-subetha-linux-amd64 ./cmd/ftw-subetha
-	@ls -la bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64 bin/ftw-subetha-linux-amd64
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-amd64 ./cmd/ftw-relay
+	@ls -la bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64 bin/ftw-relay-linux-amd64
 
 build-windows-amd64:
 	@mkdir -p bin

@@ -19,7 +19,7 @@ name: release
 #        'false'`. The "Tag and create GitHub Release" step then runs
 #        idempotently: independent existence checks for the tag and
 #        the release let a partial-failure rerun finish the job.
-#   3. Downstream jobs (binaries, ftw-connect, ftw-subetha, docker,
+#   3. Downstream jobs (binaries, ftw-relay, docker,
 #      rpi-image, discord) gate on `release.outputs.published == 'true'`
 #      and run only when a real release was cut.
 #
@@ -239,75 +239,13 @@ jobs:
         # failing — useful when the publish step is re-triggered manually.
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
-  ftw-connect:
-    name: build + upload ftw-connect binaries
+  ftw-relay:
+    name: build + upload ftw-relay binaries
     runs-on: ubuntu-latest
     needs: release
-    # Publish standalone ftw-connect binaries for every major platform so
-    # the curl installer has assets to download. These are separate from
-    # the main tarball because ftw-connect is a client-side tool (runs on
-    # Mac/Windows/Linux laptops) while the main tarball targets the Pi.
-    if: needs.release.outputs.published == 'true'
-    permissions:
-      contents: write  # upload assets to the release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: linux
-            goarch: arm64
-            ext: ""
-          - goos: darwin
-            goarch: amd64
-            ext: ""
-          - goos: darwin
-            goarch: arm64
-            ext: ""
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: go/go.sum
-
-      - name: Build ftw-connect
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.version }}
-        working-directory: go
-        run: |
-          mkdir -p ../bin
-          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-connect-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw-connect
-          ls -la "../bin/ftw-connect-${GOOS}-${GOARCH}${{ matrix.ext }}"
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.version }}
-          ASSET: bin/ftw-connect-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
-
-  ftw-subetha:
-    name: build + upload ftw-subetha binaries
-    runs-on: ubuntu-latest
-    needs: release
-    # Publish standalone relay binaries for linux/amd64 + linux/arm64.
-    # Operators deploying their own relay can grab these from releases.
+    # The HTTPS request-response relay that replaces ftw-subetha.
+    # Deployed by the operator on relay.fortytwowatts.com — see
+    # docs/relay-deploy.md.
     if: needs.release.outputs.published == 'true'
     permissions:
       contents: write  # upload assets to the release
@@ -333,7 +271,7 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
-      - name: Build ftw-subetha
+      - name: Build ftw-relay
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -343,15 +281,15 @@ jobs:
         run: |
           mkdir -p ../bin
           go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw-subetha
-          ls -la "../bin/ftw-subetha-${GOOS}-${GOARCH}${{ matrix.ext }}"
+            -o "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-relay
+          ls -la "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}"
 
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.release.outputs.version }}
-          ASSET: bin/ftw-subetha-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          ASSET: bin/ftw-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
   docker:
@@ -519,7 +457,7 @@ jobs:
     # release being useful (disk-space eviction regressions, pi-gen
     # upstream breakage). The announcement should still go out with
     # the binary + image links when that happens.
-    needs: [release, binaries, ftw-connect, ftw-subetha, docker]
+    needs: [release, binaries, ftw-relay, docker]
     if: needs.release.outputs.published == 'true'
     permissions:
       contents: read   # gh release view needs read access

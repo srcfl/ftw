@@ -180,9 +180,9 @@ func main() {
 	// Clear the dashboard's pair-status entry so the UI doesn't keep showing
 	// the session as active after the sidecar has exited. Without this, a
 	// session that ends on its own (TTL expiry, abort-poller, etc.) leaves a
-	// stale entry — the dashboard says "active" while ftw-connect on the
-	// friend side gets "no host ready" from the relay (the host workers are
-	// already dead). Use a fresh context since ctx is likely cancelled.
+	// stale entry — the dashboard says "active" while a friend hitting the
+	// relay URL gets a 502 (the long-poll loop is already dead). Use a fresh
+	// context since ctx is likely cancelled.
 	cleanupReq, _ := http.NewRequest("POST", *apiBase+"/api/pair/abort", nil)
 	cleanupReq.Header.Set("Content-Type", "application/json")
 	cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
