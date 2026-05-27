@@ -931,6 +931,13 @@ func ComputeDispatch(
 	case ModeCharge:
 		state.resetSettlementAccounting()
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
+		targets = applyFuseGuard(targets, store, state, fuseMaxW)
+		targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
+		now := time.Now()
+		state.LastDispatch = &now
+		for _, t := range targets {
+			state.PrevTargets[t.Driver] = t.TargetW
+		}
 		state.LastTargets = targets
 		return targets
 	}

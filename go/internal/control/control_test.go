@@ -213,6 +213,27 @@ func TestChargeModeForcesAllBatteriesPositive5kW(t *testing.T) {
 	}
 }
 
+func TestChargeModeRespectsFuseGuard(t *testing.T) {
+	store := seedStore(10000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeCharge
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if !targets[0].Clamped {
+		t.Fatalf("charge target should be clamped by fuse guard: %+v", targets[0])
+	}
+	if math.Abs(targets[0].TargetW-1040) > 1 {
+		t.Fatalf("charge target = %.0f W, want remaining fuse headroom 1040 W", targets[0].TargetW)
+	}
+}
+
 func TestDeadbandSkipsWithinTolerance(t *testing.T) {
 	store := seedStore(30, []struct {
 		name          string
