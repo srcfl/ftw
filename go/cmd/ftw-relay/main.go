@@ -36,6 +36,7 @@ func main() {
 	r := &Relay{
 		Queue:       tunnel.NewQueue(),
 		Tokens:      NewTokenRegistry(),
+		Owners:      NewOwnerRegistry(),
 		PollTimeout: *pollTimeout,
 	}
 

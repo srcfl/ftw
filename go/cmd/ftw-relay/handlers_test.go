@@ -17,6 +17,7 @@ func newTestRelay() *Relay {
 	return &Relay{
 		Queue:  tunnel.NewQueue(),
 		Tokens: NewTokenRegistry(),
+		Owners: NewOwnerRegistry(),
 	}
 }
 
