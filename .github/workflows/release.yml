@@ -1,6 +1,6 @@
 name: release
 
-# Changesets-driven release. Pattern lifted from umara/u-front.
+# Changesets-driven release.
 #
 # This workflow ONLY handles the changesets flow + tag + GitHub Release
 # creation. The cross-platform binaries, docker images, RPi image, and
@@ -97,7 +97,7 @@ jobs:
           # the auto-generated Version PR. If branch protection
           # requires those checks, push an empty commit to the
           # `changeset-release/master` branch from a user account
-          # (or admin-merge the PR) — same pattern u-front uses.
+          # (or admin-merge the PR).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag and create GitHub Release
@@ -169,7 +169,7 @@ jobs:
         # GitHub does NOT fire downstream `push: tags` workflows from
         # events created by GITHUB_TOKEN, so the tag push above won't
         # auto-trigger release-assets.yml. workflow_dispatch via gh
-        # CLI does. (u-front uses the identical pattern.)
+        # CLI does.
         if: steps.publish.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
