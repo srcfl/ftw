@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -104,15 +103,16 @@ func TestPairFlow(t *testing.T) {
 	}
 }
 
-// TestPairFlowThroughRelay is the full-stack regression for the host-pool
-// starvation bug. It runs a real ftw-subetha relay in-process, points
-// ftw-pair (host) and ftw-connect (client) at it, then issues N sequential
-// GET /healthz requests through the tunnel — every one MUST return 200.
+// TestPairFlowThroughRelay is the binary-level e2e for the new
+// request-response relay (replaces the old subetha host-pool
+// regression). Builds ftw-relay + ftw-pair + main service, registers
+// a token via ftw-pair startup, approves it via the relay's
+// /h/<token>/approve endpoint, and issues N sequential GET /web/...
+// requests as the "friend" using plain http.DefaultClient.
 //
-// Before the relay-splice fix, the 5th request would return 000 because
-// the host's worker pool was deadlocked in pipeConns (the relay's splice
-// never closed the host side when the client closed, so the host's read
-// from the keep-alive HTTP conn blocked forever).
+// The N-sequential assertion preserves the spirit of the old
+// host-pool starvation test — any leak in the long-poll loop, queue,
+// or response routing would show up as a request timing out.
 func TestPairFlowThroughRelay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped in short mode")
@@ -120,8 +120,7 @@ func TestPairFlowThroughRelay(t *testing.T) {
 
 	repo := repoRoot(t)
 	pairBin := buildBinary(t, repo, "ftw-pair")
-	relayBin := buildBinary(t, repo, "ftw-subetha")
-	connectBin := buildBinary(t, repo, "ftw-connect")
+	relayBin := buildBinary(t, repo, "ftw-relay")
 	mainBin := buildBinary(t, repo, "forty-two-watts")
 
 	work := t.TempDir()
@@ -129,8 +128,10 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	_ = os.MkdirAll(stateDir, 0o755)
 	cfgPath := writeMinimalConfig(t, work, stateDir)
 
-	// 1. Relay on a random localhost port.
-	relayCmd := exec.Command(relayBin, "-addr", "127.0.0.1:27777")
+	// 1. Relay (HTTP mode, no TLS). The relay's mux serves /healthz,
+	//    /tunnel/*, and /h/* — same family ftw-pair will register against.
+	const relayAddr = "127.0.0.1:27778"
+	relayCmd := exec.Command(relayBin, "-addr", relayAddr, "-poll-timeout", "5s")
 	relayCmd.Stdout = os.Stdout
 	relayCmd.Stderr = os.Stderr
 	if err := relayCmd.Start(); err != nil {
@@ -138,16 +139,8 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	}
 	defer relayCmd.Process.Kill()
 
-	// Wait until the relay's TCP listener is up.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.DialTimeout("tcp", "127.0.0.1:27777", 200*time.Millisecond)
-		if err == nil {
-			c.Close()
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	relayURL := "http://" + relayAddr
+	waitForAPI(t, relayURL+"/healthz")
 
 	// 2. 42W main service so ftw-pair has something to report to.
 	mainCmd := exec.Command(mainBin, "-config", cfgPath, "-web", filepath.Join(repo, "web"))
@@ -159,8 +152,7 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	defer mainCmd.Process.Kill()
 	waitForAPI(t, "http://127.0.0.1:8080/api/status")
 
-	// 3. ftw-pair pointed at the in-process relay. Capture stderr to a pipe
-	//    so we can extract the PAIR CODE the sidecar prints.
+	// 3. ftw-pair pointed at the in-process relay.
 	pairCmd := exec.Command(pairBin,
 		"-addr", "127.0.0.1:29998",
 		"-api", "http://127.0.0.1:8080",
@@ -169,7 +161,7 @@ func TestPairFlowThroughRelay(t *testing.T) {
 		"-config", cfgPath,
 		"-ttl", "2m",
 		"-intent", "relay e2e",
-		"-relay-addr", "127.0.0.1:27777",
+		"-relay", relayURL,
 		"-stateless",
 	)
 	pairStderr, err := pairCmd.StderrPipe()
@@ -182,33 +174,28 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	}
 	defer pairCmd.Process.Kill()
 
-	pairCode := readPairCode(t, pairStderr)
+	pairCode, approvalCode := readPairCodeAndApproval(t, pairStderr)
 
-	// 4. ftw-connect — picks its own random localhost port for the tunnel.
-	connectCmd := exec.Command(connectBin,
-		"-relay-addr", "127.0.0.1:27777",
-		pairCode,
-	)
-	connectStdout, err := connectCmd.StdoutPipe()
+	// 4. Friend side: approve the session via the relay endpoint.
+	apvBody := strings.NewReader(`{"code":"` + approvalCode + `"}`)
+	apvResp, err := http.Post(relayURL+"/h/"+pairCode+"/approve", "application/json", apvBody)
 	if err != nil {
-		t.Fatalf("connect stdout pipe: %v", err)
+		t.Fatalf("approve: %v", err)
 	}
-	connectCmd.Stderr = os.Stderr
-	if err := connectCmd.Start(); err != nil {
-		t.Fatalf("start connect: %v", err)
+	if apvResp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(apvResp.Body)
+		t.Fatalf("approve status %d body %q", apvResp.StatusCode, body)
 	}
-	defer connectCmd.Process.Kill()
+	apvResp.Body.Close()
 
-	tunnelURL := readTunnelURL(t, connectStdout)
-
-	// Give the connect listener a beat to bind before we hammer it.
+	// Give the host loop a beat to settle after the first response.
 	time.Sleep(200 * time.Millisecond)
 
-	// 5. The actual regression assertion — N sequential requests through the tunnel.
+	// 5. N sequential requests through the relay → host → dashboard.
 	const N = 10
 	for i := 0; i < N; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", tunnelURL+"/healthz", nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", relayURL+"/h/"+pairCode+"/web/api/status", nil)
 		resp, err := http.DefaultClient.Do(req)
 		cancel()
 		if err != nil {
@@ -245,6 +232,35 @@ func readPairCode(t *testing.T, r io.Reader) string {
 	}
 	t.Fatal("pair code not seen on ftw-pair stderr")
 	return ""
+}
+
+// readPairCodeAndApproval scans the ftw-pair stderr for both
+// "PAIR CODE: …" and "APPROVAL CODE (tell host on voice): …".
+func readPairCodeAndApproval(t *testing.T, r io.Reader) (pair, approval string) {
+	t.Helper()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 64*1024)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) && scanner.Scan() {
+		line := scanner.Text()
+		os.Stderr.WriteString(line + "\n")
+		if strings.HasPrefix(line, "PAIR CODE: ") {
+			pair = strings.TrimPrefix(line, "PAIR CODE: ")
+		}
+		if strings.HasPrefix(line, "APPROVAL CODE (tell host on voice): ") {
+			approval = strings.TrimPrefix(line, "APPROVAL CODE (tell host on voice): ")
+		}
+		if pair != "" && approval != "" {
+			go func() {
+				for scanner.Scan() {
+					os.Stderr.WriteString(scanner.Text() + "\n")
+				}
+			}()
+			return pair, approval
+		}
+	}
+	t.Fatal("pair code + approval not seen on ftw-pair stderr")
+	return "", ""
 }
 
 // readTunnelURL scans ftw-connect stdout for "Tunnel ready: …".
