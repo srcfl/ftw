@@ -247,6 +247,158 @@ func TestRelayIdleCleanup(t *testing.T) {
 	}
 }
 
+// TestRelaySpliceHalfCloseUnblocksOtherSide is the regression test for the
+// host-pool starvation bug: when a one-shot client (curl) closes its side of
+// the splice after receiving the response, the host-side socket would stay
+// open forever — the host's HTTP keep-alive Read kept the other io.Copy
+// blocked, the relay's WaitGroup never finished, and the host's worker
+// couldn't re-queue. After 4 such requests, every new client got
+// "no host ready".
+//
+// The fix: close BOTH conns as soon as EITHER io.Copy returns. This test
+// verifies that the host's Read returns shortly after the client closes,
+// even when the host is idle (no traffic from host→client).
+func TestRelaySpliceHalfCloseUnblocksOtherSide(t *testing.T) {
+	addr := startTestRelay(t)
+	const token = "half-close-token"
+
+	host := connectRaw(t, addr, token, roleHost)
+	defer host.Close()
+	if ack := readAck(t, host); ack != 0x01 {
+		t.Fatalf("host: expected 0x01, got 0x%02x", ack)
+	}
+
+	client := connectRaw(t, addr, token, roleClient)
+	if ack := readAck(t, client); ack != 0x00 {
+		t.Fatalf("client: expected 0x00, got 0x%02x", ack)
+	}
+	if ack := readAck(t, host); ack != 0x00 {
+		t.Fatalf("host matched-ack: expected 0x00, got 0x%02x", ack)
+	}
+
+	// Client sends one byte (simulates HTTP request).
+	if _, err := client.Write([]byte{'x'}); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	buf := make([]byte, 1)
+	host.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	if _, err := io.ReadFull(host, buf); err != nil {
+		t.Fatalf("host read: %v", err)
+	}
+	host.SetDeadline(time.Time{}) //nolint:errcheck
+
+	// Host is idle — does NOT reply. Simulates HTTP keep-alive after the
+	// response has already been sent on a different short-lived conn.
+	// Client closes (curl finishes).
+	client.Close()
+
+	// Host MUST see EOF (or a closed-conn error) within a short window —
+	// not after the 60 s idle timeout. Before the fix, this read would
+	// block until the test timeout.
+	host.SetDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	n, err := host.Read(buf)
+	if err == nil && n > 0 {
+		t.Fatalf("host read returned %d bytes %q without error — splice did not propagate close", n, buf[:n])
+	}
+	if err == nil {
+		t.Fatal("host read returned nil error — expected EOF after client close")
+	}
+	// Either io.EOF or a "use of closed network connection" — both are correct outcomes.
+
+	// And a fresh host can re-queue immediately, proving the splice released
+	// the queue slot.
+	host2 := connectRaw(t, addr, token, roleHost)
+	defer host2.Close()
+	if ack := readAck(t, host2); ack != 0x01 {
+		t.Fatalf("host2 (re-queue): expected 0x01, got 0x%02x", ack)
+	}
+}
+
+// TestRelaySpliceHalfCloseHostSide is the mirror of HalfCloseUnblocksOtherSide:
+// host closes first, client must see EOF promptly. This covers the case where
+// the host's worker decides to tear down (TTL expiry, abort) while the client
+// is mid-request.
+func TestRelaySpliceHalfCloseHostSide(t *testing.T) {
+	addr := startTestRelay(t)
+	const token = "half-close-host-token"
+
+	host := connectRaw(t, addr, token, roleHost)
+	if ack := readAck(t, host); ack != 0x01 {
+		t.Fatalf("host: expected 0x01, got 0x%02x", ack)
+	}
+
+	client := connectRaw(t, addr, token, roleClient)
+	defer client.Close()
+	if ack := readAck(t, client); ack != 0x00 {
+		t.Fatalf("client: expected 0x00, got 0x%02x", ack)
+	}
+	if ack := readAck(t, host); ack != 0x00 {
+		t.Fatalf("host matched-ack: expected 0x00, got 0x%02x", ack)
+	}
+
+	// Host closes while client is idle. Client must see EOF promptly.
+	host.Close()
+
+	buf := make([]byte, 1)
+	client.SetDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	_, err := client.Read(buf)
+	if err == nil {
+		t.Fatal("client read returned nil error — expected EOF after host close")
+	}
+}
+
+// TestRelaySpliceSequentialRequests is the end-to-end regression for the bug
+// that caused "no host ready" after 4 requests: simulate the host's worker
+// pool re-queueing N times and verify each new client gets matched and the
+// pipe terminates promptly.
+func TestRelaySpliceSequentialRequests(t *testing.T) {
+	addr := startTestRelay(t)
+	const token = "sequential-token"
+	const N = 10
+
+	for i := 0; i < N; i++ {
+		host := connectRaw(t, addr, token, roleHost)
+		if ack := readAck(t, host); ack != 0x01 {
+			host.Close()
+			t.Fatalf("iter %d host: expected 0x01, got 0x%02x", i, ack)
+		}
+
+		client := connectRaw(t, addr, token, roleClient)
+		if ack := readAck(t, client); ack != 0x00 {
+			host.Close()
+			client.Close()
+			t.Fatalf("iter %d client: expected 0x00, got 0x%02x", i, ack)
+		}
+		if ack := readAck(t, host); ack != 0x00 {
+			host.Close()
+			client.Close()
+			t.Fatalf("iter %d host matched-ack: expected 0x00, got 0x%02x", i, ack)
+		}
+
+		// One byte each way to confirm the splice is live.
+		if _, err := client.Write([]byte{byte(i)}); err != nil {
+			t.Fatalf("iter %d client write: %v", i, err)
+		}
+		buf := make([]byte, 1)
+		host.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		if _, err := io.ReadFull(host, buf); err != nil {
+			t.Fatalf("iter %d host read: %v", i, err)
+		}
+		if buf[0] != byte(i) {
+			t.Errorf("iter %d: got 0x%02x, want 0x%02x", i, buf[0], byte(i))
+		}
+
+		// Client closes (curl finishes). Host MUST see EOF and the relay
+		// MUST release this slot so the next iteration's host can queue.
+		client.Close()
+		host.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		if _, err := host.Read(buf); err == nil {
+			t.Fatalf("iter %d: host read returned nil error after client close — splice did not propagate", i)
+		}
+		host.Close()
+	}
+}
+
 // TestRelayBadVersion verifies that connections with an unknown protocol version
 // are rejected with a 0x02 error.
 func TestRelayBadVersion(t *testing.T) {

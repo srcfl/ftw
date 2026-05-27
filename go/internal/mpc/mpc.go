@@ -315,6 +315,41 @@ func exportPricingFromParams(p Params) gridcost.ExportPricing {
 	}
 }
 
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+func sanitizeOptimizeSlots(slots []Slot) []Slot {
+	out := make([]Slot, 0, len(slots))
+	for _, s := range slots {
+		if s.LenMin <= 0 {
+			s.LenMin = 60
+		}
+		if !finite(s.PriceOre) || !finite(s.SpotOre) {
+			continue
+		}
+		if !finite(s.PVW) {
+			s.PVW = 0
+		}
+		if !finite(s.LoadW) || s.LoadW < 0 {
+			s.LoadW = 0
+		}
+		if !finite(s.Confidence) || s.Confidence <= 0 {
+			s.Confidence = 1.0
+		} else if s.Confidence > 1 {
+			s.Confidence = 1.0
+		}
+		if !finite(s.Limits.MaxImportW) {
+			s.Limits.MaxImportW = 0
+		}
+		if !finite(s.Limits.MaxExportW) {
+			s.Limits.MaxExportW = 0
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // Optimize runs DP and returns the cost-minimizing plan.
 //
 // Complexity: O(N × S × A) where N = len(slots), S = SoCLevels, A = ActionLevels.
@@ -322,6 +357,7 @@ func exportPricingFromParams(p Params) gridcost.ExportPricing {
 // ~82k evaluations — well under 10ms.
 func Optimize(slots []Slot, p Params) Plan {
 	now := time.Now().UnixMilli()
+	slots = sanitizeOptimizeSlots(slots)
 	if len(slots) == 0 || p.CapacityWh <= 0 {
 		return Plan{GeneratedAtMs: now, Mode: p.Mode}
 	}

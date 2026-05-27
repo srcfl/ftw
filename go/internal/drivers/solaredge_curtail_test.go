@@ -173,7 +173,12 @@ func TestSolarEdgeCurtailDisable(t *testing.T) {
 func TestSolarEdgeCurtailWithoutNominalRejected(t *testing.T) {
 	d, mb := loadSolarEdgeDriver(t, "../../../drivers/solaredge.lua", 0)
 	defer d.Cleanup()
-	runCmd(t, d, "curtail", 5000)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd, _ := json.Marshal(map[string]any{"action": "curtail", "power_w": 5000.0})
+	if err := d.Command(ctx, cmd); err == nil {
+		t.Fatal("curtail without nominal_w should return an error")
+	}
 	if len(mb.snapshot()) != 0 {
 		t.Errorf("curtail without nominal_w should write nothing, got %+v", mb.snapshot())
 	}

@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,6 +56,7 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 	if len(byDay) == 0 { return 0, nil, nil }
 
 	for k, rows := range byDay {
+		newRows := len(rows)
 		// Sort by ts to maximize compression and make consumer scans linear.
 		sort.Slice(rows, func(i, j int) bool { return rows[i].TsMs < rows[j].TsMs })
 
@@ -63,11 +65,16 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 			return rolledRows, files, fmt.Errorf("mkdir %s: %w", dayDir, err)
 		}
 		path := filepath.Join(dayDir, fmt.Sprintf("%02d.parquet", k.day))
+		if existing, err := readParquetDay(path); err == nil {
+			rows = mergeParquetRows(existing, rows)
+		} else if !os.IsNotExist(err) {
+			return rolledRows, files, fmt.Errorf("read existing %s: %w", path, err)
+		}
 		if err := writeParquetDay(path, rows); err != nil {
 			return rolledRows, files, fmt.Errorf("write %s: %w", path, err)
 		}
 		files = append(files, path)
-		rolledRows += int64(len(rows))
+		rolledRows += int64(newRows)
 	}
 
 	// Delete the rolled-off rows from SQLite. Single statement, atomic.
@@ -99,6 +106,66 @@ func writeParquetDay(path string, rows []parquetSampleRow) error {
 	return os.Rename(tmp, path)
 }
 
+func readParquetDay(path string) ([]parquetSampleRow, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	pf, err := parquet.OpenFile(f, stat.Size())
+	if err != nil {
+		return nil, err
+	}
+	reader := parquet.NewGenericReader[parquetSampleRow](pf)
+	defer reader.Close()
+
+	rows := make([]parquetSampleRow, 0, 1024)
+	buf := make([]parquetSampleRow, 1024)
+	for {
+		n, err := reader.Read(buf)
+		rows = append(rows, buf[:n]...)
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			return rows, nil
+		}
+		return rows, err
+	}
+}
+
+func mergeParquetRows(existing, current []parquetSampleRow) []parquetSampleRow {
+	type sampleKey struct {
+		ts             int64
+		driver, metric string
+	}
+	byKey := make(map[sampleKey]parquetSampleRow, len(existing)+len(current))
+	for _, r := range existing {
+		byKey[sampleKey{ts: r.TsMs, driver: r.Driver, metric: r.Metric}] = r
+	}
+	for _, r := range current {
+		byKey[sampleKey{ts: r.TsMs, driver: r.Driver, metric: r.Metric}] = r
+	}
+	out := make([]parquetSampleRow, 0, len(byKey))
+	for _, r := range byKey {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TsMs != out[j].TsMs {
+			return out[i].TsMs < out[j].TsMs
+		}
+		if out[i].Driver != out[j].Driver {
+			return out[i].Driver < out[j].Driver
+		}
+		return out[i].Metric < out[j].Metric
+	})
+	return out
+}
+
 // LoadSeriesFromParquet reads one (driver, metric) series from cold storage.
 // Scans every parquet file whose day overlaps [sinceMs, untilMs]. Filtered in
 // process — daily files are small enough that pushdown isn't worth the
@@ -112,30 +179,17 @@ func (s *Store) LoadSeriesFromParquet(coldDir, driver, metric string, sinceMs, u
 	for d := since; !d.After(until); d = d.AddDate(0, 0, 1) {
 		path := filepath.Join(coldDir,
 			fmt.Sprintf("%04d/%02d/%02d.parquet", d.Year(), int(d.Month()), d.Day()))
-		f, err := os.Open(path)
+		rows, err := readParquetDay(path)
 		if err != nil {
 			if os.IsNotExist(err) { continue }
 			return out, err
 		}
-		stat, err := f.Stat()
-		if err != nil { f.Close(); return out, err }
-		pf, err := parquet.OpenFile(f, stat.Size())
-		if err != nil { f.Close(); return out, err }
-		reader := parquet.NewGenericReader[parquetSampleRow](pf)
-		buf := make([]parquetSampleRow, 1024)
-		for {
-			n, err := reader.Read(buf)
-			for i := 0; i < n; i++ {
-				r := buf[i]
-				if r.Driver == driver && r.Metric == metric &&
-					r.TsMs >= sinceMs && r.TsMs <= untilMs {
-					out = append(out, Sample{Driver: r.Driver, Metric: r.Metric, TsMs: r.TsMs, Value: r.Value})
-				}
+		for _, r := range rows {
+			if r.Driver == driver && r.Metric == metric &&
+				r.TsMs >= sinceMs && r.TsMs <= untilMs {
+				out = append(out, Sample{Driver: r.Driver, Metric: r.Metric, TsMs: r.TsMs, Value: r.Value})
 			}
-			if err != nil { break }
 		}
-		reader.Close()
-		f.Close()
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].TsMs < out[j].TsMs })
 	return out, nil

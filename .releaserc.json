@@ -68,6 +68,7 @@
         }
       }
     ],
+    "./scripts/release-codename.cjs",
     [
       "@semantic-release/github",
       {

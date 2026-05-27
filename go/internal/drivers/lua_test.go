@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,78 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	err = d.Command(context.Background(), []byte(`{"action":"set","w":-1500}`))
 	if err != nil {
 		t.Fatalf("command: %v", err)
+	}
+}
+
+func TestLuaDriverCommandAndDefaultModeReturnErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "failing.lua")
+	src := `
+function driver_command(action, w, cmd)
+    return "write failed"
+end
+function driver_default_mode()
+    return false
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewLuaDriver(path, NewHostEnv("failing", telemetry.NewStore()))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	err = d.Command(context.Background(), []byte(`{"action":"battery","power_w":1000}`))
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("Command error = %v, want write failed", err)
+	}
+	err = d.DefaultMode()
+	if err == nil || !strings.Contains(err.Error(), "returned false") {
+		t.Fatalf("DefaultMode error = %v, want returned false", err)
+	}
+}
+
+type luaKindTestModbus struct {
+	called bool
+}
+
+func (m *luaKindTestModbus) Read(uint16, uint16, int32) ([]uint16, error) {
+	m.called = true
+	return []uint16{1}, nil
+}
+
+func (m *luaKindTestModbus) WriteSingle(uint16, uint16) error  { return nil }
+func (m *luaKindTestModbus) WriteMulti(uint16, []uint16) error { return nil }
+func (m *luaKindTestModbus) Close() error                      { return nil }
+
+func TestLuaModbusReadRejectsUnknownKind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad_kind.lua")
+	src := `
+function driver_command(action, w, cmd)
+    local regs, err = host.modbus_read(1, 1, "inputs")
+    if err then return err end
+    return "expected unknown kind error"
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	modbus := &luaKindTestModbus{}
+	d, err := NewLuaDriver(path, NewHostEnv("bad-kind", telemetry.NewStore()).WithModbus(modbus))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	err = d.Command(context.Background(), []byte(`{"action":"test"}`))
+	if err == nil || !strings.Contains(err.Error(), "unknown modbus kind") {
+		t.Fatalf("Command error = %v, want unknown modbus kind", err)
+	}
+	if modbus.called {
+		t.Fatal("modbus Read was called for an unknown kind")
 	}
 }
 

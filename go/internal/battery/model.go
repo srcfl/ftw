@@ -3,8 +3,10 @@
 // Port of the Rust src/battery_model.rs + src/control.rs cascade parts.
 //
 // Under the site sign convention (+ = into site, − = out of site):
-//   command u = charge (+) or discharge (−)
-//   actual  y = same convention
+//
+//	command u = charge (+) or discharge (−)
+//	actual  y = same convention
+//
 // The ARX(1) model y(t+1) = a·y(t) + b·u(t) is sign-agnostic — we learn the
 // same `a` and `b` regardless of convention. Only the curves and clamps need
 // to be convention-aware.
@@ -17,15 +19,15 @@ import (
 
 // Constants tuned to match Rust src/battery_model.rs exactly.
 const (
-	DefaultForgetting = 0.99    // ~100-cycle effective window
-	InitialCov        = 1000.0  // high initial uncertainty
-	SoCBucket         = 0.05    // 5% SoC buckets for saturation curve
-	SatDecay          = 0.9999  // slow decay so old peaks fade
-	MinCommandForRLS  = 100.0   // W
-	MinDeltaForRLS    = 20.0    // W after warmup
-	OutlierSigma      = 5.0     // σ threshold for rejecting a residual
+	DefaultForgetting = 0.99   // ~100-cycle effective window
+	InitialCov        = 1000.0 // high initial uncertainty
+	SoCBucket         = 0.05   // 5% SoC buckets for saturation curve
+	SatDecay          = 0.9999 // slow decay so old peaks fade
+	MinCommandForRLS  = 100.0  // W
+	MinDeltaForRLS    = 20.0   // W after warmup
+	OutlierSigma      = 5.0    // σ threshold for rejecting a residual
 	GainHistoryLen    = 2000
-	MinSatSeedW       = 1000.0  // regression guard (see clamp_to_saturation comment)
+	MinSatSeedW       = 1000.0 // regression guard (see clamp_to_saturation comment)
 )
 
 // Model holds the per-battery ARX(1) state + saturation envelope + health baseline.
@@ -82,11 +84,11 @@ type GainPoint struct {
 // New creates a fresh model with sensible defaults.
 func New(name string) *Model {
 	return &Model{
-		Name: name,
-		A:    0.7,  // moderate memory
-		B:    0.3,  // moderate gain (steady-state ≈ 1.0)
-		P:    [2][2]float64{{InitialCov, 0}, {0, InitialCov}},
-		ResidualVarEMA:   1000,
+		Name:              name,
+		A:                 0.7, // moderate memory
+		B:                 0.3, // moderate gain (steady-state ≈ 1.0)
+		P:                 [2][2]float64{{InitialCov, 0}, {0, InitialCov}},
+		ResidualVarEMA:    1000,
 		MaxChargeCurve:    []SoCPoint{},
 		MaxDischargeCurve: []SoCPoint{},
 		DeadbandW:         50,
@@ -134,10 +136,16 @@ func (m *Model) TimeConstantS(dtS float64) float64 {
 // Confidence in [0,1] from sample count and residual variance.
 func (m *Model) Confidence() float64 {
 	n := float64(m.NSamples) / 200.0
-	if n > 1 { n = 1 }
+	if n > 1 {
+		n = 1
+	}
 	v := 1 - (m.ResidualVarEMA / 10000.0)
-	if v < 0 { v = 0 }
-	if v > 1 { v = 1 }
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
 	return n * v
 }
 
@@ -149,29 +157,38 @@ func (m *Model) HealthScore() float64 {
 	}
 	drift := math.Abs(m.SteadyStateGain()-*m.BaselineGain) / math.Abs(*m.BaselineGain)
 	h := 1.0 - 2.0*drift
-	if h < 0 { h = 0 }
-	if h > 1 { h = 1 }
+	if h < 0 {
+		h = 0
+	}
+	if h > 1 {
+		h = 1
+	}
 	return h
 }
 
 // HealthDriftPerDay = linear regression slope over GainHistory (gain/day).
 // Negative = gain is declining over time (aging).
 func (m *Model) HealthDriftPerDay() float64 {
-	if len(m.GainHistory) < 10 { return 0 }
+	if len(m.GainHistory) < 10 {
+		return 0
+	}
 	n := float64(len(m.GainHistory))
 	var meanT, meanG float64
 	for _, p := range m.GainHistory {
 		meanT += float64(p.TsMs)
 		meanG += p.Gain
 	}
-	meanT /= n; meanG /= n
+	meanT /= n
+	meanG /= n
 	var num, den float64
 	for _, p := range m.GainHistory {
 		dt := float64(p.TsMs) - meanT
 		num += dt * (p.Gain - meanG)
 		den += dt * dt
 	}
-	if den < 1 { return 0 }
+	if den < 1 {
+		return 0
+	}
 	slopePerMs := num / den
 	return slopePerMs * 86400_000
 }
@@ -209,6 +226,11 @@ func (m *Model) ClampToSaturation(target, soc float64) (clamped float64, wasClam
 // derived state. Returns true if the model was updated, false if the
 // observation was filtered out (too small to be informative).
 func (m *Model) Update(command, actual, soc, dtS float64, nowMs int64) bool {
+	if !finite(command) || !finite(actual) || !finite(soc) || !finite(dtS) ||
+		soc < 0 || soc > 1 || dtS <= 0 {
+		return false
+	}
+
 	// Saturation curve is always updated (decoupled from RLS gating)
 	m.updateSaturationCurves(actual, soc)
 
@@ -239,7 +261,9 @@ func (m *Model) Update(command, actual, soc, dtS float64, nowMs int64) bool {
 
 	// Outlier rejection
 	std := math.Sqrt(m.ResidualVarEMA)
-	if std < 10 { std = 10 }
+	if std < 10 {
+		std = 10
+	}
 	if math.Abs(err) > OutlierSigma*std && m.NSamples > 20 {
 		m.LastU = command
 		m.LastY = actual
@@ -321,8 +345,12 @@ func (m *Model) SetFromStepFit(gain, tauS, dtS float64) {
 
 func (m *Model) updateSaturationCurves(actual, soc float64) {
 	bucket := math.Round(soc/SoCBucket) * SoCBucket
-	if bucket < 0 { bucket = 0 }
-	if bucket > 1 { bucket = 1 }
+	if bucket < 0 {
+		bucket = 0
+	}
+	if bucket > 1 {
+		bucket = 1
+	}
 
 	if actual > 0 {
 		m.MaxChargeCurve = updateCurve(m.MaxChargeCurve, bucket, actual)
@@ -330,8 +358,12 @@ func (m *Model) updateSaturationCurves(actual, soc float64) {
 		m.MaxDischargeCurve = updateCurve(m.MaxDischargeCurve, bucket, -actual)
 	}
 	// Decay so old over-optimistic peaks fade
-	for i := range m.MaxChargeCurve { m.MaxChargeCurve[i].Value *= SatDecay }
-	for i := range m.MaxDischargeCurve { m.MaxDischargeCurve[i].Value *= SatDecay }
+	for i := range m.MaxChargeCurve {
+		m.MaxChargeCurve[i].Value *= SatDecay
+	}
+	for i := range m.MaxDischargeCurve {
+		m.MaxDischargeCurve[i].Value *= SatDecay
+	}
 }
 
 // updateCurve inserts or raises a bucket; NEVER seeds a new bucket with small
@@ -357,14 +389,22 @@ func updateCurve(curve []SoCPoint, bucket, value float64) []SoCPoint {
 }
 
 func interpolate(curve []SoCPoint, soc, fallback float64) float64 {
-	if len(curve) == 0 { return fallback }
-	if soc <= curve[0].SoC { return curve[0].Value }
-	if soc >= curve[len(curve)-1].SoC { return curve[len(curve)-1].Value }
+	if len(curve) == 0 {
+		return fallback
+	}
+	if soc <= curve[0].SoC {
+		return curve[0].Value
+	}
+	if soc >= curve[len(curve)-1].SoC {
+		return curve[len(curve)-1].Value
+	}
 	for i := 0; i < len(curve)-1; i++ {
 		a, b := curve[i], curve[i+1]
 		if soc >= a.SoC && soc <= b.SoC {
 			denom := b.SoC - a.SoC
-			if denom < 1e-6 { return a.Value }
+			if denom < 1e-6 {
+				return a.Value
+			}
 			t := (soc - a.SoC) / denom
 			return a.Value + t*(b.Value-a.Value)
 		}
@@ -373,9 +413,17 @@ func interpolate(curve []SoCPoint, soc, fallback float64) float64 {
 }
 
 func clamp(v, lo, hi float64) float64 {
-	if v < lo { return lo }
-	if v > hi { return hi }
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
 	return v
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // Duration helper for test readability

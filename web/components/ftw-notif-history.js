@@ -28,7 +28,7 @@ export class FtwNotifHistory extends FtwElement {
     .dot {
       position: absolute; top: 2px; right: 2px;
       min-width: 14px; height: 14px; padding: 0 3px;
-      border-radius: 10px; background: #e57373; color: #fff;
+      border-radius: 10px; background: var(--red-e, #e57373); color: #0a0a0a;
       font-size: 10px; font-weight: 700; line-height: 14px;
       text-align: center;
     }
@@ -45,12 +45,12 @@ export class FtwNotifHistory extends FtwElement {
       position: sticky; top: 0;
       background: var(--ink-raised, #1a1a1a); font-weight: 600;
     }
-    ftw-modal tr.sent    td .status-cell { color: var(--ok-fg, #7dd17d); }
-    ftw-modal tr.failed  td .status-cell { color: var(--warn-fg, #e57373); }
+    ftw-modal tr.sent    td .status-cell { color: var(--green-e, #7dd17d); }
+    ftw-modal tr.failed  td .status-cell { color: var(--red-e, #e57373); }
     ftw-modal td.body    { color: var(--text-dim, #aaa); }
     ftw-modal .empty { padding: 24px; text-align: center; color: var(--text-dim, #888); }
     ftw-modal .scroll { max-height: 60vh; overflow: auto; }
-    ftw-modal .error-text { color: var(--warn-fg, #e57373); font-family: monospace; }
+    ftw-modal .error-text { color: var(--red-e, #e57373); font-family: monospace; }
     ftw-modal .refresh-btn {
       background: var(--ink-raised, #222); color: var(--fg, #eee);
       border: 1px solid var(--line, #333); border-radius: 4px;

@@ -931,6 +931,13 @@ func ComputeDispatch(
 	case ModeCharge:
 		state.resetSettlementAccounting()
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
+		targets = applyFuseGuard(targets, store, state, fuseMaxW)
+		targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
+		now := time.Now()
+		state.LastDispatch = &now
+		for _, t := range targets {
+			state.PrevTargets[t.Driver] = t.TargetW
+		}
 		state.LastTargets = targets
 		return targets
 	}
@@ -1097,6 +1104,35 @@ func ComputeDispatch(
 			}
 			if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered > currentDirective.BatteryEnergyWh {
 				state.slotDelivered = currentDirective.BatteryEnergyWh
+			}
+			// Mirror cap for the GROW-budget case: a mid-slot replan that
+			// raises the slot's energy budget (e.g. peak-price reactive
+			// replan late in a low-discharge slot) makes the old
+			// slotDelivered look "behind" by a large margin, and
+			// remainingWh × 3600 / remainingS demands catastrophic
+			// catch-up power (>> slot avg, clamped to MaxDischargeW).
+			// Observed on .139 2026-05-17: slot avg in plan was −900 W
+			// but dispatch held −9000 W for 70 s near slot-end after a
+			// mid-slot replan; battery hit its inverter limit.
+			//
+			// Rebase slotDelivered toward "expected at new pace" so the
+			// catch-up rate stays close to slot average. The new plan is
+			// treated as if it had been active since slot start, scaled
+			// by elapsed fraction. Only applied when the actual delivery
+			// is BEHIND the expected pace (catch-up direction); when
+			// ahead, the asymmetric cap above already handles it.
+			slotH := currentDirective.SlotEnd.Sub(currentDirective.SlotStart).Seconds() / 3600.0
+			if slotH > 0 {
+				elapsedH := now.Sub(currentDirective.SlotStart).Seconds() / 3600.0
+				if elapsedH > 0 && elapsedH < slotH {
+					expectedDelivered := (elapsedH / slotH) * currentDirective.BatteryEnergyWh
+					if currentDirective.BatteryEnergyWh < 0 && state.slotDelivered > expectedDelivered {
+						state.slotDelivered = expectedDelivered
+					}
+					if currentDirective.BatteryEnergyWh > 0 && state.slotDelivered < expectedDelivered {
+						state.slotDelivered = expectedDelivered
+					}
+				}
 			}
 		}
 		remainingWh := currentDirective.BatteryEnergyWh - state.slotDelivered
@@ -2069,14 +2105,14 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	return out
 }
 
-// pvCurtailBatterySoCMaxPct is the SoC ceiling above which a battery
+// pvCurtailBatterySoCMax is the fractional SoC ceiling above which a battery
 // is treated as having no curtail-absorption headroom. Below it, the
 // battery's MaxChargeW (or MaxCommandW default) is added to the live
 // curtail limit so PV stays uncapped while the battery can still take
 // the energy. Hard-coded conservatively — the goal is to err on the
 // side of preserving PV generation when there's anywhere meaningful
 // to put it.
-const pvCurtailBatterySoCMaxPct = 99.0
+const pvCurtailBatterySoCMax = 0.99
 
 // liveCurtailLimitW computes the cap PV may produce *right now* given
 // the planner's decision that curtail is economically warranted for
@@ -2089,7 +2125,7 @@ const pvCurtailBatterySoCMaxPct = 99.0
 //     stays the priority.
 //
 //  2. Battery absorption headroom — for every online battery with
-//     SoC below `pvCurtailBatterySoCMaxPct`, the per-driver MaxChargeW
+//     SoC below `pvCurtailBatterySoCMax`, the per-driver MaxChargeW
 //     (or MaxCommandW default) is added. PV can keep producing because
 //     the dispatch loop will route the surplus into the battery.
 //
@@ -2168,7 +2204,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 		if h == nil || !h.IsOnline() {
 			continue
 		}
-		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMaxPct {
+		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMax {
 			continue
 		}
 		capW := float64(MaxCommandW)
@@ -2581,10 +2617,22 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		return targets
 	}
 	siteMeter := state.SiteMeterDriver
-	// Aggregate live battery power so we can hold load+pv constant.
+	// Aggregate live battery power for the batteries this dispatch is
+	// about to control so we can hold load+pv+uncontrolled-batteries
+	// constant. Offline or otherwise untargeted batteries are already
+	// reflected in currentGrid; subtracting them here without adding a
+	// replacement target would double-remove their contribution and miss
+	// fuse overages.
+	seenBat := make(map[string]struct{}, len(targets))
 	var currentBat float64
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		currentBat += r.SmoothedW
+	for _, t := range targets {
+		if _, seen := seenBat[t.Driver]; seen {
+			continue
+		}
+		seenBat[t.Driver] = struct{}{}
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
 	}
 	var currentGrid float64
 	if siteMeter != "" {
