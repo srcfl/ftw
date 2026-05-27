@@ -186,7 +186,20 @@ type Manager struct {
 	// EV modal, not the YAML they'd think to edit. Same pattern as
 	// scheduleSaver.
 	surplusOnlySaver func(id string, v bool)
+
+	// nowFn is the clock the manager uses for time-sensitive logic
+	// (NCRQ-completion timer in particular). Defaults to time.Now;
+	// tests inject a deterministic clock via SetNowFn.
+	nowFn func() time.Time
 }
+
+// NCRQCompletionThreshold is how long a vehicle must stay connected but
+// explicitly not requesting current before the loadpoint treats the
+// session as car-side-complete. Tuned to swallow the CTEK firmware's
+// own PAUS↔NCRQ retry flapping (observed ~10 s–90 s cycles) without
+// snapping on a transient car-side hiccup. Once tripped, the snap
+// persists until the cable is unplugged.
+const NCRQCompletionThreshold = 90 * time.Second
 
 // loadpointRuntime is the in-memory representation. Its fields are the
 // union of configured parameters and observed state. Lives behind
@@ -220,6 +233,25 @@ type loadpointRuntime struct {
 	// schedule re-promotes its own freshly-set targetTime back to
 	// the day after that, racing the clock by 24 h every tick.
 	lastRolledFor time.Time
+
+	// notRequestingSince marks when the loadpoint first observed
+	// "connected + vehicle not requesting current" on the current
+	// session. Zero when the vehicle is requesting or unplugged.
+	// Drives NCRQ-completion (see Observe).
+	notRequestingSince time.Time
+
+	// ncrqCompleted latches once the vehicle has held NCRQ past
+	// NCRQCompletionThreshold for this session. While set, the
+	// inferred SoC is pinned to targetSoCPct so the MPC stops
+	// allocating PV surplus to a sink the car has already refused.
+	// Cleared on plug-out.
+	ncrqCompleted bool
+
+	// socSource, when non-empty, overrides the API layer's
+	// vehicle-driver attribution in the State snapshot. Set to "ncrq"
+	// when ncrqCompleted is latched so operators can see why the
+	// inferred SoC pinned at target.
+	socSource string
 }
 
 // NewManager returns an empty manager. Configure with Load().
@@ -256,6 +288,9 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.sessionPluginSoCPct = existing.sessionPluginSoCPct
 			lp.schedule = existing.schedule
 			lp.lastRolledFor = existing.lastRolledFor
+			lp.notRequestingSince = existing.notRequestingSince
+			lp.ncrqCompleted = existing.ncrqCompleted
+			lp.socSource = existing.socSource
 		}
 		newByID[c.ID] = lp
 		newOrder = append(newOrder, c.ID)
@@ -325,33 +360,100 @@ func (m *Manager) Configs() []Config {
 // inference is stable across plug cycles even if the underlying
 // charger's session counter wraps or resets.
 //
+// requestActive expresses whether the vehicle is (or could imminently
+// be) drawing current. Drivers that can distinguish "we throttled to 0"
+// from "the car has explicitly refused" pass false on the latter (e.g.
+// CTEK NCRQ); drivers without that signal pass true and the legacy
+// behaviour is preserved. After NCRQCompletionThreshold of sustained
+// !requestActive on a connected session, the inferred SoC is pinned to
+// targetSoCPct so the MPC stops allocating PV surplus to a sink the
+// car has already refused.
+//
 // No-op for unknown IDs — a misconfigured driver shouldn't crash the
 // manager.
-func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64) {
+func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	lp, ok := m.byID[id]
 	if !ok {
 		return
 	}
+	now := m.now()
 	if pluggedIn && !lp.pluggedIn {
-		// Plug-in transition: seed the session anchor.
+		// Plug-in transition: seed the session anchor and clear any
+		// NCRQ-completion latched from a prior session.
 		anchor := lp.PluginSoCPct
 		if anchor <= 0 {
 			anchor = 20 // conservative default
 		}
 		lp.sessionPluginSoCPct = anchor
+		lp.notRequestingSince = time.Time{}
+		lp.ncrqCompleted = false
+		lp.socSource = ""
+	}
+	if !pluggedIn {
+		// Plug-out: drop any pending NCRQ timer / latch.
+		lp.notRequestingSince = time.Time{}
+		lp.ncrqCompleted = false
+		lp.socSource = ""
 	}
 	lp.pluggedIn = pluggedIn
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
+
+	if pluggedIn && !requestActive {
+		// Vehicle has explicitly stopped requesting current. Start
+		// (or continue) the completion timer; latch once it elapses.
+		if lp.notRequestingSince.IsZero() {
+			lp.notRequestingSince = now
+		}
+		if !lp.ncrqCompleted && lp.targetSoCPct > 0 &&
+			!lp.notRequestingSince.IsZero() &&
+			now.Sub(lp.notRequestingSince) >= NCRQCompletionThreshold {
+			lp.ncrqCompleted = true
+			lp.socSource = "ncrq"
+		}
+	} else if pluggedIn && requestActive {
+		// Vehicle is back to requesting. Reset the timer, but keep
+		// ncrqCompleted latched — once a car has refused this
+		// session, treating it as "still hungry" the moment an EVSE
+		// retry briefly succeeds would reopen the export hole the
+		// completion latch exists to close. Plug-cycle to reset.
+		lp.notRequestingSince = time.Time{}
+	}
+
 	if pluggedIn {
-		lp.currentSoCPct = estimateSoCPct(lp.sessionPluginSoCPct,
-			deliveredWh, lp.VehicleCapacityWh)
+		if lp.ncrqCompleted && lp.targetSoCPct > 0 {
+			// Snap the inferred SoC to target; the planner reads
+			// currentSoCPct as the MPC LoadpointSpec.InitialSoCPct,
+			// so InitialSoCPct == TargetSoCPct → DP allocates 0 W.
+			lp.currentSoCPct = lp.targetSoCPct
+		} else {
+			lp.currentSoCPct = estimateSoCPct(lp.sessionPluginSoCPct,
+				deliveredWh, lp.VehicleCapacityWh)
+		}
 	} else {
 		lp.currentSoCPct = 0
 	}
-	lp.updatedAtMs = time.Now().UnixMilli()
+	lp.updatedAtMs = now.UnixMilli()
+}
+
+// now returns the manager's clock, defaulting to time.Now when nowFn
+// is unset. Tests inject a deterministic clock via SetNowFn.
+func (m *Manager) now() time.Time {
+	if m.nowFn != nil {
+		return m.nowFn()
+	}
+	return time.Now()
+}
+
+// SetNowFn overrides the manager's clock. Tests use this to drive the
+// NCRQ-completion timer deterministically. Pass nil to revert to
+// time.Now.
+func (m *Manager) SetNowFn(fn func() time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nowFn = fn
 }
 
 // estimateSoCPct returns the vehicle SoC % inferred from the session
@@ -507,6 +609,7 @@ func (lp *loadpointRuntime) snapshot() State {
 		AllowedStepsW:      steps,
 		SurplusOnly:        lp.Config.SurplusOnly,
 		Schedule:           lp.schedule,
+		SoCSource:          lp.socSource,
 	}
 }
 

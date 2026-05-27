@@ -309,33 +309,50 @@ local function parse_em_payload(payload)
     return true
 end
 
--- Map a CTEK/CSOS state code to (charging, connected). The state strings
--- here are CTEK's internal codes as observed in CSOS firmware 4.9.x; if a
--- future firmware adds new ones, the function returns nil → the caller
--- falls back to Modbus heuristics for that frame only.
+-- Map a CTEK/CSOS state code to (charging, connected, request_active). The
+-- state strings here are CTEK's internal codes as observed in CSOS firmware
+-- 4.9.x; if a future firmware adds new ones, the function returns nils →
+-- the caller falls back to Modbus heuristics for that frame only.
 --
 --   IDLE / A / "DISC"        — cable not present
 --   EVRD / B / "CONN"        — vehicle connected, not charging yet
 --   CHRG / C                 — actively charging
 --   PAUS                     — vehicle connected, paused (we, EVSE, or grid)
+--   NCRQ                     — vehicle connected but NOT requesting current
+--                              (car hit its own SoC target or its onboard
+--                              schedule ended). Distinct from PAUS because
+--                              the vehicle, not the EVSE, owns the refusal —
+--                              waking it back into CHRG requires user action
+--                              at the car. Loadpoint controller uses this
+--                              to stop allocating PV surplus to a phantom
+--                              sink.
 --   FAULT / ERR / "ERR_*"    — fault → conservative: connected=true so the
 --                              loadpoint UI shows the device, charging=false
+--
+-- request_active is the third return: true when the vehicle is (or could
+-- imminently be) drawing current, false when the vehicle has explicitly
+-- refused. nil for plug-out / unknown states — caller defaults to true so
+-- non-NCRQ-aware drivers don't accidentally trip completion.
 local function classify_state(code)
-    if code == nil or code == "" then return nil, nil end
+    if code == nil or code == "" then return nil, nil, nil end
     if code == "IDLE" or code == "A" or code == "DISC" or code == "DISCONNECTED" then
-        return false, false
+        return false, false, nil
+    end
+    if code == "NCRQ" then
+        -- Connected, not charging, vehicle refusing — explicit signal.
+        return false, true, false
     end
     if code == "EVRD" or code == "B" or code == "CONN" or code == "CONNECTED" or code == "PAUS" or code == "PAUSED" then
-        return false, true
+        return false, true, true
     end
     if code == "CHRG" or code == "C" or code == "CHARGING" then
-        return true, true
+        return true, true, true
     end
     if code:find("^FAULT") or code:find("^ERR") or code == "F" then
-        return false, true
+        return false, true, nil
     end
     -- Unknown code — caller falls back.
-    return nil, nil
+    return nil, nil, nil
 end
 
 ----------------------------------------------------------------------------
@@ -514,11 +531,11 @@ function driver_poll()
     -- Authoritative state: prefer MQTT when fresh.
     local state_age_ms = (mqtt_state_ts == 0) and -1 or (now - mqtt_state_ts)
     local state_fresh  = (mqtt_state_ts ~= 0) and (state_age_ms <= mqtt_max_stale_ms)
-    local charging, connected
+    local charging, connected, request_active
     if state_fresh then
-        local c, k = classify_state(mqtt_state_str)
+        local c, k, r = classify_state(mqtt_state_str)
         if c ~= nil and k ~= nil then
-            charging, connected = c, k
+            charging, connected, request_active = c, k, r
         end
     end
     if charging == nil or connected == nil then
@@ -528,18 +545,25 @@ function driver_poll()
         local max_phase_a = math.max(i_l1, i_l2, i_l3)
         charging  = (ev_w > 100) or (max_phase_a > 1.0)
         connected = charging or (limit >= min_a and max_assign > 0)
+        -- Modbus can't distinguish "throttled to 0" from "car refusing";
+        -- leave request_active unset so the Go side defaults to true and
+        -- keeps the legacy behaviour for non-NCRQ-aware code paths.
+    end
+    if request_active == nil then
+        request_active = true
     end
 
     host.emit("ev", {
-        w           = ev_w,
-        connected   = connected,
-        charging    = charging,
-        max_a       = limit,
-        phases      = phases,
-        l1_v        = v_l1, l2_v = v_l2, l3_v = v_l3,
-        l1_a        = i_l1, l2_a = i_l2, l3_a = i_l3,
-        lifetime_wh = lifetime_wh,
-        state_code  = mqtt_state_str,
+        w               = ev_w,
+        connected       = connected,
+        charging        = charging,
+        request_active  = request_active,
+        max_a           = limit,
+        phases          = phases,
+        l1_v            = v_l1, l2_v = v_l2, l3_v = v_l3,
+        l1_a            = i_l1, l2_a = i_l2, l3_a = i_l3,
+        lifetime_wh     = lifetime_wh,
+        state_code      = mqtt_state_str,
     })
 
     host.emit_metric("ev_set_current_a",  limit)

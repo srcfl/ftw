@@ -1046,15 +1046,26 @@ func main() {
 			if r == nil {
 				return loadpoint.EVSample{}, false
 			}
-			var d struct {
-				Connected bool    `json:"connected"`
-				SessionWh float64 `json:"session_wh"`
-			}
+			// RequestActive defaults to true so legacy drivers
+			// (those that don't emit the field) keep their
+			// existing behaviour — only drivers that explicitly
+			// emit request_active=false will trip the
+			// NCRQ-completion detector.
+			d := struct {
+				Connected     bool    `json:"connected"`
+				SessionWh     float64 `json:"session_wh"`
+				RequestActive *bool   `json:"request_active"`
+			}{}
 			_ = json.Unmarshal(r.Data, &d)
+			reqActive := true
+			if d.RequestActive != nil {
+				reqActive = *d.RequestActive
+			}
 			return loadpoint.EVSample{
-				PowerW:    r.SmoothedW,
-				SessionWh: d.SessionWh,
-				Connected: d.Connected,
+				PowerW:        r.SmoothedW,
+				SessionWh:     d.SessionWh,
+				Connected:     d.Connected,
+				RequestActive: reqActive,
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)

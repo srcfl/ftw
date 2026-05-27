@@ -30,7 +30,7 @@ func TestReloadPreservesObservedState(t *testing.T) {
 		ID: "garage", DriverName: "easee-cloud",
 		VehicleCapacityWh: 60000, PluginSoCPct: 40,
 	}})
-	m.Observe("garage", true, 7400, 1200) // 1.2 kWh into session
+	m.Observe("garage", true, 7400, 1200, true) // 1.2 kWh into session
 	target := time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC)
 	m.SetTarget("garage", 80, target)
 
@@ -71,7 +71,7 @@ func TestReloadDropsRemovedIDs(t *testing.T) {
 func TestObserveOnUnknownIsNoop(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "real"}})
-	m.Observe("ghost", true, 7400, 0) // must not panic
+	m.Observe("ghost", true, 7400, 0, true) // must not panic
 	if _, ok := m.State("ghost"); ok {
 		t.Error("ghost state should not exist")
 	}
@@ -99,11 +99,11 @@ func TestSetTargetClamp(t *testing.T) {
 func TestObserveUnpluggedClearsSoCEstimate(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 30}})
-	m.Observe("a", true, 7400, 1800) // charging → SoC = 30 + 3 = 33
+	m.Observe("a", true, 7400, 1800, true) // charging → SoC = 30 + 3 = 33
 	if st, _ := m.State("a"); st.CurrentSoCPct < 32.5 || st.CurrentSoCPct > 33.5 {
 		t.Fatalf("expected ~33 %% while plugged in, got %.2f", st.CurrentSoCPct)
 	}
-	m.Observe("a", false, 0, 0)
+	m.Observe("a", false, 0, 0, true)
 	if st, _ := m.State("a"); st.CurrentSoCPct != 0 || st.PluggedIn {
 		t.Errorf("expected cleared state when unplugged, got %+v", st)
 	}
@@ -115,14 +115,14 @@ func TestObserveUnpluggedClearsSoCEstimate(t *testing.T) {
 func TestObserveNewSessionAnchor(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 50}})
-	m.Observe("a", true, 0, 0)
+	m.Observe("a", true, 0, 0, true)
 	if st, _ := m.State("a"); st.CurrentSoCPct < 49 || st.CurrentSoCPct > 51 {
 		t.Errorf("fresh plug-in should show 50 %%, got %.2f", st.CurrentSoCPct)
 	}
 	// Disconnect.
-	m.Observe("a", false, 0, 0)
+	m.Observe("a", false, 0, 0, true)
 	// Re-plug — session delivered counter starts fresh.
-	m.Observe("a", true, 0, 0)
+	m.Observe("a", true, 0, 0, true)
 	if st, _ := m.State("a"); st.CurrentSoCPct < 49 || st.CurrentSoCPct > 51 {
 		t.Errorf("re-plug should re-anchor at 50 %%, got %.2f", st.CurrentSoCPct)
 	}
@@ -137,7 +137,7 @@ func TestSetCurrentSoCReAnchors(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000, PluginSoCPct: 25}})
 	// Plug in, deliver 9 kWh → naive estimate = 25 + 9000/60000*100 = 40 %.
-	m.Observe("a", true, 7400, 9000)
+	m.Observe("a", true, 7400, 9000, true)
 	if st, _ := m.State("a"); st.CurrentSoCPct < 39 || st.CurrentSoCPct > 41 {
 		t.Fatalf("pre-correction SoC: got %.2f want ~40", st.CurrentSoCPct)
 	}
@@ -150,7 +150,7 @@ func TestSetCurrentSoCReAnchors(t *testing.T) {
 		t.Errorf("post-correction SoC: got %.2f want ~60", st.CurrentSoCPct)
 	}
 	// Deliver another 3 kWh → should be ~65 % (60 + 3000/60000*100).
-	m.Observe("a", true, 7400, 12000)
+	m.Observe("a", true, 7400, 12000, true)
 	st, _ = m.State("a")
 	if st.CurrentSoCPct < 64 || st.CurrentSoCPct > 66 {
 		t.Errorf("after more delivery SoC: got %.2f want ~65", st.CurrentSoCPct)
@@ -166,8 +166,8 @@ func TestSetCurrentSoCRejectsUnplugged(t *testing.T) {
 	if m.SetCurrentSoC("a", 55) {
 		t.Error("should reject SetCurrentSoC on never-plugged loadpoint")
 	}
-	m.Observe("a", true, 0, 0)
-	m.Observe("a", false, 0, 0)
+	m.Observe("a", true, 0, 0, true)
+	m.Observe("a", false, 0, 0, true)
 	if m.SetCurrentSoC("a", 55) {
 		t.Error("should reject SetCurrentSoC after unplug")
 	}
@@ -176,7 +176,7 @@ func TestSetCurrentSoCRejectsUnplugged(t *testing.T) {
 func TestSetCurrentSoCClampsRange(t *testing.T) {
 	m := NewManager()
 	m.Load([]Config{{ID: "a", VehicleCapacityWh: 60000}})
-	m.Observe("a", true, 0, 0)
+	m.Observe("a", true, 0, 0, true)
 	m.SetCurrentSoC("a", 150)
 	if st, _ := m.State("a"); st.CurrentSoCPct != 100 {
 		t.Errorf("clamp high: got %.2f", st.CurrentSoCPct)
@@ -193,7 +193,7 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 		{ID: "garage", MaxChargeW: 11000, VehicleCapacityWh: 60000},
 		{ID: "street", MaxChargeW: 7400, VehicleCapacityWh: 60000},
 	})
-	m.Observe("garage", true, 11000, 500)
+	m.Observe("garage", true, 11000, 500, true)
 	states := m.States()
 	if len(states) != 2 {
 		t.Fatalf("expected 2 states, got %d", len(states))
@@ -206,5 +206,136 @@ func TestStatesReturnsAllInOrder(t *testing.T) {
 	}
 	if states[1].PluggedIn {
 		t.Error("street should not be plugged in")
+	}
+}
+
+// TestNCRQCompletionSnapsToTarget walks the scenario observed in prod
+// on 2026-05-27: car charges normally, then the CTEK driver reports a
+// sustained CHRG → NCRQ transition (vehicle hit its onboard SoC target).
+// Before this fix the loadpoint kept reporting the inferred SoC at 20 %
+// and the MPC kept allocating 6.2 kW to a phantom sink, spilling PV
+// surplus to the grid at near-zero / negative spot. With NCRQ-aware
+// completion the inferred SoC snaps to the target so the planner sees
+// the EV as done and allocates 0 W.
+func TestNCRQCompletionSnapsToTarget(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{
+		ID: "garage", DriverName: "ctek-chargestorm-hybrid",
+		VehicleCapacityWh: 60000, PluginSoCPct: 20, MaxChargeW: 11000,
+	}})
+	m.SetTarget("garage", 60, time.Date(2026, 5, 27, 15, 0, 0, 0, time.UTC))
+
+	clock := time.Date(2026, 5, 27, 10, 19, 0, 0, time.UTC)
+	m.SetNowFn(func() time.Time { return clock })
+
+	// Tick 1: connected and charging — request_active = true.
+	m.Observe("garage", true, 7400, 0, true)
+	if st, _ := m.State("garage"); st.SoCSource != "" {
+		t.Errorf("session start should not be marked completed: %+v", st)
+	}
+
+	// Tick 2 (T+1m of charging): some energy delivered, inferred SoC rises.
+	clock = clock.Add(60 * time.Second)
+	m.Observe("garage", true, 7400, 1000, true) // SoC = 20 + 1000/60000*100 ≈ 21.67
+	if st, _ := m.State("garage"); st.CurrentSoCPct < 21 || st.CurrentSoCPct > 22.5 {
+		t.Errorf("expected inferred SoC ~21.67, got %.2f", st.CurrentSoCPct)
+	}
+
+	// Tick 3 (T+1m6s, mirroring the production 11:25:16Z transition):
+	// car goes NCRQ. delivered_wh frozen, power drops to 0.
+	clock = clock.Add(6 * time.Second)
+	m.Observe("garage", true, 0, 1000, false)
+	if st, _ := m.State("garage"); st.SoCSource == "ncrq" {
+		t.Errorf("first NCRQ tick should NOT yet complete (under threshold): %+v", st)
+	}
+
+	// Tick 4 (T+30s of NCRQ): below threshold — still not completed.
+	clock = clock.Add(30 * time.Second)
+	m.Observe("garage", true, 0, 1000, false)
+	if st, _ := m.State("garage"); st.SoCSource == "ncrq" {
+		t.Errorf("30s NCRQ should NOT yet complete (under 90s threshold): %+v", st)
+	}
+
+	// Tick 5 (T+90s of NCRQ): threshold reached — snap SoC to target.
+	clock = clock.Add(60 * time.Second)
+	m.Observe("garage", true, 0, 1000, false)
+	st, _ := m.State("garage")
+	if st.SoCSource != "ncrq" {
+		t.Errorf("expected SoCSource='ncrq' after threshold, got %q (state=%+v)", st.SoCSource, st)
+	}
+	if st.CurrentSoCPct != 60 {
+		t.Errorf("expected inferred SoC pinned to target 60, got %.2f", st.CurrentSoCPct)
+	}
+
+	// Tick 6: CTEK flaps NCRQ → PAUS → CHRG very briefly (request_active
+	// = true). The latch must NOT release — once the car has refused
+	// this session, a transient EVSE retry isn't enough to reopen the
+	// allocation. Only a plug-out clears it.
+	clock = clock.Add(15 * time.Second)
+	m.Observe("garage", true, 0, 1000, true)
+	if st, _ := m.State("garage"); st.SoCSource != "ncrq" || st.CurrentSoCPct != 60 {
+		t.Errorf("brief request_active flicker should not clear latch: %+v", st)
+	}
+
+	// Plug-out clears the latch fully.
+	clock = clock.Add(10 * time.Second)
+	m.Observe("garage", false, 0, 0, false)
+	if st, _ := m.State("garage"); st.SoCSource != "" || st.PluggedIn {
+		t.Errorf("plug-out should clear NCRQ latch and SoCSource: %+v", st)
+	}
+}
+
+// TestNCRQNoCompletionWithoutTarget asserts the latch is gated on a
+// configured target — an opportunistic loadpoint with no schedule
+// should not snap to 0 (which would surprise an operator who left a
+// car plugged in expecting overnight slow-charge from cheap grid).
+func TestNCRQNoCompletionWithoutTarget(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{
+		ID: "garage", DriverName: "ctek-chargestorm-hybrid",
+		VehicleCapacityWh: 60000, PluginSoCPct: 20,
+	}})
+	// No SetTarget call — targetSoCPct stays 0.
+
+	clock := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	m.SetNowFn(func() time.Time { return clock })
+
+	m.Observe("garage", true, 0, 0, false) // start with NCRQ
+	clock = clock.Add(2 * time.Minute)     // well past 90s threshold
+	m.Observe("garage", true, 0, 0, false)
+
+	st, _ := m.State("garage")
+	if st.SoCSource == "ncrq" {
+		t.Errorf("NCRQ completion should not trigger without a target: %+v", st)
+	}
+}
+
+// TestLegacyDriverPassesThrough asserts that the existing test fixtures
+// (request_active = true everywhere) keep their pre-fix behaviour: SoC
+// inference runs normally and nothing snaps to target. This is the
+// regression net for non-CTEK drivers (Easee, Zap, …) that don't emit
+// the new field.
+func TestLegacyDriverPassesThrough(t *testing.T) {
+	m := NewManager()
+	m.Load([]Config{{
+		ID: "garage", DriverName: "easee-cloud",
+		VehicleCapacityWh: 60000, PluginSoCPct: 30,
+	}})
+	m.SetTarget("garage", 80, time.Date(2026, 4, 18, 6, 0, 0, 0, time.UTC))
+
+	clock := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+	m.SetNowFn(func() time.Time { return clock })
+
+	// Plug in + charge — request_active=true the entire time (legacy
+	// driver that doesn't know about NCRQ).
+	m.Observe("garage", true, 0, 0, true)
+	clock = clock.Add(5 * time.Minute)
+	m.Observe("garage", true, 7400, 600, true) // 600 Wh in → SoC = 30 + 1
+	st, _ := m.State("garage")
+	if st.SoCSource == "ncrq" {
+		t.Errorf("legacy driver must not trigger NCRQ completion: %+v", st)
+	}
+	if st.CurrentSoCPct < 30.5 || st.CurrentSoCPct > 31.5 {
+		t.Errorf("inferred SoC drifted: %.2f", st.CurrentSoCPct)
 	}
 }
