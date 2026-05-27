@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>forty-two-watts — enroll passkey</title>
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="stylesheet" href="/components/theme.css">
+  <style>
+    body { font-family: var(--sans), system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--fg, #222); background: var(--bg, #fff); }
+    h1 { font-weight: 600; }
+    .panel { border: 1px solid var(--line, #ddd); padding: 1.5rem; border-radius: .5rem; margin-top: 2rem; }
+    label { display: block; margin: 1rem 0 .3rem; font-weight: 600; }
+    input { font: inherit; padding: .5rem; width: 100%; box-sizing: border-box; border: 1px solid var(--line, #ddd); border-radius: .3rem; background: var(--bg, #fff); color: inherit; }
+    button { font: inherit; padding: .6rem 1.2rem; border-radius: .3rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; margin-top: 1rem; }
+    button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
+    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    .muted { color: var(--fg-muted, #888); font-size: .9em; }
+    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
+  </style>
+</head>
+<body>
+  <h1>Enroll a passkey</h1>
+  <p class="muted">Bind this device's secure enclave (Touch ID, Windows Hello, Android keystore) to your forty-two-watts instance. Once enrolled, this device can sign in from anywhere through the relay.</p>
+
+  <div class="panel">
+    <label for="name">Friendly name</label>
+    <input id="name" placeholder="e.g. Fredrik's MacBook" autocomplete="off">
+    <p class="muted">Shows up in the trusted-devices list so you can identify and revoke this passkey later.</p>
+
+    <button id="enroll" class="primary">Enroll passkey</button>
+    <button onclick="location.href='./'">Cancel</button>
+
+    <div id="msg"></div>
+  </div>
+
+  <script type="module">
+    import { apiBase, decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    const base = apiBase();
+    const msg = document.getElementById("msg");
+    const nameInput = document.getElementById("name");
+    nameInput.focus();
+
+    document.getElementById("enroll").onclick = async () => {
+      msg.innerHTML = "";
+      const name = nameInput.value.trim();
+      if (!name) {
+        msg.innerHTML = '<div class="err">Friendly name is required.</div>';
+        return;
+      }
+      try {
+        // 1. Start ceremony.
+        const start = await fetch(base + "/api/owner-access/enroll/start", { method: "POST" });
+        if (!start.ok) {
+          const body = await start.text();
+          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}</div>`;
+          return;
+        }
+        const { ceremony_token, options } = await start.json();
+
+        // 2. Browser ceremony.
+        const credOpts = decodeCreationOptions(options);
+        const cred = await navigator.credentials.create({ publicKey: credOpts });
+
+        // 3. Finish.
+        const finish = await fetch(
+          base + "/api/owner-access/enroll/finish?ceremony_token=" + encodeURIComponent(ceremony_token) + "&name=" + encodeURIComponent(name),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(encodeRegistrationResult(cred)),
+            credentials: "same-origin",
+          }
+        );
+        if (!finish.ok) {
+          const body = await finish.text();
+          msg.innerHTML = `<div class="err">Finish failed (${finish.status}): ${body}</div>`;
+          return;
+        }
+        const out = await finish.json();
+        msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Redirecting…</div>';
+        setTimeout(() => location.href = "./", 1500);
+      } catch (e) {
+        msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;
+      }
+    };
+  </script>
+</body>
+</html>

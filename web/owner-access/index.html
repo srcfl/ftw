@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>forty-two-watts — owner remote access</title>
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="stylesheet" href="/components/theme.css">
+  <style>
+    body { font-family: var(--sans), system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--fg, #222); background: var(--bg, #fff); }
+    h1 { font-weight: 600; letter-spacing: -0.01em; }
+    .panel { border: 1px solid var(--line, #ddd); padding: 1.5rem; border-radius: .5rem; margin-top: 2rem; }
+    button { font: inherit; padding: .6rem 1.2rem; border-radius: .3rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; }
+    button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
+    .muted { color: var(--fg-muted, #888); font-size: .9em; }
+    .row { display: flex; gap: .5rem; align-items: center; margin: 1rem 0; }
+    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
+    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Owner remote access</h1>
+  <p class="muted">Sign in with a registered passkey to reach your forty-two-watts instance from outside the local network.</p>
+
+  <div id="loading" class="panel">Loading…</div>
+
+  <div id="signed-in" class="panel" style="display:none">
+    <p class="ok">Signed in as <span class="code" id="device-name">…</span></p>
+    <p>You can now open the dashboard:</p>
+    <div class="row">
+      <a id="open-dashboard" href="#"><button class="primary">Open dashboard</button></a>
+      <button id="signout">Sign out</button>
+    </div>
+    <p class="muted">Manage enrolled devices on the dashboard's Settings → Trusted devices tab.</p>
+  </div>
+
+  <div id="login" class="panel" style="display:none">
+    <p>This device is not signed in. Use a previously enrolled passkey to authenticate.</p>
+    <div class="row">
+      <button id="login-btn" class="primary">Sign in with passkey</button>
+      <button id="add-device-btn">Add this device</button>
+    </div>
+    <div id="login-msg"></div>
+  </div>
+
+  <div id="no-devices" class="panel" style="display:none">
+    <p>No passkeys are enrolled for this instance yet.</p>
+    <p>Open the dashboard on your local network (e.g. <span class="code">http://&lt;pi-ip&gt;:8080/owner-access/enroll.html</span>) to register your first device. Once one is enrolled here, you'll be able to log in from anywhere.</p>
+  </div>
+
+  <script type="module">
+    import { apiBase } from "./webauthn.js";
+    const base = apiBase();
+
+    async function whoami() {
+      const r = await fetch(base + "/api/owner-access/whoami", { credentials: "same-origin" });
+      if (r.status === 200) return await r.json();
+      if (r.status === 401) return null;
+      throw new Error(`whoami: ${r.status}`);
+    }
+
+    function show(id) {
+      ["loading", "signed-in", "login", "no-devices"].forEach(x => {
+        document.getElementById(x).style.display = x === id ? "block" : "none";
+      });
+    }
+
+    async function refresh() {
+      const me = await whoami();
+      if (me) {
+        document.getElementById("device-name").textContent = me.friendly_name || "(unnamed)";
+        document.getElementById("open-dashboard").href = base + "/";
+        show("signed-in");
+        return;
+      }
+      // Not authenticated. Find out if there's anything to log in to.
+      // Use /login/start as the probe — returns 404 when no devices enrolled.
+      const probe = await fetch(base + "/api/owner-access/login/start", { method: "POST" });
+      if (probe.status === 404) {
+        show("no-devices");
+      } else {
+        show("login");
+      }
+    }
+
+    document.getElementById("signout").onclick = async () => {
+      document.cookie = "ftw_owner=; Max-Age=0; Path=/";
+      await refresh();
+    };
+
+    document.getElementById("login-btn").onclick = () => location.href = "./login.html";
+    document.getElementById("add-device-btn").onclick = () => location.href = "./enroll.html";
+
+    refresh().catch(e => {
+      document.getElementById("loading").innerHTML = '<div class="err">' + e.message + '</div>';
+    });
+  </script>
+</body>
+</html>
