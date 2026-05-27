@@ -156,6 +156,13 @@ local MAX_DISPATCH_SCALE  = 2.0
 local last_eso_count             = 0
 local last_eso_discharge_capable = 0
 local last_eso_charge_capable    = 0
+-- Cumulative count of Ferroamp extapi `nak` responses since driver
+-- start. Surfaced as the `extapi_nak_count` metric so an operator can
+-- alert on any non-zero rate. NAKs are early signals of EMS-side
+-- trouble (e.g. "no available ESOs detected in system" preceded the
+-- 2026-05-27 brick by minutes).
+local extapi_nak_count           = 0
+local extapi_ack_count           = 0
 -- -1 = "no snapshot yet" sentinel. host.millis() can legitimately
 -- return 0 on the very first poll (sub-millisecond since startup), so
 -- we can't use 0 to mean "never set".
@@ -379,8 +386,15 @@ function driver_init(config)
     host.mqtt_subscribe("extapi/data/eso")
     host.mqtt_subscribe("extapi/data/sso")
 
-    -- Subscribe to control response topic to verify commands are received
-    host.mqtt_subscribe("extapi/result")
+    -- Subscribe to the EMS-side response channel for every command we
+    -- publish. We parse `{"status":"ack|nak", ...}` from each message
+    -- and count NAKs in a metric for operator alerting. The 2026-05-27
+    -- brick was preceded by minutes of `{"status":"nak","msg":"no
+    -- available ESOs detected in system"}` that we couldn't see at the
+    -- time because the driver subscribed to the wrong topic. Older
+    -- code used "extapi/result"; the actual response topic on the
+    -- firmwares we've tested is "extapi/control/response".
+    host.mqtt_subscribe("extapi/control/response")
 
     -- Query API version to verify connectivity and external API access
     local version_cmd = '{"transId":"init","cmd":{"name":"extapiversion"}}'
@@ -423,9 +437,28 @@ function driver_poll()
                 eso_ts_by_id[eid]   = now
             elseif msg.topic == "extapi/data/sso" then
                 sso_data = data; sso_ts = now
+            elseif msg.topic == "extapi/control/response" then
+                -- Track EMS-side ack/nak counters per published cmd.
+                -- A NAK is the canary for trouble (`"no available ESOs
+                -- detected in system"` preceded the 2026-05-27 brick by
+                -- minutes). Log every NAK so operators can correlate
+                -- with their command stream; surface the count as a
+                -- metric so ops dashboards can alert on rate.
+                local status = data["status"]
+                if status == "nak" then
+                    extapi_nak_count = extapi_nak_count + 1
+                    host.log("warn", string.format(
+                        "Ferroamp: extapi NAK (transId=%s msg=%s)",
+                        tostring(data["transId"] or "?"),
+                        tostring(data["msg"] or "?")))
+                elseif status == "ack" then
+                    extapi_ack_count = extapi_ack_count + 1
+                end
             end
         end
     end
+    host.emit_metric("extapi_nak_count", extapi_nak_count)
+    host.emit_metric("extapi_ack_count", extapi_ack_count)
 
     -- Drop stale caches so the rest of the poll falls through and
     -- the watchdog catches us when the EnergyHub stops publishing.

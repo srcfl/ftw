@@ -2079,28 +2079,102 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		}
 	}
 
+	// Release path. A previously-curtailed driver gets an explicit
+	// `curtail_disable` (LimitW: 0) only when one of the following is
+	// true:
+	//   - the curtail directive has cleared (no slot, no manual hold)
+	//   - the driver is no longer in `state.SupportsPVCurtail` (config
+	//     change removed the opt-in)
+	//   - the driver went offline (no harm — driver can't receive
+	//     anyway, but keeps `state.LastCurtailedDrivers` clean)
+	//
+	// We deliberately do NOT release a driver just because it dropped
+	// out of the live proportional allocation due to its own |PV|
+	// crashing to ~0. That very thing often happens as a direct
+	// consequence of our prior curtail (the inverter throttled PV down
+	// to the cap, telemetry reports 0 generation, allocator excludes
+	// it next tick). Emitting a release in that case publishes
+	// `pplim arg=0` on Ferroamp's extapi — same wire bytes as the
+	// release would have, opposite semantics — and locks the inverter
+	// at 0 W PV until the operator clears it from the Ferroamp portal
+	// (sticky-lock trap, 2026-05-27 incident; see #367 for the driver-
+	// side hard-fail that paired with this dispatcher fix).
+	//
+	// While the directive is active and the driver is still online +
+	// supported, the right behaviour is to leave the existing pplim
+	// in place; the driver will get a fresh non-zero target as soon as
+	// its live |PV| returns to a level the allocator can split.
 	var out []CurtailTarget
-	// Release any driver we curtailed last tick but not this one.
+	suppressedTrack := map[string]bool{}
 	for d := range state.LastCurtailedDrivers {
-		if _, ok := next[d]; !ok {
-			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+		if _, stillActive := next[d]; stillActive {
+			continue
 		}
+		if !wantCurtail {
+			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+			continue
+		}
+		if !state.SupportsPVCurtail[d] {
+			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+			continue
+		}
+		if store != nil {
+			if h := store.DriverHealth(d); h == nil || !h.IsOnline() {
+				out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+				continue
+			}
+		}
+		// Online + supported + curtail still active + dropped from
+		// allocation. Don't release — the inverter is presumably at
+		// or near the previously-commanded cap and re-publishing 0
+		// would trip the sticky-pplim trap. Keep the driver in
+		// LastCurtailedDrivers so the next cycle's allocation decision
+		// is taken against an accurate baseline.
+		suppressedTrack[d] = true
 	}
 	for d, w := range next {
+		// Skip vanishingly-small per-driver shares. Proportional
+		// allocation can round a driver's share to ~0 when its live
+		// |PV| is small relative to the site total, and a curtail
+		// with power_w <= ~1 W lands at the driver as `pplim arg=0`
+		// on Ferroamp — the same sticky-lock trap. Better to leave
+		// the previous pplim in place for one cycle than risk it.
+		if w <= curtailMinPerDriverW {
+			continue
+		}
 		out = append(out, CurtailTarget{Driver: d, LimitW: w})
 	}
 
-	if len(next) == 0 {
+	// Update LastCurtailedDrivers to include every driver that either
+	// got a fresh non-zero target this tick OR was tracked through a
+	// suppressed-release decision above.
+	if len(out) == 0 && len(suppressedTrack) == 0 {
 		state.LastCurtailedDrivers = nil
 	} else {
-		updated := make(map[string]bool, len(next))
-		for d := range next {
+		updated := make(map[string]bool, len(out)+len(suppressedTrack))
+		for _, t := range out {
+			if t.LimitW > 0 {
+				updated[t.Driver] = true
+			}
+		}
+		for d := range suppressedTrack {
 			updated[d] = true
 		}
-		state.LastCurtailedDrivers = updated
+		if len(updated) == 0 {
+			state.LastCurtailedDrivers = nil
+		} else {
+			state.LastCurtailedDrivers = updated
+		}
 	}
 	return out
 }
+
+// curtailMinPerDriverW is the lower bound on a per-driver curtail
+// allocation. Anything at or below this is suppressed so we never
+// publish a near-zero pplim that some inverters (Ferroamp) treat as a
+// hard "limit to 0 W" sticky lock. Tuned conservatively — well below
+// any realistic curtail target operators actually want.
+const curtailMinPerDriverW = 1.0
 
 // pvCurtailBatterySoCMax is the fractional SoC ceiling above which a battery
 // is treated as having no curtail-absorption headroom. Below it, the

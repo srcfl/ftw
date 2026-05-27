@@ -146,6 +146,64 @@ func TestFerroampCurtailDisableWithReleaseWattsPublishesRelease(t *testing.T) {
 	}
 }
 
+// 2026-05-27 observability gap. The driver subscribed to "extapi/result"
+// but Ferroamp's real response topic on the firmwares we've tested is
+// "extapi/control/response", so the EMS-side `{"status":"nak","msg":...}`
+// chatter was invisible. The brick that day was preceded by minutes of
+// `nak: no available ESOs detected in system` that we only discovered
+// via a mosquitto_sub session, not through ftw telemetry. The driver
+// now subscribes to the right topic and exposes an `extapi_nak_count`
+// metric so ops dashboards can alert on rate.
+func TestFerroampExtapiNakIncrementsCounterMetric(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newFerroampDriverWithConfig(t, tel, mqtt, nil)
+
+	// Drain any init-time emit_metric chatter so we measure only what
+	// our injected responses produce.
+	_ = tel.FlushSamples()
+
+	// First NAK.
+	mqtt.Push("extapi/control/response",
+		`{"status":"nak","transId":"ems-1","msg":"no available ESOs detected in system"}`)
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll-1: %v", err)
+	}
+	checkMetric(t, tel.FlushSamples(), "extapi_nak_count", 1)
+
+	// Second NAK + an ACK in the same tick.
+	mqtt.Push("extapi/control/response",
+		`{"status":"nak","transId":"ems-2","msg":"some other reason"}`)
+	mqtt.Push("extapi/control/response",
+		`{"status":"ack","transId":"init","msg":"version: 1.2.1"}`)
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll-2: %v", err)
+	}
+	samples := tel.FlushSamples()
+	checkMetric(t, samples, "extapi_nak_count", 2)
+	checkMetric(t, samples, "extapi_ack_count", 1)
+}
+
+// checkMetric asserts that `samples` contains at least one MetricSample
+// for `name` whose value equals `want` (most recent wins).
+func checkMetric(t *testing.T, samples []telemetry.MetricSample, name string, want float64) {
+	t.Helper()
+	var got float64
+	found := false
+	for _, s := range samples {
+		if s.Metric == name {
+			got = s.Value
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("metric %q not emitted in samples %+v", name, samples)
+	}
+	if got != want {
+		t.Errorf("metric %q = %v, want %v", name, got, want)
+	}
+}
+
 func TestFerroampCurtailNormalWattsPublishesPplim(t *testing.T) {
 	mqtt := &fakeMQTT{}
 	d := newFerroampDriverWithConfig(t, telemetry.NewStore(), mqtt, nil)
