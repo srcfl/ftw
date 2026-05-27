@@ -312,14 +312,22 @@ end
 
 -- Watchdog fallback: revert to autonomous self-consumption (mode 0).
 -- Matches drivers/ferroamp.lua's "auto" command for the MQTT variant.
--- Wrapped in pcall because the watchdog may fire precisely because
--- Modbus is unreachable — an unhandled write error here would crash the VM.
 function driver_default_mode()
     host.log("info", "Ferroamp Modbus: watchdog → auto / self-consumption")
-    pcall(host.modbus_write, 6000, 0)
+    local err = host.modbus_write(6000, 0)
+    if err ~= nil and err ~= "" then
+        host.log("warn", "Ferroamp Modbus: watchdog auto failed: " .. tostring(err))
+        return false
+    end
+    return true
 end
 
 function driver_cleanup()
     -- Return to auto on shutdown so the device doesn't stay in a forced mode.
-    pcall(host.modbus_write, 6000, 0)
+    local err = host.modbus_write(6000, 0)
+    if err ~= nil and err ~= "" then
+        host.log("warn", "Ferroamp Modbus: cleanup auto failed: " .. tostring(err))
+        return false
+    end
+    return true
 end

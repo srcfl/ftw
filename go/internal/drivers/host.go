@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -66,9 +67,9 @@ type HostEnv struct {
 	DriverName string
 	Logger     *slog.Logger
 	Telemetry  *telemetry.Store
-	MQTT       MQTTCap    // nil → mqtt_* calls return ErrNoCapability
-	Modbus     ModbusCap  // nil → modbus_* calls return ErrNoCapability
-	HTTP       bool       // false → http_* calls return ErrNoCapability
+	MQTT       MQTTCap   // nil → mqtt_* calls return ErrNoCapability
+	Modbus     ModbusCap // nil → modbus_* calls return ErrNoCapability
+	HTTP       bool      // false → http_* calls return ErrNoCapability
 	// HTTPAllowedHosts, when non-empty, restricts which hosts this
 	// driver can reach via host.http_get / host.http_post. Each entry
 	// is matched case-insensitively against the URL's host component
@@ -77,17 +78,17 @@ type HostEnv struct {
 	// backward compat with existing drivers that didn't declare a list.
 	// Populated from driver config `capabilities.http.allowed_hosts`.
 	HTTPAllowedHosts []string
-	WS              WSCap    // nil → ws_* calls return ErrNoCapability
+	WS               WSCap // nil → ws_* calls return ErrNoCapability
 	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
 	// passed to host.ws_open. Same matching semantics; empty = any host.
-	WSAllowedHosts  []string
-	TCP             TCPCap   // nil → tcp_* calls return ErrNoCapability
+	WSAllowedHosts []string
+	TCP            TCPCap // nil → tcp_* calls return ErrNoCapability
 	// TCPAllowedHosts gates host.tcp_open(addr) the same way
 	// HTTPAllowedHosts gates HTTP. Empty = any host:port. The cap impl
 	// holds its own copy at construction; this field is informational so
 	// callers / tests can inspect what was granted.
 	TCPAllowedHosts []string
-	Start      time.Time  // monotonic start; host.millis() computed from here
+	Start           time.Time // monotonic start; host.millis() computed from here
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -211,7 +212,7 @@ func (h *HostEnv) setPollInterval(ms int32) {
 func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	var env struct {
 		Type string   `json:"type"`
-		W    float64  `json:"w"`
+		W    *float64 `json:"w"`
 		SoC  *float64 `json:"soc,omitempty"`
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
@@ -220,6 +221,12 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
 		return err
+	}
+	rawW := 0.0
+	if env.W != nil {
+		rawW = *env.W
+	} else if t != telemetry.DerVehicle {
+		return fmt.Errorf("emit_telemetry: %s missing required w", t)
 	}
 	// Drop battery emits from drivers the operator declared as no-battery
 	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
@@ -235,8 +242,11 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		}
 		return nil
 	}
+	if err := telemetry.ValidateReading(t, rawW, env.SoC); err != nil {
+		return fmt.Errorf("emit_telemetry: %w", err)
+	}
 	if h.Telemetry != nil {
-		h.Telemetry.Update(h.DriverName, t, env.W, env.SoC, rawJSON)
+		h.Telemetry.Update(h.DriverName, t, rawW, env.SoC, rawJSON)
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
@@ -248,19 +258,29 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 // emitMetric buffers a scalar diagnostic metric for the long-format TS DB.
 // Driver authors call this for anything beyond the standard pv/battery/meter
 // shape — temperatures, voltages, frequencies, MPPT currents, etc.
-func (h *HostEnv) emitMetric(name string, value float64) {
-	if h.Telemetry == nil { return }
+func (h *HostEnv) emitMetric(name string, value float64) error {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
+	}
+	if h.Telemetry == nil {
+		return nil
+	}
 	h.Telemetry.EmitMetric(h.DriverName, name, value)
+	return nil
 }
 
 // setSN records the device serial number.
 func (h *HostEnv) setSN(sn string) {
-	h.mu.Lock(); h.SN = sn; h.mu.Unlock()
+	h.mu.Lock()
+	h.SN = sn
+	h.mu.Unlock()
 }
 
 // setMake records the device manufacturer.
 func (h *HostEnv) setMake(m string) {
-	h.mu.Lock(); h.Make = m; h.mu.Unlock()
+	h.mu.Lock()
+	h.Make = m
+	h.mu.Unlock()
 }
 
 // PollInterval returns the driver's current requested poll cadence.
@@ -292,44 +312,60 @@ func (h *HostEnv) FullIdentity() (make, sn, mac, endpoint string) {
 // driver so it can participate in device_id resolution. Called by main
 // when wiring the MQTT/Modbus capability.
 func (h *HostEnv) SetEndpoint(ep string) {
-	h.mu.Lock(); h.Endpoint = ep; h.mu.Unlock()
+	h.mu.Lock()
+	h.Endpoint = ep
+	h.mu.Unlock()
 }
 
 // SetMAC records the L2 hardware address discovered via ARP.
 func (h *HostEnv) SetMAC(mac string) {
-	h.mu.Lock(); h.MAC = mac; h.mu.Unlock()
+	h.mu.Lock()
+	h.MAC = mac
+	h.mu.Unlock()
 }
 
 // ---- MQTT proxy ----
 
 func (h *HostEnv) mqttSubscribe(ctx context.Context, topic string) error {
-	if h.MQTT == nil { return ErrNoCapability }
+	if h.MQTT == nil {
+		return ErrNoCapability
+	}
 	return h.MQTT.Subscribe(topic)
 }
 
 func (h *HostEnv) mqttPublish(ctx context.Context, topic string, payload []byte) error {
-	if h.MQTT == nil { return ErrNoCapability }
+	if h.MQTT == nil {
+		return ErrNoCapability
+	}
 	return h.MQTT.Publish(topic, payload)
 }
 
 func (h *HostEnv) mqttPollMessages() ([]MQTTMessage, error) {
-	if h.MQTT == nil { return nil, ErrNoCapability }
+	if h.MQTT == nil {
+		return nil, ErrNoCapability
+	}
 	return h.MQTT.PopMessages(), nil
 }
 
 // ---- Modbus proxy ----
 
 func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
-	if h.Modbus == nil { return nil, ErrNoCapability }
+	if h.Modbus == nil {
+		return nil, ErrNoCapability
+	}
 	return h.Modbus.Read(addr, count, kind)
 }
 
 func (h *HostEnv) modbusWriteSingle(addr, value uint16) error {
-	if h.Modbus == nil { return ErrNoCapability }
+	if h.Modbus == nil {
+		return ErrNoCapability
+	}
 	return h.Modbus.WriteSingle(addr, value)
 }
 
 func (h *HostEnv) modbusWriteMulti(addr uint16, values []uint16) error {
-	if h.Modbus == nil { return ErrNoCapability }
+	if h.Modbus == nil {
+		return ErrNoCapability
+	}
 	return h.Modbus.WriteMulti(addr, values)
 }

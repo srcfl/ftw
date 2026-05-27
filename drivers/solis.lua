@@ -350,9 +350,9 @@ local WRITE_DELAY_MS = 100
 -- Write a single holding register and pace the bus so the next write
 -- doesn't land inside Solis's NACK window.
 local function write_reg(addr, val)
-    local ok, err = pcall(host.modbus_write, addr, val)
+    local err = host.modbus_write(addr, val)
     host.sleep(WRITE_DELAY_MS)
-    if not ok then
+    if err ~= nil and err ~= "" then
         host.log("warn", string.format("Solis: write %d=%d failed: %s",
             addr, val, tostring(err)))
         return false

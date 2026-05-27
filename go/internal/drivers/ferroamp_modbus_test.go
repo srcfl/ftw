@@ -10,12 +10,12 @@ import (
 )
 
 // TestFerroampModbusLoads exercises every lifecycle hook in the new
-// drivers/ferroamp_modbus.lua driver. No Modbus capability is attached,
-// so modbus_read / modbus_write calls inside the driver return an error
-// string — the driver's pcall guards must swallow those gracefully.
+// drivers/ferroamp_modbus.lua driver. A no-op Modbus capability is attached
+// so the default-mode write path can be exercised now that driver_default_mode
+// failures are surfaced.
 func TestFerroampModbusLoads(t *testing.T) {
 	tel := telemetry.NewStore()
-	env := NewHostEnv("ferroamp_modbus", tel)
+	env := NewHostEnv("ferroamp_modbus", tel).WithModbus(&mockModbus{})
 	d, err := NewLuaDriver("../../../drivers/ferroamp_modbus.lua", env)
 	if err != nil {
 		t.Fatalf("load: %v", err)

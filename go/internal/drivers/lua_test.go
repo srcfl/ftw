@@ -250,6 +250,64 @@ end
 	}
 }
 
+func TestHostEmitRejectsInvalidTelemetry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.lua")
+	src := `
+function driver_init(config) end
+function driver_poll()
+    local pv_err = host.emit("pv", { w = 500 })
+    assert(pv_err ~= nil, "positive pv should be rejected")
+    local bat_err = host.emit("battery", { w = 0, soc = 42 })
+    assert(bat_err ~= nil, "battery soc percent should be rejected")
+    local missing_w_err = host.emit("meter", { l1_w = 10 })
+    assert(missing_w_err ~= nil, "meter without w should be rejected")
+    local metric_err = host.emit_metric("bad_metric", 0/0)
+    assert(metric_err ~= nil, "non-finite metric should be rejected")
+    host.emit("vehicle", { soc = 55 })
+    host.emit("pv", { w = -500 })
+    return 1000
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	env := NewHostEnv("boundary", tel)
+	env.BatteryCapacityWh = 9600
+
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if got := tel.Get("boundary", telemetry.DerBattery); got != nil {
+		t.Fatalf("invalid battery reading should be dropped, got %+v", got)
+	}
+	if got := tel.Get("boundary", telemetry.DerMeter); got != nil {
+		t.Fatalf("missing-w meter reading should be dropped, got %+v", got)
+	}
+	if got := tel.Get("boundary", telemetry.DerPV); got == nil || got.RawW != -500 {
+		t.Fatalf("valid negative pv reading should pass, got %+v", got)
+	}
+	if got := tel.Get("boundary", telemetry.DerVehicle); got == nil || got.SoC == nil || *got.SoC != 55 {
+		t.Fatalf("vehicle percent soc should pass, got %+v", got)
+	}
+	for _, sample := range tel.FlushSamples() {
+		if sample.Metric == "bad_metric" {
+			t.Fatalf("non-finite metric must not be buffered: %+v", sample)
+		}
+	}
+}
+
 func TestLuaDriverMissingFile(t *testing.T) {
 	env := NewHostEnv("test", telemetry.NewStore())
 	_, err := NewLuaDriver("/nonexistent/path.lua", env)

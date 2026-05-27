@@ -931,15 +931,10 @@ func ComputeDispatch(
 	case ModeCharge:
 		state.resetSettlementAccounting()
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
-		targets = applyFuseGuard(targets, store, state, fuseMaxW)
-		targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
-		now := time.Now()
-		state.LastDispatch = &now
-		for _, t := range targets {
-			state.PrevTargets[t.Driver] = t.TargetW
-		}
-		state.LastTargets = targets
-		return targets
+		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
+			updatePrevTargets: true,
+			recordDispatch:    true,
+		})
 	}
 
 	// ---- Holdoff ----
@@ -1735,117 +1730,119 @@ func ComputeDispatch(
 	}
 
 	// ---- Fuse guard (bidirectional, #145) ----
-	raw = applyFuseGuard(raw, store, state, fuseMaxW)
+	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
+		manualHoldActive:  manualHoldActive,
+		noSelfDischarge:   noSelfDischarge,
+		updatePrevTargets: true,
+		recordDispatch:    true,
+	})
+}
+
+type dispatchSafetyOptions struct {
+	manualHoldActive  bool
+	noSelfDischarge   bool
+	updatePrevTargets bool
+	recordDispatch    bool
+}
+
+func applyDispatchSafetyPipeline(
+	targets []DispatchTarget,
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+	opts dispatchSafetyOptions,
+) []DispatchTarget {
+	// ---- Fuse guard (bidirectional, #145) ----
+	targets = applyFuseGuard(targets, store, state, fuseMaxW)
 
 	// ---- Plan/exec sign-mismatch floor (energy planner modes only) ----
-	// Operator-report 2026-04-28 (08:00–08:15 CEST): planner_arbitrage
+	// Operator-report 2026-04-28 (08:00-08:15 CEST): planner_arbitrage
 	// peak slot wanted battery_w = -2400 W (discharge to export at peak),
-	// dispatch produced +1640..+1860 W (charged from PV surplus). PV
-	// got swallowed by the battery instead of sold at 334 öre/kWh.
+	// dispatch produced +1640..+1860 W (charged from PV surplus). PV got
+	// swallowed by the battery instead of sold at 334 ore/kWh.
 	//
-	// Root cause was a code-path divergence elsewhere; this is the
-	// rail that makes that whole class of bug a no-op:
+	// Root cause was a code-path divergence elsewhere; this is the rail that
+	// makes that whole class of bug a no-op:
 	//
-	//   plan says discharge, exec produces charge → idle this tick
-	//   plan says charge,    exec produces discharge → idle this tick
+	//   plan says discharge, exec produces charge -> idle this tick
+	//   plan says charge,    exec produces discharge -> idle this tick
 	//
-	// "Idle for this tick" is the right floor because:
-	//   - Discharging a charge slot would burn cycles against operator
-	//     intent. Idling and waiting for the next replan is harmless.
-	//   - Charging a discharge slot would buy energy at the exact slot
-	//     the planner intended to SELL it. Idling and letting PV export
-	//     naturally captures most of the lost revenue without any risk.
-	//
-	// Only applied in the energy planner modes. Manual modes have no plan
-	// to disagree with, and planner_self deliberately ignores plan sign:
-	// its plan contribution is idle-vs-participate; when it participates,
-	// the live self-consumption controller may charge or discharge to
-	// hold the grid near zero. forceFuseDischarge runs AFTER this
-	// so a fuse overflow can still drive discharge regardless of plan
-	// intent.
-	//
-	// Skipped when a manual hold is active: the operator is
-	// deliberately overriding the planner, so a sign mismatch with the
-	// plan is the intended behaviour, not a bug to clamp out.
-	if !manualHoldActive {
-		raw = applyPlanSignFloor(raw, state)
+	// Only applied in the energy planner modes. Manual modes have no plan to
+	// disagree with, and manual holds intentionally override planner intent.
+	if !opts.manualHoldActive {
+		targets = applyPlanSignFloor(targets, state)
 	}
-	if noSelfDischarge {
-		raw = floorNegativeTargets(raw)
+	if opts.noSelfDischarge {
+		targets = floorNegativeTargets(targets)
 	}
 
-	// forceFuseDischarge runs LAST, deliberately AFTER the slew loop
-	// at line 625. A fuse overflow can demand a battery target that's
-	// far beyond what slew would normally allow in a single 5 s tick
-	// (e.g. 0 W → −3 kW), and slew-limiting that would leave the
-	// fuse violated for multiple ticks. The fuse is the
-	// non-negotiable ceiling — it bypasses slew. Regression-guarded
-	// by TestFuseSaverBypassesSlew.
-	raw = forceFuseDischarge(raw, store, state, driverCapacities, fuseMaxW)
+	// forceFuseDischarge runs LAST. A fuse overflow can demand a battery
+	// target far beyond what slew would allow in one tick; slew-limiting that
+	// response would leave the fuse violated for multiple ticks.
+	targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
+	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
+	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
+	return targets
+}
 
-	// ---- Republish FuseEVMaxW after forceFuseDischarge ----
-	// The joint allocator (line 625) computes FuseEVMaxW assuming the
-	// battery target it just produced is what gets dispatched. But
-	// forceFuseDischarge may have flipped that target from charge to
-	// discharge — freeing additional fuse headroom for the EV.
-	// Without this re-publish the loadpoint controller throttles the
-	// EV against a stale (too-conservative) cap for one tick. Run only
-	// when the joint allocator already engaged this tick — otherwise
-	// FuseEVMaxW is "no advice" and should stay 0.
-	// Skip the republish when the operator's tariff peak is the binding
-	// ceiling (peak < fuse). The republish's purpose is to free up EV
-	// headroom freed by forceFuseDischarge's transient battery bridge —
-	// that's the right thing for FUSE protection (hardware safety,
-	// battery is the last line of defense and there's no policy
-	// preference about how long to drain it). For TARIFF protection,
-	// the EV cap must reflect the steady state where the battery
-	// isn't covering, otherwise the bridge becomes a permanent
-	// shuttle and the operator pays the peak charge anyway. Let the
-	// joint allocator's pre-forceFuseDischarge FuseEVMaxW stand.
+func republishFuseEVCapAfterFuseDischarge(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) {
+	// The joint allocator computes FuseEVMaxW assuming the battery target it
+	// produced is what gets dispatched. forceFuseDischarge may flip that target
+	// from charge to discharge, freeing additional fuse headroom for the EV.
+	if state == nil || !state.FuseSaturated || state.EVChargingW <= 0 || fuseMaxW <= 0 {
+		return
+	}
 	peakBindingW := fuseMaxW - state.fuseSafetyMarginW()
-	peakBinding := state != nil && state.PeakImportCeilingW > 0 && state.PeakImportCeilingW < peakBindingW
-	if !peakBinding && state.FuseSaturated && state.EVChargingW > 0 && fuseMaxW > 0 {
-		var postBat float64
-		seen := make(map[string]struct{}, len(raw))
-		for _, t := range raw {
-			if _, ok := seen[t.Driver]; ok {
-				continue
-			}
-			seen[t.Driver] = struct{}{}
-			postBat += t.TargetW
-		}
-		// H = rawGridW − currentTotal − E (unchanged from joint allocator)
-		// newGrid = H + postBat + E*scale ≤ ceiling
-		// → scale ≤ (ceiling − H − postBat) / E, capped to ≤1
-		// Use the effective import ceiling so peak-driven caps survive
-		// the post-forceFuseDischarge republish (otherwise the joint
-		// allocator's tariff-tightened cap gets overwritten with the
-		// fuse-only headroom).
-		ceilingW := state.effectiveImportCeilingW(fuseMaxW)
-		var rawGridW2 float64
-		if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
-			rawGridW2 = r.SmoothedW
-		}
-		H := rawGridW2 - currentTotal - state.EVChargingW
-		headroom := ceilingW - H - postBat
-		if headroom < 0 {
-			headroom = 0
-		}
-		newCap := headroom
-		if newCap > state.EVChargingW {
-			newCap = state.EVChargingW
-		}
-		state.FuseEVMaxW = newCap
+	peakBinding := state.PeakImportCeilingW > 0 && state.PeakImportCeilingW < peakBindingW
+	if peakBinding {
+		return
 	}
 
-	// Update state
-	now := time.Now()
-	state.LastDispatch = &now
-	for _, t := range raw {
-		state.PrevTargets[t.Driver] = t.TargetW
+	var currentBat, postBat float64
+	seen := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		if _, ok := seen[t.Driver]; ok {
+			continue
+		}
+		seen[t.Driver] = struct{}{}
+		postBat += t.TargetW
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			currentBat += r.SmoothedW
+		}
 	}
-	state.LastTargets = raw
-	return raw
+
+	ceilingW := state.effectiveImportCeilingW(fuseMaxW)
+	var rawGridW float64
+	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
+		rawGridW = r.SmoothedW
+	}
+	H := rawGridW - currentBat - state.EVChargingW
+	headroom := ceilingW - H - postBat
+	if headroom < 0 {
+		headroom = 0
+	}
+	newCap := headroom
+	if newCap > state.EVChargingW {
+		newCap = state.EVChargingW
+	}
+	state.FuseEVMaxW = newCap
+}
+
+func recordDispatchTargets(targets []DispatchTarget, state *State, updatePrevTargets, recordDispatch bool) {
+	if state == nil {
+		return
+	}
+	if recordDispatch {
+		now := time.Now()
+		state.LastDispatch = &now
+	}
+	if updatePrevTargets {
+		for _, t := range targets {
+			state.PrevTargets[t.Driver] = t.TargetW
+		}
+	}
+	state.LastTargets = targets
 }
 
 // ComputePVCurtail returns one CurtailTarget per affected driver for

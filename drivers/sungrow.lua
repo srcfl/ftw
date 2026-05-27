@@ -82,7 +82,10 @@ function configure_power_limits()
         host.log("info", "Max charge power: " .. string.format("%.2f", chg_kw) .. " kW")
         if chg[1] < 500 then
             host.log("info", "Setting max charge power to 5 kW")
-            pcall(host.modbus_write, 33046, 500)
+            local err = host.modbus_write(33046, 500)
+            if err ~= nil and err ~= "" then
+                host.log("warn", "Sungrow: max charge power write failed: " .. tostring(err))
+            end
         end
     end
 
@@ -93,7 +96,10 @@ function configure_power_limits()
         host.log("info", "Max discharge power: " .. string.format("%.2f", dis_kw) .. " kW")
         if dis[1] < 500 then
             host.log("info", "Setting max discharge power to 5 kW")
-            pcall(host.modbus_write, 33047, 500)
+            local err = host.modbus_write(33047, 500)
+            if err ~= nil and err ~= "" then
+                host.log("warn", "Sungrow: max discharge power write failed: " .. tostring(err))
+            end
         end
     end
 

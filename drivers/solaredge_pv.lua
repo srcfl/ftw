@@ -224,9 +224,8 @@ end
 
 -- See solaredge.lua write_apc for the FC 0x10 atomic-write rationale.
 local function write_apc(enable, limit_pct)
-    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
-        { enable, limit_pct })
-    if (not ok) or type(err) == "string" then
+    local err = host.modbus_write_multi(REG_APC_ENABLE, { enable, limit_pct })
+    if err ~= nil and err ~= "" then
         return false, tostring(err)
     end
     return true, nil

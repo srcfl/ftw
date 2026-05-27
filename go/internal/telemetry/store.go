@@ -222,9 +222,42 @@ func key(driver string, t DerType) string {
 	return driver + ":" + t.String()
 }
 
+// ValidateReading enforces the site-convention invariants before telemetry
+// reaches smoothing, history buffering, control, or models.
+func ValidateReading(t DerType, rawW float64, soc *float64) error {
+	if !finite(rawW) {
+		return fmt.Errorf("%s power is non-finite: %v", t, rawW)
+	}
+	if soc != nil && !finite(*soc) {
+		return fmt.Errorf("%s soc is non-finite: %v", t, *soc)
+	}
+	switch t {
+	case DerPV:
+		if rawW > 0 {
+			return fmt.Errorf("pv power must be <= 0 in site convention, got %.3f W", rawW)
+		}
+	case DerEV:
+		if rawW < 0 {
+			return fmt.Errorf("ev power must be >= 0 in site convention, got %.3f W", rawW)
+		}
+	case DerBattery:
+		if soc != nil && (*soc < 0 || *soc > 1) {
+			return fmt.Errorf("battery soc must be a 0..1 fraction, got %.3f", *soc)
+		}
+	}
+	return nil
+}
+
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
 // Update feeds a new reading. Applies Kalman smoothing and stores both raw
 // and smoothed values.
 func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage) {
+	if err := ValidateReading(t, rawW, soc); err != nil {
+		return
+	}
 	k := key(driver, t)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -274,6 +307,9 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // pv/battery/meter shape (temperatures, voltages, frequencies, etc.).
 // Drained by the control loop via FlushSamples.
 func (s *Store) EmitMetric(driver, name string, value float64) {
+	if !finite(value) {
+		return
+	}
 	now := time.Now()
 	s.pendingMu.Lock()
 	s.pending = append(s.pending, MetricSample{
@@ -332,7 +368,9 @@ func (s *Store) LatestMetric(driver, name string) (float64, time.Time, bool) {
 func (s *Store) FlushSamples() []MetricSample {
 	s.pendingMu.Lock()
 	defer s.pendingMu.Unlock()
-	if len(s.pending) == 0 { return nil }
+	if len(s.pending) == 0 {
+		return nil
+	}
 	out := s.pending
 	s.pending = nil
 	return out
@@ -340,7 +378,8 @@ func (s *Store) FlushSamples() []MetricSample {
 
 // Get returns the latest reading for a driver+type, or nil if absent.
 func (s *Store) Get(driver string, t DerType) *DerReading {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if r, ok := s.readings[key(driver, t)]; ok {
 		return r
 	}
@@ -349,7 +388,8 @@ func (s *Store) Get(driver string, t DerType) *DerReading {
 
 // ReadingsByType returns all readings of a given type (e.g. all batteries).
 func (s *Store) ReadingsByType(t DerType) []*DerReading {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]*DerReading, 0)
 	for _, r := range s.readings {
 		if r.DerType == t {
@@ -400,7 +440,8 @@ func (s *Store) SumOnlineEVW() float64 {
 
 // ReadingsByDriver returns all readings from one driver.
 func (s *Store) ReadingsByDriver(driver string) []*DerReading {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make([]*DerReading, 0)
 	for _, r := range s.readings {
 		if r.Driver == driver {
@@ -423,9 +464,12 @@ func (s *Store) IsStale(driver string, t DerType, timeout time.Duration) bool {
 // (or nil if unknown). Mutations must go through Store methods or
 // DriverHealthMut in single-threaded test setup.
 func (s *Store) DriverHealth(name string) *DriverHealth {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	h := s.health[name]
-	if h == nil { return nil }
+	if h == nil {
+		return nil
+	}
 	cp := *h
 	return &cp
 }
@@ -434,7 +478,8 @@ func (s *Store) DriverHealth(name string) *DriverHealth {
 // Holds no lock after return — callers must not share the pointer across
 // goroutines. Runtime code should use the Store RecordDriver* helpers.
 func (s *Store) DriverHealthMut(name string) *DriverHealth {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.driverHealthLocked(name)
 }
 
@@ -448,22 +493,26 @@ func (s *Store) driverHealthLocked(name string) *DriverHealth {
 }
 
 func (s *Store) EnsureDriverHealth(name string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.driverHealthLocked(name)
 }
 
 func (s *Store) RecordDriverSuccess(name string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.driverHealthLocked(name).RecordSuccess()
 }
 
 func (s *Store) RecordDriverTick(name string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.driverHealthLocked(name).RecordTick()
 }
 
 func (s *Store) RecordDriverError(name, err string) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.driverHealthLocked(name).RecordError(err)
 }
 
@@ -485,7 +534,8 @@ func (s *Store) Remove(driver string) {
 
 // AllHealth returns a snapshot of all driver health entries.
 func (s *Store) AllHealth() map[string]DriverHealth {
-	s.mu.RLock(); defer s.mu.RUnlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	out := make(map[string]DriverHealth, len(s.health))
 	for name, h := range s.health {
 		out[name] = *h
@@ -499,7 +549,8 @@ func (s *Store) AllHealth() map[string]DriverHealth {
 // cycle so the control loop can react (e.g. exclude offline drivers from
 // dispatch and ask them to revert to autonomous mode).
 func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := time.Now()
 	var out []WatchdogTransition
 	for name, h := range s.health {
@@ -526,7 +577,8 @@ func (s *Store) WatchdogScan(timeout time.Duration) []WatchdogTransition {
 // DriverHealth entry — drivers can call this from driver_init before
 // any telemetry has flowed.
 func (s *Store) SetDriverWatchdogTimeout(name string, d time.Duration) {
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	h, ok := s.health[name]
 	if !ok {
 		h = &DriverHealth{Name: name}
@@ -552,6 +604,7 @@ func (s *Store) UpdateLoad(rawLoad float64) float64 {
 	if rawLoad < 0 {
 		rawLoad = 0
 	}
-	s.mu.Lock(); defer s.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.loadFilter.Update(rawLoad)
 }

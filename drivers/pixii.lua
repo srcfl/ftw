@@ -115,7 +115,10 @@ function driver_poll()
     -- Keep the handshake counter moving so the Pixii never times out
     -- to idle. Pixii only requires that the value changes; 0..99 wrap.
     hb_tick = (hb_tick + 1) % 100
-    pcall(host.modbus_write, REG_HEARTBEAT, hb_tick)
+    local hb_err = host.modbus_write(REG_HEARTBEAT, hb_tick)
+    if hb_err ~= nil and hb_err ~= "" then
+        host.log("warn", "Pixii: heartbeat write failed: " .. tostring(hb_err))
+    end
 
     -- Read serial number once from SunSpec Common Model (offset 52 from
     -- the common block → absolute 40052, 16 regs ASCII).
@@ -399,7 +402,10 @@ local function write_setpoint_w(pixii_w)
     -- often faster than the poll tick, and we don't want the Pixii to
     -- edge into idle right after we told it to move.
     hb_tick = (hb_tick + 1) % 100
-    pcall(host.modbus_write, REG_HEARTBEAT, hb_tick)
+    local hb_err = host.modbus_write(REG_HEARTBEAT, hb_tick)
+    if hb_err ~= nil and hb_err ~= "" then
+        host.log("warn", "Pixii: heartbeat write failed: " .. tostring(hb_err))
+    end
     return true
 end
 

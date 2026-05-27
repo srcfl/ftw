@@ -348,7 +348,7 @@ func TestComputePVCurtail_FullBatteryNoHeadroomCurtails(t *testing.T) {
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
 	emitBattery(t, store, "pixii", 0, 0.995) // above ceiling — no headroom
-	emitMeter(t, store, "meter", -2500)     // exporting 2.5 kW → live load = 500 W
+	emitMeter(t, store, "meter", -2500)      // exporting 2.5 kW → live load = 500 W
 
 	got := findCurtail(ComputePVCurtail(st, store))
 	if abs(got["solaredge"]-500) > 1e-3 {
@@ -401,8 +401,8 @@ func TestComputePVCurtail_EVCurtailHeadroomLiftsCap(t *testing.T) {
 	st := NewState(0, 100, "meter")
 	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 500})
 	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
-	st.EVSurplusOnlyReserveW = 0    // EV isn't drawing — dispatch reserve is 0
-	st.EVCurtailHeadroomW = 11000   // but it COULD draw up to 11 kW if PV grew
+	st.EVSurplusOnlyReserveW = 0  // EV isn't drawing — dispatch reserve is 0
+	st.EVCurtailHeadroomW = 11000 // but it COULD draw up to 11 kW if PV grew
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
 	emitBattery(t, store, "pixii", 0, 0.995)
@@ -422,7 +422,7 @@ func TestComputePVCurtail_ManualHoldBypassesLiveLimit(t *testing.T) {
 	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 50.0)    // big headroom
+	emitBattery(t, store, "pixii", 0, 0.50) // big headroom
 	emitMeter(t, store, "meter", 0)
 	st.SetPVManualHold(PVManualHold{
 		Driver:    "solaredge",

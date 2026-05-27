@@ -61,7 +61,7 @@ func TestStoreKeepsSeparateFiltersPerDriver(t *testing.T) {
 	soc := 0.5
 	s.Update("a", DerBattery, 100, &soc, nil)
 	s.Update("b", DerBattery, 200, &soc, nil)
-	s.Update("a", DerPV, 300, nil, nil)
+	s.Update("a", DerPV, -300, nil, nil)
 
 	if r := s.Get("a", DerBattery); r == nil || r.RawW != 100 {
 		t.Error("a:battery")
@@ -69,7 +69,7 @@ func TestStoreKeepsSeparateFiltersPerDriver(t *testing.T) {
 	if r := s.Get("b", DerBattery); r == nil || r.RawW != 200 {
 		t.Error("b:battery")
 	}
-	if r := s.Get("a", DerPV); r == nil || r.RawW != 300 {
+	if r := s.Get("a", DerPV); r == nil || r.RawW != -300 {
 		t.Error("a:pv")
 	}
 	if r := s.Get("b", DerPV); r != nil {
@@ -124,7 +124,9 @@ func TestHealthDegradesAfter3Errors(t *testing.T) {
 
 func TestHealthRecoversOnSuccess(t *testing.T) {
 	h := &DriverHealth{Name: "t"}
-	h.RecordError("e1"); h.RecordError("e2"); h.RecordError("e3")
+	h.RecordError("e1")
+	h.RecordError("e2")
+	h.RecordError("e3")
 	h.RecordSuccess()
 	if h.Status != StatusOk {
 		t.Errorf("success should reset to Ok: %v", h.Status)
@@ -155,6 +157,44 @@ func TestReadingPreservesData(t *testing.T) {
 	r := s.Get("a", DerMeter)
 	if string(r.Data) != string(raw) {
 		t.Errorf("data roundtrip: got %s", string(r.Data))
+	}
+}
+
+func TestStoreRejectsInvalidReadings(t *testing.T) {
+	s := NewStore()
+	s.Update("pv", DerPV, 500, nil, nil)
+	if r := s.Get("pv", DerPV); r != nil {
+		t.Fatalf("positive pv reading must be rejected, got %+v", r)
+	}
+
+	s.Update("pv", DerPV, -1200, nil, nil)
+	if r := s.Get("pv", DerPV); r == nil || r.RawW != -1200 {
+		t.Fatalf("valid pv reading should be stored, got %+v", r)
+	}
+
+	s.Update("pv", DerPV, math.NaN(), nil, nil)
+	if r := s.Get("pv", DerPV); r == nil || r.RawW != -1200 {
+		t.Fatalf("non-finite update should not overwrite last valid reading, got %+v", r)
+	}
+
+	badSoC := 42.0
+	s.Update("bat", DerBattery, 0, &badSoC, nil)
+	if r := s.Get("bat", DerBattery); r != nil {
+		t.Fatalf("battery percent soc must be rejected at telemetry boundary, got %+v", r)
+	}
+}
+
+func TestEmitMetricRejectsNonFinite(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("driver", "bad", math.Inf(1))
+	if samples := s.FlushSamples(); len(samples) != 0 {
+		t.Fatalf("non-finite metric should be dropped, got %+v", samples)
+	}
+
+	s.EmitMetric("driver", "ok", 42)
+	samples := s.FlushSamples()
+	if len(samples) != 1 || samples[0].Metric != "ok" || samples[0].Value != 42 {
+		t.Fatalf("valid metric not buffered as expected: %+v", samples)
 	}
 }
 

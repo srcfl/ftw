@@ -428,9 +428,9 @@ local CHARGE_CURRENT_DEFAULT_A = 31  -- matches Zap init profile
 local WRITE_DELAY_MS = 50
 
 local function write_reg(addr, val)
-    local ok, err = pcall(host.modbus_write, addr, val)
+    local err = host.modbus_write(addr, val)
     host.sleep(WRITE_DELAY_MS)
-    if not ok then
+    if err ~= nil and err ~= "" then
         host.log("warn", string.format("Deye: write %d=%d failed: %s",
             addr, val, tostring(err)))
         return false

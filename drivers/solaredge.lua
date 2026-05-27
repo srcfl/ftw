@@ -404,9 +404,8 @@ end
 -- REG_APC_ENABLE is at 61440, REG_APC_LIMIT at 61441 → adjacent, so
 -- one multi-register write covers both.
 local function write_apc(enable, limit_pct)
-    local ok, err = pcall(host.modbus_write_multi, REG_APC_ENABLE,
-        { enable, limit_pct })
-    if (not ok) or type(err) == "string" then
+    local err = host.modbus_write_multi(REG_APC_ENABLE, { enable, limit_pct })
+    if err ~= nil and err ~= "" then
         return false, tostring(err)
     end
     return true, nil

@@ -267,7 +267,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("emit_metric", L.NewFunction(func(L *lua.LState) int {
 		name := L.CheckString(1)
 		val := float64(L.CheckNumber(2))
-		env.emitMetric(name, val)
+		if err := env.emitMetric(name, val); err != nil {
+			L.Push(lua.LString(err.Error()))
+			return 1
+		}
 		return 0
 	}))
 

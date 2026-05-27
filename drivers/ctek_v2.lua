@@ -143,15 +143,8 @@ local function decode_ascii(regs, n)
 end
 
 local function write_setpoint(amps)
-    -- host.modbus_write signals errors by RETURNING a string, not by
-    -- raising — pcall's `ok` is only false on a Lua runtime exception
-    -- (rare). On a Modbus / transport error the host pushes the error
-    -- string into pcall's second slot instead, so we have to inspect
-    -- both. Without this the driver would silently treat a failed
-    -- write as success and emit a stale `max_a` while the charger
-    -- never accepted the new setpoint.
-    local ok, err = pcall(host.modbus_write, REG_CHARGE_LIMIT, amps)
-    if not ok or (err ~= nil and err ~= "") then
+    local err = host.modbus_write(REG_CHARGE_LIMIT, amps)
+    if err ~= nil and err ~= "" then
         host.log("warn", "CTEK: write charging limit failed: " .. tostring(err))
         return false
     end

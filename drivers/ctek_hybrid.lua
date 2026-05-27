@@ -171,8 +171,8 @@ local function decode_ascii(regs, n)
 end
 
 local function write_setpoint(amps)
-    local ok, err = pcall(host.modbus_write, REG_CHARGE_LIMIT, amps)
-    if not ok or (err ~= nil and err ~= "") then
+    local err = host.modbus_write(REG_CHARGE_LIMIT, amps)
+    if err ~= nil and err ~= "" then
         host.log("warn", "CTEK-hybrid: write charging limit failed: " .. tostring(err))
         return false
     end
