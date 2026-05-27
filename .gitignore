@@ -44,3 +44,10 @@ dev-data/
 bin/
 artifacts/
 .cache/
+
+# TLS material — never commit. Public certs go on the deploy host, private keys never leave the browser.
+*.pem
+*.crt
+*.key
+deploy/secrets/*
+!deploy/secrets/README.md
