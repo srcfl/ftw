@@ -44,3 +44,10 @@ dev-data/
 bin/
 artifacts/
 .cache/
+
+# Changesets / Node — devtool surface only. package.json + .changeset/
+# are tracked; the install artifacts and lockfile noise are not.
+node_modules/
+package-lock.json
+release-notes.md
+

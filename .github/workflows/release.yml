@@ -1,75 +1,114 @@
 name: release
 
-# Manual-only trigger. We merge to master many times a day during
-# fast-iteration; auto-cutting a release per conventional commit spammed
-# Discord and burned ~30 min/release on the pi-gen image build.
-# Run `gh workflow run release.yml` (or click "Run workflow" in Actions)
-# when it's time to cut a real release — semantic-release will batch
-# every `fix:`/`feat:` since the last tag into one changelog + bump.
+# Changesets-driven release.
+#
+# Flow:
+#   1. PRs land on master, each carrying a `.changeset/*.md` file.
+#   2. This workflow runs on push to master. The `changesets/action`
+#      step looks at unconsumed changesets:
+#        - if any exist  → it opens (or updates) a "Version Packages" PR
+#          that bumps package.json + rewrites CHANGELOG.md.
+#        - if none exist (the Version PR just merged) → it runs our
+#          `publish` script which tags v$VERSION, pushes the tag, and
+#          creates the GitHub Release with codename-annotated notes.
+#   3. Downstream jobs (binaries, ftw-connect, ftw-subetha, docker,
+#      rpi-image, discord) gate on `steps.changesets.outputs.published`
+#      and run only when a real release was cut.
+#
+# Manual workflow_dispatch is still available as an emergency lever
+# (e.g. re-running the publish step against existing state) but the
+# day-to-day trigger is "Version Packages" PR merge.
+
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
-# semantic-release needs to push a tag + the changelog commit.
-# The docker job needs to push a package to GHCR.
+# changesets/action needs to push the Version PR + tag + release.
+# docker job needs to push to GHCR.
 permissions:
   contents: write
   packages: write
   issues: write
   pull-requests: write
 
+# Serialize release workflow runs. Two concurrent "push to master"
+# events otherwise race on the Version PR branch + tag creation.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    name: semantic-release
+    name: changesets (version PR / publish)
     runs-on: ubuntu-latest
     outputs:
-      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
-      new_release_version:   ${{ steps.semantic.outputs.new_release_version }}
+      published: ${{ steps.changesets.outputs.published }}
+      version:   ${{ steps.publish_meta.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
-          # semantic-release walks every commit since the last tag, so
-          # it needs the full history. fetch-depth: 0 is the standard.
+          # changesets/action needs full history so it can detect
+          # which changesets have already been consumed by past
+          # Version PRs (it walks .changeset/ vs CHANGELOG.md).
           fetch-depth: 0
-          # @semantic-release/github now creates the tag + release via
-          # the API — no local branch push happens anymore. The @…/git
-          # plugin was removed because its changelog-commit push was
-          # rejected by master's branch protection (the fresh commit
-          # had no status check attached).
           persist-credentials: true
 
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
           node-version: '22'
+          # No lockfile — the repo is Go-first. npm picks the
+          # @changesets/cli major pinned in package.json devDeps.
+          cache: ''
 
-      - name: Run semantic-release
-        id: semantic
-        uses: cycjimmy/semantic-release-action@v5
+      - name: Install changesets CLI
+        # Lockfile-less install of just the CLI declared in
+        # devDependencies. `--no-audit --no-fund` keeps the log
+        # quiet; `--no-save` avoids mutating package.json.
+        run: npm install --no-audit --no-fund --no-save
+
+      - name: Run changesets action
+        id: changesets
+        uses: changesets/action@v1
         with:
-          # Pin to a known-good major. Plugins listed here mirror
-          # .releaserc.json so the action installer picks them up
-          # without needing a package.json in the repo.
-          #
-          # conventional-changelog-conventionalcommits is the preset
-          # backing the `conventionalcommits` config in .releaserc.json
-          # (the analyzer + notes generator look it up by name at
-          # runtime, so it must be in node_modules even though we
-          # never import it directly).
-          semantic_version: 24
-          extra_plugins: |
-            conventional-changelog-conventionalcommits@8
+          # `version` runs `changeset version` to bump package.json
+          # and rewrite CHANGELOG.md when consumed changesets exist.
+          # changesets/action handles opening/updating the PR.
+          version: npm run changeset:version
+          # `publish` runs after the Version PR has been merged and
+          # there are no more changesets pending. Our script tags
+          # v$VERSION, pushes it, and creates the GH release with
+          # codename-annotated notes from CHANGELOG.md.
+          publish: bash scripts/release-publish.sh
+          # Title + commit of the Version PR. Keep it boring so it's
+          # easy to recognize in the PR list.
+          title:  "chore(release): version packages"
+          commit: "chore(release): version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read published version
+        id: publish_meta
+        # When `published` is true the publish script just tagged a
+        # release. Read the bumped version off package.json so the
+        # downstream jobs know what tag to check out.
+        if: steps.changesets.outputs.published == 'true'
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Published v${VERSION}"
 
   binaries:
     name: build + upload release binaries
     runs-on: ubuntu-latest
     needs: release
-    # Skip when semantic-release didn't cut a new version — nothing to
+    # Skip when changesets didn't cut a new version — nothing to
     # attach to. Parallel with the docker job (both gated on the same
     # output) so a failing binary build doesn't block the image push.
-    if: needs.release.outputs.new_release_published == 'true'
+    if: needs.release.outputs.published == 'true'
     permissions:
       contents: write  # upload assets to the release
     strategy:
@@ -94,9 +133,9 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v5
         with:
-          # semantic-release pushed v${version} (tag) + a changelog commit.
-          # Check out the tag so -X main.Version matches what users install.
-          ref: v${{ needs.release.outputs.new_release_version }}
+          # changesets-publish pushed v${version}. Check out the tag
+          # so -X main.Version matches what users install.
+          ref: v${{ needs.release.outputs.version }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -109,7 +148,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.new_release_version }}
+          VERSION: v${{ needs.release.outputs.version }}
         working-directory: go
         run: |
           mkdir -p ../bin
@@ -139,10 +178,10 @@ jobs:
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.new_release_version }}
+          TAG: v${{ needs.release.outputs.version }}
           ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
         # --clobber lets a workflow re-run replace a prior upload without
-        # failing — useful when semantic-release is re-triggered manually.
+        # failing — useful when the publish step is re-triggered manually.
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
   ftw-connect:
@@ -150,10 +189,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: release
     # Publish standalone ftw-connect binaries for every major platform so
-    # the curl installer has assets to download.  These are separate from
+    # the curl installer has assets to download. These are separate from
     # the main tarball because ftw-connect is a client-side tool (runs on
     # Mac/Windows/Linux laptops) while the main tarball targets the Pi.
-    if: needs.release.outputs.new_release_published == 'true'
+    if: needs.release.outputs.published == 'true'
     permissions:
       contents: write  # upload assets to the release
     strategy:
@@ -179,7 +218,7 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v5
         with:
-          ref: v${{ needs.release.outputs.new_release_version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -192,7 +231,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.new_release_version }}
+          VERSION: v${{ needs.release.outputs.version }}
         working-directory: go
         run: |
           mkdir -p ../bin
@@ -204,7 +243,7 @@ jobs:
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.new_release_version }}
+          TAG: v${{ needs.release.outputs.version }}
           ASSET: bin/ftw-connect-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
@@ -214,7 +253,7 @@ jobs:
     needs: release
     # Publish standalone relay binaries for linux/amd64 + linux/arm64.
     # Operators deploying their own relay can grab these from releases.
-    if: needs.release.outputs.new_release_published == 'true'
+    if: needs.release.outputs.published == 'true'
     permissions:
       contents: write  # upload assets to the release
     strategy:
@@ -231,7 +270,7 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v5
         with:
-          ref: v${{ needs.release.outputs.new_release_version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -244,7 +283,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.new_release_version }}
+          VERSION: v${{ needs.release.outputs.version }}
         working-directory: go
         run: |
           mkdir -p ../bin
@@ -256,7 +295,7 @@ jobs:
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.new_release_version }}
+          TAG: v${{ needs.release.outputs.version }}
           ASSET: bin/ftw-subetha-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
         run: gh release upload "${TAG}" "${ASSET}" --clobber
 
@@ -264,10 +303,10 @@ jobs:
     name: docker build + push (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: release
-    # Only build if semantic-release actually cut a new version. Skipping
-    # when there's no release keeps `:latest` deterministic — every
-    # `:latest` corresponds to a real tagged version.
-    if: needs.release.outputs.new_release_published == 'true'
+    # Only build if a new version was cut. Skipping when there's no
+    # release keeps `:latest` deterministic — every `:latest`
+    # corresponds to a real tagged version.
+    if: needs.release.outputs.published == 'true'
     # Build both the main image and the ftw-updater sidecar image from
     # the same tag. They're paired — `docker compose pull` upgrades them
     # together — so tagging in lockstep (latest, vX.Y.Z, sha) keeps the
@@ -287,12 +326,10 @@ jobs:
             title: forty-two-watts-updater
             description: Sidecar that executes docker compose pull + up for in-app updates
     steps:
-      - name: Checkout
+      - name: Checkout tag
         uses: actions/checkout@v5
         with:
-          # Pull the tag semantic-release just pushed so the build sees
-          # the new state of master (changelog commit included).
-          fetch-depth: 0
+          ref: v${{ needs.release.outputs.version }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -314,15 +351,15 @@ jobs:
           # ghcr.io/<owner>/<repo>[-updater]:<tag>
           images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
           tags: |
-            type=raw,value=v${{ needs.release.outputs.new_release_version }}
-            type=raw,value=${{ needs.release.outputs.new_release_version }}
+            type=raw,value=v${{ needs.release.outputs.version }}
+            type=raw,value=${{ needs.release.outputs.version }}
             type=raw,value=latest
             type=sha,format=short
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.release.outputs.new_release_version }}
+            org.opencontainers.image.version=${{ needs.release.outputs.version }}
             org.opencontainers.image.licenses=MIT
 
       - name: Build and push
@@ -335,7 +372,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=v${{ needs.release.outputs.new_release_version }}
+            VERSION=v${{ needs.release.outputs.version }}
           # Use the GHA cache backend so subsequent builds reuse layers.
           # Per-target scope keeps main + updater from evicting each other.
           cache-from: type=gha,scope=${{ matrix.target }}
@@ -349,7 +386,7 @@ jobs:
     # before the image hits the release. Depend on the docker job to
     # enforce that ordering.
     needs: [release, docker]
-    if: needs.release.outputs.new_release_published == 'true'
+    if: needs.release.outputs.published == 'true'
     permissions:
       contents: write  # upload the .img.xz as a release asset
     steps:
@@ -378,10 +415,7 @@ jobs:
       - name: Checkout tag
         uses: actions/checkout@v5
         with:
-          # Build from the exact tag semantic-release just cut, same
-          # as the binaries + docker jobs, so the compose file baked
-          # into the image matches the docker tags it will pull.
-          ref: v${{ needs.release.outputs.new_release_version }}
+          ref: v${{ needs.release.outputs.version }}
 
       - name: Build image
         # Pin to pi-gen's bookworm-arm64 branch. Upstream master has
@@ -405,7 +439,7 @@ jobs:
             echo "pi-gen produced no .img.xz — check build log above" >&2
             exit 1
           fi
-          DST="deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-v${{ needs.release.outputs.new_release_version }}.img.xz"
+          DST="deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-v${{ needs.release.outputs.version }}.img.xz"
           mv "${SRC}" "${DST}"
           ls -lah "${DST}"
           echo "asset=${DST}" >> "${GITHUB_OUTPUT}"
@@ -413,7 +447,7 @@ jobs:
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:   v${{ needs.release.outputs.new_release_version }}
+          TAG:   v${{ needs.release.outputs.version }}
           ASSET: ${{ steps.artifact.outputs.asset }}
         # --clobber mirrors the binaries job — lets a manual re-run
         # replace a prior upload without aborting the job.
@@ -423,7 +457,7 @@ jobs:
     name: announce release on Discord
     runs-on: ubuntu-latest
     # Wait for binaries + docker so the message links to assets that
-    # actually exist. semantic-release output gates the whole job —
+    # actually exist. published == 'true' gates the whole job —
     # nothing to announce when no version was cut. The rpi-image job
     # is intentionally NOT in `needs` here: it's a ~30 min pi-gen
     # build that can legitimately fail for reasons orthogonal to the
@@ -431,7 +465,7 @@ jobs:
     # upstream breakage). The announcement should still go out with
     # the binary + image links when that happens.
     needs: [release, binaries, ftw-connect, ftw-subetha, docker]
-    if: needs.release.outputs.new_release_published == 'true'
+    if: needs.release.outputs.published == 'true'
     permissions:
       contents: read   # gh release view needs read access
     steps:
@@ -440,7 +474,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           REPO:            ${{ github.repository }}
-          VERSION:         v${{ needs.release.outputs.new_release_version }}
+          VERSION:         v${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
           if [ -z "${DISCORD_WEBHOOK:-}" ]; then
@@ -452,7 +486,7 @@ jobs:
           IMAGE_MAIN="ghcr.io/${REPO}:${VERSION}"
           IMAGE_UPDATER="ghcr.io/${REPO}-updater:${VERSION}"
 
-          # Pull the release body (changelog) semantic-release wrote.
+          # Pull the release body (changelog) the publish step wrote.
           # Truncated to 3500 chars so the embed description stays under
           # Discord's 4096-char limit even after we add the trailer.
           BODY="$(gh release view "${VERSION}" --repo "${REPO}" --json body --jq .body || echo '')"
@@ -465,7 +499,7 @@ jobs:
 
           # jq builds the JSON so embedded backticks / newlines / quotes
           # in the changelog can't break out of the payload string.
-          # Code-fence the image refs with a literal backtick char (\u0060)
+          # Code-fence the image refs with a literal backtick char (`)
           # so the markdown renders as inline code in Discord.
           PAYLOAD="$(jq -n \
             --arg title "🚀 forty-two-watts ${VERSION}" \
@@ -481,8 +515,8 @@ jobs:
                 color: 16753920,
                 description: $desc,
                 fields: [
-                  { name: "Main image",    value: ("\u0060" + $main + "\u0060"), inline: false },
-                  { name: "Updater image", value: ("\u0060" + $upd  + "\u0060"), inline: false }
+                  { name: "Main image",    value: ("`" + $main + "`"), inline: false },
+                  { name: "Updater image", value: ("`" + $upd  + "`"), inline: false }
                 ],
                 footer: { text: ("github.com/" + env.REPO) },
                 timestamp: (now | todateiso8601)

@@ -1,0 +1,102 @@
+name: changeset-check
+
+# Gate on PRs targeting master: require either a new .changeset/*.md
+# file in the diff, or the `no-changeset` label on the PR (escape
+# hatch for pure docs / CI / chore PRs that don't ship anything to
+# users). The release workflow consumes those changesets — without
+# this gate, ship-relevant PRs land on master with no entry in the
+# next release's CHANGELOG.
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changeset-required:
+    name: changeset present (or no-changeset label)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Short-circuit on no-changeset label
+        # If the PR carries the explicit skip label, accept the PR
+        # without checking for a changeset file. This is the escape
+        # hatch for docs / CI / chore work — anything that genuinely
+        # shouldn't contribute a CHANGELOG line.
+        id: label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          if echo "${LABELS}" | jq -e '.[] | select(.name == "no-changeset")' >/dev/null; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            echo "PR carries 'no-changeset' label — release-notes gate satisfied."
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout
+        if: steps.label.outputs.skip != 'true'
+        uses: actions/checkout@v5
+        with:
+          # Need both sides of the PR diff so `changeset status
+          # --since=origin/master` can detect new .changeset/*.md
+          # files. fetch-depth: 0 is the standard.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Node
+        if: steps.label.outputs.skip != 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: ''
+
+      - name: Install changesets CLI
+        if: steps.label.outputs.skip != 'true'
+        run: npm install --no-audit --no-fund --no-save
+
+      - name: Fetch base ref
+        if: steps.label.outputs.skip != 'true'
+        # `changeset status --since=...` diffs against a ref, so we
+        # need it locally. actions/checkout@v5 with fetch-depth: 0
+        # fetches refs/remotes/origin/* by default — confirm master
+        # is present and fall back to fetching it explicitly if not.
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify origin/master >/dev/null 2>&1; then
+            git fetch origin master --depth=1
+          fi
+
+      - name: Verify a changeset is present
+        if: steps.label.outputs.skip != 'true'
+        # `changeset status --since=origin/master` exits non-zero
+        # (with a "no changesets" message) when the PR adds none.
+        # That non-zero exit is exactly the failure signal we want
+        # to surface as a red required check.
+        run: |
+          set -euo pipefail
+          if ! npx --no-install changeset status --since=origin/master; then
+            cat <<'EOF' >&2
+
+          ===============================================================
+          No changeset detected on this PR.
+
+          Add one with:
+
+              npx changeset
+
+          …and commit the generated .changeset/*.md file.
+
+          If this PR genuinely doesn't need a release entry (docs-only,
+          CI tweak, pure chore), add the "no-changeset" label to the PR
+          instead.
+
+          See .changeset/README.md for guidance.
+          ===============================================================
+          EOF
+            exit 1
+          fi
