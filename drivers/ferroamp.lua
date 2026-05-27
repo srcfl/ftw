@@ -304,6 +304,44 @@ function driver_init(config)
         end
     end
 
+    -- Per-driver SoC bounds — operator override for the file-scope
+    -- DISCHARGE_FLOOR_SOC and CHARGE_CEIL_SOC defaults. Lets sites
+    -- with different chemistry / longevity preferences tune the
+    -- window without forking the driver. Ferroamp's own BMS still
+    -- protects against overcharge / deep discharge regardless of
+    -- what we set here.
+    if config and config.charge_ceil_soc ~= nil then
+        local v = tonumber(config.charge_ceil_soc)
+        if v and v > 0 and v <= 1.0 then
+            CHARGE_CEIL_SOC = v
+            host.log("info", string.format(
+                "Ferroamp: CHARGE_CEIL_SOC = %.3f (from config)", v))
+        else
+            host.log("warn", string.format(
+                "Ferroamp: charge_ceil_soc=%s ignored (must be 0 < v <= 1)",
+                tostring(config.charge_ceil_soc)))
+        end
+    end
+
+    if config and config.discharge_floor_soc ~= nil then
+        local v = tonumber(config.discharge_floor_soc)
+        if v and v >= 0 and v < 1.0 then
+            DISCHARGE_FLOOR_SOC = v
+            host.log("info", string.format(
+                "Ferroamp: DISCHARGE_FLOOR_SOC = %.3f (from config)", v))
+        else
+            host.log("warn", string.format(
+                "Ferroamp: discharge_floor_soc=%s ignored (must be 0 <= v < 1)",
+                tostring(config.discharge_floor_soc)))
+        end
+    end
+
+    if CHARGE_CEIL_SOC <= DISCHARGE_FLOOR_SOC then
+        host.log("warn", string.format(
+            "Ferroamp: CHARGE_CEIL_SOC (%.3f) <= DISCHARGE_FLOOR_SOC (%.3f) — usable charge window is empty",
+            CHARGE_CEIL_SOC, DISCHARGE_FLOOR_SOC))
+    end
+
     -- Subscribe to telemetry topics
     host.mqtt_subscribe("extapi/data/ehub")
     host.mqtt_subscribe("extapi/data/eso")

@@ -47,80 +47,76 @@ forty-two-watts pair --abort
 
 ## On the friend
 
-One-time install (Mac or Linux):
+**No install.** The host sends the friend a URL of the form:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
+```
+https://relay.fortytwowatts.com/h/garage-coffee-river-bicycle-window-cat
 ```
 
-The curl installer detects your OS and CPU architecture, downloads the
-right binary from the latest GitHub release, and installs it to
-`/usr/local/bin` (or `~/.local/bin` as a fallback when `/usr/local/bin`
-requires elevated permissions).
+The friend opens it in any modern browser. The landing page displays
+a **4-digit code** and waits. The friend reads the code to the host
+over a voice channel (phone call, Signal voice, etc.) — that voice
+channel is the second factor; a leaked URL alone cannot complete the
+handshake.
 
-Developer / Go toolchain alternative:
+The host hears the code, sees the matching code on the dashboard's
+pair card, and clicks **Allow**. The page then reveals two
+ready-to-paste blocks:
 
-```bash
-go install github.com/frahlg/forty-two-watts/go/cmd/ftw-connect@latest
-```
+1. For Claude Code (or any MCP-aware agent):
+   ```bash
+   claude mcp add ftw-friend --transport http \
+     https://relay.fortytwowatts.com/h/<token>/mcp
+   ```
+2. For the browser dashboard:
+   ```
+   https://relay.fortytwowatts.com/h/<token>/web/
+   ```
 
-Per session:
+Both URLs are live for the rest of the TTL (default 4 h). The host
+can revoke from the dashboard at any time.
 
-```bash
-ftw-connect garage-coffee-river-bicycle-window-cat
-```
+When the work is done, **the friend opens the PR from their own
+machine** — they clone the 42W repo locally (the agent does this for
+them via its own shell), apply the changes they wrote on the owner's
+instance, and run `gh pr create` with the `pair-session.md` template.
 
-That:
-
-1. Connects to the Sourceful relay with the given token.
-2. Prints a local URL — the sidecar's HTTP API, tunnelled to the
-   friend's machine.
-3. Copies a ready-to-paste agent prompt to the clipboard (the prompt
-   teaches the agent to talk to the local URL with `curl`).
-
-`ftw-connect` writes **nothing** to disk on the friend's side — no
-config files, no MCP entries, no agent CLI mutations. The agent
-(Claude Code, Codex, Gemini Code, anything with Bash + curl) just
-follows the prompt and reaches the tools through the local URL.
-
-Open your agent of choice, paste the prompt, work. When done, **the
-friend opens the PR from their own machine** — they clone the 42W
-repo locally (the agent does this for them via its own shell), apply
-the changes they wrote on the owner's instance, and run `gh pr
-create` with the `pair-session.md` template.
-
-The owner doesn't touch git or GitHub. They share the token,
-let the friend work, and get a PR link back.
+The owner doesn't touch git or GitHub. They share the URL, approve
+the connection, let the friend work, and get a PR link back.
 
 ## Relay
 
-The transport uses a Sourceful-operated relay server at
-`subetha.fortytwowatts.com:7777`. Both the host (Pi) and the friend
-connect outbound to the relay; the relay matches them by their shared
-6-word token and splices the TCP streams bidirectionally.
+The transport uses the Sourceful-operated HTTPS relay at
+`relay.fortytwowatts.com`. The host (Pi) opens a long-poll
+connection outbound; the relay enqueues friend traffic for the host
+to pick up. Friend connects with normal HTTPS — browser, `curl`, or
+Claude Code's HTTP MCP transport.
 
 ```
-       subetha.fortytwowatts.com:7777
+       relay.fortytwowatts.com (HTTPS, terminated by CF + ftw-relay)
                       |
           +-----------+-----------+
           |                       |
-       outbound                outbound
+     outbound long-poll      HTTPS request
           |                       |
-    OWNER's Pi              FRIEND's Mac
-  (ftw-pair sidecar)       (ftw-connect)
+    OWNER's Pi              FRIEND's browser /
+  (ftw-pair sidecar)        Claude Code
 ```
 
-All traffic is end-to-end encrypted with **ChaCha20-Poly1305 AEAD**
-keyed from the token via HKDF-SHA256. The relay sees only ciphertext and
-token-match strings; it cannot read or modify the MCP payload.
+The relay terminates TLS and sees plaintext MCP + dashboard traffic.
+This is a deliberate trade — the operator runs the relay (or trusts
+the operator who does), and end-to-end encryption was protecting
+against a threat the help-a-friend flow doesn't actually face. See
+`docs/goals/relay-as-tunnel.md` for the security model.
 
-**Token format:** 6 random words from the BIP39 English wordlist
-(2048 words, ~66 bits of entropy). Example:
-`garage-coffee-river-bicycle-window-cat`.
+**Token format:** 6 short words. Example:
+`garage-coffee-river-bicycle-window-cat`. The token is a routing
+key, not an access secret — the 4-digit voice-channel approval is
+the actual access gate.
 
-The relay address can be overridden with the `-relay-addr` flag or the
-`FTW_PAIR_RELAY` environment variable — useful for self-hosted relays or
-local testing.
+The relay base URL can be overridden with the `-relay` flag or the
+`FTW_PAIR_RELAY` environment variable — useful for self-hosted
+relays or local development against `http://localhost:7378`.
 
 ## What the friend gets
 
@@ -155,9 +151,10 @@ what changed on the owner's instance.
 | Step | Owner | Friend |
 |---|---|---|
 | Trigger pair session | Click **Start pair session** in the dashboard (or `forty-two-watts pair --intent "..."`) | — |
-| Share token | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
-| Connect | — | `ftw-connect <token>` |
-| Develop the driver / debug | — | Drives their agent (Claude Code, Codex, …) through the tunnel |
+| Share URL | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
+| Connect | — | Open the URL in a browser |
+| Approve | Hears the 4-digit code on voice, clicks **Allow** on the dashboard | Reads the code aloud |
+| Develop the driver / debug | — | Drives their agent (Claude Code, Codex, …) through the relay-tunneled MCP / dashboard |
 | Open the PR | — | Clones repo locally, `gh pr create` from own machine |
 | Review the PR | Reviews via GitHub web UI | — |
 
@@ -170,15 +167,16 @@ PR the friend opens.
 
 `forty-two-watts pair` spawns the `ftw-pair` sidecar. The sidecar runs
 a 17-tool HTTP surface on `localhost:9999` (REST at `/tools/<name>` +
-MCP at `/mcp`, sharing the same Tool[] and audit log), then connects
-to the Sourceful relay (`subetha.fortytwowatts.com:7777`) using a
-randomly generated 6-word token. The relay holds the connection until
-the friend connects with the same token, then splices the two TCP
-streams. All bytes are ChaCha20-Poly1305 encrypted end-to-end using
-HKDF-derived keys from the shared token — the relay sees only
-ciphertext. The friend runs `ftw-connect <token>` which opens a local
-port on their machine; their agent of choice talks to that port over
-plain HTTP via `curl`. The friend's CLI config is never touched.
+MCP at `/mcp`, sharing the same Tool[] and audit log), then registers
+a 6-word token with the HTTPS relay at `relay.fortytwowatts.com` and
+starts a long-poll loop. When a friend opens the URL, the relay
+displays a 4-digit code; the host approves on its dashboard with the
+matching code (heard over voice). After approval, the relay forwards
+friend HTTP traffic to the host: `/h/<token>/mcp` lands on the local
+MCP server, `/h/<token>/web/...` proxies to the dashboard at
+`localhost:8080`. The friend's machine never installs anything —
+their agent uses Claude Code's `--transport http` directly against
+the relay URL.
 
 ## When the work is done — driver persistence
 
@@ -207,19 +205,28 @@ regardless of whether the PR is merged.
 
 - One session at a time.
 - 4 h default TTL, configurable, hard kill at expiry.
-- Relay: `subetha.fortytwowatts.com:7777` (Sourceful-operated). Override
-  with `-relay-addr` flag or `FTW_PAIR_RELAY` env var for self-hosted relays.
-- No per-call approval. Pairing = full trust for the session.
+- Relay: `relay.fortytwowatts.com` (Sourceful-operated). Override
+  with `-relay` flag or `FTW_PAIR_RELAY` env var for self-hosted relays
+  or local development.
+- No per-call approval after the initial connect-approval. Pairing =
+  full trust for the session duration.
 
 ## Troubleshooting
 
-**`relay connect: dial relay subetha.fortytwowatts.com:7777: ...`** —
-the relay is not yet deployed in this environment, or network access is
-blocked. Use `-relay-addr` to point at a local relay for testing.
+**`register with relay: ...`** — the relay isn't reachable from the
+host. Check the host can `curl https://relay.fortytwowatts.com/healthz`.
+Use `-relay http://localhost:7378` to point at a local relay for testing.
 
-**Agent can't reach the local URL** — confirm the tunnel is still up
-(`ftw-connect` should be running in its terminal). `curl <local-url>/tools`
-from any shell to test directly; you should get a JSON tool catalog.
+**Friend gets `425 Too Early`** — the host hasn't approved the session
+yet. The friend hits the URL, the relay shows the 4-digit code, the
+friend reads it on voice, the host clicks Allow on the dashboard.
+Without approval, MCP and web paths return 425.
+
+**Agent can't reach the dashboard** — confirm the host's `ftw-pair`
+process is still running and the long-poll loop is healthy. `curl
+https://relay.fortytwowatts.com/h/<token>/web/api/status` from any
+shell to test directly; you should get a JSON payload from the
+dashboard.
 
 **Card doesn't appear on the dashboard** — the sidecar posts to
 `/api/pair/status` every 5 s; check the main service is reachable on
@@ -227,18 +234,28 @@ from any shell to test directly; you should get a JSON tool catalog.
 
 ## Self-hosting the relay
 
-The `ftw-subetha` binary is published as a release asset alongside
-`ftw-connect`. To run your own relay:
+The `ftw-relay` binary is published as a release asset for
+`linux/amd64` + `linux/arm64`. Full operator runbook (Cloudflare
+Origin Certificate, DNS, systemd hardening) is in
+`docs/relay-deploy.md`.
+
+Quick local-development version:
 
 ```bash
-# Download from the latest release
-curl -fsSL .../ftw-subetha-linux-amd64 -o ftw-subetha
-chmod +x ftw-subetha
+# Build from source
+cd go && go build -o ../bin/ftw-relay ./cmd/ftw-relay
 
-# Run (plain TCP; add -tls-cert / -tls-key for TLS)
-./ftw-subetha -addr :7777
+# Run on plain HTTP (no TLS — fine for localhost only)
+./bin/ftw-relay -addr :7378
 
-# Point host + friend at your relay
-FTW_PAIR_RELAY=myrelay.example.com:7777 forty-two-watts pair --intent "..."
-FTW_PAIR_RELAY=myrelay.example.com:7777 ftw-connect <token>
+# Point the host at it
+FTW_PAIR_RELAY=http://localhost:7378 forty-two-watts pair --intent "..."
+
+# Friend just opens the URL the host prints:
+#   http://localhost:7378/h/<token>
 ```
+
+For production use add `-cert /path/to/cert.pem -key /path/to/key.pem`;
+the binary then serves HTTPS directly. Most deployments instead front
+it with Cloudflare proxy + a Cloudflare Origin Certificate — see
+`docs/relay-deploy.md` for the full setup.

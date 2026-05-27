@@ -4,8 +4,9 @@
 //
 // The REST layer exists so a connecting agent (Claude Code, Codex, Gemini,
 // anything else with Bash + curl) can drive the sidecar without us having
-// to register an MCP server with their CLI. The friend runs ftw-connect,
-// gets a local URL, and the agent's prompt teaches it to:
+// to register an MCP server with their CLI. The friend opens the relay
+// URL in a browser, gets a tunneled REST surface, and the agent's prompt
+// teaches it to:
 //
 //	curl <URL>/tools                          # list available tools + schemas
 //	curl -X POST <URL>/tools/<name> -d <json> # invoke a tool

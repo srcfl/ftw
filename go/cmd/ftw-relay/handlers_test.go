@@ -1,0 +1,175 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+)
+
+func newTestRelay() *Relay {
+	return &Relay{
+		Queue:  tunnel.NewQueue(),
+		Tokens: NewTokenRegistry(),
+	}
+}
+
+func TestHealthz(t *testing.T) {
+	srv := httptest.NewServer(newTestRelay().Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+func TestTunnelNextLongPollsAndDelivers(t *testing.T) {
+	r := newTestRelay()
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+
+	respCh := make(chan tunnel.TunneledResponse, 1)
+	go func() {
+		resp, err := r.Queue.Enqueue(context.Background(), "host-a", tunnel.TunneledRequest{Method: "GET", Path: "/mcp"})
+		if err == nil {
+			respCh <- resp
+		}
+	}()
+
+	resp, err := http.Get(srv.URL + "/tunnel/host-a/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var tr tunnel.TunneledRequest
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if tr.Path != "/mcp" {
+		t.Fatalf("wrong path: %q", tr.Path)
+	}
+
+	body, _ := json.Marshal(tunnel.TunneledResponse{Status: 200, Body: []byte("ok")})
+	postResp, err := http.Post(srv.URL+"/tunnel/host-a/response/"+tr.ReqID, "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if postResp.StatusCode != 204 {
+		t.Fatalf("post status %d", postResp.StatusCode)
+	}
+
+	select {
+	case got := <-respCh:
+		if got.Status != 200 || string(got.Body) != "ok" {
+			t.Fatalf("wrong response: %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("response never made it back to enqueuer")
+	}
+}
+
+func TestTunnelNextTimesOutWith204(t *testing.T) {
+	r := newTestRelay()
+	r.PollTimeout = 50 * time.Millisecond
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/tunnel/host-empty/next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 204 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterEndpoint(t *testing.T) {
+	r := newTestRelay()
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	body := strings.NewReader(`{"host_id":"host-a","token":"tok1","ttl_ms":3600000,"approval_code":"4827","intent":"help","as":"@erik"}`)
+	resp, err := http.Post(srv.URL+"/tunnel/register", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	var out registerResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.PublicURL, "/h/tok1") {
+		t.Fatalf("bad public_url: %q", out.PublicURL)
+	}
+}
+
+func TestLandingPageShowsApprovalCode(t *testing.T) {
+	r := newTestRelay()
+	_, _ = r.Tokens.Register(TokenRegistration{
+		HostID: "host-a", Token: "lookme", TTL: time.Hour,
+		ApprovalCode: "4827", Intent: "help me", As: "@erik",
+	})
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/h/lookme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := readBody(resp.Body)
+	resp.Body.Close()
+	html := string(body)
+	if !strings.Contains(html, "4827") {
+		t.Fatalf("approval code missing from landing page:\n%s", html)
+	}
+	if !strings.Contains(html, "@erik") {
+		t.Fatalf("identity missing from landing page")
+	}
+}
+
+func TestApproveFlipsState(t *testing.T) {
+	r := newTestRelay()
+	_, _ = r.Tokens.Register(TokenRegistration{
+		HostID: "host-a", Token: "tok2", TTL: time.Hour, ApprovalCode: "9911",
+	})
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/h/tok2/approve", "application/json", strings.NewReader(`{"code":"9911"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 204 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	tok, _ := r.Tokens.Get("tok2")
+	if tok.State() != TokenActive {
+		t.Fatalf("expected active, got %v", tok.State())
+	}
+}
+
+func TestPendingTokenReturns425OnPublicMCP(t *testing.T) {
+	r := newTestRelay()
+	_, _ = r.Tokens.Register(TokenRegistration{
+		HostID: "host-a", Token: "tok3", TTL: time.Hour, ApprovalCode: "1",
+	})
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/h/tok3/mcp", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusTooEarly {
+		t.Fatalf("status %d, want 425", resp.StatusCode)
+	}
+}
