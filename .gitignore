@@ -44,3 +44,10 @@ dev-data/
 bin/
 artifacts/
 .cache/
+
+# Changesets / Node — devtool surface only. package.json + the
+# committed package-lock.json are tracked (reproducible installs in
+# CI via `npm ci`); node_modules and runtime artifacts are not.
+node_modules/
+release-notes.md
+

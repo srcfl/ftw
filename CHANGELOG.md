@@ -1,3 +1,5 @@
+# Changelog
+
 ## [0.8.0](https://github.com/frahlg/forty-two-watts/compare/v0.7.0...v0.8.0) (2026-04-16)
 
 ### Features

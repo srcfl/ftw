@@ -1,0 +1,137 @@
+name: changeset-check
+
+# Gate on PRs targeting master: require a `.changeset/*.md` file unless
+# the PR only touches paths in the allowlist below (docs, repo config,
+# CI tooling, markdown). Pattern lifted from umara/u-front.
+#
+# Escape layers, in order:
+#   1. PR title matches the auto-generated Version PR → skip (defensive;
+#      Version PRs are created via GITHUB_TOKEN so they don't cascade
+#      workflow runs, but this guards against a manual push to the
+#      Version PR branch).
+#   2. PR carries the `no-changeset` label → skip (manual override for
+#      cases the allowlist doesn't anticipate).
+#   3. All changed files are in the path allowlist → skip.
+#   4. Otherwise: require at least one added .changeset/<name>.md file.
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changeset-required:
+    name: changeset present (or auto-exempt)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Short-circuit on auto-generated Version PR
+        id: version_pr
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          if [[ "${TITLE}" == "chore(release): version packages"* ]]; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            echo "Auto-generated Version PR — gate skipped."
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Short-circuit on no-changeset label
+        if: steps.version_pr.outputs.skip != 'true'
+        id: label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          set -euo pipefail
+          if echo "${LABELS}" | jq -e '.[] | select(.name == "no-changeset")' >/dev/null; then
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+            echo "PR carries 'no-changeset' label — release-notes gate satisfied."
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Checkout
+        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify changeset present (or PR is allowlisted)
+        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          git fetch --no-tags origin "${BASE_SHA}" "${HEAD_SHA}"
+
+          CHANGED="$(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")"
+          if [ -z "${CHANGED}" ]; then
+            echo "No file changes — passing."
+            exit 0
+          fi
+
+          # Paths in this allowlist do NOT require a changeset. Tweak
+          # if a new "obviously doesn't ship to users" path is added.
+          # Patterns are extended-grep regexes:
+          #   - any *.md / *.mdx / *.txt anywhere in the tree
+          #   - the docs/ tree
+          #   - .changeset/ (the changesets themselves + README/config)
+          #   - .github/ (workflows, CODEOWNERS, issue templates…)
+          #   - .vscode/ (editor settings)
+          #   - dotfiles at repo root
+          REQUIRES_CHANGESET="$(echo "${CHANGED}" | grep -vE \
+              -e '(^|/)[^/]+\.(md|mdx|txt)$' \
+              -e '^docs/' \
+              -e '^\.changeset/' \
+              -e '^\.github/' \
+              -e '^\.vscode/' \
+              -e '^\.editorconfig$' \
+              -e '^\.gitignore$' \
+              -e '^\.gitattributes$' \
+              -e '^LICENSE$' \
+              || true)"
+
+          if [ -z "${REQUIRES_CHANGESET}" ]; then
+            echo "✓ PR changes only docs / repo config / CI tooling (allowlist) — changeset not required."
+            echo ""
+            echo "Files in this PR:"
+            echo "${CHANGED}" | sed 's/^/  /'
+            exit 0
+          fi
+
+          # Accept any added or modified changeset file. Exclude
+          # deletions (--diff-filter=d) so a PR that *deletes* a
+          # changeset can't satisfy the rule. Exclude the README +
+          # config files which are infrastructure, not real entries.
+          CHANGESETS="$(git diff --name-only --diff-filter=d "${BASE_SHA}"..."${HEAD_SHA}" \
+              | grep -E '^\.changeset/[^/]+\.md$' \
+              | grep -vE '^\.changeset/(README)\.md$' \
+              || true)"
+
+          if [ -n "${CHANGESETS}" ]; then
+            echo "✓ Found changeset(s):"
+            echo "${CHANGESETS}" | sed 's/^/  /'
+            exit 0
+          fi
+
+          echo "::error::No changeset found and this PR touches files outside the docs/config/CI allowlist."
+          echo ""
+          echo "Files that triggered the changeset requirement:"
+          echo "${REQUIRES_CHANGESET}" | sed 's/^/  /'
+          echo ""
+          echo "Add one with:"
+          echo "  npx changeset"
+          echo ""
+          echo "Or hand-create '.changeset/<descriptive-name>.md' following an existing example."
+          echo ""
+          echo "If this PR genuinely needs no release entry, either:"
+          echo "  - apply the 'no-changeset' label to skip the gate, or"
+          echo "  - expand the allowlist in .github/workflows/changeset-check.yml in the same PR."
+          exit 1
