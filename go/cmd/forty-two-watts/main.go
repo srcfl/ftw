@@ -215,11 +215,23 @@ func main() {
 		}
 	}
 
+	// ---- Driver catalog (pure text scan, no Lua VM) ----
+	// Loaded once here so the pre-flight capacity + warning logic can
+	// ask the catalog "is this driver an EV charger / vehicle source?"
+	// rather than sniffing filenames. The Lua DRIVER table's
+	// capabilities list is the driver's self-declaration.
+	driverCatalog, catErr := drivers.LoadCatalogMulti(*userDriversDirFlag, resolveDriverDir())
+	if catErr != nil {
+		slog.Warn("driver catalog load failed; EV-driver classification will be conservative",
+			"err", catErr)
+		driverCatalog = nil
+	}
+
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh
 	// is vehicle capacity, not site-battery capacity.
-	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints)
-	warnIfEVHasBatteryCapacity(cfg.Drivers, cfg.Loadpoints)
+	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog)
+	warnIfEVHasBatteryCapacity(cfg.Drivers, cfg.Loadpoints, driverCatalog)
 
 	// ---- Battery models — restore from SQLite + ensure one per driver ----
 	models := make(map[string]*battery.Model)
@@ -445,7 +457,11 @@ func main() {
 			for k := range capacities {
 				delete(capacities, k)
 			}
-			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints) {
+			// Re-scan the catalog so a hot-edited Lua driver's
+			// capability change is picked up by the EV-classification
+			// filter on the very next reload tick.
+			reloadCatalog, _ := drivers.LoadCatalogMulti(*userDriversDirFlag, resolveDriverDir())
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog) {
 				capacities[k] = v
 			}
 			capMu.Unlock()
@@ -2255,7 +2271,7 @@ func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []
 // Filtering here rather than at config-parse time means the vehicle
 // capacity is still available for EV-side logic (loadpoint manager)
 // without a schema migration.
-func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint) map[string]float64 {
+func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry) map[string]float64 {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
 		// Only treat a loadpoint row as authoritative when it's
@@ -2269,8 +2285,8 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 		}
 		evDrivers[lp.DriverName] = struct{}{}
 	}
-	out := make(map[string]float64, len(drivers))
-	for _, d := range drivers {
+	out := make(map[string]float64, len(drvList))
+	for _, d := range drvList {
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
@@ -2279,13 +2295,13 @@ func driverCapacitiesFrom(drivers []config.Driver, loadpoints []config.Loadpoint
 			// (Value remains in cfg.Drivers for any driver-side use.)
 			continue
 		}
-		// Fallback detection: operators who haven't migrated to a
-		// `loadpoints:` config block still have EV drivers with
-		// `battery_capacity_wh` pointing at vehicle capacity. Match
-		// on Lua filename prefix — narrow allowlist of known EV
-		// charger drivers so we don't accidentally exclude a battery
-		// driver whose name happens to share a substring.
-		if isLikelyEVDriver(d.Lua) {
+		// Fallback detection for operators who haven't migrated to a
+		// `loadpoints:` config block: ask the catalog whether the
+		// driver self-declares an EV or vehicle capability. Source of
+		// truth is the Lua DRIVER table; Go matches on what the
+		// driver says it is, not what its filename happens to look
+		// like.
+		if drivers.IsEVOrVehicleDriver(catalog, d.Lua) {
 			continue
 		}
 		out[d.Name] = d.BatteryCapacityWh
@@ -2361,41 +2377,17 @@ func supportsPVCurtailFrom(drivers []config.Driver) map[string]bool {
 	return out
 }
 
-// isLikelyEVDriver classifies a Lua path as pointing at an EV charger
-// driver based on the filename prefix. Kept narrow + allowlist-style —
-// a battery driver named "easy_battery.lua" would be wrongly excluded
-// by a broader regex, so we only match EV chargers we actually ship.
-func isLikelyEVDriver(luaPath string) bool {
-	if luaPath == "" {
-		return false
-	}
-	base := strings.ToLower(luaPath)
-	if i := strings.LastIndex(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	base = strings.TrimSuffix(base, ".lua")
-	for _, p := range []string{
-		"easee",         // easee_cloud.lua, easee.lua
-		"ocpp",          // ocpp_cp.lua, ocpp_csms.lua
-		"ctek",          // ctek.lua, ctek_mqtt.lua, ctek_v2.lua
-		"chargestorm",   // CTEK Chargestorm variants
-		"tesla_vehicle", // tesla_vehicle.lua — DerVehicle emitter (BLE proxy)
-		"vehicle",       // generic vehicle drivers — anything emitting DerVehicle should NOT be counted as a stationary battery
-	} {
-		if strings.HasPrefix(base, p) {
-			return true
-		}
-	}
-	return false
-}
-
 // warnIfEVHasBatteryCapacity surfaces operator mis-config where an EV
 // driver's YAML entry still carries battery_capacity_wh. The value is
 // now ignored for MPC battery-pool purposes, but we log at WARN so the
 // operator moves it to the loadpoint's vehicle_capacity_wh (where it
 // serves the DP's EV SoC inference) rather than leaving it as a
 // silent no-op.
-func warnIfEVHasBatteryCapacity(drivers []config.Driver, loadpoints []config.Loadpoint) {
+//
+// catalog is the parsed driver catalog (Lua DRIVER tables); the
+// detection consults it for self-declared "ev" / "vehicle" capability
+// rather than sniffing filenames or vendor names.
+func warnIfEVHasBatteryCapacity(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry) {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
 		if lp.ID == "" || lp.DriverName == "" {
@@ -2403,18 +2395,18 @@ func warnIfEVHasBatteryCapacity(drivers []config.Driver, loadpoints []config.Loa
 		}
 		evDrivers[lp.DriverName] = struct{}{}
 	}
-	for _, d := range drivers {
+	for _, d := range drvList {
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
 		_, isEVByLoadpoint := evDrivers[d.Name]
-		isEVByFilename := isLikelyEVDriver(d.Lua)
-		if !isEVByLoadpoint && !isEVByFilename {
+		isEVByCatalog := drivers.IsEVOrVehicleDriver(catalog, d.Lua)
+		if !isEVByLoadpoint && !isEVByCatalog {
 			continue
 		}
 		reason := "driver is referenced by a loadpoint"
-		if !isEVByLoadpoint && isEVByFilename {
-			reason = "driver's Lua filename matches a known EV charger"
+		if !isEVByLoadpoint && isEVByCatalog {
+			reason = "driver self-declares ev/vehicle capability in its Lua DRIVER table"
 		}
 		slog.Warn(reason+" — battery_capacity_wh is being ignored for MPC "+
 			"battery-pool sizing. Move the value to "+
