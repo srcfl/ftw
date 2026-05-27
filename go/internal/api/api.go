@@ -150,6 +150,28 @@ type Deps struct {
 	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
 	PairStore *PairStatusStore
 
+	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
+
+	// OwnerAccessRPID is the WebAuthn Relying Party ID for owner-access
+	// passkeys. Must match the hostname the browser sees. Defaults to
+	// "relay.fortytwowatts.com"; override to "localhost" for local dev.
+	OwnerAccessRPID string
+
+	// OwnerAccessOrigins is the list of permitted browser origins for
+	// owner-access ceremonies. Defaults to ["https://"+OwnerAccessRPID].
+	OwnerAccessOrigins []string
+
+	// OwnerAccessLANBypass, when true, treats any request from a loopback
+	// host (127.0.0.1, localhost, ::1) as already authenticated. Used by
+	// the LAN-served dashboard so the operator doesn't have to re-auth at
+	// home. NEVER enable when the server is reachable from the public
+	// internet directly (without the relay in front).
+	OwnerAccessLANBypass bool
+
+	// ownerAccess is the lazy-initialised ceremony + session map. Built
+	// on first request via Server.ownerAccess().
+	ownerAccess *ownerAccessState
+
 	// PairSelfExe overrides the binary path used by POST /api/pair/start to
 	// spawn child pair sessions. Empty means "use os.Executable()". Tests
 	// inject "/bin/true" (or a fake echo binary) here so they don't actually
@@ -162,6 +184,10 @@ type Deps struct {
 type Server struct {
 	deps *Deps
 	mux  *http.ServeMux
+
+	// mu protects lazy-initialised per-server caches (currently just
+	// the owner-access ceremony state on Deps.ownerAccess).
+	mu sync.Mutex
 
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
@@ -294,6 +320,15 @@ func (s *Server) routes() {
 		selfExe = resolvedSelfExe()
 	}
 	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
+
+	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
+	s.handle("POST /api/owner-access/enroll/start", s.handleOwnerEnrollStart)
+	s.handle("POST /api/owner-access/enroll/finish", s.handleOwnerEnrollFinish)
+	s.handle("POST /api/owner-access/login/start", s.handleOwnerLoginStart)
+	s.handle("POST /api/owner-access/login/finish", s.handleOwnerLoginFinish)
+	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
+	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
+	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

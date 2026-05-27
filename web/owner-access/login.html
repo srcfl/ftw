@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>forty-two-watts — sign in</title>
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="stylesheet" href="/components/theme.css">
+  <style>
+    body { font-family: var(--sans), system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--fg, #222); background: var(--bg, #fff); }
+    h1 { font-weight: 600; }
+    .panel { border: 1px solid var(--line, #ddd); padding: 1.5rem; border-radius: .5rem; margin-top: 2rem; }
+    button { font: inherit; padding: .6rem 1.2rem; border-radius: .3rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; }
+    button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
+    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    .muted { color: var(--fg-muted, #888); font-size: .9em; }
+  </style>
+</head>
+<body>
+  <h1>Sign in</h1>
+  <p class="muted">Authenticate with a previously enrolled passkey. Your browser will prompt for Touch ID, Windows Hello, or your device's equivalent.</p>
+
+  <div class="panel">
+    <button id="signin" class="primary">Sign in with passkey</button>
+    <button onclick="location.href='./'">Cancel</button>
+    <div id="msg"></div>
+  </div>
+
+  <script type="module">
+    import { apiBase, decodeAssertionOptions, encodeAssertionResult } from "./webauthn.js";
+    const base = apiBase();
+    const msg = document.getElementById("msg");
+
+    async function signin() {
+      msg.innerHTML = "";
+      try {
+        const start = await fetch(base + "/api/owner-access/login/start", { method: "POST" });
+        if (start.status === 404) {
+          msg.innerHTML = '<div class="err">No passkeys enrolled. Enroll one on the LAN dashboard first.</div>';
+          return;
+        }
+        if (!start.ok) {
+          const body = await start.text();
+          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}</div>`;
+          return;
+        }
+        const { ceremony_token, options } = await start.json();
+        const credOpts = decodeAssertionOptions(options);
+        const cred = await navigator.credentials.get({ publicKey: credOpts });
+        const finish = await fetch(
+          base + "/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(ceremony_token),
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(encodeAssertionResult(cred)),
+            credentials: "same-origin",
+          }
+        );
+        if (!finish.ok) {
+          const body = await finish.text();
+          msg.innerHTML = `<div class="err">Finish failed (${finish.status}): ${body}</div>`;
+          return;
+        }
+        msg.innerHTML = '<div class="ok">Signed in. Redirecting…</div>';
+        setTimeout(() => location.href = "./", 800);
+      } catch (e) {
+        msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;
+      }
+    }
+
+    document.getElementById("signin").onclick = signin;
+    // Auto-trigger on page load so the user doesn't have to click twice
+    // after navigating from /. WebAuthn requires user activation, but a
+    // recent click counts; if it fails, the user clicks the button again.
+    if (document.referrer.endsWith("/owner-access/")) {
+      signin();
+    }
+  </script>
+</body>
+</html>

@@ -16,6 +16,7 @@ import (
 type Relay struct {
 	Queue       *tunnel.Queue
 	Tokens      *TokenRegistry
+	Owners      *OwnerRegistry
 	PollTimeout time.Duration // 0 → 25s default
 }
 
@@ -45,6 +46,15 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /h/{token}/approve", r.publicApprove)
 	mux.HandleFunc("/h/{token}/mcp", r.publicMCP)
 	mux.HandleFunc("/h/{token}/web/", r.publicWeb)
+
+	// Owner remote access (Phase 3) — site-id-keyed routes that bypass
+	// the pair-token flow. Host must POST /me/register on startup; the
+	// /me/<site_id>/... family then tunnels to that host's long-poll
+	// loop just like /h/<token>/... does for friend access. WebAuthn
+	// session validation happens on the host side via the session cookie.
+	mux.HandleFunc("POST /me/register", r.meRegister)
+	mux.HandleFunc("/me/{site_id}/{rest...}", r.meTunnel)
+	mux.HandleFunc("/me/{site_id}", r.meRoot)
 	return mux
 }
 
@@ -231,4 +241,84 @@ func readBody(r io.Reader) ([]byte, error) {
 		return nil, nil
 	}
 	return io.ReadAll(r)
+}
+
+// ---- Owner remote access (Phase 3) ----
+
+type meRegisterRequest struct {
+	SiteID string `json:"site_id"`
+	HostID string `json:"host_id"`
+}
+
+func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
+	var reg meRegisterRequest
+	if err := json.NewDecoder(req.Body).Decode(&reg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if reg.SiteID == "" || reg.HostID == "" {
+		http.Error(w, "site_id and host_id required", http.StatusBadRequest)
+		return
+	}
+	if r.Owners == nil {
+		http.Error(w, "owner registry not configured", http.StatusInternalServerError)
+		return
+	}
+	r.Owners.Register(reg.SiteID, reg.HostID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// meRoot handles GET /me/<site_id> — the landing page when the operator
+// types the bare URL. Forwards to the host's /owner-access/ landing
+// page so the host can decide whether to show "log in with passkey" or
+// "no devices enrolled yet — go enroll one on LAN first".
+func (r *Relay) meRoot(w http.ResponseWriter, req *http.Request) {
+	r.meForward(w, req, "/owner-access/")
+}
+
+// meTunnel handles /me/<site_id>/{rest...} — generic forwarder.
+// Everything past /me/<site_id>/ is passed verbatim through the tunnel
+// to the host. The host's auth middleware (cookie check on the
+// /owner-access/ family + /api/owner-access/*) decides what's allowed.
+func (r *Relay) meTunnel(w http.ResponseWriter, req *http.Request) {
+	rest := req.PathValue("rest")
+	r.meForward(w, req, "/"+rest)
+}
+
+func (r *Relay) meForward(w http.ResponseWriter, req *http.Request, innerPath string) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" {
+		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	if r.Owners == nil {
+		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
+		return
+	}
+	hostID, err := r.Owners.Lookup(siteID)
+	if err != nil {
+		http.Error(w, "site not registered (host may be offline)", http.StatusServiceUnavailable)
+		return
+	}
+	// Preserve the query string so login redirects, ceremony tokens etc.
+	// land at the host intact.
+	if q := req.URL.RawQuery; q != "" {
+		innerPath = innerPath + "?" + q
+	}
+	body, _ := readBody(req.Body)
+	resp, err := r.Queue.Enqueue(req.Context(), hostID, tunnel.TunneledRequest{
+		Method: req.Method,
+		Path:   innerPath,
+		Header: req.Header,
+		Body:   body,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	for k, vv := range resp.Header {
+		w.Header()[k] = vv
+	}
+	w.WriteHeader(resp.Status)
+	_, _ = w.Write(resp.Body)
 }
