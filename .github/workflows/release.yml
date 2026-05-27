@@ -1,8 +1,14 @@
 name: release
 
-# Changesets-driven release.
+# Changesets-driven release. Pattern lifted from umara/u-front.
 #
-# Pattern lifted from umara/u-front — proven on a higher-traffic repo.
+# This workflow ONLY handles the changesets flow + tag + GitHub Release
+# creation. The cross-platform binaries, docker images, RPi image, and
+# Discord announcement live in `release-assets.yml` and are triggered
+# explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
+# the end of the publish step. Keeping the heavy build matrix out of
+# this workflow means regular changeset-PR merges to master don't
+# queue + skip ~half a dozen asset jobs on every single push.
 #
 # Flow:
 #   1. PRs land on master, each carrying a `.changeset/*.md` file (or
@@ -18,10 +24,8 @@ name: release
 #        changesets, so `steps.changesets.outputs.hasChangesets ==
 #        'false'`. The "Tag and create GitHub Release" step then runs
 #        idempotently: independent existence checks for the tag and
-#        the release let a partial-failure rerun finish the job.
-#   3. Downstream jobs (binaries, ftw-relay, docker,
-#      rpi-image, discord) gate on `release.outputs.published == 'true'`
-#      and run only when a real release was cut.
+#        the release let a partial-failure rerun finish the job, then
+#        dispatches `release-assets.yml` against the new tag.
 #
 # Manual workflow_dispatch is still available as an emergency lever
 # (e.g. re-running the publish step against partial state) but the
@@ -33,12 +37,12 @@ on:
   workflow_dispatch:
 
 # changesets/action needs to push the Version PR. The publish step
-# pushes the tag + creates the GH release. The docker job pushes to GHCR.
+# pushes the tag + creates the GH release + dispatches release-assets.
 permissions:
   contents: write
-  packages: write
   issues: write
   pull-requests: write
+  actions: write   # required by `gh workflow run release-assets.yml` at the end
 
 # Serialize release workflow runs. Two concurrent "push to master"
 # events otherwise race on the Version PR branch + tag creation.
@@ -71,9 +75,6 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install dependencies
-        # Lockfile-reproducible install. The previous `npm install
-        # --no-save` flow risked picking up a future @changesets/cli
-        # minor regression on every workflow run.
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Create or update Version Packages PR
@@ -89,6 +90,14 @@ jobs:
           title:  "chore(release): version packages"
           commit: "chore(release): version packages"
         env:
+          # Pushes to the "Version Packages" branch use GITHUB_TOKEN.
+          # GitHub deliberately does NOT cascade `pull_request` /
+          # `push` workflow runs from GITHUB_TOKEN events, so checks
+          # like `test.yml` and `changeset-check.yml` won't fire on
+          # the auto-generated Version PR. If branch protection
+          # requires those checks, push an empty commit to the
+          # `changeset-release/master` branch from a user account
+          # (or admin-merge the PR) — same pattern u-front uses.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag and create GitHub Release
@@ -118,8 +127,8 @@ jobs:
           fi
 
           # Already-done case: a previous run completed cleanly. No
-          # new release was cut on THIS run, so downstream asset jobs
-          # should skip — emit `published=false` so they do.
+          # new release was cut on THIS run, so the release-assets
+          # dispatch below should skip — emit `published=false`.
           if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ]; then
             echo "Tag ${TAG} and GitHub Release already exist — nothing to publish."
             {
@@ -156,369 +165,18 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
           echo "Published ${TAG}"
 
-  binaries:
-    name: build + upload release binaries
-    runs-on: ubuntu-latest
-    needs: release
-    # Skip when changesets didn't cut a new version — nothing to
-    # attach to. Parallel with the docker job (both gated on the same
-    # output) so a failing binary build doesn't block the image push.
-    if: needs.release.outputs.published == 'true'
-    permissions:
-      contents: write  # upload assets to the release
-    strategy:
-      # fail-fast off: if one platform breaks, still get assets for the
-      # others uploaded so users aren't blocked by a single bad target.
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-            archive: tar.gz
-          - goos: linux
-            goarch: arm64
-            ext: ""
-            archive: tar.gz
-          - goos: windows
-            goarch: amd64
-            ext: ".exe"
-            archive: zip
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          # changesets-publish pushed v${version}. Check out the tag
-          # so -X main.Version matches what users install.
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: go/go.sum
-
-      - name: Build
+      - name: Dispatch release-assets workflow
+        # GitHub does NOT fire downstream `push: tags` workflows from
+        # events created by GITHUB_TOKEN, so the tag push above won't
+        # auto-trigger release-assets.yml. workflow_dispatch via gh
+        # CLI does. (u-front uses the identical pattern.)
+        if: steps.publish.outputs.published == 'true'
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.version }}
-        working-directory: go
-        run: |
-          mkdir -p ../bin
-          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/forty-two-watts
-          ls -la "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}"
-
-      - name: Package
-        env:
-          PLATFORM: ${{ matrix.goos }}-${{ matrix.goarch }}
-          BINARY: forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-          ARCHIVE: ${{ matrix.archive }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ steps.publish.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p release
-          if [[ "${ARCHIVE}" == "zip" ]]; then
-            (cd bin && zip -q "../release/forty-two-watts-${PLATFORM}.zip" "${BINARY}")
-            zip -qr "release/forty-two-watts-${PLATFORM}.zip" drivers web config.example.yaml
-          else
-            tar czf "release/forty-two-watts-${PLATFORM}.tar.gz" \
-              -C bin "${BINARY}" \
-              -C .. drivers web config.example.yaml
-          fi
-          ls -la release/
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.version }}
-          ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
-        # --clobber lets a workflow re-run replace a prior upload without
-        # failing — useful when the publish step is re-triggered manually.
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
-
-  ftw-relay:
-    name: build + upload ftw-relay binaries
-    runs-on: ubuntu-latest
-    needs: release
-    # The HTTPS request-response relay that replaces ftw-subetha.
-    # Deployed by the operator on relay.fortytwowatts.com — see
-    # docs/relay-deploy.md.
-    if: needs.release.outputs.published == 'true'
-    permissions:
-      contents: write  # upload assets to the release
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-            ext: ""
-          - goos: linux
-            goarch: arm64
-            ext: ""
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache-dependency-path: go/go.sum
-
-      - name: Build ftw-relay
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
-          VERSION: v${{ needs.release.outputs.version }}
-        working-directory: go
-        run: |
-          mkdir -p ../bin
-          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/ftw-relay
-          ls -la "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}"
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: v${{ needs.release.outputs.version }}
-          ASSET: bin/ftw-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
-
-  docker:
-    name: docker build + push (${{ matrix.target }})
-    runs-on: ubuntu-latest
-    needs: release
-    # Only build if a new version was cut. Skipping when there's no
-    # release keeps `:latest` deterministic — every `:latest`
-    # corresponds to a real tagged version.
-    if: needs.release.outputs.published == 'true'
-    # Build both the main image and the ftw-updater sidecar image from
-    # the same tag. They're paired — `docker compose pull` upgrades them
-    # together — so tagging in lockstep (latest, vX.Y.Z, sha) keeps the
-    # shared state.json schema in sync on both sides of update-ipc.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: main
-            dockerfile: ./Dockerfile
-            image_suffix: ""
-            title: forty-two-watts
-            description: Unified Home Energy Management System
-          - target: updater
-            dockerfile: ./Dockerfile.updater
-            image_suffix: "-updater"
-            title: forty-two-watts-updater
-            description: Sidecar that executes docker compose pull + up for in-app updates
-    steps:
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          # ghcr.io/<owner>/<repo>[-updater]:<tag>
-          images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
-          tags: |
-            type=raw,value=v${{ needs.release.outputs.version }}
-            type=raw,value=${{ needs.release.outputs.version }}
-            type=raw,value=latest
-            type=sha,format=short
-          labels: |
-            org.opencontainers.image.title=${{ matrix.title }}
-            org.opencontainers.image.description=${{ matrix.description }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.version=${{ needs.release.outputs.version }}
-            org.opencontainers.image.licenses=MIT
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=v${{ needs.release.outputs.version }}
-          # Use the GHA cache backend so subsequent builds reuse layers.
-          # Per-target scope keeps main + updater from evicting each other.
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to:   type=gha,mode=max,scope=${{ matrix.target }}
-
-  rpi-image:
-    name: build + upload RPi SD-card image
-    runs-on: ubuntu-latest
-    # The image's firstboot.service runs `docker compose pull` against
-    # GHCR, so the docker images for this version have to be live
-    # before the image hits the release. Depend on the docker job to
-    # enforce that ordering.
-    needs: [release, docker]
-    if: needs.release.outputs.published == 'true'
-    permissions:
-      contents: write  # upload the .img.xz as a release asset
-    steps:
-      - name: Free disk space
-        # pi-gen's chroot stages want ~15 GB of working disk during
-        # a build; ubuntu-latest ships with ~14 GB free. Evicting
-        # the preinstalled dotnet / GHC / boost trees we don't use
-        # and the runner's docker image cache buys ~30 GB back.
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
-          sudo docker system prune -af
-          df -h /
-
-      - name: Register binfmt_misc handlers for arm / arm64
-        # See rpi-image-build.yml for the full rationale. Short version:
-        # install qemu-user-static with --no-install-recommends (pi-gen's
-        # bookworm-arm64 branch wants /usr/bin/qemu-aarch64-static, and
-        # the flag keeps the wrapper-registering qemu-user-binfmt out),
-        # then let tonistiigi/binfmt install F-flagged handlers that
-        # survive pi-gen's chroot mount-namespace switch.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
-
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          ref: v${{ needs.release.outputs.version }}
-
-      - name: Build image
-        # Pin to pi-gen's bookworm-arm64 branch. Upstream master has
-        # advanced to Debian trixie; we keep the image on bookworm
-        # so the curl|bash installer and the SD image deploy to the
-        # same base OS. Bump this when we choose to jump to trixie.
-        env:
-          PI_GEN_REF: bookworm-arm64
-        run: deploy/pi-gen/build.sh
-
-      - name: Locate + rename artifact
-        id: artifact
-        # pi-gen names its output <IMG_NAME>-<date>.img.xz. Embed the
-        # release version in the filename so the GitHub Release asset
-        # matches the binaries job's naming convention and is
-        # self-identifying when users download it later.
-        run: |
-          set -euo pipefail
-          SRC="$(ls deploy/pi-gen/pi-gen/deploy/*.img.xz | head -n1)"
-          if [ -z "${SRC}" ]; then
-            echo "pi-gen produced no .img.xz — check build log above" >&2
-            exit 1
-          fi
-          DST="deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-v${{ needs.release.outputs.version }}.img.xz"
-          mv "${SRC}" "${DST}"
-          ls -lah "${DST}"
-          echo "asset=${DST}" >> "${GITHUB_OUTPUT}"
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:   v${{ needs.release.outputs.version }}
-          ASSET: ${{ steps.artifact.outputs.asset }}
-        # --clobber mirrors the binaries job — lets a manual re-run
-        # replace a prior upload without aborting the job.
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
-
-  discord:
-    name: announce release on Discord
-    runs-on: ubuntu-latest
-    # Wait for binaries + docker so the message links to assets that
-    # actually exist. published == 'true' gates the whole job —
-    # nothing to announce when no version was cut. The rpi-image job
-    # is intentionally NOT in `needs` here: it's a ~30 min pi-gen
-    # build that can legitimately fail for reasons orthogonal to the
-    # release being useful (disk-space eviction regressions, pi-gen
-    # upstream breakage). The announcement should still go out with
-    # the binary + image links when that happens.
-    needs: [release, binaries, ftw-relay, docker]
-    if: needs.release.outputs.published == 'true'
-    permissions:
-      contents: read   # gh release view needs read access
-    steps:
-      - name: Post release announcement
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
-          REPO:            ${{ github.repository }}
-          VERSION:         v${{ needs.release.outputs.version }}
-        run: |
-          set -euo pipefail
-          if [ -z "${DISCORD_WEBHOOK:-}" ]; then
-            echo "DISCORD_WEBHOOK secret not set — skipping announcement."
-            exit 0
-          fi
-
-          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
-          IMAGE_MAIN="ghcr.io/${REPO}:${VERSION}"
-          IMAGE_UPDATER="ghcr.io/${REPO}-updater:${VERSION}"
-
-          # Pull the release body (changelog) the publish step wrote.
-          # Truncated to 3500 chars so the embed description stays under
-          # Discord's 4096-char limit even after we add the trailer.
-          BODY="$(gh release view "${VERSION}" --repo "${REPO}" --json body --jq .body || echo '')"
-          if [ "${#BODY}" -gt 3500 ]; then
-            BODY="${BODY:0:3500}"$'\n\n…truncated. Full notes: '"${RELEASE_URL}"
-          fi
-          if [ -z "${BODY}" ]; then
-            BODY="Release ${VERSION} is live. See ${RELEASE_URL} for details."
-          fi
-
-          # jq builds the JSON so embedded backticks / newlines / quotes
-          # in the changelog can't break out of the payload string.
-          # Code-fence the image refs with a literal backtick char (`)
-          # so the markdown renders as inline code in Discord.
-          PAYLOAD="$(jq -n \
-            --arg title "🚀 forty-two-watts ${VERSION}" \
-            --arg url   "${RELEASE_URL}" \
-            --arg desc  "${BODY}" \
-            --arg main  "${IMAGE_MAIN}" \
-            --arg upd   "${IMAGE_UPDATER}" \
-            '{
-              username: "forty-two-watts",
-              embeds: [{
-                title: $title,
-                url:   $url,
-                color: 16753920,
-                description: $desc,
-                fields: [
-                  { name: "Main image",    value: ("`" + $main + "`"), inline: false },
-                  { name: "Updater image", value: ("`" + $upd  + "`"), inline: false }
-                ],
-                footer: { text: ("github.com/" + env.REPO) },
-                timestamp: (now | todateiso8601)
-              }]
-            }')"
-
-          # Post — fail the step on non-2xx so a broken webhook doesn't
-          # silently swallow an announcement.
-          curl -sS -f -X POST \
-            -H "Content-Type: application/json" \
-            -d "${PAYLOAD}" \
-            "${DISCORD_WEBHOOK}"
+          echo "Dispatching release-assets.yml for ${TAG}"
+          gh workflow run release-assets.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${TAG}"

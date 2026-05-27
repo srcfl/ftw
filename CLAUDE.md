@@ -81,6 +81,73 @@ release tarball and is loaded on startup.
 No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua). `go build`
 produces a static single-binary distribution.
 
+## Releases (Changesets)
+
+The release pipeline is driven by [Changesets](https://github.com/changesets/changesets).
+**Every PR with a user-visible change needs a changeset file.** The pattern
+is lifted from `umara/u-front` — start there if you need a reference setup.
+
+**Workflow per PR.** From the repo root:
+
+```bash
+npx changeset      # interactive: pick bump (patch/minor/major) + summary
+```
+
+That writes a `.changeset/<name>.md` file you commit with your change. The
+`changeset-check` workflow on the PR enforces presence (or one of the
+exempt paths below).
+
+**Bump types.**
+- `patch` — bug fix, perf tweak, internal refactor, doc fix that affects
+  user-visible content.
+- `minor` — new driver, new feature flag, new API endpoint, new UI
+  surface, expanded device support.
+- `major` — breaking change (config schema rename, removed endpoint,
+  removed driver capability, sign-convention change at the boundary).
+  Pair with `BREAKING CHANGE:` notes in the changeset body.
+
+**Auto-exempt paths.** If a PR touches only `*.md` / `*.mdx` / `*.txt`,
+`docs/`, `.github/`, `.vscode/`, or root dotfiles (`.editorconfig`,
+`.gitignore`, `.gitattributes`, `LICENSE`), the gate auto-passes — no
+changeset required. The full allowlist lives in
+`.github/workflows/changeset-check.yml`; extend it in the same PR if a
+new "obviously doesn't ship to users" path appears.
+
+**Manual escape hatch.** Apply the `no-changeset` label to the PR if the
+allowlist doesn't cover your case but the change genuinely doesn't merit
+a release entry. Use sparingly — the allowlist exists to make this rare.
+
+**Release flow.**
+
+1. PR with changeset lands on master.
+2. `release.yml` runs `changesets/action`, which opens / updates the
+   "Version Packages" PR (titled `chore(release): version packages`).
+   That PR contains the bumped `package.json` version + a rewritten
+   `CHANGELOG.md` section + deletion of the consumed `.changeset/*.md`
+   files.
+3. Merge the Version PR when you're ready to cut a release.
+4. `release.yml` fires again on master, sees `hasChangesets == 'false'`,
+   tags `vX.Y.Z`, creates the GitHub Release with codename-annotated
+   notes, then triggers binaries / docker / rpi-image / discord jobs.
+
+**Key files.**
+- `package.json` — version source. Bumped automatically; do not edit
+  by hand. (Private package; this isn't published to npm.)
+- `.changeset/config.json` — Changesets config (preset, baseBranch).
+- `.changeset/<name>.md` — pending entries.
+- `CHANGELOG.md` — generated; first line `# Changelog`, entries
+  prepended above the legacy semantic-release history.
+- `scripts/apply-codename.cjs` — Hitchhiker codename header generator
+  for release notes. Deterministic per `MAJOR.MINOR` so patches share a
+  codename; "42 appears anywhere" triggers an Easter-egg ceremony line.
+- `.github/workflows/release.yml` — orchestrator.
+- `.github/workflows/changeset-check.yml` — PR gate.
+
+**Don't.** Don't hand-edit `CHANGELOG.md` (changesets rewrites it).
+Don't bump `package.json` version manually. Don't use the old
+`make release` Makefile target as a substitute for the workflow — it
+builds tarballs locally but doesn't tag or publish.
+
 ## Adding a new driver
 
 1. Copy `drivers/ferroamp.lua` as a template to `drivers/mydevice.lua`.

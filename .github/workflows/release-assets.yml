@@ -1,0 +1,434 @@
+name: release-assets
+
+# Build + publish the artefacts that accompany a tagged release:
+#   - cross-platform main binaries (linux amd64/arm64, windows amd64)
+#   - linux ftw-relay relay binaries
+#   - docker images for main + ftw-updater pushed to GHCR
+#   - Raspberry Pi SD-card image (.img.xz)
+#   - Discord release announcement
+#
+# Triggered by `release.yml` via `gh workflow run release-assets.yml
+# --ref vX.Y.Z` immediately after the tag + GitHub Release are created.
+# Also listens directly on `push: tags: ['v*']` so a hand-pushed tag
+# (e.g. via `git push origin vX.Y.Z` from a maintainer's laptop) does
+# the same thing — but in the normal Changesets flow that won't fire
+# because the bot-pushed tag from release.yml doesn't cascade workflow
+# runs.
+#
+# Splitting these jobs out of release.yml means:
+#   - regular changeset-PR merges to master don't queue + skip a half
+#     dozen asset jobs every time.
+#   - asset builds run on the tag ref directly — no need for the meta
+#     job to thread `outputs.version` from a different workflow run.
+#   - failures here don't block the next release; a re-run is a clean
+#     `gh workflow run release-assets.yml --ref vX.Y.Z`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (vX.Y.Z) — defaults to the tag this workflow is dispatched against"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # upload release assets + read tag refs
+  packages: write   # push to GHCR
+
+# Multiple tags shouldn't trample each other. ref-scoped concurrency
+# group means dispatching v0.102.4 won't cancel an in-flight v0.102.3.
+concurrency:
+  group: release-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: derive tag + version
+    runs-on: ubuntu-latest
+    outputs:
+      tag:     ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Derive tag/version from ref
+        id: meta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Priority order:
+          #   1. explicit workflow_dispatch `tag` input (operator override).
+          #   2. github.ref when it's a tag ref (set by `--ref` on dispatch
+          #      OR by `push: tags`).
+          if [ -n "${INPUT_TAG}" ]; then
+            TAG="${INPUT_TAG}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF##refs/tags/}"
+          else
+            echo "release-assets must be dispatched against a v* tag (got ref=${GITHUB_REF})" >&2
+            exit 1
+          fi
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "Tag ${TAG} doesn't look like a vX.Y.Z release tag" >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "Building assets for ${TAG} (version ${VERSION})"
+
+  binaries:
+    name: build + upload release binaries
+    runs-on: ubuntu-latest
+    needs: meta
+    permissions:
+      contents: write  # upload assets to the release
+    strategy:
+      # fail-fast off: if one platform breaks, still get assets for the
+      # others uploaded so users aren't blocked by a single bad target.
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive: zip
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          # Check out the tag so -X main.Version matches what users install.
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.meta.outputs.tag }}
+        working-directory: go
+        run: |
+          mkdir -p ../bin
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/forty-two-watts
+          ls -la "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}"
+
+      - name: Package
+        env:
+          PLATFORM: ${{ matrix.goos }}-${{ matrix.goarch }}
+          BINARY: forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          if [[ "${ARCHIVE}" == "zip" ]]; then
+            (cd bin && zip -q "../release/forty-two-watts-${PLATFORM}.zip" "${BINARY}")
+            zip -qr "release/forty-two-watts-${PLATFORM}.zip" drivers web config.example.yaml
+          else
+            tar czf "release/forty-two-watts-${PLATFORM}.tar.gz" \
+              -C bin "${BINARY}" \
+              -C .. drivers web config.example.yaml
+          fi
+          ls -la release/
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+        # --clobber lets a workflow re-run replace a prior upload without
+        # failing — useful when this workflow is re-dispatched manually.
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
+  ftw-relay:
+    name: build + upload ftw-relay binaries
+    runs-on: ubuntu-latest
+    needs: meta
+    # The HTTPS request-response relay that replaces ftw-subetha.
+    # Deployed by the operator on relay.fortytwowatts.com — see
+    # docs/relay-deploy.md.
+    permissions:
+      contents: write  # upload assets to the release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go/go.sum
+
+      - name: Build ftw-relay
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ needs.meta.outputs.tag }}
+        working-directory: go
+        run: |
+          mkdir -p ../bin
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-relay
+          ls -la "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}"
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          ASSET: bin/ftw-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
+  docker:
+    name: docker build + push (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    needs: meta
+    # Build both the main image and the ftw-updater sidecar image from
+    # the same tag. They're paired — `docker compose pull` upgrades them
+    # together — so tagging in lockstep (latest, vX.Y.Z, sha) keeps the
+    # shared state.json schema in sync on both sides of update-ipc.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: main
+            dockerfile: ./Dockerfile
+            image_suffix: ""
+            title: forty-two-watts
+            description: Unified Home Energy Management System
+          - target: updater
+            dockerfile: ./Dockerfile.updater
+            image_suffix: "-updater"
+            title: forty-two-watts-updater
+            description: Sidecar that executes docker compose pull + up for in-app updates
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # ghcr.io/<owner>/<repo>[-updater]:<tag>
+          images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
+          tags: |
+            type=raw,value=${{ needs.meta.outputs.tag }}
+            type=raw,value=${{ needs.meta.outputs.version }}
+            type=raw,value=latest
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=${{ matrix.description }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.meta.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.meta.outputs.tag }}
+          # Use the GHA cache backend so subsequent builds reuse layers.
+          # Per-target scope keeps main + updater from evicting each other.
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to:   type=gha,mode=max,scope=${{ matrix.target }}
+
+  rpi-image:
+    name: build + upload RPi SD-card image
+    runs-on: ubuntu-latest
+    # The image's firstboot.service runs `docker compose pull` against
+    # GHCR, so the docker images for this version have to be live
+    # before the image hits the release. Depend on the docker job to
+    # enforce that ordering.
+    needs: [meta, docker]
+    permissions:
+      contents: write  # upload the .img.xz as a release asset
+    steps:
+      - name: Free disk space
+        # pi-gen's chroot stages want ~15 GB of working disk during
+        # a build; ubuntu-latest ships with ~14 GB free. Evicting
+        # the preinstalled dotnet / GHC / boost trees we don't use
+        # and the runner's docker image cache buys ~30 GB back.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
+          sudo docker system prune -af
+          df -h /
+
+      - name: Register binfmt_misc handlers for arm / arm64
+        # See rpi-image-build.yml for the full rationale. Short version:
+        # install qemu-user-static with --no-install-recommends (pi-gen's
+        # bookworm-arm64 branch wants /usr/bin/qemu-aarch64-static, and
+        # the flag keeps the wrapper-registering qemu-user-binfmt out),
+        # then let tonistiigi/binfmt install F-flagged handlers that
+        # survive pi-gen's chroot mount-namespace switch.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
+          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
+
+      - name: Checkout tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Build image
+        # Pin to pi-gen's bookworm-arm64 branch. Upstream master has
+        # advanced to Debian trixie; we keep the image on bookworm
+        # so the curl|bash installer and the SD image deploy to the
+        # same base OS. Bump this when we choose to jump to trixie.
+        env:
+          PI_GEN_REF: bookworm-arm64
+        run: deploy/pi-gen/build.sh
+
+      - name: Locate + rename artifact
+        id: artifact
+        # pi-gen names its output <IMG_NAME>-<date>.img.xz. Embed the
+        # release version in the filename so the GitHub Release asset
+        # matches the binaries job's naming convention and is
+        # self-identifying when users download it later.
+        run: |
+          set -euo pipefail
+          SRC="$(ls deploy/pi-gen/pi-gen/deploy/*.img.xz | head -n1)"
+          if [ -z "${SRC}" ]; then
+            echo "pi-gen produced no .img.xz — check build log above" >&2
+            exit 1
+          fi
+          DST="deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-${{ needs.meta.outputs.tag }}.img.xz"
+          mv "${SRC}" "${DST}"
+          ls -lah "${DST}"
+          echo "asset=${DST}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG:   ${{ needs.meta.outputs.tag }}
+          ASSET: ${{ steps.artifact.outputs.asset }}
+        # --clobber mirrors the binaries job — lets a manual re-run
+        # replace a prior upload without aborting the job.
+        run: gh release upload "${TAG}" "${ASSET}" --clobber
+
+  discord:
+    name: announce release on Discord
+    runs-on: ubuntu-latest
+    # Wait for binaries + docker so the message links to assets that
+    # actually exist. The rpi-image job is intentionally NOT in `needs`
+    # here: it's a ~30 min pi-gen build that can legitimately fail for
+    # reasons orthogonal to the release being useful (disk-space
+    # eviction regressions, pi-gen upstream breakage). The announcement
+    # should still go out with the binary + image links when that
+    # happens.
+    needs: [meta, binaries, ftw-relay, docker]
+    permissions:
+      contents: read   # gh release view needs read access
+    steps:
+      - name: Post release announcement
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
+          REPO:            ${{ github.repository }}
+          VERSION:         ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_WEBHOOK:-}" ]; then
+            echo "DISCORD_WEBHOOK secret not set — skipping announcement."
+            exit 0
+          fi
+
+          RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
+          IMAGE_MAIN="ghcr.io/${REPO}:${VERSION}"
+          IMAGE_UPDATER="ghcr.io/${REPO}-updater:${VERSION}"
+
+          # Pull the release body (changelog) the publish step wrote.
+          # Truncated to 3500 chars so the embed description stays under
+          # Discord's 4096-char limit even after we add the trailer.
+          BODY="$(gh release view "${VERSION}" --repo "${REPO}" --json body --jq .body || echo '')"
+          if [ "${#BODY}" -gt 3500 ]; then
+            BODY="${BODY:0:3500}"$'\n\n…truncated. Full notes: '"${RELEASE_URL}"
+          fi
+          if [ -z "${BODY}" ]; then
+            BODY="Release ${VERSION} is live. See ${RELEASE_URL} for details."
+          fi
+
+          # jq builds the JSON so embedded backticks / newlines / quotes
+          # in the changelog can't break out of the payload string.
+          # Code-fence the image refs with a literal backtick char (`)
+          # so the markdown renders as inline code in Discord.
+          PAYLOAD="$(jq -n \
+            --arg title "🚀 forty-two-watts ${VERSION}" \
+            --arg url   "${RELEASE_URL}" \
+            --arg desc  "${BODY}" \
+            --arg main  "${IMAGE_MAIN}" \
+            --arg upd   "${IMAGE_UPDATER}" \
+            '{
+              username: "forty-two-watts",
+              embeds: [{
+                title: $title,
+                url:   $url,
+                color: 16753920,
+                description: $desc,
+                fields: [
+                  { name: "Main image",    value: ("`" + $main + "`"), inline: false },
+                  { name: "Updater image", value: ("`" + $upd  + "`"), inline: false }
+                ],
+                footer: { text: ("github.com/" + env.REPO) },
+                timestamp: (now | todateiso8601)
+              }]
+            }')"
+
+          # Post — fail the step on non-2xx so a broken webhook doesn't
+          # silently swallow an announcement.
+          curl -sS -f -X POST \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}" \
+            "${DISCORD_WEBHOOK}"
