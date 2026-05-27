@@ -65,6 +65,11 @@ type Token struct {
 	expiresAt        time.Time
 	state            TokenState
 	approvalAttempts int
+	lastActivity     time.Time
+	// pendingApprovals tracks landing-page hits that haven't been
+	// matched yet by an /approve POST. Used by the host dashboard's
+	// "friend opened the URL, code shown" indicator.
+	pendingApprovals int
 }
 
 // State returns the current state, lazily transitioning to TokenExpired
@@ -161,4 +166,56 @@ func (r *TokenRegistry) Revoke(token string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.state = TokenRevoked
+}
+
+// TouchActivity bumps the last-activity timestamp. Called by the
+// public-tunnel handlers every time a friend request lands on this
+// token. The dashboard's session-info polling surfaces it as
+// "friend last active N seconds ago".
+func (r *TokenRegistry) TouchActivity(token string) {
+	t, err := r.Get(token)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	t.lastActivity = time.Now()
+	t.mu.Unlock()
+}
+
+// MarkPendingHit increments the count of landing-page hits for this
+// token. Used by the dashboard to surface "friend opened the URL"
+// before they've called in with the code.
+func (r *TokenRegistry) MarkPendingHit(token string) {
+	t, err := r.Get(token)
+	if err != nil {
+		return
+	}
+	t.mu.Lock()
+	if t.state == TokenPending {
+		t.pendingApprovals++
+	}
+	t.mu.Unlock()
+}
+
+// SessionInfo is the snapshot the host polls via /sessions/<token>/info.
+type SessionInfo struct {
+	State            string `json:"state"`
+	PendingApprovals int    `json:"pending_approvals"`
+	LastActivityMs   int64  `json:"last_activity_ms"`
+	ExpiresAtMs      int64  `json:"expires_at_ms"`
+}
+
+func (t *Token) Snapshot() SessionInfo {
+	state := t.State() // takes lock internally (lazy-expires)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	si := SessionInfo{
+		State:            state.String(),
+		PendingApprovals: t.pendingApprovals,
+		ExpiresAtMs:      t.expiresAt.UnixMilli(),
+	}
+	if !t.lastActivity.IsZero() {
+		si.LastActivityMs = t.lastActivity.UnixMilli()
+	}
+	return si
 }

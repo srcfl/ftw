@@ -49,6 +49,34 @@ type PairStatus struct {
 	ToolCount        int      `json:"tool_count,omitempty"`
 	LastTools        []string `json:"last_tools,omitempty"`
 	ClientsConnected int      `json:"clients_connected"`
+
+	// PairURL is the full public URL the friend opens to join the
+	// session. Empty when running with -no-relay (LAN-only). The
+	// dashboard renders this verbatim — operator copies + sends.
+	PairURL string `json:"pair_url,omitempty"`
+
+	// ApprovalCode is the 4-digit voice-channel cross-check code.
+	// Friend reads it from the relay landing page; operator types it
+	// into the dashboard's Allow form. The matching POST flips the
+	// relay's token state from pending → active.
+	ApprovalCode string `json:"approval_code,omitempty"`
+
+	// SessionState mirrors the relay-side token state ("pending",
+	// "active", "expired", "revoked"). Updated by the sidecar's
+	// heartbeat after polling /sessions/<token>/info on the relay.
+	// Empty in LAN-only mode (no relay state to track).
+	SessionState string `json:"session_state,omitempty"`
+
+	// LastActivityMs is the millisecond Unix timestamp of the most
+	// recent tunneled request from the friend (via the relay's
+	// /sessions/<token>/info endpoint). 0 means no activity yet OR
+	// LAN-only mode.
+	LastActivityMs int64 `json:"last_activity_ms,omitempty"`
+
+	// PendingApprovalsCount is how many landing-page hits the relay
+	// has seen for a still-pending token. Surfaces to the dashboard
+	// as "friend opened the URL — call you with the code".
+	PendingApprovalsCount int `json:"pending_approvals_count,omitempty"`
 }
 
 // isExpired returns true when StartedAt + TTLS is in the past.

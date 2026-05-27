@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
@@ -31,6 +32,50 @@ type TunnelHandle struct {
 	ApprovalCode string
 	PublicURL    string
 	HostID       string
+	RelayBase    string // base URL for /tunnel/sessions/<token>/info polling
+
+	// LastInfo holds the most recent /tunnel/sessions/<token>/info
+	// snapshot, refreshed by RefreshSessionInfo on the heartbeat
+	// cycle. Nil until first successful poll.
+	infoMu   sync.Mutex
+	LastInfo *RelaySessionInfo
+}
+
+// RelaySessionInfo mirrors the relay's SessionInfo JSON.
+type RelaySessionInfo struct {
+	State            string `json:"state"`
+	PendingApprovals int    `json:"pending_approvals"`
+	LastActivityMs   int64  `json:"last_activity_ms"`
+	ExpiresAtMs      int64  `json:"expires_at_ms"`
+}
+
+// RefreshSessionInfo polls the relay's /tunnel/sessions/<token>/info
+// endpoint and updates LastInfo. Best-effort — a transient failure is
+// logged at debug level and the previous snapshot is kept.
+func (h *TunnelHandle) RefreshSessionInfo(ctx context.Context) {
+	if h == nil || h.RelayBase == "" || h.Token == "" {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		h.RelayBase+"/tunnel/sessions/"+h.Token+"/info", nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return
+	}
+	defer resp.Body.Close()
+	var info RelaySessionInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return
+	}
+	h.infoMu.Lock()
+	h.LastInfo = &info
+	h.infoMu.Unlock()
 }
 
 // StartTunnelHost registers a token with the relay and returns a handle
@@ -92,5 +137,6 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 		ApprovalCode: code,
 		PublicURL:    fmt.Sprintf("%s/h/%s", relayURL, token),
 		HostID:       hostID,
+		RelayBase:    relayURL,
 	}, nil
 }

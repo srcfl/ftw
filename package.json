@@ -3,6 +3,9 @@
   "version": "0.102.3",
   "private": true,
   "description": "Unified Home Energy Management System — version metadata only; the application itself is Go. Changesets reads `version` from this file to drive the release tag.",
+  "scripts": {
+    "test": "node --test 'web/**/*.test.mjs'"
+  },
   "devDependencies": {
     "@changesets/cli": "^2.27.10"
   }

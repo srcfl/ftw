@@ -163,13 +163,14 @@ func main() {
 			case <-sess.Done():
 				return
 			case <-t.C:
-				// TODO(relay-as-tunnel): the new request-response relay
-				// doesn't track "active tunnels" the way subetha did.
-				// Wire a relay-side /sessions/<token>/info endpoint or
-				// derive presence from recent activity timestamps. For
-				// now the dashboard always sees 0 clients.
-				_ = tunHandle
-				_ = postPairStatusFull(*apiBase, pairCode, sess, audit, 0)
+				// Refresh the relay's session-info snapshot before
+				// posting so the dashboard sees fresh presence + state.
+				// Best-effort — if the relay is unreachable the last
+				// snapshot is kept and the dashboard surfaces "stale".
+				if tunHandle != nil {
+					tunHandle.RefreshSessionInfo(ctx)
+				}
+				_ = postPairStatusFull(*apiBase, pairCode, sess, audit, tunHandle)
 			}
 		}
 	}()
@@ -193,9 +194,14 @@ func main() {
 }
 
 // postPairStatusFull is the heartbeat variant of postPairStatus: it
-// includes live tool_count + last_tools + clients_connected so the
-// dashboard <ftw-pair-card> can show real-time activity.
-func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, clients int) error {
+// includes live tool_count + last_tools + clients_connected, plus the
+// relay-side metadata (PairURL + ApprovalCode + SessionState +
+// LastActivityMs) so the dashboard <ftw-pair-card> can show the URL
+// to share, the 4-digit voice-channel code, and live presence.
+//
+// All four relay fields are zero in -no-relay mode and the dashboard
+// degrades gracefully (omits the URL row, hides the Allow form).
+func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, tun *TunnelHandle) error {
 	body := map[string]any{
 		"session_id":        sess.ID,
 		"code":              code,
@@ -204,7 +210,17 @@ func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, clien
 		"ttl_s":             int(sess.Remaining().Seconds()),
 		"tool_count":        audit.ToolCount(),
 		"last_tools":        audit.LastTools(5),
-		"clients_connected": clients,
+		"clients_connected":       0, // legacy field; presence now derived from last_activity_ms
+		"pending_approvals_count": 0,
+	}
+	if tun != nil {
+		body["pair_url"] = tun.PublicURL
+		body["approval_code"] = tun.ApprovalCode
+		if tun.LastInfo != nil {
+			body["session_state"] = tun.LastInfo.State
+			body["last_activity_ms"] = tun.LastInfo.LastActivityMs
+			body["pending_approvals_count"] = tun.LastInfo.PendingApprovals
+		}
 	}
 	buf, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", apiBase+"/api/pair/status", bytes.NewReader(buf))
