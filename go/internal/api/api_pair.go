@@ -41,13 +41,29 @@ func resolvedSelfExe() string {
 // PairStatus is the metadata the ftw-pair sidecar POSTs to
 // /api/pair/status so the dashboard can render the active session.
 type PairStatus struct {
-	SessionID string   `json:"session_id"`
-	Code      string   `json:"code"`
-	Intent    string   `json:"intent"`
-	StartedAt string   `json:"started_at"`
-	TTLS      int      `json:"ttl_s"`
-	ToolCount int      `json:"tool_count,omitempty"`
-	LastTools []string `json:"last_tools,omitempty"`
+	SessionID        string   `json:"session_id"`
+	Code             string   `json:"code"`
+	Intent           string   `json:"intent"`
+	StartedAt        string   `json:"started_at"`
+	TTLS             int      `json:"ttl_s"`
+	ToolCount        int      `json:"tool_count,omitempty"`
+	LastTools        []string `json:"last_tools,omitempty"`
+	ClientsConnected int      `json:"clients_connected"`
+}
+
+// isExpired returns true when StartedAt + TTLS is in the past.
+// Garbage strings are considered NOT expired (we don't want a parse glitch
+// to nuke a live session) — the sidecar's own TTL check is the source of truth.
+func (p PairStatus) isExpired(now time.Time) bool {
+	if p.StartedAt == "" || p.TTLS <= 0 {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, p.StartedAt)
+	if err != nil {
+		return false
+	}
+	expiry := started.Add(time.Duration(p.TTLS) * time.Second)
+	return now.After(expiry)
 }
 
 // PairStatusStore holds at most one active pair session in memory.
@@ -99,6 +115,16 @@ func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe stri
 	mux.HandleFunc("GET /api/pair/status", func(w http.ResponseWriter, r *http.Request) {
 		p, ok := store.Get()
 		if !ok {
+			http.Error(w, `{"error":"no active session"}`, http.StatusNotFound)
+			return
+		}
+		// Self-heal stale records: if the session's TTL has already elapsed
+		// the sidecar should have torn down by now. Treat as gone — flip the
+		// dashboard to the start form and unblock POST /api/pair/start.
+		// Without this, a sidecar that exited without posting /api/pair/abort
+		// (kill -9, container restart) leaves the card stuck at "active".
+		if p.isExpired(time.Now()) {
+			store.Clear()
 			http.Error(w, `{"error":"no active session"}`, http.StatusNotFound)
 			return
 		}

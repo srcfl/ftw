@@ -198,6 +198,13 @@ class FtwPairCard extends FtwElement {
       color: var(--ink-raised);
       font-family: var(--sans, var(--mono));
     }
+    .muted {
+      color: var(--ink-raised2, var(--fg-dim, var(--fg)));
+      opacity: 0.6;
+    }
+    .live {
+      color: var(--accent-e);
+    }
   `;
 
   constructor() {
@@ -350,6 +357,7 @@ class FtwPairCard extends FtwElement {
         </section>
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
+          <dt>Friend</dt><dd>${this._renderClients()}</dd>
           <dt>Tool calls</dt><dd>${this._state.tool_count ?? 0}</dd>
           <dt>Last tools</dt><dd>${lastTools}</dd>
         </dl>
@@ -478,6 +486,17 @@ Session expires in ${remaining} or when I click Abort.`;
     const h = Math.floor(left / 3600);
     const m = Math.floor((left % 3600) / 60);
     return `${h}h ${m}m`;
+  }
+
+  // _renderClients surfaces the subetha host's ActiveTunnels() count: it tells
+  // the operator whether a friend is currently piping bytes through the tunnel.
+  // 0 = nobody's connected right now (still normal — agents poll, they don't
+  // keep a long-lived conn); ≥ 1 = at least one in-flight request being served.
+  _renderClients() {
+    const n = this._state.clients_connected ?? 0;
+    if (n <= 0) return `<span class="muted">idle</span>`;
+    if (n === 1) return `<span class="live">● connected</span>`;
+    return `<span class="live">● connected (${n} in flight)</span>`;
   }
 }
 

@@ -3,10 +3,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPairStatusPostThenGet(t *testing.T) {
@@ -14,7 +16,8 @@ func TestPairStatusPostThenGet(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterPairRoutes(mux, store, "/bin/true")
 
-	body := `{"session_id":"abc","code":"7-x","intent":"goodwe","started_at":"2026-05-25T10:00:00Z","ttl_s":14400}`
+	now := time.Now().UTC().Format(time.RFC3339)
+	body := fmt.Sprintf(`{"session_id":"abc","code":"7-x","intent":"goodwe","started_at":"%s","ttl_s":14400}`, now)
 	req := httptest.NewRequest("POST", "/api/pair/status", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -43,6 +46,58 @@ func TestPairStatusGet404WhenNoSession(t *testing.T) {
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pair/status", nil))
 	if w.Code != 404 {
 		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestPairStatusGet404WhenExpired verifies the self-heal behaviour: a stale
+// PairStatus whose started_at + ttl_s lies in the past should be treated as
+// gone and 404'd, with the store cleared as a side-effect. Without this, a
+// sidecar that died without posting /api/pair/abort (kill -9, crash, container
+// restart) would leave the dashboard stuck at "session active" forever and
+// block POST /api/pair/start with a 409.
+func TestPairStatusGet404WhenExpired(t *testing.T) {
+	store := NewPairStatusStore()
+	mux := http.NewServeMux()
+	RegisterPairRoutes(mux, store, "/bin/true")
+
+	stale := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	store.Set(PairStatus{
+		SessionID: "expired-abc",
+		Code:      "7-x",
+		StartedAt: stale,
+		TTLS:      3600, // 1h TTL, started 2h ago → expired
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pair/status", nil))
+	if w.Code != 404 {
+		t.Fatalf("expected 404 for expired session, got %d body %q", w.Code, w.Body)
+	}
+	// Side-effect: store was cleared so a follow-up POST /api/pair/start works.
+	if _, ok := store.Get(); ok {
+		t.Fatal("expected store to be cleared by GET after expiry")
+	}
+}
+
+// TestPairStatusGetServesUnexpiredSession is the happy-path counterpart — make
+// sure the expiry guard doesn't accidentally nuke live sessions.
+func TestPairStatusGetServesUnexpiredSession(t *testing.T) {
+	store := NewPairStatusStore()
+	mux := http.NewServeMux()
+	RegisterPairRoutes(mux, store, "/bin/true")
+
+	fresh := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+	store.Set(PairStatus{
+		SessionID: "fresh-abc",
+		Code:      "7-x",
+		StartedAt: fresh,
+		TTLS:      14400, // 4h TTL, started 30s ago → live
+	})
+
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pair/status", nil))
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for unexpired session, got %d body %q", w.Code, w.Body)
 	}
 }
 

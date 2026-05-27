@@ -3,6 +3,8 @@ package drivers
 import (
 	"reflect"
 	"testing"
+
+	"github.com/frahlg/forty-two-watts/go/internal/config"
 )
 
 func TestMergeAllowedHosts(t *testing.T) {
@@ -75,6 +77,81 @@ func TestMergeAllowedHosts(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("mergeAllowedHosts() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TCP gets a tighter default than HTTP/WS: when the driver config supplies
+// both host and port, the auto-injected allowlist entry is `host:port`
+// (not bare host). Raw TCP can reach any service on the same IP, so
+// "P1 reader on :23" must not also grant access to SSH on :22.
+func TestTcpAllowedHostsFor(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  config.Driver
+		want []string
+	}{
+		{
+			name: "config.host+port → tight host:port entry",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{}},
+				Config:       map[string]any{"host": "192.168.1.40", "port": 23},
+			},
+			want: []string{"192.168.1.40:23"},
+		},
+		{
+			name: "config.host without port falls back to bare host",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{}},
+				Config:       map[string]any{"host": "192.168.1.40"},
+			},
+			want: []string{"192.168.1.40"},
+		},
+		{
+			name: "explicit allowlist preserved, config.host:port appended",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{
+					AllowedHosts: []string{"10.0.0.5", "loose-host"},
+				}},
+				Config: map[string]any{"host": "192.168.1.40", "port": 23},
+			},
+			want: []string{"10.0.0.5", "loose-host", "192.168.1.40:23"},
+		},
+		{
+			name: "duplicate entry dropped",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{
+					AllowedHosts: []string{"192.168.1.40:23"},
+				}},
+				Config: map[string]any{"host": "192.168.1.40", "port": 23},
+			},
+			want: []string{"192.168.1.40:23"},
+		},
+		{
+			name: "yaml-decoded port (int) is honoured",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{}},
+				Config:       map[string]any{"host": "192.168.1.40", "port": int64(2300)},
+			},
+			want: []string{"192.168.1.40:2300"},
+		},
+		{
+			name: "no config at all returns empty (no implicit any-host)",
+			cfg: config.Driver{
+				Capabilities: config.Capabilities{TCP: &config.TCPCapability{}},
+			},
+			want: []string{},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tcpAllowedHostsFor(tc.cfg)
+			if len(got) == 0 && len(tc.want) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("tcpAllowedHostsFor() = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -468,9 +468,11 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP   *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	MQTT      *MQTTConfig      `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus    *ModbusConfig    `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	HTTP      *HTTPCapability  `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket *WSCapability    `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP       *TCPCapability   `yaml:"tcp,omitempty" json:"tcp,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -490,6 +492,21 @@ type ModbusConfig struct {
 
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// WSCapability grants WebSocket (ws://, wss://) access. Same allowlist
+// semantics as HTTPCapability — bare host = any port; "host:port" = exact.
+type WSCapability struct {
+	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// TCPCapability grants raw TCP socket access (host.tcp_open). Same
+// allowlist semantics as the HTTP/WS lists: bare host entry matches any
+// port; "host:port" requires an exact match. Empty list = any host:port,
+// which is fine for fully-trusted LAN deployments but loose enough to
+// warrant an explicit list in shared installs.
+type TCPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 }
 
@@ -1063,8 +1080,10 @@ func (c *Config) Validate() error {
 		if d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `lua`", d.Name)
 		}
-		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil {
-			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
+		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil &&
+			d.Capabilities.HTTP == nil && d.Capabilities.WebSocket == nil &&
+			d.Capabilities.TCP == nil {
+			return fmt.Errorf("driver %q: must have mqtt, modbus, http, websocket, or tcp capability", d.Name)
 		}
 	}
 	if len(c.Drivers) > 0 && siteMeters == 0 {
@@ -1094,6 +1113,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Fuse.MaxAmps <= 0 {
 		return errors.New("fuse.max_amps must be > 0")
+	}
+	if c.Fuse.Phases <= 0 {
+		return errors.New("fuse.phases must be > 0")
+	}
+	if c.Fuse.Voltage <= 0 {
+		return errors.New("fuse.voltage must be > 0")
 	}
 	// safety_margin_a must be in [0, max_amps) when explicitly set.
 	// Negative would *raise* the per-phase threshold above the breaker

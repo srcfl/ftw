@@ -32,6 +32,7 @@ func TestCatalogVerificationStatus(t *testing.T) {
 		{"deye", "experimental"},
 		{"solis", "experimental"},
 		{"solis-string", "experimental"},
+		{"tibber", "experimental"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.id, func(t *testing.T) {
