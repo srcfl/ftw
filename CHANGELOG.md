@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.106.0
+
+### Minor Changes
+
+- 9638c78: **Ferroamp self-healing watchdog for the sticky-pplim trap.** When the
+  SSO reports the post-incident signature — DC bus voltage > 200 V, zero
+  PV current, no fault, relay closed — continuously for ten minutes, the
+  driver now auto-publishes `pplim arg=<pplim_release_w>` to release
+  the lock. Operator opts in by setting `config.pplim_release_w > 0`;
+  without it, the watchdog logs a per-incident warning but does not
+  publish (we have no safe release value to send).
+
+  A five-minute cooldown between successive recoveries prevents command-
+  spam if the release doesn't take. A new `stuck_pv_recovery_count`
+  metric tracks lifetime recovery count so operators can alert on a
+  chronic condition.
+
+  Reuses the existing `pplim_release_w` field — same value, dual
+  purpose (dispatcher `curtail_disable` release AND watchdog
+  self-recovery).
+
+  Layered with [#367](https://github.com/frahlg/forty-two-watts/pull/367)
+  (driver hard-fail on `pplim arg=0`) and the dispatcher fix in the
+  parallel PR (`fix(curtail): no spurious release ...`) this is the
+  third and final layer of defense against the 2026-05-27 brick.
+
+### Patch Changes
+
+- 312e9ba: **Defense-in-depth against the 2026-05-27 Ferroamp brick.** Two
+  independent changes that, combined with PR #367's driver-side hard
+  fail on `pplim arg=0`, eliminate every known trigger path:
+
+  - **Dispatcher**: `ComputePVCurtail` no longer emits a `curtail_disable`
+    release simply because a previously-curtailed driver dropped out of
+    the proportional allocation due to its own `|PV|` crashing to ~0
+    (often a direct consequence of OUR curtail throttling that driver
+    down). The release is now only sent when the curtail directive
+    truly clears, or the driver is removed from `SupportsPVCurtail`, or
+    the driver goes offline. Also: per-driver allocations rounding to
+    `≤ 1 W` are suppressed entirely — never publish a near-zero
+    `pplim` that some inverters treat as a hard "limit to 0 W" lock.
+
+  - **Ferroamp driver**: subscribes to `extapi/control/response`
+    (was: `extapi/result` — wrong topic, never received anything),
+    parses `{"status":"ack|nak", ...}` responses, and exposes
+    cumulative `extapi_nak_count` + `extapi_ack_count` metrics. NAK
+    responses are also logged as warnings with `transId` + `msg`
+    fields. The 2026-05-27 brick was preceded by minutes of
+    `nak: no available ESOs detected in system` that we couldn't see
+    through ftw telemetry — now the operator can alert on any non-zero
+    NAK rate.
+
+  Tests added:
+
+  - Four new dispatcher regressions in `control/pv_curtail_test.go`
+    guarding the suppression / release semantics.
+  - One driver test in `drivers/lua_ferroamp_curtail_test.go`
+    asserting NAK + ACK counter advancement.
+
+- 322ffe2: **Ferroamp safety fix:** the Lua driver now refuses to publish
+  `pplim arg=0` from any `curtail` / `curtail_disable` path.
+
+  Ferroamp's extapi treats `{"cmd":{"name":"pplim","arg":0}}` as
+  "limit PV output to 0 W" — same wire bytes as a naive release would
+  have, opposite semantics. The inverter sticks at 0 W PV until the
+  operator clears pplim from the Ferroamp portal or power-cycles the
+  EnergyHub. On 2026-05-27 this fired against a live SE4 site after the
+  dispatcher's proportional curtail allocation gave a 0-share to
+  Ferroamp; recovery required a 30+ minute outage and a portal-side
+  reset.
+
+  Changes:
+
+  - `curtail` with `power_w <= 0` is now a logged no-op (was: published
+    `pplim arg=0`).
+  - `curtail_disable` is a logged no-op by default (was: published
+    `pplim arg=0`). To restore automatic release, set
+    `config.pplim_release_w` on the driver to the inverter's nominal
+    max (e.g. `15000` for a 15 kW SSO). The driver then publishes
+    `pplim arg=<release_w>` which Ferroamp accepts as "raise the limit".
+  - New unit tests guard the wire payload against any regression that
+    reintroduces `pplim arg=0`.
+  - Docs in `docs/configuration.md` describe the trap and the new
+    config field.
+
+  Operators with `supports_pv_curtail: true` on Ferroamp **should** add
+  `config.pplim_release_w: <SSO-rated-watts>` to keep curtailment
+  auto-releasing. Without it, curtail still engages correctly, but
+  release becomes a portal action.
+
 ## 0.105.0
 
 ### Minor Changes
