@@ -1393,6 +1393,15 @@ func main() {
 		Events:        bus,
 		Notifications: notifSvc,
 		SelfUpdate:    selfUpdater,
+		// ---- Owner remote access (Phase 3) ----
+		// rp.id defaults to the production relay; override with
+		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). LAN bypass
+		// is on by default — the dashboard served on the local
+		// network is already implicitly trusted (no other auth on /api).
+		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "relay.fortytwowatts.com"),
+		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
+		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
+
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -1462,6 +1471,14 @@ func main() {
 		defer c()
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
+
+	// ---- Relay registration for owner remote access (Phase 3) ----
+	// When FTW_RELAY_URL is set, post our (site_id, host_id) to the
+	// relay periodically so /me/<site_id>/* routes to this instance.
+	// host_id is derived once from site_id + a stable random suffix.
+	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
+		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name))
+	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
 	// Provider selection uses the strategy registry in internal/notifications;
@@ -2641,4 +2658,38 @@ func envBool(key string) bool {
 		return true
 	}
 	return false
+}
+
+// envBoolDefault is like envBool but returns def when the var is unset.
+// Negative explicit values (0/false/no/off) override the default to false;
+// any other explicit value parses as true.
+func envBoolDefault(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "0", "false", "no", "off", "":
+		return false
+	}
+	return true
+}
+
+// parseOriginsEnv splits a comma-separated list of WebAuthn-acceptable
+// origins from an env var. Empty / unset returns nil — caller treats
+// nil as "derive from rp.id".
+func parseOriginsEnv(key string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
