@@ -31,8 +31,8 @@ func emitPV(t *testing.T, s *telemetry.Store, driver string, w float64) {
 	s.Update(driver, telemetry.DerPV, w, nil, nil)
 }
 
-// emitBattery pushes a battery reading with an explicit SoC%. Used by
-// the live-curtail tests to vary absorption headroom.
+// emitBattery pushes a battery reading with an explicit fractional SoC.
+// Used by the live-curtail tests to vary absorption headroom.
 func emitBattery(t *testing.T, s *telemetry.Store, driver string, w, soc float64) {
 	t.Helper()
 	s.DriverHealthMut(driver).RecordSuccess()
@@ -330,7 +330,7 @@ func TestComputePVCurtail_BatteryHeadroomLiftsCap(t *testing.T) {
 	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 60.0) // 60% SoC → 5 kW headroom available
+	emitBattery(t, store, "pixii", 0, 0.60) // 60% SoC → 5 kW headroom available
 	emitMeter(t, store, "meter", -2500)     // exporting 2.5 kW (load present but PV bigger)
 
 	got := findCurtail(ComputePVCurtail(st, store))
@@ -347,7 +347,7 @@ func TestComputePVCurtail_FullBatteryNoHeadroomCurtails(t *testing.T) {
 	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 99.5) // above ceiling — no headroom
+	emitBattery(t, store, "pixii", 0, 0.995) // above ceiling — no headroom
 	emitMeter(t, store, "meter", -2500)     // exporting 2.5 kW → live load = 500 W
 
 	got := findCurtail(ComputePVCurtail(st, store))
@@ -364,7 +364,7 @@ func TestComputePVCurtail_RisingLoadLiftsCap(t *testing.T) {
 	st.SupportsPVCurtail = map[string]bool{"solaredge": true}
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 99.5) // full — no battery headroom
+	emitBattery(t, store, "pixii", 0, 0.995) // full — no battery headroom
 	// Live: load actually became 2500 W (heater turned on). Meter
 	// reports import = load - pv = 2500 - 3000 = -500 W (still
 	// exporting 500 W). live_load = -500 - (-3000) - 0 = 2500 W.
@@ -385,7 +385,7 @@ func TestComputePVCurtail_EVReserveLiftsCap(t *testing.T) {
 	st.EVSurplusOnlyReserveW = 3500 // wallbox wants 3.5 kW from PV
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 99.5)
+	emitBattery(t, store, "pixii", 0, 0.995)
 	emitMeter(t, store, "meter", -3000) // all PV currently exporting
 
 	got := findCurtail(ComputePVCurtail(st, store))
@@ -405,7 +405,7 @@ func TestComputePVCurtail_EVCurtailHeadroomLiftsCap(t *testing.T) {
 	st.EVCurtailHeadroomW = 11000   // but it COULD draw up to 11 kW if PV grew
 	store := telemetry.NewStore()
 	emitPV(t, store, "solaredge", -3000)
-	emitBattery(t, store, "pixii", 0, 99.5)
+	emitBattery(t, store, "pixii", 0, 0.995)
 	emitMeter(t, store, "meter", -3000)
 
 	got := findCurtail(ComputePVCurtail(st, store))

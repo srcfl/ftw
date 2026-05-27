@@ -2098,14 +2098,14 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 	return out
 }
 
-// pvCurtailBatterySoCMaxPct is the SoC ceiling above which a battery
+// pvCurtailBatterySoCMax is the fractional SoC ceiling above which a battery
 // is treated as having no curtail-absorption headroom. Below it, the
 // battery's MaxChargeW (or MaxCommandW default) is added to the live
 // curtail limit so PV stays uncapped while the battery can still take
 // the energy. Hard-coded conservatively — the goal is to err on the
 // side of preserving PV generation when there's anywhere meaningful
 // to put it.
-const pvCurtailBatterySoCMaxPct = 99.0
+const pvCurtailBatterySoCMax = 0.99
 
 // liveCurtailLimitW computes the cap PV may produce *right now* given
 // the planner's decision that curtail is economically warranted for
@@ -2118,7 +2118,7 @@ const pvCurtailBatterySoCMaxPct = 99.0
 //     stays the priority.
 //
 //  2. Battery absorption headroom — for every online battery with
-//     SoC below `pvCurtailBatterySoCMaxPct`, the per-driver MaxChargeW
+//     SoC below `pvCurtailBatterySoCMax`, the per-driver MaxChargeW
 //     (or MaxCommandW default) is added. PV can keep producing because
 //     the dispatch loop will route the surplus into the battery.
 //
@@ -2197,7 +2197,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 		if h == nil || !h.IsOnline() {
 			continue
 		}
-		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMaxPct {
+		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMax {
 			continue
 		}
 		capW := float64(MaxCommandW)
