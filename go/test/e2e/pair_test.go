@@ -375,7 +375,19 @@ drivers: []
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	// Strip GIT_* env vars so a parent pre-commit hook's GIT_DIR /
+	// GIT_WORK_TREE does not confuse --show-toplevel when `go test`
+	// is invoked transitively from `make verify` inside the hook.
+	env := os.Environ()
+	cleaned := env[:0]
+	for _, e := range env {
+		if !strings.HasPrefix(e, "GIT_") {
+			cleaned = append(cleaned, e)
+		}
+	}
+	cmd.Env = cleaned
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("repo root: %v", err)
 	}

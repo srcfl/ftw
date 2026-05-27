@@ -139,6 +139,31 @@ v0.27). See issue #143 for the design rationale. Estimated benefit on a
 two-inverter site with balanced PV strings: ~3-4 % round-trip efficiency
 improvement during the hours when the plan chooses to charge from PV.
 
+#### Ferroamp per-driver SoC bounds (`config.charge_ceil_soc`, `config.discharge_floor_soc`)
+
+The Ferroamp Lua driver gates per-ESO charge/discharge dispatch on two
+SoC bounds. Both are read from the driver's `config:` block and default
+to the existing hardcoded values when unset.
+
+```yaml
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    config:
+      # Optional. Defaults shown — both fields are read by the Lua
+      # driver to gate per-ESO charge/discharge dispatch. Ferroamp's
+      # own BMS still protects against overcharge / deep discharge,
+      # so these are tuning knobs for cell-balancing / longevity
+      # preferences, not safety limits.
+      charge_ceil_soc: 0.95      # exclude ESOs at or above this SoC from charge dispatch
+      discharge_floor_soc: 0.15  # exclude ESOs at or below this SoC from discharge dispatch
+```
+
+Validation: `charge_ceil_soc` must be in `(0, 1.0]`; `discharge_floor_soc`
+must be in `[0, 1.0)`. Out-of-range or non-numeric values log a warning
+and keep the default. Note that the planner's `soc_max_pct` is an
+independent layer — to actually charge to 100 % both caps must be lifted.
+
 ### `api` — REST + web UI
 
 ```yaml

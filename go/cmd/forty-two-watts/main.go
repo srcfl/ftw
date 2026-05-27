@@ -2418,12 +2418,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		safetyPenalty = 100
 	}
 	pvBonus := pl.PVChargeBonusOreKwh
-	if pvBonus <= 0 {
-		// 30 öre/kWh — beats typical PV-export spot prices and the
-		// round-trip efficiency cost (~20 öre/kWh against mean retail
-		// import), but small enough that genuine arbitrage spreads
-		// (>100 öre/kWh) still drive the DP.
-		pvBonus = 30
+	if pvBonus < 0 {
+		pvBonus = 0
 	}
 	chgEff := pl.ChargeEfficiency
 	if chgEff <= 0 {
