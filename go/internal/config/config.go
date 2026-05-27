@@ -273,12 +273,15 @@ type Planner struct {
 	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
 
 	// PVChargeBonusOreKwh credits each kWh of battery charge fed from
-	// live PV surplus, in passive_arbitrage mode. Operator preference
-	// "always prefer PV first" — certain PV now beats forecast
-	// grid-charging later, even at economic parity. Default 30
-	// öre/kWh; set to 0 to disable the bias and let the DP optimise
-	// purely on price (which on flat-price days lets cheap PV export
-	// and refills from cheap grid later, losing efficiency).
+	// live PV surplus, in passive_arbitrage mode. Default 0 (disabled)
+	// — the import-tariff + VAT asymmetry already makes "store PV now"
+	// strictly preferred over "export PV now, reimport later" in the
+	// underlying DP economics, so the bonus is redundant under typical
+	// retail pricing. Setting it > 0 reinstates the bias and can pull
+	// battery charging forward; on days with future negative-price
+	// hours this leaves no headroom to absorb negative-priced PV and
+	// forces export at a loss. Use only if you have evidence that the
+	// DP is undervaluing storage in your specific configuration.
 	PVChargeBonusOreKwh float64 `yaml:"pv_charge_bonus_ore_kwh,omitempty" json:"pv_charge_bonus_ore_kwh,omitempty"`
 
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
