@@ -1021,10 +1021,35 @@ func TestOptimizeWithNaNPVDoesNotPanic(t *testing.T) {
 		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 100, LoadW: 1000, PVW: 0},
 	}
 	p := baseParams(ModeArbitrage)
-	// Must not panic — NaN propagates through arithmetic without crashing.
 	plan := Optimize(slots, p)
 	if len(plan.Actions) != 2 {
 		t.Errorf("expected 2 actions, got %d", len(plan.Actions))
+	}
+	for i, a := range plan.Actions {
+		if math.IsNaN(a.GridW) || math.IsInf(a.GridW, 0) {
+			t.Fatalf("slot %d: grid_w is non-finite: %v", i, a.GridW)
+		}
+		if math.IsNaN(a.CostOre) || math.IsInf(a.CostOre, 0) {
+			t.Fatalf("slot %d: cost_ore is non-finite: %v", i, a.CostOre)
+		}
+		if math.IsNaN(a.PVW) || math.IsInf(a.PVW, 0) {
+			t.Fatalf("slot %d: pv_w is non-finite: %v", i, a.PVW)
+		}
+	}
+}
+
+func TestOptimizeDropsNonFinitePriceSlots(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: math.NaN(), SpotOre: 100, LoadW: 1000, PVW: 0},
+		{StartMs: 3600 * 1000, LenMin: 60, PriceOre: 100, SpotOre: math.Inf(1), LoadW: 1000, PVW: 0},
+		{StartMs: 2 * 3600 * 1000, LenMin: 60, PriceOre: 100, SpotOre: 100, LoadW: 1000, PVW: 0},
+	}
+	plan := Optimize(slots, baseParams(ModeArbitrage))
+	if len(plan.Actions) != 1 {
+		t.Fatalf("got %d actions, want only the finite-price slot", len(plan.Actions))
+	}
+	if plan.Actions[0].SlotStartMs != 2*3600*1000 {
+		t.Fatalf("kept slot start %d, want final finite slot", plan.Actions[0].SlotStartMs)
 	}
 }
 
