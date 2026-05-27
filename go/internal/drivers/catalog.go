@@ -152,6 +152,39 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	return e, nil
 }
 
+// IsEVOrVehicleDriver reports whether the driver at luaPath is an EV
+// charger (capabilities contains "ev") or a vehicle telemetry source
+// (capabilities contains "vehicle"). Returns false when the driver
+// isn't in the catalog or declares neither.
+//
+// The match is by the catalog entry's portable Path (relative to
+// drivers/) first, then by Filename — operators reference drivers
+// either way in YAML and both forms must work.
+//
+// This is the source of truth for "is this a non-stationary-battery
+// driver" decisions in main.go (battery-pool capacity exclusion +
+// operator-warning routing). The Lua DRIVER table's capabilities list
+// is the driver's self-declaration; nothing in Go should match on
+// filenames or vendor names directly.
+func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	wantPath := filepath.ToSlash(luaPath)
+	wantFilename := filepath.Base(wantPath)
+	for _, e := range catalog {
+		if e.Path == wantPath || e.Filename == wantFilename {
+			for _, c := range e.Capabilities {
+				if c == "ev" || c == "vehicle" {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
 // normalizeVerificationStatus coerces the Lua string into one of the
 // three canonical values the UI renders badges for. Anything else
 // (blank, typo, unknown) falls back to "experimental" — the safest
