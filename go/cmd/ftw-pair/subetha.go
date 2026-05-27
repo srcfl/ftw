@@ -11,6 +11,9 @@ import (
 )
 
 // SubethaHost is an alias for subetha.Host — host-side tunnel handle.
+// The aliased type exposes ActiveTunnels(): the number of live client peers
+// currently piped through the relay, which the heartbeat surfaces to the
+// dashboard so the operator sees when a friend is actually connected.
 type SubethaHost = subetha.Host
 
 // SubethaClient is an alias for subetha.Client — client-side tunnel handle.

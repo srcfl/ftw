@@ -4,7 +4,7 @@
 This doc captures the original proposal and trade-off analysis that led to
 adopting this transport over the fowl/magic-wormhole approach. Kept for
 historical context. Live implementation details live in
-`go/internal/subetha/` and `docs/pair-relay-deploy.md`.
+`go/internal/subetha/` and `docs/subetha-deploy.md`.
 
 ## Context
 

@@ -28,6 +28,15 @@
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers) -- HTTP POST, returns (body, nil) or (nil, err)
+//	host.ws_open(url, headers)      -- open WebSocket; (true, nil) or (nil, err)
+//	host.ws_send(text)              -- send one text frame; (true, nil) or (nil, err)
+//	host.ws_messages()              -- drain inbound frames; "" entry = EOF
+//	host.ws_is_open()               -- boolean
+//	host.ws_close()                 -- close + free
+//	host.tcp_open(addr)             -- open raw TCP socket "host:port"; (true, nil) or (nil, err)
+//	host.tcp_recv()                 -- drain inbound bytes as a Lua string ("" if nothing)
+//	host.tcp_is_open()              -- boolean
+//	host.tcp_close()                -- close + free
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -617,6 +626,151 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 		L.Push(lua.LString(string(body)))
 		return 1
+	}))
+
+	// ---- WebSocket capability ----
+	// host.ws_open(url, headers?)      → (true, nil) or (nil, error_string)
+	// host.ws_send(text)               → (true, nil) or (nil, error_string)
+	// host.ws_messages()               → table of inbound text frames (oldest first).
+	//                                    Drained on each call; empty table when idle.
+	//                                    An empty-string entry "" is the EOF sentinel:
+	//                                    the read pump exited and the driver should
+	//                                    ws_close + ws_open again on the next tick.
+	// host.ws_is_open()                → boolean
+	// host.ws_close()                  → nil
+	host.RawSetString("ws_open", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: capability not granted"))
+			return 2
+		}
+		url := L.CheckString(1)
+		if ok, reason := wsHostAllowed(url, env.WSAllowedHosts); !ok {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: " + reason))
+			return 2
+		}
+		// Optional headers table {"Header-Name"="value", ...}
+		headers := map[string]string{}
+		if tbl := L.OptTable(2, nil); tbl != nil {
+			tbl.ForEach(func(k, v lua.LValue) {
+				if ks, ok := k.(lua.LString); ok {
+					headers[string(ks)] = v.String()
+				}
+			})
+		}
+		if err := env.WS.Open(url, headers); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("ws_send", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("ws: capability not granted"))
+			return 2
+		}
+		text := L.CheckString(1)
+		if err := env.WS.Send(text); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("ws_messages", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			// Match mqtt_messages contract: return an empty table rather
+			// than nil so drivers can iterate without a nil check.
+			L.Push(L.NewTable())
+			return 1
+		}
+		msgs := env.WS.PopMessages()
+		tbl := L.NewTable()
+		for i, m := range msgs {
+			tbl.RawSetInt(i+1, lua.LString(m))
+		}
+		L.Push(tbl)
+		return 1
+	}))
+
+	host.RawSetString("ws_is_open", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			L.Push(lua.LBool(false))
+			return 1
+		}
+		L.Push(lua.LBool(env.WS.IsOpen()))
+		return 1
+	}))
+
+	host.RawSetString("ws_close", L.NewFunction(func(L *lua.LState) int {
+		if env.WS == nil {
+			return 0
+		}
+		_ = env.WS.Close()
+		return 0
+	}))
+
+	// host.tcp_open("host:port")      → (true, nil) or (nil, error_string)
+	// host.tcp_recv()                 → string of buffered bytes since last
+	//                                   call ("" when nothing arrived). The
+	//                                   driver does its own framing (P1
+	//                                   telegrams use ! as the end-of-frame
+	//                                   marker, for instance).
+	// host.tcp_is_open()              → boolean — read pump alive. Flips to
+	//                                   false on EOF / read error; the
+	//                                   driver re-opens on the next poll.
+	// host.tcp_close()                → nil
+	host.RawSetString("tcp_open", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("tcp: capability not granted"))
+			return 2
+		}
+		addr := L.CheckString(1)
+		if err := env.TCP.Open(addr); err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		return 1
+	}))
+
+	host.RawSetString("tcp_recv", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			// Mirror ws_messages / mqtt_messages contract: return an empty
+			// value rather than nil so drivers can concatenate without a
+			// nil guard.
+			L.Push(lua.LString(""))
+			return 1
+		}
+		b := env.TCP.PopBytes()
+		L.Push(lua.LString(string(b)))
+		return 1
+	}))
+
+	host.RawSetString("tcp_is_open", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			L.Push(lua.LBool(false))
+			return 1
+		}
+		L.Push(lua.LBool(env.TCP.IsOpen()))
+		return 1
+	}))
+
+	host.RawSetString("tcp_close", L.NewFunction(func(L *lua.LState) int {
+		if env.TCP == nil {
+			return 0
+		}
+		_ = env.TCP.Close()
+		return 0
 	}))
 
 	L.SetGlobal("host", host)

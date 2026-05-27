@@ -978,19 +978,21 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
 	s.deps.CfgMu.RUnlock()
 
-	// EV charger password: persist to state.db instead of config.yaml.
-	// Empty or the masked placeholder means "keep existing"; a new value
-	// means the user typed a real password.
+	// EV charger password lives in state.db instead of config.yaml. Empty
+	// or the masked placeholder means "keep existing"; a new value means
+	// the user typed a real password. Defer the state write until after
+	// validation + config save succeed so a rejected config cannot rotate
+	// credentials behind the operator's back.
+	var evPasswordToPersist string
+	var persistEVPassword bool
 	if newCfg.EVCharger != nil {
 		pw := newCfg.EVCharger.Password
 		if pw != "" && pw != maskedPlaceholder {
-			if err := s.deps.State.SaveConfig(evPasswordKey, pw); err != nil {
-				slog.Warn("failed to persist ev_charger_password", "err", err)
-			}
-		}
-		// Restore the real password into the in-memory config so the
-		// config-reload watcher sees it on the next apply.
-		if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
+			evPasswordToPersist = pw
+			persistEVPassword = true
+		} else if stored, ok := s.deps.State.LoadConfig(evPasswordKey); ok {
+			// Restore the real password into the candidate config so the
+			// config-reload watcher sees it on the next apply.
 			newCfg.EVCharger.Password = stored
 		}
 	}
@@ -1010,6 +1012,11 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &newCfg); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
+	}
+	if persistEVPassword {
+		if err := s.deps.State.SaveConfig(evPasswordKey, evPasswordToPersist); err != nil {
+			slog.Warn("failed to persist ev_charger_password", "err", err)
+		}
 	}
 	// Apply control-level changes immediately (file watcher will also pick
 	// this up but we're snappier).

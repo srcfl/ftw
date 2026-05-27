@@ -216,15 +216,30 @@ func (r *Relay) handleClient(conn net.Conn, ip, token string) {
 	close(host.matched)
 	slog.Info("relay: matched pair", "token_prefix", tokenPrefix(token))
 
-	// Splice — bidirectional io.Copy.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); _, _ = io.Copy(host.conn, conn) }()
-	go func() { defer wg.Done(); _, _ = io.Copy(conn, host.conn) }()
-	wg.Wait()
+	// Splice — bidirectional io.Copy with half-close handling.
+	//
+	// As soon as EITHER direction reaches EOF, close BOTH conns so the other
+	// io.Copy unblocks. Without this, a short-lived client (e.g. one-shot curl)
+	// that closes its side after the response would leave the splice deadlocked:
+	// the client→host Copy returns on EOF, but the host→client Copy stays
+	// blocked reading from a keep-alive HTTP conn on the host's MCP server,
+	// holding the host's relay socket open forever. The host's worker pool then
+	// fills up after a few requests and every new client gets "no host ready".
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(host.conn, conn)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(conn, host.conn)
+		done <- struct{}{}
+	}()
 
+	<-done
 	conn.Close()
 	host.conn.Close()
+	<-done // drain the second goroutine — its io.Copy returns once the close above lands
+
 	slog.Info("relay: pair disconnected", "token_prefix", tokenPrefix(token))
 }
 
