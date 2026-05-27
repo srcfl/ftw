@@ -16,10 +16,13 @@ import (
 type daySavings struct {
 	ImportWh         float64
 	ExportWh         float64
+	LoadWh           float64
 	ImportCostOre    float64
 	ExportRevenueOre float64
+	BaselineCostOre  float64
 	AvgImportOreKwh  float64
 	AvgExportOreKwh  float64
+	PriceSlotCount   int
 	ActualCostOre    float64
 	FlatCostOre      float64
 	SavedOre         float64
@@ -30,10 +33,13 @@ func fromBreakdown(b state.DayCostBreakdown, resolution string) daySavings {
 	return daySavings{
 		ImportWh:         b.ImportWh,
 		ExportWh:         b.ExportWh,
+		LoadWh:           b.LoadWh,
 		ImportCostOre:    b.ImportCostOre,
 		ExportRevenueOre: b.ExportRevenueOre,
+		BaselineCostOre:  b.BaselineCostOre,
 		AvgImportOreKwh:  b.AvgImportOreKwh,
 		AvgExportOreKwh:  b.AvgExportOreKwh,
+		PriceSlotCount:   b.PriceSlotCount,
 		ActualCostOre:    b.ActualCostOre(),
 		FlatCostOre:      b.FlatCostOre(),
 		SavedOre:         b.SavedOre(),
@@ -52,7 +58,8 @@ type savingsCacheT struct {
 	m  map[string]daySavings
 }
 
-// handleSavingsDaily returns per-local-day savings vs flat-rate.
+// handleSavingsDaily returns per-local-day actual net cost vs the load-only
+// no-PV/no-battery baseline. The endpoint name is kept for compatibility.
 //
 // GET /api/savings/daily?days=N
 //
@@ -62,16 +69,16 @@ type savingsCacheT struct {
 //	  "days": [
 //	    {
 //	      "day": "YYYY-MM-DD",
-//	      "import_wh": ..., "export_wh": ...,
+//	      "import_wh": ..., "export_wh": ..., "load_wh": ...,
 //	      "import_cost_ore": ..., "export_revenue_ore": ...,
-//	      "actual_cost_ore": ..., "flat_cost_ore": ..., "saved_ore": ...,
+//	      "actual_cost_ore": ..., "baseline_cost_ore": ..., "saved_ore": ...,
 //	      "avg_import_ore_kwh": ..., "avg_export_ore_kwh": ...,
 //	      "resolution": "slot" | "no_prices"
 //	    },
 //	    ...
 //	  ],
-//	  "totals": { "import_wh": ..., "export_wh": ...,
-//	              "actual_cost_ore": ..., "flat_cost_ore": ..., "saved_ore": ... },
+//	  "totals": { "import_wh": ..., "export_wh": ..., "load_wh": ...,
+//	              "actual_cost_ore": ..., "baseline_cost_ore": ..., "saved_ore": ... },
 //	  "tz": "Local"
 //	}
 //
@@ -126,7 +133,7 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 	s.ensureSavingsCache()
 
 	out := make([]map[string]any, 0, days)
-	var tImpWh, tExpWh, tActual, tFlat, tSaved float64
+	var tImpWh, tExpWh, tLoadWh, tActual, tBaseline, tSaved float64
 
 	for i := days - 1; i >= 0; i-- {
 		dayStart := todayMidnight.AddDate(0, 0, -i)
@@ -165,17 +172,22 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 
 		tImpWh += ds.ImportWh
 		tExpWh += ds.ExportWh
+		tLoadWh += ds.LoadWh
 		tActual += ds.ActualCostOre
-		tFlat += ds.FlatCostOre
+		tBaseline += ds.BaselineCostOre
 		tSaved += ds.SavedOre
 
 		out = append(out, map[string]any{
 			"day":                dayKey,
 			"import_wh":          ds.ImportWh,
 			"export_wh":          ds.ExportWh,
+			"load_wh":            ds.LoadWh,
 			"import_cost_ore":    ds.ImportCostOre,
 			"export_revenue_ore": ds.ExportRevenueOre,
 			"actual_cost_ore":    ds.ActualCostOre,
+			"baseline_cost_ore":  ds.BaselineCostOre,
+			// Deprecated compatibility alias: this now means the same
+			// load-only baseline as baseline_cost_ore, not a flat-average tariff.
 			"flat_cost_ore":      ds.FlatCostOre,
 			"saved_ore":          ds.SavedOre,
 			"avg_import_ore_kwh": ds.AvgImportOreKwh,
@@ -187,22 +199,24 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"days": out,
 		"totals": map[string]any{
-			"import_wh":       tImpWh,
-			"export_wh":       tExpWh,
-			"actual_cost_ore": tActual,
-			"flat_cost_ore":   tFlat,
-			"saved_ore":       tSaved,
+			"import_wh":         tImpWh,
+			"export_wh":         tExpWh,
+			"load_wh":           tLoadWh,
+			"actual_cost_ore":   tActual,
+			"baseline_cost_ore": tBaseline,
+			// Deprecated compatibility alias for older UI callers.
+			"flat_cost_ore": tBaseline,
+			"saved_ore":     tSaved,
 		},
 		"tz": loc.String(),
 	})
 }
 
 // resolutionFor reports whether the breakdown saw any price data. A day
-// with energy traffic but zero average prices means the prices table had
-// no slot covering the range, which the UI may want to render
-// differently ("no_prices") from a true zero-cost day.
+// with zero-price slots is still priced; only zero overlapping price slots
+// means the UI should render "awaiting prices".
 func resolutionFor(b state.DayCostBreakdown) string {
-	if b.AvgImportOreKwh == 0 && b.AvgExportOreKwh == 0 {
+	if b.PriceSlotCount == 0 {
 		return "no_prices"
 	}
 	return "slot"

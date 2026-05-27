@@ -1,10 +1,9 @@
-// <ftw-savings-card> — historical vs flat-rate savings card.
+// <ftw-savings-card> — historical savings vs no-PV/no-battery baseline.
 //
 // Fetches /api/savings/daily and renders:
-//   - a headline "+247 SEK (+23%)" sized for scanning, color by sign
+//   - a headline "+247 SEK saved (+23%)" sized for scanning, color by sign
 //   - a diverging per-day sparkline (positive days green, negative red)
-//     anchored on a zero baseline — same +/- shape the plan-view's
-//     "vs flat avg price" badge uses, extended along the time axis.
+//     anchored on a zero baseline.
 //   - a Week/Month toggle matching ftw-history-card's pill style
 //
 // Attributes:
@@ -12,11 +11,8 @@
 //   range         — when set externally, drives the toggle state
 //   poll-ms       — refresh interval (default 300000 = 5 min; 0 disables)
 //
-// Empty-state handling: when /api/savings/daily returns no days (most
-// commonly because cfg.Price.Zone is unset), the card collapses to a
-// muted line and hides the sparkline. The card still mounts so the
-// presence in the DOM is intentional — operators see it and know the
-// feature exists, they just need to configure prices.
+// Empty-state handling: when /api/savings/daily returns no days, the card
+// collapses to a muted line and hides the sparkline.
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 
@@ -296,7 +292,7 @@ class FtwSavingsCard extends FtwElement {
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label">Saved vs flat-rate</div>
+          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">Saved vs no PV/battery</div>
           <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
@@ -412,10 +408,10 @@ class FtwSavingsCard extends FtwElement {
     const d = days[idx];
     const savedOre = Number(d.saved_ore) || 0;
     const actualOre = Number(d.actual_cost_ore) || 0;
-    const flatOre = Number(d.flat_cost_ore) || 0;
+    const baselineOre = Number(d.baseline_cost_ore ?? d.flat_cost_ore) || 0;
     tip.innerHTML =
-      `<div><b>${escapeHtml(fmtDayShort(d.day))}</b> ${escapeHtml(fmtSignedSekOre(savedOre))}</div>` +
-      `<div class="muted">Actual ${escapeHtml(fmtSekOre(actualOre))} · flat-rate ${escapeHtml(fmtSekOre(flatOre))}</div>`;
+      `<div><b>${escapeHtml(fmtDayShort(d.day))}</b> ${escapeHtml(fmtSavedSekOre(savedOre))}</div>` +
+      `<div class="muted">Actual ${escapeHtml(fmtSekOre(actualOre))} · baseline ${escapeHtml(fmtSekOre(baselineOre))}</div>`;
     tip.style.display = 'block';
 
     const stageRect = stage.getBoundingClientRect();
@@ -469,7 +465,7 @@ class FtwSavingsCard extends FtwElement {
     if (this._state === "empty" || !this._payload) {
       totalEl.textContent = "—";
       pctEl.textContent = "";
-      subEl.innerHTML = 'No price provider configured — set <b>price.zone</b> in config to enable historical savings.';
+      subEl.innerHTML = 'No price provider configured — set <b>price.zone</b> to calculate historical savings.';
       sparkWrap.style.display = "none";
       if (axisMaxEl) axisMaxEl.textContent = "";
       if (axisMinEl) axisMinEl.textContent = "";
@@ -479,7 +475,7 @@ class FtwSavingsCard extends FtwElement {
     if (this._state === "awaiting_prices") {
       totalEl.textContent = "—";
       pctEl.textContent = "";
-      subEl.innerHTML = 'Awaiting price data for the selected range — savings will appear once the price provider catches up.';
+      subEl.innerHTML = 'Awaiting price data for the selected range.';
       sparkWrap.style.display = "none";
       if (axisMaxEl) axisMaxEl.textContent = "";
       if (axisMinEl) axisMinEl.textContent = "";
@@ -490,13 +486,13 @@ class FtwSavingsCard extends FtwElement {
     sparkWrap.style.display = "";
     const { days, totals } = this._payload;
     const savedOre = Number(totals && totals.saved_ore) || 0;
-    const flatOre  = Number(totals && totals.flat_cost_ore) || 0;
+    const baselineOre  = Number(totals && (totals.baseline_cost_ore ?? totals.flat_cost_ore)) || 0;
     const actualOre = Number(totals && totals.actual_cost_ore) || 0;
     const savedSek = savedOre / 100;
-    // Percentage anchors on absolute flat cost so a $0 flat baseline
-    // doesn't divide-by-zero. When flat is tiny, we suppress the pct
+    // Percentage anchors on absolute baseline cost so a zero baseline
+    // doesn't divide-by-zero. When the baseline is tiny, we suppress the pct
     // entirely — the absolute SEK number tells the story alone.
-    const denomOre = Math.abs(flatOre);
+    const denomOre = Math.abs(baselineOre);
     const pct = denomOre > 1 ? (savedOre / denomOre) * 100 : 0;
 
     const sign = (v) => (v >= 0 ? "+" : "−");
@@ -507,7 +503,7 @@ class FtwSavingsCard extends FtwElement {
       return v.toFixed(2);
     };
 
-    totalEl.textContent = `${sign(savedSek)}${fmtSek(savedSek)} SEK`;
+    totalEl.textContent = `${sign(savedSek)}${fmtSek(savedSek)} SEK ${savedSek >= 0 ? "saved" : "lost"}`;
     if (Math.abs(pct) >= 0.5) {
       pctEl.textContent = `(${sign(pct)}${Math.abs(pct).toFixed(0)}%)`;
     } else {
@@ -522,12 +518,12 @@ class FtwSavingsCard extends FtwElement {
       : (savedSek > 0 ? "var(--green-e)" : "var(--red-e)");
     this.style.setProperty('--ftw-savings-color', color);
 
-    // Sub-line: actual + flat cost in SEK, dim. Gives the operator the
-    // two numbers the saving is derived from.
+    // Sub-line: actual + no-PV/no-battery baseline in SEK. Gives the
+    // operator the two numbers the delta is derived from.
     const actualSek = actualOre / 100;
-    const flatSek = flatOre / 100;
+    const baselineSek = baselineOre / 100;
     subEl.innerHTML =
-      `Actual <b>${fmtSek(actualSek)} SEK</b>, flat-rate <b>${fmtSek(flatSek)} SEK</b>`;
+      `Actual <b>${fmtSek(actualSek)} SEK</b>, no PV/battery <b>${fmtSek(baselineSek)} SEK</b>`;
 
     // ---- Sparkline -----------------------------------------------------
     // Bars on a zero baseline, full height split 50/50 above/below.
@@ -606,9 +602,9 @@ function fmtSekOre(ore) {
   if (sek >= 10) return sek.toFixed(1) + " SEK";
   return sek.toFixed(2) + " SEK";
 }
-function fmtSignedSekOre(ore) {
+function fmtSavedSekOre(ore) {
   const v = Number(ore) || 0;
-  return (v >= 0 ? "+" : "−") + fmtSekOre(v);
+  return (v >= 0 ? "+" : "−") + fmtSekOre(v) + (v >= 0 ? " saved" : " lost");
 }
 function escapeHtml(s) {
   return String(s).replace(/[<>&"']/g, (c) =>
