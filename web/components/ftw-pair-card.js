@@ -1,19 +1,32 @@
-// <ftw-pair-card> — surfaces an active pair session on the dashboard, and
-// lets the owner start a new session without touching the CLI.
+// <ftw-pair-card> — surfaces an active pair session on the dashboard.
 //
-// When no session is active (GET /api/pair/status → 404) the card renders a
-// start form (intent textarea + TTL select + Start button). POST /api/pair/start
-// spawns the sidecar; three fast 1 s polls flip the card to active-mode as
-// soon as the sidecar registers itself via POST /api/pair/status.
+// v2 of the friend onboarding (Phase 1+2 of relay-as-tunnel):
+//   - shows the public URL the operator copies + sends to the friend
+//   - shows the 4-digit voice-channel approval code prominently
+//   - exposes an Allow form that POSTs the matching code to the relay
+//     once the friend reads it back on voice
+//   - replaces the misleading "0 clients connected" with a real
+//     last-activity presence indicator backed by the relay's
+//     /tunnel/sessions/<token>/info endpoint
 //
-// When a session is active the card renders the subetha pair code (with a
-// Copy button), intent, TTL countdown, tool counter, and an Abort button.
+// All pure render decisions live in ./ftw-pair-card-render.js so the
+// state-machine + golden message can be unit-tested in Node without
+// a DOM or Web Components polyfill — see the .test.mjs file next to
+// the helpers.
 
 import { FtwElement } from "./ftw-element.js";
-
-const POLL_MS = 5000;
-const FAST_POLL_MS = 1000;
-const FAST_POLL_ROUNDS = 3;
+import {
+  POLL_MS,
+  FAST_POLL_MS,
+  FAST_POLL_ROUNDS,
+  escapeHTML,
+  computeRemaining,
+  derivePresence,
+  friendMessage,
+  canApprove,
+  approveRequest,
+  validateTypedCode,
+} from "./ftw-pair-card-render.js";
 
 class FtwPairCard extends FtwElement {
   static styles = `
@@ -205,6 +218,104 @@ class FtwPairCard extends FtwElement {
     .live {
       color: var(--accent-e);
     }
+
+    /* ---- Approval form + presence indicator (v2) ---- */
+    .approval {
+      margin: 12px 0;
+      padding: 10px 12px;
+      border: 1px solid var(--accent-e);
+      background: var(--surface, var(--bg, #111));
+    }
+    .approval .big-code {
+      font-family: var(--mono);
+      font-size: 2.4rem;
+      letter-spacing: 0.4em;
+      text-align: center;
+      color: var(--accent-e);
+      margin: 10px 0;
+      font-weight: 700;
+    }
+    .approval p {
+      margin: 4px 0;
+      font-size: 0.85rem;
+    }
+    .approval-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+    }
+    .approval-row input {
+      font-family: var(--mono);
+      font-size: 1.2rem;
+      letter-spacing: 0.2em;
+      text-align: center;
+      width: 5.5em;
+      padding: 4px 6px;
+      background: var(--bg, #111);
+      color: var(--fg);
+      border: 1px solid var(--line);
+    }
+    .approval-row button {
+      background: var(--accent-e);
+      color: #0a0a0a;
+      border: 0;
+      padding: 6px 14px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      cursor: pointer;
+    }
+    .approval-row button:disabled {
+      opacity: 0.4;
+      cursor: default;
+    }
+    .approval-msg {
+      font-size: 0.78rem;
+      margin-top: 6px;
+      font-family: var(--mono);
+    }
+    .approval-msg.err { color: #c66; }
+    .approval-msg.ok  { color: var(--accent-e); }
+
+    /* presence dot + label */
+    .presence {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      background: var(--fg);
+    }
+    .dot.fresh  { background: var(--accent-e); box-shadow: 0 0 6px var(--accent-e); }
+    .dot.recent { background: var(--accent-e); opacity: 0.7; }
+    .dot.idle   { background: var(--ink-raised2, #888); opacity: 0.6; }
+    .dot.pending{ background: var(--accent-e); opacity: 0.5; }
+    .dot.dead   { background: #c66; }
+
+    /* URL block — long URL with copy button */
+    .url-block {
+      margin: 10px 0;
+      padding: 8px 10px;
+      background: var(--surface, var(--bg, #111));
+      border: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .url-block .url {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      flex: 1;
+      overflow-x: auto;
+      white-space: nowrap;
+      color: var(--fg);
+    }
   `;
 
   constructor() {
@@ -325,14 +436,17 @@ class FtwPairCard extends FtwElement {
       `;
     }
 
-    // Active session — show code, intent, countdown, tools, abort + copy.
-    const remaining = this._computeRemaining();
+    // Active session — show URL, approval form (if pending), token,
+    // intent, countdown, presence, tools, abort + copy.
+    const remaining = computeRemaining(this._state);
     const lastTools = (this._state.last_tools || [])
       .map((t) => escapeHTML(t))
       .join(", ") || "—";
 
-    const friendMsg = this._friendMessage(remaining);
-    const aiPrompt = this._aiPrompt();
+    const friendMsg = friendMessage(this._state);
+    const presence = derivePresence(this._state);
+    const showApprove = canApprove(this._state);
+    const url = this._state.pair_url || "";
 
     return `
       <div class="pair-card">
@@ -340,24 +454,47 @@ class FtwPairCard extends FtwElement {
           <span class="eyebrow">Pair session active</span>
           <button class="abort" id="abort-btn">Abort</button>
         </header>
+
+        ${url ? `
+        <div class="url-block">
+          <span class="url" id="url-span">${escapeHTML(url)}</span>
+          <button class="copy" id="copy-url-btn">Copy URL</button>
+        </div>
+        ` : ""}
+
+        ${showApprove ? `
+        <div class="approval">
+          <p><strong>Friend opened the URL.</strong> Their browser shows a 4-digit code. Call/Signal them and ask them to read it aloud, then type it here.</p>
+          <div class="big-code">${escapeHTML(this._state.approval_code)}</div>
+          <p class="muted">This is the code you should hear from your friend. If they read a different code, do <strong>NOT</strong> approve — the URL has leaked.</p>
+          <div class="approval-row">
+            <input id="approval-input" inputmode="numeric" pattern="\\d{4}" maxlength="4" placeholder="0000" autocomplete="off">
+            <button id="approval-btn">Allow</button>
+          </div>
+          <div class="approval-msg" id="approval-msg"></div>
+        </div>
+        ` : ""}
+
         <div class="code-row">
           <p class="code">${escapeHTML(this._state.code)}</p>
-          <button class="copy" id="copy-btn">Copy</button>
+          <button class="copy" id="copy-btn">Copy token</button>
         </div>
         <p class="intent">${escapeHTML(this._state.intent || "(no intent set)")}</p>
+
         <section class="friend-message">
           <span class="eyebrow">SHARE WITH YOUR FRIEND</span>
           <pre class="message" id="friend-msg-pre">${escapeHTML(friendMsg)}</pre>
           <button class="copy-msg" id="copy-msg-btn">Copy this message</button>
         </section>
-        <section class="friend-message">
-          <span class="eyebrow">Claude Code prompt</span>
-          <pre class="message" id="ai-prompt-pre">${escapeHTML(aiPrompt)}</pre>
-          <button class="copy-msg" id="copy-ai-prompt-btn">Copy</button>
-        </section>
+
         <dl>
           <dt>TTL</dt><dd>${escapeHTML(remaining)}</dd>
-          <dt>Friend</dt><dd>${this._renderClients()}</dd>
+          <dt>Friend</dt><dd>
+            <span class="presence">
+              <span class="dot ${escapeHTML(presence.class)}"></span>
+              <span>${escapeHTML(presence.label)}</span>
+            </span>
+          </dd>
           <dt>Tool calls</dt><dd>${this._state.tool_count ?? 0}</dd>
           <dt>Last tools</dt><dd>${lastTools}</dd>
         </dl>
@@ -380,16 +517,27 @@ class FtwPairCard extends FtwElement {
       copyMsgBtn.addEventListener("click", () => this._copyFriendMessage(copyMsgBtn));
     }
 
-    const copyAiBtn = this.shadowRoot.getElementById("copy-ai-prompt-btn");
-    if (copyAiBtn) {
-      copyAiBtn.addEventListener("click", () => this._copyAiPrompt(copyAiBtn));
+    const copyUrlBtn = this.shadowRoot.getElementById("copy-url-btn");
+    if (copyUrlBtn) {
+      copyUrlBtn.addEventListener("click", () => this._copyUrl(copyUrlBtn));
+    }
+
+    const approveBtn = this.shadowRoot.getElementById("approval-btn");
+    if (approveBtn) {
+      approveBtn.addEventListener("click", () => this._approve());
+    }
+    const approveInput = this.shadowRoot.getElementById("approval-input");
+    if (approveInput) {
+      approveInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") this._approve();
+      });
+      approveInput.focus();
     }
   }
 
   async _copyFriendMessage(btn) {
     if (!this._state) return;
-    const remaining = this._computeRemaining();
-    const msg = this._friendMessage(remaining);
+    const msg = friendMessage(this._state);
     const ok = await copyToClipboard(msg);
     if (ok) {
       const original = btn.textContent;
@@ -398,8 +546,9 @@ class FtwPairCard extends FtwElement {
     }
   }
 
-  async _copyAiPrompt(btn) {
-    const ok = await copyToClipboard(this._aiPrompt());
+  async _copyUrl(btn) {
+    if (!this._state || !this._state.pair_url) return;
+    const ok = await copyToClipboard(this._state.pair_url);
     if (ok) {
       const original = btn.textContent;
       btn.textContent = "Copied!";
@@ -407,106 +556,47 @@ class FtwPairCard extends FtwElement {
     }
   }
 
-  // _aiPrompt MUST stay in sync with buildPrompt() in
-  // go/cmd/ftw-connect/main.go — that's what ftw-connect auto-copies to the
-  // friend's clipboard. The dashboard renders the same text so the owner can
-  // paste it manually if clipboard sync fails on the friend side.
-  _aiPrompt() {
-    return `You are connected to a live forty-two-watts (42W) instance over the MCP server \`ftw-remote\`.
-
-You're helping the owner remotely. The owner is *not* expected to know git or GitHub — **you** open the PR at the end, from your own machine, not theirs. The owner's role here is to share their site with you and accept your help; you handle the development.
-
-## First, orient yourself
-
-Run these in order on your first turn:
-
-1. \`ftw_api\` with \`method: GET, path: /api/pair/status\` — reads the owner's stated intent for this session and the time remaining.
-2. \`ftw_api\` with \`method: GET, path: /api/status\` — shows the running state of the instance (drivers, mode, grid/PV/battery readings).
-3. \`read_file\` at \`/app/docs/api.md\` (or wherever the repo is mounted — try \`list_directory\` from \`/app\` first) if you need a catalog of HTTP endpoints.
-
-Tell the owner in chat what you found so they can confirm the plan before you start making changes.
-
-## Available MCP tools (17 — these run *on the owner's machine* through the tunnel)
-
-- \`ftw_api(method, path, body?)\` — proxy to the running 42W HTTP API (see docs/api.md)
-- \`read_file\` / \`write_file\` / \`list_directory\` — scoped to the owner's repo, state dir, and /tmp
-- \`run_command(cmd, workdir)\` — shell on the owner's machine, same scope, 30s default timeout
-- \`restart_main_service\` / \`tail_service_logs\` — restart the owner's service, read recent logs
-- \`network_scan\` / \`http_probe\` / \`modbus_probe\` / \`modbus_write\` / \`mqtt_observe\` / \`pcap_capture\` — LAN-level introspection from the owner's machine
-- \`deploy_driver(name, lua_source, config)\` — write a Lua driver, update config.yaml, wait for reload, verify it ticks against the owner's hardware
-- \`session_log\` / \`session_remaining\` / \`session_end\` — session controls
-
-You also have your *own* local tools (Read/Write/Edit/Bash on your local filesystem) — those are how you'll prepare and submit the PR.
-
-## When the work is done — opening the PR
-
-The driver source lives on the owner's machine after you \`write_file\` it there. To turn that into a PR from your own machine:
-
-1. **Snapshot the final state.** Call \`read_file\` on every file you modified on the owner's machine, so you have the canonical text in this conversation. Also call \`session_log\` once to get the audit-log markdown.
-2. **Clone the repo locally** if you haven't already: \`git clone https://github.com/frahlg/forty-two-watts.git /tmp/ftw-work\` (use your local Bash tool, not \`run_command\`).
-3. **Apply the changes** to that local clone using your local Write tool — drop the driver file into \`drivers/\`, edit \`config.yaml\` to add the driver entry, etc. Match what's on the owner's machine.
-4. **Open the PR** with \`gh pr create\` against \`master\`, picking the \`pair-session.md\` template and pasting the session-log markdown into the *Pair-session report* section. Use a \`feat(driver): ...\` style title.
-5. **Tell the owner** in chat: link to the PR, what was changed, what you'd like them to test, anything unexpected they should know.
-6. **Call \`session_end\`** to close the tunnel. The owner's sidecar exits.
-
-## Boundaries
-
-- Trust level is "ssh-equivalent for the duration of this session". Be respectful of the owner's site.
-- Modbus writes and \`deploy_driver\` calls touch real hardware. Confirm with the owner in chat before doing anything that could move energy.
-- Everything you do is recorded; the owner sees the audit log in the PR you open.
-`;
+  async _approve() {
+    const input = this.shadowRoot.getElementById("approval-input");
+    const msgEl = this.shadowRoot.getElementById("approval-msg");
+    if (!input || !msgEl) return;
+    const typed = input.value;
+    const v = validateTypedCode(this._state, typed);
+    if (!v.ok) {
+      msgEl.className = "approval-msg err";
+      msgEl.textContent = v.reason;
+      return;
+    }
+    const req = approveRequest(this._state, typed.trim());
+    if (!req) {
+      msgEl.className = "approval-msg err";
+      msgEl.textContent = "no pair URL — cannot approve in local-only mode";
+      return;
+    }
+    msgEl.className = "approval-msg";
+    msgEl.textContent = "approving…";
+    try {
+      const resp = await fetch(req.url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req.body),
+      });
+      if (resp.status === 204) {
+        msgEl.className = "approval-msg ok";
+        msgEl.textContent = "approved — friend can now use the session";
+        // Fast-poll so the dashboard flips to active state quickly.
+        this._startFastPolls();
+      } else {
+        const text = await resp.text();
+        msgEl.className = "approval-msg err";
+        msgEl.textContent = `relay rejected: ${resp.status} ${text.slice(0, 200)}`;
+      }
+    } catch (e) {
+      msgEl.className = "approval-msg err";
+      msgEl.textContent = `network error: ${e.message}`;
+    }
   }
 
-  _friendMessage(remaining) {
-    const code = this._state ? this._state.code : "";
-    return `I need help with my home energy system. I've started a pair
-session — please join with this code:
-
-  ${code}
-
-One-time setup (Mac/Linux):
-  curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-ftw-connect.sh | bash
-
-Then run:
-  ftw-connect ${code}
-
-It opens an end-to-end-encrypted tunnel and prints a local URL.
-It also copies a ready-to-paste agent prompt to your clipboard —
-paste it into Claude Code, Codex, or whatever agent you use, and
-we're connected. No config files touched on your side.
-
-Session expires in ${remaining} or when I click Abort.`;
-  }
-
-  _computeRemaining() {
-    if (!this._state.started_at || !this._state.ttl_s) return "—";
-    const startedMs = Date.parse(this._state.started_at);
-    const expiry = startedMs + this._state.ttl_s * 1000;
-    const left = Math.max(0, Math.floor((expiry - Date.now()) / 1000));
-    const h = Math.floor(left / 3600);
-    const m = Math.floor((left % 3600) / 60);
-    return `${h}h ${m}m`;
-  }
-
-  // _renderClients surfaces the subetha host's ActiveTunnels() count: it tells
-  // the operator whether a friend is currently piping bytes through the tunnel.
-  // 0 = nobody's connected right now (still normal — agents poll, they don't
-  // keep a long-lived conn); ≥ 1 = at least one in-flight request being served.
-  _renderClients() {
-    const n = this._state.clients_connected ?? 0;
-    if (n <= 0) return `<span class="muted">idle</span>`;
-    if (n === 1) return `<span class="live">● connected</span>`;
-    return `<span class="live">● connected (${n} in flight)</span>`;
-  }
-}
-
-function escapeHTML(s) {
-  return String(s == null ? "" : s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 // copyToClipboard — works in both secure (HTTPS/localhost) and insecure

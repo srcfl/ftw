@@ -41,6 +41,7 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
 	mux.HandleFunc("POST /tunnel/{host_id}/response/{req_id}", r.tunnelResponse)
 	mux.HandleFunc("POST /tunnel/register", r.tunnelRegister)
+	mux.HandleFunc("GET /tunnel/sessions/{token}/info", r.tunnelSessionInfo)
 	mux.HandleFunc("GET /h/{token}", r.publicLanding)
 	mux.HandleFunc("POST /h/{token}/approve", r.publicApprove)
 	mux.HandleFunc("/h/{token}/mcp", r.publicMCP)
@@ -129,8 +130,22 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
+	// Bump the pending-approval counter so the operator's dashboard
+	// surfaces "friend opened the URL — call you yet?".
+	r.Tokens.MarkPendingHit(tok)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.ApprovalCode(), t.State())
+}
+
+func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
+	tok := req.PathValue("token")
+	t, err := r.Tokens.Get(tok)
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(t.Snapshot())
 }
 
 func esc(s string) string {
@@ -210,6 +225,10 @@ func (r *Relay) tunnelPublic(w http.ResponseWriter, req *http.Request, tok, inne
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// Bump activity timestamp so the dashboard's presence indicator
+	// can show "friend active 12s ago" instead of the misleading
+	// "no friend connected" we had during the Phase 1+2 deploy.
+	r.Tokens.TouchActivity(tok)
 	for k, vv := range resp.Header {
 		w.Header()[k] = vv
 	}
