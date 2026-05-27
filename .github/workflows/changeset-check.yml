@@ -2,7 +2,7 @@ name: changeset-check
 
 # Gate on PRs targeting master: require a `.changeset/*.md` file unless
 # the PR only touches paths in the allowlist below (docs, repo config,
-# CI tooling, markdown). Pattern lifted from umara/u-front.
+# CI tooling, markdown).
 #
 # Escape layers, in order:
 #   1. PR title matches the auto-generated Version PR → skip (defensive;

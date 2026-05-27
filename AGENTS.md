@@ -75,8 +75,7 @@ produces a static single-binary distribution.
 ## Releases (Changesets)
 
 The release pipeline is driven by [Changesets](https://github.com/changesets/changesets).
-**Every PR with a user-visible change needs a changeset file.** The pattern
-is lifted from `umara/u-front` — start there if you need a reference setup.
+**Every PR with a user-visible change needs a changeset file.**
 
 **Workflow per PR.** From the repo root:
 
