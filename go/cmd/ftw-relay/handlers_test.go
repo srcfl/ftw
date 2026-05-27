@@ -116,7 +116,7 @@ func TestRegisterEndpoint(t *testing.T) {
 	}
 }
 
-func TestLandingPageShowsApprovalCode(t *testing.T) {
+func TestLandingPageHasCodeEntryForm(t *testing.T) {
 	r := newTestRelay()
 	_, _ = r.Tokens.Register(TokenRegistration{
 		HostID: "host-a", Token: "lookme", TTL: time.Hour,
@@ -131,11 +131,29 @@ func TestLandingPageShowsApprovalCode(t *testing.T) {
 	body, _ := readBody(resp.Body)
 	resp.Body.Close()
 	html := string(body)
-	if !strings.Contains(html, "4827") {
-		t.Fatalf("approval code missing from landing page:\n%s", html)
+
+	// The approval code must NOT appear on the landing page — the
+	// security model relies on the friend receiving it out-of-band
+	// from the host. Showing it here would let anyone with the URL
+	// activate the session.
+	if strings.Contains(html, "4827") {
+		t.Fatalf("approval code MUST NOT appear on the landing page:\n%s", html)
 	}
+	// But the input form must be there so the friend can type the
+	// code they received separately.
+	if !strings.Contains(html, `id="code"`) {
+		t.Fatalf("code input field missing from landing page")
+	}
+	if !strings.Contains(html, `id="approve-form"`) {
+		t.Fatalf("approve form missing")
+	}
+	// Identity + intent should be displayed so the friend can sanity-
+	// check who they're connecting to.
 	if !strings.Contains(html, "@erik") {
 		t.Fatalf("identity missing from landing page")
+	}
+	if !strings.Contains(html, "help me") {
+		t.Fatalf("intent missing from landing page")
 	}
 }
 

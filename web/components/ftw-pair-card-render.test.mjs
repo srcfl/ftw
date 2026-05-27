@@ -15,9 +15,6 @@ import {
   derivePresence,
   formatAge,
   friendMessage,
-  canApprove,
-  approveRequest,
-  validateTypedCode,
 } from "./ftw-pair-card-render.js";
 
 const stateActive = {
@@ -100,13 +97,13 @@ describe("derivePresence (state machine across session lifecycle)", () => {
     {
       name: "pending, friend hasn't opened URL yet",
       state: { session_state: "pending", pending_approvals_count: 0 },
-      want: { label: "waiting for friend to open the URL", class: "pending" },
+      want: { label: "waiting for friend to open URL + enter code", class: "pending" },
     },
     {
-      name: "pending, friend opened URL (operator should approve)",
+      name: "pending, friend opened URL (waiting for them to enter the code)",
       state: { session_state: "pending", pending_approvals_count: 1 },
       want: {
-        label: "friend opened URL — call you with the code",
+        label: "friend opened URL — waiting for them to enter the code",
         class: "pending",
       },
     },
@@ -150,111 +147,29 @@ describe("derivePresence (state machine across session lifecycle)", () => {
 });
 
 describe("friendMessage (golden snapshot)", () => {
-  it("renders the URL flow when pair_url is set", () => {
+  it("includes BOTH the URL and the 4-digit code", () => {
     const msg = friendMessage(stateActive);
     assert.match(msg, /https:\/\/relay\.fortytwowatts\.com\/h\/alpha-amber/);
-    assert.match(msg, /4-digit code/);
+    assert.match(msg, /Code: 4827/);
     assert.match(msg, /Open the dashboard:/);
     assert.match(msg, /claude mcp add ftw-friend/);
-    assert.match(msg, /leaked URL/, "must warn that code-mismatch = leaked URL");
     assert.doesNotMatch(msg, /ftw-connect/, "v2 must not mention the deprecated binary");
     assert.doesNotMatch(msg, /install-ftw-connect/);
     assert.doesNotMatch(msg, /go install/);
   });
 
+  it("warns the operator that URL+code together = access grant", () => {
+    const msg = friendMessage(stateActive);
+    assert.match(msg, /together they're the access grant/);
+  });
+
   it("falls back to local-only message when no pair_url", () => {
     const msg = friendMessage(stateNoRelay);
-    assert.match(msg, /local-only/);
+    assert.match(msg, /Local-only/);
     assert.match(msg, /127\.0\.0\.1:9999/);
   });
 
   it("returns empty string for null state", () => {
     assert.equal(friendMessage(null), "");
-  });
-});
-
-describe("canApprove gating", () => {
-  it("allows when pending + has url + has code", () => {
-    assert.equal(canApprove({
-      session_state: "pending",
-      approval_code: "1234",
-      pair_url: "https://x/h/y",
-    }), true);
-  });
-
-  it("rejects when not pending", () => {
-    assert.equal(canApprove({
-      session_state: "active",
-      approval_code: "1234",
-      pair_url: "https://x/h/y",
-    }), false);
-  });
-
-  it("rejects in no-relay mode (missing pair_url)", () => {
-    assert.equal(canApprove({
-      session_state: "pending",
-      approval_code: "1234",
-    }), false);
-  });
-
-  it("rejects null state", () => {
-    assert.equal(canApprove(null), false);
-    assert.equal(canApprove(undefined), false);
-  });
-});
-
-describe("approveRequest construction", () => {
-  it("targets /h/<token>/approve on the relay", () => {
-    const req = approveRequest(stateActive, "4827");
-    assert.equal(
-      req.url,
-      "https://relay.fortytwowatts.com/h/alpha-amber-arrow-atom-axis-bay/approve",
-    );
-    assert.deepEqual(req.body, { code: "4827" });
-  });
-
-  it("returns null without pair_url", () => {
-    assert.equal(approveRequest(stateNoRelay, "1234"), null);
-  });
-});
-
-describe("validateTypedCode (voice-channel cross-check)", () => {
-  const state = { approval_code: "4827", pair_url: "x" };
-
-  it("accepts exact match", () => {
-    assert.deepEqual(validateTypedCode(state, "4827"), { ok: true });
-  });
-
-  it("accepts with surrounding whitespace", () => {
-    assert.deepEqual(validateTypedCode(state, "  4827  "), { ok: true });
-  });
-
-  it("rejects 3 digits", () => {
-    const r = validateTypedCode(state, "482");
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /expected 4 digits/);
-  });
-
-  it("rejects 5 digits", () => {
-    const r = validateTypedCode(state, "48275");
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /expected 4 digits/);
-  });
-
-  it("rejects non-numeric", () => {
-    const r = validateTypedCode(state, "abcd");
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /expected 4 digits/);
-  });
-
-  it("rejects mismatch with security warning", () => {
-    const r = validateTypedCode(state, "9999");
-    assert.equal(r.ok, false);
-    assert.match(r.reason, /leaked-URL attack/, "operator must see the security implication");
-  });
-
-  it("rejects when no active session", () => {
-    const r = validateTypedCode(null, "4827");
-    assert.equal(r.ok, false);
   });
 });

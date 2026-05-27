@@ -36,17 +36,20 @@ describe("ftw-pair-card source hygiene (v2 migration)", () => {
       "render helpers must come from the testable module");
     assert.match(SRC, /friendMessage,/);
     assert.match(SRC, /derivePresence,/);
-    assert.match(SRC, /canApprove,/);
-    assert.match(SRC, /approveRequest,/);
-    assert.match(SRC, /validateTypedCode,/);
   });
 
-  it("renders the approval form when state allows it", () => {
-    assert.match(SRC, /id="approval-input"/,
-      "v2 must surface the 4-digit code input");
-    assert.match(SRC, /id="approval-btn"/);
+  it("displays the code prominently for the operator to share", () => {
     assert.match(SRC, /class="big-code"/,
-      "the friend's expected code must be shown prominently");
+      "the 4-digit code must be displayed for copy/share");
+    assert.match(SRC, /id="copy-code-btn"/);
+    assert.match(SRC, /id="copy-bundle-btn"/);
+  });
+
+  it("does NOT host the approval form anymore (friend types code on relay page)", () => {
+    assert.doesNotMatch(SRC, /id="approval-input"/,
+      "dashboard must not be the place where the operator types the code");
+    assert.doesNotMatch(SRC, /id="approval-btn"/,
+      "no Allow button — friend approves on their own page");
   });
 
   it("renders the URL block with a copy button", () => {
@@ -67,7 +70,7 @@ describe("ftw-pair-card-render module hygiene", () => {
     for (const name of [
       "POLL_MS", "FAST_POLL_MS", "FAST_POLL_ROUNDS",
       "escapeHTML", "computeRemaining", "derivePresence", "formatAge",
-      "friendMessage", "canApprove", "approveRequest", "validateTypedCode",
+      "friendMessage",
     ]) {
       assert.match(RENDER, new RegExp(`export (function|const) ${name}\\b`),
         `${name} must be exported`);

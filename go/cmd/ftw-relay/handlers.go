@@ -131,10 +131,10 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// Bump the pending-approval counter so the operator's dashboard
-	// surfaces "friend opened the URL — call you yet?".
+	// surfaces "friend opened the URL — waiting for them to enter the code".
 	r.Tokens.MarkPendingHit(tok)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.ApprovalCode(), t.State())
+	fmt.Fprintf(w, landingHTML, esc(tok), esc(t.As()), esc(t.Intent()), t.State())
 }
 
 func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
@@ -153,21 +153,114 @@ func esc(s string) string {
 	return r.Replace(s)
 }
 
+// landingHTML is the friend-side page. The 4-digit code travels with
+// the URL (shared by the host on Signal etc.); the friend types it
+// here to activate the session. Same-origin POST to /approve so there
+// are no CORS surprises.
+//
+// Format args (in order): token, claimed identity (host-supplied "as"),
+// intent, current token state.
 const landingHTML = `<!doctype html>
 <html><head><title>forty-two-watts pair session</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
+  body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
   code { background: #f4f4f4; padding: .2rem .4rem; border-radius: .2rem; }
-  .code { font-size: 3rem; letter-spacing: .3em; text-align: center; padding: 2rem;
-          background: #fffbea; border: 1px solid #f0c040; border-radius: .5rem; margin: 2rem 0; }
+  .panel { border: 1px solid #ddd; padding: 1.5rem; border-radius: .5rem; margin-top: 2rem; }
+  input[type=text] {
+    font-family: ui-monospace, monospace;
+    font-size: 2rem;
+    letter-spacing: 0.4em;
+    text-align: center;
+    width: 7em;
+    padding: 6px 8px;
+    border: 1px solid #f0c040;
+    border-radius: .4rem;
+    background: #fffbea;
+  }
+  button {
+    font: inherit;
+    font-size: 1rem;
+    padding: 8px 20px;
+    margin-left: 8px;
+    background: #f0c040;
+    color: #0a0a0a;
+    border: 0;
+    border-radius: .3rem;
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+  .ok  { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+  .muted { color: #888; font-size: 0.9em; }
 </style>
 </head><body>
-<h1>Connect to a forty-two-watts instance</h1>
-<p>Identity: <code>%s</code></p>
+<h1>forty-two-watts pair session</h1>
+<p>From: <code>%s</code></p>
 <p>Intent: %s</p>
-<p>Tell the host this code over voice (phone, Signal call, etc.):</p>
-<div class="code">%s</div>
-<p>State: <code>%s</code>. This page does not refresh automatically.</p>
+
+<div class="panel" id="entry">
+  <p>The host has shared a <strong>4-digit code</strong> along with this URL. Enter it to activate the session.</p>
+  <p class="muted">If you don't have the code, ask the host for it on the same channel they shared the URL.</p>
+  <form id="approve-form">
+    <input id="code" type="text" inputmode="numeric" pattern="\d{4}" maxlength="4" placeholder="0000" autocomplete="off" autofocus>
+    <button id="approve-btn" type="submit">Activate</button>
+  </form>
+  <div id="msg"></div>
+</div>
+
+<p class="muted">State: <code id="state">%s</code></p>
+
+<script>
+const TOKEN = %q;
+const form = document.getElementById('approve-form');
+const codeInput = document.getElementById('code');
+const msg = document.getElementById('msg');
+const btn = document.getElementById('approve-btn');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  msg.textContent = '';
+  msg.className = '';
+  const code = codeInput.value.trim();
+  if (!/^\d{4}$/.test(code)) {
+    msg.className = 'err';
+    msg.textContent = 'Enter 4 digits.';
+    return;
+  }
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/h/' + encodeURIComponent(TOKEN) + '/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (resp.status === 204) {
+      msg.className = 'ok';
+      msg.innerHTML = 'Activated. You can now:<br><br>' +
+        '<strong>Browser:</strong> <a href="/h/' + encodeURIComponent(TOKEN) + '/web/">open the dashboard</a><br><br>' +
+        '<strong>Claude Code:</strong><br><code>claude mcp add ftw-friend --transport http ' +
+        location.origin + '/h/' + encodeURIComponent(TOKEN) + '/mcp</code>';
+      document.getElementById('state').textContent = 'active';
+      btn.style.display = 'none';
+      codeInput.disabled = true;
+    } else {
+      const body = await resp.text();
+      msg.className = 'err';
+      if (resp.status === 403) {
+        msg.textContent = 'Wrong code. Double-check with the host — and make sure this is the URL they sent (not a forwarded one).';
+      } else {
+        msg.textContent = body || ('relay error: ' + resp.status);
+      }
+      btn.disabled = false;
+    }
+  } catch (err) {
+    msg.className = 'err';
+    msg.textContent = 'network error: ' + err.message;
+    btn.disabled = false;
+  }
+});
+</script>
 </body></html>`
 
 func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {

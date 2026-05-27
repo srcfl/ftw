@@ -57,8 +57,8 @@ export function derivePresence(state, now = Date.now()) {
     case "pending":
       return {
         label: state.pending_approvals_count > 0
-          ? "friend opened URL — call you with the code"
-          : "waiting for friend to open the URL",
+          ? "friend opened URL — waiting for them to enter the code"
+          : "waiting for friend to open URL + enter code",
         class: "pending",
       };
     case "expired":
@@ -94,63 +94,32 @@ export function formatAge(ms) {
 }
 
 // friendMessage is what the operator copies and sends to the friend.
-// The URL flow is the v2 friend onboarding — no install required.
+// Both the URL AND the code are in the same message — the friend
+// opens the URL, types the code, done. The 4-digit code is what
+// prevents a leaked URL alone from activating the session (the
+// attacker also needs the code).
+//
 // When state has no pair_url (e.g. -no-relay mode) it falls back to
 // the local MCP addr stored in `code` so the same template works for
 // local-only testing.
 export function friendMessage(state) {
   if (!state) return "";
-  const url = state.pair_url || ("(local-only: " + state.code + ")");
-  const code = state.approval_code || "—";
-  return `I need help with my home energy system. I started a pair
-session — open this in any browser:
+  if (!state.pair_url) {
+    return `Local-only pair session running at ${state.code}. No relay URL — share this only with someone on the same network.`;
+  }
+  const url = state.pair_url;
+  const code = state.approval_code || "(no code — bug?)";
+  return `I need help with my home energy system. Open this URL and enter the 4-digit code below to activate the session:
 
-  ${url}
+  URL:  ${url}
+  Code: ${code}
 
-You'll see a 4-digit code on the page. Call/Signal me and read
-that code aloud. Once I confirm it matches the code I see here,
-the session activates and you can:
+Once active you can:
 
   - Open the dashboard:   ${url}/web/
   - Add as Claude Code MCP:
       claude mcp add ftw-friend --transport http ${url}/mcp
 
-Session expires when I close it or TTL runs out. The code I'll be
-waiting to hear from you matches what shows up on your screen — if
-it doesn't match, do NOT confirm (could be a leaked URL).`;
-}
-
-// canApprove returns true when the dashboard should expose the Allow
-// form (operator types the friend's 4-digit code → POST /approve).
-export function canApprove(state) {
-  return Boolean(
-    state &&
-    state.session_state === "pending" &&
-    state.approval_code &&
-    state.pair_url
-  );
-}
-
-// approveRequest constructs the request the Allow button fires.
-// Returns { url, body } so the test can assert without a real fetch.
-export function approveRequest(state, typedCode) {
-  if (!state || !state.pair_url) return null;
-  return {
-    url: state.pair_url + "/approve",
-    body: { code: typedCode },
-  };
-}
-
-// validateTypedCode: did the operator type the same 4-digit code we
-// generated? Comparing strictly (not just suffix) because a stale
-// session could leave a different code in scrollback.
-export function validateTypedCode(state, typedCode) {
-  if (!state || !state.approval_code) return { ok: false, reason: "no active session" };
-  if (typeof typedCode !== "string" || !/^\d{4}$/.test(typedCode.trim())) {
-    return { ok: false, reason: "expected 4 digits" };
-  }
-  if (typedCode.trim() !== state.approval_code) {
-    return { ok: false, reason: "code mismatch — do NOT approve, this could be a leaked-URL attack" };
-  }
-  return { ok: true };
+Session expires when I close it or TTL runs out. Don't share the
+URL + code with anyone else — together they're the access grant.`;
 }

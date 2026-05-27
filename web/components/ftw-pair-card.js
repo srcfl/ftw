@@ -23,9 +23,6 @@ import {
   computeRemaining,
   derivePresence,
   friendMessage,
-  canApprove,
-  approveRequest,
-  validateTypedCode,
 } from "./ftw-pair-card-render.js";
 
 class FtwPairCard extends FtwElement {
@@ -445,8 +442,8 @@ class FtwPairCard extends FtwElement {
 
     const friendMsg = friendMessage(this._state);
     const presence = derivePresence(this._state);
-    const showApprove = canApprove(this._state);
     const url = this._state.pair_url || "";
+    const approvalCode = this._state.approval_code || "";
 
     return `
       <div class="pair-card">
@@ -460,19 +457,16 @@ class FtwPairCard extends FtwElement {
           <span class="url" id="url-span">${escapeHTML(url)}</span>
           <button class="copy" id="copy-url-btn">Copy URL</button>
         </div>
-        ` : ""}
-
-        ${showApprove ? `
+        ${approvalCode ? `
         <div class="approval">
-          <p><strong>Friend opened the URL.</strong> Their browser shows a 4-digit code. Call/Signal them and ask them to read it aloud, then type it here.</p>
-          <div class="big-code">${escapeHTML(this._state.approval_code)}</div>
-          <p class="muted">This is the code you should hear from your friend. If they read a different code, do <strong>NOT</strong> approve — the URL has leaked.</p>
+          <p>Share <strong>both</strong> with your friend — URL via Signal/SMS, code on the same message. They'll open the URL and type the code to activate.</p>
+          <div class="big-code">${escapeHTML(approvalCode)}</div>
           <div class="approval-row">
-            <input id="approval-input" inputmode="numeric" pattern="\\d{4}" maxlength="4" placeholder="0000" autocomplete="off">
-            <button id="approval-btn">Allow</button>
+            <button id="copy-code-btn">Copy code</button>
+            <button id="copy-bundle-btn">Copy URL + code</button>
           </div>
-          <div class="approval-msg" id="approval-msg"></div>
         </div>
+        ` : ""}
         ` : ""}
 
         <div class="code-row">
@@ -522,16 +516,26 @@ class FtwPairCard extends FtwElement {
       copyUrlBtn.addEventListener("click", () => this._copyUrl(copyUrlBtn));
     }
 
-    const approveBtn = this.shadowRoot.getElementById("approval-btn");
-    if (approveBtn) {
-      approveBtn.addEventListener("click", () => this._approve());
+    const copyCodeBtn = this.shadowRoot.getElementById("copy-code-btn");
+    if (copyCodeBtn) {
+      copyCodeBtn.addEventListener("click", () => this._copyText(copyCodeBtn, this._state?.approval_code || ""));
     }
-    const approveInput = this.shadowRoot.getElementById("approval-input");
-    if (approveInput) {
-      approveInput.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") this._approve();
+    const copyBundleBtn = this.shadowRoot.getElementById("copy-bundle-btn");
+    if (copyBundleBtn) {
+      copyBundleBtn.addEventListener("click", () => {
+        const bundle = (this._state?.pair_url || "") + "\nCode: " + (this._state?.approval_code || "");
+        this._copyText(copyBundleBtn, bundle);
       });
-      approveInput.focus();
+    }
+  }
+
+  async _copyText(btn, text) {
+    if (!text) return;
+    const ok = await copyToClipboard(text);
+    if (ok) {
+      const original = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => { btn.textContent = original; }, 1500);
     }
   }
 
@@ -553,47 +557,6 @@ class FtwPairCard extends FtwElement {
       const original = btn.textContent;
       btn.textContent = "Copied!";
       setTimeout(() => { btn.textContent = original; }, 1500);
-    }
-  }
-
-  async _approve() {
-    const input = this.shadowRoot.getElementById("approval-input");
-    const msgEl = this.shadowRoot.getElementById("approval-msg");
-    if (!input || !msgEl) return;
-    const typed = input.value;
-    const v = validateTypedCode(this._state, typed);
-    if (!v.ok) {
-      msgEl.className = "approval-msg err";
-      msgEl.textContent = v.reason;
-      return;
-    }
-    const req = approveRequest(this._state, typed.trim());
-    if (!req) {
-      msgEl.className = "approval-msg err";
-      msgEl.textContent = "no pair URL — cannot approve in local-only mode";
-      return;
-    }
-    msgEl.className = "approval-msg";
-    msgEl.textContent = "approving…";
-    try {
-      const resp = await fetch(req.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req.body),
-      });
-      if (resp.status === 204) {
-        msgEl.className = "approval-msg ok";
-        msgEl.textContent = "approved — friend can now use the session";
-        // Fast-poll so the dashboard flips to active state quickly.
-        this._startFastPolls();
-      } else {
-        const text = await resp.text();
-        msgEl.className = "approval-msg err";
-        msgEl.textContent = `relay rejected: ${resp.status} ${text.slice(0, 200)}`;
-      }
-    } catch (e) {
-      msgEl.className = "approval-msg err";
-      msgEl.textContent = `network error: ${e.message}`;
     }
   }
 
