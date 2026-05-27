@@ -442,6 +442,24 @@ func (s *Store) migrate() error {
 			load_wh           REAL NOT NULL,
 			computed_at_ms    INTEGER NOT NULL
 		) STRICT`,
+
+		// Passkeys (WebAuthn credentials) registered by the operator for
+		// owner remote access via the relay. One row per device enrolled.
+		// credential_id is the raw bytes returned by the authenticator
+		// (Touch ID handle, Windows Hello CredID, etc.); we look up by
+		// this on every login. public_key is the COSE-encoded ES256 /
+		// EdDSA pubkey for signature verification. sign_count guards
+		// against cloned authenticators (must monotonically increase).
+		`CREATE TABLE IF NOT EXISTS trusted_devices (
+			credential_id BLOB    PRIMARY KEY NOT NULL,
+			public_key    BLOB    NOT NULL,
+			sign_count    INTEGER NOT NULL DEFAULT 0,
+			aaguid        BLOB    NOT NULL DEFAULT x'',
+			transports    TEXT    NOT NULL DEFAULT '',
+			friendly_name TEXT    NOT NULL,
+			created_at_ms INTEGER NOT NULL,
+			last_used_ms  INTEGER NOT NULL DEFAULT 0
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
