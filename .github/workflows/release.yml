@@ -2,21 +2,29 @@ name: release
 
 # Changesets-driven release.
 #
+# Pattern lifted from umara/u-front — proven on a higher-traffic repo.
+#
 # Flow:
-#   1. PRs land on master, each carrying a `.changeset/*.md` file.
-#   2. This workflow runs on push to master. The `changesets/action`
-#      step looks at unconsumed changesets:
-#        - if any exist  → it opens (or updates) a "Version Packages" PR
-#          that bumps package.json + rewrites CHANGELOG.md.
-#        - if none exist (the Version PR just merged) → it runs our
-#          `publish` script which tags v$VERSION, pushes the tag, and
-#          creates the GitHub Release with codename-annotated notes.
+#   1. PRs land on master, each carrying a `.changeset/*.md` file (or
+#      touching only allowlisted paths — see changeset-check.yml).
+#   2. This workflow fires on push to master.
+#      - `changesets/action` opens / updates a "Version Packages" PR
+#        whenever unconsumed changesets exist. We deliberately do NOT
+#        pass `publish:` — past experience on admin-next showed
+#        `changeset publish` / `changeset tag` silently no-op'd in
+#        CI, and the action's built-in `createGithubReleases` defaults
+#        to true and 422-collides with our own `gh release create`.
+#      - When the Version PR is merged, the next push has no pending
+#        changesets, so `steps.changesets.outputs.hasChangesets ==
+#        'false'`. The "Tag and create GitHub Release" step then runs
+#        idempotently: independent existence checks for the tag and
+#        the release let a partial-failure rerun finish the job.
 #   3. Downstream jobs (binaries, ftw-connect, ftw-subetha, docker,
-#      rpi-image, discord) gate on `steps.changesets.outputs.published`
+#      rpi-image, discord) gate on `release.outputs.published == 'true'`
 #      and run only when a real release was cut.
 #
 # Manual workflow_dispatch is still available as an emergency lever
-# (e.g. re-running the publish step against existing state) but the
+# (e.g. re-running the publish step against partial state) but the
 # day-to-day trigger is "Version Packages" PR merge.
 
 on:
@@ -24,8 +32,8 @@ on:
     branches: [master]
   workflow_dispatch:
 
-# changesets/action needs to push the Version PR + tag + release.
-# docker job needs to push to GHCR.
+# changesets/action needs to push the Version PR. The publish step
+# pushes the tag + creates the GH release. The docker job pushes to GHCR.
 permissions:
   contents: write
   packages: write
@@ -43,8 +51,8 @@ jobs:
     name: changesets (version PR / publish)
     runs-on: ubuntu-latest
     outputs:
-      published: ${{ steps.changesets.outputs.published }}
-      version:   ${{ steps.publish_meta.outputs.version }}
+      published: ${{ steps.publish.outputs.published }}
+      version:   ${{ steps.publish.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -53,73 +61,100 @@ jobs:
           # which changesets have already been consumed by past
           # Version PRs (it walks .changeset/ vs CHANGELOG.md).
           fetch-depth: 0
-          # Use CI_TOKEN (PAT or GitHub App token) when available so
-          # the Version PR's push events trigger `test.yml` and
-          # `changeset-check.yml`. The default GITHUB_TOKEN suppresses
-          # cascading workflow runs on bot-authored pushes, which
-          # would leave the Version PR without required status checks
-          # under branch protection.
-          token: ${{ secrets.CI_TOKEN || secrets.GITHUB_TOKEN }}
           persist-credentials: true
 
       - name: Setup Node
         uses: actions/setup-node@v5
         with:
           node-version: '22'
-          # No lockfile — the repo is Go-first. npm picks the
-          # @changesets/cli major pinned in package.json devDeps.
-          cache: ''
+          cache: npm
+          cache-dependency-path: package-lock.json
 
-      - name: Install changesets CLI
-        # Lockfile-less install of just the CLI declared in
-        # devDependencies. `--no-audit --no-fund` keeps the log
-        # quiet; `--no-save` avoids mutating package.json.
-        run: npm install --no-audit --no-fund --no-save
+      - name: Install dependencies
+        # Lockfile-reproducible install. The previous `npm install
+        # --no-save` flow risked picking up a future @changesets/cli
+        # minor regression on every workflow run.
+        run: npm ci --prefer-offline --no-audit --no-fund
 
-      - name: Run changesets action
+      - name: Create or update Version Packages PR
         id: changesets
         uses: changesets/action@v1
         with:
           # `version` runs `changeset version` to bump package.json
           # and rewrite CHANGELOG.md when consumed changesets exist.
-          # changesets/action handles opening/updating the PR.
-          version: npm run changeset:version
-          # `publish` runs after the Version PR has been merged and
-          # there are no more changesets pending. Our script tags
-          # v$VERSION, pushes it, and creates the GH release with
-          # codename-annotated notes from CHANGELOG.md.
-          publish: bash scripts/release-publish.sh
-          # Title + commit of the Version PR. Keep it boring so it's
-          # easy to recognize in the PR list.
+          # We deliberately do NOT pass `publish:` — see the header
+          # comment for the rationale. The publish step below does
+          # the tag + GitHub Release manually, idempotently.
+          version: npx changeset version
           title:  "chore(release): version packages"
           commit: "chore(release): version packages"
-          # Disable the action's built-in GitHub Release creation:
-          # our `publish` script already creates the release via
-          # `gh release create`. With this left at the default `true`
-          # the action would try to create a second release at the
-          # same tag, hit 422 "already_exists", throw uncaught, and
-          # leave `outputs.published` unset — silently skipping every
-          # downstream asset job. Cross-audit by codex + a fresh-
-          # context architect agent both flagged this as critical.
-          createGithubReleases: false
         env:
-          # Same CI_TOKEN preference: pushing the Version PR branch
-          # with GITHUB_TOKEN suppresses workflow_run on bot pushes,
-          # leaving required checks unrun. CI_TOKEN (PAT / GH App)
-          # makes the push look like a user push so checks fire.
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Read published version
-        id: publish_meta
-        # When `published` is true the publish script just tagged a
-        # release. Read the bumped version off package.json so the
-        # downstream jobs know what tag to check out.
-        if: steps.changesets.outputs.published == 'true'
+      - name: Tag and create GitHub Release
+        id: publish
+        # Fires after the Version Packages PR is merged: at that point
+        # the consumed `.changeset/*.md` files are gone, so the action
+        # reports `hasChangesets == 'false'`. This branch is also
+        # entered on every direct push to master that happens to have
+        # no pending changesets — the idempotent existence checks
+        # below turn those into a clean no-op.
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
           VERSION="$(node -p "require('./package.json').version")"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "Published v${VERSION}"
+          TAG="v${VERSION}"
+
+          TAG_EXISTS=false
+          if git ls-remote --exit-code --tags origin "${TAG}" >/dev/null 2>&1; then
+            TAG_EXISTS=true
+          fi
+          RELEASE_EXISTS=false
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            RELEASE_EXISTS=true
+          fi
+
+          # Already-done case: a previous run completed cleanly. No
+          # new release was cut on THIS run, so downstream asset jobs
+          # should skip — emit `published=false` so they do.
+          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ]; then
+            echo "Tag ${TAG} and GitHub Release already exist — nothing to publish."
+            {
+              echo "published=false"
+              echo "version=${VERSION}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Build codename-annotated release notes. The script extracts
+          # the latest section from CHANGELOG.md (between `## <version>`
+          # and the next version-shaped heading) and prepends the
+          # Hitchhiker codename header.
+          node scripts/apply-codename.cjs "${VERSION}" > release-notes.md
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+          echo "--- end ---"
+
+          if [ "${TAG_EXISTS}" = "false" ]; then
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
+          fi
+
+          if [ "${RELEASE_EXISTS}" = "false" ]; then
+            gh release create "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --notes-file release-notes.md
+          fi
+
+          {
+            echo "published=true"
+            echo "version=${VERSION}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Published ${TAG}"
 
   binaries:
     name: build + upload release binaries

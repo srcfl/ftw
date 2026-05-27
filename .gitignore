@@ -45,9 +45,9 @@ bin/
 artifacts/
 .cache/
 
-# Changesets / Node — devtool surface only. package.json + .changeset/
-# are tracked; the install artifacts and lockfile noise are not.
+# Changesets / Node — devtool surface only. package.json + the
+# committed package-lock.json are tracked (reproducible installs in
+# CI via `npm ci`); node_modules and runtime artifacts are not.
 node_modules/
-package-lock.json
 release-notes.md
 
