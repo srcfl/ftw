@@ -669,10 +669,14 @@ func main() {
 		loadPeakW = 5000
 	}
 	loadSvc := loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	// SeedHeatingCoef — operator config is a cold-start prior. Once the
+	// load model has accumulated samples in production, its
+	// telemetry-fit HeatingW_per_degC survives restart and the config
+	// value is ignored. See loadmodel/service.go for the rationale.
 	if cfg.Weather != nil {
-		loadSvc.SetHeatingCoef(cfg.Weather.HeatingWPerDegC)
+		loadSvc.SeedHeatingCoef(cfg.Weather.HeatingWPerDegC)
 	} else {
-		loadSvc.SetHeatingCoef(0)
+		loadSvc.SeedHeatingCoef(0)
 	}
 	// Temperature source for heating-gain fit: same forecast cache.
 	loadSvc.Temp = func(t time.Time) (float64, bool) {

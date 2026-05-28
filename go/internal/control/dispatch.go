@@ -581,6 +581,12 @@ func resetEnergyDispatchBookkeeping(state *State) {
 type SlotDeliveryStats struct {
 	OverDeliveryCount  uint64 `json:"over_delivery_count"`
 	UnderDeliveryCount uint64 `json:"under_delivery_count"`
+	// SignMismatchCount counts slots where the fleet moved energy in the
+	// opposite direction from the plan (planned discharge → actual
+	// charge, or vice-versa) for non-idle slots. Caught separately
+	// because the magnitude-only over/under check would happily report
+	// `|−425| ≈ |+425|` as on-target — the largest possible miss.
+	SignMismatchCount uint64 `json:"sign_mismatch_count"`
 }
 
 // slotDeliveryOverThreshold + slotDeliveryUnderThreshold define the
@@ -638,24 +644,39 @@ func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Tim
 		// so this accumulator keeps its own slotActualPlannedWh.
 		plannedWh := state.slotActualPlannedWh
 		if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
-			ratio := math.Abs(state.slotActualWh) / math.Max(math.Abs(plannedWh), 1)
-			switch {
-			case ratio > slotDeliveryOverThreshold:
-				slog.Info("dispatch slot over-delivery",
+			actualWh := state.slotActualWh
+			// Sign mismatch is the categorical failure mode: we moved
+			// energy in the opposite direction from the plan. Caught
+			// before the magnitude-ratio check below, which would
+			// otherwise treat opposite-sign-equal-magnitude (planned
+			// −425, actual +425) as ratio 1.0 = on target.
+			if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
+				slog.Info("dispatch slot sign mismatch",
 					"mode", state.Mode,
 					"planned_wh", plannedWh,
-					"actual_wh", state.slotActualWh,
-					"ratio", ratio,
+					"actual_wh", actualWh,
 					"slot_start", state.slotActualSlotStart)
-				state.SlotDeliveryStats.OverDeliveryCount++
-			case ratio < slotDeliveryUnderThreshold:
-				slog.Info("dispatch slot under-delivery",
-					"mode", state.Mode,
-					"planned_wh", plannedWh,
-					"actual_wh", state.slotActualWh,
-					"ratio", ratio,
-					"slot_start", state.slotActualSlotStart)
-				state.SlotDeliveryStats.UnderDeliveryCount++
+				state.SlotDeliveryStats.SignMismatchCount++
+			} else {
+				ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
+				switch {
+				case ratio > slotDeliveryOverThreshold:
+					slog.Info("dispatch slot over-delivery",
+						"mode", state.Mode,
+						"planned_wh", plannedWh,
+						"actual_wh", actualWh,
+						"ratio", ratio,
+						"slot_start", state.slotActualSlotStart)
+					state.SlotDeliveryStats.OverDeliveryCount++
+				case ratio < slotDeliveryUnderThreshold:
+					slog.Info("dispatch slot under-delivery",
+						"mode", state.Mode,
+						"planned_wh", plannedWh,
+						"actual_wh", actualWh,
+						"ratio", ratio,
+						"slot_start", state.slotActualSlotStart)
+					state.SlotDeliveryStats.UnderDeliveryCount++
+				}
 			}
 		}
 		state.slotActualSlotStart = dir.SlotStart
@@ -997,6 +1018,12 @@ func ComputeDispatch(
 	// triggered by LIVE grid sign rather than planned grid — since
 	// passive_arbitrage idle slots can be set with planned grid near zero).
 	passiveArbitrageIdleSlot := false
+	// coverLoadDischargeSlot: planner_arbitrage discharge slot the DP
+	// picked for covering load rather than peak export (PlannedGridW ≈ 0).
+	// Same outer-scope lift as passiveArbitrageIdleSlot so the post-block
+	// fall-through can recognise carve-out slots and force grid_target=0
+	// instead of letting PlanTarget set the planned import.
+	coverLoadDischargeSlot := false
 	var currentDirective SlotDirective
 
 	// ---- Manual hold: highest-priority override ----
@@ -1044,8 +1071,16 @@ func ComputeDispatch(
 				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
 				// path so the DP's deliberate grid-charge intent is honoured.
 				const idleWhGate = 50.0
+				// |BatteryEnergyWh| ≤ idleWhGate — true idle only. A
+				// planned-discharge slot is also ≤ idleWhGate by the
+				// signed comparison alone (negative numbers satisfy
+				// the inequality), and would incorrectly route the
+				// live-export charge block onto a deliberate discharge
+				// decision. passive_arbitrage doesn't plan discharge
+				// today; the predicate is defensive. Codex P2 / #375
+				// follow-up.
 				passiveArbitrageIdleSlot = state.Mode == ModePlannerPassiveArbitrage &&
-					dir.BatteryEnergyWh <= idleWhGate
+					math.Abs(dir.BatteryEnergyWh) <= idleWhGate
 				// planner_arbitrage cover-load discharge slots: same fallthrough.
 				// The energy path's "extra export is bonus revenue" carve-out
 				// (see SlotDirective.PlannedGridW doc) is correct for peak-export
@@ -1060,7 +1095,18 @@ func ComputeDispatch(
 				// passive cover-load discharge (BatteryEnergyWh <= idleWh
 				// captures non-charge slots). Operator-report 2026-05-28.
 				const coverLoadExportToleranceW = 100.0
-				coverLoadDischargeSlot := state.Mode == ModePlannerArbitrage &&
+				// Same cover-load reasoning applies in both planner_arbitrage
+				// and planner_passive_arbitrage. Both modes can plan a
+				// discharge slot whose purpose is to *cover load* (not to
+				// export at peak price); both need reactive PI on grid=0
+				// when the forecast load is wrong. The earlier (#378)
+				// implementation only listed planner_arbitrage and relied
+				// on the passive_arbitrage flag's loose predicate to fold
+				// in the passive variant — Codex P2 / #375 follow-up
+				// tightened that flag to true-idle only, so include the
+				// passive mode explicitly here.
+				coverLoadDischargeSlot = (state.Mode == ModePlannerArbitrage ||
+					state.Mode == ModePlannerPassiveArbitrage) &&
 					dir.HasPlannedGridW &&
 					dir.BatteryEnergyWh < -idleWhGate &&
 					dir.PlannedGridW > -coverLoadExportToleranceW
@@ -1074,9 +1120,20 @@ func ComputeDispatch(
 				// weighted, they use the manual modes, not a planner mode.
 				effectiveMode = ModeSelfConsumption
 				state.PlanStale = false
+				// Carve-out slots must chase grid=0, not the legacy
+				// PlanTarget's planned grid. main.go wires PlanTarget
+				// alongside SlotDirective; for arbitrage cover-load,
+				// PlanTarget returns ("self_consumption", planned_import),
+				// and falling through to the !useEnergyPath branch below
+				// would SetGridTarget(+plannedImport) — defeating the
+				// reactive carve-out entirely. Force the setpoint here
+				// and skip the legacy lookup. Codex P1, PR #378 follow-up.
+				if passiveArbitrageIdleSlot || coverLoadDischargeSlot {
+					state.SetGridTarget(0)
+				}
 			}
 		}
-		if !useEnergyPath {
+		if !useEnergyPath && !passiveArbitrageIdleSlot && !coverLoadDischargeSlot {
 			var modeStr string
 			var gridW float64
 			ok := false
@@ -1246,8 +1303,13 @@ func ComputeDispatch(
 	// baselineGridW removes the batteries' current contribution from the
 	// live meter — same shape as planner_self's planned-baseline gate, but
 	// computed from telemetry instead of the (possibly-stale) plan.
+	// Extended to cover-load discharge slots too (#379 follow-up): a
+	// planned-discharge slot whose forecast load doesn't materialise must
+	// not turn into "absorb the live PV surplus" via reactive PI on grid=0.
+	// Battery stays at 0 in both directions for the slot — neither
+	// reactive charge from PV nor force-export discharge.
 	passiveArbitrageIdleLiveExportGate := false
-	if passiveArbitrageIdleSlot {
+	if passiveArbitrageIdleSlot || coverLoadDischargeSlot {
 		baselineGridW := gridW - currentTotal
 		if baselineGridW < -mpc.IdleGateThresholdW {
 			passiveArbitrageIdleLiveExportGate = true
