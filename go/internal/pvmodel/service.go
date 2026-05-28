@@ -44,6 +44,12 @@ type Service struct {
 	model     *Model
 	persistMu sync.Mutex // serialises SQLite writes so a stale persist can't clobber a Reset
 
+	// Residuals captures (predicted_at_t, actual_at_t) pairs to compute a
+	// short-horizon additive correction the MPC applies on top of the
+	// structural prediction. See residual.go for the math + gates. Lives
+	// for the lifetime of the Service; cleared by Reset().
+	Residuals *ResidualBuffer
+
 	stop chan struct{}
 	done chan struct{}
 }
@@ -58,6 +64,7 @@ func NewService(st *state.Store, tel *telemetry.Store, cs ClearSkyFunc, cf Cloud
 		Cloud:          cf,
 		SampleInterval: 60 * time.Second,
 		PersistEvery:   10,
+		Residuals:      NewResidualBuffer(),
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
@@ -338,11 +345,23 @@ func (s *Service) sample() {
 		return
 	}
 
+	// Capture (predicted_at_now, actual_at_now) for the residual buffer
+	// BEFORE running the RLS update — otherwise the model's prediction
+	// already incorporates the sample we're about to use as ground
+	// truth, and the residual collapses to ~0. Predict against the
+	// structural model only (no now-anchor) since the residual layer
+	// is correcting that structural output. The Residuals buffer
+	// itself applies the gates / fade / variance check.
 	s.mu.Lock()
+	predicted := s.model.Predict(cs, cloud, now)
 	updated := s.model.Update(cs, cloud, now, pvW)
 	samples := s.model.Samples
 	mae := s.model.MAE
 	s.mu.Unlock()
+
+	if s.Residuals != nil {
+		s.Residuals.Add(now, predicted, pvW)
+	}
 
 	slog.Info("pvmodel: sample", "cs_wm2", cs, "cloud_pct", cloud, "pv_w", pvW, "samples", samples, "mae_w", mae, "updated", updated)
 
@@ -372,7 +391,9 @@ func (s *Service) persist() {
 }
 
 // Reset clears the model to a fresh prior (useful after a system change
-// — new panels, cleaning, etc.).
+// — new panels, cleaning, etc.). Also clears the residual buffer so a
+// stale set of "old-model" residuals doesn't bias the fresh prior's
+// predictions during the cold-start blend.
 func (s *Service) Reset() {
 	if s == nil {
 		return
@@ -380,6 +401,31 @@ func (s *Service) Reset() {
 	s.mu.Lock()
 	rated := s.model.RatedW
 	s.model = NewModel(rated)
+	s.Residuals = NewResidualBuffer()
 	s.mu.Unlock()
 	s.persist()
+}
+
+// ResidualCorrect is the integration point for the MPC. Returns the
+// additive correction (W) to apply to a base prediction targeting
+// tTarget, computed at wall time `now`. Returns 0 when residuals are
+// unavailable, insufficient, or noise-dominated. See ResidualBuffer.Correct.
+//
+// Sign convention: this returns generation-positive W (same as the
+// underlying pvmodel.Predict). Callers consuming site-sign PV (e.g.
+// mpc.buildSlots which negates) should match the sign at their boundary.
+func (s *Service) ResidualCorrect(now, tTarget time.Time, basePrediction float64) float64 {
+	if s == nil || s.Residuals == nil {
+		return 0
+	}
+	return s.Residuals.Correct(now, tTarget, basePrediction)
+}
+
+// ResidualDiagSnapshot returns the current residual-buffer state for
+// /api/pvmodel diagnostics. Zero-valued when the buffer is empty.
+func (s *Service) ResidualDiagSnapshot() ResidualDiag {
+	if s == nil || s.Residuals == nil {
+		return ResidualDiag{WindowMinutes: int(ResidualBufferWindow.Minutes())}
+	}
+	return s.Residuals.Diag(time.Now())
 }

@@ -30,6 +30,7 @@ func TestBuildSlotsFallsBackToForecastWhenTwinCollapses(t *testing.T) {
 		ts,
 		func(time.Time, float64) float64 { return 0 },
 		nil,
+		nil,
 	)
 	if len(slots) != 1 {
 		t.Fatalf("got %d slots, want 1", len(slots))
@@ -61,12 +62,61 @@ func TestBuildSlotsKeepsTwinWhenPredictionIsSane(t *testing.T) {
 		ts,
 		func(time.Time, float64) float64 { return twinPV },
 		nil,
+		nil,
 	)
 	if len(slots) != 1 {
 		t.Fatalf("got %d slots, want 1", len(slots))
 	}
 	if got := slots[0].PVW; math.Abs(got+twinPV) > 1e-6 {
 		t.Fatalf("slot PVW = %f, want %f", got, -twinPV)
+	}
+}
+
+// TestBuildSlots_AppliesPVResidualCorrection: a non-nil
+// PVResidualCorrector adds an additive bias to the twin's per-slot
+// prediction BEFORE selectPlannerPVW blends with the forecast. We mock
+// the corrector to apply -200 W to the first slot only and verify the
+// final slot 0 PVW reflects the correction while slot 1 does not.
+func TestBuildSlots_AppliesPVResidualCorrection(t *testing.T) {
+	ts0 := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC).UnixMilli()
+	ts1 := ts0 + 15*60*1000
+	cloud := 30.0
+	forecastPV := 0.0 // disable forecast blending so we see the pure twin path
+	twinPV := 1500.0
+	// Correction of -200 W means PV generation is being under-predicted
+	// by 200 W on the rolling residual; final base should be 1300 W on
+	// slot 0 only.
+	correctedSlot := time.UnixMilli(ts0 + 15*30*1000).UTC() // slot 0 midpoint
+	pvCorrect := func(now, tTarget time.Time, base float64) float64 {
+		if tTarget.Equal(correctedSlot) {
+			return -200
+		}
+		return 0
+	}
+	slots := buildSlots(
+		[]state.PricePoint{
+			{SlotTsMs: ts0, SlotLenMin: 15, SpotOreKwh: 120, TotalOreKwh: 180},
+			{SlotTsMs: ts1, SlotLenMin: 15, SpotOreKwh: 120, TotalOreKwh: 180},
+		},
+		[]state.ForecastPoint{
+			{SlotTsMs: ts0, SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &forecastPV},
+		},
+		2500,
+		ts0,
+		func(time.Time, float64) float64 { return twinPV },
+		pvCorrect,
+		nil,
+	)
+	if len(slots) != 2 {
+		t.Fatalf("got %d slots, want 2", len(slots))
+	}
+	// Slot 0: base 1500 + (-200) = 1300 → PVW = -1300 (site-sign).
+	if got, want := slots[0].PVW, -1300.0; math.Abs(got-want) > 1e-6 {
+		t.Fatalf("slot 0 PVW = %f, want %f (correction applied)", got, want)
+	}
+	// Slot 1: no correction → PVW = -1500.
+	if got, want := slots[1].PVW, -1500.0; math.Abs(got-want) > 1e-6 {
+		t.Fatalf("slot 1 PVW = %f, want %f (no correction)", got, want)
 	}
 }
 
@@ -261,6 +311,7 @@ func TestBuildSlotsEmptyForecast(t *testing.T) {
 		nil, // empty forecasts
 		1500,
 		ts,
+		nil,
 		nil,
 		nil,
 	)

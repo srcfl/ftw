@@ -2016,15 +2016,27 @@ func (s *Server) handlePVModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := s.deps.PVModel.Model()
+	rd := s.deps.PVModel.ResidualDiagSnapshot()
+	// Single-number "what is the planner doing right now" view: the
+	// correction the MPC would apply to a slot 15 min out, after the
+	// ramp-off + gates. Saves operators from interpreting mean × ramp
+	// themselves.
+	now := time.Now()
+	currentCorrW := s.deps.PVModel.ResidualCorrect(now, now.Add(15*time.Minute), 0)
 	writeJSON(w, 200, map[string]any{
-		"enabled":    true,
-		"samples":    m.Samples,
-		"mae_w":      m.MAE,
-		"rated_w":    m.RatedW,
-		"quality":    m.Quality(),
-		"last_ms":    m.LastMs,
-		"forgetting": m.Forgetting,
-		"beta":       m.Beta,
+		"enabled":                    true,
+		"samples":                    m.Samples,
+		"mae_w":                      m.MAE,
+		"rated_w":                    m.RatedW,
+		"quality":                    m.Quality(),
+		"last_ms":                    m.LastMs,
+		"forgetting":                 m.Forgetting,
+		"beta":                       m.Beta,
+		"pv_residual_correction_w":   currentCorrW,
+		"pv_residual_sample_count":   rd.SampleCount,
+		"pv_residual_mean_w":         rd.MeanW,
+		"pv_residual_std_w":          rd.StdW,
+		"pv_residual_window_minutes": rd.WindowMinutes,
 	})
 }
 

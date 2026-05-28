@@ -712,6 +712,7 @@ func main() {
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
 		if pvSvc != nil {
 			mpcSvc.PV = pvSvc.Predict
+			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
 		}
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
