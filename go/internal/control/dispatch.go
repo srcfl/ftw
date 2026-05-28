@@ -825,6 +825,14 @@ func ComputeDispatch(
 	plannerSelfIdleGate := false
 	plannerSelfExportSurplusGate := false
 	plannerSelfNoChargeStalePlan := false
+	// passiveArbitrageIdleSlot tracks "we're in planner_passive_arbitrage on an
+	// idle plan-slot (BatteryEnergyWh ≈ 0)". For these slots the DP picked
+	// idle deliberately; the live-export gate below uses this to suppress
+	// reactive absorption when actual conditions show PV surplus the
+	// forecast missed (mirror of plannerSelfExportSurplusGate, but
+	// triggered by LIVE grid sign rather than planned grid — since
+	// passive_arbitrage idle slots can be set with planned grid near zero).
+	passiveArbitrageIdleSlot := false
 	var currentDirective SlotDirective
 
 	// ---- Manual hold: highest-priority override ----
@@ -872,9 +880,9 @@ func ComputeDispatch(
 				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
 				// path so the DP's deliberate grid-charge intent is honoured.
 				const idleWhGate = 50.0
-				isPassiveArbitrageIdleSlot := state.Mode == ModePlannerPassiveArbitrage &&
+				passiveArbitrageIdleSlot = state.Mode == ModePlannerPassiveArbitrage &&
 					dir.BatteryEnergyWh <= idleWhGate
-				if !isPassiveArbitrageIdleSlot {
+				if !passiveArbitrageIdleSlot {
 					useEnergyPath = true
 				}
 				// Distribution mode is decoupled from planner strategy in
@@ -1037,10 +1045,6 @@ func ComputeDispatch(
 	// modes' non-discharge intent (planner_cheap / planner_arbitrage
 	// during charging slots) remains in scope.
 	noSelfDischarge := planNonDischargeIntent
-	// CHARGE-direction safeties for planner_self. exportSurplusGate +
-	// stale-plan block charge fully; idleGate applies a soft ceiling
-	// computed from live PV surplus (handled below, not via this flag).
-	noSelfCharge := !manualHoldActive && (plannerSelfExportSurplusGate || plannerSelfNoChargeStalePlan)
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -1050,6 +1054,29 @@ func ComputeDispatch(
 		currentTotal += b.currentW
 	}
 	surplus := newSurplusAccounting(rawGridW, gridW, currentTotal, state)
+
+	// passive_arbitrage idle slot + live PV surplus: don't absorb. Forecasts
+	// guide FUTURE slots; for the slot we're already in, the live meter is
+	// authoritative. The DP picked idle here on purpose — when actual
+	// conditions diverge upward in PV (or downward in load) such that the
+	// baseline-grid-with-battery-at-zero shows export, sustain the DP's
+	// "don't charge" choice rather than letting reactive PI swallow it.
+	// baselineGridW removes the batteries' current contribution from the
+	// live meter — same shape as planner_self's planned-baseline gate, but
+	// computed from telemetry instead of the (possibly-stale) plan.
+	passiveArbitrageIdleLiveExportGate := false
+	if passiveArbitrageIdleSlot {
+		baselineGridW := gridW - currentTotal
+		if baselineGridW < -mpc.IdleGateThresholdW {
+			passiveArbitrageIdleLiveExportGate = true
+		}
+	}
+	// CHARGE-direction safeties for planner_self. exportSurplusGate +
+	// stale-plan block charge fully; idleGate applies a soft ceiling
+	// computed from live PV surplus (handled below, not via this flag).
+	// passiveArbitrageIdleLiveExportGate is the live-grid mirror that
+	// extends the same charge-block to planner_passive_arbitrage idle slots.
+	noSelfCharge := !manualHoldActive && (plannerSelfExportSurplusGate || plannerSelfNoChargeStalePlan || passiveArbitrageIdleLiveExportGate)
 
 	// ---- Compute totalCorrection — paths diverge here ----
 	var totalCorrection float64
