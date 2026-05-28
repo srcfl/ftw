@@ -2369,6 +2369,104 @@ func TestPlannerPassiveArbitrageCoverLoadBacksOffOnLoadUndershoot(t *testing.T) 
 	}
 }
 
+// planner_arbitrage cover-load slot must chase grid=0, not the plan's
+// forecasted positive import. The PR #378 carve-out only sets
+// useEnergyPath=false; production wires both SlotDirective and PlanTarget,
+// so falling through to the !useEnergyPath block called PlanTarget which
+// returned `("self_consumption", +1700, true)` and then SetGridTarget(+1700)
+// made PI try to hit +1.7 kW import — undoing the carve-out's whole point.
+// The fix routes carve-out slots to grid_target=0 unconditionally.
+// Cover-load discharge slot (planned discharge to offset import) under
+// live PV surplus: don't absorb the surplus into the battery. The slot
+// was planned with the assumption of expected import; if live shows
+// export instead, charging would steal export revenue AND the cover-
+// load discharge purpose is moot (no load to cover). Right behaviour:
+// hold battery near 0, let surplus export. Mirror of the passive
+// idle-slot gate but for the discharge-intent slot. Codex P2 / #375
+// follow-up — extends live-export gate to cover-load-discharge slots
+// in both planner_arbitrage and planner_passive_arbitrage.
+func TestCoverLoadDischargeDoesNotAbsorbLiveSurplus(t *testing.T) {
+	for _, mode := range []Mode{ModePlannerArbitrage, ModePlannerPassiveArbitrage} {
+		t.Run(string(mode), func(t *testing.T) {
+			now := time.Now()
+			d := SlotDirective{
+				SlotStart:       now,
+				SlotEnd:         now.Add(15 * time.Minute),
+				BatteryEnergyWh: -600, // planned discharge to cover load
+				Strategy:        "arbitrage",
+				PlannedGridW:    0, // forecast: cover load, no export anticipated
+				HasPlannedGridW: true,
+			}
+			// Live: PV-surplus exporting via the meter, battery already
+			// pulling 1.6 kW. The reactive PI on grid=0 would otherwise
+			// ramp charge UP to absorb the surplus, swallowing PV export
+			// at high spot.
+			store := seedStore(-100, []struct {
+				name          string
+				currentW, soc float64
+			}{
+				{"ferroamp", 1600, 0.5},
+			})
+			st := NewState(0, 0, "ferroamp")
+			st.Mode = mode
+			st.UseEnergyDispatch = true
+			st.SlewRateW = 10000
+			st.MinDispatchIntervalS = 0
+			st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+			if len(targets) != 1 {
+				t.Fatalf("want 1 target, got %d", len(targets))
+			}
+			if math.Abs(targets[0].TargetW) > 1 {
+				t.Errorf("TargetW = %.0f W — cover-load discharge slot with live PV surplus must not absorb (battery should be ramped back to 0)", targets[0].TargetW)
+			}
+		})
+	}
+}
+
+func TestPlannerArbitrageCoverLoadChasesGridZeroNotPlannedImport(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -800, // planned discharge — cover-load slot
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700, // forecast: still importing 1.7 kW even with the discharge
+		HasPlannedGridW: true,
+	}
+	// Live: importing 1500 W, batteries idle. The carve-out's promise is
+	// "chase grid=0 so a forecast-load undershoot doesn't lock discharge
+	// off". If PlanTarget's +1700 wins, PI sees grid=1500 vs setpoint=1700
+	// and tries to import MORE (charge battery). Battery should instead
+	// discharge ~1.5 kW to cover live load.
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	// Production wiring: PlanTarget exists alongside SlotDirective.
+	// actionToSlot returns ("self_consumption", a.GridW, true) for
+	// arbitrage discharge — i.e. would set grid_target to planned import.
+	st.PlanTarget = func(time.Time) (string, float64, bool) {
+		return "self_consumption", 1700, true
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW > -500 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with live import must discharge to cover (carve-out must override PlanTarget's planned-import setpoint)", targets[0].TargetW)
+	}
+}
+
 func TestPlannerSelfPlannedPVExportStopsChargingWithoutSlew(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -4995,6 +5093,58 @@ func TestSlotMetricsLogsOverDeliveryAtSlotEnd(t *testing.T) {
 	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver+1 {
 		t.Errorf("OverDeliveryCount = %d, want %d (incremented by 1 at rollover)",
 			st.SlotDeliveryStats.OverDeliveryCount, beforeOver+1)
+	}
+	if st.SlotDeliveryStats.UnderDeliveryCount != beforeUnder {
+		t.Errorf("UnderDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.UnderDeliveryCount, beforeUnder)
+	}
+}
+
+// Planned discharge but actual charge (same magnitude) — the largest
+// possible plan-vs-reality miss must NOT register as "on target" just
+// because |actual| ≈ |planned|. Sign mismatch is a categorically
+// different failure (we did the opposite of what was planned) and needs
+// its own counter. Codex P2 / #379 follow-up.
+func TestSlotMetricsDetectsSignMismatch(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425, // planned: discharge
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1700, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// Same magnitude as planned, opposite direction.
+	st.slotActualWh = +425
+
+	active = slot2
+	beforeMismatch := st.SlotDeliveryStats.SignMismatchCount
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	beforeUnder := st.SlotDeliveryStats.UnderDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.SlotDeliveryStats.SignMismatchCount != beforeMismatch+1 {
+		t.Errorf("SignMismatchCount = %d, want %d (incremented at rollover)",
+			st.SlotDeliveryStats.SignMismatchCount, beforeMismatch+1)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver {
+		t.Errorf("OverDeliveryCount = %d, want unchanged %d (magnitude ratio is 1.0 but the sign is wrong)",
+			st.SlotDeliveryStats.OverDeliveryCount, beforeOver)
 	}
 	if st.SlotDeliveryStats.UnderDeliveryCount != beforeUnder {
 		t.Errorf("UnderDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.UnderDeliveryCount, beforeUnder)

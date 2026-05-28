@@ -21,6 +21,39 @@ func TestResetPreservesHeatingCoefficient(t *testing.T) {
 	}
 }
 
+// TestSeedHeatingCoefDoesNotOverwriteLearnedValue — restart on a deployment
+// where the load model has been adapting must not clobber the learned
+// HeatingW_per_degC with the operator-config seed. Without this guarantee
+// every binary update silently throws away weeks of online fit. The
+// startup wiring in cmd/forty-two-watts/main.go uses SeedHeatingCoef
+// precisely because operator config is a *prior*, not an override.
+func TestSeedHeatingCoefDoesNotOverwriteLearnedValue(t *testing.T) {
+	s := NewService(nil, telemetry.NewStore(), "site", 4000)
+	// Simulate a model that has been adapting in production.
+	s.mu.Lock()
+	m := s.activeModelLocked()
+	m.HeatingW_per_degC = 80.0
+	m.Samples = 500
+	s.mu.Unlock()
+
+	s.SeedHeatingCoef(300) // operator config value carried into a restart
+
+	if got := s.Model().HeatingW_per_degC; got != 80.0 {
+		t.Errorf("learned heating coef must survive seed-only call: got %.0f, want 80", got)
+	}
+}
+
+func TestSeedHeatingCoefAppliesOnColdStart(t *testing.T) {
+	s := NewService(nil, telemetry.NewStore(), "site", 4000)
+	// Fresh model — no samples observed yet.
+
+	s.SeedHeatingCoef(300)
+
+	if got := s.Model().HeatingW_per_degC; got != 300 {
+		t.Errorf("cold-start seed should apply: got %.0f, want 300", got)
+	}
+}
+
 func TestProfileSwitchTrainsOnlyActiveProfile(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("site", telemetry.DerMeter, 1000, nil, nil)
