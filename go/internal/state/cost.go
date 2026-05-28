@@ -9,17 +9,29 @@ import (
 // DayCostBreakdown decomposes a historical range into actual net grid cost and
 // a no-PV/no-battery baseline. All monetary values are in öre.
 //
-// BaselineCostOre prices recorded house load as if every Wh had been bought
-// from the grid. ActualCostOre prices the real grid-boundary import/export.
-// Their difference is the operator-facing savings from PV self-consumption,
-// battery shifting, and export revenue.
+// BaselineCostOre prices the household's total consumption — split between
+// inflexible house load (priced slot-by-slot at the spot total) and flexible
+// EV charging (priced at the day's time-weighted average import) — as if
+// every Wh had been bought from the grid. The EV-as-average treatment exists
+// because the EMS schedules EV charging into low-price slots: pricing those
+// kWh at the slot they actually landed in would zero out the credit owed to
+// the scheduler. Crediting them at the day's average price says "a dumb
+// charger with no timing awareness would have paid this much" and lets the
+// shifted timing show up as savings.
+//
+// ActualCostOre prices the real grid-boundary import/export. Their
+// difference is the operator-facing savings from PV self-consumption,
+// battery shifting, export revenue, and EV scheduling.
 type DayCostBreakdown struct {
 	ImportWh         float64
 	ExportWh         float64
-	LoadWh           float64
+	LoadWh           float64 // house load (excludes EV) — kept stable for live chart
+	EVWh             float64 // EV charging energy
 	ImportCostOre    float64 // Σ slot ( import_wh × total_ore_kwh ) / 1000
 	ExportRevenueOre float64 // Σ slot ( export_wh × export_price_ore ) / 1000
-	BaselineCostOre  float64 // Σ slot ( load_wh × total_ore_kwh ) / 1000
+	BaselineHouseOre float64 // Σ slot ( house_load_wh × total_ore_kwh ) / 1000
+	BaselineEvOre    float64 // ev_wh × AvgImportOreKwh / 1000
+	BaselineCostOre  float64 // BaselineHouseOre + BaselineEvOre
 	AvgImportOreKwh  float64 // time-weighted mean of total_ore_kwh over slots in range
 	AvgExportOreKwh  float64 // time-weighted mean of effective export price over slots in range
 	PriceSlotCount   int     // overlapping price slots used for the cost model
@@ -101,6 +113,11 @@ func (s *Store) DailyCostBreakdown(sinceMs, untilMs int64, zone string, ep Expor
 	out.AvgImportOreKwh = avgImp
 	out.AvgExportOreKwh = avgExp
 	out.PriceSlotCount = priceSlots
+	// Price EV energy at the day's time-weighted average import. If the
+	// range has no overlapping price slots, AvgImportOreKwh is 0 and the
+	// EV term collapses cleanly to 0 — matching the "no prices" rendering.
+	out.BaselineEvOre = out.EVWh * avgImp / 1000.0
+	out.BaselineCostOre = out.BaselineHouseOre + out.BaselineEvOre
 	return out, nil
 }
 
@@ -148,17 +165,37 @@ func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]p
 // Slots are walked with a sliding pointer: both sides are ascending, so for
 // each midpoint we advance until the slot's EndMs is past the midpoint.
 // Samples whose midpoint has no covering slot still count toward ImportWh,
-// ExportWh, and LoadWh but contribute zero to cost / revenue.
+// ExportWh, LoadWh, and EVWh but contribute zero to cost / revenue.
+//
+// EV power is derived per row as `grid_w − bat_w − pv_w − load_w` (clamped
+// non-negative — the same identity main.go uses in reverse to compute
+// `load_w` for the history rows). Pricing of EVWh is deferred to the
+// caller (DailyCostBreakdown applies the day's avg import).
 func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot, ep ExportPricing) (DayCostBreakdown, error) {
 	rows, err := s.db.Query(`
 		WITH all_rows AS (
-			SELECT ts_ms, COALESCE(grid_w, 0) AS grid_w, COALESCE(load_w, 0) AS load_w FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms,
+			       COALESCE(grid_w, 0) AS grid_w,
+			       COALESCE(load_w, 0) AS load_w,
+			       COALESCE(bat_w,  0) AS bat_w,
+			       COALESCE(pv_w,   0) AS pv_w
+			FROM history_hot  WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, COALESCE(grid_w, 0),           COALESCE(load_w, 0)           FROM history_warm WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms,
+			       COALESCE(grid_w, 0),
+			       COALESCE(load_w, 0),
+			       COALESCE(bat_w,  0),
+			       COALESCE(pv_w,   0)
+			FROM history_warm WHERE ts_ms BETWEEN ? AND ?
 			UNION ALL
-			SELECT ts_ms, COALESCE(grid_w, 0),           COALESCE(load_w, 0)           FROM history_cold WHERE ts_ms BETWEEN ? AND ?
+			SELECT ts_ms,
+			       COALESCE(grid_w, 0),
+			       COALESCE(load_w, 0),
+			       COALESCE(bat_w,  0),
+			       COALESCE(pv_w,   0)
+			FROM history_cold WHERE ts_ms BETWEEN ? AND ?
 		)
-		SELECT ts_ms, grid_w, load_w FROM all_rows ORDER BY ts_ms ASC
+		SELECT ts_ms, grid_w, load_w, bat_w, pv_w FROM all_rows ORDER BY ts_ms ASC
 	`,
 		sinceMs, untilMs,
 		sinceMs, untilMs,
@@ -177,8 +214,8 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 	)
 	for rows.Next() {
 		var ts int64
-		var gridW, loadW float64
-		if err := rows.Scan(&ts, &gridW, &loadW); err != nil {
+		var gridW, loadW, batW, pvW float64
+		if err := rows.Scan(&ts, &gridW, &loadW, &batW, &pvW); err != nil {
 			return DayCostBreakdown{}, err
 		}
 		if !havePrev {
@@ -206,8 +243,15 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 			loadWh := loadW * float64(dtMs) / 3600000.0
 			out.LoadWh += loadWh
 			if covering != nil {
-				out.BaselineCostOre += loadWh * covering.TotalOre / 1000.0
+				out.BaselineHouseOre += loadWh * covering.TotalOre / 1000.0
 			}
+		}
+
+		// EV = grid_w − bat_w − pv_w − load_w. Clamp negative noise to
+		// zero (matches main.go's clamp on load_w going the other way).
+		evW := gridW - batW - pvW - loadW
+		if evW > 0 {
+			out.EVWh += evW * float64(dtMs) / 3600000.0
 		}
 
 		wh := gridW * float64(dtMs) / 3600000.0
