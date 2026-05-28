@@ -157,6 +157,48 @@ func TestLandingPageHasCodeEntryForm(t *testing.T) {
 	}
 }
 
+// TestLandingPageTokenConstMatchesPath pins the format-args wiring in
+// publicLanding. Regression for the "wrong code even when right code"
+// bug: a misordered fmt.Fprintf put the token *state* into the JS
+// const TOKEN, so the page's approve POST hit /h/<state>/approve and
+// the relay returned 403 (token-not-found mapped to forbidden), which
+// the JS surfaced as "Wrong code" regardless of the code the friend
+// typed.
+func TestLandingPageTokenConstMatchesPath(t *testing.T) {
+	r := newTestRelay()
+	_, _ = r.Tokens.Register(TokenRegistration{
+		HostID: "host-a", Token: "alpha-beta-gamma", TTL: time.Hour,
+		ApprovalCode: "1234", Intent: "intent-text", As: "@friend",
+	})
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/h/alpha-beta-gamma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := readBody(resp.Body)
+	resp.Body.Close()
+	html := string(body)
+
+	// The JS const that drives the approve POST must be the actual
+	// token. Anything else (state, intent, as) means /h/<wrong>/approve
+	// returns 403 and the friend sees "Wrong code" forever.
+	if !strings.Contains(html, `const TOKEN = "alpha-beta-gamma";`) {
+		t.Fatalf("landing-page JS const TOKEN is not the session token:\n%s", html)
+	}
+	// And the "From:" row must show the claimed identity, not the
+	// token — the friend uses that to sanity-check who they're talking to.
+	if !strings.Contains(html, `<p>From: <code>@friend</code></p>`) {
+		t.Fatalf(`expected "From: @friend" in landing page:\n%s`, html)
+	}
+	if !strings.Contains(html, `<p>Intent: intent-text</p>`) {
+		t.Fatalf(`expected "Intent: intent-text" in landing page:\n%s`, html)
+	}
+	if !strings.Contains(html, `<code id="state">pending</code>`) {
+		t.Fatalf(`expected state "pending" in landing page:\n%s`, html)
+	}
+}
+
 func TestApproveFlipsState(t *testing.T) {
 	r := newTestRelay()
 	_, _ = r.Tokens.Register(TokenRegistration{

@@ -134,7 +134,16 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 	// surfaces "friend opened the URL — waiting for them to enter the code".
 	r.Tokens.MarkPendingHit(tok)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, landingHTML, esc(tok), esc(t.As()), esc(t.Intent()), t.State())
+	// Format args (in landingHTML positional order):
+	//   1. "From: %s"        — claimed identity (host-supplied "as")
+	//   2. "Intent: %s"      — what the host says the session is for
+	//   3. "State: %s"       — current token state
+	//   4. "const TOKEN = %q" — the actual session token, used by the JS
+	//      to POST to /h/<token>/approve. Getting this wrong is fatal:
+	//      the approve POST hits the wrong path and the relay returns
+	//      403, which the JS surfaces as "Wrong code" even when the
+	//      friend typed the correct 4-digit code.
+	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.State(), tok)
 }
 
 func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
