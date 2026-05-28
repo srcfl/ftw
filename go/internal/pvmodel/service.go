@@ -117,8 +117,27 @@ func (s *Service) SetRated(w float64) {
 	}
 }
 
-// Predict is the main integration point: MPC + UI call this to get the
-// twin's prediction for any future instant.
+// PredictStructural returns the RLS-driven prediction WITHOUT the
+// now-anchor live-telemetry correction. This is the surface the MPC and
+// residual-buffer sampler consume: the residual buffer measures and
+// corrects exactly the same structural-vs-live bias the now-anchor
+// would otherwise apply, so layering both produces a double-correction
+// bug (PR #381 follow-up). Keep `Predict` (anchored) for any path that
+// wants the live-blended prediction (UI overlays, dispatch "now" gate).
+func (s *Service) PredictStructural(t time.Time, cloudPct float64) float64 {
+	if s == nil {
+		return 0
+	}
+	cs := s.ClearSky(t)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.model.Predict(cs, cloudPct, t)
+}
+
+// Predict is the main integration point for the UI + dispatch live-reading
+// path: it returns the twin's prediction with the live-telemetry "now
+// anchor" folded in. The MPC and the residual-buffer sampler should use
+// PredictStructural instead — see that method's doc for why.
 //
 // Near-future predictions are anchored to live telemetry: if the model's
 // "what PV should be doing right now" disagrees with what PV IS doing

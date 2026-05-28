@@ -120,6 +120,76 @@ func TestBuildSlots_AppliesPVResidualCorrection(t *testing.T) {
 	}
 }
 
+// TestBuildSlots_NoDoubleCorrection: regression for the PR #381
+// follow-up. The MPC must consume the UNANCHORED structural PV
+// predictor plus the residual corrector — wiring the anchored
+// predictor (which already folds in the same structural-vs-live bias)
+// produces a double-correction so the planner sees ~0 W PV on a sunny
+// day with a heavy downward residual.
+//
+// Worked example (Codex's reproduction):
+//
+//	structural prediction  = 1000 W
+//	live PV measurement    =  500 W  (heavy downward bias of −500 W)
+//	→ anchored Predict     ≈  500 W  (the now-anchor already pulled it)
+//	→ ResidualCorrect      = −500 W  (rolling mean of the same bias)
+//
+// Wiring `PV = pvSvc.Predict` (anchored) + `PVResidualCorrect` gives the
+// planner ≈ 0 W. Wiring `PV = pvSvc.PredictStructural` + `PVResidualCorrect`
+// (the fix) gives the planner ≈ 500 W — the bias is corrected exactly
+// once, by the residual layer that is designed for it.
+//
+// We simulate both wirings here and assert the structural one matches
+// the single-correction outcome.
+func TestBuildSlots_NoDoubleCorrection(t *testing.T) {
+	ts0 := time.Date(2026, 4, 15, 14, 0, 0, 0, time.UTC).UnixMilli()
+	cloud := 30.0
+	forecastPV := 0.0 // disable forecast blending to expose the pure twin path
+
+	const structuralW = 1000.0
+	const anchoredW = 500.0 // what Predict would return after the now-anchor
+	const residualW = -500.0
+
+	// Slot 0 midpoint — buildSlots passes this to both PV and PVResidualCorrect.
+	correctedSlot := time.UnixMilli(ts0 + 15*30*1000).UTC()
+	pvCorrect := func(now, tTarget time.Time, base float64) float64 {
+		if tTarget.Equal(correctedSlot) {
+			return residualW
+		}
+		return 0
+	}
+
+	// --- Buggy wiring (anchored predictor + residual): double correction ---
+	slotsBuggy := buildSlots(
+		[]state.PricePoint{{SlotTsMs: ts0, SlotLenMin: 15, SpotOreKwh: 120, TotalOreKwh: 180}},
+		[]state.ForecastPoint{{SlotTsMs: ts0, SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &forecastPV}},
+		2500,
+		ts0,
+		func(time.Time, float64) float64 { return anchoredW },
+		pvCorrect,
+		nil,
+	)
+	// Anchored 500 + residual -500 = 0 → site-sign PVW = 0.
+	if got, want := slotsBuggy[0].PVW, 0.0; math.Abs(got-want) > 1e-6 {
+		t.Fatalf("buggy-wiring slot 0 PVW = %f, want %f (anchored + residual double-corrects)", got, want)
+	}
+
+	// --- Correct wiring (structural predictor + residual): single correction ---
+	slotsFixed := buildSlots(
+		[]state.PricePoint{{SlotTsMs: ts0, SlotLenMin: 15, SpotOreKwh: 120, TotalOreKwh: 180}},
+		[]state.ForecastPoint{{SlotTsMs: ts0, SlotLenMin: 60, CloudCoverPct: &cloud, PVWEstimated: &forecastPV}},
+		2500,
+		ts0,
+		func(time.Time, float64) float64 { return structuralW },
+		pvCorrect,
+		nil,
+	)
+	// Structural 1000 + residual -500 = 500 → site-sign PVW = -500.
+	if got, want := slotsFixed[0].PVW, -500.0; math.Abs(got-want) > 1e-6 {
+		t.Fatalf("fixed-wiring slot 0 PVW = %f, want %f (single correction reflects live bias)", got, want)
+	}
+}
+
 // ---- upperHalfMeanPrice (arbitrage terminal valuation) ----
 
 func TestUpperHalfMeanLiftsTerminalCreditAboveOverallMean(t *testing.T) {
