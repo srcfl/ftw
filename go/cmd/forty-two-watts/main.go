@@ -715,7 +715,13 @@ func main() {
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
 		if pvSvc != nil {
-			mpcSvc.PV = pvSvc.Predict
+			// Use the unanchored structural predictor here: the MPC also
+			// receives PVResidualCorrect, which captures the same
+			// structural-vs-live bias the now-anchor would apply, so
+			// wiring Predict (anchored) would double-correct and the
+			// planner would see ~0 W PV on a sunny day with a heavy
+			// downward residual. See pvmodel.Service.PredictStructural.
+			mpcSvc.PV = pvSvc.PredictStructural
 			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
 		}
 		mpcSvc.Load = loadSvc.Predict
