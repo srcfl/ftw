@@ -2126,6 +2126,249 @@ func TestPlannerPassiveArbitrageIdleDoesNotAbsorbLiveSurplus(t *testing.T) {
 	}
 }
 
+// Operator-report 2026-05-28: planner_arbitrage discharge slot, plan estimated
+// baseload ~1.7 kW (BatteryEnergyWh ≈ -425 over 15 min), plan grid target ~0.
+// Live load was 0.9 kW; battery sat at -1.7 kW per the energy-allocation
+// formula, exporting 800 W at the spot price the operator would later have to
+// buy back at consumer price. The DP picked this slot to *cover load* during
+// an expensive window, not to export — the existing "bonus revenue" carve-out
+// on the energy path applies only to slots where PlannedGridW < 0 (export
+// intent). The fix routes cover-load discharge slots (BatteryEnergyWh < 0 AND
+// PlannedGridW ~> 0) through reactive PI-on-grid=0, same path passive_arb
+// idle slots already use.
+func TestPlannerArbitrageCoverLoadBacksOffOnLoadUndershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425, // DP planned -1.7 kW × 15 min discharge
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700, // plan: cover ~1.7 kW load, no export
+		HasPlannedGridW: true,
+	}
+	// Battery already running at the planned -1.7 kW; live grid is -800 W
+	// because actual load is only 900 W (load = grid - battery = -800 + 1700).
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path would hold target at -1700. Reactive PI must back off
+	// toward -900 W (the actual load). First-cycle PI is between -1700 and
+	// -900 W; assert "less negative than planned" with margin.
+	if got <= -1500 {
+		t.Errorf("TargetW = %.0f W — cover-load arbitrage slot must back off from planned -1700 W when live grid shows export; want target > -1500 W", got)
+	}
+	// Sign should still be discharge (still positive load to cover).
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with positive live load must still discharge", got)
+	}
+}
+
+// Mirror of the undershoot case for a load *spike*: planned -1.7 kW but real
+// load is 3.2 kW. Energy path holds at -1.7 kW and lets 1.5 kW import. Reactive
+// PI ramps the battery down further to keep grid near 0.
+func TestPlannerArbitrageCoverLoadRampsOnLoadOvershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	// Battery at planned -1700; load surged to 3200 → grid = 3200 - 1700 = 1500.
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path would hold at -1700. Reactive PI must push more discharge.
+	if got >= -2000 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with 1500 W live import must discharge more than the planned -1700 W; want target ≤ -2000 W", got)
+	}
+}
+
+// Peak-export discharge slot (PlannedGridW < 0): the DP deliberately chose
+// to export at this slot's high price. Reactive carve-out must NOT trigger;
+// energy path holds the planned rate even when live PV varies. This is the
+// behaviour the existing dispatch.go:87-91 comment justifies.
+func TestPlannerArbitragePeakExportSlotStaysOnEnergyPath(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -500, // -2 kW × 15 min
+		Strategy:        "arbitrage",
+		PlannedGridW:    -2000, // plan: export 2 kW to grid
+		HasPlannedGridW: true,
+	}
+	// Live grid already exporting (-500 W). Reactive PI on grid=0 would
+	// charge (+500 W). Energy path must discharge ≈ -2000 W per plan.
+	store := seedStore(-500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.8},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got >= -1000 {
+		t.Errorf("TargetW = %.0f W — peak-export arbitrage slot (PlannedGridW=-2000) must stay on energy path and discharge ≈ -2000 W; cover-load carve-out incorrectly fired", got)
+	}
+}
+
+// Cover-load slot with live PV surplus (unexpected). Energy path would blindly
+// discharge -1.7 kW *into* the export, doubling the loss. Reactive carve-out
+// must absorb the live surplus (or at least not discharge further).
+func TestPlannerArbitrageCoverLoadDoesNotDischargeIntoLiveExport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    500, // plan: small net import (cover load)
+		HasPlannedGridW: true,
+	}
+	// Unexpected PV surplus: grid exporting 800 W with battery idle.
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Must not discharge into the live export. Either idle (≈0) or charge to absorb.
+	if got < -50 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with live PV surplus must not discharge into export; want target ≥ -50 W", got)
+	}
+}
+
+// Backcompat: legacy callers without HasPlannedGridW (the simpler slotDirective
+// test helper) must still use the energy path — intent is unknown. Locks in
+// behaviour-preservation for tests written before this change.
+func TestPlannerArbitrageDischargeSlotWithoutPlannedGridWUsesEnergyPath(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		HasPlannedGridW: false, // unknown intent
+	}
+	// Same live conditions as the undershoot test, but unknown plan intent.
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path must hold ≈ -1700 W.
+	if got > -1500 {
+		t.Errorf("TargetW = %.0f W — HasPlannedGridW=false means unknown intent; must fall through to energy path and hold ≈ -1700 W", got)
+	}
+}
+
+// The carve-out also applies to passive_arbitrage — same cover-load math,
+// just under the passive-arbitrage contract (no grid-charge ever). Mirror of
+// the load-undershoot test for the passive mode.
+func TestPlannerPassiveArbitrageCoverLoadBacksOffOnLoadUndershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got <= -1500 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage cover-load slot must back off when live grid shows export; want target > -1500 W", got)
+	}
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with positive live load must still discharge", got)
+	}
+}
+
 func TestPlannerSelfPlannedPVExportStopsChargingWithoutSlew(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{

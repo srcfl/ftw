@@ -84,11 +84,17 @@ type SlotDirective struct {
 	// live gridW match plan", preventing the energy budget from blindly
 	// driving extra grid import.
 	//
-	// Discharge slots are intentionally NOT clamped: extra export during
-	// a discharge slot is bonus revenue (the Wh budget is still delivered
-	// — the extra comes from load undershooting forecast), and backing
-	// off would undermine a DP choice the planner already evaluated. See
+	// Discharge slots are intentionally NOT clamped on the energy-allocation
+	// path: extra export during an EXPORT-INTENT slot (PlannedGridW < 0,
+	// e.g. peak-shave discharge picked by the DP for its export price) is
+	// bonus revenue and backing off would undermine the DP choice. See
 	// docs/safety.md §8 for the full rationale.
+	//
+	// Cover-load discharge slots (PlannedGridW ≈ 0 or import) are a
+	// DIFFERENT story: the DP picked discharge to offset an expensive
+	// import, not to export. There the energy path is rerouted to reactive
+	// PI on grid=0 — see the cover-load carve-out a few hundred lines
+	// below where useEnergyPath is decided.
 	//
 	// HasPlannedGridW gates whether the cap should consult PlannedGridW
 	// at all. Stored as a separate bool (rather than a *float64) so the
@@ -882,7 +888,25 @@ func ComputeDispatch(
 				const idleWhGate = 50.0
 				passiveArbitrageIdleSlot = state.Mode == ModePlannerPassiveArbitrage &&
 					dir.BatteryEnergyWh <= idleWhGate
-				if !passiveArbitrageIdleSlot {
+				// planner_arbitrage cover-load discharge slots: same fallthrough.
+				// The energy path's "extra export is bonus revenue" carve-out
+				// (see SlotDirective.PlannedGridW doc) is correct for peak-export
+				// slots where the DP picked the slot for its export price. But
+				// when PlannedGridW ≈ 0 (or import), the DP picked discharge
+				// to *cover load* — no export was anticipated. Locking discharge
+				// at the planned rate then exports any forecast-load undershoot
+				// at the spot price the operator later buys back at consumer
+				// price. Reactive PI on grid=0 fixes both directions: load
+				// undershoot backs off; load overshoot ramps further. The
+				// passive_arbitrage variant of this carve-out already covers
+				// passive cover-load discharge (BatteryEnergyWh <= idleWh
+				// captures non-charge slots). Operator-report 2026-05-28.
+				const coverLoadExportToleranceW = 100.0
+				coverLoadDischargeSlot := state.Mode == ModePlannerArbitrage &&
+					dir.HasPlannedGridW &&
+					dir.BatteryEnergyWh < -idleWhGate &&
+					dir.PlannedGridW > -coverLoadExportToleranceW
+				if !passiveArbitrageIdleSlot && !coverLoadDischargeSlot {
 					useEnergyPath = true
 				}
 				// Distribution mode is decoupled from planner strategy in
