@@ -1,6 +1,6 @@
 {
   "name": "forty-two-watts",
-  "version": "0.108.0",
+  "version": "0.108.1",
   "private": true,
   "description": "Unified Home Energy Management System — version metadata only; the application itself is Go. Changesets reads `version` from this file to drive the release tag.",
   "scripts": {
