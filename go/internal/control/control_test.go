@@ -2078,6 +2078,54 @@ func TestPlannerSelfPlannedPVExportDoesNotAbsorbLiveSurplus(t *testing.T) {
 	}
 }
 
+// passive_arbitrage idle slot under live PV surplus: the EMS must not absorb
+// the surplus into the battery, even when the plan's own forecast for this
+// slot was near-balanced (idle, no planned export). For the slot we're
+// already in, live measurements override the forecast — the DP picked idle
+// deliberately, so sustaining "do not charge" under a bigger-than-forecast
+// surplus is the correct generalisation.
+//
+// Production trigger (v0.87.x, 2026-05-28, site .40): load forecast was
+// 2782 W vs actual 504 W on a high-PV slot. Plan said grid≈+28 W with
+// battery_w=0. Dispatch fell through to self_consumption + grid_target=0
+// and charged 2.6 kW into batteries despite high current spot + low future
+// spot + abundant future PV — the exact case the DP picked idle to avoid.
+func TestPlannerPassiveArbitrageIdleDoesNotAbsorbLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // DP picked idle (load≈PV per forecast)
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    30, // forecast: grid near zero, not export
+		HasPlannedGridW: true,
+	}
+	// Live mirrors the production report: PV surplus pushing the meter
+	// negative, battery already pulling 1600 W. Without a live-export gate
+	// the PI ramps charge UP to chase grid=0 and swallows the surplus.
+	// Correct behaviour: ramp battery back to 0, let the surplus export.
+	store := seedStore(-100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1600, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f W — passive_arbitrage idle slot with live PV surplus must NOT absorb (DP picked idle; for the current slot, live grid sign overrides stale forecast)", targets[0].TargetW)
+	}
+}
+
 func TestPlannerSelfPlannedPVExportStopsChargingWithoutSlew(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
