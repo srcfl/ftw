@@ -2467,6 +2467,96 @@ func TestPlannerArbitrageCoverLoadChasesGridZeroNotPlannedImport(t *testing.T) {
 	}
 }
 
+// Same forward-transition risk that preparePlannerSelf already guards against
+// (see resetEnergyDispatchBookkeeping comment at dispatch.go:798-803): if the
+// site spent part of a slot on the energy-allocation path before the plan
+// refined to a cover-load discharge or a passive-arbitrage idle, the stale
+// slotDelivered accumulator stays around. A subsequent transition back to
+// the energy path within the same slot (another plan refinement, an operator
+// mode-hop, etc.) would then read stale Wh and miscompute remainingWh. The
+// fix mirrors planner_self: when the reactive carve-out fires, reset the
+// energy-path bookkeeping.
+func TestPlannerArbitrageCoverLoadResetsEnergyPathBookkeeping(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	// Simulate "we just left the energy path mid-slot" — slotDelivered has
+	// non-zero leftover, lastTickTs is in the past, currentDirective points
+	// at the now-superseded plan view.
+	st.slotDelivered = -200
+	st.lastTickTs = now.Add(-30 * time.Second)
+	st.currentDirective = SlotDirective{SlotStart: now.Add(-10 * time.Minute)}
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %.0f, want 0 — cover-load carve-out must clear stale energy-path bookkeeping", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v, want zero — cover-load carve-out must clear lastTickTs", st.lastTickTs)
+	}
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v, want zero — carve-out must clear stale directive", st.currentDirective.SlotStart)
+	}
+}
+
+func TestPlannerPassiveArbitrageIdleResetsEnergyPathBookkeeping(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle slot
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    50,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	st.slotDelivered = 150
+	st.lastTickTs = now.Add(-1 * time.Minute)
+	st.currentDirective = SlotDirective{SlotStart: now.Add(-20 * time.Minute)}
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %.0f, want 0", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v, want zero", st.lastTickTs)
+	}
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v, want zero", st.currentDirective.SlotStart)
+	}
+}
+
 func TestPlannerSelfPlannedPVExportStopsChargingWithoutSlew(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{

@@ -1130,6 +1130,16 @@ func ComputeDispatch(
 				// and skip the legacy lookup. Codex P1, PR #378 follow-up.
 				if passiveArbitrageIdleSlot || coverLoadDischargeSlot {
 					state.SetGridTarget(0)
+					// Mirror preparePlannerSelf (dispatch.go:797-804):
+					// if the slot was previously on the energy path —
+					// directly or via an operator mode-hop earlier in
+					// the same 15-min window — slotDelivered /
+					// lastTickTs / currentDirective hold stale values.
+					// A future transition back to the energy path
+					// within the same slot would then read those and
+					// miscompute remainingWh. Reset on every carve-out
+					// tick (idempotent).
+					resetEnergyDispatchBookkeeping(state)
 				}
 			}
 		}
