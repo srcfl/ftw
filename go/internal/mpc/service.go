@@ -18,6 +18,20 @@ import (
 // in the DB.
 type PVPredictor func(t time.Time, cloudPct float64) float64
 
+// PVResidualCorrector is an optional additive bias the planner applies
+// on top of a base PV prediction for short-horizon slots. Implemented
+// by *pvmodel.Service.ResidualCorrect. Returns 0 when no correction is
+// available; sign + magnitude come from a recent rolling residual of
+// predicted-vs-actual PV (generation-positive W). Leave nil to disable.
+//
+// Why a separate hook rather than baking it into PVPredictor: the
+// correction is purely a planner-side adjustment — UI overlays and
+// dispatch's "is the twin's *now* prediction close to *now* reading"
+// gate want the structural twin, not a slot-target-dependent additive.
+// Keeping it a separate hook also makes the wiring trivially testable
+// without a full pvmodel.Service.
+type PVResidualCorrector func(now, tTarget time.Time, basePrediction float64) float64
+
 // LoadPredictor plugs in a learned load predictor. Implemented by
 // *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
 type LoadPredictor func(t time.Time) float64
@@ -60,10 +74,11 @@ type Service struct {
 	BaseLoad  float64 // baseline household load (W). 0 disables load assumption.
 	Horizon   time.Duration
 	Interval  time.Duration
-	PV        PVPredictor    // optional — overrides stored pv_w_estimated
-	Load      LoadPredictor  // optional — overrides flat BaseLoad
-	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
-	Loadpoint LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
+	PV                PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	Load              LoadPredictor       // optional — overrides flat BaseLoad
+	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
 
 	// SaveDiag is called synchronously after every successful replan
 	// with the same Diagnostic the /api/mpc/diagnose endpoint would
@@ -615,7 +630,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 		// continue without PV forecast
 	}
 
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.Load)
+	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
 	if len(slots) == 0 {
 		return nil
 	}
@@ -900,8 +915,9 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 // that the forecast service stored at fetch time. This lets the model
 // learn system-specific orientation/shading/soiling and drive planning
 // off the better signal without re-fetching weather.
-func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, load LoadPredictor) []Slot {
+func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor) []Slot {
 	out := make([]Slot, 0, len(prices))
+	now := time.UnixMilli(nowMs).UTC()
 	for _, pr := range prices {
 		slotLen := pr.SlotLenMin
 		if slotLen <= 0 {
@@ -912,12 +928,30 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 			continue // past slot
 		}
 		slotT := time.UnixMilli(pr.SlotTsMs).UTC()
+		// Slot midpoint feeds the residual ramp-off: dt measured from
+		// the middle of the slot is a better proxy for the average
+		// correction applied across the slot than dt-from-start (which
+		// under-counts the slot's slice of the 30-min full-on plateau).
+		slotMidMs := pr.SlotTsMs + int64(slotLen)*30*1000 // start + half-slot in ms
+		slotMidT := time.UnixMilli(slotMidMs).UTC()
 		var pvW float64
 		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
 			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
-			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud), radiationBacked)
+			base := pv(slotT, cloud)
+			if pvCorrect != nil {
+				// Correction returns generation-positive W (same as `base`).
+				// Floor the corrected base at 0 — a residual large enough
+				// to push it negative is a sign-flip, not a plausible PV
+				// prediction.
+				corrected := base + pvCorrect(now, slotMidT, base)
+				if corrected < 0 {
+					corrected = 0
+				}
+				base = corrected
+			}
+			pvW = selectPlannerPVW(forecastPVW, base, radiationBacked)
 		} else {
 			pvW = forecastPVW
 		}
