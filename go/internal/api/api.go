@@ -748,6 +748,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"phase_powers": siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
 		"drivers":      drivers,
 		"dispatch":     dispatch,
+		// Observability counters for the per-slot Wh tracker. Pure
+		// diagnostic — incremented when actual fleet delivery diverges
+		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
+		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
+		"slot_delivery_stats": ctrl.SlotDeliveryStats,
 	}
 	if energyToday != nil || energyCurrentSlot != nil {
 		energy := map[string]any{}

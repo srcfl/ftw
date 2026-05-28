@@ -4838,3 +4838,283 @@ func TestPlannerPassiveArbitrageChargeSlotPreservedAgainstReactiveDischarge(t *t
 		t.Errorf("TargetW = %.0f W — passive_arbitrage charge slot must NOT discharge reactively; the grid-charge plan must remain authoritative", got)
 	}
 }
+
+// ---- Slot delivery observability ----
+//
+// These tests cover the path-agnostic per-slot Wh accumulator that
+// runs on EVERY dispatch tick (planner_self, planner_passive_arbitrage,
+// the planner_arbitrage cover-load carve-out from PR #378, etc.).
+// The accumulator measures actual fleet delivery and compares it
+// against the plan's BatteryEnergyWh at slot rollover. Pure
+// observability — no dispatch decision reads the counters.
+
+// makeSlotMetricsState configures the minimum State needed to exercise
+// the slot-delivery accumulator. Mode is planner_arbitrage so that
+// SlotDirective is consulted, but useEnergyPath is irrelevant to the
+// accumulator (it runs above all mode logic).
+func makeSlotMetricsState(siteMeter string, dirFn SlotDirectiveFunc) *State {
+	st := NewState(0, 0, siteMeter)
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = dirFn
+	return st
+}
+
+// 1. The accumulator integrates current battery total × dt across
+//    multiple ticks within the same slot.
+func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now.Add(-1 * time.Minute),
+		SlotEnd:         now.Add(14 * time.Minute),
+		BatteryEnergyWh: -300,
+		Strategy:        "arbitrage",
+	}
+	// Battery at -1000 W (site-signed: discharging) throughout.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1000, 0.5},
+	})
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return dir, true })
+
+	// Tick 1 — initialise accumulator (no integration yet, anchor only).
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.slotActualWh != 0 {
+		t.Fatalf("first tick should only anchor, got slotActualWh=%f", st.slotActualWh)
+	}
+	if !st.slotActualSlotStart.Equal(dir.SlotStart) {
+		t.Fatalf("anchor SlotStart = %v, want %v", st.slotActualSlotStart, dir.SlotStart)
+	}
+
+	// Simulate 60 s elapsed since the anchor tick by rewinding the
+	// last-tick timestamp. -1000 W × 60 s ≈ -16.67 Wh.
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	wantWh := -1000.0 * 60.0 / 3600.0 // ≈ -16.667
+	if math.Abs(st.slotActualWh-wantWh) > 1.0 {
+		t.Errorf("after ~60 s @ -1000 W: slotActualWh = %.3f Wh, want ≈ %.3f Wh", st.slotActualWh, wantWh)
+	}
+
+	// Another 60 s — total should be ~ -33.3 Wh.
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	wantWh2 := -1000.0 * 120.0 / 3600.0
+	if math.Abs(st.slotActualWh-wantWh2) > 1.0 {
+		t.Errorf("after ~120 s @ -1000 W: slotActualWh = %.3f Wh, want ≈ %.3f Wh", st.slotActualWh, wantWh2)
+	}
+}
+
+// 2. When the SlotDirective's SlotStart advances, the accumulator
+//    resets — the in-progress slot accumulator must not leak into
+//    the next slot's measurement.
+func TestSlotMetricsResetsOnSlotRollover(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-30 * time.Second)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -300,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -300,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1000, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	// Tick 1 — anchor slot 1, then integrate 60 s.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if math.Abs(st.slotActualWh) < 10 {
+		t.Fatalf("setup: slot 1 should have ~ -16.7 Wh accumulated, got %f", st.slotActualWh)
+	}
+
+	// Swap to slot 2 — rollover should reset slotActualWh and re-anchor.
+	active = slot2
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.slotActualWh != 0 {
+		t.Errorf("after slot rollover, slotActualWh should reset to 0, got %f", st.slotActualWh)
+	}
+	if !st.slotActualSlotStart.Equal(slot2Start) {
+		t.Errorf("after rollover, anchor = %v, want %v", st.slotActualSlotStart, slot2Start)
+	}
+}
+
+// 3. Over-delivery: planned -425 Wh, actual ~ -850 Wh → ratio 2.0,
+//    well above 1.5. Counter should increment by 1 on slot rollover.
+func TestSlotMetricsLogsOverDeliveryAtSlotEnd(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	// Battery discharging hard: -1700 W average × 30 min = -850 Wh
+	// (using fewer ticks here — we drive the accumulator directly).
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	// Anchor slot 1.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// Force accumulator to -850 Wh (2 × planned magnitude → ratio 2.0).
+	st.slotActualWh = -850
+
+	// Rollover into slot 2 — should log + increment OverDeliveryCount.
+	active = slot2
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	beforeUnder := st.SlotDeliveryStats.UnderDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver+1 {
+		t.Errorf("OverDeliveryCount = %d, want %d (incremented by 1 at rollover)",
+			st.SlotDeliveryStats.OverDeliveryCount, beforeOver+1)
+	}
+	if st.SlotDeliveryStats.UnderDeliveryCount != beforeUnder {
+		t.Errorf("UnderDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.UnderDeliveryCount, beforeUnder)
+	}
+}
+
+// 4. Under-delivery: planned -425 Wh, actual -100 Wh → ratio 0.235,
+//    well below 0.5. Counter should increment by 1.
+func TestSlotMetricsLogsUnderDelivery(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -400, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualWh = -100 // ratio = 100/425 ≈ 0.235 < 0.5
+
+	active = slot2
+	before := st.SlotDeliveryStats.UnderDeliveryCount
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.UnderDeliveryCount != before+1 {
+		t.Errorf("UnderDeliveryCount = %d, want %d", st.SlotDeliveryStats.UnderDeliveryCount, before+1)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver {
+		t.Errorf("OverDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.OverDeliveryCount, beforeOver)
+	}
+}
+
+// 5. Idle slots — |planned| ≤ 50 Wh — must not trigger logs or
+//    counters regardless of actual delivery. Ratio against ~0 is
+//    meaningless.
+func TestSlotMetricsIgnoresIdleSlots(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -30, // below 50 Wh threshold
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -30,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -2000, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualWh = -500 // any value — should be ignored at rollover
+
+	active = slot2
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.OverDeliveryCount != 0 || st.SlotDeliveryStats.UnderDeliveryCount != 0 {
+		t.Errorf("idle slot (|planned|=30 Wh) must not bump counters, got over=%d under=%d",
+			st.SlotDeliveryStats.OverDeliveryCount, st.SlotDeliveryStats.UnderDeliveryCount)
+	}
+}
+
+// 6. Counter accumulates monotonically across multiple over-delivery
+//    rollovers — three slots in sequence → counter = 3.
+func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
+	now := time.Now()
+	base := now.Add(-1 * time.Hour) // well in the past so all slots are "real"
+
+	slots := []SlotDirective{
+		{SlotStart: base, SlotEnd: base.Add(15 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(15 * time.Minute), SlotEnd: base.Add(30 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(30 * time.Minute), SlotEnd: base.Add(45 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(45 * time.Minute), SlotEnd: base.Add(60 * time.Minute), BatteryEnergyWh: -400},
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -2000, 0.5},
+	})
+
+	idx := 0
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) {
+		return slots[idx], true
+	})
+
+	// Anchor slot 0.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	// For each of slots 0,1,2: force over-delivery on the in-flight slot,
+	// then advance idx → next tick triggers rollover evaluation.
+	for i := 0; i < 3; i++ {
+		st.slotActualWh = -1000 // ratio = 1000/400 = 2.5 → over
+		idx++
+		_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != 3 {
+		t.Errorf("after 3 over-delivery rollovers, OverDeliveryCount = %d, want 3",
+			st.SlotDeliveryStats.OverDeliveryCount)
+	}
+}

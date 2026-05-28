@@ -330,6 +330,37 @@ type State struct {
 	slotDelivered    float64   // Wh delivered to batteries since slot start
 	lastTickTs       time.Time // for ∫ battery_w dt
 
+	// slotActualWh + slotActualLastTs + slotActualSlotStart are the
+	// path-agnostic per-slot delivery accumulator. Updated on EVERY
+	// dispatch tick (every mode, every path) from the live battery
+	// aggregate — independent of the energy-allocation bookkeeping
+	// above (which only updates inside useEnergyPath).
+	//
+	// The point is observability: when reactive paths (cover-load
+	// discharge, planner_self, planner_passive_arbitrage idle slots,
+	// the planner_arbitrage cover-load carve-out from PR #378) execute,
+	// the existing slotDelivered does not track them. Without an
+	// independent accumulator there's no way to measure whether those
+	// paths over- or under-deliver vs the plan's BatteryEnergyWh.
+	//
+	// At slot rollover (SlotStart change) the just-ended slot is
+	// evaluated and over/under-delivery is logged + counted. The
+	// resulting counters surface on /api/status so operators can spot
+	// systemic forecast vs reality drift. Site-signed: negative = the
+	// fleet discharged Wh during the slot.
+	slotActualWh         float64
+	slotActualLastTs     time.Time
+	slotActualSlotStart  time.Time
+	slotActualPlannedWh  float64 // planned BatteryEnergyWh cached for the slot in flight
+
+	// SlotDeliveryStats counts how many slots ended with the actual
+	// fleet delivery falling outside ±50 % of the planned magnitude.
+	// Idle/charge slots with |planned| ≤ 50 Wh are ignored — the
+	// ratio is meaningless when the denominator is ~0. Read-only from
+	// the API; mutated only inside ComputeDispatch under the caller's
+	// outer ctrlMu.
+	SlotDeliveryStats SlotDeliveryStats
+
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
 	PlanStale bool
@@ -541,6 +572,106 @@ func resetEnergyDispatchBookkeeping(state *State) {
 	state.currentDirective = SlotDirective{}
 	state.slotDelivered = 0
 	state.lastTickTs = time.Time{}
+}
+
+// SlotDeliveryStats tracks observed gaps between the plan's per-slot
+// BatteryEnergyWh and the live fleet's actual delivered Wh. Updated at
+// slot rollover by updateSlotDeliveryMetrics. Pure observability — no
+// dispatch decision reads these.
+type SlotDeliveryStats struct {
+	OverDeliveryCount  uint64 `json:"over_delivery_count"`
+	UnderDeliveryCount uint64 `json:"under_delivery_count"`
+}
+
+// slotDeliveryOverThreshold + slotDeliveryUnderThreshold define the
+// magnitude band that counts as "delivered within plan". The plan-vs-
+// actual ratio is computed as |actual| / max(|planned|, 1); ratios
+// outside [0.5, 1.5] increment the corresponding counter (when the
+// slot wasn't an idle one — see slotDeliveryIdleWhCutoff).
+const (
+	slotDeliveryOverThreshold  = 1.5
+	slotDeliveryUnderThreshold = 0.5
+	slotDeliveryIdleWhCutoff   = 50.0
+	slotDeliveryMaxTickDtS     = 300.0
+)
+
+// updateSlotDeliveryMetrics is the path-agnostic per-slot Wh tracker.
+// It runs on EVERY dispatch tick (every mode, every path) so reactive
+// paths that bypass the energy-allocation bookkeeping still feed an
+// independent record of "what did the fleet actually deliver this
+// slot, and how does that compare to the plan?". See State.slotActualWh
+// for the rationale and the cover-load carve-out (PR #378) context.
+//
+// When SlotDirective is unset or returns ok=false the accumulator is
+// paused for this tick: there's no slot context to attribute Wh to.
+//
+// When the directive's SlotStart advances the just-ended slot is
+// scored: |actual| / max(|planned|, 1). Ratios > 1.5 log an
+// over-delivery and bump OverDeliveryCount; ratios < 0.5 log
+// under-delivery and bump UnderDeliveryCount. Idle/charge slots
+// where |planned| ≤ slotDeliveryIdleWhCutoff are skipped — measuring
+// a ratio against ~0 is meaningless.
+//
+// The first-ever tick (zero-value slotActualSlotStart) initialises
+// the accumulator without emitting anything.
+func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Time) {
+	if state == nil || state.SlotDirective == nil {
+		return
+	}
+	dir, ok := state.SlotDirective(now)
+	if !ok {
+		return
+	}
+
+	if state.slotActualSlotStart.IsZero() {
+		state.slotActualSlotStart = dir.SlotStart
+		state.slotActualLastTs = now
+		state.slotActualWh = 0
+		state.slotActualPlannedWh = dir.BatteryEnergyWh
+		return
+	}
+
+	if !dir.SlotStart.Equal(state.slotActualSlotStart) {
+		// Slot rollover: evaluate the just-ended slot using the
+		// planned Wh cached from prior ticks. Reactive paths don't
+		// touch state.currentDirective (that's energy-path bookkeeping),
+		// so this accumulator keeps its own slotActualPlannedWh.
+		plannedWh := state.slotActualPlannedWh
+		if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
+			ratio := math.Abs(state.slotActualWh) / math.Max(math.Abs(plannedWh), 1)
+			switch {
+			case ratio > slotDeliveryOverThreshold:
+				slog.Info("dispatch slot over-delivery",
+					"mode", state.Mode,
+					"planned_wh", plannedWh,
+					"actual_wh", state.slotActualWh,
+					"ratio", ratio,
+					"slot_start", state.slotActualSlotStart)
+				state.SlotDeliveryStats.OverDeliveryCount++
+			case ratio < slotDeliveryUnderThreshold:
+				slog.Info("dispatch slot under-delivery",
+					"mode", state.Mode,
+					"planned_wh", plannedWh,
+					"actual_wh", state.slotActualWh,
+					"ratio", ratio,
+					"slot_start", state.slotActualSlotStart)
+				state.SlotDeliveryStats.UnderDeliveryCount++
+			}
+		}
+		state.slotActualSlotStart = dir.SlotStart
+		state.slotActualLastTs = now
+		state.slotActualWh = 0
+		state.slotActualPlannedWh = dir.BatteryEnergyWh
+		return
+	}
+
+	dt := now.Sub(state.slotActualLastTs).Seconds()
+	if dt > 0 && dt < slotDeliveryMaxTickDtS {
+		state.slotActualWh += currentTotalW * dt / 3600.0
+	}
+	state.slotActualLastTs = now
+	// Keep the planned value fresh in case a mid-slot replan changed it.
+	state.slotActualPlannedWh = dir.BatteryEnergyWh
 }
 
 const (
@@ -780,6 +911,33 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	// ---- Per-slot Wh delivery observability (path-agnostic) ----
+	// Runs on EVERY tick before any mode/short-circuit decision so the
+	// idle / charge / holdoff / reactive-fallback paths all contribute
+	// to the actual-delivered accumulator. Independent of the
+	// energy-allocation bookkeeping (slotDelivered) which only updates
+	// inside useEnergyPath — that's why reactive cover-load discharge
+	// (PR #378) and planner_passive_arbitrage idle slots are invisible
+	// to that accumulator. This one isn't.
+	//
+	// Pure observability — log + counter only. No dispatch decision
+	// reads SlotDeliveryStats; no Wh cap is applied to reactive paths
+	// from this data. The point is to measure first, decide whether a
+	// cap is warranted later.
+	{
+		now := time.Now()
+		var liveBatTotal float64
+		for name := range driverCapacities {
+			if r := store.Get(name, telemetry.DerBattery); r != nil {
+				h := store.DriverHealth(name)
+				if h != nil && h.IsOnline() {
+					liveBatTotal += r.SmoothedW
+				}
+			}
+		}
+		updateSlotDeliveryMetrics(state, liveBatTotal, now)
+	}
+
 	// ---- Planner modes: the plan is a scheduler, not a regulator ----
 	// The plan decides WHEN each strategy applies (self-consumption now,
 	// charge at 02:00, export at 17:00). The EMS decides HOW batteries
