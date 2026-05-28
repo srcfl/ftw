@@ -26,6 +26,7 @@ func main() {
 	cert := flag.String("cert", "", "TLS cert path (HTTPS mode if set)")
 	key := flag.String("key", "", "TLS key path (HTTPS mode if set)")
 	pollTimeout := flag.Duration("poll-timeout", 25*time.Second, "long-poll deadline per /tunnel/<host>/next call")
+	baseDomain := flag.String("base-domain", "", "apex for subdomain-per-session routing (e.g. fortytwowatts.com); empty disables Host routing")
 	flag.Parse()
 
 	if *version {
@@ -38,6 +39,7 @@ func main() {
 		Tokens:      NewTokenRegistry(),
 		Owners:      NewOwnerRegistry(),
 		PollTimeout: *pollTimeout,
+		BaseDomain:  *baseDomain,
 	}
 
 	srv := &http.Server{
@@ -60,7 +62,7 @@ func main() {
 	var err error
 	if *cert != "" && *key != "" {
 		mode = "HTTPS"
-		slog.Info("ftw-relay starting", "mode", mode, "addr", *addr, "version", Version)
+		slog.Info("ftw-relay starting", "mode", mode, "addr", *addr, "version", Version, "base_domain", *baseDomain)
 		err = srv.ListenAndServeTLS(*cert, *key)
 	} else {
 		slog.Info("ftw-relay starting", "mode", mode, "addr", *addr, "version", Version)

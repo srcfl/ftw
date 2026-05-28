@@ -18,6 +18,25 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	PollTimeout time.Duration // 0 → 25s default
+
+	// BaseDomain enables subdomain-per-session routing. When set (e.g.
+	// "fortytwowatts.com") a request whose Host is "<token>.<BaseDomain>"
+	// is served as that session — the dashboard sees normal root-absolute
+	// paths instead of the /h/<token>/web prefix. Empty disables Host
+	// routing entirely (every request falls through to the path-based
+	// control mux), which is what local/dev + the existing tests want.
+	// See docs/goals/relay-subdomain-sessions.md.
+	BaseDomain string
+}
+
+// reservedLabels are first-level labels under BaseDomain that are never
+// treated as a session token, so wildcard DNS (*.<BaseDomain> → relay)
+// can't accidentally turn the control-plane host (or the marketing site)
+// into a "session". The apex itself is handled separately in sessionToken.
+var reservedLabels = map[string]bool{
+	"relay":   true, // control plane: /tunnel/*, /h/*, /me/*
+	"www":     true,
+	"subetha": true, // legacy raw-TCP relay name
 }
 
 type registerRequest struct {
@@ -34,8 +53,27 @@ type registerResponse struct {
 	ApprovalURL string `json:"approval_url"`
 }
 
-// Handler returns the mux for this relay.
+// Handler returns the HTTP handler for this relay. When BaseDomain is set
+// it first inspects the Host header: "<token>.<BaseDomain>" is served as a
+// session (subdomain mode); anything else (the apex, reserved labels, raw
+// IPs, the control-plane host) falls through to the path-based control mux.
+// The /h/<token>/... path family stays live alongside subdomain mode for
+// one release so existing pair URLs keep working during the transition.
 func (r *Relay) Handler() http.Handler {
+	mux := r.controlMux()
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if tok, ok := r.sessionToken(req.Host); ok {
+			r.serveSession(w, req, tok)
+			return
+		}
+		mux.ServeHTTP(w, req)
+	})
+}
+
+// controlMux is the path-routed surface: tunnel control plane, the legacy
+// /h/<token>/... pair family, and owner remote access. Served for every
+// request whose Host is not a session subdomain.
+func (r *Relay) controlMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -56,6 +94,38 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("/me/{site_id}/{rest...}", r.meTunnel)
 	mux.HandleFunc("/me/{site_id}", r.meRoot)
 	return mux
+}
+
+// sessionToken extracts the session token from a request Host when it
+// matches the "<token>.<BaseDomain>" subdomain scheme. It returns ("",
+// false) for the apex, reserved labels, multi-level names, non-matching
+// domains (raw IPs, localhost), and when BaseDomain is unset.
+//
+// The relay sits behind Cloudflare, which preserves the original Host
+// header, so req.Host is the name the friend's browser actually used.
+func (r *Relay) sessionToken(host string) (string, bool) {
+	if r.BaseDomain == "" {
+		return "", false
+	}
+	h := host
+	if i := strings.IndexByte(h, ':'); i >= 0 { // strip :port
+		h = h[:i]
+	}
+	h = strings.ToLower(strings.TrimSuffix(h, ".")) // tolerate trailing root dot
+	base := strings.ToLower(r.BaseDomain)
+	if h == base {
+		return "", false // apex is control plane, never a session
+	}
+	label, ok := strings.CutSuffix(h, "."+base)
+	if !ok || label == "" || strings.Contains(label, ".") {
+		// Not our domain, or a multi-level name (a.b.<base>) outside the
+		// flat first-level token scheme.
+		return "", false
+	}
+	if reservedLabels[label] {
+		return "", false
+	}
+	return label, true
 }
 
 func (r *Relay) pollTimeout() time.Duration {
@@ -123,6 +193,39 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 	})
 }
 
+// landingPaths are the three relative URLs the landing-page JS needs.
+// They differ between path mode (/h/<token>/…) and subdomain mode (/…),
+// so the template itself stays agnostic to the routing scheme — and there
+// is no positional token argument to get wrong (the cause of the
+// "Wrong code" landing bug).
+type landingPaths struct {
+	approve   string // where the code form POSTs
+	dashboard string // "open the dashboard" link target
+	mcp       string // path appended to location.origin for the MCP one-liner
+}
+
+// pathModeLanding builds the legacy /h/<token>/... URLs.
+func pathModeLanding(tok string) landingPaths {
+	return landingPaths{
+		approve:   "/h/" + tok + "/approve",
+		dashboard: "/h/" + tok + "/web/",
+		mcp:       "/h/" + tok + "/mcp",
+	}
+}
+
+// subdomainLanding builds the session-root URLs (Host = <token>.<base>).
+func subdomainLanding() landingPaths {
+	return landingPaths{approve: "/approve", dashboard: "/", mcp: "/mcp"}
+}
+
+func (r *Relay) renderLanding(w http.ResponseWriter, tok string, t *Token, lp landingPaths) {
+	// Bump the pending-approval counter so the operator's dashboard
+	// surfaces "friend opened the URL — waiting for them to enter the code".
+	r.Tokens.MarkPendingHit(tok)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.State(), lp.approve, lp.dashboard, lp.mcp)
+}
+
 func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
 	t, err := r.Tokens.Get(tok)
@@ -130,11 +233,33 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
-	// Bump the pending-approval counter so the operator's dashboard
-	// surfaces "friend opened the URL — waiting for them to enter the code".
-	r.Tokens.MarkPendingHit(tok)
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, landingHTML, esc(tok), esc(t.As()), esc(t.Intent()), t.State())
+	r.renderLanding(w, tok, t, pathModeLanding(tok))
+}
+
+// serveSession handles every request that arrived on a session subdomain
+// (<token>.<BaseDomain>). Unlike path mode, the host sees verbatim
+// root-absolute paths, so the dashboard's /api/*, /style.css etc. resolve
+// correctly with no prefix stripping.
+func (r *Relay) serveSession(w http.ResponseWriter, req *http.Request, tok string) {
+	t, err := r.Tokens.Get(tok)
+	if err != nil {
+		http.NotFound(w, req)
+		return
+	}
+	// The code form POSTs here while still pending — handle before the
+	// state gate below.
+	if req.Method == http.MethodPost && req.URL.Path == "/approve" {
+		r.approve(w, req, tok)
+		return
+	}
+	// Until approved, the only thing on the subdomain is the landing page.
+	if t.State() == TokenPending && req.URL.Path == "/" {
+		r.renderLanding(w, tok, t, subdomainLanding())
+		return
+	}
+	// Active → tunnel the request verbatim to the host. tunnelPublic
+	// re-checks token state (pending → 425, expired/revoked → 410).
+	r.tunnelPublic(w, req, tok, req.URL.Path)
 }
 
 func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
@@ -155,11 +280,13 @@ func esc(s string) string {
 
 // landingHTML is the friend-side page. The 4-digit code travels with
 // the URL (shared by the host on Signal etc.); the friend types it
-// here to activate the session. Same-origin POST to /approve so there
-// are no CORS surprises.
+// here to activate the session. Same-origin POST so there are no CORS
+// surprises.
 //
-// Format args (in order): token, claimed identity (host-supplied "as"),
-// intent, current token state.
+// Format args (in order): claimed identity (host-supplied "as"), intent,
+// current token state, then three relative paths (approve, dashboard,
+// mcp) so the page works under both /h/<token>/… and <token>.<base>/
+// without baking in a routing scheme — see landingPaths.
 const landingHTML = `<!doctype html>
 <html><head><title>forty-two-watts pair session</title>
 <style>
@@ -212,7 +339,9 @@ const landingHTML = `<!doctype html>
 <p class="muted">State: <code id="state">%s</code></p>
 
 <script>
-const TOKEN = %q;
+const APPROVE_PATH = %q;
+const DASHBOARD_PATH = %q;
+const MCP_PATH = %q;
 const form = document.getElementById('approve-form');
 const codeInput = document.getElementById('code');
 const msg = document.getElementById('msg');
@@ -230,7 +359,7 @@ form.addEventListener('submit', async (e) => {
   }
   btn.disabled = true;
   try {
-    const resp = await fetch('/h/' + encodeURIComponent(TOKEN) + '/approve', {
+    const resp = await fetch(APPROVE_PATH, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code }),
@@ -238,9 +367,9 @@ form.addEventListener('submit', async (e) => {
     if (resp.status === 204) {
       msg.className = 'ok';
       msg.innerHTML = 'Activated. You can now:<br><br>' +
-        '<strong>Browser:</strong> <a href="/h/' + encodeURIComponent(TOKEN) + '/web/">open the dashboard</a><br><br>' +
+        '<strong>Browser:</strong> <a href="' + DASHBOARD_PATH + '">open the dashboard</a><br><br>' +
         '<strong>Claude Code:</strong><br><code>claude mcp add ftw-friend --transport http ' +
-        location.origin + '/h/' + encodeURIComponent(TOKEN) + '/mcp</code>';
+        location.origin + MCP_PATH + '</code>';
       document.getElementById('state').textContent = 'active';
       btn.style.display = 'none';
       codeInput.disabled = true;
@@ -264,7 +393,12 @@ form.addEventListener('submit', async (e) => {
 </body></html>`
 
 func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {
-	tok := req.PathValue("token")
+	r.approve(w, req, req.PathValue("token"))
+}
+
+// approve is the shared body for both /h/<token>/approve (path mode) and
+// <token>.<base>/approve (subdomain mode).
+func (r *Relay) approve(w http.ResponseWriter, req *http.Request, tok string) {
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -306,6 +440,11 @@ func (r *Relay) tunnelPublic(w http.ResponseWriter, req *http.Request, tok, inne
 	case TokenExpired, TokenRevoked:
 		http.Error(w, "session expired", http.StatusGone)
 		return
+	}
+	// Preserve the query string so the dashboard's /api/history?range=…
+	// style requests reach the host intact.
+	if q := req.URL.RawQuery; q != "" {
+		innerPath += "?" + q
 	}
 	body, _ := readBody(req.Body)
 	resp, err := r.Queue.Enqueue(req.Context(), t.HostID(), tunnel.TunneledRequest{
