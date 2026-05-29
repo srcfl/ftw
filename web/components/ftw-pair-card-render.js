@@ -94,10 +94,15 @@ export function formatAge(ms) {
 }
 
 // friendMessage is what the operator copies and sends to the friend.
-// Both the URL AND the code are in the same message — the friend
-// opens the URL, types the code, done. The 4-digit code is what
-// prevents a leaked URL alone from activating the session (the
-// attacker also needs the code).
+// Both the URL AND the code travel together — the friend opens the URL,
+// types the 4-digit code, and the landing page then hands them the exact
+// `claude mcp add …` command with a one-time access token baked in.
+//
+// The MCP command is deliberately NOT pre-baked here: the access token
+// (grant) is minted by the relay only when the code is accepted, so it
+// cannot exist before approval. Pre-baking a token-less command would
+// just hand the friend something that gets rejected with 401. See the
+// grant-exchange model in docs/goals/relay-subdomain-sessions.md.
 //
 // When state has no pair_url (e.g. -no-relay mode) it falls back to
 // the local MCP addr stored in `code` so the same template works for
@@ -109,17 +114,15 @@ export function friendMessage(state) {
   }
   const url = state.pair_url;
   const code = state.approval_code || "(no code — bug?)";
-  return `I need help with my home energy system. Open this URL and enter the 4-digit code below to activate the session:
+  return `I need help with my home energy system. Open this link and enter the 4-digit code to start the session:
 
   URL:  ${url}
   Code: ${code}
 
-Once active you can:
+After you enter the code, the page shows a "claude mcp add …" command with a
+one-time access token baked in — copy that into Claude Code to connect. The
+token only appears once you've entered the code, so I can't include it here.
 
-  - Open the dashboard:   ${url}/web/
-  - Add as Claude Code MCP:
-      claude mcp add ftw-friend --transport http ${url}/mcp
-
-Session expires when I close it or TTL runs out. Don't share the
-URL + code with anyone else — together they're the access grant.`;
+The session expires when I close it or the timer runs out. Don't forward the
+URL + code to anyone else — together they start the session.`;
 }
