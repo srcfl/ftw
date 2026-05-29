@@ -176,26 +176,39 @@ func TestPairFlowThroughRelay(t *testing.T) {
 
 	pairCode, approvalCode := readPairCodeAndApproval(t, pairStderr)
 
-	// 4. Friend side: approve the session via the relay endpoint.
+	// 4. Friend side: approve the session via the relay endpoint. Approval
+	//    returns the session grant (the post-grant-exchange model); web
+	//    access then requires that grant as the ftw_grant cookie.
 	apvBody := strings.NewReader(`{"code":"` + approvalCode + `"}`)
 	apvResp, err := http.Post(relayURL+"/h/"+pairCode+"/approve", "application/json", apvBody)
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
-	if apvResp.StatusCode != http.StatusNoContent {
+	if apvResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(apvResp.Body)
 		t.Fatalf("approve status %d body %q", apvResp.StatusCode, body)
 	}
+	var apv struct {
+		Grant string `json:"grant"`
+	}
+	if err := json.NewDecoder(apvResp.Body).Decode(&apv); err != nil {
+		t.Fatalf("decode approve body: %v", err)
+	}
 	apvResp.Body.Close()
+	if apv.Grant == "" {
+		t.Fatal("approve returned empty grant")
+	}
 
 	// Give the host loop a beat to settle after the first response.
 	time.Sleep(200 * time.Millisecond)
 
-	// 5. N sequential requests through the relay → host → dashboard.
+	// 5. N sequential requests through the relay → host → dashboard,
+	//    each carrying the grant cookie.
 	const N = 10
 	for i := 0; i < N; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		req, _ := http.NewRequestWithContext(ctx, "GET", relayURL+"/h/"+pairCode+"/web/api/status", nil)
+		req.Header.Set("Cookie", "ftw_grant="+apv.Grant)
 		resp, err := http.DefaultClient.Do(req)
 		cancel()
 		if err != nil {

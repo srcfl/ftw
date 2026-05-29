@@ -210,8 +210,18 @@ func TestApproveFlipsState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 204 {
-		t.Fatalf("status %d", resp.StatusCode)
+	// Approve now returns 200 + the minted grant (was 204 before the
+	// grant-exchange model).
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Grant string `json:"grant"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	resp.Body.Close()
+	if out.Grant == "" {
+		t.Fatal("approve did not return a grant")
 	}
 	tok, _ := r.Tokens.Get("tok2")
 	if tok.State() != TokenActive {
@@ -219,18 +229,32 @@ func TestApproveFlipsState(t *testing.T) {
 	}
 }
 
-func TestPendingTokenReturns425OnPublicMCP(t *testing.T) {
+func TestPublicMCPRequiresGrant(t *testing.T) {
 	r := newTestRelay()
 	_, _ = r.Tokens.Register(TokenRegistration{
 		HostID: "host-a", Token: "tok3", TTL: time.Hour, ApprovalCode: "1",
 	})
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
+	// Pending (no grant minted yet) → 401.
 	resp, err := http.Post(srv.URL+"/h/tok3/mcp", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusTooEarly {
-		t.Fatalf("status %d, want 425", resp.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("pending /mcp status %d, want 401", resp.StatusCode)
+	}
+	// Activate, then a wrong Bearer is still rejected.
+	_ = r.Tokens.Approve("tok3", "1")
+	bad, _ := http.NewRequest("POST", srv.URL+"/h/tok3/mcp", strings.NewReader(`{}`))
+	bad.Header.Set("Authorization", "Bearer not-the-grant")
+	bresp, err := http.DefaultClient.Do(bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bresp.Body.Close()
+	if bresp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong-Bearer /mcp status %d, want 401", bresp.StatusCode)
 	}
 }
