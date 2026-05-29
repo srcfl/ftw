@@ -151,16 +151,26 @@ describe("friendMessage (golden snapshot)", () => {
     const msg = friendMessage(stateActive);
     assert.match(msg, /https:\/\/relay\.fortytwowatts\.com\/h\/alpha-amber/);
     assert.match(msg, /Code: 4827/);
-    assert.match(msg, /Open the dashboard:/);
-    assert.match(msg, /claude mcp add ftw-friend/);
-    assert.doesNotMatch(msg, /ftw-connect/, "v2 must not mention the deprecated binary");
-    assert.doesNotMatch(msg, /install-ftw-connect/);
+  });
+
+  it("points to the post-approval MCP command but does NOT pre-bake it", () => {
+    const msg = friendMessage(stateActive);
+    // The grant is minted at approval, so a usable `claude mcp add … --header`
+    // command can only appear on the landing page afterwards. The share
+    // message must not pre-bake a (token-less) command that would 401.
+    assert.match(msg, /after you enter the code/i);
+    assert.match(msg, /claude mcp add/);
+    assert.doesNotMatch(msg, /--transport http/, "must not pre-bake the relay MCP URL/command");
+    assert.doesNotMatch(msg, /\/mcp/, "must not pre-bake the /mcp endpoint without a grant");
+    // The dashboard link is dropped while the browser view is deferred.
+    assert.doesNotMatch(msg, /Open the dashboard:/);
+    assert.doesNotMatch(msg, /ftw-connect/, "must not mention the deprecated binary");
     assert.doesNotMatch(msg, /go install/);
   });
 
-  it("warns the operator that URL+code together = access grant", () => {
+  it("warns the operator not to forward URL + code", () => {
     const msg = friendMessage(stateActive);
-    assert.match(msg, /together they're the access grant/);
+    assert.match(msg, /Don't forward the\s+URL \+ code/);
   });
 
   it("falls back to local-only message when no pair_url", () => {
