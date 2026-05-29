@@ -55,26 +55,33 @@ func TestE2EHostAndFriendRoundtripThroughRelay(t *testing.T) {
 		t.Fatalf("register status %d", regResp.StatusCode)
 	}
 
-	// 2. Friend hits /h/tok1/mcp before approval → 425.
+	// 2. Friend hits /h/tok1/mcp before approval → 401 (no session grant yet).
 	pre, err := http.Post(srv.URL+"/h/tok1/mcp", "application/json", strings.NewReader(`{"x":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pre.StatusCode != http.StatusTooEarly {
-		t.Fatalf("expected 425 before approval, got %d", pre.StatusCode)
+	if pre.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 before approval, got %d", pre.StatusCode)
 	}
 
-	// 3. Approve.
-	apv, err := http.Post(srv.URL+"/h/tok1/approve", "application/json", strings.NewReader(`{"code":"4827"}`))
+	// 3. Approve → mints + returns the session grant.
+	grant := approveGrant(t, srv, "tok1", "4827")
+
+	// 3b. /mcp WITHOUT the grant is still rejected after activation
+	//     (a leaked-but-active URL is useless without the secret).
+	noGrant, err := http.Post(srv.URL+"/h/tok1/mcp", "application/json", strings.NewReader(`{"x":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if apv.StatusCode != http.StatusNoContent {
-		t.Fatalf("approve status %d", apv.StatusCode)
+	if noGrant.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("active /mcp without grant: got %d, want 401", noGrant.StatusCode)
 	}
 
-	// 4. Friend POSTs MCP request.
-	post, err := http.Post(srv.URL+"/h/tok1/mcp", "application/json", strings.NewReader(`{"method":"ping"}`))
+	// 4. Friend POSTs MCP request WITH the Bearer grant.
+	mreq, _ := http.NewRequest("POST", srv.URL+"/h/tok1/mcp", strings.NewReader(`{"method":"ping"}`))
+	mreq.Header.Set("Content-Type", "application/json")
+	mreq.Header.Set("Authorization", "Bearer "+grant)
+	post, err := http.DefaultClient.Do(mreq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,12 +126,19 @@ func TestE2EWebReverseProxy(t *testing.T) {
 
 	regBody, _ := json.Marshal(registerRequest{HostID: "host-b", Token: "tok2", TTLMs: 60_000, ApprovalCode: "1234"})
 	_, _ = http.Post(srv.URL+"/tunnel/register", "application/json", bytes.NewReader(regBody))
-	_, _ = http.Post(srv.URL+"/h/tok2/approve", "application/json", strings.NewReader(`{"code":"1234"}`))
+	grant := approveGrant(t, srv, "tok2", "1234")
 
-	r1, err := http.Get(srv.URL + "/h/tok2/web/")
+	// Web access requires the grant cookie; without it → 401.
+	noCookie, err := http.Get(srv.URL + "/h/tok2/web/")
 	if err != nil {
 		t.Fatal(err)
 	}
+	noCookie.Body.Close()
+	if noCookie.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("/web without grant cookie: got %d, want 401", noCookie.StatusCode)
+	}
+
+	r1 := getWithGrantCookie(t, srv.URL+"/h/tok2/web/", grant)
 	defer r1.Body.Close()
 	b1, _ := io.ReadAll(r1.Body)
 	if string(b1) != "home" {
@@ -134,13 +148,49 @@ func TestE2EWebReverseProxy(t *testing.T) {
 		t.Fatalf("header lost: %v", r1.Header)
 	}
 
-	r2, err := http.Get(srv.URL + "/h/tok2/web/api/status")
-	if err != nil {
-		t.Fatal(err)
-	}
+	r2 := getWithGrantCookie(t, srv.URL+"/h/tok2/web/api/status", grant)
 	defer r2.Body.Close()
 	b2, _ := io.ReadAll(r2.Body)
 	if !strings.Contains(string(b2), `"ok":true`) {
 		t.Fatalf("/api/status → %q", b2)
 	}
+}
+
+// approveGrant POSTs the 4-digit code and returns the session grant minted
+// by the relay. Fails the test on any non-200 or missing grant.
+func approveGrant(t *testing.T, srv *httptest.Server, token, code string) string {
+	t.Helper()
+	resp, err := http.Post(srv.URL+"/h/"+token+"/approve", "application/json",
+		strings.NewReader(`{"code":"`+code+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("approve status %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		Grant string `json:"grant"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode approve body: %v", err)
+	}
+	if out.Grant == "" {
+		t.Fatal("approve returned empty grant")
+	}
+	return out.Grant
+}
+
+// getWithGrantCookie issues a GET carrying the grant cookie (the Secure
+// flag means httptest's http client won't send it from a jar, so we set
+// the header directly).
+func getWithGrantCookie(t *testing.T, url, grant string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("Cookie", grantCookie+"="+grant)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
 }

@@ -38,11 +38,7 @@ func TestSessionInfoTracksLandingHitsAndActivity(t *testing.T) {
 	}
 
 	// Approve. Then a tunneled request bumps activity.
-	apv, _ := http.Post(srv.URL+"/h/live/approve", "application/json", strings.NewReader(`{"code":"0000"}`))
-	apv.Body.Close()
-	if apv.StatusCode != 204 {
-		t.Fatalf("approve status %d", apv.StatusCode)
-	}
+	grant := approveGrant(t, srv, "live", "0000")
 
 	// Spin up a host so /h/live/mcp completes the roundtrip.
 	host := tunnel.NewHost(srv.URL, "h", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +50,9 @@ func TestSessionInfoTracksLandingHitsAndActivity(t *testing.T) {
 	go host.Run(ctx)
 
 	before := time.Now().UnixMilli()
-	resp, err := http.Post(srv.URL+"/h/live/mcp", "application/json", strings.NewReader(`{}`))
+	mreq, _ := http.NewRequest("POST", srv.URL+"/h/live/mcp", strings.NewReader(`{}`))
+	mreq.Header.Set("Authorization", "Bearer "+grant)
+	resp, err := http.DefaultClient.Do(mreq)
 	if err != nil {
 		t.Fatal(err)
 	}
