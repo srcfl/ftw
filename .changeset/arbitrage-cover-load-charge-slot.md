@@ -22,10 +22,23 @@ predicate so the discharge isn't undone downstream: the soft-cap floor,
 `planHasNonDischargeIntent` (so `noSelfDischarge` doesn't re-clamp it), and the
 plan/exec sign floor (so it isn't treated as a sign mismatch).
 
+**The same cover-load behaviour now also applies to `planner_arbitrage`
+*idle* slots.** An idle slot (the DP planned neither charge nor discharge,
+expecting PV to cover the load) used to stay on the energy path — which yields
+a 0 W target and can't react — so a forecast miss left the site importing while
+the battery sat idle. Idle `planner_arbitrage` slots now fall through to the
+reactive PI / grid=0 path, the same one `planner_passive_arbitrage` idle slots
+already use: the battery discharges to cover a live import, and the existing
+live-export gate still prevents it from reactively absorbing a live PV surplus
+(the DP's idle choice is honoured on the charge side).
+
 Scope is deliberately narrow and safe:
-- Only `planner_arbitrage`, and only charge slots whose plan was **not** a
-  deliberate grid-charge (`PlannedGridW` below the 100 W import band). A real
-  grid-charge slot still floors at 0 — its refill intent is preserved.
+- Only `planner_arbitrage` (mirroring the existing `planner_passive_arbitrage`
+  behaviour). `planner_cheap` idle slots keep the non-discharge block — only
+  deliberate discharge slots are exempt there.
+- Charge slots: a deliberate grid-charge (`PlannedGridW` ≥ the 100 W import
+  band) still floors at 0; only charge-from-PV-surplus and idle slots flip to
+  reactive cover-load.
 - Normal sunny charge-from-surplus operation is unchanged (the cap only fires
   on a live import divergence; absorbing surplus is untouched).
 - The SoC floor, fuse guard, and slew limiter still bound the discharge.
