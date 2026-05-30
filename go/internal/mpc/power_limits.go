@@ -52,3 +52,27 @@ func (l PowerLimits) allowsExport(gridW float64) bool {
 	}
 	return -gridW <= l.MaxExportW
 }
+
+// clampSlotGridLimits bounds each slot's grid import/export so the DP never
+// schedules a flow the site can't physically sustain. Import is capped at
+// the fuse; export at the tighter of the fuse and maxExportW (the operator's
+// site export-protection limit; 0 = unset). A slot that already carries a
+// tighter limit (e.g. a DSO curtailment signal) is never loosened. No-op
+// when fuseMaxW <= 0 (fuse unconfigured) — matches the prior gating.
+func clampSlotGridLimits(slots []Slot, fuseMaxW, maxExportW float64) {
+	if fuseMaxW <= 0 {
+		return
+	}
+	exportCap := fuseMaxW
+	if maxExportW > 0 && maxExportW < exportCap {
+		exportCap = maxExportW
+	}
+	for i := range slots {
+		if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > fuseMaxW {
+			slots[i].Limits.MaxImportW = fuseMaxW
+		}
+		if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > exportCap {
+			slots[i].Limits.MaxExportW = exportCap
+		}
+	}
+}
