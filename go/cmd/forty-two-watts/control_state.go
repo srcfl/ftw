@@ -38,5 +38,9 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	ctrl.DCLinkProtectionEnabled = cfg.Site.DCLinkProtectionEnabled
 	ctrl.DCLinkProtectionSoCThreshold = cfg.Site.DCLinkProtectionSoCThreshold
 	ctrl.DCLinkProtectionMarginW = cfg.Site.DCLinkProtectionMarginW
+	// Site export ceiling — opt-in, default off. The fuse guard scales
+	// battery discharge back so predicted export stays under max_export_w,
+	// protecting inverters that trip below the breaker rating.
+	ctrl.MaxExportW = cfg.Site.MaxExportW
 	return ctrl
 }
