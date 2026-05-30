@@ -3083,6 +3083,7 @@
   var historyCakeWrap = $("history-cake");
   var historyCakeEl = $("history-cake-el");
   var historyCakeWaitingForUpgrade = false;
+  var historyCakeReqSeq = 0;
 
   // historyState mirrors both toggles so the Bars/Cakes view and
   // the Week/Month range stay coordinated. Only the cake re-fetches
@@ -3091,6 +3092,7 @@
   var historyState = { range: "week", view: "bars" };
 
   function fetchHistoryCake() {
+    var seq = ++historyCakeReqSeq;
     historyCakeEl = $("history-cake-el");
     if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") {
       if (!historyCakeWaitingForUpgrade && window.customElements && customElements.whenDefined) {
@@ -3105,11 +3107,13 @@
     if (historyCakeWrap) historyCakeWrap.classList.add("loading");
     var days = historyState.range === "month" ? 30 : 7;
     var clearLoading = function () {
+      if (seq !== historyCakeReqSeq) return;
       if (historyCakeWrap) historyCakeWrap.classList.remove("loading");
     };
     fetch("/api/energy/daily?days=" + days)
       .then(function (r) { return r.json(); })
       .then(function (j) {
+        if (seq !== historyCakeReqSeq) return;
         var arr = (j && j.days) || [];
         var totals = { import_wh: 0, load_wh: 0, export_wh: 0, pv_wh: 0 };
         for (var i = 0; i < arr.length; i++) {

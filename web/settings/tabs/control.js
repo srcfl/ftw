@@ -41,7 +41,7 @@
         '</div></div>' +
         '</fieldset>' +
         '<fieldset><legend>PV surplus absorber</legend>' +
-        '<p style="color:var(--ink-dim);font-size:0.85rem;margin:0 0 8px">' +
+        '<p style="color:var(--fg-dim);font-size:0.85rem;margin:0 0 8px">' +
         'Opt-in underlay for planner_cheap / planner_arbitrage. ' +
         'When the plan would still leave the grid exporting beyond the threshold AND ' +
         'average battery SoC is below the cap, the leftover export is redirected into the battery ' +
