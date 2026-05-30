@@ -224,6 +224,16 @@ type State struct {
 	// an aggregate import-only concept (tariff). Persisted in state.db
 	// under "peak_import_ceiling_w".
 	PeakImportCeilingW float64
+
+	// MaxExportW is a hard export ceiling (W, magnitude) enforced in EVERY
+	// mode, at or below the physical fuse. Default 0 = disabled (export
+	// bounded only by the fuse). When > 0 the export side of the fuse
+	// guard uses min(fuse−margin, MaxExportW) as its threshold and scales
+	// battery discharge back so predicted export stays under it. Protects
+	// inverters that trip on sustained export well below the breaker
+	// rating — the recurring Ferroamp EnergyHub 0x8030 fault after ~8 kW
+	// sustained midday export. Sourced from site.max_export_w.
+	MaxExportW float64
 	// EV charging signal — batteries won't try to cover this much of import
 	EVChargingW float64
 
@@ -3023,15 +3033,14 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// own per-phase limiter doesn't fire first and cause a flap.
 	//
 	// Import ceiling is the tighter of (fuse − safety margin) and the
-	// operator's tariff peak; export ceiling is fuse-only — peak is
-	// import-only (effekttariff is billed on import).
-	effFuseW := fuseMaxW - state.fuseSafetyMarginW()
-	if effFuseW < 0 {
-		effFuseW = 0
-	}
+	// operator's tariff peak; export ceiling is the tighter of (fuse −
+	// safety margin) and the operator's max_export_w protection limit —
+	// set when an inverter trips on sustained export below the breaker
+	// (recurring Ferroamp 0x8030 fault). Both share one enforcement surface.
 	effImportW := state.effectiveImportCeilingW(fuseMaxW)
+	effExportW := state.effectiveExportCeilingW(fuseMaxW)
 	importOverage := predicted - effImportW
-	exportOverage := -effFuseW - predicted
+	exportOverage := -effExportW - predicted
 	if perPhase > 0 {
 		if currentGrid >= 0 {
 			if perPhase > importOverage {
@@ -3204,6 +3213,25 @@ func (s *State) effectiveImportCeilingW(fuseMaxW float64) float64 {
 	}
 	if s != nil && s.PeakImportCeilingW > 0 && s.PeakImportCeilingW < eff {
 		eff = s.PeakImportCeilingW
+	}
+	return eff
+}
+
+// effectiveExportCeilingW returns the binding ceiling for grid export in
+// watts: the fuse limit minus its safety margin, further capped by
+// MaxExportW when the operator has opted into a site export protection
+// limit (MaxExportW > 0). Mirrors effectiveImportCeilingW on the export
+// side so the fuse guard scales battery discharge back below an inverter's
+// sustained-export trip point, not just the physical breaker. MaxExportW
+// is taken at face value (no extra safety subtraction) — the operator
+// typed the protection limit; the fuse keeps its own independent margin.
+func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
+	eff := fuseMaxW - s.fuseSafetyMarginW()
+	if eff < 0 {
+		eff = 0
+	}
+	if s != nil && s.MaxExportW > 0 && s.MaxExportW < eff {
+		eff = s.MaxExportW
 	}
 	return eff
 }

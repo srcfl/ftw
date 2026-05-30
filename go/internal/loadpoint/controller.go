@@ -92,6 +92,12 @@ type Controller struct {
 	surplusWin      map[string]*surplusWindow
 	surplusPaused   map[string]bool
 	surplusPausedAt map[string]time.Time
+	// surplusStepW is the last applied surplus_only step per loadpoint.
+	// Used for asymmetric step smoothing: down-steps track instant surplus
+	// (no-import promise), up-steps are gated on the rolling average so a
+	// transient surplus spike can't ratchet the EV up a step it can't hold
+	// (which would whipsaw the home battery's PI). See computeSurplusCmd.
+	surplusStepW map[string]float64
 
 	// vehicleStatus reports the matched vehicle driver + its
 	// charging_state for a given loadpoint, so the controller can
@@ -1588,23 +1594,47 @@ func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, curre
 	c.setSurplusPause(lpCfg.ID, paused, pausedAt)
 
 	if paused {
+		// Reset the step memory so the next resume ramps up fresh under
+		// the avg gate rather than from a stale pre-pause level.
+		c.setSurplusStepW(lpCfg.ID, 0)
 		return 0
 	}
-	// Setpoint tracks INSTANT surplus, not the rolling average. The
-	// avg smooths the pause/resume decision so we don't cycle the
-	// contactor on transients (that's the user-stated intent: "avg
-	// over 4 ticks to determine pause"), but using avg for the
-	// setpoint magnitude lags reality — on a slowly dropping cloud
-	// front the EV would hold its previous draw for ~20 s while
-	// live PV had already fallen below it, and the difference
-	// leaks straight into grid import. Tracking instant keeps the
-	// no-import promise tight; the home battery's reactive PI in
-	// self_consumption fills sub-tick gaps.
+	// Setpoint magnitude: down-steps track INSTANT surplus (keeps the
+	// no-import promise tight — on a dropping cloud front the EV must shed
+	// load immediately or it leaks straight into grid import). Up-steps are
+	// gated on the rolling AVERAGE.
 	target := wantW
 	if instant < target {
 		target = instant
 	}
-	return SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+	snapped := SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+
+	// Asymmetric step smoothing (operator report 2026-05-30). surplusW counts
+	// the home battery's current charge power as EV-available, so a single-
+	// tick wobble (the battery briefly backing off, a cloud edge, the load
+	// twitching) would ratchet the EV UP a step it can't hold — it collapses
+	// the next tick, and the repeated multi-kW load swing whipsaws the home
+	// battery's reactive PI into integrator windup, so the battery stops
+	// delivering its planned discharge (EV ↔ battery limit cycle). Requiring
+	// the smoothed average to ALSO clear the higher step lets the EV ramp up
+	// only on a sustained rise. Down-steps stay instant (above), so the
+	// no-import guarantee is unaffected.
+	prev := c.getSurplusStepW(lpCfg.ID)
+	if snapped > prev {
+		avgTarget := wantW
+		if avg < avgTarget {
+			avgTarget = avg
+		}
+		avgSnapped := SnapChargeW(avgTarget, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+		if avgSnapped < snapped {
+			snapped = avgSnapped
+			if snapped < prev {
+				snapped = prev // never force a down-step on an up-tick
+			}
+		}
+	}
+	c.setSurplusStepW(lpCfg.ID, snapped)
+	return snapped
 }
 
 // pickSurplusSteps returns the step set surplus_only should snap to
@@ -1967,6 +1997,21 @@ func (c *Controller) setSurplusPause(id string, paused bool, at time.Time) {
 	} else {
 		delete(c.surplusPausedAt, id)
 	}
+}
+
+func (c *Controller) getSurplusStepW(id string) float64 {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	return c.surplusStepW[id]
+}
+
+func (c *Controller) setSurplusStepW(id string, w float64) {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	if c.surplusStepW == nil {
+		c.surplusStepW = map[string]float64{}
+	}
+	c.surplusStepW[id] = w
 }
 
 // computeCommand resolves the W setpoint for a plugged loadpoint.

@@ -43,6 +43,26 @@ cat <<'BANNER'
 
 BANNER
 
+# ---- Platform guard ----
+# This installer is Linux-only (apt-get, get.docker.com, `hostname -I`,
+# usermod, host networking). On macOS the deploy story is different —
+# Docker Desktop + the dedicated macOS compose file. Bail early with a
+# pointer instead of failing halfway through with cryptic errors.
+if [ "$(uname -s)" = "Darwin" ]; then
+  cat >&2 <<'EOF'
+This installer is for Linux only.
+
+On macOS, install Docker Desktop and use docker-compose.macos.yml:
+
+  mkdir -p ~/forty-two-watts/data && cd ~/forty-two-watts
+  curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/docker-compose.macos.yml -o docker-compose.macos.yml
+  docker compose -f docker-compose.macos.yml up -d
+
+Full walkthrough: docs/deploy-platforms.md
+EOF
+  exit 1
+fi
+
 # ---- Prerequisites ----
 if ! command -v curl >/dev/null 2>&1; then
   echo "ERROR: 'curl' is required. Install with:" >&2

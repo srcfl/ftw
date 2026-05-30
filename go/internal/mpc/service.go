@@ -142,6 +142,14 @@ type Service struct {
 	// execution time. Wired from main.go (cfg.Fuse → fuseMaxW).
 	FuseMaxW float64
 
+	// MaxExportW caps total site export (W, magnitude) below the fuse.
+	// When > 0, every slot's export limit becomes min(FuseMaxW, MaxExportW)
+	// so the DP never schedules a battery discharge that would over-export
+	// and trip an inverter that faults below the breaker rating (recurring
+	// Ferroamp 0x8030 fault). 0 = disabled (export bounded by the fuse).
+	// Wired from main.go (cfg.Site.MaxExportW).
+	MaxExportW float64
+
 	lastReplanAt time.Time
 	lastReason   string // "scheduled" | "reactive-pv" | "reactive-load" | "manual"
 
@@ -817,26 +825,17 @@ func (s *Service) replan(_ context.Context) *Plan {
 		return nil
 	}
 
-	// Plumb the site fuse into per-slot limits so the DP joint-plans
-	// battery + EV under the fuse constraint instead of producing plans
-	// that dispatch then has to scale at execution time. The DP already
-	// honours Slot.Limits.MaxImportW + MaxExportW (mpc.go:450); we just
-	// feed both directions — the fuse trips on |I| regardless of sign,
-	// and exporting 14 kW through an 11 kW breaker is just as bad as
-	// importing it (probably worse — the inverter's local current
-	// limiter trips first and the operator sees a sudden zero-output
-	// flap as PV+battery collapses). Pre-fix this only set MaxImportW,
-	// producing plans like 14:45 slot grid=-14.2 kW past an 11 kW fuse.
-	if s.FuseMaxW > 0 {
-		for i := range slots {
-			if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > s.FuseMaxW {
-				slots[i].Limits.MaxImportW = s.FuseMaxW
-			}
-			if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > s.FuseMaxW {
-				slots[i].Limits.MaxExportW = s.FuseMaxW
-			}
-		}
-	}
+	// Plumb the site fuse + export ceiling into per-slot limits so the DP
+	// joint-plans battery + EV under the grid constraints instead of
+	// producing plans dispatch then has to scale at execution time. The DP
+	// already honours Slot.Limits.MaxImportW + MaxExportW (mpc.go:450).
+	// Import is bounded by the fuse (the breaker trips on |I| regardless of
+	// sign); export by the tighter of the fuse and the operator's
+	// max_export_w — the latter protects inverters that trip on sustained
+	// export below the breaker rating (the recurring Ferroamp 0x8030
+	// fault). Pre-fix this only set MaxImportW, producing plans like a
+	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
+	clampSlotGridLimits(slots, s.FuseMaxW, s.MaxExportW)
 
 	s.mu.RLock()
 	p := s.Defaults

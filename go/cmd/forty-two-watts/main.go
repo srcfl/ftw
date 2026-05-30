@@ -465,6 +465,7 @@ func main() {
 			// Mirror the startup-path default semantics — nil → 0.5,
 			// explicit 0 → disabled. See EffectiveSafetyMarginA.
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
+			ctrl.MaxExportW = newCfg.Site.MaxExportW
 			ctrlMu.Unlock()
 
 			// Keep the loadpoint controller's per-phase EV fuse clamp in
@@ -727,6 +728,11 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		// Cap planned export below the fuse when the operator set a site
+		// export ceiling, so the DP never schedules a discharge that would
+		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
+		// Startup-only, matching FuseMaxW above.
+		mpcSvc.MaxExportW = cfg.Site.MaxExportW
 		if pvSvc != nil {
 			// Use the unanchored structural predictor here: the MPC also
 			// receives PVResidualCorrect, which captures the same

@@ -282,6 +282,8 @@ light theme can flip it cleanly.
 - `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
 - `docs/api.md` — HTTP endpoint reference (NEW)
 - `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
+- `docs/deploy-platforms.md` — running on a Mac mini or generic Linux server (Ubuntu/NUC/VM) via Docker (NEW)
+- `docs/rpi-image.md` — turnkey Raspberry Pi SD-card image
 - `docs/self-update.md` — in-app update flow + ftw-updater sidecar architecture
 - `docs/nova-integration.md` — opt-in federation to Sourceful Nova Core (MQTT + ES256 JWT, clean schema + legacy adapter)
 - `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
