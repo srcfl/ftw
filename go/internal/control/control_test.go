@@ -1846,6 +1846,90 @@ func TestEnergyDispatchPlannedGridCapNoFireInsideDeadband(t *testing.T) {
 	}
 }
 
+// TestEnergyDispatchPlannedGridCapCoversLoadSurgeOnSurplusSlot is the
+// symmetric companion to the charge-back-off cap (operator report
+// 2026-05-30, planner_arbitrage). On a charge-from-PV-surplus slot
+// (PlannedGridW ≈ 0 — the DP meant to soak surplus, NOT grid-charge), a
+// sudden load surge leaves the site importing. The old cap floored the
+// back-off at 0 (battery idle) and left the import to the slow reactive
+// replan, so the battery never supported the load. The cap must instead
+// flip to discharge, driving projected grid back to PlannedGridW (~0).
+//
+// Plan: arbitrage charge slot, 1200 Wh over 15 min ≈ 4800 W, PlannedGridW=0.
+// Live: battery at 0 W, load surged so the meter reads +682 W import.
+// Executing the +4800 W plan would project +5482 W import; covering the
+// load means a discharge of ~682 W (projected grid → 0).
+func TestEnergyDispatchPlannedGridCapCoversLoadSurgeOnSurplusSlot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average planned charge
+		Strategy:        "arbitrage",
+		PlannedGridW:    0, // plan expected ~zero grid (charge from PV surplus)
+		HasPlannedGridW: true,
+	}
+	// Live import of +682 W (load surged past PV) with the battery at 0 W.
+	store := seedStore(682, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -1797, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Cover-load discharge drives projected grid to PlannedGridW (0):
+	// adjusted = PlannedGridW − rawGridW + currentTotal = 0 − 682 + 0 = −682 W.
+	if got > -582 || got < -782 {
+		t.Errorf("TargetW = %f W — surplus-slot load surge must discharge to cover "+
+			"load (~−682 W, grid→0), not floor at 0 and import", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapKeepsFloorOnGridChargeSlot guards the
+// scope of the cover-load discharge above: on a DELIBERATE grid-charge
+// slot (PlannedGridW > 0 — the DP chose to buy from the grid to refill),
+// a load surge must still only back the charge off to 0, never flip to
+// discharge — undoing the planned refill would defeat the arbitrage.
+func TestEnergyDispatchPlannedGridCapKeepsFloorOnGridChargeSlot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 500, // ~2000 W planned charge
+		Strategy:        "arbitrage",
+		PlannedGridW:    2000, // plan: import 2 kW to grid-charge
+		HasPlannedGridW: true,
+	}
+	// Live import +3000 W (load surged beyond the planned 2 kW), battery 0.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Floor holds: charge backs off to 0, battery does NOT discharge.
+	if got < -50 || got > 50 {
+		t.Errorf("TargetW = %f W — deliberate grid-charge slot must floor at 0 on a "+
+			"load surge (no cover-load discharge)", got)
+	}
+}
+
 // TestEnergyDispatchUnsetPlannedGridWBypassesCap — legacy callers /
 // tests construct SlotDirective without setting PlannedGridW (and
 // without flipping HasPlannedGridW). HasPlannedGridW=false is the

@@ -1580,7 +1580,19 @@ func ComputeDispatch(
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
-				if adjusted < 0 {
+				// The back-off normally floors at 0 (charge → idle): on a
+				// deliberate grid-charge slot the plan meant to import, so a
+				// load surge must not flip it to discharge and undo the refill.
+				// But on a planner_arbitrage charge-from-PV-surplus slot
+				// (PlannedGridW below the grid-charge band — the DP only meant
+				// to soak surplus, not buy from the grid), let the target go
+				// negative so the battery covers the live load surge, driving
+				// projected grid back toward PlannedGridW (~0). This is the
+				// charge-side mirror of the discharge-slot cover-load carve-out;
+				// downstream SoC floor / fuse guard / slew still bound the
+				// discharge, and planHasNonDischargeIntent permits it for exactly
+				// these slots. Operator report 2026-05-30.
+				if adjusted < 0 && !coverLoadChargeSlot(state, currentDirective) {
 					adjusted = 0
 				}
 				targetTotalW = adjusted
@@ -2753,6 +2765,30 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	return targets
 }
 
+// coverLoadChargeSlot reports whether the current plan slot is a
+// planner_arbitrage charge-from-PV-surplus slot: the DP meant to soak surplus
+// (PlannedGridW below the grid-charge import band), NOT buy from the grid.
+// Such a slot carries no hard charge commitment — when the forecast load is
+// wrong and the site is importing, the battery should reactively discharge to
+// cover it (the charge-side mirror of the discharge-slot cover-load carve-out).
+//
+// Three rails consult this so a legitimate cover-load discharge isn't undone:
+//   - the soft cap (ComputeDispatch) lets the back-off go negative,
+//   - planHasNonDischargeIntent doesn't block the reactive discharge,
+//   - applyPlanSignFloor (via planSignIntent) doesn't treat it as a
+//     plan/exec sign mismatch.
+//
+// A deliberate grid-charge slot (PlannedGridW ≥ band) is excluded: its
+// realisable refill intent is preserved. Operator report 2026-05-30.
+func coverLoadChargeSlot(state *State, dir SlotDirective) bool {
+	const idleWhGate = 50.0         // a near-zero per-slot energy is idle, not charge
+	const gridChargeImportW = 100.0 // PlannedGridW ≥ this ⇒ deliberate grid-charge
+	return state != nil && state.Mode == ModePlannerArbitrage &&
+		dir.HasPlannedGridW &&
+		dir.BatteryEnergyWh > idleWhGate &&
+		dir.PlannedGridW < gridChargeImportW
+}
+
 func planHasNonDischargeIntent(state *State) bool {
 	if state == nil || !state.Mode.IsPlannerMode() {
 		return false
@@ -2800,6 +2836,13 @@ func planHasNonDischargeIntent(state *State) bool {
 			// get no non-discharge block — reactive discharge may cover load.
 			if state.Mode == ModePlannerPassiveArbitrage {
 				return dir.BatteryEnergyWh > idleWh
+			}
+			// planner_arbitrage charge-from-PV-surplus slot: no hard charge
+			// commitment, so reactive discharge may cover a forecast-missed
+			// load. See coverLoadChargeSlot. A deliberate grid-charge slot
+			// keeps the block so its refill intent is honoured.
+			if coverLoadChargeSlot(state, dir) {
+				return false
 			}
 			return dir.BatteryEnergyWh >= -idleWh
 		}
@@ -2919,8 +2962,7 @@ func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map
 // The caps are asymmetric on purpose — real hybrid inverters often have
 // different charge and discharge capability (e.g. Ferroamp 15 kW charge /
 // 10 kW discharge). Issue #145.
-func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
-	clamped := target
+func clampWithSoC(target float64, b batteryInfo) (float64, bool) {	clamped := target
 	wasClamped := false
 	// Block discharge when the battery is empty.
 	if b.soc < 0.05 && target < 0 {
@@ -3329,6 +3371,12 @@ func planSignIntent(state *State) int {
 	if state.SlotDirective != nil {
 		if dir, ok := state.SlotDirective(time.Now()); ok {
 			if dir.BatteryEnergyWh > idleWh {
+				// A charge-from-PV-surplus slot has no hard charge commitment
+				// (see coverLoadChargeSlot) — report idle intent so the sign
+				// floor doesn't clamp a legitimate cover-load discharge.
+				if coverLoadChargeSlot(state, dir) {
+					return 0
+				}
 				return +1
 			}
 			if dir.BatteryEnergyWh < -idleWh {
