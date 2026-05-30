@@ -416,6 +416,11 @@ func main() {
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
 
+	// Forward-declared before the reload watcher so the reload callback
+	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
+	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
+	var lpController *loadpoint.Controller
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -462,6 +467,20 @@ func main() {
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 			ctrl.MaxExportW = newCfg.Site.MaxExportW
 			ctrlMu.Unlock()
+
+			// Keep the loadpoint controller's per-phase EV fuse clamp in
+			// sync with hot-reloaded fuse params — previously startup-only,
+			// so an operator tuning max_amps / margin from the UI updated
+			// the control-package battery lever (above) but left the EV
+			// clamp on the stale startup value until restart. SetSiteFuse
+			// takes its own lock; call it outside ctrlMu.
+			if lpController != nil {
+				lpController.SetSiteFuse(loadpoint.SiteFuse{
+					MaxAmps:  newCfg.Fuse.MaxAmps,
+					Voltage:  newCfg.Fuse.Voltage,
+					PhaseCnt: newCfg.Fuse.Phases,
+				})
+			}
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -701,12 +720,6 @@ func main() {
 	loadSvc.Start(ctx)
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
-
-	// Forward-declared so the MPC spec builder closure (set below) can
-	// push grid-deferred state into the runtime controller. The
-	// controller itself is constructed further down once its
-	// dependencies (planAdapter, telAdapter, registry) are wired.
-	var lpController *loadpoint.Controller
 
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
@@ -1094,6 +1107,29 @@ func main() {
 				return 0, false
 			}
 			return ctrl.FuseEVMaxW, true
+		})
+		// Wire the live per-phase site-meter current reader. The control
+		// package's fuse guard is site-TOTAL only (sum across phases);
+		// a single phase can still trip from house-load imbalance (e.g.
+		// a vacuum or oven on L1) stacked on top of the EV's per-phase
+		// draw. This reader feeds the loadpoint's reactive per-phase EV
+		// clamp (applyPerPhaseFuseClamp), which lowers max_amps_per_phase
+		// the instant the worst phase approaches the breaker. Reads the
+		// same meter_lN_a metrics the fuse_over_limit notifier uses.
+		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
+			cfgMu.RLock()
+			siteMeter := cfg.SiteMeterDriver()
+			cfgMu.RUnlock()
+			if siteMeter == "" {
+				return 0, 0, 0, false
+			}
+			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
+			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
+			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
+			if !ok1 && !ok2 && !ok3 {
+				return 0, 0, 0, false
+			}
+			return l1, l2, l3, true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
