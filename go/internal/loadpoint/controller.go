@@ -45,6 +45,13 @@ type Controller struct {
 	// EV cooperatively share the site fuse.
 	fuseEVMax func() (float64, bool)
 
+	// perPhaseMeterAmps returns the live site-meter per-phase currents (L1,
+	// L2, L3). Wired from telemetry; nil disables the per-phase fuse clamp.
+	perPhaseMeterAmps func() (l1, l2, l3 float64, ok bool)
+	// fusePhaseCapA holds the per-loadpoint per-phase EV current cap carried
+	// between ticks by the reactive per-phase fuse clamp (tickOne goroutine).
+	fusePhaseCapA map[string]float64
+
 	// siteSurplusForEVW returns the live PV surplus that this loadpoint
 	// could legally claim under surplus_only — i.e. *what's left of PV
 	// after house load*, regardless of what the home battery is
@@ -374,6 +381,15 @@ func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
 	c.fuseEVMax = f
 }
 
+// SetPerPhaseMeterAmps wires the live site-meter per-phase current reader
+// used by the per-phase fuse clamp.
+func (c *Controller) SetPerPhaseMeterAmps(f func() (l1, l2, l3 float64, ok bool)) {
+	if c == nil {
+		return
+	}
+	c.perPhaseMeterAmps = f
+}
+
 // SetSiteSurplusForEV wires a per-tick "PV surplus available to the
 // EV" reader for the surplus_only clamp. The function returns total
 // W the EV could safely claim without forcing site import — typically
@@ -432,6 +448,80 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 // neither a sticky operator hold nor a stale MPC budget can drive
 // the fuse over limit, and the cooldown prevents fuse flap when a
 // transient overload clears momentarily.
+// ---- Per-phase fuse clamp (operator report 2026-05-30) ----
+//
+// The dispatch fuse guard protects the 3-phase TOTAL import; it is blind to
+// per-phase imbalance, so a phase carrying house load + the EV's full offer can
+// exceed the breaker while the site total looks fine (observed: L1 ~18 A on a
+// 16 A fuse). This reactive clamp lowers the EV's per-phase offer whenever the
+// worst measured phase nears the breaker.
+
+// fusePhaseMarginA is the per-phase amp headroom held below the breaker.
+const fusePhaseMarginA = 1.0
+
+// fusePhaseStepUpA is how fast the per-phase EV cap recovers per tick once a
+// phase has headroom — gentle enough not to re-trip, quick enough to ramp back.
+const fusePhaseStepUpA = 1.0
+
+// nextFusePhaseCapA reactively caps the EV's per-phase offer so the worst
+// measured site-meter phase stays at or below (fuseA - marginA). Reductions are
+// immediate (the full overage) to protect the breaker; ramp-up is gradual
+// (stepA/tick). prevCapA <= 0 means "uninitialised" -> start from the full fuse.
+// Pure for testability.
+func nextFusePhaseCapA(prevCapA, worstMeterA, fuseA, marginA, stepA float64) float64 {
+	if fuseA <= 0 {
+		return prevCapA
+	}
+	limit := fuseA - marginA
+	capA := prevCapA
+	if capA <= 0 {
+		capA = fuseA
+	}
+	switch {
+	case worstMeterA > limit:
+		capA -= worstMeterA - limit
+	case worstMeterA+stepA <= limit:
+		capA += stepA
+	}
+	if capA < 0 {
+		capA = 0
+	}
+	if capA > fuseA {
+		capA = fuseA
+	}
+	return capA
+}
+
+// applyPerPhaseFuseClamp lowers the EV's per-phase offer (cmd["max_amps_per_phase"])
+// when any live site-meter phase nears the breaker. The dispatch fuse guard
+// only protects the 3-phase TOTAL, so an imbalanced phase (house load + the
+// EV's full offer) can trip the breaker while the total looks fine. Reactive:
+// see nextFusePhaseCapA. Called just before the cmd is dispatched so it caps
+// whatever the paths above set. Operator report 2026-05-30.
+func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
+	if c == nil || c.perPhaseMeterAmps == nil || c.site.MaxAmps <= 0 {
+		return
+	}
+	l1, l2, l3, ok := c.perPhaseMeterAmps()
+	if !ok {
+		return
+	}
+	worst := math.Max(l1, math.Max(l2, l3))
+	if c.fusePhaseCapA == nil {
+		c.fusePhaseCapA = map[string]float64{}
+	}
+	capA := nextFusePhaseCapA(c.fusePhaseCapA[lpCfg.ID], worst, c.site.MaxAmps, fusePhaseMarginA, fusePhaseStepUpA)
+	c.fusePhaseCapA[lpCfg.ID] = capA
+	if capA >= c.site.MaxAmps {
+		return
+	}
+	if existing, has := cmd["max_amps_per_phase"].(float64); !has || capA < existing {
+		cmd["max_amps_per_phase"] = capA
+		slog.Info("loadpoint per-phase fuse clamp",
+			"lp", lpCfg.ID, "worst_phase_a", worst, "ev_cap_a", capA, "fuse_a", c.site.MaxAmps)
+	}
+}
+
 func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) float64 {
 	if c == nil {
 		return wantW
@@ -1211,6 +1301,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		}
 	}
 
+	c.applyPerPhaseFuseClamp(lpCfg, cmd)
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return

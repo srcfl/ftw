@@ -1089,6 +1089,29 @@ func main() {
 			}
 			return ctrl.FuseEVMaxW, true
 		})
+		// Wire the live per-phase site-meter current reader. The control
+		// package's fuse guard is site-TOTAL only (sum across phases);
+		// a single phase can still trip from house-load imbalance (e.g.
+		// a vacuum or oven on L1) stacked on top of the EV's per-phase
+		// draw. This reader feeds the loadpoint's reactive per-phase EV
+		// clamp (applyPerPhaseFuseClamp), which lowers max_amps_per_phase
+		// the instant the worst phase approaches the breaker. Reads the
+		// same meter_lN_a metrics the fuse_over_limit notifier uses.
+		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
+			cfgMu.RLock()
+			siteMeter := cfg.SiteMeterDriver()
+			cfgMu.RUnlock()
+			if siteMeter == "" {
+				return 0, 0, 0, false
+			}
+			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
+			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
+			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
+			if !ok1 && !ok2 && !ok3 {
+				return 0, 0, 0, false
+			}
+			return l1, l2, l3, true
+		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
 		// reports `Stopped` / `Disconnected` / `Complete`, the
