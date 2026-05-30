@@ -1165,30 +1165,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// Operators who picked surplus_only have clearly opted into
 		// "react to PV"; dynamic phase switching is the only way to
 		// actually deliver low-power surplus to the EV.
-		phaseMode := lpCfg.PhaseMode
-		if c.surplusLockedTo1P(lpCfg.ID) {
-			phaseMode = "1p"
-		} else if surplusOn && (phaseMode == "" || phaseMode == "auto") {
-			// Honour the 30-min near-term dwell decision ONLY when the
-			// operator hasn't explicitly pinned a phase. Explicit "1p"
-			// or "3p" is a fixed-install contract: a 1Φ-only home or a
-			// 3Φ-only contactor preference. Overriding it via dwell
-			// would let a near-term forecast flip the install's
-			// physical configuration, exactly the wear case the dwell
-			// was meant to avoid.
-			//
-			// When phase_mode is unset or "auto", pin the driver to
-			// the dwell decision across the dwell window so a transient
-			// cmd_w=0 (pause) doesn't make the driver's "auto" snap to
-			// 1Φ and flip the contactor. Without this,
-			// pickSurplusSteps' step-list lock is silently bypassed
-			// every time the surplus clamp pauses.
-			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
-				phaseMode = dwell
-			} else if phaseMode == "" {
-				phaseMode = "auto"
-			}
-		}
+		// Phase selection. An active charge schedule overrides the surplus
+		// 1Φ forecast lock (and the near-term dwell verdict) so a deadline-
+		// driven charge can pull 3Φ grid power instead of being throttled to
+		// ~3.7 kW on a cloudy day; the surplus lock / dwell only applies when
+		// no schedule is committed. resolvePhaseMode keeps the dwell/lock
+		// rationale in one testable place. Operator directive 2026-05-30.
+		phaseMode := resolvePhaseMode(
+			lpCfg.PhaseMode,
+			sched.SoCPct > 0,
+			c.surplusLockedTo1P(lpCfg.ID),
+			surplusOn,
+			c.dwellSelectedPhaseMode(lpCfg.ID),
+		)
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
 		}
@@ -1700,6 +1689,43 @@ afterNearTerm:
 
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
+// resolvePhaseMode decides the phase_mode command sent to the charger driver
+// for a loadpoint tick. Precedence:
+//
+//  1. An ACTIVE charge schedule wins: a deadline-driven SoC target may need
+//     3Φ grid power to be met, so it must NOT be throttled to 1Φ by the
+//     surplus optimisation. An explicit operator pin ("1p"/"3p") is honoured;
+//     otherwise "auto" lets the driver pick the phase count for the power.
+//  2. Surplus 1Φ forecast lock: when the day's PV can't sustain 3Φ the
+//     loadpoint is pinned to 1Φ (the operator's surplus-only intent).
+//  3. Surplus-active + auto/unset: hold the 30-min near-term dwell verdict so
+//     a transient pause doesn't flip the contactor; default "auto".
+//  4. Otherwise: the operator's configured phase mode, verbatim.
+//
+// Pure function so the precedence stays unit-testable. Operator directive
+// 2026-05-30 (a schedule must override the 1Φ forecast lock).
+func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
+	switch {
+	case scheduleActive:
+		if operatorMode == "" {
+			return "auto"
+		}
+		return operatorMode
+	case surplusLocked1P:
+		return "1p"
+	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
+		if dwell != "" {
+			return dwell
+		}
+		if operatorMode == "" {
+			return "auto"
+		}
+		return operatorMode
+	default:
+		return operatorMode
+	}
+}
+
 func (c *Controller) surplusLockedTo1P(id string) bool {
 	if c == nil {
 		return false
