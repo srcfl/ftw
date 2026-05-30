@@ -615,6 +615,17 @@ func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
 	if lpCfg.SurplusOnly {
 		return true
 	}
+	// A committed charge schedule (with surplus_only OFF) overrides the
+	// RUNTIME surplus clamp. Reaching the target SoC by the deadline may need
+	// grid power, so the MPC grid-deferral guard and the bat-SoC arm must NOT
+	// snap the EV's commanded W to live PV surplus — otherwise the schedule's
+	// planned grid charge (e.g. the plan's 11 kW) is silently throttled to the
+	// available surplus and the deadline is missed. The explicit SurplusOnly
+	// config above still wins, so a "surplus-preferred with a deadline floor"
+	// combo is unaffected. Operator directive 2026-05-30.
+	if sched.SoCPct > 0 {
+		return false
+	}
 	if c.gridDeferredFor(lpCfg.ID) {
 		return true
 	}
