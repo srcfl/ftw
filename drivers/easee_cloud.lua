@@ -614,6 +614,22 @@ function driver_command(action, power_w, cmd)
         -- the charger's.
         local phase_changed = false
         if last_sent_phases ~= requested_phases then
+            -- A live phase flip (notably 1Φ→3Φ) won't move the Easee
+            -- contactor while a session is charging: the phase count is only
+            -- latched when a session (re)starts. So on a real mid-session flip
+            -- pause first; the phaseMode write reconfigures, and the auto-
+            -- resume below (amps > 0 && paused_state) re-closes the contactor
+            -- on the new phase count. Operator-confirmed: a manual
+            -- pause+resume was the only thing that flipped 1Φ→3Φ. Skip on the
+            -- first command of a session (last_sent_phases == nil) — there's no
+            -- live contactor to recycle. 2026-05-30.
+            if last_sent_phases ~= nil then
+                if post_command("/commands/pause_charging") then
+                    paused_state = true
+                    host.log("info", "Easee: pause to flip phaseMode " ..
+                        tostring(last_sent_phases) .. "→" .. tostring(requested_phases))
+                end
+            end
             local pm_err = write_setting(charger_serial, {phaseMode = requested_phases})
             if pm_err == nil then
                 phases = requested_phases
