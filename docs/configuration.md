@@ -164,6 +164,56 @@ must be in `[0, 1.0)`. Out-of-range or non-numeric values log a warning
 and keep the default. Note that the planner's `soc_max_pct` is an
 independent layer — to actually charge to 100 % both caps must be lifted.
 
+#### Ferroamp PV-curtail release watts (`config.pplim_release_w`)
+
+Required if you set `supports_pv_curtail: true` on the Ferroamp driver
+and want the dispatcher's automatic curtail-release to take effect.
+
+**Background.** Ferroamp's extapi treats `{"cmd":{"name":"pplim","arg":0}}`
+as "limit PV output to 0 W" — the same wire bytes a naive release
+would have, opposite semantics. The inverter then sticks at 0 W PV
+until the operator clears pplim from the Ferroamp portal or
+power-cycles the EnergyHub. The driver therefore refuses to publish
+`pplim arg=0` from any path, and the default `curtail_disable`
+handler is a no-op.
+
+To recover automatic release, set `pplim_release_w` to the inverter's
+nominal max (e.g. 15000 for a 15 kW SSO). On `curtail_disable` the
+driver publishes `pplim arg=<pplim_release_w>` which Ferroamp accepts
+as "raise the limit so PV can run free".
+
+```yaml
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    supports_pv_curtail: true
+    config:
+      pplim_release_w: 15000  # SSO nominal max — adapt to your inverter
+```
+
+If left unset (default `0`), curtail still works (pplim arg=N for
+N > 0), but the release path is a no-op and the operator must clear
+pplim manually from the Ferroamp portal once curtailment ends.
+
+The 2026-05-27 incident: dispatching `pplim arg=0` during a stale
+curtail-allocation cycle locked the SSO at 0 W PV for 30+ minutes
+and triggered a fault state on the EnergyHub.
+
+#### Ferroamp stuck-pplim self-healing watchdog
+
+The same `pplim_release_w` value (when set > 0) also arms a self-
+healing watchdog in the Ferroamp driver. If the SSO reports the
+sticky-pplim signature — DC bus voltage above 200 V, zero PV current,
+no fault, relay closed — continuously for ten minutes, the driver
+auto-publishes `pplim arg=<pplim_release_w>` to release the lock.
+A five-minute cooldown prevents command-spam if the recovery doesn't
+take. Operators who leave `pplim_release_w` unset see a per-incident
+warning log instead — no MQTT publish, because we don't have a safe
+release value to send.
+
+The `stuck_pv_recovery_count` metric tracks how many auto-recoveries
+the driver has issued since startup; alert on any non-zero rate to
+catch a chronic sticky-pplim condition that needs operator attention.
+
 ### `api` — REST + web UI
 
 ```yaml

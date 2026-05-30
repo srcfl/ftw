@@ -134,7 +134,16 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 	// surfaces "friend opened the URL — waiting for them to enter the code".
 	r.Tokens.MarkPendingHit(tok)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprintf(w, landingHTML, esc(tok), esc(t.As()), esc(t.Intent()), t.State())
+	// Format args (in landingHTML positional order):
+	//   1. "From: %s"        — claimed identity (host-supplied "as")
+	//   2. "Intent: %s"      — what the host says the session is for
+	//   3. "State: %s"       — current token state
+	//   4. "const TOKEN = %q" — the actual session token, used by the JS
+	//      to POST to /h/<token>/approve. Getting this wrong is fatal:
+	//      the approve POST hits the wrong path and the relay returns
+	//      403, which the JS surfaces as "Wrong code" even when the
+	//      friend typed the correct 4-digit code.
+	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.State(), tok)
 }
 
 func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
@@ -235,12 +244,17 @@ form.addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code }),
     });
-    if (resp.status === 204) {
+    if (resp.ok) {
+      const data = await resp.json();
+      const grant = (data && data.grant) ? data.grant : '';
+      const mcpURL = location.origin + '/h/' + encodeURIComponent(TOKEN) + '/mcp';
+      const addCmd = 'claude mcp add ftw-friend --transport http ' + mcpURL +
+        ' --header "Authorization: Bearer ' + grant + '"';
       msg.className = 'ok';
-      msg.innerHTML = 'Activated. You can now:<br><br>' +
-        '<strong>Browser:</strong> <a href="/h/' + encodeURIComponent(TOKEN) + '/web/">open the dashboard</a><br><br>' +
-        '<strong>Claude Code:</strong><br><code>claude mcp add ftw-friend --transport http ' +
-        location.origin + '/h/' + encodeURIComponent(TOKEN) + '/mcp</code>';
+      msg.innerHTML = 'Activated. Add this to Claude Code:<br><br>' +
+        '<code>' + addCmd.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</code>' +
+        '<p class="muted">The Bearer token is your session secret — anyone with it can use the tools. ' +
+        'It is shown only once, here, and expires when the session does.</p>';
       document.getElementById('state').textContent = 'active';
       btn.style.display = 'none';
       codeInput.disabled = true;
@@ -263,6 +277,11 @@ form.addEventListener('submit', async (e) => {
 </script>
 </body></html>`
 
+// grantCookie is the cookie name carrying the session grant for browser
+// (dashboard) access. Path-scoped to the token so it is only sent on that
+// session's routes.
+const grantCookie = "ftw_grant"
+
 func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
 	var body struct {
@@ -276,16 +295,66 @@ func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// Approval just minted the session grant. Hand it to the friend two
+	// ways: an HttpOnly cookie (browser → dashboard) and the JSON body
+	// (so the landing-page JS can print the MCP `--header "Authorization:
+	// Bearer …"` one-liner). The 4-digit code's whole job is this one-time
+	// exchange; from here the grant — not the URL — is the access secret.
+	t, err := r.Tokens.Get(tok)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	grant := t.Grant()
+	http.SetCookie(w, &http.Cookie{
+		Name:     grantCookie,
+		Value:    grant,
+		Path:     "/h/" + tok + "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(time.Until(t.ExpiresAt()).Seconds()),
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"grant": grant})
+}
+
+// bearerGrant pulls the grant from an "Authorization: Bearer <grant>"
+// header (the MCP client path).
+func bearerGrant(req *http.Request) string {
+	const p = "Bearer "
+	auth := req.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, p) {
+		return ""
+	}
+	return strings.TrimPrefix(auth, p)
 }
 
 func (r *Relay) publicMCP(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
+	if !r.Tokens.CheckGrant(tok, bearerGrant(req)) {
+		http.Error(w, "missing or invalid session grant", http.StatusUnauthorized)
+		return
+	}
+	// Never forward the relay-side session secret to the host.
+	req.Header.Del("Authorization")
 	r.tunnelPublic(w, req, tok, "/mcp")
 }
 
 func (r *Relay) publicWeb(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
+	c, _ := req.Cookie(grantCookie)
+	grant := ""
+	if c != nil {
+		grant = c.Value
+	}
+	if !r.Tokens.CheckGrant(tok, grant) {
+		http.Error(w, "missing or invalid session grant", http.StatusUnauthorized)
+		return
+	}
+	// Strip cookies before tunneling — the friend's grant cookie is a
+	// relay secret and the host dashboard has no use for friend cookies.
+	req.Header.Del("Cookie")
 	stripped := strings.TrimPrefix(req.URL.Path, "/h/"+tok+"/web")
 	if stripped == "" {
 		stripped = "/"

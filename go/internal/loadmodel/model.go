@@ -18,9 +18,13 @@
 //     yields ~60 samples per bucket per week), we trust observations.
 //
 //  4. Optional temperature correction. Outdoor temperature below 18°C
-//     tracks strongly with heating load. We maintain a global scalar
-//     `HeatingW_per_degC`, fit online via a simple EMA of residuals
-//     vs. (18 − temp_c). Adds 0 W when temp is unknown or ≥ 18°C.
+//     tracks heating load in homes with electric/heat-pump heating. We
+//     maintain a global scalar `HeatingW_per_degC` and fit it online
+//     via SGD on the prediction residual against (18 − temp_c), gated
+//     on bucket trust. Houses unaffected by outdoor temperature (district
+//     heating, all-electric pure-resistive baseboards on thermostats,
+//     etc.) converge toward 0 W/°C. Adds 0 W when temp is unknown or
+//     ≥ 18°C.
 //
 // The fallback-on-empty behavior makes this model safe on cold boot —
 // the MPC always gets a plausible load estimate, never zero or wild.
@@ -42,6 +46,22 @@ const MinTrustSamples = 8
 // HeatingReferenceC is the indoor setpoint the heating curve is
 // relative to. Load proportional to max(setpoint − outdoor, 0).
 const HeatingReferenceC = 18.0
+
+// HeatingAlpha is the EMA weight applied to per-sample heating-slope
+// estimates. ~0.01 picks up systematic bias within a few hundred cold
+// samples (~1–2 weeks of every-15-min telemetry) while staying robust
+// to noise and to the bucket↔coef joint-fit underdetermination.
+const HeatingAlpha = 0.01
+
+// HeatingMinDeltaT gates the online fit: a sample whose deltaT is too
+// small (warm day, near reference) contributes too much noise via the
+// 1/deltaT divisor in the SGD step. Skip it. Bucket EMA still updates.
+const HeatingMinDeltaT = 3.0
+
+// HeatingCoefMaxW is the physical upper bound for the learned slope.
+// District-heating-replacement territory; well above any single-family
+// home. Clamp prevents one anomalous sample from blowing up the fit.
+const HeatingCoefMaxW = 1500.0
 
 // Profile selects which learned occupancy profile is used for training
 // and prediction.
@@ -222,9 +242,38 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 	}
 	idx := HourOfWeek(t)
 	b := &m.Bucket[idx]
-	// Outlier filter: once we have some history, reject 10× MAE residuals.
 	predicted := m.Predict(t, tempC)
 	err := actualLoadW - predicted
+
+	// ---- Online heating fit ----
+	// Adapt HeatingW_per_degC from observed residuals before the outlier
+	// filter so a wildly stale coefficient can recover: every cold sample
+	// would otherwise look like an outlier vs the warm-day MAE, and no
+	// data could ever pull the coefficient down. Bucket-trust gates the
+	// fit because the residual derives the slope from the bucket
+	// baseline; an untrusted bucket would feed prior error into the
+	// heating estimate.
+	//
+	// SGD step on the squared-error loss: d/d(coef) ∝ −err · deltaT,
+	// so coef ← coef + α · err / deltaT (the 1/deltaT cancels the
+	// gradient's deltaT factor, giving a per-sample slope estimate).
+	// HeatingMinDeltaT gates near-reference samples where 1/deltaT
+	// amplifies noise. Clamp to [0, HeatingCoefMaxW]: floor at zero
+	// (heating doesn't go negative physically); a household whose load
+	// is unaffected by outdoor temperature gracefully settles at the
+	// floor.
+	if tempC < HeatingReferenceC-HeatingMinDeltaT && b.Samples >= MinTrustSamples {
+		deltaT := HeatingReferenceC - tempC
+		m.HeatingW_per_degC += HeatingAlpha * err / deltaT
+		if m.HeatingW_per_degC < 0 {
+			m.HeatingW_per_degC = 0
+		}
+		if m.HeatingW_per_degC > HeatingCoefMaxW {
+			m.HeatingW_per_degC = HeatingCoefMaxW
+		}
+	}
+
+	// Outlier filter: once we have some history, reject 10× MAE residuals.
 	if m.Samples > 50 {
 		band := math.Max(m.MAE*10, 200)
 		if math.Abs(err) > band {
@@ -257,12 +306,12 @@ func (m *Model) Update(t time.Time, actualLoadW, tempC float64) (updated bool) {
 		}
 		b.Samples++
 	}
-	// Heating coefficient is operator-configured (Planner.HeatingWPerDegC
-	// in config). We don't try to identify it from data here because
-	// online fit is noisy + entangled with the bucket baseline. The
-	// simple path is: user enters "my house needs ~300 W/°C" once,
-	// the MPC uses it for forward-looking cold-day planning. Room for
-	// a dedicated offline OLS fit in a future iteration.
+	// Heating coefficient is adapted online above. The operator value
+	// (Planner.HeatingWPerDegC) seeds the initial estimate and is also
+	// applied on /api/loadmodel/reset; from there observation drives the
+	// fit. For a household whose load doesn't track temperature, the
+	// coefficient converges toward zero — which matches the user-visible
+	// guarantee "the model uses what it sees".
 
 	m.Samples++
 	m.LastMs = t.UnixMilli()

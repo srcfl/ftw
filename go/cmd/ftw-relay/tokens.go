@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"sync"
 	"time"
@@ -70,6 +73,12 @@ type Token struct {
 	// matched yet by an /approve POST. Used by the host dashboard's
 	// "friend opened the URL, code shown" indicator.
 	pendingApprovals int
+	// grant is the high-entropy session secret minted when the 4-digit
+	// code is accepted. It — not the URL token — is what authorizes
+	// /h/<token>/{mcp,web} requests after activation, so a leaked-but-
+	// already-activated URL is useless without it. Empty until approval.
+	// See docs/goals/relay-subdomain-sessions.md (grant-exchange model).
+	grant string
 }
 
 // State returns the current state, lazily transitioning to TokenExpired
@@ -91,6 +100,22 @@ func (t *Token) ApprovalCode() string { return t.approvalCode }
 func (t *Token) Intent() string       { return t.intent }
 func (t *Token) As() string           { return t.as }
 func (t *Token) ExpiresAt() time.Time { return t.expiresAt }
+
+// Grant returns the session grant minted at approval (empty before).
+func (t *Token) Grant() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.grant
+}
+
+// mintGrant returns 32 bytes of CSPRNG entropy as base64url — the session
+// secret handed to the friend once (cookie for the browser, Bearer header
+// for MCP).
+func mintGrant() string {
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
 
 // TokenRegistry is the in-memory token store for one relay process.
 type TokenRegistry struct {
@@ -154,7 +179,27 @@ func (r *TokenRegistry) Approve(token, code string) error {
 		return ErrBadApprovalCode
 	}
 	t.state = TokenActive
+	t.grant = mintGrant()
 	return nil
+}
+
+// CheckGrant reports whether grant matches the session's minted grant and
+// the session is currently active. Constant-time compare so a timing
+// oracle can't recover the grant byte-by-byte. Empty grants never match.
+func (r *TokenRegistry) CheckGrant(token, grant string) bool {
+	t, err := r.Get(token)
+	if err != nil {
+		return false
+	}
+	if t.State() != TokenActive { // lazy-expires under its own lock
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.grant == "" || grant == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(t.grant), []byte(grant)) == 1
 }
 
 // Revoke unconditionally marks a token as revoked. Idempotent.

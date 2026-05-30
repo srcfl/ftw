@@ -442,3 +442,119 @@ func abs(x float64) float64 {
 	}
 	return x
 }
+
+// 2026-05-27 brick regression. A curtailed driver whose own |PV|
+// dropped to ~0 (often because OUR curtail throttled it) used to be
+// excluded from the proportional allocation, fall through the release
+// path, and receive a `CurtailTarget{LimitW: 0}` → main.go translated
+// to `curtail_disable` → Ferroamp Lua published `pplim arg=0` →
+// sticky-lock until portal reset. The dispatcher must NOT emit that
+// release while the curtail directive is still active and the driver
+// is online + supports curtail.
+func TestComputePVCurtail_DroppedDueToZeroPVDoesNotEmitRelease(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true, "sungrow": true}
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 1000})
+	store := telemetry.NewStore()
+
+	// Tick 1: both drivers producing; both get curtailed.
+	emitPV(t, store, "ferroamp", -2000)
+	emitPV(t, store, "sungrow", -2000)
+	tick1 := findCurtail(ComputePVCurtail(st, store))
+	if !(tick1["ferroamp"] > 0 && tick1["sungrow"] > 0) {
+		t.Fatalf("tick1: expected both drivers curtailed, got %+v", tick1)
+	}
+
+	// Tick 2: ferroamp's PV crashed to 0 (the curtail throttled it
+	// down). Sungrow keeps generating. Directive still wants curtail.
+	emitPV(t, store, "ferroamp", 0)
+	emitPV(t, store, "sungrow", -2000)
+	tick2 := ComputePVCurtail(st, store)
+	for _, tg := range tick2 {
+		if tg.Driver == "ferroamp" {
+			t.Fatalf("ferroamp must NOT receive a release while curtail directive is still active and driver is online — got %+v (would publish pplim=0, sticky-lock trap)", tg)
+		}
+	}
+	// Sungrow should still get a fresh non-zero target.
+	gotSungrow := false
+	for _, tg := range tick2 {
+		if tg.Driver == "sungrow" && tg.LimitW > 0 {
+			gotSungrow = true
+		}
+	}
+	if !gotSungrow {
+		t.Errorf("tick2: sungrow should still be curtailed, got %+v", tick2)
+	}
+	// Ferroamp must remain in LastCurtailedDrivers (suppressed-track),
+	// so a future allocation knows its baseline.
+	if !st.LastCurtailedDrivers["ferroamp"] {
+		t.Errorf("ferroamp should remain tracked in LastCurtailedDrivers after suppression")
+	}
+}
+
+// A per-driver share that rounds to ~0 (≤ curtailMinPerDriverW) must
+// also be suppressed. Same trap as the above test, but the trigger is
+// proportional-allocation rounding rather than a |PV|==0 reading.
+func TestComputePVCurtail_TinyShareSuppressedNotPublishedAsZero(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true, "sungrow": true}
+	// Tiny PVLimitW vs huge sungrow PV → ferroamp's share is < 1 W.
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 100})
+	store := telemetry.NewStore()
+	emitPV(t, store, "ferroamp", -1) // 1 W abs
+	emitPV(t, store, "sungrow", -10000)
+
+	got := ComputePVCurtail(st, store)
+	for _, tg := range got {
+		if tg.LimitW > 0 && tg.LimitW <= 1.0 {
+			t.Fatalf("per-driver share <= curtailMinPerDriverW must be suppressed (sticky-pplim trap), got %+v", tg)
+		}
+		if tg.Driver == "ferroamp" && tg.LimitW == 0 {
+			t.Fatalf("ferroamp must not receive a zero release here (would publish pplim=0), got %+v", tg)
+		}
+	}
+}
+
+// Removing a driver from `SupportsPVCurtail` (operator opted out via
+// config) IS a legitimate release event — the dispatcher won't be
+// sending curtail to it anymore, so the driver-side pplim should be
+// released. This stays as the existing semantics; the brick fix only
+// changes the |PV|==0 suppression behaviour.
+func TestComputePVCurtail_RemovedFromSupportsStillEmitsRelease(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.LastCurtailedDrivers = map[string]bool{"ferroamp": true}
+	st.SlotDirective = stubSlotDirective(SlotDirective{PVLimitW: 1000})
+	store := telemetry.NewStore()
+	emitPV(t, store, "ferroamp", -2000)
+
+	// Operator removes ferroamp from supports map between ticks.
+	st.SupportsPVCurtail = map[string]bool{}
+
+	got := ComputePVCurtail(st, store)
+	if len(got) != 1 || got[0].Driver != "ferroamp" || got[0].LimitW != 0 {
+		t.Fatalf("removed-from-supports driver must get a release, got %+v", got)
+	}
+}
+
+// When the slot directive clears (curtail epoch ends), every previously
+// curtailed driver must receive an explicit release — even ones whose
+// |PV| has been 0 (which would otherwise be suppressed per the brick
+// fix). This is the normal end-of-slot path that the original code
+// was conflating with the |PV|==0 drop-out path.
+func TestComputePVCurtail_SlotClearReleasesEvenZeroPVDrivers(t *testing.T) {
+	st := NewState(0, 100, "meter")
+	st.SupportsPVCurtail = map[string]bool{"ferroamp": true}
+	st.LastCurtailedDrivers = map[string]bool{"ferroamp": true}
+	st.SlotDirective = stubSlotDirective(SlotDirective{}) // PVLimitW=0 → curtail cleared
+	store := telemetry.NewStore()
+	emitPV(t, store, "ferroamp", 0) // |PV|==0 path
+
+	got := ComputePVCurtail(st, store)
+	if len(got) != 1 || got[0].Driver != "ferroamp" || got[0].LimitW != 0 {
+		t.Fatalf("end-of-slot must release even zero-PV drivers, got %+v", got)
+	}
+	if len(st.LastCurtailedDrivers) != 0 {
+		t.Errorf("LastCurtailedDrivers should be cleared after the release tick, got %+v", st.LastCurtailedDrivers)
+	}
+}

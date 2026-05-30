@@ -2078,6 +2078,485 @@ func TestPlannerSelfPlannedPVExportDoesNotAbsorbLiveSurplus(t *testing.T) {
 	}
 }
 
+// passive_arbitrage idle slot under live PV surplus: the EMS must not absorb
+// the surplus into the battery, even when the plan's own forecast for this
+// slot was near-balanced (idle, no planned export). For the slot we're
+// already in, live measurements override the forecast — the DP picked idle
+// deliberately, so sustaining "do not charge" under a bigger-than-forecast
+// surplus is the correct generalisation.
+//
+// Production trigger (v0.87.x, 2026-05-28, site .40): load forecast was
+// 2782 W vs actual 504 W on a high-PV slot. Plan said grid≈+28 W with
+// battery_w=0. Dispatch fell through to self_consumption + grid_target=0
+// and charged 2.6 kW into batteries despite high current spot + low future
+// spot + abundant future PV — the exact case the DP picked idle to avoid.
+func TestPlannerPassiveArbitrageIdleDoesNotAbsorbLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // DP picked idle (load≈PV per forecast)
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    30, // forecast: grid near zero, not export
+		HasPlannedGridW: true,
+	}
+	// Live mirrors the production report: PV surplus pushing the meter
+	// negative, battery already pulling 1600 W. Without a live-export gate
+	// the PI ramps charge UP to chase grid=0 and swallows the surplus.
+	// Correct behaviour: ramp battery back to 0, let the surplus export.
+	store := seedStore(-100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1600, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f W — passive_arbitrage idle slot with live PV surplus must NOT absorb (DP picked idle; for the current slot, live grid sign overrides stale forecast)", targets[0].TargetW)
+	}
+}
+
+// Operator-report 2026-05-28: planner_arbitrage discharge slot, plan estimated
+// baseload ~1.7 kW (BatteryEnergyWh ≈ -425 over 15 min), plan grid target ~0.
+// Live load was 0.9 kW; battery sat at -1.7 kW per the energy-allocation
+// formula, exporting 800 W at the spot price the operator would later have to
+// buy back at consumer price. The DP picked this slot to *cover load* during
+// an expensive window, not to export — the existing "bonus revenue" carve-out
+// on the energy path applies only to slots where PlannedGridW < 0 (export
+// intent). The fix routes cover-load discharge slots (BatteryEnergyWh < 0 AND
+// PlannedGridW ~> 0) through reactive PI-on-grid=0, same path passive_arb
+// idle slots already use.
+func TestPlannerArbitrageCoverLoadBacksOffOnLoadUndershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425, // DP planned -1.7 kW × 15 min discharge
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700, // plan: cover ~1.7 kW load, no export
+		HasPlannedGridW: true,
+	}
+	// Battery already running at the planned -1.7 kW; live grid is -800 W
+	// because actual load is only 900 W (load = grid - battery = -800 + 1700).
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path would hold target at -1700. Reactive PI must back off
+	// toward -900 W (the actual load). First-cycle PI is between -1700 and
+	// -900 W; assert "less negative than planned" with margin.
+	if got <= -1500 {
+		t.Errorf("TargetW = %.0f W — cover-load arbitrage slot must back off from planned -1700 W when live grid shows export; want target > -1500 W", got)
+	}
+	// Sign should still be discharge (still positive load to cover).
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with positive live load must still discharge", got)
+	}
+}
+
+// Mirror of the undershoot case for a load *spike*: planned -1.7 kW but real
+// load is 3.2 kW. Energy path holds at -1.7 kW and lets 1.5 kW import. Reactive
+// PI ramps the battery down further to keep grid near 0.
+func TestPlannerArbitrageCoverLoadRampsOnLoadOvershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	// Battery at planned -1700; load surged to 3200 → grid = 3200 - 1700 = 1500.
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path would hold at -1700. Reactive PI must push more discharge.
+	if got >= -2000 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with 1500 W live import must discharge more than the planned -1700 W; want target ≤ -2000 W", got)
+	}
+}
+
+// Peak-export discharge slot (PlannedGridW < 0): the DP deliberately chose
+// to export at this slot's high price. Reactive carve-out must NOT trigger;
+// energy path holds the planned rate even when live PV varies. This is the
+// behaviour the existing dispatch.go:87-91 comment justifies.
+func TestPlannerArbitragePeakExportSlotStaysOnEnergyPath(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -500, // -2 kW × 15 min
+		Strategy:        "arbitrage",
+		PlannedGridW:    -2000, // plan: export 2 kW to grid
+		HasPlannedGridW: true,
+	}
+	// Live grid already exporting (-500 W). Reactive PI on grid=0 would
+	// charge (+500 W). Energy path must discharge ≈ -2000 W per plan.
+	store := seedStore(-500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.8},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got >= -1000 {
+		t.Errorf("TargetW = %.0f W — peak-export arbitrage slot (PlannedGridW=-2000) must stay on energy path and discharge ≈ -2000 W; cover-load carve-out incorrectly fired", got)
+	}
+}
+
+// Cover-load slot with live PV surplus (unexpected). Energy path would blindly
+// discharge -1.7 kW *into* the export, doubling the loss. Reactive carve-out
+// must absorb the live surplus (or at least not discharge further).
+func TestPlannerArbitrageCoverLoadDoesNotDischargeIntoLiveExport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    500, // plan: small net import (cover load)
+		HasPlannedGridW: true,
+	}
+	// Unexpected PV surplus: grid exporting 800 W with battery idle.
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Must not discharge into the live export. Either idle (≈0) or charge to absorb.
+	if got < -50 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with live PV surplus must not discharge into export; want target ≥ -50 W", got)
+	}
+}
+
+// Backcompat: legacy callers without HasPlannedGridW (the simpler slotDirective
+// test helper) must still use the energy path — intent is unknown. Locks in
+// behaviour-preservation for tests written before this change.
+func TestPlannerArbitrageDischargeSlotWithoutPlannedGridWUsesEnergyPath(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		HasPlannedGridW: false, // unknown intent
+	}
+	// Same live conditions as the undershoot test, but unknown plan intent.
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Energy path must hold ≈ -1700 W.
+	if got > -1500 {
+		t.Errorf("TargetW = %.0f W — HasPlannedGridW=false means unknown intent; must fall through to energy path and hold ≈ -1700 W", got)
+	}
+}
+
+// The carve-out also applies to passive_arbitrage — same cover-load math,
+// just under the passive-arbitrage contract (no grid-charge ever). Mirror of
+// the load-undershoot test for the passive mode.
+func TestPlannerPassiveArbitrageCoverLoadBacksOffOnLoadUndershoot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got <= -1500 {
+		t.Errorf("TargetW = %.0f W — passive_arbitrage cover-load slot must back off when live grid shows export; want target > -1500 W", got)
+	}
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with positive live load must still discharge", got)
+	}
+}
+
+// planner_arbitrage cover-load slot must chase grid=0, not the plan's
+// forecasted positive import. The PR #378 carve-out only sets
+// useEnergyPath=false; production wires both SlotDirective and PlanTarget,
+// so falling through to the !useEnergyPath block called PlanTarget which
+// returned `("self_consumption", +1700, true)` and then SetGridTarget(+1700)
+// made PI try to hit +1.7 kW import — undoing the carve-out's whole point.
+// The fix routes carve-out slots to grid_target=0 unconditionally.
+// Cover-load discharge slot (planned discharge to offset import) under
+// live PV surplus: don't absorb the surplus into the battery. The slot
+// was planned with the assumption of expected import; if live shows
+// export instead, charging would steal export revenue AND the cover-
+// load discharge purpose is moot (no load to cover). Right behaviour:
+// hold battery near 0, let surplus export. Mirror of the passive
+// idle-slot gate but for the discharge-intent slot. Codex P2 / #375
+// follow-up — extends live-export gate to cover-load-discharge slots
+// in both planner_arbitrage and planner_passive_arbitrage.
+func TestCoverLoadDischargeDoesNotAbsorbLiveSurplus(t *testing.T) {
+	for _, mode := range []Mode{ModePlannerArbitrage, ModePlannerPassiveArbitrage} {
+		t.Run(string(mode), func(t *testing.T) {
+			now := time.Now()
+			d := SlotDirective{
+				SlotStart:       now,
+				SlotEnd:         now.Add(15 * time.Minute),
+				BatteryEnergyWh: -600, // planned discharge to cover load
+				Strategy:        "arbitrage",
+				PlannedGridW:    0, // forecast: cover load, no export anticipated
+				HasPlannedGridW: true,
+			}
+			// Live: PV-surplus exporting via the meter, battery already
+			// pulling 1.6 kW. The reactive PI on grid=0 would otherwise
+			// ramp charge UP to absorb the surplus, swallowing PV export
+			// at high spot.
+			store := seedStore(-100, []struct {
+				name          string
+				currentW, soc float64
+			}{
+				{"ferroamp", 1600, 0.5},
+			})
+			st := NewState(0, 0, "ferroamp")
+			st.Mode = mode
+			st.UseEnergyDispatch = true
+			st.SlewRateW = 10000
+			st.MinDispatchIntervalS = 0
+			st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+			if len(targets) != 1 {
+				t.Fatalf("want 1 target, got %d", len(targets))
+			}
+			if math.Abs(targets[0].TargetW) > 1 {
+				t.Errorf("TargetW = %.0f W — cover-load discharge slot with live PV surplus must not absorb (battery should be ramped back to 0)", targets[0].TargetW)
+			}
+		})
+	}
+}
+
+func TestPlannerArbitrageCoverLoadChasesGridZeroNotPlannedImport(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -800, // planned discharge — cover-load slot
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700, // forecast: still importing 1.7 kW even with the discharge
+		HasPlannedGridW: true,
+	}
+	// Live: importing 1500 W, batteries idle. The carve-out's promise is
+	// "chase grid=0 so a forecast-load undershoot doesn't lock discharge
+	// off". If PlanTarget's +1700 wins, PI sees grid=1500 vs setpoint=1700
+	// and tries to import MORE (charge battery). Battery should instead
+	// discharge ~1.5 kW to cover live load.
+	store := seedStore(1500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	// Production wiring: PlanTarget exists alongside SlotDirective.
+	// actionToSlot returns ("self_consumption", a.GridW, true) for
+	// arbitrage discharge — i.e. would set grid_target to planned import.
+	st.PlanTarget = func(time.Time) (string, float64, bool) {
+		return "self_consumption", 1700, true
+	}
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW > -500 {
+		t.Errorf("TargetW = %.0f W — cover-load slot with live import must discharge to cover (carve-out must override PlanTarget's planned-import setpoint)", targets[0].TargetW)
+	}
+}
+
+// Same forward-transition risk that preparePlannerSelf already guards against
+// (see resetEnergyDispatchBookkeeping comment at dispatch.go:798-803): if the
+// site spent part of a slot on the energy-allocation path before the plan
+// refined to a cover-load discharge or a passive-arbitrage idle, the stale
+// slotDelivered accumulator stays around. A subsequent transition back to
+// the energy path within the same slot (another plan refinement, an operator
+// mode-hop, etc.) would then read stale Wh and miscompute remainingWh. The
+// fix mirrors planner_self: when the reactive carve-out fires, reset the
+// energy-path bookkeeping.
+func TestPlannerArbitrageCoverLoadResetsEnergyPathBookkeeping(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+		Strategy:        "arbitrage",
+		PlannedGridW:    1700,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(-800, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	// Simulate "we just left the energy path mid-slot" — slotDelivered has
+	// non-zero leftover, lastTickTs is in the past, currentDirective points
+	// at the now-superseded plan view.
+	st.slotDelivered = -200
+	st.lastTickTs = now.Add(-30 * time.Second)
+	st.currentDirective = SlotDirective{SlotStart: now.Add(-10 * time.Minute)}
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %.0f, want 0 — cover-load carve-out must clear stale energy-path bookkeeping", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v, want zero — cover-load carve-out must clear lastTickTs", st.lastTickTs)
+	}
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v, want zero — carve-out must clear stale directive", st.currentDirective.SlotStart)
+	}
+}
+
+func TestPlannerPassiveArbitrageIdleResetsEnergyPathBookkeeping(t *testing.T) {
+	now := time.Now()
+	d := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle slot
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    50,
+		HasPlannedGridW: true,
+	}
+	store := seedStore(100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100_000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return d, true }
+	st.slotDelivered = 150
+	st.lastTickTs = now.Add(-1 * time.Minute)
+	st.currentDirective = SlotDirective{SlotStart: now.Add(-20 * time.Minute)}
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.slotDelivered != 0 {
+		t.Errorf("slotDelivered = %.0f, want 0", st.slotDelivered)
+	}
+	if !st.lastTickTs.IsZero() {
+		t.Errorf("lastTickTs = %v, want zero", st.lastTickTs)
+	}
+	if !st.currentDirective.SlotStart.IsZero() {
+		t.Errorf("currentDirective.SlotStart = %v, want zero", st.currentDirective.SlotStart)
+	}
+}
+
 func TestPlannerSelfPlannedPVExportStopsChargingWithoutSlew(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -4545,5 +5024,337 @@ func TestPlannerPassiveArbitrageChargeSlotPreservedAgainstReactiveDischarge(t *t
 	// battery is commanded to CHARGE, not discharge.
 	if got < 0 {
 		t.Errorf("TargetW = %.0f W — passive_arbitrage charge slot must NOT discharge reactively; the grid-charge plan must remain authoritative", got)
+	}
+}
+
+// ---- Slot delivery observability ----
+//
+// These tests cover the path-agnostic per-slot Wh accumulator that
+// runs on EVERY dispatch tick (planner_self, planner_passive_arbitrage,
+// the planner_arbitrage cover-load carve-out from PR #378, etc.).
+// The accumulator measures actual fleet delivery and compares it
+// against the plan's BatteryEnergyWh at slot rollover. Pure
+// observability — no dispatch decision reads the counters.
+
+// makeSlotMetricsState configures the minimum State needed to exercise
+// the slot-delivery accumulator. Mode is planner_arbitrage so that
+// SlotDirective is consulted, but useEnergyPath is irrelevant to the
+// accumulator (it runs above all mode logic).
+func makeSlotMetricsState(siteMeter string, dirFn SlotDirectiveFunc) *State {
+	st := NewState(0, 0, siteMeter)
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = dirFn
+	return st
+}
+
+// 1. The accumulator integrates current battery total × dt across
+//    multiple ticks within the same slot.
+func TestSlotMetricsAccumulatesActualWhAcrossTicks(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now.Add(-1 * time.Minute),
+		SlotEnd:         now.Add(14 * time.Minute),
+		BatteryEnergyWh: -300,
+		Strategy:        "arbitrage",
+	}
+	// Battery at -1000 W (site-signed: discharging) throughout.
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1000, 0.5},
+	})
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return dir, true })
+
+	// Tick 1 — initialise accumulator (no integration yet, anchor only).
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.slotActualWh != 0 {
+		t.Fatalf("first tick should only anchor, got slotActualWh=%f", st.slotActualWh)
+	}
+	if !st.slotActualSlotStart.Equal(dir.SlotStart) {
+		t.Fatalf("anchor SlotStart = %v, want %v", st.slotActualSlotStart, dir.SlotStart)
+	}
+
+	// Simulate 60 s elapsed since the anchor tick by rewinding the
+	// last-tick timestamp. -1000 W × 60 s ≈ -16.67 Wh.
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	wantWh := -1000.0 * 60.0 / 3600.0 // ≈ -16.667
+	if math.Abs(st.slotActualWh-wantWh) > 1.0 {
+		t.Errorf("after ~60 s @ -1000 W: slotActualWh = %.3f Wh, want ≈ %.3f Wh", st.slotActualWh, wantWh)
+	}
+
+	// Another 60 s — total should be ~ -33.3 Wh.
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	wantWh2 := -1000.0 * 120.0 / 3600.0
+	if math.Abs(st.slotActualWh-wantWh2) > 1.0 {
+		t.Errorf("after ~120 s @ -1000 W: slotActualWh = %.3f Wh, want ≈ %.3f Wh", st.slotActualWh, wantWh2)
+	}
+}
+
+// 2. When the SlotDirective's SlotStart advances, the accumulator
+//    resets — the in-progress slot accumulator must not leak into
+//    the next slot's measurement.
+func TestSlotMetricsResetsOnSlotRollover(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-30 * time.Second)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -300,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -300,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1000, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	// Tick 1 — anchor slot 1, then integrate 60 s.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualLastTs = st.slotActualLastTs.Add(-60 * time.Second)
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if math.Abs(st.slotActualWh) < 10 {
+		t.Fatalf("setup: slot 1 should have ~ -16.7 Wh accumulated, got %f", st.slotActualWh)
+	}
+
+	// Swap to slot 2 — rollover should reset slotActualWh and re-anchor.
+	active = slot2
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.slotActualWh != 0 {
+		t.Errorf("after slot rollover, slotActualWh should reset to 0, got %f", st.slotActualWh)
+	}
+	if !st.slotActualSlotStart.Equal(slot2Start) {
+		t.Errorf("after rollover, anchor = %v, want %v", st.slotActualSlotStart, slot2Start)
+	}
+}
+
+// 3. Over-delivery: planned -425 Wh, actual ~ -850 Wh → ratio 2.0,
+//    well above 1.5. Counter should increment by 1 on slot rollover.
+func TestSlotMetricsLogsOverDeliveryAtSlotEnd(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	// Battery discharging hard: -1700 W average × 30 min = -850 Wh
+	// (using fewer ticks here — we drive the accumulator directly).
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -1700, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	// Anchor slot 1.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// Force accumulator to -850 Wh (2 × planned magnitude → ratio 2.0).
+	st.slotActualWh = -850
+
+	// Rollover into slot 2 — should log + increment OverDeliveryCount.
+	active = slot2
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	beforeUnder := st.SlotDeliveryStats.UnderDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver+1 {
+		t.Errorf("OverDeliveryCount = %d, want %d (incremented by 1 at rollover)",
+			st.SlotDeliveryStats.OverDeliveryCount, beforeOver+1)
+	}
+	if st.SlotDeliveryStats.UnderDeliveryCount != beforeUnder {
+		t.Errorf("UnderDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.UnderDeliveryCount, beforeUnder)
+	}
+}
+
+// Planned discharge but actual charge (same magnitude) — the largest
+// possible plan-vs-reality miss must NOT register as "on target" just
+// because |actual| ≈ |planned|. Sign mismatch is a categorically
+// different failure (we did the opposite of what was planned) and needs
+// its own counter. Codex P2 / #379 follow-up.
+func TestSlotMetricsDetectsSignMismatch(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425, // planned: discharge
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1700, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	// Same magnitude as planned, opposite direction.
+	st.slotActualWh = +425
+
+	active = slot2
+	beforeMismatch := st.SlotDeliveryStats.SignMismatchCount
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	beforeUnder := st.SlotDeliveryStats.UnderDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	if st.SlotDeliveryStats.SignMismatchCount != beforeMismatch+1 {
+		t.Errorf("SignMismatchCount = %d, want %d (incremented at rollover)",
+			st.SlotDeliveryStats.SignMismatchCount, beforeMismatch+1)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver {
+		t.Errorf("OverDeliveryCount = %d, want unchanged %d (magnitude ratio is 1.0 but the sign is wrong)",
+			st.SlotDeliveryStats.OverDeliveryCount, beforeOver)
+	}
+	if st.SlotDeliveryStats.UnderDeliveryCount != beforeUnder {
+		t.Errorf("UnderDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.UnderDeliveryCount, beforeUnder)
+	}
+}
+
+// 4. Under-delivery: planned -425 Wh, actual -100 Wh → ratio 0.235,
+//    well below 0.5. Counter should increment by 1.
+func TestSlotMetricsLogsUnderDelivery(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -425,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -400, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualWh = -100 // ratio = 100/425 ≈ 0.235 < 0.5
+
+	active = slot2
+	before := st.SlotDeliveryStats.UnderDeliveryCount
+	beforeOver := st.SlotDeliveryStats.OverDeliveryCount
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.UnderDeliveryCount != before+1 {
+		t.Errorf("UnderDeliveryCount = %d, want %d", st.SlotDeliveryStats.UnderDeliveryCount, before+1)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != beforeOver {
+		t.Errorf("OverDeliveryCount = %d, want unchanged %d", st.SlotDeliveryStats.OverDeliveryCount, beforeOver)
+	}
+}
+
+// 5. Idle slots — |planned| ≤ 50 Wh — must not trigger logs or
+//    counters regardless of actual delivery. Ratio against ~0 is
+//    meaningless.
+func TestSlotMetricsIgnoresIdleSlots(t *testing.T) {
+	now := time.Now()
+	slot1Start := now.Add(-1 * time.Minute)
+	slot1 := SlotDirective{
+		SlotStart:       slot1Start,
+		SlotEnd:         slot1Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -30, // below 50 Wh threshold
+	}
+	slot2Start := slot1Start.Add(15 * time.Minute)
+	slot2 := SlotDirective{
+		SlotStart:       slot2Start,
+		SlotEnd:         slot2Start.Add(15 * time.Minute),
+		BatteryEnergyWh: -30,
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -2000, 0.5},
+	})
+
+	active := slot1
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) { return active, true })
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	st.slotActualWh = -500 // any value — should be ignored at rollover
+
+	active = slot2
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.SlotDeliveryStats.OverDeliveryCount != 0 || st.SlotDeliveryStats.UnderDeliveryCount != 0 {
+		t.Errorf("idle slot (|planned|=30 Wh) must not bump counters, got over=%d under=%d",
+			st.SlotDeliveryStats.OverDeliveryCount, st.SlotDeliveryStats.UnderDeliveryCount)
+	}
+}
+
+// 6. Counter accumulates monotonically across multiple over-delivery
+//    rollovers — three slots in sequence → counter = 3.
+func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
+	now := time.Now()
+	base := now.Add(-1 * time.Hour) // well in the past so all slots are "real"
+
+	slots := []SlotDirective{
+		{SlotStart: base, SlotEnd: base.Add(15 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(15 * time.Minute), SlotEnd: base.Add(30 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(30 * time.Minute), SlotEnd: base.Add(45 * time.Minute), BatteryEnergyWh: -400},
+		{SlotStart: base.Add(45 * time.Minute), SlotEnd: base.Add(60 * time.Minute), BatteryEnergyWh: -400},
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", -2000, 0.5},
+	})
+
+	idx := 0
+	st := makeSlotMetricsState("ferroamp", func(time.Time) (SlotDirective, bool) {
+		return slots[idx], true
+	})
+
+	// Anchor slot 0.
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+
+	// For each of slots 0,1,2: force over-delivery on the in-flight slot,
+	// then advance idx → next tick triggers rollover evaluation.
+	for i := 0; i < 3; i++ {
+		st.slotActualWh = -1000 // ratio = 1000/400 = 2.5 → over
+		idx++
+		_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	}
+	if st.SlotDeliveryStats.OverDeliveryCount != 3 {
+		t.Errorf("after 3 over-delivery rollovers, OverDeliveryCount = %d, want 3",
+			st.SlotDeliveryStats.OverDeliveryCount)
 	}
 }

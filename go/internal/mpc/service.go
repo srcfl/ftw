@@ -18,6 +18,20 @@ import (
 // in the DB.
 type PVPredictor func(t time.Time, cloudPct float64) float64
 
+// PVResidualCorrector is an optional additive bias the planner applies
+// on top of a base PV prediction for short-horizon slots. Implemented
+// by *pvmodel.Service.ResidualCorrect. Returns 0 when no correction is
+// available; sign + magnitude come from a recent rolling residual of
+// predicted-vs-actual PV (generation-positive W). Leave nil to disable.
+//
+// Why a separate hook rather than baking it into PVPredictor: the
+// correction is purely a planner-side adjustment — UI overlays and
+// dispatch's "is the twin's *now* prediction close to *now* reading"
+// gate want the structural twin, not a slot-target-dependent additive.
+// Keeping it a separate hook also makes the wiring trivially testable
+// without a full pvmodel.Service.
+type PVResidualCorrector func(now, tTarget time.Time, basePrediction float64) float64
+
 // LoadPredictor plugs in a learned load predictor. Implemented by
 // *loadmodel.Service.Predict. Leave nil to fall back to Service.BaseLoad.
 type LoadPredictor func(t time.Time) float64
@@ -60,10 +74,11 @@ type Service struct {
 	BaseLoad  float64 // baseline household load (W). 0 disables load assumption.
 	Horizon   time.Duration
 	Interval  time.Duration
-	PV        PVPredictor    // optional — overrides stored pv_w_estimated
-	Load      LoadPredictor  // optional — overrides flat BaseLoad
-	Price     PricePredictor // optional — fills in future slots when day-ahead isn't published yet
-	Loadpoint LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
+	PV                PVPredictor         // optional — overrides stored pv_w_estimated
+	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
+	Load              LoadPredictor       // optional — overrides flat BaseLoad
+	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
 
 	// SaveDiag is called synchronously after every successful replan
 	// with the same Diagnostic the /api/mpc/diagnose endpoint would
@@ -85,15 +100,33 @@ type Service struct {
 	// kWh-scale drift, not W-scale noise. Integrating over a window
 	// filters the transients and keeps us honest.
 	ReactiveInterval time.Duration // how often to check (default 10s)
-	MinReplanGap     time.Duration // cooldown between reactive replans (default 60s)
-	PVDivergenceWh   float64       // |integrated gap|; 0 disables (default 500 Wh)
-	LoadDivergenceWh float64       // |integrated gap|; 0 disables (default 400 Wh)
+	MinReplanGap     time.Duration // cooldown between reactive replans (default 30s)
+	PVDivergenceWh   float64       // |integrated gap|; 0 disables (default 250 Wh)
+	LoadDivergenceWh float64       // |integrated gap|; 0 disables (default 200 Wh)
+
+	// TwinDriftPVW and TwinDriftLoadW trigger a replan when the PV /
+	// load twin's CURRENT prediction over the next TwinDriftHorizonSlots
+	// slots diverges (RMSE, W) from the prediction snapshot baked into
+	// the active plan. Complements the integral-of-error path: the
+	// integrators only see the current slot, but the twins self-correct
+	// continuously (RLS) — so when their next-few-hours forecast shifts
+	// materially, the plan goes stale even while the current slot looks
+	// fine. 0 disables.
+	TwinDriftPVW          float64 // RMSE threshold (W), default 250
+	TwinDriftLoadW        float64 // RMSE threshold (W), default 200
+	TwinDriftHorizonSlots int     // how many forward slots to compare (default 16 ≈ 4 h @15-min)
 
 	// Leaky integrals (Wh) of (actual − predicted) over the last
 	// ~WindowMin minutes. Decayed each tick so old divergence fades.
 	pvErrIntWh   float64
 	loadErrIntWh float64
 	lastTickMs   int64
+
+	// plannedPredictions snapshots the per-slot PV + load predictions
+	// the most recent successful replan was built on, so the twin-drift
+	// detector can compare today's prediction against the one the active
+	// plan committed to. Updated under s.mu in replan().
+	plannedPredictions *plannedPredictions
 
 	// SiteMeter is the driver name whose meter reading represents the
 	// site's grid connection. Used by the reactive-replan check to
@@ -141,6 +174,18 @@ type Service struct {
 	done chan struct{}
 }
 
+// plannedPredictions captures the PV + load twin predictions the most
+// recent replan was built on, plus the slot grid they were sampled at.
+// The twin-drift check polls the predictors again at the same slot
+// timestamps and computes RMSE — any material shift means the plan is
+// running on a forecast the twins have since corrected away from.
+type plannedPredictions struct {
+	pv        []float64   // per-slot W (magnitude, ≥ 0)
+	load      []float64   // per-slot W (≥ 0)
+	slotStart []time.Time // slot-start timestamps for re-sampling
+	builtAt   time.Time
+}
+
 func (s *Service) driverOnline(name string) bool {
 	if s == nil || s.Tele == nil {
 		return false
@@ -159,11 +204,20 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		Horizon:          48 * time.Hour, // always plan 48h — forecaster fills beyond day-ahead
 		Interval:         15 * time.Minute,
 		ReactiveInterval: 10 * time.Second,
-		MinReplanGap:     60 * time.Second,
-		PVDivergenceWh:   500, // 500 Wh sustained gap over ~15 min
-		LoadDivergenceWh: 400,
-		stop:             make(chan struct{}),
-		done:             make(chan struct{}),
+		// Tightened 2026-05: lower thresholds + shorter half-life + shorter
+		// cooldown so reactive paths replan well before the integrated gap
+		// has shifted real arbitrage value. Each replan is ~100 ms on a
+		// Pi 4 (51 SoC × 21 action × 193 slots DP, sub-1 % CPU) — being
+		// stingy was leaving stale plans in place every time the cover-
+		// load reactive carve-out fired (PR #378).
+		MinReplanGap:          30 * time.Second,
+		PVDivergenceWh:        250, // 250 Wh sustained gap over ~8 min
+		LoadDivergenceWh:      200,
+		TwinDriftPVW:          250,
+		TwinDriftLoadW:        200,
+		TwinDriftHorizonSlots: 16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
+		stop:                  make(chan struct{}),
+		done:                  make(chan struct{}),
 	}
 }
 
@@ -445,6 +499,7 @@ func (s *Service) loop(ctx context.Context) {
 			s.replan(ctx)
 		case <-reactiveTick:
 			s.checkDivergence(ctx)
+			s.checkTwinDrift(ctx)
 		}
 	}
 }
@@ -513,10 +568,13 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		}
 	}
 
-	// Leaky integral of energy error (Wh). Decay with a 15-minute
+	// Leaky integral of energy error (Wh). Decay with an 8-minute
 	// half-life so transients fade but a sustained offset accumulates.
-	// decay = 0.5^(dt/halflife), halflife = 900s.
-	const halflifeS = 900.0
+	// decay = 0.5^(dt/halflife), halflife = 480s. Shortened from 15 min
+	// to react ~2× faster — replanning is cheap (~100 ms DP) and the old
+	// half-life left stale plans in flight every time the integral was
+	// dominated by minutes-old residuals.
+	const halflifeS = 480.0
 	tickMs := time.Now().UnixMilli()
 	dtS := 0.0
 	if s.lastTickMs > 0 {
@@ -561,6 +619,145 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.Lock()
 	s.pvErrIntWh = 0
 	s.loadErrIntWh = 0
+	s.mu.Unlock()
+	s.replan(ctx)
+}
+
+// snapshotPredictions samples the PV + load twins at the build-time slot
+// grid so the twin-drift detector can later re-sample at the same
+// timestamps and compute RMSE. Returns nil when neither predictor is
+// wired — twin-drift is a no-op in that case.
+func (s *Service) snapshotPredictions(slots []Slot, forecasts []state.ForecastPoint) *plannedPredictions {
+	if s == nil || (s.PV == nil && s.Load == nil) {
+		return nil
+	}
+	horizon := s.TwinDriftHorizonSlots
+	if horizon <= 0 {
+		horizon = 16
+	}
+	n := len(slots)
+	if n > horizon {
+		n = horizon
+	}
+	if n == 0 {
+		return nil
+	}
+	pp := &plannedPredictions{
+		pv:        make([]float64, n),
+		load:      make([]float64, n),
+		slotStart: make([]time.Time, n),
+		builtAt:   time.Now(),
+	}
+	for i := 0; i < n; i++ {
+		ts := time.UnixMilli(slots[i].StartMs).UTC()
+		pp.slotStart[i] = ts
+		if s.PV != nil {
+			cloud := lookupCloud(forecasts, slots[i].StartMs)
+			pv := s.PV(ts, cloud)
+			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+				pv = 0
+			}
+			pp.pv[i] = pv
+		}
+		if s.Load != nil {
+			ld := s.Load(ts)
+			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
+				ld = 0
+			}
+			pp.load[i] = ld
+		}
+	}
+	return pp
+}
+
+// checkTwinDrift compares the PV + load twin's CURRENT predictions over
+// the next horizon slots to the snapshot the active plan was built on.
+// RMSE per signal; trigger replan when either exceeds its threshold.
+// Subject to MinReplanGap cooldown. No-op when no snapshot exists (e.g.
+// before the first replan) or predictors aren't wired.
+func (s *Service) checkTwinDrift(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.mu.RLock()
+	pp := s.plannedPredictions
+	last := s.lastReplanAt
+	pvThresh := s.TwinDriftPVW
+	loadThresh := s.TwinDriftLoadW
+	pvFn := s.PV
+	loadFn := s.Load
+	s.mu.RUnlock()
+	if pp == nil || len(pp.slotStart) == 0 {
+		return
+	}
+	if pvFn == nil && loadFn == nil {
+		return
+	}
+	if pvThresh <= 0 && loadThresh <= 0 {
+		return
+	}
+	if time.Since(last) < s.MinReplanGap {
+		return
+	}
+
+	// Re-sample at the same slot timestamps. Need forecasts again for
+	// cloud lookup (PV predictor signature). Read from store; on error
+	// we fall back to a 50% cloud prior — the comparison is still valid
+	// because the original snapshot would have used the same fallback.
+	var forecasts []state.ForecastPoint
+	if s.Store != nil && pvFn != nil {
+		untilMs := pp.slotStart[len(pp.slotStart)-1].UnixMilli() + 24*3600*1000
+		sinceMs := pp.slotStart[0].UnixMilli() - 15*60*1000
+		if fs, err := s.Store.LoadForecasts(sinceMs, untilMs); err == nil {
+			forecasts = fs
+		}
+	}
+
+	var pvSumSq, loadSumSq float64
+	pvCount, loadCount := 0, 0
+	for i, ts := range pp.slotStart {
+		if pvFn != nil && pvThresh > 0 {
+			cloud := lookupCloud(forecasts, ts.UnixMilli())
+			pv := pvFn(ts, cloud)
+			if math.IsNaN(pv) || math.IsInf(pv, 0) || pv < 0 {
+				pv = 0
+			}
+			d := pv - pp.pv[i]
+			pvSumSq += d * d
+			pvCount++
+		}
+		if loadFn != nil && loadThresh > 0 {
+			ld := loadFn(ts)
+			if math.IsNaN(ld) || math.IsInf(ld, 0) || ld < 0 {
+				ld = 0
+			}
+			d := ld - pp.load[i]
+			loadSumSq += d * d
+			loadCount++
+		}
+	}
+	var pvRMSE, loadRMSE float64
+	if pvCount > 0 {
+		pvRMSE = math.Sqrt(pvSumSq / float64(pvCount))
+	}
+	if loadCount > 0 {
+		loadRMSE = math.Sqrt(loadSumSq / float64(loadCount))
+	}
+
+	reason := ""
+	switch {
+	case pvThresh > 0 && pvRMSE > pvThresh:
+		reason = "twin-drift-pv"
+		slog.Info("mpc: reactive replan", "trigger", "twin-drift-pv", "rmse", pvRMSE)
+	case loadThresh > 0 && loadRMSE > loadThresh:
+		reason = "twin-drift-load"
+		slog.Info("mpc: reactive replan", "trigger", "twin-drift-load", "rmse", loadRMSE)
+	}
+	if reason == "" {
+		return
+	}
+	s.mu.Lock()
+	s.lastReason = reason
 	s.mu.Unlock()
 	s.replan(ctx)
 }
@@ -615,7 +812,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 		// continue without PV forecast
 	}
 
-	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.Load)
+	slots := buildSlots(prices, forecasts, s.BaseLoad, now.UnixMilli(), s.PV, s.PVResidualCorrect, s.Load)
 	if len(slots) == 0 {
 		return nil
 	}
@@ -765,12 +962,21 @@ func (s *Service) replan(_ context.Context) *Plan {
 		plan.Baselines = &bl
 	}
 
+	// Snapshot the twin predictions that went into this plan so the
+	// twin-drift detector can compare today's predictor output against
+	// the prediction the plan committed to. Sampled at the same slot
+	// timestamps buildSlots used. forecasts cloud lookup mirrors the
+	// path buildSlots takes for the PV predictor so the snapshot is
+	// apples-to-apples with what's re-sampled later.
+	pp := s.snapshotPredictions(slots, forecasts)
+
 	s.mu.Lock()
 	s.last = &plan
 	s.lastSlots = slots
 	s.lastParams = p
 	s.lastLoadpointID = loadpointID
 	s.lastReplanAt = time.Now()
+	s.plannedPredictions = pp
 	reason := s.lastReason
 	if reason == "" {
 		reason = "manual"
@@ -900,8 +1106,9 @@ func extendPricesWithForecast(prices []state.PricePoint, zone string, pricer Pri
 // that the forecast service stored at fetch time. This lets the model
 // learn system-specific orientation/shading/soiling and drive planning
 // off the better signal without re-fetching weather.
-func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, load LoadPredictor) []Slot {
+func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, baseLoad float64, nowMs int64, pv PVPredictor, pvCorrect PVResidualCorrector, load LoadPredictor) []Slot {
 	out := make([]Slot, 0, len(prices))
+	now := time.UnixMilli(nowMs).UTC()
 	for _, pr := range prices {
 		slotLen := pr.SlotLenMin
 		if slotLen <= 0 {
@@ -912,12 +1119,30 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 			continue // past slot
 		}
 		slotT := time.UnixMilli(pr.SlotTsMs).UTC()
+		// Slot midpoint feeds the residual ramp-off: dt measured from
+		// the middle of the slot is a better proxy for the average
+		// correction applied across the slot than dt-from-start (which
+		// under-counts the slot's slice of the 30-min full-on plateau).
+		slotMidMs := pr.SlotTsMs + int64(slotLen)*30*1000 // start + half-slot in ms
+		slotMidT := time.UnixMilli(slotMidMs).UTC()
 		var pvW float64
 		forecastPVW := lookupPV(forecasts, pr.SlotTsMs)
 		if pv != nil {
 			cloud := lookupCloud(forecasts, pr.SlotTsMs)
 			radiationBacked := lookupHasRadiation(forecasts, pr.SlotTsMs)
-			pvW = selectPlannerPVW(forecastPVW, pv(slotT, cloud), radiationBacked)
+			base := pv(slotT, cloud)
+			if pvCorrect != nil {
+				// Correction returns generation-positive W (same as `base`).
+				// Floor the corrected base at 0 — a residual large enough
+				// to push it negative is a sign-flip, not a plausible PV
+				// prediction.
+				corrected := base + pvCorrect(now, slotMidT, base)
+				if corrected < 0 {
+					corrected = 0
+				}
+				base = corrected
+			}
+			pvW = selectPlannerPVW(forecastPVW, base, radiationBacked)
 		} else {
 			pvW = forecastPVW
 		}

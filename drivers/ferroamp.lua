@@ -134,6 +134,34 @@ local ESO_CAPACITY_KWH = {}
 --     the per-driver caps in config.yaml.
 local DISCHARGE_FLOOR_SOC = 0.15
 local CHARGE_CEIL_SOC     = 0.95
+-- PV-curtail release power (watts). When ComputePVCurtail releases this
+-- driver (curtail_disable action), the dispatcher historically wanted us
+-- to send `pplim arg=0`. Ferroamp's extapi treats that as "limit PV to
+-- 0 W" — same wire bytes as a release would have, opposite semantics —
+-- and the inverter sticks at 0 W PV until a portal reset. So we publish
+-- pplim arg=PPLIM_RELEASE_W instead, which the operator sets to the
+-- inverter's nominal max (e.g. 15000 for a 15 kW SSO). Default 0 means
+-- "do not publish a release at all", which preserves whatever pplim
+-- Ferroamp last received. Override via config.pplim_release_w in
+-- config.yaml. 2026-05-27 incident: dispatching `pplim arg=0` bricked
+-- the live SE4 site for 30+ minutes; recovery required a Ferroamp
+-- portal reset.
+local PPLIM_RELEASE_W     = 0
+
+-- Stuck-pplim self-healing watchdog. If the SSO reports DC bus voltage
+-- (paneler aktiva) AND zero PV current AND no fault for STUCK_PV_AFTER_MS
+-- continuous, we treat that as the sticky-pplim trap signature and
+-- auto-publish `pplim arg=PPLIM_RELEASE_W` to recover. Operator opts in
+-- by setting PPLIM_RELEASE_W > 0 — without that we just log a warning
+-- because we have no safe release value. The recovery has a cooldown
+-- (STUCK_PV_RECOVERY_COOLDOWN_MS) so a persistent issue can't loop us
+-- into command-spam. 2026-05-27 incident background: PR #367 + #372.
+local STUCK_PV_AFTER_MS              = 10 * 60 * 1000  -- 10 minutes
+local STUCK_PV_RECOVERY_COOLDOWN_MS  = 5 * 60 * 1000   -- 5 minutes
+local STUCK_PV_DC_V_THRESHOLD        = 200             -- volts on the DC bus
+local stuck_pv_since_ms              = -1              -- -1 = not stuck
+local stuck_pv_last_recovery_ms      = -1              -- -1 = never recovered
+local stuck_pv_recovery_count        = 0
 -- Cap on the N_total/N_capable multiplier so a transient "only 1 of 4
 -- capable" snapshot can't quadruple the on-wire setpoint past inverter
 -- rating before the next poll corrects it. 2.0 covers the common
@@ -143,6 +171,13 @@ local MAX_DISPATCH_SCALE  = 2.0
 local last_eso_count             = 0
 local last_eso_discharge_capable = 0
 local last_eso_charge_capable    = 0
+-- Cumulative count of Ferroamp extapi `nak` responses since driver
+-- start. Surfaced as the `extapi_nak_count` metric so an operator can
+-- alert on any non-zero rate. NAKs are early signals of EMS-side
+-- trouble (e.g. "no available ESOs detected in system" preceded the
+-- 2026-05-27 brick by minutes).
+local extapi_nak_count           = 0
+local extapi_ack_count           = 0
 -- -1 = "no snapshot yet" sentinel. host.millis() can legitimately
 -- return 0 on the very first poll (sub-millisecond since startup), so
 -- we can't use 0 to mean "never set".
@@ -342,13 +377,39 @@ function driver_init(config)
             CHARGE_CEIL_SOC, DISCHARGE_FLOOR_SOC))
     end
 
+    -- pplim release watts: see the file-scope PPLIM_RELEASE_W comment for
+    -- why this matters (the 2026-05-27 sticky-pplim incident). Operators
+    -- who use supports_pv_curtail=true SHOULD set this to the SSO nominal
+    -- max so curtail_disable safely publishes a release. Leaving it 0
+    -- means "no release published" — safe default, but the operator must
+    -- manually clear pplim from the Ferroamp portal after curtail ends.
+    if config and config.pplim_release_w ~= nil then
+        local v = tonumber(config.pplim_release_w)
+        if v and v > 0 then
+            PPLIM_RELEASE_W = math.floor(v)
+            host.log("info", string.format(
+                "Ferroamp: PPLIM_RELEASE_W = %d (from config)", PPLIM_RELEASE_W))
+        else
+            host.log("warn", string.format(
+                "Ferroamp: pplim_release_w=%s ignored (must be > 0)",
+                tostring(config.pplim_release_w)))
+        end
+    end
+
     -- Subscribe to telemetry topics
     host.mqtt_subscribe("extapi/data/ehub")
     host.mqtt_subscribe("extapi/data/eso")
     host.mqtt_subscribe("extapi/data/sso")
 
-    -- Subscribe to control response topic to verify commands are received
-    host.mqtt_subscribe("extapi/result")
+    -- Subscribe to the EMS-side response channel for every command we
+    -- publish. We parse `{"status":"ack|nak", ...}` from each message
+    -- and count NAKs in a metric for operator alerting. The 2026-05-27
+    -- brick was preceded by minutes of `{"status":"nak","msg":"no
+    -- available ESOs detected in system"}` that we couldn't see at the
+    -- time because the driver subscribed to the wrong topic. Older
+    -- code used "extapi/result"; the actual response topic on the
+    -- firmwares we've tested is "extapi/control/response".
+    host.mqtt_subscribe("extapi/control/response")
 
     -- Query API version to verify connectivity and external API access
     local version_cmd = '{"transId":"init","cmd":{"name":"extapiversion"}}'
@@ -391,9 +452,28 @@ function driver_poll()
                 eso_ts_by_id[eid]   = now
             elseif msg.topic == "extapi/data/sso" then
                 sso_data = data; sso_ts = now
+            elseif msg.topic == "extapi/control/response" then
+                -- Track EMS-side ack/nak counters per published cmd.
+                -- A NAK is the canary for trouble (`"no available ESOs
+                -- detected in system"` preceded the 2026-05-27 brick by
+                -- minutes). Log every NAK so operators can correlate
+                -- with their command stream; surface the count as a
+                -- metric so ops dashboards can alert on rate.
+                local status = data["status"]
+                if status == "nak" then
+                    extapi_nak_count = extapi_nak_count + 1
+                    host.log("warn", string.format(
+                        "Ferroamp: extapi NAK (transId=%s msg=%s)",
+                        tostring(data["transId"] or "?"),
+                        tostring(data["msg"] or "?")))
+                elseif status == "ack" then
+                    extapi_ack_count = extapi_ack_count + 1
+                end
             end
         end
     end
+    host.emit_metric("extapi_nak_count", extapi_nak_count)
+    host.emit_metric("extapi_ack_count", extapi_ack_count)
 
     -- Drop stale caches so the rest of the poll falls through and
     -- the watchdog catches us when the EnergyHub stops publishing.
@@ -677,13 +757,62 @@ function driver_poll()
         local sso_udc = extract_val(sso_data, "udc")
         if sso_udc then host.emit_metric("sso_dc_link_v", tonumber(sso_udc) or 0) end
         local sso_upv = extract_val(sso_data, "upv")
-        if sso_upv then host.emit_metric("sso_pv_v", tonumber(sso_upv) or 0) end
+        local upv_n = tonumber(sso_upv) or 0
+        if sso_upv then host.emit_metric("sso_pv_v", upv_n) end
         local sso_ipv = extract_val(sso_data, "ipv")
-        if sso_ipv then host.emit_metric("sso_pv_a", tonumber(sso_ipv) or 0) end
+        local ipv_n = tonumber(sso_ipv) or 0
+        if sso_ipv then host.emit_metric("sso_pv_a", ipv_n) end
         local sso_relay = extract_val(sso_data, "relaystatus")
-        if sso_relay then host.emit_metric("sso_relaystatus", tonumber(sso_relay) or 0) end
+        local relay_n = tonumber(sso_relay) or 0
+        if sso_relay then host.emit_metric("sso_relaystatus", relay_n) end
         local sso_fault = extract_val(sso_data, "faultcode")
-        if sso_fault then host.emit_metric("sso_faultcode", tonumber(sso_fault) or 0) end
+        local fault_n = tonumber(sso_fault) or 0
+        if sso_fault then host.emit_metric("sso_faultcode", fault_n) end
+
+        -- Stuck-pplim self-healing watchdog. The 2026-05-27 incident
+        -- left the SSO at upv≈500V + ipv=0 + faultcode=0 + relay=1
+        -- (paneler aktiva, ingen MPPT, ingen hårdvarufel) — the
+        -- signature of a sticky `pplim arg=0` lock. Recovery via portal
+        -- took 30+ minutes. If the operator has opted in by setting
+        -- `pplim_release_w`, the driver now detects the signature and
+        -- auto-publishes a release (`pplim arg=PPLIM_RELEASE_W`) after
+        -- STUCK_PV_AFTER_MS continuous, throttled by a cooldown so a
+        -- persistent issue can't loop us into command-spam.
+        local stuck = (upv_n > STUCK_PV_DC_V_THRESHOLD)
+                  and (ipv_n == 0)
+                  and (fault_n == 0)
+                  and (relay_n == 1)
+        if stuck then
+            if stuck_pv_since_ms < 0 then
+                stuck_pv_since_ms = now
+            elseif (now - stuck_pv_since_ms) > STUCK_PV_AFTER_MS then
+                local cool_ok = stuck_pv_last_recovery_ms < 0
+                            or (now - stuck_pv_last_recovery_ms) > STUCK_PV_RECOVERY_COOLDOWN_MS
+                if PPLIM_RELEASE_W > 0 and cool_ok then
+                    local payload = string.format(
+                        '{"transId":"stuck-pv-recover","cmd":{"name":"pplim","arg":%d}}',
+                        PPLIM_RELEASE_W)
+                    local err = host.mqtt_publish("extapi/control/request", payload)
+                    if not err then
+                        stuck_pv_last_recovery_ms = now
+                        stuck_pv_recovery_count   = stuck_pv_recovery_count + 1
+                        host.log("warn", string.format(
+                            "Ferroamp: stuck-pplim detected (upv=%.1fV, ipv=0A for %d min) — auto-published pplim arg=%d to recover",
+                            upv_n, math.floor((now - stuck_pv_since_ms) / 60000), PPLIM_RELEASE_W))
+                    end
+                elseif PPLIM_RELEASE_W <= 0 and cool_ok then
+                    -- Log-only path: operator hasn't opted in. Reuse the
+                    -- cooldown so we don't spam every poll.
+                    stuck_pv_last_recovery_ms = now
+                    host.log("warn", string.format(
+                        "Ferroamp: stuck-pplim signature for %d min (upv=%.1fV, ipv=0A) — set config.pplim_release_w to enable auto-recovery",
+                        math.floor((now - stuck_pv_since_ms) / 60000), upv_n))
+                end
+            end
+        else
+            stuck_pv_since_ms = -1
+        end
+        host.emit_metric("stuck_pv_recovery_count", stuck_pv_recovery_count)
     end
 
     return 1000
@@ -784,14 +913,45 @@ function driver_command(action, power_w, cmd)
             return publish_idle(tid)
         end
     elseif action == "curtail" then
+        -- Ferroamp's extapi treats `pplim arg=0` as "limit PV output to
+        -- 0 W" — same wire bytes as a release would have, opposite
+        -- semantics. A curtail request that resolves to ≤ 0 W therefore
+        -- locks the inverter at zero PV until the operator manually
+        -- clears pplim from the Ferroamp portal or power-cycles the
+        -- EnergyHub. Refuse the dangerous request — log a warning so
+        -- the operator sees the regression upstream (dispatch sent a
+        -- zero target for a curtail-capable driver, which shouldn't
+        -- happen because the dispatcher filters out drivers with
+        -- |PV| == 0 before allocating). 2026-05-27 incident: a 0-share
+        -- allocation through this path bricked the live SE4 site for
+        -- 30+ minutes; needed a Ferroamp portal reset to recover.
+        local watts = math.floor(math.abs(power_w))
+        if watts <= 0 then
+            host.log("warn", string.format(
+                "Ferroamp: refusing pplim=0 (sticky lock on this firmware); upstream wanted curtail to %d W",
+                math.floor(power_w)))
+            return nil
+        end
         local payload = string.format(
-            '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}',
-            math.floor(math.abs(power_w))
-        )
+            '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}', watts)
         return host.mqtt_publish("extapi/control/request", payload)
     elseif action == "curtail_disable" then
-        return host.mqtt_publish("extapi/control/request",
-            '{"transId":"ems","cmd":{"name":"pplim","arg":0}}')
+        -- DO NOT send `pplim arg=0` here. On Ferroamp's extapi that is
+        -- "limit to 0 W", not "release the limit", and it sticks until
+        -- portal reset. The safe release is to publish a pplim equal
+        -- to the operator-declared maximum (or skip the publish when
+        -- no max is configured, leaving whatever pplim Ferroamp last
+        -- received in place — operator can clear it from the portal).
+        -- See drivers/ferroamp.lua docs section for pplim_release_w.
+        if PPLIM_RELEASE_W > 0 then
+            local payload = string.format(
+                '{"transId":"ems","cmd":{"name":"pplim","arg":%d}}',
+                PPLIM_RELEASE_W)
+            return host.mqtt_publish("extapi/control/request", payload)
+        end
+        host.log("info",
+            "Ferroamp: curtail_disable skipped (set config.pplim_release_w to enable; default behaviour avoids the sticky pplim=0 trap)")
+        return nil
     elseif action == "deinit" then
         return publish_auto("ems")
     end

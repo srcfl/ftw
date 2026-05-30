@@ -65,9 +65,16 @@ Persistence: `state.Store.SaveConfig("loadmodel/state_utc", …)` — constant a
 Reset: `POST /api/loadmodel/reset` preserves the configured heating
 coefficient.
 
-`HeatingW_per_degC` is operator-set via `Service.SetHeatingCoef` (called
-from config reload). Not fit online — too noisy and entangled with bucket
-baseline (`model.go:179-184`).
+`HeatingW_per_degC` is adapted online from prediction residuals
+(`model.go` — SGD step `coef ← coef + HeatingAlpha · err / deltaT`,
+gated on `bucket.Samples ≥ MinTrustSamples` and `deltaT ≥
+HeatingMinDeltaT`). The fit runs **before** the outlier filter so a
+stale coefficient can recover even when its own predictions look like
+outliers vs warm-day MAE. Operator-set via `Service.SetHeatingCoef` /
+config reload seeds the initial estimate; observation drives adaptation
+from there. A household whose load is unaffected by outdoor temperature
+(district heating, well-insulated home dominated by solar gain in
+shoulder season) converges to 0 W/°C.
 
 ## Public API surface
 
@@ -98,11 +105,12 @@ Service (`service.go`):
 
 ## What NOT to do
 
-- Do not use this to learn heating sensitivity — leave
-  `HeatingW_per_degC` as an operator input. Online fit co-varies with the
-  bucket baseline and gives noise.
 - Never train on `loadW < 0`; transient flows during PI steps can appear
   negative. `sample()` already skips, keep it that way (`service.go:145`).
+- Do not gate the heating fit on the outlier filter. The whole point of
+  the pre-filter placement is that a stale coefficient can recover —
+  every cold-day sample under a wrong coef looks like an outlier, and
+  gating the fit would lock the model into the wrong estimate forever.
 - Do not remove the "subtract heating before EMA" step — a bucket should
   learn base load, not "base + this week's weather".
 - Do not change `Buckets` without migrating stored state.

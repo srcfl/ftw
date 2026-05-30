@@ -1,5 +1,376 @@
 # Changelog
 
+## 0.109.0
+
+### Minor Changes
+
+- af6435c: **Relay: the 4-digit code is now a one-time exchange for a session grant,
+  not a standing password.** Previously, once a pair session was approved,
+  anyone who got hold of the `/h/<token>/…` URL had full access for the
+  rest of the TTL — and for MCP that means powerful tools
+  (`run_command`, `modbus_write`, `deploy_driver`, `write_file`). A
+  forwarded or leaked-from-history URL was effectively a host handover.
+
+  Now, accepting the code mints a high-entropy session grant (32 bytes,
+  CSPRNG). It is handed to the friend exactly once:
+
+  - **MCP**: the landing page prints
+    `claude mcp add ftw-friend --transport http <url>/h/<token>/mcp --header "Authorization: Bearer <grant>"`.
+    `/h/<token>/mcp` now requires that Bearer grant.
+  - **Browser/dashboard**: approval sets an `HttpOnly; Secure;
+SameSite=Strict` `ftw_grant` cookie scoped to the session path;
+    `/h/<token>/web/…` now requires it.
+
+  A leaked-but-already-active URL is useless without the grant — the
+  recipient lands back on the code-entry page and doesn't have the
+  out-of-band 4-digit code (5 wrong tries still locks it). The grant is
+  validated constant-time, never forwarded to the host, and expires with
+  the session. `POST /h/<token>/approve` now responds `200 {"grant":"…"}`
+  instead of `204`.
+
+  Works on the existing path-based routes — no subdomains or new domain
+  required (the browser-dashboard _rendering_ fix and any subdomain work
+  remain deferred; see `docs/goals/relay-subdomain-sessions.md`).
+
+### Patch Changes
+
+- ce92b4a: **Fix: relay landing page rejected every approval code as "Wrong code"
+  even when the friend typed the right one.** The `fmt.Fprintf` that
+  renders the landing HTML in `ftw-relay`'s `publicLanding` passed format
+  arguments in the wrong order, so the embedded JS `const TOKEN` was
+  populated with the token state (`"pending"`) instead of the actual
+  session token. The Activate button then POSTed to
+  `/h/pending/approve`; the relay couldn't find that token and returned
+  `403 Forbidden`, which the page surfaced as "Wrong code" regardless of
+  what was typed. As a side effect "From:" showed the token, "Intent:"
+  was empty, and "State:" showed the intent.
+
+  Argument order is now `as → intent → state → token`, matching the
+  positional verbs in `landingHTML`. A regression test
+  (`TestLandingPageTokenConstMatchesPath`) pins the JS const + each label
+  row so a future reshuffle can't silently regress the approve POST path.
+
+## 0.108.2
+
+### Patch Changes
+
+- 0779ff2: **Hardening: cover-load and passive-arbitrage-idle carve-outs now reset stale
+  energy-path bookkeeping on every tick they fire**, mirroring what
+  `preparePlannerSelf` already does for `planner_self`.
+
+  Without this, `slotDelivered` / `lastTickTs` / `currentDirective` could
+  carry leftover state from a prior energy-path tick into the carve-out
+  window. A subsequent transition back to the energy path within the same
+  15-min slot (e.g., a mid-slot replan flipping the slot's intent, or an
+  operator mode-hop) would then read those stale values and miscompute
+  `remainingWh`. Same forward-transition risk that `planner_self` has
+  guarded against since PR #131.
+
+  No new behaviour, no signal change in the steady-state cover-load reactive
+  path — purely defence-in-depth for plan-refinement / mode-transition
+  scenarios. Two regression tests pin the bookkeeping reset for both the
+  `planner_arbitrage` cover-load and the `planner_passive_arbitrage` idle
+  carve-outs.
+
+## 0.108.1
+
+### Patch Changes
+
+- 1160393: fix(pvmodel): MPC now consumes the unanchored structural PV predictor so the rolling residual correction (PR #381) is not applied twice. Previously `mpcSvc.PV` was wired to `pvSvc.Predict`, which already folds in the live-vs-model now-anchor; combined with `PVResidualCorrect` the planner saw the structural-vs-live bias subtracted twice and could plan as if PV was ~0 W on a sunny day with a heavy downward residual. A new `pvmodel.Service.PredictStructural` returns the RLS-only prediction; the anchored `Predict` is kept for UI overlays and dispatch's live-reading path.
+
+## 0.108.0
+
+### Minor Changes
+
+- b887541: **PV twin now applies a short-horizon residual correction on top of the
+  structural RLS prediction.** The RLS model's forgetting factor (~3h
+  half-life @ 60s cadence) is tuned to learn site orientation, shading
+  and slow soiling drift; it does not respond fast enough to "today's
+  persistent NWP bias" — e.g. when measured cloud cover is heavier than
+  the forecast assumed for the last 90 minutes, structural predictions
+  stay biased high while RLS chews through the samples needed to adapt.
+
+  The new layer keeps a 2-hour rolling buffer of (predicted_at_t,
+  actual_at_t) pairs, computes the mean residual, and applies it as an
+  additive bias to MPC slot predictions, fading linearly over a 2 h
+  horizon (full correction ≤ 30 min, zero by 120 min). Beyond 2 h the
+  structural model is again the best estimate — weather fronts roll in,
+  time-of-day shifts, and the residual is no longer relevant.
+
+  Gates (`go/internal/pvmodel/residual.go`):
+
+  - ≥ 20 samples in the 2 h window before any correction applies.
+  - `|mean residual|` ≥ 25 W → otherwise treated as "no bias detected".
+  - `std / |mean|` ≤ 1.0 → variance-dominated streams are skipped.
+  - `dt ≤ 0` (past slot) → factor = 0.
+
+  Wiring: `pvmodel.Service.ResidualCorrect` is plumbed into
+  `mpc.Service.PVResidualCorrect` (new optional hook). The planner calls
+  the corrector on the slot midpoint inside `buildSlots`, after the twin
+  prediction and before `selectPlannerPVW` blends with the NWP forecast.
+  A nil hook is a hard no-op, so existing wiring without the corrector
+  is unchanged.
+
+  **PV only**: load is multimodal (appliances cycling) and a rolling-mean
+  correction can chase the noise. Variance gate would catch it most of
+  the time, but risk/reward is poor without dedicated diagnostics.
+  Revisit when load observability lands.
+
+  Diagnostics exposed via `GET /api/pvmodel`:
+  `pv_residual_correction_w` (the value the planner would apply 15 min
+  out), `pv_residual_sample_count`, `pv_residual_mean_w`,
+  `pv_residual_std_w`, `pv_residual_window_minutes`.
+
+- 2ff3d09: feat(mpc): tighter replan triggers + twin-driven replan signal
+
+  Tightens the reactive replan thresholds (PV 500→250 Wh, load 400→200 Wh,
+  half-life 15→8 min, cooldown 60→30 s) and adds a third trigger that fires
+  when the PV or load twin's CURRENT prediction has shifted materially (RMSE
+
+  > 250 W PV / 200 W load over the next 16 slots) from the prediction the
+  > active plan was built on.
+
+  The twin already self-corrects every cycle through RLS; the planner only
+  consumed its output every 15 min. The new signal closes that gap without
+  waiting for the integral-of-error to accumulate. Replanning is ~100 ms on
+  a Pi 4 (51 × 21 × 193 DP cells, sub-1 % CPU) — being stingy was the wrong
+  default.
+
+### Patch Changes
+
+- 55fb0c3: **Codex review follow-ups for v0.107.0** — fixes 2 P1 and 2 P2 review
+  findings on the dispatch / loadmodel changes shipped in v0.107.0.
+
+  **P1: Heating coefficient survives restarts.** `main.go` had been calling
+  `loadSvc.SetHeatingCoef(cfg.Weather.HeatingWPerDegC)` at startup, which
+  unconditionally overwrote any value persisted from previous training.
+  After every binary update the adaptive fit was thrown away. New
+  `SeedHeatingCoef(w)` only writes the value when the model has no samples
+  yet — operator config is the cold-start prior, observation drives the
+  value once learning has begun. `SetHeatingCoef` remains for explicit
+  operator overrides.
+
+  **P1: Cover-load carve-out actually chases grid=0.** The PR #378
+  carve-out only set `useEnergyPath = false`; in production `main.go` wires
+  both `SlotDirective` and `PlanTarget`, so the code fell into the legacy
+  `!useEnergyPath` branch and called `SetGridTarget(plannedImportW)` —
+  chasing the planned positive import instead of grid=0. Result: cover-
+  load slot with a 1.7 kW planned import would back the battery off all
+  the way to idle instead of covering live load. Fixed by forcing
+  `SetGridTarget(0)` for carve-out slots and skipping the legacy
+  PlanTarget block when a carve-out predicate fires.
+
+  **P2: Live-export gate predicate tightened.** `passiveArbitrageIdleSlot`
+  used `dir.BatteryEnergyWh <= idleWhGate`, which is true for _any_
+  negative-energy slot (planned discharge). Tightened to
+  `|BatteryEnergyWh| ≤ idleWhGate` so the predicate names what it does
+  (true idle only). The planned-discharge case is now folded into
+  `coverLoadDischargeSlot`, which was also extended to cover
+  `planner_passive_arbitrage` (not just `planner_arbitrage`), and the
+  live-export gate now fires on either predicate.
+
+  **P2: SlotDeliveryStats catches sign mismatches.** Planned `-425 Wh`
+  discharge vs actual `+425 Wh` charge would have scored `|actual| /
+|planned| = 1.0` = "on target" — the largest possible miss, invisible
+  on `/api/status`. New `SignMismatchCount` field fires when planned and
+  actual have opposite signs (and both exceed the idle cutoff). The
+  magnitude over/under counters then only fire on same-sign cases,
+  keeping their semantics clean.
+
+## 0.107.0
+
+### Minor Changes
+
+- adf3f86: **Fix: `planner_arbitrage` cover-load discharge slots now chase the live
+  zero-grid line instead of rigidly running the planned discharge power.**
+  When the DP picks a discharge slot to _offset expensive import_ (rather
+  than to _export at peak price_), the energy-allocation path used to lock
+  the battery at `remainingWh × 3600 / remainingS` regardless of live
+  conditions — exporting at spot price any forecast-load undershoot and
+  under-covering any forecast-load overshoot. The EMS now routes these
+  slots through reactive PI on grid=0, the same path
+  `planner_passive_arbitrage` non-charge slots and `planner_self`
+  participant slots already use.
+
+  Detection: `PlannedGridW > -100 W` (no significant planned export) AND
+  `BatteryEnergyWh < -50 Wh` (discharge planned). Peak-export slots
+  (`PlannedGridW < -100 W`) stay on the energy path — extra export there is
+  bonus revenue at the price the DP picked the slot for. Charge slots
+  stay on the energy path so deliberate grid-charge intent is honoured.
+
+  Found 2026-05-28: plan estimated baseload 1.7 kW for a slot that scheduled
+  the battery to be empty by 23:30. Real load was 0.9 kW; battery sat at
+  -1.7 kW exporting 800 W at spot. Then load surged to 3.2 kW and the
+  battery stayed at -1.7 kW, forcing 0.5 kW import. Both directions are
+  now reactive — the slot's Wh budget guides where the battery is
+  generally headed, the meter decides the instantaneous power.
+
+- fdbf53c: **Load model now adapts the heating coefficient online from measurements.**
+  Previously `HeatingW_per_degC` was operator-set and never moved — if the
+  value drifted from reality (or the house turned out not to track outdoor
+  temperature at all), forecasts silently inflated cold-day load and the
+  MPC made decisions on phantom heating draw.
+
+  The fit runs as one-parameter SGD on the prediction residual:
+  `coef ← coef + α · err / deltaT`. Gated on `bucket.Samples ≥
+MinTrustSamples` (residual derives the slope from the bucket baseline)
+  and on `deltaT ≥ 3 °C` (warm samples and near-reference samples have no
+  heating signal to extract). Clamped to `[0, 1500] W/°C`.
+
+  The fit runs **before** the outlier filter so a wildly stale coefficient
+  can recover — without that ordering, every cold sample under a wrong
+  coef looks like an outlier vs the warm-day MAE and nothing could ever
+  pull the value down.
+
+  Operator config (`Planner.HeatingWPerDegC` / `SetHeatingCoef`) still
+  seeds the initial estimate and is re-applied on
+  `POST /api/loadmodel/reset`. From there observation drives the value.
+  Households whose load is temperature-independent (district heating,
+  solar-gain-dominated shoulder seasons, well-insulated homes) converge
+  toward 0 W/°C.
+
+  Found 2026-05-28 on site .40: planner predicted 2782 W load for a sunny
+  May afternoon (actual 504 W). Root cause was the un-adapted heating
+  term — `300 W/°C × (18 − 11.4 °C) = 1980 W` of phantom load applied
+  without seasonal / solar-gain awareness. The dispatcher fix in #375
+  prevents the _symptom_; this change addresses the _cause_.
+
+- c1cbda7: feat(diagnostics): per-slot Wh delivery tracking for reactive dispatch paths
+
+  Adds an independent per-slot Wh accumulator that runs on every dispatch
+  tick regardless of which execution path was taken (planner_self, planner
+  passive_arbitrage idle slots, the planner_arbitrage cover-load carve-out
+  from PR #378, manual modes, plain self_consumption). At slot rollover
+  the actual fleet delivery is compared against the plan's
+  `BatteryEnergyWh`; ratios outside [0.5, 1.5] are logged and bump
+  `SlotDeliveryStats.OverDeliveryCount` / `UnderDeliveryCount`, surfaced
+  on `/api/status`. Idle slots (|planned| ≤ 50 Wh) are skipped — ratio
+  against ~0 is meaningless.
+
+  Pure observability — no dispatch decision reads the counters and no
+  hard Wh cap is applied to reactive paths. The point is to measure
+  first, decide on enforcement later.
+
+### Patch Changes
+
+- bdf2352: **Fix: `planner_passive_arbitrage` no longer absorbs live PV surplus into the
+  battery on a plan-idle slot.** When the DP picked idle for a slot
+  (`battery_w = 0`) and live conditions turn out to have more PV (or less
+  load) than the forecast assumed, the dispatcher now holds the battery at
+  0 and lets the surplus export — rather than collapsing to
+  self-consumption and chasing `grid = 0` by ramping the charge up.
+
+  The DP picks idle slots deliberately, often to preserve export revenue
+  at the current spot when future PV is plentiful and future prices are
+  lower. The old behaviour reactively swallowed that surplus because the
+  fallback path was symmetric with self-consumption ("balance to zero"),
+  which discards the DP's intent. The gate is the mirror of
+  `plannerSelfExportSurplusGate`, but triggered on the **live** baseline
+  grid (`grid_meter − Σ battery_w`) rather than the plan's forecasted
+  grid — for the slot we're already in, live measurements override the
+  (possibly-stale) forecast.
+
+  Reactive discharge on live import is unchanged: a passive-arbitrage
+  idle slot with the meter importing still allows the battery to cover
+  the load. The change is one-sided — block reactive charging when the
+  meter shows export potential the forecast missed.
+
+  Found 2026-05-28 on a sunny May afternoon with a wildly over-estimated
+  load forecast: planner expected ~2.8 kW load vs. actual ~0.5 kW, picked
+  idle on net-≈0 forecast, and the dispatcher charged 2.6 kW into the
+  battery despite high current spot (160 öre), low future spot (95 öre),
+  and abundant forecast PV in upcoming slots.
+
+## 0.106.0
+
+### Minor Changes
+
+- 9638c78: **Ferroamp self-healing watchdog for the sticky-pplim trap.** When the
+  SSO reports the post-incident signature — DC bus voltage > 200 V, zero
+  PV current, no fault, relay closed — continuously for ten minutes, the
+  driver now auto-publishes `pplim arg=<pplim_release_w>` to release
+  the lock. Operator opts in by setting `config.pplim_release_w > 0`;
+  without it, the watchdog logs a per-incident warning but does not
+  publish (we have no safe release value to send).
+
+  A five-minute cooldown between successive recoveries prevents command-
+  spam if the release doesn't take. A new `stuck_pv_recovery_count`
+  metric tracks lifetime recovery count so operators can alert on a
+  chronic condition.
+
+  Reuses the existing `pplim_release_w` field — same value, dual
+  purpose (dispatcher `curtail_disable` release AND watchdog
+  self-recovery).
+
+  Layered with [#367](https://github.com/frahlg/forty-two-watts/pull/367)
+  (driver hard-fail on `pplim arg=0`) and the dispatcher fix in the
+  parallel PR (`fix(curtail): no spurious release ...`) this is the
+  third and final layer of defense against the 2026-05-27 brick.
+
+### Patch Changes
+
+- 312e9ba: **Defense-in-depth against the 2026-05-27 Ferroamp brick.** Two
+  independent changes that, combined with PR #367's driver-side hard
+  fail on `pplim arg=0`, eliminate every known trigger path:
+
+  - **Dispatcher**: `ComputePVCurtail` no longer emits a `curtail_disable`
+    release simply because a previously-curtailed driver dropped out of
+    the proportional allocation due to its own `|PV|` crashing to ~0
+    (often a direct consequence of OUR curtail throttling that driver
+    down). The release is now only sent when the curtail directive
+    truly clears, or the driver is removed from `SupportsPVCurtail`, or
+    the driver goes offline. Also: per-driver allocations rounding to
+    `≤ 1 W` are suppressed entirely — never publish a near-zero
+    `pplim` that some inverters treat as a hard "limit to 0 W" lock.
+
+  - **Ferroamp driver**: subscribes to `extapi/control/response`
+    (was: `extapi/result` — wrong topic, never received anything),
+    parses `{"status":"ack|nak", ...}` responses, and exposes
+    cumulative `extapi_nak_count` + `extapi_ack_count` metrics. NAK
+    responses are also logged as warnings with `transId` + `msg`
+    fields. The 2026-05-27 brick was preceded by minutes of
+    `nak: no available ESOs detected in system` that we couldn't see
+    through ftw telemetry — now the operator can alert on any non-zero
+    NAK rate.
+
+  Tests added:
+
+  - Four new dispatcher regressions in `control/pv_curtail_test.go`
+    guarding the suppression / release semantics.
+  - One driver test in `drivers/lua_ferroamp_curtail_test.go`
+    asserting NAK + ACK counter advancement.
+
+- 322ffe2: **Ferroamp safety fix:** the Lua driver now refuses to publish
+  `pplim arg=0` from any `curtail` / `curtail_disable` path.
+
+  Ferroamp's extapi treats `{"cmd":{"name":"pplim","arg":0}}` as
+  "limit PV output to 0 W" — same wire bytes as a naive release would
+  have, opposite semantics. The inverter sticks at 0 W PV until the
+  operator clears pplim from the Ferroamp portal or power-cycles the
+  EnergyHub. On 2026-05-27 this fired against a live SE4 site after the
+  dispatcher's proportional curtail allocation gave a 0-share to
+  Ferroamp; recovery required a 30+ minute outage and a portal-side
+  reset.
+
+  Changes:
+
+  - `curtail` with `power_w <= 0` is now a logged no-op (was: published
+    `pplim arg=0`).
+  - `curtail_disable` is a logged no-op by default (was: published
+    `pplim arg=0`). To restore automatic release, set
+    `config.pplim_release_w` on the driver to the inverter's nominal
+    max (e.g. `15000` for a 15 kW SSO). The driver then publishes
+    `pplim arg=<release_w>` which Ferroamp accepts as "raise the limit".
+  - New unit tests guard the wire payload against any regression that
+    reintroduces `pplim arg=0`.
+  - Docs in `docs/configuration.md` describe the trap and the new
+    config field.
+
+  Operators with `supports_pv_curtail: true` on Ferroamp **should** add
+  `config.pplim_release_w: <SSO-rated-watts>` to keep curtailment
+  auto-releasing. Without it, curtail still engages correctly, but
+  release becomes a portal action.
+
 ## 0.105.0
 
 ### Minor Changes

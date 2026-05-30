@@ -84,11 +84,17 @@ type SlotDirective struct {
 	// live gridW match plan", preventing the energy budget from blindly
 	// driving extra grid import.
 	//
-	// Discharge slots are intentionally NOT clamped: extra export during
-	// a discharge slot is bonus revenue (the Wh budget is still delivered
-	// — the extra comes from load undershooting forecast), and backing
-	// off would undermine a DP choice the planner already evaluated. See
+	// Discharge slots are intentionally NOT clamped on the energy-allocation
+	// path: extra export during an EXPORT-INTENT slot (PlannedGridW < 0,
+	// e.g. peak-shave discharge picked by the DP for its export price) is
+	// bonus revenue and backing off would undermine the DP choice. See
 	// docs/safety.md §8 for the full rationale.
+	//
+	// Cover-load discharge slots (PlannedGridW ≈ 0 or import) are a
+	// DIFFERENT story: the DP picked discharge to offset an expensive
+	// import, not to export. There the energy path is rerouted to reactive
+	// PI on grid=0 — see the cover-load carve-out a few hundred lines
+	// below where useEnergyPath is decided.
 	//
 	// HasPlannedGridW gates whether the cap should consult PlannedGridW
 	// at all. Stored as a separate bool (rather than a *float64) so the
@@ -324,6 +330,37 @@ type State struct {
 	slotDelivered    float64   // Wh delivered to batteries since slot start
 	lastTickTs       time.Time // for ∫ battery_w dt
 
+	// slotActualWh + slotActualLastTs + slotActualSlotStart are the
+	// path-agnostic per-slot delivery accumulator. Updated on EVERY
+	// dispatch tick (every mode, every path) from the live battery
+	// aggregate — independent of the energy-allocation bookkeeping
+	// above (which only updates inside useEnergyPath).
+	//
+	// The point is observability: when reactive paths (cover-load
+	// discharge, planner_self, planner_passive_arbitrage idle slots,
+	// the planner_arbitrage cover-load carve-out from PR #378) execute,
+	// the existing slotDelivered does not track them. Without an
+	// independent accumulator there's no way to measure whether those
+	// paths over- or under-deliver vs the plan's BatteryEnergyWh.
+	//
+	// At slot rollover (SlotStart change) the just-ended slot is
+	// evaluated and over/under-delivery is logged + counted. The
+	// resulting counters surface on /api/status so operators can spot
+	// systemic forecast vs reality drift. Site-signed: negative = the
+	// fleet discharged Wh during the slot.
+	slotActualWh         float64
+	slotActualLastTs     time.Time
+	slotActualSlotStart  time.Time
+	slotActualPlannedWh  float64 // planned BatteryEnergyWh cached for the slot in flight
+
+	// SlotDeliveryStats counts how many slots ended with the actual
+	// fleet delivery falling outside ±50 % of the planned magnitude.
+	// Idle/charge slots with |planned| ≤ 50 Wh are ignored — the
+	// ratio is meaningless when the denominator is ~0. Read-only from
+	// the API; mutated only inside ComputeDispatch under the caller's
+	// outer ctrlMu.
+	SlotDeliveryStats SlotDeliveryStats
+
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
 	PlanStale bool
@@ -535,6 +572,127 @@ func resetEnergyDispatchBookkeeping(state *State) {
 	state.currentDirective = SlotDirective{}
 	state.slotDelivered = 0
 	state.lastTickTs = time.Time{}
+}
+
+// SlotDeliveryStats tracks observed gaps between the plan's per-slot
+// BatteryEnergyWh and the live fleet's actual delivered Wh. Updated at
+// slot rollover by updateSlotDeliveryMetrics. Pure observability — no
+// dispatch decision reads these.
+type SlotDeliveryStats struct {
+	OverDeliveryCount  uint64 `json:"over_delivery_count"`
+	UnderDeliveryCount uint64 `json:"under_delivery_count"`
+	// SignMismatchCount counts slots where the fleet moved energy in the
+	// opposite direction from the plan (planned discharge → actual
+	// charge, or vice-versa) for non-idle slots. Caught separately
+	// because the magnitude-only over/under check would happily report
+	// `|−425| ≈ |+425|` as on-target — the largest possible miss.
+	SignMismatchCount uint64 `json:"sign_mismatch_count"`
+}
+
+// slotDeliveryOverThreshold + slotDeliveryUnderThreshold define the
+// magnitude band that counts as "delivered within plan". The plan-vs-
+// actual ratio is computed as |actual| / max(|planned|, 1); ratios
+// outside [0.5, 1.5] increment the corresponding counter (when the
+// slot wasn't an idle one — see slotDeliveryIdleWhCutoff).
+const (
+	slotDeliveryOverThreshold  = 1.5
+	slotDeliveryUnderThreshold = 0.5
+	slotDeliveryIdleWhCutoff   = 50.0
+	slotDeliveryMaxTickDtS     = 300.0
+)
+
+// updateSlotDeliveryMetrics is the path-agnostic per-slot Wh tracker.
+// It runs on EVERY dispatch tick (every mode, every path) so reactive
+// paths that bypass the energy-allocation bookkeeping still feed an
+// independent record of "what did the fleet actually deliver this
+// slot, and how does that compare to the plan?". See State.slotActualWh
+// for the rationale and the cover-load carve-out (PR #378) context.
+//
+// When SlotDirective is unset or returns ok=false the accumulator is
+// paused for this tick: there's no slot context to attribute Wh to.
+//
+// When the directive's SlotStart advances the just-ended slot is
+// scored: |actual| / max(|planned|, 1). Ratios > 1.5 log an
+// over-delivery and bump OverDeliveryCount; ratios < 0.5 log
+// under-delivery and bump UnderDeliveryCount. Idle/charge slots
+// where |planned| ≤ slotDeliveryIdleWhCutoff are skipped — measuring
+// a ratio against ~0 is meaningless.
+//
+// The first-ever tick (zero-value slotActualSlotStart) initialises
+// the accumulator without emitting anything.
+func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Time) {
+	if state == nil || state.SlotDirective == nil {
+		return
+	}
+	dir, ok := state.SlotDirective(now)
+	if !ok {
+		return
+	}
+
+	if state.slotActualSlotStart.IsZero() {
+		state.slotActualSlotStart = dir.SlotStart
+		state.slotActualLastTs = now
+		state.slotActualWh = 0
+		state.slotActualPlannedWh = dir.BatteryEnergyWh
+		return
+	}
+
+	if !dir.SlotStart.Equal(state.slotActualSlotStart) {
+		// Slot rollover: evaluate the just-ended slot using the
+		// planned Wh cached from prior ticks. Reactive paths don't
+		// touch state.currentDirective (that's energy-path bookkeeping),
+		// so this accumulator keeps its own slotActualPlannedWh.
+		plannedWh := state.slotActualPlannedWh
+		if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
+			actualWh := state.slotActualWh
+			// Sign mismatch is the categorical failure mode: we moved
+			// energy in the opposite direction from the plan. Caught
+			// before the magnitude-ratio check below, which would
+			// otherwise treat opposite-sign-equal-magnitude (planned
+			// −425, actual +425) as ratio 1.0 = on target.
+			if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
+				slog.Info("dispatch slot sign mismatch",
+					"mode", state.Mode,
+					"planned_wh", plannedWh,
+					"actual_wh", actualWh,
+					"slot_start", state.slotActualSlotStart)
+				state.SlotDeliveryStats.SignMismatchCount++
+			} else {
+				ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
+				switch {
+				case ratio > slotDeliveryOverThreshold:
+					slog.Info("dispatch slot over-delivery",
+						"mode", state.Mode,
+						"planned_wh", plannedWh,
+						"actual_wh", actualWh,
+						"ratio", ratio,
+						"slot_start", state.slotActualSlotStart)
+					state.SlotDeliveryStats.OverDeliveryCount++
+				case ratio < slotDeliveryUnderThreshold:
+					slog.Info("dispatch slot under-delivery",
+						"mode", state.Mode,
+						"planned_wh", plannedWh,
+						"actual_wh", actualWh,
+						"ratio", ratio,
+						"slot_start", state.slotActualSlotStart)
+					state.SlotDeliveryStats.UnderDeliveryCount++
+				}
+			}
+		}
+		state.slotActualSlotStart = dir.SlotStart
+		state.slotActualLastTs = now
+		state.slotActualWh = 0
+		state.slotActualPlannedWh = dir.BatteryEnergyWh
+		return
+	}
+
+	dt := now.Sub(state.slotActualLastTs).Seconds()
+	if dt > 0 && dt < slotDeliveryMaxTickDtS {
+		state.slotActualWh += currentTotalW * dt / 3600.0
+	}
+	state.slotActualLastTs = now
+	// Keep the planned value fresh in case a mid-slot replan changed it.
+	state.slotActualPlannedWh = dir.BatteryEnergyWh
 }
 
 const (
@@ -774,6 +932,33 @@ func ComputeDispatch(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	// ---- Per-slot Wh delivery observability (path-agnostic) ----
+	// Runs on EVERY tick before any mode/short-circuit decision so the
+	// idle / charge / holdoff / reactive-fallback paths all contribute
+	// to the actual-delivered accumulator. Independent of the
+	// energy-allocation bookkeeping (slotDelivered) which only updates
+	// inside useEnergyPath — that's why reactive cover-load discharge
+	// (PR #378) and planner_passive_arbitrage idle slots are invisible
+	// to that accumulator. This one isn't.
+	//
+	// Pure observability — log + counter only. No dispatch decision
+	// reads SlotDeliveryStats; no Wh cap is applied to reactive paths
+	// from this data. The point is to measure first, decide whether a
+	// cap is warranted later.
+	{
+		now := time.Now()
+		var liveBatTotal float64
+		for name := range driverCapacities {
+			if r := store.Get(name, telemetry.DerBattery); r != nil {
+				h := store.DriverHealth(name)
+				if h != nil && h.IsOnline() {
+					liveBatTotal += r.SmoothedW
+				}
+			}
+		}
+		updateSlotDeliveryMetrics(state, liveBatTotal, now)
+	}
+
 	// ---- Planner modes: the plan is a scheduler, not a regulator ----
 	// The plan decides WHEN each strategy applies (self-consumption now,
 	// charge at 02:00, export at 17:00). The EMS decides HOW batteries
@@ -825,6 +1010,20 @@ func ComputeDispatch(
 	plannerSelfIdleGate := false
 	plannerSelfExportSurplusGate := false
 	plannerSelfNoChargeStalePlan := false
+	// passiveArbitrageIdleSlot tracks "we're in planner_passive_arbitrage on an
+	// idle plan-slot (BatteryEnergyWh ≈ 0)". For these slots the DP picked
+	// idle deliberately; the live-export gate below uses this to suppress
+	// reactive absorption when actual conditions show PV surplus the
+	// forecast missed (mirror of plannerSelfExportSurplusGate, but
+	// triggered by LIVE grid sign rather than planned grid — since
+	// passive_arbitrage idle slots can be set with planned grid near zero).
+	passiveArbitrageIdleSlot := false
+	// coverLoadDischargeSlot: planner_arbitrage discharge slot the DP
+	// picked for covering load rather than peak export (PlannedGridW ≈ 0).
+	// Same outer-scope lift as passiveArbitrageIdleSlot so the post-block
+	// fall-through can recognise carve-out slots and force grid_target=0
+	// instead of letting PlanTarget set the planned import.
+	coverLoadDischargeSlot := false
 	var currentDirective SlotDirective
 
 	// ---- Manual hold: highest-priority override ----
@@ -872,9 +1071,46 @@ func ComputeDispatch(
 				// Charge slots (BatteryEnergyWh > idleWh) still use the energy
 				// path so the DP's deliberate grid-charge intent is honoured.
 				const idleWhGate = 50.0
-				isPassiveArbitrageIdleSlot := state.Mode == ModePlannerPassiveArbitrage &&
-					dir.BatteryEnergyWh <= idleWhGate
-				if !isPassiveArbitrageIdleSlot {
+				// |BatteryEnergyWh| ≤ idleWhGate — true idle only. A
+				// planned-discharge slot is also ≤ idleWhGate by the
+				// signed comparison alone (negative numbers satisfy
+				// the inequality), and would incorrectly route the
+				// live-export charge block onto a deliberate discharge
+				// decision. passive_arbitrage doesn't plan discharge
+				// today; the predicate is defensive. Codex P2 / #375
+				// follow-up.
+				passiveArbitrageIdleSlot = state.Mode == ModePlannerPassiveArbitrage &&
+					math.Abs(dir.BatteryEnergyWh) <= idleWhGate
+				// planner_arbitrage cover-load discharge slots: same fallthrough.
+				// The energy path's "extra export is bonus revenue" carve-out
+				// (see SlotDirective.PlannedGridW doc) is correct for peak-export
+				// slots where the DP picked the slot for its export price. But
+				// when PlannedGridW ≈ 0 (or import), the DP picked discharge
+				// to *cover load* — no export was anticipated. Locking discharge
+				// at the planned rate then exports any forecast-load undershoot
+				// at the spot price the operator later buys back at consumer
+				// price. Reactive PI on grid=0 fixes both directions: load
+				// undershoot backs off; load overshoot ramps further. The
+				// passive_arbitrage variant of this carve-out already covers
+				// passive cover-load discharge (BatteryEnergyWh <= idleWh
+				// captures non-charge slots). Operator-report 2026-05-28.
+				const coverLoadExportToleranceW = 100.0
+				// Same cover-load reasoning applies in both planner_arbitrage
+				// and planner_passive_arbitrage. Both modes can plan a
+				// discharge slot whose purpose is to *cover load* (not to
+				// export at peak price); both need reactive PI on grid=0
+				// when the forecast load is wrong. The earlier (#378)
+				// implementation only listed planner_arbitrage and relied
+				// on the passive_arbitrage flag's loose predicate to fold
+				// in the passive variant — Codex P2 / #375 follow-up
+				// tightened that flag to true-idle only, so include the
+				// passive mode explicitly here.
+				coverLoadDischargeSlot = (state.Mode == ModePlannerArbitrage ||
+					state.Mode == ModePlannerPassiveArbitrage) &&
+					dir.HasPlannedGridW &&
+					dir.BatteryEnergyWh < -idleWhGate &&
+					dir.PlannedGridW > -coverLoadExportToleranceW
+				if !passiveArbitrageIdleSlot && !coverLoadDischargeSlot {
 					useEnergyPath = true
 				}
 				// Distribution mode is decoupled from planner strategy in
@@ -884,9 +1120,30 @@ func ComputeDispatch(
 				// weighted, they use the manual modes, not a planner mode.
 				effectiveMode = ModeSelfConsumption
 				state.PlanStale = false
+				// Carve-out slots must chase grid=0, not the legacy
+				// PlanTarget's planned grid. main.go wires PlanTarget
+				// alongside SlotDirective; for arbitrage cover-load,
+				// PlanTarget returns ("self_consumption", planned_import),
+				// and falling through to the !useEnergyPath branch below
+				// would SetGridTarget(+plannedImport) — defeating the
+				// reactive carve-out entirely. Force the setpoint here
+				// and skip the legacy lookup. Codex P1, PR #378 follow-up.
+				if passiveArbitrageIdleSlot || coverLoadDischargeSlot {
+					state.SetGridTarget(0)
+					// Mirror preparePlannerSelf (dispatch.go:797-804):
+					// if the slot was previously on the energy path —
+					// directly or via an operator mode-hop earlier in
+					// the same 15-min window — slotDelivered /
+					// lastTickTs / currentDirective hold stale values.
+					// A future transition back to the energy path
+					// within the same slot would then read those and
+					// miscompute remainingWh. Reset on every carve-out
+					// tick (idempotent).
+					resetEnergyDispatchBookkeeping(state)
+				}
 			}
 		}
-		if !useEnergyPath {
+		if !useEnergyPath && !passiveArbitrageIdleSlot && !coverLoadDischargeSlot {
 			var modeStr string
 			var gridW float64
 			ok := false
@@ -1037,10 +1294,6 @@ func ComputeDispatch(
 	// modes' non-discharge intent (planner_cheap / planner_arbitrage
 	// during charging slots) remains in scope.
 	noSelfDischarge := planNonDischargeIntent
-	// CHARGE-direction safeties for planner_self. exportSurplusGate +
-	// stale-plan block charge fully; idleGate applies a soft ceiling
-	// computed from live PV surplus (handled below, not via this flag).
-	noSelfCharge := !manualHoldActive && (plannerSelfExportSurplusGate || plannerSelfNoChargeStalePlan)
 
 	// ---- Sum of battery current power (site-signed) ----
 	// Used by both paths: legacy distributors take (currentTotal + correction);
@@ -1050,6 +1303,34 @@ func ComputeDispatch(
 		currentTotal += b.currentW
 	}
 	surplus := newSurplusAccounting(rawGridW, gridW, currentTotal, state)
+
+	// passive_arbitrage idle slot + live PV surplus: don't absorb. Forecasts
+	// guide FUTURE slots; for the slot we're already in, the live meter is
+	// authoritative. The DP picked idle here on purpose — when actual
+	// conditions diverge upward in PV (or downward in load) such that the
+	// baseline-grid-with-battery-at-zero shows export, sustain the DP's
+	// "don't charge" choice rather than letting reactive PI swallow it.
+	// baselineGridW removes the batteries' current contribution from the
+	// live meter — same shape as planner_self's planned-baseline gate, but
+	// computed from telemetry instead of the (possibly-stale) plan.
+	// Extended to cover-load discharge slots too (#379 follow-up): a
+	// planned-discharge slot whose forecast load doesn't materialise must
+	// not turn into "absorb the live PV surplus" via reactive PI on grid=0.
+	// Battery stays at 0 in both directions for the slot — neither
+	// reactive charge from PV nor force-export discharge.
+	passiveArbitrageIdleLiveExportGate := false
+	if passiveArbitrageIdleSlot || coverLoadDischargeSlot {
+		baselineGridW := gridW - currentTotal
+		if baselineGridW < -mpc.IdleGateThresholdW {
+			passiveArbitrageIdleLiveExportGate = true
+		}
+	}
+	// CHARGE-direction safeties for planner_self. exportSurplusGate +
+	// stale-plan block charge fully; idleGate applies a soft ceiling
+	// computed from live PV surplus (handled below, not via this flag).
+	// passiveArbitrageIdleLiveExportGate is the live-grid mirror that
+	// extends the same charge-block to planner_passive_arbitrage idle slots.
+	noSelfCharge := !manualHoldActive && (plannerSelfExportSurplusGate || plannerSelfNoChargeStalePlan || passiveArbitrageIdleLiveExportGate)
 
 	// ---- Compute totalCorrection — paths diverge here ----
 	var totalCorrection float64
@@ -2079,28 +2360,102 @@ func ComputePVCurtail(state *State, store *telemetry.Store) []CurtailTarget {
 		}
 	}
 
+	// Release path. A previously-curtailed driver gets an explicit
+	// `curtail_disable` (LimitW: 0) only when one of the following is
+	// true:
+	//   - the curtail directive has cleared (no slot, no manual hold)
+	//   - the driver is no longer in `state.SupportsPVCurtail` (config
+	//     change removed the opt-in)
+	//   - the driver went offline (no harm — driver can't receive
+	//     anyway, but keeps `state.LastCurtailedDrivers` clean)
+	//
+	// We deliberately do NOT release a driver just because it dropped
+	// out of the live proportional allocation due to its own |PV|
+	// crashing to ~0. That very thing often happens as a direct
+	// consequence of our prior curtail (the inverter throttled PV down
+	// to the cap, telemetry reports 0 generation, allocator excludes
+	// it next tick). Emitting a release in that case publishes
+	// `pplim arg=0` on Ferroamp's extapi — same wire bytes as the
+	// release would have, opposite semantics — and locks the inverter
+	// at 0 W PV until the operator clears it from the Ferroamp portal
+	// (sticky-lock trap, 2026-05-27 incident; see #367 for the driver-
+	// side hard-fail that paired with this dispatcher fix).
+	//
+	// While the directive is active and the driver is still online +
+	// supported, the right behaviour is to leave the existing pplim
+	// in place; the driver will get a fresh non-zero target as soon as
+	// its live |PV| returns to a level the allocator can split.
 	var out []CurtailTarget
-	// Release any driver we curtailed last tick but not this one.
+	suppressedTrack := map[string]bool{}
 	for d := range state.LastCurtailedDrivers {
-		if _, ok := next[d]; !ok {
-			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+		if _, stillActive := next[d]; stillActive {
+			continue
 		}
+		if !wantCurtail {
+			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+			continue
+		}
+		if !state.SupportsPVCurtail[d] {
+			out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+			continue
+		}
+		if store != nil {
+			if h := store.DriverHealth(d); h == nil || !h.IsOnline() {
+				out = append(out, CurtailTarget{Driver: d, LimitW: 0})
+				continue
+			}
+		}
+		// Online + supported + curtail still active + dropped from
+		// allocation. Don't release — the inverter is presumably at
+		// or near the previously-commanded cap and re-publishing 0
+		// would trip the sticky-pplim trap. Keep the driver in
+		// LastCurtailedDrivers so the next cycle's allocation decision
+		// is taken against an accurate baseline.
+		suppressedTrack[d] = true
 	}
 	for d, w := range next {
+		// Skip vanishingly-small per-driver shares. Proportional
+		// allocation can round a driver's share to ~0 when its live
+		// |PV| is small relative to the site total, and a curtail
+		// with power_w <= ~1 W lands at the driver as `pplim arg=0`
+		// on Ferroamp — the same sticky-lock trap. Better to leave
+		// the previous pplim in place for one cycle than risk it.
+		if w <= curtailMinPerDriverW {
+			continue
+		}
 		out = append(out, CurtailTarget{Driver: d, LimitW: w})
 	}
 
-	if len(next) == 0 {
+	// Update LastCurtailedDrivers to include every driver that either
+	// got a fresh non-zero target this tick OR was tracked through a
+	// suppressed-release decision above.
+	if len(out) == 0 && len(suppressedTrack) == 0 {
 		state.LastCurtailedDrivers = nil
 	} else {
-		updated := make(map[string]bool, len(next))
-		for d := range next {
+		updated := make(map[string]bool, len(out)+len(suppressedTrack))
+		for _, t := range out {
+			if t.LimitW > 0 {
+				updated[t.Driver] = true
+			}
+		}
+		for d := range suppressedTrack {
 			updated[d] = true
 		}
-		state.LastCurtailedDrivers = updated
+		if len(updated) == 0 {
+			state.LastCurtailedDrivers = nil
+		} else {
+			state.LastCurtailedDrivers = updated
+		}
 	}
 	return out
 }
+
+// curtailMinPerDriverW is the lower bound on a per-driver curtail
+// allocation. Anything at or below this is suppressed so we never
+// publish a near-zero pplim that some inverters (Ferroamp) treat as a
+// hard "limit to 0 W" sticky lock. Tuned conservatively — well below
+// any realistic curtail target operators actually want.
+const curtailMinPerDriverW = 1.0
 
 // pvCurtailBatterySoCMax is the fractional SoC ceiling above which a battery
 // is treated as having no curtail-absorption headroom. Below it, the

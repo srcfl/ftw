@@ -142,6 +142,42 @@ The plan becomes a **participation schedule** for this mode, not a
 power trajectory. The three principles still hold for the other planner
 modes where they make sense.
 
+## Exception: planner_arbitrage cover-load discharge
+
+`planner_arbitrage` discharge slots are not all alike. The DP picks a
+slot for one of two reasons:
+
+- **Peak-export intent** (`PlannedGridW < 0`): the export price at this
+  slot is high enough to make sending energy across the meter net
+  positive. Extra export from a load undershoot is bonus revenue.
+- **Cover-load intent** (`PlannedGridW ≈ 0` or import): the import price
+  at this slot is high enough to make discharging worthwhile against
+  *local load*. No export was anticipated; any export at this slot's
+  export price is energy the operator buys back later at consumer price.
+
+Until 2026-05-28 the EMS treated both identically on the
+energy-allocation path — `targetTotalW = remainingWh × 3600 / remainingS`
+runs whether the slot exports or not. An operator reported the symptom:
+plan baseload 1.7 kW, real load 0.9 kW, battery sat at -1.7 kW exporting
+800 W at spot, then bought it back later at the consumer rate.
+
+`planner_arbitrage` cover-load discharge slots therefore execute as
+**reactive PI-on-grid=0**, identical to `planner_self` participant slots
+and the existing `planner_passive_arbitrage` non-charge carve-out. Live
+load undershoot backs the battery off toward 0; live load overshoot
+ramps the battery further within driver limits.
+
+Detection (`go/internal/control/dispatch.go`): `state.Mode == planner_arbitrage`,
+`HasPlannedGridW`, `BatteryEnergyWh < -idleWhGate`, and
+`PlannedGridW > -coverLoadExportToleranceW` (default -100 W). Peak-export
+slots stay on the energy path; charge slots stay on the energy path.
+
+The Wh budget for the slot is *not* enforced as a hard cap on the
+reactive path. A 15-min slot × MaxDischargeW caps over-delivery at
+~1.25 kWh, and the next reactive replan (load-error integral >400 Wh)
+picks up the actual SoC for re-allocation. Symmetric to `planner_self`,
+which has run without a per-slot Wh cap since #130.
+
 ## Mode taxonomy
 
 Today's `Mode` is a soup of strategies, dispatch rules, and execution

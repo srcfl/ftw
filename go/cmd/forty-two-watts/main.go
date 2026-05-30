@@ -669,10 +669,14 @@ func main() {
 		loadPeakW = 5000
 	}
 	loadSvc := loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	// SeedHeatingCoef — operator config is a cold-start prior. Once the
+	// load model has accumulated samples in production, its
+	// telemetry-fit HeatingW_per_degC survives restart and the config
+	// value is ignored. See loadmodel/service.go for the rationale.
 	if cfg.Weather != nil {
-		loadSvc.SetHeatingCoef(cfg.Weather.HeatingWPerDegC)
+		loadSvc.SeedHeatingCoef(cfg.Weather.HeatingWPerDegC)
 	} else {
-		loadSvc.SetHeatingCoef(0)
+		loadSvc.SeedHeatingCoef(0)
 	}
 	// Temperature source for heating-gain fit: same forecast cache.
 	loadSvc.Temp = func(t time.Time) (float64, bool) {
@@ -711,7 +715,14 @@ func main() {
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
 		if pvSvc != nil {
-			mpcSvc.PV = pvSvc.Predict
+			// Use the unanchored structural predictor here: the MPC also
+			// receives PVResidualCorrect, which captures the same
+			// structural-vs-live bias the now-anchor would apply, so
+			// wiring Predict (anchored) would double-correct and the
+			// planner would see ~0 W PV on a sunny day with a heavy
+			// downward residual. See pvmodel.Service.PredictStructural.
+			mpcSvc.PV = pvSvc.PredictStructural
+			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
 		}
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict

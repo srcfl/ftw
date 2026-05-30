@@ -220,3 +220,140 @@ func TestService_PredictFallsBackWhenNoTelemetry(t *testing.T) {
 		t.Errorf("fallback should land near the raw prior (~900 W), got %.0f", got)
 	}
 }
+
+// ---- PredictStructural (unanchored) ----
+
+// TestPredict_AppliesNowAnchor — same scenario as
+// TestService_PredictAnchorsOnLiveTelemetry but framed as the explicit
+// pre-condition for PredictStructural's contract: with live telemetry
+// disagreeing with the model, Predict IS pulled toward the measurement.
+func TestPredict_AppliesNowAnchor(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+
+	svc := &Service{
+		Tele:     tel,
+		ClearSky: func(time.Time) float64 { return 800 },
+		Cloud:    func(time.Time) (float64, bool) { return 80, true },
+		model:    NewModel(10000),
+	}
+
+	rawPrior := svc.model.Predict(800, 80, time.Now())
+	anchored := svc.Predict(time.Now(), 80)
+	// The anchored prediction must be pulled UP toward 8000 W relative
+	// to the raw prior (~715 W) — the live PV is dramatically larger
+	// than what the forecast cloud cover suggests.
+	if anchored <= rawPrior*1.5 {
+		t.Errorf("Predict (anchored) should be pulled up by live 8 kW; got %.0f W (raw prior %.0f W)", anchored, rawPrior)
+	}
+}
+
+// TestPredictStructural_DoesNotApplyNowAnchor: under the same live-
+// disagreement scenario, PredictStructural returns the raw RLS output
+// untouched. This is the property that prevents double-correction when
+// the residual buffer is also wired.
+func TestPredictStructural_DoesNotApplyNowAnchor(t *testing.T) {
+	tel := telemetry.NewStore()
+	// 8 kW live, but model predicts ~715 W from the prior.
+	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+
+	svc := &Service{
+		Tele:     tel,
+		ClearSky: func(time.Time) float64 { return 800 },
+		Cloud:    func(time.Time) (float64, bool) { return 80, true },
+		model:    NewModel(10000),
+	}
+
+	now := time.Now()
+	rawPrior := svc.model.Predict(800, 80, now)
+	structural := svc.PredictStructural(now, 80)
+	if math.Abs(structural-rawPrior) > 1e-6 {
+		t.Errorf("PredictStructural = %.6f W, want %.6f W (no anchor; live telemetry must be ignored)", structural, rawPrior)
+	}
+
+	// Sanity: the anchored Predict path DOES respond — confirms the
+	// telemetry plumbing is wired so the "doesn't respond" assertion
+	// above is meaningful, not a no-op.
+	anchored := svc.Predict(now, 80)
+	if anchored <= structural*1.5 {
+		t.Fatalf("test setup broken: anchored Predict (%.0f W) should differ from structural (%.0f W); live telemetry not reaching applyNowAnchor", anchored, structural)
+	}
+}
+
+// TestPredictStructural_StillRespectsRLS: the unanchored variant is not
+// a frozen baseline — it tracks the RLS coefficients. Feed enough
+// training samples to shift Beta and verify the structural prediction
+// follows.
+func TestPredictStructural_StillRespectsRLS(t *testing.T) {
+	svc := &Service{
+		ClearSky: func(time.Time) float64 { return 800 },
+		Cloud:    func(time.Time) (float64, bool) { return 20, true },
+		model:    NewModel(5000),
+	}
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	before := svc.PredictStructural(now, 20)
+
+	// Drive ~60 RLS updates against a synthetic "actual" that is well
+	// above what the cold-start prior would predict. RLS should track
+	// the new operating point.
+	target := before * 1.6
+	for i := 0; i < 60; i++ {
+		svc.mu.Lock()
+		svc.model.Update(800, 20, now, target)
+		svc.mu.Unlock()
+	}
+	after := svc.PredictStructural(now, 20)
+	if after <= before*1.1 {
+		t.Errorf("PredictStructural did not track RLS update: before=%.0f W, after=%.0f W (target was %.0f W)", before, after, target)
+	}
+}
+
+// TestResidualBufferSampler_UsesStructuralPrediction: when sample()
+// records into the residual buffer, the "predicted" component must be
+// the structural prediction (no now-anchor), not the anchored Predict.
+// Otherwise the buffer captures (anchored, actual) and the residual
+// double-counts the same correction the anchor already applied —
+// exactly the bug we're fixing.
+//
+// We set up a Service where Predict would anchor heavily upward (live
+// 8 kW vs raw prior ~715 W) and then drive a single sample(). The
+// recorded `predicted` should match the raw model prior, not the
+// anchored 3.5 kW.
+func TestResidualBufferSampler_UsesStructuralPrediction(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("pv", telemetry.DerPV, -8000, nil, nil)
+
+	svc := &Service{
+		Tele:         tel,
+		ClearSky:     func(time.Time) float64 { return 800 },
+		Cloud:        func(time.Time) (float64, bool) { return 80, true },
+		model:        NewModel(10000),
+		Residuals:    NewResidualBuffer(),
+		PersistEvery: 10, // avoid mod-by-zero in sample(); no Store means persist() no-ops
+	}
+
+	// Verify the test setup: anchored vs structural disagree.
+	now := time.Now()
+	structural := svc.PredictStructural(now, 80)
+	anchored := svc.Predict(now, 80)
+	if anchored <= structural*1.5 {
+		t.Fatalf("test setup broken: need anchored ≫ structural to detect the bug, got anchored=%.0f structural=%.0f", anchored, structural)
+	}
+
+	svc.sample()
+
+	if got := svc.Residuals.Len(); got != 1 {
+		t.Fatalf("residual buffer should have exactly one sample after sample(), got %d", got)
+	}
+	svc.Residuals.mu.Lock()
+	rec := svc.Residuals.samples[0]
+	svc.Residuals.mu.Unlock()
+	// Recorded "predicted" must be the structural value (within
+	// floating noise), not the anchored 3.5 kW.
+	if math.Abs(rec.predicted-structural) > 1.0 {
+		t.Errorf("residual sampler captured predicted=%.2f W; want structural=%.2f W (anchored would have been %.2f W)", rec.predicted, structural, anchored)
+	}
+	if rec.predicted >= anchored*0.5 {
+		t.Errorf("residual sampler captured %.0f W which looks anchored (anchored=%.0f); must be the unanchored structural %.0f", rec.predicted, anchored, structural)
+	}
+}

@@ -374,13 +374,41 @@ func (s *Service) persist() error {
 }
 
 // SetHeatingCoef lets the operator declare heating-load sensitivity
-// from config. Units: W per °C below 18°C. 0 disables.
+// explicitly. Units: W per °C below 18°C. 0 disables. Always overwrites
+// the current value across all profiles. Use SeedHeatingCoef on startup
+// so a learned coefficient survives restarts.
 func (s *Service) SetHeatingCoef(w float64) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	for _, model := range s.models {
+		model.HeatingW_per_degC = w
+	}
+	s.mu.Unlock()
+}
+
+// SeedHeatingCoef applies an operator-config heating-load sensitivity
+// only as a cold-start prior. Per profile: if the model already has
+// telemetry-driven samples (Samples > 0), its learned coefficient is
+// preserved; the seed value is ignored for that profile.
+//
+// This is the startup-path entry point. Operator config is the prior;
+// observation drives the value once learning has begun. Without this
+// guard, every restart would clobber the learned coefficient with the
+// (often-stale) config value — defeating the adaptive fit.
+//
+// Operators who want to forcibly reset the coefficient should hit the
+// reset endpoint (which clears bucket samples) or call SetHeatingCoef.
+func (s *Service) SeedHeatingCoef(w float64) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	for _, model := range s.models {
+		if model.Samples > 0 {
+			continue
+		}
 		model.HeatingW_per_degC = w
 	}
 	s.mu.Unlock()

@@ -242,3 +242,90 @@ func TestRepairPoisonedBuckets(t *testing.T) {
 		t.Errorf("healthy bucket should be untouched: got %.0f W, want 2200 W", m.Bucket[eveningIdx].Mean)
 	}
 }
+
+// TestHeatingCoefLearnsFromMeasurements — a household whose load grows with
+// the heating-degrees signal should converge to roughly the true sensitivity
+// from measurements alone. The old behaviour was operator-only: coef stayed
+// at whatever the human typed in (or 0 if untyped). With online adaptation,
+// the model uses what it observes — including across mixed warm/cold days
+// where the warm days anchor the bucket baseline.
+func TestHeatingCoefLearnsFromMeasurements(t *testing.T) {
+	const trueBase = 800.0
+	const trueCoef = 250.0 // W per °C below 18°C
+	m := NewModel(8000)
+	rng := rand.New(rand.NewSource(7))
+	t0 := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	// 80 weeks of hourly samples (~13.5k) — every bucket gets ~80 samples,
+	// alternating warm (no heating signal) and cold (heating signal) days.
+	for i := 0; i < 80*7*24; i++ {
+		ts := t0.Add(time.Duration(i) * time.Hour)
+		// Day index alternates warm vs cold so each bucket trains under
+		// both regimes; bucket Mean anchors on warm samples, heating
+		// coefficient learns from the cold-day excess.
+		day := i / 24
+		var tempC float64
+		if day%2 == 0 {
+			tempC = 19.0 // warm — no heating contribution
+		} else {
+			tempC = 6.0 // cold — deltaT = 12 → +3000 W heating contribution
+		}
+		deltaT := math.Max(0, HeatingReferenceC-tempC)
+		actual := trueBase + trueCoef*deltaT + (rng.Float64()*2-1)*40
+		m.Update(ts, actual, tempC)
+	}
+	if math.Abs(m.HeatingW_per_degC-trueCoef) > 80 {
+		t.Errorf("heating coef should learn ~%.0f W/°C, got %.0f W/°C",
+			trueCoef, m.HeatingW_per_degC)
+	}
+}
+
+// TestHeatingCoefLearnsDownForUnheatedHome — operator may have configured a
+// non-zero heating coefficient, but if the actual load shows no temperature
+// dependence (district heating, all-electric with no thermostat coupling, or
+// even an over-shaded house dominated by solar gain in shoulder season),
+// the learned coefficient must adapt downward toward 0. Without this, a
+// stale operator value silently inflates forecast load on every cold-day
+// slot — which is exactly the failure mode that bit site .40 in May 2026
+// (300 W/°C × 6.6°C cold → 1980 W of phantom load while the sun was out).
+func TestHeatingCoefLearnsDownForUnheatedHome(t *testing.T) {
+	const trueBase = 800.0
+	m := NewModel(8000)
+	m.HeatingW_per_degC = 500 // operator-set; actual home is unheated
+	rng := rand.New(rand.NewSource(11))
+	t0 := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 80*7*24; i++ {
+		ts := t0.Add(time.Duration(i) * time.Hour)
+		day := i / 24
+		var tempC float64
+		if day%2 == 0 {
+			tempC = 19.0
+		} else {
+			tempC = 6.0
+		}
+		// Actual load is temperature-independent — pure noise around base.
+		actual := trueBase + (rng.Float64()*2-1)*40
+		m.Update(ts, actual, tempC)
+	}
+	if m.HeatingW_per_degC > 80 {
+		t.Errorf("unheated home: heating coef should drift toward 0, got %.0f W/°C",
+			m.HeatingW_per_degC)
+	}
+}
+
+// TestHeatingFitWaitsForBucketTrust — the heating regression piggybacks on
+// the bucket-baseline estimate; if buckets haven't accumulated enough
+// samples, the residual `(actual − bucket.Mean)` is dominated by prior
+// error, not by the heating term. Fitting heating off untrustworthy buckets
+// produces wild swings — gate the fit on bucket trust the same way Predict
+// gates the bucket EMA blend.
+func TestHeatingFitWaitsForBucketTrust(t *testing.T) {
+	m := NewModel(8000)
+	// Feed exactly one cold sample at a single bucket. Bucket samples count
+	// will be 1 — far below MinTrustSamples. The heating coef must not
+	// jump from this single under-trusted observation.
+	t0 := time.Date(2026, 1, 5, 12, 0, 0, 0, time.UTC)
+	m.Update(t0, 5000, 5.0) // arbitrary big load, cold day
+	if m.HeatingW_per_degC != 0 {
+		t.Errorf("untrusted bucket must not drive heating fit, coef = %.0f", m.HeatingW_per_degC)
+	}
+}
