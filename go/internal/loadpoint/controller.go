@@ -68,6 +68,9 @@ type Controller struct {
 	// disables the per-phase fields in the cmd; the driver then
 	// falls back to its own configured defaults.
 	site SiteFuse
+	// siteMu guards site against concurrent SetSiteFuse hot-reloads
+	// (config-reload goroutine) vs the tick goroutine's reads.
+	siteMu sync.RWMutex
 
 	// holds is the manual-override registry: per-loadpoint power +
 	// phase parameters that win over the MPC-driven dispatch until
@@ -499,7 +502,11 @@ func nextFusePhaseCapA(prevCapA, worstMeterA, fuseA, marginA, stepA float64) flo
 // see nextFusePhaseCapA. Called just before the cmd is dispatched so it caps
 // whatever the paths above set. Operator report 2026-05-30.
 func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
-	if c == nil || c.perPhaseMeterAmps == nil || c.site.MaxAmps <= 0 {
+	if c == nil || c.perPhaseMeterAmps == nil {
+		return
+	}
+	fuseA := c.siteFuse().MaxAmps
+	if fuseA <= 0 {
 		return
 	}
 	l1, l2, l3, ok := c.perPhaseMeterAmps()
@@ -510,15 +517,15 @@ func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
 	if c.fusePhaseCapA == nil {
 		c.fusePhaseCapA = map[string]float64{}
 	}
-	capA := nextFusePhaseCapA(c.fusePhaseCapA[lpCfg.ID], worst, c.site.MaxAmps, fusePhaseMarginA, fusePhaseStepUpA)
+	capA := nextFusePhaseCapA(c.fusePhaseCapA[lpCfg.ID], worst, fuseA, fusePhaseMarginA, fusePhaseStepUpA)
 	c.fusePhaseCapA[lpCfg.ID] = capA
-	if capA >= c.site.MaxAmps {
+	if capA >= fuseA {
 		return
 	}
 	if existing, has := cmd["max_amps_per_phase"].(float64); !has || capA < existing {
 		cmd["max_amps_per_phase"] = capA
 		slog.Info("loadpoint per-phase fuse clamp",
-			"lp", lpCfg.ID, "worst_phase_a", worst, "ev_cap_a", capA, "fuse_a", c.site.MaxAmps)
+			"lp", lpCfg.ID, "worst_phase_a", worst, "ev_cap_a", capA, "fuse_a", fuseA)
 	}
 }
 
@@ -953,7 +960,17 @@ func (c *Controller) SetSiteFuse(f SiteFuse) {
 	if c == nil {
 		return
 	}
+	c.siteMu.Lock()
 	c.site = f
+	c.siteMu.Unlock()
+}
+
+// siteFuse returns a snapshot of the site fuse under read lock, safe
+// against a concurrent SetSiteFuse hot-reload.
+func (c *Controller) siteFuse() SiteFuse {
+	c.siteMu.RLock()
+	defer c.siteMu.RUnlock()
+	return c.site
 }
 
 // SetManualHold pins the given loadpoint to a fixed dispatch payload
@@ -1147,23 +1164,24 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		case lpCfg.MinPhaseHoldS > 0:
 			cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
 		}
+		site := c.siteFuse()
 		switch {
 		case hold.Voltage > 0:
 			cmd["voltage"] = hold.Voltage
-		case c.site.Voltage > 0:
-			cmd["voltage"] = c.site.Voltage
+		case site.Voltage > 0:
+			cmd["voltage"] = site.Voltage
 		}
 		switch {
 		case hold.MaxAmpsPerPhase > 0:
 			cmd["max_amps_per_phase"] = hold.MaxAmpsPerPhase
-		case c.site.MaxAmps > 0:
-			cmd["max_amps_per_phase"] = c.site.MaxAmps
+		case site.MaxAmps > 0:
+			cmd["max_amps_per_phase"] = site.MaxAmps
 		}
 		switch {
 		case hold.SitePhases > 0:
 			cmd["site_phases"] = hold.SitePhases
-		case c.site.MaxAmps > 0:
-			cmd["site_phases"] = c.site.Phases()
+		case site.MaxAmps > 0:
+			cmd["site_phases"] = site.Phases()
 		}
 	} else {
 		cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
@@ -1292,11 +1310,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// ceiling using the actual mains voltage instead of hard-coding
 		// 230 V × 16 A. Drivers that don't support phase switching can
 		// safely ignore these fields.
-		if c.site.MaxAmps > 0 {
-			cmd["max_amps_per_phase"] = c.site.MaxAmps
-			cmd["site_phases"] = c.site.Phases()
+		site := c.siteFuse()
+		if site.MaxAmps > 0 {
+			cmd["max_amps_per_phase"] = site.MaxAmps
+			cmd["site_phases"] = site.Phases()
 		}
-		if v := c.site.Voltage; v > 0 {
+		if v := site.Voltage; v > 0 {
 			cmd["voltage"] = v
 		}
 	}

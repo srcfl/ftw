@@ -416,6 +416,11 @@ func main() {
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
 
+	// Forward-declared before the reload watcher so the reload callback
+	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
+	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
+	var lpController *loadpoint.Controller
+
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
 		func(newCfg, oldCfg *config.Config) {
@@ -461,6 +466,20 @@ func main() {
 			// explicit 0 → disabled. See EffectiveSafetyMarginA.
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 			ctrlMu.Unlock()
+
+			// Keep the loadpoint controller's per-phase EV fuse clamp in
+			// sync with hot-reloaded fuse params — previously startup-only,
+			// so an operator tuning max_amps / margin from the UI updated
+			// the control-package battery lever (above) but left the EV
+			// clamp on the stale startup value until restart. SetSiteFuse
+			// takes its own lock; call it outside ctrlMu.
+			if lpController != nil {
+				lpController.SetSiteFuse(loadpoint.SiteFuse{
+					MaxAmps:  newCfg.Fuse.MaxAmps,
+					Voltage:  newCfg.Fuse.Voltage,
+					PhaseCnt: newCfg.Fuse.Phases,
+				})
+			}
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -700,12 +719,6 @@ func main() {
 	loadSvc.Start(ctx)
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
-
-	// Forward-declared so the MPC spec builder closure (set below) can
-	// push grid-deferred state into the runtime controller. The
-	// controller itself is constructed further down once its
-	// dependencies (planAdapter, telAdapter, registry) are wired.
-	var lpController *loadpoint.Controller
 
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
