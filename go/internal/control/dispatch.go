@@ -348,10 +348,10 @@ type State struct {
 	// resulting counters surface on /api/status so operators can spot
 	// systemic forecast vs reality drift. Site-signed: negative = the
 	// fleet discharged Wh during the slot.
-	slotActualWh         float64
-	slotActualLastTs     time.Time
-	slotActualSlotStart  time.Time
-	slotActualPlannedWh  float64 // planned BatteryEnergyWh cached for the slot in flight
+	slotActualWh        float64
+	slotActualLastTs    time.Time
+	slotActualSlotStart time.Time
+	slotActualPlannedWh float64 // planned BatteryEnergyWh cached for the slot in flight
 
 	// SlotDeliveryStats counts how many slots ended with the actual
 	// fleet delivery falling outside ±50 % of the planned magnitude.
@@ -2962,7 +2962,8 @@ func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map
 // The caps are asymmetric on purpose — real hybrid inverters often have
 // different charge and discharge capability (e.g. Ferroamp 15 kW charge /
 // 10 kW discharge). Issue #145.
-func clampWithSoC(target float64, b batteryInfo) (float64, bool) {	clamped := target
+func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
+	clamped := target
 	wasClamped := false
 	// Block discharge when the battery is empty.
 	if b.soc < 0.05 && target < 0 {
