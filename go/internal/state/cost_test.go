@@ -305,6 +305,50 @@ func TestDailyCostBreakdown_EVChargingPricedAtDailyAverage(t *testing.T) {
 	}
 }
 
+// Regression: EV energy charged during a price GAP (no covering slot) must
+// NOT inflate the EV baseline. Before the fix, EVWh counted uncovered
+// samples and BaselineEvOre priced them at the daily average — manufacturing
+// savings with no matching actual import cost. The house baseline already
+// gates on coverage (BaselineHouseOre only accrues when covering != nil); EV
+// must too. Mirrors the rationale in cost.go.
+func TestDailyCostBreakdown_EVInPriceGapExcludedFromBaseline(t *testing.T) {
+	s := freshStore(t)
+
+	// Only ONE slot: hour 1 [0, 3.6M) at 100 öre. Hour 2 [3.6M, 7.2M) has
+	// no price slot — a gap.
+	if err := s.SavePrices([]PricePoint{
+		{Zone: "SE3", SlotTsMs: 0, SlotLenMin: 60, SpotOreKwh: 100, TotalOreKwh: 100, Source: "test"},
+	}); err != nil {
+		t.Fatalf("save prices: %v", err)
+	}
+
+	// EV charges 11 kW across BOTH hours (grid imports 11 kW, no house load):
+	//   row @3.6M → EV over (0, 3.6M]   midpoint 1.8M  → COVERED
+	//   row @7.2M → EV over (3.6M, 7.2M] midpoint 5.4M → GAP (no slot)
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 0, GridW: 11000, LoadW: 0},
+		{TsMs: 3_600_000, GridW: 11000, LoadW: 0},
+		{TsMs: 7_200_000, GridW: 11000, LoadW: 0},
+	}); err != nil {
+		t.Fatalf("record history: %v", err)
+	}
+
+	b, err := s.DailyCostBreakdown(0, 7_200_000, "SE3", ExportPricing{})
+	if err != nil {
+		t.Fatalf("breakdown: %v", err)
+	}
+
+	// Only the covered hour's 11 kWh of EV counts toward the priced baseline;
+	// the gap hour's 11 kWh must be excluded (no phantom savings).
+	if !approxEq(b.EVWh, 11_000, 0.01) {
+		t.Errorf("EVWh = %.4f, want 11000 (gap-hour EV excluded)", b.EVWh)
+	}
+	// avg import = 100 öre (single slot). Baseline EV = 11 kWh × 100 = 1100 öre.
+	if !approxEq(b.BaselineEvOre, 1100, 0.01) {
+		t.Errorf("BaselineEvOre = %.4f, want 1100 (gap EV must not inflate baseline)", b.BaselineEvOre)
+	}
+}
+
 // Dumb EV charging on the expensive hour must show up as a loss vs the
 // daily-average baseline — the metric is symmetric and doesn't only credit
 // good decisions.

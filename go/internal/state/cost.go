@@ -165,7 +165,10 @@ func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]p
 // Slots are walked with a sliding pointer: both sides are ascending, so for
 // each midpoint we advance until the slot's EndMs is past the midpoint.
 // Samples whose midpoint has no covering slot still count toward ImportWh,
-// ExportWh, LoadWh, and EVWh but contribute zero to cost / revenue.
+// ExportWh, and LoadWh but contribute zero to cost / revenue. EVWh is the
+// exception: it is gated on coverage too, because it feeds the priced EV
+// baseline (BaselineEvOre) — counting gap-hour EV would inflate savings
+// with no matching actual cost.
 //
 // EV power is derived per row as `grid_w − bat_w − pv_w − load_w` (clamped
 // non-negative — the same identity main.go uses in reverse to compute
@@ -249,8 +252,12 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 
 		// EV = grid_w − bat_w − pv_w − load_w. Clamp negative noise to
 		// zero (matches main.go's clamp on load_w going the other way).
+		// Gate on `covering`: EVWh feeds BaselineEvOre (priced at the
+		// daily average), so counting EV charged in a price gap would
+		// credit a baseline with no matching actual import cost —
+		// phantom savings. The house baseline gates the same way above.
 		evW := gridW - batW - pvW - loadW
-		if evW > 0 {
+		if evW > 0 && covering != nil {
 			out.EVWh += evW * float64(dtMs) / 3600000.0
 		}
 
