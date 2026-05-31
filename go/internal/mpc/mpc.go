@@ -35,6 +35,7 @@ package mpc
 
 import (
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -415,15 +416,35 @@ func Optimize(slots []Slot, p Params) Plan {
 		return s.Confidence*raw + (1-s.Confidence)*meanExport
 	}
 
-	// Action grid spans −MaxDischargeW … +MaxChargeW. Forcing an odd
-	// ActionLevels puts 0 exactly at the midpoint.
-	actionAt := func(j int) float64 {
-		if A == 1 {
-			return 0
-		}
+	// Action grid spans −MaxDischargeW … +MaxChargeW and always contains
+	// 0 W. With asymmetric charge/discharge limits, an odd number of evenly
+	// spaced points does not put zero at the midpoint, so inject it
+	// explicitly and remember the true idle index for infeasible fallbacks.
+	actionGrid := make([]float64, 0, A+1)
+	hasZero := false
+	for j := 0; j < A; j++ {
 		frac := float64(j) / float64(A-1) // 0..1
-		return -p.MaxDischargeW + frac*(p.MaxChargeW+p.MaxDischargeW)
+		w := -p.MaxDischargeW + frac*(p.MaxChargeW+p.MaxDischargeW)
+		if math.Abs(w) < 1e-9 {
+			w = 0
+			hasZero = true
+		}
+		actionGrid = append(actionGrid, w)
 	}
+	if !hasZero {
+		actionGrid = append(actionGrid, 0)
+	}
+	sort.Float64s(actionGrid)
+	A = len(actionGrid)
+	idleActionIdx := 0
+	idleAbs := math.Inf(1)
+	for i, w := range actionGrid {
+		if aw := math.Abs(w); aw < idleAbs {
+			idleAbs = aw
+			idleActionIdx = i
+		}
+	}
+	actionAt := func(j int) float64 { return actionGrid[j] }
 
 	// EV dimensions. When no loadpoint is active, EL=EA=1 and the
 	// EV loops degenerate to a single pass that adds zero power /
@@ -818,7 +839,7 @@ func Optimize(slots []Slot, p Params) Plan {
 				// DP avoids routing through this infeasible region
 				// when a legal path exists.
 				if math.IsInf(bestV, 1) {
-					bestPolicy = ((A - 1) / 2) * EA
+					bestPolicy = idleActionIdx * EA
 				}
 				V[t][si][ei] = bestV
 				Policy[t][si][ei] = bestPolicy

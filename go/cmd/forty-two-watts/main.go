@@ -382,13 +382,16 @@ func main() {
 			slog.Warn("failed to persist loadpoint surplus_only", "lp", id, "err", err)
 		}
 	})
-	lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
-		v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
-		if !ok || v == "" {
-			return false, false
-		}
-		return v == "true", true
-	})
+	hydrateLoadpointSurplusOnly := func() {
+		lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
+			v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
+			if !ok || v == "" {
+				return false, false
+			}
+			return v == "true", true
+		})
+	}
+	hydrateLoadpointSurplusOnly()
 	// Seed any recurring deadlines from boot — without this the first
 	// dispatch tick would race with an empty target_time and might
 	// miss the deadline penalty for ~5 s.
@@ -501,6 +504,7 @@ func main() {
 			// observed state across reloads (plug status, session
 			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
+			hydrateLoadpointSurplusOnly()
 
 			// Notifications: rebuild the provider from fresh config
 			// (handles the cold-start case where the initial config
@@ -1782,7 +1786,7 @@ func main() {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					_ = reg.SendDefault(ctx, tr.Name)
+					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
@@ -1826,21 +1830,8 @@ func main() {
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
-				for _, n := range reg.Names() {
-					// Skip the site-meter driver itself: when it's both
-					// the meter AND a battery (e.g. Pixii), its meter
-					// going stale is usually because its own modbus poll
-					// stalled. Writing setpoint 0 into that same hung
-					// session disrupts whatever it was already doing
-					// and creates a flap loop — the symptom the user
-					// actually sees is the battery cutting in/out
-					// every minute. The protection rationale (don't
-					// charge from a stale grid signal) only applies to
-					// OTHER batteries, not the meter owner itself.
-					if n == ctrl.SiteMeterDriver {
-						continue
-					}
-					_ = reg.SendDefault(ctx, n)
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
+					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
 			}
@@ -2125,6 +2116,35 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 	}
 }
 
+const driverDefaultTimeout = 2 * time.Second
+
+func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
+	defer cancel()
+	if err := reg.SendDefault(cmdCtx, name); err != nil {
+		slog.Warn("driver default command failed",
+			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
+	}
+}
+
+// driversToDefaultOnSiteMeterStale returns the driver names to revert to
+// DefaultMode when the site meter goes stale: every driver EXCEPT the
+// site-meter owner itself. Skipping the meter owner avoids a flap loop on
+// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
+// reading is usually their own hung modbus poll — writing DefaultMode into
+// that same session cuts the battery in/out every minute. The "don't act on
+// a stale grid signal" protection only applies to the OTHER batteries.
+func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == siteMeterDriver {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
 // the MPC sums into Params.CapacityWh and the control layer uses for
 // fuse-guard / peak-shave sizing.
@@ -2329,6 +2349,7 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			PhaseMode:         lp.PhaseMode,
 			PhaseSplitW:       lp.PhaseSplitW,
 			MinPhaseHoldS:     lp.MinPhaseHoldS,
+			SurplusOnly:       lp.SurplusOnly,
 		})
 	}
 	return out
