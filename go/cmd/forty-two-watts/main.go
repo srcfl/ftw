@@ -1830,7 +1830,7 @@ func main() {
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
-				for _, n := range reg.Names() {
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
 					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
@@ -2125,6 +2125,24 @@ func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason 
 		slog.Warn("driver default command failed",
 			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
 	}
+}
+
+// driversToDefaultOnSiteMeterStale returns the driver names to revert to
+// DefaultMode when the site meter goes stale: every driver EXCEPT the
+// site-meter owner itself. Skipping the meter owner avoids a flap loop on
+// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
+// reading is usually their own hung modbus poll — writing DefaultMode into
+// that same session cuts the battery in/out every minute. The "don't act on
+// a stale grid signal" protection only applies to the OTHER batteries.
+func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == siteMeterDriver {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
