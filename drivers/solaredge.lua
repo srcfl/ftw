@@ -189,6 +189,43 @@ local function decode_ascii(regs, n)
 end
 
 ----------------------------------------------------------------------------
+-- Fingerprint
+----------------------------------------------------------------------------
+
+-- driver_fingerprint() — passive probe used by /api/drivers/fingerprint to
+-- auto-detect what's listening on a Modbus endpoint. NEVER writes to the
+-- device (no curtail-register access here). Tri-state:
+--   true  → SunSpec common block reports manufacturer "SolarEdge"
+--   false → responded, but it's a non-SolarEdge device (no SunSpec marker,
+--           or a SunSpec marker from another vendor)
+--   nil    → couldn't read (wrong unit id, not Modbus, timeout) → inconclusive
+function driver_fingerprint()
+    -- SunSpec identifier "SunS" lives at 40000-40001 (0x5375, 0x6E53).
+    local ok, sid = pcall(host.modbus_read, 40000, 2, "input")
+    if not ok or sid == nil or sid[1] == nil or sid[2] == nil then
+        return nil
+    end
+    if sid[1] ~= 0x5375 or sid[2] ~= 0x6E53 then
+        return false -- answered Modbus but not a SunSpec device
+    end
+    -- Common block manufacturer string at 40004 (16 regs ASCII).
+    local mok, mfg_regs = pcall(host.modbus_read, 40004, 16, "input")
+    if not mok or mfg_regs == nil then
+        return nil
+    end
+    local mfg = decode_ascii(mfg_regs, 16)
+    if mfg:sub(1, 9) ~= "SolarEdge" then
+        return false -- SunSpec, but a different vendor (Fronius, SMA, …)
+    end
+    local serial = ""
+    local sok, sn_regs = pcall(host.modbus_read, 40052, 16, "input")
+    if sok and sn_regs ~= nil then
+        serial = decode_ascii(sn_regs, 16)
+    end
+    return true, { make = "SolarEdge", serial = serial, confidence = 0.97 }
+end
+
+----------------------------------------------------------------------------
 -- Lifecycle
 ----------------------------------------------------------------------------
 

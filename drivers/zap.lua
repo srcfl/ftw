@@ -181,6 +181,43 @@ local function fetch_device(sn)
 end
 
 ----------------------------------------------------------------------------
+-- Fingerprint
+----------------------------------------------------------------------------
+
+-- driver_fingerprint(target) — passive HTTP probe for
+-- /api/drivers/fingerprint and /api/scan?fingerprint=1. GETs the Zap's
+-- local JSON device list and matches on its signature shape. Read-only;
+-- uses target.base_url (the scanned endpoint) rather than the configured
+-- zap_host, since driver_init has not run. Tri-state:
+--   true  → GET <base>/api/devices returned the Zap's {devices=[…]} shape
+--   false → :80 answered HTTP, but it isn't the Zap device API
+--   nil    → no usable HTTP response (port closed, timeout) → inconclusive
+function driver_fingerprint(target)
+    local base = target and target.base_url
+    if not base or base == "" then
+        return nil
+    end
+    local body, err = host.http_get(base .. "/api/devices")
+    if err or not body then
+        return nil
+    end
+    local data = host.json_decode(body)
+    if type(data) ~= "table" or type(data.devices) ~= "table" then
+        return false -- answered HTTP, but not the Zap device API
+    end
+    -- A Zap device entry carries `sn` plus a `type` / `device_type`. Latch
+    -- the P1 serial as the gateway identity when present.
+    local serial = nil
+    for _, dev in ipairs(data.devices) do
+        if type(dev) == "table" and dev.type == "p1_uart" and dev.sn then
+            serial = dev.sn
+            break
+        end
+    end
+    return true, { make = "Sourceful", model = "Zap", serial = serial or "", confidence = 0.95 }
+end
+
+----------------------------------------------------------------------------
 -- Driver interface
 ----------------------------------------------------------------------------
 

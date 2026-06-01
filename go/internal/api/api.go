@@ -312,6 +312,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/drivers", s.handleDrivers)
 	s.handle("GET  /api/drivers/catalog", s.handleDriversCatalog)
 	s.handle("POST /api/drivers/test", s.handleDriverTest)
+	s.handle("POST /api/drivers/fingerprint", s.handleDriverFingerprint)
 	s.handle("GET  /api/drivers/{name}", s.handleDriverDetail)
 	s.handle("GET  /api/drivers/{name}/logs", s.handleDriverLogs)
 	s.handle("GET  /api/logs", s.handleGlobalLogs)
@@ -2207,14 +2208,26 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 
 // ---- network scan ----
 
-// handleScan: GET /api/scan
+// handleScan: GET /api/scan[?fingerprint=1]
 // Probes the local network for devices on common energy-protocol ports
 // (Modbus 502, MQTT 1883, HTTP 80). Used by Settings → Scan and the
 // bootstrap wizard.
+//
+// With ?fingerprint=1 each discovered Modbus host is additionally probed
+// against every Modbus-speaking driver's driver_fingerprint hook, and the
+// confirmed matches are attached under each device's `matches` field —
+// turning "port 502 is open" into "that's a SolarEdge". Without the flag
+// the response is unchanged (matches omitted), so existing callers are
+// unaffected. The flag is opt-in because fingerprinting opens a Modbus
+// connection per candidate and is materially slower than a bare port scan.
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	devices, err := scanner.Scan(r.Context())
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if r.URL.Query().Get("fingerprint") != "" {
+		writeJSON(w, 200, s.enrichScanWithFingerprints(devices))
 		return
 	}
 	writeJSON(w, 200, devices)
