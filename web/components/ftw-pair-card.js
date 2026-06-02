@@ -2,9 +2,10 @@
 //
 // v2 of the friend onboarding (Phase 1+2 of relay-as-tunnel):
 //   - shows the public URL the operator copies + sends to the friend
-//   - shows the 4-digit voice-channel approval code prominently
-//   - exposes an Allow form that POSTs the matching code to the relay
-//     once the friend reads it back on voice
+//   - shows the 4-digit activation code prominently, alongside a
+//     "Copy URL + code" button — the operator shares both; the friend
+//     types the code on the relay landing page to activate (no Allow
+//     click on the dashboard, the grant-exchange model approves on entry)
 //   - replaces the misleading "0 clients connected" with a real
 //     last-activity presence indicator backed by the relay's
 //     /tunnel/sessions/<token>/info endpoint

@@ -55,10 +55,11 @@ type PairStatus struct {
 	// dashboard renders this verbatim — operator copies + sends.
 	PairURL string `json:"pair_url,omitempty"`
 
-	// ApprovalCode is the 4-digit voice-channel cross-check code.
-	// Friend reads it from the relay landing page; operator types it
-	// into the dashboard's Allow form. The matching POST flips the
-	// relay's token state from pending → active.
+	// ApprovalCode is the 4-digit activation code. The operator shares it
+	// with the friend alongside the URL; the friend types it on the relay
+	// landing page, which mints the session grant and flips the relay's
+	// token state from pending → active. The operator does not approve on
+	// the dashboard — entering the code is the approval.
 	ApprovalCode string `json:"approval_code,omitempty"`
 
 	// SessionState mirrors the relay-side token state ("pending",

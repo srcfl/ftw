@@ -116,7 +116,7 @@ func main() {
 		go handle.Host.Run(ctx)
 		fmt.Fprintf(os.Stderr, "PAIR CODE: %s\n", handle.Token)
 		fmt.Fprintf(os.Stderr, "PAIR URL:  %s\n", handle.PublicURL)
-		fmt.Fprintf(os.Stderr, "APPROVAL CODE (tell host on voice): %s\n", handle.ApprovalCode)
+		fmt.Fprintf(os.Stderr, "APPROVAL CODE (share with the friend): %s\n", handle.ApprovalCode)
 	}
 	fmt.Fprintf(os.Stderr, "TTL: %s — sidecar will exit at expiry\n", *ttl)
 
@@ -197,10 +197,10 @@ func main() {
 // includes live tool_count + last_tools + clients_connected, plus the
 // relay-side metadata (PairURL + ApprovalCode + SessionState +
 // LastActivityMs) so the dashboard <ftw-pair-card> can show the URL
-// to share, the 4-digit voice-channel code, and live presence.
+// and 4-digit code to share, and live presence.
 //
 // All four relay fields are zero in -no-relay mode and the dashboard
-// degrades gracefully (omits the URL row, hides the Allow form).
+// degrades gracefully (omits the URL + code rows).
 func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, tun *TunnelHandle) error {
 	body := map[string]any{
 		"session_id":        sess.ID,
