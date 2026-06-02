@@ -129,28 +129,10 @@ type Params struct {
 	SoCMaxPct     float64 // e.g. 95
 	InitialSoCPct float64
 
-	// SoCSafetyFloorPct is the OPERATIONAL floor: a soft target above
-	// the hardware SoCMinPct. The DP applies a per-slot penalty when
-	// SoC ends a slot below this value AND that slot has PV surplus
-	// (PV magnitude > load), so the planner spends free PV refilling
-	// the battery early rather than deferring to peak-PV hours.
-	//
-	// The penalty is gated on PV-surplus so it cannot incentivise
-	// grid-charging in self-consumption mode — without surplus the
-	// planner sees no penalty and follows the normal "never import"
-	// contract.
-	//
-	// 0 = disabled (no operational floor — backward compat).
-	SoCSafetyFloorPct float64
-
-	// SafetyFloorPenaltyOreKwhHour is the per-(kWh of deficit × hour)
-	// cost added when SoC ends a PV-surplus slot below SoCSafetyFloorPct.
-	// 0 = disabled. Default 100 öre/kWh-hour: large enough to dominate
-	// typical spot export prices (5-200 öre/kWh) so the DP prefers
-	// charging from PV; small enough that the planner doesn't try to
-	// recover safety floor by manipulating downstream slots in
-	// economically expensive ways.
-	SafetyFloorPenaltyOreKwhHour float64
+	// Forecast-risk reserve is handled outside the DP cost now: the planner
+	// optimises against downside PV (forecast − k·σ) via
+	// service.go:applyPVDownside, replacing the former SoCSafetyFloorPct /
+	// SafetyFloorPenaltyOreKwhHour soft floor. See the Alt 2 design spec.
 
 	// PVChargeBonusOreKwh credits each kWh of battery charge that
 	// comes from live PV surplus. Operator preference: prefer using
@@ -717,30 +699,13 @@ func Optimize(slots []Slot, p Params) Plan {
 							}
 						}
 
-						// Safety-floor penalty: when SoC ends this slot
-						// below the operational floor AND PV surplus is
-						// available, charge it up. Gated on surplus so
-						// the penalty cannot ever motivate grid-charging
-						// — without surplus the DP sees no penalty and
-						// follows the normal "never import" contract.
-						//
-						// Operator rationale (2026-05-25): the hardware
-						// SoCMinPct is the chemistry safety floor; the
-						// operational floor SoCSafetyFloorPct is the
-						// buffer against forecast risk (cloud event,
-						// load surprise). DP would otherwise wait for
-						// peak-PV slots to refill, leaving the battery
-						// at hardware floor across early-day surplus
-						// hours.
-						if p.SoCSafetyFloorPct > 0 && p.SafetyFloorPenaltyOreKwhHour > 0 &&
-							battSoc2 < p.SoCSafetyFloorPct {
-							pvSurplusW := -slot.PVW - slot.LoadW
-							if pvSurplusW > 0 {
-								deficitPct := p.SoCSafetyFloorPct - battSoc2
-								deficitKwh := deficitPct / 100.0 * p.CapacityWh / 1000.0
-								cost += deficitKwh * dtH * p.SafetyFloorPenaltyOreKwhHour
-							}
-						}
+						// Forecast-risk reserve is no longer a SoC/energy floor.
+						// The planner instead optimises against DOWNSIDE PV
+						// (forecast − k·σ, applied in service.go:applyPVDownside),
+						// so a reserve emerges from the live forecast uncertainty
+						// itself — sized to the real risk, zero when PV is certain
+						// (clear day) or absent (winter). See Alt 2 design spec
+						// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
 
 						// PV-first bias: when this slot has PV surplus
 						// AND the action charges the battery, credit a
