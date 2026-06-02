@@ -723,7 +723,15 @@ func main() {
 			// downward residual. See pvmodel.Service.PredictStructural.
 			mpcSvc.PV = pvSvc.PredictStructural
 			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
+			mpcSvc.PVUncertaintyW = pvSvc.ResidualStdW
 		}
+		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
+		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
+		pvSafetyK := 1.0
+		if cfg.Planner != nil && cfg.Planner.PVForecastSafetyK != nil {
+			pvSafetyK = *cfg.Planner.PVForecastSafetyK
+		}
+		mpcSvc.PVForecastSafetyK = pvSafetyK
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
@@ -2414,19 +2422,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if socMax <= 0 || socMax > 100 {
 		socMax = 95
 	}
-	socSafety := pl.SoCSafetyFloorPct
-	if socSafety <= 0 {
-		// Default: 25 % absolute. Operational floor above the
-		// hardware min, leaves buffer against forecast risk (cloud,
-		// load surprise). Set to 0 in config to disable.
-		socSafety = 25
-	}
-	if socSafety < socMin {
-		socSafety = socMin
-	}
-	safetyPenalty := pl.SafetyFloorPenaltyOreKwhHour
-	if safetyPenalty <= 0 {
-		safetyPenalty = 100
+	if pl.SoCSafetyFloorPct != 0 || pl.SafetyFloorPenaltyOreKwhHour != 0 {
+		slog.Warn("config: soc_safety_floor_pct / safety_floor_penalty_ore_kwh_hour are deprecated and ignored — forecast-risk reserve is now handled by pv_forecast_safety_k (downside-PV planning)")
 	}
 	pvBonus := pl.PVChargeBonusOreKwh
 	if pvBonus < 0 {
@@ -2446,8 +2443,6 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		CapacityWh:                   totalCap,
 		SoCMinPct:                    socMin,
 		SoCMaxPct:                    socMax,
-		SoCSafetyFloorPct:            socSafety,
-		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
 		PVChargeBonusOreKwh:          pvBonus,
 		InitialSoCPct:                50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW

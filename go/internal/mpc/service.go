@@ -77,6 +77,15 @@ type Service struct {
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
 	Load              LoadPredictor       // optional — overrides flat BaseLoad
+
+	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
+	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
+	// Optional; nil → no downside haircut.
+	PVUncertaintyW func() float64
+	// PVForecastSafetyK scales the downside-PV haircut: the DP plans against
+	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
+	// unset config to 1.0.
+	PVForecastSafetyK float64
 	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
 	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
 
@@ -816,6 +825,12 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if len(slots) == 0 {
 		return nil
 	}
+	// Plan against downside PV (forecast − k·σ) so the DP holds a reserve sized
+	// to the live forecast uncertainty instead of a flat SoC floor. See Alt 2,
+	// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
+	if s.PVUncertaintyW != nil {
+		applyPVDownside(slots, s.PVForecastSafetyK, s.PVUncertaintyW())
+	}
 
 	// Plumb the site fuse into per-slot limits so the DP joint-plans
 	// battery + EV under the fuse constraint instead of producing plans
@@ -1168,6 +1183,29 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		})
 	}
 	return out
+}
+
+// applyPVDownside reduces each slot's planned PV generation by k·σ (the recent
+// PV forecast error std, in W), flooring at zero. Planning the DP against this
+// downside is the Alt-2 safety mechanism: the optimizer won't run the battery
+// down betting on PV that may not arrive, so a reserve emerges from the
+// forecast uncertainty itself — sized to the real risk, not a flat SoC %.
+// On a clear, stable day σ is small (use the battery freely); on a variable
+// cloudy day σ grows (keep more reserve). k=0 or σ=0 → raw forecast (no hedge,
+// e.g. operators who want "use the battery you have"). Night slots (PVW=0) are
+// unaffected — the haircut only ever shaves real generation.
+func applyPVDownside(slots []Slot, k, sigmaW float64) {
+	if k <= 0 || sigmaW <= 0 {
+		return
+	}
+	haircut := k * sigmaW
+	for i := range slots {
+		gen := -slots[i].PVW - haircut // PVW is site-signed (≤ 0); -PVW is generation
+		if gen < 0 {
+			gen = 0
+		}
+		slots[i].PVW = -gen
+	}
 }
 
 const (
