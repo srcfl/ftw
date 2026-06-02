@@ -1078,6 +1078,41 @@ func TestCurtailmentSkipsPositiveSpotExport(t *testing.T) {
 	}
 }
 
+// TestCurtailmentIncludesLoadpoint is the regression for the bug where
+// annotateCurtailment only considered house load + battery when
+// computing the safe PV absorption limit. When the planner had
+// scheduled EV charging (LoadpointW > 0), the recommended PVLimitW
+// would understate local consumption and could starve the EV charge
+// the DP itself decided to run.
+func TestCurtailmentIncludesLoadpoint(t *testing.T) {
+	plan := &Plan{
+		Actions: []Action{
+			{
+				GridW:       -3000,
+				LoadW:       400,
+				BatteryW:    0,
+				LoadpointW:  2500, // EV scheduled by the planner
+				PVW:         -6000,
+				PriceOre:    10,
+				SpotOre:     -5, // negative export revenue → curtailment candidate
+				SlotLenMin:  60,
+				SlotStartMs: 0,
+			},
+		},
+	}
+	p := baseParams(ModeArbitrage)
+	annotateCurtailment(plan, p)
+	a := &plan.Actions[0]
+	if a.PVLimitW == 0 {
+		t.Fatal("expected PV curtailment recommendation for negative-export slot")
+	}
+	// Must include the EV load the plan scheduled.
+	expected := 400.0 + 2500.0 // load + loadpoint (battery not charging)
+	if math.Abs(a.PVLimitW-expected) > 0.1 {
+		t.Errorf("PVLimitW = %v, want %v (must account for planned EV charging)", a.PVLimitW, expected)
+	}
+}
+
 // ---- Edge cases / hardening ----
 
 func TestOptimizeWithNaNPVDoesNotPanic(t *testing.T) {

@@ -130,6 +130,7 @@ type Loadpoint struct {
 	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
 	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
+	SurplusOnly   bool    `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -382,6 +383,17 @@ type Site struct {
 	// allowed through, smaller load-step capacity before re-curtail.
 	// Default 1000.
 	DCLinkProtectionMarginW float64 `yaml:"dc_link_protection_margin_w,omitempty" json:"dc_link_protection_margin_w,omitempty"`
+
+	// MaxExportW caps total site export (W, magnitude) below the physical
+	// fuse. 0 = disabled (export bounded only by the fuse). When > 0 it is
+	// enforced two ways: the dispatch fuse guard scales battery discharge
+	// back so predicted export stays under it, and the MPC caps each slot's
+	// export so the planner never schedules a discharge that would
+	// over-export. Protects inverters that trip on sustained export well
+	// below the breaker rating — the recurring Ferroamp EnergyHub fault
+	// state 0x8030 after ~8 kW sustained midday export, which only cleared
+	// as PV waned. Set it just under the observed trip point.
+	MaxExportW float64 `yaml:"max_export_w,omitempty" json:"max_export_w,omitempty"`
 }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom

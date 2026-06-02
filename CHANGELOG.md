@@ -1,5 +1,205 @@
 # Changelog
 
+## 0.110.0
+
+### Minor Changes
+
+- 34335cf: **Document and support running off a Mac mini or a generic Linux server.**
+  The Docker stack already ran on any Linux box via `docker-compose.yml`,
+  but that file uses `network_mode: host` — a Linux-kernel feature that, on
+  macOS, binds to the Docker Desktop VM rather than the Mac, leaving the
+  dashboard unreachable and silently breaking device discovery.
+
+  - **`docker-compose.macos.yml`** — a self-contained macOS compose file
+    that swaps host networking for bridge networking with published ports
+    (`8080`, `1883`). The app reaches the embedded broker by service name
+    (`mosquitto:1883`), and the `ftw-updater` sidecar is wired to the
+    macOS file so the in-app Update/Restart buttons recreate the right
+    containers.
+  - **`scripts/install-macos.sh`** — one-shot macOS installer: verifies
+    Docker Desktop is up, lays out `~/forty-two-watts`, fetches the macOS
+    compose file + broker config, and brings the stack up. The Linux
+    installer now bails early with a pointer when run on macOS.
+  - **`docs/deploy-platforms.md`** — new guide covering both the generic
+    Linux server path (Ubuntu/NUC/VM: install, `ufw`, device-identity
+    caveats) and the Mac mini path (Docker Desktop networking caveats:
+    point MQTT at `mosquitto`, use explicit driver IPs since mDNS/broadcast
+    don't cross the VM boundary, keep-it-running tips). `docker-compose.yml`
+    and `operations.md` now cross-reference it.
+
+- f6935e4: **Add `site.max_export_w` — an opt-in site export ceiling below the
+  physical fuse.** Some inverters trip into a protective fault on
+  _sustained_ grid export well under the breaker rating: the Ferroamp
+  EnergyHub faults to state `0x8030` after ~8 kW of continuous midday
+  export (battery discharge stacked on PV surplus) and only recovers as PV
+  wanes — losing hours of solar. Recurred daily on a live
+  `planner_arbitrage` site whose plan discharged the battery into the
+  morning price peak while PV was already exporting; grid voltage and
+  frequency were both in spec at every trip, ruling out a normal grid
+  protection.
+
+  `max_export_w` (W, magnitude; `0` = disabled, the default) is enforced
+  on two layers:
+
+  - **Dispatch** — the fuse guard's export side now scales battery
+    discharge against `min(fuse − margin, max_export_w)` via the new
+    `(*State).effectiveExportCeilingW`, mirroring the import-side
+    `effectiveImportCeilingW` / `peak_import_ceiling_w`. Hot-reloadable.
+  - **MPC** — every plan slot's export limit becomes
+    `min(FuseMaxW, max_export_w)` (`clampSlotGridLimits`), so the DP never
+    _schedules_ a discharge that would over-export — fixing the root cause
+    rather than only clamping at execution time. Applied at startup
+    (parity with the existing per-slot fuse plumbing).
+
+  Off by default; existing sites are unaffected until they set the knob.
+  The full-battery, PV-only over-export case still needs PV curtailment —
+  the discharge clamp can only scale battery action, not PV.
+
+- b4d3db6: **Savings: baseline now includes EV charging priced at the day's average,
+  so EMS-scheduled EV laddning shows up as savings instead of zeroing out.**
+  Previously the `BaselineCostOre` returned by `state.DailyCostBreakdown`
+  (and surfaced by `/api/savings/daily` as `baseline_cost_ore`) was
+  `Σ slot ( house_load_w × spot_total )`, where `house_load_w` was
+  explicitly the meter reading minus EV (see
+  `main.go`'s `loadW := gridW − batW − pvW − evW`). Two consequences:
+
+  1. When the EMS scheduled EV charging onto a near-zero spot hour, that
+     energy contributed ~0 to baseline but the matching grid import still
+     went into `ActualCostOre`. Saved-tal looked flat or even negative.
+  2. When the EV was charged on a higher-priced hour (cold-start, no
+     override), actual rose while baseline didn't move — the metric was
+     systematically biased toward "lost" whenever the EV was active.
+
+  The breakdown now treats EV separately:
+
+  - `BaselineHouseOre` keeps the slot-by-slot house pricing (unchanged
+    behaviour for the EV-less case).
+  - `BaselineEvOre = EVWh × AvgImportOreKwh / 1000` prices the day's EV
+    energy at the day's time-weighted average spot. Interpretation: "a
+    dumb charger with no timing awareness would have paid the day's avg
+    per kWh". Smart scheduling onto cheap hours then surfaces as savings;
+    charging on a peak shows up as a penalty. Symmetric.
+  - `BaselineCostOre = BaselineHouseOre + BaselineEvOre` (sum exposed for
+    back-compat).
+  - `EVWh` is derived per history sample as
+    `grid_w − bat_w − pv_w − load_w` (clamped non-negative), the inverse
+    of `main.go`'s identity. No schema change.
+
+  The `/api/savings/daily` response gains `ev_wh`, `baseline_house_ore`,
+  and `baseline_ev_ore` fields so the UI can render the EV share of
+  savings separately. Existing fields (`baseline_cost_ore`, `saved_ore`,
+  `flat_cost_ore`) keep their names; their values now incorporate the EV
+  term.
+
+  Historical days will re-render with the new baseline once a process
+  restart clears the savings cache; volume columns are unchanged.
+
+### Patch Changes
+
+- 8df5c11: Fix backend safety edge cases around driver default timeouts, stale site-meter fallback, loadpoint surplus-only persistence, and MPC idle action selection with asymmetric power limits.
+- 1cca922: **Easee driver: pause+resume the contactor on a live phase flip so 1Φ→3Φ
+  actually takes effect.** The Easee only latches its phase count when a session
+  (re)starts — writing `phaseMode=3` while a session is actively charging at 1Φ
+  leaves the contactor on a single phase, so a loadpoint that crossed from 1Φ to
+  3Φ (e.g. a schedule ramping to 11 kW) stayed throttled to ~3.7 kW. Field-
+  confirmed: only a manual pause+resume flipped it.
+
+  The driver now pauses charging before writing the new `phaseMode` on a real
+  mid-session flip (`last_sent_phases` already set); the existing auto-resume
+  (offer > 0 while paused) re-closes the contactor on the new phase count. The
+  first command of a session is unaffected (no live contactor to recycle).
+
+- 32c238e: **surplus_only EV charging: smooth the step setpoint so the EV and home
+  battery stop fighting over the same PV surplus.** The surplus_only setpoint
+  magnitude tracked the _instant_ surplus and snapped to an `allowed_steps_w`
+  step every 5 s tick. Because `surplusW = −gridW + batW + evW` counts the home
+  battery's current charge power as EV-available, a single-tick wobble (the
+  battery briefly backing off, a cloud edge, a load twitch) ratcheted the EV up
+  a step it couldn't hold — it collapsed the next tick, and the repeated
+  multi-kW load swing whipsawed the home battery's reactive PI into integrator
+  windup, so the battery stopped delivering its planned discharge (an EV↔battery
+  limit cycle; observed live as `ev_w` swinging 0–4.7 kW and the battery
+  under-delivering to ~4% of plan).
+
+  The step setpoint now uses **asymmetric smoothing**: down-steps still track the
+  instant surplus (the no-import promise is unchanged), but an **up-step is gated
+  on the rolling average** — the EV only climbs to a higher step when the smoothed
+  surplus sustains it. This breaks the limit cycle: the EV ramps up only on a
+  genuine surplus rise and the home battery's PI stays stable. Pause/resume
+  hysteresis and the no-import guarantee are untouched.
+
+- 990457e: fix(mpc): include planned EV loadpoint power when computing PV curtailment limit
+
+  `annotateCurtailment` previously only considered house load + battery charge when deciding how much PV can be safely absorbed locally before recommending `pv_limit_w`. When the planner had scheduled EV charging (`LoadpointW > 0`) in a negative-export-revenue slot, the limit would be too low and a curtailment-capable driver could starve the EV session the DP itself had chosen.
+
+  The fix adds `max(0, LoadpointW)` to the local-consumption total, matching the accounting already used for battery charging. Updated godoc, docs, and added regression test.
+
+  This only affects sites using both planner strategies that can produce export + a PV-curtailment-capable driver + configured loadpoints.
+
+- 4f2e204: Fix dashboard UI state regressions around settings edits, notification history, history cakes, and the Plan Today horizon.
+- 9f10e91: fix(loadpoint): reactive per-phase fuse clamp for the EV charger
+
+  The site-level fuse guard only protects the three-phase _total_ — a single
+  phase can still trip from house-load imbalance (a vacuum, kettle or oven on
+  one leg) stacked on top of the EV's per-phase draw, which forced manual
+  ramp-downs in the Tesla app. The loadpoint now reads the site meter's live
+  per-phase currents (`meter_l1_a/l2_a/l3_a`) and reactively caps the EV's
+  `max_amps_per_phase`: the worst phase drops by the full overage the instant
+  it nears the breaker, and recovers at 1 A/tick once there is headroom
+  (fast-down / slow-up servo, deadband below the limit). Pure, table-tested
+  `nextFusePhaseCapA`; clamp disabled cleanly when per-phase telemetry is
+  absent.
+
+## 0.109.0
+
+### Minor Changes
+
+- af6435c: **Relay: the 4-digit code is now a one-time exchange for a session grant,
+  not a standing password.** Previously, once a pair session was approved,
+  anyone who got hold of the `/h/<token>/…` URL had full access for the
+  rest of the TTL — and for MCP that means powerful tools
+  (`run_command`, `modbus_write`, `deploy_driver`, `write_file`). A
+  forwarded or leaked-from-history URL was effectively a host handover.
+
+  Now, accepting the code mints a high-entropy session grant (32 bytes,
+  CSPRNG). It is handed to the friend exactly once:
+
+  - **MCP**: the landing page prints
+    `claude mcp add ftw-friend --transport http <url>/h/<token>/mcp --header "Authorization: Bearer <grant>"`.
+    `/h/<token>/mcp` now requires that Bearer grant.
+  - **Browser/dashboard**: approval sets an `HttpOnly; Secure;
+SameSite=Strict` `ftw_grant` cookie scoped to the session path;
+    `/h/<token>/web/…` now requires it.
+
+  A leaked-but-already-active URL is useless without the grant — the
+  recipient lands back on the code-entry page and doesn't have the
+  out-of-band 4-digit code (5 wrong tries still locks it). The grant is
+  validated constant-time, never forwarded to the host, and expires with
+  the session. `POST /h/<token>/approve` now responds `200 {"grant":"…"}`
+  instead of `204`.
+
+  Works on the existing path-based routes — no subdomains or new domain
+  required (the browser-dashboard _rendering_ fix and any subdomain work
+  remain deferred; see `docs/goals/relay-subdomain-sessions.md`).
+
+### Patch Changes
+
+- ce92b4a: **Fix: relay landing page rejected every approval code as "Wrong code"
+  even when the friend typed the right one.** The `fmt.Fprintf` that
+  renders the landing HTML in `ftw-relay`'s `publicLanding` passed format
+  arguments in the wrong order, so the embedded JS `const TOKEN` was
+  populated with the token state (`"pending"`) instead of the actual
+  session token. The Activate button then POSTed to
+  `/h/pending/approve`; the relay couldn't find that token and returned
+  `403 Forbidden`, which the page surfaced as "Wrong code" regardless of
+  what was typed. As a side effect "From:" showed the token, "Intent:"
+  was empty, and "State:" showed the intent.
+
+  Argument order is now `as → intent → state → token`, matching the
+  positional verbs in `landingHTML`. A regression test
+  (`TestLandingPageTokenConstMatchesPath`) pins the JS const + each label
+  row so a future reshuffle can't silently regress the approve POST path.
+
 ## 0.108.2
 
 ### Patch Changes

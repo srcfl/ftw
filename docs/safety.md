@@ -135,6 +135,31 @@ The scale is proportional so the per-battery distribution (from
 `distributeProportional` / `distributeWeighted` / `distributePriority`)
 is preserved while staying inside the breaker envelope.
 
+### 3c. Site export ceiling (`site.max_export_w`)
+
+Some inverters fault on *sustained* grid export **below** the breaker
+rating. Real recurring incident: a Ferroamp EnergyHub tripping to state
+`0x8030` after ~8 kW of continuous midday export (battery discharge
+stacked on PV surplus), staying down until PV waned — grid voltage
+(≤ 244 V) and frequency (≈ 50 Hz) were in spec the whole time, so the
+fuse guard and grid-protection both saw nothing wrong.
+
+`site.max_export_w` (W magnitude; `0` = disabled) lowers the export
+ceiling the guard enforces: the export side scales battery discharge
+against `min(fuse − margin, max_export_w)` via
+`(*State).effectiveExportCeilingW`, the export-side twin of the
+import-side `effectiveImportCeilingW` / `peak_import_ceiling_w`. It only
+scales **battery discharge** — when PV alone exceeds the ceiling (full
+battery, nothing to scale) the guard can't help and PV curtailment is
+the lever.
+
+The MPC enforces the same ceiling ahead of time: every plan slot's
+`Limits.MaxExportW` becomes `min(FuseMaxW, max_export_w)`
+(`clampSlotGridLimits` in `go/internal/mpc/power_limits.go`), so the DP
+never *schedules* a discharge that would over-export — fixing the root
+cause (a `planner_arbitrage` plan that discharges into a PV-exporting
+morning) instead of only clamping it at execution time.
+
 Per-phase imbalance isn't modeled in `applyFuseGuard` directly, but
 Sungrow and Ferroamp both emit per-phase data into
 `DerReading.Data` — drivers that need per-phase guards can read that

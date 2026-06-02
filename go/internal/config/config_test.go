@@ -160,6 +160,25 @@ planner:
 	}
 }
 
+func TestLoadpointSurplusOnlyParses(t *testing.T) {
+	yaml := minimalYAML + `
+loadpoints:
+  - id: garage
+    driver_name: easee
+    surplus_only: true
+`
+	c, err := Parse([]byte(yaml), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Loadpoints) != 1 {
+		t.Fatalf("loadpoints = %d, want 1", len(c.Loadpoints))
+	}
+	if !c.Loadpoints[0].SurplusOnly {
+		t.Fatal("loadpoint surplus_only was not parsed")
+	}
+}
+
 func TestRelativeDriverPathResolved(t *testing.T) {
 	c, err := Parse([]byte(minimalYAML), "/base/dir")
 	if err != nil {
