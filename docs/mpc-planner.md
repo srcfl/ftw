@@ -196,11 +196,13 @@ Post-processing flags each plan slot with a recommended PV cap
 
 1. the slot is exporting (`grid_w < 0`)
 2. export revenue is non-positive (spot ≤ 0 or fees ≥ revenue)
-3. local consumption (load + battery charge) cannot absorb the PV
+3. local consumption (load + battery charge + any planned EV loadpoint
+   charge) cannot absorb the PV
 
 In that regime, exporting costs money and curtailing the PV is a pure
-win. The recommended limit equals `load_w + max(battery_w, 0)` — just
-enough to cover on-site absorption.
+win. The recommended limit equals `load_w + max(battery_w, 0) + max(loadpoint_w, 0)`
+— just enough to cover on-site absorption (including EV charging the
+planner itself scheduled).
 
 The MPC cost function isn't changed by curtailment; the annotation is
 a dispatch-time suggestion. A driver that advertises

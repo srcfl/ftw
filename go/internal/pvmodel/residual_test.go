@@ -10,6 +10,30 @@ import (
 // downstream "must be daylight" gates don't accidentally short-circuit.
 var residualNow = time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 
+// ResidualStdW feeds the MPC's downside-PV safety (σ). It must surface the
+// residual-buffer std, and degrade to 0 (no hedge) when there's no buffer.
+func TestServiceResidualStdW(t *testing.T) {
+	if got := (*Service)(nil).ResidualStdW(); got != 0 {
+		t.Errorf("nil Service → 0, got %v", got)
+	}
+	if got := (&Service{}).ResidualStdW(); got != 0 {
+		t.Errorf("nil Residuals buffer → 0, got %v", got)
+	}
+	b := NewResidualBuffer()
+	now := time.Now()
+	for i := 0; i < 10; i++ {
+		ts := now.Add(time.Duration(-45+i*5) * time.Minute) // 45..0 min ago, inside the 2h window
+		b.Add(ts, 1000, float64(700+i*60))                  // residuals span −300..+240 → positive std
+	}
+	want := b.Diag(time.Now()).StdW
+	if want <= 0 {
+		t.Fatalf("setup: varying residuals must yield a positive std, got %v", want)
+	}
+	if got := (&Service{Residuals: b}).ResidualStdW(); math.Abs(got-want) > 1e-9 {
+		t.Errorf("ResidualStdW = %v, want Diag().StdW = %v", got, want)
+	}
+}
+
 // TestResidualBufferAdd_AppendsAndAgesOff: samples older than the buffer
 // window relative to the most-recently-added sample must be dropped.
 func TestResidualBufferAdd_AppendsAndAgesOff(t *testing.T) {
