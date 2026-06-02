@@ -247,6 +247,55 @@ func TestHandleStatusIgnoresOfflineDERInLiveBalance(t *testing.T) {
 	}
 }
 
+func TestHandleStatusKeepsFaultedSiteMeterReading(t *testing.T) {
+	tel := telemetry.NewStore()
+	ctrl := &control.State{SiteMeterDriver: "ferroamp"}
+
+	tel.Update("ferroamp", telemetry.DerMeter, 2400, nil, nil)
+	soc := 0.55
+	tel.Update("ferroamp", telemetry.DerBattery, -500, &soc, nil)
+	tel.RecordDriverSuccess("ferroamp")
+	tel.SetDriverDeviceFault("ferroamp", true, "EnergyHub Fault Mode")
+
+	srv := New(&Deps{
+		Tel:        tel,
+		Ctrl:       ctrl,
+		CtrlMu:     &sync.Mutex{},
+		CapMu:      &sync.RWMutex{},
+		Capacities: map[string]float64{"ferroamp": 10_000},
+		CfgMu:      &sync.RWMutex{},
+		Cfg:        &config.Config{},
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		GridW   float64                   `json:"grid_w"`
+		BatW    float64                   `json:"bat_w"`
+		LoadW   float64                   `json:"load_w"`
+		Drivers map[string]map[string]any `json:"drivers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.GridW != 2400 {
+		t.Fatalf("grid_w = %v, want fresh faulted-device meter reading 2400", resp.GridW)
+	}
+	if resp.BatW != 0 {
+		t.Fatalf("bat_w = %v, want faulted actuator excluded", resp.BatW)
+	}
+	if resp.LoadW != 2400 {
+		t.Fatalf("load_w = %v, want 2400 from retained meter and excluded battery", resp.LoadW)
+	}
+	if got := resp.Drivers["ferroamp"]["status"]; got != "fault" {
+		t.Fatalf("driver status = %v, want fault", got)
+	}
+}
+
 func TestHandleV2XPolicyReturnsLiveEnvelope(t *testing.T) {
 	tel := telemetry.NewStore()
 	tel.Update("meter", telemetry.DerMeter, 1500, nil, nil)

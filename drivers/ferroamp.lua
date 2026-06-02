@@ -572,7 +572,22 @@ function driver_poll()
         if meter.hz   then host.emit_metric("grid_hz",    meter.hz)   end
 
         local state = extract_val(ehub_data, "state")
-        if state then host.emit_metric("ehub_state", tonumber(state) or 0) end
+        if state then
+            local sn = tonumber(state) or 0
+            host.emit_metric("ehub_state", sn)
+            -- EnergyHub "Fault Mode" = ehub.state bit 15 (0x8000) set (e.g.
+            -- 0x8030); normal operating states (0x1001 / 0x1101) don't have it.
+            -- In Fault Mode the hub opens its PV + battery relays — it keeps
+            -- publishing telemetry but cannot actuate. Flag a device fault so
+            -- the dispatcher + MPC exclude it instead of commanding a dead
+            -- battery (whose un-delivered power would silently become grid
+            -- import) and so the dashboard shows "fault", not "ok". Cleared
+            -- automatically when the hub recovers (state bit 15 clears).
+            -- (Lua 5.1 has no bitops; isolate bit 15 arithmetically.)
+            local faultMode = (math.floor(sn / 32768) % 2) == 1
+            host.set_device_fault(faultMode,
+                faultMode and ("EnergyHub Fault Mode (ehub state " .. tostring(sn) .. ")") or "")
+        end
     end
 
     --------------------------------------------------------------------------
