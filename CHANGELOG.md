@@ -1,5 +1,104 @@
 # Changelog
 
+## 0.112.0
+
+### Minor Changes
+
+- 3e24a6e: **Settings UI: expose `pv_forecast_safety_k` on the Planner tab.** The
+  downside-PV safety factor (v0.111.0) was config-only; it now has a "PV forecast
+  safety (k)" field under Settings → Planner (default 1.0, with inline help).
+  Operators can dial it down to 0 to use the full battery, or up to keep more
+  reserve on uncertain days, without editing config.yaml.
+
+### Patch Changes
+
+- c359527: **planner_arbitrage: the battery now reactively covers a sudden load on a
+  charge-from-PV-surplus slot.** Previously, when the DP planned to "absorb PV
+  surplus" this slot (a charge slot with `PlannedGridW ≈ 0` — charge from PV,
+  not buy from the grid) and a large unforecast load came in, the battery sat
+  idle at 0 W while the house imported the deficit from the grid, waiting for the
+  slow reactive replan (60 s+ cooldown) to catch up. The existing PlannedGridW
+  soft cap correctly _backed the charge off_ toward available PV, but floored at
+  0 and never flipped to discharge, so the battery never supported the load.
+
+  The soft cap's back-off may now go **negative (discharge)** on a
+  charge-from-PV-surplus slot, driving projected grid back toward the plan's
+  `PlannedGridW` (~0) — i.e. the battery covers the load the moment PV can't,
+  instead of importing. This is the charge-side mirror of the existing
+  discharge-slot cover-load carve-out.
+
+  Three dispatch rails were aligned through a single `coverLoadChargeSlot`
+  predicate so the discharge isn't undone downstream: the soft-cap floor,
+  `planHasNonDischargeIntent` (so `noSelfDischarge` doesn't re-clamp it), and the
+  plan/exec sign floor (so it isn't treated as a sign mismatch).
+
+  **The same cover-load behaviour now also applies to `planner_arbitrage`
+  _idle_ slots.** An idle slot (the DP planned neither charge nor discharge,
+  expecting PV to cover the load) used to stay on the energy path — which yields
+  a 0 W target and can't react — so a forecast miss left the site importing while
+  the battery sat idle. Idle `planner_arbitrage` slots now fall through to the
+  reactive PI / grid=0 path, the same one `planner_passive_arbitrage` idle slots
+  already use: the battery discharges to cover a live import, and the existing
+  live-export gate still prevents it from reactively absorbing a live PV surplus
+  (the DP's idle choice is honoured on the charge side).
+
+  Scope is deliberately narrow and safe:
+
+  - Only `planner_arbitrage` (mirroring the existing `planner_passive_arbitrage`
+    behaviour). `planner_cheap` idle slots keep the non-discharge block — only
+    deliberate discharge slots are exempt there.
+  - Charge slots: a deliberate grid-charge (`PlannedGridW` ≥ the 100 W import
+    band) still floors at 0; only charge-from-PV-surplus and idle slots flip to
+    reactive cover-load.
+  - Normal sunny charge-from-surplus operation is unchanged (the cap only fires
+    on a live import divergence; absorbing surplus is untouched).
+  - The SoC floor, fuse guard, and slew limiter still bound the discharge.
+
+  Does not change PV forecasting or any planner mode other than
+  `planner_arbitrage`.
+
+- 49a3046: loadpoint: detect CTEK NCRQ (car-side refusal) and stop allocating PV to a phantom EV sink
+
+  When a vehicle hits its onboard SoC target mid-session, the CTEK driver reports
+  `CHRG → NCRQ` ("No Charge Request") — the car has decided it's done, even
+  though the cable is still plugged in. Before this fix `classify_state` had no
+  branch for NCRQ, the loadpoint manager kept inferring a low SoC from the
+  session's plug-in anchor, and the MPC kept allocating multi-kW of PV surplus
+  to a sink that would never accept it. With a saturated home battery and no
+  other dump load, the surplus spilled to the grid — sometimes at negative spot.
+
+  The fix wires car-side refusal end-to-end:
+
+  - `drivers/ctek_hybrid.lua` — `classify_state` recognises `NCRQ` and emits a
+    new `request_active` flag in the EV table (false on NCRQ, true otherwise).
+  - `internal/loadpoint` — `Manager.Observe` takes a `requestActive bool`. When
+    the vehicle holds NCRQ past `NCRQCompletionThreshold` (90 s) on a session
+    with a configured target, the inferred SoC pins to `targetSoCPct` and
+    `SoCSource` becomes `"ncrq"`. The latch clears on plug-out only — a transient
+    EVSE retry isn't enough to reopen the allocation.
+  - `cmd/forty-two-watts` — `telAdapter` parses `request_active` from
+    `DerReading.Data`, defaulting to `true` so non-NCRQ-aware drivers (Easee,
+    Zap, etc.) keep their existing behaviour.
+
+  The pinned SoC then flows naturally into `mpc.LoadpointSpec.InitialSoCPct`
+  on the next replan: `InitialSoCPct == TargetSoCPct` means the DP allocates
+  0 W to this loadpoint and the PV/battery curtail-vs-export trade-off no
+  longer competes against a fictional sink.
+
+- e0ba0bb: **A charge schedule now overrides the surplus 1-phase forecast lock.** On a
+  cloudy day the surplus_only logic can pin a loadpoint to 1-phase for the whole
+  day (`surplusLockedTo1P`, the "today's PV can't sustain 3Φ" verdict). That lock
+  is sticky and was applied even when the operator had set a **deadline-driven
+  charge schedule** that needs 3-phase grid power — so an "11 kW by 13:00"
+  schedule was silently throttled to ~3.7 kW (1-phase) and could miss its target.
+
+  Phase selection now puts an **active schedule first**: when a schedule SoC
+  target is set, the charger is given the operator's explicit phase pin or
+  `auto` (never forced to `1p` by the surplus optimisation), so a scheduled
+  charge can use 3-phase. With no schedule, the surplus 1-phase lock and the
+  30-minute near-term dwell verdict behave exactly as before. The precedence
+  lives in a single pure `resolvePhaseMode` helper with a table-driven test.
+
 ## 0.111.0
 
 ### Minor Changes
