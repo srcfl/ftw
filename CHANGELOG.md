@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.111.0
+
+### Minor Changes
+
+- a129137: **Replace the SoC safety floor with downside-PV planning.** The MPC's forecast-
+  risk reserve was a `soc_safety_floor_pct` (default 25 %) — a soft cost penalty
+  that kept SoC above a percentage on PV-surplus slots. A percentage is the wrong
+  unit (25 % of a 5 kWh battery and a 40 kWh battery hedge wildly different
+  absolute risk), it couldn't be set low or disabled (`0` was forced back to
+  25 %), and as a separate penalty it could fight legitimate "run down now, refill
+  cheap later" decisions.
+
+  The planner now instead optimises against **downside PV**: `PV_plan = forecast −
+k·σ`, where σ is the live PV forecast-error std (the pvmodel residual std) and
+  `k = pv_forecast_safety_k` (default 1.0; `0` disables the hedge). The DP no
+  longer runs the battery down betting on PV that may not arrive, so a reserve
+  _emerges from the live forecast uncertainty itself_ — large on variable cloudy
+  days, ~zero on clear days, and naturally inert in winter / no-sun (so passive
+  runs its charge-cheap / discharge-for-self-consumption loop down to the hardware
+  floor). No separate magic floor; the robustness comes from the economics.
+
+  **Config:** new `pv_forecast_safety_k` (pointer; unset → 1.0, explicit `0` →
+  no hedge). `soc_safety_floor_pct` and `safety_floor_penalty_ore_kwh_hour` are
+  deprecated — still parsed so existing config loads, but ignored with a warning.
+  Remove them and set `pv_forecast_safety_k` instead.
+
 ## 0.110.0
 
 ### Minor Changes
@@ -110,8 +136,8 @@
   first command of a session is unaffected (no live contactor to recycle).
 
 - 32c238e: **surplus_only EV charging: smooth the step setpoint so the EV and home
-  battery stop fighting over the same PV surplus.** The surplus_only setpoint
-  magnitude tracked the _instant_ surplus and snapped to an `allowed_steps_w`
+  battery stop fighting over the same PV surplus.** The surplus*only setpoint
+  magnitude tracked the \_instant* surplus and snapped to an `allowed_steps_w`
   step every 5 s tick. Because `surplusW = −gridW + batW + evW` counts the home
   battery's current charge power as EV-available, a single-tick wobble (the
   battery briefly backing off, a cloud edge, a load twitch) ratcheted the EV up
