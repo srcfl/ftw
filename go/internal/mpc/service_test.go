@@ -107,6 +107,56 @@ func TestApplyPVDownsideNoOpWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestApplyPVDownsideNegativeKIsNoOp(t *testing.T) {
+	slots := []Slot{{PVW: -3000}}
+	applyPVDownside(slots, -1.0, 500) // negative k must be guarded, not amplify PV
+	if slots[0].PVW != -3000 {
+		t.Errorf("negative k must be a no-op, got %v", slots[0].PVW)
+	}
+}
+
+func TestApplyPVDownsideScalesWithK(t *testing.T) {
+	slots := []Slot{{PVW: -3000}}
+	applyPVDownside(slots, 2.0, 500) // k=2, σ=500 → haircut 1000 W
+	if slots[0].PVW != -2000 {
+		t.Errorf("PVW = %v, want -2000 (3000 − 2·500)", slots[0].PVW)
+	}
+}
+
+// The Service seam reads σ from the PVUncertaintyW hook and the configured k.
+func TestServiceApplyPVDownsideToSlotsUsesHookAndK(t *testing.T) {
+	s := &Service{
+		PVForecastSafetyK: 1.0,
+		PVUncertaintyW:    func() float64 { return 800 }, // live σ = 800 W
+	}
+	slots := []Slot{{PVW: -3000}, {PVW: 0}}
+	s.applyPVDownsideToSlots(slots)
+	if slots[0].PVW != -2200 {
+		t.Errorf("PVW[0] = %v, want -2200 (3000 − 1·800 from the hook)", slots[0].PVW)
+	}
+	if slots[1].PVW != 0 {
+		t.Errorf("night slot must stay 0, got %v", slots[1].PVW)
+	}
+}
+
+func TestServiceApplyPVDownsideToSlotsNoOpWithoutHook(t *testing.T) {
+	s := &Service{PVForecastSafetyK: 1.0} // PVUncertaintyW unwired
+	slots := []Slot{{PVW: -3000}}
+	s.applyPVDownsideToSlots(slots)
+	if slots[0].PVW != -3000 {
+		t.Errorf("no σ hook → raw forecast, got %v", slots[0].PVW)
+	}
+}
+
+func TestServiceApplyPVDownsideToSlotsNilServiceNoPanic(t *testing.T) {
+	var s *Service
+	slots := []Slot{{PVW: -3000}}
+	s.applyPVDownsideToSlots(slots) // must not panic
+	if slots[0].PVW != -3000 {
+		t.Errorf("nil Service must be a no-op, got %v", slots[0].PVW)
+	}
+}
+
 // TestBuildSlots_AppliesPVResidualCorrection: a non-nil
 // PVResidualCorrector adds an additive bias to the twin's per-slot
 // prediction BEFORE selectPlannerPVW blends with the forecast. We mock

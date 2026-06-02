@@ -308,6 +308,16 @@ type Planner struct {
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
 }
 
+// PVSafetyK resolves the downside-PV haircut scale (forecast − k·σ). Unset
+// config (nil Planner or nil field) → default 1.0; an explicit value is
+// honored verbatim, including 0 (no hedge — "use the battery you have").
+func (p *Planner) PVSafetyK() float64 {
+	if p == nil || p.PVForecastSafetyK == nil {
+		return 1.0
+	}
+	return *p.PVForecastSafetyK
+}
+
 // Site is the top-level control loop config.
 type Site struct {
 	Name                 string  `yaml:"name" json:"name"`

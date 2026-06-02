@@ -24,6 +24,75 @@ api:
   port: 8080
 `
 
+func TestPlannerPVSafetyKResolution(t *testing.T) {
+	var nilPlanner *Planner
+	if got := nilPlanner.PVSafetyK(); got != 1.0 {
+		t.Errorf("nil Planner → 1.0, got %v", got)
+	}
+	if got := (&Planner{}).PVSafetyK(); got != 1.0 {
+		t.Errorf("nil field → 1.0, got %v", got)
+	}
+	zero := 0.0
+	if got := (&Planner{PVForecastSafetyK: &zero}).PVSafetyK(); got != 0 {
+		t.Errorf("explicit 0 → 0 (no hedge), got %v", got)
+	}
+	two := 2.0
+	if got := (&Planner{PVForecastSafetyK: &two}).PVSafetyK(); got != 2.0 {
+		t.Errorf("explicit 2.0 → 2.0, got %v", got)
+	}
+}
+
+func TestPlannerPVForecastSafetyKParsing(t *testing.T) {
+	base := `
+site:
+  name: Test
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+planner:
+  mode: passive_arbitrage
+`
+	// Unset → nil pointer → default 1.0.
+	c, err := Parse([]byte(base), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Planner == nil {
+		t.Fatal("planner block should parse")
+	}
+	if c.Planner.PVForecastSafetyK != nil {
+		t.Errorf("unset pv_forecast_safety_k must stay nil, got %v", *c.Planner.PVForecastSafetyK)
+	}
+	if got := c.Planner.PVSafetyK(); got != 1.0 {
+		t.Errorf("unset → PVSafetyK 1.0, got %v", got)
+	}
+	// Explicit 0 must parse to *0 (distinct from unset) and be honored.
+	c0, err := Parse([]byte(base+"  pv_forecast_safety_k: 0\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c0.Planner.PVForecastSafetyK == nil || *c0.Planner.PVForecastSafetyK != 0 {
+		t.Errorf("explicit 0 must parse to *0, got %v", c0.Planner.PVForecastSafetyK)
+	}
+	if got := c0.Planner.PVSafetyK(); got != 0 {
+		t.Errorf("explicit 0 → PVSafetyK 0 (no hedge), got %v", got)
+	}
+	// Explicit non-default value.
+	c25, err := Parse([]byte(base+"  pv_forecast_safety_k: 2.5\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c25.Planner.PVSafetyK(); got != 2.5 {
+		t.Errorf("explicit 2.5 → PVSafetyK 2.5, got %v", got)
+	}
+}
+
 func TestLoadMinimalYAML(t *testing.T) {
 	c, err := Parse([]byte(minimalYAML), "/tmp")
 	if err != nil {

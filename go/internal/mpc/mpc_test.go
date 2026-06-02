@@ -358,6 +358,82 @@ func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
 	}
 }
 
+func planMinSoC(pl Plan) float64 {
+	m := 100.0
+	for _, a := range pl.Actions {
+		if a.SoCPct < m {
+			m = a.SoCPct
+		}
+	}
+	return m
+}
+
+// The reserve scales with k: k=0 uses the battery fully (lowest reserve), and a
+// larger k keeps strictly more back. Same morning-sell / midday-PV scenario as
+// TestDownsidePVKeepsReserve, with σ small enough that the haircut grades the
+// midday PV (5 kW) down across k rather than zeroing it at k=1.
+func TestDownsidePVReserveIncreasesWithK(t *testing.T) {
+	mk := func() []Slot {
+		s := make([]Slot, 8)
+		for i := range s {
+			price, spot, pv := 400.0, 30.0, 5000.0
+			if i < 4 {
+				price, spot, pv = 400, 300, 0
+			}
+			s[i] = Slot{
+				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
+				PriceOre: price, SpotOre: spot, LoadW: 0, PVW: -pv, Confidence: 1,
+			}
+		}
+		return s
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 50
+	p.TerminalSoCPrice = 350
+	reserve := func(k float64) float64 {
+		sl := mk()
+		applyPVDownside(sl, k, 2000) // σ=2 kW: k=1→3 kW PV, k=2→1 kW PV
+		return planMinSoC(Optimize(sl, p))
+	}
+	r0, r1, r2 := reserve(0), reserve(1), reserve(2)
+	if !(r0 <= r1 && r1 <= r2) {
+		t.Errorf("reserve must be non-decreasing in k: k0=%.1f%% k1=%.1f%% k2=%.1f%%", r0, r1, r2)
+	}
+	if r2 <= r0 {
+		t.Errorf("a larger k must keep strictly more reserve than k=0 (no hedge): k0=%.1f%% k2=%.1f%%", r0, r2)
+	}
+}
+
+// No-sun property: with PV=0 in every slot, even a large σ must not manufacture
+// a reserve — the plan is identical to the un-hedged one, so passive runs its
+// charge-cheap / discharge-for-self-consumption loop using the full battery.
+func TestDownsidePVWinterNoReserveForced(t *testing.T) {
+	mk := func() []Slot {
+		s := make([]Slot, 8)
+		for i := range s {
+			price := 100.0
+			if i >= 4 {
+				price = 300 // cheap-then-expensive → something to arbitrage
+			}
+			s[i] = Slot{
+				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
+				PriceOre: price, SpotOre: price * 0.5, LoadW: 1000, PVW: 0, Confidence: 1,
+			}
+		}
+		return s
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 50
+	raw := Optimize(mk(), p)
+	hair := mk()
+	applyPVDownside(hair, 2.0, 5000) // large σ, but no PV to cut
+	cut := Optimize(hair, p)
+	if planMinSoC(cut) != planMinSoC(raw) {
+		t.Errorf("winter (PV=0): the haircut must not change the plan — min SoC cut=%.1f%% raw=%.1f%%",
+			planMinSoC(cut), planMinSoC(raw))
+	}
+}
+
 func TestSelfConsumptionDefersPVStorageWhenCheaperSurplusAhead(t *testing.T) {
 	// Operator report 2026-05-24: early positive export price, followed by
 	// stronger PV at negative spot. Smart self-consumption should preserve

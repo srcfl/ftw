@@ -828,9 +828,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// Plan against downside PV (forecast − k·σ) so the DP holds a reserve sized
 	// to the live forecast uncertainty instead of a flat SoC floor. See Alt 2,
 	// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
-	if s.PVUncertaintyW != nil {
-		applyPVDownside(slots, s.PVForecastSafetyK, s.PVUncertaintyW())
-	}
+	s.applyPVDownsideToSlots(slots)
 
 	// Plumb the site fuse into per-slot limits so the DP joint-plans
 	// battery + EV under the fuse constraint instead of producing plans
@@ -1194,6 +1192,18 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 // cloudy day σ grows (keep more reserve). k=0 or σ=0 → raw forecast (no hedge,
 // e.g. operators who want "use the battery you have"). Night slots (PVW=0) are
 // unaffected — the haircut only ever shaves real generation.
+// applyPVDownsideToSlots is the Service-level seam over applyPVDownside: it
+// reads the live σ from the PVUncertaintyW hook and the configured k, and
+// applies the downside haircut to the plan's slots. No-op when the hook is
+// unwired (PVUncertaintyW nil) or on a nil Service — the planner then runs
+// against the raw forecast.
+func (s *Service) applyPVDownsideToSlots(slots []Slot) {
+	if s == nil || s.PVUncertaintyW == nil {
+		return
+	}
+	applyPVDownside(slots, s.PVForecastSafetyK, s.PVUncertaintyW())
+}
+
 func applyPVDownside(slots []Slot, k, sigmaW float64) {
 	if k <= 0 || sigmaW <= 0 {
 		return
