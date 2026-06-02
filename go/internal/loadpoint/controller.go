@@ -353,11 +353,19 @@ type Directive struct {
 // EVSample is the loadpoint-relevant slice of telemetry.DerReading
 // for a DerEV entry — power, cumulative session energy, plug state.
 // Chargers like Easee don't expose the vehicle's BMS SoC, so the
-// controller only sees these three fields.
+// controller only sees these four fields.
+//
+// RequestActive is true when the vehicle is (or could imminently be)
+// drawing current. Drivers that can distinguish "throttled to 0" from
+// "the vehicle has explicitly stopped requesting current" set this to
+// false on the latter. Drivers without that distinction leave it
+// true. The loadpoint manager uses it to detect vehicle-side
+// completion via the SessionCompletionTimeout timer.
 type EVSample struct {
-	PowerW    float64
-	SessionWh float64
-	Connected bool
+	PowerW        float64
+	SessionWh     float64
+	Connected     bool
+	RequestActive bool
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)
@@ -1108,7 +1116,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		wasPlugged = st.PluggedIn
 		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
-	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
+	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
 		return
