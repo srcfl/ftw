@@ -17,8 +17,11 @@ type daySavings struct {
 	ImportWh         float64
 	ExportWh         float64
 	LoadWh           float64
+	EVWh             float64
 	ImportCostOre    float64
 	ExportRevenueOre float64
+	BaselineHouseOre float64
+	BaselineEvOre    float64
 	BaselineCostOre  float64
 	AvgImportOreKwh  float64
 	AvgExportOreKwh  float64
@@ -34,8 +37,11 @@ func fromBreakdown(b state.DayCostBreakdown, resolution string) daySavings {
 		ImportWh:         b.ImportWh,
 		ExportWh:         b.ExportWh,
 		LoadWh:           b.LoadWh,
+		EVWh:             b.EVWh,
 		ImportCostOre:    b.ImportCostOre,
 		ExportRevenueOre: b.ExportRevenueOre,
+		BaselineHouseOre: b.BaselineHouseOre,
+		BaselineEvOre:    b.BaselineEvOre,
 		BaselineCostOre:  b.BaselineCostOre,
 		AvgImportOreKwh:  b.AvgImportOreKwh,
 		AvgExportOreKwh:  b.AvgExportOreKwh,
@@ -178,16 +184,19 @@ func (s *Server) handleSavingsDaily(w http.ResponseWriter, r *http.Request) {
 		tSaved += ds.SavedOre
 
 		out = append(out, map[string]any{
-			"day":                dayKey,
-			"import_wh":          ds.ImportWh,
-			"export_wh":          ds.ExportWh,
-			"load_wh":            ds.LoadWh,
-			"import_cost_ore":    ds.ImportCostOre,
-			"export_revenue_ore": ds.ExportRevenueOre,
-			"actual_cost_ore":    ds.ActualCostOre,
-			"baseline_cost_ore":  ds.BaselineCostOre,
-			// Deprecated compatibility alias: this now means the same
-			// load-only baseline as baseline_cost_ore, not a flat-average tariff.
+			"day":                 dayKey,
+			"import_wh":           ds.ImportWh,
+			"export_wh":           ds.ExportWh,
+			"load_wh":             ds.LoadWh,
+			"ev_wh":               ds.EVWh,
+			"import_cost_ore":     ds.ImportCostOre,
+			"export_revenue_ore":  ds.ExportRevenueOre,
+			"actual_cost_ore":     ds.ActualCostOre,
+			"baseline_house_ore":  ds.BaselineHouseOre,
+			"baseline_ev_ore":     ds.BaselineEvOre,
+			"baseline_cost_ore":   ds.BaselineCostOre,
+			// Deprecated compatibility alias: now equals baseline_cost_ore
+			// (house slot-priced + EV at daily-avg), not a flat-average tariff.
 			"flat_cost_ore":      ds.FlatCostOre,
 			"saved_ore":          ds.SavedOre,
 			"avg_import_ore_kwh": ds.AvgImportOreKwh,

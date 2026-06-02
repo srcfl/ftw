@@ -48,7 +48,20 @@ site:
   gain: 0.5                       # legacy proportional gain
   slew_rate_w: 500                # max change in dispatch target per cycle
   min_dispatch_interval_s: 5      # holdoff between successive dispatches
+  max_export_w: 0                 # cap total site export (W); 0 = fuse only
 ```
+
+`max_export_w` is an **opt-in export ceiling below the physical fuse**.
+Some inverters trip into a protective fault on *sustained* grid export
+well under the breaker rating — a Ferroamp EnergyHub, for example, faults
+(state `0x8030`) after ~8 kW of continuous midday export and only recovers
+as PV wanes, losing hours of solar. Set `max_export_w` just below the
+observed trip point and the EMS enforces it two ways: the dispatch fuse
+guard scales battery discharge back so predicted export stays under it,
+and the MPC caps each plan slot's export so the planner never *schedules*
+a discharge that would over-export. `0` (default) leaves export bounded
+only by the fuse. Hot-reloads on the dispatch side; the MPC picks it up on
+restart (parity with `fuse.max_amps`). See [safety.md §3c](safety.md).
 
 ### `fuse` — shared breaker limit
 
@@ -291,6 +304,7 @@ Keys must match `drivers[].name`. Leave blank to use BMS defaults.
 | `site.grid_tolerance_w` | ✅ | Deadband applied next cycle |
 | `site.slew_rate_w` | ✅ | Applied next dispatch |
 | `site.min_dispatch_interval_s` | ✅ | |
+| `site.max_export_w` | ⚠️ | Dispatch guard hot-reloads; MPC picks it up on restart |
 | `site.control_interval_s` | ⚠️ | Picked up next cycle (current cycle uses old value) |
 | `site.watchdog_timeout_s` | ✅ | |
 | `fuse.*` | ✅ | Read fresh each cycle |

@@ -1,4 +1,4 @@
-# forty-two-watts — Home Energy Management System
+# forty-two-watts — Home Energy Management System (Linux)
 #
 # Pulls the pre-built multi-arch image (linux/amd64 + linux/arm64) from
 # GitHub Container Registry. No local build needed.
@@ -7,6 +7,13 @@
 #   Logs:     docker compose logs -f
 #   Upgrade:  docker compose pull && docker compose up -d
 #   Stop:     docker compose down
+#
+# PLATFORM:  This file uses `network_mode: host`, a Linux-kernel feature.
+# It is the right file for a Raspberry Pi, an Ubuntu/Debian server, a
+# NUC, or a Linux VM. On macOS (e.g. a Mac mini) host networking binds to
+# the Docker Desktop VM, not to the Mac, so the dashboard is unreachable
+# and discovery breaks silently — use docker-compose.macos.yml instead.
+# See docs/deploy-platforms.md for the full Mac mini + generic-Linux guide.
 #
 # Persistent state — config.yaml, state.db, battery models, cold/
 # Parquet files — lives in ./data and survives image upgrades. The

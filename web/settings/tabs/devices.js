@@ -357,6 +357,7 @@
         var sel = document.getElementById("driver-catalog-picker");
         var nameEl = document.getElementById("driver-catalog-name");
         if (!sel || !sel.value) return;
+        ctx.captureCurrentTab();
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
         var name = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);

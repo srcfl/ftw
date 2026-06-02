@@ -236,17 +236,15 @@ func TestRestoreDiagnosticRehydratesActivePlan(t *testing.T) {
 	}
 }
 
-// 2026-05-25 live regression: deploy of v0.82 added SoCSafetyFloorPct
-// to Params but persisted snapshots from v0.81 had no field for it.
-// RestoreDiagnostic re-hydrated lastParams from the old snapshot
-// (SoCSafetyFloorPct=0), so the safety-floor gate sat inactive until
-// the next scheduled replan (15 min later). Fix: when restoring,
-// merge fields that are zero-in-snapshot but non-zero-in-Defaults
-// with the current Defaults value.
+// RestoreDiagnostic must merge fields that are zero-in-snapshot but
+// non-zero-in-Defaults with the current Defaults value, so a deploy that adds
+// a new Params field doesn't let an older snapshot's zero overwrite the
+// operator's intended default until the next replan. Exercised here with
+// PVChargeBonusOreKwh.
 func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 	now := time.Now()
 	start := now.Add(-5 * time.Minute).Truncate(time.Minute)
-	// Snapshot WITHOUT SoCSafetyFloorPct (simulates an older binary).
+	// Snapshot WITHOUT PVChargeBonusOreKwh (simulates an older binary).
 	d := &Diagnostic{
 		ComputedAtMs:   now.Add(-1 * time.Minute).UnixMilli(),
 		Zone:           "SE4",
@@ -265,8 +263,7 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 			DischargeEfficiency: 0.95,
 			CapacityWh:          16000,
 			TerminalSoCPrice:    100,
-			// SoCSafetyFloorPct: 0 (field didn't exist when snapshot was written)
-			// SafetyFloorPenaltyOreKwhHour: 0
+			// PVChargeBonusOreKwh: 0 (field didn't exist when snapshot was written)
 		},
 		Slots: []DiagnosticSlot{{
 			Idx: 0, SlotStartMs: start.UnixMilli(),
@@ -276,13 +273,12 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 			EMSMode: "self_consumption",
 		}},
 	}
-	// Service has the newer defaults — operator picked 25% safety floor.
+	// Service has the newer defaults — operator picked a 30 öre PV-charge bonus.
 	svc := &Service{
 		Zone: "SE4",
 		Defaults: Params{
-			Mode:                         ModeSelfConsumption,
-			SoCSafetyFloorPct:            25,
-			SafetyFloorPenaltyOreKwhHour: 100,
+			Mode:                ModeSelfConsumption,
+			PVChargeBonusOreKwh: 30,
 		},
 	}
 	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
@@ -292,16 +288,13 @@ func TestRestoreDiagnosticMergesNewerDefaultsForMissingFields(t *testing.T) {
 	if diag == nil {
 		t.Fatal("Diagnose returned nil after restore")
 	}
-	if diag.Params.SoCSafetyFloorPct != 25 {
-		t.Errorf("SoCSafetyFloorPct after restore = %v, want 25 (merged from Defaults; snapshot had 0)", diag.Params.SoCSafetyFloorPct)
-	}
-	if diag.Params.SafetyFloorPenaltyOreKwhHour != 100 {
-		t.Errorf("SafetyFloorPenaltyOreKwhHour after restore = %v, want 100 (merged from Defaults)", diag.Params.SafetyFloorPenaltyOreKwhHour)
+	if diag.Params.PVChargeBonusOreKwh != 30 {
+		t.Errorf("PVChargeBonusOreKwh after restore = %v, want 30 (merged from Defaults; snapshot had 0)", diag.Params.PVChargeBonusOreKwh)
 	}
 }
 
-// If the snapshot DOES have explicit values (operator persisted a
-// non-zero choice), restore must preserve them — not overwrite with
+// If the snapshot DOES have an explicit value (operator persisted a
+// non-zero choice), restore must preserve it — not overwrite with
 // Defaults. Only zero-in-snapshot fields get the merge.
 func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 	now := time.Now()
@@ -312,20 +305,19 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 		Horizon:        1,
 		LastReplanAtMs: now.Add(-1 * time.Minute).UnixMilli(),
 		Params: DiagnosticParams{
-			Mode:                         ModeSelfConsumption,
-			InitialSoCPct:                30,
-			SoCMinPct:                    10,
-			SoCMaxPct:                    95,
-			SoCLevels:                    41,
-			ActionLevels:                 81,
-			MaxChargeW:                   5000,
-			MaxDischargeW:                5000,
-			ChargeEfficiency:             0.95,
-			DischargeEfficiency:          0.95,
-			CapacityWh:                   16000,
-			TerminalSoCPrice:             100,
-			SoCSafetyFloorPct:            15, // operator picked a different value
-			SafetyFloorPenaltyOreKwhHour: 50,
+			Mode:                ModeSelfConsumption,
+			InitialSoCPct:       30,
+			SoCMinPct:           10,
+			SoCMaxPct:           95,
+			SoCLevels:           41,
+			ActionLevels:        81,
+			MaxChargeW:          5000,
+			MaxDischargeW:       5000,
+			ChargeEfficiency:    0.95,
+			DischargeEfficiency: 0.95,
+			CapacityWh:          16000,
+			TerminalSoCPrice:    100,
+			PVChargeBonusOreKwh: 15, // operator picked a different value
 		},
 		Slots: []DiagnosticSlot{{
 			Idx: 0, SlotStartMs: start.UnixMilli(),
@@ -338,20 +330,16 @@ func TestRestoreDiagnosticPreservesExplicitSnapshotValues(t *testing.T) {
 	svc := &Service{
 		Zone: "SE4",
 		Defaults: Params{
-			Mode:                         ModeSelfConsumption,
-			SoCSafetyFloorPct:            25, // Defaults would say 25 but snapshot has 15
-			SafetyFloorPenaltyOreKwhHour: 100,
+			Mode:                ModeSelfConsumption,
+			PVChargeBonusOreKwh: 30, // Defaults would say 30 but snapshot has 15
 		},
 	}
 	if ok := svc.RestoreDiagnostic(d, now, "restored_diagnostic"); !ok {
 		t.Fatal("RestoreDiagnostic returned false")
 	}
 	diag := svc.Diagnose()
-	if diag.Params.SoCSafetyFloorPct != 15 {
-		t.Errorf("SoCSafetyFloorPct = %v, want 15 (snapshot value must win over Defaults)", diag.Params.SoCSafetyFloorPct)
-	}
-	if diag.Params.SafetyFloorPenaltyOreKwhHour != 50 {
-		t.Errorf("SafetyFloorPenaltyOreKwhHour = %v, want 50 (snapshot value must win)", diag.Params.SafetyFloorPenaltyOreKwhHour)
+	if diag.Params.PVChargeBonusOreKwh != 15 {
+		t.Errorf("PVChargeBonusOreKwh = %v, want 15 (snapshot value must win over Defaults)", diag.Params.PVChargeBonusOreKwh)
 	}
 }
 

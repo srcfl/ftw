@@ -65,6 +65,20 @@ func TestDriverCapacitiesFromMultipleLoadpoints(t *testing.T) {
 	}
 }
 
+func TestBuildLoadpointConfigsPreservesSurplusOnly(t *testing.T) {
+	got := buildLoadpointConfigs([]config.Loadpoint{{
+		ID:          "garage",
+		DriverName:  "easee",
+		SurplusOnly: true,
+	}})
+	if len(got) != 1 {
+		t.Fatalf("loadpoints = %d, want 1", len(got))
+	}
+	if !got[0].SurplusOnly {
+		t.Fatal("SurplusOnly was dropped by buildLoadpointConfigs")
+	}
+}
+
 // TestDriverCapacitiesFromLuaFilenameFallback covers the case where
 // an operator has not (yet) migrated to a `loadpoints:` config block
 // but still has an EV driver with a vehicle-sized `battery_capacity_wh`.
