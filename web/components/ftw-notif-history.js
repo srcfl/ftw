@@ -104,7 +104,22 @@ export class FtwNotifHistory extends FtwElement {
     var cutoff = Date.now() - windowMs;
     var fails = rows.filter(r => r.status === "failed" && (r.ts_ms || 0) >= cutoff).length;
     this._failCount = fails;
-    this.update();
+    this._updateDot();
+  }
+
+  _updateDot() {
+    var dot = this.shadowRoot.querySelector(".dot");
+    if (!dot) {
+      this.update();
+      return;
+    }
+    if (this._failCount > 0) {
+      dot.textContent = this._failCount > 99 ? "99+" : String(this._failCount);
+      dot.classList.remove("hidden");
+    } else {
+      dot.textContent = "";
+      dot.classList.add("hidden");
+    }
   }
 
   async _open() {

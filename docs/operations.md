@@ -2,6 +2,13 @@
 
 The operator's guide. From "I have a fresh Raspberry Pi" to "I can debug a hung driver at 3am".
 
+> This doc covers the **native-binary + systemd** deploy and the
+> platform-independent runbook (logs, backup, troubleshooting). If you'd
+> rather run the **Docker** stack — the default for most installs — see
+> [deploy-platforms.md](deploy-platforms.md) for the Mac mini and
+> generic-Linux (Ubuntu/NUC/VM) guides, or [rpi-image.md](rpi-image.md)
+> for the turnkey Raspberry Pi SD-card image.
+
 Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (buying from grid), `grid_w < 0` means **export** (selling). Battery `bat_w > 0` means **charging** (load, draws from grid), `bat_w < 0` means **discharging** (source, reduces import). PV `pv_w` is always ≤ 0 (generation pushes energy into the site). See [site-convention.md](site-convention.md) for the full convention.
 
 ## 1. Build + cross-compile

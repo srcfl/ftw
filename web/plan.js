@@ -43,7 +43,7 @@
   function horizonBounds(horizon) {
     const now = Date.now();
     if (horizon === "today") {
-      return { tMin: localMidnight(0), tMax: localMidnight(1) };
+      return { tMin: Math.max(localMidnight(0), now - 30 * 60 * 1000), tMax: localMidnight(1) };
     }
     if (horizon === "tomorrow") {
       return { tMin: localMidnight(1), tMax: localMidnight(2) };
