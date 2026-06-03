@@ -182,3 +182,33 @@ func TestOpenCheckedStateFreshWhenNoSnapshot(t *testing.T) {
 		t.Fatalf("want rebuilt/state event, got %+v", ev)
 	}
 }
+
+func TestPricesRouteToCache(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	// cache.db must exist alongside state.db
+	if _, err := os.Stat(filepath.Join(dir, "cache.db")); err != nil {
+		t.Fatalf("cache.db not created: %v", err)
+	}
+	// Prices save + load through the cache handle
+	if err := st.SavePrices([]PricePoint{{
+		Zone: "SE3", SlotTsMs: 1000, SlotLenMin: 60,
+		SpotOreKwh: 50, TotalOreKwh: 60, Source: "test", FetchedAtMs: 1,
+	}}); err != nil {
+		t.Fatalf("SavePrices: %v", err)
+	}
+	got, err := st.LoadPrices("SE3", 0, 2000)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("LoadPrices got %d (%v)", len(got), err)
+	}
+	// The prices table lives in cache.db, NOT state.db.
+	var name string
+	if err := st.db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='prices'`).Scan(&name); err == nil {
+		t.Error("prices table should not exist in state.db")
+	}
+}
