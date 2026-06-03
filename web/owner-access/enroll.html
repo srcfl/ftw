@@ -29,6 +29,10 @@
     <input id="name" placeholder="e.g. Fredrik's MacBook" autocomplete="off">
     <p class="muted">Shows up in the trusted-devices list so you can identify and revoke this passkey later.</p>
 
+    <label for="pin">First-time enrollment PIN <span class="muted">(only for your first passkey)</span></label>
+    <input id="pin" inputmode="numeric" autocomplete="off" placeholder="6 digits — shown on the Pi's LAN dashboard">
+    <p class="muted">Leave blank if you already have a passkey, or if you're enrolling on the local network. For the very first passkey via the relay, read the PIN on the Pi at <span class="code">/api/owner-access/enroll-pin</span> (or its logs).</p>
+
     <button id="enroll" class="primary">Enroll passkey</button>
     <button onclick="location.href='./'">Cancel</button>
 
@@ -50,11 +54,17 @@
         return;
       }
       try {
-        // 1. Start ceremony.
-        const start = await fetch(base + "/api/owner-access/enroll/start", { method: "POST" });
+        // 1. Start ceremony. The first passkey enrolled through the relay
+        //    needs the LAN PIN (?pin=); later enrollments (logged in) don't.
+        const pin = document.getElementById("pin").value.trim();
+        const startUrl = base + "/api/owner-access/enroll/start" + (pin ? ("?pin=" + encodeURIComponent(pin)) : "");
+        const start = await fetch(startUrl, { method: "POST" });
         if (!start.ok) {
           const body = await start.text();
-          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}</div>`;
+          const hint = (start.status === 403 && /pin/i.test(body))
+            ? ' — your first passkey through the relay needs the LAN PIN (read it on the Pi at /api/owner-access/enroll-pin or in its logs).'
+            : '';
+          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}${hint}</div>`;
           return;
         }
         const { ceremony_token, options } = await start.json();

@@ -28,6 +28,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -53,6 +55,11 @@ const ownerAccessSessionTTL = 24 * time.Hour
 // the ceremony in <30s; 5 min covers slow Touch-ID prompts.
 const ownerAccessCeremonyTTL = 5 * time.Minute
 
+// ownerAccessEnrollPinTTL is how long a LAN-minted enrollment PIN stays
+// valid. 10 min lets the owner read the code off the Pi's console and walk
+// to the relay origin in another tab.
+const ownerAccessEnrollPinTTL = 10 * time.Minute
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
@@ -62,6 +69,41 @@ type ownerAccessState struct {
 	enrollSessions map[string]ceremonySession
 	loginSessions  map[string]ceremonySession
 	authSessions   map[string]authSession
+
+	// enrollPin is the in-memory LAN-first-enrollment PIN. Regenerated on
+	// demand (each GET /enroll-pin mints a fresh value), expires after
+	// ownerAccessEnrollPinTTL. Empty pin means "none minted".
+	enrollPin       string
+	enrollPinExpiry time.Time
+}
+
+// mintEnrollPin generates a fresh 6-digit numeric PIN, stores it with a
+// 10-minute TTL, and returns it together with the remaining seconds. Any
+// previously-minted PIN is replaced.
+func (oa *ownerAccessState) mintEnrollPin() (pin string, expiresInS int, err error) {
+	p, err := randomDigits(6)
+	if err != nil {
+		return "", 0, err
+	}
+	oa.mu.Lock()
+	oa.enrollPin = p
+	oa.enrollPinExpiry = time.Now().Add(ownerAccessEnrollPinTTL)
+	oa.mu.Unlock()
+	return p, int(ownerAccessEnrollPinTTL.Seconds()), nil
+}
+
+// validateEnrollPin reports whether candidate matches the currently-minted,
+// unexpired PIN. Constant-time compare so a tunnelled attacker can't probe for
+// the digits. An empty stored PIN (none minted, or expired) never matches.
+func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
+	oa.mu.Lock()
+	stored := oa.enrollPin
+	expiry := oa.enrollPinExpiry
+	oa.mu.Unlock()
+	if stored == "" || time.Now().After(expiry) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(stored)) == 1
 }
 
 type ceremonySession struct {
@@ -227,6 +269,20 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// randomDigits returns n cryptographically-random decimal digits as a string
+// (zero-padded, e.g. "042315"). Used for the LAN enrollment PIN.
+func randomDigits(n int) (string, error) {
+	out := make([]byte, n)
+	for i := range out {
+		d, err := rand.Int(rand.Reader, big.NewInt(10))
+		if err != nil {
+			return "", err
+		}
+		out[i] = byte('0' + d.Int64())
+	}
+	return string(out), nil
+}
+
 func (oa *ownerAccessState) gcCeremonies() {
 	cutoff := time.Now().Add(-ownerAccessCeremonyTTL)
 	for k, v := range oa.enrollSessions {
@@ -337,13 +393,20 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return fmt.Errorf("check trusted devices: %w", err)
 	}
 	if len(devices) == 0 {
-		// Bootstrap (trust-on-first-use): allowed only from the LAN, never
-		// over the relay tunnel where the window would be internet-exposed
-		// (whoever reaches enroll/start first on an un-enrolled Pi becomes
-		// the owner). The first passkey must be enrolled with physical/LAN
-		// presence.
+		// Bootstrap (trust-on-first-use). On the genuine LAN this is allowed
+		// outright — physical/LAN presence is the proof. Over the relay tunnel
+		// the window would otherwise be internet-exposed (whoever reaches
+		// enroll/start first on an un-enrolled Pi becomes the owner), so we
+		// require the LAN-minted PIN: a 6-digit code only a local user can
+		// read off the Pi's console. This lets the owner enroll the first
+		// passkey at the relay origin (needed for the relay RP-ID) while still
+		// proving LAN presence.
 		if s.isTunneled(r) {
-			return errors.New("first enrollment must be performed on the local network")
+			pin := r.URL.Query().Get("pin")
+			if pin == "" || !s.ownerAccess().validateEnrollPin(pin) {
+				return errors.New("first enrollment requires the LAN PIN")
+			}
+			return nil
 		}
 		return nil
 	}
@@ -351,6 +414,31 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return nil
 	}
 	return errors.New("enrollment requires an existing authenticated session")
+}
+
+// handleOwnerEnrollPin mints (and returns) the LAN-first-enrollment PIN.
+// Reachable ONLY from genuine LAN/loopback requests: a relay-tunnelled
+// request (carrying the X-FTW-Tunnel marker) gets 403 — the PIN must never
+// leave the local network, since it's the very proof of LAN presence. The PIN
+// is also logged at Info level so it shows up on the Pi's console for an
+// operator standing at the machine.
+func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
+	if s.isTunneled(r) {
+		http.Error(w, "enrollment PIN is only available on the local network", http.StatusForbidden)
+		return
+	}
+	pin, expiresIn, err := s.ownerAccess().mintEnrollPin()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.Info("owner-access enrollment PIN minted",
+		"pin", pin, "expires_in_s", expiresIn)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"pin":          pin,
+		"expires_in_s": expiresIn,
+	})
 }
 
 func (s *Server) handleOwnerEnrollStart(w http.ResponseWriter, r *http.Request) {

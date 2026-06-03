@@ -54,7 +54,8 @@ func (s *Server) gate(next http.Handler) http.Handler {
 // strips its /me/<site_id> prefix before forwarding.
 func isOwnerAccessOpenPath(p string) bool {
 	switch p {
-	case "/api/owner-access/login/start",
+	case "/api/owner-access/enroll-pin",
+		"/api/owner-access/login/start",
 		"/api/owner-access/login/finish",
 		"/api/owner-access/enroll/start",
 		"/api/owner-access/enroll/finish",
