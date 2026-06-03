@@ -95,3 +95,90 @@ func TestQuickCheckDetectsCorruption(t *testing.T) {
 		t.Error("corrupted DB reported healthy")
 	}
 }
+
+// copyFile is a test helper (distinct from production copyFileRaw).
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenCheckedCleanNoEvent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "clean.db")
+	writePopulated(t, path, 10)
+	db, ev, err := openChecked(path, tierCache, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if ev != nil {
+		t.Errorf("clean open produced heal event: %+v", ev)
+	}
+}
+
+func TestOpenCheckedCacheRebuildsOnCorruption(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.db")
+	writePopulated(t, path, 200)
+	corruptAt(t, path, 8192)
+
+	db, ev, err := openChecked(path, tierCache, 1717430000000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if ev == nil || ev.Action != healRebuilt || ev.Tier != tierCache {
+		t.Fatalf("want rebuilt/cache event, got %+v", ev)
+	}
+	if ok, _ := quickCheck(db); !ok {
+		t.Error("rebuilt cache is not healthy")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "cache.db.corrupt-1717430000000")); err != nil {
+		t.Errorf("corrupt file not quarantined: %v", err)
+	}
+}
+
+func TestOpenCheckedStateRestoresFromSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	writePopulated(t, path, 200)
+	copyFile(t, path, path+".snapshot") // known-good copy
+	corruptAt(t, path, 8192)
+
+	db, ev, err := openChecked(path, tierState, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if ev == nil || ev.Action != healRestored {
+		t.Fatalf("want restored event, got %+v", ev)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM big`).Scan(&n); err != nil {
+		t.Fatalf("restored DB missing data: %v", err)
+	}
+	if n != 200 {
+		t.Errorf("restored row count = %d, want 200", n)
+	}
+}
+
+func TestOpenCheckedStateFreshWhenNoSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	writePopulated(t, path, 200)
+	corruptAt(t, path, 8192)
+
+	db, ev, err := openChecked(path, tierState, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if ev == nil || ev.Action != healRebuilt || ev.Tier != tierState {
+		t.Fatalf("want rebuilt/state event, got %+v", ev)
+	}
+}
