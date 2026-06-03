@@ -275,6 +275,49 @@ func TestOwnerWhoamiReturnsWallet(t *testing.T) {
 	}
 }
 
+// The discoverable-login handler resolves the single owner from the
+// assertion's userHandle (== the wallet handle W), and rejects any other.
+func TestResolveDiscoverableOwner(t *testing.T) {
+	d := minDeps(t)
+	srv := New(d)
+	w, _ := srv.ownerWalletHandle()
+	u, err := srv.resolveDiscoverableOwner([]byte("rawid"), w)
+	if err != nil {
+		t.Fatalf("resolve with correct handle: %v", err)
+	}
+	if string(u.WebAuthnID()) != string(w) {
+		t.Fatalf("resolved wrong user: %q", u.WebAuthnID())
+	}
+	if _, err := srv.resolveDiscoverableOwner([]byte("rawid"), []byte("not-the-wallet")); err == nil {
+		t.Fatal("expected error for unknown wallet handle")
+	}
+}
+
+// login/start must be discoverable: 200 with NO allowCredentials leaking the
+// enrolled credential id (BeginLogin would include it; BeginDiscoverableLogin
+// must not). 404 stays when nothing is enrolled.
+func TestLoginStartIsDiscoverable(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("seed"), PublicKey: []byte("k"), FriendlyName: "x",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/owner-access/login/start", nil)
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	// base64url("seed") == "c2VlZA" — must NOT appear in allowCredentials.
+	if contains(rec.Body.String(), "c2VlZA") {
+		t.Fatalf("allowCredentials leaked credential id — not discoverable: %q", rec.Body.String())
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }

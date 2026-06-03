@@ -123,7 +123,7 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 		RPOrigins:     origins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 			UserVerification: protocol.VerificationPreferred,
 		},
 	})
@@ -162,6 +162,21 @@ func (s *Server) buildOwnerUser() (*ownerUser, error) {
 		displayName: ownerDisplayName(s.deps),
 		credentials: creds,
 	}, nil
+}
+
+// resolveDiscoverableOwner is the DiscoverableUserHandler for usernameless
+// login: it returns the single owner iff the assertion's userHandle matches
+// the stable wallet handle W. The library then matches the credential rawID
+// against that owner's enrolled credentials and verifies the signature.
+func (s *Server) resolveDiscoverableOwner(rawID, userHandle []byte) (webauthn.User, error) {
+	user, err := s.buildOwnerUser()
+	if err != nil {
+		return nil, err
+	}
+	if subtle.ConstantTimeCompare(userHandle, user.WebAuthnID()) != 1 {
+		return nil, errors.New("owner-access: unknown wallet handle")
+	}
+	return user, nil
 }
 
 func ownerUserID(deps *Deps) []byte {
@@ -465,18 +480,22 @@ func (s *Server) handleOwnerLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
+	// Still 404 when nothing is enrolled so the landing page shows the
+	// "enroll on LAN first" panel.
+	devices, err := s.deps.State.LoadTrustedDevices()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if len(user.credentials) == 0 {
+	if len(devices) == 0 {
 		http.Error(w, "no devices enrolled yet", http.StatusNotFound)
 		return
 	}
-	options, sessionData, err := wa.BeginLogin(user)
+	// Usernameless: empty allowCredentials, resolve the user from the
+	// assertion's userHandle at finish time.
+	options, sessionData, err := wa.BeginDiscoverableLogin()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("begin login: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("begin discoverable login: %v", err), http.StatusInternalServerError)
 		return
 	}
 	tok, err := randomToken()
@@ -517,12 +536,7 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	cred, err := wa.FinishLogin(user, *sess.data, r)
+	cred, err := wa.FinishDiscoverableLogin(s.resolveDiscoverableOwner, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish login: %v", err), http.StatusUnauthorized)
 		return
