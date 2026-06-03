@@ -463,6 +463,11 @@ func (s *Store) migrate() error {
 			backup_eligible INTEGER NOT NULL DEFAULT 0,
 			backup_state    INTEGER NOT NULL DEFAULT 0
 		) STRICT`,
+		`CREATE TABLE IF NOT EXISTS owner_sessions (
+			token         TEXT    PRIMARY KEY NOT NULL,
+			credential_id BLOB    NOT NULL DEFAULT x'',
+			expires_at_ms INTEGER NOT NULL
+		) STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

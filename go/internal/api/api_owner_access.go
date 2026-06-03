@@ -136,11 +136,25 @@ func (s *Server) ownerAccess() *ownerAccessState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deps.ownerAccess == nil {
-		s.deps.ownerAccess = &ownerAccessState{
+		oa := &ownerAccessState{
 			enrollSessions: make(map[string]ceremonySession),
 			loginSessions:  make(map[string]ceremonySession),
 			authSessions:   make(map[string]authSession),
 		}
+		// Restore persisted sessions so a process restart doesn't sign
+		// everyone out (sessions are otherwise in-memory only).
+		if s.deps.State != nil {
+			now := time.Now()
+			_ = s.deps.State.PruneOwnerSessions(now.UnixMilli())
+			if sess, err := s.deps.State.LoadOwnerSessions(); err == nil {
+				for _, p := range sess {
+					if exp := time.UnixMilli(p.ExpiresAtMs); exp.After(now) {
+						oa.authSessions[p.Token] = authSession{credentialID: p.CredentialID, expiresAt: exp}
+					}
+				}
+			}
+		}
+		s.deps.ownerAccess = oa
 	}
 	return s.deps.ownerAccess
 }
@@ -367,13 +381,19 @@ func (s *Server) issueOwnerSession(w http.ResponseWriter, credentialID []byte) e
 	if err != nil {
 		return err
 	}
+	exp := time.Now().Add(ownerAccessSessionTTL)
 	oa := s.ownerAccess()
 	oa.mu.Lock()
 	oa.authSessions[tok] = authSession{
 		credentialID: credentialID,
-		expiresAt:    time.Now().Add(ownerAccessSessionTTL),
+		expiresAt:    exp,
 	}
 	oa.mu.Unlock()
+	// Persist so the session survives a restart (best-effort; the in-memory
+	// map is the hot path).
+	if s.deps.State != nil {
+		_ = s.deps.State.SaveOwnerSession(tok, credentialID, exp.UnixMilli())
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     ownerAccessCookieName,
 		Value:    tok,

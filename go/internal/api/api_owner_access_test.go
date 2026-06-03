@@ -318,6 +318,35 @@ func TestLoginStartIsDiscoverable(t *testing.T) {
 	}
 }
 
+// An owner session must survive a process restart (persisted to state.db) so a
+// Pi reboot doesn't sign the operator out.
+func TestOwnerSessionSurvivesRestart(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("cred")); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no session cookie issued")
+	}
+	// Simulate a restart: drop in-memory state, fresh Server over the same db.
+	d.ownerAccess = nil
+	srv2 := New(d)
+	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
+	req.Host = "1.2.3.4"
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	srv2.Handler().ServeHTTP(rec2, req)
+	if rec2.Code != 200 {
+		t.Fatalf("session must survive restart, got %d body=%q", rec2.Code, rec2.Body.String())
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }
