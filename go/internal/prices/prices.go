@@ -17,11 +17,14 @@ package prices
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
@@ -121,10 +124,13 @@ func (e *ElpriserProvider) Fetch(ctx context.Context, zone string, day time.Time
 
 // ENTSOEProvider uses the EU transparency platform. Needs an API key
 // ("security token") — free to request at
-// https://transparency.entsoe.eu/ Then email for activation.
+// https://transparency.entsoe.eu/ then email for activation (~1 day).
 //
-// Minimal implementation: fetches day-ahead prices for a bidding zone
-// as XML, parses it. Supports most EU zones via EIC codes (below).
+// Fetches the A44 day-ahead Publication_MarketDocument for a bidding zone
+// (EIC codes below), decodes its TimeSeries > Period > Point structure
+// (handling both PT60M and PT15M resolutions and the sparse carry-forward
+// representation), and converts EUR/MWh to native currency per kWh via
+// EURToNative. Returns {} for a day not yet published, like elprisetjustnu.
 type ENTSOEProvider struct {
 	Client  *http.Client
 	APIKey  string
@@ -186,23 +192,152 @@ func (e *ENTSOEProvider) Fetch(ctx context.Context, zone string, day time.Time) 
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("entsoe: status %d: %s", resp.StatusCode, string(body))
 	}
-	// Minimal XML decode — ENTSOE returns a Publication_MarketDocument
-	// with nested TimeSeries > Period > Point entries. Prices are in EUR/MWh.
-	// Convert to SEK/kWh using a fixed exchange rate (or the user should use
-	// elprisetjustnu which already does the conversion).
-	// For now: return EUR/MWh in the SEKPerKWh field if zone isn't SE* and
-	// let the user configure; otherwise multiply by rough ~11.5 SEK/EUR / 1000.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil { return nil, err }
-	return parseENTSOEXML(body, day.UTC())
+	return e.parseXML(body)
 }
 
-// parseENTSOEXML is a stub — real implementation will use encoding/xml
-// with the ENTSOE Publication_MarketDocument schema.
-func parseENTSOEXML(body []byte, dayStart time.Time) ([]RawPrice, error) {
-	_ = body
-	_ = dayStart
-	return nil, fmt.Errorf("entsoe: XML parser not yet implemented")
+// ---- ENTSOE XML decode ----
+//
+// The transparency platform returns a Publication_MarketDocument with
+// nested TimeSeries > Period > Point entries. Prices are EUR/MWh. We
+// convert to native currency per kWh via EURToNative (set from config FX;
+// falls back to a ballpark 11.5 SEK/EUR when unwired).
+//
+// The struct tags carry no namespace, which encoding/xml matches by local
+// name regardless of the document's default xmlns — so the dotted element
+// names (price.amount, currency_Unit.name) bind directly.
+type entsoePublication struct {
+	XMLName    xml.Name           `xml:"Publication_MarketDocument"`
+	TimeSeries []entsoeTimeSeries `xml:"TimeSeries"`
+}
+
+type entsoeTimeSeries struct {
+	Periods []entsoePeriod `xml:"Period"`
+}
+
+type entsoePeriod struct {
+	Start      string        `xml:"timeInterval>start"`
+	End        string        `xml:"timeInterval>end"`
+	Resolution string        `xml:"resolution"`
+	Points     []entsoePoint `xml:"Point"`
+}
+
+type entsoePoint struct {
+	Position int     `xml:"position"`
+	Amount   float64 `xml:"price.amount"`
+}
+
+// eurMWhToNative converts an EUR/MWh figure to native currency per kWh,
+// using the provider's configured converter or the ballpark fallback.
+func (e *ENTSOEProvider) eurMWhToNative(eurPerMWh float64) float64 {
+	eurPerKWh := eurPerMWh / 1000.0
+	if e.EURToNative != nil {
+		return e.EURToNative(eurPerKWh)
+	}
+	return eurPerKWh * 11.5
+}
+
+// parseXML decodes a day-ahead Publication_MarketDocument into raw slots.
+// Returns ({}, nil) when the document carries no price data (e.g. an
+// Acknowledgement returned for a day the auction hasn't published yet),
+// mirroring the elprisetjustnu 404 path so the scheduler just retries.
+func (e *ENTSOEProvider) parseXML(body []byte) ([]RawPrice, error) {
+	var doc entsoePublication
+	if err := xml.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("entsoe: decode: %w", err)
+	}
+	var out []RawPrice
+	for _, ts := range doc.TimeSeries {
+		for _, pd := range ts.Periods {
+			rows, err := e.expandPeriod(pd)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rows...)
+		}
+	}
+	return out, nil
+}
+
+// expandPeriod turns one Period into per-slot prices. ENTSOE uses a sparse
+// A44 representation: a Point is omitted when its price equals the previous
+// position's, so we carry the last seen price forward to fill the period's
+// full slot count (derived from the timeInterval, not the Point count).
+func (e *ENTSOEProvider) expandPeriod(pd entsoePeriod) ([]RawPrice, error) {
+	slotMin := resolutionMinutes(pd.Resolution)
+	if slotMin <= 0 {
+		return nil, fmt.Errorf("entsoe: bad resolution %q", pd.Resolution)
+	}
+	start, err := parseENTSOETime(pd.Start)
+	if err != nil {
+		return nil, fmt.Errorf("entsoe: period start %q: %w", pd.Start, err)
+	}
+	// Slot count from the interval if the end is parseable, else from the
+	// highest position present. The interval form is what lets carry-forward
+	// extend a trailing price to the end of the day.
+	nSlots := 0
+	if end, err := parseENTSOETime(pd.End); err == nil && end.After(start) {
+		nSlots = int(end.Sub(start) / (time.Duration(slotMin) * time.Minute))
+	}
+	priceAt := make(map[int]float64, len(pd.Points))
+	maxPos := 0
+	for _, p := range pd.Points {
+		priceAt[p.Position] = p.Amount
+		if p.Position > maxPos {
+			maxPos = p.Position
+		}
+	}
+	if nSlots < maxPos {
+		nSlots = maxPos
+	}
+	if nSlots <= 0 || nSlots > 4*24*4 { // guard malformed intervals (≤ 4 days @ 15min)
+		return nil, fmt.Errorf("entsoe: implausible slot count %d", nSlots)
+	}
+	out := make([]RawPrice, 0, nSlots)
+	last, have := 0.0, false
+	for pos := 1; pos <= nSlots; pos++ {
+		if v, ok := priceAt[pos]; ok {
+			last, have = v, true
+		}
+		if !have {
+			continue // no leading price to carry yet
+		}
+		out = append(out, RawPrice{
+			SlotStart:  start.Add(time.Duration(pos-1) * time.Duration(slotMin) * time.Minute),
+			SlotLenMin: slotMin,
+			SEKPerKWh:  e.eurMWhToNative(last),
+		})
+	}
+	return out, nil
+}
+
+// resolutionMinutes maps an ISO-8601 duration (PT60M, PT15M, PT30M, PT1H)
+// to minutes. Returns 0 for anything it can't read.
+func resolutionMinutes(res string) int {
+	s := strings.TrimPrefix(res, "PT")
+	switch {
+	case strings.HasSuffix(s, "M"):
+		if n, err := strconv.Atoi(strings.TrimSuffix(s, "M")); err == nil {
+			return n
+		}
+	case strings.HasSuffix(s, "H"):
+		if n, err := strconv.Atoi(strings.TrimSuffix(s, "H")); err == nil {
+			return n * 60
+		}
+	}
+	return 0
+}
+
+// parseENTSOETime reads the platform's timestamps, which come minute-
+// precision UTC ("2026-06-02T22:00Z") but occasionally second-precision.
+func parseENTSOETime(s string) (time.Time, error) {
+	for _, layout := range []string{"2006-01-02T15:04Z07:00", time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC(), nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized time %q", s)
 }
 
 // ---- Applier: turns raw SEK/kWh into consumer öre/kWh ----
