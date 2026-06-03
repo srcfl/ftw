@@ -36,14 +36,20 @@ func (s *Server) gate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Unauthenticated and remote (bypass already declined inside
-		// authorizeOwner for tunnelled requests). Serve the passkey landing
-		// for top-level navigations; 401 for API/asset calls.
-		if r.Method == http.MethodGet && acceptsHTML(r) {
+		// Unauthenticated remote. The data + control surface (/api/*) is never
+		// served without a session. Static assets (CSS/JS/images) stay public
+		// so the login page itself renders styled; only the dashboard's
+		// app-shell HTML routes redirect an unauthenticated visitor to the
+		// passkey login.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodGet && acceptsHTML(r) && isDashboardShell(r.URL.Path) {
 			s.serveOwnerLogin(w, r)
 			return
 		}
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -67,6 +73,18 @@ func isOwnerAccessOpenPath(p string) bool {
 
 func acceptsHTML(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// isDashboardShell reports whether the path is one of the dashboard's HTML
+// entry points (the SPA shell). An unauthenticated remote visitor hitting one
+// is redirected to the passkey login; all other static files stay public so
+// the login surface renders styled.
+func isDashboardShell(p string) bool {
+	switch p {
+	case "/", "/index.html", "/setup", "/setup.html", "/legacy", "/legacy.html", "/next":
+		return true
+	}
+	return false
 }
 
 // serveOwnerLogin serves the passkey landing page without leaking the

@@ -94,3 +94,35 @@ func TestGateLoginSurfaceStaysOpen(t *testing.T) {
 		t.Fatalf("login/start must not be gated; got 401")
 	}
 }
+
+// Static assets (CSS/JS/images) must stay public for an unauthenticated remote
+// request, so the login page renders styled. Only /api/* and the dashboard
+// shell are gated.
+func TestGateStaticAssetsPublicForUnauth(t *testing.T) {
+	d := gateDeps(t)
+	if err := os.WriteFile(filepath.Join(d.WebDir, "style.css"), []byte("body{color:#000}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+
+	// (a) a static asset — unauth remote → served, NOT 401.
+	req := httptest.NewRequest("GET", "/style.css", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-FTW-Tunnel", "marker")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("static asset must be public for unauth remote, got %d", rec.Code)
+	}
+
+	// (b) /api/* — unauth remote → still 401.
+	req2 := httptest.NewRequest("GET", "/api/status", nil)
+	req2.Host = "127.0.0.1:8080"
+	req2.Header.Set("X-FTW-Tunnel", "marker")
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != 401 {
+		t.Fatalf("/api/* must stay gated for unauth remote, got %d", rec2.Code)
+	}
+}
