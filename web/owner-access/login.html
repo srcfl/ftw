@@ -22,6 +22,9 @@
   <p class="muted">Authenticate with a previously enrolled passkey. Your browser will prompt for Touch ID, Windows Hello, or your device's equivalent.</p>
 
   <div class="panel">
+    <input id="passkey-field" name="username" autocomplete="username webauthn"
+           placeholder="Sign in with your passkey…" autofocus
+           style="width:100%; font:inherit; padding:.6rem; border:1px solid var(--line,#ddd); border-radius:.3rem; margin-bottom:.8rem;" />
     <button id="signin" class="primary">Sign in with passkey</button>
     <button onclick="location.href='./'">Cancel</button>
     <div id="msg"></div>
@@ -32,7 +35,7 @@
     const base = apiBase();
     const msg = document.getElementById("msg");
 
-    async function signin() {
+    async function runLogin(mediation) {
       msg.innerHTML = "";
       try {
         const start = await fetch(base + "/api/owner-access/login/start", { method: "POST" });
@@ -41,13 +44,15 @@
           return;
         }
         if (!start.ok) {
-          const body = await start.text();
-          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}</div>`;
+          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${await start.text()}</div>`;
           return;
         }
         const { ceremony_token, options } = await start.json();
         const credOpts = decodeAssertionOptions(options);
-        const cred = await navigator.credentials.get({ publicKey: credOpts });
+        const getOpts = { publicKey: credOpts };
+        if (mediation) getOpts.mediation = mediation;
+        const cred = await navigator.credentials.get(getOpts);
+        if (!cred) return; // conditional aborted / no selection
         const finish = await fetch(
           base + "/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(ceremony_token),
           {
@@ -58,24 +63,28 @@
           }
         );
         if (!finish.ok) {
-          const body = await finish.text();
-          msg.innerHTML = `<div class="err">Finish failed (${finish.status}): ${body}</div>`;
+          msg.innerHTML = `<div class="err">Finish failed (${finish.status}): ${await finish.text()}</div>`;
           return;
         }
         msg.innerHTML = '<div class="ok">Signed in. Redirecting…</div>';
         setTimeout(() => location.href = "./", 800);
       } catch (e) {
+        if (e.name === "AbortError") return; // conditional UI cancelled — silent
         msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;
       }
     }
 
-    document.getElementById("signin").onclick = signin;
-    // Auto-trigger on page load so the user doesn't have to click twice
-    // after navigating from /. WebAuthn requires user activation, but a
-    // recent click counts; if it fails, the user clicks the button again.
-    if (document.referrer.endsWith("/owner-access/")) {
-      signin();
-    }
+    document.getElementById("signin").onclick = () => runLogin(undefined);
+
+    // Conditional UI: silently offer the passkey on the autofill field when
+    // supported. The button remains the fallback for browsers without it.
+    (async () => {
+      try {
+        if (await PublicKeyCredential.isConditionalMediationAvailable?.()) {
+          runLogin("conditional");
+        }
+      } catch { /* feature-detect failure → button only */ }
+    })();
   </script>
 </body>
 </html>
