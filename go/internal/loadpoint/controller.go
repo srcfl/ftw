@@ -45,6 +45,13 @@ type Controller struct {
 	// EV cooperatively share the site fuse.
 	fuseEVMax func() (float64, bool)
 
+	// perPhaseMeterAmps returns the live site-meter per-phase currents (L1,
+	// L2, L3). Wired from telemetry; nil disables the per-phase fuse clamp.
+	perPhaseMeterAmps func() (l1, l2, l3 float64, ok bool)
+	// fusePhaseCapA holds the per-loadpoint per-phase EV current cap carried
+	// between ticks by the reactive per-phase fuse clamp (tickOne goroutine).
+	fusePhaseCapA map[string]float64
+
 	// siteSurplusForEVW returns the live PV surplus that this loadpoint
 	// could legally claim under surplus_only — i.e. *what's left of PV
 	// after house load*, regardless of what the home battery is
@@ -61,6 +68,9 @@ type Controller struct {
 	// disables the per-phase fields in the cmd; the driver then
 	// falls back to its own configured defaults.
 	site SiteFuse
+	// siteMu guards site against concurrent SetSiteFuse hot-reloads
+	// (config-reload goroutine) vs the tick goroutine's reads.
+	siteMu sync.RWMutex
 
 	// holds is the manual-override registry: per-loadpoint power +
 	// phase parameters that win over the MPC-driven dispatch until
@@ -82,6 +92,12 @@ type Controller struct {
 	surplusWin      map[string]*surplusWindow
 	surplusPaused   map[string]bool
 	surplusPausedAt map[string]time.Time
+	// surplusStepW is the last applied surplus_only step per loadpoint.
+	// Used for asymmetric step smoothing: down-steps track instant surplus
+	// (no-import promise), up-steps are gated on the rolling average so a
+	// transient surplus spike can't ratchet the EV up a step it can't hold
+	// (which would whipsaw the home battery's PI). See computeSurplusCmd.
+	surplusStepW map[string]float64
 
 	// vehicleStatus reports the matched vehicle driver + its
 	// charging_state for a given loadpoint, so the controller can
@@ -337,11 +353,19 @@ type Directive struct {
 // EVSample is the loadpoint-relevant slice of telemetry.DerReading
 // for a DerEV entry — power, cumulative session energy, plug state.
 // Chargers like Easee don't expose the vehicle's BMS SoC, so the
-// controller only sees these three fields.
+// controller only sees these four fields.
+//
+// RequestActive is true when the vehicle is (or could imminently be)
+// drawing current. Drivers that can distinguish "throttled to 0" from
+// "the vehicle has explicitly stopped requesting current" set this to
+// false on the latter. Drivers without that distinction leave it
+// true. The loadpoint manager uses it to detect vehicle-side
+// completion via the SessionCompletionTimeout timer.
 type EVSample struct {
-	PowerW    float64
-	SessionWh float64
-	Connected bool
+	PowerW        float64
+	SessionWh     float64
+	Connected     bool
+	RequestActive bool
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)
@@ -372,6 +396,15 @@ func (c *Controller) SetFuseEVMax(f func() (float64, bool)) {
 		return
 	}
 	c.fuseEVMax = f
+}
+
+// SetPerPhaseMeterAmps wires the live site-meter per-phase current reader
+// used by the per-phase fuse clamp.
+func (c *Controller) SetPerPhaseMeterAmps(f func() (l1, l2, l3 float64, ok bool)) {
+	if c == nil {
+		return
+	}
+	c.perPhaseMeterAmps = f
 }
 
 // SetSiteSurplusForEV wires a per-tick "PV surplus available to the
@@ -432,6 +465,84 @@ func (c *Controller) SetPeakRemainingSurplusW(f func() (float64, bool)) {
 // neither a sticky operator hold nor a stale MPC budget can drive
 // the fuse over limit, and the cooldown prevents fuse flap when a
 // transient overload clears momentarily.
+// ---- Per-phase fuse clamp (operator report 2026-05-30) ----
+//
+// The dispatch fuse guard protects the 3-phase TOTAL import; it is blind to
+// per-phase imbalance, so a phase carrying house load + the EV's full offer can
+// exceed the breaker while the site total looks fine (observed: L1 ~18 A on a
+// 16 A fuse). This reactive clamp lowers the EV's per-phase offer whenever the
+// worst measured phase nears the breaker.
+
+// fusePhaseMarginA is the per-phase amp headroom held below the breaker.
+const fusePhaseMarginA = 1.0
+
+// fusePhaseStepUpA is how fast the per-phase EV cap recovers per tick once a
+// phase has headroom — gentle enough not to re-trip, quick enough to ramp back.
+const fusePhaseStepUpA = 1.0
+
+// nextFusePhaseCapA reactively caps the EV's per-phase offer so the worst
+// measured site-meter phase stays at or below (fuseA - marginA). Reductions are
+// immediate (the full overage) to protect the breaker; ramp-up is gradual
+// (stepA/tick). prevCapA <= 0 means "uninitialised" -> start from the full fuse.
+// Pure for testability.
+func nextFusePhaseCapA(prevCapA, worstMeterA, fuseA, marginA, stepA float64) float64 {
+	if fuseA <= 0 {
+		return prevCapA
+	}
+	limit := fuseA - marginA
+	capA := prevCapA
+	if capA <= 0 {
+		capA = fuseA
+	}
+	switch {
+	case worstMeterA > limit:
+		capA -= worstMeterA - limit
+	case worstMeterA+stepA <= limit:
+		capA += stepA
+	}
+	if capA < 0 {
+		capA = 0
+	}
+	if capA > fuseA {
+		capA = fuseA
+	}
+	return capA
+}
+
+// applyPerPhaseFuseClamp lowers the EV's per-phase offer (cmd["max_amps_per_phase"])
+// when any live site-meter phase nears the breaker. The dispatch fuse guard
+// only protects the 3-phase TOTAL, so an imbalanced phase (house load + the
+// EV's full offer) can trip the breaker while the total looks fine. Reactive:
+// see nextFusePhaseCapA. Called just before the cmd is dispatched so it caps
+// whatever the paths above set. Operator report 2026-05-30.
+func (c *Controller) applyPerPhaseFuseClamp(lpCfg Config, cmd map[string]any) {
+	if c == nil || c.perPhaseMeterAmps == nil {
+		return
+	}
+	fuseA := c.siteFuse().MaxAmps
+	if fuseA <= 0 {
+		return
+	}
+	l1, l2, l3, ok := c.perPhaseMeterAmps()
+	if !ok {
+		return
+	}
+	worst := math.Max(l1, math.Max(l2, l3))
+	if c.fusePhaseCapA == nil {
+		c.fusePhaseCapA = map[string]float64{}
+	}
+	capA := nextFusePhaseCapA(c.fusePhaseCapA[lpCfg.ID], worst, fuseA, fusePhaseMarginA, fusePhaseStepUpA)
+	c.fusePhaseCapA[lpCfg.ID] = capA
+	if capA >= fuseA {
+		return
+	}
+	if existing, has := cmd["max_amps_per_phase"].(float64); !has || capA < existing {
+		cmd["max_amps_per_phase"] = capA
+		slog.Info("loadpoint per-phase fuse clamp",
+			"lp", lpCfg.ID, "worst_phase_a", worst, "ev_cap_a", capA, "fuse_a", fuseA)
+	}
+}
+
 func (c *Controller) applyFuseClampAndCooldown(now time.Time, lpCfg Config, wantW float64) float64 {
 	if c == nil {
 		return wantW
@@ -614,6 +725,17 @@ func (c *Controller) gridDeferredFor(lpID string) bool {
 func (c *Controller) surplusActive(lpCfg Config, sched Schedule) bool {
 	if lpCfg.SurplusOnly {
 		return true
+	}
+	// A committed charge schedule (with surplus_only OFF) overrides the
+	// RUNTIME surplus clamp. Reaching the target SoC by the deadline may need
+	// grid power, so the MPC grid-deferral guard and the bat-SoC arm must NOT
+	// snap the EV's commanded W to live PV surplus — otherwise the schedule's
+	// planned grid charge (e.g. the plan's 11 kW) is silently throttled to the
+	// available surplus and the deadline is missed. The explicit SurplusOnly
+	// config above still wins, so a "surplus-preferred with a deadline floor"
+	// combo is unaffected. Operator directive 2026-05-30.
+	if sched.SoCPct > 0 {
+		return false
 	}
 	if c.gridDeferredFor(lpCfg.ID) {
 		return true
@@ -863,7 +985,17 @@ func (c *Controller) SetSiteFuse(f SiteFuse) {
 	if c == nil {
 		return
 	}
+	c.siteMu.Lock()
 	c.site = f
+	c.siteMu.Unlock()
+}
+
+// siteFuse returns a snapshot of the site fuse under read lock, safe
+// against a concurrent SetSiteFuse hot-reload.
+func (c *Controller) siteFuse() SiteFuse {
+	c.siteMu.RLock()
+	defer c.siteMu.RUnlock()
+	return c.site
 }
 
 // SetManualHold pins the given loadpoint to a fixed dispatch payload
@@ -984,7 +1116,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		wasPlugged = st.PluggedIn
 		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
-	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh)
+	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
 		return
@@ -1057,23 +1189,24 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		case lpCfg.MinPhaseHoldS > 0:
 			cmd["min_phase_hold_s"] = lpCfg.MinPhaseHoldS
 		}
+		site := c.siteFuse()
 		switch {
 		case hold.Voltage > 0:
 			cmd["voltage"] = hold.Voltage
-		case c.site.Voltage > 0:
-			cmd["voltage"] = c.site.Voltage
+		case site.Voltage > 0:
+			cmd["voltage"] = site.Voltage
 		}
 		switch {
 		case hold.MaxAmpsPerPhase > 0:
 			cmd["max_amps_per_phase"] = hold.MaxAmpsPerPhase
-		case c.site.MaxAmps > 0:
-			cmd["max_amps_per_phase"] = c.site.MaxAmps
+		case site.MaxAmps > 0:
+			cmd["max_amps_per_phase"] = site.MaxAmps
 		}
 		switch {
 		case hold.SitePhases > 0:
 			cmd["site_phases"] = hold.SitePhases
-		case c.site.MaxAmps > 0:
-			cmd["site_phases"] = c.site.Phases()
+		case site.MaxAmps > 0:
+			cmd["site_phases"] = site.Phases()
 		}
 	} else {
 		cmdW, planReady := c.computeCommand(now, lpCfg, sample.PowerW)
@@ -1165,30 +1298,19 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// Operators who picked surplus_only have clearly opted into
 		// "react to PV"; dynamic phase switching is the only way to
 		// actually deliver low-power surplus to the EV.
-		phaseMode := lpCfg.PhaseMode
-		if c.surplusLockedTo1P(lpCfg.ID) {
-			phaseMode = "1p"
-		} else if surplusOn && (phaseMode == "" || phaseMode == "auto") {
-			// Honour the 30-min near-term dwell decision ONLY when the
-			// operator hasn't explicitly pinned a phase. Explicit "1p"
-			// or "3p" is a fixed-install contract: a 1Φ-only home or a
-			// 3Φ-only contactor preference. Overriding it via dwell
-			// would let a near-term forecast flip the install's
-			// physical configuration, exactly the wear case the dwell
-			// was meant to avoid.
-			//
-			// When phase_mode is unset or "auto", pin the driver to
-			// the dwell decision across the dwell window so a transient
-			// cmd_w=0 (pause) doesn't make the driver's "auto" snap to
-			// 1Φ and flip the contactor. Without this,
-			// pickSurplusSteps' step-list lock is silently bypassed
-			// every time the surplus clamp pauses.
-			if dwell := c.dwellSelectedPhaseMode(lpCfg.ID); dwell != "" {
-				phaseMode = dwell
-			} else if phaseMode == "" {
-				phaseMode = "auto"
-			}
-		}
+		// Phase selection. An active charge schedule overrides the surplus
+		// 1Φ forecast lock (and the near-term dwell verdict) so a deadline-
+		// driven charge can pull 3Φ grid power instead of being throttled to
+		// ~3.7 kW on a cloudy day; the surplus lock / dwell only applies when
+		// no schedule is committed. resolvePhaseMode keeps the dwell/lock
+		// rationale in one testable place. Operator directive 2026-05-30.
+		phaseMode := resolvePhaseMode(
+			lpCfg.PhaseMode,
+			sched.SoCPct > 0,
+			c.surplusLockedTo1P(lpCfg.ID),
+			surplusOn,
+			c.dwellSelectedPhaseMode(lpCfg.ID),
+		)
 		if phaseMode != "" {
 			cmd["phase_mode"] = phaseMode
 		}
@@ -1202,15 +1324,17 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// ceiling using the actual mains voltage instead of hard-coding
 		// 230 V × 16 A. Drivers that don't support phase switching can
 		// safely ignore these fields.
-		if c.site.MaxAmps > 0 {
-			cmd["max_amps_per_phase"] = c.site.MaxAmps
-			cmd["site_phases"] = c.site.Phases()
+		site := c.siteFuse()
+		if site.MaxAmps > 0 {
+			cmd["max_amps_per_phase"] = site.MaxAmps
+			cmd["site_phases"] = site.Phases()
 		}
-		if v := c.site.Voltage; v > 0 {
+		if v := site.Voltage; v > 0 {
 			cmd["voltage"] = v
 		}
 	}
 
+	c.applyPerPhaseFuseClamp(lpCfg, cmd)
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return
@@ -1478,23 +1602,47 @@ func (c *Controller) computeSurplusCmd(now time.Time, lpCfg Config, wantW, curre
 	c.setSurplusPause(lpCfg.ID, paused, pausedAt)
 
 	if paused {
+		// Reset the step memory so the next resume ramps up fresh under
+		// the avg gate rather than from a stale pre-pause level.
+		c.setSurplusStepW(lpCfg.ID, 0)
 		return 0
 	}
-	// Setpoint tracks INSTANT surplus, not the rolling average. The
-	// avg smooths the pause/resume decision so we don't cycle the
-	// contactor on transients (that's the user-stated intent: "avg
-	// over 4 ticks to determine pause"), but using avg for the
-	// setpoint magnitude lags reality — on a slowly dropping cloud
-	// front the EV would hold its previous draw for ~20 s while
-	// live PV had already fallen below it, and the difference
-	// leaks straight into grid import. Tracking instant keeps the
-	// no-import promise tight; the home battery's reactive PI in
-	// self_consumption fills sub-tick gaps.
+	// Setpoint magnitude: down-steps track INSTANT surplus (keeps the
+	// no-import promise tight — on a dropping cloud front the EV must shed
+	// load immediately or it leaks straight into grid import). Up-steps are
+	// gated on the rolling AVERAGE.
 	target := wantW
 	if instant < target {
 		target = instant
 	}
-	return SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+	snapped := SnapChargeW(target, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+
+	// Asymmetric step smoothing (operator report 2026-05-30). surplusW counts
+	// the home battery's current charge power as EV-available, so a single-
+	// tick wobble (the battery briefly backing off, a cloud edge, the load
+	// twitching) would ratchet the EV UP a step it can't hold — it collapses
+	// the next tick, and the repeated multi-kW load swing whipsaws the home
+	// battery's reactive PI into integrator windup, so the battery stops
+	// delivering its planned discharge (EV ↔ battery limit cycle). Requiring
+	// the smoothed average to ALSO clear the higher step lets the EV ramp up
+	// only on a sustained rise. Down-steps stay instant (above), so the
+	// no-import guarantee is unaffected.
+	prev := c.getSurplusStepW(lpCfg.ID)
+	if snapped > prev {
+		avgTarget := wantW
+		if avg < avgTarget {
+			avgTarget = avg
+		}
+		avgSnapped := SnapChargeW(avgTarget, lpCfg.MinChargeW, lpCfg.MaxChargeW, steps3)
+		if avgSnapped < snapped {
+			snapped = avgSnapped
+			if snapped < prev {
+				snapped = prev // never force a down-step on an up-tick
+			}
+		}
+	}
+	c.setSurplusStepW(lpCfg.ID, snapped)
+	return snapped
 }
 
 // pickSurplusSteps returns the step set surplus_only should snap to
@@ -1700,6 +1848,43 @@ afterNearTerm:
 
 // surplusLockedTo1P reports whether the surplus_only 1Φ lock is
 // currently active for the given loadpoint. Read-only accessor.
+// resolvePhaseMode decides the phase_mode command sent to the charger driver
+// for a loadpoint tick. Precedence:
+//
+//  1. An ACTIVE charge schedule wins: a deadline-driven SoC target may need
+//     3Φ grid power to be met, so it must NOT be throttled to 1Φ by the
+//     surplus optimisation. An explicit operator pin ("1p"/"3p") is honoured;
+//     otherwise "auto" lets the driver pick the phase count for the power.
+//  2. Surplus 1Φ forecast lock: when the day's PV can't sustain 3Φ the
+//     loadpoint is pinned to 1Φ (the operator's surplus-only intent).
+//  3. Surplus-active + auto/unset: hold the 30-min near-term dwell verdict so
+//     a transient pause doesn't flip the contactor; default "auto".
+//  4. Otherwise: the operator's configured phase mode, verbatim.
+//
+// Pure function so the precedence stays unit-testable. Operator directive
+// 2026-05-30 (a schedule must override the 1Φ forecast lock).
+func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surplusOn bool, dwell string) string {
+	switch {
+	case scheduleActive:
+		if operatorMode == "" {
+			return "auto"
+		}
+		return operatorMode
+	case surplusLocked1P:
+		return "1p"
+	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
+		if dwell != "" {
+			return dwell
+		}
+		if operatorMode == "" {
+			return "auto"
+		}
+		return operatorMode
+	default:
+		return operatorMode
+	}
+}
+
 func (c *Controller) surplusLockedTo1P(id string) bool {
 	if c == nil {
 		return false
@@ -1857,6 +2042,21 @@ func (c *Controller) setSurplusPause(id string, paused bool, at time.Time) {
 	} else {
 		delete(c.surplusPausedAt, id)
 	}
+}
+
+func (c *Controller) getSurplusStepW(id string) float64 {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	return c.surplusStepW[id]
+}
+
+func (c *Controller) setSurplusStepW(id string, w float64) {
+	c.surplusMu.Lock()
+	defer c.surplusMu.Unlock()
+	if c.surplusStepW == nil {
+		c.surplusStepW = map[string]float64{}
+	}
+	c.surplusStepW[id] = w
 }
 
 // computeCommand resolves the W setpoint for a plugged loadpoint.

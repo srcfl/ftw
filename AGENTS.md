@@ -246,6 +246,7 @@ charge another.
 - `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
 - `docs/api.md` — HTTP endpoint reference (NEW)
 - `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
+- `docs/deploy-platforms.md` — running on a Mac mini or generic Linux server (Ubuntu/NUC/VM) via Docker (NEW)
 - `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
 - `docs/configuration.md` — YAML schema reference
 - `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune

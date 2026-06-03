@@ -130,6 +130,7 @@ type Loadpoint struct {
 	PhaseMode     string  `yaml:"phase_mode,omitempty" json:"phase_mode,omitempty"`
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
 	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
+	SurplusOnly   bool    `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -257,20 +258,24 @@ type Planner struct {
 	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
 	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
-	// SoCSafetyFloorPct is the operational floor above the hardware
-	// SoCMinPct. When SoC is below this AND a slot has PV surplus,
-	// the planner prefers charging up immediately rather than
-	// deferring to peak-PV hours. Gated on PV-surplus so it cannot
-	// motivate grid-charging in self-consumption mode. Defaults to
-	// 25 % when unset; set to 0 to disable.
-	SoCSafetyFloorPct float64 `yaml:"soc_safety_floor_pct,omitempty" json:"soc_safety_floor_pct,omitempty"`
-
-	// SafetyFloorPenaltyOreKwhHour is the cost per (kWh of deficit
-	// below SoCSafetyFloorPct × hour) added to slot cost when PV
-	// surplus is available. Defaults to 100 öre/kWh-hour; set to 0
-	// to disable the safety-floor mechanism while keeping a non-zero
-	// floor value visible to operators.
+	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
+	// SoC-percentage safety floor was replaced by downside-PV planning
+	// (PVForecastSafetyK) — a percentage is the wrong unit (relative to
+	// battery size) for an absolute forecast risk. Still parsed so old
+	// config files load; ignored at runtime with a warning. Remove from
+	// your config and set pv_forecast_safety_k instead.
+	SoCSafetyFloorPct            float64 `yaml:"soc_safety_floor_pct,omitempty" json:"soc_safety_floor_pct,omitempty"`
 	SafetyFloorPenaltyOreKwhHour float64 `yaml:"safety_floor_penalty_ore_kwh_hour,omitempty" json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
+
+	// PVForecastSafetyK scales the downside-PV haircut: the MPC plans
+	// against forecast PV minus k·σ, where σ is the recent PV forecast
+	// error std (pvmodel residual). The DP then won't run the battery
+	// down betting on PV that may not arrive — a reserve emerges from the
+	// live forecast uncertainty itself, sized to the real risk (large on
+	// variable cloudy days, ~zero on clear days or in winter), not a flat
+	// SoC %. Pointer so unset (→ default 1.0) is distinct from an explicit
+	// 0 (= raw forecast, no hedge: "use the battery you have").
+	PVForecastSafetyK *float64 `yaml:"pv_forecast_safety_k,omitempty" json:"pv_forecast_safety_k,omitempty"`
 
 	// PVChargeBonusOreKwh credits each kWh of battery charge fed from
 	// live PV surplus, in passive_arbitrage mode. Default 0 (disabled)
@@ -302,6 +307,16 @@ type Planner struct {
 	// to the energy path on upgrade. Honored with a startup WARN
 	// and will be removed after one release.
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
+}
+
+// PVSafetyK resolves the downside-PV haircut scale (forecast − k·σ). Unset
+// config (nil Planner or nil field) → default 1.0; an explicit value is
+// honored verbatim, including 0 (no hedge — "use the battery you have").
+func (p *Planner) PVSafetyK() float64 {
+	if p == nil || p.PVForecastSafetyK == nil {
+		return 1.0
+	}
+	return *p.PVForecastSafetyK
 }
 
 // Site is the top-level control loop config.
@@ -368,6 +383,17 @@ type Site struct {
 	// allowed through, smaller load-step capacity before re-curtail.
 	// Default 1000.
 	DCLinkProtectionMarginW float64 `yaml:"dc_link_protection_margin_w,omitempty" json:"dc_link_protection_margin_w,omitempty"`
+
+	// MaxExportW caps total site export (W, magnitude) below the physical
+	// fuse. 0 = disabled (export bounded only by the fuse). When > 0 it is
+	// enforced two ways: the dispatch fuse guard scales battery discharge
+	// back so predicted export stays under it, and the MPC caps each slot's
+	// export so the planner never schedules a discharge that would
+	// over-export. Protects inverters that trip on sustained export well
+	// below the breaker rating — the recurring Ferroamp EnergyHub fault
+	// state 0x8030 after ~8 kW sustained midday export, which only cleared
+	// as PV waned. Set it just under the observed trip point.
+	MaxExportW float64 `yaml:"max_export_w,omitempty" json:"max_export_w,omitempty"`
 }
 
 // DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom

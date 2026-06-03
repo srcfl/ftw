@@ -1,0 +1,121 @@
+# forty-two-watts — macOS (Docker Desktop) deployment
+#
+# Use this file INSTEAD of docker-compose.yml on a Mac (e.g. a Mac mini
+# running as an always-on home server). It is self-contained — do not
+# layer it on top of docker-compose.yml with `-f`.
+#
+#   Start:    docker compose -f docker-compose.macos.yml up -d
+#   Logs:     docker compose -f docker-compose.macos.yml logs -f
+#   Upgrade:  docker compose -f docker-compose.macos.yml pull && \
+#             docker compose -f docker-compose.macos.yml up -d
+#   Stop:     docker compose -f docker-compose.macos.yml down
+#
+# WHY A SEPARATE FILE.  The Linux compose file uses `network_mode: host`,
+# which on macOS does NOT bind to the Mac's network — Docker Desktop runs
+# every container inside a Linux VM, so "host" means the VM, not macOS.
+# The dashboard would be unreachable and mDNS/broadcast discovery would
+# fail silently. This file uses bridge networking with published ports
+# instead, which is the only thing that works on Docker Desktop.
+#
+# NETWORKING CAVEATS ON macOS (read docs/deploy-platforms.md for detail):
+#   - The app reaches the embedded broker by SERVICE NAME, not localhost.
+#     In config.yaml set the MQTT host to `mosquitto` (port 1883), NOT
+#     `localhost` / `127.0.0.1`. There is no host networking to make
+#     localhost mean "the broker".
+#   - mDNS (`zap.local`) and UDP broadcast device discovery do NOT cross
+#     the Docker Desktop VM boundary. Configure every driver with an
+#     EXPLICIT IP address. Outbound unicast TCP (Modbus TCP to a known
+#     inverter/meter IP) works fine through Docker Desktop's NAT.
+#   - LAN devices that push to the broker (e.g. a Pixii PowerShaper)
+#     reach it at <mac-ip>:1883 because port 1883 is published below.
+#   - ARP-based device identity (`mac:<addr>`) won't resolve across the
+#     VM boundary, so device_id falls back to `make:serial` (preferred,
+#     set by the driver) or `ep:<endpoint>`. See docs/device-identity.md.
+#
+# PERSISTENT STATE.  config.yaml, state.db, battery models and the cold/
+# Parquet archive live in ./data and survive image upgrades. Unlike the
+# Linux file, you do NOT need to chown ./data to uid 100:101 — Docker
+# Desktop's file sharing (VirtioFS/gRPC-FUSE) maps host ownership
+# transparently, so the container's ftw user can always write to it.
+# Just `mkdir -p ./data` before the first `up`.
+
+services:
+  forty-two-watts:
+    # Tag is variable so the ftw-updater sidecar can pin to a specific
+    # release on `update`. Manual `up -d` (no env set) → :latest.
+    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
+    container_name: forty-two-watts
+    restart: unless-stopped
+
+    environment:
+      # In-app self-update feature (version banner + Update/Restart
+      # buttons). Wired to the ftw-updater sidecar below.
+      FTW_SELFUPDATE_ENABLED: "1"
+
+    # Bridge networking + a published port. The dashboard is reachable at
+    # http://localhost:8080/ on the Mac itself and http://<mac-ip>:8080/
+    # from other devices on the LAN. (Host networking is intentionally
+    # NOT used — see the header.)
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - ./data:/app/data
+      # Shared tmpfs with the updater — the main app reads state.json from
+      # here to render update progress in the UI; it never writes to it.
+      - update-ipc:/run/ftw-update
+
+  ftw-updater:
+    image: ghcr.io/frahlg/forty-two-watts-updater:latest
+    container_name: ftw-updater
+    restart: unless-stopped
+
+    # No outbound network — the sidecar reaches the Docker Desktop daemon
+    # over its Unix socket and the main app over a socket in update-ipc.
+    network_mode: none
+
+    environment:
+      # Point the sidecar's internal `docker compose -f <path>` at THIS
+      # file (not docker-compose.yml). The host daemon interprets the
+      # bind paths, so it must be the real macOS path the user launched
+      # compose from.
+      FTW_UPDATER_COMPOSE: ${PWD:-.}/docker-compose.macos.yml
+      # Keep the project name stable so the sidecar recreates the real
+      # containers instead of a parallel set. Defaults to the directory
+      # name compose derives; pin it to match your manual invocation.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-forty-two-watts}
+
+    volumes:
+      # The Docker Desktop socket — the one privileged resource the
+      # sidecar touches, so it can `compose pull` + recreate the main
+      # service. Docker Desktop exposes this at the usual path.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Bind the project dir at its host path, read-only, for the same
+      # reason as the Linux file: the daemon resolves `./data` relative
+      # to this path. ${PWD} is the macOS dir at `up` time.
+      - ${PWD:-.}:${PWD:-.}:ro
+      - update-ipc:/run/ftw-update
+
+  # ---------------------------------------------------------------------
+  # MQTT broker (Eclipse Mosquitto)
+  #
+  # The main app reaches this broker at `mosquitto:1883` over the compose
+  # project network (NOT localhost — there is no host networking on
+  # macOS). LAN devices reach it at <mac-ip>:1883 via the published port.
+  # Remove this service if you dial out to a broker elsewhere on the LAN.
+  # ---------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: forty-two-watts-mosquitto
+    restart: unless-stopped
+
+    ports:
+      - "1883:1883"
+
+    volumes:
+      - ./mosquitto/config:/mosquitto/config:ro
+      - mosquitto-data:/mosquitto/data
+
+volumes:
+  update-ipc:
+  mosquitto-data:

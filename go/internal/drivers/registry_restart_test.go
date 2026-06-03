@@ -2,6 +2,7 @@ package drivers
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,9 +19,9 @@ import (
 // is what prevents the broker from leaving two clients fighting for
 // the same clientID across a restart cycle.
 type mockMQTT struct {
-	mu        sync.Mutex
-	subs      []string
-	closeN    atomic.Int32
+	mu     sync.Mutex
+	subs   []string
+	closeN atomic.Int32
 }
 
 func (m *mockMQTT) Subscribe(topic string) error {
@@ -30,7 +31,7 @@ func (m *mockMQTT) Subscribe(topic string) error {
 	return nil
 }
 func (m *mockMQTT) Publish(topic string, payload []byte) error { return nil }
-func (m *mockMQTT) PopMessages() []MQTTMessage                  { return nil }
+func (m *mockMQTT) PopMessages() []MQTTMessage                 { return nil }
 func (m *mockMQTT) Close() error {
 	m.closeN.Add(1)
 	return nil
@@ -44,7 +45,7 @@ type mockModbus struct {
 func (m *mockModbus) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	return nil, nil
 }
-func (m *mockModbus) WriteSingle(addr, value uint16) error   { return nil }
+func (m *mockModbus) WriteSingle(addr, value uint16) error { return nil }
 func (m *mockModbus) WriteMulti(addr uint16, vals []uint16) error {
 	return nil
 }
@@ -71,6 +72,57 @@ func newTestRegistry(t *testing.T, mq *mockMQTT, mb *mockModbus) *Registry {
 		}
 	}
 	return r
+}
+
+type ctxAwareRuntime struct {
+	env     *HostEnv
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (r *ctxAwareRuntime) Init(ctx context.Context, configJSON []byte) error { return nil }
+func (r *ctxAwareRuntime) Poll(ctx context.Context) (time.Duration, error)   { return time.Hour, nil }
+func (r *ctxAwareRuntime) Command(ctx context.Context, cmdJSON []byte) error {
+	return ctx.Err()
+}
+func (r *ctxAwareRuntime) DefaultMode(ctx context.Context) error {
+	r.once.Do(func() { close(r.entered) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (r *ctxAwareRuntime) Cleanup(ctx context.Context) error { return nil }
+func (r *ctxAwareRuntime) Env() *HostEnv                     { return r.env }
+
+func TestSendDefaultPassesCallerContextToRuntime(t *testing.T) {
+	tel := telemetry.NewStore()
+	r := NewRegistry(tel)
+	rt := &ctxAwareRuntime{
+		env:     NewHostEnv("d1", tel),
+		entered: make(chan struct{}),
+	}
+	rd := &runningDriver{
+		driver: rt,
+		env:    rt.env,
+		cfg:    config.Driver{Name: "d1"},
+		cmdCh:  make(chan driverCmd, 1),
+		stop:   make(chan bool, 1),
+		done:   make(chan struct{}),
+	}
+	r.rec["d1"] = rd
+	go r.runLoop(rd)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := r.SendDefault(ctx, "d1")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SendDefault err = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-rt.entered:
+	default:
+		t.Fatal("runtime DefaultMode was not called")
+	}
+	r.remove("d1", true)
 }
 
 // Reset all — used to test a series of adds / removes in the same

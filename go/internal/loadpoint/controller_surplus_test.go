@@ -89,6 +89,69 @@ func TestSurplusCmd_PauseResumeHysteresis(t *testing.T) {
 	}
 }
 
+// TestSurplusCmd_UpStepGatedOnAverage is the anti-flap regression
+// (operator report 2026-05-30). The surplus_only setpoint magnitude must
+// only step UP when the rolling average sustains the higher step — a single-
+// tick instant-surplus spike (the home battery briefly backing off, a cloud
+// edge) must NOT ratchet the EV up a step it can't hold. Down-steps stay
+// instant so the no-import promise is preserved. Without the gate the EV
+// jumps steps every tick and the load swing whipsaws the home battery's PI
+// into windup, starving its planned discharge.
+func TestSurplusCmd_UpStepGatedOnAverage(t *testing.T) {
+	c := NewController(NewManager(), nil, nil, nil)
+	cfg := surplusTestConfig() // steps {0, 1380, 4140, 6900}
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	// Force the 1Φ day-lock so pickSurplusSteps returns the full step set
+	// every tick (otherwise the forecast-driven phase logic would vary it).
+	c.phaseLocked1P = map[string]bool{cfg.ID: true}
+	c.phaseLockedAt = map[string]time.Time{cfg.ID: now}
+
+	var surplus float64
+	c.SetSiteSurplusForEV(func() (float64, bool) { return surplus, true })
+	step := func(s float64) float64 {
+		surplus = s
+		got := c.computeSurplusCmd(now, cfg, 11040, 0)
+		now = now.Add(5 * time.Second)
+		return got
+	}
+
+	// Settle on a sustained 2000 W surplus → snaps to the 1380 W step.
+	var settled float64
+	for i := 0; i < 5; i++ {
+		settled = step(2000)
+	}
+	if settled <= 0 {
+		t.Fatalf("expected a positive settled step, got %v", settled)
+	}
+
+	// A SINGLE-tick spike to 5000 W must not ratchet the EV up — the 4-tick
+	// rolling average has barely moved, so the higher step isn't sustained.
+	spike := step(5000)
+	if spike > settled {
+		t.Errorf("one-tick surplus spike ratcheted EV up: settled=%v spike=%v "+
+			"(up-step must be gated on the rolling average)", settled, spike)
+	}
+
+	// Now SUSTAIN 5000 W: once the average clears the higher step, the EV
+	// ramps up.
+	var sustained float64
+	for i := 0; i < 5; i++ {
+		sustained = step(5000)
+	}
+	if sustained <= settled {
+		t.Errorf("sustained surplus rise did not step EV up: settled=%v sustained=%v",
+			settled, sustained)
+	}
+
+	// Down-steps are immediate (no-import promise): drop the surplus and the
+	// EV sheds to a lower step on the very next tick, no avg gating.
+	down := step(2000)
+	if down >= sustained {
+		t.Errorf("down-step was not immediate: sustained=%v down=%v "+
+			"(down must track instant surplus)", sustained, down)
+	}
+}
+
 // TestSurplusCmd_MinPauseHold verifies that even with the rolling avg
 // instantly above the resume threshold, the loadpoint stays paused for
 // at least surplusMinPauseHold after a pause edge. Without this guard

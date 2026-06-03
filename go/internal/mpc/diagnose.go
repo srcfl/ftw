@@ -49,8 +49,6 @@ type DiagnosticParams struct {
 	InitialSoCPct       float64  `json:"initial_soc_pct"`
 	SoCMinPct                    float64 `json:"soc_min_pct"`
 	SoCMaxPct                    float64 `json:"soc_max_pct"`
-	SoCSafetyFloorPct            float64 `json:"soc_safety_floor_pct,omitempty"`
-	SafetyFloorPenaltyOreKwhHour float64 `json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
 	PVChargeBonusOreKwh          float64 `json:"pv_charge_bonus_ore_kwh,omitempty"`
 	SoCLevels                    int     `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
@@ -155,8 +153,6 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			InitialSoCPct:                p.InitialSoCPct,
 			SoCMinPct:                    p.SoCMinPct,
 			SoCMaxPct:                    p.SoCMaxPct,
-			SoCSafetyFloorPct:            p.SoCSafetyFloorPct,
-			SafetyFloorPenaltyOreKwhHour: p.SafetyFloorPenaltyOreKwhHour,
 			PVChargeBonusOreKwh:          p.PVChargeBonusOreKwh,
 			SoCLevels:                    p.SoCLevels,
 			ActionLevels:                 p.ActionLevels,
@@ -227,19 +223,10 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	}
 	// Merge fields that exist in the current binary's Defaults but
 	// could be missing-or-zero in a persisted snapshot written by an
-	// older binary. Without this merge, a deploy that adds a new
-	// Params field (e.g. SoCSafetyFloorPct added in v0.82) lets the
-	// restored snapshot's zero overwrite the operator's intended
-	// default until the next successful replan rebuilds params from
-	// s.Defaults. Live regression 2026-05-25: a v0.82 deploy restored
-	// the v0.81 snapshot with SoCSafetyFloorPct=0; safety floor stayed
-	// inactive for ~10 minutes until manual /api/mpc/replan.
-	if params.SoCSafetyFloorPct == 0 && s.Defaults.SoCSafetyFloorPct > 0 {
-		params.SoCSafetyFloorPct = s.Defaults.SoCSafetyFloorPct
-	}
-	if params.SafetyFloorPenaltyOreKwhHour == 0 && s.Defaults.SafetyFloorPenaltyOreKwhHour > 0 {
-		params.SafetyFloorPenaltyOreKwhHour = s.Defaults.SafetyFloorPenaltyOreKwhHour
-	}
+	// older binary. Without this merge, a deploy that adds a new Params
+	// field lets the restored snapshot's zero overwrite the operator's
+	// intended default until the next successful replan rebuilds params
+	// from s.Defaults.
 	if params.PVChargeBonusOreKwh == 0 && s.Defaults.PVChargeBonusOreKwh > 0 {
 		params.PVChargeBonusOreKwh = s.Defaults.PVChargeBonusOreKwh
 	}
@@ -269,8 +256,6 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		InitialSoCPct:                d.Params.InitialSoCPct,
 		SoCMinPct:                    d.Params.SoCMinPct,
 		SoCMaxPct:                    d.Params.SoCMaxPct,
-		SoCSafetyFloorPct:            d.Params.SoCSafetyFloorPct,
-		SafetyFloorPenaltyOreKwhHour: d.Params.SafetyFloorPenaltyOreKwhHour,
 		PVChargeBonusOreKwh:          d.Params.PVChargeBonusOreKwh,
 		SoCLevels:                    d.Params.SoCLevels,
 		ActionLevels:                 d.Params.ActionLevels,

@@ -20,6 +20,10 @@
           "Highest SoC the planner will charge to (percent). 90 = 90%.") +
         '</div></div>' +
         '<div class="field-row"><div>' +
+        field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,
+          "How conservative the planner is about solar that might not arrive. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k keeps more battery reserve on uncertain/cloudy days; 1.0 is the default; 0 = use the full battery (no hedge). On clear days and in winter the hedge is ~0 automatically.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
         field("Base load (W)", "planner.base_load_w", "number", 0,
           "Constant household load estimate used when the load twin has no data yet.") +
         '</div><div>' +

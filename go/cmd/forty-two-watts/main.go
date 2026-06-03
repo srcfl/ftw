@@ -382,13 +382,16 @@ func main() {
 			slog.Warn("failed to persist loadpoint surplus_only", "lp", id, "err", err)
 		}
 	})
-	lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
-		v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
-		if !ok || v == "" {
-			return false, false
-		}
-		return v == "true", true
-	})
+	hydrateLoadpointSurplusOnly := func() {
+		lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
+			v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
+			if !ok || v == "" {
+				return false, false
+			}
+			return v == "true", true
+		})
+	}
+	hydrateLoadpointSurplusOnly()
 	// Seed any recurring deadlines from boot — without this the first
 	// dispatch tick would race with an empty target_time and might
 	// miss the deadline penalty for ~5 s.
@@ -415,6 +418,11 @@ func main() {
 	// HA from disabled to enabled at runtime) keeps the API handler's
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
+
+	// Forward-declared before the reload watcher so the reload callback
+	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
+	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
+	var lpController *loadpoint.Controller
 
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
@@ -460,7 +468,22 @@ func main() {
 			// Mirror the startup-path default semantics — nil → 0.5,
 			// explicit 0 → disabled. See EffectiveSafetyMarginA.
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
+			ctrl.MaxExportW = newCfg.Site.MaxExportW
 			ctrlMu.Unlock()
+
+			// Keep the loadpoint controller's per-phase EV fuse clamp in
+			// sync with hot-reloaded fuse params — previously startup-only,
+			// so an operator tuning max_amps / margin from the UI updated
+			// the control-package battery lever (above) but left the EV
+			// clamp on the stale startup value until restart. SetSiteFuse
+			// takes its own lock; call it outside ctrlMu.
+			if lpController != nil {
+				lpController.SetSiteFuse(loadpoint.SiteFuse{
+					MaxAmps:  newCfg.Fuse.MaxAmps,
+					Voltage:  newCfg.Fuse.Voltage,
+					PhaseCnt: newCfg.Fuse.Phases,
+				})
+			}
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -481,6 +504,7 @@ func main() {
 			// observed state across reloads (plug status, session
 			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
+			hydrateLoadpointSurplusOnly()
 
 			// Notifications: rebuild the provider from fresh config
 			// (handles the cold-start case where the initial config
@@ -701,12 +725,6 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
-	// Forward-declared so the MPC spec builder closure (set below) can
-	// push grid-deferred state into the runtime controller. The
-	// controller itself is constructed further down once its
-	// dependencies (planAdapter, telAdapter, registry) are wired.
-	var lpController *loadpoint.Controller
-
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
@@ -714,6 +732,11 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		// Cap planned export below the fuse when the operator set a site
+		// export ceiling, so the DP never schedules a discharge that would
+		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
+		// Startup-only, matching FuseMaxW above.
+		mpcSvc.MaxExportW = cfg.Site.MaxExportW
 		if pvSvc != nil {
 			// Use the unanchored structural predictor here: the MPC also
 			// receives PVResidualCorrect, which captures the same
@@ -723,7 +746,11 @@ func main() {
 			// downward residual. See pvmodel.Service.PredictStructural.
 			mpcSvc.PV = pvSvc.PredictStructural
 			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
+			mpcSvc.PVUncertaintyW = pvSvc.ResidualStdW
 		}
+		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
+		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
+		mpcSvc.PVForecastSafetyK = cfg.Planner.PVSafetyK()
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
@@ -1057,15 +1084,26 @@ func main() {
 			if r == nil {
 				return loadpoint.EVSample{}, false
 			}
-			var d struct {
-				Connected bool    `json:"connected"`
-				SessionWh float64 `json:"session_wh"`
-			}
+			// RequestActive defaults to true so drivers that
+			// don't emit the field keep their pre-existing
+			// behaviour — only drivers that explicitly emit
+			// request_active=false will trip the
+			// session-completion detector.
+			d := struct {
+				Connected     bool    `json:"connected"`
+				SessionWh     float64 `json:"session_wh"`
+				RequestActive *bool   `json:"request_active"`
+			}{}
 			_ = json.Unmarshal(r.Data, &d)
+			reqActive := true
+			if d.RequestActive != nil {
+				reqActive = *d.RequestActive
+			}
 			return loadpoint.EVSample{
-				PowerW:    r.SmoothedW,
-				SessionWh: d.SessionWh,
-				Connected: d.Connected,
+				PowerW:        r.SmoothedW,
+				SessionWh:     d.SessionWh,
+				Connected:     d.Connected,
+				RequestActive: reqActive,
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
@@ -1088,6 +1126,29 @@ func main() {
 				return 0, false
 			}
 			return ctrl.FuseEVMaxW, true
+		})
+		// Wire the live per-phase site-meter current reader. The control
+		// package's fuse guard is site-TOTAL only (sum across phases);
+		// a single phase can still trip from house-load imbalance (e.g.
+		// a vacuum or oven on L1) stacked on top of the EV's per-phase
+		// draw. This reader feeds the loadpoint's reactive per-phase EV
+		// clamp (applyPerPhaseFuseClamp), which lowers max_amps_per_phase
+		// the instant the worst phase approaches the breaker. Reads the
+		// same meter_lN_a metrics the fuse_over_limit notifier uses.
+		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
+			cfgMu.RLock()
+			siteMeter := cfg.SiteMeterDriver()
+			cfgMu.RUnlock()
+			if siteMeter == "" {
+				return 0, 0, 0, false
+			}
+			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
+			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
+			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
+			if !ok1 && !ok2 && !ok3 {
+				return 0, 0, 0, false
+			}
+			return l1, l2, l3, true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
@@ -1740,7 +1801,7 @@ func main() {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					_ = reg.SendDefault(ctx, tr.Name)
+					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
@@ -1784,21 +1845,8 @@ func main() {
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
-				for _, n := range reg.Names() {
-					// Skip the site-meter driver itself: when it's both
-					// the meter AND a battery (e.g. Pixii), its meter
-					// going stale is usually because its own modbus poll
-					// stalled. Writing setpoint 0 into that same hung
-					// session disrupts whatever it was already doing
-					// and creates a flap loop — the symptom the user
-					// actually sees is the battery cutting in/out
-					// every minute. The protection rationale (don't
-					// charge from a stale grid signal) only applies to
-					// OTHER batteries, not the meter owner itself.
-					if n == ctrl.SiteMeterDriver {
-						continue
-					}
-					_ = reg.SendDefault(ctx, n)
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
+					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
 			}
@@ -2083,6 +2131,35 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 	}
 }
 
+const driverDefaultTimeout = 2 * time.Second
+
+func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
+	defer cancel()
+	if err := reg.SendDefault(cmdCtx, name); err != nil {
+		slog.Warn("driver default command failed",
+			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
+	}
+}
+
+// driversToDefaultOnSiteMeterStale returns the driver names to revert to
+// DefaultMode when the site meter goes stale: every driver EXCEPT the
+// site-meter owner itself. Skipping the meter owner avoids a flap loop on
+// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
+// reading is usually their own hung modbus poll — writing DefaultMode into
+// that same session cuts the battery in/out every minute. The "don't act on
+// a stale grid signal" protection only applies to the OTHER batteries.
+func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == siteMeterDriver {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
 // the MPC sums into Params.CapacityWh and the control layer uses for
 // fuse-guard / peak-shave sizing.
@@ -2287,6 +2364,7 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			PhaseMode:         lp.PhaseMode,
 			PhaseSplitW:       lp.PhaseSplitW,
 			MinPhaseHoldS:     lp.MinPhaseHoldS,
+			SurplusOnly:       lp.SurplusOnly,
 		})
 	}
 	return out
@@ -2414,19 +2492,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if socMax <= 0 || socMax > 100 {
 		socMax = 95
 	}
-	socSafety := pl.SoCSafetyFloorPct
-	if socSafety <= 0 {
-		// Default: 25 % absolute. Operational floor above the
-		// hardware min, leaves buffer against forecast risk (cloud,
-		// load surprise). Set to 0 in config to disable.
-		socSafety = 25
-	}
-	if socSafety < socMin {
-		socSafety = socMin
-	}
-	safetyPenalty := pl.SafetyFloorPenaltyOreKwhHour
-	if safetyPenalty <= 0 {
-		safetyPenalty = 100
+	if pl.SoCSafetyFloorPct != 0 || pl.SafetyFloorPenaltyOreKwhHour != 0 {
+		slog.Warn("config: soc_safety_floor_pct / safety_floor_penalty_ore_kwh_hour are deprecated and ignored — forecast-risk reserve is now handled by pv_forecast_safety_k (downside-PV planning)")
 	}
 	pvBonus := pl.PVChargeBonusOreKwh
 	if pvBonus < 0 {
@@ -2446,8 +2513,6 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		CapacityWh:                   totalCap,
 		SoCMinPct:                    socMin,
 		SoCMaxPct:                    socMax,
-		SoCSafetyFloorPct:            socSafety,
-		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
 		PVChargeBonusOreKwh:          pvBonus,
 		InitialSoCPct:                50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW

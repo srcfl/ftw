@@ -108,7 +108,6 @@ func TestPassiveArbitragePVChargeBonusPrefersPVOverExport(t *testing.T) {
 	}}
 	pNoBonus := baseParams(ModePassiveArbitrage)
 	pNoBonus.InitialSoCPct = 60
-	pNoBonus.SoCSafetyFloorPct = 0 // disable safety floor — focus the test on the bonus
 	pNoBonus.TerminalSoCPrice = 20 // matches export revenue → DP indifferent without bonus
 	pNoBonus.PVChargeBonusOreKwh = 0
 	planNoBonus := Optimize(slots, pNoBonus)
@@ -160,7 +159,6 @@ func TestPassiveArbitragePVChargeBonusDoesNotMotivateGridCharge(t *testing.T) {
 	}
 	p := baseParams(ModePassiveArbitrage)
 	p.InitialSoCPct = 50
-	p.SoCSafetyFloorPct = 0 // disable safety floor — focus the test on the bonus
 	p.TerminalSoCPrice = 50 // moderate — SC bias must be what blocks grid-charge
 	p.PVChargeBonusOreKwh = 30
 
@@ -303,69 +301,136 @@ func TestPassiveArbitrageNeverExportsFromBattery(t *testing.T) {
 	}
 }
 
-func TestSelfConsumptionSafetyFloorChargesEarlyWhenBelowFloor(t *testing.T) {
-	// 12 slots × 15 min = 3 hours. PV surplus throughout (PV 5 kW,
-	// load 500 W → 4.5 kW surplus). Without the safety floor, DP
-	// would defer charging until peak-PV slot; with it, DP must
-	// charge in slot 0.
-	slots := make([]Slot, 12)
-	for i := range slots {
-		slots[i] = Slot{
-			StartMs:    int64(i) * 15 * 60 * 1000,
-			LenMin:     15,
-			PriceOre:   200,
-			SpotOre:    20,
-			LoadW:      500,
-			PVW:        -5000,
-			Confidence: 1,
+// TestDownsidePVKeepsReserveAgainstUncertainLatePV is the Alt-2 replacement
+// for the old SoC safety floor: forecast risk is handled by optimising against
+// downside PV (forecast − k·σ), so a reserve emerges from the uncertainty.
+// Scenario: prices are high all day so the only profitable refill after an
+// export is free midday PV. With confident PV (σ=0) the DP empties the battery
+// exporting early, banking on the free refill. With the PV discounted to zero
+// by a large σ, that refill is no longer trusted, so the DP keeps more reserve.
+func TestDownsidePVKeepsReserveAgainstUncertainLatePV(t *testing.T) {
+	mk := func(latePV float64) []Slot {
+		s := make([]Slot, 8)
+		for i := range s {
+			// Prices are high all day (grid refill unattractive vs the 350
+			// terminal value), so free midday PV is the ONLY way to refill.
+			// Morning (0-3): tempting export price, no PV. Midday (4-7): PV.
+			price, spot, pv := 400.0, 30.0, latePV
+			if i < 4 {
+				price, spot, pv = 400, 300, 0
+			}
+			s[i] = Slot{
+				StartMs:    int64(i) * 15 * 60 * 1000,
+				LenMin:     15,
+				PriceOre:   price,
+				SpotOre:    spot,
+				LoadW:      0,
+				PVW:        -pv,
+				Confidence: 1,
+			}
 		}
+		return s
 	}
-	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 10 // at hardware floor — needs to recover
-	p.SoCSafetyFloorPct = 25
-	p.SafetyFloorPenaltyOreKwhHour = 100
-	p.TerminalSoCPrice = 200 // matches the post-fix mean-import behaviour
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 50
+	// Leftover energy is worth more than the morning export price, so selling
+	// the battery early only pays off if it can be refilled — i.e. only when
+	// the midday PV is trusted.
+	p.TerminalSoCPrice = 350
 
-	plan := Optimize(slots, p)
-	if plan.Actions[0].BatteryW <= 0 {
-		t.Errorf("safety-floor active and SoC=10%% (below 25%% floor): slot 0 should charge, got %f W", plan.Actions[0].BatteryW)
+	full := Optimize(mk(5000), p) // confident the midday PV will refill
+	down := mk(5000)
+	applyPVDownside(down, 1.0, 5000) // σ=5 kW zeros the midday PV → refill not trusted
+	cons := Optimize(down, p)
+
+	minSoC := func(pl Plan) float64 {
+		m := 100.0
+		for _, a := range pl.Actions {
+			if a.SoCPct < m {
+				m = a.SoCPct
+			}
+		}
+		return m
 	}
-	// SoC must climb out of deficit fast — within ~3 slots.
-	if plan.Actions[2].SoCPct < p.SoCSafetyFloorPct-1 {
-		t.Errorf("after 3 slots of PV-surplus charging, SoC = %f%%; safety floor = %f%%",
-			plan.Actions[2].SoCPct, p.SoCSafetyFloorPct)
+	if minSoC(cons) <= minSoC(full) {
+		t.Errorf("downside-PV plan must keep a higher reserve than the full-PV plan: "+
+			"min SoC downside=%.1f%% vs full=%.1f%%", minSoC(cons), minSoC(full))
 	}
 }
 
-// Safety floor must NOT motivate grid-charging when there's no PV
-// surplus. Operator's "never import" contract is non-negotiable —
-// safety is a soft target, the floor is hard physics.
-func TestSelfConsumptionSafetyFloorDoesNotGridCharge(t *testing.T) {
-	// All slots: load 1000 W, PV 0. No surplus, only import covers
-	// the load. DP must NOT charge the battery even though SoC is
-	// below the safety floor; safety penalty is gated on PV surplus.
-	slots := make([]Slot, 8)
-	for i := range slots {
-		slots[i] = Slot{
-			StartMs:    int64(i) * 15 * 60 * 1000,
-			LenMin:     15,
-			PriceOre:   30, // cheap night
-			SpotOre:    5,
-			LoadW:      1000,
-			PVW:        0,
-			Confidence: 1,
+func planMinSoC(pl Plan) float64 {
+	m := 100.0
+	for _, a := range pl.Actions {
+		if a.SoCPct < m {
+			m = a.SoCPct
 		}
 	}
-	p := baseParams(ModeSelfConsumption)
-	p.InitialSoCPct = 10
-	p.SoCSafetyFloorPct = 25
-	p.SafetyFloorPenaltyOreKwhHour = 100
+	return m
+}
 
-	plan := Optimize(slots, p)
-	for i, a := range plan.Actions {
-		if a.BatteryW > 1 {
-			t.Errorf("slot %d: BatteryW = %f W — safety floor must not trigger grid-charge", i, a.BatteryW)
+// The reserve scales with k: k=0 uses the battery fully (lowest reserve), and a
+// larger k keeps strictly more back. Same morning-sell / midday-PV scenario as
+// TestDownsidePVKeepsReserve, with σ small enough that the haircut grades the
+// midday PV (5 kW) down across k rather than zeroing it at k=1.
+func TestDownsidePVReserveIncreasesWithK(t *testing.T) {
+	mk := func() []Slot {
+		s := make([]Slot, 8)
+		for i := range s {
+			price, spot, pv := 400.0, 30.0, 5000.0
+			if i < 4 {
+				price, spot, pv = 400, 300, 0
+			}
+			s[i] = Slot{
+				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
+				PriceOre: price, SpotOre: spot, LoadW: 0, PVW: -pv, Confidence: 1,
+			}
 		}
+		return s
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 50
+	p.TerminalSoCPrice = 350
+	reserve := func(k float64) float64 {
+		sl := mk()
+		applyPVDownside(sl, k, 2000) // σ=2 kW: k=1→3 kW PV, k=2→1 kW PV
+		return planMinSoC(Optimize(sl, p))
+	}
+	r0, r1, r2 := reserve(0), reserve(1), reserve(2)
+	if !(r0 <= r1 && r1 <= r2) {
+		t.Errorf("reserve must be non-decreasing in k: k0=%.1f%% k1=%.1f%% k2=%.1f%%", r0, r1, r2)
+	}
+	if r2 <= r0 {
+		t.Errorf("a larger k must keep strictly more reserve than k=0 (no hedge): k0=%.1f%% k2=%.1f%%", r0, r2)
+	}
+}
+
+// No-sun property: with PV=0 in every slot, even a large σ must not manufacture
+// a reserve — the plan is identical to the un-hedged one, so passive runs its
+// charge-cheap / discharge-for-self-consumption loop using the full battery.
+func TestDownsidePVWinterNoReserveForced(t *testing.T) {
+	mk := func() []Slot {
+		s := make([]Slot, 8)
+		for i := range s {
+			price := 100.0
+			if i >= 4 {
+				price = 300 // cheap-then-expensive → something to arbitrage
+			}
+			s[i] = Slot{
+				StartMs: int64(i) * 15 * 60 * 1000, LenMin: 15,
+				PriceOre: price, SpotOre: price * 0.5, LoadW: 1000, PVW: 0, Confidence: 1,
+			}
+		}
+		return s
+	}
+	p := baseParams(ModeArbitrage)
+	p.InitialSoCPct = 50
+	raw := Optimize(mk(), p)
+	hair := mk()
+	applyPVDownside(hair, 2.0, 5000) // large σ, but no PV to cut
+	cut := Optimize(hair, p)
+	if planMinSoC(cut) != planMinSoC(raw) {
+		t.Errorf("winter (PV=0): the haircut must not change the plan — min SoC cut=%.1f%% raw=%.1f%%",
+			planMinSoC(cut), planMinSoC(raw))
 	}
 }
 
@@ -1010,6 +1075,41 @@ func TestCurtailmentSkipsPositiveSpotExport(t *testing.T) {
 	if plan.Actions[0].PVLimitW != 0 {
 		t.Errorf("positive per-slot export price should not trigger curtailment, got pv_limit_w=%f",
 			plan.Actions[0].PVLimitW)
+	}
+}
+
+// TestCurtailmentIncludesLoadpoint is the regression for the bug where
+// annotateCurtailment only considered house load + battery when
+// computing the safe PV absorption limit. When the planner had
+// scheduled EV charging (LoadpointW > 0), the recommended PVLimitW
+// would understate local consumption and could starve the EV charge
+// the DP itself decided to run.
+func TestCurtailmentIncludesLoadpoint(t *testing.T) {
+	plan := &Plan{
+		Actions: []Action{
+			{
+				GridW:       -3000,
+				LoadW:       400,
+				BatteryW:    0,
+				LoadpointW:  2500, // EV scheduled by the planner
+				PVW:         -6000,
+				PriceOre:    10,
+				SpotOre:     -5, // negative export revenue → curtailment candidate
+				SlotLenMin:  60,
+				SlotStartMs: 0,
+			},
+		},
+	}
+	p := baseParams(ModeArbitrage)
+	annotateCurtailment(plan, p)
+	a := &plan.Actions[0]
+	if a.PVLimitW == 0 {
+		t.Fatal("expected PV curtailment recommendation for negative-export slot")
+	}
+	// Must include the EV load the plan scheduled.
+	expected := 400.0 + 2500.0 // load + loadpoint (battery not charging)
+	if math.Abs(a.PVLimitW-expected) > 0.1 {
+		t.Errorf("PVLimitW = %v, want %v (must account for planned EV charging)", a.PVLimitW, expected)
 	}
 }
 
