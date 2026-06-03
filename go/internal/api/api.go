@@ -236,7 +236,10 @@ func New(deps *Deps) *Server {
 }
 
 // Handler returns the http.Handler suitable for `http.ListenAndServe`.
-func (s *Server) Handler() http.Handler { return s.mux }
+// The mux is wrapped by the owner auth-gate so remote (relay-tunnelled)
+// requests can't reach the dashboard or control endpoints without a passkey
+// session; genuine LAN/loopback requests pass via LAN-bypass.
+func (s *Server) Handler() http.Handler { return s.gate(s.mux) }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
