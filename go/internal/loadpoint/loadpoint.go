@@ -155,6 +155,13 @@ type State struct {
 	MaxChargeW    float64   `json:"max_charge_w"`
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
 
+	// ManualCurrentA is the active user "set my charge current" override (amps,
+	// the dashboard slider). 0 = Auto (no override → normal dispatch).
+	// ManualCurrentMaxA is the charger's max settable amps, for the slider's
+	// upper bound. Populated by the API layer from the loadpoint controller.
+	ManualCurrentA    float64 `json:"manual_current_a"`
+	ManualCurrentMaxA float64 `json:"manual_current_max_a,omitempty"`
+
 	// SurplusOnly mirrors Config.SurplusOnly with any runtime override
 	// (set via POST /api/loadpoints/{id}/target). Always emitted (no
 	// omitempty) so a polling client can distinguish "explicitly off"

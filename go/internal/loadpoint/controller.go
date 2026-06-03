@@ -83,6 +83,12 @@ type Controller struct {
 	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
+	// manualCurrent is the user-facing "set my charge current" override (the
+	// dashboard amps slider, like the Tesla app). Unlike a diagnostics hold it
+	// persists — no expiry — until the user picks Auto or the car unplugs
+	// (tickOne clears it on the disconnect edge). Value is amps; 0/absent means
+	// no override → normal surplus/schedule/plan dispatch. Guarded by holdMu.
+	manualCurrent map[string]float64
 
 	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
 	// state that smooths the surplus_only pause/resume decision over
@@ -1057,6 +1063,93 @@ func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) 
 	return h, true
 }
 
+// SetManualCurrent installs the user-facing charge-current override (amps) for
+// a loadpoint. It persists until ClearManualCurrent, a SetManualCurrent(≤0), or
+// the car unplugs (tickOne clears it on the disconnect edge). amps ≤ 0 clears.
+func (c *Controller) SetManualCurrent(id string, amps float64) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	if c.manualCurrent == nil {
+		c.manualCurrent = map[string]float64{}
+	}
+	if amps <= 0 {
+		delete(c.manualCurrent, id)
+		return
+	}
+	c.manualCurrent[id] = amps
+}
+
+// ClearManualCurrent removes the charge-current override. Idempotent.
+func (c *Controller) ClearManualCurrent(id string) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	delete(c.manualCurrent, id)
+}
+
+// GetManualCurrent returns the override amps for a loadpoint, ok=false when none.
+func (c *Controller) GetManualCurrent(id string) (float64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.holdMu.Lock()
+	defer c.holdMu.Unlock()
+	a, ok := c.manualCurrent[id]
+	return a, ok
+}
+
+// ManualCurrentInfo returns the active override amps (0 if none) and the
+// charger's max settable amps — the amps that map to the loadpoint's
+// MaxChargeW at its phase count — for the dashboard slider's upper bound.
+func (c *Controller) ManualCurrentInfo(id string) (amps, maxA float64) {
+	if c == nil {
+		return 0, 0
+	}
+	amps, _ = c.GetManualCurrent(id)
+	if c.manager == nil {
+		return amps, 0
+	}
+	for _, cfg := range c.manager.Configs() {
+		if cfg.ID != id {
+			continue
+		}
+		fuse := c.siteFuse()
+		v := fuse.Voltage
+		if v <= 0 {
+			v = 230
+		}
+		phases := manualCurrentPhases(cfg, fuse)
+		if cfg.MaxChargeW > 0 {
+			maxA = cfg.MaxChargeW / (v * float64(phases))
+		}
+		break
+	}
+	return amps, maxA
+}
+
+// manualCurrentPhases is the phase count used to convert the override amps to
+// power and to pick the commanded phase_mode, so the driver's per-phase current
+// equals the slider. Explicit loadpoint PhaseMode wins; otherwise the service-
+// entrance phase count (3φ install → 3, single-phase → 1).
+func manualCurrentPhases(lpCfg Config, fuse SiteFuse) int {
+	switch lpCfg.PhaseMode {
+	case "1p":
+		return 1
+	case "3p":
+		return 3
+	default:
+		if fuse.PhaseCnt == 1 {
+			return 1
+		}
+		return 3
+	}
+}
+
 // Tick runs one dispatch cycle for every configured loadpoint.
 // Safe to call even when no loadpoints are configured. Idempotent —
 // calling it twice in the same moment produces the same commands.
@@ -1118,6 +1211,9 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
+		// Car unplugged → the session is over; drop any user charge-current
+		// override so the next car/session resumes normal auto dispatch.
+		c.ClearManualCurrent(lpCfg.ID)
 		c.resetSurplusSession(lpCfg.ID)
 		return
 	}
@@ -1206,6 +1302,37 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		case hold.SitePhases > 0:
 			cmd["site_phases"] = hold.SitePhases
 		case site.MaxAmps > 0:
+			cmd["site_phases"] = site.Phases()
+		}
+	} else if amps, mcOK := c.GetManualCurrent(lpCfg.ID); mcOK && amps > 0 {
+		// User charge-current override (dashboard amps slider, Tesla-style).
+		// Charge NOW at the requested amps — overrides surplus_only and the
+		// plan budget (the user explicitly asked to charge) — but still
+		// respects the fuse. Convert amps→watts at the loadpoint's phase count
+		// and command that explicit phase_mode so the driver's per-phase
+		// current equals the slider.
+		site := c.siteFuse()
+		v := site.Voltage
+		if v <= 0 {
+			v = 230
+		}
+		phases := manualCurrentPhases(lpCfg, site)
+		wantW := amps * v * float64(phases)
+		if lpCfg.MaxChargeW > 0 && wantW > lpCfg.MaxChargeW {
+			wantW = lpCfg.MaxChargeW
+		}
+		wantW = c.applyFuseClampAndCooldown(now, lpCfg, wantW)
+		cmd["power_w"] = wantW
+		if phases == 1 {
+			cmd["phase_mode"] = "1p"
+		} else {
+			cmd["phase_mode"] = "3p"
+		}
+		if site.Voltage > 0 {
+			cmd["voltage"] = site.Voltage
+		}
+		if site.MaxAmps > 0 {
+			cmd["max_amps_per_phase"] = site.MaxAmps
 			cmd["site_phases"] = site.Phases()
 		}
 	} else {

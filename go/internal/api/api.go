@@ -295,6 +295,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHold)
 	s.handle("DELETE /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldClear)
 	s.handle("GET  /api/loadpoints/{id}/manual_hold", s.handleLoadpointManualHoldGet)
+	s.handle("POST /api/loadpoints/{id}/charge_current", s.handleLoadpointChargeCurrent)
+	s.handle("DELETE /api/loadpoints/{id}/charge_current", s.handleLoadpointChargeCurrentClear)
+	s.handle("GET  /api/loadpoints/{id}/charge_current", s.handleLoadpointChargeCurrentGet)
 	s.handle("POST /api/battery/manual_hold", s.handleBatteryManualHold)
 	s.handle("DELETE /api/battery/manual_hold", s.handleBatteryManualHoldClear)
 	s.handle("GET  /api/battery/manual_hold", s.handleBatteryManualHoldGet)
@@ -2315,6 +2318,12 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	states := s.deps.Loadpoints.States()
 	if s.deps.Tel != nil {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
+	}
+	if s.deps.LoadpointCtrl != nil {
+		for i := range states {
+			states[i].ManualCurrentA, states[i].ManualCurrentMaxA =
+				s.deps.LoadpointCtrl.ManualCurrentInfo(states[i].ID)
+		}
 	}
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,

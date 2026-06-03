@@ -25,12 +25,36 @@
   // typical overnight charging window plus the next afternoon.
   const SCHEDULE_SLOTS = 96;
 
+  // true while the user is dragging an amps slider, so the 10 s poll doesn't
+  // rebuild the DOM out from under the drag.
+  let suspendRefresh = false;
+
   async function fetchAll() {
+    if (suspendRefresh) return;
     const [lps, plan] = await Promise.all([
       fetch('/api/loadpoints').then(r => r.json()).catch(() => ({ loadpoints: [] })),
       fetch('/api/mpc/plan').then(r => r.json()).catch(() => null),
     ]);
     render(lps && lps.loadpoints ? lps.loadpoints : [], plan);
+  }
+
+  // Charge-current control: a Tesla-style amps slider per loadpoint. Sets a
+  // manual override (POST /charge_current) that persists until Auto or the car
+  // unplugs; overrides surplus/schedule. Range is 6 A → the charger's max.
+  function chargeCurrentControl(lp) {
+    const maxA = Math.round(lp.manual_current_max_a > 0 ? lp.manual_current_max_a : 16);
+    const minA = 6;
+    const manual = lp.manual_current_a > 0;
+    const val = manual ? Math.round(lp.manual_current_a) : maxA;
+    const label = manual ? `${Math.round(lp.manual_current_a)} A · manual` : 'Auto';
+    return `<div class="lp-amps">` +
+      `<div class="lp-amps-head"><span class="lp-cfg-key">Charge current</span>` +
+      `<span class="lp-amps-val${manual ? ' lp-amps-manual' : ''}">${label}</span></div>` +
+      `<div class="lp-amps-row">` +
+      `<input class="lp-amps-slider" type="range" min="${minA}" max="${maxA}" step="1" value="${val}" ` +
+      `data-lp-id="${lp.id}" aria-label="Charge current (amps)">` +
+      `<button class="lp-amps-auto" data-lp-id="${lp.id}"${manual ? '' : ' disabled'}>Auto</button>` +
+      `</div></div>`;
   }
 
   function fmtW(w) {
@@ -169,6 +193,7 @@
       `<div class="lp-card-header"><h3>${lp.id}</h3></div>` +
       '<div class="lp-card-body">' +
       configBlock(lp) +
+      chargeCurrentControl(lp) +
       scheduleTable(lp, plan) +
       '</div></div>';
   }
@@ -222,7 +247,43 @@
     }
   }
 
+  function postChargeCurrent(id, amps) {
+    return fetch(`/api/loadpoints/${encodeURIComponent(id)}/charge_current`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amps }),
+    }).catch(() => {});
+  }
+
   function init() {
+    // Delegate on the stable grid so handlers survive the poll's innerHTML swap.
+    const grid = document.getElementById('loadpoints-grid');
+    if (grid) {
+      grid.addEventListener('input', (e) => {
+        const t = e.target;
+        if (!t.classList || !t.classList.contains('lp-amps-slider')) return;
+        suspendRefresh = true; // freeze the poll while dragging
+        const box = t.closest('.lp-amps');
+        const lbl = box && box.querySelector('.lp-amps-val');
+        if (lbl) { lbl.textContent = `${t.value} A · manual`; lbl.classList.add('lp-amps-manual'); }
+        const auto = box && box.querySelector('.lp-amps-auto');
+        if (auto) auto.disabled = false;
+      });
+      grid.addEventListener('change', async (e) => {
+        const t = e.target;
+        if (!t.classList || !t.classList.contains('lp-amps-slider')) return;
+        await postChargeCurrent(t.getAttribute('data-lp-id'), parseFloat(t.value));
+        suspendRefresh = false;
+        fetchAll();
+      });
+      grid.addEventListener('click', async (e) => {
+        const t = e.target;
+        if (!t.classList || !t.classList.contains('lp-amps-auto')) return;
+        await fetch(`/api/loadpoints/${encodeURIComponent(t.getAttribute('data-lp-id'))}/charge_current`,
+          { method: 'DELETE' }).catch(() => {});
+        suspendRefresh = false;
+        fetchAll();
+      });
+    }
     fetchAll();
     setInterval(fetchAll, REFRESH_MS);
   }

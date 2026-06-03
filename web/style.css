@@ -1748,6 +1748,49 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   background: var(--amber, var(--accent, #5566ff));
   border-color: transparent;
 }
+.lp-amps {
+  padding: 8px 0 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--line, rgba(255,255,255,0.08));
+}
+.lp-amps-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.lp-amps-val {
+  font-family: var(--mono, monospace);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+  color: var(--fg-dim, var(--text-dim, #94a3b8));
+}
+.lp-amps-val.lp-amps-manual { color: var(--amber, var(--accent, #5566ff)); }
+.lp-amps-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.lp-amps-slider {
+  flex: 1;
+  height: 4px;
+  cursor: pointer;
+  accent-color: var(--amber, var(--accent, #5566ff));
+}
+.lp-amps-auto {
+  font-family: var(--mono, monospace);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border: 1px solid var(--line, rgba(255,255,255,0.08));
+  border-radius: 3px;
+  background: transparent;
+  color: var(--fg, var(--text, #e2e8f0));
+  cursor: pointer;
+}
+.lp-amps-auto:disabled { opacity: 0.4; cursor: default; }
+.lp-amps-auto:not(:disabled):hover { border-color: var(--amber, var(--accent, #5566ff)); }
 .lp-schedule-wrap {
   /* Bound the table height so a 16-row plan doesn't push the card
      off-screen on a small viewport. The diag-table inherits a sticky
