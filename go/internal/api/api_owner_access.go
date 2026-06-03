@@ -295,7 +295,15 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return fmt.Errorf("check trusted devices: %w", err)
 	}
 	if len(devices) == 0 {
-		return nil // bootstrap path — first device, no auth required
+		// Bootstrap (trust-on-first-use): allowed only from the LAN, never
+		// over the relay tunnel where the window would be internet-exposed
+		// (whoever reaches enroll/start first on an un-enrolled Pi becomes
+		// the owner). The first passkey must be enrolled with physical/LAN
+		// presence.
+		if s.isTunneled(r) {
+			return errors.New("first enrollment must be performed on the local network")
+		}
+		return nil
 	}
 	if _, ok := s.authorizeOwner(r); ok {
 		return nil

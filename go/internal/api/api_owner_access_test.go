@@ -191,6 +191,39 @@ func TestOwnerAccessForgedMarkerIsNotTunnel(t *testing.T) {
 	}
 }
 
+// First-enrollment (zero devices) is trust-on-first-use. Over the relay that
+// window is internet-exposed, so a remote (marked) request must be refused —
+// the first passkey must be enrolled on the LAN.
+func TestOwnerAccessBootstrapBlockedOverTunnel(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-FTW-Tunnel", "marker")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("remote bootstrap must be 403, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// First-enrollment on the LAN (unmarked) is still allowed.
+func TestOwnerAccessBootstrapAllowedOnLAN(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
+	req.Host = "127.0.0.1:8080" // unmarked → LAN
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("LAN bootstrap should be allowed, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }
