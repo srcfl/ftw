@@ -26,6 +26,8 @@ func main() {
 	cert := flag.String("cert", "", "TLS cert path (HTTPS mode if set)")
 	key := flag.String("key", "", "TLS key path (HTTPS mode if set)")
 	pollTimeout := flag.Duration("poll-timeout", 25*time.Second, "long-poll deadline per /tunnel/<host>/next call")
+	homeHost := flag.String("home-host", "", "bare host that maps to a single owner Pi (e.g. home.fortytwowatts.com); requires -home-site")
+	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	flag.Parse()
 
 	if *version {
@@ -38,6 +40,8 @@ func main() {
 		Tokens:      NewTokenRegistry(),
 		Owners:      NewOwnerRegistry(),
 		PollTimeout: *pollTimeout,
+		HomeHost:    *homeHost,
+		HomeSite:    *homeSite,
 	}
 
 	srv := &http.Server{
