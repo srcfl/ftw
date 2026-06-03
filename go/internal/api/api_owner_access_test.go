@@ -224,6 +224,38 @@ func TestOwnerAccessBootstrapAllowedOnLAN(t *testing.T) {
 	}
 }
 
+// W is a stable opaque handle persisted in state.db — it must NOT change when
+// the site is renamed (the whole point of decoupling owner identity from the
+// mutable site name).
+func TestOwnerWalletHandleStableAcrossRename(t *testing.T) {
+	d := minDeps(t)
+	srv := New(d)
+	w1, err := srv.ownerWalletHandle()
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(w1) == 0 {
+		t.Fatal("empty wallet handle")
+	}
+	// Simulate a site rename.
+	d.Cfg.Site.Name = "renamed-site"
+	w2, err := srv.ownerWalletHandle()
+	if err != nil {
+		t.Fatalf("handle 2: %v", err)
+	}
+	if string(w1) != string(w2) {
+		t.Fatalf("wallet handle changed on rename: %q -> %q", w1, w2)
+	}
+	// And the WebAuthn owner id is the handle, not the site name.
+	u, err := srv.buildOwnerUser()
+	if err != nil {
+		t.Fatalf("buildOwnerUser: %v", err)
+	}
+	if string(u.WebAuthnID()) != string(w2) {
+		t.Fatalf("owner WebAuthnID = %q, want wallet handle %q", u.WebAuthnID(), w2)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }

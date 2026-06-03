@@ -152,7 +152,10 @@ func (s *Server) buildOwnerUser() (*ownerUser, error) {
 			},
 		})
 	}
-	id := ownerUserID(s.deps)
+	id, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil, fmt.Errorf("owner wallet handle: %w", err)
+	}
 	return &ownerUser{
 		id:          id,
 		name:        "owner",
@@ -173,6 +176,30 @@ func ownerDisplayName(deps *Deps) string {
 		return deps.Cfg.Site.Name + " operator"
 	}
 	return "Operator"
+}
+
+// ownerWalletHandleKey is the state.db config key holding the stable opaque
+// wallet handle W. Minted once, never derived from the mutable site name, so
+// renames and name-collisions never orphan enrolled passkeys.
+const ownerWalletHandleKey = "owner_wallet_handle"
+
+// ownerWalletHandle returns the stable opaque wallet handle W, minting and
+// persisting it on first use.
+func (s *Server) ownerWalletHandle() ([]byte, error) {
+	if s.deps.State == nil {
+		return nil, errors.New("state store not configured")
+	}
+	if v, ok := s.deps.State.LoadConfig(ownerWalletHandleKey); ok && v != "" {
+		return []byte(v), nil
+	}
+	tok, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.State.SaveConfig(ownerWalletHandleKey, tok); err != nil {
+		return nil, err
+	}
+	return []byte(tok), nil
 }
 
 // ---- Helpers ----
