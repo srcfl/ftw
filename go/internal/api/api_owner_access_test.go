@@ -256,6 +256,25 @@ func TestOwnerWalletHandleStableAcrossRename(t *testing.T) {
 	}
 }
 
+// whoami reports the stable wallet handle so the browser can key on the
+// wallet rather than the mutable site name.
+func TestOwnerWhoamiReturnsWallet(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	w, _ := srv.ownerWalletHandle()
+	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), `"wallet":"`+string(w)+`"`) {
+		t.Fatalf("whoami missing wallet handle %q: %q", w, rec.Body.String())
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }

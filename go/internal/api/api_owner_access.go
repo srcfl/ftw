@@ -428,6 +428,11 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 	for _, t := range cred.Transport {
 		transports = append(transports, string(t))
 	}
+	walletHandle, err := s.ownerWalletHandle()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	dev := state.TrustedDevice{
 		CredentialID: cred.ID,
 		PublicKey:    cred.PublicKey,
@@ -436,6 +441,7 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		Transports:   transports,
 		FriendlyName: friendlyName,
 		CreatedAtMs:  time.Now().UnixMilli(),
+		WalletHandle: string(walletHandle),
 	}
 	if err := s.deps.State.SaveTrustedDevice(dev); err != nil {
 		http.Error(w, fmt.Sprintf("save device: %v", err), http.StatusInternalServerError)
@@ -607,9 +613,20 @@ func (s *Server) handleOwnerWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"authenticated":     true,
-		"friendly_name":     name,
-		"devices_enrolled":  len(devices),
-		"site_id":           string(ownerUserID(s.deps)),
+		"authenticated":    true,
+		"friendly_name":    name,
+		"devices_enrolled": len(devices),
+		"site_id":          string(ownerUserID(s.deps)),
+		"wallet":           string(mustWalletHandle(s)),
 	})
+}
+
+// mustWalletHandle returns the wallet handle for response surfaces that must
+// not fail the whole request if state is momentarily unavailable.
+func mustWalletHandle(s *Server) []byte {
+	w, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil
+	}
+	return w
 }
