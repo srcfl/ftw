@@ -67,7 +67,7 @@
           return;
         }
         msg.innerHTML = '<div class="ok">Signed in. Redirecting…</div>';
-        setTimeout(() => location.href = "./", 800);
+        setTimeout(() => location.href = base + "/", 800);
       } catch (e) {
         if (e.name === "AbortError") return; // conditional UI cancelled — silent
         msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;

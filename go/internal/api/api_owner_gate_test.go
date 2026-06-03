@@ -56,11 +56,11 @@ func TestGateServesLoginForRemoteHTML(t *testing.T) {
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("expected 200 login page, got %d", rec.Code)
+	if rec.Code != 302 {
+		t.Fatalf("expected 302 redirect to login, got %d", rec.Code)
 	}
-	if body := rec.Body.String(); !contains(body, "passkey login") || contains(body, "DASHBOARD") {
-		t.Fatalf("expected passkey landing, not dashboard: %q", body)
+	if loc := rec.Header().Get("Location"); loc != "/owner-access/login.html" {
+		t.Fatalf("expected redirect to /owner-access/login.html, got %q", loc)
 	}
 }
 

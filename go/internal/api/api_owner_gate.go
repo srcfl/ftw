@@ -10,7 +10,6 @@ package api
 
 import (
 	"net/http"
-	"path/filepath"
 	"strings"
 )
 
@@ -87,11 +86,10 @@ func isDashboardShell(p string) bool {
 	return false
 }
 
-// serveOwnerLogin serves the passkey landing page without leaking the
-// dashboard. Uses a file serve (no Location header) so it works regardless
-// of the relay's /me/<site_id> prefix.
+// serveOwnerLogin redirects an unauthenticated dashboard-shell hit to the
+// passkey login page served at its real path, so the page's relative module
+// imports (./webauthn.js) resolve. Serving it inline at "/" would break those
+// imports and the page would hang on "Loading…".
 func (s *Server) serveOwnerLogin(w http.ResponseWriter, r *http.Request) {
-	landing := filepath.Clean(filepath.Join(s.deps.WebDir, "owner-access", "index.html"))
-	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	http.ServeFile(w, r, landing)
+	http.Redirect(w, r, "/owner-access/login.html", http.StatusFound)
 }
