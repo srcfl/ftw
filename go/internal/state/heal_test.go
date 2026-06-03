@@ -212,3 +212,46 @@ func TestPricesRouteToCache(t *testing.T) {
 		t.Error("prices table should not exist in state.db")
 	}
 }
+
+func TestLegacyPricesMigratedToCache(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.db")
+
+	// Simulate an OLD single-DB install: prices live in state.db.
+	{
+		db, err := openRaw(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustExec(t, db, `CREATE TABLE prices (zone TEXT, slot_ts_ms INTEGER, slot_len_min INTEGER,
+			spot_ore_kwh REAL, total_ore_kwh REAL, source TEXT, fetched_at_ms INTEGER,
+			PRIMARY KEY(zone, slot_ts_ms))`)
+		mustExec(t, db, `INSERT INTO prices VALUES ('SE3', 1000, 60, 50, 60, 'old', 1)`)
+		mustExec(t, db, `PRAGMA wal_checkpoint(TRUNCATE)`)
+		db.Close()
+	}
+
+	st, err := Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	got, err := st.LoadPrices("SE3", 0, 2000)
+	if err != nil || len(got) != 1 || got[0].SpotOreKwh != 50 {
+		t.Fatalf("legacy price not migrated to cache: %d rows, err=%v", len(got), err)
+	}
+	// And the legacy table is gone from state.db.
+	var name string
+	if err := st.db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='prices'`).Scan(&name); err == nil {
+		t.Error("legacy prices table still present in state.db")
+	}
+}
+
+func mustExec(t *testing.T, db *sql.DB, q string) {
+	t.Helper()
+	if _, err := db.Exec(q); err != nil {
+		t.Fatal(err)
+	}
+}
