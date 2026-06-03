@@ -30,10 +30,11 @@
   <div id="signed-in" class="panel" style="display:none">
     <p class="ok">Signed in as <span class="code" id="device-name">…</span>.</p>
     <div class="row"><a class="block" id="open-dashboard" href="#"><button class="primary">Open dashboard</button></a></div>
-    <div id="backup-nudge" class="muted" style="display:none">
-      <strong>Add a backup passkey.</strong> You have one passkey — add a second (another device or a security key) so losing this one never locks you out.
-      <div class="row"><a class="block" href="./enroll.html"><button>Add a backup passkey</button></a></div>
-    </div>
+    <hr class="sep">
+    <strong>Your passkeys</strong>
+    <ul id="device-list" style="list-style:none;padding:0;margin:.6rem 0 0"></ul>
+    <p id="backup-nudge" class="muted" style="display:none">Add a second passkey so losing this device never locks you out.</p>
+    <div class="row"><a class="block" href="./enroll.html"><button>Add a device</button></a></div>
     <div class="row"><button id="signout">Sign out</button></div>
   </div>
 
@@ -71,9 +72,40 @@
         document.getElementById("open-dashboard").href = base + "/";
         document.getElementById("backup-nudge").style.display = (me.devices_enrolled === 1) ? "block" : "none";
         show("signed-in");
+        renderDevices();
         return;
       }
       show("choose");
+    }
+
+    // List enrolled passkeys with a Remove button (revoke).
+    async function renderDevices() {
+      const ul = document.getElementById("device-list");
+      ul.innerHTML = "";
+      let devices = [];
+      try {
+        const r = await fetch(base + "/api/owner-access/devices", { credentials: "same-origin" });
+        if (r.ok) ({ devices } = await r.json());
+      } catch { return; }
+      for (const d of (devices || [])) {
+        const li = document.createElement("li");
+        li.style = "display:flex;align-items:center;gap:.6rem;padding:.55rem 0;border-top:1px solid var(--line,#eee)";
+        const name = document.createElement("span");
+        name.style = "flex:1";
+        name.textContent = d.friendly_name || "(unnamed)";
+        const btn = document.createElement("button");
+        btn.textContent = "Remove";
+        btn.style = "width:auto;padding:.35rem .7rem;font-size:.85em";
+        btn.onclick = async () => {
+          if (!confirm("Remove the passkey \"" + (d.friendly_name || "unnamed") + "\"?")) return;
+          await fetch(base + "/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
+            { method: "DELETE", credentials: "same-origin" });
+          refresh();
+        };
+        li.appendChild(name);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      }
     }
     refresh();
   </script>
