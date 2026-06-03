@@ -57,3 +57,6 @@ release-notes.md
 *.key
 deploy/secrets/*
 !deploy/secrets/README.md
+
+# superpowers brainstorm visual companion (local only)
+.superpowers/

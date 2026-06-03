@@ -1431,6 +1431,27 @@ func main() {
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
+	// Per-process secret stamped on every relay-tunnelled request so the API
+	// auth-gate can tell remote (relay) traffic from genuine LAN/loopback.
+	tunnelMarker := newTunnelMarker()
+
+	// Self-sovereign site identity: always generated on first boot, Nova-
+	// format (P-256 PEM) so federation can reuse it, but never dependent on
+	// Nova being enabled. Canonical path is the same nova.key default so
+	// existing federated gateways keep their claimed key.
+	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
+	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
+		identityKeyPath = cfg.Nova.KeyPath
+	}
+	var siteIdentityPubHex string
+	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+	if err != nil {
+		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
+	} else {
+		siteIdentityPubHex = siteIdentity.PublicKeyHex()
+		slog.Info("site identity ready", "pubkey_prefix", siteIdentityPubHex[:16])
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1473,6 +1494,8 @@ func main() {
 		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "relay.fortytwowatts.com"),
 		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
+		TunnelMarker:         tunnelMarker,
+		SiteIdentityPubHex:   siteIdentityPubHex,
 
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
@@ -1549,7 +1572,7 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name))
+		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker)
 	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
@@ -1651,14 +1674,11 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		keyPath := cfg.Nova.KeyPath
-		if keyPath == "" {
-			keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
-		}
-		novaID, err := nova.LoadOrCreateIdentity(keyPath)
-		if err != nil {
-			slog.Warn("nova identity load failed — federation disabled", "err", err)
-		} else if pub, err := nova.Start(cfg.Nova, novaID, st, tel); err != nil {
+		// Reuse the already-loaded self-sovereign identity (same canonical
+		// path) so federation and local identity are one and the same key.
+		if siteIdentity == nil {
+			slog.Warn("nova federation disabled — site identity unavailable")
+		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()

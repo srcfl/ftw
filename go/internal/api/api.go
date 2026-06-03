@@ -168,6 +168,21 @@ type Deps struct {
 	// internet directly (without the relay in front).
 	OwnerAccessLANBypass bool
 
+	// TunnelMarker is a per-process random secret. The relay long-poll
+	// reverse-proxy (cmd/forty-two-watts/owner_relay_register.go) sets it
+	// as the X-FTW-Tunnel header on every request it forwards from the
+	// relay to the local API server. A request carrying this exact value
+	// is therefore known to have arrived via the relay tunnel (remote) and
+	// MUST NOT inherit LAN-bypass — even though it lands on a loopback host.
+	// Empty disables tunnel detection (pure-LAN deployments with no relay).
+	TunnelMarker string
+
+	// SiteIdentityPubHex is the uncompressed P-256 public key (X||Y, 128 hex
+	// chars) of this Pi's self-sovereign ES256 identity — generated on first
+	// boot regardless of Nova (see cmd/forty-two-watts/main.go). Empty if
+	// identity load failed; the /api/identity endpoint then returns 503.
+	SiteIdentityPubHex string
+
 	// ownerAccess is the lazy-initialised ceremony + session map. Built
 	// on first request via Server.ownerAccess().
 	ownerAccess *ownerAccessState
@@ -227,7 +242,10 @@ func New(deps *Deps) *Server {
 }
 
 // Handler returns the http.Handler suitable for `http.ListenAndServe`.
-func (s *Server) Handler() http.Handler { return s.mux }
+// The mux is wrapped by the owner auth-gate so remote (relay-tunnelled)
+// requests can't reach the dashboard or control endpoints without a passkey
+// session; genuine LAN/loopback requests pass via LAN-bypass.
+func (s *Server) Handler() http.Handler { return s.gate(s.mux) }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
@@ -322,6 +340,7 @@ func (s *Server) routes() {
 	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
 
 	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
+	s.handle("GET  /api/owner-access/enroll-pin", s.handleOwnerEnrollPin)
 	s.handle("POST /api/owner-access/enroll/start", s.handleOwnerEnrollStart)
 	s.handle("POST /api/owner-access/enroll/finish", s.handleOwnerEnrollFinish)
 	s.handle("POST /api/owner-access/login/start", s.handleOwnerLoginStart)
@@ -329,6 +348,9 @@ func (s *Server) routes() {
 	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
+
+	// ---- Self-sovereign site identity (Phase 2) ----
+	s.handle("GET  /api/identity", s.handleIdentity)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

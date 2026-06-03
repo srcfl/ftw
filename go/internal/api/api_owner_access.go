@@ -23,10 +23,13 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -52,6 +55,11 @@ const ownerAccessSessionTTL = 24 * time.Hour
 // the ceremony in <30s; 5 min covers slow Touch-ID prompts.
 const ownerAccessCeremonyTTL = 5 * time.Minute
 
+// ownerAccessEnrollPinTTL is how long a LAN-minted enrollment PIN stays
+// valid. 10 min lets the owner read the code off the Pi's console and walk
+// to the relay origin in another tab.
+const ownerAccessEnrollPinTTL = 10 * time.Minute
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
@@ -61,6 +69,41 @@ type ownerAccessState struct {
 	enrollSessions map[string]ceremonySession
 	loginSessions  map[string]ceremonySession
 	authSessions   map[string]authSession
+
+	// enrollPin is the in-memory LAN-first-enrollment PIN. Regenerated on
+	// demand (each GET /enroll-pin mints a fresh value), expires after
+	// ownerAccessEnrollPinTTL. Empty pin means "none minted".
+	enrollPin       string
+	enrollPinExpiry time.Time
+}
+
+// mintEnrollPin generates a fresh 6-digit numeric PIN, stores it with a
+// 10-minute TTL, and returns it together with the remaining seconds. Any
+// previously-minted PIN is replaced.
+func (oa *ownerAccessState) mintEnrollPin() (pin string, expiresInS int, err error) {
+	p, err := randomDigits(6)
+	if err != nil {
+		return "", 0, err
+	}
+	oa.mu.Lock()
+	oa.enrollPin = p
+	oa.enrollPinExpiry = time.Now().Add(ownerAccessEnrollPinTTL)
+	oa.mu.Unlock()
+	return p, int(ownerAccessEnrollPinTTL.Seconds()), nil
+}
+
+// validateEnrollPin reports whether candidate matches the currently-minted,
+// unexpired PIN. Constant-time compare so a tunnelled attacker can't probe for
+// the digits. An empty stored PIN (none minted, or expired) never matches.
+func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
+	oa.mu.Lock()
+	stored := oa.enrollPin
+	expiry := oa.enrollPinExpiry
+	oa.mu.Unlock()
+	if stored == "" || time.Now().After(expiry) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(candidate), []byte(stored)) == 1
 }
 
 type ceremonySession struct {
@@ -93,11 +136,25 @@ func (s *Server) ownerAccess() *ownerAccessState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deps.ownerAccess == nil {
-		s.deps.ownerAccess = &ownerAccessState{
+		oa := &ownerAccessState{
 			enrollSessions: make(map[string]ceremonySession),
 			loginSessions:  make(map[string]ceremonySession),
 			authSessions:   make(map[string]authSession),
 		}
+		// Restore persisted sessions so a process restart doesn't sign
+		// everyone out (sessions are otherwise in-memory only).
+		if s.deps.State != nil {
+			now := time.Now()
+			_ = s.deps.State.PruneOwnerSessions(now.UnixMilli())
+			if sess, err := s.deps.State.LoadOwnerSessions(); err == nil {
+				for _, p := range sess {
+					if exp := time.UnixMilli(p.ExpiresAtMs); exp.After(now) {
+						oa.authSessions[p.Token] = authSession{credentialID: p.CredentialID, expiresAt: exp}
+					}
+				}
+			}
+		}
+		s.deps.ownerAccess = oa
 	}
 	return s.deps.ownerAccess
 }
@@ -122,7 +179,7 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 		RPOrigins:     origins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 			UserVerification: protocol.VerificationPreferred,
 		},
 	})
@@ -145,19 +202,41 @@ func (s *Server) buildOwnerUser() (*ownerUser, error) {
 		creds = append(creds, webauthn.Credential{
 			ID:        d.CredentialID,
 			PublicKey: d.PublicKey,
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: d.BackupEligible,
+				BackupState:    d.BackupState,
+			},
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    d.AAGUID,
 				SignCount: d.SignCount,
 			},
 		})
 	}
-	id := ownerUserID(s.deps)
+	id, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil, fmt.Errorf("owner wallet handle: %w", err)
+	}
 	return &ownerUser{
 		id:          id,
 		name:        "owner",
 		displayName: ownerDisplayName(s.deps),
 		credentials: creds,
 	}, nil
+}
+
+// resolveDiscoverableOwner is the DiscoverableUserHandler for usernameless
+// login: it returns the single owner iff the assertion's userHandle matches
+// the stable wallet handle W. The library then matches the credential rawID
+// against that owner's enrolled credentials and verifies the signature.
+func (s *Server) resolveDiscoverableOwner(rawID, userHandle []byte) (webauthn.User, error) {
+	user, err := s.buildOwnerUser()
+	if err != nil {
+		return nil, err
+	}
+	if subtle.ConstantTimeCompare(userHandle, user.WebAuthnID()) != 1 {
+		return nil, errors.New("owner-access: unknown wallet handle")
+	}
+	return user, nil
 }
 
 func ownerUserID(deps *Deps) []byte {
@@ -174,6 +253,30 @@ func ownerDisplayName(deps *Deps) string {
 	return "Operator"
 }
 
+// ownerWalletHandleKey is the state.db config key holding the stable opaque
+// wallet handle W. Minted once, never derived from the mutable site name, so
+// renames and name-collisions never orphan enrolled passkeys.
+const ownerWalletHandleKey = "owner_wallet_handle"
+
+// ownerWalletHandle returns the stable opaque wallet handle W, minting and
+// persisting it on first use.
+func (s *Server) ownerWalletHandle() ([]byte, error) {
+	if s.deps.State == nil {
+		return nil, errors.New("state store not configured")
+	}
+	if v, ok := s.deps.State.LoadConfig(ownerWalletHandleKey); ok && v != "" {
+		return []byte(v), nil
+	}
+	tok, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.State.SaveConfig(ownerWalletHandleKey, tok); err != nil {
+		return nil, err
+	}
+	return []byte(tok), nil
+}
+
 // ---- Helpers ----
 
 func randomToken() (string, error) {
@@ -182,6 +285,20 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// randomDigits returns n cryptographically-random decimal digits as a string
+// (zero-padded, e.g. "042315"). Used for the LAN enrollment PIN.
+func randomDigits(n int) (string, error) {
+	out := make([]byte, n)
+	for i := range out {
+		d, err := rand.Int(rand.Reader, big.NewInt(10))
+		if err != nil {
+			return "", err
+		}
+		out[i] = byte('0' + d.Int64())
+	}
+	return string(out), nil
 }
 
 func (oa *ownerAccessState) gcCeremonies() {
@@ -212,7 +329,11 @@ func (oa *ownerAccessState) gcAuths() {
 // cookie; honours LAN-bypass when Deps.OwnerAccessLANBypass is true and
 // the request came from a loopback address.
 func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) {
-	if s.deps.OwnerAccessLANBypass && isLoopback(r) {
+	// LAN-bypass applies to genuinely-local requests only. A relay-tunnelled
+	// request also lands on a loopback host (the long-poll reverse-proxy
+	// connects from 127.0.0.1), so loopback alone is NOT proof of locality —
+	// the unforgeable tunnel marker is what distinguishes them.
+	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) {
 		return []byte("lan-bypass"), true
 	}
 	c, err := r.Cookie(ownerAccessCookieName)
@@ -241,18 +362,38 @@ func isLoopback(r *http.Request) bool {
 	return host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1"
 }
 
+// isTunneled reports whether the request arrived via the relay long-poll
+// reverse-proxy, which stamps every forwarded request with the per-process
+// TunnelMarker secret. Constant-time compare so a direct client cannot probe
+// for the secret. A direct client that guesses wrong is simply treated as a
+// normal (trusted) LAN client — never an escalation.
+func (s *Server) isTunneled(r *http.Request) bool {
+	m := s.deps.TunnelMarker
+	if m == "" {
+		return false
+	}
+	got := r.Header.Get("X-FTW-Tunnel")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(m)) == 1
+}
+
 func (s *Server) issueOwnerSession(w http.ResponseWriter, credentialID []byte) error {
 	tok, err := randomToken()
 	if err != nil {
 		return err
 	}
+	exp := time.Now().Add(ownerAccessSessionTTL)
 	oa := s.ownerAccess()
 	oa.mu.Lock()
 	oa.authSessions[tok] = authSession{
 		credentialID: credentialID,
-		expiresAt:    time.Now().Add(ownerAccessSessionTTL),
+		expiresAt:    exp,
 	}
 	oa.mu.Unlock()
+	// Persist so the session survives a restart (best-effort; the in-memory
+	// map is the hot path).
+	if s.deps.State != nil {
+		_ = s.deps.State.SaveOwnerSession(tok, credentialID, exp.UnixMilli())
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     ownerAccessCookieName,
 		Value:    tok,
@@ -276,12 +417,52 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return fmt.Errorf("check trusted devices: %w", err)
 	}
 	if len(devices) == 0 {
-		return nil // bootstrap path — first device, no auth required
+		// Bootstrap (trust-on-first-use). On the genuine LAN this is allowed
+		// outright — physical/LAN presence is the proof. Over the relay tunnel
+		// the window would otherwise be internet-exposed (whoever reaches
+		// enroll/start first on an un-enrolled Pi becomes the owner), so we
+		// require the LAN-minted PIN: a 6-digit code only a local user can
+		// read off the Pi's console. This lets the owner enroll the first
+		// passkey at the relay origin (needed for the relay RP-ID) while still
+		// proving LAN presence.
+		if s.isTunneled(r) {
+			pin := r.URL.Query().Get("pin")
+			if pin == "" || !s.ownerAccess().validateEnrollPin(pin) {
+				return errors.New("first enrollment requires the LAN PIN")
+			}
+			return nil
+		}
+		return nil
 	}
 	if _, ok := s.authorizeOwner(r); ok {
 		return nil
 	}
 	return errors.New("enrollment requires an existing authenticated session")
+}
+
+// handleOwnerEnrollPin mints (and returns) the LAN-first-enrollment PIN.
+// Reachable ONLY from genuine LAN/loopback requests: a relay-tunnelled
+// request (carrying the X-FTW-Tunnel marker) gets 403 — the PIN must never
+// leave the local network, since it's the very proof of LAN presence. The PIN
+// is also logged at Info level so it shows up on the Pi's console for an
+// operator standing at the machine.
+func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
+	if s.isTunneled(r) {
+		http.Error(w, "enrollment PIN is only available on the local network", http.StatusForbidden)
+		return
+	}
+	pin, expiresIn, err := s.ownerAccess().mintEnrollPin()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.Info("owner-access enrollment PIN minted",
+		"pin", pin, "expires_in_s", expiresIn)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"pin":          pin,
+		"expires_in_s": expiresIn,
+	})
 }
 
 func (s *Server) handleOwnerEnrollStart(w http.ResponseWriter, r *http.Request) {
@@ -374,14 +555,22 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 	for _, t := range cred.Transport {
 		transports = append(transports, string(t))
 	}
+	walletHandle, err := s.ownerWalletHandle()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	dev := state.TrustedDevice{
-		CredentialID: cred.ID,
-		PublicKey:    cred.PublicKey,
-		SignCount:    cred.Authenticator.SignCount,
-		AAGUID:       cred.Authenticator.AAGUID,
-		Transports:   transports,
-		FriendlyName: friendlyName,
-		CreatedAtMs:  time.Now().UnixMilli(),
+		CredentialID:   cred.ID,
+		PublicKey:      cred.PublicKey,
+		SignCount:      cred.Authenticator.SignCount,
+		AAGUID:         cred.Authenticator.AAGUID,
+		Transports:     transports,
+		FriendlyName:   friendlyName,
+		CreatedAtMs:    time.Now().UnixMilli(),
+		WalletHandle:   string(walletHandle),
+		BackupEligible: cred.Flags.BackupEligible,
+		BackupState:    cred.Flags.BackupState,
 	}
 	if err := s.deps.State.SaveTrustedDevice(dev); err != nil {
 		http.Error(w, fmt.Sprintf("save device: %v", err), http.StatusInternalServerError)
@@ -405,18 +594,22 @@ func (s *Server) handleOwnerLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
+	// Still 404 when nothing is enrolled so the landing page shows the
+	// "enroll on LAN first" panel.
+	devices, err := s.deps.State.LoadTrustedDevices()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if len(user.credentials) == 0 {
+	if len(devices) == 0 {
 		http.Error(w, "no devices enrolled yet", http.StatusNotFound)
 		return
 	}
-	options, sessionData, err := wa.BeginLogin(user)
+	// Usernameless: empty allowCredentials, resolve the user from the
+	// assertion's userHandle at finish time.
+	options, sessionData, err := wa.BeginDiscoverableLogin()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("begin login: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("begin discoverable login: %v", err), http.StatusInternalServerError)
 		return
 	}
 	tok, err := randomToken()
@@ -457,12 +650,7 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	cred, err := wa.FinishLogin(user, *sess.data, r)
+	cred, err := wa.FinishDiscoverableLogin(s.resolveDiscoverableOwner, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish login: %v", err), http.StatusUnauthorized)
 		return
@@ -553,9 +741,20 @@ func (s *Server) handleOwnerWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"authenticated":     true,
-		"friendly_name":     name,
-		"devices_enrolled":  len(devices),
-		"site_id":           string(ownerUserID(s.deps)),
+		"authenticated":    true,
+		"friendly_name":    name,
+		"devices_enrolled": len(devices),
+		"site_id":          string(ownerUserID(s.deps)),
+		"wallet":           string(mustWalletHandle(s)),
 	})
+}
+
+// mustWalletHandle returns the wallet handle for response surfaces that must
+// not fail the whole request if state is momentarily unavailable.
+func mustWalletHandle(s *Server) []byte {
+	w, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil
+	}
+	return w
 }

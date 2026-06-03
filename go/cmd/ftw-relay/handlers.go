@@ -18,6 +18,12 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	PollTimeout time.Duration // 0 → 25s default
+	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
+	// the single owner Pi registered under HomeSite — forwarding every path
+	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
+	// paths resolve. The Phase 4 single-home cutover.
+	HomeHost string
+	HomeSite string
 }
 
 type registerRequest struct {
@@ -55,7 +61,51 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /me/register", r.meRegister)
 	mux.HandleFunc("/me/{site_id}/{rest...}", r.meTunnel)
 	mux.HandleFunc("/me/{site_id}", r.meRoot)
+
+	// Single-home cutover: a bare host (home.fortytwowatts.com) forwards
+	// every path verbatim to the owner Pi registered under HomeSite, so the
+	// dashboard loads at the root with working absolute asset paths. Only
+	// browser traffic to HomeHost matches this; the Pi still talks to the
+	// relay over relay.* (/me/register, /tunnel/*), unaffected.
+	if r.HomeHost != "" && r.HomeSite != "" {
+		mux.HandleFunc(r.HomeHost+"/", r.homeForward)
+	}
 	return mux
+}
+
+// homeForward forwards a bare-host request (HomeHost) verbatim to the single
+// owner Pi (HomeSite). Same tunnel mechanism as meForward, but the full
+// request path is preserved (no /me/<site_id> prefix to strip).
+func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
+	if r.Owners == nil {
+		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
+		return
+	}
+	hostID, err := r.Owners.Lookup(r.HomeSite)
+	if err != nil {
+		http.Error(w, "home not registered (Pi offline?)", http.StatusServiceUnavailable)
+		return
+	}
+	innerPath := req.URL.Path
+	if q := req.URL.RawQuery; q != "" {
+		innerPath = innerPath + "?" + q
+	}
+	body, _ := readBody(req.Body)
+	resp, err := r.Queue.Enqueue(req.Context(), hostID, tunnel.TunneledRequest{
+		Method: req.Method,
+		Path:   innerPath,
+		Header: req.Header,
+		Body:   body,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	for k, vv := range resp.Header {
+		w.Header()[k] = vv
+	}
+	w.WriteHeader(resp.Status)
+	_, _ = w.Write(resp.Body)
 }
 
 func (r *Relay) pollTimeout() time.Duration {

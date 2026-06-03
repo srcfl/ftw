@@ -458,7 +458,15 @@ func (s *Store) migrate() error {
 			transports    TEXT    NOT NULL DEFAULT '',
 			friendly_name TEXT    NOT NULL,
 			created_at_ms INTEGER NOT NULL,
-			last_used_ms  INTEGER NOT NULL DEFAULT 0
+			last_used_ms  INTEGER NOT NULL DEFAULT 0,
+			wallet_handle TEXT    NOT NULL DEFAULT '',
+			backup_eligible INTEGER NOT NULL DEFAULT 0,
+			backup_state    INTEGER NOT NULL DEFAULT 0
+		) STRICT`,
+		`CREATE TABLE IF NOT EXISTS owner_sessions (
+			token         TEXT    PRIMARY KEY NOT NULL,
+			credential_id BLOB    NOT NULL DEFAULT x'',
+			expires_at_ms INTEGER NOT NULL
 		) STRICT`,
 	}
 	for _, stmt := range stmts {
@@ -466,7 +474,46 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
 		}
 	}
+	if err := s.addColumnIfMissing("trusted_devices", "wallet_handle",
+		"wallet_handle TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate trusted_devices.wallet_handle: %w", err)
+	}
+	for _, col := range []struct{ name, ddl string }{
+		{"backup_eligible", "backup_eligible INTEGER NOT NULL DEFAULT 0"},
+		{"backup_state", "backup_state INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := s.addColumnIfMissing("trusted_devices", col.name, col.ddl); err != nil {
+			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)
+		}
+	}
 	return nil
+}
+
+// addColumnIfMissing runs ALTER TABLE ADD COLUMN only when the column is
+// absent, so upgrades from a pre-column schema are idempotent. SQLite has no
+// ADD COLUMN IF NOT EXISTS, so we inspect PRAGMA table_info first.
+func (s *Store) addColumnIfMissing(table, column, ddl string) error {
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + ddl)
+	return err
 }
 
 // ---- Config key-value ----

@@ -134,6 +134,219 @@ func TestOwnerAccessLoginStartRequiresEnrolledDevice(t *testing.T) {
 	}
 }
 
+// A relay-tunnelled request (carrying the trusted tunnel marker) must NOT
+// inherit LAN-bypass even though it arrives at a loopback host. This is the
+// single most important regression in the whole feature: without it every
+// remote request silently skips the passkey.
+func TestOwnerAccessTunneledRequestNeverBypasses(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true // bypass ON
+	d.TunnelMarker = "test-marker-secret"
+	srv := New(d)
+
+	// Marked + loopback host + no cookie → must be treated as remote.
+	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-FTW-Tunnel", "test-marker-secret")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("tunnelled request must require auth, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// An UNMARKED loopback/LAN request still bypasses when LANBypass is on.
+func TestOwnerAccessUnmarkedRequestStillBypasses(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "test-marker-secret"
+	srv := New(d)
+
+	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
+	req.Host = "127.0.0.1:8080"
+	// no X-FTW-Tunnel header
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("unmarked LAN request should bypass, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// A forged marker that doesn't match the per-process secret is NOT treated
+// as a tunnel (constant-time compare); it just behaves like a normal LAN
+// client (still bypassed) — never an escalation.
+func TestOwnerAccessForgedMarkerIsNotTunnel(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "the-real-secret"
+	srv := New(d)
+
+	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-FTW-Tunnel", "a-wrong-guess")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("wrong marker must behave as LAN (bypass), got %d", rec.Code)
+	}
+}
+
+// First-enrollment (zero devices) is trust-on-first-use. Over the relay that
+// window is internet-exposed, so a remote (marked) request must be refused —
+// the first passkey must be enrolled on the LAN.
+func TestOwnerAccessBootstrapBlockedOverTunnel(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-FTW-Tunnel", "marker")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("remote bootstrap must be 403, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// First-enrollment on the LAN (unmarked) is still allowed.
+func TestOwnerAccessBootstrapAllowedOnLAN(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
+	req.Host = "127.0.0.1:8080" // unmarked → LAN
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("LAN bootstrap should be allowed, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// W is a stable opaque handle persisted in state.db — it must NOT change when
+// the site is renamed (the whole point of decoupling owner identity from the
+// mutable site name).
+func TestOwnerWalletHandleStableAcrossRename(t *testing.T) {
+	d := minDeps(t)
+	srv := New(d)
+	w1, err := srv.ownerWalletHandle()
+	if err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if len(w1) == 0 {
+		t.Fatal("empty wallet handle")
+	}
+	// Simulate a site rename.
+	d.Cfg.Site.Name = "renamed-site"
+	w2, err := srv.ownerWalletHandle()
+	if err != nil {
+		t.Fatalf("handle 2: %v", err)
+	}
+	if string(w1) != string(w2) {
+		t.Fatalf("wallet handle changed on rename: %q -> %q", w1, w2)
+	}
+	// And the WebAuthn owner id is the handle, not the site name.
+	u, err := srv.buildOwnerUser()
+	if err != nil {
+		t.Fatalf("buildOwnerUser: %v", err)
+	}
+	if string(u.WebAuthnID()) != string(w2) {
+		t.Fatalf("owner WebAuthnID = %q, want wallet handle %q", u.WebAuthnID(), w2)
+	}
+}
+
+// whoami reports the stable wallet handle so the browser can key on the
+// wallet rather than the mutable site name.
+func TestOwnerWhoamiReturnsWallet(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	w, _ := srv.ownerWalletHandle()
+	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
+	req.Host = "127.0.0.1:8080"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !contains(rec.Body.String(), `"wallet":"`+string(w)+`"`) {
+		t.Fatalf("whoami missing wallet handle %q: %q", w, rec.Body.String())
+	}
+}
+
+// The discoverable-login handler resolves the single owner from the
+// assertion's userHandle (== the wallet handle W), and rejects any other.
+func TestResolveDiscoverableOwner(t *testing.T) {
+	d := minDeps(t)
+	srv := New(d)
+	w, _ := srv.ownerWalletHandle()
+	u, err := srv.resolveDiscoverableOwner([]byte("rawid"), w)
+	if err != nil {
+		t.Fatalf("resolve with correct handle: %v", err)
+	}
+	if string(u.WebAuthnID()) != string(w) {
+		t.Fatalf("resolved wrong user: %q", u.WebAuthnID())
+	}
+	if _, err := srv.resolveDiscoverableOwner([]byte("rawid"), []byte("not-the-wallet")); err == nil {
+		t.Fatal("expected error for unknown wallet handle")
+	}
+}
+
+// login/start must be discoverable: 200 with NO allowCredentials leaking the
+// enrolled credential id (BeginLogin would include it; BeginDiscoverableLogin
+// must not). 404 stays when nothing is enrolled.
+func TestLoginStartIsDiscoverable(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("seed"), PublicKey: []byte("k"), FriendlyName: "x",
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/api/owner-access/login/start", nil)
+	req.Host = "127.0.0.1"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	// base64url("seed") == "c2VlZA" — must NOT appear in allowCredentials.
+	if contains(rec.Body.String(), "c2VlZA") {
+		t.Fatalf("allowCredentials leaked credential id — not discoverable: %q", rec.Body.String())
+	}
+}
+
+// An owner session must survive a process restart (persisted to state.db) so a
+// Pi reboot doesn't sign the operator out.
+func TestOwnerSessionSurvivesRestart(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("cred")); err != nil {
+		t.Fatalf("issue: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no session cookie issued")
+	}
+	// Simulate a restart: drop in-memory state, fresh Server over the same db.
+	d.ownerAccess = nil
+	srv2 := New(d)
+	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
+	req.Host = "1.2.3.4"
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	rec2 := httptest.NewRecorder()
+	srv2.Handler().ServeHTTP(rec2, req)
+	if rec2.Code != 200 {
+		t.Fatalf("session must survive restart, got %d body=%q", rec2.Code, rec2.Body.String())
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }

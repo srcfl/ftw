@@ -3,50 +3,47 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts — owner remote access</title>
+  <title>forty-two-watts — home</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <link rel="stylesheet" href="/components/theme.css">
   <style>
-    body { font-family: var(--sans), system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: var(--fg, #222); background: var(--bg, #fff); }
+    body { font-family: var(--sans), system-ui, sans-serif; max-width: 30rem; margin: 3rem auto; padding: 0 1.2rem; color: var(--fg, #222); background: var(--bg, #fff); }
     h1 { font-weight: 600; letter-spacing: -0.01em; }
-    .panel { border: 1px solid var(--line, #ddd); padding: 1.5rem; border-radius: .5rem; margin-top: 2rem; }
-    button { font: inherit; padding: .6rem 1.2rem; border-radius: .3rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; }
+    .panel { border: 1px solid var(--line, #ddd); padding: 1.4rem; border-radius: .6rem; margin-top: 1.4rem; }
+    button { font: inherit; padding: .75rem 1.2rem; border-radius: .4rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; width: 100%; }
     button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
-    .muted { color: var(--fg-muted, #888); font-size: .9em; }
-    .row { display: flex; gap: .5rem; align-items: center; margin: 1rem 0; }
-    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
-    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
-    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+    a.block { text-decoration: none; display: block; }
+    .muted { color: var(--fg-muted, #888); font-size: .9em; margin: .6rem 0 1.1rem; }
+    .sep { border: 0; border-top: 1px solid var(--line, #eee); margin: 1.3rem 0; }
+    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .15rem .4rem; border-radius: .2rem; }
+    .ok { color: #060; }
+    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; }
+    .row { margin: .45rem 0; }
   </style>
 </head>
 <body>
-  <h1>Owner remote access</h1>
-  <p class="muted">Sign in with a registered passkey to reach your forty-two-watts instance from outside the local network.</p>
+  <h1>forty-two&nbsp;watts</h1>
+  <p class="muted">Your home, one URL. Sign in with your passkey — or set up this device.</p>
 
   <div id="loading" class="panel">Loading…</div>
 
   <div id="signed-in" class="panel" style="display:none">
-    <p class="ok">Signed in as <span class="code" id="device-name">…</span></p>
-    <p>You can now open the dashboard:</p>
-    <div class="row">
-      <a id="open-dashboard" href="#"><button class="primary">Open dashboard</button></a>
-      <button id="signout">Sign out</button>
-    </div>
-    <p class="muted">Manage enrolled devices on the dashboard's Settings → Trusted devices tab.</p>
+    <p class="ok">Signed in as <span class="code" id="device-name">…</span>.</p>
+    <div class="row"><a class="block" id="open-dashboard" href="#"><button class="primary">Open dashboard</button></a></div>
+    <hr class="sep">
+    <strong>Your passkeys</strong>
+    <ul id="device-list" style="list-style:none;padding:0;margin:.6rem 0 0"></ul>
+    <p id="backup-nudge" class="muted" style="display:none">Add a second passkey so losing this device never locks you out.</p>
+    <div class="row"><a class="block" href="./enroll.html"><button>Add a device</button></a></div>
+    <div class="row"><button id="signout">Sign out</button></div>
   </div>
 
-  <div id="login" class="panel" style="display:none">
-    <p>This device is not signed in. Use a previously enrolled passkey to authenticate.</p>
-    <div class="row">
-      <button id="login-btn" class="primary">Sign in with passkey</button>
-      <button id="add-device-btn">Add this device</button>
-    </div>
-    <div id="login-msg"></div>
-  </div>
-
-  <div id="no-devices" class="panel" style="display:none">
-    <p>No passkeys are enrolled for this instance yet.</p>
-    <p>Open the dashboard on your local network (e.g. <span class="code">http://&lt;pi-ip&gt;:8080/owner-access/enroll.html</span>) to register your first device. Once one is enrolled here, you'll be able to log in from anywhere.</p>
+  <div id="choose" class="panel" style="display:none">
+    <div class="row"><a class="block" href="./login.html"><button class="primary">Sign in with passkey</button></a></div>
+    <p class="muted">Already set up on this device? Face&nbsp;ID / Touch&nbsp;ID.</p>
+    <hr class="sep">
+    <div class="row"><a class="block" href="./enroll.html"><button>Set up this device</button></a></div>
+    <p class="muted">First time here? Enroll a passkey. The very first device needs the LAN&nbsp;PIN shown on your Pi.</p>
   </div>
 
   <script type="module">
@@ -55,46 +52,62 @@
 
     async function whoami() {
       const r = await fetch(base + "/api/owner-access/whoami", { credentials: "same-origin" });
-      if (r.status === 200) return await r.json();
-      if (r.status === 401) return null;
-      throw new Error(`whoami: ${r.status}`);
+      return r.status === 200 ? await r.json() : null;
     }
-
     function show(id) {
-      ["loading", "signed-in", "login", "no-devices"].forEach(x => {
+      ["loading", "signed-in", "choose"].forEach(x => {
         document.getElementById(x).style.display = x === id ? "block" : "none";
       });
     }
-
-    async function refresh() {
-      const me = await whoami();
-      if (me) {
-        document.getElementById("device-name").textContent = me.friendly_name || "(unnamed)";
-        document.getElementById("open-dashboard").href = base + "/";
-        show("signed-in");
-        return;
-      }
-      // Not authenticated. Find out if there's anything to log in to.
-      // Use /login/start as the probe — returns 404 when no devices enrolled.
-      const probe = await fetch(base + "/api/owner-access/login/start", { method: "POST" });
-      if (probe.status === 404) {
-        show("no-devices");
-      } else {
-        show("login");
-      }
-    }
-
     document.getElementById("signout").onclick = async () => {
       document.cookie = "ftw_owner=; Max-Age=0; Path=/";
-      await refresh();
+      show("choose");
     };
+    async function refresh() {
+      let me;
+      try { me = await whoami(); }
+      catch (e) { document.getElementById("loading").innerHTML = '<div class="err">' + e.message + '</div>'; return; }
+      if (me) {
+        document.getElementById("device-name").textContent = me.friendly_name || "this device";
+        document.getElementById("open-dashboard").href = base + "/";
+        document.getElementById("backup-nudge").style.display = (me.devices_enrolled === 1) ? "block" : "none";
+        show("signed-in");
+        renderDevices();
+        return;
+      }
+      show("choose");
+    }
 
-    document.getElementById("login-btn").onclick = () => location.href = "./login.html";
-    document.getElementById("add-device-btn").onclick = () => location.href = "./enroll.html";
-
-    refresh().catch(e => {
-      document.getElementById("loading").innerHTML = '<div class="err">' + e.message + '</div>';
-    });
+    // List enrolled passkeys with a Remove button (revoke).
+    async function renderDevices() {
+      const ul = document.getElementById("device-list");
+      ul.innerHTML = "";
+      let devices = [];
+      try {
+        const r = await fetch(base + "/api/owner-access/devices", { credentials: "same-origin" });
+        if (r.ok) ({ devices } = await r.json());
+      } catch { return; }
+      for (const d of (devices || [])) {
+        const li = document.createElement("li");
+        li.style = "display:flex;align-items:center;gap:.6rem;padding:.55rem 0;border-top:1px solid var(--line,#eee)";
+        const name = document.createElement("span");
+        name.style = "flex:1";
+        name.textContent = d.friendly_name || "(unnamed)";
+        const btn = document.createElement("button");
+        btn.textContent = "Remove";
+        btn.style = "width:auto;padding:.35rem .7rem;font-size:.85em";
+        btn.onclick = async () => {
+          if (!confirm("Remove the passkey \"" + (d.friendly_name || "unnamed") + "\"?")) return;
+          await fetch(base + "/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
+            { method: "DELETE", credentials: "same-origin" });
+          refresh();
+        };
+        li.appendChild(name);
+        li.appendChild(btn);
+        ul.appendChild(li);
+      }
+    }
+    refresh();
   </script>
 </body>
 </html>
