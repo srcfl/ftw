@@ -90,15 +90,34 @@ func (q *Queue) Poll(ctx context.Context, hostID string, timeout time.Duration) 
 	case req := <-wait:
 		return req, nil
 	case <-timer.C:
-		// Race: a producer may have just handed off via wait. Drain.
-		select {
-		case req := <-wait:
-			return req, nil
-		default:
-			return TunneledRequest{}, ErrPollTimeout
-		}
+		return q.abandonWaiter(hostID, wait)
 	case <-ctx.Done():
+		if req, err := q.abandonWaiter(hostID, wait); err == nil {
+			return req, nil
+		}
 		return TunneledRequest{}, ctx.Err()
+	}
+}
+
+// abandonWaiter removes a timed-out / cancelled waiter from the host's waiter
+// slice so a later Enqueue never hands a request off to a dead poller — which
+// would silently drop the request and hang the caller forever. It drains the
+// channel first, so a request handed off in the race window is never lost.
+func (q *Queue) abandonWaiter(hostID string, wait chan TunneledRequest) (TunneledRequest, error) {
+	q.mu.Lock()
+	ws := q.waiters[hostID]
+	for i, c := range ws {
+		if c == wait {
+			q.waiters[hostID] = append(ws[:i], ws[i+1:]...)
+			break
+		}
+	}
+	q.mu.Unlock()
+	select {
+	case req := <-wait:
+		return req, nil
+	default:
+		return TunneledRequest{}, ErrPollTimeout
 	}
 }
 
