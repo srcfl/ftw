@@ -59,8 +59,8 @@ func TestGateServesLoginForRemoteHTML(t *testing.T) {
 	if rec.Code != 302 {
 		t.Fatalf("expected 302 redirect to login, got %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/owner-access/login.html" {
-		t.Fatalf("expected redirect to /owner-access/login.html, got %q", loc)
+	if loc := rec.Header().Get("Location"); loc != "/owner-access/" {
+		t.Fatalf("expected redirect to /owner-access/, got %q", loc)
 	}
 }
 

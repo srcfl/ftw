@@ -87,9 +87,8 @@ func isDashboardShell(p string) bool {
 }
 
 // serveOwnerLogin redirects an unauthenticated dashboard-shell hit to the
-// passkey login page served at its real path, so the page's relative module
-// imports (./webauthn.js) resolve. Serving it inline at "/" would break those
-// imports and the page would hang on "Loading…".
+// owner-access landing page (sign in OR enroll), served at its real path so
+// the page's relative module imports (./webauthn.js) resolve.
 func (s *Server) serveOwnerLogin(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/owner-access/login.html", http.StatusFound)
+	http.Redirect(w, r, "/owner-access/", http.StatusFound)
 }
