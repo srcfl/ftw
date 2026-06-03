@@ -19,6 +19,7 @@ type TrustedDevice struct {
 	FriendlyName string
 	CreatedAtMs  int64
 	LastUsedMs   int64
+	WalletHandle string // opaque wallet (owner) handle this credential belongs to
 }
 
 // SaveTrustedDevice inserts a new passkey. The credential_id PK
@@ -41,10 +42,10 @@ func (s *Store) SaveTrustedDevice(d TrustedDevice) error {
 	}
 	_, err := s.db.Exec(`
 		INSERT INTO trusted_devices
-			(credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			(credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms, wallet_handle)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.CredentialID, d.PublicKey, int64(d.SignCount), d.AAGUID,
-		strings.Join(d.Transports, ","), d.FriendlyName, d.CreatedAtMs, d.LastUsedMs,
+		strings.Join(d.Transports, ","), d.FriendlyName, d.CreatedAtMs, d.LastUsedMs, d.WalletHandle,
 	)
 	return err
 }
@@ -52,7 +53,7 @@ func (s *Store) SaveTrustedDevice(d TrustedDevice) error {
 // LoadTrustedDevices returns all enrolled passkeys, newest first.
 func (s *Store) LoadTrustedDevices() ([]TrustedDevice, error) {
 	rows, err := s.db.Query(`
-		SELECT credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms
+		SELECT credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms, wallet_handle
 		FROM trusted_devices
 		ORDER BY created_at_ms DESC`)
 	if err != nil {
@@ -64,7 +65,7 @@ func (s *Store) LoadTrustedDevices() ([]TrustedDevice, error) {
 		var d TrustedDevice
 		var signCount int64
 		var transports string
-		if err := rows.Scan(&d.CredentialID, &d.PublicKey, &signCount, &d.AAGUID, &transports, &d.FriendlyName, &d.CreatedAtMs, &d.LastUsedMs); err != nil {
+		if err := rows.Scan(&d.CredentialID, &d.PublicKey, &signCount, &d.AAGUID, &transports, &d.FriendlyName, &d.CreatedAtMs, &d.LastUsedMs, &d.WalletHandle); err != nil {
 			return nil, err
 		}
 		d.SignCount = uint32(signCount)
@@ -83,9 +84,9 @@ func (s *Store) LookupTrustedDevice(credentialID []byte) (TrustedDevice, error) 
 	var signCount int64
 	var transports string
 	err := s.db.QueryRow(`
-		SELECT credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms
+		SELECT credential_id, public_key, sign_count, aaguid, transports, friendly_name, created_at_ms, last_used_ms, wallet_handle
 		FROM trusted_devices WHERE credential_id = ?`, credentialID).
-		Scan(&d.CredentialID, &d.PublicKey, &signCount, &d.AAGUID, &transports, &d.FriendlyName, &d.CreatedAtMs, &d.LastUsedMs)
+		Scan(&d.CredentialID, &d.PublicKey, &signCount, &d.AAGUID, &transports, &d.FriendlyName, &d.CreatedAtMs, &d.LastUsedMs, &d.WalletHandle)
 	if err != nil {
 		return d, err
 	}

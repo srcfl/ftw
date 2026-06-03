@@ -149,3 +149,25 @@ func TestUpdateSignCountConstantZeroIsBenign(t *testing.T) {
 		t.Fatalf("expected LastUsedMs updated to 2000, got %d", devs[0].LastUsedMs)
 	}
 }
+
+func TestTrustedDeviceWalletHandleRoundTrip(t *testing.T) {
+	s := openTempStore(t)
+	dev := TrustedDevice{
+		CredentialID: []byte("c1"), PublicKey: []byte("k"),
+		FriendlyName: "phone", WalletHandle: "wallet-abc",
+	}
+	if err := s.SaveTrustedDevice(dev); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := s.LookupTrustedDevice(dev.CredentialID)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got.WalletHandle != "wallet-abc" {
+		t.Fatalf("wallet_handle = %q, want wallet-abc", got.WalletHandle)
+	}
+	list, _ := s.LoadTrustedDevices()
+	if len(list) != 1 || list[0].WalletHandle != "wallet-abc" {
+		t.Fatalf("load wallet_handle mismatch: %+v", list)
+	}
+}
