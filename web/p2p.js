@@ -58,37 +58,59 @@
 
   function supported() { return typeof window.RTCPeerConnection === "function"; }
 
-  // isDirectLAN reports whether the page is loaded over a DIRECT connection to
-  // the Pi (no relay in the path) — localhost, a loopback/private/CGNAT IP, a
-  // single-label hostname, or a *.local mDNS name. On such a connection a P2P
-  // DataChannel buys nothing (we're already direct) and the STUN handshake
-  // needs WAN a fresh Pi may not have, so P2P stays off.
+  // isDirectLAN reports whether the page's HOST is a direct connection to the
+  // Pi (no relay) — loopback, an RFC1918 / CGNAT / link-local IPv4, an IPv6
+  // loopback / ULA / link-local / IPv4-mapped-private literal, a single-label
+  // hostname, or a *.local mDNS name. On such a host a P2P DataChannel buys
+  // nothing and the STUN handshake needs WAN a fresh Pi may not have.
   //
-  // Crucially this is NOT the same as `apiBase() === ""`: the production
-  // bare-host relay (e.g. home.fortytwowatts.com) is also served WITHOUT the
-  // /me/<site> prefix, but it is a PUBLIC FQDN reached THROUGH the relay — a
-  // remote context where P2P is exactly what we want. Gating on the pathname
-  // alone would wrongly disable P2P there; gating on the host does not.
+  // Only consulted for the BARE-PATH case (no /me/<site> prefix — see
+  // isRelayContext). A public FQDN served bare is the bare-host relay
+  // (e.g. home.fortytwowatts.com) and falls through to `false` → relay.
   function isDirectLAN() {
     var h = (location.hostname || "").toLowerCase();
     if (!h) return false;
-    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
-    if (h.indexOf(".") === -1) return true;            // single-label host (e.g. "fortytwowatts")
-    if (/\.local$/.test(h)) return true;               // mDNS
+    if (h.charAt(h.length - 1) === ".") h = h.slice(0, -1);             // strip FQDN root dot
+    if (h.charAt(0) === "[" && h.charAt(h.length - 1) === "]") h = h.slice(1, -1); // unwrap IPv6
+
+    // IPv6 literal (has a colon). Handle BEFORE the single-label rule so a
+    // global IPv6 (which also has no dot) isn't mistaken for a LAN short-name.
+    if (h.indexOf(":") !== -1) {
+      if (h === "::1") return true;                    // loopback
+      if (/^f[cd]/.test(h)) return true;               // ULA fc00::/7
+      if (/^fe[89ab]/.test(h)) return true;            // link-local fe80::/10
+      var v4 = h.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/); // ::ffff:a.b.c.d
+      if (v4) { h = v4[1]; }                           // reuse the IPv4 tests below
+      else return false;                               // global/other IPv6 → relay
+    }
+
+    if (h === "localhost" || h === "127.0.0.1") return true;
     if (/^10\./.test(h)) return true;                  // RFC1918 10/8
     if (/^192\.168\./.test(h)) return true;            // RFC1918 192.168/16
     if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)) return true; // RFC1918 172.16/12
     if (/^169\.254\./.test(h)) return true;            // link-local
-    if (/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // CGNAT 100.64/10 (Tailscale et al)
+    if (/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // CGNAT 100.64/10
+    if (/\.local$/.test(h)) return true;               // mDNS
+    if (h.indexOf(".") === -1) return true;            // single-label host (e.g. "fortytwowatts")
     return false;                                      // public FQDN → relay context (incl. home.*)
+  }
+
+  // isRelayContext reports whether the page is reached THROUGH the relay (where
+  // a direct P2P channel is worth attempting). A present /me/<site> tunnel
+  // prefix is definitively relay — regardless of the host it's served on, so a
+  // relay reached by a private-DNS alias or single-label name still keeps P2P.
+  // Only when there's no prefix do we fall back to the host heuristic.
+  function isRelayContext() {
+    if (apiBase() !== "") return true;     // /me/<site> tunnel → relay
+    return !isDirectLAN();                 // bare path: public FQDN → relay, LAN host → direct
   }
 
   function enabled() {
     // Opt-in defaults ON (the feature's whole point); set localStorage
-    // "ftw.p2p" = "off" to force the relay path. Skip the direct-LAN path
-    // entirely (see isDirectLAN) — there's no relay to bypass and the
-    // handshake would only waste a WAN round-trip.
-    return supported() && !isDirectLAN() && localStorage.getItem("ftw.p2p") !== "off";
+    // "ftw.p2p" = "off" to force the relay path. Skip non-relay (direct-LAN)
+    // contexts entirely — there's no relay to bypass and the handshake would
+    // only waste a WAN round-trip.
+    return supported() && isRelayContext() && localStorage.getItem("ftw.p2p") !== "off";
   }
 
   function teardown() {
@@ -281,10 +303,11 @@
   // opted out on a relay context, still surface a "relay" state so the
   // indicator stays clickable to re-enable.
   //
-  // On a direct-LAN connection (see isDirectLAN) P2P is not applicable — there's
-  // no relay to bypass — so we leave the state "off" (indicator hidden) rather
-  // than showing a misleading, un-toggleable "Relay" badge. The bare-host relay
-  // (home.*) is NOT direct-LAN, so it warms up and connects like /me/<site>.
+  // On a direct-LAN connection (see isRelayContext) P2P is not applicable —
+  // there's no relay to bypass — so we leave the state "off" (indicator hidden)
+  // rather than showing a misleading, un-toggleable "Relay" badge. The bare-host
+  // relay (home.*) and the /me/<site> tunnel are both relay contexts, so they
+  // warm up and connect.
   if (enabled()) { try { connect(); } catch (e) {} }
-  else if (supported() && !isDirectLAN()) { setState("relay"); }
+  else if (supported() && isRelayContext()) { setState("relay"); }
 })();

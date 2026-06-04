@@ -13,13 +13,16 @@
 // to mount alongside other persistent header bits.
 import { FtwElement } from "./ftw-element.js";
 
-// Shared, deduped notification-history fetch. The badge poll, the modal
-// open, and any transient re-connect of the element can all ask for the
-// SAME (endpoint, limit) payload in a short window; without coalescing
-// that fans out into repeated identical GET /api/notifications/history
-// requests. Share a single in-flight request and reuse a fresh result for
-// a short TTL. Pass force=true (the manual Refresh button) to bypass it.
-// Mirrors next-app.js's fetchHistory / ftw-history-card's dailyFetchCache.
+// Shared, deduped notification-history fetch, keyed on the full URL
+// (endpoint + limit). When several callers hit the SAME key in a short
+// window — concurrent calls, or a transient re-connect that re-fires the
+// badge fetch on every connect — this collapses them into one in-flight
+// request and reuses a fresh result for a short TTL, instead of fanning out
+// into repeated identical GET /api/notifications/history. (The 30s badge
+// poll at limit=50 and a modal open at limit=100 are different keys, so the
+// cache coalesces bursts, not the steady-state poll.) Pass force=true (the
+// manual Refresh button) to bypass it. Mirrors next-app.js's fetchHistory /
+// ftw-history-card's dailyFetchCache.
 const NOTIF_CACHE_TTL_MS = 5000;
 const notifFetchCache = new Map(); // "endpoint?limit" -> { at, rows?, promise? }
 
@@ -30,20 +33,23 @@ function fetchNotifRows(url, force) {
     if (c.rows) return Promise.resolve(c.rows);
     if (c.promise) return c.promise;
   }
+  // Every cache mutation is guarded by `cur.promise === promise`: only the
+  // entry that still references THIS request may write it, so a slow older
+  // request can't clobber a newer (e.g. forced-refresh) entry that replaced it.
+  const owns = () => { const cur = notifFetchCache.get(url); return cur && cur.promise === promise; };
   const promise = fetch(url)
     .then((r) => {
-      // Don't cache a non-OK response — drop the entry so the next call
+      // Don't cache a non-OK response — drop our entry so the next call
       // retries instead of serving a stale empty list for the TTL.
-      if (!r.ok) { notifFetchCache.delete(url); return []; }
+      if (!r.ok) { if (owns()) notifFetchCache.delete(url); return []; }
       return r.json().then((d) => {
         const rows = Array.isArray(d) ? d : [];
-        notifFetchCache.set(url, { at: Date.now(), rows: rows });
+        if (owns()) notifFetchCache.set(url, { at: Date.now(), rows: rows });
         return rows;
       });
     })
     .catch(() => {
-      const cur = notifFetchCache.get(url);
-      if (cur && cur.promise === promise) notifFetchCache.delete(url);
+      if (owns()) notifFetchCache.delete(url);
       return [];
     });
   notifFetchCache.set(url, { at: now, promise: promise });
@@ -131,10 +137,11 @@ export class FtwNotifHistory extends FtwElement {
     return fetchNotifRows(url, force);
   }
 
-  async _refreshBadge() {
+  async _refreshBadge(force) {
     // Only need the recent window to count failures — hit a small limit
-    // so the polling call is cheap.
-    var rows = await this._fetchRows(50);
+    // so the polling call is cheap. force=true (manual Refresh) bypasses
+    // the cache so the badge can't lag the freshly-rendered list.
+    var rows = await this._fetchRows(50, force);
     var windowMs = this._failHours() * 3600 * 1000;
     var cutoff = Date.now() - windowMs;
     var fails = rows.filter(r => r.status === "failed" && (r.ts_ms || 0) >= cutoff).length;
@@ -177,7 +184,7 @@ export class FtwNotifHistory extends FtwElement {
       this.update();
       this._rows = await this._fetchRows(this._limit(), true); // force: explicit refresh bypasses cache
       this._loading = false;
-      this._refreshBadge();
+      this._refreshBadge(true); // force the badge too so list + count agree
       this.update();
       var m = this.shadowRoot.querySelector("ftw-modal");
       if (m) m.setAttribute("open", ""); // keep open after re-render
