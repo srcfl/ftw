@@ -401,32 +401,51 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
 		return
 	}
-	_, err := r.Tokens.Register(TokenRegistration{
+	// ATOMICITY (escalation fix): the token and its poll-secret ownership must be
+	// committed as a unit. If poll-secret ownership of host_id can't be proven
+	// (the host_id's secret is bound to a DIFFERENT principal — e.g. it belongs to
+	// an owner, or to another friend's pair token), this registration must leave
+	// NO token behind. Otherwise an attacker could register T for a victim's
+	// host_id H, get the 403, then approve T with their own code and have
+	// /h/T/mcp route friend traffic to H — unauthorized access to the victim's Pi.
+	//
+	// We register the token, then prove poll-secret ownership; on ANY failure of
+	// the ownership step we roll the token back (Delete) and release any secret
+	// THIS call freshly minted, so a 403 is indistinguishable from "never
+	// registered". The owner-prefix guard above already rejects owner host_ids
+	// outright; this closes the same class for any non-owner host_id whose secret
+	// is held by a different principal — and keeps the two steps atomic so the
+	// ordering bug can't re-open it.
+	pairPrincipal := "pair:" + reg.Token
+	if _, err := r.Tokens.Register(TokenRegistration{
 		HostID:       reg.HostID,
 		Token:        reg.Token,
 		TTL:          time.Duration(reg.TTLMs) * time.Millisecond,
 		ApprovalCode: reg.ApprovalCode,
 		Intent:       reg.Intent,
 		As:           reg.As,
-	})
-	if errors.Is(err, ErrTooManyTokens) {
-		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
-		return
-	}
-	if err != nil {
+	}); err != nil {
+		if errors.Is(err, ErrTooManyTokens) {
+			http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	secret := ""
 	if r.Polls != nil {
 		// Bind the friend's poll secret to the pair token that minted it (the
-		// principal). A subsequent register for the same host_id with a different
-		// token can't retrieve this secret, and the owner path (principal = site
-		// key) can never collide with it.
-		s, err := r.Polls.Issue(reg.HostID, "pair:"+reg.Token)
+		// principal). A register for the same host_id under a different token can't
+		// retrieve this secret, and the owner path (principal = site key) can never
+		// collide with it. Issue NEVER mints on a principal mismatch — it returns
+		// the error untouched — so the only state to undo on the 403 path is the
+		// token we just registered.
+		s, err := r.Polls.Issue(reg.HostID, pairPrincipal)
 		if err != nil {
-			// The host_id already has a secret minted by a different principal.
-			// Don't disclose it: refuse the registration.
+			// The host_id's secret is held by a DIFFERENT principal (owner or other
+			// friend). Roll the token back so the 403 leaves nothing for the
+			// attacker to approve, then refuse.
+			r.Tokens.Delete(reg.Token)
 			http.Error(w, "host_id in use by another principal", http.StatusForbidden)
 			return
 		}
