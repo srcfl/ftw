@@ -1,5 +1,149 @@
 # Changelog
 
+## 0.114.0
+
+### Minor Changes
+
+- 2a67660: Owner remote access — **LAN-PIN first enrollment**. A short-lived 6-digit PIN,
+  readable only on the Pi's local network (`GET /api/owner-access/enroll-pin` —
+  `403` over the relay) and printed to the Pi's console, authorizes the very
+  first passkey enrollment through the relay origin. This resolves the deadlock
+  between the WebAuthn RP-ID origin requirement (the first passkey must be
+  created at `relay.fortytwowatts.com`) and the bootstrap hardening that blocks
+  un-authenticated first-enrollment over the tunnel. `enroll.html` gains an
+  optional PIN field. Once one passkey exists the PIN path is inert (further
+  enrollment requires a logged-in session).
+- 7efc9b3: Owner remote access — single-home **`home.fortytwowatts.com`** cutover. The relay
+  gains `-home-host` / `-home-site` flags that forward a bare host (e.g.
+  `home.fortytwowatts.com`) verbatim to the single owner Pi, so the dashboard loads
+  at the clean root URL with working absolute asset paths (no `/me/<site_id>`
+  prefix). The Pi auth-gate is refined to keep static assets (CSS/JS/images) public
+  so the login page renders styled, while `/api/*` and the dashboard HTML shell stay
+  gated.
+- 14f964f: Owner remote access — passkey foundation (home route, Phases 1–3):
+
+  - **Safe floor:** a per-process unforgeable tunnel marker excludes relay-tunnelled
+    (remote) requests from LAN-bypass, and a global auth-gate wraps the whole mux —
+    remote hits now require a passkey session, while genuine LAN/loopback stays
+    frictionless. First-enrollment bootstrap is denied over the tunnel (LAN-only).
+  - **Identity spine:** every Pi generates an always-on self-sovereign ES256 identity
+    on first boot (Nova reuses it when federation is enabled); `GET /api/identity`
+    exposes the public key; the owner's WebAuthn identity is now a stable opaque
+    wallet handle decoupled from the mutable site name (rename-safe).
+  - **Usernameless login:** discoverable resident-key passkeys + Conditional-UI
+    autofill (no username — just Face ID / Touch ID / Windows Hello) with a button
+    fallback, plus a backup-passkey recovery nudge.
+
+- ab238ee: Home route Phase 5: **direct browser↔Pi P2P transport**. The dashboard at
+  home.fortytwowatts.com now opens a direct, DTLS-end-to-end-encrypted WebRTC
+  DataChannel to the Pi and routes its live `/api/status` poll over it, bypassing
+  the relay on the data path. A `Direct / Relay` indicator in the header shows
+  which transport is live; if the DataChannel can't open (hard NAT, no STUN
+  reachability) it falls back to the relay fetch invisibly.
+
+  - **Signaling rides the existing authenticated owner tunnel** — `POST
+/api/p2p/offer` is owner-gated, so only an authenticated owner can open a
+    channel. No relay changes.
+  - **Pi side**: `p2p.Manager` answers SDP offers and serves the channel with a
+    `Bridge` over the local API mux; pure Go (`pion/webrtc/v4`, no CGo), with
+    PeerConnection lifecycle reaping and a connection cap.
+  - The DataChannel carries the existing `tunnel.TunneledRequest/Response`
+    frames, so the Pi's mux is unchanged. The data plane is ciphertext even over
+    a future TURN relay — closing the "cloud sees plaintext" gap for P2P-routed
+    traffic. STUN-only for now; TURN deferred.
+
+- e0eb84c: Owner remote access: **persist sessions** to `state.db` (a new `owner_sessions`
+  table) so a Pi restart no longer signs you out — the in-memory session map is
+  restored on boot. And the owner-access landing now **manages passkeys** when
+  signed in: list your enrolled passkeys, remove (revoke) one, or add a device.
+- 3702a27: **Relay: the 4-digit code is now a one-time exchange for a session grant,
+  not a standing password.** Previously, once a pair session was approved,
+  anyone who got hold of the `/h/<token>/…` URL had full access for the
+  rest of the TTL — and for MCP that means powerful tools
+  (`run_command`, `modbus_write`, `deploy_driver`, `write_file`). A
+  forwarded or leaked-from-history URL was effectively a host handover.
+
+  Now, accepting the code mints a high-entropy session grant (32 bytes,
+  CSPRNG). It is handed to the friend exactly once:
+
+  - **MCP**: the landing page prints
+    `claude mcp add ftw-friend --transport http <url>/h/<token>/mcp --header "Authorization: Bearer <grant>"`.
+    `/h/<token>/mcp` now requires that Bearer grant.
+  - **Browser/dashboard**: approval sets an `HttpOnly; Secure;
+SameSite=Strict` `ftw_grant` cookie scoped to the session path;
+    `/h/<token>/web/…` now requires it.
+
+  A leaked-but-already-active URL is useless without the grant — the
+  recipient lands back on the code-entry page and doesn't have the
+  out-of-band 4-digit code (5 wrong tries still locks it). The grant is
+  validated constant-time, never forwarded to the host, and expires with
+  the session. `POST /h/<token>/approve` now responds `200 {"grant":"…"}`
+  instead of `204`.
+
+  Works on the existing path-based routes — no subdomains or new domain
+  required (the browser-dashboard _rendering_ fix and any subdomain work
+  remain deferred; see `docs/goals/relay-subdomain-sessions.md`).
+
+### Patch Changes
+
+- 623a998: Fix the e2e pair-flow tests (`TestPairFlow`, `TestPairFlowThroughRelay`) so
+  they bind a dynamic API port instead of a hardcoded `:8080`. On a machine
+  where `:8080` is already taken (e.g. an OrbStack / docker control-plane
+  publishing `0.0.0.0:8080`), the test's main service couldn't bind, `waitForAPI`
+  silently latched onto the squatter, and the friend's request 404'd — a false
+  "grant broken" failure. The tests now use the same `freePort` helper
+  `stack_test.go` already relies on.
+- 5aa164f: Home route Phase 5 groundwork: add the CI-verifiable P2P transport core
+  (`go/internal/p2p`). A `Bridge` reads `tunnel.TunneledRequest` JSON frames off
+  an open WebRTC `DataChannel`, replays each against the local HTTP handler, and
+  writes back a `ResponseFrame` — the same tunnel protocol the relay long-poll
+  uses, so the Pi's mux is unchanged. Proven by an in-process pion↔pion loopback
+  test (DTLS DataChannel, no browser/network). Pure-Go (`pion/webrtc/v4`, no
+  CGo). Not yet wired to any user-facing surface — the relay signaling endpoints
+  and browser `p2pClient` are later slices that need a browser harness.
+- c333139: Persist the WebAuthn `BackupEligible` / `BackupState` credential flags on enrolled
+  passkeys and restore them at login. Without this, go-webauthn rejected logins from
+  synced / backed-up passkeys (iCloud Keychain, Google Password Manager) with
+  "BackupEligible flag inconsistency during login validation" — the stored credential
+  reported BE=false while the live assertion reported BE=true. Existing flag-less
+  credentials must be re-enrolled.
+- e91bbea: Fix the owner-access sign-in page throwing "OperationError: A request is
+  already pending." The page started a Conditional-UI (autofill) WebAuthn
+  ceremony on load and a second one on the "Sign in with passkey" button click
+  without cancelling the first — browsers allow only one credential request at a
+  time (a password manager like Bitwarden grabbing the autofill slot makes the
+  collision near-certain). The page now tracks an `AbortController` and aborts any
+  in-flight ceremony before starting the next, so the button and autofill no
+  longer collide.
+- 5a6d1be: Owner remote access: add a real server-side **sign out**. The `ftw_owner`
+  session cookie is HttpOnly, so the landing page's old client-side
+  `document.cookie` clear never actually logged you out — the session stayed alive
+  on the Pi. New `POST /api/owner-access/logout` revokes the session both in
+  memory and in the persisted store and expires the cookie; the landing's
+  Sign-out button now calls it. `whoami` also returns `can_sign_out` (false on
+  LAN-bypass) so the dashboard can show a Sign-out control only on a real remote
+  session.
+- 75f4579: Owner remote access hardening (security review): (1) deleting a passkey now
+  revokes its active sessions immediately, so revoking a lost device actually logs
+  it out instead of leaving its session alive until the 24 h TTL; (2) the LAN
+  bootstrap enrollment PIN is burned after 5 wrong guesses, so its 6-digit space
+  can't be brute-forced within the 10-minute window.
+- 2d7f3f1: ui: dashboard banner when the database auto-recovered from corruption
+
+  The dashboard now reads the `storage` field from `GET /api/health` (added in
+  the two-tier storage work) and shows a dismissible amber banner when
+  `state.db` or `cache.db` was found corrupt and healed at boot — e.g. "cache.db
+  was corrupt — rebuilt empty, re-fetching" or "state.db … restored from last
+  snapshot". Closes the loop so DB corruption is visible at a glance instead of
+  only in the logs.
+
+- 59e33aa: Fix a relay tunnel **poll-waiter** bug: a timed-out long-poll left a dead waiter
+  channel in the queue, so a later request was handed off to that dead poller and
+  **silently dropped — hanging the caller forever** (the remote dashboard would
+  "just load" once a host had idled long enough to accumulate dead waiters).
+  Timed-out and cancelled waiters are now removed from the queue, and the channel
+  is drained first so a request handed off in the race window is never lost.
+
 ## 0.113.0
 
 ### Minor Changes
