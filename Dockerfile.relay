@@ -1,0 +1,35 @@
+# Dockerfile.relay — standalone build of the ftw-relay signaling + tunnel server.
+#
+# The relay is NOT bundled in the main forty-two-watts image (it's deployed
+# separately on its own VM). This file exists for two reasons:
+#   1. the local end-to-end harness (docker-compose.e2e.yml) — run the whole
+#      home-route stack on one machine, no real relay VM / Cloudflare; and
+#   2. self-hosters who want to run their own relay in a container.
+#
+# Mirrors the main Dockerfile's multi-stage, CGO-free, static-binary pattern.
+
+# --- Builder ---------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+
+COPY go/go.mod go/go.sum ./go/
+RUN cd go && go mod download
+COPY go/ ./go/
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+RUN cd go && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-relay ./cmd/ftw-relay
+
+# --- Runtime ---------------------------------------------------------------
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S ftw && adduser -S ftw -G ftw
+COPY --from=builder /out/ftw-relay /usr/local/bin/ftw-relay
+USER ftw
+EXPOSE 7378
+ENTRYPOINT ["/usr/local/bin/ftw-relay"]

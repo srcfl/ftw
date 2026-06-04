@@ -166,6 +166,24 @@ dev:
 	(cd go && go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
 	wait
 
+# ---- Local docker E2E harness (relay + Pi on this machine) ----
+#
+# Brings up ftw-relay + a forty-two-watts "Pi" wired to dial it, so the whole
+# home-route / owner-access / pair / P2P flow runs locally with no real Pi,
+# relay VM, or Cloudflare. See docs/local-e2e-docker.md.
+#   Pi:         http://localhost:8080/
+#   Home route: http://home.fortytwowatts.localhost/
+
+e2e-docker-up:
+	docker compose -f docker-compose.e2e.yml up --build -d
+	@echo "Pi: http://localhost:8080/   Home route: http://home.fortytwowatts.localhost/"
+
+e2e-docker-logs:
+	docker compose -f docker-compose.e2e.yml logs -f
+
+e2e-docker-down:
+	docker compose -f docker-compose.e2e.yml down -v
+
 # ---- Hygiene ----
 
 fmt:

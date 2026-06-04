@@ -1,0 +1,69 @@
+# docker-compose.e2e.yml — LOCAL end-to-end harness (relay + Pi) on ONE machine.
+#
+# Brings up the standalone ftw-relay and a forty-two-watts "Pi" wired to dial it,
+# so you can exercise the whole home-route / owner-access / pair / P2P flow
+# locally — no real Pi, no real relay VM, no Cloudflare, no certs.
+#
+#   Build + start:  make e2e-docker-up
+#   Logs:           make e2e-docker-logs
+#   Stop + wipe:    make e2e-docker-down
+#
+# Open in your browser:
+#   - Pi dashboard (LAN / loopback view):      http://localhost:8080/
+#   - Home route   (remote view via relay):    http://home.fortytwowatts.localhost/
+#
+# `*.localhost` resolves to 127.0.0.1 in every modern browser AND is treated as a
+# secure context (so WebAuthn works without a cert). The relay listens on host
+# port 80 so the browser sends `Host: home.fortytwowatts.localhost` with NO port
+# — matching the relay's home-host mux pattern exactly like prod's :443.
+#
+# WHAT THIS EXERCISES END-TO-END: the Pi dials the relay (FTW_RELAY_URL), signs
+# its ES256 /me/register, the relay TOFU-pins it, and the home route tunnels the
+# browser to the Pi — the real owner-access gate, the X-FTW-Tunnel remote/LAN
+# discriminator, the pair flow, and the P2P signaling all run for real.
+#
+# P2P (WebRTC) CAVEAT: from your Mac browser to the app CONTAINER the direct
+# DataChannel may not form (Docker Desktop NAT hides the container's ICE host
+# candidates), so traffic transparently falls back to the relay tunnel — which is
+# fine for auth/gate/registration testing. For automated browser P2P tests, add a
+# headless-Chrome container to THIS network (tier 2): container-to-container P2P
+# connects directly on the bridge net. See docs/local-e2e-docker.md.
+#
+# TOFU WARNING: the relay runs with -home-allow-tofu (no operator-pinned key), so
+# the Pi's key is trusted on first registration. TESTING ONLY — never production.
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.relay
+    container_name: ftw-e2e-relay
+    command:
+      - "-addr=:7378"
+      - "-home-host=home.fortytwowatts.localhost"
+      - "-home-site=site:Home"
+      - "-home-allow-tofu"
+    ports:
+      # Host 80 → container 7378, so the browser's Host header carries no port
+      # and matches the `home.fortytwowatts.localhost/` mux pattern.
+      - "80:7378"
+
+  forty-two-watts:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ftw-e2e-pi
+    depends_on:
+      - relay
+    environment:
+      # The Pi dials this to register + open its owner tunnel. Container-internal
+      # DNS resolves `relay` to the service above on the bridge network.
+      FTW_RELAY_URL: "http://relay:7378"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./deploy/local-e2e/config.yaml:/app/data/config.yaml:ro
+      - ftw-e2e-data:/app/data
+
+volumes:
+  ftw-e2e-data:
