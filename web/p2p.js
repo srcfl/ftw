@@ -35,6 +35,50 @@
   }
   function relayURL(path) { return apiBase() + path; }
 
+  // ---- LAN-origin detection (FIX-2) -----------------------------------------
+  // Owner API calls must NEVER fall back to the cleartext relay on the PUBLIC
+  // home route — a channel timeout would otherwise leak the WebAuthn assertion +
+  // ceremony token to the untrusted relay. We allow the relay fallback ONLY when
+  // the page is served DIRECTLY by the Pi (genuine LAN), where "the relay" is not
+  // in the path at all. Everything else — the /me/<site> tunnel prefix, or a
+  // public home host like home.fortytwowatts.com — is treated as NOT-LAN, so
+  // strict owner fetches fail closed instead of leaking. When in doubt: not LAN.
+  function isPrivateIPv4(h) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) return false;
+    var a = +m[1], b = +m[2];
+    if (a === 10) return true;                       // 10.0.0.0/8
+    if (a === 127) return true;                      // loopback
+    if (a === 192 && b === 168) return true;         // 192.168.0.0/16
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 169 && b === 254) return true;         // link-local
+    return false;
+  }
+  function isLanOrigin() {
+    // A relay tunnel prefix is, by definition, the relay in the path → not LAN.
+    if (apiBase() !== "") return false;
+    var h = (location.hostname || "").toLowerCase();
+    if (h === "localhost") return true;
+    if (h === "::1" || h === "[::1]") return true;
+    // mDNS / local hostnames the Pi answers on directly.
+    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) {
+      // A bare single-label host (e.g. "fortytwowatts", "raspberrypi") or *.local
+      // is a direct-LAN name — never the public home host (which has dots).
+      // Exception: don't treat a future bare public alias as LAN; but a
+      // single-label host can't be a public FQDN, so this is safe.
+      return true;
+    }
+    if (isPrivateIPv4(h)) return true;
+    // Private/link-local IPv6 (ULA fc00::/7, link-local fe80::/10), possibly
+    // bracketed.
+    var hv6 = h.replace(/^\[|\]$/g, "");
+    if (/^f[cd][0-9a-f]{2}:/.test(hv6)) return true; // fc00::/7 ULA
+    if (/^fe[89ab][0-9a-f]:/.test(hv6)) return true; // fe80::/10 link-local
+    // Anything with a dotted public hostname (home.fortytwowatts.com, etc.) is
+    // NOT LAN → strict owner fetches fail closed rather than leak to the relay.
+    return false;
+  }
+
   // ---- signaling rendezvous URL (P2P-only home route) -----------------------
   // The /signal/* mailbox lives at the relay ROOT (it is keyed by site_id, never
   // under the /me/<site> tunnel prefix), so signaling URLs are origin-absolute
@@ -380,16 +424,52 @@
     return out;
   }
 
+  // failClosedResponse synthesises a 503 Response-like object for STRICT owner
+  // fetches when no channel is available. It looks enough like a fetch Response
+  // (ok/status/headers/json/text) that callers handle it uniformly — but the
+  // owner body NEVER leaves the browser, so the WebAuthn assertion + ceremony
+  // token can't leak to the relay (FIX-2).
+  function failClosedResponse(path) {
+    var msg = "P2P channel unavailable — reconnecting. Retry in a moment.";
+    return {
+      ok: false,
+      status: 503,
+      url: path,
+      headers: new Headers(),
+      json: function () { return Promise.resolve({ error: msg, retry: true }); },
+      text: function () { return Promise.resolve(msg); }
+    };
+  }
+
   // p2pFetch: fetch-compatible. Routes over the DataChannel when available,
   // else the normal relay fetch. Never rejects on transport failure — it always
   // falls back — so callers treat it as a drop-in fetch.
+  //
+  // STRICT mode (opts.strict === true, FIX-2): for owner /api/* calls that carry
+  // secrets (WebAuthn assertion, ceremony token, owner session). On the PUBLIC
+  // home route (relay in the path) it NEVER falls back to the relay — on
+  // no-channel/failure it fails closed with a synthetic 503, so the owner body
+  // can't leak to the untrusted relay. The relay fallback is kept ONLY for a
+  // genuine-LAN origin (isLanOrigin: the Pi serves the page directly, relay not
+  // in the path). When in doubt → not LAN → fail closed.
   function p2pFetch(path, opts) {
     opts = opts || {};
-    var fallback = function () {
+    var strict = opts.strict === true;
+    var canFallBack = !strict || isLanOrigin();
+    var relayFallback = function () {
       var o = {};
       for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+      delete o.strict; // not a fetch() init field
       if (!o.credentials) o.credentials = "same-origin";
       return fetch(relayURL(path), o);
+    };
+    var fallback = function () {
+      if (canFallBack) return relayFallback();
+      // STRICT + not-LAN: fail closed. Do NOT send the owner body to the relay.
+      // Nudge a reconnect for the next attempt, but only if P2P is enabled (don't
+      // resurrect a user-disabled channel).
+      if (enabled()) { try { connect(); } catch (e) {} }
+      return Promise.resolve(failClosedResponse(path));
     };
     if (!enabled()) return fallback();
     return connect().then(function (ok) {
@@ -398,8 +478,21 @@
     }, fallback);
   }
 
+  // fetchStrict is the owner-API entry point: same as p2pFetch but forces strict
+  // mode, so a channel timeout fails closed instead of leaking the owner body to
+  // the relay on the public home route.
+  function p2pFetchStrict(path, opts) {
+    opts = opts || {};
+    var o = {};
+    for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+    o.strict = true;
+    return p2pFetch(path, o);
+  }
+
   window.ftwP2P = {
     fetch: p2pFetch,
+    fetchStrict: p2pFetchStrict,
+    isLanOrigin: isLanOrigin,
     connect: connect,
     onState: function (fn) { listeners.push(fn); try { fn(stateName); } catch (e) {} },
     state: function () { return stateName; },
@@ -410,6 +503,7 @@
     }
   };
   window.p2pFetch = p2pFetch;
+  window.p2pFetchStrict = p2pFetchStrict;
 
   // Warm up the channel on load so the dashboard's first poll can already be
   // direct (and the indicator settles quickly). When P2P is supported but

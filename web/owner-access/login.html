@@ -40,17 +40,20 @@
     const base = apiBase();
     const msg = document.getElementById("msg");
 
-    // ownerFetch routes an owner API call over the P2P DataChannel when one is
-    // available (window.p2pFetch), else falls back to a plain relay fetch. In
-    // the P2P-only home route the owner session must travel inside DTLS, so the
-    // login ceremony (start + finish) goes through here.
+    // ownerFetch routes an owner API call over the P2P DataChannel in STRICT mode
+    // (FIX-2): the login ceremony carries the WebAuthn assertion + ceremony token,
+    // which must NEVER leak to the untrusted relay. p2pFetchStrict fails closed
+    // (synthetic 503) on the public home route if the channel is down, instead of
+    // falling back to a cleartext relay fetch. The relay fallback is allowed ONLY
+    // on a genuine-LAN origin (where the Pi serves this page directly).
     //
-    // window.p2pFetch takes the BARE API path: it sends that path verbatim over
-    // the channel (the Pi serves it directly) and, on fallback, prepends the
-    // relay /me/<site> prefix itself via its own apiBase(). The non-p2p branch
-    // (no transport loaded at all) prepends base for the plain relay fetch.
+    // window.p2pFetchStrict takes the BARE API path: it sends that path verbatim
+    // over the channel (the Pi serves it directly) and, on a LAN-only fallback,
+    // prepends the relay /me/<site> prefix itself. The non-p2p branch (no
+    // transport loaded at all) is LAN-only by construction, so a plain fetch is
+    // safe there.
     function ownerFetch(path, opts) {
-      if (typeof window.p2pFetch === "function") return window.p2pFetch(path, opts || {});
+      if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts || {});
       return fetch(base + path, opts || {});
     }
 

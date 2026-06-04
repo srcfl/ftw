@@ -1907,9 +1907,14 @@
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
   function fetchStatus() {
-    // Route the hot poll over the direct P2P DataChannel when it's up; p2pFetch
-    // falls back to the relay fetch transparently (home-route Phase 5).
-    var xfetch = window.p2pFetch || fetch;
+    // Route the hot poll over the direct P2P DataChannel when it's up. STRICT
+    // mode (FIX-2): the owner API (/api/status etc.) must never ride the cleartext
+    // relay on the public home route — strict fails closed (synthetic 503) if the
+    // channel is down, while still allowing the relay fallback on a genuine-LAN
+    // origin where the Pi serves the page directly. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    var xfetch = window.p2pFetchStrict ||
+      (window.p2pFetch ? function (p, o) { return window.p2pFetch(p, o); } : fetch);
     Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
       xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),

@@ -167,6 +167,24 @@ async function statusOverP2P(page: Page): Promise<{ ok: boolean; status: number 
   });
 }
 
+// strictStatusWithChannelDown disables P2P (tears the channel down + blocks
+// reconnect via the backoff) and then issues a STRICT owner fetch. On the public
+// home host (relay in the path, NOT a LAN origin) it must FAIL CLOSED with the
+// synthetic 503 — proving the owner body never silently fell back to the relay
+// (FIX-2). It returns the status the strict call produced.
+async function strictStatusWithChannelDown(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    // Tear the channel down and force the relay path off so no channel is up.
+    (window as any).ftwP2P.setEnabled(false);
+    // isLanOrigin must be false on the home host, so strict cannot fall back.
+    if ((window as any).ftwP2P.isLanOrigin()) {
+      throw new Error("home host wrongly classified as LAN — strict would leak to relay");
+    }
+    const r = await (window as any).p2pFetchStrict("/api/status", { method: "GET" });
+    return r.status;
+  });
+}
+
 // ---- the test -------------------------------------------------------------
 
 test("home route: P2P-only passkey ceremony + authenticated owner API over the DataChannel", async ({ page }) => {
@@ -228,6 +246,16 @@ test("home route: P2P-only passkey ceremony + authenticated owner API over the D
   const loginStatus = await statusOverP2P(page);
   expect(loginStatus.status, "/api/status over the login channel should be 200").toBe(200);
   expect(loginStatus.ok).toBe(true);
+
+  // 6. STRICT FAIL-CLOSED (FIX-2): with the channel torn down on the public home
+  //    host, a STRICT owner fetch must NOT silently fall back to the cleartext
+  //    relay — it must fail closed with the synthetic 503. (A relay fallback would
+  //    instead surface the relay's 403 P2P-only refusal or leak the body; 503 is
+  //    the in-browser fail-closed marker proving nothing left the page.)
+  const strictStatus = await strictStatusWithChannelDown(page);
+  expect(strictStatus,
+    "strict owner fetch with the channel down must fail closed (503), never relay-fallback")
+    .toBe(503);
 
   await cdp.detach().catch(() => { /* best-effort */ });
 });

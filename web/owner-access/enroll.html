@@ -93,11 +93,14 @@
     const nameInput = document.getElementById("name");
     nameInput.focus();
 
-    // Route owner API calls over the P2P DataChannel when available (the owner
-    // API is P2P-only over the relay). p2pFetch takes the BARE path; the non-p2p
-    // branch prepends the relay base for a plain fetch.
+    // Route owner API calls over the P2P DataChannel in STRICT mode (FIX-2): the
+    // enroll ceremony carries the WebAuthn attestation + ceremony token + PIN,
+    // which must NEVER leak to the untrusted relay. p2pFetchStrict fails closed on
+    // the public home route if the channel is down (no relay fallback); the relay
+    // fallback is allowed only on a genuine-LAN origin. The non-p2p branch is
+    // LAN-only by construction.
     function ownerFetch(path, opts) {
-      if (typeof window.p2pFetch === "function") return window.p2pFetch(path, opts || {});
+      if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts || {});
       return fetch(base + path, opts || {});
     }
 
