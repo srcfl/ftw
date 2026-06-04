@@ -13,7 +13,8 @@
 
 .PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-        verify verify-all install-hooks
+        verify verify-all install-hooks \
+        e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -183,6 +184,22 @@ e2e-docker-logs:
 
 e2e-docker-down:
 	docker compose -f docker-compose.e2e.yml down -v
+
+# ---- Tier 2: container-side browser P2P + passkey proof ----
+#
+# Brings up relay + Pi (patched with the harness WebAuthn RP-ID) PLUS a
+# headless-Chromium (Playwright) container on the SAME bridge net, and runs a
+# test that: enrolls + logs in with a virtual WebAuthn authenticator, asserts
+# the REAL P2P DataChannel reaches `direct` (container-to-container, no NAT),
+# and makes one authenticated owner API call over it. Exits non-zero on failure.
+# See docs/local-e2e-docker.md.
+E2E_TIER2_COMPOSE := -f docker-compose.e2e.yml -f docker-compose.e2e-tier2.yml
+
+e2e-docker-tier2:
+	@set -e; \
+	trap 'docker compose $(E2E_TIER2_COMPOSE) --profile tier2 down -v >/dev/null 2>&1 || true' EXIT; \
+	docker compose $(E2E_TIER2_COMPOSE) --profile tier2 up \
+		--build --abort-on-container-exit --exit-code-from playwright
 
 # ---- Hygiene ----
 
