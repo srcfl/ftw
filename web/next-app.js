@@ -370,16 +370,11 @@
     el.textContent = (soc * 100).toFixed(1) + " %";
     el.className = "live-stat-value is-neutral";
   }
-  function batteryStateLabel(w) {
-    var watts = Number(w) || 0;
-    var idleW = flowIdleKw() * 1000;
-    if (watts > idleW) return "charging";
-    if (watts < -idleW) return "discharging";
-    return "idle";
-  }
   function batteryTargetLine(targetW) {
     if (targetW == null || !isFinite(targetW)) return "";
-    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+    // Just the target — the "· charging/discharging" suffix overflowed the
+    // node circle; the live W value + SoC% already convey direction.
+    return "target " + formatW(targetW);
   }
 
   function smoothDisplayNumber(key, value, now) {
