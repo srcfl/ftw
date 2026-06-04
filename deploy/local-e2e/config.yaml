@@ -28,3 +28,8 @@ drivers:
 
 api:
   port: 8080
+
+# Opt into the owner remote-access home route so this harness Pi dials the relay.
+# DEFAULT is off; the harness explicitly turns it on.
+remote_access:
+  enabled: true

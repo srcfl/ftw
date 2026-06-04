@@ -1590,12 +1590,18 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		if siteIdentity == nil {
-			// The relay now requires an ES256-signed registration. Without a
-			// site identity we cannot sign, so we must not register (an
-			// unsigned mapping would be refused anyway) — fail loud, not silent.
-			slog.Error("owner-access: FTW_RELAY_URL set but no site identity; skipping relay registration", "key_path", identityKeyPath)
-		} else {
+		switch {
+		case !cfg.RemoteAccessEnabled():
+			// OPT-IN, DEFAULT OFF: never dial out on the env var alone. A Pi
+			// that merely inherits FTW_RELAY_URL from an image default stays
+			// local until the owner explicitly sets remote_access.enabled.
+			slog.Info("owner-access: FTW_RELAY_URL set but remote_access.enabled is false — not dialing the relay (opt-in, default off)")
+		case siteIdentity == nil:
+			// The relay requires an ES256-signed registration. Without a site
+			// identity we cannot sign, so we must not register (an unsigned
+			// mapping would be refused anyway) — fail loud, not silent.
+			slog.Error("owner-access: remote_access enabled but no site identity; skipping relay registration", "key_path", identityKeyPath)
+		default:
 			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity)
 		}
 	}

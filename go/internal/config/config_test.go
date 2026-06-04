@@ -119,6 +119,42 @@ func TestLoadMinimalYAML(t *testing.T) {
 	}
 }
 
+// TestRemoteAccessOptInDefaultsOff: the owner remote-access home route is
+// opt-in / default-off. A config with no remote_access block must NOT dial out
+// (a Pi that merely inherits FTW_RELAY_URL stays local); only an explicit
+// enabled:true opts in. The blind TURN knob must parse while staying off.
+func TestRemoteAccessOptInDefaultsOff(t *testing.T) {
+	off, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.RemoteAccess != nil {
+		t.Errorf("remote_access should be nil when unset, got %+v", off.RemoteAccess)
+	}
+	if off.RemoteAccessEnabled() {
+		t.Error("remote access must default OFF when no block is set")
+	}
+
+	on, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: true must opt in")
+	}
+
+	turn, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: false\n  turn:\n    enabled: false\n    url: turn:relay.example:3478\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: false must stay off")
+	}
+	if turn.RemoteAccess == nil || turn.RemoteAccess.TURN == nil || turn.RemoteAccess.TURN.URL != "turn:relay.example:3478" {
+		t.Errorf("turn block did not parse: %+v", turn.RemoteAccess)
+	}
+}
+
 // TestDeprecatedUseEnergyDispatchParsesAsPointer covers the
 // Codex P1 on PR #124: an operator who explicitly set
 // `use_energy_dispatch: false` to pick legacy dispatch pre-v0.27
