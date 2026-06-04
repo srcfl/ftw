@@ -268,7 +268,9 @@
             .then(function () {
               return fetch(signalURL(site, "offer"), {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                // The body is the raw SDP offer (the relay parks it verbatim and
+                // the Pi reads it raw); it is not a JSON envelope.
+                headers: { "Content-Type": "application/sdp" },
                 body: pc.localDescription.sdp
               });
             })

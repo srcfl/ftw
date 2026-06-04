@@ -134,6 +134,15 @@ func (r *Relay) Handler() http.Handler {
 	// browser fetches the SPA shell here, then opens the P2P channel for all
 	// owner data + the login ceremony.
 	if r.HomeHost != "" && r.HomeSite != "" {
+		// The browser reaches the relay AS the home host, and Go's ServeMux gives
+		// a host-specific pattern precedence over a host-less one — so the
+		// host-less /signal/{site}/* browser routes above would be shadowed by the
+		// home-host catch-all below. Re-register the BROWSER signaling routes on
+		// the home host explicitly so the rendezvous works from the dashboard
+		// origin. (The Pi's /signal/{host}/* routes need no host pin: the Pi dials
+		// the relay by its own host, not the home host.)
+		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
 	return r.limitBody(mux)

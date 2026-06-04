@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -28,6 +29,10 @@ import (
 //
 // The relay only ever sees opaque SDP/signature blobs; the resulting DataChannel
 // is DTLS-encrypted end to end.
+
+// maxSignalBodyBytes bounds a drained offer body. A WebRTC offer with embedded
+// ICE candidates is a few KiB; this matches the relay's own per-slot cap.
+const maxSignalBodyBytes = 64 << 10
 
 // p2pAnswerer is the slice of p2p.Manager this loop needs. Declared as an
 // interface so the wiring stays narrow and testable.
@@ -104,16 +109,17 @@ func pollSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID,
 	case http.StatusNoContent:
 		return "", false, nil
 	case http.StatusOK:
-		var off struct {
-			SDP string `json:"sdp"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&off); err != nil {
+		// The browser POSTs the raw SDP as the offer body and the relay parks it
+		// verbatim, so the drained body IS the raw SDP — not a JSON envelope.
+		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSignalBodyBytes))
+		if err != nil {
 			return "", false, err
 		}
-		if off.SDP == "" {
+		sdp := string(b)
+		if sdp == "" {
 			return "", false, nil
 		}
-		return off.SDP, true, nil
+		return sdp, true, nil
 	default:
 		return "", false, &signalHTTPError{status: resp.StatusCode}
 	}

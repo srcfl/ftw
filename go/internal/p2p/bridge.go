@@ -145,7 +145,12 @@ func (b *Bridge) serve(frame []byte) {
 		b.log.Error("p2p: marshal response", "err", err, "req_id", req.ReqID)
 		return
 	}
-	if err := b.dc.Send(out); err != nil {
+	// Send a TEXT frame (not binary): the browser's DataChannel onmessage does
+	// JSON.parse(ev.data), which only works when ev.data is a string. dc.Send
+	// would emit a BINARY frame, which the browser surfaces as a Blob, so
+	// JSON.parse fails silently and the response is dropped. SendText mirrors the
+	// browser, which sends its request frames as text (dc.send(JSON.stringify)).
+	if err := b.dc.SendText(string(out)); err != nil {
 		b.log.Error("p2p: send response", "err", err, "req_id", req.ReqID)
 	}
 }
