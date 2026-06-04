@@ -35,6 +35,15 @@
   }
   function relayURL(path) { return apiBase() + path; }
 
+  // ---- signaling rendezvous URL (P2P-only home route) -----------------------
+  // The /signal/* mailbox lives at the relay ROOT (it is keyed by site_id, never
+  // under the /me/<site> tunnel prefix), so signaling URLs are origin-absolute
+  // and never carry the apiBase prefix. site is URL-encoded — it can contain a
+  // colon ("site:Home").
+  function signalURL(site, leaf) {
+    return "/signal/" + encodeURIComponent(site) + "/" + leaf;
+  }
+
   // ---- state broadcast (drives the dashboard transport indicator) ----
   function setState(s) {
     if (s === stateName) return;
@@ -178,6 +187,28 @@
     });
   }
 
+  // pollAnswer long-polls /signal/<site>/answer until the Pi parks its answer
+  // blob ({sdp, fp_sig, ts}) or the connect attempt is abandoned. The relay
+  // returns 204 when no answer is parked yet; we re-poll until CONNECT_TIMEOUT_MS
+  // (the outer connect() timer also caps the whole attempt). isSettled() lets the
+  // outer finish() short-circuit a long-poll in flight.
+  function pollAnswer(site) {
+    var deadline = Date.now() + CONNECT_TIMEOUT_MS;
+    function once() {
+      if (Date.now() > deadline) return Promise.reject(new Error("answer poll timeout"));
+      return fetch(signalURL(site, "answer"), { method: "GET" }).then(function (r) {
+        if (r.status === 204) {
+          // No answer yet — re-poll immediately (the relay holds the request
+          // open server-side, so this is not a busy loop).
+          return once();
+        }
+        if (!r.ok) throw new Error("answer http " + r.status);
+        return r.json();
+      });
+    }
+    return once();
+  }
+
   function connect() {
     if (ready) return Promise.resolve(true);
     if (connecting) return connecting;
@@ -223,26 +254,38 @@
 
       to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
 
-      pc.createOffer()
-        .then(function (offer) { return pc.setLocalDescription(offer); })
-        .then(function () { return waitIceComplete(pc); })
-        .then(function () {
-          return fetch(relayURL("/api/p2p/offer"), {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp })
-          });
-        })
-        .then(function (r) { if (!r.ok) throw new Error("offer http " + r.status); return r.json(); })
-        .then(function (ans) {
-          // Verify the Pi signed this answer's DTLS fingerprint, against the key
-          // pinned at first connect, BEFORE trusting the channel — the
-          // anti-relay-MITM check. Fail-closed: any failure aborts P2P and the
-          // caller transparently falls back to the relay path.
-          return verifyAnswerSignature(ans).then(function () {
-            return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
-          });
+      // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
+      // offer to /signal/<site>/offer, then long-poll /signal/<site>/answer. The
+      // relay forwards opaque SDP/signature blobs and never sees plaintext. We
+      // need the pinned site_id first (it keys the mailbox); pinnedIdentity also
+      // gives us the key we verify the answer signature against.
+      pinnedIdentity()
+        .then(function (pin) {
+          var site = pin.site;
+          return pc.createOffer()
+            .then(function (offer) { return pc.setLocalDescription(offer); })
+            .then(function () { return waitIceComplete(pc); })
+            .then(function () {
+              return fetch(signalURL(site, "offer"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: pc.localDescription.sdp
+              });
+            })
+            .then(function (r) {
+              // 204 = parked OK; anything else is a hard signaling error.
+              if (r.status !== 204 && !r.ok) throw new Error("offer http " + r.status);
+              return pollAnswer(site);
+            })
+            .then(function (ans) {
+              // Verify the Pi signed this answer's DTLS fingerprint, against the
+              // key pinned at first connect, BEFORE trusting the channel — the
+              // anti-relay-MITM check. Fail-closed: any failure aborts P2P and
+              // the caller transparently falls back to the relay path.
+              return verifyAnswerSignature(ans).then(function () {
+                return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
+              });
+            });
         })
         .catch(function (e) {
           if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }

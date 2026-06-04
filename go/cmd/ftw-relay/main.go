@@ -60,6 +60,7 @@ func main() {
 		Tokens:      NewTokenRegistry(),
 		Owners:      owners,
 		Polls:       NewPollSecrets(),
+		Signals:     NewSignalMailbox(),
 		PollTimeout: *pollTimeout,
 		HomeHost:    *homeHost,
 		HomeSite:    *homeSite,
@@ -102,6 +103,11 @@ func main() {
 				}
 				if n := r.Polls.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: poll-token GC", "removed", n)
+				}
+				// Evict idle signaling mailboxes so a flood of offers for random
+				// site_ids can't grow relay memory; a live pair re-signals on demand.
+				if n := r.Signals.GC(30 * time.Minute); n > 0 {
+					slog.Info("ftw-relay: signal GC", "removed", n)
 				}
 			}
 		}

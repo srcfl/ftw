@@ -91,7 +91,7 @@ func sanitizeSiteName(s string) string {
 //
 // Also starts the long-poll loop that drains those requests and
 // forwards them to the local API server.
-func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string, apiPort int, signer relaySigner) {
+func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string, apiPort int, signer relaySigner, p2p p2pAnswerer) {
 	relayURL = strings.TrimRight(relayURL, "/")
 
 	// The public key is not a secret; log it in full so an operator can pin it
@@ -104,6 +104,15 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 	// registration sets the token its polls are 401'd and it backs off + retries.
 	host := buildOwnerHost(relayURL, hostID, tunnelMarker, apiPort)
 	go host.Run(ctx)
+
+	// Alongside the tunnel: the blind WebRTC signaling loop. It shares the same
+	// per-host poll secret (via host.PollSecret) and answers browser offers over
+	// P2P with fail-closed replay headers. The tunnel above stays for now (slice
+	// 6 removes it once the P2P-only path is proven). When no P2P manager is
+	// wired (e.g. identity load failed) we skip it — answers would be unsigned.
+	if p2p != nil {
+		go runOwnerSignalLoop(ctx, relayURL, hostID, tunnelMarker, p2p, host)
+	}
 
 	registerOnce := func() {
 		tsMs := time.Now().UnixMilli()

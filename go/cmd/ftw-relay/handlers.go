@@ -61,7 +61,8 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	Polls       *PollSecrets
-	PollTimeout time.Duration // 0 → 25s default
+	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
+	PollTimeout time.Duration  // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
@@ -90,6 +91,9 @@ func (r *Relay) Handler() http.Handler {
 	if r.Polls == nil {
 		r.Polls = NewPollSecrets()
 	}
+	if r.Signals == nil {
+		r.Signals = NewSignalMailbox()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -100,6 +104,18 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("POST /h/{token}/approve", r.publicApprove)
 	mux.HandleFunc("/h/{token}/mcp", r.publicMCP)
 	mux.HandleFunc("/h/{token}/web/", r.publicWeb)
+
+	// Blind WebRTC signaling rendezvous (P2P-only home route). The relay parks
+	// opaque SDP/signature blobs in a tiny per-site 2-slot mailbox; it never sees
+	// plaintext (the resulting DataChannel is DTLS-encrypted end to end).
+	//   - browser: POST /signal/{site_id}/offer  + long-poll GET /signal/{site_id}/answer
+	//   - Pi:      long-poll GET /signal/{host_id}/offer + POST /signal/{host_id}/answer
+	// The Pi side is authenticated with the per-host poll secret (X-FTW-Poll), the
+	// same token minted at /me/register; the browser side is rate-limited.
+	mux.HandleFunc("POST /signal/{site_id}/offer", r.signalBrowserOffer)
+	mux.HandleFunc("GET /signal/{site_id}/answer", r.signalBrowserAnswer)
+	mux.HandleFunc("GET /signal/{host_id}/offer", r.signalHostOffer)
+	mux.HandleFunc("POST /signal/{host_id}/answer", r.signalHostAnswer)
 
 	// Owner remote access (Phase 3) — site-id-keyed routes that bypass
 	// the pair-token flow. Host must POST /me/register on startup; the
@@ -737,6 +753,124 @@ func (r *Relay) meRoot(w http.ResponseWriter, req *http.Request) {
 func (r *Relay) meTunnel(w http.ResponseWriter, req *http.Request) {
 	rest := req.PathValue("rest")
 	r.meForward(w, req, "/"+rest)
+}
+
+// ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
+
+// signalBrowserOffer parks a browser's SDP offer for {site_id} and wakes any Pi
+// offer-poller. Unauthenticated (the channel that results is itself
+// authenticated end to end by the signed-fingerprint handshake + owner login
+// over the DataChannel), but rate-limited and body-capped so it can't be abused
+// to spin the mailbox.
+func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" {
+		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	if r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := readBodyLimited(req.Body, maxSignalOfferBytes)
+	if err != nil {
+		http.Error(w, "offer too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(body) == 0 {
+		http.Error(w, "empty offer", http.StatusBadRequest)
+		return
+	}
+	if err := r.Signals.ParkOffer(siteID, body); err != nil {
+		if err == errSignalRateLimited {
+			http.Error(w, "too many offers", http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "signaling at capacity", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// signalBrowserAnswer long-polls for the Pi's parked answer for {site_id}. The
+// browser calls this after POSTing its offer; it returns the opaque answer blob
+// (SDP + fp_sig + ts) verbatim, or 204 to re-poll.
+func (r *Relay) signalBrowserAnswer(w http.ResponseWriter, req *http.Request) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" {
+		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	if r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	data, ok := r.Signals.TakeAnswer(siteID, signalPollTimeout)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+// signalHostOffer is the Pi's long-poll for a parked offer. AUTHENTICATED with
+// the per-host poll secret (the same token minted at /me/register and used on
+// /tunnel/{host}/next), then host_id is mapped back to its site_id via the
+// ES256-pinned OwnerRegistry so a Pi only ever drains offers for its own site.
+func (r *Relay) signalHostOffer(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
+	if r.Owners == nil || r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	siteID, err := r.Owners.SiteForHost(hostID)
+	if err != nil {
+		http.Error(w, "host not registered", http.StatusServiceUnavailable)
+		return
+	}
+	data, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+// signalHostAnswer parks the Pi's answer blob (SDP + fp_sig + ts) for delivery
+// to the browser, waking the browser's answer-poller. AUTHENTICATED with the
+// per-host poll secret, then host_id->site_id via the registry.
+func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
+	if r.Owners == nil || r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	siteID, err := r.Owners.SiteForHost(hostID)
+	if err != nil {
+		http.Error(w, "host not registered", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := readBodyLimited(req.Body, maxSignalAnswerBytes)
+	if err != nil {
+		http.Error(w, "answer too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(body) == 0 {
+		http.Error(w, "empty answer", http.StatusBadRequest)
+		return
+	}
+	r.Signals.ParkAnswer(siteID, body)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (r *Relay) meForward(w http.ResponseWriter, req *http.Request, innerPath string) {
