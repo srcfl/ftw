@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -124,6 +125,61 @@ func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
 	// The same cookie is now revoked server-side.
 	if rec := serve("GET", "/api/owner-access/whoami", cookie); rec.Code != 401 {
 		t.Errorf("session should be revoked after logout: status=%d", rec.Code)
+	}
+}
+
+func TestEnrollPinBurnsAfterMaxTries(t *testing.T) {
+	srv := New(minDeps(t))
+	oa := srv.ownerAccess()
+	pin, _, err := oa.mintEnrollPin()
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	// A guaranteed-wrong guess (first digit + 1 mod 10).
+	wrong := string('0'+(pin[0]-'0'+1)%10) + pin[1:]
+
+	for i := 0; i < ownerAccessEnrollPinMaxTries; i++ {
+		if oa.validateEnrollPin(wrong) {
+			t.Fatalf("wrong PIN accepted on attempt %d", i)
+		}
+	}
+	// The PIN is now burned — even the correct one must be rejected.
+	if oa.validateEnrollPin(pin) {
+		t.Error("correct PIN should be rejected after the attempt cap (PIN burned)")
+	}
+}
+
+func TestDeviceDeleteRevokesSessions(t *testing.T) {
+	srv := New(minDeps(t)) // LAN bypass on → the DELETE is authorized from loopback
+	oa := srv.ownerAccess()
+	credID := []byte("cred-X")
+
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, credID); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	tok := rec.Result().Cookies()[0].Value
+	oa.mu.Lock()
+	_, exists := oa.authSessions[tok]
+	oa.mu.Unlock()
+	if !exists {
+		t.Fatal("session was not created")
+	}
+
+	credB64 := base64.RawURLEncoding.EncodeToString(credID)
+	del := httptest.NewRequest("DELETE", "/api/owner-access/devices/"+credB64, nil)
+	del.Host = "127.0.0.1:8080" // loopback → LAN bypass authorizes
+	delRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delRec, del)
+	if delRec.Code != 204 {
+		t.Fatalf("delete status=%d body=%q", delRec.Code, delRec.Body.String())
+	}
+
+	oa.mu.Lock()
+	_, still := oa.authSessions[tok]
+	oa.mu.Unlock()
+	if still {
+		t.Error("session for the deleted credential should be revoked")
 	}
 }
 

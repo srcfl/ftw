@@ -60,6 +60,10 @@ const ownerAccessCeremonyTTL = 5 * time.Minute
 // to the relay origin in another tab.
 const ownerAccessEnrollPinTTL = 10 * time.Minute
 
+// ownerAccessEnrollPinMaxTries burns the PIN after this many wrong guesses so
+// the 6-digit space can't be brute-forced within the TTL window.
+const ownerAccessEnrollPinMaxTries = 5
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
@@ -75,6 +79,7 @@ type ownerAccessState struct {
 	// ownerAccessEnrollPinTTL. Empty pin means "none minted".
 	enrollPin       string
 	enrollPinExpiry time.Time
+	enrollPinTries  int // wrong attempts since mint; PIN is burned past the cap
 }
 
 // mintEnrollPin generates a fresh 6-digit numeric PIN, stores it with a
@@ -88,6 +93,7 @@ func (oa *ownerAccessState) mintEnrollPin() (pin string, expiresInS int, err err
 	oa.mu.Lock()
 	oa.enrollPin = p
 	oa.enrollPinExpiry = time.Now().Add(ownerAccessEnrollPinTTL)
+	oa.enrollPinTries = 0
 	oa.mu.Unlock()
 	return p, int(ownerAccessEnrollPinTTL.Seconds()), nil
 }
@@ -97,13 +103,24 @@ func (oa *ownerAccessState) mintEnrollPin() (pin string, expiresInS int, err err
 // the digits. An empty stored PIN (none minted, or expired) never matches.
 func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
 	oa.mu.Lock()
-	stored := oa.enrollPin
-	expiry := oa.enrollPinExpiry
-	oa.mu.Unlock()
-	if stored == "" || time.Now().After(expiry) {
+	defer oa.mu.Unlock()
+	if oa.enrollPin == "" || time.Now().After(oa.enrollPinExpiry) {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(candidate), []byte(stored)) == 1
+	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
+		oa.enrollPin = "" // already burned — require a fresh mint
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(candidate), []byte(oa.enrollPin)) == 1 {
+		return true
+	}
+	// Wrong guess: count it, and burn the PIN once the cap is hit so the
+	// 6-digit space can't be exhausted within the TTL.
+	oa.enrollPinTries++
+	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
+		oa.enrollPin = ""
+	}
+	return false
 }
 
 type ceremonySession struct {
@@ -718,6 +735,23 @@ func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if err := s.deps.State.DeleteTrustedDevice(credID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Revoke any active sessions minted for that credential — otherwise
+	// "revoke a lost device" wouldn't actually log it out until the 24 h TTL.
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	var revoked []string
+	for tok, sess := range oa.authSessions {
+		if string(sess.credentialID) == string(credID) {
+			revoked = append(revoked, tok)
+			delete(oa.authSessions, tok)
+		}
+	}
+	oa.mu.Unlock()
+	if s.deps.State != nil {
+		for _, tok := range revoked {
+			_ = s.deps.State.DeleteOwnerSession(tok)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
