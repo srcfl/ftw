@@ -1907,10 +1907,13 @@
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
   function fetchStatus() {
+    // Route the hot poll over the direct P2P DataChannel when it's up; p2pFetch
+    // falls back to the relay fetch transparently (home-route Phase 5).
+    var xfetch = window.p2pFetch || fetch;
     Promise.all([
-      fetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
-      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+      xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      xfetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ])
       .then(function (results) {
         var data = results[0];
@@ -3369,10 +3372,60 @@
       .catch(function () { /* silent — chart just shows last state */ });
   }
 
+  // ---- P2P transport indicator ----
+  // Reflects window.ftwP2P state (direct / relay / connecting); click toggles
+  // direct P2P on/off (persisted). Hidden only when WebRTC is unsupported.
+  function setupP2PIndicator() {
+    var el = document.getElementById("p2p-status");
+    if (!el || !window.ftwP2P) return;
+    var label = el.querySelector(".p2p-label");
+    var titles = {
+      direct: "Direct P2P — end-to-end encrypted, bypassing the relay",
+      relay: "Via relay — click to toggle direct P2P",
+      connecting: "Connecting direct P2P…",
+      off: "Direct P2P unavailable",
+    };
+    var text = { direct: "Direct", relay: "Relay", connecting: "P2P…", off: "" };
+    window.ftwP2P.onState(function (s) {
+      if (s === "off") { el.hidden = true; return; }
+      el.hidden = false;
+      el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
+      el.classList.add("p2p-" + s);
+      if (label) label.textContent = text[s] || "";
+      el.title = titles[s] || "Transport";
+    });
+    el.addEventListener("click", function () {
+      var disabled = localStorage.getItem("ftw.p2p") === "off";
+      window.ftwP2P.setEnabled(disabled); // toggle
+    });
+  }
+
+  // ---- Sign out (remote sessions only) ----
+  // whoami reports whether there's a real session to revoke; on the LAN
+  // (bypass) there's nothing to sign out of, so the button stays hidden.
+  function setupSignOut() {
+    var btn = document.getElementById("signout-btn");
+    if (!btn) return;
+    fetch("/api/owner-access/whoami", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (me) {
+        if (!me || !me.can_sign_out) return; // LAN bypass / not signed in
+        btn.hidden = false;
+        btn.onclick = function () {
+          fetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+            .catch(function () {})
+            .then(function () { location.href = "/owner-access/"; });
+        };
+      })
+      .catch(function () { /* whoami failed → leave the button hidden */ });
+  }
+
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();
+  setupP2PIndicator();
+  setupSignOut();
   setInterval(fetchStatus, POLL_INTERVAL);
   setInterval(fetchLiveHistory, 60_000); // 1-min refresh
   window.addEventListener("resize", function () {

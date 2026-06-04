@@ -118,3 +118,56 @@ func TestSaveRejectsMissingRequiredFields(t *testing.T) {
 		}
 	}
 }
+
+// Modern synced passkeys (iCloud Keychain, Google Password Manager) report
+// signCount == 0 on every login. Persisting 0 after a prior 0 must be a
+// no-corruption no-op, never treated as a clone (a clone is a *decrease*
+// from a previously-positive value, handled by the webauthn lib upstream).
+func TestUpdateSignCountConstantZeroIsBenign(t *testing.T) {
+	s := openTempStore(t)
+	cred := []byte("cred-zero")
+	if err := s.SaveTrustedDevice(TrustedDevice{
+		CredentialID: cred, PublicKey: []byte("k"), SignCount: 0, FriendlyName: "phone",
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Two consecutive logins, both reporting 0.
+	if err := s.UpdateTrustedDeviceSignCount(cred, 0, 1000); err != nil {
+		t.Fatalf("update 1: %v", err)
+	}
+	if err := s.UpdateTrustedDeviceSignCount(cred, 0, 2000); err != nil {
+		t.Fatalf("update 2: %v", err)
+	}
+	devs, err := s.LoadTrustedDevices()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(devs) != 1 || devs[0].SignCount != 0 {
+		t.Fatalf("expected 1 device with signCount 0, got %+v", devs)
+	}
+	if devs[0].LastUsedMs != 2000 {
+		t.Fatalf("expected LastUsedMs updated to 2000, got %d", devs[0].LastUsedMs)
+	}
+}
+
+func TestTrustedDeviceWalletHandleRoundTrip(t *testing.T) {
+	s := openTempStore(t)
+	dev := TrustedDevice{
+		CredentialID: []byte("c1"), PublicKey: []byte("k"),
+		FriendlyName: "phone", WalletHandle: "wallet-abc",
+	}
+	if err := s.SaveTrustedDevice(dev); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := s.LookupTrustedDevice(dev.CredentialID)
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if got.WalletHandle != "wallet-abc" {
+		t.Fatalf("wallet_handle = %q, want wallet-abc", got.WalletHandle)
+	}
+	list, _ := s.LoadTrustedDevices()
+	if len(list) != 1 || list[0].WalletHandle != "wallet-abc" {
+		t.Fatalf("load wallet_handle mismatch: %+v", list)
+	}
+}

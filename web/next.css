@@ -1783,3 +1783,38 @@ body.ftw-next .twin-profile-toggle button:focus-visible {
     height: var(--fill-pct, 0%);
   }
 }
+
+/* ---- P2P transport indicator (home-route Phase 5) ----
+   6 px status dot + mono eyebrow label per DESIGN.md. Direct = green-e
+   (online), Relay = accent-e (amber, active). The dot's accent glow is the
+   only sanctioned shadow. */
+body.ftw-next .p2p-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+  cursor: pointer;
+}
+body.ftw-next .p2p-status[hidden] { display: none; }
+body.ftw-next .p2p-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  transition: background 0.2s ease;
+}
+body.ftw-next .p2p-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+body.ftw-next .p2p-status.p2p-direct .p2p-dot {
+  background: var(--green-e);
+  box-shadow: 0 0 10px var(--green-e);
+}
+body.ftw-next .p2p-status.p2p-relay .p2p-dot { background: var(--accent-e); }
+body.ftw-next .p2p-status.p2p-connecting .p2p-dot { background: var(--fg-muted); }

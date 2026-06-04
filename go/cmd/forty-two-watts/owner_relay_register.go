@@ -42,6 +42,15 @@ func randomRead(b []byte) (int, error) {
 	return cryptoRandRead(b)
 }
 
+// newTunnelMarker returns a 256-bit random hex secret used to mark
+// relay-tunnelled requests (see api.Deps.TunnelMarker). Generated once per
+// process; never persisted, never leaves the host.
+func newTunnelMarker() string {
+	b := make([]byte, 32)
+	_, _ = randomRead(b)
+	return hex.EncodeToString(b)
+}
+
 func sanitizeSiteName(s string) string {
 	if s == "" {
 		return "site"
@@ -73,7 +82,7 @@ func sanitizeSiteName(s string) string {
 //
 // Also starts the long-poll loop that drains those requests and
 // forwards them to the local API server.
-func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID string) {
+func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string) {
 	relayURL = strings.TrimRight(relayURL, "/")
 
 	registerOnce := func() {
@@ -99,7 +108,7 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID str
 
 	// Start the long-poll loop in a goroutine so the registration
 	// retries continue independently.
-	go runOwnerLongPoll(ctx, relayURL, hostID)
+	go runOwnerLongPoll(ctx, relayURL, hostID, tunnelMarker)
 
 	// Register immediately, then every 60s. A relay restart drops all
 	// registrations, so we re-register periodically to recover without
@@ -128,11 +137,20 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID str
 // roundtrip — the JSON wire format already preserves headers, so the
 // ReverseProxy is technically optional, but it's clearer than
 // re-implementing the forwarding logic here.
-func runOwnerLongPoll(ctx context.Context, relayURL, hostID string) {
+func runOwnerLongPoll(ctx context.Context, relayURL, hostID, tunnelMarker string) {
 	// Connect to the local API server. cfg.API.Port isn't available
 	// here without restructuring; use the standard :8080 default.
 	target, _ := url.Parse("http://127.0.0.1:8080")
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// Stamp every forwarded (relay-tunnelled) request with the per-process
+	// marker so the local API auth-gate treats it as remote, not LAN. Set()
+	// overwrites any value a malicious browser tried to smuggle through the
+	// header-preserving tunnel.
+	origDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		origDirector(req)
+		req.Header.Set("X-FTW-Tunnel", tunnelMarker)
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, fmt.Sprintf("local api unavailable: %v", err), http.StatusBadGateway)
 	}

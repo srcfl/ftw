@@ -41,6 +41,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
+	"github.com/frahlg/forty-two-watts/go/internal/p2p"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/proxy"
@@ -1431,6 +1432,35 @@ func main() {
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
+	// Per-process secret stamped on every relay-tunnelled request so the API
+	// auth-gate can tell remote (relay) traffic from genuine LAN/loopback.
+	tunnelMarker := newTunnelMarker()
+
+	// Self-sovereign site identity: always generated on first boot, Nova-
+	// format (P-256 PEM) so federation can reuse it, but never dependent on
+	// Nova being enabled. Canonical path is the same nova.key default so
+	// existing federated gateways keep their claimed key.
+	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
+	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
+		identityKeyPath = cfg.Nova.KeyPath
+	}
+	var siteIdentityPubHex string
+	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+	if err != nil {
+		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
+	} else {
+		siteIdentityPubHex = siteIdentity.PublicKeyHex()
+		slog.Info("site identity ready", "pubkey_prefix", siteIdentityPubHex[:16])
+	}
+
+	// Browser P2P (Phase 5): the manager answers WebRTC SDP offers
+	// (POST /api/p2p/offer) and serves the resulting direct DataChannel with a
+	// p2p.Bridge over the ungated API mux. Signaling rides the authenticated
+	// owner tunnel — no relay changes. The local-API handler is injected after
+	// api.New (srv.Mux()) since srv does not exist yet at this point.
+	p2pMgr := p2p.NewManager(slog.Default(), p2p.DefaultSTUNServers)
+	defer p2pMgr.Close()
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1473,6 +1503,9 @@ func main() {
 		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "relay.fortytwowatts.com"),
 		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
+		TunnelMarker:         tunnelMarker,
+		SiteIdentityPubHex:   siteIdentityPubHex,
+		P2P:                  p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
@@ -1501,6 +1534,11 @@ func main() {
 		Version: Version,
 	}
 	srv := api.New(deps)
+	// Wire the P2P bridge to the GATED API handler now that srv exists. The
+	// Bridge stamps each replayed request with the offer's auth context, so the
+	// gate authorizes them at the owner's real trust tier (remote over the
+	// relay, local on the LAN) — not an unconditional bypass.
+	p2pMgr.SetLocalAPI(srv.Handler())
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
 	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
 	// the local UI renders live data without owning the control loop.
@@ -1549,7 +1587,7 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name))
+		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker)
 	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
@@ -1651,14 +1689,11 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		keyPath := cfg.Nova.KeyPath
-		if keyPath == "" {
-			keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
-		}
-		novaID, err := nova.LoadOrCreateIdentity(keyPath)
-		if err != nil {
-			slog.Warn("nova identity load failed — federation disabled", "err", err)
-		} else if pub, err := nova.Start(cfg.Nova, novaID, st, tel); err != nil {
+		// Reuse the already-loaded self-sovereign identity (same canonical
+		// path) so federation and local identity are one and the same key.
+		if siteIdentity == nil {
+			slog.Warn("nova federation disabled — site identity unavailable")
+		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()

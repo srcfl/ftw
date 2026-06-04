@@ -36,7 +36,9 @@ func TestPairFlow(t *testing.T) {
 	work := t.TempDir()
 	stateDir := filepath.Join(work, "state")
 	_ = os.MkdirAll(stateDir, 0o755)
-	cfgPath := writeMinimalConfig(t, work, stateDir)
+	apiPort := freePort(t)
+	apiURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	cfgPath := writeMinimalConfig(t, work, stateDir, apiPort)
 
 	mainCmd := exec.Command(mainBin,
 		"-config", cfgPath,
@@ -48,13 +50,13 @@ func TestPairFlow(t *testing.T) {
 		t.Fatalf("start main: %v", err)
 	}
 	defer mainCmd.Process.Kill()
-	waitForAPI(t, "http://127.0.0.1:8080/api/status")
+	waitForAPI(t, apiURL+"/api/status")
 
 	// Start the sidecar on a fixed high port (the sidecar doesn't accept :0).
 	// -no-subetha skips the relay handshake so the test doesn't need a live relay.
 	pairCmd := exec.Command(pairBin,
 		"-addr", "127.0.0.1:19999",
-		"-api", "http://127.0.0.1:8080",
+		"-api", apiURL,
 		"-repo", repo,
 		"-state", stateDir,
 		"-config", cfgPath,
@@ -126,7 +128,9 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	work := t.TempDir()
 	stateDir := filepath.Join(work, "state")
 	_ = os.MkdirAll(stateDir, 0o755)
-	cfgPath := writeMinimalConfig(t, work, stateDir)
+	apiPort := freePort(t)
+	apiURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+	cfgPath := writeMinimalConfig(t, work, stateDir, apiPort)
 
 	// 1. Relay (HTTP mode, no TLS). The relay's mux serves /healthz,
 	//    /tunnel/*, and /h/* — same family ftw-pair will register against.
@@ -150,12 +154,12 @@ func TestPairFlowThroughRelay(t *testing.T) {
 		t.Fatalf("start main: %v", err)
 	}
 	defer mainCmd.Process.Kill()
-	waitForAPI(t, "http://127.0.0.1:8080/api/status")
+	waitForAPI(t, apiURL+"/api/status")
 
 	// 3. ftw-pair pointed at the in-process relay.
 	pairCmd := exec.Command(pairBin,
 		"-addr", "127.0.0.1:29998",
-		"-api", "http://127.0.0.1:8080",
+		"-api", apiURL,
 		"-repo", repo,
 		"-state", stateDir,
 		"-config", cfgPath,
@@ -366,11 +370,13 @@ func getREST(t *testing.T, url string) string {
 	return string(out)
 }
 
-func writeMinimalConfig(t *testing.T, dir, stateDir string) string {
+func writeMinimalConfig(t *testing.T, dir, stateDir string, apiPort int) string {
 	t.Helper()
 	p := filepath.Join(dir, "config.yaml")
 	contents := fmt.Sprintf(`site:
   name: e2e
+api:
+  port: %d
 fuse:
   max_amps: 16
   phases: 3
@@ -379,7 +385,7 @@ state:
   path: %s/state.db
   cold_dir: %s/cold
 drivers: []
-`, stateDir, stateDir)
+`, apiPort, stateDir, stateDir)
 	if err := os.WriteFile(p, []byte(contents), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
