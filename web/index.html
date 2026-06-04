@@ -79,6 +79,10 @@
            drivers, models, manual mode buttons). The button still
            lives in the DOM as #ui-mode-toggle, just rendered there. -->
       <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
+      <!-- Always-available entry into the setup wizard. The wizard
+           currently REPLACES config on save, so the copy says "Run setup
+           wizard" rather than implying a safe additive "Add a device". -->
+      <a id="setup-wizard-btn" class="icon-btn" href="/setup" data-menu-label="Run setup wizard" title="Run setup wizard" aria-label="Run setup wizard" role="button">&#9874;</a>
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
       <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>

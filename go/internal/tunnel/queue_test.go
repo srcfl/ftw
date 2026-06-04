@@ -7,6 +7,27 @@ import (
 	"time"
 )
 
+// Poll must refuse to park a new waiter once the global cap is reached, so an
+// unauthenticated flood of long-polls can't pin unbounded goroutines/channels.
+func TestQueueWaiterCap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	q := NewQueue()
+	q.maxWaiters = 0 // cap already reached → no new waiter may park
+	if _, err := q.Poll(ctx, "host", 50*time.Millisecond); !errors.Is(err, ErrTooManyWaiters) {
+		t.Fatalf("Poll at cap: err = %v, want ErrTooManyWaiters", err)
+	}
+
+	// The cap only gates NEW waiters: a request already pending is still served.
+	q2 := NewQueue()
+	q2.maxWaiters = 0
+	q2.pending["host"] = []TunneledRequest{{ReqID: "r1", Path: "/x"}}
+	if tr, err := q2.Poll(ctx, "host", 50*time.Millisecond); err != nil || tr.ReqID != "r1" {
+		t.Fatalf("pending Poll: tr=%v err=%v, want r1/nil", tr, err)
+	}
+}
+
 func TestQueueEnqueuePollResponse(t *testing.T) {
 	q := NewQueue()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,57 @@ func TestLandingPageTokenConstMatchesPath(t *testing.T) {
 	}
 	if !strings.Contains(html, `<code id="state">pending</code>`) {
 		t.Fatalf(`expected state "pending" in landing page:\n%s`, html)
+	}
+}
+
+// TestRegisterRejectsUnsafeToken proves /tunnel/register — open to the
+// internet — refuses a token carrying HTML/JS metacharacters, so it can never
+// be planted and reflected into the landing page (the XSS sink).
+func TestRegisterRejectsUnsafeToken(t *testing.T) {
+	r := newTestRelay()
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	body := strings.NewReader(`{"host_id":"host-a","token":"</script><script>alert(1)</script>","ttl_ms":3600000,"approval_code":"4827"}`)
+	resp, err := http.Post(srv.URL+"/tunnel/register", "application/json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsafe token must be rejected with 400, got %d", resp.StatusCode)
+	}
+}
+
+// TestLandingPageJSONEncodesToken is the defence-in-depth layer: even if a
+// token with a quote/script sequence reaches the registry directly (bypassing
+// the register-time charset guard), publicLanding must \u-escape it via
+// json.Marshal so it cannot break out of the <script> context.
+func TestLandingPageJSONEncodesToken(t *testing.T) {
+	r := newTestRelay()
+	const nasty = `a</script><script>x`
+	// Register straight into the registry (no HTTP validation) to simulate a
+	// hypothetical bypass of validPairToken.
+	_, _ = r.Tokens.Register(TokenRegistration{
+		HostID: "host-a", Token: nasty, TTL: time.Hour, ApprovalCode: "1234",
+	})
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/h/" + url.PathEscape(nasty))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := readBody(resp.Body)
+	resp.Body.Close()
+	html := string(body)
+	// The raw closing tag must NOT appear inside the script literal.
+	if strings.Contains(html, `const TOKEN = "a</script>`) {
+		t.Fatalf("token broke out of the <script> context:\n%s", html)
+	}
+	// Reconstruct exactly what publicLanding emits: the token const must be the
+	// json.Marshal (angle-bracket-escaped) form, not the raw breakout sequence.
+	escaped, _ := json.Marshal(nasty)
+	if !strings.Contains(html, "const TOKEN = "+string(escaped)+";") {
+		t.Fatalf("token const is not the json-escaped form:\n%s", html)
 	}
 }
 

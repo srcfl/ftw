@@ -44,6 +44,39 @@ func TestGateBlocksRemoteAPI(t *testing.T) {
 	}
 }
 
+// On-host liveness probes (deploy/CI healthchecks, docker HEALTHCHECK) curl
+// http://127.0.0.1/api/health over loopback with NO tunnel marker — the gate
+// must let those through even though loopback is otherwise not auto-trusted.
+func TestGateAllowsLoopbackHealthProbe(t *testing.T) {
+	d := gateDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.RemoteAddr = "127.0.0.1:54321" // genuine on-host loopback source, unmarked
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("loopback /api/health must be 200 (liveness probe), got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// The relay reverse-proxy also connects from loopback, but stamps the tunnel
+// marker. The liveness exception must NOT apply to it — otherwise a remote
+// visitor could read /api/health through the relay. This is the foot-gun guard.
+func TestGateTunneledHealthProbeStillGated(t *testing.T) {
+	d := gateDeps(t)
+	d.OwnerAccessLANBypass = true
+	srv := New(d)
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.RemoteAddr = "127.0.0.1:54321"       // loopback source...
+	req.Header.Set("X-FTW-Tunnel", "marker") // ...but relay-tunnelled
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("tunnelled /api/health must stay gated even from loopback, got %d", rec.Code)
+	}
+}
+
 // Remote (marked) + unauthenticated + HTML navigation → serves the passkey
 // landing (200), NOT the dashboard.
 func TestGateServesLoginForRemoteHTML(t *testing.T) {
@@ -71,6 +104,7 @@ func TestGateAllowsLocalDashboard(t *testing.T) {
 	srv := New(d)
 	req := httptest.NewRequest("GET", "/", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	req.Header.Set("Accept", "text/html")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

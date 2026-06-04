@@ -68,6 +68,7 @@ func TestOwnerAccessWhoamiLANBypass(t *testing.T) {
 	srv := New(d)
 	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -168,7 +169,8 @@ func TestDeviceDeleteRevokesSessions(t *testing.T) {
 
 	credB64 := base64.RawURLEncoding.EncodeToString(credID)
 	del := httptest.NewRequest("DELETE", "/api/owner-access/devices/"+credB64, nil)
-	del.Host = "127.0.0.1:8080" // loopback → LAN bypass authorizes
+	del.Host = "127.0.0.1:8080"
+	del.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source → LAN bypass authorizes
 	delRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delRec, del)
 	if delRec.Code != 204 {
@@ -188,6 +190,7 @@ func TestOwnerAccessDevicesListEmpty(t *testing.T) {
 	srv := New(d)
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -274,6 +277,7 @@ func TestOwnerAccessUnmarkedRequestStillBypasses(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	// no X-FTW-Tunnel header
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -293,6 +297,7 @@ func TestOwnerAccessForgedMarkerIsNotTunnel(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	req.Header.Set("X-FTW-Tunnel", "a-wrong-guess")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -326,7 +331,8 @@ func TestOwnerAccessBootstrapAllowedOnLAN(t *testing.T) {
 	d.TunnelMarker = "marker"
 	srv := New(d)
 	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
-	req.Host = "127.0.0.1:8080" // unmarked → LAN
+	req.Host = "127.0.0.1:8080"          // unmarked → LAN
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -375,6 +381,7 @@ func TestOwnerWhoamiReturnsWallet(t *testing.T) {
 	w, _ := srv.ownerWalletHandle()
 	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -454,6 +461,52 @@ func TestOwnerSessionSurvivesRestart(t *testing.T) {
 	srv2.Handler().ServeHTTP(rec2, req)
 	if rec2.Code != 200 {
 		t.Fatalf("session must survive restart, got %d body=%q", rec2.Code, rec2.Body.String())
+	}
+}
+
+// Post-bootstrap (an owner passkey already exists), a friend pair-flow request
+// (loopback source, unmarked) must NOT be able to manage owner credentials —
+// no enrolling its own passkey (permanent-owner escalation), no listing or
+// deleting the owner's passkeys (recon / lockout). A genuine private-LAN owner
+// still can. This is the fix for the Codex P1 friend->owner escalation.
+func TestFriendLoopbackCannotManageOwner(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("owner-cred"), PublicKey: []byte("k"),
+		FriendlyName: "owner phone", CreatedAtMs: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed owner device: %v", err)
+	}
+	srv := New(d)
+
+	send := func(remoteAddr, method, path string) int {
+		req := httptest.NewRequest(method, path, nil)
+		req.Host = "127.0.0.1:8080"
+		req.RemoteAddr = remoteAddr // no X-FTW-Tunnel marker (friend-flow is unmarked)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	const friend = "127.0.0.1:55555"    // ftw-pair / relay reverse-proxy origin
+	const lanOwner = "192.168.1.50:1234" // genuine private-range LAN owner
+	credB64 := base64.RawURLEncoding.EncodeToString([]byte("owner-cred"))
+
+	// Friend (loopback) is refused every owner-credential action.
+	if code := send(friend, "POST", "/api/owner-access/enroll/start"); code != 403 {
+		t.Errorf("friend enroll/start: got %d, want 403", code)
+	}
+	if code := send(friend, "GET", "/api/owner-access/devices"); code != 401 {
+		t.Errorf("friend devices list: got %d, want 401", code)
+	}
+	if code := send(friend, "DELETE", "/api/owner-access/devices/"+credB64); code != 401 {
+		t.Errorf("friend device delete: got %d, want 401", code)
+	}
+
+	// Genuine private-LAN owner can still list devices (manage path open to LAN).
+	if code := send(lanOwner, "GET", "/api/owner-access/devices"); code != 200 {
+		t.Errorf("LAN owner devices list: got %d, want 200", code)
 	}
 }
 

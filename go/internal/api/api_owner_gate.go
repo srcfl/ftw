@@ -35,6 +35,16 @@ func (s *Server) gate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// On-host liveness exception: deploy/CI smoke-tests and the docker
+		// HEALTHCHECK curl http://127.0.0.1/api/health on loopback and must not
+		// be gated. Restricted to a loopback SOURCE that did NOT arrive via the
+		// relay tunnel — the relay proxy also connects from loopback but stamps
+		// the marker, so a remote visitor can never reach this path. The probe
+		// returns only coarse up/down counts, never control or secrets.
+		if isLoopbackLivenessPath(r.URL.Path) && isLoopbackSource(r) && !s.isTunneled(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Unauthenticated remote. The data + control surface (/api/*) is never
 		// served without a session. Static assets (CSS/JS/images) stay public
 		// so the login page itself renders styled; only the dashboard's
@@ -73,6 +83,15 @@ func isOwnerAccessOpenPath(p string) bool {
 
 func acceptsHTML(r *http.Request) bool {
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// isLoopbackLivenessPath lists the non-sensitive liveness probes that on-host
+// healthchecks (deploy smoke-tests, docker HEALTHCHECK, CI) reach over the
+// loopback interface. Kept deliberately tiny: only coarse up/down signals with
+// no control surface or secrets may appear here, since the gate grants them to
+// any loopback-source request that is not relay-tunnelled.
+func isLoopbackLivenessPath(p string) bool {
+	return p == "/api/health"
 }
 
 // isDashboardShell reports whether the path is one of the dashboard's HTML

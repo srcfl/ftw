@@ -14,7 +14,16 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
+
+// relaySigner is the ES256 identity used to authenticate owner-access relay
+// registrations. Satisfied by *nova.Identity (the self-sovereign site key
+// loaded in main, independent of whether Nova federation is enabled).
+type relaySigner interface {
+	PublicKeyHex() string
+	SignRawHex(msg string) (string, error)
+}
 
 // deriveOwnerHostID returns a stable host_id for the owner-access
 // relay registration. It looks up (or creates) a row in the
@@ -82,11 +91,28 @@ func sanitizeSiteName(s string) string {
 //
 // Also starts the long-poll loop that drains those requests and
 // forwards them to the local API server.
-func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string) {
+func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string, apiPort int, signer relaySigner) {
 	relayURL = strings.TrimRight(relayURL, "/")
 
+	// The public key is not a secret; log it in full so an operator can pin it
+	// on the relay with -home-pubkey (closes the post-restart TOFU race).
+	slog.Info("owner-access: relay registration identity",
+		"site_id", siteID, "public_key", signer.PublicKeyHex())
+
 	registerOnce := func() {
-		body, _ := json.Marshal(map[string]string{"site_id": siteID, "host_id": hostID})
+		tsMs := time.Now().UnixMilli()
+		sig, err := signer.SignRawHex(tunnel.MeRegisterSigningString(siteID, hostID, tsMs))
+		if err != nil {
+			slog.Warn("owner-access: sign register", "err", err)
+			return
+		}
+		body, _ := json.Marshal(map[string]any{
+			"site_id":    siteID,
+			"host_id":    hostID,
+			"public_key": signer.PublicKeyHex(),
+			"ts_ms":      tsMs,
+			"sig":        sig,
+		})
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/me/register", bytes.NewReader(body))
 		if err != nil {
 			slog.Warn("owner-access: build register request", "err", err)
@@ -108,7 +134,7 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 
 	// Start the long-poll loop in a goroutine so the registration
 	// retries continue independently.
-	go runOwnerLongPoll(ctx, relayURL, hostID, tunnelMarker)
+	go runOwnerLongPoll(ctx, relayURL, hostID, tunnelMarker, apiPort)
 
 	// Register immediately, then every 60s. A relay restart drops all
 	// registrations, so we re-register periodically to recover without
@@ -137,10 +163,9 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 // roundtrip — the JSON wire format already preserves headers, so the
 // ReverseProxy is technically optional, but it's clearer than
 // re-implementing the forwarding logic here.
-func runOwnerLongPoll(ctx context.Context, relayURL, hostID, tunnelMarker string) {
-	// Connect to the local API server. cfg.API.Port isn't available
-	// here without restructuring; use the standard :8080 default.
-	target, _ := url.Parse("http://127.0.0.1:8080")
+func runOwnerLongPoll(ctx context.Context, relayURL, hostID, tunnelMarker string, apiPort int) {
+	// Connect to the local API server on its configured port.
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", apiPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	// Stamp every forwarded (relay-tunnelled) request with the per-process
 	// marker so the local API auth-gate treats it as remote, not LAN. Set()
