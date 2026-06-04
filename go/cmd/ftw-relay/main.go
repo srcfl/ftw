@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,11 +30,19 @@ func main() {
 	homeHost := flag.String("home-host", "", "bare host that maps to a single owner Pi (e.g. home.fortytwowatts.com); requires -home-site")
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
+	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	flag.Parse()
 
 	if *version {
 		fmt.Println(Version)
 		return
+	}
+
+	// Fail closed: the internet-exposed home route must never run on
+	// trust-on-first-use (see requireHomePin).
+	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeAllowTOFU); err != nil {
+		slog.Error("ftw-relay: " + err.Error())
+		os.Exit(1)
 	}
 
 	owners := NewOwnerRegistry()
@@ -103,6 +112,18 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("ftw-relay shut down cleanly", "mode", mode, "addr", *addr)
+}
+
+// requireHomePin enforces that the internet-exposed home route never runs on
+// trust-on-first-use: when a home host/site is configured, -home-pubkey must pin
+// the key (so a racer can't claim home.* after a relay restart drops the
+// in-memory pin) unless TOFU was explicitly allowed. Extracted from main so the
+// fail-closed rule is unit-testable.
+func requireHomePin(homeHost, homeSite, homePubKey string, allowTOFU bool) error {
+	if (homeHost != "" || homeSite != "") && homePubKey == "" && !allowTOFU {
+		return errors.New("-home-host/-home-site requires -home-pubkey to pin the home site key — refusing to run the public home route in trust-on-first-use mode. Pass the Pi's public key (it logs it at startup) via -home-pubkey, or -home-allow-tofu to override for testing")
+	}
+	return nil
 }
 
 // safePrefix returns a short, log-safe prefix of a public key (never a secret,

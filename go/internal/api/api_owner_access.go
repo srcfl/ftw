@@ -64,6 +64,11 @@ const ownerAccessEnrollPinTTL = 10 * time.Minute
 // the 6-digit space can't be brute-forced within the TTL window.
 const ownerAccessEnrollPinMaxTries = 5
 
+// maxOwnerCeremonyBody bounds the WebAuthn attestation/assertion body the
+// go-webauthn library decodes (its json.NewDecoder is otherwise unbounded).
+// Real ceremony payloads are a few KiB; 64 KiB is comfortable headroom.
+const maxOwnerCeremonyBody = 64 << 10
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
@@ -184,7 +189,9 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 	}
 	rpID := deps.OwnerAccessRPID
 	if rpID == "" {
-		rpID = "relay.fortytwowatts.com"
+		// The owner visits home.fortytwowatts.com; the RP-ID must match that
+		// origin's registrable suffix (one-way door — see main.go wiring).
+		rpID = "home.fortytwowatts.com"
 	}
 	origins := deps.OwnerAccessOrigins
 	if len(origins) == 0 {
@@ -361,6 +368,30 @@ func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) 
 	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) {
 		return []byte("lan-bypass"), true
 	}
+	return s.ownerSession(r)
+}
+
+// authorizeOwnerManage authorizes owner-ADMIN actions — credential management
+// (enroll an additional passkey, list/delete devices) and pairing control —
+// MORE strictly than authorizeOwner: the passwordless LAN-bypass here requires a
+// GENUINE private-range LAN source, never loopback. The friend pair-flow
+// reverse-proxies from loopback (unmarked), so it can read the dashboard via
+// authorizeOwner but can NEVER manage owner credentials, lock the owner out, or
+// escalate a time-boxed grant into a permanent owner passkey. A valid passkey
+// session also authorizes (the legitimate remote-owner path). Genuine LAN
+// presence (private source IP) authorizes too, so the on-LAN owner can manage
+// devices without first holding a session.
+func (s *Server) authorizeOwnerManage(r *http.Request) (credentialID []byte, ok bool) {
+	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) && isLANClientSource(r) {
+		return []byte("lan-bypass"), true
+	}
+	return s.ownerSession(r)
+}
+
+// ownerSession returns the credential_id for a request carrying a valid owner
+// session cookie, renewing the session TTL on use. No cookie / unknown session
+// → not authorized.
+func (s *Server) ownerSession(r *http.Request) (credentialID []byte, ok bool) {
 	c, err := r.Cookie(ownerAccessCookieName)
 	if err != nil {
 		return nil, false
@@ -493,7 +524,12 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		}
 		return errors.New("first enrollment must be performed on the local network")
 	}
-	if _, ok := s.authorizeOwner(r); ok {
+	// Adding a further passkey to an already-enrolled Pi is owner-credential
+	// management: authorize with the strict manager (a real session, or genuine
+	// LAN presence), NEVER the loopback bypass — so a friend pair-flow request
+	// (loopback, unmarked) can't enroll its own passkey and escalate a time-boxed
+	// grant into permanent owner access.
+	if _, ok := s.authorizeOwnerManage(r); ok {
 		return nil
 	}
 	return errors.New("enrollment requires an existing authenticated session")
@@ -611,6 +647,7 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody)
 	cred, err := wa.FinishRegistration(user, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish registration: %v", err), http.StatusBadRequest)
@@ -715,6 +752,7 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody)
 	cred, err := wa.FinishDiscoverableLogin(s.resolveDiscoverableOwner, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish login: %v", err), http.StatusUnauthorized)
@@ -739,7 +777,10 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeOwner(r); !ok {
+	// Owner-credential surface: strict authz (session or genuine LAN), never the
+	// loopback bypass — a friend pair-flow request must not enumerate the owner's
+	// passkeys (takeover recon).
+	if _, ok := s.authorizeOwnerManage(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -770,7 +811,10 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeOwner(r); !ok {
+	// Owner-credential surface: strict authz (session or genuine LAN), never the
+	// loopback bypass — a friend pair-flow request must not be able to delete the
+	// owner's passkeys (lockout / takeover).
+	if _, ok := s.authorizeOwnerManage(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

@@ -34,8 +34,11 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 
 	// Relay with home-host routing → site:e2e.
 	relayAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	// -home-allow-tofu: this test exercises the Pi's signed registration + the
+	// relay's trust-on-first-use pin (it can't know the Pi's pubkey up front), so
+	// it opts into TOFU rather than passing -home-pubkey.
 	relayCmd := exec.Command(relayBin, "-addr", relayAddr, "-poll-timeout", "5s",
-		"-home-host", "home.test", "-home-site", "site:e2e")
+		"-home-host", "home.test", "-home-site", "site:e2e", "-home-allow-tofu")
 	relayCmd.Stdout = os.Stdout
 	relayCmd.Stderr = os.Stderr
 	if err := relayCmd.Start(); err != nil {

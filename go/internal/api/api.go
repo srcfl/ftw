@@ -345,7 +345,7 @@ func (s *Server) routes() {
 	if selfExe == "" {
 		selfExe = resolvedSelfExe()
 	}
-	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
+	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe, s.authorizeOwnerManage)
 
 	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
 	s.handle("GET  /api/owner-access/enroll-pin", s.handleOwnerEnrollPin)

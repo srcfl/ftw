@@ -63,6 +63,44 @@ func TestTokenRegistryGC(t *testing.T) {
 	}
 }
 
+// The public home route must fail closed without a pinned key.
+func TestRequireHomePin(t *testing.T) {
+	cases := []struct {
+		host, site, key string
+		tofu            bool
+		wantErr         bool
+	}{
+		{"", "", "", false, false},                    // no home host configured → ok
+		{"home.test", "site:x", "abcd", false, false}, // pinned key → ok
+		{"home.test", "site:x", "", true, false},      // explicit TOFU override → ok
+		{"home.test", "site:x", "", false, true},      // public host, no pin, no override → error
+		{"", "site:x", "", false, true},               // site alone without pin → error
+	}
+	for i, c := range cases {
+		err := requireHomePin(c.host, c.site, c.key, c.tofu)
+		if (err != nil) != c.wantErr {
+			t.Errorf("case %d (%+v): err=%v wantErr=%v", i, c, err, c.wantErr)
+		}
+	}
+}
+
+// An oversize body to an unauthenticated control endpoint must be rejected
+// (bounded), never buffered unboundedly.
+func TestRelayRejectsOversizeControlBody(t *testing.T) {
+	srv := httptest.NewServer(newTestRelay().Handler())
+	defer srv.Close()
+	big := strings.Repeat("a", 200*1024) // 200 KiB > 64 KiB control cap
+	body := `{"host_id":"h","token":"x","junk":"` + big + `"}`
+	resp, err := http.Post(srv.URL+"/tunnel/register", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("oversize register body must be rejected, got %d", resp.StatusCode)
+	}
+}
+
 // home.* must serve the styled offline page (not a raw timeout) when the Pi has
 // never registered.
 func TestHomeForwardServesOfflinePage(t *testing.T) {

@@ -28,6 +28,17 @@ const (
 	// treats it as offline and serves the offline page instead of hanging. The
 	// Pi re-registers every 60s, so 2.5× tolerates a missed beat without flapping.
 	homeStaleAfter = 150 * time.Second
+	// maxRelayBodyBytes is the hard ceiling the limitBody middleware puts on
+	// EVERY request body, so no handler — including the JSON control-plane
+	// decoders (/tunnel/register, /me/register, /tunnel/.../response, /h/.../approve)
+	// — can be made to buffer an unbounded body. Sized above the largest legit
+	// payload: a tunneled response carrying a ~16 MiB body base64-expands to ~21 MiB.
+	maxRelayBodyBytes = 32 << 20 // 32 MiB
+	// maxControlBodyBytes is a much tighter cap for the small, unauthenticated
+	// control-plane JSON endpoints (register, me-register, approve). Their
+	// payloads are a handful of fields, so anything larger is abuse — reject it
+	// before allocating/parsing.
+	maxControlBodyBytes = 64 << 10 // 64 KiB
 )
 
 var errBodyTooLarge = errors.New("tunneled body exceeds limit")
@@ -102,7 +113,20 @@ func (r *Relay) Handler() http.Handler {
 	if r.HomeHost != "" && r.HomeSite != "" {
 		mux.HandleFunc(r.HomeHost+"/", r.homeForward)
 	}
-	return mux
+	return r.limitBody(mux)
+}
+
+// limitBody caps every request body so a hostile client can't exhaust relay
+// memory through ANY handler. The per-endpoint readBody discipline only covered
+// the tunnel-forward paths; this is the safety net that also bounds the
+// unauthenticated JSON control-plane decoders (register/approve/response).
+func (r *Relay) limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Body != nil {
+			req.Body = http.MaxBytesReader(w, req.Body, maxRelayBodyBytes)
+		}
+		next.ServeHTTP(w, req)
+	})
 }
 
 // homeForward forwards a bare-host request (HomeHost) verbatim to the single
@@ -249,6 +273,7 @@ func (r *Relay) tunnelResponse(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var reg registerRequest
 	if err := json.NewDecoder(req.Body).Decode(&reg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -444,6 +469,7 @@ const grantCookie = "ftw_grant"
 
 func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -610,6 +636,7 @@ type meRegisterRequest struct {
 }
 
 func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var reg meRegisterRequest
 	if err := json.NewDecoder(req.Body).Decode(&reg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

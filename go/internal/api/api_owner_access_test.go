@@ -464,6 +464,52 @@ func TestOwnerSessionSurvivesRestart(t *testing.T) {
 	}
 }
 
+// Post-bootstrap (an owner passkey already exists), a friend pair-flow request
+// (loopback source, unmarked) must NOT be able to manage owner credentials —
+// no enrolling its own passkey (permanent-owner escalation), no listing or
+// deleting the owner's passkeys (recon / lockout). A genuine private-LAN owner
+// still can. This is the fix for the Codex P1 friend->owner escalation.
+func TestFriendLoopbackCannotManageOwner(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("owner-cred"), PublicKey: []byte("k"),
+		FriendlyName: "owner phone", CreatedAtMs: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed owner device: %v", err)
+	}
+	srv := New(d)
+
+	send := func(remoteAddr, method, path string) int {
+		req := httptest.NewRequest(method, path, nil)
+		req.Host = "127.0.0.1:8080"
+		req.RemoteAddr = remoteAddr // no X-FTW-Tunnel marker (friend-flow is unmarked)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	const friend = "127.0.0.1:55555"    // ftw-pair / relay reverse-proxy origin
+	const lanOwner = "192.168.1.50:1234" // genuine private-range LAN owner
+	credB64 := base64.RawURLEncoding.EncodeToString([]byte("owner-cred"))
+
+	// Friend (loopback) is refused every owner-credential action.
+	if code := send(friend, "POST", "/api/owner-access/enroll/start"); code != 403 {
+		t.Errorf("friend enroll/start: got %d, want 403", code)
+	}
+	if code := send(friend, "GET", "/api/owner-access/devices"); code != 401 {
+		t.Errorf("friend devices list: got %d, want 401", code)
+	}
+	if code := send(friend, "DELETE", "/api/owner-access/devices/"+credB64); code != 401 {
+		t.Errorf("friend device delete: got %d, want 401", code)
+	}
+
+	// Genuine private-LAN owner can still list devices (manage path open to LAN).
+	if code := send(lanOwner, "GET", "/api/owner-access/devices"); code != 200 {
+		t.Errorf("LAN owner devices list: got %d, want 200", code)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return strings.Contains(haystack, needle)
 }
