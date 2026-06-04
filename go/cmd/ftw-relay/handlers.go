@@ -835,6 +835,21 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 
 // ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
 
+// signalNonceHeader carries the rendezvous nonce the Pi echoes back to the
+// browser on a drained offer (FIX-4a). The browser supplied it as ?n=<nonce>;
+// the Pi reads it here and re-sends it on POST /signal/{host}/answer?n=<nonce>,
+// so the relay routes the answer to the right per-nonce mailbox.
+const signalNonceHeader = "X-FTW-Signal-Nonce"
+
+// signalNonceRe bounds the opaque rendezvous nonce to a safe hex charset and
+// length. It is a pure routing key (the relay never parses the SDP), so a tight
+// charset both prevents abuse and keeps it usable as a map key + header value.
+var signalNonceRe = regexp.MustCompile(`^[0-9a-fA-F]{8,64}$`)
+
+func validSignalNonce(s string) bool {
+	return signalNonceRe.MatchString(s)
+}
+
 // signalBrowserOffer parks a browser's SDP offer for {site_id} and wakes any Pi
 // offer-poller. Unauthenticated (the channel that results is itself
 // authenticated end to end by the signed-fingerprint handshake + owner login
@@ -844,6 +859,14 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	siteID := req.PathValue("site_id")
 	if siteID == "" {
 		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	// FIX-4a: the opaque rendezvous nonce keys the per-(site,nonce) mailbox so an
+	// attacker's offers land in their own slot and can't displace the legit
+	// browser's answer. Required + bounded.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
 		return
 	}
 	if r.Signals == nil {
@@ -859,7 +882,7 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty offer", http.StatusBadRequest)
 		return
 	}
-	if err := r.Signals.ParkOffer(siteID, body); err != nil {
+	if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
 		if err == errSignalRateLimited {
 			http.Error(w, "too many offers", http.StatusTooManyRequests)
 			return
@@ -879,11 +902,18 @@ func (r *Relay) signalBrowserAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "missing site_id", http.StatusBadRequest)
 		return
 	}
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
 	if r.Signals == nil {
 		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
 		return
 	}
-	data, ok := r.Signals.TakeAnswer(siteID, signalPollTimeout)
+	// TakeAnswer never allocates a mailbox for an unknown site/nonce, so a flood
+	// of GET /signal/<random>/answer?n=<random> can't grow relay memory (FIX-3).
+	data, ok := r.Signals.TakeAnswer(siteID, nonce, signalPollTimeout)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -911,11 +941,14 @@ func (r *Relay) signalHostOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
-	data, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
+	data, nonce, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// Echo the rendezvous nonce so the Pi can POST its answer back under the same
+	// per-nonce mailbox the browser is polling (FIX-4a).
+	w.Header().Set(signalNonceHeader, nonce)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
 }
@@ -938,6 +971,13 @@ func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
+	// The Pi echoes the nonce the offer was drained under (FIX-4a) so the answer
+	// lands in the same per-nonce mailbox the browser is polling.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
 	body, err := readBodyLimited(req.Body, maxSignalAnswerBytes)
 	if err != nil {
 		http.Error(w, "answer too large", http.StatusRequestEntityTooLarge)
@@ -947,6 +987,6 @@ func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty answer", http.StatusBadRequest)
 		return
 	}
-	r.Signals.ParkAnswer(siteID, body)
+	r.Signals.ParkAnswer(siteID, nonce, body)
 	w.WriteHeader(http.StatusNoContent)
 }

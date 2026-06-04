@@ -39,9 +39,23 @@
   // The /signal/* mailbox lives at the relay ROOT (it is keyed by site_id, never
   // under the /me/<site> tunnel prefix), so signaling URLs are origin-absolute
   // and never carry the apiBase prefix. site is URL-encoded — it can contain a
-  // colon ("site:Home").
-  function signalURL(site, leaf) {
-    return "/signal/" + encodeURIComponent(site) + "/" + leaf;
+  // colon ("site:Home"). The nonce (?n=) keys a per-(site,nonce) mailbox so an
+  // attacker's offers can't displace/steal this browser's answer (FIX-4a); it is
+  // an OPAQUE routing key, never the SDP.
+  function signalURL(site, leaf, nonce) {
+    return "/signal/" + encodeURIComponent(site) + "/" + leaf +
+      "?n=" + encodeURIComponent(nonce);
+  }
+
+  // randomNonce returns a fresh 128-bit hex rendezvous nonce. Each connect()
+  // attempt mints its own, so concurrent/retried attempts never collide and an
+  // attacker's offers land in a different nonce slot.
+  function randomNonce() {
+    var b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    var s = "";
+    for (var i = 0; i < b.length; i++) s += (b[i] + 0x100).toString(16).slice(1);
+    return s;
   }
 
   // ---- state broadcast (drives the dashboard transport indicator) ----
@@ -192,11 +206,11 @@
   // returns 204 when no answer is parked yet; we re-poll until CONNECT_TIMEOUT_MS
   // (the outer connect() timer also caps the whole attempt). isSettled() lets the
   // outer finish() short-circuit a long-poll in flight.
-  function pollAnswer(site) {
+  function pollAnswer(site, nonce) {
     var deadline = Date.now() + CONNECT_TIMEOUT_MS;
     function once() {
       if (Date.now() > deadline) return Promise.reject(new Error("answer poll timeout"));
-      return fetch(signalURL(site, "answer"), { method: "GET" }).then(function (r) {
+      return fetch(signalURL(site, "answer", nonce), { method: "GET" }).then(function (r) {
         if (r.status === 204) {
           // No answer yet — re-poll immediately (the relay holds the request
           // open server-side, so this is not a busy loop).
@@ -259,6 +273,9 @@
       // relay forwards opaque SDP/signature blobs and never sees plaintext. We
       // need the pinned site_id first (it keys the mailbox); pinnedIdentity also
       // gives us the key we verify the answer signature against.
+      // One opaque rendezvous nonce per attempt — the offer is parked under it
+      // and we poll only its answer, so a hostile offer can't steal ours.
+      var nonce = randomNonce();
       pinnedIdentity()
         .then(function (pin) {
           var site = pin.site;
@@ -266,7 +283,7 @@
             .then(function (offer) { return pc.setLocalDescription(offer); })
             .then(function () { return waitIceComplete(pc); })
             .then(function () {
-              return fetch(signalURL(site, "offer"), {
+              return fetch(signalURL(site, "offer", nonce), {
                 method: "POST",
                 // The body is the raw SDP offer (the relay parks it verbatim and
                 // the Pi reads it raw); it is not a JSON envelope.
@@ -277,7 +294,7 @@
             .then(function (r) {
               // 204 = parked OK; anything else is a hard signaling error.
               if (r.status !== 204 && !r.ok) throw new Error("offer http " + r.status);
-              return pollAnswer(site);
+              return pollAnswer(site, nonce);
             })
             .then(function (ans) {
               // Verify the Pi signed this answer's DTLS fingerprint, against the

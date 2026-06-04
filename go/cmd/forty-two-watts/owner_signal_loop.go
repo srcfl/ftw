@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
@@ -67,7 +68,7 @@ func runOwnerSignalLoop(ctx context.Context, relayURL, hostID, tunnelMarker stri
 		if ctx.Err() != nil {
 			return
 		}
-		offerSDP, ok, err := pollSignalOffer(ctx, client, relayURL, hostID, polls.PollSecret())
+		offerSDP, nonce, ok, err := pollSignalOffer(ctx, client, relayURL, hostID, polls.PollSecret())
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -84,49 +85,59 @@ func runOwnerSignalLoop(ctx context.Context, relayURL, hostID, tunnelMarker stri
 			continue // 204 — re-poll
 		}
 		// Answer in its own goroutine so the loop keeps polling for the next
-		// browser while this handshake (up to the ICE-gather timeout) runs.
-		go handleSignalOffer(ctx, client, relayURL, hostID, tunnelMarker, offerSDP, p2p, polls)
+		// browser while this handshake (up to the ICE-gather timeout) runs. The
+		// nonce echoes back to the relay so the answer reaches the browser's own
+		// per-nonce mailbox (FIX-4a).
+		go handleSignalOffer(ctx, client, relayURL, hostID, tunnelMarker, offerSDP, nonce, p2p, polls)
 	}
 }
 
 // pollSignalOffer issues one long-poll for a parked offer. Returns
-// (sdp, true, nil) on an offer, ("", false, nil) on 204, or an error.
-func pollSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, pollSecret string) (string, bool, error) {
+// (sdp, nonce, true, nil) on an offer, ("", "", false, nil) on 204, or an error.
+// The nonce (echoed in the X-FTW-Signal-Nonce response header) routes the answer
+// back to the browser's own per-nonce mailbox (FIX-4a).
+func pollSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, pollSecret string) (string, string, bool, error) {
 	url := relayURL + "/signal/" + hostID + "/offer"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	if pollSecret != "" {
 		req.Header.Set(tunnel.PollSecretHeader, pollSecret)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusNoContent:
-		return "", false, nil
+		return "", "", false, nil
 	case http.StatusOK:
 		// The browser POSTs the raw SDP as the offer body and the relay parks it
 		// verbatim, so the drained body IS the raw SDP — not a JSON envelope.
 		b, err := io.ReadAll(io.LimitReader(resp.Body, maxSignalBodyBytes))
 		if err != nil {
-			return "", false, err
+			return "", "", false, err
 		}
 		sdp := string(b)
 		if sdp == "" {
-			return "", false, nil
+			return "", "", false, nil
 		}
-		return sdp, true, nil
+		return sdp, resp.Header.Get(signalNonceHeaderClient), true, nil
 	default:
-		return "", false, &signalHTTPError{status: resp.StatusCode}
+		return "", "", false, &signalHTTPError{status: resp.StatusCode}
 	}
 }
 
-// handleSignalOffer answers one offer and parks the signed answer.
-func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, tunnelMarker, offerSDP string, p2p p2pAnswerer, polls pollSecretSource) {
+// signalNonceHeaderClient mirrors the relay's signalNonceHeader (the Pi can't
+// import the relay package). The relay echoes the browser's opaque nonce here on
+// a drained offer; the Pi sends it back as ?n=<nonce> on the answer POST.
+const signalNonceHeaderClient = "X-FTW-Signal-Nonce"
+
+// handleSignalOffer answers one offer and parks the signed answer under the same
+// nonce the offer was drained with.
+func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, tunnelMarker, offerSDP, nonce string, p2p p2pAnswerer, polls pollSecretSource) {
 	// FAIL-CLOSED replay headers: stamp the per-process tunnel marker so every
 	// DataChannel frame is REMOTE (the gate can never grant it LAN-bypass), and
 	// inject NO cookie — the channel is unauthenticated until the browser logs in
@@ -146,15 +157,15 @@ func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostI
 		slog.Warn("owner-access: marshal answer", "err", err)
 		return
 	}
-	if err := postSignalAnswer(ctx, client, relayURL, hostID, polls.PollSecret(), body); err != nil {
+	if err := postSignalAnswer(ctx, client, relayURL, hostID, nonce, polls.PollSecret(), body); err != nil {
 		if ctx.Err() == nil {
 			slog.Warn("owner-access: post signal answer failed", "err", err, "host_id", hostID)
 		}
 	}
 }
 
-func postSignalAnswer(ctx context.Context, client *http.Client, relayURL, hostID, pollSecret string, body []byte) error {
-	url := relayURL + "/signal/" + hostID + "/answer"
+func postSignalAnswer(ctx context.Context, client *http.Client, relayURL, hostID, nonce, pollSecret string, body []byte) error {
+	url := relayURL + "/signal/" + hostID + "/answer?n=" + neturl.QueryEscape(nonce)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
