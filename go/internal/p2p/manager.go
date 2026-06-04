@@ -302,15 +302,27 @@ func (m *Manager) markAuthed(id string) {
 
 // reapIfUnauthed closes a session iff it is still un-authenticated when its grace
 // timer fires (FIX-4b). An authed session (logged in over the channel) is kept.
+//
+// FIX-D (TOCTOU): the authed check and the removal happen under the SAME lock
+// hold. The earlier version checked !authed, dropped the lock, then removed in a
+// second lock hold — markAuthed could win the gap and a peer that authenticated a
+// microsecond before its grace timer fired would still be closed. Deciding and
+// deleting atomically closes that window; only pc.Close() (which must not run
+// under the lock) is deferred to after the unlock.
 func (m *Manager) reapIfUnauthed(id string) {
 	m.mu.Lock()
 	s := m.sessions[id]
-	stale := s != nil && !s.authed
-	m.mu.Unlock()
-	if stale {
-		m.log.Debug("p2p: reaping un-authenticated peer past grace", "session", id)
-		m.remove(id)
+	if s == nil || s.authed {
+		// Already gone, or it authenticated before the timer fired (possibly in the
+		// race window) — keep it. Re-checked under the lock that also deletes, so
+		// markAuthed can't slip in between the decision and the removal.
+		m.mu.Unlock()
+		return
 	}
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	m.log.Debug("p2p: reaping un-authenticated peer past grace", "session", id)
+	_ = s.pc.Close()
 }
 
 // remove closes and forgets one session.
@@ -333,23 +345,33 @@ func (m *Manager) remove(id string) {
 func (m *Manager) reap() {
 	now := time.Now()
 	m.mu.Lock()
-	var dead []string
+	// Decide AND delete under the same lock so markAuthed can't race the unauth
+	// reap (FIX-D): a peer that authenticates between "flagged dead" and "removed"
+	// must survive. Collect the closed PeerConnections and Close() them after the
+	// unlock (pc.Close blocks; never hold m.mu across it).
+	var closing []*webrtc.PeerConnection
 	for id, s := range m.sessions {
 		st := s.pc.ConnectionState()
 		switch {
 		case st == webrtc.PeerConnectionStateClosed,
 			st == webrtc.PeerConnectionStateFailed,
 			now.Sub(s.created) > sessionMaxAge:
-			dead = append(dead, id)
+			// Terminal / aged-out — reap regardless of auth state.
+			delete(m.sessions, id)
+			closing = append(closing, s.pc)
 		case !s.authed && now.Sub(s.created) > unauthReapAfter:
 			// Connected-but-never-authenticated (or stuck mid-handshake) past the
-			// grace window — reap so an unauth flood can't hold slots.
-			dead = append(dead, id)
+			// grace window — reap so an unauth flood can't hold slots. The !authed
+			// read and the delete are in the same lock hold, so a concurrent
+			// markAuthed either ran before (s.authed true → kept) or runs after
+			// (no-op on a removed session); a just-authed peer is never closed.
+			delete(m.sessions, id)
+			closing = append(closing, s.pc)
 		}
 	}
 	m.mu.Unlock()
-	for _, id := range dead {
-		m.remove(id)
+	for _, pc := range closing {
+		_ = pc.Close()
 	}
 }
 
