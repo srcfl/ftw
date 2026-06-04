@@ -43,6 +43,16 @@ const (
 
 var errBodyTooLarge = errors.New("tunneled body exceeds limit")
 
+// ownerHostIDPrefix is the reserved prefix the owner-access Pi derives its
+// host_id with (deriveOwnerHostID: "owner-<site>-<rand>"). The owner poll secret
+// for such a host_id is minted ONLY by the ES256-verified /me/register, bound to
+// the verified site key. The unauthenticated friend path (/tunnel/register) MUST
+// refuse any host_id carrying this prefix, so it can never be used to register a
+// fake friend session under an owner host_id and be handed the owner's poll
+// secret (which then unlocks the /signal rendezvous). Owner and friend host_id
+// namespaces are disjoint by this prefix.
+const ownerHostIDPrefix = "owner-"
+
 // pairTokenRe bounds the routing token to a safe charset. The host generates
 // word-dash tokens (genWordToken: lowercase words joined by '-'); this tolerates
 // that plus digits but rejects anything with HTML/JS metacharacters, so the
@@ -377,6 +387,16 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
+	// CRITICAL: refuse owner-namespaced host_ids on the unauthenticated friend
+	// path. The owner poll secret for an owner-<…> host_id is minted only by the
+	// ES256-verified /me/register; if a friend could register one here it would be
+	// handed back that secret (Issue's principal binding also blocks it, but
+	// rejecting outright keeps owner/friend host_id namespaces structurally
+	// disjoint and avoids ever touching the owner secret store from this path).
+	if strings.HasPrefix(reg.HostID, ownerHostIDPrefix) {
+		http.Error(w, "host_id namespace reserved", http.StatusForbidden)
+		return
+	}
 	if reg.TTLMs <= 0 {
 		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
 		return
@@ -399,7 +419,18 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 	}
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		// Bind the friend's poll secret to the pair token that minted it (the
+		// principal). A subsequent register for the same host_id with a different
+		// token can't retrieve this secret, and the owner path (principal = site
+		// key) can never collide with it.
+		s, err := r.Polls.Issue(reg.HostID, "pair:"+reg.Token)
+		if err != nil {
+			// The host_id already has a secret minted by a different principal.
+			// Don't disclose it: refuse the registration.
+			http.Error(w, "host_id in use by another principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResponse{
@@ -779,13 +810,24 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	// Return the poll token this host must present on /tunnel/<host>/next. The
-	// ES256-verified registration above proves it owns host_id, so only it
-	// learns the token. Re-registration returns the same token (refreshes after
-	// a relay restart re-mints).
+	// Return the poll token this host must present on /tunnel/<host>/next and the
+	// /signal/* rendezvous. The ES256-verified registration above proves it owns
+	// host_id, so only it learns the token. The secret is bound to the verified
+	// site PUBLIC KEY as its principal, so the unauthenticated friend path (which
+	// can only present a pair-token principal) can never retrieve it even if it
+	// learned the owner host_id. Re-registration with the same key returns the
+	// same token (refreshes after a relay restart re-mints).
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		s, err := r.Polls.Issue(reg.HostID, "site:"+reg.PublicKey)
+		if err != nil {
+			// The host_id's secret is bound to a different principal — refuse
+			// rather than disclose it. (Should not happen for a key-continuous
+			// site; defends against a host_id reused across principals.)
+			http.Error(w, "poll secret bound to a different principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})

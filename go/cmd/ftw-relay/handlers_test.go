@@ -38,7 +38,7 @@ func TestTunnelNextLongPollsAndDelivers(t *testing.T) {
 	r := newTestRelay()
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
-	secret := r.Polls.Issue("host-a") // the host authenticates its polls with this
+	secret := mustIssue(t, r.Polls, "host-a") // the host authenticates its polls with this
 
 	respCh := make(chan tunnel.TunneledResponse, 1)
 	go func() {
@@ -94,7 +94,7 @@ func TestTunnelNextTimesOutWith204(t *testing.T) {
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
 	pollReq, _ := http.NewRequest("GET", srv.URL+"/tunnel/host-empty/next", nil)
-	pollReq.Header.Set(tunnel.PollSecretHeader, r.Polls.Issue("host-empty"))
+	pollReq.Header.Set(tunnel.PollSecretHeader, mustIssue(t, r.Polls, "host-empty"))
 	resp, err := http.DefaultClient.Do(pollReq)
 	if err != nil {
 		t.Fatal(err)

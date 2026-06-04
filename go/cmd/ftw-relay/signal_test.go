@@ -28,7 +28,7 @@ func newSignalRelay(t *testing.T) (*httptest.Server, *Relay, string) {
 		Signals:     NewSignalMailbox(),
 		PollTimeout: time.Second,
 	}
-	secret := r.Polls.Issue("host-xyz")
+	secret := mustIssue(t, r.Polls, "host-xyz")
 	ts := httptest.NewServer(r.Handler())
 	t.Cleanup(ts.Close)
 	return ts, r, secret
@@ -207,7 +207,7 @@ func TestHomeStaticForward_FailClosed(t *testing.T) {
 	})
 	host := tunnel.NewHost(srv.URL, "host-home", backend)
 	host.PollTimeout = time.Second
-	host.SetPollSecret(relay.Polls.Issue("host-home"))
+	host.SetPollSecret(mustIssue(t, relay.Polls, "host-home"))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go host.Run(ctx)
