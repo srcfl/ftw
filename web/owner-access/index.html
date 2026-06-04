@@ -92,17 +92,15 @@
   <script type="module">
     import { apiBase } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
+    import { ownerFetch } from "./owner-fetch.js";
     const base = apiBase();
 
-    // Route owner API calls over the P2P DataChannel in STRICT mode (FIX-2):
-    // whoami/devices/logout carry or rely on the owner session, which must never
-    // ride the cleartext relay on the public home route. p2pFetchStrict fails
-    // closed if the channel is down (no relay fallback); the relay fallback is
-    // allowed only on a genuine-LAN origin. The non-p2p branch is LAN-only.
-    function ownerFetch(path, opts) {
-      if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts || {});
-      return fetch(base + path, opts || {});
-    }
+    // ownerFetch (shared, owner-fetch.js) routes owner API calls — whoami, the
+    // devices list + DELETE revoke, logout — over the STRICT P2P transport (FIX-2):
+    // they carry or rely on the owner session, which must never ride the cleartext
+    // relay on the public home route. It fails closed on a public origin both when
+    // the channel is down AND when p2p.js never loaded (FIX-B); only a genuine-LAN
+    // origin raw-fetches.
 
     // "Show enrollment PIN" lives in the first-time "choose" panel; it's
     // inert until clicked and gracefully degrades over the relay (LAN-only).

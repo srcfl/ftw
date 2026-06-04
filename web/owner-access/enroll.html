@@ -86,23 +86,18 @@
        window.p2pFetch when a channel is up. -->
   <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
-    import { apiBase, decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    import { decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
-    const base = apiBase();
+    import { ownerFetch } from "./owner-fetch.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
 
-    // Route owner API calls over the P2P DataChannel in STRICT mode (FIX-2): the
-    // enroll ceremony carries the WebAuthn attestation + ceremony token + PIN,
-    // which must NEVER leak to the untrusted relay. p2pFetchStrict fails closed on
-    // the public home route if the channel is down (no relay fallback); the relay
-    // fallback is allowed only on a genuine-LAN origin. The non-p2p branch is
-    // LAN-only by construction.
-    function ownerFetch(path, opts) {
-      if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts || {});
-      return fetch(base + path, opts || {});
-    }
+    // ownerFetch (shared, owner-fetch.js) routes the enroll ceremony over the P2P
+    // DataChannel in STRICT mode (FIX-2): the WebAuthn attestation + ceremony token
+    // + PIN must NEVER leak to the untrusted relay. It fails closed on a public
+    // origin both when the channel is down AND when p2p.js never loaded (FIX-B);
+    // only a genuine-LAN origin raw-fetches.
 
     // "Show enrollment PIN" — LAN-only; gracefully degrades over the relay.
     mountEnrollPin(document.getElementById("pin-panel"));

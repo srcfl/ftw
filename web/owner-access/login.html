@@ -37,25 +37,16 @@
   <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
     import { apiBase, decodeAssertionOptions, encodeAssertionResult } from "./webauthn.js";
+    import { ownerFetch } from "./owner-fetch.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
 
-    // ownerFetch routes an owner API call over the P2P DataChannel in STRICT mode
-    // (FIX-2): the login ceremony carries the WebAuthn assertion + ceremony token,
-    // which must NEVER leak to the untrusted relay. p2pFetchStrict fails closed
-    // (synthetic 503) on the public home route if the channel is down, instead of
-    // falling back to a cleartext relay fetch. The relay fallback is allowed ONLY
-    // on a genuine-LAN origin (where the Pi serves this page directly).
-    //
-    // window.p2pFetchStrict takes the BARE API path: it sends that path verbatim
-    // over the channel (the Pi serves it directly) and, on a LAN-only fallback,
-    // prepends the relay /me/<site> prefix itself. The non-p2p branch (no
-    // transport loaded at all) is LAN-only by construction, so a plain fetch is
-    // safe there.
-    function ownerFetch(path, opts) {
-      if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts || {});
-      return fetch(base + path, opts || {});
-    }
+    // ownerFetch (shared, owner-fetch.js) routes the owner login ceremony over the
+    // P2P DataChannel in STRICT mode (FIX-2): the WebAuthn assertion + ceremony
+    // token must NEVER leak to the untrusted relay. It fails closed on a public
+    // origin both when the channel is down (p2pFetchStrict's synthetic 503) AND
+    // when p2p.js never loaded at all (FIX-B) — only a genuine-LAN origin, where
+    // the Pi serves this page directly, raw-fetches.
 
     let pendingAbort = null;
 

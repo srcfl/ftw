@@ -41,6 +41,55 @@
   let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
   let lastFlashAt = 0;               // browser-clock timestamp of last "new data" flash
 
+  // ---- Owner / CONTROL fetch (FIX-B) ----------------------------------------
+  // Every owner + state-changing API call (mode, target, peak limit, EV command,
+  // loadpoint schedule, driver lifecycle, sign-out, …) must ride the STRICT P2P
+  // transport so its body + the owner session cookie never traverse the untrusted
+  // relay on the public home route. p2pFetchStrict fails closed (synthetic 503)
+  // when the channel is down on a public origin; we additionally fail closed when
+  // p2p.js never LOADED at all on a non-LAN origin, instead of raw-fetching the
+  // owner/control body to the relay. Read-only GETs of non-secret data may still
+  // use plain fetch (no body, cookie stripped) — this is for OWNER + CONTROL calls
+  // only.
+  function isLanFallbackOrigin() {
+    // Genuine-LAN origin = the Pi serves this page directly (relay not in path),
+    // so a raw fetch is safe. Prefer p2p.js's own isLanOrigin (single source of
+    // truth); only when p2p.js never loaded do we conservatively treat a dotted
+    // public host as NOT-LAN and fail closed.
+    if (window.ftwP2P && typeof window.ftwP2P.isLanOrigin === "function") {
+      try { return window.ftwP2P.isLanOrigin(); } catch (e) { /* fall through */ }
+    }
+    if (/^\/me\/[^/]+\//.test(location.pathname)) return false; // relay tunnel prefix
+    var h = (location.hostname || "").toLowerCase();
+    if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true; // *.local / single-label
+    if (/^10\./.test(h) || /^127\./.test(h) || /^192\.168\./.test(h) ||
+        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+    var hv6 = h.replace(/^\[|\]$/g, "");
+    if (/^f[cd][0-9a-f]{2}:/.test(hv6) || /^fe[89ab][0-9a-f]:/.test(hv6)) return true;
+    return false; // dotted public host → NOT LAN → fail closed
+  }
+  // ownerWriteFailClosed mimics enough of a fetch Response that callers handle it
+  // uniformly; the owner/control body NEVER leaves the browser.
+  function ownerWriteFailClosed(path) {
+    var msg = "Secure channel unavailable — reconnecting. This control request was NOT sent to the relay.";
+    return Promise.resolve({
+      ok: false, status: 503, url: path, headers: new Headers(),
+      json: function () { return Promise.resolve({ error: msg, retry: true }); },
+      text: function () { return Promise.resolve(msg); }
+    });
+  }
+  // ownerFetch is the single owner/CONTROL fetch entry point. Strict when the P2P
+  // transport is present; fail-closed on a public origin when it isn't; raw fetch
+  // only on a genuine LAN.
+  function ownerFetch(path, opts) {
+    opts = opts || {};
+    if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts);
+    if (window.p2pFetch) return window.p2pFetch(path, Object.assign({ strict: true }, opts));
+    if (!isLanFallbackOrigin()) return ownerWriteFailClosed(path);
+    return fetch(path, opts);
+  }
+
   // ---- Chart data ----
   var chartHistory = {
     grid: [],
@@ -197,7 +246,8 @@
   // extending past "now").
   var chartPlan = null;
   function refreshChartPlan() {
-    fetch("/api/mpc/plan")
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/mpc/plan")
       .then(function (r) { return r.json(); })
       .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
       .catch(function () {});
@@ -1655,7 +1705,8 @@
   }
 
   function driverLifecycleCall(name, action) {
-    return fetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
+    // CONTROL write — strict (FIX-B): driver enable/disable/restart/diagnose.
+    return ownerFetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
       .then(function (res) {
         if (!res.ok) return res.text().then(function (t) { throw new Error(t || ("HTTP " + res.status)); });
         return res.json();
@@ -1913,8 +1964,11 @@
     // channel is down, while still allowing the relay fallback on a genuine-LAN
     // origin where the Pi serves the page directly. A 503 here just shows
     // "reconnecting" until the channel recovers (p2p.js auto-retries).
-    var xfetch = window.p2pFetchStrict ||
-      (window.p2pFetch ? function (p, o) { return window.p2pFetch(p, o); } : fetch);
+    // Owner reads carry the owner session cookie, so route them STRICT too (FIX-B):
+    // ownerFetch fails closed on a public origin when no channel/transport is
+    // available rather than sending the cookie to the relay. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    var xfetch = ownerFetch;
     Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
       xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
@@ -2053,7 +2107,8 @@
   }
 
   function setMode(mode) {
-    fetch("/api/mode", {
+    // CONTROL write — strict (FIX-B): never send the mode change to the relay.
+    ownerFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: mode }),
@@ -2098,7 +2153,10 @@
   }
 
   function postJson(url, body) {
-    return fetch(url, {
+    // CONTROL write — strict (FIX-B). Covers /api/target, /api/peak_limit,
+    // /api/peak_import_ceiling, /api/ev_charging, /api/battery_covers_ev,
+    // /api/ev/command, … (every state-changing dashboard knob routes here).
+    return ownerFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -2309,8 +2367,9 @@
     // duplicate /api/status fetch on every 5 s modal tick. Falls back
     // to "no PV" until the dashboard's own fetchStatus lands once.
     Promise.all([
-      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      // Owner reads (carry the session cookie) — strict (FIX-B).
+      ownerFetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      ownerFetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var d = results[0];
       var lps = results[1];
@@ -2507,7 +2566,8 @@
       }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ surplus_only: soCb.checked }),
@@ -2778,7 +2838,8 @@
           surplus_unlock_bat_soc_pct: unlockVal,
         },
       };
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule save.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -2798,7 +2859,8 @@
       saveBtn.disabled = true;
       clearBtn.disabled = true;
       status.textContent = "Clearing…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule clear.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ schedule: null }),
@@ -3063,7 +3125,8 @@
   // ---- History loader ----
   function loadHistory(range) {
     var points = CHART_POINTS;
-    return fetch("/api/history?range=" + (range || "5m") + "&points=" + points)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    return ownerFetch("/api/history?range=" + (range || "5m") + "&points=" + points)
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data || !data.items) return;
@@ -3182,7 +3245,8 @@
       if (seq !== historyCakeReqSeq) return;
       if (historyCakeWrap) historyCakeWrap.classList.remove("loading");
     };
-    fetch("/api/energy/daily?days=" + days)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/energy/daily?days=" + days)
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (seq !== historyCakeReqSeq) return;
@@ -3371,7 +3435,8 @@
   var lastLiveHistFetch = 0;
   function fetchLiveHistory() {
     lastLiveHistFetch = Date.now();
-    return fetch("/api/history?range=24h&points=288") // 5-min cadence
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    return ownerFetch("/api/history?range=24h&points=288") // 5-min cadence
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (!d || !d.items) return;
@@ -3414,13 +3479,16 @@
   function setupSignOut() {
     var btn = document.getElementById("signout-btn");
     if (!btn) return;
-    fetch("/api/owner-access/whoami", { credentials: "same-origin" })
+    // whoami carries the owner session cookie and logout revokes it — both are
+    // owner/CONTROL calls, so route them strict (FIX-B): they must never traverse
+    // the relay on the public home route.
+    ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (me) {
         if (!me || !me.can_sign_out) return; // LAN bypass / not signed in
         btn.hidden = false;
         btn.onclick = function () {
-          fetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+          ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
             .catch(function () {})
             .then(function () { location.href = "/owner-access/"; });
         };
