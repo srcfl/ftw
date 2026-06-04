@@ -185,6 +185,39 @@ async function strictStatusWithChannelDown(page: Page): Promise<number> {
   });
 }
 
+// controlPostOverP2P makes a state-changing CONTROL write (POST /api/mode) over
+// the live DataChannel. A 200 proves a control write rides the same authenticated
+// channel as the reads — the dashboard's setMode/postJson path (FIX-B).
+async function controlPostOverP2P(page: Page, mode: string): Promise<{ ok: boolean; status: number }> {
+  return page.evaluate(async (m) => {
+    const r = await (window as any).p2pFetchStrict("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: m }),
+    });
+    return { ok: r.ok, status: r.status };
+  }, mode);
+}
+
+// strictControlPostWithChannelDown is the CONTROL-write counterpart of the FIX-2
+// status guard, for FIX-B: a state-changing owner POST (/api/mode) issued strict
+// with the channel down on the public home host must FAIL CLOSED (synthetic 503),
+// so the control body + owner session never fall back to the cleartext relay.
+async function strictControlPostWithChannelDown(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    (window as any).ftwP2P.setEnabled(false);
+    if ((window as any).ftwP2P.isLanOrigin()) {
+      throw new Error("home host wrongly classified as LAN — strict control POST would leak to relay");
+    }
+    const r = await (window as any).p2pFetchStrict("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "self_consumption" }),
+    });
+    return r.status;
+  });
+}
+
 // ---- the test -------------------------------------------------------------
 
 test("home route: P2P-only passkey ceremony + authenticated owner API over the DataChannel", async ({ page }) => {
@@ -247,14 +280,29 @@ test("home route: P2P-only passkey ceremony + authenticated owner API over the D
   expect(loginStatus.status, "/api/status over the login channel should be 200").toBe(200);
   expect(loginStatus.ok).toBe(true);
 
-  // 6. STRICT FAIL-CLOSED (FIX-2): with the channel torn down on the public home
-  //    host, a STRICT owner fetch must NOT silently fall back to the cleartext
-  //    relay — it must fail closed with the synthetic 503. (A relay fallback would
-  //    instead surface the relay's 403 P2P-only refusal or leak the body; 503 is
-  //    the in-browser fail-closed marker proving nothing left the page.)
+  // 5b. CONTROL WRITE over P2P (FIX-B): a state-changing owner POST (/api/mode)
+  //     rides the SAME authenticated channel as the reads — proving the dashboard's
+  //     setMode/postJson strict path reaches the Pi over DTLS, not the relay.
+  //     "self_consumption" is a canonical mode (control.ModeSelfConsumption).
+  const controlPost = await controlPostOverP2P(page, "self_consumption");
+  expect(controlPost.status, "POST /api/mode over the login channel should be 200").toBe(200);
+  expect(controlPost.ok).toBe(true);
+
+  // 6. STRICT FAIL-CLOSED (FIX-2 + FIX-B): with the channel torn down on the public
+  //    home host, BOTH a strict owner READ and a strict CONTROL WRITE must FAIL
+  //    CLOSED with the synthetic 503 — never silently falling back to the cleartext
+  //    relay. (A relay fallback would surface the relay's 403 P2P-only refusal or
+  //    leak the body; 503 is the in-browser fail-closed marker proving nothing left
+  //    the page.)
   const strictStatus = await strictStatusWithChannelDown(page);
   expect(strictStatus,
-    "strict owner fetch with the channel down must fail closed (503), never relay-fallback")
+    "strict owner READ with the channel down must fail closed (503), never relay-fallback")
+    .toBe(503);
+  // Re-tear (the read above already disabled P2P, but be explicit) and prove the
+  // control WRITE fails closed identically.
+  const strictControl = await strictControlPostWithChannelDown(page);
+  expect(strictControl,
+    "strict CONTROL write with the channel down must fail closed (503), never relay-fallback")
     .toBe(503);
 
   await cdp.detach().catch(() => { /* best-effort */ });
