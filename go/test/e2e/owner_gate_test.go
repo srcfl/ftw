@@ -53,6 +53,7 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	mainCmd := exec.Command(mainBin, "-config", cfgPath, "-web", filepath.Join(repo, "web"))
 	mainCmd.Env = append(os.Environ(),
 		"FTW_RELAY_URL="+relayURL,
+		"FTW_REMOTE_ACCESS_ENABLED=true", // opt in (default off; FTW_RELAY_URL alone no longer dials)
 		"FTW_OWNER_ACCESS_LAN_BYPASS=true",
 		"FTW_OWNER_ACCESS_RPID=home.test",
 	)

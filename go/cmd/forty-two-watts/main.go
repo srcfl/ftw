@@ -1590,12 +1590,14 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
+		// OPT-IN, DEFAULT OFF: never dial out on FTW_RELAY_URL alone. Opt in via
+		// config (remote_access.enabled) OR the explicit FTW_REMOTE_ACCESS_ENABLED
+		// env (sibling of the other FTW_OWNER_ACCESS_* overrides). A Pi that merely
+		// inherits FTW_RELAY_URL from an image default stays local.
+		enabled := cfg.RemoteAccessEnabled() || envBoolDefault("FTW_REMOTE_ACCESS_ENABLED", false)
 		switch {
-		case !cfg.RemoteAccessEnabled():
-			// OPT-IN, DEFAULT OFF: never dial out on the env var alone. A Pi
-			// that merely inherits FTW_RELAY_URL from an image default stays
-			// local until the owner explicitly sets remote_access.enabled.
-			slog.Info("owner-access: FTW_RELAY_URL set but remote_access.enabled is false — not dialing the relay (opt-in, default off)")
+		case !enabled:
+			slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled or FTW_REMOTE_ACCESS_ENABLED=true)")
 		case siteIdentity == nil:
 			// The relay requires an ES256-signed registration. Without a site
 			// identity we cannot sign, so we must not register (an unsigned
