@@ -3339,11 +3339,32 @@
     });
   }
 
+  // ---- Sign out (remote sessions only) ----
+  // whoami reports whether there's a real session to revoke; on the LAN
+  // (bypass) there's nothing to sign out of, so the button stays hidden.
+  function setupSignOut() {
+    var btn = document.getElementById("signout-btn");
+    if (!btn) return;
+    fetch("/api/owner-access/whoami", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (me) {
+        if (!me || !me.can_sign_out) return; // LAN bypass / not signed in
+        btn.hidden = false;
+        btn.onclick = function () {
+          fetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+            .catch(function () {})
+            .then(function () { location.href = "/owner-access/"; });
+        };
+      })
+      .catch(function () { /* whoami failed → leave the button hidden */ });
+  }
+
   // ---- Init ----
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();
   setupP2PIndicator();
+  setupSignOut();
   setInterval(fetchStatus, POLL_INTERVAL);
   setInterval(fetchLiveHistory, 60_000); // 1-min refresh
   window.addEventListener("resize", function () {
