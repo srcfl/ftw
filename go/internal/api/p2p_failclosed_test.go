@@ -89,17 +89,21 @@ func TestP2PFrame_AfterLogin_Gets200(t *testing.T) {
 	}
 
 	// 2. Login over the channel: the side-door login-finish emits
-	//    Set-Cookie: ftw_owner=<tok>, which the Bridge captures.
+	//    Set-Cookie: ftw_owner=<tok>, which the Bridge captures internally. FIX-5:
+	//    the Bridge STRIPS Set-Cookie from the response that crosses the channel,
+	//    so the owner cookie is never visible to JS. The capture is proven by the
+	//    post-login 200 below, not by a leaked Set-Cookie.
 	login := br.Replay(tunnel.TunneledRequest{Method: http.MethodPost, Path: "/__login_finish"})
 	if login.Status != http.StatusOK {
 		t.Fatalf("login-finish over channel = %d, want 200", login.Status)
 	}
-	if !hasOwnerSetCookie(login.Header) {
-		t.Fatalf("login-finish response did not carry a ftw_owner Set-Cookie (capture would be impossible)")
+	if hasOwnerSetCookie(login.Header) {
+		t.Fatalf("login-finish response leaked a ftw_owner Set-Cookie over the channel (FIX-5: must be stripped)")
 	}
 
 	// 3. Post-login: the SAME channel now authorizes owner frames, because the
-	//    Bridge stamps the captured ftw_owner cookie on every later frame.
+	//    Bridge stamps the captured ftw_owner cookie on every later frame —
+	//    proving the session was captured even though Set-Cookie was stripped.
 	if resp := br.Replay(tunnel.TunneledRequest{Method: http.MethodGet, Path: ownerPath}); resp.Status != http.StatusOK {
 		t.Fatalf("post-login %s = %d, want 200 (captured channel session)", ownerPath, resp.Status)
 	}

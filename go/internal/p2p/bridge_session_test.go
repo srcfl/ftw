@@ -103,6 +103,46 @@ func TestBridge_RejectsClientSuppliedMarker(t *testing.T) {
 	}
 }
 
+// TestBridge_StripsSetCookieFromResponse is the FIX-5 guard: a login-finish
+// response over the channel sets ftw_owner via Set-Cookie, which the Bridge
+// captures internally — but the response that crosses the DataChannel must carry
+// NO Set-Cookie, so the owner session can never be read by JS. The capture is
+// proven by a later frame being stamped with the cookie server-side.
+func TestBridge_StripsSetCookieFromResponse(t *testing.T) {
+	const tok = "secret-session-tok"
+	var seenCookie string
+	handler := http.NewServeMux()
+	handler.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+		// Emit BOTH the owner cookie and an unrelated one, to prove ALL Set-Cookie
+		// is dropped from the crossing response (not just ftw_owner).
+		http.SetCookie(w, &http.Cookie{Name: "ftw_owner", Value: tok, Path: "/"})
+		http.SetCookie(w, &http.Cookie{Name: "unrelated", Value: "x", Path: "/"})
+		w.WriteHeader(http.StatusOK)
+	})
+	handler.HandleFunc("/after", func(w http.ResponseWriter, r *http.Request) {
+		seenCookie = r.Header.Get("Cookie")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	auth := http.Header{}
+	auth.Set("X-FTW-Tunnel", "marker")
+	br := NewReplayer(handler, auth)
+
+	resp := br.Replay(tunnel.TunneledRequest{Method: http.MethodGet, Path: "/login"})
+	// The crossing response must carry NO Set-Cookie at all.
+	if got := resp.Header.Values("Set-Cookie"); len(got) != 0 {
+		t.Fatalf("response leaked Set-Cookie over the channel: %v (FIX-5: must be stripped)", got)
+	}
+	// But the session WAS captured internally — a later frame is stamped with it.
+	if br.session() != tok {
+		t.Fatalf("session not captured (FIX-5 must strip the crossing header WITHOUT breaking capture): %q", br.session())
+	}
+	br.Replay(tunnel.TunneledRequest{Method: http.MethodGet, Path: "/after"})
+	if seenCookie != "ftw_owner="+tok {
+		t.Fatalf("post-login frame Cookie = %q, want ftw_owner=%s", seenCookie, tok)
+	}
+}
+
 // TestBridge_LogoutClearsSession proves a logout over the channel (a clearing
 // ftw_owner cookie) drops the captured session so later frames are unauthorized.
 func TestBridge_LogoutClearsSession(t *testing.T) {

@@ -348,6 +348,11 @@
     if (resp.headers) {
       for (var k in resp.headers) {
         if (!Object.prototype.hasOwnProperty.call(resp.headers, k)) continue;
+        // FIX-5 defence in depth: never expose Set-Cookie over the channel. The
+        // Pi's Bridge already strips it (the owner session lives only inside
+        // DTLS, replayed server-side), but filter here too so an injected script
+        // can never read an owner cookie even if a future Pi forgot to strip it.
+        if (k.toLowerCase() === "set-cookie") continue;
         var vs = resp.headers[k] || [];
         for (var i = 0; i < vs.length; i++) headers.append(k, vs[i]);
       }

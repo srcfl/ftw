@@ -216,9 +216,21 @@ func (b *Bridge) replay(req tunnel.TunneledRequest) tunnel.TunneledResponse {
 	// without the cookie ever leaving DTLS or being readable by JS.
 	b.captureSession(res.Cookies())
 	payload, _ := io.ReadAll(res.Body)
+	// FIX-5: STRIP Set-Cookie from the response that crosses the DataChannel. The
+	// owner session is captured above and replayed server-side as a channel-scoped
+	// Cookie; it must NEVER reach JS. Without this, p2p.js copies Set-Cookie into a
+	// JS-visible Headers, so an injected same-origin script could read the owner
+	// cookie during login. The session lives only inside the Bridge now.
+	hdr := res.Header
+	if len(hdr["Set-Cookie"]) > 0 {
+		// Clone so we don't mutate the recorder's header (defensive; the recorder
+		// result is otherwise discarded, but a clone keeps the intent explicit).
+		hdr = res.Header.Clone()
+		hdr.Del("Set-Cookie")
+	}
 	return tunnel.TunneledResponse{
 		Status: res.StatusCode,
-		Header: res.Header,
+		Header: hdr,
 		Body:   payload,
 	}
 }
