@@ -14,11 +14,14 @@ import (
 )
 
 // handleP2POffer accepts a browser SDP offer and returns the Pi's SDP answer.
-// Reaching this handler already proves owner authorization (the gate requires
-// an ftw_owner session for this tunnelled route; on LAN the bypass applies);
-// the re-check keeps the handler safe even if it is ever reached ungated.
+// Opening a DataChannel is owner-credential-grade: it grants a direct
+// browser↔Pi tunnel that OUTLIVES a pair grant (until the channel's own GC), so
+// it must use the STRICT authorizer (a real session or a genuine private-range
+// LAN source, never the loopback bypass). Otherwise a friend pair-flow request
+// (loopback, unmarked) could stand up a channel and keep owner access after the
+// grant expires.
 func (s *Server) handleP2POffer(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeOwner(r); !ok {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}

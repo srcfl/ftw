@@ -26,13 +26,22 @@ type OwnerRegistry struct {
 	bySite     map[string]string    // site_id → host_id
 	keyBySite  map[string]string    // site_id → pinned ES256 public key (hex X||Y)
 	seenBySite map[string]time.Time // site_id → last successful registration
+	pinned     map[string]bool      // operator-pinned sites — never capped or GC'd
 }
+
+// maxOwnerSites bounds the number of TOFU (self-registered) sites the in-memory
+// registry holds, so an attacker minting ES256 keypairs and registering
+// arbitrary site_ids via the unauthenticated /me/register can't grow it without
+// limit. Operator-pinned and already-known sites are exempt.
+const maxOwnerSites = 1024
 
 var (
 	ErrSiteNotFound = errors.New("site not registered")
 	// ErrKeyMismatch is returned when a registration presents a public key
 	// that differs from the one already pinned for the site.
 	ErrKeyMismatch = errors.New("site is pinned to a different key")
+	// ErrTooManyOwners is returned when the TOFU-site cap is reached.
+	ErrTooManyOwners = errors.New("too many registered sites")
 )
 
 func NewOwnerRegistry() *OwnerRegistry {
@@ -40,15 +49,17 @@ func NewOwnerRegistry() *OwnerRegistry {
 		bySite:     make(map[string]string),
 		keyBySite:  make(map[string]string),
 		seenBySite: make(map[string]time.Time),
+		pinned:     make(map[string]bool),
 	}
 }
 
 // Pin pre-pins a public key for a site, so it is authoritative from boot and
-// never subject to first-come TOFU. Used at startup for the operator-
-// provisioned home-site key. Idempotent; intended to be called once.
+// never subject to first-come TOFU, the site cap, or GC eviction. Used at
+// startup for the operator-provisioned home-site key. Idempotent.
 func (r *OwnerRegistry) Pin(siteID, pubKeyHex string) {
 	r.mu.Lock()
 	r.keyBySite[siteID] = pubKeyHex
+	r.pinned[siteID] = true
 	r.mu.Unlock()
 }
 
@@ -65,11 +76,40 @@ func (r *OwnerRegistry) Register(siteID, hostID, pubKeyHex string) error {
 			return ErrKeyMismatch
 		}
 	} else {
+		// A brand-new (TOFU) site. Cap the number of self-registered sites so a
+		// flood of minted keypairs can't exhaust relay memory; known and
+		// operator-pinned sites are never blocked by this.
+		if len(r.bySite) >= maxOwnerSites {
+			return ErrTooManyOwners
+		}
 		r.keyBySite[siteID] = pubKeyHex // trust-on-first-use
 	}
 	r.bySite[siteID] = hostID
 	r.seenBySite[siteID] = time.Now()
 	return nil
+}
+
+// GC drops self-registered sites whose last registration is older than maxAge
+// (a Pi re-registers periodically, so a stale mapping means it is gone). Returns
+// how many were evicted. Operator-pinned sites (e.g. the home site) are never
+// evicted. Wired into the relay janitor so the registry self-heals.
+func (r *OwnerRegistry) GC(maxAge time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	removed := 0
+	for site, seen := range r.seenBySite {
+		if r.pinned[site] {
+			continue
+		}
+		if now.Sub(seen) > maxAge {
+			delete(r.bySite, site)
+			delete(r.seenBySite, site)
+			delete(r.keyBySite, site)
+			removed++
+		}
+	}
+	return removed
 }
 
 // Lookup returns the host_id for a site_id, or ErrSiteNotFound.

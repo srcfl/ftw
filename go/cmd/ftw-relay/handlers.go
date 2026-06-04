@@ -285,6 +285,10 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
+	if reg.TTLMs <= 0 {
+		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
+		return
+	}
 	_, err := r.Tokens.Register(TokenRegistration{
 		HostID:       reg.HostID,
 		Token:        reg.Token,
@@ -293,6 +297,10 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		Intent:       reg.Intent,
 		As:           reg.As,
 	})
+	if errors.Is(err, ErrTooManyTokens) {
+		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -667,6 +675,10 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 	// the operator-provisioned home key). A different key is refused so nobody
 	// can hijack an existing site's mapping.
 	if err := r.Owners.Register(reg.SiteID, reg.HostID, reg.PublicKey); err != nil {
+		if errors.Is(err, ErrTooManyOwners) {
+			http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}

@@ -50,6 +50,9 @@ func (q *Queue) Enqueue(ctx context.Context, hostID string, req TunneledRequest)
 	if waiters := q.waiters[hostID]; len(waiters) > 0 {
 		next := waiters[0]
 		q.waiters[hostID] = waiters[1:]
+		if len(q.waiters[hostID]) == 0 {
+			delete(q.waiters, hostID) // don't leak an empty-slice entry per host_id
+		}
 		q.mu.Unlock()
 		next <- req
 	} else {
@@ -130,6 +133,11 @@ func (q *Queue) abandonWaiter(hostID string, wait chan TunneledRequest) (Tunnele
 			q.waiters[hostID] = append(ws[:i], ws[i+1:]...)
 			break
 		}
+	}
+	// An unauthenticated client can long-poll arbitrary host_ids; without this
+	// the waiters map keeps one empty-slice entry per distinct host_id forever.
+	if len(q.waiters[hostID]) == 0 {
+		delete(q.waiters, hostID)
 	}
 	q.mu.Unlock()
 	select {

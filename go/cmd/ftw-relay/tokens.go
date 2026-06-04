@@ -15,12 +15,26 @@ import (
 // success rate before the operator notices something is off.
 const MaxApprovalAttempts = 5
 
+const (
+	// maxTokenTTL clamps an attacker-supplied registration TTL so a pending
+	// token can't be pinned in memory indefinitely (GC only reclaims
+	// expired/revoked tokens, so a near-infinite TTL would never be collected).
+	maxTokenTTL = 24 * time.Hour
+	// maxLiveTokens bounds the in-memory token map against a /tunnel/register
+	// flood from the unauthenticated, internet-facing public endpoint.
+	maxLiveTokens = 4096
+	// maxPendingApprovals caps the per-token landing-page-hit counter so an
+	// unauthenticated GET /h/<token> flood can't grow it without bound.
+	maxPendingApprovals = 10000
+)
+
 var (
 	ErrTokenExists     = errors.New("token already registered")
 	ErrTokenNotFound   = errors.New("token not found")
 	ErrTokenNotPending = errors.New("token not in pending state")
 	ErrBadApprovalCode = errors.New("bad approval code")
 	ErrApprovalLocked  = errors.New("approval locked after too many bad attempts")
+	ErrTooManyTokens   = errors.New("too many active tokens")
 )
 
 type TokenState int
@@ -133,6 +147,17 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 	if _, ok := r.tokens[reg.Token]; ok {
 		return nil, ErrTokenExists
 	}
+	// Bound the map so the unauthenticated /tunnel/register can't exhaust relay
+	// memory with a flood of distinct tokens.
+	if len(r.tokens) >= maxLiveTokens {
+		return nil, ErrTooManyTokens
+	}
+	// Clamp the TTL: an attacker-supplied near-infinite TTL would otherwise pin
+	// a pending token in memory forever.
+	ttl := reg.TTL
+	if ttl > maxTokenTTL {
+		ttl = maxTokenTTL
+	}
 	t := &Token{
 		hostID:       reg.HostID,
 		token:        reg.Token,
@@ -140,7 +165,7 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 		intent:       reg.Intent,
 		as:           reg.As,
 		createdAt:    time.Now(),
-		expiresAt:    time.Now().Add(reg.TTL),
+		expiresAt:    time.Now().Add(ttl),
 		state:        TokenPending,
 	}
 	r.tokens[reg.Token] = t
@@ -253,7 +278,7 @@ func (r *TokenRegistry) MarkPendingHit(token string) {
 		return
 	}
 	t.mu.Lock()
-	if t.state == TokenPending {
+	if t.state == TokenPending && t.pendingApprovals < maxPendingApprovals {
 		t.pendingApprovals++
 	}
 	t.mu.Unlock()

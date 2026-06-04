@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,54 @@ func TestRelayRejectsOversizeControlBody(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		t.Fatalf("oversize register body must be rejected, got %d", resp.StatusCode)
+	}
+}
+
+// TokenRegistry must clamp an attacker's near-infinite TTL and cap the live
+// token count so /tunnel/register can't exhaust relay memory.
+func TestTokenRegistryCaps(t *testing.T) {
+	reg := NewTokenRegistry()
+	// TTL clamp: a 100-year TTL is clamped to maxTokenTTL.
+	tok, err := reg.Register(TokenRegistration{HostID: "h", Token: "clamp", TTL: 100 * 365 * 24 * time.Hour, ApprovalCode: "1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if d := time.Until(tok.ExpiresAt()); d > maxTokenTTL+time.Minute {
+		t.Fatalf("TTL not clamped: expires in %v, want <= %v", d, maxTokenTTL)
+	}
+	// Count cap: fill to the limit, then the next distinct token is refused.
+	for i := 1; i < maxLiveTokens; i++ {
+		if _, err := reg.Register(TokenRegistration{HostID: "h", Token: fmtTok(i), TTL: time.Hour, ApprovalCode: "1"}); err != nil {
+			t.Fatalf("register %d: %v", i, err)
+		}
+	}
+	if _, err := reg.Register(TokenRegistration{HostID: "h", Token: "overflow", TTL: time.Hour, ApprovalCode: "1"}); err != ErrTooManyTokens {
+		t.Fatalf("over-cap register: err = %v, want ErrTooManyTokens", err)
+	}
+}
+
+func fmtTok(i int) string { return "t-" + strconv.Itoa(i) }
+
+// OwnerRegistry caps TOFU sites and GC evicts stale non-pinned ones, never the
+// operator-pinned home site.
+func TestOwnerRegistryCapAndGC(t *testing.T) {
+	reg := NewOwnerRegistry()
+	reg.Pin("site:Home", "homekey")
+	if err := reg.Register("site:Home", "host-home", "homekey"); err != nil {
+		t.Fatalf("home register: %v", err)
+	}
+	if err := reg.Register("site:other", "host-o", "otherkey"); err != nil {
+		t.Fatalf("other register: %v", err)
+	}
+	// GC with a zero maxAge evicts the stale non-pinned site but keeps the pin.
+	if n := reg.GC(0); n != 1 {
+		t.Fatalf("GC removed %d, want 1 (the non-pinned site)", n)
+	}
+	if _, err := reg.Lookup("site:Home"); err != nil {
+		t.Fatalf("home site must survive GC: %v", err)
+	}
+	if _, err := reg.Lookup("site:other"); err == nil {
+		t.Fatal("stale non-pinned site should be evicted")
 	}
 }
 

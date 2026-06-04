@@ -93,6 +93,12 @@ func main() {
 				if n := r.Tokens.GC(); n > 0 {
 					slog.Info("ftw-relay: token GC", "removed", n)
 				}
+				// Evict self-registered sites whose Pi stopped re-registering, so
+				// the owner registry self-heals against a /me/register flood. The
+				// home/pinned site is exempt; a live Pi re-registers every ~60s.
+				if n := r.Owners.GC(30 * time.Minute); n > 0 {
+					slog.Info("ftw-relay: owner GC", "removed", n)
+				}
 			}
 		}
 	}()

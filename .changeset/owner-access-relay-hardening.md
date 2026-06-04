@@ -61,5 +61,22 @@ home.* exposure and the issues a multi-agent audit surfaced around it.
   username/field-id mismatch that made the whole EV section non-functional is
   corrected.
 
+**Further hardening (independent review)**
+
+- Owner-credential surfaces fully closed to the friend pair-flow: the P2P offer
+  (`/api/p2p/offer`) now uses the strict authorizer (a friend could otherwise
+  open a WebRTC DataChannel that outlives the grant), and the ftw-pair
+  friend-proxy refuses to forward `/api/pair/*` and `/api/owner-access/*` (so a
+  friend can't forge the owner's pair-card or probe owner-access).
+- Relay/Pi memory bounded against unauthenticated floods: the token registry
+  clamps TTL + caps live tokens, the owner registry caps TOFU sites and GCs
+  stale ones (never the pinned home site), the tunnel queue no longer leaks
+  waiter-map entries per polled host_id, and the Pi caps in-flight WebAuthn
+  ceremonies and the landing-page hit counter.
+- Deploy docs corrected for the shipped RP-ID cutover (now
+  `home.fortytwowatts.com`), the ES256-signed `/me/register`, and the
+  `-home-pubkey` requirement — the runbook previously instructed the wrong,
+  one-way-door RP-ID.
+
 Note for operators: upgrade the relay and the Pi together — the hardened relay
 requires the signed registration the updated Pi sends.

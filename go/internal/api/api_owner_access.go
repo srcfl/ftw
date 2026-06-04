@@ -69,6 +69,12 @@ const ownerAccessEnrollPinMaxTries = 5
 // Real ceremony payloads are a few KiB; 64 KiB is comfortable headroom.
 const maxOwnerCeremonyBody = 64 << 10
 
+// maxCeremoniesPerKind caps the in-flight enroll/login ceremony maps. login/start
+// and enroll/start are reachable unauthenticated (open paths), so without a cap
+// an internet client could grow Pi memory within the 5-minute ceremony TTL. A
+// real operator never has more than a couple of ceremonies open at once.
+const maxCeremoniesPerKind = 64
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
@@ -323,6 +329,23 @@ func randomDigits(n int) (string, error) {
 		out[i] = byte('0' + d.Int64())
 	}
 	return string(out), nil
+}
+
+// capCeremonies evicts the oldest entries until the map is below the per-kind
+// cap, bounding it against an unauthenticated flood within the GC TTL window.
+// Caller holds oa.mu.
+func capCeremonies(m map[string]ceremonySession) {
+	for len(m) >= maxCeremoniesPerKind {
+		var oldestKey string
+		var oldest time.Time
+		first := true
+		for k, v := range m {
+			if first || v.createdAt.Before(oldest) {
+				oldestKey, oldest, first = k, v.createdAt, false
+			}
+		}
+		delete(m, oldestKey)
+	}
 }
 
 func (oa *ownerAccessState) gcCeremonies() {
@@ -606,6 +629,7 @@ func (s *Server) handleOwnerEnrollStart(w http.ResponseWriter, r *http.Request) 
 	}
 	oa.mu.Lock()
 	oa.gcCeremonies()
+	capCeremonies(oa.enrollSessions)
 	oa.enrollSessions[tok] = ceremonySession{data: sessionData, createdAt: time.Now()}
 	oa.mu.Unlock()
 	resp := map[string]any{
@@ -721,6 +745,7 @@ func (s *Server) handleOwnerLoginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	oa.mu.Lock()
 	oa.gcCeremonies()
+	capCeremonies(oa.loginSessions)
 	oa.loginSessions[tok] = ceremonySession{data: sessionData, createdAt: time.Now()}
 	oa.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")

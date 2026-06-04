@@ -127,7 +127,9 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpProxy)
 	mux.Handle("/mcp/", mcpProxy)
-	mux.Handle("/", dashProxy)
+	// The friend's browser must not reach owner-only control surfaces either —
+	// e.g. POST /api/pair/status would let a friend forge the owner's pair-card.
+	mux.Handle("/", denyOwnerOnly(dashProxy))
 
 	host := tunnel.NewHost(relayURL, hostID, mux)
 
@@ -139,4 +141,25 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 		HostID:       hostID,
 		RelayBase:    relayURL,
 	}, nil
+}
+
+// isOwnerOnlyPath reports whether a path is an owner-only control surface that a
+// friend pair-flow request must never reach through the sidecar's proxies:
+// pairing control (a friend could forge the owner's pair-card state) and
+// owner-access credential management. Shared by the ftw_api tool and the
+// dashboard proxy. The genuine sidecar posts its own /api/pair/status DIRECTLY
+// to the Pi (not through these friend proxies), so it is unaffected.
+func isOwnerOnlyPath(p string) bool {
+	return strings.HasPrefix(p, "/api/pair/") || strings.HasPrefix(p, "/api/owner-access/")
+}
+
+// denyOwnerOnly wraps a handler to refuse any owner-only path before forwarding.
+func denyOwnerOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isOwnerOnlyPath(r.URL.Path) {
+			http.Error(w, "not permitted over a friend session", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
