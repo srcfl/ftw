@@ -30,8 +30,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -344,12 +344,20 @@ func (oa *ownerAccessState) gcAuths() {
 // authorizeRequest returns the credential_id of the authenticated owner
 // for this request, or empty if not authenticated. Reads the session
 // cookie; honours LAN-bypass when Deps.OwnerAccessLANBypass is true and
-// the request came from a loopback address.
+// the request came from a genuine private-range LAN source IP (never
+// loopback and never the relay tunnel).
 func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) {
-	// LAN-bypass applies to genuinely-local requests only. A relay-tunnelled
-	// request also lands on a loopback host (the long-poll reverse-proxy
-	// connects from 127.0.0.1), so loopback alone is NOT proof of locality —
-	// the unforgeable tunnel marker is what distinguishes them.
+	// The X-FTW-Tunnel marker is the discriminator: the owner-remote long-poll
+	// proxy stamps it, so an owner-remote request is never LAN-bypassed and must
+	// carry a passkey session (this is what closes the home.* exposure — see the
+	// TestOwnerGateThroughRelay regression guard). Everything unmarked is treated
+	// as trusted-local: genuine LAN, AND the friend pair-flow, whose ftw-pair
+	// sidecar reverse-proxies from loopback and whose access is already gated by
+	// the relay grant. We deliberately do NOT additionally require a private
+	// source IP here, because that would break the friend flow (loopback). The
+	// fail-closed source check lives instead on the owner-only enrollment paths
+	// (enrollAllowed bootstrap, handleOwnerEnrollPin), which a friend-flow
+	// request must never be able to reach — see those call sites.
 	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) {
 		return []byte("lan-bypass"), true
 	}
@@ -371,12 +379,36 @@ func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) 
 	return sess.credentialID, true
 }
 
-func isLoopback(r *http.Request) bool {
-	host := r.Host
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
+// isLoopbackSource reports whether the request's SOURCE address (RemoteAddr)
+// is a loopback IP. Used only for the narrow on-host liveness-probe exception
+// in the gate (deploy/CI healthchecks curl http://127.0.0.1). It is NOT a trust
+// signal for the API surface: the relay tunnel's reverse-proxy also connects
+// from loopback, so the gate pairs this with !isTunneled so a relay-forwarded
+// request can never satisfy it.
+func isLoopbackSource(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1"
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLANClientSource reports whether the request's SOURCE address (RemoteAddr,
+// never a spoofable X-Forwarded-For) is a genuine LAN client: a private-range
+// IPv4/IPv6 address that is NOT loopback. The relay tunnel's reverse-proxy
+// connects from loopback, so loopback is never a LAN client — this is the
+// fail-closed second line of defence behind the X-FTW-Tunnel marker.
+func isLANClientSource(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
 }
 
 // isTunneled reports whether the request arrived via the relay long-poll
@@ -434,14 +466,17 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return fmt.Errorf("check trusted devices: %w", err)
 	}
 	if len(devices) == 0 {
-		// Bootstrap (trust-on-first-use). On the genuine LAN this is allowed
-		// outright — physical/LAN presence is the proof. Over the relay tunnel
-		// the window would otherwise be internet-exposed (whoever reaches
-		// enroll/start first on an un-enrolled Pi becomes the owner), so we
-		// require the LAN-minted PIN: a 6-digit code only a local user can
-		// read off the Pi's console. This lets the owner enroll the first
-		// passkey at the relay origin (needed for the relay RP-ID) while still
-		// proving LAN presence.
+		// Bootstrap (trust-on-first-use). When no relay tunnel is wired
+		// (TunnelMarker empty) there is no internet-exposed path at all, so the
+		// pre-relay LAN-only behaviour applies: bootstrap is allowed outright.
+		if s.deps.TunnelMarker == "" {
+			return nil
+		}
+		// A relay IS wired, so the bootstrap window is internet-reachable.
+		// Over the tunnel, require the LAN-minted PIN: a 6-digit code only a
+		// local user can read off the Pi's console. This lets the owner enroll
+		// the first passkey at the relay origin (needed for the relay RP-ID)
+		// while still proving LAN presence.
 		if s.isTunneled(r) {
 			pin := r.URL.Query().Get("pin")
 			if pin == "" || !s.ownerAccess().validateEnrollPin(pin) {
@@ -449,7 +484,14 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 			}
 			return nil
 		}
-		return nil
+		// Not tunnelled. Defence in depth behind the marker: require a genuine
+		// private-range LAN source IP. A relay-forwarded request that somehow
+		// lost its marker still originates from loopback, so it fails here and
+		// can never open the bootstrap window from the internet.
+		if isLANClientSource(r) {
+			return nil
+		}
+		return errors.New("first enrollment must be performed on the local network")
 	}
 	if _, ok := s.authorizeOwner(r); ok {
 		return nil
@@ -464,7 +506,13 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 // is also logged at Info level so it shows up on the Pi's console for an
 // operator standing at the machine.
 func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
-	if s.isTunneled(r) {
+	// Fail-closed: the PIN is the proof of LAN presence, so it is minted ONLY
+	// for a genuine private-range LAN source that did not arrive via the relay
+	// tunnel. Requiring isLANClientSource in addition to !isTunneled means that
+	// even if the tunnel marker is ever lost, a relay-forwarded request (which
+	// originates from loopback) can never satisfy isLANClientSource and so can
+	// never extract the PIN.
+	if s.isTunneled(r) || !isLANClientSource(r) {
 		http.Error(w, "enrollment PIN is only available on the local network", http.StatusForbidden)
 		return
 	}

@@ -2039,7 +2039,10 @@
     var prompt = document.createElement("div");
     prompt.id = "no-devices-prompt";
     prompt.className = "no-devices-prompt";
-    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Add a device</a>';
+    // The wizard's Save replaces config (it doesn't merge yet), so the copy
+    // says "Run setup wizard" rather than "Add a device". ?step=3 is honored
+    // by setup.js init (deep-link → scan step).
+    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Run setup wizard &rarr;</a>';
     var cards = document.querySelector(".summary-cards");
     if (cards) cards.parentNode.insertBefore(prompt, cards.nextSibling);
   }

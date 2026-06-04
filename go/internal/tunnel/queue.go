@@ -61,10 +61,29 @@ func (q *Queue) Enqueue(ctx context.Context, hostID string, req TunneledRequest)
 	case resp := <-respCh:
 		return resp, nil
 	case <-ctx.Done():
+		// The caller gave up (client disconnect or a deadline — see the relay's
+		// per-request timeout for a dead-but-registered host). Drop both the
+		// inflight channel and any still-queued copy of this request so a host
+		// that never polls can't make the pending slice grow without bound.
 		q.mu.Lock()
 		delete(q.inflight, req.ReqID)
+		q.removePendingLocked(hostID, req.ReqID)
 		q.mu.Unlock()
 		return TunneledResponse{}, ctx.Err()
+	}
+}
+
+// removePendingLocked drops a queued request by ReqID. Caller holds q.mu.
+func (q *Queue) removePendingLocked(hostID, reqID string) {
+	ps := q.pending[hostID]
+	for i, r := range ps {
+		if r.ReqID == reqID {
+			q.pending[hostID] = append(ps[:i], ps[i+1:]...)
+			break
+		}
+	}
+	if len(q.pending[hostID]) == 0 {
+		delete(q.pending, hostID)
 	}
 }
 

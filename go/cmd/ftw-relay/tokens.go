@@ -147,6 +147,23 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 	return t, nil
 }
 
+// GC removes tokens that have expired or been revoked, returning how many were
+// dropped. Called periodically by the relay so the in-memory map doesn't grow
+// unbounded across many short pair sessions. Pending/active tokens are kept.
+func (r *TokenRegistry) GC() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	removed := 0
+	for tok, t := range r.tokens {
+		switch t.State() { // lazily transitions to Expired under its own lock
+		case TokenExpired, TokenRevoked:
+			delete(r.tokens, tok)
+			removed++
+		}
+	}
+	return removed
+}
+
 func (r *TokenRegistry) Get(token string) (*Token, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

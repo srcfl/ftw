@@ -68,6 +68,7 @@ func TestOwnerAccessWhoamiLANBypass(t *testing.T) {
 	srv := New(d)
 	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -168,7 +169,8 @@ func TestDeviceDeleteRevokesSessions(t *testing.T) {
 
 	credB64 := base64.RawURLEncoding.EncodeToString(credID)
 	del := httptest.NewRequest("DELETE", "/api/owner-access/devices/"+credB64, nil)
-	del.Host = "127.0.0.1:8080" // loopback → LAN bypass authorizes
+	del.Host = "127.0.0.1:8080"
+	del.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source → LAN bypass authorizes
 	delRec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(delRec, del)
 	if delRec.Code != 204 {
@@ -188,6 +190,7 @@ func TestOwnerAccessDevicesListEmpty(t *testing.T) {
 	srv := New(d)
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -274,6 +277,7 @@ func TestOwnerAccessUnmarkedRequestStillBypasses(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	// no X-FTW-Tunnel header
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -293,6 +297,7 @@ func TestOwnerAccessForgedMarkerIsNotTunnel(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	req.Header.Set("X-FTW-Tunnel", "a-wrong-guess")
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
@@ -326,7 +331,8 @@ func TestOwnerAccessBootstrapAllowedOnLAN(t *testing.T) {
 	d.TunnelMarker = "marker"
 	srv := New(d)
 	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
-	req.Host = "127.0.0.1:8080" // unmarked → LAN
+	req.Host = "127.0.0.1:8080"          // unmarked → LAN
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -375,6 +381,7 @@ func TestOwnerWhoamiReturnsWallet(t *testing.T) {
 	w, _ := srv.ownerWalletHandle()
 	req := httptest.NewRequest("GET", "/api/owner-access/whoami", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {

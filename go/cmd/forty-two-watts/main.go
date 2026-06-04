@@ -1587,7 +1587,14 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker)
+		if siteIdentity == nil {
+			// The relay now requires an ES256-signed registration. Without a
+			// site identity we cannot sign, so we must not register (an
+			// unsigned mapping would be refused anyway) — fail loud, not silent.
+			slog.Error("owner-access: FTW_RELAY_URL set but no site identity; skipping relay registration", "key_path", identityKeyPath)
+		} else {
+			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity)
+		}
 	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
