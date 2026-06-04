@@ -60,7 +60,10 @@
       });
     }
     document.getElementById("signout").onclick = async () => {
-      document.cookie = "ftw_owner=; Max-Age=0; Path=/";
+      // The ftw_owner cookie is HttpOnly, so JS can't clear it — POST the
+      // server logout to revoke the session AND expire the cookie properly.
+      try { await fetch(base + "/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
+      catch (e) { /* best-effort — fall through to the choose panel regardless */ }
       show("choose");
     };
     async function refresh() {

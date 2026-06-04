@@ -746,7 +746,37 @@ func (s *Server) handleOwnerWhoami(w http.ResponseWriter, r *http.Request) {
 		"devices_enrolled": len(devices),
 		"site_id":          string(ownerUserID(s.deps)),
 		"wallet":           string(mustWalletHandle(s)),
+		// can_sign_out is false on LAN-bypass (no session cookie to revoke) — the
+		// dashboard hides its Sign-out control on the local network, where you're
+		// implicitly trusted and signing out would be meaningless.
+		"can_sign_out": string(credID) != "lan-bypass",
 	})
+}
+
+// handleOwnerLogout revokes the caller's owner session: deletes it in memory and
+// from the persisted store, then expires the cookie. It is an open path
+// (reachable without re-auth) because it only ever clears the cookie the caller
+// presents — it can never sign out a different owner, and no cookie is a no-op.
+func (s *Server) handleOwnerLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil && c.Value != "" {
+		oa := s.ownerAccess()
+		oa.mu.Lock()
+		delete(oa.authSessions, c.Value)
+		oa.mu.Unlock()
+		if s.deps.State != nil {
+			_ = s.deps.State.DeleteOwnerSession(c.Value)
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     ownerAccessCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "signed out"})
 }
 
 // mustWalletHandle returns the wallet handle for response surfaces that must

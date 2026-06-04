@@ -356,6 +356,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
+	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
 
 	// ---- Self-sovereign site identity (Phase 2) ----
 	s.handle("GET  /api/identity", s.handleIdentity)

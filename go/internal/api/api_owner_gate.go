@@ -64,7 +64,8 @@ func isOwnerAccessOpenPath(p string) bool {
 		"/api/owner-access/login/finish",
 		"/api/owner-access/enroll/start",
 		"/api/owner-access/enroll/finish",
-		"/api/owner-access/whoami":
+		"/api/owner-access/whoami",
+		"/api/owner-access/logout":
 		return true
 	}
 	return strings.HasPrefix(p, "/owner-access/")

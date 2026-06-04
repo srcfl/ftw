@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,59 @@ func TestOwnerAccessWhoamiLANBypass(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("LAN bypass should authenticate: status=%d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false // force the cookie/session path, not LAN bypass
+	srv := New(d)
+
+	// Issue a session and capture its cookie.
+	issueRec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(issueRec, []byte("cred-1")); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	cookies := issueRec.Result().Cookies()
+	if len(cookies) == 0 || cookies[0].Name != ownerAccessCookieName || cookies[0].Value == "" {
+		t.Fatalf("expected a %s session cookie, got %+v", ownerAccessCookieName, cookies)
+	}
+	cookie := cookies[0]
+
+	serve := func(method, path string, c *http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Host = "1.2.3.4" // not loopback
+		if c != nil {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// The session authenticates before logout.
+	if rec := serve("GET", "/api/owner-access/whoami", cookie); rec.Code != 200 {
+		t.Fatalf("session should authenticate before logout: status=%d", rec.Code)
+	}
+
+	// Logout returns 200 and expires the cookie.
+	out := serve("POST", "/api/owner-access/logout", cookie)
+	if out.Code != 200 {
+		t.Fatalf("logout status=%d body=%q", out.Code, out.Body.String())
+	}
+	cleared := false
+	for _, c := range out.Result().Cookies() {
+		if c.Name == ownerAccessCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("logout did not expire the %s cookie", ownerAccessCookieName)
+	}
+
+	// The same cookie is now revoked server-side.
+	if rec := serve("GET", "/api/owner-access/whoami", cookie); rec.Code != 401 {
+		t.Errorf("session should be revoked after logout: status=%d", rec.Code)
 	}
 }
 
