@@ -167,6 +167,11 @@ type Service struct {
 	ExportBonusOreKwh float64
 	ExportFeeOreKwh   float64
 
+	// MinArbitrageSpreadOreKwh flows in from config.Planner. Copied into
+	// Params so the DP applies the arbitrage cycle deadband. See
+	// mpc.Params.MinArbitrageSpreadOreKwh.
+	MinArbitrageSpreadOreKwh float64
+
 	// ExportFloorOreKwh, when non-nil, clamps the per-slot export ore
 	// at the floor. Wired from config.Price.ExportFloorOreKwh; nil =
 	// no clamp, real spot pass-through (default).
@@ -871,6 +876,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// to force a flat feed-in tariff).
 	p.ExportBonusOreKwh = s.ExportBonusOreKwh
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
+	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 
 	// Default terminal valuation. Mode-dependent because self-consumption

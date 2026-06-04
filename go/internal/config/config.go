@@ -292,6 +292,16 @@ type Planner struct {
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
+
+	// MinArbitrageSpreadOreKwh is the operator's "don't cycle the battery
+	// for marginal gains" knob, in öre per kWh. The planner won't cycle for
+	// grid arbitrage unless the price gain beats this many öre/kWh on top of
+	// round-trip losses. Applies only to the arbitrage modes
+	// (planner_arbitrage / planner_passive_arbitrage); self-consumption is
+	// never affected. It biases the planner's decision only — the savings
+	// statistics stay on real spot economics. 0 (default) = disabled.
+	MinArbitrageSpreadOreKwh float64 `yaml:"min_arbitrage_spread_ore_kwh,omitempty" json:"min_arbitrage_spread_ore_kwh,omitempty"`
+
 	// LegacyDispatch reverts the control loop from the default
 	// energy-allocation path back to the legacy PI-on-grid-target
 	// path. Provided for emergency rollback only — the energy path
@@ -1220,6 +1230,9 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("nova.schema_mode must be \"legacy\" or \"unified\", got %q", c.Nova.SchemaMode)
 		}
+	}
+	if c.Planner != nil && c.Planner.MinArbitrageSpreadOreKwh < 0 {
+		return fmt.Errorf("planner.min_arbitrage_spread_ore_kwh must be ≥ 0, got %g", c.Planner.MinArbitrageSpreadOreKwh)
 	}
 	return nil
 }

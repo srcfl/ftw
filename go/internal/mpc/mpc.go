@@ -190,6 +190,16 @@ type Params struct {
 	ExportFeeOreKwh   float64
 	ExportFloorOreKwh *float64
 
+	// MinArbitrageSpreadOreKwh is a virtual cost in öre per kWh of battery
+	// discharge throughput, applied ONLY in the arbitrage modes
+	// (ModeArbitrage / ModePassiveArbitrage). It is the operator's
+	// "minimum arbitrage spread": the planner won't cycle the battery for
+	// grid arbitrage unless the price gain beats this many öre/kWh on top
+	// of the round-trip efficiency loss. It biases the DP's *decision*
+	// only — the reported Plan.CostOre is recomputed from raw grid flow
+	// (SlotGridCostOre), so savings accounting is unaffected. 0 disables.
+	MinArbitrageSpreadOreKwh float64
+
 	// Loadpoint extends the DP state space with one EV charge point.
 	// Nil (default) keeps the battery-only optimization path. See
 	// LoadpointSpec for the state/action shape.
@@ -725,6 +735,25 @@ func Optimize(slots []Slot, p Params) Plan {
 								chargeFromPVkWh := chargeFromPVW * dtH / 1000.0
 								cost -= p.PVChargeBonusOreKwh * chargeFromPVkWh
 							}
+						}
+
+						// Minimum-arbitrage-spread deadband. A virtual cost
+						// per kWh of battery discharge throughput, applied only
+						// in the arbitrage modes. It makes the DP refuse a
+						// discharge whose revenue doesn't beat the stored
+						// energy's opportunity cost by at least this margin —
+						// i.e. "don't cycle for a gain smaller than S". Taxing
+						// discharge alone suppresses the whole round-trip (no
+						// point charging for a discharge that won't clear the
+						// threshold). Self-consumption / cover-load discharge
+						// is never reached here: their spread is retail+VAT,
+						// orders of magnitude above any öre-level S. The cost
+						// is virtual — Plan.CostOre is re-derived from raw grid
+						// flow below, so savings accounting is untouched.
+						if p.MinArbitrageSpreadOreKwh > 0 && battW < 0 &&
+							(p.Mode == ModeArbitrage || p.Mode == ModePassiveArbitrage) {
+							dischargeKWh := -battW * dtH / 1000.0
+							cost += p.MinArbitrageSpreadOreKwh * dischargeKWh
 						}
 
 						// Deadline slot: if this slot is the EV's
