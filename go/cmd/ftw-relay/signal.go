@@ -50,10 +50,21 @@ const (
 	maxSignalOfferBytes = 64 << 10
 	// maxSignalAnswerBytes caps a parked answer blob (SDP + signature + ts).
 	maxSignalAnswerBytes = 64 << 10
-	// signalOfferMinInterval rate-limits how often a single site may park a new
-	// offer, so an unauthenticated browser endpoint can't be used to spin the
-	// mailbox. One offer per 500ms per site is far above any legitimate retry.
-	signalOfferMinInterval = 500 * time.Millisecond
+	// FIX-C: the per-site offer limit is now a GENEROUS token-bucket BACKSTOP, not
+	// the primary throttle. The old per-site min-interval (one offer / 500ms / site)
+	// was a lockout lever: an attacker spamming offers for site:Home kept the legit
+	// browser permanently at 429, because the limit fired on the SITE, not the
+	// abuser. The primary bound is now per-SOURCE-IP at the relay handler
+	// (IPRateLimiter), which the Pi can't see but the relay can. This per-site
+	// bucket only caps absolute per-site mailbox churn so even a distributed flood
+	// can't spin one site's mailbox unboundedly; its burst is wide enough that
+	// several legit concurrent tabs/retries never trip it.
+	//
+	// siteOfferBucketCap is the per-site burst; siteOfferRefillPerSec the sustained
+	// rate. ~10 burst + ~5/s is far above any honest browser's offer cadence but
+	// keeps a single site from being used to churn the mailbox without limit.
+	siteOfferBucketCap      = 10.0
+	siteOfferRefillPerSec   = 5.0
 	// maxSignalSites bounds the number of distinct sites the mailbox tracks, so a
 	// flood of offers for random site_ids can't grow relay memory without limit.
 	maxSignalSites = 4096
@@ -110,12 +121,37 @@ func (nb *nonceMailbox) empty(now time.Time) bool {
 
 // siteMailbox holds the bounded set of in-flight rendezvous nonces for one site,
 // the Pi's site-wide offer-waiters (the Pi drains any nonce), and the per-site
-// offer rate-limit clock.
+// offer rate-limit state (a generous token-bucket BACKSTOP — the primary throttle
+// is per-source-IP at the handler; FIX-C).
 type siteMailbox struct {
 	byNonce      map[string]*nonceMailbox
 	offerWaiters []chan struct{} // Pi pollers waiting for ANY offer on this site
 
-	lastOfferAt time.Time // for the per-site offer rate limit
+	// Per-site offer token bucket (FIX-C backstop). offerTokens refills at
+	// siteOfferRefillPerSec up to siteOfferBucketCap; each parked offer spends one.
+	// lastOfferAt doubles as the bucket's last-fill clock AND the GC idle marker.
+	offerTokens float64
+	lastOfferAt time.Time
+}
+
+// allowOfferLocked spends one per-site offer token, refilling first. Returns
+// false when the site's generous backstop bucket is empty. Caller holds m.mu.
+// A brand-new mailbox (zero lastOfferAt) starts at full capacity.
+func (s *siteMailbox) allowOfferLocked(now time.Time) bool {
+	if s.lastOfferAt.IsZero() {
+		s.offerTokens = siteOfferBucketCap
+	} else if d := now.Sub(s.lastOfferAt).Seconds(); d > 0 {
+		s.offerTokens += d * siteOfferRefillPerSec
+		if s.offerTokens > siteOfferBucketCap {
+			s.offerTokens = siteOfferBucketCap
+		}
+	}
+	s.lastOfferAt = now
+	if s.offerTokens >= 1 {
+		s.offerTokens--
+		return true
+	}
+	return false
 }
 
 func (s *siteMailbox) waiterCount() int {
@@ -224,7 +260,12 @@ func (m *SignalMailbox) ParkOffer(siteID, nonce string, data []byte) error {
 		return errSignalAtCapacity
 	}
 	now := time.Now()
-	if !b.lastOfferAt.IsZero() && now.Sub(b.lastOfferAt) < signalOfferMinInterval {
+	// Per-site generous token-bucket backstop (FIX-C). The primary per-IP throttle
+	// runs at the handler; this only caps absolute per-site mailbox churn so even a
+	// distributed flood can't spin one site without limit. A legit browser's offer
+	// cadence is far under this, so it is never the lockout lever the old per-site
+	// min-interval was.
+	if !b.allowOfferLocked(now) {
 		return errSignalRateLimited
 	}
 	nb := b.nonceBox(nonce, true)
@@ -233,7 +274,6 @@ func (m *SignalMailbox) ParkOffer(siteID, nonce string, data []byte) error {
 		// strand one. The browser retries under a fresh attempt.
 		return errSignalAtCapacity
 	}
-	b.lastOfferAt = now
 	nb.offer = &signalSlot{data: data, parkedAt: now}
 	// Wake the Pi's site-wide offer-waiters — any of them can drain this offer.
 	m.wakeAll(&b.offerWaiters)

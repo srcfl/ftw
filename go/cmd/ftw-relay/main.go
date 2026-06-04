@@ -109,6 +109,14 @@ func main() {
 				if n := r.Signals.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: signal GC", "removed", n)
 				}
+				// Evict idle per-source-IP offer buckets (FIX-C) so a churn of source
+				// IPs can't grow the limiter map without bound; an idle IP has
+				// refilled to full anyway, so forgetting it only resets it fresh.
+				if r.OfferLimit != nil {
+					if n := r.OfferLimit.GC(offerBucketIdleTTL); n > 0 {
+						slog.Info("ftw-relay: offer-limit GC", "removed", n)
+					}
+				}
 			}
 		}
 	}()

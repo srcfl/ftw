@@ -71,8 +71,9 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	Polls       *PollSecrets
-	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
-	PollTimeout time.Duration  // 0 → 25s default
+	Signals     *SignalMailbox  // blind WebRTC signaling rendezvous (P2P-only home route)
+	OfferLimit  *IPRateLimiter  // per-source-IP throttle on browser signaling offers (FIX-C)
+	PollTimeout time.Duration   // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
@@ -103,6 +104,12 @@ func (r *Relay) Handler() http.Handler {
 	}
 	if r.Signals == nil {
 		r.Signals = NewSignalMailbox()
+	}
+	if r.OfferLimit == nil {
+		// Per-source-IP token bucket on the unauthenticated browser offer endpoint
+		// (FIX-C): bounds one abusive IP without letting it lock out a legit browser
+		// on a different IP (which the old per-site limit did).
+		r.OfferLimit = newIPRateLimiter(offerBucketCapacity, offerBucketRefillPerSec)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
@@ -886,6 +893,16 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	nonce := req.URL.Query().Get("n")
 	if !validSignalNonce(nonce) {
 		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
+	// FIX-C: throttle PER SOURCE IP, not per site. The relay (unlike the Pi) sees
+	// the browser's source IP, so a single abusive IP is bounded here while a legit
+	// browser on a DIFFERENT IP is never pushed to 429 — closing the per-site
+	// lockout lever. The per-(site) ceiling in ParkOffer remains as a generous
+	// backstop. clientIP uses the un-spoofable RemoteAddr (no trusted-proxy header
+	// handling exists in the codebase yet; see clientIP).
+	if r.OfferLimit != nil && !r.OfferLimit.Allow(clientIP(req)) {
+		http.Error(w, "too many offers from your address", http.StatusTooManyRequests)
 		return
 	}
 	if r.Signals == nil {

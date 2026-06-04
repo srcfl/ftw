@@ -125,27 +125,52 @@ func TestSignalHostAnswer_RequiresPollSecret(t *testing.T) {
 	}
 }
 
-// TestSignalOffer_RateLimited proves a second offer within the min interval is
-// rejected with 429.
+// TestSignalOffer_RateLimited proves a sustained burst of offers from one source
+// eventually hits 429 (the per-IP primary throttle), while a small burst — what a
+// legit browser does on a flaky network — is allowed. The old per-site 500ms
+// min-interval (429 on the immediate SECOND offer) was a lockout lever and is
+// gone; see TestSignalOffer_PerIP_NoCrossLockout for the lever-removal guard.
 func TestSignalOffer_RateLimited(t *testing.T) {
 	ts, _, _ := newSignalRelay(t)
-	url := ts.URL + "/signal/" + urlSite("site:Home") + "/offer?n=aabbccddeeff0011"
-	r1, err := http.Post(url, "application/json", bytes.NewReader([]byte("A")))
-	if err != nil {
-		t.Fatalf("post1: %v", err)
+	post := func(nonce string) int {
+		url := ts.URL + "/signal/" + urlSite("site:Home") + "/offer?n=" + nonce
+		r, err := http.Post(url, "application/json", bytes.NewReader([]byte("A")))
+		if err != nil {
+			t.Fatalf("post: %v", err)
+		}
+		r.Body.Close()
+		return r.StatusCode
 	}
-	r1.Body.Close()
-	if r1.StatusCode != http.StatusNoContent {
-		t.Fatalf("first offer = %d, want 204", r1.StatusCode)
+	// A few rapid offers (within the burst) are accepted — a legit retrying browser
+	// is never blocked on its first attempts.
+	if code := post("aabbccddeeff0011"); code != http.StatusNoContent {
+		t.Fatalf("first offer = %d, want 204", code)
 	}
-	r2, err := http.Post(url, "application/json", bytes.NewReader([]byte("B")))
-	if err != nil {
-		t.Fatalf("post2: %v", err)
+	if code := post("aabbccddeeff0012"); code != http.StatusNoContent {
+		t.Fatalf("second offer (within burst) = %d, want 204", code)
 	}
-	r2.Body.Close()
-	if r2.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("rapid second offer = %d, want 429", r2.StatusCode)
+	// Drive a sustained flood from the same source; it MUST eventually 429 (per-IP
+	// bound). The per-IP burst is offerBucketCapacity, so well within a small loop.
+	got429 := false
+	for i := 0; i < int(offerBucketCapacity)+8; i++ {
+		nonce := "ccddeeff0011" + fmtNonceSuffix(i)
+		if post(nonce) == http.StatusTooManyRequests {
+			got429 = true
+			break
+		}
 	}
+	if !got429 {
+		t.Fatal("a sustained offer flood from one source was never throttled (per-IP limit missing)")
+	}
+}
+
+// fmtNonceSuffix returns a 4-hex-digit suffix so each offer uses a distinct
+// (bounded-charset) nonce.
+func fmtNonceSuffix(i int) string {
+	const hexd = "0123456789abcdef"
+	return string([]byte{
+		hexd[(i>>12)&0xf], hexd[(i>>8)&0xf], hexd[(i>>4)&0xf], hexd[i&0xf],
+	})
 }
 
 func mustGet(t *testing.T, url, pollSecret string) []byte {

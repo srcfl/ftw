@@ -40,18 +40,37 @@ const (
 	// unauthenticated, so without this an offer flood — each draining a slot
 	// before any auth — fills maxOpen and denies the owner. Authenticated peers
 	// are counted against maxOpen, not this; an attacker who never logs in can
-	// pin at most defaultMaxUnauth slots, and unauthReapAfter frees those fast.
-	defaultMaxUnauth = 6
+	// pin at most defaultMaxUnauth slots, and the unauth reaps free those fast.
+	//
+	// FIX-C: bumped from 6 to 12 (still < maxOpen) and PAIRED with a much faster
+	// unauth reap (unauthConnectGrace / unauthReapAfter below). The owner's FIRST
+	// login is itself unauthenticated until the WebAuthn session is captured, so a
+	// transient attacker flood must not be able to fill every unauth slot for long.
+	// A wider unauth cap leaves headroom for the real owner to land while the fast
+	// reap continuously frees attacker slots; the relay per-IP limit (FIX-C) is the
+	// primary bound on flood volume, so this only needs to survive a brief burst.
+	//
+	// RESIDUAL: a DISTRIBUTED flood (many source IPs, each within the relay per-IP
+	// limit) is a higher-bar residual — it can still momentarily occupy unauth
+	// slots. The fast reap caps how long each is held; a true sustained botnet
+	// flood belongs to the CDN/WAF in front of the relay, not this in-process cap.
+	defaultMaxUnauth = 12
 	// handshakeTimeout bounds how long Answer waits for ICE gathering before
 	// giving up — the browser falls back to the relay if we don't answer.
 	handshakeTimeout = 12 * time.Second
-	// unauthReapAfter is the short grace window an UN-authenticated peer gets to
-	// (a) complete the DTLS handshake and (b) log in over the channel. A peer that
-	// hasn't captured a session within this window is reaped, so a flood of offers
-	// that connect-but-never-login (or never connect at all) can't hold slots. The
-	// legitimate flow — WebAuthn login over the channel — completes in a few
-	// seconds, well inside this.
-	unauthReapAfter = 30 * time.Second
+	// unauthConnectGrace is the SHORT window a brand-new un-authed peer gets to
+	// reach a live DTLS connection (FIX-C). A peer still NOT in the Connected state
+	// past this — an offer that drained a slot but never completed the handshake,
+	// the most common cheap flood — is reaped promptly so it can't pin an unauth
+	// slot. A genuine browser completes the handshake in well under a second on a
+	// reachable path.
+	unauthConnectGrace = 5 * time.Second
+	// unauthReapAfter is the grace an un-authed but CONNECTED peer gets to log in
+	// over the channel. The legitimate WebAuthn-over-DataChannel ceremony completes
+	// in a few seconds; a connected peer that never captures a session past this is
+	// reaped. Shortened from 30s (FIX-C) so a connect-but-never-login flood frees
+	// its slots quickly without starving a slow-but-real owner login.
+	unauthReapAfter = 12 * time.Second
 	// sessionMaxAge is a backstop GC for connections whose state never
 	// transitioned to closed/failed (e.g. a browser tab killed mid-session).
 	sessionMaxAge = 6 * time.Hour
@@ -218,8 +237,13 @@ func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders htt
 	m.sessions[id] = &pcSession{pc: pc, created: time.Now()}
 	m.mu.Unlock()
 
-	// Schedule a deterministic unauth-grace reap so a peer that connects but never
-	// logs in is freed even if no further offers arrive to drive reap() (FIX-4b).
+	// Schedule the deterministic unauth reaps so slots are freed even if no further
+	// offers arrive to drive reap() (FIX-4b + FIX-C):
+	//   - a FAST pre-connect reap (unauthConnectGrace): an offer that drained a slot
+	//     but never reached a live DTLS connection is closed in seconds.
+	//   - the login-window reap (unauthReapAfter): a connected-but-never-logged-in
+	//     peer is closed after the short ceremony window.
+	time.AfterFunc(unauthConnectGrace, func() { m.reapIfUnconnected(id) })
 	time.AfterFunc(unauthReapAfter, func() { m.reapIfUnauthed(id) })
 
 	// The browser creates the channel; the Pi serves whatever it is handed,
@@ -325,6 +349,32 @@ func (m *Manager) reapIfUnauthed(id string) {
 	_ = s.pc.Close()
 }
 
+// reapIfUnconnected closes a session iff, when its short connect-grace timer
+// fires, it is still un-authenticated AND has not reached a live DTLS connection
+// (FIX-C). This is the cheap-flood case: an offer that drained an unauth slot but
+// never completed the handshake. An already-connected (still logging in) or authed
+// peer is kept — the login-window reaper handles those. Same same-lock discipline
+// as FIX-D: the decision and the delete happen under one lock hold so a peer that
+// connects/auths in the gap is never wrongly closed.
+func (m *Manager) reapIfUnconnected(id string) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	if s == nil || s.authed {
+		m.mu.Unlock()
+		return
+	}
+	st := s.pc.ConnectionState()
+	if st == webrtc.PeerConnectionStateConnected {
+		// Connected and logging in — the login-window reaper owns it from here.
+		m.mu.Unlock()
+		return
+	}
+	delete(m.sessions, id)
+	m.mu.Unlock()
+	m.log.Debug("p2p: reaping un-connected peer past connect grace", "session", id, "state", st.String())
+	_ = s.pc.Close()
+}
+
 // remove closes and forgets one session.
 func (m *Manager) remove(id string) {
 	m.mu.Lock()
@@ -359,12 +409,20 @@ func (m *Manager) reap() {
 			// Terminal / aged-out — reap regardless of auth state.
 			delete(m.sessions, id)
 			closing = append(closing, s.pc)
+		case !s.authed && st != webrtc.PeerConnectionStateConnected &&
+			now.Sub(s.created) > unauthConnectGrace:
+			// FIX-C fast pre-connect reap: an un-authed peer that never reached a live
+			// DTLS connection past the short connect grace — the cheap-flood case (an
+			// offer drained a slot but the handshake never completed). Free it fast so
+			// it can't pin an unauth slot.
+			delete(m.sessions, id)
+			closing = append(closing, s.pc)
 		case !s.authed && now.Sub(s.created) > unauthReapAfter:
-			// Connected-but-never-authenticated (or stuck mid-handshake) past the
-			// grace window — reap so an unauth flood can't hold slots. The !authed
-			// read and the delete are in the same lock hold, so a concurrent
-			// markAuthed either ran before (s.authed true → kept) or runs after
-			// (no-op on a removed session); a just-authed peer is never closed.
+			// Connected-but-never-authenticated past the login grace — reap so a
+			// connect-but-never-login flood can't hold slots. The !authed read and the
+			// delete are in the same lock hold, so a concurrent markAuthed either ran
+			// before (s.authed true → kept) or runs after (no-op on a removed
+			// session); a just-authed peer is never closed (FIX-D).
 			delete(m.sessions, id)
 			closing = append(closing, s.pc)
 		}
