@@ -108,13 +108,26 @@ async function captureLastPC(page: Page): Promise<void> {
 }
 
 // waitForP2PDirect resolves once window.ftwP2P.state() === 'direct' — a DTLS
-// DataChannel formed straight to the Pi (no relay fallback).
-async function waitForP2PDirect(page: Page, timeoutMs = 30_000): Promise<void> {
-  await page.waitForFunction(
-    () => (window as any).ftwP2P && (window as any).ftwP2P.state() === "direct",
-    null,
-    { timeout: timeoutMs, polling: 250 },
-  );
+// DataChannel formed straight to the Pi (no relay fallback). p2p.js auto-connects
+// on load and, on a failed attempt, backs off 30s before retrying; we GENTLY nudge
+// a reconnect (setEnabled(true) clears that backoff) at a 6s cadence so a single
+// early attempt that raced the Pi's signaling loop doesn't make the test wait out
+// the full cooldown — while staying well clear of the relay's per-site offer rate
+// limit and avoiding the reconnect churn that aggressive nudging would cause.
+async function waitForP2PDirect(page: Page, timeoutMs = 45_000): Promise<void> {
+  await page.waitForFunction(() => typeof (window as any).ftwP2P !== "undefined", null, { timeout: 15_000 });
+  const deadline = Date.now() + timeoutMs;
+  let lastNudge = 0;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => (window as any).ftwP2P?.state());
+    if (state === "direct") return;
+    if (Date.now() - lastNudge > 6000) {
+      lastNudge = Date.now();
+      await page.evaluate(() => { try { (window as any).ftwP2P?.setEnabled(true); } catch (e) { /* ignore */ } });
+    }
+    await page.waitForTimeout(500);
+  }
+  throw new Error("P2P channel never reached `direct`");
 }
 
 // assertSelectedPairDirect reads getStats() off the live RTCPeerConnection and
@@ -179,7 +192,6 @@ test("home route: P2P-only passkey ceremony + authenticated owner API over the D
   //    answers create() unattended. enroll/finish mints the session, captured by
   //    the Pi's Bridge on THIS channel.
   await page.goto(`${HOME_ORIGIN}/owner-access/enroll.html`);
-  await page.waitForFunction(() => typeof (window as any).ftwP2P !== "undefined", null, { timeout: 15_000 });
   await waitForP2PDirect(page);
   await page.locator("#name").fill("tier2-virtual-authenticator");
   await page.locator("#pin").fill(pin);
@@ -206,7 +218,6 @@ test("home route: P2P-only passkey ceremony + authenticated owner API over the D
   //    a fresh channel with no session, so this proves login-over-P2P stands on
   //    its own — not riding the enroll channel's captured session.)
   await page.goto(`${HOME_ORIGIN}/owner-access/login.html`);
-  await page.waitForFunction(() => typeof (window as any).ftwP2P !== "undefined", null, { timeout: 15_000 });
   await waitForP2PDirect(page);
   await page.locator("#signin").click();
   await expect(page.locator("#msg .ok"), "login over P2P should report success").toBeVisible({
