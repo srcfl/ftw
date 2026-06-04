@@ -167,7 +167,7 @@ func TestTunnelPollRequiresToken(t *testing.T) {
 	r.PollTimeout = 50 * time.Millisecond
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
-	secret := r.Polls.Issue("host-x")
+	secret := mustIssue(t, r.Polls, "host-x")
 
 	poll := func(host, token string) int {
 		req, _ := http.NewRequest("GET", srv.URL+"/tunnel/"+host+"/next", nil)

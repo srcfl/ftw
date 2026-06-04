@@ -43,6 +43,16 @@ const (
 
 var errBodyTooLarge = errors.New("tunneled body exceeds limit")
 
+// ownerHostIDPrefix is the reserved prefix the owner-access Pi derives its
+// host_id with (deriveOwnerHostID: "owner-<site>-<rand>"). The owner poll secret
+// for such a host_id is minted ONLY by the ES256-verified /me/register, bound to
+// the verified site key. The unauthenticated friend path (/tunnel/register) MUST
+// refuse any host_id carrying this prefix, so it can never be used to register a
+// fake friend session under an owner host_id and be handed the owner's poll
+// secret (which then unlocks the /signal rendezvous). Owner and friend host_id
+// namespaces are disjoint by this prefix.
+const ownerHostIDPrefix = "owner-"
+
 // pairTokenRe bounds the routing token to a safe charset. The host generates
 // word-dash tokens (genWordToken: lowercase words joined by '-'); this tolerates
 // that plus digits but rejects anything with HTML/JS metacharacters, so the
@@ -377,6 +387,16 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
+	// CRITICAL: refuse owner-namespaced host_ids on the unauthenticated friend
+	// path. The owner poll secret for an owner-<…> host_id is minted only by the
+	// ES256-verified /me/register; if a friend could register one here it would be
+	// handed back that secret (Issue's principal binding also blocks it, but
+	// rejecting outright keeps owner/friend host_id namespaces structurally
+	// disjoint and avoids ever touching the owner secret store from this path).
+	if strings.HasPrefix(reg.HostID, ownerHostIDPrefix) {
+		http.Error(w, "host_id namespace reserved", http.StatusForbidden)
+		return
+	}
 	if reg.TTLMs <= 0 {
 		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
 		return
@@ -399,7 +419,18 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 	}
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		// Bind the friend's poll secret to the pair token that minted it (the
+		// principal). A subsequent register for the same host_id with a different
+		// token can't retrieve this secret, and the owner path (principal = site
+		// key) can never collide with it.
+		s, err := r.Polls.Issue(reg.HostID, "pair:"+reg.Token)
+		if err != nil {
+			// The host_id already has a secret minted by a different principal.
+			// Don't disclose it: refuse the registration.
+			http.Error(w, "host_id in use by another principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResponse{
@@ -779,19 +810,45 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	// Return the poll token this host must present on /tunnel/<host>/next. The
-	// ES256-verified registration above proves it owns host_id, so only it
-	// learns the token. Re-registration returns the same token (refreshes after
-	// a relay restart re-mints).
+	// Return the poll token this host must present on /tunnel/<host>/next and the
+	// /signal/* rendezvous. The ES256-verified registration above proves it owns
+	// host_id, so only it learns the token. The secret is bound to the verified
+	// site PUBLIC KEY as its principal, so the unauthenticated friend path (which
+	// can only present a pair-token principal) can never retrieve it even if it
+	// learned the owner host_id. Re-registration with the same key returns the
+	// same token (refreshes after a relay restart re-mints).
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		s, err := r.Polls.Issue(reg.HostID, "site:"+reg.PublicKey)
+		if err != nil {
+			// The host_id's secret is bound to a different principal — refuse
+			// rather than disclose it. (Should not happen for a key-continuous
+			// site; defends against a host_id reused across principals.)
+			http.Error(w, "poll secret bound to a different principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})
 }
 
 // ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
+
+// signalNonceHeader carries the rendezvous nonce the Pi echoes back to the
+// browser on a drained offer (FIX-4a). The browser supplied it as ?n=<nonce>;
+// the Pi reads it here and re-sends it on POST /signal/{host}/answer?n=<nonce>,
+// so the relay routes the answer to the right per-nonce mailbox.
+const signalNonceHeader = "X-FTW-Signal-Nonce"
+
+// signalNonceRe bounds the opaque rendezvous nonce to a safe hex charset and
+// length. It is a pure routing key (the relay never parses the SDP), so a tight
+// charset both prevents abuse and keeps it usable as a map key + header value.
+var signalNonceRe = regexp.MustCompile(`^[0-9a-fA-F]{8,64}$`)
+
+func validSignalNonce(s string) bool {
+	return signalNonceRe.MatchString(s)
+}
 
 // signalBrowserOffer parks a browser's SDP offer for {site_id} and wakes any Pi
 // offer-poller. Unauthenticated (the channel that results is itself
@@ -802,6 +859,14 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	siteID := req.PathValue("site_id")
 	if siteID == "" {
 		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	// FIX-4a: the opaque rendezvous nonce keys the per-(site,nonce) mailbox so an
+	// attacker's offers land in their own slot and can't displace the legit
+	// browser's answer. Required + bounded.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
 		return
 	}
 	if r.Signals == nil {
@@ -817,7 +882,7 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty offer", http.StatusBadRequest)
 		return
 	}
-	if err := r.Signals.ParkOffer(siteID, body); err != nil {
+	if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
 		if err == errSignalRateLimited {
 			http.Error(w, "too many offers", http.StatusTooManyRequests)
 			return
@@ -837,11 +902,18 @@ func (r *Relay) signalBrowserAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "missing site_id", http.StatusBadRequest)
 		return
 	}
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
 	if r.Signals == nil {
 		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
 		return
 	}
-	data, ok := r.Signals.TakeAnswer(siteID, signalPollTimeout)
+	// TakeAnswer never allocates a mailbox for an unknown site/nonce, so a flood
+	// of GET /signal/<random>/answer?n=<random> can't grow relay memory (FIX-3).
+	data, ok := r.Signals.TakeAnswer(siteID, nonce, signalPollTimeout)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -869,11 +941,14 @@ func (r *Relay) signalHostOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
-	data, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
+	data, nonce, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
 	if !ok {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	// Echo the rendezvous nonce so the Pi can POST its answer back under the same
+	// per-nonce mailbox the browser is polling (FIX-4a).
+	w.Header().Set(signalNonceHeader, nonce)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(data)
 }
@@ -896,6 +971,13 @@ func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
+	// The Pi echoes the nonce the offer was drained under (FIX-4a) so the answer
+	// lands in the same per-nonce mailbox the browser is polling.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
 	body, err := readBodyLimited(req.Body, maxSignalAnswerBytes)
 	if err != nil {
 		http.Error(w, "answer too large", http.StatusRequestEntityTooLarge)
@@ -905,6 +987,6 @@ func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty answer", http.StatusBadRequest)
 		return
 	}
-	r.Signals.ParkAnswer(siteID, body)
+	r.Signals.ParkAnswer(siteID, nonce, body)
 	w.WriteHeader(http.StatusNoContent)
 }

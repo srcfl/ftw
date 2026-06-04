@@ -45,7 +45,7 @@ func TestSessionInfoTracksLandingHitsAndActivity(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	host.PollTimeout = 500 * time.Millisecond
-	host.SetPollSecret(r.Polls.Issue("h")) // authenticate the host's polls
+	host.SetPollSecret(mustIssue(t, r.Polls, "h")) // authenticate the host's polls
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go host.Run(ctx)

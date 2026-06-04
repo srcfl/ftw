@@ -28,7 +28,7 @@ func newSignalRelay(t *testing.T) (*httptest.Server, *Relay, string) {
 		Signals:     NewSignalMailbox(),
 		PollTimeout: time.Second,
 	}
-	secret := r.Polls.Issue("host-xyz")
+	secret := mustIssue(t, r.Polls, "host-xyz")
 	ts := httptest.NewServer(r.Handler())
 	t.Cleanup(ts.Close)
 	return ts, r, secret
@@ -40,9 +40,10 @@ func newSignalRelay(t *testing.T) (*httptest.Server, *Relay, string) {
 // blobs verbatim and the host_id->site_id mapping wires the two ends together.
 func TestSignalRendezvous_OfferAnswer(t *testing.T) {
 	ts, _, secret := newSignalRelay(t)
+	const nonce = "00112233445566778899aabbccddeeff"
 
-	// 1. Browser parks an offer for the site.
-	resp, err := http.Post(ts.URL+"/signal/"+urlSite("site:Home")+"/offer", "application/json",
+	// 1. Browser parks an offer for the site under its nonce.
+	resp, err := http.Post(ts.URL+"/signal/"+urlSite("site:Home")+"/offer?n="+nonce, "application/json",
 		bytes.NewReader([]byte("OFFER-SDP")))
 	if err != nil {
 		t.Fatalf("park offer: %v", err)
@@ -52,14 +53,18 @@ func TestSignalRendezvous_OfferAnswer(t *testing.T) {
 		t.Fatalf("park offer status = %d, want 204", resp.StatusCode)
 	}
 
-	// 2. Pi drains the offer with its poll secret (host-keyed path).
-	off := mustGet(t, ts.URL+"/signal/host-xyz/offer", secret)
+	// 2. Pi drains the offer with its poll secret (host-keyed path) and gets the
+	//    nonce echoed back in the response header.
+	off, drainNonce := mustGetWithNonce(t, ts.URL+"/signal/host-xyz/offer", secret)
 	if string(off) != "OFFER-SDP" {
 		t.Fatalf("drained offer = %q, want OFFER-SDP", off)
 	}
+	if drainNonce != nonce {
+		t.Fatalf("drained nonce = %q, want %q", drainNonce, nonce)
+	}
 
-	// 3. Pi parks an answer blob.
-	areq, _ := http.NewRequest(http.MethodPost, ts.URL+"/signal/host-xyz/answer",
+	// 3. Pi parks an answer blob under the echoed nonce.
+	areq, _ := http.NewRequest(http.MethodPost, ts.URL+"/signal/host-xyz/answer?n="+drainNonce,
 		bytes.NewReader([]byte(`{"sdp":"ANSWER-SDP","fp_sig":"sig","ts":1}`)))
 	areq.Header.Set(tunnel.PollSecretHeader, secret)
 	ar, err := http.DefaultClient.Do(areq)
@@ -71,8 +76,8 @@ func TestSignalRendezvous_OfferAnswer(t *testing.T) {
 		t.Fatalf("park answer status = %d, want 204", ar.StatusCode)
 	}
 
-	// 4. Browser long-polls the answer back.
-	ans := mustGet(t, ts.URL+"/signal/"+urlSite("site:Home")+"/answer", "")
+	// 4. Browser long-polls the answer back on its own nonce.
+	ans := mustGet(t, ts.URL+"/signal/"+urlSite("site:Home")+"/answer?n="+nonce, "")
 	if !bytes.Contains(ans, []byte("ANSWER-SDP")) {
 		t.Fatalf("answer = %q, want it to contain ANSWER-SDP", ans)
 	}
@@ -124,7 +129,7 @@ func TestSignalHostAnswer_RequiresPollSecret(t *testing.T) {
 // rejected with 429.
 func TestSignalOffer_RateLimited(t *testing.T) {
 	ts, _, _ := newSignalRelay(t)
-	url := ts.URL + "/signal/" + urlSite("site:Home") + "/offer"
+	url := ts.URL + "/signal/" + urlSite("site:Home") + "/offer?n=aabbccddeeff0011"
 	r1, err := http.Post(url, "application/json", bytes.NewReader([]byte("A")))
 	if err != nil {
 		t.Fatalf("post1: %v", err)
@@ -159,6 +164,27 @@ func mustGet(t *testing.T, url, pollSecret string) []byte {
 	}
 	b, _ := io.ReadAll(resp.Body)
 	return b
+}
+
+// mustGetWithNonce is mustGet that also returns the echoed X-FTW-Signal-Nonce
+// header (the Pi's offer-drain returns the browser's nonce so the answer routes
+// back to the right per-nonce mailbox).
+func mustGetWithNonce(t *testing.T, url, pollSecret string) ([]byte, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	if pollSecret != "" {
+		req.Header.Set(tunnel.PollSecretHeader, pollSecret)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get %s status = %d, want 200", url, resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	return b, resp.Header.Get("X-FTW-Signal-Nonce")
 }
 
 // urlSite percent-encodes a site_id for a path segment (the colon in
@@ -207,7 +233,7 @@ func TestHomeStaticForward_FailClosed(t *testing.T) {
 	})
 	host := tunnel.NewHost(srv.URL, "host-home", backend)
 	host.PollTimeout = time.Second
-	host.SetPollSecret(relay.Polls.Issue("host-home"))
+	host.SetPollSecret(mustIssue(t, relay.Polls, "host-home"))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go host.Run(ctx)

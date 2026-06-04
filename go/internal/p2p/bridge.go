@@ -83,6 +83,21 @@ type Bridge struct {
 	// against overwriting a live session with a malformed later header.
 	mu      sync.Mutex
 	sessTok string // captured ftw_owner token, "" until login-over-channel succeeds
+
+	// onSession, when set, fires once the FIRST time a login-over-channel session
+	// is captured. The Manager uses it to mark an otherwise-unauthenticated peer
+	// as authenticated, so its reaper can aggressively close peers that connected
+	// but never logged in (the unauth-flood slot-exhaustion guard, FIX-4b). Nil in
+	// tests / the NewReplayer path.
+	onSession func()
+}
+
+// SetOnSession registers a callback fired once when this Bridge first captures a
+// login-over-channel session. Safe to call before the channel sees traffic.
+func (b *Bridge) SetOnSession(fn func()) {
+	b.mu.Lock()
+	b.onSession = fn
+	b.mu.Unlock()
 }
 
 // NewReplayer builds a DataChannel-less Bridge that can replay frames against
@@ -216,9 +231,21 @@ func (b *Bridge) replay(req tunnel.TunneledRequest) tunnel.TunneledResponse {
 	// without the cookie ever leaving DTLS or being readable by JS.
 	b.captureSession(res.Cookies())
 	payload, _ := io.ReadAll(res.Body)
+	// FIX-5: STRIP Set-Cookie from the response that crosses the DataChannel. The
+	// owner session is captured above and replayed server-side as a channel-scoped
+	// Cookie; it must NEVER reach JS. Without this, p2p.js copies Set-Cookie into a
+	// JS-visible Headers, so an injected same-origin script could read the owner
+	// cookie during login. The session lives only inside the Bridge now.
+	hdr := res.Header
+	if len(hdr["Set-Cookie"]) > 0 {
+		// Clone so we don't mutate the recorder's header (defensive; the recorder
+		// result is otherwise discarded, but a clone keeps the intent explicit).
+		hdr = res.Header.Clone()
+		hdr.Del("Set-Cookie")
+	}
 	return tunnel.TunneledResponse{
 		Status: res.StatusCode,
-		Header: res.Header,
+		Header: hdr,
 		Body:   payload,
 	}
 }
@@ -241,12 +268,22 @@ func (b *Bridge) captureSession(cookies []*http.Cookie) {
 			continue
 		}
 		b.mu.Lock()
+		var fire func()
 		if c.Value == "" || c.MaxAge < 0 {
 			b.sessTok = "" // logout-over-channel
 		} else {
+			// Fire onSession only on the FIRST capture (a transition from no
+			// session to a session), so the Manager marks the peer authenticated
+			// exactly once.
+			if b.sessTok == "" && b.onSession != nil {
+				fire = b.onSession
+			}
 			b.sessTok = c.Value
 		}
 		b.mu.Unlock()
+		if fire != nil {
+			fire()
+		}
 	}
 }
 

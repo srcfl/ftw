@@ -218,6 +218,83 @@ func TestMeRegisterSameKeyReRegisterUpdatesHost(t *testing.T) {
 	}
 }
 
+// FIX-1 (CRITICAL): /tunnel/register (unauthenticated, the friend path) must
+// NEVER disclose the OWNER poll secret. An attacker who learns an owner-* host_id
+// could otherwise POST a fake friend registration with it and be handed back the
+// owner's poll secret minted by /me/register — then poll/inject the owner's
+// /signal rendezvous. Two guards: (1) /tunnel/register rejects any owner-* host_id
+// with 403, and (2) PollSecrets binds the secret to the minting principal so even
+// without the prefix guard a different principal can't retrieve it.
+func TestTunnelRegister_DoesNotDiscloseOwnerPollSecret(t *testing.T) {
+	relay := &Relay{
+		Queue:       tunnel.NewQueue(),
+		Tokens:      NewTokenRegistry(),
+		Owners:      NewOwnerRegistry(),
+		Polls:       NewPollSecrets(),
+		PollTimeout: time.Second,
+	}
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+
+	// 1. The owner registers via the ES256-signed /me/register, minting its poll
+	//    secret (bound to the site key). This is the secret the /signal rendezvous
+	//    is authenticated with.
+	owner := newTestIdentity(t)
+	const ownerHost = "owner-home-deadbeef" // owner-* namespace, like deriveOwnerHostID
+	reg := signedMeBody(t, owner, "site:Home", ownerHost, time.Now().UnixMilli())
+	mr, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(reg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Body.Close()
+	if mr.StatusCode != 200 {
+		t.Fatalf("/me/register status=%d, want 200", mr.StatusCode)
+	}
+	var owned struct {
+		PollSecret string `json:"poll_secret"`
+	}
+	if err := json.NewDecoder(mr.Body).Decode(&owned); err != nil {
+		t.Fatalf("decode owner poll secret: %v", err)
+	}
+	if owned.PollSecret == "" {
+		t.Fatal("owner /me/register returned an empty poll secret")
+	}
+	// Sanity: the owner secret really does authenticate the owner /signal drain.
+	if !relay.Polls.Check(ownerHost, owned.PollSecret) {
+		t.Fatal("owner poll secret does not authenticate its host — test premise broken")
+	}
+
+	// 2. The attacker POSTs a friend /tunnel/register using the OWNER host_id,
+	//    hoping to be handed the owner's existing poll secret. It must be REFUSED
+	//    (owner-* namespace reserved) — and must NOT return the owner secret.
+	frBody, _ := json.Marshal(registerRequest{
+		HostID: ownerHost,
+		Token:  "attacker-token",
+		TTLMs:  60_000,
+	})
+	fr, err := http.Post(srv.URL+"/tunnel/register", "application/json", bytes.NewReader(frBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fr.Body.Close()
+	if fr.StatusCode != http.StatusForbidden {
+		t.Fatalf("/tunnel/register with owner-* host_id status=%d, want 403 (reserved)", fr.StatusCode)
+	}
+	var leaked registerResponse
+	_ = json.NewDecoder(fr.Body).Decode(&leaked)
+	if leaked.PollSecret != "" {
+		t.Fatalf("/tunnel/register leaked a poll secret: %q", leaked.PollSecret)
+	}
+	if leaked.PollSecret == owned.PollSecret {
+		t.Fatal("/tunnel/register disclosed the OWNER poll secret to the friend path")
+	}
+	// The owner secret is unchanged and still the only one that authenticates the
+	// owner host — the attacker learned nothing.
+	if !relay.Polls.Check(ownerHost, owned.PollSecret) {
+		t.Fatal("owner poll secret changed after the friend-register attempt")
+	}
+}
+
 // An operator-provisioned pin (Pin) is authoritative even over a first-arriving
 // different key — so the internet-exposed home site can't be TOFU-claimed by a
 // racer after a relay restart.

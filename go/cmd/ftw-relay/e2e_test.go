@@ -39,12 +39,11 @@ func TestE2EHostAndFriendRoundtripThroughRelay(t *testing.T) {
 
 	host := tunnel.NewHost(srv.URL, "host-a", mcpBackend)
 	host.PollTimeout = 1 * time.Second
-	host.SetPollSecret(relay.Polls.Issue("host-a")) // authenticate the host's polls
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go host.Run(ctx)
 
-	// 1. Register.
+	// 1. Register first — the friend host mints its poll secret HERE (bound to the
+	//    pair token), exactly as production does, then authenticates its polls with
+	//    the returned secret. (Pre-seeding a secret under a different principal
+	//    would now be refused by the FIX-1 principal binding.)
 	regBody, _ := json.Marshal(registerRequest{
 		HostID: "host-a", Token: "tok1", TTLMs: 60_000, ApprovalCode: "4827",
 	})
@@ -55,6 +54,18 @@ func TestE2EHostAndFriendRoundtripThroughRelay(t *testing.T) {
 	if regResp.StatusCode != 200 {
 		t.Fatalf("register status %d", regResp.StatusCode)
 	}
+	var regOut registerResponse
+	if err := json.NewDecoder(regResp.Body).Decode(&regOut); err != nil {
+		t.Fatalf("decode register response: %v", err)
+	}
+	regResp.Body.Close()
+	if regOut.PollSecret == "" {
+		t.Fatal("register returned an empty poll secret")
+	}
+	host.SetPollSecret(regOut.PollSecret) // authenticate the host's polls
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go host.Run(ctx)
 
 	// 2. Friend hits /h/tok1/mcp before approval → 401 (no session grant yet).
 	pre, err := http.Post(srv.URL+"/h/tok1/mcp", "application/json", strings.NewReader(`{"x":1}`))
@@ -121,13 +132,24 @@ func TestE2EWebReverseProxy(t *testing.T) {
 
 	host := tunnel.NewHost(srv.URL, "host-b", dashboard)
 	host.PollTimeout = 1 * time.Second
-	host.SetPollSecret(relay.Polls.Issue("host-b")) // authenticate the host's polls
+
+	// Register first; the host authenticates its polls with the poll secret the
+	// register response returns (bound to the pair token), as in production.
+	regBody, _ := json.Marshal(registerRequest{HostID: "host-b", Token: "tok2", TTLMs: 60_000, ApprovalCode: "1234"})
+	regResp, err := http.Post(srv.URL+"/tunnel/register", "application/json", bytes.NewReader(regBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var regOut registerResponse
+	if err := json.NewDecoder(regResp.Body).Decode(&regOut); err != nil {
+		t.Fatalf("decode register response: %v", err)
+	}
+	regResp.Body.Close()
+	host.SetPollSecret(regOut.PollSecret) // authenticate the host's polls
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go host.Run(ctx)
 
-	regBody, _ := json.Marshal(registerRequest{HostID: "host-b", Token: "tok2", TTLMs: 60_000, ApprovalCode: "1234"})
-	_, _ = http.Post(srv.URL+"/tunnel/register", "application/json", bytes.NewReader(regBody))
 	grant := approveGrant(t, srv, "tok2", "1234")
 
 	// Web access requires the grant cookie; without it → 401.
