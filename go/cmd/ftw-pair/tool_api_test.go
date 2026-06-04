@@ -54,9 +54,27 @@ func TestToolFtwAPI_DeniesOwnerOnlyAndNonAPI(t *testing.T) {
 		"/api/pair/start",                //
 		"/api/owner-access/enroll/start", // owner-only credential management
 		"/api/owner-access/devices",      //
+		"/api/%70air/status",             // percent-encoded 'p' → /api/pair/status
+		"/api/%70air/%73tatus",           // doubly-encoded segments
+		"/api/../api/pair/status",        // path-traversal back into /api/pair/
+		"/api//pair/status",              // double slash
 	} {
 		if _, err := tool.Handle(context.Background(), map[string]any{"method": "POST", "path": path}); err == nil {
 			t.Errorf("path %q should be rejected by ftw_api, got nil error", path)
+		}
+	}
+}
+
+func TestNormalizeAPIPath(t *testing.T) {
+	cases := map[string]string{
+		"/api/%70air/status":      "/api/pair/status",
+		"/api/../api/pair/status": "/api/pair/status",
+		"/api//pair/status":       "/api/pair/status",
+		"/api/status":             "/api/status",
+	}
+	for in, want := range cases {
+		if got := normalizeAPIPath(in); got != want {
+			t.Errorf("normalizeAPIPath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

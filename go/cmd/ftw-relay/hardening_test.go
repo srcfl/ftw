@@ -120,8 +120,17 @@ func TestTokenRegistryCaps(t *testing.T) {
 			t.Fatalf("register %d: %v", i, err)
 		}
 	}
-	if _, err := reg.Register(TokenRegistration{HostID: "h", Token: "overflow", TTL: time.Hour, ApprovalCode: "1"}); err != ErrTooManyTokens {
-		t.Fatalf("over-cap register: err = %v, want ErrTooManyTokens", err)
+	// At the cap, a new registration evicts the OLDEST pending token ("clamp")
+	// and succeeds — a flood of unapproved tokens must not permanently lock out
+	// real pair sessions.
+	if _, err := reg.Register(TokenRegistration{HostID: "h", Token: "newone", TTL: time.Hour, ApprovalCode: "1"}); err != nil {
+		t.Fatalf("at-cap register should evict-and-succeed, got %v", err)
+	}
+	if _, err := reg.Get("newone"); err != nil {
+		t.Fatalf("new token should be present after evict: %v", err)
+	}
+	if _, err := reg.Get("clamp"); err == nil {
+		t.Fatal("oldest pending token should have been evicted at cap")
 	}
 }
 

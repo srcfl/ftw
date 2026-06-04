@@ -148,8 +148,15 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 		return nil, ErrTokenExists
 	}
 	// Bound the map so the unauthenticated /tunnel/register can't exhaust relay
-	// memory with a flood of distinct tokens.
+	// memory with a flood of distinct tokens. First reclaim expired/revoked
+	// tokens (so a stale entry the janitor hasn't swept doesn't count); then, if
+	// still full, evict the oldest unapproved token so a flood can't permanently
+	// block real pair sessions. Only if every live token is an active session do
+	// we refuse.
 	if len(r.tokens) >= maxLiveTokens {
+		r.gcLocked()
+	}
+	if len(r.tokens) >= maxLiveTokens && !r.evictOldestPendingLocked() {
 		return nil, ErrTooManyTokens
 	}
 	// Clamp the TTL: an attacker-supplied near-infinite TTL would otherwise pin
@@ -178,6 +185,11 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 func (r *TokenRegistry) GC() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.gcLocked()
+}
+
+// gcLocked removes expired/revoked tokens. Caller holds r.mu.
+func (r *TokenRegistry) gcLocked() int {
 	removed := 0
 	for tok, t := range r.tokens {
 		switch t.State() { // lazily transitions to Expired under its own lock
@@ -187,6 +199,28 @@ func (r *TokenRegistry) GC() int {
 		}
 	}
 	return removed
+}
+
+// evictOldestPendingLocked drops the oldest still-PENDING token (never an active
+// session), so a flood of unapproved registrations can't permanently lock out
+// legitimate ones once the cap is reached. Returns false if every live token is
+// an active session. Caller holds r.mu. createdAt is immutable after Register.
+func (r *TokenRegistry) evictOldestPendingLocked() bool {
+	var oldestTok string
+	var oldest time.Time
+	found := false
+	for tok, t := range r.tokens {
+		if t.State() != TokenPending {
+			continue
+		}
+		if !found || t.createdAt.Before(oldest) {
+			oldestTok, oldest, found = tok, t.createdAt, true
+		}
+	}
+	if found {
+		delete(r.tokens, oldestTok)
+	}
+	return found
 }
 
 func (r *TokenRegistry) Get(token string) (*Token, error) {

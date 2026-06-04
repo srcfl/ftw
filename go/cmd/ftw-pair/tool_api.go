@@ -51,6 +51,11 @@ func (t *FtwAPITool) Handle(ctx context.Context, args map[string]any) (any, erro
 	if method == "" || path == "" {
 		return nil, fmt.Errorf("method and path are required")
 	}
+	// Normalize (decode percent-encoding, clean ./..//) before BOTH the allowlist
+	// checks and forwarding, so a friend can't smuggle e.g. /api/%70air/status
+	// past the denylist to the ungated sidecar status endpoint (the Pi decodes it
+	// back to /api/pair/status).
+	path = normalizeAPIPath(path)
 	if !strings.HasPrefix(path, "/api/") {
 		return nil, fmt.Errorf("path must start with /api/ (got %q)", path)
 	}

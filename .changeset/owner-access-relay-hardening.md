@@ -77,6 +77,11 @@ home.* exposure and the issues a multi-agent audit surfaced around it.
   `home.fortytwowatts.com`), the ES256-signed `/me/register`, and the
   `-home-pubkey` requirement — the runbook previously instructed the wrong,
   one-way-door RP-ID.
+- The friend-proxy denylist now normalizes (decodes + cleans) the path before
+  matching, so `/api/%70air/status`-style percent-encoding can't smuggle a
+  request past it; the relay's token registry evicts the oldest *unapproved*
+  token at capacity (a flood can't lock out real pair sessions) and the tunnel
+  queue caps total parked long-poll waiters against an unauthenticated flood.
 
 Note for operators: upgrade the relay and the Pi together — the hardened relay
 requires the signed registration the updated Pi sends.

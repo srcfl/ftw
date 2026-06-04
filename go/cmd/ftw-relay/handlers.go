@@ -250,6 +250,10 @@ func (r *Relay) tunnelNext(w http.ResponseWriter, req *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if errors.Is(err, tunnel.ErrTooManyWaiters) {
+		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
