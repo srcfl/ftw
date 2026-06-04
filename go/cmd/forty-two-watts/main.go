@@ -1693,6 +1693,9 @@ func main() {
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
 	go rolloffLoop(ctx, st, coldDir)
 
+	// ---- Background: daily state.db recovery snapshot ----
+	go snapshotLoop(ctx, st)
+
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
@@ -2062,6 +2065,37 @@ func main() {
 				}
 				modelsMu.Unlock()
 			}
+		}
+	}
+}
+
+// snapshotLoop writes a recovery snapshot of state.db daily and once on
+// shutdown. The snapshot is the restore source if state.db corrupts (see
+// state.openChecked). cache.db needs none — it's re-fetchable. Daily (not
+// hourly) keeps SD-card write-wear low while bounding worst-case loss of
+// precious data to one day.
+func snapshotLoop(ctx context.Context, st *state.Store) {
+	// Initial snapshot shortly after boot so a fresh install gets one fast.
+	first := time.NewTimer(2 * time.Minute)
+	defer first.Stop()
+	tick := time.NewTicker(24 * time.Hour)
+	defer tick.Stop()
+	doSnap := func() {
+		if err := st.SnapshotState(); err != nil {
+			slog.Warn("state snapshot failed", "err", err)
+		} else {
+			slog.Info("state snapshot written")
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			doSnap() // best-effort on graceful shutdown
+			return
+		case <-first.C:
+			doSnap()
+		case <-tick.C:
+			doSnap()
 		}
 	}
 }
