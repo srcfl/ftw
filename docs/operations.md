@@ -188,9 +188,10 @@ For the `docker-compose.yml` deployment, the web UI's version badge and "Update"
 
 ## 7. Backup + restore
 
-Three things hold state:
+State is split across two SQLite files by criticality:
 
-- **`state.db`** — SQLite (config, battery models, devices, prices, forecasts, recent TSDB tier). Highest priority.
+- **`state.db`** — precious data (config, battery/PV/load models, devices, energy history, recent TSDB tier). Highest priority. A daily `state.db.snapshot` is written automatically (see §8 "Database corrupt") as a restore source.
+- **`cache.db`** — disposable, re-fetchable data (spot prices, weather forecasts). Lowest priority — safe to delete; it rebuilds and re-fetches within the hour.
 - **`cold/YYYY/MM/DD.parquet`** — long-format TS history for data > 14 days old. Medium priority (losing it loses history, not control).
 - **`config.yaml`** — operator-edited config. High priority; may not be reproducible from git.
 
@@ -200,7 +201,8 @@ Backup (stop for a consistent SQLite snapshot):
 # On the Pi
 cd ~/forty-two-watts-go
 sudo systemctl stop forty-two-watts
-tar czf ~/backup-$(date +%F).tgz state.db state.db-wal state.db-shm cold/ config.yaml
+tar czf ~/backup-$(date +%F).tgz state.db state.db-wal state.db-shm \
+        state.db.snapshot cache.db cold/ config.yaml
 sudo systemctl start forty-two-watts
 ```
 
@@ -209,6 +211,33 @@ Online backup is possible (SQLite is WAL-mode and survives `cp`), but cold backu
 Restore: stop the service, extract into `WorkingDirectory`, start the service. On first startup after restore, device-identity reconciliation and battery-model key migration are idempotent — nothing to do manually.
 
 ## 8. Troubleshooting runbook
+
+### Database corrupt (no prices / blank dashboard data)
+
+Symptom: spot prices (or other data) stop appearing; logs show
+`price save failed err="database disk image is malformed (11)"` or similar
+SQLITE_CORRUPT errors. Almost always SD-card corruption after a power loss.
+
+The service now self-heals at boot and surfaces the result on
+`GET /api/health` under `storage`:
+
+```json
+"storage": { "state": "ok", "cache": "rebuilt", "detail": "cache.db was corrupt — rebuilt empty, re-fetching" }
+```
+
+- `storage.cache: "rebuilt"` — the disposable `cache.db` was corrupt and was
+  quarantined + rebuilt empty. Prices/forecasts re-fetch within the hour. No
+  action needed.
+- `storage.state: "restored"` — the precious `state.db` was corrupt and was
+  restored from the daily `state.db.snapshot`. You lose at most a day of
+  history/model training. No action needed.
+- `storage.state: "rebuilt"` — `state.db` was corrupt **and** no snapshot
+  existed, so it started fresh (history + trained models lost). Restore from a
+  backup (§7) if you have one.
+
+Quarantined corrupt files are kept as `<db>.corrupt-<ms>` for inspection.
+`cache.db` is always safe to delete manually. If corruption recurs, the SD
+card is likely failing — reflash/replace it and ensure clean shutdowns.
 
 ### Driver hung (tick_count not advancing)
 
@@ -354,8 +383,10 @@ The rolloff loop runs once per hour and is cheap when nothing is due (a single `
 
 | File | Owner | Purpose | Backup priority |
 |---|---|---|---|
-| `state.db` | sqlite (WAL) | Config, models, devices, prices, forecasts, recent TSDB | High |
+| `state.db` | sqlite (WAL) | Config, models, devices, energy history, recent TSDB | High |
 | `state.db-wal`, `state.db-shm` | sqlite | WAL sidecars — include in backup | High |
+| `state.db.snapshot` | snapshotLoop | Daily recovery copy; restore source if `state.db` corrupts | Medium |
+| `cache.db` | sqlite (WAL) | Disposable, re-fetchable spot prices + weather forecasts | Low (safe to delete) |
 | `cold/YYYY/MM/DD.parquet` | rolloffLoop | Long-format TS history > 14 days | Medium |
 | `config.yaml` | operator | All operator-tunable settings | High |
 | `forty-two-watts.log` | service | Diagnostic log (stdout redirect) | Low |

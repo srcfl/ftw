@@ -11,7 +11,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,45 +31,81 @@ const (
 	ColdBucketMS = 24 * 60 * 60 * 1000
 )
 
-// Store is the persistent state DB (thin wrapper around *sql.DB).
+// Store is the persistent state DB. It wraps two SQLite files:
+//   - db:    precious state.db (models, history, devices, config, telemetry)
+//   - cache: disposable cache.db (prices, forecasts) — re-fetchable, so it can
+//     be quarantined and rebuilt on corruption without losing anything.
+//
+// See heal.go for the boot-time integrity gate that populates healEvents.
 type Store struct {
-	db *sql.DB
-	ts *internCache
+	db    *sql.DB
+	cache *sql.DB
+	ts    *internCache
+
+	healEvents []HealEvent
 }
 
-// Open initializes (or creates) the DB at path. Runs all migrations.
+// Open initializes (or creates) the precious state.db at path plus the
+// disposable cache.db beside it, healing either if corrupt (see openChecked),
+// then runs all migrations. The connection pragmas (WAL, synchronous(NORMAL),
+// foreign_keys, busy_timeout) and a small pool live in openRaw — see heal.go.
 func Open(path string) (*Store, error) {
-	// busy_timeout(5000) is mandatory once we allow >1 connection — without
-	// it, concurrent writers race for the WAL lock and SQLITE_BUSY surfaces
-	// to callers immediately. With it, contenders wait up to 5 s for the
-	// lock, which is well within HTTP request budgets and longer than any
-	// real write batch in this codebase.
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	nowMs := time.Now().UnixMilli()
+	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
+
+	db, stEv, err := openChecked(path, tierState, nowMs)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", path, err)
+		return nil, err
 	}
-	// WAL mode allows many concurrent readers + one writer. With a single
-	// connection any expensive read (e.g. DailyCostBreakdown) serializes
-	// the entire app on the DB mutex, which is what produced the post-v0.76
-	// "dashboard locked up + control loop stalled" reports. A small pool
-	// lets reads run in parallel while writers still queue safely behind
-	// busy_timeout.
-	db.SetMaxOpenConns(4)
-	db.SetMaxIdleConns(2)
-	s := &Store{db: db, ts: newInternCache()}
+	cache, caEv, err := openChecked(cachePath, tierCache, nowMs)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	s := &Store{db: db, cache: cache, ts: newInternCache()}
+	for _, ev := range []*HealEvent{stEv, caEv} {
+		if ev != nil {
+			s.healEvents = append(s.healEvents, *ev)
+		}
+	}
 	if err := s.migrate(); err != nil {
 		db.Close()
+		cache.Close()
+		return nil, err
+	}
+	if err := s.migrateLegacyTierSplit(); err != nil {
+		db.Close()
+		cache.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// Close releases the DB file. Safe to call multiple times.
+// Close releases both DB files. Safe to call multiple times.
 func (s *Store) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	var err error
+	if s.cache != nil {
+		err = s.cache.Close()
+	}
+	if s.db != nil {
+		if e := s.db.Close(); e != nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// HealEvents returns the corruption-recovery events from this boot (nil = a
+// clean boot). Surfaced on /api/health so DB corruption is never silent.
+func (s *Store) HealEvents() []HealEvent {
+	if s == nil {
+		return nil
+	}
+	return s.healEvents
 }
 
 // SnapshotTo writes a self-contained, defragmented copy of the database
@@ -289,34 +327,8 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_cold_ts ON history_cold(ts_ms)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms DESC)`,
 
-		// Spot prices — one row per time slot per zone.
-		// Slot duration is provider-dependent: NordPool went to 15-min PTU
-		// in late 2025; ENTSOE is mixed. The table just stores timestamps —
-		// slot_len_min tells consumers what duration each row represents.
-		`CREATE TABLE IF NOT EXISTS prices (
-			zone TEXT NOT NULL,
-			slot_ts_ms INTEGER NOT NULL,
-			slot_len_min INTEGER NOT NULL DEFAULT 60,
-			spot_ore_kwh REAL NOT NULL,
-			total_ore_kwh REAL NOT NULL,
-			source TEXT NOT NULL,
-			fetched_at_ms INTEGER NOT NULL,
-			PRIMARY KEY (zone, slot_ts_ms)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_prices_slot ON prices(slot_ts_ms)`,
-
-		// Weather + PV forecasts — one row per hour (met.no/openweather
-		// both default to hourly; can downsample to 15-min if needed later).
-		`CREATE TABLE IF NOT EXISTS forecasts (
-			slot_ts_ms INTEGER PRIMARY KEY,
-			slot_len_min INTEGER NOT NULL DEFAULT 60,
-			cloud_cover_pct REAL,
-			temp_c REAL,
-			solar_wm2 REAL,
-			pv_w_estimated REAL,
-			source TEXT NOT NULL,
-			fetched_at_ms INTEGER NOT NULL
-		)`,
+		// NB: the `prices` and `forecasts` tables live in the disposable
+		// cache.db, not here — see cacheStmts below.
 
 		// ---- Long-format time-series ("recent" tier, last 14 days) ----
 		// Drivers + metrics are interned to integer ids to keep rows small.
@@ -486,6 +498,42 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)
 		}
 	}
+
+	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
+	// separate file so its corruption (or a deliberate flush) never risks the
+	// precious state.db — and recovery is just "rebuild empty + re-fetch".
+	cacheStmts := []string{
+		// Spot prices — one row per time slot per zone. Slot duration is
+		// provider-dependent (NordPool 15-min PTU since late 2025; ENTSOE
+		// mixed); slot_len_min tells consumers what each row represents.
+		`CREATE TABLE IF NOT EXISTS prices (
+			zone TEXT NOT NULL,
+			slot_ts_ms INTEGER NOT NULL,
+			slot_len_min INTEGER NOT NULL DEFAULT 60,
+			spot_ore_kwh REAL NOT NULL,
+			total_ore_kwh REAL NOT NULL,
+			source TEXT NOT NULL,
+			fetched_at_ms INTEGER NOT NULL,
+			PRIMARY KEY (zone, slot_ts_ms)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_prices_slot ON prices(slot_ts_ms)`,
+		// Weather + PV forecasts — one row per hour.
+		`CREATE TABLE IF NOT EXISTS forecasts (
+			slot_ts_ms INTEGER PRIMARY KEY,
+			slot_len_min INTEGER NOT NULL DEFAULT 60,
+			cloud_cover_pct REAL,
+			temp_c REAL,
+			solar_wm2 REAL,
+			pv_w_estimated REAL,
+			source TEXT NOT NULL,
+			fetched_at_ms INTEGER NOT NULL
+		)`,
+	}
+	for _, stmt := range cacheStmts {
+		if _, err := s.cache.Exec(stmt); err != nil {
+			return fmt.Errorf("cache migration %q: %w", stmt[:40]+"…", err)
+		}
+	}
 	return nil
 }
 
@@ -514,6 +562,77 @@ func (s *Store) addColumnIfMissing(table, column, ddl string) error {
 	}
 	_, err = s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + ddl)
 	return err
+}
+
+// migrateLegacyTierSplit moves prices/forecasts rows from a pre-tiering
+// state.db into cache.db, then drops them from state.db. Idempotent: a no-op
+// once state.db has no such tables. Best-effort on copy — a read failure on the
+// (possibly corrupt) source is logged and skipped, since the data is
+// re-fetchable.
+func (s *Store) migrateLegacyTierSplit() error {
+	for _, tbl := range []string{"prices", "forecasts"} {
+		var name string
+		err := s.db.QueryRow(
+			`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tbl).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // already migrated / fresh install
+		}
+		if err != nil {
+			return fmt.Errorf("legacy check %s: %w", tbl, err)
+		}
+		if err := s.copyTableToCache(tbl); err != nil {
+			slog.Warn("legacy tier migration: copy failed, skipping (data re-fetchable)",
+				"table", tbl, "err", err)
+		}
+		if _, err := s.db.Exec(`DROP TABLE ` + tbl); err != nil {
+			return fmt.Errorf("drop legacy %s: %w", tbl, err)
+		}
+		slog.Info("migrated legacy table to cache.db", "table", tbl)
+	}
+	return nil
+}
+
+// copyTableToCache streams every row of tbl from state.db into the
+// already-created cache.db table via a parameterized INSERT OR IGNORE.
+func (s *Store) copyTableToCache(tbl string) error {
+	rows, err := s.db.Query(`SELECT * FROM ` + tbl)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return err
+	}
+	placeholders := make([]string, len(cols))
+	for i := range placeholders {
+		placeholders[i] = "?"
+	}
+	insert := fmt.Sprintf(`INSERT OR IGNORE INTO %s (%s) VALUES (%s)`,
+		tbl, strings.Join(cols, ","), strings.Join(placeholders, ","))
+
+	tx, err := s.cache.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(insert, vals...); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---- Config key-value ----
@@ -979,7 +1098,7 @@ type PricePoint struct {
 // SavePrices upserts a batch of price rows (slot duration per-row).
 func (s *Store) SavePrices(pts []PricePoint) error {
 	if len(pts) == 0 { return nil }
-	tx, err := s.db.Begin()
+	tx, err := s.cache.Begin()
 	if err != nil { return err }
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO prices
@@ -1005,7 +1124,7 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 
 // LoadPrices returns prices for zone in [sinceMs, untilMs], ordered ascending.
 func (s *Store) LoadPrices(zone string, sinceMs, untilMs int64) ([]PricePoint, error) {
-	rows, err := s.db.Query(`SELECT zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms
+	rows, err := s.cache.Query(`SELECT zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms
 		FROM prices
 		WHERE zone = ? AND slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, zone, sinceMs, untilMs)
@@ -1039,7 +1158,7 @@ type ForecastPoint struct {
 // SaveForecasts upserts a batch of forecast rows.
 func (s *Store) SaveForecasts(pts []ForecastPoint) error {
 	if len(pts) == 0 { return nil }
-	tx, err := s.db.Begin()
+	tx, err := s.cache.Begin()
 	if err != nil { return err }
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO forecasts
@@ -1067,7 +1186,7 @@ func (s *Store) SaveForecasts(pts []ForecastPoint) error {
 
 // LoadForecasts returns forecasts in [sinceMs, untilMs], ordered ascending.
 func (s *Store) LoadForecasts(sinceMs, untilMs int64) ([]ForecastPoint, error) {
-	rows, err := s.db.Query(`SELECT slot_ts_ms, slot_len_min, cloud_cover_pct, temp_c, solar_wm2, pv_w_estimated, source, fetched_at_ms
+	rows, err := s.cache.Query(`SELECT slot_ts_ms, slot_len_min, cloud_cover_pct, temp_c, solar_wm2, pv_w_estimated, source, fetched_at_ms
 		FROM forecasts
 		WHERE slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, sinceMs, untilMs)

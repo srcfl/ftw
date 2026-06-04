@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.113.0
+
+### Minor Changes
+
+- bba0d1a: prices: implement the ENTSO-E day-ahead XML parser
+
+  The `entsoe` provider previously returned `"entsoe: XML parser not yet
+implemented"` for every fetch — selecting it in Settings → Price (or as a
+  fallback when elprisetjustnu fails) silently produced no prices at all.
+
+  It now decodes the A44 `Publication_MarketDocument` (TimeSeries > Period >
+  Point), handling both PT60M and PT15M resolutions and the sparse
+  carry-forward representation, and converts EUR/MWh to the configured
+  currency per kWh via the existing FX converter (ballpark 11.5 SEK/EUR when
+  rates aren't wired). A day the auction hasn't published yet returns no
+  rows, mirroring the elprisetjustnu path so the hourly scheduler just
+  retries.
+
+- 285cca0: state: resilient two-tier storage with auto-heal
+
+  Disposable, re-fetchable data (spot prices, weather forecasts) now lives in a
+  separate `cache.db`, isolated from the precious `state.db` (trained models,
+  energy history, device identity). At boot each database runs `PRAGMA
+quick_check`: a corrupt `cache.db` is quarantined and rebuilt empty
+  (re-fetched within the hour); a corrupt `state.db` is restored from a daily
+  recovery snapshot, or quarantined and started fresh if none exists. Every
+  recovery is surfaced on `GET /api/health` under `storage`, so DB corruption is
+  never a silent, blank-dashboard failure again. Existing installs migrate
+  automatically — `prices`/`forecasts` move from `state.db` to `cache.db` on
+  first boot.
+
+### Patch Changes
+
+- e046eb0: ui(flow): drop the "· charging/discharging" suffix on battery nodes
+
+  The battery node in the energy-flow view showed `target −83 W · discharging`,
+  which overflowed the node circle. The suffix is now removed — the live W value
+  and SoC% already convey direction — so the label reads just `target −83 W`.
+
 ## 0.112.0
 
 ### Minor Changes

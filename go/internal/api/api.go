@@ -418,12 +418,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if off > 0 {
 		status = "degraded"
 	}
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"status":           status,
 		"drivers_ok":       ok,
 		"drivers_degraded": deg,
 		"drivers_offline":  off,
-	})
+	}
+	// storage: surface DB corruption-recovery events from this boot so a
+	// corrupt database is never a silent, blank-dashboard failure again.
+	if s.deps.State != nil {
+		storage := map[string]any{"state": "ok", "cache": "ok"}
+		for _, ev := range s.deps.State.HealEvents() {
+			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
+			storage["last_event_ms"] = ev.AtMs
+			storage["detail"] = ev.Detail
+		}
+		resp["storage"] = storage
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- /api/status ----

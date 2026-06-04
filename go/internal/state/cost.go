@@ -126,7 +126,7 @@ func (s *Store) DailyCostBreakdown(sinceMs, untilMs int64, zone string, ep Expor
 // maxSlotPadMs (1 day) — generous against any real provider slot length so
 // a slot that started just before sinceMs and extends into it is included.
 func (s *Store) loadPriceSlotsForRange(zone string, sinceMs, untilMs int64) ([]priceSlot, error) {
-	rows, err := s.db.Query(`
+	rows, err := s.cache.Query(`
 		SELECT slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh
 		FROM prices
 		WHERE zone = ?
@@ -282,7 +282,7 @@ func (s *Store) integrateHistoryRange(sinceMs, untilMs int64, slots []priceSlot,
 // over price slots overlapping [sinceMs, untilMs), including variable slot
 // lengths and partial edge slots.
 func (s *Store) avgSlotPricesForRange(zone string, sinceMs, untilMs int64, ep ExportPricing) (avgImport, avgExport float64, count int, err error) {
-	rows, err := s.db.Query(`
+	rows, err := s.cache.Query(`
 		SELECT slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh
 		FROM prices
 		WHERE zone = ?

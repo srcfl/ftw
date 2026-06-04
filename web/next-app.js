@@ -370,16 +370,11 @@
     el.textContent = (soc * 100).toFixed(1) + " %";
     el.className = "live-stat-value is-neutral";
   }
-  function batteryStateLabel(w) {
-    var watts = Number(w) || 0;
-    var idleW = flowIdleKw() * 1000;
-    if (watts > idleW) return "charging";
-    if (watts < -idleW) return "discharging";
-    return "idle";
-  }
   function batteryTargetLine(targetW) {
     if (targetW == null || !isFinite(targetW)) return "";
-    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+    // Just the target — the "· charging/discharging" suffix overflowed the
+    // node circle; the live W value + SoC% already convey direction.
+    return "target " + formatW(targetW);
   }
 
   function smoothDisplayNumber(key, value, now) {
@@ -1918,11 +1913,17 @@
     Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
       xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      xfetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ])
       .then(function (results) {
         var data = results[0];
         var lp = results[1];
+        var health = results[2];
         lastStatusPayload = data;
+        // Surface DB corruption-recovery events (boot-time, immutable per
+        // process) as a top banner. Tolerant: health may be null.
+        try { updateStorageBanner(health && health.storage); }
+        catch (eSb) { /* silent */ }
         if (lp && Array.isArray(lp.loadpoints)) {
           var idx = {};
           lp.loadpoints.forEach(function (l) {
@@ -1947,6 +1948,66 @@
         setConnected(false);
         if (firstLoad) { showSetupBanner(); }
       });
+  }
+
+  // ---- Storage-health banner (DB corruption auto-recovered) ----
+  // storage = { state, cache, last_event_ms, detail } from /api/health.
+  // Heal events are set once at boot and never change, so a session-scoped
+  // dismissal (keyed on the event) hides it without losing a fresh alert
+  // after a later restart.
+  function updateStorageBanner(storage) {
+    var existing = document.getElementById("storage-banner");
+    var bad = !!storage && (
+      (storage.state && storage.state !== "ok") ||
+      (storage.cache && storage.cache !== "ok")
+    );
+    if (!bad) { if (existing) existing.remove(); return; }
+
+    var key = String(storage.last_event_ms || storage.detail || "1");
+    try {
+      if (sessionStorage.getItem("ftw-storage-banner-dismissed") === key) {
+        if (existing) existing.remove();
+        return;
+      }
+    } catch (e) { /* sessionStorage unavailable — show anyway */ }
+
+    var detail = storage.detail || "Database recovered from a problem.";
+    if (existing) {
+      var t = existing.querySelector(".storage-banner-text");
+      if (t) t.textContent = detail;
+      existing.setAttribute("data-key", key);
+      return;
+    }
+
+    var banner = document.createElement("div");
+    banner.id = "storage-banner";
+    banner.className = "storage-banner";
+    banner.setAttribute("data-key", key);
+
+    var tag = document.createElement("span");
+    tag.className = "storage-banner-tag";
+    tag.textContent = "Storage";
+
+    var text = document.createElement("span");
+    text.className = "storage-banner-text";
+    text.textContent = detail;
+
+    var dismiss = document.createElement("button");
+    dismiss.className = "storage-banner-dismiss";
+    dismiss.type = "button";
+    dismiss.setAttribute("aria-label", "Dismiss");
+    dismiss.innerHTML = "&times;";
+    dismiss.addEventListener("click", function () {
+      try { sessionStorage.setItem("ftw-storage-banner-dismissed", banner.getAttribute("data-key") || "1"); }
+      catch (e) { /* ignore */ }
+      banner.remove();
+    });
+
+    banner.appendChild(tag);
+    banner.appendChild(text);
+    banner.appendChild(dismiss);
+    var main = document.querySelector("main");
+    if (main) main.parentNode.insertBefore(banner, main);
   }
 
   // ---- Setup banner (bootstrap mode — no config yet) ----
