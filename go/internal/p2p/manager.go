@@ -16,11 +16,20 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 	"github.com/pion/webrtc/v4"
 )
+
+// FingerprintSigner signs a canonical string with the Pi's ES256 identity key
+// (nova.Identity satisfies it via SignRawHex). Injected as an interface so the
+// p2p package needn't import nova.
+type FingerprintSigner interface {
+	SignRawHex(msg string) (string, error)
+}
 
 const (
 	// defaultMaxOpen caps simultaneous PeerConnections so a misbehaving or
@@ -44,6 +53,8 @@ type Manager struct {
 	local    http.Handler          // ungated API mux; set via SetLocalAPI
 	sessions map[string]*pcSession // active connections by session id
 	maxOpen  int
+	siteID   string                // for the fingerprint signing string
+	signer   FingerprintSigner     // signs the answer DTLS fingerprint; set via SetSigner
 }
 
 type pcSession struct {
@@ -73,6 +84,57 @@ func (m *Manager) SetLocalAPI(h http.Handler) {
 	m.mu.Lock()
 	m.local = h
 	m.mu.Unlock()
+}
+
+// SetSigner wires the identity that signs the DTLS fingerprint of every answer.
+// The browser, having pinned this Pi's public key at first connect, verifies the
+// signature — so a key-less relay that swaps the relayed SDP/fingerprint cannot
+// produce a valid signature and the browser aborts. siteID binds the signature to
+// this site (it is part of the signed string).
+func (m *Manager) SetSigner(siteID string, signer FingerprintSigner) {
+	m.mu.Lock()
+	m.siteID = siteID
+	m.signer = signer
+	m.mu.Unlock()
+}
+
+// SignFingerprint extracts the SHA-256 DTLS fingerprint from an answer SDP and
+// returns a detached ES256 signature over tunnel.DtlsFingerprintSigningString,
+// plus the millisecond timestamp it bound. Returns ("", 0) when no signer is set
+// (e.g. unit tests) or the SDP carries no fingerprint — the caller then omits the
+// signature and a verifying browser treats the answer as unauthenticated.
+func (m *Manager) SignFingerprint(answerSDP string) (sig string, tsMs int64) {
+	m.mu.Lock()
+	signer, siteID := m.signer, m.siteID
+	m.mu.Unlock()
+	if signer == nil {
+		return "", 0
+	}
+	fp, ok := extractSha256Fingerprint(answerSDP)
+	if !ok {
+		return "", 0
+	}
+	tsMs = time.Now().UnixMilli()
+	s, err := signer.SignRawHex(tunnel.DtlsFingerprintSigningString(siteID, tunnel.NormalizeDtlsFingerprint(fp), tsMs))
+	if err != nil {
+		m.log.Warn("p2p: sign fingerprint", "err", err)
+		return "", 0
+	}
+	return s, tsMs
+}
+
+// extractSha256Fingerprint pulls the hex token from the first
+// "a=fingerprint:sha-256 <token>" line of an SDP. All m-lines share one cert, so
+// the first is authoritative.
+func extractSha256Fingerprint(sdp string) (string, bool) {
+	for _, line := range strings.Split(sdp, "\n") {
+		line = strings.TrimSpace(line)
+		const pfx = "a=fingerprint:sha-256 "
+		if strings.HasPrefix(line, pfx) {
+			return strings.TrimSpace(line[len(pfx):]), true
+		}
+	}
+	return "", false
 }
 
 // ActiveCount reports the number of tracked PeerConnections.

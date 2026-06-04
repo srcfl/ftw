@@ -56,6 +56,98 @@
     return out;
   }
 
+  // ---- DTLS-fingerprint verification (anti relay-MITM) ----------------------
+  // The Pi signs every answer's DTLS fingerprint with its ES256 identity key.
+  // The browser pins that key (TOFU) on first connect and verifies the signature
+  // BEFORE trusting the channel — so a relay that swaps the relayed SDP /
+  // fingerprint can't MITM: it can't forge the signature without the Pi's key.
+
+  // SubjectPublicKeyInfo prefix for an uncompressed P-256 EC public key. Raw
+  // X||Y is wrapped into SPKI because WebCrypto's "raw" EC import is uneven
+  // across browsers (Safari/WebKit historically rejected it); "spki" works.
+  var SPKI_P256_PREFIX = new Uint8Array([
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00
+  ]);
+
+  function hexToBytes(h) {
+    var a = new Uint8Array(h.length >> 1);
+    for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+    return a;
+  }
+  // normalizeFp mirrors tunnel.NormalizeDtlsFingerprint: keep hex, drop colons,
+  // lowercase — so both ends sign/verify the identical string.
+  function normalizeFp(s) { return (s.match(/[0-9a-fA-F]/g) || []).join("").toLowerCase(); }
+  function fingerprintFromSDP(sdp) {
+    var m = /a=fingerprint:sha-256[ \t]+([0-9A-Fa-f:]+)/.exec(sdp || "");
+    return m ? m[1] : null;
+  }
+  function importP256Pub(xyHex) {
+    var xy = hexToBytes(xyHex);
+    if (xy.length !== 64) return Promise.reject(new Error("bad pubkey length"));
+    var spki = new Uint8Array(SPKI_P256_PREFIX.length + 65);
+    spki.set(SPKI_P256_PREFIX, 0);
+    spki[SPKI_P256_PREFIX.length] = 0x04;
+    spki.set(xy, SPKI_P256_PREFIX.length + 1);
+    return crypto.subtle.importKey("spki", spki.buffer,
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  }
+
+  var _pinPromise = null;
+  // pinnedIdentity TOFU-fetches + pins {pubkey, site_id} from /api/identity on
+  // first connect (keyed per home origin / me-prefix), then reuses it. The first
+  // fetch trusts the path once (SSH known-hosts model); every later answer is
+  // verified against the pinned key, so the relay can't MITM after that.
+  function pinnedIdentity() {
+    if (_pinPromise) return _pinPromise;
+    var p = (function () {
+      var storeKey = "ftw.identity:" + apiBase();
+      var stored = null;
+      try { stored = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (e) {}
+      var got = stored
+        ? Promise.resolve(stored)
+        : fetch(relayURL("/api/identity"), { credentials: "same-origin" })
+            .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
+            .then(function (id) {
+              if (!id.public_key_hex || !id.site_id) throw new Error("identity response missing fields");
+              var rec = { pub: id.public_key_hex, site: id.site_id };
+              try { localStorage.setItem(storeKey, JSON.stringify(rec)); } catch (e) {}
+              return rec;
+            });
+      return got.then(function (rec) {
+        return importP256Pub(rec.pub).then(function (key) { return { key: key, site: rec.site }; });
+      });
+    })();
+    // Cache only on success — a transient fetch failure must not poison later
+    // verifications (the pinned record persists in localStorage regardless).
+    p.catch(function () { if (_pinPromise === p) _pinPromise = null; });
+    _pinPromise = p;
+    return p;
+  }
+
+  // verifyAnswerSignature rejects unless the answer's DTLS fingerprint is signed
+  // by the pinned Pi key. Mandatory / fail-closed: on any error the caller falls
+  // back to the relay rather than trusting an unverified channel.
+  function verifyAnswerSignature(ans) {
+    if (!ans || !ans.fp_sig) return Promise.reject(new Error("answer not signed (no fp_sig)"));
+    var fp = fingerprintFromSDP(ans.sdp);
+    if (!fp) return Promise.reject(new Error("answer has no DTLS fingerprint"));
+    var ts = Number(ans.ts) || 0;
+    if (Math.abs(Date.now() - ts) > 5 * 60 * 1000) {
+      return Promise.reject(new Error("answer timestamp outside skew window"));
+    }
+    return pinnedIdentity().then(function (pin) {
+      var msg = "ftw-dtls-fp:v1:" + pin.site + ":" + normalizeFp(fp) + ":" + ts;
+      var sig = hexToBytes(ans.fp_sig);
+      if (sig.length !== 64) throw new Error("bad signature length");
+      return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pin.key, sig,
+        new TextEncoder().encode(msg)
+      ).then(function (ok) {
+        if (!ok) throw new Error("answer fingerprint signature INVALID — aborting (possible relay MITM)");
+      });
+    });
+  }
+
   function supported() { return typeof window.RTCPeerConnection === "function"; }
   function enabled() {
     // Opt-in defaults ON (the feature's whole point); set localStorage
@@ -143,8 +235,19 @@
           });
         })
         .then(function (r) { if (!r.ok) throw new Error("offer http " + r.status); return r.json(); })
-        .then(function (ans) { return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp }); })
-        .catch(function () { finish(false); });
+        .then(function (ans) {
+          // Verify the Pi signed this answer's DTLS fingerprint, against the key
+          // pinned at first connect, BEFORE trusting the channel — the
+          // anti-relay-MITM check. Fail-closed: any failure aborts P2P and the
+          // caller transparently falls back to the relay path.
+          return verifyAnswerSignature(ans).then(function () {
+            return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
+          });
+        })
+        .catch(function (e) {
+          if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
+          finish(false);
+        });
     });
     return connecting;
   }

@@ -60,5 +60,10 @@ func (s *Server) handleP2POffer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "p2p handshake failed"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"type": "answer", "sdp": answerSDP})
+	// Sign the answer's DTLS fingerprint so the browser can verify, against the
+	// Pi key it pinned at first connect, that this answer is really this Pi's
+	// (closing relay MITM of the signaling). fp_sig is empty when the Pi has no
+	// identity; a verifying browser treats an unsigned answer as unauthenticated.
+	fpSig, tsMs := s.deps.P2P.SignFingerprint(answerSDP)
+	writeJSON(w, http.StatusOK, map[string]any{"type": "answer", "sdp": answerSDP, "fp_sig": fpSig, "ts": tsMs})
 }

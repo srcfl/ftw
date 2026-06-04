@@ -184,6 +184,11 @@ type Deps struct {
 	// identity load failed; the /api/identity endpoint then returns 503.
 	SiteIdentityPubHex string
 
+	// SiteID is this Pi's site identifier ("site:<name>"). Published via
+	// /api/identity so the browser can pin it and rebuild the canonical DTLS
+	// fingerprint signing string (which binds the signature to this site).
+	SiteID string
+
 	// P2P is the Pi-side WebRTC manager (Phase 5). It answers browser SDP
 	// offers (POST /api/p2p/offer) and serves the resulting direct DataChannel
 	// with a p2p.Bridge over the ungated API mux (injected via SetLocalAPI in

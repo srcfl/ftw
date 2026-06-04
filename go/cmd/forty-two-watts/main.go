@@ -1467,6 +1467,13 @@ func main() {
 	// Otherwise a comma-separated list of stun: URLs replaces the default.
 	p2pMgr := p2p.NewManager(slog.Default(), p2pSTUNFromEnv())
 	defer p2pMgr.Close()
+	// Sign every answer's DTLS fingerprint with the site identity so the browser
+	// can verify (against the key it pinned at first connect) that the answer is
+	// this Pi's — closing relay MITM of the signaling. Skip if there's no identity
+	// (then answers are unsigned and a verifying browser treats them as such).
+	if siteIdentity != nil {
+		p2pMgr.SetSigner("site:"+cfg.Site.Name, siteIdentity)
+	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
@@ -1515,6 +1522,7 @@ func main() {
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
 		TunnelMarker:         tunnelMarker,
 		SiteIdentityPubHex:   siteIdentityPubHex,
+		SiteID:               "site:" + cfg.Site.Name,
 		P2P:                  p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
