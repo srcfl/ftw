@@ -53,7 +53,58 @@ container P2P connects **directly** — on the docker net there is no NAT, so di
 ICE always succeeds, which is exactly what you want for a deterministic P2P test
 (no CGNAT/TURN variables). Playwright also exposes a **virtual WebAuthn
 authenticator** (CDP `WebAuthn.addVirtualAuthenticator`) so the passkey ceremony
-runs unattended. Tier 2 is not built yet — it's the next step.
+runs unattended.
+
+## Tier 2 — automated container-side P2P + passkey proof
+
+```bash
+make e2e-docker-tier2   # build relay + Pi + browser, run the test, tear down
+```
+
+One command brings up the tier-1 stack **plus** a headless-Chromium
+(Playwright) container on the same bridge net, runs a single test, and exits
+non-zero if it fails. The test:
+
+1. installs a **CDP virtual WebAuthn authenticator** (`WebAuthn.enable` +
+   `WebAuthn.addVirtualAuthenticator`, `ctap2`/`internal`/resident-key/UV) so
+   the passkey enroll + login run with no human prompt;
+2. **enrolls** a passkey over the relay tunnel (first enrollment needs the LAN
+   PIN — the test mints it straight from the Pi's bridge port
+   `forty-two-watts:8080`, a genuine private-range source, exactly the
+   local-presence proof the PIN exists for), then **logs in** with it;
+3. asserts the real P2P `RTCDataChannel` reaches **`direct`** (polls
+   `window.ftwP2P.state()`), proving container-to-container WebRTC forms with no
+   relay fallback; and
+4. makes one **authenticated owner API call** (`window.p2pFetch('/api/status')`)
+   over that DataChannel and asserts `200`.
+
+### How the wiring lines up
+
+- **RP-ID / origin.** The Pi defaults its WebAuthn RP-ID to the production host
+  (`home.fortytwowatts.com`). The tier-2 override
+  (`docker-compose.e2e-tier2.yml`) sets
+  `FTW_OWNER_ACCESS_RPID=home.fortytwowatts.localhost` and
+  `FTW_OWNER_ACCESS_ORIGINS=http://home.fortytwowatts.localhost[,:7378]` on the
+  Pi, so `clientDataJSON.origin` (the harness home host over plain HTTP) passes
+  the RP-ID check. `*.localhost` is a secure context, so WebAuthn + WebCrypto
+  work without TLS; WebAuthn ignores the port for both RP-ID and origin.
+- **Home host → relay.** The browser must reach the home route *as* the home
+  host (or WebAuthn refuses). A docker network **alias**
+  (`home.fortytwowatts.localhost` on the relay) lets the bridge DNS resolve it
+  for the Node test process, and Chromium's `--host-resolver-rules=MAP
+  home.fortytwowatts.localhost relay` does the same for the page — so the
+  request bytes go to the relay while the page origin stays the home host.
+- **STUN.** The harness has no WAN, so resolving public STUN would just burn the
+  ICE-gather budget. `FTW_P2P_STUN=none` (a knob that defaults to the production
+  STUN set when unset) makes the Pi gather **host candidates only** — correct
+  and fast on a shared-L2 bridge, where host pairs route directly.
+
+### Files
+
+- `docker-compose.e2e-tier2.yml` — the `playwright` service (profile `tier2`) +
+  the Pi RP-ID/STUN patch + the relay home-host alias.
+- `deploy/local-e2e/tier2/` — the Playwright project: `package.json`,
+  `playwright.config.ts`, and `tests/home-route-p2p.spec.ts`.
 
 ## Files
 

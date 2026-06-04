@@ -1458,7 +1458,14 @@ func main() {
 	// p2p.Bridge over the ungated API mux. Signaling rides the authenticated
 	// owner tunnel — no relay changes. The local-API handler is injected after
 	// api.New (srv.Mux()) since srv does not exist yet at this point.
-	p2pMgr := p2p.NewManager(slog.Default(), p2p.DefaultSTUNServers)
+	//
+	// STUN set is overridable for closed networks (the local docker E2E harness
+	// has no WAN, so resolving public STUN just wastes the ICE-gather budget).
+	// Unset → DefaultSTUNServers (production). FTW_P2P_STUN="none"/"off" →
+	// host-candidate-only gathering, which is all that's needed when both peers
+	// share an L2 (e.g. the docker bridge — direct host pairing, no NAT).
+	// Otherwise a comma-separated list of stun: URLs replaces the default.
+	p2pMgr := p2p.NewManager(slog.Default(), p2pSTUNFromEnv())
 	defer p2pMgr.Close()
 
 	deps = &api.Deps{
@@ -2824,6 +2831,33 @@ func envBoolDefault(key string, def bool) bool {
 		return false
 	}
 	return true
+}
+
+// p2pSTUNFromEnv resolves the WebRTC STUN server set from FTW_P2P_STUN.
+// Unset → p2p.DefaultSTUNServers (production NAT traversal). "none"/"off"/""
+// (explicit empty) → nil, i.e. host-candidate-only gathering for closed
+// networks like the docker E2E harness. Anything else is a comma-separated
+// list of stun: URLs that replaces the default.
+func p2pSTUNFromEnv() []string {
+	v, ok := os.LookupEnv("FTW_P2P_STUN")
+	if !ok {
+		return p2p.DefaultSTUNServers
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none", "off":
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseOriginsEnv splits a comma-separated list of WebAuthn-acceptable
