@@ -71,9 +71,9 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	Polls       *PollSecrets
-	Signals     *SignalMailbox  // blind WebRTC signaling rendezvous (P2P-only home route)
-	OfferLimit  *IPRateLimiter  // per-source-IP throttle on browser signaling offers (FIX-C)
-	PollTimeout time.Duration   // 0 → 25s default
+	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
+	OfferLimit  *IPRateLimiter // per-source-IP throttle on browser signaling offers (FIX-C)
+	PollTimeout time.Duration  // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset

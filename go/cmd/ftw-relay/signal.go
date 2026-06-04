@@ -63,8 +63,8 @@ const (
 	// siteOfferBucketCap is the per-site burst; siteOfferRefillPerSec the sustained
 	// rate. ~10 burst + ~5/s is far above any honest browser's offer cadence but
 	// keeps a single site from being used to churn the mailbox without limit.
-	siteOfferBucketCap      = 10.0
-	siteOfferRefillPerSec   = 5.0
+	siteOfferBucketCap    = 10.0
+	siteOfferRefillPerSec = 5.0
 	// maxSignalSites bounds the number of distinct sites the mailbox tracks, so a
 	// flood of offers for random site_ids can't grow relay memory without limit.
 	maxSignalSites = 4096

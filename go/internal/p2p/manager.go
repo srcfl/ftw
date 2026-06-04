@@ -86,9 +86,9 @@ type Manager struct {
 	local     http.Handler          // ungated API mux; set via SetLocalAPI
 	sessions  map[string]*pcSession // active connections by session id
 	maxOpen   int
-	maxUnauth int                   // separate cap on not-yet-authenticated peers (FIX-4b)
-	siteID    string                // for the fingerprint signing string
-	signer    FingerprintSigner     // signs the answer DTLS fingerprint; set via SetSigner
+	maxUnauth int               // separate cap on not-yet-authenticated peers (FIX-4b)
+	siteID    string            // for the fingerprint signing string
+	signer    FingerprintSigner // signs the answer DTLS fingerprint; set via SetSigner
 }
 
 type pcSession struct {
