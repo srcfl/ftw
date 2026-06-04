@@ -35,9 +35,23 @@ const (
 	// defaultMaxOpen caps simultaneous PeerConnections so a misbehaving or
 	// hostile authenticated client can't exhaust the Pi with half-open peers.
 	defaultMaxOpen = 16
+	// defaultMaxUnauth is a SEPARATE, lower cap on peers that have not yet
+	// captured a login-over-channel session (FIX-4b). The signaling rendezvous is
+	// unauthenticated, so without this an offer flood — each draining a slot
+	// before any auth — fills maxOpen and denies the owner. Authenticated peers
+	// are counted against maxOpen, not this; an attacker who never logs in can
+	// pin at most defaultMaxUnauth slots, and unauthReapAfter frees those fast.
+	defaultMaxUnauth = 6
 	// handshakeTimeout bounds how long Answer waits for ICE gathering before
 	// giving up — the browser falls back to the relay if we don't answer.
 	handshakeTimeout = 12 * time.Second
+	// unauthReapAfter is the short grace window an UN-authenticated peer gets to
+	// (a) complete the DTLS handshake and (b) log in over the channel. A peer that
+	// hasn't captured a session within this window is reaped, so a flood of offers
+	// that connect-but-never-login (or never connect at all) can't hold slots. The
+	// legitimate flow — WebAuthn login over the channel — completes in a few
+	// seconds, well inside this.
+	unauthReapAfter = 30 * time.Second
 	// sessionMaxAge is a backstop GC for connections whose state never
 	// transitioned to closed/failed (e.g. a browser tab killed mid-session).
 	sessionMaxAge = 6 * time.Hour
@@ -49,17 +63,23 @@ type Manager struct {
 	log  *slog.Logger
 	stun []string
 
-	mu       sync.Mutex
-	local    http.Handler          // ungated API mux; set via SetLocalAPI
-	sessions map[string]*pcSession // active connections by session id
-	maxOpen  int
-	siteID   string                // for the fingerprint signing string
-	signer   FingerprintSigner     // signs the answer DTLS fingerprint; set via SetSigner
+	mu        sync.Mutex
+	local     http.Handler          // ungated API mux; set via SetLocalAPI
+	sessions  map[string]*pcSession // active connections by session id
+	maxOpen   int
+	maxUnauth int                   // separate cap on not-yet-authenticated peers (FIX-4b)
+	siteID    string                // for the fingerprint signing string
+	signer    FingerprintSigner     // signs the answer DTLS fingerprint; set via SetSigner
 }
 
 type pcSession struct {
 	pc      *webrtc.PeerConnection
 	created time.Time
+	// authed flips true once the browser captures a login-over-channel session on
+	// this peer's Bridge (FIX-4b). An un-authed peer is subject to the lower
+	// maxUnauth cap and the unauthReapAfter grace; once authed it is a real owner
+	// session counted only against maxOpen.
+	authed bool
 }
 
 // NewManager builds a Manager. Pass DefaultSTUNServers for real NAT traversal,
@@ -69,10 +89,11 @@ func NewManager(log *slog.Logger, stun []string) *Manager {
 		log = slog.Default()
 	}
 	return &Manager{
-		log:      log,
-		stun:     stun,
-		sessions: make(map[string]*pcSession),
-		maxOpen:  defaultMaxOpen,
+		log:       log,
+		stun:      stun,
+		sessions:  make(map[string]*pcSession),
+		maxOpen:   defaultMaxOpen,
+		maxUnauth: defaultMaxUnauth,
 	}
 }
 
@@ -170,10 +191,18 @@ func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders htt
 	}
 	id := newSessionID()
 
-	// Reserve the slot atomically with the cap check: reap dead peers, then
+	// Reserve the slot atomically with the cap check: reap dead/stale peers, then
 	// insert the live pc under the lock BEFORE the (up to handshakeTimeout) ICE
-	// gather, so concurrent Answers can't over-admit past maxOpen during the
-	// half-open window. Every error path below removes it (which closes the pc).
+	// gather, so concurrent Answers can't over-admit during the half-open window.
+	// Every error path below removes it (which closes the pc).
+	//
+	// FIX-4b: a NEW peer starts un-authenticated, so it is admitted against the
+	// LOWER maxUnauth cap (separate from maxOpen). The signaling rendezvous is
+	// unauthenticated; without this a flood of offers — each draining a slot
+	// before any login — fills maxOpen and denies the owner. An attacker who never
+	// logs in can hold at most maxUnauth slots, and the reaper frees those after
+	// unauthReapAfter. Authenticated peers (session captured) are counted only
+	// against maxOpen, so a logged-in owner is never blocked by the unauth flood.
 	m.reap()
 	m.mu.Lock()
 	if len(m.sessions) >= m.maxOpen {
@@ -181,14 +210,27 @@ func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders htt
 		_ = pc.Close()
 		return "", fmt.Errorf("p2p: too many active sessions (%d)", m.maxOpen)
 	}
+	if m.unauthCountLocked() >= m.maxUnauth {
+		m.mu.Unlock()
+		_ = pc.Close()
+		return "", fmt.Errorf("p2p: too many un-authenticated sessions (%d)", m.maxUnauth)
+	}
 	m.sessions[id] = &pcSession{pc: pc, created: time.Now()}
 	m.mu.Unlock()
 
+	// Schedule a deterministic unauth-grace reap so a peer that connects but never
+	// logs in is freed even if no further offers arrive to drive reap() (FIX-4b).
+	time.AfterFunc(unauthReapAfter, func() { m.reapIfUnauthed(id) })
+
 	// The browser creates the channel; the Pi serves whatever it is handed,
-	// stamping the trusted auth context on each replayed request.
+	// stamping the trusted auth context on each replayed request. When the browser
+	// logs in over THIS channel, the Bridge captures the session and fires
+	// onSession, which marks the peer authenticated so it is no longer subject to
+	// the unauth cap / grace reaping (FIX-4b).
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		m.log.Info("p2p: data channel open", "session", id, "label", dc.Label())
-		NewBridge(dc, local, replayHeaders, m.log)
+		br := NewBridge(dc, local, replayHeaders, m.log)
+		br.SetOnSession(func() { m.markAuthed(id) })
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		m.log.Debug("p2p: connection state", "session", id, "state", s.String())
@@ -235,6 +277,42 @@ func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders htt
 	return final.SDP, nil
 }
 
+// unauthCountLocked returns how many tracked peers have NOT yet captured a
+// session. Caller holds m.mu.
+func (m *Manager) unauthCountLocked() int {
+	n := 0
+	for _, s := range m.sessions {
+		if !s.authed {
+			n++
+		}
+	}
+	return n
+}
+
+// markAuthed flips a peer to authenticated once the browser captures a
+// login-over-channel session on its Bridge (FIX-4b), so it is no longer subject
+// to the unauth cap / grace reaping.
+func (m *Manager) markAuthed(id string) {
+	m.mu.Lock()
+	if s := m.sessions[id]; s != nil {
+		s.authed = true
+	}
+	m.mu.Unlock()
+}
+
+// reapIfUnauthed closes a session iff it is still un-authenticated when its grace
+// timer fires (FIX-4b). An authed session (logged in over the channel) is kept.
+func (m *Manager) reapIfUnauthed(id string) {
+	m.mu.Lock()
+	s := m.sessions[id]
+	stale := s != nil && !s.authed
+	m.mu.Unlock()
+	if stale {
+		m.log.Debug("p2p: reaping un-authenticated peer past grace", "session", id)
+		m.remove(id)
+	}
+}
+
 // remove closes and forgets one session.
 func (m *Manager) remove(id string) {
 	m.mu.Lock()
@@ -246,15 +324,26 @@ func (m *Manager) remove(id string) {
 	}
 }
 
-// reap closes connections that are no longer live or have aged out.
+// reap closes connections that are no longer live, have aged out, or are
+// un-authenticated past the short grace window (FIX-4b). The unauth-grace reap is
+// what frees slots an offer flood pinned without ever logging in: a peer that
+// connected but never captured a session — or never finished the handshake — is
+// closed after unauthReapAfter. A logged-in (authed) peer is exempt from the
+// grace reap and only ages out at sessionMaxAge.
 func (m *Manager) reap() {
+	now := time.Now()
 	m.mu.Lock()
 	var dead []string
 	for id, s := range m.sessions {
 		st := s.pc.ConnectionState()
-		if st == webrtc.PeerConnectionStateClosed ||
-			st == webrtc.PeerConnectionStateFailed ||
-			time.Since(s.created) > sessionMaxAge {
+		switch {
+		case st == webrtc.PeerConnectionStateClosed,
+			st == webrtc.PeerConnectionStateFailed,
+			now.Sub(s.created) > sessionMaxAge:
+			dead = append(dead, id)
+		case !s.authed && now.Sub(s.created) > unauthReapAfter:
+			// Connected-but-never-authenticated (or stuck mid-handshake) past the
+			// grace window — reap so an unauth flood can't hold slots.
 			dead = append(dead, id)
 		}
 	}
