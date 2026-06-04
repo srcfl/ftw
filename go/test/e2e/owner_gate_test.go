@@ -13,10 +13,15 @@ import (
 
 // TestOwnerGateThroughRelay reproduces the home.fortytwowatts.com path end to
 // end with REAL binaries: ftw-relay (home-host routing) + the main service
-// registered as the owner over the relay tunnel. A request via the relay's
-// home-host route with NO session MUST be refused by the auth-gate (401) — a
-// 200 means the dashboard is exposed to the public internet. This is the
-// regression guard for the exposure incident.
+// registered as the owner over the relay.
+//
+// In the P2P-only home route (slices 4-6) the owner API no longer traverses the
+// relay AT ALL: the home-host forwarder serves static GETs only and FAIL-CLOSED
+// refuses every /api/* path (403). So a request via the relay's home-host route
+// for an owner API endpoint MUST be refused at the relay (403) — and, as before,
+// a 200 would mean the dashboard is exposed to the public internet. This is the
+// regression guard for the exposure incident, now strengthened: the owner API
+// is sealed off the relay entirely rather than merely gated 401 on the Pi.
 func TestOwnerGateThroughRelay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped in short mode")
@@ -88,9 +93,41 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	}
 
 	if code == http.StatusOK {
-		t.Fatalf("EXPOSURE: home-host /api/status returned 200 with NO session — the gate failed to treat the relay request as remote. body=%q", body)
+		t.Fatalf("EXPOSURE: home-host /api/status returned 200 — the owner API must NEVER be served over the relay (P2P-only). body=%q", body)
 	}
-	if code != http.StatusUnauthorized {
-		t.Fatalf("home-host /api/status: got %d, want 401 (gated). body=%q", code, body)
+	// Post-slice-6: the owner API is refused at the relay (403, P2P-only), never
+	// forwarded to the Pi. (Pre-cutover this was 401 from the Pi's gate; the new
+	// 403-at-relay is a strictly stronger seal — the request never leaves the
+	// relay edge.)
+	if code != http.StatusForbidden {
+		t.Fatalf("home-host /api/status: got %d, want 403 (owner API is P2P-only, refused at relay). body=%q", code, body)
+	}
+
+	// Belt-and-braces: /api/identity (the public-key TOFU anchor) IS reachable
+	// over the relay so the browser can pin before opening the P2P channel. Poll
+	// until the Pi's registration has propagated (503 = home offline / not yet
+	// routed), then assert 200.
+	idDeadline := time.Now().Add(20 * time.Second)
+	var idCode int
+	var idBody string
+	for time.Now().Before(idDeadline) {
+		req, _ := http.NewRequest("GET", relayURL+"/api/identity", nil)
+		req.Host = "home.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		idCode, idBody = resp.StatusCode, string(b)
+		if idCode == http.StatusServiceUnavailable || idCode == http.StatusBadGateway {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	if idCode != http.StatusOK {
+		t.Fatalf("/api/identity over relay: got %d, want 200 (TOFU anchor). body=%q", idCode, idBody)
 	}
 }

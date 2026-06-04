@@ -117,22 +117,24 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /signal/{host_id}/offer", r.signalHostOffer)
 	mux.HandleFunc("POST /signal/{host_id}/answer", r.signalHostAnswer)
 
-	// Owner remote access (Phase 3) — site-id-keyed routes that bypass
-	// the pair-token flow. Host must POST /me/register on startup; the
-	// /me/<site_id>/... family then tunnels to that host's long-poll
-	// loop just like /h/<token>/... does for friend access. WebAuthn
-	// session validation happens on the host side via the session cookie.
+	// Owner remote access registration (Phase 3). The Pi POSTs its ES256-signed
+	// /me/register on startup; the relay pins the key and returns the per-host
+	// poll secret the Pi uses BOTH to drain the (friend-flow) tunnel and to
+	// authenticate the /signal/* rendezvous. This is control-plane only — there
+	// is NO LONGER an owner HTTP request/response tunnel (the /me/<site>/... and
+	// /me/<site> forwarders were removed in the P2P-only cutover, slice 6). Owner
+	// data exists ONLY as DTLS DataChannel frames now.
 	mux.HandleFunc("POST /me/register", r.meRegister)
-	mux.HandleFunc("/me/{site_id}/{rest...}", r.meTunnel)
-	mux.HandleFunc("/me/{site_id}", r.meRoot)
 
-	// Single-home cutover: a bare host (home.fortytwowatts.com) forwards
-	// every path verbatim to the owner Pi registered under HomeSite, so the
-	// dashboard loads at the root with working absolute asset paths. Only
-	// browser traffic to HomeHost matches this; the Pi still talks to the
-	// relay over relay.* (/me/register, /tunnel/*), unaffected.
+	// Single-home cutover: a bare host (home.fortytwowatts.com) serves the
+	// dashboard's STATIC assets from the owner Pi so the SPA, login page, and
+	// p2p.js load at the root with working absolute paths. It is restricted to
+	// GET of NON-/api/ paths: the owner API + the ftw_owner cookie never traverse
+	// the relay — they ride the DTLS DataChannel only (P2P-only home route). The
+	// browser fetches the SPA shell here, then opens the P2P channel for all
+	// owner data + the login ceremony.
 	if r.HomeHost != "" && r.HomeSite != "" {
-		mux.HandleFunc(r.HomeHost+"/", r.homeForward)
+		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
 	return r.limitBody(mux)
 }
@@ -150,12 +152,32 @@ func (r *Relay) limitBody(next http.Handler) http.Handler {
 	})
 }
 
-// homeForward forwards a bare-host request (HomeHost) verbatim to the single
-// owner Pi (HomeSite). Same tunnel mechanism as meForward, but the full
-// request path is preserved (no /me/<site_id> prefix to strip).
-func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
+// homeStaticForward serves the dashboard's STATIC assets for the bare home host
+// from the owner Pi, over the friend-flow tunnel queue, but FAIL-CLOSED for the
+// owner data plane: it forwards only GET requests for NON-/api/ paths. The owner
+// API and the ftw_owner session cookie therefore NEVER traverse the relay — they
+// ride the DTLS DataChannel only (the P2P-only home route). The browser loads
+// the SPA shell + login page + p2p.js here, then opens the P2P channel for all
+// owner traffic and the login ceremony.
+//
+// This keeps the app loadable without shipping the web bundle into the relay,
+// while structurally guaranteeing (path + method gate) that no cleartext owner
+// request or cookie can be tunneled through this host route.
+func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 	if r.Owners == nil {
 		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// FAIL-CLOSED owner-data gate. Only GET may traverse the relay for the home
+	// host, and never an /api/ path — those carry owner data + the session cookie
+	// and must travel inside DTLS only. Anything else is refused here so the
+	// relay can never see (or be tricked into proxying) owner traffic.
+	if req.Method != http.MethodGet {
+		http.Error(w, "owner API is P2P-only; this relay serves static assets only", http.StatusMethodNotAllowed)
+		return
+	}
+	if isOwnerAPIPath(req.URL.Path) {
+		http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
 		return
 	}
 	hostID, registered, fresh := r.Owners.Active(r.HomeSite, homeStaleAfter)
@@ -165,27 +187,49 @@ func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
 		r.serveHomeOffline(w, req, registered)
 		return
 	}
-	body, err := readBody(req.Body)
-	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
+	// GET assets have no meaningful body; do not read/forward one.
 	innerPath := req.URL.Path
 	if q := req.URL.RawQuery; q != "" {
 		innerPath = innerPath + "?" + q
 	}
-	resp, err := r.enqueue(req, hostID, innerPath, body)
+	// Strip any inbound cookies: the owner session lives only inside DTLS, so a
+	// stray ftw_owner on a static-asset GET must never reach the Pi over the relay
+	// (it would be ignored, but stripping it keeps the no-owner-cookie-on-relay
+	// invariant structural rather than incidental).
+	req.Header.Del("Cookie")
+	resp, err := r.enqueue(req, hostID, innerPath, nil)
 	if err != nil {
 		// Fresh a moment ago but the tunnel didn't answer in time — the Pi most
 		// likely just dropped. Same reassuring page rather than a bare 502.
 		r.serveHomeOffline(w, req, true)
 		return
 	}
+	// Defence in depth: never relay a Set-Cookie from the Pi for the home host —
+	// a static asset has no business setting the owner cookie, and the owner
+	// session must never appear on a relay-visible response.
+	resp.Header.Del("Set-Cookie")
 	for k, vv := range resp.Header {
 		w.Header()[k] = vv
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+}
+
+// isOwnerAPIPath reports whether a request path is part of the owner API surface
+// that must travel only inside DTLS — never over the relay. The static home-host
+// forwarder refuses these so no owner request/cookie can be tunneled in
+// cleartext.
+//
+// The SOLE exception is GET /api/identity: it returns only the Pi's PUBLIC ES256
+// key (no secret, no cookie, no control surface), and the browser MUST fetch +
+// pin it BEFORE it can open (and verify) the P2P channel — so it cannot itself
+// ride the channel. Allowing this one read is the TOFU bootstrap and costs
+// nothing: a key-less relay still cannot forge the signed fingerprint.
+func isOwnerAPIPath(p string) bool {
+	if p == "/api/identity" {
+		return false
+	}
+	return strings.HasPrefix(p, "/api/")
 }
 
 // serveHomeOffline renders a calm, self-contained "home offline" page for the
@@ -738,23 +782,6 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})
 }
 
-// meRoot handles GET /me/<site_id> — the landing page when the operator
-// types the bare URL. Forwards to the host's /owner-access/ landing
-// page so the host can decide whether to show "log in with passkey" or
-// "no devices enrolled yet — go enroll one on LAN first".
-func (r *Relay) meRoot(w http.ResponseWriter, req *http.Request) {
-	r.meForward(w, req, "/owner-access/")
-}
-
-// meTunnel handles /me/<site_id>/{rest...} — generic forwarder.
-// Everything past /me/<site_id>/ is passed verbatim through the tunnel
-// to the host. The host's auth middleware (cookie check on the
-// /owner-access/ family + /api/owner-access/*) decides what's allowed.
-func (r *Relay) meTunnel(w http.ResponseWriter, req *http.Request) {
-	rest := req.PathValue("rest")
-	r.meForward(w, req, "/"+rest)
-}
-
 // ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
 
 // signalBrowserOffer parks a browser's SDP offer for {site_id} and wakes any Pi
@@ -871,41 +898,4 @@ func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
 	}
 	r.Signals.ParkAnswer(siteID, body)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (r *Relay) meForward(w http.ResponseWriter, req *http.Request, innerPath string) {
-	siteID := req.PathValue("site_id")
-	if siteID == "" {
-		http.Error(w, "missing site_id", http.StatusBadRequest)
-		return
-	}
-	if r.Owners == nil {
-		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
-		return
-	}
-	hostID, err := r.Owners.Lookup(siteID)
-	if err != nil {
-		http.Error(w, "site not registered (host may be offline)", http.StatusServiceUnavailable)
-		return
-	}
-	// Preserve the query string so login redirects, ceremony tokens etc.
-	// land at the host intact.
-	if q := req.URL.RawQuery; q != "" {
-		innerPath = innerPath + "?" + q
-	}
-	body, err := readBody(req.Body)
-	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	resp, err := r.enqueue(req, hostID, innerPath, body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	for k, vv := range resp.Header {
-		w.Header()[k] = vv
-	}
-	w.WriteHeader(resp.Status)
-	_, _ = w.Write(resp.Body)
 }

@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/state"
@@ -93,25 +94,36 @@ func sanitizeSiteName(s string) string {
 // forwards them to the local API server.
 func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string, apiPort int, signer relaySigner, p2p p2pAnswerer) {
 	relayURL = strings.TrimRight(relayURL, "/")
-
 	// The public key is not a secret; log it in full so an operator can pin it
 	// on the relay with -home-pubkey (closes the post-restart TOFU race).
 	slog.Info("owner-access: relay registration identity",
 		"site_id", siteID, "public_key", signer.PublicKeyHex())
 
-	// Build the long-poll host up front so the registration loop can hand it the
-	// relay-minted poll token. It starts polling immediately; until the first
-	// registration sets the token its polls are 401'd and it backs off + retries.
-	host := buildOwnerHost(relayURL, hostID, tunnelMarker, apiPort)
-	go host.Run(ctx)
+	// The owner HTTP request/response tunnel is GONE (P2P-only cutover, slice 6):
+	// owner data exists only as DTLS DataChannel frames. The relay registration
+	// below pins the site key and returns the per-host poll secret used BOTH for
+	// the signaling loop AND the static-asset poller below.
+	polls := &pollSecretHolder{}
 
-	// Alongside the tunnel: the blind WebRTC signaling loop. It shares the same
-	// per-host poll secret (via host.PollSecret) and answers browser offers over
-	// P2P with fail-closed replay headers. The tunnel above stays for now (slice
-	// 6 removes it once the P2P-only path is proven). When no P2P manager is
-	// wired (e.g. identity load failed) we skip it — answers would be unsigned.
+	// STATIC-ONLY asset host. The relay still needs to serve the SPA shell, the
+	// login page, p2p.js, and the /api/identity TOFU anchor — these have no
+	// owner data. We drain /tunnel/{host}/next and reverse-proxy to the local API,
+	// but FAIL-CLOSED: only GET of non-/api/ paths (plus GET /api/identity) is
+	// served; the owner API + cookie are refused here too, as defence in depth
+	// behind the relay's identical refusal. No owner request or session ever
+	// rides this transport.
+	staticHost := buildStaticAssetHost(relayURL, hostID, apiPort)
+	go staticHost.Run(ctx)
+
+	// The blind WebRTC signaling loop is the ONLY owner-DATA transport: it
+	// long-polls browser offers, answers them over P2P with fail-closed replay
+	// headers (remote marker stamped, no cookie), and parks the signed answer.
+	// Skipped only when no P2P manager is wired (identity load failed), in which
+	// case there is no owner remote access at all.
 	if p2p != nil {
-		go runOwnerSignalLoop(ctx, relayURL, hostID, tunnelMarker, p2p, host)
+		go runOwnerSignalLoop(ctx, relayURL, hostID, tunnelMarker, p2p, polls)
+	} else {
+		slog.Warn("owner-access: no P2P manager wired — remote access disabled (no owner transport)")
 	}
 
 	registerOnce := func() {
@@ -151,9 +163,11 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 			slog.Warn("owner-access: decode register response", "err", err)
 			return
 		}
-		// Update the host's poll token (a relay restart re-mints it, so refresh
-		// on every registration).
-		host.SetPollSecret(out.PollSecret)
+		// Update the poll token (a relay restart re-mints it, so refresh on every
+		// registration). Both the signaling loop and the static-asset host present
+		// it on their relay polls.
+		polls.set(out.PollSecret)
+		staticHost.SetPollSecret(out.PollSecret)
 		slog.Info("owner-access: registered with relay", "site_id", siteID, "host_id", hostID)
 	}
 
@@ -173,39 +187,92 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 	}
 }
 
-// buildOwnerHost constructs (but does not run) the host-side long-poll host for
-// the owner-access tunnel. It pulls tunneled requests for this hostID and
-// reverse-proxies them to the local API server on localhost. The local server's
-// /api/owner-access/* handlers + cookie-based middleware validate WebAuthn
-// assertions and gate access to /web /mcp paths.
+// pollSecretHolder carries the relay-minted per-host poll secret, refreshed on
+// every registration (a relay restart re-mints it). It satisfies the signaling
+// loop's pollSecretSource so that loop always presents the current token. Safe
+// for concurrent use: the registration loop writes, the signaling loop reads.
+type pollSecretHolder struct {
+	mu     sync.Mutex
+	secret string
+}
+
+func (p *pollSecretHolder) set(s string) {
+	p.mu.Lock()
+	p.secret = s
+	p.mu.Unlock()
+}
+
+// PollSecret implements pollSecretSource.
+func (p *pollSecretHolder) PollSecret() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.secret
+}
+
+// buildStaticAssetHost constructs (but does not run) the host-side long-poll for
+// serving the dashboard's STATIC assets over the relay's friend-flow tunnel
+// queue. It reverse-proxies forwarded requests to the local API, but ONLY for
+// GET of non-/api/ paths plus GET /api/identity — the owner API + session cookie
+// are refused here (404/no-cookie) as defence in depth behind the relay's
+// identical refusal. So no owner request or session ever rides this transport;
+// owner data exists solely as DTLS DataChannel frames.
 //
-// We use a fresh net/http/httputil.ReverseProxy so cookies (Set-Cookie on
-// /login/finish, Cookie on subsequent requests) survive the tunnel roundtrip.
-// The caller starts host.Run and feeds it the relay-minted poll token via
-// host.SetPollSecret once registration returns it.
-func buildOwnerHost(relayURL, hostID, tunnelMarker string, apiPort int) *tunnel.Host {
-	// Connect to the local API server on its configured port.
+// Unlike the removed owner tunnel, this does NOT stamp the X-FTW-Tunnel marker:
+// it only ever proxies public assets, which the local gate already serves
+// without auth, and never an owner API call.
+func buildStaticAssetHost(relayURL, hostID string, apiPort int) *tunnel.Host {
 	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", apiPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	// Stamp every forwarded (relay-tunnelled) request with the per-process
-	// marker so the local API auth-gate treats it as remote, not LAN. Set()
-	// overwrites any value a malicious browser tried to smuggle through the
-	// header-preserving tunnel.
-	origDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		origDirector(req)
-		req.Header.Set("X-FTW-Tunnel", tunnelMarker)
-	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, fmt.Sprintf("local api unavailable: %v", err), http.StatusBadGateway)
 	}
-	return newOwnerTunnelHost(relayURL, hostID, &ownerProxyHandler{proxy: proxy})
+	return tunnel.NewHost(relayURL, hostID, &staticAssetHandler{proxy: proxy})
 }
 
-type ownerProxyHandler struct {
+// staticAssetHandler is the fail-closed wrapper around the reverse proxy: it
+// serves only public static assets (and the /api/identity TOFU anchor), refusing
+// every other /api/ path and every non-GET method so the owner API can never be
+// reached over the relay tunnel even if the relay's own refusal were bypassed.
+type staticAssetHandler struct {
 	proxy *httputil.ReverseProxy
 }
 
-func (o *ownerProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	o.proxy.ServeHTTP(w, r)
+func (h *staticAssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "owner API is P2P-only", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/identity" {
+		http.Error(w, "owner API is P2P-only", http.StatusForbidden)
+		return
+	}
+	// Strip any owner cookie before proxying to the local API: a static asset
+	// must never carry the owner session, and the local API must never set one on
+	// this path. Belt-and-braces behind the relay's own cookie stripping.
+	r.Header.Del("Cookie")
+	rec := &stripSetCookieWriter{ResponseWriter: w}
+	h.proxy.ServeHTTP(rec, r)
+}
+
+// stripSetCookieWriter drops any Set-Cookie the local API emits on the static
+// path, so the owner session can never leave the Pi over the relay tunnel.
+type stripSetCookieWriter struct {
+	http.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *stripSetCookieWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.Header().Del("Set-Cookie")
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *stripSetCookieWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.Header().Del("Set-Cookie")
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
 }

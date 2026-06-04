@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -42,10 +41,12 @@ func signedMeBody(t *testing.T, id *nova.Identity, siteID, hostID string, tsMs i
 	return b
 }
 
-// TestMeRegisterAndForward stands up a relay + a fake host running
-// the tunnel loop, registers the site, and confirms /me/<site>/x lands
-// at /x on the host.
-func TestMeRegisterAndForward(t *testing.T) {
+// TestMeRegisterReturnsPollSecret confirms the control-plane registration: an
+// ES256-signed /me/register pins the site key and returns the per-host poll
+// secret. The owner HTTP request/response tunnel (/me/<site>/...) was REMOVED in
+// the P2P-only cutover (slice 6) — owner data rides the DTLS DataChannel only —
+// so this test no longer forwards any owner request through the relay.
+func TestMeRegisterReturnsPollSecret(t *testing.T) {
 	relay := &Relay{
 		Queue:       tunnel.NewQueue(),
 		Tokens:      NewTokenRegistry(),
@@ -55,77 +56,50 @@ func TestMeRegisterAndForward(t *testing.T) {
 	srv := httptest.NewServer(relay.Handler())
 	defer srv.Close()
 
-	// Local handler the host will forward to.
-	hostBackend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Inner-Path", r.URL.Path)
-		_, _ = w.Write([]byte("hello from host:" + r.URL.Path))
-	})
-
-	host := tunnel.NewHost(srv.URL, "host-owner", hostBackend)
-	host.PollTimeout = 1 * time.Second
-	host.SetPollSecret(relay.Polls.Issue("host-owner")) // authenticate the host's polls
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go host.Run(ctx)
-
-	// 1. Register the site → host mapping (ES256-signed). meRegister now returns
-	// 200 + {"poll_secret": …}.
 	id := newTestIdentity(t)
 	regBody := signedMeBody(t, id, "site-A", "host-owner", time.Now().UnixMilli())
 	regResp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(regBody))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer regResp.Body.Close()
 	if regResp.StatusCode != 200 {
 		body, _ := io.ReadAll(regResp.Body)
 		t.Fatalf("register status=%d body=%q", regResp.StatusCode, body)
 	}
-
-	// 2. /me/<site>/ → host sees /owner-access/
-	r1, err := http.Get(srv.URL + "/me/site-A")
-	if err != nil {
-		t.Fatal(err)
+	var out struct {
+		PollSecret string `json:"poll_secret"`
 	}
-	b1, _ := io.ReadAll(r1.Body)
-	r1.Body.Close()
-	if r1.StatusCode != 200 {
-		t.Fatalf("/me/<site> status=%d body=%q", r1.StatusCode, b1)
+	if err := json.NewDecoder(regResp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode register response: %v", err)
 	}
-	if !strings.Contains(string(b1), "/owner-access/") {
-		t.Fatalf("expected /owner-access/ inner path, got %q", b1)
+	if out.PollSecret == "" {
+		t.Fatal("register returned an empty poll_secret")
 	}
-	if got := r1.Header.Get("X-Inner-Path"); got != "/owner-access/" {
-		t.Fatalf("inner path header = %q want /owner-access/", got)
-	}
-
-	// 3. /me/<site>/api/owner-access/whoami → host sees /api/owner-access/whoami
-	r2, err := http.Get(srv.URL + "/me/site-A/api/owner-access/whoami")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b2, _ := io.ReadAll(r2.Body)
-	r2.Body.Close()
-	if r2.StatusCode != 200 {
-		t.Fatalf("/api/owner-access/whoami status=%d body=%q", r2.StatusCode, b2)
-	}
-	if got := r2.Header.Get("X-Inner-Path"); got != "/api/owner-access/whoami" {
-		t.Fatalf("inner path = %q", got)
+	if got, _ := relay.Owners.Lookup("site-A"); got != "host-owner" {
+		t.Fatalf("mapping = %q, want host-owner", got)
 	}
 }
 
-func TestMeUnknownSiteReturns503(t *testing.T) {
+// TestOwnerTunnelRoutesRemoved is the slice-6 guard: the cleartext owner HTTP
+// tunnel paths (/me/<site>, /me/<site>/...) no longer exist, so the owner API +
+// cookie can never traverse the relay. Hitting them is a 404 (no such route).
+func TestOwnerTunnelRoutesRemoved(t *testing.T) {
 	relay := &Relay{
 		Queue: tunnel.NewQueue(), Tokens: NewTokenRegistry(), Owners: NewOwnerRegistry(),
 		PollTimeout: 100 * time.Millisecond,
 	}
 	srv := httptest.NewServer(relay.Handler())
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/me/unknown")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("status=%d, want 503", resp.StatusCode)
+	for _, p := range []string{"/me/site-A", "/me/site-A/api/owner-access/whoami", "/me/site-A/owner-access/"} {
+		resp, err := http.Get(srv.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s status=%d, want 404 (owner tunnel removed)", p, resp.StatusCode)
+		}
 	}
 }
 
