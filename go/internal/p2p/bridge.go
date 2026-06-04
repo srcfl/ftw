@@ -23,6 +23,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 
 	"github.com/pion/webrtc/v4"
 
@@ -58,12 +60,47 @@ const maxInflight = 16
 // never be able to supply it — only the trusted offer-time auth context may.
 const tunnelMarkerHeader = "X-Ftw-Tunnel"
 
+// ownerSessionCookieName is the owner session cookie the channel-scoped session
+// captures from a login-finish response and replays on subsequent frames. Kept
+// as a literal (not imported from api) so the p2p package stays free of the api
+// dependency; it must match api.ownerAccessCookieName.
+const ownerSessionCookieName = "ftw_owner"
+
 type Bridge struct {
 	handler http.Handler
 	dc      *webrtc.DataChannel
-	auth    http.Header   // trusted offer-time auth context, stamped on each replay
+	auth    http.Header // trusted offer-time auth context, stamped on each replay
 	log     *slog.Logger
 	sem     chan struct{} // caps concurrent in-flight replays
+
+	// mu guards the per-channel session captured when the browser logs in OVER
+	// this DataChannel. In the P2P-only home route the offer carries NO owner
+	// cookie (the channel starts unauthenticated, marked remote); the browser
+	// runs the WebAuthn ceremony over the channel, and login-finish returns a
+	// Set-Cookie: ftw_owner=<token>. We capture that token here and stamp it as
+	// Cookie: ftw_owner=<token> on every later frame, so the session lives ONLY
+	// inside DTLS and is never visible to the relay or to JS. cookieSet guards
+	// against overwriting a live session with a malformed later header.
+	mu      sync.Mutex
+	sessTok string // captured ftw_owner token, "" until login-over-channel succeeds
+}
+
+// NewReplayer builds a DataChannel-less Bridge that can replay frames against
+// handler with the given trusted auth context. It exposes the SAME replay +
+// channel-scoped-session machinery NewBridge uses, but with no pion DataChannel,
+// so the fail-closed gate behaviour (marker stamping, login-over-channel session
+// capture) is testable in the api package — which imports p2p and cannot reach
+// the unexported replay path otherwise. Production code always uses NewBridge.
+func NewReplayer(handler http.Handler, auth http.Header) *Bridge {
+	return &Bridge{handler: handler, auth: auth, log: slog.Default(), sem: make(chan struct{}, maxInflight)}
+}
+
+// Replay runs one tunneled request through the Bridge's replay path (auth +
+// marker stamping, channel-session capture/stamp) and returns the response. It
+// is the exported entry point NewReplayer-built Bridges drive in tests; the
+// production message pump calls the unexported replay directly.
+func (b *Bridge) Replay(req tunnel.TunneledRequest) tunnel.TunneledResponse {
+	return b.replay(req)
 }
 
 // NewBridge attaches a Bridge to an open DataChannel, the local handler (the
@@ -130,10 +167,23 @@ func (b *Bridge) replay(req tunnel.TunneledRequest) tunnel.TunneledResponse {
 	}
 	hr := httptest.NewRequest(method, path, body)
 	// Client-supplied headers first — but never honour a client-supplied tunnel
-	// marker: that header is the relay's remote-vs-LAN trust signal, and only
-	// the trusted offer-time auth context (b.auth) may set it.
+	// marker OR a client-supplied owner-session cookie: both are server-trusted
+	// signals. The marker is the relay's remote-vs-LAN trust signal; the
+	// ftw_owner cookie is the channel session, which ONLY the Bridge may set
+	// from a captured login-finish. A browser could otherwise forge either by
+	// putting it in the frame's headers.
 	for k, vs := range req.Header {
-		if http.CanonicalHeaderKey(k) == tunnelMarkerHeader {
+		ck := http.CanonicalHeaderKey(k)
+		if ck == tunnelMarkerHeader {
+			continue
+		}
+		if ck == "Cookie" {
+			// Drop any client-supplied ftw_owner; keep other cookies (none are
+			// trusted by the gate, but stripping just the owner cookie is the
+			// minimal, least-surprising rule).
+			if v := stripOwnerCookie(vs); v != "" {
+				hr.Header.Set("Cookie", v)
+			}
 			continue
 		}
 		for _, v := range vs {
@@ -142,20 +192,92 @@ func (b *Bridge) replay(req tunnel.TunneledRequest) tunnel.TunneledResponse {
 	}
 	// Then stamp the trusted auth context authoritatively (overwriting any
 	// client value) so the replayed request carries the owner's real trust tier
-	// — the same the relay path grants, never a forged local console.
+	// — remote (marker stamped) for the signaling path, never a forged local
+	// console.
 	for k, vs := range b.auth {
 		hr.Header[http.CanonicalHeaderKey(k)] = append([]string(nil), vs...)
+	}
+	// Stamp the channel-scoped session cookie (captured when the browser logged
+	// in over THIS channel). It is appended to any surviving non-owner cookies.
+	if tok := b.session(); tok != "" {
+		appendCookie(hr.Header, ownerSessionCookieName+"="+tok)
 	}
 	rec := httptest.NewRecorder()
 	b.handler.ServeHTTP(rec, hr)
 	res := rec.Result()
 	defer res.Body.Close()
+	// Capture an ftw_owner session minted by a login-finish over this channel, so
+	// every subsequent frame is authorized by the gate's ownerSession check —
+	// without the cookie ever leaving DTLS or being readable by JS.
+	b.captureSession(res.Cookies())
 	payload, _ := io.ReadAll(res.Body)
 	return tunnel.TunneledResponse{
 		Status: res.StatusCode,
 		Header: res.Header,
 		Body:   payload,
 	}
+}
+
+// session returns the captured channel session token, or "" if the browser has
+// not yet logged in over this channel.
+func (b *Bridge) session() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.sessTok
+}
+
+// captureSession scans a replayed response's Set-Cookie headers for ftw_owner
+// and records it as this channel's session. A clearing cookie (MaxAge<0 / empty
+// value — emitted by logout) drops the captured session so a sign-out over the
+// channel actually de-authorizes subsequent frames.
+func (b *Bridge) captureSession(cookies []*http.Cookie) {
+	for _, c := range cookies {
+		if c.Name != ownerSessionCookieName {
+			continue
+		}
+		b.mu.Lock()
+		if c.Value == "" || c.MaxAge < 0 {
+			b.sessTok = "" // logout-over-channel
+		} else {
+			b.sessTok = c.Value
+		}
+		b.mu.Unlock()
+	}
+}
+
+// stripOwnerCookie returns the Cookie header value(s) with any ftw_owner pair
+// removed, so a client can never smuggle a forged session through the frame
+// headers. Other cookies are preserved verbatim.
+func stripOwnerCookie(vs []string) string {
+	var kept []string
+	for _, v := range vs {
+		for _, pair := range strings.Split(v, ";") {
+			p := strings.TrimSpace(pair)
+			if p == "" {
+				continue
+			}
+			name := p
+			if i := strings.IndexByte(p, '='); i >= 0 {
+				name = strings.TrimSpace(p[:i])
+			}
+			if name == ownerSessionCookieName {
+				continue
+			}
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "; ")
+}
+
+// appendCookie adds a "name=value" pair to the request's Cookie header,
+// preserving any existing pairs.
+func appendCookie(h http.Header, pair string) {
+	existing := h.Get("Cookie")
+	if existing == "" {
+		h.Set("Cookie", pair)
+		return
+	}
+	h.Set("Cookie", existing+"; "+pair)
 }
 
 // NewPeer creates an RTCPeerConnection configured with the given STUN/TURN

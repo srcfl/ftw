@@ -30,10 +30,29 @@
     <div id="msg"></div>
   </div>
 
+  <!-- Load the P2P transport so the login ceremony can run OVER the DTLS
+       DataChannel (P2P-only home route). ownerFetch() below routes owner API
+       calls through window.p2pFetch when a channel is up, so the owner session
+       cookie is minted INSIDE DTLS and never crosses the relay. -->
+  <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
     import { apiBase, decodeAssertionOptions, encodeAssertionResult } from "./webauthn.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
+
+    // ownerFetch routes an owner API call over the P2P DataChannel when one is
+    // available (window.p2pFetch), else falls back to a plain relay fetch. In
+    // the P2P-only home route the owner session must travel inside DTLS, so the
+    // login ceremony (start + finish) goes through here.
+    //
+    // window.p2pFetch takes the BARE API path: it sends that path verbatim over
+    // the channel (the Pi serves it directly) and, on fallback, prepends the
+    // relay /me/<site> prefix itself via its own apiBase(). The non-p2p branch
+    // (no transport loaded at all) prepends base for the plain relay fetch.
+    function ownerFetch(path, opts) {
+      if (typeof window.p2pFetch === "function") return window.p2pFetch(path, opts || {});
+      return fetch(base + path, opts || {});
+    }
 
     let pendingAbort = null;
 
@@ -48,7 +67,7 @@
       const abort = new AbortController();
       pendingAbort = abort;
       try {
-        const start = await fetch(base + "/api/owner-access/login/start", { method: "POST" });
+        const start = await ownerFetch("/api/owner-access/login/start", { method: "POST" });
         if (abort.signal.aborted) return; // superseded while we were fetching
         if (start.status === 404) {
           msg.innerHTML = '<div class="err">No passkeys enrolled. Enroll one on the LAN dashboard first.</div>';
@@ -64,8 +83,8 @@
         if (mediation) getOpts.mediation = mediation;
         const cred = await navigator.credentials.get(getOpts);
         if (!cred) return; // no selection
-        const finish = await fetch(
-          base + "/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(ceremony_token),
+        const finish = await ownerFetch(
+          "/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(ceremony_token),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
