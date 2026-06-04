@@ -111,6 +111,12 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("register status %d: %s", resp.StatusCode, body)
 	}
+	var regResp struct {
+		PollSecret string `json:"poll_secret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&regResp); err != nil {
+		return nil, fmt.Errorf("decode register response: %w", err)
+	}
 
 	// Router: dispatch /mcp to the local MCP server, everything else
 	// (the /web/* family already stripped of its prefix by the relay)
@@ -133,6 +139,7 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 	mux.Handle("/", denyOwnerOnly(dashProxy))
 
 	host := tunnel.NewHost(relayURL, hostID, mux)
+	host.SetPollSecret(regResp.PollSecret) // authenticate this host's polls
 
 	return &TunnelHandle{
 		Host:         host,
