@@ -57,17 +57,38 @@
   }
 
   function supported() { return typeof window.RTCPeerConnection === "function"; }
+
+  // isDirectLAN reports whether the page is loaded over a DIRECT connection to
+  // the Pi (no relay in the path) — localhost, a loopback/private/CGNAT IP, a
+  // single-label hostname, or a *.local mDNS name. On such a connection a P2P
+  // DataChannel buys nothing (we're already direct) and the STUN handshake
+  // needs WAN a fresh Pi may not have, so P2P stays off.
+  //
+  // Crucially this is NOT the same as `apiBase() === ""`: the production
+  // bare-host relay (e.g. home.fortytwowatts.com) is also served WITHOUT the
+  // /me/<site> prefix, but it is a PUBLIC FQDN reached THROUGH the relay — a
+  // remote context where P2P is exactly what we want. Gating on the pathname
+  // alone would wrongly disable P2P there; gating on the host does not.
+  function isDirectLAN() {
+    var h = (location.hostname || "").toLowerCase();
+    if (!h) return false;
+    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
+    if (h.indexOf(".") === -1) return true;            // single-label host (e.g. "fortytwowatts")
+    if (/\.local$/.test(h)) return true;               // mDNS
+    if (/^10\./.test(h)) return true;                  // RFC1918 10/8
+    if (/^192\.168\./.test(h)) return true;            // RFC1918 192.168/16
+    if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)) return true; // RFC1918 172.16/12
+    if (/^169\.254\./.test(h)) return true;            // link-local
+    if (/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // CGNAT 100.64/10 (Tailscale et al)
+    return false;                                      // public FQDN → relay context (incl. home.*)
+  }
+
   function enabled() {
     // Opt-in defaults ON (the feature's whole point); set localStorage
-    // "ftw.p2p" = "off" to force the relay path.
-    //
-    // Only engage on the remote relay path (apiBase() is the "/me/<site>"
-    // prefix). On a direct LAN / home-host visit apiBase() is "" — we're
-    // already connected straight to the Pi, so a WebRTC DataChannel buys
-    // nothing and the STUN handshake (needs WAN) would stall the first
-    // status poll ~8s before falling back. Fall straight through to fetch.
-    if (apiBase() === "") return false;
-    return supported() && localStorage.getItem("ftw.p2p") !== "off";
+    // "ftw.p2p" = "off" to force the relay path. Skip the direct-LAN path
+    // entirely (see isDirectLAN) — there's no relay to bypass and the
+    // handshake would only waste a WAN round-trip.
+    return supported() && !isDirectLAN() && localStorage.getItem("ftw.p2p") !== "off";
   }
 
   function teardown() {
@@ -229,10 +250,17 @@
       return fetch(relayURL(path), o);
     };
     if (!enabled()) return fallback();
-    return connect().then(function (ok) {
-      if (!ok || !ready || !dc || dc.readyState !== "open") return fallback();
+    // Never block a request on the handshake. If the channel is already open,
+    // use it; otherwise kick a background connect (deduped + backoff-guarded)
+    // and serve THIS request over the relay fetch immediately. Once the
+    // channel opens, subsequent polls go direct. This is what keeps the very
+    // first /api/status poll from stalling on CONNECT_TIMEOUT_MS — on the
+    // relay path too, not just LAN.
+    if (ready && dc && dc.readyState === "open") {
       return channelFetch(path, opts).catch(fallback);
-    }, fallback);
+    }
+    connect(); // fire-and-forget; ignore the promise so we don't await it
+    return fallback();
   }
 
   window.ftwP2P = {
@@ -250,13 +278,13 @@
 
   // Warm up the channel on load so the dashboard's first poll can already be
   // direct (and the indicator settles quickly). When P2P is supported but
-  // opted out, still surface a "relay" state so the indicator stays clickable
-  // to re-enable; only an unsupported browser leaves the state "off" (hidden).
+  // opted out on a relay context, still surface a "relay" state so the
+  // indicator stays clickable to re-enable.
   //
-  // On a direct LAN / home-host visit (apiBase() === "") P2P is not applicable
-  // at all — there's no relay to bypass — so we stay "off" (indicator hidden)
-  // rather than showing a misleading, un-toggleable "Relay" badge.
-  if (apiBase() === "") { /* not applicable on the direct path — stay "off" */ }
-  else if (enabled()) { try { connect(); } catch (e) {} }
-  else if (supported()) { setState("relay"); }
+  // On a direct-LAN connection (see isDirectLAN) P2P is not applicable — there's
+  // no relay to bypass — so we leave the state "off" (indicator hidden) rather
+  // than showing a misleading, un-toggleable "Relay" badge. The bare-host relay
+  // (home.*) is NOT direct-LAN, so it warms up and connects like /me/<site>.
+  if (enabled()) { try { connect(); } catch (e) {} }
+  else if (supported() && !isDirectLAN()) { setState("relay"); }
 })();
