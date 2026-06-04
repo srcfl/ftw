@@ -159,6 +159,43 @@ func TestOwnerRegistryCapAndGC(t *testing.T) {
 	}
 }
 
+// The host poll endpoints require the registration-minted poll token, so a
+// caller that only learned host_id can't poll for (and steal) the host's
+// tunneled traffic, nor can an unregistered host_id create waiters.
+func TestTunnelPollRequiresToken(t *testing.T) {
+	r := newTestRelay()
+	r.PollTimeout = 50 * time.Millisecond
+	srv := httptest.NewServer(r.Handler())
+	defer srv.Close()
+	secret := r.Polls.Issue("host-x")
+
+	poll := func(host, token string) int {
+		req, _ := http.NewRequest("GET", srv.URL+"/tunnel/"+host+"/next", nil)
+		if token != "" {
+			req.Header.Set(tunnel.PollSecretHeader, token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := poll("host-x", ""); code != http.StatusUnauthorized {
+		t.Errorf("poll without token: got %d, want 401", code)
+	}
+	if code := poll("host-x", "wrong-token"); code != http.StatusUnauthorized {
+		t.Errorf("poll with wrong token: got %d, want 401", code)
+	}
+	if code := poll("never-registered", secret); code != http.StatusUnauthorized {
+		t.Errorf("poll for unregistered host: got %d, want 401", code)
+	}
+	if code := poll("host-x", secret); code != http.StatusNoContent {
+		t.Errorf("poll with correct token: got %d, want 204", code)
+	}
+}
+
 // home.* must serve the styled offline page (not a raw timeout) when the Pi has
 // never registered.
 func TestHomeForwardServesOfflinePage(t *testing.T) {

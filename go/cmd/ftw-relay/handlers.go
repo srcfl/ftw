@@ -60,6 +60,7 @@ type Relay struct {
 	Queue       *tunnel.Queue
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
+	Polls       *PollSecrets
 	PollTimeout time.Duration // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
@@ -81,10 +82,14 @@ type registerRequest struct {
 type registerResponse struct {
 	PublicURL   string `json:"public_url"`
 	ApprovalURL string `json:"approval_url"`
+	PollSecret  string `json:"poll_secret"`
 }
 
 // Handler returns the mux for this relay.
 func (r *Relay) Handler() http.Handler {
+	if r.Polls == nil {
+		r.Polls = NewPollSecrets()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -245,6 +250,13 @@ func (r *Relay) healthz(w http.ResponseWriter, _ *http.Request) {
 
 func (r *Relay) tunnelNext(w http.ResponseWriter, req *http.Request) {
 	hostID := req.PathValue("host_id")
+	// Authenticate the poller against the token minted at registration, so a
+	// caller that only learned host_id can't poll for (and steal) this host's
+	// tunneled traffic. Unknown host / wrong token → 401. The host retries.
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
 	tr, err := r.Queue.Poll(req.Context(), hostID, r.pollTimeout())
 	if errors.Is(err, tunnel.ErrPollTimeout) {
 		w.WriteHeader(http.StatusNoContent)
@@ -263,6 +275,13 @@ func (r *Relay) tunnelNext(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) tunnelResponse(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	// Same poll-token auth as tunnelNext: only the real host may post responses,
+	// so a caller knowing only host_id (+ a guessed req_id) can't inject one.
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
 	reqID := req.PathValue("req_id")
 	var resp tunnel.TunneledResponse
 	if err := json.NewDecoder(req.Body).Decode(&resp); err != nil {
@@ -309,10 +328,15 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	secret := ""
+	if r.Polls != nil {
+		secret = r.Polls.Issue(reg.HostID)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResponse{
 		PublicURL:   fmt.Sprintf("/h/%s", reg.Token),
 		ApprovalURL: fmt.Sprintf("/h/%s/approve", reg.Token),
+		PollSecret:  secret,
 	})
 }
 
@@ -686,7 +710,16 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	// Return the poll token this host must present on /tunnel/<host>/next. The
+	// ES256-verified registration above proves it owns host_id, so only it
+	// learns the token. Re-registration returns the same token (refreshes after
+	// a relay restart re-mints).
+	secret := ""
+	if r.Polls != nil {
+		secret = r.Polls.Issue(reg.HostID)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})
 }
 
 // meRoot handles GET /me/<site_id> — the landing page when the operator

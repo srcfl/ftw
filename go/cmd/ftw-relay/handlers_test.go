@@ -38,6 +38,7 @@ func TestTunnelNextLongPollsAndDelivers(t *testing.T) {
 	r := newTestRelay()
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
+	secret := r.Polls.Issue("host-a") // the host authenticates its polls with this
 
 	respCh := make(chan tunnel.TunneledResponse, 1)
 	go func() {
@@ -47,7 +48,9 @@ func TestTunnelNextLongPollsAndDelivers(t *testing.T) {
 		}
 	}()
 
-	resp, err := http.Get(srv.URL + "/tunnel/host-a/next")
+	pollReq, _ := http.NewRequest("GET", srv.URL+"/tunnel/host-a/next", nil)
+	pollReq.Header.Set(tunnel.PollSecretHeader, secret)
+	resp, err := http.DefaultClient.Do(pollReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +67,10 @@ func TestTunnelNextLongPollsAndDelivers(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(tunnel.TunneledResponse{Status: 200, Body: []byte("ok")})
-	postResp, err := http.Post(srv.URL+"/tunnel/host-a/response/"+tr.ReqID, "application/json", bytes.NewReader(body))
+	postReq, _ := http.NewRequest("POST", srv.URL+"/tunnel/host-a/response/"+tr.ReqID, bytes.NewReader(body))
+	postReq.Header.Set("Content-Type", "application/json")
+	postReq.Header.Set(tunnel.PollSecretHeader, secret)
+	postResp, err := http.DefaultClient.Do(postReq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +93,9 @@ func TestTunnelNextTimesOutWith204(t *testing.T) {
 	r.PollTimeout = 50 * time.Millisecond
 	srv := httptest.NewServer(r.Handler())
 	defer srv.Close()
-	resp, err := http.Get(srv.URL + "/tunnel/host-empty/next")
+	pollReq, _ := http.NewRequest("GET", srv.URL+"/tunnel/host-empty/next", nil)
+	pollReq.Header.Set(tunnel.PollSecretHeader, r.Polls.Issue("host-empty"))
+	resp, err := http.DefaultClient.Do(pollReq)
 	if err != nil {
 		t.Fatal(err)
 	}
