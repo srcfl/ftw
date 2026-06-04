@@ -59,6 +59,7 @@ func main() {
 		Queue:       tunnel.NewQueue(),
 		Tokens:      NewTokenRegistry(),
 		Owners:      owners,
+		Polls:       NewPollSecrets(),
 		PollTimeout: *pollTimeout,
 		HomeHost:    *homeHost,
 		HomeSite:    *homeSite,
@@ -98,6 +99,9 @@ func main() {
 				// home/pinned site is exempt; a live Pi re-registers every ~60s.
 				if n := r.Owners.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: owner GC", "removed", n)
+				}
+				if n := r.Polls.GC(30 * time.Minute); n > 0 {
+					slog.Info("ftw-relay: poll-token GC", "removed", n)
 				}
 			}
 		}

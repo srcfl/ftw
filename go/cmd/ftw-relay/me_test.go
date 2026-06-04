@@ -63,18 +63,20 @@ func TestMeRegisterAndForward(t *testing.T) {
 
 	host := tunnel.NewHost(srv.URL, "host-owner", hostBackend)
 	host.PollTimeout = 1 * time.Second
+	host.SetPollSecret(relay.Polls.Issue("host-owner")) // authenticate the host's polls
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go host.Run(ctx)
 
-	// 1. Register the site → host mapping (ES256-signed).
+	// 1. Register the site → host mapping (ES256-signed). meRegister now returns
+	// 200 + {"poll_secret": …}.
 	id := newTestIdentity(t)
 	regBody := signedMeBody(t, id, "site-A", "host-owner", time.Now().UnixMilli())
 	regResp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(regBody))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if regResp.StatusCode != 204 {
+	if regResp.StatusCode != 200 {
 		body, _ := io.ReadAll(regResp.Body)
 		t.Fatalf("register status=%d body=%q", regResp.StatusCode, body)
 	}
@@ -209,8 +211,8 @@ func TestMeRegisterTOFUPinRejectsDifferentKey(t *testing.T) {
 
 	owner := newTestIdentity(t)
 	first := signedMeBody(t, owner, "site-A", "host-owner", time.Now().UnixMilli())
-	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(first)); resp.StatusCode != 204 {
-		t.Fatalf("first registration status=%d want 204", resp.StatusCode)
+	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(first)); resp.StatusCode != 200 {
+		t.Fatalf("first registration status=%d want 200", resp.StatusCode)
 	}
 
 	attacker := newTestIdentity(t) // different keypair, validly self-signed
@@ -230,12 +232,12 @@ func TestMeRegisterSameKeyReRegisterUpdatesHost(t *testing.T) {
 
 	owner := newTestIdentity(t)
 	b1 := signedMeBody(t, owner, "site-A", "host-1", time.Now().UnixMilli())
-	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(b1)); resp.StatusCode != 204 {
-		t.Fatalf("first status=%d want 204", resp.StatusCode)
+	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(b1)); resp.StatusCode != 200 {
+		t.Fatalf("first status=%d want 200", resp.StatusCode)
 	}
 	b2 := signedMeBody(t, owner, "site-A", "host-2", time.Now().UnixMilli())
-	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(b2)); resp.StatusCode != 204 {
-		t.Fatalf("re-register status=%d want 204", resp.StatusCode)
+	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(b2)); resp.StatusCode != 200 {
+		t.Fatalf("re-register status=%d want 200", resp.StatusCode)
 	}
 	if got, _ := relay.Owners.Lookup("site-A"); got != "host-2" {
 		t.Fatalf("mapping = %q, want host-2 after same-key re-register", got)
@@ -259,7 +261,7 @@ func TestMeRegisterOperatorPinBeatsTOFU(t *testing.T) {
 	}
 	// The real owner still registers fine.
 	good := signedMeBody(t, owner, "site:Home", "host-owner", time.Now().UnixMilli())
-	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(good)); resp.StatusCode != 204 {
-		t.Fatalf("owner against own pin status=%d want 204", resp.StatusCode)
+	if resp, _ := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(good)); resp.StatusCode != 200 {
+		t.Fatalf("owner against own pin status=%d want 200", resp.StatusCode)
 	}
 }
