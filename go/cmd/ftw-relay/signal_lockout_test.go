@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 )
@@ -14,27 +14,37 @@ import (
 // client can't vary the source IP), through the full mux so the limiter +
 // ParkOffer backstop both run.
 
-func newLockoutRelay(t *testing.T) http.Handler {
+func newLockoutRelay(t *testing.T) (http.Handler, *Relay) {
 	t.Helper()
 	owners := NewOwnerRegistry()
 	if err := owners.Register("site:Home", "host-xyz", "deadbeef"); err != nil {
 		t.Fatalf("register: %v", err)
 	}
+	owners.SetDeviceKeys("site:Home", []string{testDeviceKey.pubKeyHex})
 	r := &Relay{
 		Owners:      owners,
 		Polls:       NewPollSecrets(),
 		Signals:     NewSignalMailbox(),
+		Challenges:  NewSignalChallenges(),
 		PollTimeout: time.Second,
 	}
-	return r.Handler()
+	return r.Handler(), r
 }
 
-// offerFromIP builds a POST /signal/site:Home/offer request whose source IP is
-// fixed to ip, with a distinct VALID (16-hex) rendezvous nonce derived from tag,
-// and serves it through h.
-func offerFromIP(h http.Handler, ip, tag string) int {
+// offerFromIP builds a SIGNED POST /signal/site:Home/offer request (C2 device
+// proof) whose source IP is fixed to ip, with a distinct VALID (16-hex)
+// rendezvous nonce derived from tag, and serves it through h. The challenge nonce
+// is minted straight from the relay's store (these tests drive the handler
+// directly, not a live server). The per-IP throttle runs BEFORE the proof check,
+// so a throttled request still returns 429 even though we supply a valid proof.
+func offerFromIP(t *testing.T, h http.Handler, r *Relay, ip, tag string) int {
+	challenge, _, ok := r.Challenges.Issue("site:Home")
+	if !ok {
+		t.Fatalf("issue challenge: store at capacity")
+	}
+	body := offerEnvelope(t, testDeviceKey, "site:Home", challenge, "OFFER-SDP")
 	req := httptest.NewRequest(http.MethodPost,
-		"/signal/site%3AHome/offer?n="+nonce16(tag), strings.NewReader("OFFER-SDP"))
+		"/signal/site%3AHome/offer?n="+nonce16(tag), bytes.NewReader(body))
 	req.RemoteAddr = ip + ":40000"
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -63,7 +73,7 @@ func nonce16(tag string) string {
 // a DIFFERENT IP can still park its offer (204). With the old per-site limit the
 // attacker's flood would 429 the legit browser too.
 func TestSignalOffer_PerIP_NoCrossLockout(t *testing.T) {
-	h := newLockoutRelay(t)
+	h, r := newLockoutRelay(t)
 	const attacker = "203.0.113.66"
 	const victim = "198.51.100.20"
 
@@ -72,7 +82,7 @@ func TestSignalOffer_PerIP_NoCrossLockout(t *testing.T) {
 	// attacker's OWN IP saturates first — proving the bound is per-IP.
 	attackerThrottled := false
 	for i := 0; i < int(siteOfferBucketCap)+int(offerBucketCapacity)+16; i++ {
-		if offerFromIP(h, attacker, "a"+fmtNonceSuffix(i)) == http.StatusTooManyRequests {
+		if offerFromIP(t, h, r, attacker, "a"+fmtNonceSuffix(i)) == http.StatusTooManyRequests {
 			attackerThrottled = true
 			break
 		}
@@ -82,7 +92,7 @@ func TestSignalOffer_PerIP_NoCrossLockout(t *testing.T) {
 	}
 
 	// THE INVARIANT: the victim, on a different IP, can still park an offer.
-	if code := offerFromIP(h, victim, "deadbeef0001"); code != http.StatusNoContent {
+	if code := offerFromIP(t, h, r, victim, "deadbeef0001"); code != http.StatusNoContent {
 		t.Fatalf("FIX-C: legit different-IP browser got %d (want 204) — attacker locked it out of site:Home", code)
 	}
 }
@@ -91,20 +101,20 @@ func TestSignalOffer_PerIP_NoCrossLockout(t *testing.T) {
 // even while the attacker keeps hammering (and getting 429s), the victim's offers
 // keep succeeding, bounded only by the victim's own generous per-IP bucket.
 func TestSignalOffer_PerIP_AttackerBoundedButVictimFlows(t *testing.T) {
-	h := newLockoutRelay(t)
+	h, r := newLockoutRelay(t)
 	const attacker = "203.0.113.99"
 	const victim = "198.51.100.50"
 
 	// Saturate the attacker first.
 	for i := 0; i < int(offerBucketCapacity)+4; i++ {
-		offerFromIP(h, attacker, "x"+fmtNonceSuffix(i))
+		offerFromIP(t, h, r, attacker, "x"+fmtNonceSuffix(i))
 	}
 	// Now interleave: attacker is throttled, victim still gets through for its
 	// first several (within its own burst).
 	victimOK := 0
 	for i := 0; i < 4; i++ {
-		offerFromIP(h, attacker, "y"+fmtNonceSuffix(i)) // attacker keeps trying (likely 429)
-		if offerFromIP(h, victim, "z"+fmtNonceSuffix(i)) == http.StatusNoContent {
+		offerFromIP(t, h, r, attacker, "y"+fmtNonceSuffix(i)) // attacker keeps trying (likely 429)
+		if offerFromIP(t, h, r, victim, "z"+fmtNonceSuffix(i)) == http.StatusNoContent {
 			victimOK++
 		}
 	}

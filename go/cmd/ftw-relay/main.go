@@ -30,6 +30,8 @@ func main() {
 	homeHost := flag.String("home-host", "", "bare host that maps to a single owner Pi (e.g. home.fortytwowatts.com); requires -home-site")
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
+	homeWeb := flag.String("home-web", "", "path to the web/ bundle on the relay VM; when set, the home host's static GETs are served from here instead of forwarded to the Pi (SLICE 1). Unset → forward static GETs to the Pi (back-compat).")
+	requireDeviceKey := flag.Bool("require-device-key", false, "ENFORCE the device-key signaling gate (C2): an offer must carry a verified device-key proof or the Pi is never contacted. Off (default) keeps the pre-C2 behaviour so the relay can serve the shell + identity (slices 1+2) while a home Pi that doesn't yet publish device-keys keeps working. Turn on once device-keys are enrolled.")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
 	flag.Parse()
@@ -41,7 +43,7 @@ func main() {
 
 	// Fail closed: the internet-exposed home route must never run on
 	// trust-on-first-use (see requireHomePin).
-	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeAllowTOFU); err != nil {
+	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeWeb, *homeAllowTOFU); err != nil {
 		slog.Error("ftw-relay: " + err.Error())
 		os.Exit(1)
 	}
@@ -57,15 +59,19 @@ func main() {
 	}
 
 	r := &Relay{
-		Queue:       tunnel.NewQueue(),
-		Tokens:      NewTokenRegistry(),
-		Owners:      owners,
-		Polls:       NewPollSecrets(),
-		Signals:     NewSignalMailbox(),
-		TrustCFIP:   *trustCFIP,
-		PollTimeout: *pollTimeout,
-		HomeHost:    *homeHost,
-		HomeSite:    *homeSite,
+		Queue:            tunnel.NewQueue(),
+		Tokens:           NewTokenRegistry(),
+		Owners:           owners,
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		TrustCFIP:        *trustCFIP,
+		PollTimeout:      *pollTimeout,
+		HomeHost:         *homeHost,
+		HomeSite:         *homeSite,
+		HomeWeb:          *homeWeb,
+		HomePubKey:       *homePubKey,
+		RequireDeviceKey: *requireDeviceKey,
 	}
 
 	srv := &http.Server{
@@ -111,6 +117,14 @@ func main() {
 				if n := r.Signals.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: signal GC", "removed", n)
 				}
+				// Reap expired device-key challenge nonces (C2) so a flood of
+				// GET /signal/<random>/challenge can't grow relay memory; each nonce
+				// also self-expires after ~60s, so this just trims the map proactively.
+				if r.Challenges != nil {
+					if n := r.Challenges.GC(0); n > 0 {
+						slog.Info("ftw-relay: signal-challenge GC", "removed", n)
+					}
+				}
 				// Evict idle per-source-IP offer buckets (FIX-C) so a churn of source
 				// IPs can't grow the limiter map without bound; an idle IP has
 				// refilled to full anyway, so forgetting it only resets it fresh.
@@ -145,9 +159,14 @@ func main() {
 // the key (so a racer can't claim home.* after a relay restart drops the
 // in-memory pin) unless TOFU was explicitly allowed. Extracted from main so the
 // fail-closed rule is unit-testable.
-func requireHomePin(homeHost, homeSite, homePubKey string, allowTOFU bool) error {
-	if (homeHost != "" || homeSite != "") && homePubKey == "" && !allowTOFU {
-		return errors.New("-home-host/-home-site requires -home-pubkey to pin the home site key — refusing to run the public home route in trust-on-first-use mode. Pass the Pi's public key (it logs it at startup) via -home-pubkey, or -home-allow-tofu to override for testing")
+func requireHomePin(homeHost, homeSite, homePubKey, homeWeb string, allowTOFU bool) error {
+	if (homeHost != "" || homeSite != "") && !allowTOFU {
+		if homePubKey == "" {
+			return errors.New("-home-host/-home-site requires -home-pubkey to pin the home site key — refusing to run the public home route in trust-on-first-use mode. Pass the Pi's public key (it logs it at startup) via -home-pubkey, or -home-allow-tofu to override for testing")
+		}
+		if homeWeb == "" {
+			return errors.New("-home-host/-home-site requires -home-web — the relay must serve the sign-in shell + /api/identity itself and NEVER forward an anonymous request to the Pi (forwarding would let an unauthenticated internet visitor reach the home network). Pass the path to the web/ bundle on the relay VM, or -home-allow-tofu to override for testing")
+		}
 	}
 	return nil
 }

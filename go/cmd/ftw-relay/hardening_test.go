@@ -67,18 +67,19 @@ func TestTokenRegistryGC(t *testing.T) {
 // The public home route must fail closed without a pinned key.
 func TestRequireHomePin(t *testing.T) {
 	cases := []struct {
-		host, site, key string
-		tofu            bool
-		wantErr         bool
+		host, site, key, web string
+		tofu                 bool
+		wantErr              bool
 	}{
-		{"", "", "", false, false},                    // no home host configured → ok
-		{"home.test", "site:x", "abcd", false, false}, // pinned key → ok
-		{"home.test", "site:x", "", true, false},      // explicit TOFU override → ok
-		{"home.test", "site:x", "", false, true},      // public host, no pin, no override → error
-		{"", "site:x", "", false, true},               // site alone without pin → error
+		{"", "", "", "", false, false},                        // no home host configured → ok
+		{"home.test", "site:x", "abcd", "/web", false, false}, // pinned key + web → ok
+		{"home.test", "site:x", "abcd", "", false, true},      // pinned key but NO -home-web → error
+		{"home.test", "site:x", "", "/web", true, false},      // explicit TOFU override → ok
+		{"home.test", "site:x", "", "/web", false, true},      // has web but no pin → error
+		{"", "site:x", "", "", false, true},                   // site alone without pin/web → error
 	}
 	for i, c := range cases {
-		err := requireHomePin(c.host, c.site, c.key, c.tofu)
+		err := requireHomePin(c.host, c.site, c.key, c.web, c.tofu)
 		if (err != nil) != c.wantErr {
 			t.Errorf("case %d (%+v): err=%v wantErr=%v", i, c, err, c.wantErr)
 		}

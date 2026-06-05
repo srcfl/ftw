@@ -89,6 +89,7 @@
     import { decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
     import { ownerFetch } from "./owner-fetch.js";
+    import { exportPubHex } from "./device-key.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
@@ -129,13 +130,32 @@
         const credOpts = decodeCreationOptions(options);
         const cred = await navigator.credentials.create({ publicKey: credOpts });
 
-        // 3. Finish.
+        // 2b. Mint this device's silent-login key (C4). Enrollment is the ONLY
+        //     place it's created — it always runs on the LAN-trusted path (the
+        //     enroll ceremony rides strict P2P / genuine LAN), so the public key
+        //     we send here gets PINNED on the Pi's new credential. After this the
+        //     device can sign in over the relay with NO passkey (C2/C3). A failure
+        //     to mint must not silently drop the field — it would leave the device
+        //     un-rememberable without any signal — so we surface it.
+        let devicePubHex;
+        try {
+          devicePubHex = await exportPubHex();
+        } catch (e) {
+          msg.innerHTML = `<div class="err">Couldn't set up this device's silent-login key (${e.name}: ${e.message}). Your passkey still works; this device just won't be remembered.</div>`;
+          // Continue without the field rather than abort the passkey enrollment.
+          devicePubHex = null;
+        }
+
+        // 3. Finish. The device_pubkey rides INSIDE the WebAuthn registration JSON
+        //    body (C4): the Pi pins it on the NEW credential's trusted_devices row.
+        const finishBody = encodeRegistrationResult(cred);
+        if (devicePubHex) finishBody.device_pubkey = devicePubHex;
         const finish = await ownerFetch(
           "/api/owner-access/enroll/finish?ceremony_token=" + encodeURIComponent(ceremony_token) + "&name=" + encodeURIComponent(name),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(encodeRegistrationResult(cred)),
+            body: JSON.stringify(finishBody),
             credentials: "same-origin",
           }
         );

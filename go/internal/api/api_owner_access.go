@@ -22,12 +22,14 @@
 package api
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -84,6 +86,11 @@ type ownerAccessState struct {
 	enrollSessions map[string]ceremonySession
 	loginSessions  map[string]ceremonySession
 	authSessions   map[string]authSession
+
+	// devicePoPChallenges holds the in-flight single-use device-PoP challenges
+	// (C3). Value is the challenge's expiry; the entry is deleted on consume or
+	// when GC'd past TTL. See api_owner_device_pop.go.
+	devicePoPChallenges map[string]time.Time
 
 	// enrollPin is the in-memory LAN-first-enrollment PIN. Regenerated on
 	// demand (each GET /enroll-pin mints a fresh value), expires after
@@ -165,9 +172,10 @@ func (s *Server) ownerAccess() *ownerAccessState {
 	defer s.mu.Unlock()
 	if s.deps.ownerAccess == nil {
 		oa := &ownerAccessState{
-			enrollSessions: make(map[string]ceremonySession),
-			loginSessions:  make(map[string]ceremonySession),
-			authSessions:   make(map[string]authSession),
+			enrollSessions:      make(map[string]ceremonySession),
+			loginSessions:       make(map[string]ceremonySession),
+			authSessions:        make(map[string]authSession),
+			devicePoPChallenges: make(map[string]time.Time),
 		}
 		// Restore persisted sessions so a process restart doesn't sign
 		// everyone out (sessions are otherwise in-memory only).
@@ -671,7 +679,18 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody)
+	// The C4 device_pubkey rides as an extra top-level field on the SAME finish
+	// body the WebAuthn library parses. go-webauthn's decoder ignores unknown
+	// fields, so we buffer the body once, pull device_pubkey out of it, then hand
+	// the library a fresh reader over the identical bytes. Buffering also enforces
+	// the ceremony size cap.
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
+	if err != nil {
+		http.Error(w, "finish registration: read body", http.StatusBadRequest)
+		return
+	}
+	devicePubkey := extractDevicePubkeyField(bodyBytes)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	cred, err := wa.FinishRegistration(user, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish registration: %v", err), http.StatusBadRequest)
@@ -697,6 +716,12 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		WalletHandle:   string(walletHandle),
 		BackupEligible: cred.Flags.BackupEligible,
 		BackupState:    cred.Flags.BackupState,
+		// Pin the freshly-minted device key (C4). Only a syntactically-valid
+		// canonical key is stored; a malformed value is dropped silently so the
+		// passkey still enrolls (the device key is an optional upgrade, not a
+		// hard requirement for the passkey itself). An empty/invalid value means
+		// "no silent device login yet" — the operator can still log in by passkey.
+		DevicePubkey: canonicalDevicePubkey(devicePubkey),
 	}
 	if err := s.deps.State.SaveTrustedDevice(dev); err != nil {
 		http.Error(w, fmt.Sprintf("save device: %v", err), http.StatusInternalServerError)
@@ -777,7 +802,19 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody)
+	// Optional C4 upgrade: a credential enrolled before the device-key feature
+	// can attach its device key on a later passkey login by riding device_pubkey
+	// on this finish body (same buffer-and-replay trick as enroll/finish). Only an
+	// empty slot is filled — a passkey login can never silently REPOINT a key
+	// that's already pinned (that would let a fresh-but-valid passkey assertion
+	// hijack the silent-login key). Buffering also enforces the ceremony cap.
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
+	if err != nil {
+		http.Error(w, "finish login: read body", http.StatusBadRequest)
+		return
+	}
+	devicePubkey := canonicalDevicePubkey(extractDevicePubkeyField(bodyBytes))
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	cred, err := wa.FinishDiscoverableLogin(s.resolveDiscoverableOwner, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish login: %v", err), http.StatusUnauthorized)
@@ -790,6 +827,14 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 	if err := s.deps.State.UpdateTrustedDeviceSignCount(cred.ID, cred.Authenticator.SignCount, time.Now().UnixMilli()); err != nil {
 		http.Error(w, fmt.Sprintf("update sign count: %v", err), http.StatusInternalServerError)
 		return
+	}
+	// Fill the device-key slot only if empty (allowOverwrite=false). Best-effort:
+	// the login itself already succeeded, so a failed upgrade must not 500 the
+	// operator out of a valid session.
+	if devicePubkey != "" {
+		if err := s.deps.State.SetTrustedDevicePubkey(cred.ID, devicePubkey, false); err != nil {
+			slog.Warn("owner-access: device-key upgrade on login failed", "err", err)
+		}
 	}
 	if err := s.issueOwnerSession(w, cred.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -815,11 +860,16 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	type devOut struct {
-		CredentialIDB64 string `json:"credential_id_b64"`
-		FriendlyName    string `json:"friendly_name"`
-		CreatedAtMs     int64  `json:"created_at_ms"`
-		LastUsedMs      int64  `json:"last_used_ms"`
+		CredentialIDB64 string   `json:"credential_id_b64"`
+		FriendlyName    string   `json:"friendly_name"`
+		CreatedAtMs     int64    `json:"created_at_ms"`
+		LastUsedMs      int64    `json:"last_used_ms"`
 		Transports      []string `json:"transports,omitempty"`
+		// HasDeviceKey reports whether this credential carries a pinned device key
+		// (C4) — i.e. whether it can mint a silent device-PoP session (C3). The
+		// raw key itself is public, but the UI only needs the boolean to show an
+		// "upgrade for one-tap login" affordance, so we don't ship the 128 hex.
+		HasDeviceKey bool `json:"has_device_key"`
 	}
 	out := make([]devOut, 0, len(devices))
 	for _, d := range devices {
@@ -829,6 +879,7 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 			CreatedAtMs:     d.CreatedAtMs,
 			LastUsedMs:      d.LastUsedMs,
 			Transports:      d.Transports,
+			HasDeviceKey:    d.DevicePubkey != "",
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")

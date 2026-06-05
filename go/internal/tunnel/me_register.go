@@ -1,6 +1,10 @@
 package tunnel
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
 
 // MeRegisterSigningString is the canonical message the owner Pi signs (ES256,
 // raw R||S over SHA-256) and the relay verifies for POST /me/register. It binds
@@ -17,6 +21,20 @@ import "fmt"
 // keeping it here in the shared package rather than duplicating it.
 func MeRegisterSigningString(siteID, hostID string, tsMs int64) string {
 	return fmt.Sprintf("ftw-me-register:v1:%s:%s:%d", siteID, hostID, tsMs)
+}
+
+// MeRegisterSigningStringV2 extends v1 to also cover the published device-key set
+// (C1), so a captured registration body can't be replayed with a swapped or added
+// device_pubkeys array to inject an attacker key the relay would then trust for
+// signaling. The set is canonicalised (sorted, comma-joined) so the Pi and relay
+// agree regardless of slice order. The relay verifies v2 when a device_pubkeys
+// field is present and, on success, trusts that set; a v1-only signature (old Pi,
+// no device-keys) is still accepted but its device_pubkeys (if any were appended
+// by an attacker) are IGNORED.
+func MeRegisterSigningStringV2(siteID, hostID string, tsMs int64, devicePubkeys []string) string {
+	pk := append([]string(nil), devicePubkeys...)
+	sort.Strings(pk)
+	return fmt.Sprintf("ftw-me-register:v2:%s:%s:%d:%s", siteID, hostID, tsMs, strings.Join(pk, ","))
 }
 
 // MeRegisterMaxSkewMs bounds how far the registration timestamp may be from the
