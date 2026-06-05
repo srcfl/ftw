@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -43,6 +48,7 @@ type WalletBlobStore struct {
 type blobEntry struct {
 	ciphertext  []byte
 	nonce       []byte
+	writePub    []byte // Ed25519 public key (32 B) TOFU-pinned for this wallet's writes
 	version     int
 	updatedAtMs int64
 	touchedAt   time.Time
@@ -52,15 +58,20 @@ type blobEntry struct {
 type blobFile struct {
 	CiphertextB64 string `json:"ciphertext_b64"`
 	NonceB64      string `json:"nonce_b64"`
+	WritePubB64   string `json:"write_pub_b64"`
 	Version       int    `json:"version"`
 	UpdatedAtMs   int64  `json:"updated_at_ms"`
 }
 
 const (
 	// defaultMaxWalletBlobs bounds the number of distinct wallets the store holds,
-	// so a flood of PUTs for random userHandles can't grow disk/memory without
-	// limit. A real population of tenants is far below this.
-	defaultMaxWalletBlobs = 4096
+	// so a flood of (validly self-signed) PUTs for random userHandles can't grow
+	// disk/memory without limit. Wallet blobs are NOT time-GC'd (that would drop a
+	// TOFU-pinned write key — see the janitor note), so this count cap is the sole
+	// bound; it is generous because each entry is small and a real tenant
+	// population is well below it. The residual is an enrollment-capacity DoS
+	// (filling the cap blocks NEW wallets, never overwrites existing ones).
+	defaultMaxWalletBlobs = 65536
 	// blobFileSuffix is appended to the (validated, FS-safe) userHandle.
 	blobFileSuffix = ".blob"
 	// maxVersionJump bounds how far a single Put may advance the version. The raw
@@ -83,7 +94,26 @@ var (
 	ErrTooManyBlobs = errors.New("too many wallet blobs")
 	// ErrBadUserHandle is returned when the userHandle fails validation.
 	ErrBadUserHandle = errors.New("invalid user handle")
+	// ErrUnauthorizedWrite is returned when a Put's Ed25519 signature does not
+	// verify against the wallet's TOFU-pinned write key (or the supplied key
+	// differs from the pinned one). This is what stops a userHandle-knower who
+	// lacks the owner's passkey-derived write key from overwriting a blob.
+	ErrUnauthorizedWrite = errors.New("wallet blob write not authorized")
 )
+
+// blobWriteMessage is the canonical byte string a wallet's Ed25519 write key
+// signs for a PUT. Binding handle + version + nonce + a hash of the ciphertext
+// stops replay onto a different wallet/version and stops tampering with the
+// stored bytes. The web client (instance-sync.js) MUST construct this identically:
+//
+//	"ftw-blob:v1:" + handle + ":" + version + ":" + base64url(nonce) + ":" + hex(sha256(ciphertext))
+func blobWriteMessage(userHandle string, version int, nonce, ciphertext []byte) []byte {
+	sum := sha256.Sum256(ciphertext)
+	return []byte("ftw-blob:v1:" + userHandle + ":" +
+		strconv.Itoa(version) + ":" +
+		base64.RawURLEncoding.EncodeToString(nonce) + ":" +
+		hex.EncodeToString(sum[:]))
+}
 
 // validUserHandle reports whether s is a safe opaque WebAuthn userHandle: a
 // base64url token (RFC 4648 §5 alphabet, no padding) of bounded length. This is
@@ -165,15 +195,17 @@ func NewWalletBlobStore(dir string, maxBytes, maxBlobs int) (*WalletBlobStore, e
 		}
 		ct, e1 := base64.StdEncoding.DecodeString(bf.CiphertextB64)
 		nc, e2 := base64.StdEncoding.DecodeString(bf.NonceB64)
-		if e1 != nil || e2 != nil {
+		wp, e3 := base64.StdEncoding.DecodeString(bf.WritePubB64)
+		if e1 != nil || e2 != nil || e3 != nil {
 			continue
 		}
-		if (s.maxBytes > 0 && len(ct) > s.maxBytes) || bf.Version <= 0 {
-			continue // enforce the runtime invariants on reload too
+		if (s.maxBytes > 0 && len(ct) > s.maxBytes) || bf.Version <= 0 || len(wp) != ed25519.PublicKeySize {
+			continue // enforce the runtime invariants on reload too (incl. a pinned write key)
 		}
 		s.blobs[handle] = &blobEntry{
 			ciphertext:  ct,
 			nonce:       nc,
+			writePub:    wp,
 			version:     bf.Version,
 			updatedAtMs: bf.UpdatedAtMs,
 			touchedAt:   time.Now(),
@@ -207,7 +239,7 @@ func (s *WalletBlobStore) Get(userHandle string) (ciphertext, nonce []byte, vers
 // (ErrTooManyBlobs), strict version monotonicity (ErrVersionConflict), and
 // userHandle validity (ErrBadUserHandle). On success it persists the blob to
 // disk atomically (temp file + rename) so it survives a relay restart.
-func (s *WalletBlobStore) Put(userHandle string, ciphertext, nonce []byte, version int) error {
+func (s *WalletBlobStore) Put(userHandle string, ciphertext, nonce, writePub, sig []byte, version int) error {
 	if !validUserHandle(userHandle) {
 		return ErrBadUserHandle
 	}
@@ -217,26 +249,43 @@ func (s *WalletBlobStore) Put(userHandle string, ciphertext, nonce []byte, versi
 	if s.maxBytes > 0 && len(ciphertext) > s.maxBytes {
 		return ErrBlobTooLarge
 	}
+	if len(writePub) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
+		return ErrUnauthorizedWrite
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, present := s.blobs[userHandle]; present {
-		// Monotonic but bounded: must advance, but not jump far enough to lock the
-		// wallet out (see maxVersionJump). A legitimate client increments by 1.
+	prev, present := s.blobs[userHandle]
+	if present {
+		// The write key is TOFU-pinned at the first write and cannot change — a
+		// caller presenting a different key (even a validly self-signed one) can
+		// never take over an existing wallet's blob.
+		if subtle.ConstantTimeCompare(prev.writePub, writePub) != 1 {
+			return ErrUnauthorizedWrite
+		}
+	} else if len(s.blobs) >= s.maxBlobs {
+		return ErrTooManyBlobs
+	}
+	// Authenticate the writer: the Ed25519 signature must verify against the
+	// (pinned, or first-seen TOFU) write key over the canonical message. Without
+	// the owner's passkey-derived write key this cannot be produced, so a mere
+	// userHandle-knower cannot overwrite the blob.
+	if !ed25519.Verify(writePub, blobWriteMessage(userHandle, version, nonce, ciphertext), sig) {
+		return ErrUnauthorizedWrite
+	}
+	// Version monotonicity (bounded) — checked AFTER authentication so an
+	// unauthenticated caller learns nothing about the stored version.
+	if present {
 		if version <= prev.version || version > prev.version+maxVersionJump {
 			return ErrVersionConflict
 		}
-	} else {
-		if version > maxVersionJump {
-			return ErrVersionConflict
-		}
-		if len(s.blobs) >= s.maxBlobs {
-			return ErrTooManyBlobs
-		}
+	} else if version > maxVersionJump {
+		return ErrVersionConflict
 	}
 	now := time.Now()
 	e := &blobEntry{
 		ciphertext:  append([]byte(nil), ciphertext...),
 		nonce:       append([]byte(nil), nonce...),
+		writePub:    append([]byte(nil), writePub...),
 		version:     version,
 		updatedAtMs: now.UnixMilli(),
 		touchedAt:   now,
@@ -253,6 +302,7 @@ func (s *WalletBlobStore) persist(userHandle string, e *blobEntry) error {
 	bf := blobFile{
 		CiphertextB64: base64.StdEncoding.EncodeToString(e.ciphertext),
 		NonceB64:      base64.StdEncoding.EncodeToString(e.nonce),
+		WritePubB64:   base64.StdEncoding.EncodeToString(e.writePub),
 		Version:       e.version,
 		UpdatedAtMs:   e.updatedAtMs,
 	}
@@ -284,9 +334,15 @@ func (s *WalletBlobStore) persist(userHandle string, e *blobEntry) error {
 	return os.Rename(tmp, final)
 }
 
-// GC evicts wallets untouched for longer than idle (and removes their files),
-// so a churn of one-off userHandles can't grow the store without bound. Returns
-// how many were evicted. idle<=0 evicts nothing.
+// GC evicts wallets untouched for longer than idle (and removes their files).
+// Returns how many were evicted. idle<=0 evicts nothing.
+//
+// WARNING: evicting a wallet drops its TOFU-pinned write key, so a later attacker
+// PUT for the same userHandle would re-pin THEIR key and lock the owner out. This
+// must therefore NOT be run on a schedule for the multi-tenant route (the janitor
+// intentionally does not call it). It exists for tests and for an operator that
+// knows a handle is truly abandoned. Proper abandoned-blob reclamation keeps a
+// pin tombstone — a cutover concern.
 func (s *WalletBlobStore) GC(idle time.Duration) int {
 	if idle <= 0 {
 		return 0

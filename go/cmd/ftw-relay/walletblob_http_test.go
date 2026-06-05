@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -36,28 +38,43 @@ func newMultiTenantRelay(t *testing.T) *Relay {
 	}
 }
 
-// b64 standard-base64-encodes a string so a test can build the opaque
-// ciphertext/nonce wire fields the relay round-trips without parsing.
-func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+// b64 standard-base64-encodes bytes for the opaque wire fields.
+func b64b(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+func b64(s string) string  { return b64b([]byte(s)) }
+
+// signedBlobPut builds a writer-authenticated PUT body and sends it. The body's
+// write_pub/sig are produced from (pub, priv) over the canonical message, so the
+// relay's Ed25519 check passes when the key is the wallet's pinned one.
+func signedBlobPut(t *testing.T, url, handle string, ct, nonce []byte, version int, pub ed25519.PublicKey, priv ed25519.PrivateKey) (int, string) {
+	t.Helper()
+	sig := ed25519.Sign(priv, blobWriteMessage(handle, version, nonce, ct))
+	body, _ := json.Marshal(walletBlobIO{
+		Ciphertext: b64b(ct), Nonce: b64b(nonce), Version: version,
+		WritePub: b64b(pub), Sig: b64b(sig),
+	})
+	return rawBlobPut(t, url, handle, body)
+}
+
+func rawBlobPut(t *testing.T, url, handle string, body []byte) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, url+"/wallet/"+handle+"/blob", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode, string(b)
+}
 
 // PUT then GET round-trips the opaque ciphertext blob; version monotonicity is
 // enforced (a stale PUT is 409); a bad handle is 400; an unknown handle GET is 404.
 func TestWalletBlobPutGetHTTP(t *testing.T) {
 	srv := httptest.NewServer(newMultiTenantRelay(t).Handler())
 	defer srv.Close()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 
-	put := func(handle string, ct, nonce string, version int) (int, string) {
-		body, _ := json.Marshal(walletBlobIO{Ciphertext: ct, Nonce: nonce, Version: version})
-		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/wallet/"+handle+"/blob", bytes.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return resp.StatusCode, string(b)
-	}
 	get := func(handle string) (int, walletBlobIO) {
 		resp, err := http.Get(srv.URL + "/wallet/" + handle + "/blob")
 		if err != nil {
@@ -74,7 +91,7 @@ func TestWalletBlobPutGetHTTP(t *testing.T) {
 		t.Fatalf("GET unknown handle = %d, want 404", code)
 	}
 	// First PUT (version 1) → 200.
-	if code, body := put(testHandle, b64("cipher-1"), b64("nonce-1"), 1); code != http.StatusOK {
+	if code, body := signedBlobPut(t, srv.URL, testHandle, []byte("cipher-1"), []byte("nonce-1"), 1, pub, priv); code != http.StatusOK {
 		t.Fatalf("PUT v1 = %d (%s), want 200", code, body)
 	}
 	// GET returns it verbatim.
@@ -82,32 +99,80 @@ func TestWalletBlobPutGetHTTP(t *testing.T) {
 	if code != http.StatusOK || out.Ciphertext != b64("cipher-1") || out.Nonce != b64("nonce-1") || out.Version != 1 {
 		t.Fatalf("GET v1 = %d %+v, want 200 cipher-1/nonce-1/v1", code, out)
 	}
-	// PUT v2 advances.
-	if code, body := put(testHandle, b64("cipher-2"), b64("nonce-2"), 2); code != http.StatusOK {
+	// PUT v2 advances (same pinned key).
+	if code, body := signedBlobPut(t, srv.URL, testHandle, []byte("cipher-2"), []byte("nonce-2"), 2, pub, priv); code != http.StatusOK {
 		t.Fatalf("PUT v2 = %d (%s), want 200", code, body)
 	}
-	// A stale PUT (version <= stored) is rejected 409.
-	if code, _ := put(testHandle, b64("stale"), b64("stale"), 2); code != http.StatusConflict {
+	// A stale PUT (valid sig, version <= stored) is rejected 409.
+	if code, _ := signedBlobPut(t, srv.URL, testHandle, []byte("stale"), []byte("stale"), 2, pub, priv); code != http.StatusConflict {
 		t.Fatalf("PUT stale v2 = %d, want 409", code)
 	}
-	if code, _ := put(testHandle, b64("stale"), b64("stale"), 1); code != http.StatusConflict {
+	if code, _ := signedBlobPut(t, srv.URL, testHandle, []byte("stale"), []byte("stale"), 1, pub, priv); code != http.StatusConflict {
 		t.Fatalf("PUT rollback v1 = %d, want 409", code)
 	}
-	// A bad handle is 400 on both verbs.
+	// A bad handle is 400 on both verbs (checked before the body).
 	if code, _ := get("short"); code != http.StatusBadRequest {
 		t.Fatalf("GET bad handle = %d, want 400", code)
 	}
-	if code, _ := put("short", b64("x"), b64("y"), 1); code != http.StatusBadRequest {
+	if code, _ := signedBlobPut(t, srv.URL, "short", []byte("x"), []byte("y"), 1, pub, priv); code != http.StatusBadRequest {
 		t.Fatalf("PUT bad handle = %d, want 400", code)
 	}
-	// Non-base64 ciphertext is a 400 (the relay never parses plaintext, but it
-	// validates the transport encoding so a garbage body is caught here).
-	if code, _ := put(testHandle, "!!!not-base64!!!", b64("y"), 9); code != http.StatusBadRequest {
+	// Non-base64 ciphertext is a 400 (transport-encoding validation).
+	badBody, _ := json.Marshal(map[string]any{"ciphertext": "!!!not-base64!!!", "nonce": b64("y"), "version": 9, "write_pub": b64b(pub), "sig": b64("z")})
+	if code, _ := rawBlobPut(t, srv.URL, testHandle, badBody); code != http.StatusBadRequest {
 		t.Fatalf("PUT non-base64 ciphertext = %d, want 400", code)
 	}
 }
 
-// An over-max ciphertext is rejected with 413, never buffered into the store.
+// Writer authentication over HTTP: a PUT whose signature does not verify against
+// the wallet's pinned write key is 403 — a userHandle-knower cannot overwrite.
+func TestWalletBlobWriterAuthHTTP(t *testing.T) {
+	srv := httptest.NewServer(newMultiTenantRelay(t).Handler())
+	defer srv.Close()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+
+	// Owner's first write pins the key.
+	if code, body := signedBlobPut(t, srv.URL, testHandle, []byte("ct"), []byte("nc"), 1, pub, priv); code != http.StatusOK {
+		t.Fatalf("owner PUT = %d (%s), want 200", code, body)
+	}
+	// An attacker who learned the handle but has a DIFFERENT key is 403.
+	apub, apriv, _ := ed25519.GenerateKey(rand.Reader)
+	if code, _ := signedBlobPut(t, srv.URL, testHandle, []byte("evil"), []byte("nc"), 2, apub, apriv); code != http.StatusForbidden {
+		t.Fatalf("attacker takeover = %d, want 403", code)
+	}
+	// A garbage signature with the owner's pubkey is also 403.
+	body, _ := json.Marshal(walletBlobIO{
+		Ciphertext: b64("x"), Nonce: b64("nc"), Version: 2,
+		WritePub: b64b(pub), Sig: b64b(make([]byte, 64)),
+	})
+	if code, _ := rawBlobPut(t, srv.URL, testHandle, body); code != http.StatusForbidden {
+		t.Fatalf("garbage sig = %d, want 403", code)
+	}
+}
+
+// With multi-tenant OFF the wallet-blob + per-site identity routes are NOT
+// registered at all — a request gets a plain 404 (no 503, no public-key answer),
+// so the dormant feature adds no surface.
+func TestWalletRoutesAbsentWhenFlagOff(t *testing.T) {
+	srv := httptest.NewServer(newTestRelay().Handler())
+	defer srv.Close()
+	for _, path := range []string{
+		"/wallet/" + testHandle + "/blob",
+		"/signal/site:whatever/identity",
+	} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s with multi-tenant off = %d, want 404 (route must not be registered)", path, resp.StatusCode)
+		}
+	}
+}
+
+// An over-max ciphertext is rejected with 413, never buffered into the store
+// (the size cap is enforced before the write-auth check).
 func TestWalletBlobPutTooLargeHTTP(t *testing.T) {
 	store, err := NewWalletBlobStore(t.TempDir(), 128, 1024) // tiny 128-byte cap
 	if err != nil {
@@ -119,7 +184,7 @@ func TestWalletBlobPutTooLargeHTTP(t *testing.T) {
 	defer srv.Close()
 
 	big := b64(strings.Repeat("x", 4096)) // base64 of 4 KiB, well over the 128-byte cap
-	body, _ := json.Marshal(walletBlobIO{Ciphertext: big, Nonce: b64("n"), Version: 1})
+	body, _ := json.Marshal(walletBlobIO{Ciphertext: big, Nonce: b64("n"), Version: 1, WritePub: b64("p"), Sig: b64("s")})
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/wallet/"+testHandle+"/blob", bytes.NewReader(body))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -132,12 +197,9 @@ func TestWalletBlobPutTooLargeHTTP(t *testing.T) {
 }
 
 // GET /signal/{site_id}/identity returns the PUBLIC key the relay holds for that
-// site (a convenience cross-check; the browser already pins from the Pi-signed
-// directory entry). A known site → 200 with the registered key; an unknown site
-// → 404; never a secret.
+// site. A known site → 200; an unknown site → 404; never a secret.
 func TestSignalIdentityHTTP(t *testing.T) {
 	relay := newMultiTenantRelay(t)
-	// TOFU-register a site so the relay holds its public key.
 	id := newTestIdentity(t)
 	if err := relay.Owners.Register("site:Alice", "host-alice", id.PublicKeyHex()); err != nil {
 		t.Fatalf("register: %v", err)
@@ -169,7 +231,6 @@ func TestSignalIdentityHTTP(t *testing.T) {
 		t.Fatalf("identity fields = %+v, want site:Alice/ES256/P-256", out)
 	}
 
-	// Unknown site → 404.
 	resp2, err := http.Get(srv.URL + "/signal/site:nobody/identity")
 	if err != nil {
 		t.Fatal(err)

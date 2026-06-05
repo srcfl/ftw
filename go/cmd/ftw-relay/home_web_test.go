@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -258,6 +261,42 @@ func TestMeRegister_DeviceKeysTamperRejected(t *testing.T) {
 	}
 }
 
+// Under a SINGLE-TENANT pin (multi-tenant off), the wallet/identity API paths are
+// not routes, but the home-host catch-all must still NOT serve or forward them:
+// they are reserved to 404, while ordinary SPA paths still serve the shell.
+func TestSingleTenantReservesWalletPaths(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>SHELL</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	relay := &Relay{
+		Queue: tunnel.NewQueue(), Tokens: NewTokenRegistry(), Owners: NewOwnerRegistry(),
+		Polls: NewPollSecrets(), Signals: NewSignalMailbox(), Challenges: NewSignalChallenges(),
+		HomeHost: "home.test", HomeSite: "site:Home", HomeWeb: dir, // single-tenant, MultiTenant=false
+	}
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+	get := func(path string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		req.Host = "home.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get("/wallet/" + testHandle + "/blob"); code != http.StatusNotFound {
+		t.Errorf("single-tenant /wallet = %d, want 404 (reserved, not SPA/forward)", code)
+	}
+	if code := get("/signal/site:Home/identity"); code != http.StatusNotFound {
+		t.Errorf("single-tenant /signal/.../identity = %d, want 404 (reserved)", code)
+	}
+	if code := get("/dashboard"); code != http.StatusOK {
+		t.Errorf("single-tenant ordinary SPA path = %d, want 200 (shell still served)", code)
+	}
+}
+
 // Under multi-tenant the browser reaches the relay AS the home host, so the
 // /wallet/* and /signal/{site}/identity routes must be re-registered on the
 // HomeHost mux (Go gives a host pattern precedence over a host-less one). This
@@ -288,8 +327,17 @@ func TestMultiTenantRoutesOnHomeHost(t *testing.T) {
 		t.Fatalf("home-host /signal/site:Bob/identity = %d, want 200 (route shadowed by catch-all?)", code)
 	}
 	// PUT /wallet/{handle}/blob resolves on the home host → 200 (not 405 from the
-	// GET-only static forwarder).
-	body, _ := json.Marshal(walletBlobIO{Ciphertext: "Y2lwaA==", Nonce: "bm9uYw==", Version: 1})
+	// GET-only static forwarder). Writer-authenticated: sign the canonical message.
+	wpub, wpriv, _ := ed25519.GenerateKey(rand.Reader)
+	ct, nonce := []byte("ciph"), []byte("nonc")
+	sig := ed25519.Sign(wpriv, blobWriteMessage(testHandle, 1, nonce, ct))
+	body, _ := json.Marshal(walletBlobIO{
+		Ciphertext: base64.StdEncoding.EncodeToString(ct),
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Version:    1,
+		WritePub:   base64.StdEncoding.EncodeToString(wpub),
+		Sig:        base64.StdEncoding.EncodeToString(sig),
+	})
 	if code, b := doHost(http.MethodPut, "/wallet/"+testHandle+"/blob", body); code != http.StatusOK {
 		t.Fatalf("home-host PUT /wallet/.../blob = %d (%s), want 200", code, b)
 	}
