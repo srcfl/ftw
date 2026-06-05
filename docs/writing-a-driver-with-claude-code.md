@@ -19,11 +19,8 @@ first. This guide layers on top of it.
 Before you start:
 
 - `forty-two-watts` checked out at a recent `master`.
-- Go 1.22+ installed. Run `cd go && go test ./internal/drivers/...`
+- Go 1.26+ installed. Run `cd go && go test ./internal/drivers/...`
   once to confirm the toolchain works end-to-end.
-- `make wasm` has been run at least once (even if you are writing a
-  Lua driver — the e2e test harness expects the `.wasm` artifacts to
-  exist).
 - `make dev` starts cleanly and the sims at
   `http://localhost:8080` show non-zero telemetry. If this does not
   work, fix it before layering a new driver on top.
@@ -187,7 +184,7 @@ Terminal 3 — hit the status endpoint and the catalog:
 
 ```bash
 curl -s localhost:8080/api/status | jq .
-curl -s localhost:8080/api/drivers/catalog | jq '.[] | select(.id=="<your-id>")'
+curl -s localhost:8080/api/drivers/catalog | jq '.entries[] | select(.id=="<your-id>")'
 curl -s localhost:8080/api/series/catalog | jq .
 ```
 

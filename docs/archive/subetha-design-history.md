@@ -1,10 +1,19 @@
+# Archived Subetha design history
+
+Archived on 2026-06-05. This proposal no longer describes the current relay
+implementation. Use `docs/ftw-pair.md` and `docs/relay-deploy.md` for the
+current pairing and relay flow.
+
+Original heading:
+
 # Subetha — design history
 
-**Status:** **implemented** as `go/internal/subetha` + `go/cmd/ftw-subetha`.
-This doc captures the original proposal and trade-off analysis that led to
-adopting this transport over the fowl/magic-wormhole approach. Kept for
-historical context. Live implementation details live in
-`go/internal/subetha/` and `docs/subetha-deploy.md`.
+**Historical status:** This was originally marked implemented as
+`go/internal/subetha` + `go/cmd/ftw-subetha`, but those paths are not the
+current implementation.
+This doc captures the original proposal and trade-off analysis. The original
+body below is intentionally not updated to match the current relay
+implementation.
 
 ## Context
 

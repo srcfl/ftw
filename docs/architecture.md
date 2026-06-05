@@ -7,12 +7,11 @@ convention every number in the rest of this document obeys, see
 ## System summary
 
 forty-two-watts is an embedded home energy management system that runs
-on a Raspberry Pi and coordinates two batteries (Ferroamp + Sungrow)
-sharing a single 16 A grid connection, so they stop fighting each
-other and the main fuse. A Go control loop unifies dispatch, an MPC
-planner with online ML digital twins sits on top, and per-device Lua
-drivers (one Lua VM per device) translate everything to native MQTT
-or Modbus.
+on a Raspberry Pi or Linux host and coordinates meters, PV, batteries,
+inverters, EV chargers, and V2X devices behind one site meter. A Go
+control loop unifies dispatch, an MPC planner with online ML digital
+twins sits on top, and per-device Lua drivers translate everything to
+native Modbus, MQTT, HTTP, WebSocket, or raw TCP.
 
 ## Site sign convention
 
@@ -32,14 +31,14 @@ If you're about to write `pv_w` math and it isn't negative, stop.
 ### Drivers
 Source: `go/internal/drivers/`, Lua driver scripts in `drivers/*.lua`.
 
-One goroutine per driver runs a poll loop (`go/internal/drivers/registry.go`
-`runLoop` at line 182). Each driver has its own Lua VM and a
-capability-scoped host environment (MQTT/Modbus only if the driver's
-config grants it). Drivers poll their device, call
-`host.emit_telemetry()` to push readings into the telemetry store in
+One goroutine per driver runs the registry poll loop. Each driver has
+its own Lua VM and a capability-scoped host environment (MQTT, Modbus,
+HTTP, WebSocket, or TCP only if the driver's config grants it). Drivers
+poll their device, call
+`host.emit(...)` to push readings into the telemetry store in
 site convention, and accept battery dispatch commands via
-`Registry.Send` (line 234). On hang or config reload, the registry
-issues a `DefaultMode` call so the device reverts to autonomous.
+`Registry.Send`. On hang or config reload, the registry issues a
+`DefaultMode` call so the device reverts to autonomous.
 
 ### Telemetry store
 Source: `go/internal/telemetry/`.
@@ -69,15 +68,13 @@ Single file (default `state.db`). All persistent state lives here:
 - `forecasts` — weather + PV forecast slots
 - `devices` — canonical hardware identity (make/serial/mac/endpoint)
 
-Retention constants in `go/internal/state/store.go` lines 21-28:
-30 days hot, 365 days warm, 14 days of long-format samples before
-parquet roll-off.
+Retention constants live in `go/internal/state/store.go`: 30 days hot,
+365 days warm, and 14 days of long-format samples before parquet roll-off.
 
 ### Control loop
-Source: `go/cmd/forty-two-watts/main.go` (the main ticker at
-line 445) calling `go/internal/control/`.
+Source: `go/cmd/forty-two-watts/main.go` calling `go/internal/control/`.
 
-Runs every `site.control_interval_s` seconds (default 5). Modes:
+Runs every `site.control_interval_s` seconds (default 2). Modes:
 
 - `idle` — emit nothing
 - `self_consumption` — drive the site meter toward 0 W: charge from PV
@@ -114,8 +111,8 @@ inputs, updates a small model every minute, and exposes a `Predict`
 function. `main.go` wires the three `Predict` functions directly
 into the MPC service at startup. Serialized model state round-trips
 through `state.SaveConfig`/`LoadConfig` under keys `pvmodel/state`,
-`loadmodel/state`, `pricefc/state`. See the forthcoming
-`ml-models.md` (or `ml-twins.md`) for model internals.
+`loadmodel/state`, `pricefc/state`. See [ml-models.md](ml-models.md)
+for model internals.
 
 ### API + UI
 Sources: `go/internal/api/`, `web/`.
@@ -136,26 +133,25 @@ need no sign fiddling.
 
 ### Watchdog
 In-process, owned by `telemetry.Store.WatchdogScan`, invoked once
-per control tick (`main.go:492`). Any driver whose last success is
+per control tick. Any driver whose last success is
 older than `site.watchdog_timeout_s` (default 60 s) is flipped
 offline; the control loop then calls `reg.SendDefault` so the
 device reverts to its own autonomous mode. A separate safety check
-at `main.go:505` also skips the whole dispatch cycle if the site
-meter itself is stale — otherwise one battery would charge off the
-other.
+also skips the whole dispatch cycle if the site meter itself is stale:
+otherwise one battery could charge off another.
 
 ## Data flow
 
 ```
           ┌────────────────────────────────────────────────────────┐
           │                     Devices                             │
-          │  Ferroamp ESO (MQTT)       Sungrow SH (Modbus TCP)      │
+          │  inverters, meters, batteries, EV/V2X chargers          │
           └──────────┬──────────────────────────┬──────────────────┘
                      │ native protocol          │ native protocol
                      ▼                          ▼
           ┌────────────────────────────────────────────────────────┐
           │                Drivers (one Lua VM each)                │
-          │  translate ⇆ site convention via host.emit_telemetry    │
+          │  translate ⇆ site convention via host.emit              │
           │  accept battery dispatch via registry.Send              │
           └──────────┬──────────────────────────┬──────────────────┘
                      │ DerReading (site conv.)  │ MetricSample queue
@@ -169,8 +165,8 @@ other.
                      │ Get / ReadingsByType     │ FlushSamples
                      ▼                          ▼
           ┌──────────────────────────┐   ┌──────────────────────┐
-          │ control loop (5 s tick)  │   │ state.Store (SQLite) │
-          │ main.go:445              │   │                      │
+          │ control loop (2 s tick)  │   │ state.Store (SQLite) │
+          │ main ticker              │   │                      │
           │ • watchdog scan          │   │ RecordSamples        │
           │ • compute dispatch       │◀──│ RecordHistory        │
           │ • slew + fuse clamp      │   │ LoadConfig (mode,    │
@@ -202,7 +198,7 @@ other.
           │ autodiscovery + state    │◀──────│ command topics     │
           └──────────────────────────┘       └────────────────────┘
 
-  Background (hourly tick, main.go:580):
+  Background hourly tick:
     state.Store.RolloffToParquet ──▶ <cold_dir>/YYYY/MM/DD.parquet
                                      (ts_samples older than 14 days)
 ```
@@ -225,10 +221,10 @@ N drivers, one MPC service (optional), three ML twin services
 | Telemetry snapshots (crash recovery) | telemetry dumps | `telemetry` table | driver+type key |
 | Long-format TS (14 d) | control loop (`FlushSamples`) | `ts_samples` table | `(driver_id, metric_id, ts_ms)` |
 | Long-format TS (>14 d) | hourly rolloff | `<cold_dir>/YYYY/MM/DD.parquet` | UTC day |
-| Wide history (30 d, 5 s) | control loop (`RecordHistory`) | `history_hot` | `ts_ms` |
+| Wide history (30 d, control cadence) | control loop (`RecordHistory`) | `history_hot` | `ts_ms` |
 | Wide history (365 d, 15 min) | `Prune` | `history_warm` | `ts_ms` |
 | Wide history (daily) | `Prune` | `history_cold` | `ts_ms` |
-| Devices | identity bootstrap (`main.go:607`) | `devices` table | `device_id` = `make:serial` / `mac:…` / `ep:…` |
+| Devices | identity bootstrap | `devices` table | `device_id` = `make:serial` / `mac:…` / `ep:…` |
 | Spot prices | `prices` service | `prices` table | `(zone, slot_ts_ms)` |
 | Weather forecasts | `forecast` service | `forecasts` table | `slot_ts_ms` |
 | Events | anywhere calling `RecordEvent` | `events` table | `ts_ms` |

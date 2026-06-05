@@ -1,10 +1,10 @@
 # Deploying the `ftw-relay` HTTPS relay
 
 The new relay terminates HTTPS for `relay.fortytwowatts.com` and
-serves the request-response tunnel described in
-`docs/goals/relay-as-tunnel.md`. This doc walks through the one-time
+serves the request-response tunnel. This doc walks through the one-time
 deploy on the AWS VM that previously ran the raw-TCP `ftw-subetha`
-binary.
+binary. Historical design context lives in
+[`archive/agent-artifacts/goals/relay-as-tunnel.md`](archive/agent-artifacts/goals/relay-as-tunnel.md).
 
 ## Topology
 
@@ -25,8 +25,8 @@ Pi running ftw-pair (outbound long-poll, no inbound ports)
 ```
 
 Trust path: friend → CF → relay VM → Pi. Three hops. CF and the relay
-VM both see plaintext (intentional, see `docs/goals/relay-as-tunnel.md`
-security section).
+VM both see plaintext; see the archived relay design's security section for
+the original trade-off analysis.
 
 ## Prerequisites
 

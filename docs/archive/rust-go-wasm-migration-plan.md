@@ -1,3 +1,12 @@
+# Archived migration plan: Rust to Go + WASM drivers
+
+Archived on 2026-06-05. The Rust to Go migration is complete, and the
+production driver runtime is now Go + Lua. This document is historical
+context only; it still mentions redb, WASM drivers, and paths that no longer
+exist.
+
+Original heading:
+
 # Migration Plan: Rust → Go + WASM-drivers
 
 ## Varför vi migrerar

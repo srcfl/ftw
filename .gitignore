@@ -2,8 +2,6 @@
 /release
 *.redb
 config.yaml
-# ...except the committed example config for the local docker E2E harness.
-!deploy/local-e2e/config.yaml
 data/
 
 # Go build artifacts
@@ -62,3 +60,7 @@ deploy/secrets/*
 
 # superpowers brainstorm visual companion (local only)
 .superpowers/
+
+# Goalbuddy renders local review boards; keep the markdown/state, not the
+# generated static board assets.
+docs/**/.goalbuddy-board/
