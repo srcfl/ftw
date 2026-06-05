@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.116.0
+
+### Minor Changes
+
+- 1dc6f35: Arbitrage cycle threshold: a new planner knob, **Min arbitrage spread
+  (öre/kWh)** (`planner.min_arbitrage_spread_ore_kwh`), stops the battery
+  cycling for marginal gains. The planner won't cycle for grid arbitrage
+  unless the price gain beats this many öre/kWh on top of round-trip losses.
+  It applies only to the arbitrage modes (`planner_arbitrage` /
+  `planner_passive_arbitrage`) — self-consumption is never affected — and
+  biases the planner's decision only, so the savings statistics stay on real
+  spot economics. Default 0 = off. Configurable from the Planner settings tab.
+- ed3cfc2: Capability-aware battery reallocation: when one battery can't move in the
+  demanded direction this cycle (e.g. a Ferroamp ESO floored at its discharge
+  SoC limit), the dispatcher now hands its share to a capable sibling instead
+  of leaking it to the grid. Drivers signal this with two optional battery-emit
+  fields, `discharge_capable` / `charge_capable`; absent → assumed capable, so
+  every existing driver is unaffected. The Ferroamp driver reports both from its
+  per-ESO floor/ceiling counts. Symmetric for charge (a full battery is excluded
+  from the charge split).
+- b586f09: Local docker E2E harness — tier 2: container-side P2P + passkey proof.
+
+  Adds an automated, fully-in-docker browser test that drives the real home route
+  through the relay and proves the WebRTC DataChannel forms **directly**
+  container-to-container (where there is no NAT, unlike a Mac-host browser):
+
+  - A headless-Chromium (Playwright) container on the tier-1 bridge net
+    (`docker-compose.e2e-tier2.yml`, profile `tier2`) enrolls and logs in with a
+    passkey via a **CDP virtual WebAuthn authenticator** (unattended), asserts
+    `window.ftwP2P.state()` reaches `direct` and that the selected ICE candidate
+    pair is host/srflx (never `relay`), then makes one authenticated owner API
+    call (`/api/status`) over `p2pFetch`.
+  - New `make e2e-docker-tier2` target brings the stack up, runs the test, and
+    exits non-zero on failure.
+  - New `FTW_P2P_STUN` env knob on the main app: unset keeps the production STUN
+    set; `none`/`off` gathers host candidates only (correct + fast on a closed
+    shared-L2 network like the docker bridge); a comma-separated list overrides
+    the default. No behaviour change when unset.
+
+  The harness runs the Pi with `FTW_OWNER_ACCESS_RPID=home.fortytwowatts.localhost`
+  so the WebAuthn origin check passes against the `*.localhost` secure-context home
+  host. Docs: `docs/local-e2e-docker.md`.
+
+- b586f09: Owner remote access: reach your own dashboard from anywhere via a single URL
+  (`home.fortytwowatts.com`) + a passkey — over a **direct, end-to-end-encrypted
+  browser↔Pi WebRTC DataChannel**. OPT-IN, default OFF (`remote_access.enabled` /
+  `FTW_REMOTE_ACCESS_ENABLED`); the Pi makes no outbound connection unless you turn
+  it on.
+
+  The relay is a **blind signaling rendezvous** — it brokers the connection and
+  serves the static shell, but owner traffic and the session cookie exist only as
+  DTLS-encrypted DataChannel frames and never traverse it in cleartext. Hardening
+  that shipped with it:
+
+  - **Signed DTLS-fingerprint handshake** (ES256 over the site identity key): the
+    browser TOFU-pins the Pi's key from `/api/identity` and verifies every answer,
+    so a relay that swaps the fingerprint can't MITM the channel (fail-closed).
+  - **Fail-closed gate**: an unauthenticated remote request can never reach owner
+    data or control endpoints; the relay forwards only `GET` static assets +
+    `/api/identity`, strips the owner cookie, and the Pi's tunnel marker blocks any
+    LAN-bypass on a tunnelled request. The LAN enrollment PIN is LAN-only.
+  - **Operator-pinned home site** (`-home-pubkey`): the public home host refuses to
+    run trust-on-first-use, so a racing attacker can't claim it across relay
+    restarts.
+  - **Blind TURN** (optional) as a ciphertext-only fallback for hard-NAT/CGNAT
+    peers — costs zero trustlessness.
+  - DoS-resilience on the relay: per-source-IP signaling throttle (Cloudflare-aware
+    via `-trust-cf-ip`), nonce-keyed signaling mailbox, fast unauth-peer reap, and
+    principal-bound poll secrets.
+
+### Patch Changes
+
+- b586f09: Dashboard: route every state-changing owner/CONTROL `/api/*` call through the
+  fail-closed strict transport (FIX-B).
+
+  The owner-access ceremony pages already rode `ownerFetch` (strict P2P, fail-closed
+  503 on a public / `/me/<site>` origin with no DataChannel, raw relay fetch ONLY on
+  a genuine LAN). This extends the SAME behaviour to the dashboard's classic scripts
+
+  - web components so a state-changing call's body + owner session can never traverse
+    the untrusted relay in cleartext on the public home route:
+
+  * `p2p.js` now exposes `window.ownerFetch = p2pFetchStrict` — the dashboard's one
+    shared, fail-closed entry point (not a fork; the identical function the ceremony
+    pages use).
+  * Converted the remaining bare state-changing calls: config save / restart
+    (`settings.js`), self-tune start/cancel (`models.js`), load-twin profile switch
+    - PV/load twin reset (`twins.js`), MPC replan (`plan.js`), EV-charger probe /
+      Tesla verify / driver test (`settings/tabs/devices.js`), battery + PV manual-hold
+      install/clear, pair start/abort, notification test, self-update trigger, and the
+      update-badge snapshot-delete + skip/unskip/rollback/update POSTs.
+  * Read-only GETs stay plain (no body; the relay strips the owner cookie on the
+    P2P-only route, so they can't leak).
+  * New web tests: a static guard that fails if any public-route module bare-fetches
+    a state-changing `/api` call, plus an `ownerFetch` wiring test. The tier-2 docker
+    e2e gains a `window.ownerFetch` fail-closed step + a relay-leak tripwire.
+
+- b586f09: State: skip the boot integrity check when the DB is already known-good so a large
+  `state.db` restarts in seconds instead of minutes.
+
+  `heal.go`'s boot-time `PRAGMA quick_check` scans the entire file, which on a
+  multi-GB `state.db` is minutes of disk I/O on a Pi — and it ran on every boot,
+  making a restart look like a hang. Now a persistent `<db>.clean` "verified-good"
+  marker is armed by `Open` after a successful open, and `openChecked` skips the
+  boot check whenever it is present. On a 1.3 GB field DB the integrity gate went
+  from >5 min to ~40 ms (measured).
+
+  The marker is deliberately NOT a clean-shutdown flag: it persists across both
+  clean shutdowns and crashes (a crash doesn't corrupt a WAL database, so it must
+  not force a slow re-scan), so fast restarts never depend on how the process
+  exited. The only thing that removes it is `Store.VerifyInBackground` finding real
+  corruption — that runs the full check off the startup hot path after the app is
+  already serving, and on failure removes the marker so the next boot runs the full
+  check and heals from snapshot. At-rest SD-card rot is therefore still caught,
+  recovery just takes the next boot instead of blocking this one. The background
+  scan is cancellable (`Close` interrupts it via `sqlite3_interrupt`) so a shutdown
+  isn't blocked by an in-flight multi-minute scan. Startup phases are now timed in
+  the logs (`integrity gate complete elapsed=…`, `migrations complete elapsed=…`)
+  so a slow phase is visible instead of a silent gap. See `docs/fast-restart.md`.
+
 ## 0.115.0
 
 ### Minor Changes
