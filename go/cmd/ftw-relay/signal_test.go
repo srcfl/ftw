@@ -28,11 +28,12 @@ func newSignalRelay(t *testing.T) (*httptest.Server, *Relay, string) {
 	// Publish a trusted device key for the site so the C2 offer proof can pass.
 	owners.SetDeviceKeys("site:Home", []string{testDeviceKey.pubKeyHex})
 	r := &Relay{
-		Owners:      owners,
-		Polls:       NewPollSecrets(),
-		Signals:     NewSignalMailbox(),
-		Challenges:  NewSignalChallenges(),
-		PollTimeout: time.Second,
+		Owners:           owners,
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		PollTimeout:      time.Second,
+		RequireDeviceKey: true,
 	}
 	secret := mustIssue(t, r.Polls, "host-xyz")
 	ts := httptest.NewServer(r.Handler())
@@ -365,5 +366,41 @@ func TestHomeStaticForward_FailClosed(t *testing.T) {
 	defer r4.Body.Close()
 	if r4.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("owner POST over relay status=%d, want 405 (P2P-only)", r4.StatusCode)
+	}
+}
+
+// TestSignalOffer_RolloutGateOff proves the device-key gate is DORMANT by default
+// (-require-device-key off): a raw-SDP offer with NO device-key proof is parked
+// and forwarded verbatim, so the relay can serve the shell + identity (slices
+// 1+2) while a home Pi that doesn't yet publish device-keys keeps working.
+func TestSignalOffer_RolloutGateOff(t *testing.T) {
+	owners := NewOwnerRegistry()
+	if err := owners.Register("site:Home", "host-xyz", "deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	r := &Relay{
+		Owners:      owners,
+		Polls:       NewPollSecrets(),
+		Signals:     NewSignalMailbox(),
+		Challenges:  NewSignalChallenges(),
+		PollTimeout: time.Second,
+		// RequireDeviceKey defaults to false — the rollout default.
+	}
+	secret := mustIssue(t, r.Polls, "host-xyz")
+	ts := httptest.NewServer(r.Handler())
+	defer ts.Close()
+	const nonce = "00112233445566778899aabbccddeeff"
+	// Raw SDP, no envelope, no device-key proof.
+	resp, err := http.Post(ts.URL+"/signal/site:Home/offer?n="+nonce, "application/sdp", strings.NewReader("RAW-OFFER-SDP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("rollout-off offer status = %d, want 204 (gate dormant)", resp.StatusCode)
+	}
+	off, _ := mustGetWithNonce(t, ts.URL+"/signal/host-xyz/offer", secret)
+	if string(off) != "RAW-OFFER-SDP" {
+		t.Fatalf("drained offer = %q, want RAW-OFFER-SDP parked verbatim", off)
 	}
 }

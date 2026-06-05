@@ -31,6 +31,7 @@ func main() {
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
 	homeWeb := flag.String("home-web", "", "path to the web/ bundle on the relay VM; when set, the home host's static GETs are served from here instead of forwarded to the Pi (SLICE 1). Unset → forward static GETs to the Pi (back-compat).")
+	requireDeviceKey := flag.Bool("require-device-key", false, "ENFORCE the device-key signaling gate (C2): an offer must carry a verified device-key proof or the Pi is never contacted. Off (default) keeps the pre-C2 behaviour so the relay can serve the shell + identity (slices 1+2) while a home Pi that doesn't yet publish device-keys keeps working. Turn on once device-keys are enrolled.")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
 	flag.Parse()
@@ -58,18 +59,19 @@ func main() {
 	}
 
 	r := &Relay{
-		Queue:       tunnel.NewQueue(),
-		Tokens:      NewTokenRegistry(),
-		Owners:      owners,
-		Polls:       NewPollSecrets(),
-		Signals:     NewSignalMailbox(),
-		Challenges:  NewSignalChallenges(),
-		TrustCFIP:   *trustCFIP,
-		PollTimeout: *pollTimeout,
-		HomeHost:    *homeHost,
-		HomeSite:    *homeSite,
-		HomeWeb:     *homeWeb,
-		HomePubKey:  *homePubKey,
+		Queue:            tunnel.NewQueue(),
+		Tokens:           NewTokenRegistry(),
+		Owners:           owners,
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		TrustCFIP:        *trustCFIP,
+		PollTimeout:      *pollTimeout,
+		HomeHost:         *homeHost,
+		HomeSite:         *homeSite,
+		HomeWeb:          *homeWeb,
+		HomePubKey:       *homePubKey,
+		RequireDeviceKey: *requireDeviceKey,
 	}
 
 	srv := &http.Server{

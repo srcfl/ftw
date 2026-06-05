@@ -117,11 +117,12 @@ func newC2Relay(t *testing.T) *c2Relay {
 	dev := newDeviceKey(t)
 	owners.SetDeviceKeys("site:Home", []string{dev.pubKeyHex})
 	r := &Relay{
-		Owners:      owners,
-		Polls:       NewPollSecrets(),
-		Signals:     NewSignalMailbox(),
-		Challenges:  NewSignalChallenges(),
-		PollTimeout: 200 * time.Millisecond,
+		Owners:           owners,
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		PollTimeout:      200 * time.Millisecond,
+		RequireDeviceKey: true,
 	}
 	secret := mustIssue(t, r.Polls, "host-xyz")
 	ts := httptest.NewServer(r.Handler())
@@ -267,11 +268,12 @@ func TestSignalOffer_NoDeviceKeysPublished_403(t *testing.T) {
 	}
 	// Deliberately DO NOT publish any device keys.
 	r := &Relay{
-		Owners:      owners,
-		Polls:       NewPollSecrets(),
-		Signals:     NewSignalMailbox(),
-		Challenges:  NewSignalChallenges(),
-		PollTimeout: 100 * time.Millisecond,
+		Owners:           owners,
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		PollTimeout:      100 * time.Millisecond,
+		RequireDeviceKey: true,
 	}
 	ts := httptest.NewServer(r.Handler())
 	t.Cleanup(ts.Close)

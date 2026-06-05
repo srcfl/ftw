@@ -97,6 +97,12 @@ type Relay struct {
 	// pin (SLICE 2) instead of forwarding to the Pi — the browser's TOFU anchor
 	// is then served even while the Pi is offline.
 	HomePubKey string
+	// RequireDeviceKey ENFORCES the C2 device-key signaling gate. Off (default)
+	// keeps the pre-C2 behaviour (park the raw offer, no proof) so the relay can
+	// ship slices 1+2 while a home Pi that doesn't yet publish device-keys (C1)
+	// still works. On → an offer must carry a verified device-key proof or the Pi
+	// is never contacted. Flip on only once device-keys are enrolled.
+	RequireDeviceKey bool
 }
 
 type registerRequest struct {
@@ -1152,7 +1158,26 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty offer", http.StatusBadRequest)
 		return
 	}
-	// C2: the offer body is now a JSON envelope carrying the raw SDP PLUS a
+	// ROLLOUT GATE: the device-key signaling gate (C2) is only ENFORCED when
+	// -require-device-key is set. Until then the relay behaves exactly as it did
+	// before C2 — it parks the raw offer body and forwards it, no device-key proof.
+	// This lets the relay serve the shell + identity itself (slices 1+2, the
+	// anonymous-FETCH surface closed) while a home Pi that hasn't yet been upgraded
+	// to PUBLISH device-keys (C1) keeps working. Turn the flag on once device-keys
+	// are enrolled to close the anonymous-SIGNALING surface too.
+	if !r.RequireDeviceKey {
+		if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
+			if err == errSignalRateLimited {
+				http.Error(w, "too many offers", http.StatusTooManyRequests)
+				return
+			}
+			http.Error(w, "signaling at capacity", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// C2 (enforced): the offer body is a JSON envelope carrying the raw SDP PLUS a
 	// device-key proof. The browser must prove possession of a device key the Pi
 	// published (C1) by signing the single-use challenge nonce it fetched from
 	// GET /signal/{site}/challenge. We verify {device_pubkey, nonce, sig} BEFORE
