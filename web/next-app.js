@@ -3503,27 +3503,145 @@
     });
   }
 
-  // ---- Sign out (remote sessions only) ----
-  // whoami reports whether there's a real session to revoke; on the LAN
-  // (bypass) there's nothing to sign out of, so the button stays hidden.
-  function setupSignOut() {
-    var btn = document.getElementById("signout-btn");
-    if (!btn) return;
-    // whoami carries the owner session cookie and logout revokes it — both are
-    // owner/CONTROL calls, so route them strict (FIX-B): they must never traverse
-    // the relay on the public home route.
+  // ---- Owner auth: inline sign-in + sign-out (the dashboard IS the door) ----
+  // whoami reports whether the viewer is signed in (and whether there's a
+  // session to revoke). On the LAN (bypass) there's nothing to sign in/out of.
+  // Remotely, when NOT signed in, we reveal an inline passkey sign-in (a discreet
+  // banner + a header key) and run the ceremony over the SAME strict P2P channel —
+  // no redirect to /owner-access/login.html, which would spawn a fresh channel
+  // with no session. All three calls (whoami, login/*, logout) ride ownerFetch
+  // (strict / FIX-B) so they never traverse the relay in cleartext.
+
+  // Minimal WebAuthn codec — mirrors owner-access/webauthn.js. next-app.js is a
+  // classic script, so it can't `import` the module; these few helpers are tiny.
+  function b64urlToBuf(s) {
+    if (typeof s !== "string") return s;
+    var pad = "=".repeat((4 - (s.length % 4)) % 4);
+    var b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/");
+    var bin = atob(b64), buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64url(buf) {
+    var bytes = new Uint8Array(buf), bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function decodeAssertionOptions(opts) {
+    opts = JSON.parse(JSON.stringify(opts));
+    if (opts.publicKey) opts = opts.publicKey;
+    opts.challenge = b64urlToBuf(opts.challenge);
+    if (Array.isArray(opts.allowCredentials)) {
+      opts.allowCredentials = opts.allowCredentials.map(function (c) {
+        return Object.assign({}, c, { id: b64urlToBuf(c.id) });
+      });
+    }
+    return opts;
+  }
+  function encodeAssertionResult(cred) {
+    return {
+      id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type,
+      response: {
+        clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        authenticatorData: bufToB64url(cred.response.authenticatorData),
+        signature: bufToB64url(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+      },
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    };
+  }
+
+  function showSignIn() {
+    var b = document.getElementById("signin-banner"); if (b) b.hidden = false;
+    var k = document.getElementById("signin-btn"); if (k) k.hidden = false;
+  }
+  function hideSignIn() {
+    var b = document.getElementById("signin-banner"); if (b) b.hidden = true;
+    var k = document.getElementById("signin-btn"); if (k) k.hidden = true;
+  }
+
+  // runSignIn: the passkey login ceremony, over the dashboard's strict P2P
+  // transport. On success the Pi sets the owner session cookie (captured
+  // in-process by the channel Bridge) — we just refresh the data in place.
+  var signInBusy = false;
+  function runSignIn() {
+    if (signInBusy) return Promise.resolve(false);
+    signInBusy = true;
+    var msgEl = document.getElementById("signin-banner-msg");
+    function say(t, cls) { if (msgEl) { msgEl.textContent = t || ""; msgEl.className = "signin-banner-msg" + (cls ? " " + cls : ""); } }
+    say("Waiting for your passkey…");
+    return ownerFetch("/api/owner-access/login/start", { method: "POST" })
+      .then(function (start) {
+        if (start.status === 404) { say("No passkey here yet — set up this device on your home network first.", "err"); return null; }
+        if (!start.ok) { say("Sign-in unavailable (" + start.status + ").", "err"); return null; }
+        return start.json();
+      })
+      .then(function (data) {
+        if (!data) return false;
+        return navigator.credentials.get({ publicKey: decodeAssertionOptions(data.options) }).then(function (cred) {
+          if (!cred) { say(""); return false; }
+          return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(encodeAssertionResult(cred)),
+            credentials: "same-origin",
+          }).then(function (finish) {
+            if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
+            say("Signed in.", "ok");
+            return true;
+          });
+        });
+      })
+      .catch(function (e) {
+        if (e && e.name === "AbortError") { say(""); return false; }
+        say((e && e.message) || "Sign-in error.", "err");
+        return false;
+      })
+      .then(function (ok) {
+        signInBusy = false;
+        if (ok) {
+          hideSignIn();
+          fetchStatus();
+          fetchLiveHistory(true);
+          loadHistory(chartRange);
+          setupAuth(); // flip signin → signout
+        }
+        return ok;
+      });
+  }
+
+  // setupAuth wires the buttons once, then reflects the current whoami state.
+  // Safe to call repeatedly (on load and whenever the P2P channel (re)connects),
+  // since whoami needs the channel up to answer on a remote origin.
+  function setupAuth() {
+    var signoutBtn = document.getElementById("signout-btn");
+    var signinBtn = document.getElementById("signin-btn");
+    var bannerBtn = document.getElementById("signin-banner-btn");
+    if (signinBtn && !signinBtn._wired) { signinBtn._wired = true; signinBtn.onclick = function () { runSignIn(); }; }
+    if (bannerBtn && !bannerBtn._wired) { bannerBtn._wired = true; bannerBtn.onclick = function () { runSignIn(); }; }
+    if (signoutBtn && !signoutBtn._wired) {
+      signoutBtn._wired = true;
+      signoutBtn.onclick = function () {
+        ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+          .catch(function () {})
+          .then(function () { location.reload(); });
+      };
+    }
     ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (me) {
-        if (!me || !me.can_sign_out) return; // LAN bypass / not signed in
-        btn.hidden = false;
-        btn.onclick = function () {
-          ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
-            .catch(function () {})
-            .then(function () { location.href = "/owner-access/"; });
-        };
+        if (me && me.can_sign_out) {            // signed-in remote session
+          if (signoutBtn) signoutBtn.hidden = false;
+          hideSignIn();
+        } else if (me && me.authenticated) {    // genuine-LAN bypass — full access
+          if (signoutBtn) signoutBtn.hidden = true;
+          hideSignIn();
+        } else {                                // not signed in (remote) → reveal sign-in
+          if (signoutBtn) signoutBtn.hidden = true;
+          showSignIn();
+        }
       })
-      .catch(function () { /* whoami failed → leave the button hidden */ });
+      .catch(function () { /* channel down → leave as-is; re-checked on reconnect */ });
   }
 
   // ---- Init ----
@@ -3531,7 +3649,12 @@
   fetchStatus();
   fetchLiveHistory();
   setupP2PIndicator();
-  setupSignOut();
+  setupAuth();
+  // whoami needs the P2P channel up to answer on a remote origin, so the load-time
+  // call may race the connection — re-check whenever the channel (re)connects.
+  if (window.ftwP2P && typeof window.ftwP2P.onState === "function") {
+    window.ftwP2P.onState(function (s) { if (s === "direct" || s === "relay") setupAuth(); });
+  }
   setInterval(fetchStatus, POLL_INTERVAL);
   setInterval(function () { fetchLiveHistory(true); }, 60_000); // 1-min refresh — always fresh
   window.addEventListener("resize", function () {

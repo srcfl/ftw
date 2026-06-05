@@ -249,6 +249,37 @@ body.ftw-next .icon-btn[aria-pressed="true"]:hover {
   background: color-mix(in oklab, var(--accent-e) 24%, transparent);
 }
 
+/* Inline sign-in prompt — setupAuth() reveals it when whoami reports the
+   viewer isn't signed in on a remote origin (the dashboard IS the door).
+   Discreet hairline bar, single amber accent on the action; on-accent text
+   is near-black per DESIGN.md. Tokens flip cleanly in the light theme. */
+body.ftw-next .signin-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink-raised);
+  font-family: var(--sans);
+  font-size: 13px;
+}
+body.ftw-next .signin-banner[hidden] { display: none; }
+body.ftw-next .signin-banner-text { color: var(--fg); }
+body.ftw-next .signin-banner-btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-e);
+  background: var(--accent-e);
+  color: #0a0a0a;
+  cursor: pointer;
+}
+body.ftw-next .signin-banner-btn:hover { filter: brightness(1.05); }
+body.ftw-next .signin-banner-msg { color: var(--fg-dim); font-size: 12px; }
+body.ftw-next .signin-banner-msg.err { color: var(--accent-e); }
+
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */

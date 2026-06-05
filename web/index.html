@@ -33,7 +33,7 @@
   <link rel="stylesheet" href="/style.css?v=lp2">
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
-  <link rel="stylesheet" href="/next.css?v=next2">
+  <link rel="stylesheet" href="/next.css?v=next3">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so we have no supply-chain surface area and no SRI gap — an
@@ -86,11 +86,23 @@
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
       <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
+      <button id="signin-btn" class="icon-btn" data-menu-label="Sign in" title="Sign in with your passkey" hidden>&#128273;</button>
       <button id="signout-btn" class="icon-btn" data-menu-label="Sign out" title="Sign out" hidden>&#9211;</button>
       <span id="p2p-status" class="p2p-status" title="Transport — click to toggle direct P2P" hidden><span class="p2p-dot"></span><span class="p2p-label"></span></span>
       <span id="conn-status" class="conn-status connected" title="Connected">&#9679;</span>
     </div>
   </header>
+
+  <!-- Inline sign-in prompt: the dashboard IS the door. next-app.js (setupAuth)
+       reveals this when whoami reports the viewer isn't signed in on a remote
+       origin, and runs the passkey ceremony over the SAME strict P2P channel —
+       no redirect to /owner-access/login.html (which would spawn a fresh channel
+       with no session). Hidden on the LAN (bypass) and once signed in. -->
+  <div id="signin-banner" class="signin-banner" hidden>
+    <span class="signin-banner-text">Sign in with your passkey to see and control your home.</span>
+    <button id="signin-banner-btn" class="signin-banner-btn">Sign in</button>
+    <span id="signin-banner-msg" class="signin-banner-msg" role="status" aria-live="polite"></span>
+  </div>
 
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal hidden">
@@ -676,7 +688,7 @@
   </ftw-modal>
 
   <script src="/p2p.js?v=p2p5"></script>
-  <script src="/next-app.js?v=next2"></script>
+  <script src="/next-app.js?v=next3"></script>
   <script src="/settings.js?v=diag1"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit1"></script>
