@@ -158,6 +158,7 @@ No cloud dependency for core operation. Everything runs locally on the Pi. Weath
 **Get started**
 - [SD-card image walkthrough](docs/rpi-image.md) — flash, boot, WiFi onboarding, troubleshoot
 - [Setup guide](docs/setup-guide/) — first-time wizard explained step by step
+- [Reaching your home from anywhere](docs/remote-access.md) — one URL + passkey, peer-to-peer, no app
 - [Configuration reference](docs/configuration.md) — every YAML key, with examples
 - [Driver catalog](docs/driver-catalog.md) — supported devices and their config blocks
 - [Device repository plan](docs/device-repository.md) — non-breaking driver repository rollout
