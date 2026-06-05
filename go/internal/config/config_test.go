@@ -450,6 +450,24 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSaveAtomicDoesNotLeaveTmpFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAtomic(path, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("SaveAtomic left tmp file behind: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("saved config missing: %v", err)
+	}
+}
+
 func TestSaveAtomicKeepsOutOfTreeDriverPathAbsolute(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.yaml")
