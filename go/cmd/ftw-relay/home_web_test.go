@@ -31,19 +31,21 @@ func TestMeRegister_PublishesDeviceKeys(t *testing.T) {
 	d1 := newDeviceKey(t)
 	d2 := newDeviceKey(t)
 	tsMs := time.Now().UnixMilli()
-	sig, err := id.SignRawHex(tunnel.MeRegisterSigningString("site:Home", "host-owner", tsMs))
+	keys := []string{
+		d1.pubKeyHex,
+		d2.pubKeyHex,
+		d1.pubKeyHex, // duplicate — must be de-duped, not double-stored
+		"not-a-key",  // malformed — must be dropped, not reject the whole reg
+	}
+	// v2 signing string covers the device_pubkeys set (so it can't be tampered).
+	sig, err := id.SignRawHex(tunnel.MeRegisterSigningStringV2("site:Home", "host-owner", tsMs, keys))
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
 	body, _ := json.Marshal(meRegisterRequest{
 		SiteID: "site:Home", HostID: "host-owner",
 		PublicKey: id.PublicKeyHex(), TsMs: tsMs, Sig: sig,
-		DevicePubkeys: []string{
-			d1.pubKeyHex,
-			d2.pubKeyHex,
-			d1.pubKeyHex, // duplicate — must be de-duped, not double-stored
-			"not-a-key",  // malformed — must be dropped, not reject the whole reg
-		},
+		DevicePubkeys: keys,
 	})
 	resp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(body))
 	if err != nil {
@@ -79,7 +81,7 @@ func TestMeRegister_DeviceKeys_ReplaceOnReRegister(t *testing.T) {
 	old := newDeviceKey(t)
 	post := func(keys []string) {
 		tsMs := time.Now().UnixMilli()
-		sig, _ := id.SignRawHex(tunnel.MeRegisterSigningString("site:Home", "host-owner", tsMs))
+		sig, _ := id.SignRawHex(tunnel.MeRegisterSigningStringV2("site:Home", "host-owner", tsMs, keys))
 		body, _ := json.Marshal(meRegisterRequest{
 			SiteID: "site:Home", HostID: "host-owner",
 			PublicKey: id.PublicKeyHex(), TsMs: tsMs, Sig: sig,
@@ -220,5 +222,38 @@ func TestHomeStaticForward_ServesFromHomeWeb(t *testing.T) {
 	// An /api/ path is still refused at the relay (P2P-only) even with -home-web.
 	if r, _ := get("/api/owner-access/whoami"); r.StatusCode != http.StatusForbidden {
 		t.Fatalf("/api/* over relay status=%d, want 403 even with -home-web", r.StatusCode)
+	}
+}
+
+// TestMeRegister_DeviceKeysTamperRejected locks in the #2 fix: a registration
+// replayed with a swapped/added device_pubkeys array (not what the owner signed)
+// must be REJECTED — the v2 signature covers the set, so an injected key is never
+// trusted for signaling.
+func TestMeRegister_DeviceKeysTamperRejected(t *testing.T) {
+	relay := newSignedRelay()
+	relay.Polls = NewPollSecrets()
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+	id := newTestIdentity(t)
+	good := newDeviceKey(t)
+	attacker := newDeviceKey(t)
+	tsMs := time.Now().UnixMilli()
+	// Owner signs over the GOOD set; attacker replays with their key swapped in.
+	sig, _ := id.SignRawHex(tunnel.MeRegisterSigningStringV2("site:Home", "host-owner", tsMs, []string{good.pubKeyHex}))
+	body, _ := json.Marshal(meRegisterRequest{
+		SiteID: "site:Home", HostID: "host-owner",
+		PublicKey: id.PublicKeyHex(), TsMs: tsMs, Sig: sig,
+		DevicePubkeys: []string{attacker.pubKeyHex},
+	})
+	resp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == 200 {
+		t.Fatal("tampered device_pubkeys must be rejected (the v2 signature covers the set)")
+	}
+	if relay.Owners.HasDeviceKey("site:Home", attacker.pubKeyHex) {
+		t.Fatal("attacker key must NOT be trusted after a tampered register")
 	}
 }

@@ -42,7 +42,7 @@ func main() {
 
 	// Fail closed: the internet-exposed home route must never run on
 	// trust-on-first-use (see requireHomePin).
-	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeAllowTOFU); err != nil {
+	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeWeb, *homeAllowTOFU); err != nil {
 		slog.Error("ftw-relay: " + err.Error())
 		os.Exit(1)
 	}
@@ -157,9 +157,14 @@ func main() {
 // the key (so a racer can't claim home.* after a relay restart drops the
 // in-memory pin) unless TOFU was explicitly allowed. Extracted from main so the
 // fail-closed rule is unit-testable.
-func requireHomePin(homeHost, homeSite, homePubKey string, allowTOFU bool) error {
-	if (homeHost != "" || homeSite != "") && homePubKey == "" && !allowTOFU {
-		return errors.New("-home-host/-home-site requires -home-pubkey to pin the home site key — refusing to run the public home route in trust-on-first-use mode. Pass the Pi's public key (it logs it at startup) via -home-pubkey, or -home-allow-tofu to override for testing")
+func requireHomePin(homeHost, homeSite, homePubKey, homeWeb string, allowTOFU bool) error {
+	if (homeHost != "" || homeSite != "") && !allowTOFU {
+		if homePubKey == "" {
+			return errors.New("-home-host/-home-site requires -home-pubkey to pin the home site key — refusing to run the public home route in trust-on-first-use mode. Pass the Pi's public key (it logs it at startup) via -home-pubkey, or -home-allow-tofu to override for testing")
+		}
+		if homeWeb == "" {
+			return errors.New("-home-host/-home-site requires -home-web — the relay must serve the sign-in shell + /api/identity itself and NEVER forward an anonymous request to the Pi (forwarding would let an unauthenticated internet visitor reach the home network). Pass the path to the web/ bundle on the relay VM, or -home-allow-tofu to override for testing")
+		}
 	}
 	return nil
 }

@@ -346,6 +346,19 @@ func (r *Relay) serveHomeStaticFile(w http.ResponseWriter, req *http.Request) {
 		}
 		full = index
 	}
+	// Defence in depth against symlink escape (review finding): the lexical prefix
+	// check above runs BEFORE symlink resolution, but http.ServeFile follows
+	// symlinks — a link inside HomeWeb pointing outside would otherwise leak the
+	// target. Resolve the final path + root and confirm the target truly stays
+	// inside the web root.
+	resolvedRoot, rerr := filepath.EvalSymlinks(root)
+	resolved, ferr := filepath.EvalSymlinks(full)
+	if rerr != nil || ferr != nil ||
+		(resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))) {
+		http.NotFound(w, req)
+		return
+	}
+	full = resolved
 	// Never leak an owner cookie either direction: strip any inbound Cookie (the
 	// session lives only in DTLS) — http.ServeFile sets no cookies itself.
 	req.Header.Del("Cookie")
@@ -939,8 +952,20 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "registration timestamp out of range", http.StatusUnauthorized)
 		return
 	}
-	// Verify the signature binds (site_id, host_id, ts) to the presented key.
-	msg := tunnel.MeRegisterSigningString(reg.SiteID, reg.HostID, reg.TsMs)
+	// Verify the signature binds (site_id, host_id, ts) to the presented key — and
+	// when the body carries device_pubkeys, that it ALSO covers that exact set (v2),
+	// so a captured registration body cannot be replayed with a swapped/added device
+	// key the relay would then trust for signaling (the v1 string did not cover the
+	// array — CVE-class bug found in review). A v1-only signature is still accepted
+	// (old Pi / no device keys), but then any device_pubkeys present did NOT sign and
+	// the storage step below verified the same way drops them — an attacker can't
+	// smuggle a key past a v1 signature.
+	var msg string
+	if len(reg.DevicePubkeys) > 0 {
+		msg = tunnel.MeRegisterSigningStringV2(reg.SiteID, reg.HostID, reg.TsMs, reg.DevicePubkeys)
+	} else {
+		msg = tunnel.MeRegisterSigningString(reg.SiteID, reg.HostID, reg.TsMs)
+	}
 	if !verifyES256Hex(reg.PublicKey, msg, reg.Sig) {
 		http.Error(w, "invalid registration signature", http.StatusUnauthorized)
 		return
@@ -1053,6 +1078,10 @@ func (r *Relay) signalChallenge(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
 		return
 	}
+	// TODO(C2-on phase, review finding #5): throttle challenge issuance with a
+	// SEPARATE per-IP limiter (sharing OfferLimit double-counts a legit
+	// challenge+offer pair). Until the device-key gate is ENFORCED this endpoint is
+	// inert (an evicted nonce gates nothing), so the DoS is not yet reachable.
 	nonce, expMs, ok := r.Challenges.Issue(siteID)
 	if !ok {
 		http.Error(w, "signaling at capacity", http.StatusServiceUnavailable)

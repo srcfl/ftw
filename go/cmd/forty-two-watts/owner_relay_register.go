@@ -155,7 +155,19 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 
 	registerOnce := func() {
 		tsMs := time.Now().UnixMilli()
-		sig, err := signer.SignRawHex(tunnel.MeRegisterSigningString(siteID, hostID, tsMs))
+		// C1: publish the set of trusted device_pubkeys so the relay can gate
+		// signaling offers (C2) on a browser proving one of them. When any exist we
+		// sign the v2 string that COVERS the set, so a captured register body can't
+		// be replayed with a swapped/added key to inject one the relay would trust
+		// (the v1 signature did not cover the array — that was the bug). With no
+		// device keys yet we sign v1 and omit the field; the relay's device-gate
+		// then has nothing to admit and stays closed (fail-closed default).
+		pks := loadTrustedDevicePubkeys()
+		signString := tunnel.MeRegisterSigningString(siteID, hostID, tsMs)
+		if len(pks) > 0 {
+			signString = tunnel.MeRegisterSigningStringV2(siteID, hostID, tsMs, pks)
+		}
+		sig, err := signer.SignRawHex(signString)
 		if err != nil {
 			slog.Warn("owner-access: sign register", "err", err)
 			return
@@ -167,15 +179,7 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 			"ts_ms":      tsMs,
 			"sig":        sig,
 		}
-		// C1: publish the set of trusted device_pubkeys so the relay can gate
-		// signaling offers (C2) on a browser proving one of them. The existing
-		// ES256 register signature already authenticates this body's origin (it
-		// binds site_id→host_id at a timestamp; only the site key can mint it), so
-		// the relay accepting the device set off an authenticated register is the
-		// same trust model as accepting the host_id mapping. Omitted entirely when
-		// no device key is enrolled yet (loader nil or empty) — the relay then has
-		// no set to gate on and its device-gate stays closed (fail-closed default).
-		if pks := loadTrustedDevicePubkeys(); len(pks) > 0 {
+		if len(pks) > 0 {
 			reqBody["device_pubkeys"] = pks
 		}
 		body, _ := json.Marshal(reqBody)
