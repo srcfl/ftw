@@ -907,6 +907,17 @@ type batteryInfo struct {
 	group         string  // inverter-affinity tag; empty = untagged (#143)
 	maxChargeW    float64 // per-driver cap; 0 = use MaxCommandW default (#145)
 	maxDischargeW float64 // per-driver cap; 0 = use MaxCommandW default (#145)
+
+	// Per-direction blocks the driver reports this cycle. A battery that
+	// can't move in the demanded direction (e.g. a Ferroamp ESO floored at
+	// its SoC limit) is excluded from that direction's split so its share
+	// goes to a capable sibling instead of leaking to the grid. Stored as
+	// "blocked" rather than "capable" so the zero value (false = not blocked
+	// = capable) is the safe default: a battery a driver never flags, and
+	// any directly-constructed batteryInfo, stays capable. See
+	// batteryDirectionBlocks + distributeProportional.
+	dischargeBlocked bool
+	chargeBlocked    bool
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
@@ -927,6 +938,29 @@ func (b batteryInfo) dischargeCap() float64 {
 		return b.maxDischargeW
 	}
 	return MaxCommandW
+}
+
+// batteryDirectionBlocks reads the optional discharge_capable / charge_capable
+// flags a driver may include in its battery emit (DerReading.Data) and reports
+// whether the battery is BLOCKED in each direction this cycle. A direction is
+// blocked only when the driver explicitly emits that *_capable flag as false
+// (e.g. the Ferroamp driver when all its ESOs are floored). Absent, empty, or
+// unparseable → not blocked: a driver that doesn't report capability is
+// assumed able, keeping this backward-compatible with every existing driver.
+func batteryDirectionBlocks(data json.RawMessage) (dischargeBlocked, chargeBlocked bool) {
+	if len(data) == 0 {
+		return false, false
+	}
+	var c struct {
+		DischargeCapable *bool `json:"discharge_capable"`
+		ChargeCapable    *bool `json:"charge_capable"`
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		return false, false
+	}
+	dischargeBlocked = c.DischargeCapable != nil && !*c.DischargeCapable
+	chargeBlocked = c.ChargeCapable != nil && !*c.ChargeCapable
+	return
 }
 
 // ComputeDispatch runs one cycle of the control loop and returns the targets
@@ -1272,15 +1306,18 @@ func ComputeDispatch(
 			soc = *r.SoC
 		}
 		lim := state.DriverLimits[name]
+		dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
 		batteries = append(batteries, batteryInfo{
-			driver:        name,
-			capacityWh:    cap,
-			currentW:      r.SmoothedW,
-			soc:           soc,
-			online:        h.IsOnline(),
-			group:         state.InverterGroups[name],
-			maxChargeW:    lim.MaxChargeW,
-			maxDischargeW: lim.MaxDischargeW,
+			driver:           name,
+			capacityWh:       cap,
+			currentW:         r.SmoothedW,
+			soc:              soc,
+			online:           h.IsOnline(),
+			group:            state.InverterGroups[name],
+			maxChargeW:       lim.MaxChargeW,
+			maxDischargeW:    lim.MaxDischargeW,
+			dischargeBlocked: dischargeBlocked,
+			chargeBlocked:    chargeBlocked,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -2618,6 +2655,48 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 // to today. With no `groupPV` info or during discharge, the algorithm
 // collapses to a single capacity-proportional split. Issue #143.
 func distributeProportional(bats []batteryInfo, totalCorrection float64, groupPV map[string]float64) []DispatchTarget {
+	var currentTotal float64
+	for _, b := range bats {
+		currentTotal += b.currentW
+	}
+	desiredTotal := currentTotal + totalCorrection
+
+	// Capability-aware reallocation. A battery that can't move in the
+	// demanded direction this cycle (discharge when desiredTotal < 0, charge
+	// when > 0) is excluded from the split and parked at 0; the split runs
+	// over the capable subset only, so its share is absorbed by capable
+	// siblings instead of leaking to the grid. No-op when every battery is
+	// capable (the common case — all existing drivers report capable). When
+	// NONE are capable, splitByCapacityAndPV(nil) returns nil and every
+	// battery stays parked at 0 — an honest target (the residual goes to the
+	// grid regardless, but we don't command a discharge no driver can honour).
+	if desiredTotal != 0 {
+		capable := make([]batteryInfo, 0, len(bats))
+		parked := make([]DispatchTarget, 0)
+		for _, b := range bats {
+			blocked := b.dischargeBlocked
+			if desiredTotal > 0 {
+				blocked = b.chargeBlocked
+			}
+			if blocked {
+				parked = append(parked, DispatchTarget{Driver: b.driver, TargetW: 0, Clamped: true})
+			} else {
+				capable = append(capable, b)
+			}
+		}
+		if len(parked) > 0 {
+			return append(splitByCapacityAndPV(capable, desiredTotal, groupPV), parked...)
+		}
+	}
+	return splitByCapacityAndPV(bats, desiredTotal, groupPV)
+}
+
+// splitByCapacityAndPV distributes desiredTotal across bats: charging with
+// PV-locality info prefers DC-local routing (#143); discharge, idle, or no
+// PV locality falls back to a pure capacity-proportional split. Extracted
+// from distributeProportional so the capability-aware path can run the exact
+// same split over a subset of batteries.
+func splitByCapacityAndPV(bats []batteryInfo, desiredTotal float64, groupPV map[string]float64) []DispatchTarget {
 	var totalCap float64
 	for _, b := range bats {
 		totalCap += b.capacityWh
@@ -2625,11 +2704,6 @@ func distributeProportional(bats []batteryInfo, totalCorrection float64, groupPV
 	if totalCap <= 0 {
 		return nil
 	}
-	var currentTotal float64
-	for _, b := range bats {
-		currentTotal += b.currentW
-	}
-	desiredTotal := currentTotal + totalCorrection
 
 	// Discharge, idle, or no PV locality info → capacity-only split.
 	// Discharge energy flows to the AC bus regardless of where it
