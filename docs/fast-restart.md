@@ -57,6 +57,18 @@ looked dead.
 
 ## Planned follow-ups (the real "make it better")
 
+- **Take a holistic pass over database management (own workstream).** This
+  incident exposed the storage layer as under-owned: a 1.3 GB `state.db` on an SD
+  card, a boot integrity check that scaled with file size, a snapshot/heal path
+  whose cost tracks the same size, and — found while fixing this — *uncommitted,
+  in-flight churn* in the DB layer itself (`store_ts.go`, `parquet.go`,
+  `devices.go` were modified in the worktree but never committed, and shipped in
+  the field binary). Treat it as one deliberate review rather than per-symptom
+  patches. Scope to consider: keeping SQLite small by construction (rolloff/prune
+  health, a size budget + alarm), retention/tiering correctness, snapshot +
+  recovery strategy, `VACUUM`/compaction policy, SD-card wear + durability,
+  migration discipline, and an integration test that asserts the size + restart
+  budgets. Land the loose WIP first so the baseline is committed and reproducible.
 - **Investigate the 1.3 GB DB — the root smell.** If history rolled off to
   Parquet as designed, `state.db` would be ~100 MB and *none* of this would
   matter (`quick_check` would be sub-second). Verify: is `rolloffLoop` actually
