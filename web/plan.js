@@ -7,6 +7,15 @@
 
   const PLAN_REFRESH_MS = 30000;
 
+  // ownerFetch routes state-changing owner/CONTROL calls (MPC replan) over the
+  // STRICT P2P transport so their body never traverses the untrusted relay on the
+  // public home route. Wired in p2p.js to the shared fail-closed strict function;
+  // falls back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // Horizon controls the x-axis bounds; mirrors the price chart's
   // 3-position pill so operators have a consistent affordance across
   // both charts. Persisted in localStorage so a user who prefers
@@ -93,7 +102,7 @@
 
   async function replan() {
     try {
-      const r = await fetch('/api/mpc/replan', { method: 'POST' });
+      const r = await ownerFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
       if (j && j.plan) state.plan = j.plan;
       render();

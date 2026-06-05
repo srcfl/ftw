@@ -11,6 +11,7 @@
 // Emits `ftw-notif-test` CustomEvent with { ok, error? } after each try.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 export class FtwNotifTestButton extends FtwElement {
   static styles = `
@@ -34,7 +35,7 @@ export class FtwNotifTestButton extends FtwElement {
     this._state = { busy: true, msg: "sending…", cls: "" };
     this.update();
     try {
-      const r = await fetch(url, { method: "POST" });
+      const r = await ownerFetch(url, { method: "POST" });
       const d = await r.json().catch(() => ({}));
       if (r.ok) {
         this._state = { busy: false, msg: "✓ Sent", cls: "ok" };

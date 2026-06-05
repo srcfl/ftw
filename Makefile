@@ -13,7 +13,8 @@
 
 .PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-        verify verify-all install-hooks
+        verify verify-all install-hooks \
+        e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -165,6 +166,40 @@ dev:
 	sleep 2 && \
 	(cd go && go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
 	wait
+
+# ---- Local docker E2E harness (relay + Pi on this machine) ----
+#
+# Brings up ftw-relay + a forty-two-watts "Pi" wired to dial it, so the whole
+# home-route / owner-access / pair / P2P flow runs locally with no real Pi,
+# relay VM, or Cloudflare. See docs/local-e2e-docker.md.
+#   Pi:         http://localhost:8080/
+#   Home route: http://home.fortytwowatts.localhost/
+
+e2e-docker-up:
+	docker compose -f docker-compose.e2e.yml up --build -d
+	@echo "Pi: http://localhost:8080/   Home route: http://home.fortytwowatts.localhost/"
+
+e2e-docker-logs:
+	docker compose -f docker-compose.e2e.yml logs -f
+
+e2e-docker-down:
+	docker compose -f docker-compose.e2e.yml down -v
+
+# ---- Tier 2: container-side browser P2P + passkey proof ----
+#
+# Brings up relay + Pi (patched with the harness WebAuthn RP-ID) PLUS a
+# headless-Chromium (Playwright) container on the SAME bridge net, and runs a
+# test that: enrolls + logs in with a virtual WebAuthn authenticator, asserts
+# the REAL P2P DataChannel reaches `direct` (container-to-container, no NAT),
+# and makes one authenticated owner API call over it. Exits non-zero on failure.
+# See docs/local-e2e-docker.md.
+E2E_TIER2_COMPOSE := -f docker-compose.e2e.yml -f docker-compose.e2e-tier2.yml
+
+e2e-docker-tier2:
+	@set -e; \
+	trap 'docker compose $(E2E_TIER2_COMPOSE) --profile tier2 down -v >/dev/null 2>&1 || true' EXIT; \
+	docker compose $(E2E_TIER2_COMPOSE) --profile tier2 up \
+		--build --abort-on-container-exit --exit-code-from playwright
 
 # ---- Hygiene ----
 

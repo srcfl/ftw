@@ -5,6 +5,17 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // ownerFetch routes state-changing owner/CONTROL probes (EV-charger probe with
+  // email+password, Tesla verify with IP+VIN, driver test with the full driver
+  // config) over the STRICT P2P transport so those SENSITIVE bodies never traverse
+  // the untrusted relay on the public home route. Wired in p2p.js to the shared
+  // fail-closed strict function; falls back to plain fetch only where p2p.js never
+  // loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function catalogEntryForLua(lua) {
     return lua ? (S.catalogByLua || {})[lua] : null;
   }
@@ -409,7 +420,7 @@
               .replace(/_cloud$/i, "");
             if (!provider) provider = "easee";
           }
-          fetch("/api/ev/chargers", {
+          ownerFetch("/api/ev/chargers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ provider: provider, email: email, password: pw }),
@@ -465,7 +476,7 @@
           }
           if (statusEl) { statusEl.textContent = "Verifying…"; statusEl.style.color = "var(--text-dim)"; }
           vbtn.disabled = true;
-          fetch("/api/drivers/verify_tesla", {
+          ownerFetch("/api/drivers/verify_tesla", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ip: ip, vin: vin }),
@@ -514,7 +525,7 @@
             outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
           }
           testBtn.disabled = true;
-          fetch("/api/drivers/test", {
+          ownerFetch("/api/drivers/test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(driver),

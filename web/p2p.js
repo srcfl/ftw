@@ -35,6 +35,73 @@
   }
   function relayURL(path) { return apiBase() + path; }
 
+  // ---- LAN-origin detection (FIX-2) -----------------------------------------
+  // Owner API calls must NEVER fall back to the cleartext relay on the PUBLIC
+  // home route — a channel timeout would otherwise leak the WebAuthn assertion +
+  // ceremony token to the untrusted relay. We allow the relay fallback ONLY when
+  // the page is served DIRECTLY by the Pi (genuine LAN), where "the relay" is not
+  // in the path at all. Everything else — the /me/<site> tunnel prefix, or a
+  // public home host like home.fortytwowatts.com — is treated as NOT-LAN, so
+  // strict owner fetches fail closed instead of leaking. When in doubt: not LAN.
+  function isPrivateIPv4(h) {
+    var m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) return false;
+    var a = +m[1], b = +m[2];
+    if (a === 10) return true;                       // 10.0.0.0/8
+    if (a === 127) return true;                      // loopback
+    if (a === 192 && b === 168) return true;         // 192.168.0.0/16
+    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
+    if (a === 169 && b === 254) return true;         // link-local
+    return false;
+  }
+  function isLanOrigin() {
+    // A relay tunnel prefix is, by definition, the relay in the path → not LAN.
+    if (apiBase() !== "") return false;
+    var h = (location.hostname || "").toLowerCase();
+    if (h === "localhost") return true;
+    if (h === "::1" || h === "[::1]") return true;
+    // mDNS / local hostnames the Pi answers on directly.
+    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) {
+      // A bare single-label host (e.g. "fortytwowatts", "raspberrypi") or *.local
+      // is a direct-LAN name — never the public home host (which has dots).
+      // Exception: don't treat a future bare public alias as LAN; but a
+      // single-label host can't be a public FQDN, so this is safe.
+      return true;
+    }
+    if (isPrivateIPv4(h)) return true;
+    // Private/link-local IPv6 (ULA fc00::/7, link-local fe80::/10), possibly
+    // bracketed.
+    var hv6 = h.replace(/^\[|\]$/g, "");
+    if (/^f[cd][0-9a-f]{2}:/.test(hv6)) return true; // fc00::/7 ULA
+    if (/^fe[89ab][0-9a-f]:/.test(hv6)) return true; // fe80::/10 link-local
+    // Anything with a dotted public hostname (home.fortytwowatts.com, etc.) is
+    // NOT LAN → strict owner fetches fail closed rather than leak to the relay.
+    return false;
+  }
+
+  // ---- signaling rendezvous URL (P2P-only home route) -----------------------
+  // The /signal/* mailbox lives at the relay ROOT (it is keyed by site_id, never
+  // under the /me/<site> tunnel prefix), so signaling URLs are origin-absolute
+  // and never carry the apiBase prefix. site is URL-encoded — it can contain a
+  // colon ("site:Home"). The nonce (?n=) keys a per-(site,nonce) mailbox so an
+  // attacker's offers can't displace/steal this browser's answer (FIX-4a); it is
+  // an OPAQUE routing key, never the SDP.
+  function signalURL(site, leaf, nonce) {
+    return "/signal/" + encodeURIComponent(site) + "/" + leaf +
+      "?n=" + encodeURIComponent(nonce);
+  }
+
+  // randomNonce returns a fresh 128-bit hex rendezvous nonce. Each connect()
+  // attempt mints its own, so concurrent/retried attempts never collide and an
+  // attacker's offers land in a different nonce slot.
+  function randomNonce() {
+    var b = new Uint8Array(16);
+    crypto.getRandomValues(b);
+    var s = "";
+    for (var i = 0; i < b.length; i++) s += (b[i] + 0x100).toString(16).slice(1);
+    return s;
+  }
+
   // ---- state broadcast (drives the dashboard transport indicator) ----
   function setState(s) {
     if (s === stateName) return;
@@ -54,6 +121,98 @@
     var bin = atob(s), out = new Uint8Array(bin.length);
     for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
+  }
+
+  // ---- DTLS-fingerprint verification (anti relay-MITM) ----------------------
+  // The Pi signs every answer's DTLS fingerprint with its ES256 identity key.
+  // The browser pins that key (TOFU) on first connect and verifies the signature
+  // BEFORE trusting the channel — so a relay that swaps the relayed SDP /
+  // fingerprint can't MITM: it can't forge the signature without the Pi's key.
+
+  // SubjectPublicKeyInfo prefix for an uncompressed P-256 EC public key. Raw
+  // X||Y is wrapped into SPKI because WebCrypto's "raw" EC import is uneven
+  // across browsers (Safari/WebKit historically rejected it); "spki" works.
+  var SPKI_P256_PREFIX = new Uint8Array([
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+    0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00
+  ]);
+
+  function hexToBytes(h) {
+    var a = new Uint8Array(h.length >> 1);
+    for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+    return a;
+  }
+  // normalizeFp mirrors tunnel.NormalizeDtlsFingerprint: keep hex, drop colons,
+  // lowercase — so both ends sign/verify the identical string.
+  function normalizeFp(s) { return (s.match(/[0-9a-fA-F]/g) || []).join("").toLowerCase(); }
+  function fingerprintFromSDP(sdp) {
+    var m = /a=fingerprint:sha-256[ \t]+([0-9A-Fa-f:]+)/.exec(sdp || "");
+    return m ? m[1] : null;
+  }
+  function importP256Pub(xyHex) {
+    var xy = hexToBytes(xyHex);
+    if (xy.length !== 64) return Promise.reject(new Error("bad pubkey length"));
+    var spki = new Uint8Array(SPKI_P256_PREFIX.length + 65);
+    spki.set(SPKI_P256_PREFIX, 0);
+    spki[SPKI_P256_PREFIX.length] = 0x04;
+    spki.set(xy, SPKI_P256_PREFIX.length + 1);
+    return crypto.subtle.importKey("spki", spki.buffer,
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  }
+
+  var _pinPromise = null;
+  // pinnedIdentity TOFU-fetches + pins {pubkey, site_id} from /api/identity on
+  // first connect (keyed per home origin / me-prefix), then reuses it. The first
+  // fetch trusts the path once (SSH known-hosts model); every later answer is
+  // verified against the pinned key, so the relay can't MITM after that.
+  function pinnedIdentity() {
+    if (_pinPromise) return _pinPromise;
+    var p = (function () {
+      var storeKey = "ftw.identity:" + apiBase();
+      var stored = null;
+      try { stored = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (e) {}
+      var got = stored
+        ? Promise.resolve(stored)
+        : fetch(relayURL("/api/identity"), { credentials: "same-origin" })
+            .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
+            .then(function (id) {
+              if (!id.public_key_hex || !id.site_id) throw new Error("identity response missing fields");
+              var rec = { pub: id.public_key_hex, site: id.site_id };
+              try { localStorage.setItem(storeKey, JSON.stringify(rec)); } catch (e) {}
+              return rec;
+            });
+      return got.then(function (rec) {
+        return importP256Pub(rec.pub).then(function (key) { return { key: key, site: rec.site }; });
+      });
+    })();
+    // Cache only on success — a transient fetch failure must not poison later
+    // verifications (the pinned record persists in localStorage regardless).
+    p.catch(function () { if (_pinPromise === p) _pinPromise = null; });
+    _pinPromise = p;
+    return p;
+  }
+
+  // verifyAnswerSignature rejects unless the answer's DTLS fingerprint is signed
+  // by the pinned Pi key. Mandatory / fail-closed: on any error the caller falls
+  // back to the relay rather than trusting an unverified channel.
+  function verifyAnswerSignature(ans) {
+    if (!ans || !ans.fp_sig) return Promise.reject(new Error("answer not signed (no fp_sig)"));
+    var fp = fingerprintFromSDP(ans.sdp);
+    if (!fp) return Promise.reject(new Error("answer has no DTLS fingerprint"));
+    var ts = Number(ans.ts) || 0;
+    if (Math.abs(Date.now() - ts) > 5 * 60 * 1000) {
+      return Promise.reject(new Error("answer timestamp outside skew window"));
+    }
+    return pinnedIdentity().then(function (pin) {
+      var msg = "ftw-dtls-fp:v1:" + pin.site + ":" + normalizeFp(fp) + ":" + ts;
+      var sig = hexToBytes(ans.fp_sig);
+      if (sig.length !== 64) throw new Error("bad signature length");
+      return crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, pin.key, sig,
+        new TextEncoder().encode(msg)
+      ).then(function (ok) {
+        if (!ok) throw new Error("answer fingerprint signature INVALID — aborting (possible relay MITM)");
+      });
+    });
   }
 
   function supported() { return typeof window.RTCPeerConnection === "function"; }
@@ -136,6 +295,28 @@
     });
   }
 
+  // pollAnswer long-polls /signal/<site>/answer until the Pi parks its answer
+  // blob ({sdp, fp_sig, ts}) or the connect attempt is abandoned. The relay
+  // returns 204 when no answer is parked yet; we re-poll until CONNECT_TIMEOUT_MS
+  // (the outer connect() timer also caps the whole attempt). isSettled() lets the
+  // outer finish() short-circuit a long-poll in flight.
+  function pollAnswer(site, nonce) {
+    var deadline = Date.now() + CONNECT_TIMEOUT_MS;
+    function once() {
+      if (Date.now() > deadline) return Promise.reject(new Error("answer poll timeout"));
+      return fetch(signalURL(site, "answer", nonce), { method: "GET" }).then(function (r) {
+        if (r.status === 204) {
+          // No answer yet — re-poll immediately (the relay holds the request
+          // open server-side, so this is not a busy loop).
+          return once();
+        }
+        if (!r.ok) throw new Error("answer http " + r.status);
+        return r.json();
+      });
+    }
+    return once();
+  }
+
   function connect() {
     if (ready) return Promise.resolve(true);
     if (connecting) return connecting;
@@ -181,20 +362,48 @@
 
       to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
 
-      pc.createOffer()
-        .then(function (offer) { return pc.setLocalDescription(offer); })
-        .then(function () { return waitIceComplete(pc); })
-        .then(function () {
-          return fetch(relayURL("/api/p2p/offer"), {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp })
-          });
+      // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
+      // offer to /signal/<site>/offer, then long-poll /signal/<site>/answer. The
+      // relay forwards opaque SDP/signature blobs and never sees plaintext. We
+      // need the pinned site_id first (it keys the mailbox); pinnedIdentity also
+      // gives us the key we verify the answer signature against.
+      // One opaque rendezvous nonce per attempt — the offer is parked under it
+      // and we poll only its answer, so a hostile offer can't steal ours.
+      var nonce = randomNonce();
+      pinnedIdentity()
+        .then(function (pin) {
+          var site = pin.site;
+          return pc.createOffer()
+            .then(function (offer) { return pc.setLocalDescription(offer); })
+            .then(function () { return waitIceComplete(pc); })
+            .then(function () {
+              return fetch(signalURL(site, "offer", nonce), {
+                method: "POST",
+                // The body is the raw SDP offer (the relay parks it verbatim and
+                // the Pi reads it raw); it is not a JSON envelope.
+                headers: { "Content-Type": "application/sdp" },
+                body: pc.localDescription.sdp
+              });
+            })
+            .then(function (r) {
+              // 204 = parked OK; anything else is a hard signaling error.
+              if (r.status !== 204 && !r.ok) throw new Error("offer http " + r.status);
+              return pollAnswer(site, nonce);
+            })
+            .then(function (ans) {
+              // Verify the Pi signed this answer's DTLS fingerprint, against the
+              // key pinned at first connect, BEFORE trusting the channel — the
+              // anti-relay-MITM check. Fail-closed: any failure aborts P2P and
+              // the caller transparently falls back to the relay path.
+              return verifyAnswerSignature(ans).then(function () {
+                return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
+              });
+            });
         })
-        .then(function (r) { if (!r.ok) throw new Error("offer http " + r.status); return r.json(); })
-        .then(function (ans) { return pc.setRemoteDescription({ type: "answer", sdp: ans.sdp }); })
-        .catch(function () { finish(false); });
+        .catch(function (e) {
+          if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
+          finish(false);
+        });
     });
     return connecting;
   }
@@ -233,6 +442,11 @@
     if (resp.headers) {
       for (var k in resp.headers) {
         if (!Object.prototype.hasOwnProperty.call(resp.headers, k)) continue;
+        // FIX-5 defence in depth: never expose Set-Cookie over the channel. The
+        // Pi's Bridge already strips it (the owner session lives only inside
+        // DTLS, replayed server-side), but filter here too so an injected script
+        // can never read an owner cookie even if a future Pi forgot to strip it.
+        if (k.toLowerCase() === "set-cookie") continue;
         var vs = resp.headers[k] || [];
         for (var i = 0; i < vs.length; i++) headers.append(k, vs[i]);
       }
@@ -260,16 +474,52 @@
     return out;
   }
 
+  // failClosedResponse synthesises a 503 Response-like object for STRICT owner
+  // fetches when no channel is available. It looks enough like a fetch Response
+  // (ok/status/headers/json/text) that callers handle it uniformly — but the
+  // owner body NEVER leaves the browser, so the WebAuthn assertion + ceremony
+  // token can't leak to the relay (FIX-2).
+  function failClosedResponse(path) {
+    var msg = "P2P channel unavailable — reconnecting. Retry in a moment.";
+    return {
+      ok: false,
+      status: 503,
+      url: path,
+      headers: new Headers(),
+      json: function () { return Promise.resolve({ error: msg, retry: true }); },
+      text: function () { return Promise.resolve(msg); }
+    };
+  }
+
   // p2pFetch: fetch-compatible. Routes over the DataChannel when available,
   // else the normal relay fetch. Never rejects on transport failure — it always
   // falls back — so callers treat it as a drop-in fetch.
+  //
+  // STRICT mode (opts.strict === true, FIX-2): for owner /api/* calls that carry
+  // secrets (WebAuthn assertion, ceremony token, owner session). On the PUBLIC
+  // home route (relay in the path) it NEVER falls back to the relay — on
+  // no-channel/failure it fails closed with a synthetic 503, so the owner body
+  // can't leak to the untrusted relay. The relay fallback is kept ONLY for a
+  // genuine-LAN origin (isLanOrigin: the Pi serves the page directly, relay not
+  // in the path). When in doubt → not LAN → fail closed.
   function p2pFetch(path, opts) {
     opts = opts || {};
-    var fallback = function () {
+    var strict = opts.strict === true;
+    var canFallBack = !strict || isLanOrigin();
+    var relayFallback = function () {
       var o = {};
       for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+      delete o.strict; // not a fetch() init field
       if (!o.credentials) o.credentials = "same-origin";
       return fetch(relayURL(path), o);
+    };
+    var fallback = function () {
+      if (canFallBack) return relayFallback();
+      // STRICT + not-LAN: fail closed. Do NOT send the owner body to the relay.
+      // Nudge a reconnect for the next attempt, but only if P2P is enabled (don't
+      // resurrect a user-disabled channel).
+      if (enabled()) { try { connect(); } catch (e) {} }
+      return Promise.resolve(failClosedResponse(path));
     };
     if (!enabled()) return fallback();
     // Never block a request on the handshake. If the channel is already open,
@@ -285,8 +535,21 @@
     return fallback();
   }
 
+  // fetchStrict is the owner-API entry point: same as p2pFetch but forces strict
+  // mode, so a channel timeout fails closed instead of leaking the owner body to
+  // the relay on the public home route.
+  function p2pFetchStrict(path, opts) {
+    opts = opts || {};
+    var o = {};
+    for (var k in opts) if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+    o.strict = true;
+    return p2pFetch(path, o);
+  }
+
   window.ftwP2P = {
     fetch: p2pFetch,
+    fetchStrict: p2pFetchStrict,
+    isLanOrigin: isLanOrigin,
     connect: connect,
     onState: function (fn) { listeners.push(fn); try { fn(stateName); } catch (e) {} },
     state: function () { return stateName; },
@@ -297,6 +560,16 @@
     }
   };
   window.p2pFetch = p2pFetch;
+  window.p2pFetchStrict = p2pFetchStrict;
+
+  // ownerFetch is the ONE fail-closed entry point the dashboard's classic scripts
+  // + web components use for state-changing owner/CONTROL /api/* calls. It is the
+  // SAME strict transport owner-fetch.js uses for the ceremony pages: strict P2P,
+  // fail-closed 503 on a public / /me/<site> origin with no DataChannel, raw relay
+  // fetch ONLY on a genuine LAN origin. One behaviour, shared — do not fork it.
+  // index.html loads /p2p.js before the consuming scripts, so this is defined by
+  // the time any dashboard handler runs.
+  window.ownerFetch = p2pFetchStrict;
 
   // Warm up the channel on load so the dashboard's first poll can already be
   // direct (and the indicator settles quickly). When P2P is supported but

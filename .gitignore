@@ -2,6 +2,8 @@
 /release
 *.redb
 config.yaml
+# ...except the committed example config for the local docker E2E harness.
+!deploy/local-e2e/config.yaml
 data/
 
 # Go build artifacts

@@ -1461,8 +1461,22 @@ func main() {
 	// p2p.Bridge over the ungated API mux. Signaling rides the authenticated
 	// owner tunnel — no relay changes. The local-API handler is injected after
 	// api.New (srv.Mux()) since srv does not exist yet at this point.
-	p2pMgr := p2p.NewManager(slog.Default(), p2p.DefaultSTUNServers)
+	//
+	// STUN set is overridable for closed networks (the local docker E2E harness
+	// has no WAN, so resolving public STUN just wastes the ICE-gather budget).
+	// Unset → DefaultSTUNServers (production). FTW_P2P_STUN="none"/"off" →
+	// host-candidate-only gathering, which is all that's needed when both peers
+	// share an L2 (e.g. the docker bridge — direct host pairing, no NAT).
+	// Otherwise a comma-separated list of stun: URLs replaces the default.
+	p2pMgr := p2p.NewManager(slog.Default(), p2pSTUNFromEnv())
 	defer p2pMgr.Close()
+	// Sign every answer's DTLS fingerprint with the site identity so the browser
+	// can verify (against the key it pinned at first connect) that the answer is
+	// this Pi's — closing relay MITM of the signaling. Skip if there's no identity
+	// (then answers are unsigned and a verifying browser treats them as such).
+	if siteIdentity != nil {
+		p2pMgr.SetSigner("site:"+cfg.Site.Name, siteIdentity)
+	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
@@ -1511,6 +1525,7 @@ func main() {
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
 		TunnelMarker:         tunnelMarker,
 		SiteIdentityPubHex:   siteIdentityPubHex,
+		SiteID:               "site:" + cfg.Site.Name,
 		P2P:                  p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
@@ -1582,6 +1597,12 @@ func main() {
 			slog.Error("http server", "err", err)
 		}
 	}()
+
+	// Belt-and-suspenders integrity scan, off the startup hot path: a clean
+	// restart skips the blocking boot check (so a multi-GB DB starts in seconds),
+	// and this still catches at-rest corruption without making control wait. It
+	// self-arms a heal on the next boot if it finds rot.
+	st.VerifyInBackground()
 	defer func() {
 		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -1593,13 +1614,21 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		if siteIdentity == nil {
-			// The relay now requires an ES256-signed registration. Without a
-			// site identity we cannot sign, so we must not register (an
-			// unsigned mapping would be refused anyway) — fail loud, not silent.
-			slog.Error("owner-access: FTW_RELAY_URL set but no site identity; skipping relay registration", "key_path", identityKeyPath)
-		} else {
-			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity)
+		// OPT-IN, DEFAULT OFF: never dial out on FTW_RELAY_URL alone. Opt in via
+		// config (remote_access.enabled) OR the explicit FTW_REMOTE_ACCESS_ENABLED
+		// env (sibling of the other FTW_OWNER_ACCESS_* overrides). A Pi that merely
+		// inherits FTW_RELAY_URL from an image default stays local.
+		enabled := cfg.RemoteAccessEnabled() || envBoolDefault("FTW_REMOTE_ACCESS_ENABLED", false)
+		switch {
+		case !enabled:
+			slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled or FTW_REMOTE_ACCESS_ENABLED=true)")
+		case siteIdentity == nil:
+			// The relay requires an ES256-signed registration. Without a site
+			// identity we cannot sign, so we must not register (an unsigned
+			// mapping would be refused anyway) — fail loud, not silent.
+			slog.Error("owner-access: remote_access enabled but no site identity; skipping relay registration", "key_path", identityKeyPath)
+		default:
+			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
 		}
 	}
 
@@ -2590,13 +2619,13 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		disEff = 0.95
 	}
 	params := mpc.Params{
-		Mode:                         mode,
-		SoCLevels:                    41,
-		CapacityWh:                   totalCap,
-		SoCMinPct:                    socMin,
-		SoCMaxPct:                    socMax,
-		PVChargeBonusOreKwh:          pvBonus,
-		InitialSoCPct:                50,
+		Mode:                mode,
+		SoCLevels:           41,
+		CapacityWh:          totalCap,
+		SoCMinPct:           socMin,
+		SoCMaxPct:           socMax,
+		PVChargeBonusOreKwh: pvBonus,
+		InitialSoCPct:       50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose
 		// borderline-PV slots: on a 273 W net surplus the 450 W min
@@ -2827,6 +2856,33 @@ func envBoolDefault(key string, def bool) bool {
 		return false
 	}
 	return true
+}
+
+// p2pSTUNFromEnv resolves the WebRTC STUN server set from FTW_P2P_STUN.
+// Unset → p2p.DefaultSTUNServers (production NAT traversal). "none"/"off"/""
+// (explicit empty) → nil, i.e. host-candidate-only gathering for closed
+// networks like the docker E2E harness. Anything else is a comma-separated
+// list of stun: URLs that replaces the default.
+func p2pSTUNFromEnv() []string {
+	v, ok := os.LookupEnv("FTW_P2P_STUN")
+	if !ok {
+		return p2p.DefaultSTUNServers
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none", "off":
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseOriginsEnv splits a comma-separated list of WebAuthn-acceptable

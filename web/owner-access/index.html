@@ -85,17 +85,29 @@
     <div id="pin-panel" class="pin-panel"></div>
   </div>
 
+  <!-- Load the P2P transport so the landing page's owner API calls (whoami,
+       devices, logout) ride the DTLS DataChannel — the owner API is P2P-only
+       over the relay. ownerFetch() routes through window.p2pFetch when up. -->
+  <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
     import { apiBase } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
+    import { ownerFetch } from "./owner-fetch.js";
     const base = apiBase();
+
+    // ownerFetch (shared, owner-fetch.js) routes owner API calls — whoami, the
+    // devices list + DELETE revoke, logout — over the STRICT P2P transport (FIX-2):
+    // they carry or rely on the owner session, which must never ride the cleartext
+    // relay on the public home route. It fails closed on a public origin both when
+    // the channel is down AND when p2p.js never loaded (FIX-B); only a genuine-LAN
+    // origin raw-fetches.
 
     // "Show enrollment PIN" lives in the first-time "choose" panel; it's
     // inert until clicked and gracefully degrades over the relay (LAN-only).
     mountEnrollPin(document.getElementById("pin-panel"));
 
     async function whoami() {
-      const r = await fetch(base + "/api/owner-access/whoami", { credentials: "same-origin" });
+      const r = await ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" });
       return r.status === 200 ? await r.json() : null;
     }
     function show(id) {
@@ -106,7 +118,7 @@
     document.getElementById("signout").onclick = async () => {
       // The ftw_owner cookie is HttpOnly, so JS can't clear it — POST the
       // server logout to revoke the session AND expire the cookie properly.
-      try { await fetch(base + "/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
+      try { await ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
       catch (e) { /* best-effort — fall through to the choose panel regardless */ }
       show("choose");
     };
@@ -131,7 +143,7 @@
       ul.innerHTML = "";
       let devices = [];
       try {
-        const r = await fetch(base + "/api/owner-access/devices", { credentials: "same-origin" });
+        const r = await ownerFetch("/api/owner-access/devices", { credentials: "same-origin" });
         if (r.ok) ({ devices } = await r.json());
       } catch { return; }
       for (const d of (devices || [])) {
@@ -145,7 +157,7 @@
         btn.style = "width:auto;padding:.35rem .7rem;font-size:.85em";
         btn.onclick = async () => {
           if (!confirm("Remove the passkey \"" + (d.friendly_name || "unnamed") + "\"?")) return;
-          await fetch(base + "/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
+          await ownerFetch("/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
             { method: "DELETE", credentials: "same-origin" });
           refresh();
         };

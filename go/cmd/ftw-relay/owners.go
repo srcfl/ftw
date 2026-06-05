@@ -123,6 +123,23 @@ func (r *OwnerRegistry) Lookup(siteID string) (string, error) {
 	return hostID, nil
 }
 
+// SiteForHost returns the site_id currently mapped to host_id, or ErrSiteNotFound.
+// The signaling rendezvous needs this reverse direction: the Pi polls
+// /signal/{host_id}/offer, but the mailbox is keyed by site_id (the browser's
+// pinned identifier), so the relay resolves host_id back to its site here. The
+// host_id was bound to the site by an ES256-signed /me/register, so this lookup
+// only resolves a host the registered Pi already proved it owns.
+func (r *OwnerRegistry) SiteForHost(hostID string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for site, h := range r.bySite {
+		if h == hostID {
+			return site, nil
+		}
+	}
+	return "", ErrSiteNotFound
+}
+
 // Active reports the host_id for a site and whether its registration is recent
 // (last seen within maxAge). A host re-registers periodically, so a mapping
 // that has gone stale means the Pi is offline — the caller can serve an

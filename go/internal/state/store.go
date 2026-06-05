@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,6 +44,24 @@ type Store struct {
 	ts    *internCache
 
 	healEvents []HealEvent
+
+	// mainDBPath is retained so Close can drop a clean-shutdown marker beside the
+	// precious state.db (see heal.go) — the marker is what lets the next boot skip
+	// the multi-minute integrity check on a large DB. (statePath() the method
+	// queries the live DB and can't be used after Close, hence a cached field.)
+	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
+	mainDBPath string
+
+	// healMu guards corrupt + verifyCancel. corrupt is set by the background
+	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
+	// marked clean). verifyCancel interrupts the in-flight background scan so
+	// Close can stop it before closing the DB — otherwise db.Close() blocks on
+	// the (multi-minute) scan, the clean marker never gets written, and the next
+	// boot is slow. verifyWG lets Close wait for the scan goroutine to unwind.
+	healMu       sync.Mutex
+	corrupt      bool
+	verifyCancel context.CancelFunc
+	verifyWG     sync.WaitGroup
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -53,6 +72,11 @@ func Open(path string) (*Store, error) {
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
+	// Phase-timed so a slow startup is never a silent hang: each line below
+	// reports how long its phase took, so an operator watching the logs can see
+	// exactly where a large-DB boot is spending time (integrity gate vs
+	// migrations) instead of staring at a frozen "config loaded" line.
+	tGate := time.Now()
 	db, stEv, err := openChecked(path, tierState, nowMs)
 	if err != nil {
 		return nil, err
@@ -62,13 +86,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
-	s := &Store{db: db, cache: cache, ts: newInternCache()}
+	s := &Store{db: db, cache: cache, ts: newInternCache(), mainDBPath: path}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
 			s.healEvents = append(s.healEvents, *ev)
 		}
 	}
+	tMig := time.Now()
 	if err := s.migrate(); err != nil {
 		db.Close()
 		cache.Close()
@@ -79,14 +105,38 @@ func Open(path string) (*Store, error) {
 		cache.Close()
 		return nil, err
 	}
+	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
+
+	// Arm the verified-good marker: state.db opened + migrated successfully (it
+	// either passed quick_check, was restored from snapshot, or rebuilt fresh), so
+	// the next boot can SKIP the (slow on a large DB) integrity check. The marker
+	// persists across restarts and crashes — it does NOT depend on a clean Close.
+	// Only VerifyInBackground finding corruption removes it, which forces the next
+	// boot to run the full check + heal. This is what makes restarts reliably fast.
+	writeCleanMarker(path)
 	return s, nil
 }
 
-// Close releases both DB files. Safe to call multiple times.
+// Close releases both DB files. Safe to call multiple times. The verified-good
+// marker is NOT managed here — it is armed by Open and removed only by a
+// background verify that finds corruption, so fast restarts never depend on this
+// running cleanly (a SIGKILLed shutdown still leaves a fast next boot).
 func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	// Stop the background integrity scan first: db.Close() blocks until every
+	// in-flight query finishes, and the scan's quick_check can run for minutes on
+	// a large DB. Cancelling it (sqlite3_interrupt) lets the close happen promptly
+	// instead of being SIGKILLed mid-close.
+	s.healMu.Lock()
+	cancel := s.verifyCancel
+	s.healMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.verifyWG.Wait()
+
 	var err error
 	if s.cache != nil {
 		err = s.cache.Close()
@@ -97,6 +147,61 @@ func (s *Store) Close() error {
 		}
 	}
 	return err
+}
+
+// VerifyInBackground runs the integrity check OFF the startup hot path. Call it
+// once, after the app is already serving. A clean-shutdown boot skips the
+// blocking check (see openChecked) so startup stays fast on a multi-GB DB; this
+// is the belt-and-suspenders pass that still catches at-rest corruption (e.g.
+// SD-card rot) without making control wait. On failure it logs loudly and arms a
+// full check + heal for the next boot: it marks the Store corrupt (so Close
+// leaves no clean marker) and removes any existing marker.
+func (s *Store) VerifyInBackground() {
+	if s == nil || s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.healMu.Lock()
+	s.verifyCancel = cancel
+	s.healMu.Unlock()
+	s.verifyWG.Add(1)
+	go func() {
+		defer s.verifyWG.Done()
+		s.verifyOnce(ctx)
+	}()
+}
+
+// verifyOnce is the synchronous body of VerifyInBackground (split out so it is
+// directly testable). It runs quick_check on state.db and, on failure, arms a
+// heal for the next boot. A ctx cancellation (Close interrupting the scan on
+// shutdown) is NOT a failure — the check simply didn't finish, so we leave the
+// DB's clean status untouched.
+func (s *Store) verifyOnce(ctx context.Context) {
+	t0 := time.Now()
+	ok, err := quickCheckContext(ctx, s.db)
+	if err == nil && ok {
+		slog.Info("state: background integrity check passed",
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+		return
+	}
+	if ctx.Err() != nil {
+		slog.Info("state: background integrity check aborted (shutdown)",
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+		return
+	}
+	// A malformed image surfaces as an error rather than an "ok != 'ok'" row, so
+	// treat ANY non-clean result as corruption: arm a heal for the next boot
+	// (don't leave a clean marker). The next boot's openChecked runs the full
+	// check and restores from snapshot if the damage is real; a transient error
+	// just costs one slower boot.
+	slog.Error("state: BACKGROUND INTEGRITY CHECK FAILED — state.db is not clean; "+
+		"it will be checked and healed from snapshot on the next restart", "err", err)
+	s.healMu.Lock()
+	s.corrupt = true
+	s.healMu.Unlock()
+	if s.mainDBPath != "" {
+		_ = os.Remove(cleanMarkerPath(s.mainDBPath))
+	}
 }
 
 // HealEvents returns the corruption-recovery events from this boot (nil = a
@@ -739,18 +844,24 @@ func (s *Store) LoadAllBatteryModels() (map[string]string, error) {
 	if drows, err := s.db.Query(`SELECT device_id, driver_name FROM devices`); err == nil {
 		for drows.Next() {
 			var id, n string
-			if err := drows.Scan(&id, &n); err == nil { rev[id] = n }
+			if err := drows.Scan(&id, &n); err == nil {
+				rev[id] = n
+			}
 		}
 		drows.Close()
 	}
 	// Phase 2: read battery_models, translating keys via rev.
 	rows, err := s.db.Query(`SELECT name, json FROM battery_models`)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := make(map[string]string)
 	for rows.Next() {
 		var name, js string
-		if err := rows.Scan(&name, &js); err != nil { return out, err }
+		if err := rows.Scan(&name, &js); err != nil {
+			return out, err
+		}
 		if n, ok := rev[name]; ok {
 			out[n] = js
 		} else if !strings.Contains(name, ":") {
@@ -1097,9 +1208,13 @@ type PricePoint struct {
 
 // SavePrices upserts a batch of price rows (slot duration per-row).
 func (s *Store) SavePrices(pts []PricePoint) error {
-	if len(pts) == 0 { return nil }
+	if len(pts) == 0 {
+		return nil
+	}
 	tx, err := s.cache.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO prices
 		(zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms)
@@ -1110,11 +1225,15 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 			total_ore_kwh = excluded.total_ore_kwh,
 			source = excluded.source,
 			fetched_at_ms = excluded.fetched_at_ms`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
 	for _, p := range pts {
 		slot := p.SlotLenMin
-		if slot <= 0 { slot = 60 }
+		if slot <= 0 {
+			slot = 60
+		}
 		if _, err := stmt.Exec(p.Zone, p.SlotTsMs, slot, p.SpotOreKwh, p.TotalOreKwh, p.Source, p.FetchedAtMs); err != nil {
 			return err
 		}
@@ -1128,7 +1247,9 @@ func (s *Store) LoadPrices(zone string, sinceMs, untilMs int64) ([]PricePoint, e
 		FROM prices
 		WHERE zone = ? AND slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, zone, sinceMs, untilMs)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := []PricePoint{}
 	for rows.Next() {
@@ -1157,9 +1278,13 @@ type ForecastPoint struct {
 
 // SaveForecasts upserts a batch of forecast rows.
 func (s *Store) SaveForecasts(pts []ForecastPoint) error {
-	if len(pts) == 0 { return nil }
+	if len(pts) == 0 {
+		return nil
+	}
 	tx, err := s.cache.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO forecasts
 		(slot_ts_ms, slot_len_min, cloud_cover_pct, temp_c, solar_wm2, pv_w_estimated, source, fetched_at_ms)
@@ -1172,11 +1297,15 @@ func (s *Store) SaveForecasts(pts []ForecastPoint) error {
 			pv_w_estimated = excluded.pv_w_estimated,
 			source = excluded.source,
 			fetched_at_ms = excluded.fetched_at_ms`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
 	for _, p := range pts {
 		slot := p.SlotLenMin
-		if slot <= 0 { slot = 60 }
+		if slot <= 0 {
+			slot = 60
+		}
 		if _, err := stmt.Exec(p.SlotTsMs, slot, p.CloudCoverPct, p.TempC, p.SolarWm2, p.PVWEstimated, p.Source, p.FetchedAtMs); err != nil {
 			return err
 		}
@@ -1190,7 +1319,9 @@ func (s *Store) LoadForecasts(sinceMs, untilMs int64) ([]ForecastPoint, error) {
 		FROM forecasts
 		WHERE slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, sinceMs, untilMs)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := []ForecastPoint{}
 	for rows.Next() {

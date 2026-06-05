@@ -80,13 +80,24 @@
     <div id="msg"></div>
   </div>
 
+  <!-- Load the P2P transport: in the P2P-only home route the owner API (incl.
+       enroll/start + enroll/finish) is refused over the relay, so the enrollment
+       ceremony must ride the DTLS DataChannel. ownerFetch() routes through
+       window.p2pFetch when a channel is up. -->
+  <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
-    import { apiBase, decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    import { decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
-    const base = apiBase();
+    import { ownerFetch } from "./owner-fetch.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
+
+    // ownerFetch (shared, owner-fetch.js) routes the enroll ceremony over the P2P
+    // DataChannel in STRICT mode (FIX-2): the WebAuthn attestation + ceremony token
+    // + PIN must NEVER leak to the untrusted relay. It fails closed on a public
+    // origin both when the channel is down AND when p2p.js never loaded (FIX-B);
+    // only a genuine-LAN origin raw-fetches.
 
     // "Show enrollment PIN" — LAN-only; gracefully degrades over the relay.
     mountEnrollPin(document.getElementById("pin-panel"));
@@ -102,8 +113,8 @@
         // 1. Start ceremony. The first passkey enrolled through the relay
         //    needs the LAN PIN (?pin=); later enrollments (logged in) don't.
         const pin = document.getElementById("pin").value.trim();
-        const startUrl = base + "/api/owner-access/enroll/start" + (pin ? ("?pin=" + encodeURIComponent(pin)) : "");
-        const start = await fetch(startUrl, { method: "POST" });
+        const startUrl = "/api/owner-access/enroll/start" + (pin ? ("?pin=" + encodeURIComponent(pin)) : "");
+        const start = await ownerFetch(startUrl, { method: "POST" });
         if (!start.ok) {
           const body = await start.text();
           const hint = (start.status === 403 && /pin/i.test(body))
@@ -119,8 +130,8 @@
         const cred = await navigator.credentials.create({ publicKey: credOpts });
 
         // 3. Finish.
-        const finish = await fetch(
-          base + "/api/owner-access/enroll/finish?ceremony_token=" + encodeURIComponent(ceremony_token) + "&name=" + encodeURIComponent(name),
+        const finish = await ownerFetch(
+          "/api/owner-access/enroll/finish?ceremony_token=" + encodeURIComponent(ceremony_token) + "&name=" + encodeURIComponent(name),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

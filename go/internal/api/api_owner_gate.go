@@ -75,7 +75,14 @@ func isOwnerAccessOpenPath(p string) bool {
 		"/api/owner-access/enroll/start",
 		"/api/owner-access/enroll/finish",
 		"/api/owner-access/whoami",
-		"/api/owner-access/logout":
+		"/api/owner-access/logout",
+		// /api/identity is the TOFU anchor for the P2P-only home route: the
+		// browser MUST fetch + pin the Pi's PUBLIC ES256 key before it can open
+		// (and verify) a P2P channel, so this must be reachable unauthenticated
+		// over the relay. It returns only the public key + site_id + curve — no
+		// secret, no control surface — so exposing it costs nothing and is the
+		// same security posture as the public login surface and static assets.
+		"/api/identity":
 		return true
 	}
 	return strings.HasPrefix(p, "/owner-access/")

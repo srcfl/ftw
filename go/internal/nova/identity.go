@@ -1,6 +1,7 @@
 package nova
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -85,9 +86,24 @@ func (id *Identity) PublicKeyHex() string {
 	return hex.EncodeToString(buf)
 }
 
+// Signer returns the identity's private key as a crypto.Signer so callers
+// (e.g. pion's webrtc.NewCertificate, which mints the home-route DTLS cert) can
+// bind an X.509 certificate to this identity without the key ever leaving the
+// process. It is the SAME key that signs Nova JWTs, claim proofs, /me/register,
+// and the DTLS fingerprint — see the domain-separation note on SignRawHex.
+func (id *Identity) Signer() crypto.Signer { return id.priv }
+
 // SignRawHex signs msg with the identity's ES256 key and returns the raw
 // R||S 64-byte signature as a 128-char hex string. This is the exact
 // format Nova's ownership.verifyES256Signature expects for claim proofs.
+//
+// DOMAIN SEPARATION (load-bearing): this key signs SHA-256(msg) with NO built-in
+// domain tag, and it is reused across protocols (JWTs sign base64url(header)."."
+// base64url(payload); /me/register signs MeRegisterSigningString; the home route
+// signs DtlsFingerprintSigningString). Every caller MUST therefore prefix msg
+// with a unique, versioned "ftw-<purpose>:v1:" tag so a signature minted for one
+// purpose can never be replayed as another. NEVER pass attacker-influenced bytes
+// to SignRawHex without such a prefix.
 func (id *Identity) SignRawHex(msg string) (string, error) {
 	hash := sha256.Sum256([]byte(msg))
 	r, s, err := ecdsa.Sign(rand.Reader, id.priv, hash[:])

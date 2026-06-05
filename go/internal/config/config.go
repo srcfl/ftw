@@ -32,6 +32,38 @@ type Config struct {
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+	RemoteAccess  *RemoteAccess      `yaml:"remote_access,omitempty" json:"remote_access,omitempty"`
+}
+
+// RemoteAccess opts the Pi into the owner remote-access home route. DEFAULT OFF:
+// the Pi makes NO outgoing connection to the signaling relay unless Enabled is
+// true — even if FTW_RELAY_URL is present in the environment. A fresh install
+// stays fully local (Local Over Cloud), and an operator who reaches their Pi
+// over a VPN never has to carry an unnecessary outbound connection.
+//
+// When enabled, owner traffic rides a direct browser↔Pi DTLS WebRTC DataChannel
+// (the relay is a blind signaling rendezvous, never a plaintext tunnel). See
+// docs/superpowers/specs/2026-06-04-p2p-only-home-route-v1-design.md.
+type RemoteAccess struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// TURN is a BLIND, self-hostable ICE fallback for hard-NAT / CGNAT peers
+	// where direct P2P can't form. It relays DTLS ciphertext only — it cannot
+	// read or MITM the channel (anti-MITM is the signed fingerprint, not TURN),
+	// so it costs zero trustlessness. Default OFF; enabling it is config-only.
+	TURN *TURN `yaml:"turn,omitempty" json:"turn,omitempty"`
+}
+
+// TURN is the optional, blind, ciphertext-only ICE relay fallback.
+type TURN struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	URL     string `yaml:"url,omitempty" json:"url,omitempty"`
+	Secret  string `yaml:"secret,omitempty" json:"secret,omitempty"`
+}
+
+// RemoteAccessEnabled reports whether the owner remote-access home route is
+// opted in. Nil-safe: a config with no remote_access block is OFF.
+func (c *Config) RemoteAccessEnabled() bool {
+	return c.RemoteAccess != nil && c.RemoteAccess.Enabled
 }
 
 // Notifications configures outbound push notifications. Exactly one

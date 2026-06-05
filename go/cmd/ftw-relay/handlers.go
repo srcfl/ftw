@@ -43,6 +43,16 @@ const (
 
 var errBodyTooLarge = errors.New("tunneled body exceeds limit")
 
+// ownerHostIDPrefix is the reserved prefix the owner-access Pi derives its
+// host_id with (deriveOwnerHostID: "owner-<site>-<rand>"). The owner poll secret
+// for such a host_id is minted ONLY by the ES256-verified /me/register, bound to
+// the verified site key. The unauthenticated friend path (/tunnel/register) MUST
+// refuse any host_id carrying this prefix, so it can never be used to register a
+// fake friend session under an owner host_id and be handed the owner's poll
+// secret (which then unlocks the /signal rendezvous). Owner and friend host_id
+// namespaces are disjoint by this prefix.
+const ownerHostIDPrefix = "owner-"
+
 // pairTokenRe bounds the routing token to a safe charset. The host generates
 // word-dash tokens (genWordToken: lowercase words joined by '-'); this tolerates
 // that plus digits but rejects anything with HTML/JS metacharacters, so the
@@ -61,7 +71,10 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	Polls       *PollSecrets
-	PollTimeout time.Duration // 0 → 25s default
+	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
+	OfferLimit  *IPRateLimiter // per-source-IP throttle on browser signaling offers (FIX-C)
+	TrustCFIP   bool           // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
+	PollTimeout time.Duration  // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
@@ -90,6 +103,15 @@ func (r *Relay) Handler() http.Handler {
 	if r.Polls == nil {
 		r.Polls = NewPollSecrets()
 	}
+	if r.Signals == nil {
+		r.Signals = NewSignalMailbox()
+	}
+	if r.OfferLimit == nil {
+		// Per-source-IP token bucket on the unauthenticated browser offer endpoint
+		// (FIX-C): bounds one abusive IP without letting it lock out a legit browser
+		// on a different IP (which the old per-site limit did).
+		r.OfferLimit = newIPRateLimiter(offerBucketCapacity, offerBucketRefillPerSec)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -101,22 +123,45 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("/h/{token}/mcp", r.publicMCP)
 	mux.HandleFunc("/h/{token}/web/", r.publicWeb)
 
-	// Owner remote access (Phase 3) — site-id-keyed routes that bypass
-	// the pair-token flow. Host must POST /me/register on startup; the
-	// /me/<site_id>/... family then tunnels to that host's long-poll
-	// loop just like /h/<token>/... does for friend access. WebAuthn
-	// session validation happens on the host side via the session cookie.
-	mux.HandleFunc("POST /me/register", r.meRegister)
-	mux.HandleFunc("/me/{site_id}/{rest...}", r.meTunnel)
-	mux.HandleFunc("/me/{site_id}", r.meRoot)
+	// Blind WebRTC signaling rendezvous (P2P-only home route). The relay parks
+	// opaque SDP/signature blobs in a tiny per-site 2-slot mailbox; it never sees
+	// plaintext (the resulting DataChannel is DTLS-encrypted end to end).
+	//   - browser: POST /signal/{site_id}/offer  + long-poll GET /signal/{site_id}/answer
+	//   - Pi:      long-poll GET /signal/{host_id}/offer + POST /signal/{host_id}/answer
+	// The Pi side is authenticated with the per-host poll secret (X-FTW-Poll), the
+	// same token minted at /me/register; the browser side is rate-limited.
+	mux.HandleFunc("POST /signal/{site_id}/offer", r.signalBrowserOffer)
+	mux.HandleFunc("GET /signal/{site_id}/answer", r.signalBrowserAnswer)
+	mux.HandleFunc("GET /signal/{host_id}/offer", r.signalHostOffer)
+	mux.HandleFunc("POST /signal/{host_id}/answer", r.signalHostAnswer)
 
-	// Single-home cutover: a bare host (home.fortytwowatts.com) forwards
-	// every path verbatim to the owner Pi registered under HomeSite, so the
-	// dashboard loads at the root with working absolute asset paths. Only
-	// browser traffic to HomeHost matches this; the Pi still talks to the
-	// relay over relay.* (/me/register, /tunnel/*), unaffected.
+	// Owner remote access registration (Phase 3). The Pi POSTs its ES256-signed
+	// /me/register on startup; the relay pins the key and returns the per-host
+	// poll secret the Pi uses BOTH to drain the (friend-flow) tunnel and to
+	// authenticate the /signal/* rendezvous. This is control-plane only — there
+	// is NO LONGER an owner HTTP request/response tunnel (the /me/<site>/... and
+	// /me/<site> forwarders were removed in the P2P-only cutover, slice 6). Owner
+	// data exists ONLY as DTLS DataChannel frames now.
+	mux.HandleFunc("POST /me/register", r.meRegister)
+
+	// Single-home cutover: a bare host (home.fortytwowatts.com) serves the
+	// dashboard's STATIC assets from the owner Pi so the SPA, login page, and
+	// p2p.js load at the root with working absolute paths. It is restricted to
+	// GET of NON-/api/ paths: the owner API + the ftw_owner cookie never traverse
+	// the relay — they ride the DTLS DataChannel only (P2P-only home route). The
+	// browser fetches the SPA shell here, then opens the P2P channel for all
+	// owner data + the login ceremony.
 	if r.HomeHost != "" && r.HomeSite != "" {
-		mux.HandleFunc(r.HomeHost+"/", r.homeForward)
+		// The browser reaches the relay AS the home host, and Go's ServeMux gives
+		// a host-specific pattern precedence over a host-less one — so the
+		// host-less /signal/{site}/* browser routes above would be shadowed by the
+		// home-host catch-all below. Re-register the BROWSER signaling routes on
+		// the home host explicitly so the rendezvous works from the dashboard
+		// origin. (The Pi's /signal/{host}/* routes need no host pin: the Pi dials
+		// the relay by its own host, not the home host.)
+		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)
+		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
 	return r.limitBody(mux)
 }
@@ -134,12 +179,32 @@ func (r *Relay) limitBody(next http.Handler) http.Handler {
 	})
 }
 
-// homeForward forwards a bare-host request (HomeHost) verbatim to the single
-// owner Pi (HomeSite). Same tunnel mechanism as meForward, but the full
-// request path is preserved (no /me/<site_id> prefix to strip).
-func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
+// homeStaticForward serves the dashboard's STATIC assets for the bare home host
+// from the owner Pi, over the friend-flow tunnel queue, but FAIL-CLOSED for the
+// owner data plane: it forwards only GET requests for NON-/api/ paths. The owner
+// API and the ftw_owner session cookie therefore NEVER traverse the relay — they
+// ride the DTLS DataChannel only (the P2P-only home route). The browser loads
+// the SPA shell + login page + p2p.js here, then opens the P2P channel for all
+// owner traffic and the login ceremony.
+//
+// This keeps the app loadable without shipping the web bundle into the relay,
+// while structurally guaranteeing (path + method gate) that no cleartext owner
+// request or cookie can be tunneled through this host route.
+func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 	if r.Owners == nil {
 		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// FAIL-CLOSED owner-data gate. Only GET may traverse the relay for the home
+	// host, and never an /api/ path — those carry owner data + the session cookie
+	// and must travel inside DTLS only. Anything else is refused here so the
+	// relay can never see (or be tricked into proxying) owner traffic.
+	if req.Method != http.MethodGet {
+		http.Error(w, "owner API is P2P-only; this relay serves static assets only", http.StatusMethodNotAllowed)
+		return
+	}
+	if isOwnerAPIPath(req.URL.Path) {
+		http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
 		return
 	}
 	hostID, registered, fresh := r.Owners.Active(r.HomeSite, homeStaleAfter)
@@ -149,27 +214,49 @@ func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
 		r.serveHomeOffline(w, req, registered)
 		return
 	}
-	body, err := readBody(req.Body)
-	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
+	// GET assets have no meaningful body; do not read/forward one.
 	innerPath := req.URL.Path
 	if q := req.URL.RawQuery; q != "" {
 		innerPath = innerPath + "?" + q
 	}
-	resp, err := r.enqueue(req, hostID, innerPath, body)
+	// Strip any inbound cookies: the owner session lives only inside DTLS, so a
+	// stray ftw_owner on a static-asset GET must never reach the Pi over the relay
+	// (it would be ignored, but stripping it keeps the no-owner-cookie-on-relay
+	// invariant structural rather than incidental).
+	req.Header.Del("Cookie")
+	resp, err := r.enqueue(req, hostID, innerPath, nil)
 	if err != nil {
 		// Fresh a moment ago but the tunnel didn't answer in time — the Pi most
 		// likely just dropped. Same reassuring page rather than a bare 502.
 		r.serveHomeOffline(w, req, true)
 		return
 	}
+	// Defence in depth: never relay a Set-Cookie from the Pi for the home host —
+	// a static asset has no business setting the owner cookie, and the owner
+	// session must never appear on a relay-visible response.
+	resp.Header.Del("Set-Cookie")
 	for k, vv := range resp.Header {
 		w.Header()[k] = vv
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+}
+
+// isOwnerAPIPath reports whether a request path is part of the owner API surface
+// that must travel only inside DTLS — never over the relay. The static home-host
+// forwarder refuses these so no owner request/cookie can be tunneled in
+// cleartext.
+//
+// The SOLE exception is GET /api/identity: it returns only the Pi's PUBLIC ES256
+// key (no secret, no cookie, no control surface), and the browser MUST fetch +
+// pin it BEFORE it can open (and verify) the P2P channel — so it cannot itself
+// ride the channel. Allowing this one read is the TOFU bootstrap and costs
+// nothing: a key-less relay still cannot forge the signed fingerprint.
+func isOwnerAPIPath(p string) bool {
+	if p == "/api/identity" {
+		return false
+	}
+	return strings.HasPrefix(p, "/api/")
 }
 
 // serveHomeOffline renders a calm, self-contained "home offline" page for the
@@ -308,29 +395,69 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
+	// CRITICAL: refuse owner-namespaced host_ids on the unauthenticated friend
+	// path. The owner poll secret for an owner-<…> host_id is minted only by the
+	// ES256-verified /me/register; if a friend could register one here it would be
+	// handed back that secret (Issue's principal binding also blocks it, but
+	// rejecting outright keeps owner/friend host_id namespaces structurally
+	// disjoint and avoids ever touching the owner secret store from this path).
+	if strings.HasPrefix(reg.HostID, ownerHostIDPrefix) {
+		http.Error(w, "host_id namespace reserved", http.StatusForbidden)
+		return
+	}
 	if reg.TTLMs <= 0 {
 		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
 		return
 	}
-	_, err := r.Tokens.Register(TokenRegistration{
+	// ATOMICITY (escalation fix): the token and its poll-secret ownership must be
+	// committed as a unit. If poll-secret ownership of host_id can't be proven
+	// (the host_id's secret is bound to a DIFFERENT principal — e.g. it belongs to
+	// an owner, or to another friend's pair token), this registration must leave
+	// NO token behind. Otherwise an attacker could register T for a victim's
+	// host_id H, get the 403, then approve T with their own code and have
+	// /h/T/mcp route friend traffic to H — unauthorized access to the victim's Pi.
+	//
+	// We register the token, then prove poll-secret ownership; on ANY failure of
+	// the ownership step we roll the token back (Delete) and release any secret
+	// THIS call freshly minted, so a 403 is indistinguishable from "never
+	// registered". The owner-prefix guard above already rejects owner host_ids
+	// outright; this closes the same class for any non-owner host_id whose secret
+	// is held by a different principal — and keeps the two steps atomic so the
+	// ordering bug can't re-open it.
+	pairPrincipal := "pair:" + reg.Token
+	if _, err := r.Tokens.Register(TokenRegistration{
 		HostID:       reg.HostID,
 		Token:        reg.Token,
 		TTL:          time.Duration(reg.TTLMs) * time.Millisecond,
 		ApprovalCode: reg.ApprovalCode,
 		Intent:       reg.Intent,
 		As:           reg.As,
-	})
-	if errors.Is(err, ErrTooManyTokens) {
-		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
-		return
-	}
-	if err != nil {
+	}); err != nil {
+		if errors.Is(err, ErrTooManyTokens) {
+			http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		// Bind the friend's poll secret to the pair token that minted it (the
+		// principal). A register for the same host_id under a different token can't
+		// retrieve this secret, and the owner path (principal = site key) can never
+		// collide with it. Issue NEVER mints on a principal mismatch — it returns
+		// the error untouched — so the only state to undo on the 403 path is the
+		// token we just registered.
+		s, err := r.Polls.Issue(reg.HostID, pairPrincipal)
+		if err != nil {
+			// The host_id's secret is held by a DIFFERENT principal (owner or other
+			// friend). Roll the token back so the 403 leaves nothing for the
+			// attacker to approve, then refuse.
+			r.Tokens.Delete(reg.Token)
+			http.Error(w, "host_id in use by another principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResponse{
@@ -710,68 +837,194 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	// Return the poll token this host must present on /tunnel/<host>/next. The
-	// ES256-verified registration above proves it owns host_id, so only it
-	// learns the token. Re-registration returns the same token (refreshes after
-	// a relay restart re-mints).
+	// Return the poll token this host must present on /tunnel/<host>/next and the
+	// /signal/* rendezvous. The ES256-verified registration above proves it owns
+	// host_id, so only it learns the token. The secret is bound to the verified
+	// site PUBLIC KEY as its principal, so the unauthenticated friend path (which
+	// can only present a pair-token principal) can never retrieve it even if it
+	// learned the owner host_id. Re-registration with the same key returns the
+	// same token (refreshes after a relay restart re-mints).
 	secret := ""
 	if r.Polls != nil {
-		secret = r.Polls.Issue(reg.HostID)
+		s, err := r.Polls.Issue(reg.HostID, "site:"+reg.PublicKey)
+		if err != nil {
+			// The host_id's secret is bound to a different principal — refuse
+			// rather than disclose it. (Should not happen for a key-continuous
+			// site; defends against a host_id reused across principals.)
+			http.Error(w, "poll secret bound to a different principal", http.StatusForbidden)
+			return
+		}
+		secret = s
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})
 }
 
-// meRoot handles GET /me/<site_id> — the landing page when the operator
-// types the bare URL. Forwards to the host's /owner-access/ landing
-// page so the host can decide whether to show "log in with passkey" or
-// "no devices enrolled yet — go enroll one on LAN first".
-func (r *Relay) meRoot(w http.ResponseWriter, req *http.Request) {
-	r.meForward(w, req, "/owner-access/")
+// ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
+
+// signalNonceHeader carries the rendezvous nonce the Pi echoes back to the
+// browser on a drained offer (FIX-4a). The browser supplied it as ?n=<nonce>;
+// the Pi reads it here and re-sends it on POST /signal/{host}/answer?n=<nonce>,
+// so the relay routes the answer to the right per-nonce mailbox.
+const signalNonceHeader = "X-FTW-Signal-Nonce"
+
+// signalNonceRe bounds the opaque rendezvous nonce to a safe hex charset and
+// length. It is a pure routing key (the relay never parses the SDP), so a tight
+// charset both prevents abuse and keeps it usable as a map key + header value.
+var signalNonceRe = regexp.MustCompile(`^[0-9a-fA-F]{8,64}$`)
+
+func validSignalNonce(s string) bool {
+	return signalNonceRe.MatchString(s)
 }
 
-// meTunnel handles /me/<site_id>/{rest...} — generic forwarder.
-// Everything past /me/<site_id>/ is passed verbatim through the tunnel
-// to the host. The host's auth middleware (cookie check on the
-// /owner-access/ family + /api/owner-access/*) decides what's allowed.
-func (r *Relay) meTunnel(w http.ResponseWriter, req *http.Request) {
-	rest := req.PathValue("rest")
-	r.meForward(w, req, "/"+rest)
-}
-
-func (r *Relay) meForward(w http.ResponseWriter, req *http.Request, innerPath string) {
+// signalBrowserOffer parks a browser's SDP offer for {site_id} and wakes any Pi
+// offer-poller. Unauthenticated (the channel that results is itself
+// authenticated end to end by the signed-fingerprint handshake + owner login
+// over the DataChannel), but rate-limited and body-capped so it can't be abused
+// to spin the mailbox.
+func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	siteID := req.PathValue("site_id")
 	if siteID == "" {
 		http.Error(w, "missing site_id", http.StatusBadRequest)
 		return
 	}
-	if r.Owners == nil {
-		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
+	// FIX-4a: the opaque rendezvous nonce keys the per-(site,nonce) mailbox so an
+	// attacker's offers land in their own slot and can't displace the legit
+	// browser's answer. Required + bounded.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
 		return
 	}
-	hostID, err := r.Owners.Lookup(siteID)
+	// FIX-C: throttle PER SOURCE IP, not per site. The relay (unlike the Pi) sees
+	// the browser's source IP, so a single abusive IP is bounded here while a legit
+	// browser on a DIFFERENT IP is never pushed to 429 — closing the per-site
+	// lockout lever. The per-(site) ceiling in ParkOffer remains as a generous
+	// backstop. offerClientIP uses the un-spoofable RemoteAddr unless -trust-cf-ip
+	// is set AND the peer is a validated Cloudflare edge IP (see cloudflare.go),
+	// so the per-IP throttle stays effective behind Cloudflare.
+	if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
+		http.Error(w, "too many offers from your address", http.StatusTooManyRequests)
+		return
+	}
+	if r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	body, err := readBodyLimited(req.Body, maxSignalOfferBytes)
 	if err != nil {
-		http.Error(w, "site not registered (host may be offline)", http.StatusServiceUnavailable)
+		http.Error(w, "offer too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	// Preserve the query string so login redirects, ceremony tokens etc.
-	// land at the host intact.
-	if q := req.URL.RawQuery; q != "" {
-		innerPath = innerPath + "?" + q
+	if len(body) == 0 {
+		http.Error(w, "empty offer", http.StatusBadRequest)
+		return
 	}
-	body, err := readBody(req.Body)
+	if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
+		if err == errSignalRateLimited {
+			http.Error(w, "too many offers", http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "signaling at capacity", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// signalBrowserAnswer long-polls for the Pi's parked answer for {site_id}. The
+// browser calls this after POSTing its offer; it returns the opaque answer blob
+// (SDP + fp_sig + ts) verbatim, or 204 to re-poll.
+func (r *Relay) signalBrowserAnswer(w http.ResponseWriter, req *http.Request) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" {
+		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
+	}
+	if r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// TakeAnswer never allocates a mailbox for an unknown site/nonce, so a flood
+	// of GET /signal/<random>/answer?n=<random> can't grow relay memory (FIX-3).
+	data, ok := r.Signals.TakeAnswer(siteID, nonce, signalPollTimeout)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+// signalHostOffer is the Pi's long-poll for a parked offer. AUTHENTICATED with
+// the per-host poll secret (the same token minted at /me/register and used on
+// /tunnel/{host}/next), then host_id is mapped back to its site_id via the
+// ES256-pinned OwnerRegistry so a Pi only ever drains offers for its own site.
+func (r *Relay) signalHostOffer(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
+	if r.Owners == nil || r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	siteID, err := r.Owners.SiteForHost(hostID)
 	if err != nil {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
-	resp, err := r.enqueue(req, hostID, innerPath, body)
+	data, nonce, ok := r.Signals.TakeOffer(siteID, signalPollTimeout)
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	// Echo the rendezvous nonce so the Pi can POST its answer back under the same
+	// per-nonce mailbox the browser is polling (FIX-4a).
+	w.Header().Set(signalNonceHeader, nonce)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+// signalHostAnswer parks the Pi's answer blob (SDP + fp_sig + ts) for delivery
+// to the browser, waking the browser's answer-poller. AUTHENTICATED with the
+// per-host poll secret, then host_id->site_id via the registry.
+func (r *Relay) signalHostAnswer(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
+	if r.Owners == nil || r.Signals == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	siteID, err := r.Owners.SiteForHost(hostID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, "host not registered", http.StatusServiceUnavailable)
 		return
 	}
-	for k, vv := range resp.Header {
-		w.Header()[k] = vv
+	// The Pi echoes the nonce the offer was drained under (FIX-4a) so the answer
+	// lands in the same per-nonce mailbox the browser is polling.
+	nonce := req.URL.Query().Get("n")
+	if !validSignalNonce(nonce) {
+		http.Error(w, "missing or invalid rendezvous nonce", http.StatusBadRequest)
+		return
 	}
-	w.WriteHeader(resp.Status)
-	_, _ = w.Write(resp.Body)
+	body, err := readBodyLimited(req.Body, maxSignalAnswerBytes)
+	if err != nil {
+		http.Error(w, "answer too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	if len(body) == 0 {
+		http.Error(w, "empty answer", http.StatusBadRequest)
+		return
+	}
+	r.Signals.ParkAnswer(siteID, nonce, body)
+	w.WriteHeader(http.StatusNoContent)
 }

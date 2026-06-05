@@ -31,6 +31,7 @@ func main() {
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
+	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
 	flag.Parse()
 
 	if *version {
@@ -60,6 +61,8 @@ func main() {
 		Tokens:      NewTokenRegistry(),
 		Owners:      owners,
 		Polls:       NewPollSecrets(),
+		Signals:     NewSignalMailbox(),
+		TrustCFIP:   *trustCFIP,
 		PollTimeout: *pollTimeout,
 		HomeHost:    *homeHost,
 		HomeSite:    *homeSite,
@@ -102,6 +105,19 @@ func main() {
 				}
 				if n := r.Polls.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: poll-token GC", "removed", n)
+				}
+				// Evict idle signaling mailboxes so a flood of offers for random
+				// site_ids can't grow relay memory; a live pair re-signals on demand.
+				if n := r.Signals.GC(30 * time.Minute); n > 0 {
+					slog.Info("ftw-relay: signal GC", "removed", n)
+				}
+				// Evict idle per-source-IP offer buckets (FIX-C) so a churn of source
+				// IPs can't grow the limiter map without bound; an idle IP has
+				// refilled to full anyway, so forgetting it only resets it fresh.
+				if r.OfferLimit != nil {
+					if n := r.OfferLimit.GC(offerBucketIdleTTL); n > 0 {
+						slog.Info("ftw-relay: offer-limit GC", "removed", n)
+					}
 				}
 			}
 		}

@@ -7,6 +7,7 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -53,7 +54,17 @@ func openRaw(path string) (*sql.DB, error) {
 // quickCheck runs `PRAGMA quick_check` and reports whether the database is
 // structurally sound. A healthy DB returns exactly one row, "ok".
 func quickCheck(db *sql.DB) (bool, error) {
-	rows, err := db.Query("PRAGMA quick_check")
+	return quickCheckContext(context.Background(), db)
+}
+
+// quickCheckContext is quickCheck with a cancellable context. The background
+// integrity scan (Store.verifyOnce) uses it so a shutdown can interrupt the
+// (multi-minute, on a large DB) scan instead of letting db.Close() block on it —
+// which would otherwise stop the clean-shutdown marker from being written and
+// make the NEXT boot slow. modernc.org/sqlite honours ctx cancellation via
+// sqlite3_interrupt, so the in-flight quick_check aborts promptly.
+func quickCheckContext(ctx context.Context, db *sql.DB) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA quick_check")
 	if err != nil {
 		return false, err
 	}
@@ -76,6 +87,43 @@ func quickCheck(db *sql.DB) (bool, error) {
 	return n == 1 && first == "ok", nil
 }
 
+// cleanMarkerSuffix names the "verified-good" sidecar file kept next to state.db.
+// Its presence means state.db opened + migrated cleanly (or was healed to a good
+// state) at some past boot and no background scan has found corruption since, so
+// the boot integrity check can be SKIPPED — which matters because `PRAGMA
+// quick_check` scans the whole file and takes MINUTES on a multi-GB DB, making
+// every restart look hung.
+//
+// The marker is PERSISTENT, not a clean-shutdown flag: it is armed by Open (after
+// a successful open) and survives both clean shutdowns AND crashes — a crash does
+// not corrupt a WAL DB, so it must not force a slow re-scan. The only thing that
+// removes it is Store.VerifyInBackground finding real corruption, which forces the
+// next boot to run the full check + heal. This deliberately decouples fast restarts
+// from how the process exited (a clean Close is unreliable to depend on).
+const cleanMarkerSuffix = ".clean"
+
+// cleanMarkerPath returns the verified-good marker sidecar for a DB path.
+func cleanMarkerPath(dbPath string) string { return dbPath + cleanMarkerSuffix }
+
+// markerPresent reports whether the verified-good marker exists for dbPath. It
+// does NOT remove it — the marker persists until corruption is found.
+func markerPresent(dbPath string) bool {
+	_, err := os.Stat(cleanMarkerPath(dbPath))
+	return err == nil
+}
+
+// writeCleanMarker arms the verified-good marker for dbPath so the next boot can
+// skip the integrity check. Best-effort: on failure the next boot simply runs the
+// (correct, slower) check.
+func writeCleanMarker(dbPath string) {
+	f, err := os.Create(cleanMarkerPath(dbPath))
+	if err != nil {
+		slog.Warn("state: could not write verified-good marker", "path", dbPath, "err", err)
+		return
+	}
+	_ = f.Close()
+}
+
 // openChecked opens path, verifies integrity, and heals on corruption. Returns
 // the live DB, an optional HealEvent (nil = clean), and an error only when even
 // the fresh fallback fails.
@@ -83,9 +131,23 @@ func quickCheck(db *sql.DB) (bool, error) {
 //   - tierCache: corrupt → quarantine + rebuild empty (data re-fetchable).
 //   - tierState: corrupt → restore from "<path>.snapshot" if valid, else
 //     quarantine + fresh.
+//
+// A present verified-good marker (see cleanMarkerSuffix) short-circuits the
+// quick_check so a restart of a large DB is fast. Open re-arms the marker after a
+// successful open; only a background verify finding corruption removes it.
 func openChecked(path, tier string, nowMs int64) (*sql.DB, *HealEvent, error) {
 	db, err := openRaw(path)
 	if err == nil {
+		// The skip fast path is scoped to the precious state DB: only it grows large
+		// enough for quick_check to be slow, and only it has a snapshot to heal from.
+		// cache.db is tiny (checked in microseconds) and disposable (rebuilt empty on
+		// corruption), so it is ALWAYS checked — no marker, no skip — and its
+		// rebuild-on-corruption safety net is never bypassed.
+		if tier == tierState && markerPresent(path) {
+			slog.Info("state: verified-good marker present, skipping boot integrity check",
+				"path", path, "tier", tier)
+			return db, nil, nil // verified good at a past boot; trust + skip
+		}
 		ok, qerr := quickCheck(db)
 		if qerr == nil && ok {
 			return db, nil, nil // clean
