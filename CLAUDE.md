@@ -1,7 +1,8 @@
 # forty-two-watts — project orientation
 
 Unified Home Energy Management System, written in Go with Lua drivers.
-See `MIGRATION_PLAN.md` for the historical Rust→Go migration context.
+See `docs/archive/rust-go-wasm-migration-plan.md` only if you need the
+historical Rust→Go migration context.
 
 ## Mental model
 
@@ -42,7 +43,7 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/battery` | ARX(1) model + RLS + cascade + saturation curves |
 | `go/internal/selftune` | Step-response state machine + fitter |
 | `go/internal/drivers` | Lua host (`lua.go`) + Registry + capability interfaces |
-| `go/internal/api` | HTTP endpoints (Go 1.22+ method mux) |
+| `go/internal/api` | HTTP endpoints (Go 1.26+ method mux) |
 | `go/internal/configreload` | fsnotify watcher + reload dispatch |
 | `go/internal/ha` | Home Assistant MQTT autodiscovery + bridge |
 | `go/internal/mqtt` | paho client wrapper implementing drivers.MQTTCap |
@@ -282,8 +283,6 @@ light theme can flip it cleanly.
 - `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
 - `docs/api.md` — HTTP endpoint reference (NEW)
 - `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
-- `docs/deploy-platforms.md` — running on a Mac mini or generic Linux server (Ubuntu/NUC/VM) via Docker (NEW)
-- `docs/rpi-image.md` — turnkey Raspberry Pi SD-card image
 - `docs/self-update.md` — in-app update flow + ftw-updater sidecar architecture
 - `docs/nova-integration.md` — opt-in federation to Sourceful Nova Core (MQTT + ES256 JWT, clean schema + legacy adapter)
 - `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
@@ -294,4 +293,4 @@ light theme can flip it cleanly.
 - `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
 - `docs/ha-integration.md` — Home Assistant MQTT bridge
 - `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
-- `MIGRATION_PLAN.md` — historical: Rust→Go migration context (migration is complete)
+- `docs/archive/rust-go-wasm-migration-plan.md` — historical Rust→Go migration context

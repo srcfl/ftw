@@ -1,3 +1,12 @@
+# Archived early TODO
+
+Archived on 2026-06-05. This file is kept only as historical context from
+the early Rust/redb era. It is not the active roadmap and should not be used
+for release planning. Use GitHub issues, release notes, and the current docs
+instead.
+
+Original heading:
+
 # TODO — forty-two-watts 🐬
 
 ## Short term
