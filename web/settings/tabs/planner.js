@@ -44,6 +44,10 @@
         field("Discharge efficiency", "planner.discharge_efficiency", "number", 0.95,
           "Round-trip discharge efficiency (0-1). 0.95 = 5% loss discharging.") +
         '</div></div>' +
+        '<div class="field-row"><div>' +
+        field("Min arbitrage spread (öre/kWh)", "planner.min_arbitrage_spread_ore_kwh", "number", 0,
+          "The battery won't cycle for grid arbitrage unless the price gain beats this many öre/kWh, on top of round-trip losses. 0 = off. Higher = fewer, deeper cycles. Self-consumption is never affected. Tune empirically.") +
+        '</div></div>' +
         '</fieldset>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
         'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +

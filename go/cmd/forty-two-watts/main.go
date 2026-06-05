@@ -752,6 +752,9 @@ func main() {
 		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
 		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
 		mpcSvc.PVForecastSafetyK = cfg.Planner.PVSafetyK()
+		if cfg.Planner != nil {
+			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
+		}
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()

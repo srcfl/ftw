@@ -3432,12 +3432,42 @@
     ctx.fillText("now", pad.left + plotW, cssH - 4);
   }
 
-  var lastLiveHistFetch = 0;
-  function fetchLiveHistory() {
-    lastLiveHistFetch = Date.now();
-    // Owner read (carries the session cookie) — strict (FIX-B).
-    return ownerFetch("/api/history?range=24h&points=288") // 5-min cadence
+  // Shared, deduped /api/history fetch. Several triggers ask for the SAME
+  // range+points payload — boot, the 1-min poll, and (undebounced) every
+  // window resize — so on first load a layout-driven resize storm would
+  // otherwise fan out into many identical requests. Coalesce in-flight calls
+  // and reuse a fresh result for a short TTL; pass force=true to bypass the
+  // cache when a genuinely fresh sample is wanted (the periodic poll).
+  // Mirrors ftw-history-card.js's dailyFetchCache. Routed through ownerFetch
+  // (strict / FIX-B): /api/history is an owner read carrying the session cookie,
+  // so it must never traverse the relay in cleartext on the public home route
+  // (master used a plain fetch here; the P2P-only route keeps it strict).
+  var HISTORY_CACHE_TTL_MS = 15000;
+  var historyFetchCache = Object.create(null); // "range|points" -> { at, data?, promise? }
+  function fetchHistory(range, points, force) {
+    var key = range + "|" + points;
+    var now = Date.now();
+    var c = historyFetchCache[key];
+    if (!force && c && (now - c.at) < HISTORY_CACHE_TTL_MS) {
+      if (c.data) return Promise.resolve(c.data);
+      if (c.promise) return c.promise;
+    }
+    var promise = ownerFetch("/api/history?range=" + range + "&points=" + points)
       .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { historyFetchCache[key] = { at: Date.now(), data: data }; return data; })
+      .catch(function (err) {
+        var cur = historyFetchCache[key];
+        if (cur && cur.promise === promise) delete historyFetchCache[key];
+        throw err;
+      });
+    historyFetchCache[key] = { at: now, promise: promise };
+    return promise;
+  }
+
+  var lastLiveHistFetch = 0;
+  function fetchLiveHistory(force) {
+    lastLiveHistFetch = Date.now();
+    return fetchHistory("24h", 288, force) // 5-min cadence
       .then(function (d) {
         if (!d || !d.items) return;
         renderLiveHistory(d.items);
@@ -3503,11 +3533,12 @@
   setupP2PIndicator();
   setupSignOut();
   setInterval(fetchStatus, POLL_INTERVAL);
-  setInterval(fetchLiveHistory, 60_000); // 1-min refresh
+  setInterval(function () { fetchLiveHistory(true); }, 60_000); // 1-min refresh — always fresh
   window.addEventListener("resize", function () {
-    // Last fetched points are not cached separately; trigger a fetch.
-    // 24h history is small (~288 points × ~50 bytes), zero-cost on
-    // every resize.
+    // Redraw the 24h chart at the new width. Reuses the cached payload
+    // (fetchHistory's short TTL) so a first-load resize storm doesn't
+    // fan out into identical /api/history requests — only the data is
+    // shared; renderLiveHistory still re-measures the canvas each call.
     fetchLiveHistory();
   });
   requestAnimationFrame(animationFrame);

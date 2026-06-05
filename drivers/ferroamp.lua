@@ -725,6 +725,17 @@ function driver_poll()
             if wprod_n > 0 then battery.discharge_wh = mj_to_wh(wprod_sum) end
             if wcons_n > 0 then battery.charge_wh    = mj_to_wh(wcons_sum) end
 
+            -- Per-direction capability for the dispatcher's reallocation
+            -- (docs/.../capability-aware-battery-reallocation). Mirrors the
+            -- eso_*_capable counts that already drive our own EHub dispatch
+            -- scaling: when every ESO is floored/ceilinged the pack can't
+            -- move that way this cycle, so the dispatcher should hand its
+            -- share to a capable sibling instead of commanding a setpoint
+            -- driver_command would only idle. Absent on legacy fields →
+            -- the dispatcher assumes capable, so this is purely additive.
+            battery.discharge_capable = n_discharge_capable > 0
+            battery.charge_capable    = n_charge_capable > 0
+
             host.emit("battery", battery)
             if battery.v then host.emit_metric("battery_dc_v", battery.v) end
             if battery.a then host.emit_metric("battery_dc_a", battery.a) end

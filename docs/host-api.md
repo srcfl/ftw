@@ -625,6 +625,8 @@ Emit telemetry for a DER (Distributed Energy Resource) type. This writes the dat
 | `discharge_wh` | Wh       | no       | Lifetime energy discharged     |
 | `upper_limit_w`| W        | no       | Max charge power               |
 | `lower_limit_w`| W        | no       | Max discharge power            |
+| `discharge_capable` | bool | no  | False = pack can't discharge now (e.g. floored). Dispatcher reallocates its share to a capable sibling. Absent → capable. |
+| `charge_capable`    | bool | no  | False = pack can't charge now (e.g. at ceiling). Absent → capable. |
 
 **Example:**
 ```lua
