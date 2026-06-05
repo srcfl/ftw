@@ -95,67 +95,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	r.mu.Unlock()
 
-	if cfg.Lua == "" {
-		return fmt.Errorf("driver %q: must specify `lua` path", cfg.Name)
-	}
-
-	env := NewHostEnv(cfg.Name, r.tel)
-	env.BatteryCapacityWh = cfg.BatteryCapacityWh
-	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
-		cap, err := r.MQTTFactory(cfg.Name, mq)
-		if err != nil {
-			return fmt.Errorf("mqtt capability: %w", err)
-		}
-		env.WithMQTT(cap)
-		env.SetEndpoint(fmt.Sprintf("mqtt://%s:%d", mq.Host, mq.Port))
-		// Best-effort MAC resolution. Cross-VLAN devices return ""; that's
-		// fine — device_id falls back to the endpoint.
-		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mq.Host); ok { env.SetMAC(mac) }
-		}
-	}
-	if mb := cfg.EffectiveModbus(); mb != nil && r.ModbusFactory != nil {
-		cap, err := r.ModbusFactory(cfg.Name, mb)
-		if err != nil {
-			return fmt.Errorf("modbus capability: %w", err)
-		}
-		env.WithModbus(cap)
-		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", mb.Host, mb.Port))
-		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mb.Host); ok { env.SetMAC(mac) }
-		}
-	}
-	if cfg.Capabilities.HTTP != nil {
-		env.WithHTTP()
-		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
-		if len(hosts) > 0 {
-			env.WithHTTPAllowedHosts(hosts)
-		}
-	}
-	if cfg.Capabilities.WebSocket != nil {
-		env.WithWS(NewGorillaWS(cfg.Name))
-		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
-			env.WithWSAllowedHosts(hosts)
-		}
-	}
-	if cfg.Capabilities.TCP != nil {
-		// Start with the explicit allowlist from YAML, then layer the
-		// driver's own (host, port) on top as a TIGHT host:port entry —
-		// not a bare host the way HTTP/WS do it. Raw TCP can hit any
-		// service listening on the device (SSH, web UI, ...), so the
-		// safe default is "exactly the port the driver was wired to";
-		// the operator can still loosen this by listing bare hosts in
-		// capabilities.tcp.allowed_hosts when they want any-port access.
-		hosts := tcpAllowedHostsFor(cfg)
-		env.WithTCP(NewNetTCP(cfg.Name, hosts))
-		if len(hosts) > 0 {
-			env.WithTCPAllowedHosts(hosts)
-		}
-	}
-
-	luaDrv, err := NewLuaDriver(cfg.Lua, env)
+	env, luaDrv, err := r.buildDriver(cfg)
 	if err != nil {
-		return fmt.Errorf("load lua: %w", err)
+		return err
 	}
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
 
@@ -193,6 +135,119 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	go r.runLoop(rd)
 	slog.Info("driver added", "name", cfg.Name, "path", cfg.Lua)
 	return nil
+}
+
+// buildDriver constructs a HostEnv with the driver's transports bound and a
+// loaded LuaDriver, but does NOT run driver_init or start a poll loop. Shared
+// by Add (which then inits + loops) and Fingerprint (which runs a one-shot
+// read-only probe and tears everything down).
+func (r *Registry) buildDriver(cfg config.Driver) (*HostEnv, *LuaDriver, error) {
+	if cfg.Lua == "" {
+		return nil, nil, fmt.Errorf("driver %q: must specify `lua` path", cfg.Name)
+	}
+
+	env := NewHostEnv(cfg.Name, r.tel)
+	env.BatteryCapacityWh = cfg.BatteryCapacityWh
+	if mq := cfg.EffectiveMQTT(); mq != nil && r.MQTTFactory != nil {
+		cap, err := r.MQTTFactory(cfg.Name, mq)
+		if err != nil {
+			return nil, nil, fmt.Errorf("mqtt capability: %w", err)
+		}
+		env.WithMQTT(cap)
+		env.SetEndpoint(fmt.Sprintf("mqtt://%s:%d", mq.Host, mq.Port))
+		// Best-effort MAC resolution. Cross-VLAN devices return ""; that's
+		// fine — device_id falls back to the endpoint.
+		if r.ARPLookup != nil {
+			if mac, ok := r.ARPLookup(mq.Host); ok { env.SetMAC(mac) }
+		}
+	}
+	if mb := cfg.EffectiveModbus(); mb != nil && r.ModbusFactory != nil {
+		cap, err := r.ModbusFactory(cfg.Name, mb)
+		if err != nil {
+			return nil, nil, fmt.Errorf("modbus capability: %w", err)
+		}
+		env.WithModbus(cap)
+		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", mb.Host, mb.Port))
+		if r.ARPLookup != nil {
+			if mac, ok := r.ARPLookup(mb.Host); ok { env.SetMAC(mac) }
+		}
+	}
+	if cfg.Capabilities.HTTP != nil {
+		env.WithHTTP()
+		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
+		if len(hosts) > 0 {
+			env.WithHTTPAllowedHosts(hosts)
+		}
+	}
+	if cfg.Capabilities.WebSocket != nil {
+		env.WithWS(NewGorillaWS(cfg.Name))
+		if hosts := cfg.Capabilities.WebSocket.AllowedHosts; len(hosts) > 0 {
+			env.WithWSAllowedHosts(hosts)
+		}
+	}
+	if cfg.Capabilities.TCP != nil {
+		// Start with the explicit allowlist from YAML, then layer the
+		// driver's own (host, port) on top as a TIGHT host:port entry —
+		// not a bare host the way HTTP/WS do it. Raw TCP can hit any
+		// service listening on the device (SSH, web UI, ...), so the
+		// safe default is "exactly the port the driver was wired to";
+		// the operator can still loosen this by listing bare hosts in
+		// capabilities.tcp.allowed_hosts when they want any-port access.
+		hosts := tcpAllowedHostsFor(cfg)
+		env.WithTCP(NewNetTCP(cfg.Name, hosts))
+		if len(hosts) > 0 {
+			env.WithTCPAllowedHosts(hosts)
+		}
+	}
+
+	luaDrv, err := NewLuaDriver(cfg.Lua, env)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load lua: %w", err)
+	}
+	return env, luaDrv, nil
+}
+
+// closeTransports tears down a HostEnv's capability connections. Mirrors the
+// cleanup in runLoop's stop branch; used by the fingerprint probe path which
+// never starts a poll loop.
+func closeTransports(env *HostEnv) {
+	if env == nil {
+		return
+	}
+	if env.MQTT != nil {
+		_ = env.MQTT.Close()
+	}
+	if env.Modbus != nil {
+		_ = env.Modbus.Close()
+	}
+	if env.WS != nil {
+		_ = env.WS.Close()
+	}
+	if env.TCP != nil {
+		_ = env.TCP.Close()
+	}
+}
+
+// Fingerprint builds a short-lived, READ-ONLY driver instance bound to cfg's
+// transport, runs driver_fingerprint() once, and tears it down. Unlike Add it
+// never runs driver_init or the poll loop, so a driver's connect-time
+// publishes (e.g. Ferroamp's version request) or heartbeat writes (e.g.
+// Pixii's) can't fire against the unknown host being probed during a scan.
+//
+// A driver that doesn't define driver_fingerprint returns a non-matching
+// result with no error — the orchestrator treats that as "can't identify".
+func (r *Registry) Fingerprint(ctx context.Context, cfg config.Driver) (FingerprintResult, error) {
+	env, luaDrv, err := r.buildDriver(cfg)
+	if err != nil {
+		return FingerprintResult{}, err
+	}
+	defer func() {
+		// Close (not Cleanup): skip driver_cleanup so a driver's failsafe
+		// writes never hit the unidentified host we just probed.
+		luaDrv.Close()
+		closeTransports(env)
+	}()
+	return luaDrv.Fingerprint(ctx)
 }
 
 // runLoop polls the driver at its requested cadence and handles commands.

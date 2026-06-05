@@ -20,6 +20,7 @@ import (
 // FoundDevice is one open port discovered on the local network.
 type FoundDevice struct {
 	IP        string `json:"ip"`
+	Hostname  string `json:"hostname,omitempty"` // reverse-DNS name, best-effort
 	Port      int    `json:"port"`
 	Protocol  string `json:"protocol"` // "modbus", "mqtt", "http"
 	LatencyMs int    `json:"latency_ms"`
@@ -28,6 +29,8 @@ type FoundDevice struct {
 // wellKnownPorts maps TCP ports to protocol names.
 var wellKnownPorts = map[int]string{
 	502:  "modbus",
+	503:  "modbus", // proxied Modbus units (e.g. a Pixii behind a TCP proxy) often expose here
+	1502: "modbus", // solaredge-proxy default — multiplexes a SolarEdge's single Modbus/TCP socket
 	1883: "mqtt",
 	80:   "http",
 }
@@ -94,8 +97,58 @@ done:
 		return found[i].Port < found[j].Port
 	})
 
+	resolveHostnames(ctx, found)
+
 	slog.Info("network scan complete", "found", len(found))
 	return found, nil
+}
+
+// resolveHostnames fills in the Hostname of each device via reverse DNS,
+// best-effort. Each unique IP is looked up once, concurrently, with a short
+// per-lookup budget — a name is a convenience label for the scan UI, never a
+// reason to slow down or fail the scan. IPs that don't resolve keep an empty
+// Hostname.
+func resolveHostnames(ctx context.Context, devices []FoundDevice) {
+	var resolver net.Resolver
+	names := make(map[string]string)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	seen := make(map[string]bool)
+
+	for _, d := range devices {
+		if seen[d.IP] {
+			continue
+		}
+		seen[d.IP] = true
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			lctx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+			defer cancel()
+			name := ""
+			if hosts, err := resolver.LookupAddr(lctx, ip); err == nil && len(hosts) > 0 {
+				name = strings.TrimSuffix(hosts[0], ".")
+			}
+			// Most home-energy gear has no unicast reverse-DNS record but does
+			// answer mDNS, so fall back to a reverse mDNS PTR query.
+			if name == "" {
+				name = reverseMDNS(lctx, ip)
+			}
+			if name == "" {
+				return
+			}
+			mu.Lock()
+			names[ip] = name
+			mu.Unlock()
+		}(d.IP)
+	}
+	wg.Wait()
+
+	for i := range devices {
+		if n, ok := names[devices[i].IP]; ok {
+			devices[i].Hostname = n
+		}
+	}
 }
 
 // probe tries to TCP-connect to ip:port with a 500 ms timeout.
@@ -171,7 +224,50 @@ func localSubnets() ([]net.IPNet, error) {
 			})
 		}
 	}
+
+	// Also pull in any other local networks the host knows how to reach via
+	// the routing table — e.g. a second LAN reachable through a static route
+	// that isn't bound to one of our own interfaces. Bounded to RFC1918 /24../28
+	// routes so we never try to sweep a routed /8 or a public range.
+	for _, rn := range routedSubnets() {
+		ip4 := rn.IP.To4()
+		if ip4 == nil || !isPrivateV4(ip4) {
+			continue
+		}
+		if ones, _ := rn.Mask.Size(); ones < 24 || ones > 28 {
+			continue
+		}
+		prefix := fmt.Sprintf("%d.%d.%d", ip4[0], ip4[1], ip4[2])
+		if seen[prefix] {
+			continue
+		}
+		seen[prefix] = true
+		subnets = append(subnets, net.IPNet{
+			IP:   net.IPv4(ip4[0], ip4[1], ip4[2], 0),
+			Mask: net.CIDRMask(24, 32),
+		})
+	}
+
 	return subnets, nil
+}
+
+// isPrivateV4 reports whether ip is in an RFC1918 range (10/8, 172.16/12,
+// 192.168/16). Scans are restricted to these so routing-table discovery can't
+// point the scanner at a public or VPN-routed range.
+func isPrivateV4(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	switch {
+	case ip4[0] == 10:
+		return true
+	case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+		return true
+	case ip4[0] == 192 && ip4[1] == 168:
+		return true
+	}
+	return false
 }
 
 // subnetHosts returns all 254 usable host IPs in a /24 subnet.

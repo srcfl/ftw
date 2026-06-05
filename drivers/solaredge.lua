@@ -206,6 +206,15 @@ function driver_init(config)
     end
 end
 
+-- NOTE: no driver_fingerprint here. This driver reads telemetry over INPUT
+-- registers (FC 0x04), but probing input to identify a device is unsafe: a
+-- SolarEdge reached through solaredge-proxy answers SunSpec on HOLDING only,
+-- and a timed-out input read wedges that proxy's single upstream socket for
+-- seconds (verified on an SE8K). The holding-based solaredge_legacy.lua owns
+-- SolarEdge fingerprinting for the scan flow — its holding map works on direct
+-- units too. Operators who specifically need this input-register variant can
+-- still pick it by hand in the wizard.
+
 function driver_poll()
     -- ---- Serial number (SunSpec common block, one-shot) ----
     if not sn_read then

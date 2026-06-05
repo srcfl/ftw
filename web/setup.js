@@ -12,6 +12,7 @@
   var selectedDevice = null;     // { ip, port, protocol } from scan or manual entry
   var selectedCatalog = null;    // CatalogEntry from /api/drivers/catalog
   var driverCatalog = [];        // full catalog cache
+  var lastScanResults = [];      // last rendered scan hits, for re-render after Add
 
   // --- Step navigation ---
 
@@ -69,23 +70,28 @@
           statusEl.innerHTML = 'No devices found. Try entering the IP manually.';
           return;
         }
-        statusEl.style.display = 'none';
-        var tbody = document.getElementById('scan-tbody');
-        tbody.innerHTML = '';
-        devices.forEach(function (d) {
-          var tr = document.createElement('tr');
-          var proto = d.protocol || 'modbus';
-          tr.innerHTML =
-            '<td>' + esc(d.ip) + '</td>' +
-            '<td>' + esc(String(d.port)) + '</td>' +
-            '<td>' + esc(proto) + '</td>' +
-            '<td><button class="btn-use">Use this device</button></td>';
-          tr.querySelector('.btn-use').addEventListener('click', function () {
-            useScanDevice(d.ip, d.port, proto);
-          });
-          tbody.appendChild(tr);
-        });
+        // Show the raw hits straight away; the device column says "identifying"
+        // until each driver has had a chance to fingerprint its host.
+        renderScanResults(devices, true);
         resultsEl.style.display = 'block';
+        statusEl.innerHTML = '<span class="spinner"></span> Identifying devices...';
+
+        return fetch('/api/scan/identify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ devices: devices }),
+        })
+          .then(function (r) { return r.json(); })
+          .then(function (idData) {
+            var ident = (idData && idData.devices) ? idData.devices : devices;
+            statusEl.style.display = 'none';
+            renderScanResults(ident, false);
+          })
+          .catch(function () {
+            // Identify failed — keep the basic list usable.
+            statusEl.style.display = 'none';
+            renderScanResults(devices, false);
+          });
       })
       .catch(function (err) {
         statusEl.innerHTML = 'Scan failed: ' + esc(err.message) +
@@ -93,13 +99,153 @@
       });
   };
 
+  // Render the scan table. When pending is true the device column shows a
+  // placeholder (identify is still running). Identified hits are listed first;
+  // anything no driver could claim (incl. auth-gated devices) is grouped under
+  // an "Other devices" separator.
+  function renderScanResults(devices, pending) {
+    lastScanResults = devices;
+    var tbody = document.getElementById('scan-tbody');
+    tbody.innerHTML = '';
+    var identified = devices.filter(function (d) { return d.identified; });
+    var others = devices.filter(function (d) { return !d.identified; });
+
+    identified.forEach(function (d) { tbody.appendChild(scanRow(d, pending)); });
+    if (others.length > 0) {
+      var sep = document.createElement('tr');
+      sep.className = 'scan-sep';
+      sep.innerHTML = '<td colspan="5">' +
+        (identified.length > 0 ? 'Other devices' : 'Devices found') + '</td>';
+      tbody.appendChild(sep);
+      others.forEach(function (d) { tbody.appendChild(scanRow(d, pending)); });
+    }
+  }
+
+  function deviceCell(d, pending) {
+    if (pending) return '<span class="dev-pending">identifying…</span>';
+    if (d.identified && d.driver) {
+      var name = d.driver.name || d.driver.manufacturer || 'Device';
+      var model = d.model ? (' · ' + d.model) : '';
+      var caps = (d.driver.capabilities || []).join(' · ');
+      if (d.battery_capacity_wh) {
+        caps += (caps ? ' · ' : '') + (d.battery_capacity_wh / 1000).toFixed(1) + ' kWh';
+      }
+      var sn = d.serial ? (' — SN ' + d.serial) : '';
+      return '<span class="dev-name">' + esc(name) + esc(model) + esc(sn) + '</span>' +
+        (caps ? '<span class="dev-caps">' + esc(caps) + '</span>' : '');
+    }
+    return '<span class="dev-unknown">Unrecognised</span>';
+  }
+
+  function scanRow(d, pending) {
+    var tr = document.createElement('tr');
+    var proto = d.protocol || 'modbus';
+    var addr = esc(d.ip);
+    if (d.hostname) addr += '<span class="dev-host">' + esc(d.hostname) + '</span>';
+
+    var added = isDeviceAdded(d);
+    if (added) tr.className = 'scan-added';
+
+    // Identified devices get Configure (review in the wizard) + Add (one-click,
+    // using the fingerprinted driver and detected settings). Unidentified hosts
+    // can only be Configured — there's no driver to add for them yet.
+    var actions = '<button class="btn-use btn-configure">Configure</button>';
+    if (d.identified && d.driver) {
+      actions += '<button class="btn-use btn-add"' + (added ? ' disabled' : '') + '>' +
+        (added ? 'Added ✓' : 'Add') + '</button>';
+    }
+
+    tr.innerHTML =
+      '<td>' + addr + '</td>' +
+      '<td>' + esc(String(d.port)) + '</td>' +
+      '<td>' + esc(proto) + '</td>' +
+      '<td>' + deviceCell(d, pending) + '</td>' +
+      '<td class="scan-actions">' + actions + '</td>';
+
+    tr.querySelector('.btn-configure').addEventListener('click', function () {
+      useScanDevice(d.ip, d.port, proto, (d.driver && d.driver.lua_path) || null, d.battery_capacity_wh || 0);
+    });
+    var addBtn = tr.querySelector('.btn-add');
+    if (addBtn && !added) {
+      addBtn.addEventListener('click', function () { addScanDevice(d); });
+    }
+    return tr;
+  }
+
+  // deviceEndpoint returns a driver's "host:port" so we can tell whether a
+  // scanned device is already in the configured list.
+  function deviceEndpoint(driver) {
+    var c = driver.capabilities || {};
+    if (c.modbus) return c.modbus.host + ':' + c.modbus.port;
+    if (c.mqtt) return c.mqtt.host + ':' + c.mqtt.port;
+    if (c.http && c.http.allowed_hosts && c.http.allowed_hosts.length) return c.http.allowed_hosts[0];
+    return '';
+  }
+
+  function isDeviceAdded(d) {
+    var key = d.ip + ':' + d.port;
+    return configuredDrivers.some(function (drv) {
+      if (deviceEndpoint(drv) !== key) return false;
+      return !d.driver || drv.lua === d.driver.lua_path;
+    });
+  }
+
+  function uniqueDriverName(base) {
+    var name = base, n = 2;
+    while (configuredDrivers.some(function (drv) { return drv.name === name; })) {
+      name = base + '_' + n;
+      n++;
+    }
+    return name;
+  }
+
+  // addScanDevice configures a fingerprinted device in one click, straight from
+  // the scan results — no trip through the Pick-driver / Configure steps. Builds
+  // the same driver shape saveDriver produces, then re-renders so the row dims.
+  function addScanDevice(d) {
+    if (!d.identified || !d.driver || isDeviceAdded(d)) return;
+    var proto = d.protocol || 'modbus';
+    var caps = d.driver.capabilities || [];
+    var base = (d.driver.manufacturer || d.driver.id || d.driver.name || 'device')
+      .toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+
+    var driver = {
+      name: uniqueDriverName(base || 'device'),
+      lua: d.driver.lua_path,
+      is_site_meter: false,
+      capabilities: {},
+    };
+    if (proto === 'modbus') driver.capabilities.modbus = { host: d.ip, port: d.port, unit_id: 1 };
+    else if (proto === 'mqtt') driver.capabilities.mqtt = { host: d.ip, port: d.port };
+    else if (proto === 'http') driver.capabilities.http = { allowed_hosts: [d.ip] };
+
+    if (d.battery_capacity_wh) driver.battery_capacity_wh = d.battery_capacity_wh;
+    // First configured device that can meter the grid becomes the site meter.
+    if (configuredDrivers.length === 0 && caps.indexOf('meter') >= 0) driver.is_site_meter = true;
+    driver._catalog = { name: d.driver.name, manufacturer: d.driver.manufacturer, capabilities: caps, path: d.driver.lua_path };
+
+    configuredDrivers.push(driver);
+    renderScanResults(lastScanResults, false);
+  }
+
   window.showManualIP = function () {
     document.getElementById('manual-ip-form').style.display = 'block';
     document.getElementById('manual-ip-toggle').style.display = 'none';
   };
 
-  function useScanDevice(ip, port, protocol) {
-    selectedDevice = { ip: ip, port: port, protocol: protocol };
+  // Next from the scan step: if devices were Added directly, jump to the
+  // drivers summary (skipping the pick/configure steps); otherwise go to
+  // integrations, same as "Skip".
+  window.scanNext = function () {
+    goStep(configuredDrivers.length > 0 ? 6 : 7);
+  };
+
+  function useScanDevice(ip, port, protocol, luaPath, batteryWh) {
+    selectedDevice = {
+      ip: ip, port: port, protocol: protocol,
+      luaPath: luaPath || null,
+      batteryCapacityWh: batteryWh || 0,
+    };
     goStep(4);
   }
 
@@ -167,6 +313,21 @@
       opt.textContent = label;
       sel.appendChild(opt);
     });
+
+    // If the scan already fingerprinted this host to a specific driver,
+    // pre-select it so the operator just confirms.
+    if (selectedDevice && selectedDevice.luaPath) {
+      for (var i = 0; i < sel.options.length; i++) {
+        var v = sel.options[i].value;
+        if (v === '') continue;
+        var entry = driverCatalog[parseInt(v, 10)];
+        if (entry && entry.path === selectedDevice.luaPath) {
+          sel.value = v;
+          if (window.onDriverSelected) window.onDriverSelected();
+          break;
+        }
+      }
+    }
   }
 
   window.onDriverSelected = function () {
@@ -225,6 +386,12 @@
     var hasBattery = selectedCatalog.capabilities &&
       selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
     document.getElementById('drv-battery-group').style.display = hasBattery ? 'block' : 'none';
+    // Pre-fill the nameplate capacity if the scan fingerprint read it off the
+    // device (e.g. Pixii SunSpec WHRtg) — operator just confirms.
+    if (hasBattery && selectedDevice && selectedDevice.batteryCapacityWh > 0) {
+      document.getElementById('drv-battery-kwh').value =
+        (selectedDevice.batteryCapacityWh / 1000).toFixed(1);
+    }
 
     // First driver defaults to site meter
     document.getElementById('drv-site-meter').checked = configuredDrivers.length === 0;

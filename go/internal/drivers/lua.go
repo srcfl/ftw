@@ -160,10 +160,94 @@ func (d *LuaDriver) Cleanup() {
 	d.mu.Unlock()
 }
 
+// Close shuts down the Lua VM WITHOUT invoking driver_cleanup. The fingerprint
+// probe path uses this deliberately: many drivers write a failsafe in
+// driver_cleanup (SolarEdge reverts the curtail registers, Pixii zeroes its
+// setpoint, Ferroamp republishes auto mode) and those writes must never fire
+// against an unidentified host being scanned. Use Cleanup for a driver that
+// genuinely ran; use Close for a one-shot read-only probe.
+func (d *LuaDriver) Close() {
+	d.mu.Lock()
+	d.L.Close()
+	d.mu.Unlock()
+}
+
 // DefaultMode calls driver_default_mode() — typically tells the device
 // to revert to autonomous self-consumption when the EMS is offline.
 func (d *LuaDriver) DefaultMode() error {
 	return d.call("driver_default_mode")
+}
+
+// FingerprintResult is what driver_fingerprint() reports back: whether the
+// host the driver was pointed at is a device this driver can actually drive,
+// plus whatever identity it could read off it.
+//
+// Capabilities, when non-empty, is what the driver actually detected on THIS
+// device — e.g. a SolarEdge inverter reports ["pv","meter"] when a revenue
+// meter is wired in and just ["pv"] when it isn't. It overrides the catalog
+// entry's static capabilities so the scan UI can tell the operator the truth
+// about their specific install rather than the driver's maximal feature set.
+type FingerprintResult struct {
+	Matched      bool     `json:"matched"`
+	Make         string   `json:"make,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	Serial       string   `json:"serial,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	// BatteryCapacityWh is the nameplate energy capacity the driver read off
+	// the device (e.g. Pixii's SunSpec model-802 WHRtg), 0 when unknown. The
+	// setup UI pre-fills the capacity field with it so the operator doesn't
+	// have to look it up.
+	BatteryCapacityWh float64 `json:"battery_capacity_wh,omitempty"`
+}
+
+// Fingerprint calls driver_fingerprint() if the driver defines it. The driver
+// performs a READ-ONLY identity probe against the already-configured endpoint
+// (read a known register, GET a known path, await a known MQTT topic) and
+// returns a table { matched=bool, make=, model=, serial= }. A bare boolean is
+// also accepted as shorthand for { matched=<bool> }.
+//
+// "Not my device" is a normal, non-error outcome: a driver without the
+// function, or one returning nil / false, yields Matched=false and nil error.
+// An error is returned only when the Lua call itself raised.
+//
+// Contract: driver_fingerprint MUST NOT write to the device or send commands —
+// it runs against unknown hosts on the operator's LAN during a scan, so a
+// stray write could disturb a neighbour's hardware.
+func (d *LuaDriver) Fingerprint(ctx context.Context) (FingerprintResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fn := d.L.GetGlobal("driver_fingerprint")
+	if fn == lua.LNil {
+		return FingerprintResult{}, nil
+	}
+	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
+		return FingerprintResult{}, err
+	}
+	ret := d.L.Get(-1)
+	d.L.Pop(1)
+
+	var res FingerprintResult
+	switch v := ret.(type) {
+	case lua.LBool:
+		res.Matched = bool(v)
+	case *lua.LTable:
+		m, _ := luaToGo(v).(map[string]any)
+		if b, ok := m["matched"].(bool); ok {
+			res.Matched = b
+		}
+		res.Make, _ = m["make"].(string)
+		res.Model, _ = m["model"].(string)
+		res.Serial, _ = m["serial"].(string)
+		res.BatteryCapacityWh, _ = m["battery_capacity_wh"].(float64)
+		if caps, ok := m["capabilities"].([]any); ok {
+			for _, c := range caps {
+				if s, ok := c.(string); ok && s != "" {
+					res.Capabilities = append(res.Capabilities, s)
+				}
+			}
+		}
+	}
+	return res, nil
 }
 
 // call is a convenience for parameter-less void-returning lifecycle funcs.

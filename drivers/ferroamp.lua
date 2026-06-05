@@ -421,6 +421,31 @@ function driver_init(config)
     host.log("info", "Ferroamp: set auto mode on init")
 end
 
+-- driver_fingerprint: READ-ONLY identity probe for the network-scan setup
+-- flow. The EnergyHub's extapi broker publishes telemetry on extapi/data/*
+-- roughly once a second entirely on its own, so we only subscribe (passive,
+-- no command publish) and wait briefly for a frame to arrive. A message on an
+-- extapi/data topic is conclusive: this broker is a Ferroamp EnergyHub.
+function driver_fingerprint()
+    host.mqtt_subscribe("extapi/data/ehub")
+    host.mqtt_subscribe("extapi/data/eso")
+    host.mqtt_subscribe("extapi/data/sso")
+    -- Poll for up to ~5 s in 500 ms slices. ehub alone fires ~1 Hz, so this
+    -- catches a live EnergyHub well within the scan's per-driver budget.
+    for _ = 1, 10 do
+        host.sleep(500)
+        local messages = host.mqtt_messages() or {}
+        for _, msg in ipairs(messages) do
+            if type(msg.topic) == "string"
+                and string.sub(msg.topic, 1, 12) == "extapi/data/" then
+                return { matched = true, make = "Ferroamp",
+                         capabilities = { "meter", "pv", "battery" } }
+            end
+        end
+    end
+    return { matched = false }
+end
+
 function driver_poll()
     local now = host.millis()
     local messages = host.mqtt_messages()

@@ -310,6 +310,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/series/catalog", s.handleSeriesCatalog)
 	s.handle("GET  /api/devices", s.handleDevices)
 	s.handle("GET  /api/scan", s.handleScan)
+	s.handle("POST /api/scan/identify", s.handleScanIdentify)
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)

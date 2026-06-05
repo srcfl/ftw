@@ -107,6 +107,52 @@ function driver_init(config)
     end
 end
 
+-- driver_fingerprint: READ-ONLY identity probe for the network-scan setup
+-- flow. Pixii exposes the SunSpec map over Modbus HOLDING registers (FC 0x03),
+-- so we match on the "SunS" marker at 40000 plus a manufacturer string that
+-- contains "Pixii" in the SunSpec Common Model (40004, 16 regs ASCII). The
+-- manufacturer check is what separates a Pixii from a SolarEdge K-series unit,
+-- which also answers SunSpec on holding registers. No writes here — the
+-- heartbeat in driver_poll must never fire against an unidentified host.
+function driver_fingerprint()
+    local ok, sig = pcall(host.modbus_read, 40000, 2, "holding")
+    if not ok or not sig or decode_ascii(sig, 2) ~= "SunS" then
+        return { matched = false }
+    end
+    local mok, mregs = pcall(host.modbus_read, 40004, 16, "holding")
+    local mfr = (mok and mregs) and decode_ascii(mregs, 16) or ""
+    if not string.find(string.lower(mfr), "pixii", 1, true) then
+        return { matched = false }
+    end
+    local serial = ""
+    local sok, sregs = pcall(host.modbus_read, 40052, 16, "holding")
+    if sok and sregs then serial = decode_ascii(sregs, 16) end
+
+    -- Nameplate energy capacity from SunSpec battery base model 802:
+    -- WHRtg @ 40124 scaled by WHRtg_SF @ 40174. Verified against a live
+    -- PowerShaper (WHRtg=20480, SF=0 → 20480 Wh ≈ 20.5 kWh; cross-checks
+    -- AHRtg 4000 ×10^-1 = 400 Ah × ~51 V). 0xFFFF = "not implemented";
+    -- 0x8000 is the SunSpec not-implemented sentinel for a scale factor.
+    local cap_wh = nil
+    local wok, wregs = pcall(host.modbus_read, 40124, 1, "holding")
+    if wok and wregs and wregs[1] ~= 65535 then
+        local sf = 0
+        local sfok, sfreg = pcall(host.modbus_read, 40174, 1, "holding")
+        if sfok and sfreg and sfreg[1] ~= 32768 then
+            sf = host.decode_i16(sfreg[1])
+        end
+        cap_wh = wregs[1] * (10 ^ sf)
+    end
+
+    return {
+        matched             = true,
+        make                = "Pixii",
+        serial              = serial,
+        capabilities        = { "battery", "meter" },
+        battery_capacity_wh = cap_wh,
+    }
+end
+
 ----------------------------------------------------------------------------
 -- Telemetry polling
 ----------------------------------------------------------------------------

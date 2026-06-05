@@ -203,6 +203,17 @@
       gap: 12px;
     }
 
+    .wizard-actions-right { display: flex; gap: 12px; align-items: center; }
+
+    /* Step header row — title on the left, a Next action pinned top-right. */
+    .step-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .step-header h2 { margin: 0; }
+
     .btn-primary {
       padding: 11px 18px;
       border: none;
@@ -310,6 +321,37 @@
 
     .scan-table tr:hover td { background: var(--ink-raised); }
 
+    /* Reverse-DNS hostname under the IP, and identified-device cell. */
+    .dev-host {
+      display: block;
+      font-size: 0.7rem;
+      color: var(--fg-muted);
+      margin-top: 2px;
+    }
+    .dev-name { display: block; color: var(--fg); }
+    .dev-caps {
+      display: block;
+      font-size: 0.7rem;
+      color: var(--accent-e);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-top: 2px;
+    }
+    .dev-pending { color: var(--fg-muted); font-style: italic; }
+    .dev-unknown { color: var(--fg-muted); }
+
+    /* "Other devices" separator row between identified + unidentified hits. */
+    .scan-sep td {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      color: var(--fg-muted);
+      background: var(--ink-raised);
+      padding: 6px 10px;
+    }
+    .scan-sep:hover td { background: var(--ink-raised); }
+
     .scan-table .btn-use {
       padding: 5px 12px;
       border: 1px solid var(--line);
@@ -323,6 +365,22 @@
     }
 
     .scan-table .btn-use:hover { border-color: var(--accent-e); }
+
+    .scan-actions { white-space: nowrap; }
+    .scan-actions .btn-use + .btn-use { margin-left: 6px; }
+    .scan-actions .btn-add { color: #0a0a0a; border-color: var(--accent-e); background: var(--accent-e); }
+    .scan-actions .btn-add:hover { filter: brightness(1.08); }
+
+    /* A device already added to the config dims out; its Add button is inert. */
+    .scan-table tr.scan-added td { opacity: 0.45; }
+    .scan-table tr.scan-added:hover td { background: transparent; }
+    .scan-actions .btn-add[disabled] {
+      background: transparent;
+      color: var(--fg-muted);
+      border-color: var(--line);
+      cursor: default;
+    }
+    .scan-actions .btn-add[disabled]:hover { filter: none; }
 
     .spinner {
       display: inline-block;
@@ -565,7 +623,8 @@
   <!-- Step 3: Find devices -->
   <div class="step" id="step-3" data-step="3">
     <h2>Find devices</h2>
-    <p>Scan your network for inverters, batteries, and meters.</p>
+    <p>Scan your network for inverters, batteries, and meters. Add the ones you
+      want, then continue.</p>
 
     <div id="scan-controls">
       <button class="btn-primary" id="scan-btn" onclick="startScan()">Scan network</button>
@@ -573,15 +632,6 @@
     </div>
 
     <div id="scan-status" class="scan-status" style="display:none"></div>
-
-    <div id="scan-results" style="display:none">
-      <table class="scan-table">
-        <thead>
-          <tr><th>IP</th><th>Port</th><th>Protocol</th><th></th></tr>
-        </thead>
-        <tbody id="scan-tbody"></tbody>
-      </table>
-    </div>
 
     <div id="manual-ip-form" style="display:none">
       <div class="form-row">
@@ -597,9 +647,21 @@
       <button class="btn-primary" onclick="useManualDevice()" style="margin-top:0.5rem">Use this device</button>
     </div>
 
+    <div id="scan-results" style="display:none">
+      <table class="scan-table">
+        <thead>
+          <tr><th>Address</th><th>Port</th><th>Protocol</th><th>Device &amp; capabilities</th><th></th></tr>
+        </thead>
+        <tbody id="scan-tbody"></tbody>
+      </table>
+    </div>
+
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(2)">Back</button>
-      <button class="btn-skip" onclick="goStep(7)">Skip (no devices)</button>
+      <div class="wizard-actions-right">
+        <button class="btn-skip" onclick="goStep(7)">Skip (no devices)</button>
+        <button class="btn-primary" onclick="scanNext()">Next →</button>
+      </div>
     </div>
   </div>
 

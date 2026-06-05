@@ -162,6 +162,57 @@ function driver_init(config)
     end
 end
 
+-- isKSeriesModel reports whether a SunSpec C_Model name is one of the K-series
+-- commercial display inverters this driver targets (SE7K / SE10K / SE17K /
+-- SE25K). The model name is read from the holding C_Model register (40020) and
+-- is what separates these legacy units from HD-Wave models like SE8K, which
+-- belong to solaredge_pv.lua / solaredge.lua.
+local function isKSeriesModel(model)
+    model = string.upper(model or "")
+    for _, m in ipairs({ "SE7K", "SE10K", "SE17K", "SE25K" }) do
+        if string.sub(model, 1, #m) == m then
+            return true
+        end
+    end
+    return false
+end
+
+-- driver_fingerprint: READ-ONLY identity probe for the network-scan setup flow.
+-- This driver is specifically for the K-series display inverters, so we match
+-- ONLY those — identified by the SunSpec C_Model name at holding register 40020.
+-- An HD-Wave (e.g. SE8K) returns matched=false here and is claimed by
+-- solaredge_pv.lua instead. We read holding only (FC 0x03): SolarEdge serves
+-- SunSpec there directly and through solaredge-proxy, and a stray FC 0x04
+-- (input) read wedges such a proxy's single upstream socket on timeout.
+function driver_fingerprint()
+    local hok, hregs = pcall(host.modbus_read, 40000, 2, "holding")
+    if not hok or not hregs or decode_ascii(hregs, 2) ~= "SunS" then
+        return { matched = false }
+    end
+    local mok, mregs = pcall(host.modbus_read, 40004, 16, "holding")
+    local mfr = (mok and mregs) and decode_ascii(mregs, 16) or ""
+    if not string.find(string.lower(mfr), "solaredge", 1, true) then
+        return { matched = false }
+    end
+    local model = ""
+    local dok, dregs = pcall(host.modbus_read, 40020, 16, "holding")
+    if dok and dregs then model = decode_ascii(dregs, 16) end
+    if not isKSeriesModel(model) then
+        return { matched = false } -- HD-Wave etc. → solaredge_pv.lua
+    end
+    local serial = ""
+    local sok, sregs = pcall(host.modbus_read, 40052, 16, "holding")
+    if sok and sregs then serial = decode_ascii(sregs, 16) end
+
+    return {
+        matched      = true,
+        make         = "SolarEdge",
+        model        = model,
+        serial       = serial,
+        capabilities = { "pv", "pv-curtail" },
+    }
+end
+
 -- One-shot SunSpec ID probe. SunSpec-compliant devices place the magic
 -- bytes "SunS" (0x53756e53) at registers 40000-40001. Without them, the
 -- rest of the register map we trust is meaningless — the inverter is

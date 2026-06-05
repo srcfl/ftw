@@ -87,6 +87,68 @@ func TestLuaDriverLifecycle(t *testing.T) {
 	}
 }
 
+func TestLuaDriverFingerprint(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want FingerprintResult
+	}{
+		{
+			name: "rich match",
+			src:  `function driver_fingerprint() return { matched=true, make="Acme", model="X1", serial="SN9", capabilities={"pv","meter"} } end`,
+			want: FingerprintResult{Matched: true, Make: "Acme", Model: "X1", Serial: "SN9", Capabilities: []string{"pv", "meter"}},
+		},
+		{
+			name: "no meter detected",
+			src:  `function driver_fingerprint() return { matched=true, make="Acme", capabilities={"pv"} } end`,
+			want: FingerprintResult{Matched: true, Make: "Acme", Capabilities: []string{"pv"}},
+		},
+		{
+			name: "explicit non-match",
+			src:  `function driver_fingerprint() return { matched=false } end`,
+			want: FingerprintResult{},
+		},
+		{
+			name: "bare boolean shorthand",
+			src:  `function driver_fingerprint() return true end`,
+			want: FingerprintResult{Matched: true},
+		},
+		{
+			name: "function absent",
+			src:  `-- no driver_fingerprint defined`,
+			want: FingerprintResult{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "fp.lua")
+			if err := os.WriteFile(path, []byte(tc.src), 0644); err != nil {
+				t.Fatal(err)
+			}
+			env := NewHostEnv("fp", telemetry.NewStore())
+			d, err := NewLuaDriver(path, env)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			defer d.Cleanup()
+
+			got, err := d.Fingerprint(context.Background())
+			if err != nil {
+				t.Fatalf("fingerprint: %v", err)
+			}
+			if got.Matched != tc.want.Matched ||
+				got.Make != tc.want.Make ||
+				got.Model != tc.want.Model ||
+				got.Serial != tc.want.Serial ||
+				strings.Join(got.Capabilities, ",") != strings.Join(tc.want.Capabilities, ",") {
+				t.Errorf("got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLuaDriverCommandAndDefaultModeReturnErrors(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "failing.lua")

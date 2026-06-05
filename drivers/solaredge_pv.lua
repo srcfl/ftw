@@ -140,6 +140,55 @@ function driver_init(config)
     end
 end
 
+-- K-series commercial display inverters (SE7K / SE10K / SE17K / SE25K) use a
+-- different curtail dialect (FC 0x10 multi-write) and are owned by
+-- solaredge_legacy.lua. Every other SolarEdge that speaks SunSpec on holding is
+-- HD-Wave / StorEdge generation → this driver.
+local function is_kseries_model(model)
+    model = string.upper(model or "")
+    for _, m in ipairs({ "SE7K", "SE10K", "SE17K", "SE25K" }) do
+        if string.sub(model, 1, #m) == m then
+            return true
+        end
+    end
+    return false
+end
+
+-- driver_fingerprint: READ-ONLY identity probe for the network-scan flow, and
+-- the SolarEdge driver-selection logic. SolarEdge serves SunSpec on HOLDING
+-- registers (FC 0x03) — directly and through solaredge-proxy — so we never
+-- touch input (FC 0x04), which wedges a proxy's single upstream socket on a
+-- timeout. The model name at the SunSpec Common-block C_Model register (40020)
+-- is the holding register that decides the driver: a K-series display unit
+-- defers to solaredge_legacy.lua; anything else (e.g. an SE8K HD-Wave) is ours.
+function driver_fingerprint()
+    local hok, hregs = pcall(host.modbus_read, 40000, 2, "holding")
+    if not hok or not hregs or decode_ascii(hregs, 2) ~= "SunS" then
+        return { matched = false }
+    end
+    local mok, mregs = pcall(host.modbus_read, 40004, 16, "holding")
+    local mfr = (mok and mregs) and decode_ascii(mregs, 16) or ""
+    if not string.find(string.lower(mfr), "solaredge", 1, true) then
+        return { matched = false }
+    end
+    local model = ""
+    local dok, dregs = pcall(host.modbus_read, 40020, 16, "holding")
+    if dok and dregs then model = decode_ascii(dregs, 16) end
+    if is_kseries_model(model) then
+        return { matched = false } -- K-series → solaredge_legacy.lua
+    end
+    local serial = ""
+    local sok, sregs = pcall(host.modbus_read, 40052, 16, "holding")
+    if sok and sregs then serial = decode_ascii(sregs, 16) end
+    return {
+        matched      = true,
+        make         = "SolarEdge",
+        model        = model,
+        serial       = serial,
+        capabilities = { "pv", "pv-curtail" },
+    }
+end
+
 function driver_poll()
     -- ---- Serial number (SunSpec common block, one-shot) ----
     if not sn_read then
