@@ -10,7 +10,7 @@ vs what isn't. Everything below can be pasted into a terminal.
 | Unit | All green | `cd go && go test ./...` |
 | Integration (per-package) | All green | (same — colocated with unit) |
 | End-to-end (full stack) | All green | `cd go && go test -timeout 180s ./test/e2e -v` |
-| Drivers (Lua + WASM) | All green | `cd go && go test ./internal/drivers/` |
+| Drivers (Lua) | All green | `cd go && go test ./internal/drivers/` |
 | Code coverage | Not tracked yet (manual `go test ./... -cover`) | — |
 | Local CI | Configured | `make ci` |
 | Pi UI smoke | Configured | `make ci-hw-pi` |
@@ -51,7 +51,7 @@ variables, and artifact locations.
 | `internal/config` | `config_test.go` | YAML parsing + validation |
 | `internal/control` | `control_test.go` | PI, dispatch modes, anti-windup, slew, fuse guard |
 | `internal/currency` | `currency_test.go` | ECB FX rates |
-| `internal/drivers` | `lua_test.go`, `runtime_test.go`, `ferroamp_integration_test.go`, `sungrow_integration_test.go` | WASM + Lua runtime, driver lifecycle, command round-trip |
+| `internal/drivers` | `lua_test.go`, `runtime_test.go`, `ferroamp_integration_test.go`, `sungrow_integration_test.go` | Lua runtime, driver lifecycle, host capabilities, command round-trip |
 | `internal/forecast` | `forecast_test.go` | met.no + OpenWeather parsing |
 | `internal/libcheck` | `smoke_test.go` | Smoke tests for SQLite, YAML, fsnotify, mochi MQTT + paho, modbus, wazero |
 | `internal/loadmodel` | `model_test.go` | Hour-of-week buckets + heating coefficient |
@@ -69,9 +69,9 @@ variables, and artifact locations.
 | `cmd/sim-sungrow` | `e2e_test.go` (8 tests) | Modbus reads, command writes, physics response |
 | `cmd/sim-sungrow/sungrow` | `sungrow_test.go` (13 tests) | Register encoding, bank writes, mode transitions |
 
-Packages without tests (`internal/api`, `internal/arp`, `internal/configreload`,
-`internal/ha`, `internal/mqtt`, `internal/modbus`) are exercised indirectly via
-`test/e2e/stack_test.go`.
+Most runtime packages have direct `_test.go` coverage. `internal/arp` is the
+notable package without a direct test file in this snapshot; API, configreload,
+HA, MQTT, and Modbus also get full-stack exercise through `test/e2e/stack_test.go`.
 
 ## 3. Simulators
 
@@ -125,7 +125,8 @@ make dev
 # → http://localhost:8080
 ```
 
-`make dev` also builds the WASM drivers via `make wasm` first.
+`make dev` starts the two Go simulators and the main app. Lua drivers are loaded
+from `drivers/` at runtime and do not need a separate build step.
 
 ## 5. End-to-end test
 
@@ -161,9 +162,8 @@ cd /Users/fredde/repositories/forty-two-watts
 make e2e
 ```
 
-Note: the e2e test auto-skips if `drivers-wasm/ferroamp.wasm` and
-`drivers-wasm/sungrow.wasm` are missing. Run `make wasm` first (or let
-`make e2e` do it for you).
+Note: the e2e stack uses the Lua drivers from `drivers/` directly. There is no
+separate driver build prerequisite for `make e2e`.
 
 ## 6. Where to add tests for a new feature
 
@@ -172,8 +172,8 @@ Note: the e2e test auto-skips if `drivers-wasm/ferroamp.wasm` and
 | New PI/control behavior | `go/internal/control/control_test.go` |
 | New battery model algorithm | `go/internal/battery/model_test.go` |
 | New ML twin behavior | colocated `_test.go` in `pvmodel`/`loadmodel`/`priceforecast` |
-| New driver (WASM or Lua) | new `*_integration_test.go` in `go/internal/drivers/` (mock the protocol) |
-| New API endpoint | colocated `_test.go` in `go/internal/api/` (currently empty — pioneer it) |
+| New driver (Lua) | new `*_integration_test.go` in `go/internal/drivers/` (mock the protocol) |
+| New API endpoint | add or extend a colocated `_test.go` in `go/internal/api/` |
 | Cross-package contract | `go/test/e2e/stack_test.go` |
 | Simulator physics | `go/cmd/sim-*/…/*_test.go` (colocated with the physics package) |
 
@@ -205,9 +205,9 @@ go tool cover -html=cover.out
 
 Recommended next steps (acknowledged TODOs):
 
-- Add a `coverage.yml` GitHub Actions workflow — no CI exists yet
-- Cover `go/internal/api/` — no tests at all currently
-- Cover `go/internal/arp/` — new package, no tests yet
+- Add coverage reporting to the existing GitHub Actions test workflow
+- Broaden `go/internal/api/` coverage as new endpoints are added
+- Add direct tests for `go/internal/arp/`
 - Add a regression test for the `lua.go` `power_w` field bug (commit `9237156`)
 - Add a regression test for the `LoadAllBatteryModels` deadlock (commit `c387c62`)
 
@@ -234,9 +234,9 @@ simulators.
 
 ## 10. Common test failures
 
-- **`drivers-wasm/*.wasm not found`** — run `make wasm` first (legacy WASM
-  build). The e2e test will call `t.Skipf` rather than fail if the files are
-  missing.
+- **Lua driver file not found** — check `-drivers`, `-user-drivers`, or the
+  driver path in config. The bundled drivers live under `drivers/` in the repo
+  and `/app/drivers` in the container image.
 - **e2e timeout** — bump the `-timeout` flag; the e2e test spins up a real
   broker + Modbus server and is slow on CI VMs. Default Make target uses `180s`.
 - **Date-dependent test fails** — should be fixed; if you see a new one, follow
