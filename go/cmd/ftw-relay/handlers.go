@@ -73,6 +73,7 @@ type Relay struct {
 	Polls       *PollSecrets
 	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
 	OfferLimit  *IPRateLimiter // per-source-IP throttle on browser signaling offers (FIX-C)
+	TrustCFIP   bool           // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
 	PollTimeout time.Duration  // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
@@ -899,9 +900,10 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	// the browser's source IP, so a single abusive IP is bounded here while a legit
 	// browser on a DIFFERENT IP is never pushed to 429 — closing the per-site
 	// lockout lever. The per-(site) ceiling in ParkOffer remains as a generous
-	// backstop. clientIP uses the un-spoofable RemoteAddr (no trusted-proxy header
-	// handling exists in the codebase yet; see clientIP).
-	if r.OfferLimit != nil && !r.OfferLimit.Allow(clientIP(req)) {
+	// backstop. offerClientIP uses the un-spoofable RemoteAddr unless -trust-cf-ip
+	// is set AND the peer is a validated Cloudflare edge IP (see cloudflare.go),
+	// so the per-IP throttle stays effective behind Cloudflare.
+	if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
 		http.Error(w, "too many offers from your address", http.StatusTooManyRequests)
 		return
 	}

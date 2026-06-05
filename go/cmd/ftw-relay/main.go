@@ -31,6 +31,7 @@ func main() {
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
+	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
 	flag.Parse()
 
 	if *version {
@@ -61,6 +62,7 @@ func main() {
 		Owners:      owners,
 		Polls:       NewPollSecrets(),
 		Signals:     NewSignalMailbox(),
+		TrustCFIP:   *trustCFIP,
 		PollTimeout: *pollTimeout,
 		HomeHost:    *homeHost,
 		HomeSite:    *homeSite,
