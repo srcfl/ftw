@@ -31,6 +31,17 @@
 
   if (!modal || !openBtn) return;
 
+  // ownerFetch routes state-changing owner/CONTROL calls (config save, restart)
+  // over the STRICT P2P transport so their body never traverses the untrusted
+  // relay on the public home route. window.ownerFetch is wired in p2p.js to the
+  // same fail-closed strict function the owner-access pages use; it fails closed
+  // (synthetic 503) on a public origin with no DataChannel. The plain-fetch
+  // fallback covers only contexts where p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // Expose the registry namespace immediately so tab files that load
   // before or after this shell can register idempotently.
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
@@ -74,7 +85,7 @@
   saveBtn.addEventListener("click", function () {
     captureCurrentTab();
     setStatus("Saving...");
-    fetch("/api/config", {
+    ownerFetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(currentConfig),
@@ -142,7 +153,7 @@
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
 
-    fetch("/api/restart", { method: "POST" })
+    ownerFetch("/api/restart", { method: "POST" })
       .then(function (r) {
         if (!r.ok) {
           return r.json()

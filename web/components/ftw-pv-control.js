@@ -20,6 +20,7 @@
 //   el.open("solaredge");   // scope to one driver
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 class FtwPvControl extends FtwElement {
   static styles = `
@@ -412,7 +413,7 @@ class FtwPvControl extends FtwElement {
     }
     const installBtn = this.shadowRoot.querySelector("[data-install]");
     installBtn.disabled = true;
-    fetch("/api/pv/manual_hold", {
+    ownerFetch("/api/pv/manual_hold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -432,7 +433,7 @@ class FtwPvControl extends FtwElement {
     this._showError("");
     const stopBtn = this.shadowRoot.querySelector("[data-stop]");
     stopBtn.disabled = true;
-    fetch("/api/pv/manual_hold", { method: "DELETE" })
+    ownerFetch("/api/pv/manual_hold", { method: "DELETE" })
       .then((r) => {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();

@@ -218,11 +218,52 @@ async function strictControlPostWithChannelDown(page: Page): Promise<number> {
   });
 }
 
+// ownerFetchControlPostWithChannelDown drives the EXACT entry point the dashboard's
+// classic scripts + web components now call — window.ownerFetch (wired in p2p.js to
+// p2pFetchStrict) — rather than p2pFetchStrict directly. With the channel down on
+// the public home host it must FAIL CLOSED with the synthetic 503, proving the
+// shared dashboard wiring inherits the same fail-closed behaviour as the ceremony
+// pages' ownerFetch. (Distinct from strictControlPostWithChannelDown, which proves
+// the underlying p2pFetchStrict primitive; this proves the window.ownerFetch alias.)
+async function ownerFetchControlPostWithChannelDown(page: Page): Promise<number> {
+  return page.evaluate(async () => {
+    (window as any).ftwP2P.setEnabled(false);
+    if (typeof (window as any).ownerFetch !== "function") {
+      throw new Error("window.ownerFetch is not wired — dashboard control calls would have no strict entry point");
+    }
+    if ((window as any).ftwP2P.isLanOrigin()) {
+      throw new Error("home host wrongly classified as LAN — window.ownerFetch would leak the control body to relay");
+    }
+    const r = await (window as any).ownerFetch("/api/mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "self_consumption" }),
+    });
+    return r.status;
+  });
+}
+
 // ---- the test -------------------------------------------------------------
 
 test("home route: P2P-only passkey ceremony + authenticated owner API over the DataChannel", async ({ page }) => {
   const cdp = await addVirtualAuthenticator(page);
   await captureLastPC(page);
+
+  // Relay-leak tripwire (FIX-B): if a state-changing /api/mode request EVER hits
+  // the relay over HTTP (i.e. an ownerFetch/strict body fell back to the cleartext
+  // relay instead of failing closed), record it. The fail-closed assertions below
+  // require this stays empty — the owner control body must never leave the page
+  // for the relay when the channel is down.
+  const relayControlLeaks: Array<{ method: string; url: string; body: string }> = [];
+  await page.route("**/api/mode", (route) => {
+    const req = route.request();
+    if (req.method() !== "GET") {
+      relayControlLeaks.push({ method: req.method(), url: req.url(), body: req.postData() ?? "" });
+    }
+    // Continue so non-leaking behaviour (e.g. an actual LAN call, which never
+    // happens on this public host) is unaffected; the assertion is what fails.
+    return route.continue();
+  });
 
   // 0. Wait for the relay→Pi static tunnel to be live (else the relay serves the
   //    offline page and the owner-access flow can't start).
@@ -304,6 +345,24 @@ test("home route: P2P-only passkey ceremony + authenticated owner API over the D
   expect(strictControl,
     "strict CONTROL write with the channel down must fail closed (503), never relay-fallback")
     .toBe(503);
+
+  // 6b. window.ownerFetch FAIL-CLOSED (FIX-B wiring): the dashboard's classic
+  //     scripts + web components route every state-changing owner/CONTROL call
+  //     through window.ownerFetch (wired in p2p.js to p2pFetchStrict). Prove THAT
+  //     alias inherits the fail-closed behaviour: with the channel down on the
+  //     public home host, window.ownerFetch("/api/mode", {POST, body}) must return
+  //     the synthetic 503 — never a relay fallback.
+  const ownerFetchControl = await ownerFetchControlPostWithChannelDown(page);
+  expect(ownerFetchControl,
+    "window.ownerFetch control write with the channel down must fail closed (503)")
+    .toBe(503);
+
+  // FINAL: the relay tripwire must be empty. No /api/mode write (over P2P or via a
+  // strict/ownerFetch fail-closed) ever reached the relay over HTTP — the owner
+  // control body never left the page for the cleartext relay.
+  expect(relayControlLeaks,
+    `control body leaked to the relay: ${JSON.stringify(relayControlLeaks)}`)
+    .toHaveLength(0);
 
   await cdp.detach().catch(() => { /* best-effort */ });
 });

@@ -34,6 +34,7 @@
 //     in /next.html (redesign) without per-context styling.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
@@ -214,7 +215,7 @@ class FtwUpdateCheck extends FtwElement {
     this._updateStartedAt = Date.now();
     this.update();
 
-    fetch("/api/version/update", {
+    ownerFetch("/api/version/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     })

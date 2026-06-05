@@ -18,6 +18,7 @@
 // only entry point — there's no auto-open behavior.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 class FtwBatteryControl extends FtwElement {
   static styles = `
@@ -384,7 +385,7 @@ class FtwBatteryControl extends FtwElement {
       }
     }
     installBtn.disabled = true;
-    fetch("/api/battery/manual_hold", {
+    ownerFetch("/api/battery/manual_hold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ direction: dir, power_w: powerW, hold_s: holdS }),
@@ -406,7 +407,7 @@ class FtwBatteryControl extends FtwElement {
     this._showError("");
     const stopBtn = this.shadowRoot.querySelector("[data-stop]");
     stopBtn.disabled = true;
-    fetch("/api/battery/manual_hold", { method: "DELETE" })
+    ownerFetch("/api/battery/manual_hold", { method: "DELETE" })
       .then((r) => {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();

@@ -505,6 +505,15 @@
   window.p2pFetch = p2pFetch;
   window.p2pFetchStrict = p2pFetchStrict;
 
+  // ownerFetch is the ONE fail-closed entry point the dashboard's classic scripts
+  // + web components use for state-changing owner/CONTROL /api/* calls. It is the
+  // SAME strict transport owner-fetch.js uses for the ceremony pages: strict P2P,
+  // fail-closed 503 on a public / /me/<site> origin with no DataChannel, raw relay
+  // fetch ONLY on a genuine LAN origin. One behaviour, shared — do not fork it.
+  // index.html loads /p2p.js before the consuming scripts, so this is defined by
+  // the time any dashboard handler runs.
+  window.ownerFetch = p2pFetchStrict;
+
   // Warm up the channel on load so the dashboard's first poll can already be
   // direct (and the indicator settles quickly). When P2P is supported but
   // opted out, still surface a "relay" state so the indicator stays clickable

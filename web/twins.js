@@ -9,6 +9,16 @@
 
   const REFRESH_MS = 10000;
 
+  // ownerFetch routes state-changing owner/CONTROL calls (load-twin profile
+  // switch, PV/load twin reset) over the STRICT P2P transport so their body never
+  // traverses the untrusted relay on the public home route. Wired in p2p.js to the
+  // shared fail-closed strict function; falls back to plain fetch only where
+  // p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   async function fetchAll() {
     const [pv, load] = await Promise.all([
       fetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
@@ -88,7 +98,7 @@
     const profile = e.target && e.target.dataset && e.target.dataset.loadmodelProfile;
     if (profile) {
       if (e.target.classList.contains('active')) return;
-      fetch('/api/loadmodel/profile', {
+      ownerFetch('/api/loadmodel/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile })
@@ -108,7 +118,7 @@
       'predictions while it collects samples again.')) {
       return;
     }
-    fetch(endpoint, { method: 'POST' })
+    ownerFetch(endpoint, { method: 'POST' })
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(() => fetchAll())
       .catch(err => alert('Reset failed: ' + err.message));
