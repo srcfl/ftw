@@ -27,13 +27,30 @@
         'data-theme', saved || (osLight ? 'light' : 'dark'));
     })();
   </script>
+  <!-- Cover the dashboard with the sign-in gate from the FIRST paint on a remote
+       origin, so a reload never flashes the dashboard before next-app.js loads.
+       setupAuth() unlocks it once whoami confirms a signed-in owner (and the LAN
+       bypass never gates). Mirrors next-app.js's isLanFallbackOrigin, minimally. -->
+  <script>
+    (function () {
+      try {
+        var h = (location.hostname || '').toLowerCase();
+        var lan = h === 'localhost' || h === '::1' || h.indexOf('.') === -1 ||
+                  h.slice(-6) === '.local' ||
+                  /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+        if (!lan && !/^\/me\//.test(location.pathname)) {
+          document.documentElement.classList.add('ftw-gated');
+        }
+      } catch (e) {}
+    })();
+  </script>
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=lp2">
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
-  <link rel="stylesheet" href="/next.css?v=next4">
+  <link rel="stylesheet" href="/next.css?v=next6">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so we have no supply-chain surface area and no SRI gap — an
@@ -100,7 +117,7 @@
        SAME strict P2P channel (no redirect). data-mode = connecting | signin.
        Never shown on the LAN (bypass) or once signed in. No owner DATA is ever
        served unauthenticated — the gate is purely the lock's UI. -->
-  <div id="signin-gate" class="signin-gate" data-mode="connecting" hidden>
+  <div id="signin-gate" class="signin-gate" data-mode="connecting">
     <div class="signin-gate-card">
       <div class="signin-gate-brand">&#9889; forty-two watts</div>
       <p class="signin-gate-lead signin-gate-connecting">Reaching your home&hellip;</p>
@@ -697,7 +714,7 @@
   </ftw-modal>
 
   <script src="/p2p.js?v=p2p5"></script>
-  <script src="/next-app.js?v=next5"></script>
+  <script src="/next-app.js?v=next6"></script>
   <script src="/settings.js?v=diag1"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit1"></script>

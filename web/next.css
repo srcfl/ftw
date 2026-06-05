@@ -258,12 +258,12 @@ body.ftw-next .signin-gate {
   position: fixed;
   inset: 0;
   z-index: 2000;
-  display: grid;
+  display: none;            /* shown via html.ftw-gated — set pre-paint (no flash) + by JS */
   place-items: center;
   background: var(--bg);
   font-family: var(--sans);
 }
-body.ftw-next .signin-gate[hidden] { display: none; }
+html.ftw-gated body.ftw-next .signin-gate { display: grid; }
 body.ftw-next .signin-gate-card {
   width: min(92vw, 380px);
   padding: 30px 28px;

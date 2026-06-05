@@ -3561,13 +3561,14 @@
   // also suppresses the "no devices configured" prompt for logged-out viewers.
   var ownerNotAuthed = false;
   function showGate(mode) {
+    document.documentElement.classList.add("ftw-gated"); // CSS shows the gate, hides nothing else needed (opaque overlay)
     var g = document.getElementById("signin-gate");
-    if (g) { g.hidden = false; g.setAttribute("data-mode", mode || "signin"); }
+    if (g) g.setAttribute("data-mode", mode || "signin");
     ownerNotAuthed = (mode !== "connecting");
     if (ownerNotAuthed && typeof hideSetupBanner === "function") { try { hideSetupBanner(); } catch (e) {} }
   }
   function hideGate() {
-    var g = document.getElementById("signin-gate"); if (g) g.hidden = true;
+    document.documentElement.classList.remove("ftw-gated");
     ownerNotAuthed = false;
   }
 
