@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -71,16 +74,29 @@ type Relay struct {
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
 	Polls       *PollSecrets
-	Signals     *SignalMailbox // blind WebRTC signaling rendezvous (P2P-only home route)
-	OfferLimit  *IPRateLimiter // per-source-IP throttle on browser signaling offers (FIX-C)
-	TrustCFIP   bool           // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
-	PollTimeout time.Duration  // 0 → 25s default
+	Signals     *SignalMailbox    // blind WebRTC signaling rendezvous (P2P-only home route)
+	Challenges  *SignalChallenges // single-use device-key proof nonces for the signaling offer (C2)
+	OfferLimit  *IPRateLimiter    // per-source-IP throttle on browser signaling offers (FIX-C)
+	TrustCFIP   bool              // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
+	PollTimeout time.Duration     // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
 	// paths resolve. The Phase 4 single-home cutover.
 	HomeHost string
 	HomeSite string
+	// HomeWeb, when set, is a directory on the relay VM holding the same web/
+	// bundle the Pi serves. With it set, the home host's static GETs are served
+	// from disk at the relay (SLICE 1) instead of being forwarded to the Pi over
+	// the tunnel — the SPA shell loads even while the Pi is mid-connect, and the
+	// Pi's uplink only ever carries owner DATA (over DTLS), never asset GETs.
+	// Unset → the old forward-to-Pi behaviour (back-compat).
+	HomeWeb string
+	// HomePubKey is the pinned home-site ES256 public key (hex X||Y). When set,
+	// the relay answers GET /api/identity for the home host directly from this
+	// pin (SLICE 2) instead of forwarding to the Pi — the browser's TOFU anchor
+	// is then served even while the Pi is offline.
+	HomePubKey string
 }
 
 type registerRequest struct {
@@ -106,6 +122,9 @@ func (r *Relay) Handler() http.Handler {
 	if r.Signals == nil {
 		r.Signals = NewSignalMailbox()
 	}
+	if r.Challenges == nil {
+		r.Challenges = NewSignalChallenges()
+	}
 	if r.OfferLimit == nil {
 		// Per-source-IP token bucket on the unauthenticated browser offer endpoint
 		// (FIX-C): bounds one abusive IP without letting it lock out a legit browser
@@ -130,6 +149,7 @@ func (r *Relay) Handler() http.Handler {
 	//   - Pi:      long-poll GET /signal/{host_id}/offer + POST /signal/{host_id}/answer
 	// The Pi side is authenticated with the per-host poll secret (X-FTW-Poll), the
 	// same token minted at /me/register; the browser side is rate-limited.
+	mux.HandleFunc("GET /signal/{site_id}/challenge", r.signalChallenge)
 	mux.HandleFunc("POST /signal/{site_id}/offer", r.signalBrowserOffer)
 	mux.HandleFunc("GET /signal/{site_id}/answer", r.signalBrowserAnswer)
 	mux.HandleFunc("GET /signal/{host_id}/offer", r.signalHostOffer)
@@ -159,6 +179,7 @@ func (r *Relay) Handler() http.Handler {
 		// the home host explicitly so the rendezvous works from the dashboard
 		// origin. (The Pi's /signal/{host}/* routes need no host pin: the Pi dials
 		// the relay by its own host, not the home host.)
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/challenge", r.signalChallenge)
 		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
@@ -203,8 +224,27 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "owner API is P2P-only; this relay serves static assets only", http.StatusMethodNotAllowed)
 		return
 	}
+	// SLICE 2: serve GET /api/identity from the home pubkey the relay already
+	// holds (the operator-provided -home-pubkey pin) WITHOUT forwarding to the Pi.
+	// This is the browser's TOFU anchor — a public key only, no secret/cookie — so
+	// the relay can answer it locally and the dashboard's bootstrap works even
+	// while the Pi is mid-connect or offline. Only when a key is actually pinned;
+	// otherwise fall through to the existing gate (which forwards it as the TOFU
+	// exception).
+	if req.URL.Path == "/api/identity" && r.HomePubKey != "" {
+		r.serveHomeIdentity(w)
+		return
+	}
 	if isOwnerAPIPath(req.URL.Path) {
 		http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
+		return
+	}
+	// SLICE 1: when -home-web is set, serve the static shell from the relay's own
+	// disk instead of forwarding the GET to the Pi. The SPA loads even while the
+	// Pi is mid-connect, and the Pi's uplink only ever carries owner DATA (over
+	// DTLS), never asset GETs. Unset → the old forward-to-Pi path below.
+	if r.HomeWeb != "" {
+		r.serveHomeStaticFile(w, req)
 		return
 	}
 	hostID, registered, fresh := r.Owners.Active(r.HomeSite, homeStaleAfter)
@@ -240,6 +280,76 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 	}
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+}
+
+// serveHomeIdentity answers GET /api/identity for the home host from the pinned
+// home pubkey the relay already holds (SLICE 2). It returns the same shape the Pi
+// would, so the browser's TOFU bootstrap is byte-compatible whether the key comes
+// from the relay pin or (in -home-pubkey-less back-compat) the forwarded Pi
+// response. Public key only — no secret, no cookie — so serving it locally leaks
+// nothing and lets the dashboard bootstrap even while the Pi is offline.
+func (r *Relay) serveHomeIdentity(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	// Cache-Control: the pin is stable for the relay's lifetime, but keep it
+	// short so a key rotation (operator restarts the relay with a new pin)
+	// propagates quickly.
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		PublicKeyHex string `json:"public_key_hex"`
+		SiteID       string `json:"site_id"`
+		Algorithm    string `json:"algorithm"`
+		Curve        string `json:"curve"`
+	}{
+		PublicKeyHex: r.HomePubKey,
+		SiteID:       r.HomeSite,
+		Algorithm:    "ES256",
+		Curve:        "P-256",
+	})
+}
+
+// serveHomeStaticFile serves a static asset for the home host from the -home-web
+// directory on the relay VM (SLICE 1), with path-traversal protection and an
+// index.html fallback for "/". It NEVER forwards to the Pi. A missing file is a
+// 404; "/" (or any path that resolves to a directory) serves index.html so the
+// SPA shell loads at the root. The owner-API + method gates already ran in the
+// caller, so only safe GETs of non-/api paths reach here.
+func (r *Relay) serveHomeStaticFile(w http.ResponseWriter, req *http.Request) {
+	// Clean the request path to an absolute, slash-rooted form, then strip the
+	// leading slash so filepath.Join can't escape the web root. path.Clean
+	// collapses any ".." so a crafted "/../../etc/passwd" resolves inside the
+	// tree (or to "/"), never above it; the explicit prefix check below is belt
+	// and braces.
+	clean := path.Clean("/" + req.URL.Path)
+	if clean == "/" {
+		clean = "/index.html"
+	}
+	rel := strings.TrimPrefix(clean, "/")
+	full := filepath.Join(r.HomeWeb, filepath.FromSlash(rel))
+	// Defence in depth: confirm the resolved path is still within the web root
+	// after symlink-free join. filepath.Join already cleaned ".." out of `rel`,
+	// but a web root that is itself a relative path or a stray separator could
+	// still surprise us — refuse anything that doesn't have the root as a prefix.
+	root := filepath.Clean(r.HomeWeb)
+	if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
+		http.NotFound(w, req)
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil || info.IsDir() {
+		// Missing file or a directory request → serve the SPA shell so client-side
+		// routes (deep links into the dashboard) resolve to index.html, the
+		// conventional SPA fallback. If even index.html is missing, 404.
+		index := filepath.Join(root, "index.html")
+		if _, ierr := os.Stat(index); ierr != nil {
+			http.NotFound(w, req)
+			return
+		}
+		full = index
+	}
+	// Never leak an owner cookie either direction: strip any inbound Cookie (the
+	// session lives only in DTLS) — http.ServeFile sets no cookies itself.
+	req.Header.Del("Cookie")
+	http.ServeFile(w, req, full)
 }
 
 // isOwnerAPIPath reports whether a request path is part of the owner API surface
@@ -796,6 +906,15 @@ type meRegisterRequest struct {
 	PublicKey string `json:"public_key"`
 	TsMs      int64  `json:"ts_ms"`
 	Sig       string `json:"sig"`
+	// DevicePubkeys (C1) is the set of device keys the Pi trusts to signal +
+	// mint a session for this site. The Pi publishes it on the SAME
+	// ES256-signed registration, so the relay trusts the set exactly as far as
+	// it trusts the (verified) registration signature. Each entry is an
+	// uncompressed P-256 key as 128 lowercase hex (X||Y). Optional + omitempty:
+	// a registration without it leaves the site's device-key set unchanged is
+	// NOT the behaviour — see meRegister: the field, when PRESENT, replaces the
+	// set; the Pi always sends its current set so the relay mirrors it exactly.
+	DevicePubkeys []string `json:"device_pubkeys,omitempty"`
 }
 
 func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
@@ -837,6 +956,25 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	// C1: mirror the Pi's trusted device-key set for this site. The registration
+	// signature was just verified against the site's pinned key, so the relay
+	// trusts this set exactly as far as it trusts the registration. The Pi sends
+	// its FULL current set every time, so SetDeviceKeys REPLACES (not merges) —
+	// a key the owner removed on the Pi disappears from the relay on the next
+	// re-registration. Canonicalise + de-dup so the stored set compares
+	// byte-for-byte with what the browser presents on the signaling offer (C2);
+	// silently drop malformed entries rather than reject the whole registration
+	// (a single bad key must not knock the Pi's tunnel mapping offline).
+	dev := make([]string, 0, len(reg.DevicePubkeys))
+	seenDev := make(map[string]bool, len(reg.DevicePubkeys))
+	for _, k := range reg.DevicePubkeys {
+		if !validDevicePubKeyHex(k) || seenDev[k] {
+			continue
+		}
+		seenDev[k] = true
+		dev = append(dev, k)
+	}
+	r.Owners.SetDeviceKeys(reg.SiteID, dev)
 	// Return the poll token this host must present on /tunnel/<host>/next and the
 	// /signal/* rendezvous. The ES256-verified registration above proves it owns
 	// host_id, so only it learns the token. The secret is bound to the verified
@@ -861,6 +999,71 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 }
 
 // ---- Blind WebRTC signaling rendezvous (P2P-only home route) ----
+
+// signalProofSigningString is the canonical message the browser signs with a
+// trusted device key to be allowed to forward a signaling offer (C2). Both ends
+// MUST build it identically — the browser (WebCrypto, raw r||s, base64url) and
+// the relay (verifyES256B64URL). Versioned ("v1") so it can evolve without a
+// silent browser↔relay mismatch; the colon-delimited (site, nonce) binds the
+// proof to THIS site and THIS single-use nonce, so a signature can't be lifted to
+// another site or replayed against a fresh nonce.
+func signalProofSigningString(siteID, nonce string) string {
+	return "ftw-signal:v1:" + siteID + ":" + nonce
+}
+
+// verifyOfferDeviceProof enforces C2: the browser proved possession of a device
+// key the Pi trusts. It returns true ONLY when (in this order, fail-closed):
+//   - device_pubkey is a well-formed P-256 key in the site's published set (C1),
+//   - sig verifies over "ftw-signal:v1:<site>:<nonce>" against that key, and
+//   - the challenge nonce was known, unexpired, and not yet used (consumed here).
+//
+// The nonce is consumed LAST and only on full success, so a request that fails
+// the key/sig check leaves the nonce spendable for the legitimate browser. A
+// valid signature already requires knowing the unguessable 32-byte nonce, so the
+// ordering doesn't create a probing oracle. Any failure → false → the caller
+// returns 403 WITHOUT contacting the Pi.
+func (r *Relay) verifyOfferDeviceProof(siteID, devicePubkey, nonce, sig string) bool {
+	if !validDevicePubKeyHex(devicePubkey) || nonce == "" || sig == "" {
+		return false
+	}
+	if !r.Owners.HasDeviceKey(siteID, devicePubkey) {
+		return false
+	}
+	if !verifyES256B64URL(devicePubkey, signalProofSigningString(siteID, nonce), sig) {
+		return false
+	}
+	// Consume the single-use nonce last: a replayed (device_pubkey, nonce, sig)
+	// triple fails here because the nonce is already gone, even though key + sig
+	// still check out.
+	return r.Challenges.Consume(siteID, nonce)
+}
+
+// signalChallenge issues a single-use, short-TTL nonce the browser signs with a
+// trusted device key on its subsequent POST /signal/{site}/offer (C2). It is
+// unauthenticated (the nonce is worthless without a device key in the site's
+// published set) but bounded: the store caps sites + per-site nonces so a flood
+// can't grow relay memory.
+func (r *Relay) signalChallenge(w http.ResponseWriter, req *http.Request) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" {
+		http.Error(w, "missing site_id", http.StatusBadRequest)
+		return
+	}
+	if r.Challenges == nil {
+		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
+		return
+	}
+	nonce, expMs, ok := r.Challenges.Issue(siteID)
+	if !ok {
+		http.Error(w, "signaling at capacity", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Nonce string `json:"nonce"`
+		ExpMs int64  `json:"exp_ms"`
+	}{Nonce: nonce, ExpMs: expMs})
+}
 
 // signalNonceHeader carries the rendezvous nonce the Pi echoes back to the
 // browser on a drained offer (FIX-4a). The browser supplied it as ?n=<nonce>;
@@ -907,7 +1110,7 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "too many offers from your address", http.StatusTooManyRequests)
 		return
 	}
-	if r.Signals == nil {
+	if r.Signals == nil || r.Challenges == nil || r.Owners == nil {
 		http.Error(w, "signaling not configured", http.StatusServiceUnavailable)
 		return
 	}
@@ -920,7 +1123,38 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "empty offer", http.StatusBadRequest)
 		return
 	}
-	if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
+	// C2: the offer body is now a JSON envelope carrying the raw SDP PLUS a
+	// device-key proof. The browser must prove possession of a device key the Pi
+	// published (C1) by signing the single-use challenge nonce it fetched from
+	// GET /signal/{site}/challenge. We verify {device_pubkey, nonce, sig} BEFORE
+	// touching the mailbox, so a caller that can't prove a trusted device key
+	// never causes the Pi to be contacted at all.
+	var env struct {
+		SDP          string `json:"sdp"`
+		DevicePubkey string `json:"device_pubkey"`
+		Nonce        string `json:"nonce"`
+		Sig          string `json:"sig"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		http.Error(w, "malformed offer envelope", http.StatusBadRequest)
+		return
+	}
+	if env.SDP == "" {
+		http.Error(w, "empty offer", http.StatusBadRequest)
+		return
+	}
+	if !r.verifyOfferDeviceProof(siteID, env.DevicePubkey, env.Nonce, env.Sig) {
+		// Any proof failure — unknown/expired/replayed challenge nonce, a
+		// device_pubkey not in the site's published set, or a bad signature — is a
+		// flat 403, and crucially the Pi is NEVER contacted (we have not parked the
+		// offer or woken an offer-poller). Fail-closed.
+		http.Error(w, "device proof required", http.StatusForbidden)
+		return
+	}
+	// Park ONLY the raw SDP for the Pi, exactly as before C2: the Pi drains the
+	// raw SDP body (it never sees the device-proof envelope), so the Pi side is
+	// unchanged by C2. The device proof is a relay-side gate only.
+	if err := r.Signals.ParkOffer(siteID, nonce, []byte(env.SDP)); err != nil {
 		if err == errSignalRateLimited {
 			http.Error(w, "too many offers", http.StatusTooManyRequests)
 			return

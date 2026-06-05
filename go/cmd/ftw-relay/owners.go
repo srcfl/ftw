@@ -23,10 +23,11 @@ import (
 // Pin so its pin survives restarts and is never first-come-first-served.
 type OwnerRegistry struct {
 	mu         sync.Mutex
-	bySite     map[string]string    // site_id → host_id
-	keyBySite  map[string]string    // site_id → pinned ES256 public key (hex X||Y)
-	seenBySite map[string]time.Time // site_id → last successful registration
-	pinned     map[string]bool      // operator-pinned sites — never capped or GC'd
+	bySite     map[string]string          // site_id → host_id
+	keyBySite  map[string]string          // site_id → pinned ES256 public key (hex X||Y)
+	seenBySite map[string]time.Time       // site_id → last successful registration
+	pinned     map[string]bool            // operator-pinned sites — never capped or GC'd
+	devKeys    map[string]map[string]bool // site_id → set of trusted device pubkeys (128 hex)
 }
 
 // maxOwnerSites bounds the number of TOFU (self-registered) sites the in-memory
@@ -44,12 +45,19 @@ var (
 	ErrTooManyOwners = errors.New("too many registered sites")
 )
 
+// maxDeviceKeysPerSite bounds the trusted device-key set a single site may
+// publish, so an authenticated-but-buggy (or compromised) Pi can't grow relay
+// memory without limit by registering an unbounded set. A household has a
+// handful of owner devices; this is generous headroom.
+const maxDeviceKeysPerSite = 64
+
 func NewOwnerRegistry() *OwnerRegistry {
 	return &OwnerRegistry{
 		bySite:     make(map[string]string),
 		keyBySite:  make(map[string]string),
 		seenBySite: make(map[string]time.Time),
 		pinned:     make(map[string]bool),
+		devKeys:    make(map[string]map[string]bool),
 	}
 }
 
@@ -89,6 +97,44 @@ func (r *OwnerRegistry) Register(siteID, hostID, pubKeyHex string) error {
 	return nil
 }
 
+// SetDeviceKeys replaces the trusted device-key set for a site (C1). It is
+// called ONLY from the ES256-verified /me/register path, so the relay trusts the
+// set exactly as far as it trusts the registration signature — the same key that
+// pins the site mapping authorises which device keys may signal for it. Keys are
+// already canonicalised (validDevicePubKeyHex) + de-duplicated by the caller;
+// the count is capped here so a compromised Pi can't grow relay memory without
+// bound. Passing an empty slice clears the set (the site trusts no device keys).
+// It NEVER creates a site mapping on its own — a Register must have run first.
+func (r *OwnerRegistry) SetDeviceKeys(siteID string, keys []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(keys) == 0 {
+		delete(r.devKeys, siteID)
+		return
+	}
+	set := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if len(set) >= maxDeviceKeysPerSite {
+			break
+		}
+		set[k] = true
+	}
+	r.devKeys[siteID] = set
+}
+
+// HasDeviceKey reports whether pubKeyHex is in the site's published trusted
+// device-key set (C2). The signaling-offer handler calls this AFTER verifying the
+// browser's signature over the challenge nonce, so only a browser that proved
+// possession of a published device key is allowed to forward an offer to the Pi.
+// Unknown site or empty set → false (fail-closed: no device keys ⇒ no device-key
+// signaling).
+func (r *OwnerRegistry) HasDeviceKey(siteID, pubKeyHex string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	set := r.devKeys[siteID]
+	return set != nil && set[pubKeyHex]
+}
+
 // GC drops self-registered sites whose last registration is older than maxAge
 // (a Pi re-registers periodically, so a stale mapping means it is gone). Returns
 // how many were evicted. Operator-pinned sites (e.g. the home site) are never
@@ -106,6 +152,7 @@ func (r *OwnerRegistry) GC(maxAge time.Duration) int {
 			delete(r.bySite, site)
 			delete(r.seenBySite, site)
 			delete(r.keyBySite, site)
+			delete(r.devKeys, site)
 			removed++
 		}
 	}

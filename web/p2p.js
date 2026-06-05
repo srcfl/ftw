@@ -27,6 +27,10 @@
   var seq = 0;
   var listeners = [];
   var stateName = "off";             // off | connecting | direct | relay
+  var unenrolled = false;            // true once a connect() found NO device key
+                                     // for this origin (never LAN-enrolled). The
+                                     // sign-in gate reads this to prompt setup
+                                     // instead of looping on "connecting".
 
   // ---- base path: relay /me/<site> prefix, or "" for home-host / LAN ----
   function apiBase() {
@@ -100,6 +104,66 @@
     var s = "";
     for (var i = 0; i < b.length; i++) s += (b[i] + 0x100).toString(16).slice(1);
     return s;
+  }
+
+  // challengeURL is the relay's per-site device-proof challenge endpoint (C2). It
+  // lives at the relay ROOT alongside /signal/<site>/{offer,answer} and is keyed
+  // by site_id only — never under the /me/<site> tunnel prefix.
+  function challengeURL(site) {
+    return "/signal/" + encodeURIComponent(site) + "/challenge";
+  }
+
+  // ---- device-key proof for the relay (C2) ----------------------------------
+  // Before an offer ever reaches the Pi, the browser must prove it holds a key
+  // the Pi has published to the relay (C1). The relay refuses (403) — and the Pi
+  // is NEVER contacted — for any offer without a valid proof. We:
+  //   1. GET /signal/<site>/challenge  -> {nonce, exp_ms}
+  //   2. sign "ftw-signal:v1:<site>:<nonce>" with the device key
+  //   3. include {device_pubkey, nonce, sig} in the offer POST.
+  // If this device has no key (never enrolled on the LAN), there is nothing to
+  // prove with — we set the "unenrolled" state so the gate can tell the user to
+  // set up this device on their home network first, and abort the attempt rather
+  // than firing a doomed offer.
+  function deviceKeyHandle() {
+    // Use the same per-origin device-key store the ceremony pages mint into. It's
+    // attached to window by device-key.js (loaded as a classic script before this
+    // on the dashboard). hasDeviceKey() must NOT mint — a freshly-minted key the
+    // Pi hasn't pinned would look enrolled to the relay but be rejected by the Pi.
+    if (!window.ftwDeviceKey || typeof window.ftwDeviceKey.getOrCreate !== "function") {
+      var e = new Error("device-key store not loaded yet");
+      e.code = "store-pending"; // transient — module script hasn't run yet
+      return Promise.reject(e);
+    }
+    return window.ftwDeviceKey.hasDeviceKey().then(function (has) {
+      if (!has) {
+        var err = new Error("no device key for this origin — enroll on the LAN first");
+        err.code = "no-device-key";
+        return Promise.reject(err);
+      }
+      return window.ftwDeviceKey.getOrCreate();
+    });
+  }
+
+  // signalProof fetches a fresh challenge nonce and signs it, returning the
+  // {device_pubkey, nonce, sig} the offer POST attaches. Fails closed: any error
+  // (no key, challenge fetch failure, sign failure) rejects so the offer is never
+  // sent — the relay would reject it anyway, and an unenrolled device must not
+  // wake the Pi.
+  function signalProof(site) {
+    return deviceKeyHandle().then(function (key) {
+      return fetch(challengeURL(site), { method: "GET" })
+        .then(function (r) {
+          if (!r.ok) throw new Error("signal challenge http " + r.status);
+          return r.json();
+        })
+        .then(function (ch) {
+          if (!ch || !ch.nonce) throw new Error("signal challenge missing nonce");
+          var msg = "ftw-signal:v1:" + site + ":" + ch.nonce;
+          return key.sign(msg).then(function (sig) {
+            return { device_pubkey: key.pubHex, nonce: ch.nonce, sig: sig };
+          });
+        });
+    });
   }
 
   // ---- state broadcast (drives the dashboard transport indicator) ----
@@ -326,13 +390,17 @@
     connecting = new Promise(function (resolve) {
       var settled = false;
       var to;
-      function finish(ok) {
+      // finish(ok[, soft]): soft=true means "transient, retry soon" — used when the
+      // device-key store simply hasn't loaded yet at warm-up (a module-script load
+      // race), so we DON'T arm the long cooldown that would otherwise leave the page
+      // on the relay for 30 s for no reason.
+      function finish(ok, soft) {
         if (settled) return;
         settled = true;
         connecting = null;
         clearTimeout(to);
         if (!ok) {
-          nextRetryAt = Date.now() + RETRY_COOLDOWN_MS;
+          if (!soft) nextRetryAt = Date.now() + RETRY_COOLDOWN_MS;
           teardown();
           setState("relay");
         }
@@ -373,20 +441,36 @@
       pinnedIdentity()
         .then(function (pin) {
           var site = pin.site;
+          // C2: prove this device to the RELAY before the offer can reach the Pi.
+          // signalProof fetches a fresh challenge nonce and signs
+          // "ftw-signal:v1:<site>:<nonce>" with the device key. Done in parallel
+          // with the SDP/ICE work so it adds no latency on the happy path.
+          var proofP = signalProof(site);
           return pc.createOffer()
             .then(function (offer) { return pc.setLocalDescription(offer); })
             .then(function () { return waitIceComplete(pc); })
-            .then(function () {
+            .then(function () { return proofP; })
+            .then(function (proof) {
+              // The offer body is now a JSON envelope carrying the raw SDP PLUS the
+              // device-key proof (C2). The relay verifies {device_pubkey, nonce,
+              // sig} against the site's published key set + consumes the nonce, then
+              // parks the SDP for the Pi exactly as before. Field names are fixed by
+              // the contract — do not rename.
               return fetch(signalURL(site, "offer", nonce), {
                 method: "POST",
-                // The body is the raw SDP offer (the relay parks it verbatim and
-                // the Pi reads it raw); it is not a JSON envelope.
-                headers: { "Content-Type": "application/sdp" },
-                body: pc.localDescription.sdp
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  sdp: pc.localDescription.sdp,
+                  device_pubkey: proof.device_pubkey,
+                  nonce: proof.nonce,
+                  sig: proof.sig
+                })
               });
             })
             .then(function (r) {
-              // 204 = parked OK; anything else is a hard signaling error.
+              // 204 = parked OK; anything else is a hard signaling error. A 403
+              // means the relay rejected the device proof (unknown/again-used key);
+              // the Pi was NEVER contacted — fall back to the relay transport.
               if (r.status !== 204 && !r.ok) throw new Error("offer http " + r.status);
               return pollAnswer(site, nonce);
             })
@@ -402,7 +486,14 @@
         })
         .catch(function (e) {
           if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
-          finish(false);
+          // No device key on this origin (never enrolled on the LAN): there is
+          // nothing to prove to the relay, so a direct channel can never open from
+          // here. Remember it so the sign-in gate shows "set up this device on your
+          // home network first" instead of a misleading endless "connecting".
+          if (e && e.code === "no-device-key") { unenrolled = true; }
+          // Soft-fail (store-pending): the device-key module hasn't run yet — retry
+          // soon instead of arming the long cooldown.
+          finish(false, e && e.code === "store-pending");
         });
     });
     return connecting;
@@ -553,6 +644,17 @@
     connect: connect,
     onState: function (fn) { listeners.push(fn); try { fn(stateName); } catch (e) {} },
     state: function () { return stateName; },
+    // isUnenrolled reports whether a connect() attempt found NO device key for this
+    // origin (this device was never set up on the LAN), so the relay can't be
+    // proven to and a direct channel can't open. The gate uses it to show the
+    // "set up this device on your home network first" path (C2) rather than a
+    // perpetual "connecting".
+    isUnenrolled: function () { return unenrolled; },
+    // site() resolves the pinned site_id (TOFU /api/identity, then localStorage).
+    // next-app.js needs it to build the C3 device-PoP signing string
+    // "ftw-device-pop:v1:<site>:<challenge>" — the SAME site p2p.js signs the
+    // signal proof over, so both ends agree.
+    site: function () { return pinnedIdentity().then(function (pin) { return pin.site; }); },
     setEnabled: function (on) {
       localStorage.setItem("ftw.p2p", on ? "on" : "off");
       if (!on) { teardown(); setState("relay"); }

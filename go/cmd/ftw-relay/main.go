@@ -30,6 +30,7 @@ func main() {
 	homeHost := flag.String("home-host", "", "bare host that maps to a single owner Pi (e.g. home.fortytwowatts.com); requires -home-site")
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
+	homeWeb := flag.String("home-web", "", "path to the web/ bundle on the relay VM; when set, the home host's static GETs are served from here instead of forwarded to the Pi (SLICE 1). Unset → forward static GETs to the Pi (back-compat).")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
 	flag.Parse()
@@ -62,10 +63,13 @@ func main() {
 		Owners:      owners,
 		Polls:       NewPollSecrets(),
 		Signals:     NewSignalMailbox(),
+		Challenges:  NewSignalChallenges(),
 		TrustCFIP:   *trustCFIP,
 		PollTimeout: *pollTimeout,
 		HomeHost:    *homeHost,
 		HomeSite:    *homeSite,
+		HomeWeb:     *homeWeb,
+		HomePubKey:  *homePubKey,
 	}
 
 	srv := &http.Server{
@@ -110,6 +114,14 @@ func main() {
 				// site_ids can't grow relay memory; a live pair re-signals on demand.
 				if n := r.Signals.GC(30 * time.Minute); n > 0 {
 					slog.Info("ftw-relay: signal GC", "removed", n)
+				}
+				// Reap expired device-key challenge nonces (C2) so a flood of
+				// GET /signal/<random>/challenge can't grow relay memory; each nonce
+				// also self-expires after ~60s, so this just trims the map proactively.
+				if r.Challenges != nil {
+					if n := r.Challenges.GC(0); n > 0 {
+						slog.Info("ftw-relay: signal-challenge GC", "removed", n)
+					}
 				}
 				// Evict idle per-source-IP offer buckets (FIX-C) so a churn of source
 				// IPs can't grow the limiter map without bound; an idle IP has

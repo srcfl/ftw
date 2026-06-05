@@ -1628,6 +1628,18 @@ func main() {
 			// mapping would be refused anyway) — fail loud, not silent.
 			slog.Error("owner-access: remote_access enabled but no site identity; skipping relay registration", "key_path", identityKeyPath)
 		default:
+			// C1: publish this site's trusted device_pubkeys on every /me/register
+			// so the relay can gate signaling on a device-key proof (no published
+			// key → the relay forwards no signaling, fail-closed). Wired here so
+			// owner_relay_register.go stays free of a *Store dependency.
+			trustedDevicePubkeysLoader = func() []string {
+				pks, err := st.TrustedDevicePubkeys()
+				if err != nil {
+					slog.Warn("owner-access: could not load trusted device_pubkeys for relay publish", "err", err)
+					return nil
+				}
+				return pks
+			}
 			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
 		}
 	}

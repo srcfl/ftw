@@ -26,6 +26,33 @@ type relaySigner interface {
 	SignRawHex(msg string) (string, error)
 }
 
+// trustedDevicePubkeysLoader, when set, returns the current set of trusted
+// device_pubkeys (C1) to publish on every /me/register. It is a package-level
+// hook rather than a parameter so the single call site in main.go does not need
+// to change as this area lands in parallel — main.go wires it once, right after
+// opening the state store, with:
+//
+//	trustedDevicePubkeysLoader = func() []string {
+//	    pks, err := st.TrustedDevicePubkeys()
+//	    if err != nil { slog.Warn("owner-access: load device pubkeys", "err", err); return nil }
+//	    return pks
+//	}
+//
+// Nil (unwired) means the "device_pubkeys" field is OMITTED from the body — the
+// relay then publishes no device-key set for the site and its device-gate (C2)
+// stays closed, which is the correct fail-closed default before wiring.
+var trustedDevicePubkeysLoader func() []string
+
+// loadTrustedDevicePubkeys returns the device-key set to publish, or nil when no
+// loader is wired or it errors. Always returns a non-nil-safe slice the caller
+// only marshals when len>0, so the field is omitted rather than sent as [].
+func loadTrustedDevicePubkeys() []string {
+	if trustedDevicePubkeysLoader == nil {
+		return nil
+	}
+	return trustedDevicePubkeysLoader()
+}
+
 // deriveOwnerHostID returns a stable host_id for the owner-access
 // relay registration. It looks up (or creates) a row in the
 // state.db config table so the host_id survives restarts — important
@@ -133,13 +160,25 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 			slog.Warn("owner-access: sign register", "err", err)
 			return
 		}
-		body, _ := json.Marshal(map[string]any{
+		reqBody := map[string]any{
 			"site_id":    siteID,
 			"host_id":    hostID,
 			"public_key": signer.PublicKeyHex(),
 			"ts_ms":      tsMs,
 			"sig":        sig,
-		})
+		}
+		// C1: publish the set of trusted device_pubkeys so the relay can gate
+		// signaling offers (C2) on a browser proving one of them. The existing
+		// ES256 register signature already authenticates this body's origin (it
+		// binds site_id→host_id at a timestamp; only the site key can mint it), so
+		// the relay accepting the device set off an authenticated register is the
+		// same trust model as accepting the host_id mapping. Omitted entirely when
+		// no device key is enrolled yet (loader nil or empty) — the relay then has
+		// no set to gate on and its device-gate stays closed (fail-closed default).
+		if pks := loadTrustedDevicePubkeys(); len(pks) > 0 {
+			reqBody["device_pubkeys"] = pks
+		}
+		body, _ := json.Marshal(reqBody)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/me/register", bytes.NewReader(body))
 		if err != nil {
 			slog.Warn("owner-access: build register request", "err", err)

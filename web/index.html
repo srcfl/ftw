@@ -121,11 +121,31 @@
     <div class="signin-gate-card">
       <div class="signin-gate-brand">&#9889; forty-two watts</div>
       <p class="signin-gate-lead signin-gate-connecting">Reaching your home&hellip;</p>
+
+      <!-- signin mode: passkey (or silent device) sign-in -->
       <div class="signin-gate-auth">
-        <p class="signin-gate-lead">Sign in with your passkey to reach your home.</p>
+        <p class="signin-gate-lead">Sign in to reach your home.</p>
         <button id="signin-gate-btn" class="signin-gate-btn">Sign in</button>
         <p class="signin-gate-msg" id="signin-banner-msg" role="status" aria-live="polite"></p>
         <p class="signin-gate-setup">First time on this device? <a href="/owner-access/">Set it up &rarr;</a></p>
+      </div>
+
+      <!-- setup mode: this device has no key — it was never set up on the LAN, so
+           it can't be remembered or proven to the relay. Send the user to the
+           home-network enrollment instead of a passkey prompt they can't satisfy. -->
+      <div class="signin-gate-needs-setup">
+        <p class="signin-gate-lead">Set up this device first.</p>
+        <p class="signin-gate-sub">This browser hasn&rsquo;t been set up to reach your home yet. Open this page on your home Wi&#8209;Fi, once, to add it &mdash; after that it signs in here automatically.</p>
+        <a class="signin-gate-btn" href="/owner-access/">Set up this device &rarr;</a>
+      </div>
+
+      <!-- Security clarity (Fredrik's ask): make the trust model legible. The
+           connection is direct & end-to-end encrypted to YOUR Pi; the relay only
+           forwards ciphertext and never sees your home. Reflected live by
+           next-app.js from the P2P transport state. -->
+      <div class="signin-gate-trust" id="signin-gate-trust">
+        <span class="signin-gate-trust-dot"></span>
+        <span class="signin-gate-trust-text" id="signin-gate-trust-text">End-to-end encrypted to your Pi. The relay never sees your home.</span>
       </div>
     </div>
   </div>
@@ -713,6 +733,11 @@
     </div>
   </ftw-modal>
 
+  <!-- Device-key store (home-route Phase 5): mints / loads this device's silent
+       login key and exposes window.ftwDeviceKey for p2p.js (C2) + next-app.js
+       (C3). A module, so it's deferred — p2p.js's warm-up connect soft-fails once
+       if it races ahead and retries promptly once the global is present. -->
+  <script type="module" src="/owner-access/device-key.js?v=devkey1"></script>
   <script src="/p2p.js?v=p2p5"></script>
   <script src="/next-app.js?v=next6"></script>
   <script src="/settings.js?v=diag1"></script>

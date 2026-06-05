@@ -3486,8 +3486,8 @@
   // explanation.)
   function setupP2PIndicator() {
     var el = document.getElementById("p2p-status");
-    if (!el || !window.ftwP2P) return;
-    var label = el.querySelector(".p2p-label");
+    if (!window.ftwP2P) return;
+    var label = el && el.querySelector(".p2p-label");
     var titles = {
       direct: "Direct & end-to-end encrypted between your browser and your Pi — the relay sees nothing.",
       relay: "Relayed via a blind TURN server — still end-to-end encrypted; the relay only forwards ciphertext.",
@@ -3495,14 +3495,37 @@
       off: "Direct channel unavailable.",
     };
     var text = { direct: "Direct", relay: "Relayed", connecting: "Connecting…", off: "" };
-    el.style.cursor = "default";
+    if (el) el.style.cursor = "default";
+
+    // The sign-in gate's trust line mirrors the same transport, so a visitor sees
+    // the security story BEFORE they're signed in. Direct = end-to-end to the Pi;
+    // Relayed = still E2E, relay forwards ciphertext only.
+    var trust = document.getElementById("signin-gate-trust");
+    var trustText = document.getElementById("signin-gate-trust-text");
+    var trustCopy = {
+      direct: "Direct & end-to-end encrypted to your Pi. The relay never sees your home.",
+      relay: "End-to-end encrypted. The relay only forwards ciphertext — it never sees your home.",
+      connecting: "Opening an encrypted channel to your Pi…",
+      off: "End-to-end encrypted to your Pi. The relay never sees your home.",
+    };
+
     window.ftwP2P.onState(function (s) {
-      if (s === "off") { el.hidden = true; return; }
-      el.hidden = false;
-      el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
-      el.classList.add("p2p-" + s);
-      if (label) label.textContent = text[s] || "";
-      el.title = titles[s] || "Transport";
+      if (el) {
+        if (s === "off") { el.hidden = true; }
+        else {
+          el.hidden = false;
+          el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
+          el.classList.add("p2p-" + s);
+          if (label) label.textContent = text[s] || "";
+          el.title = titles[s] || "Transport";
+        }
+      }
+      if (trust) {
+        trust.classList.remove("is-relay", "is-connecting");
+        if (s === "relay") trust.classList.add("is-relay");
+        else if (s === "connecting") trust.classList.add("is-connecting");
+        if (trustText && trustCopy[s]) trustText.textContent = trustCopy[s];
+      }
     });
   }
 
@@ -3572,15 +3595,93 @@
     ownerNotAuthed = false;
   }
 
-  // runSignIn: the passkey login ceremony, over the dashboard's strict P2P
-  // transport. On success the Pi sets the owner session cookie (captured
-  // in-process by the channel Bridge) — we just refresh the data in place.
+  // ---- C3: silent device-key sign-in (no passkey) ---------------------------
+  // A device that was set up on the LAN (C4) holds a NON-EXTRACTABLE key the Pi
+  // pinned. Once the channel is open we can prove that key to the Pi to mint the
+  // owner session SILENTLY — no Face ID. Flow:
+  //   GET  /api/owner-access/device-challenge -> {challenge, exp_ms}
+  //   sign "ftw-device-pop:v1:<site>:<challenge>" with the device key
+  //   POST /api/owner-access/device-pop {device_pubkey, challenge, sig}
+  // All over ownerFetch (strict P2P), so the proof never crosses the relay in
+  // cleartext. Resolves true iff the session was minted. Resolves false (never
+  // throws) for "no device key", "no site", or any PoP failure — the caller then
+  // falls back to the passkey ceremony.
+  var devicePoPBusy = false;
+  function runDevicePoP() {
+    if (devicePoPBusy) return Promise.resolve(false);
+    // Need both the device-key store and the pinned site (for the signing string).
+    if (!window.ftwDeviceKey || typeof window.ftwDeviceKey.hasDeviceKey !== "function") {
+      return Promise.resolve(false);
+    }
+    if (!window.ftwP2P || typeof window.ftwP2P.site !== "function") {
+      return Promise.resolve(false);
+    }
+    devicePoPBusy = true;
+    return window.ftwDeviceKey.hasDeviceKey()
+      .then(function (has) {
+        if (!has) return false; // never enrolled on this device → passkey path
+        return Promise.all([window.ftwDeviceKey.getOrCreate(), window.ftwP2P.site()])
+          .then(function (pair) {
+            var key = pair[0], site = pair[1];
+            if (!site) return false;
+            return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
+              .then(function (r) { return r.ok ? r.json() : null; })
+              .then(function (ch) {
+                if (!ch || !ch.challenge) return false;
+                var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
+                return key.sign(msg).then(function (sig) {
+                  return ownerFetch("/api/owner-access/device-pop", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
+                    credentials: "same-origin",
+                  }).then(function (pop) { return !!(pop && pop.ok); });
+                });
+              });
+          });
+      })
+      .catch(function () { return false; })
+      .then(function (ok) { devicePoPBusy = false; return ok; });
+  }
+
+  // applySignedIn refreshes the dashboard in place once a session is minted
+  // (passkey OR silent device-PoP). Shared so both paths converge.
+  function applySignedIn() {
+    hideGate();
+    fetchStatus();
+    fetchLiveHistory(true);
+    loadHistory(chartRange);
+    setupAuth(); // reflect the signed-in state (signout button)
+  }
+
+  // runSignIn: sign in over the dashboard's strict P2P transport. Tries the SILENT
+  // device-key path FIRST (C3) — a returning device signs in with no Face ID — and
+  // only falls back to the passkey ceremony when there's no device key or the PoP
+  // fails. On success the Pi sets the owner session cookie (captured in-process by
+  // the channel Bridge); we just refresh the data in place.
   var signInBusy = false;
   function runSignIn() {
     if (signInBusy) return Promise.resolve(false);
     signInBusy = true;
     var msgEl = document.getElementById("signin-banner-msg");
     function say(t, cls) { if (msgEl) { msgEl.textContent = t || ""; msgEl.className = "signin-banner-msg" + (cls ? " " + cls : ""); } }
+    // Silent first: if this device is remembered, no passkey prompt at all.
+    say("Reaching your home…");
+    return runDevicePoP().then(function (silentOk) {
+      if (silentOk) {
+        signInBusy = false;
+        say("Signed in — this device is remembered.", "ok");
+        applySignedIn();
+        return true;
+      }
+      return runPasskeySignIn(say);
+    });
+  }
+
+  // runPasskeySignIn is the explicit passkey ceremony — the fallback when the
+  // silent device path isn't available. Kept as its own function so runSignIn can
+  // try silent first without duplicating the WebAuthn flow.
+  function runPasskeySignIn(say) {
     say("Waiting for your passkey…");
     return ownerFetch("/api/owner-access/login/start", { method: "POST" })
       .then(function (start) {
@@ -3611,13 +3712,7 @@
       })
       .then(function (ok) {
         signInBusy = false;
-        if (ok) {
-          hideGate();
-          fetchStatus();
-          fetchLiveHistory(true);
-          loadHistory(chartRange);
-          setupAuth(); // reflect the signed-in state (signout button)
-        }
+        if (ok) applySignedIn();
         return ok;
       });
   }
@@ -3643,15 +3738,47 @@
         if (me && me.can_sign_out) {            // signed-in remote session
           if (signoutBtn) signoutBtn.hidden = false;
           hideGate();
-        } else if (me && me.authenticated) {    // genuine-LAN bypass — full access
+          return;
+        }
+        if (me && me.authenticated) {           // genuine-LAN bypass — full access
           if (signoutBtn) signoutBtn.hidden = true;
           hideGate();
-        } else {                                // not signed in (remote) → show the gate
-          if (signoutBtn) signoutBtn.hidden = true;
-          showGate("signin");
+          return;
         }
+        // Not signed in (remote). Try the SILENT device-key path (C3) ONCE before
+        // showing the gate — a remembered device signs in with no Face ID. Only
+        // when there's no device key / PoP fails do we fall back to the passkey
+        // gate. silentAuthTried guards against re-running it on every channel
+        // reconnect.
+        if (signoutBtn) signoutBtn.hidden = true;
+        if (!silentAuthTried) {
+          silentAuthTried = true;
+          runDevicePoP().then(function (ok) {
+            if (ok) { applySignedIn(); return; }
+            showSignInGate();
+          });
+          return;
+        }
+        showSignInGate();
       })
       .catch(function () { /* channel down → leave the gate as-is (connecting) */ });
+  }
+
+  // silentAuthTried: the C3 silent device-PoP is attempted at most once per page
+  // load (it's idempotent but pointless to repeat on every reconnect).
+  var silentAuthTried = false;
+
+  // showSignInGate reveals the passkey gate, choosing the copy by whether this
+  // device is even capable of being remembered. If p2p.js reports the origin is
+  // UNENROLLED (no device key — never set up on the LAN), we surface the explicit
+  // "set up this device on your home network first" path (C2) instead of a passkey
+  // prompt the user can't satisfy here.
+  function showSignInGate() {
+    var unEnrolled = false;
+    try {
+      unEnrolled = !!(window.ftwP2P && window.ftwP2P.isUnenrolled && window.ftwP2P.isUnenrolled());
+    } catch (e) { /* default to the normal sign-in gate */ }
+    showGate(unEnrolled ? "setup" : "signin");
   }
 
   // ---- Init ----

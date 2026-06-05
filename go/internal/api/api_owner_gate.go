@@ -76,6 +76,15 @@ func isOwnerAccessOpenPath(p string) bool {
 		"/api/owner-access/enroll/finish",
 		"/api/owner-access/whoami",
 		"/api/owner-access/logout",
+		// C3 device-key PoP login: these are the silent-login analogue of
+		// login/start + login/finish — the device key IS the credential, so they
+		// must be reachable pre-session over the P2P channel. They mint a session
+		// only on a valid PoP against a PINNED trusted device; an unauthenticated
+		// caller learns nothing (challenge is a random nonce) and can mint nothing
+		// without a key the Pi already trusts. This does NOT relax the gate for any
+		// other /api/* path.
+		"/api/owner-access/device-challenge",
+		"/api/owner-access/device-pop",
 		// /api/identity is the TOFU anchor for the P2P-only home route: the
 		// browser MUST fetch + pin the Pi's PUBLIC ES256 key before it can open
 		// (and verify) a P2P channel, so this must be reachable unauthenticated

@@ -252,8 +252,11 @@ body.ftw-next .icon-btn[aria-pressed="true"]:hover {
 /* Sign-in GATE — a full-screen lock over the dashboard for logged-out remote
    visitors (the dashboard IS the door; locked, it shows only the door, never
    the empty dashboard chrome). setupAuth() reveals it; data-mode flips between
-   "connecting" and "signin". Single amber accent; on-accent text near-black per
-   DESIGN.md; tokens flip cleanly in the light theme. */
+   "connecting" (reaching home), "signin" (passkey / silent device key) and
+   "setup" (this device has no key — send the user to LAN enrollment). A trust
+   line conveys the direct, end-to-end, relay-blind transport. Single amber
+   accent; on-accent text near-black per DESIGN.md; tokens flip cleanly in the
+   light theme. */
 body.ftw-next .signin-gate {
   position: fixed;
   inset: 0;
@@ -293,11 +296,54 @@ body.ftw-next .signin-gate-btn {
 body.ftw-next .signin-gate-btn:hover { filter: brightness(1.05); }
 body.ftw-next .signin-gate-msg { color: var(--fg-dim); font-size: 12px; margin: 12px 0 0; min-height: 1em; }
 body.ftw-next .signin-gate-msg.err { color: var(--accent-e); }
+body.ftw-next .signin-gate-msg.ok { color: var(--green-e); }
 body.ftw-next .signin-gate-setup { color: var(--fg-dim); font-size: 12px; margin: 18px 0 0; }
 body.ftw-next .signin-gate-setup a { color: var(--accent-e); text-decoration: none; }
-/* Mode switch: "connecting" shows only the reaching-home line; "signin" the card. */
-body.ftw-next .signin-gate[data-mode="connecting"] .signin-gate-auth { display: none; }
-body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-connecting { display: none; }
+/* setup mode — "set up this device first" (no device key on this origin). */
+body.ftw-next .signin-gate-sub { color: var(--fg-dim); font-size: 12.5px; line-height: 1.5; margin: 0 0 18px; }
+body.ftw-next a.signin-gate-btn { display: inline-block; text-decoration: none; }
+
+/* Trust line — direct & E2E-encrypted, relay-blind. Mono eyebrow + 6 px status
+   dot per DESIGN.md; the accent glow on the dot is the only sanctioned shadow.
+   It carries p2p-direct / p2p-relay / p2p-connecting classes from next-app.js
+   so the dot colour tracks the live transport (green = direct, amber = relay). */
+body.ftw-next .signin-gate-trust {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 22px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+}
+body.ftw-next .signin-gate-trust-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--green-e);
+  box-shadow: 0 0 10px var(--green-e);
+}
+body.ftw-next .signin-gate-trust.is-relay .signin-gate-trust-dot { background: var(--accent-e); box-shadow: none; }
+body.ftw-next .signin-gate-trust.is-connecting .signin-gate-trust-dot { background: var(--fg-muted); box-shadow: none; }
+body.ftw-next .signin-gate-trust-text {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+
+/* Mode switch: "connecting" shows only the reaching-home line; "signin" the
+   passkey card; "setup" the set-up-this-device card. */
+body.ftw-next .signin-gate-auth { display: none; }
+body.ftw-next .signin-gate-needs-setup { display: none; }
+body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-auth { display: block; }
+body.ftw-next .signin-gate[data-mode="setup"] .signin-gate-needs-setup { display: block; }
+body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-connecting,
+body.ftw-next .signin-gate[data-mode="setup"] .signin-gate-connecting { display: none; }
+/* The trust line is meaningless while still "connecting" — hide it there. */
+body.ftw-next .signin-gate[data-mode="connecting"] .signin-gate-trust { display: none; }
 
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that

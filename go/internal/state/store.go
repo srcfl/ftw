@@ -578,7 +578,8 @@ func (s *Store) migrate() error {
 			last_used_ms  INTEGER NOT NULL DEFAULT 0,
 			wallet_handle TEXT    NOT NULL DEFAULT '',
 			backup_eligible INTEGER NOT NULL DEFAULT 0,
-			backup_state    INTEGER NOT NULL DEFAULT 0
+			backup_state    INTEGER NOT NULL DEFAULT 0,
+			device_pubkey TEXT    NOT NULL DEFAULT ''
 		) STRICT`,
 		`CREATE TABLE IF NOT EXISTS owner_sessions (
 			token         TEXT    PRIMARY KEY NOT NULL,
@@ -598,6 +599,13 @@ func (s *Store) migrate() error {
 	for _, col := range []struct{ name, ddl string }{
 		{"backup_eligible", "backup_eligible INTEGER NOT NULL DEFAULT 0"},
 		{"backup_state", "backup_state INTEGER NOT NULL DEFAULT 0"},
+		// device_pubkey is the per-credential P-256 device key (X||Y, 128 hex
+		// chars) minted at LAN enrollment (C4). It backs the silent device-PoP
+		// login (C3) and is published to the relay so the browser can prove it
+		// before a signaling offer is forwarded (C1/C2). Empty for credentials
+		// enrolled before this column existed; such a device can be upgraded by
+		// re-presenting the key on a later enroll/login finish.
+		{"device_pubkey", "device_pubkey TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumnIfMissing("trusted_devices", col.name, col.ddl); err != nil {
 			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)

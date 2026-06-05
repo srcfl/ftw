@@ -362,6 +362,9 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
 	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
+	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).
+	s.handle("GET  /api/owner-access/device-challenge", s.handleOwnerDeviceChallenge)
+	s.handle("POST /api/owner-access/device-pop", s.handleOwnerDevicePoP)
 
 	// ---- Self-sovereign site identity (Phase 2) ----
 	s.handle("GET  /api/identity", s.handleIdentity)
