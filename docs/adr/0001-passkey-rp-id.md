@@ -27,8 +27,12 @@ re-enrollment. Therefore:
 
 ## Sequencing
 
-- **Phase 1–3:** RP-ID stays `relay.fortytwowatts.com` (the host actually
-  serving the page). `FTW_OWNER_ACCESS_RPID` remains the override knob.
-- **Phase 4:** when `home.fortytwowatts.com` exists (host + wildcard TLS +
-  routing), flip the default to `home.fortytwowatts.com` and serve enrollment
-  from that origin. This is the moment real passkeys are first enrolled.
+- **Phases 1–3 (done):** RP-ID ran on `relay.fortytwowatts.com` (the host then
+  serving the page) for security-floor hardening only — no real passkeys.
+- **Phase 4 (SHIPPED):** the cutover has landed. The RP-ID default is now
+  **`home.fortytwowatts.com`** (`go/cmd/forty-two-watts/main.go`, mirrored in
+  `api_owner_access.go`'s `webauthnLib` fallback), enrollment is served from that
+  origin, and the relay's single-home route requires an operator
+  `-home-pubkey` pin. `FTW_OWNER_ACCESS_RPID` remains an override knob for dev
+  (e.g. `localhost`) but **must not** be set back to `relay.fortytwowatts.com`
+  for a real deployment — that would bind passkeys to a throwaway origin.

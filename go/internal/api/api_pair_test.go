@@ -11,10 +11,35 @@ import (
 	"time"
 )
 
+// allowManage is the manage-authorizer stub for route-logic tests that aren't
+// exercising the owner gate — it authorizes every request.
+func allowManage(*http.Request) ([]byte, bool) { return []byte("test-owner"), true }
+
+// denyManage rejects every request — used to prove start/abort are owner-gated.
+func denyManage(*http.Request) ([]byte, bool) { return nil, false }
+
+// A friend pair-flow request (no owner auth) must not be able to spawn a new
+// pair sidecar or abort the active session.
+func TestPairStartAbortRequireOwner(t *testing.T) {
+	store := NewPairStatusStore()
+	mux := http.NewServeMux()
+	RegisterPairRoutes(mux, store, "/bin/true", denyManage)
+
+	for _, path := range []string{"/api/pair/start", "/api/pair/abort"} {
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{"ttl":"2h"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without owner auth: got %d, want 401", path, w.Code)
+		}
+	}
+}
+
 func TestPairStatusPostThenGet(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	body := fmt.Sprintf(`{"session_id":"abc","code":"7-x","intent":"goodwe","started_at":"%s","ttl_s":14400}`, now)
@@ -41,7 +66,7 @@ func TestPairStatusPostThenGet(t *testing.T) {
 func TestPairStatusGet404WhenNoSession(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest("GET", "/api/pair/status", nil))
 	if w.Code != 404 {
@@ -58,7 +83,7 @@ func TestPairStatusGet404WhenNoSession(t *testing.T) {
 func TestPairStatusGet404WhenExpired(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	stale := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
 	store.Set(PairStatus{
@@ -84,7 +109,7 @@ func TestPairStatusGet404WhenExpired(t *testing.T) {
 func TestPairStatusGetServesUnexpiredSession(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	fresh := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
 	store.Set(PairStatus{
@@ -104,7 +129,7 @@ func TestPairStatusGetServesUnexpiredSession(t *testing.T) {
 func TestPairAbortClearsStatus(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 	store.Set(PairStatus{SessionID: "abc", Code: "7-x"})
 
 	w := httptest.NewRecorder()
@@ -124,7 +149,7 @@ func TestPairStartReturns202(t *testing.T) {
 	mux := http.NewServeMux()
 	// Use /bin/true as the fake selfExe — exits immediately with 0, never
 	// registers a status, but lets cmd.Run() succeed without blocking.
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	body := `{"intent":"write a goodwe driver","ttl":"2h"}`
 	req := httptest.NewRequest("POST", "/api/pair/start", strings.NewReader(body))
@@ -149,7 +174,7 @@ func TestPairStartReturns202(t *testing.T) {
 func TestPairStartRejectsBadTTL(t *testing.T) {
 	store := NewPairStatusStore()
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	body := `{"ttl":"notaduration"}`
 	req := httptest.NewRequest("POST", "/api/pair/start", strings.NewReader(body))
@@ -165,7 +190,7 @@ func TestPairStartConflictWhenActive(t *testing.T) {
 	store := NewPairStatusStore()
 	store.Set(PairStatus{SessionID: "existing", Code: "3-foo"})
 	mux := http.NewServeMux()
-	RegisterPairRoutes(mux, store, "/bin/true")
+	RegisterPairRoutes(mux, store, "/bin/true", allowManage)
 
 	body := `{"ttl":"4h"}`
 	req := httptest.NewRequest("POST", "/api/pair/start", strings.NewReader(body))

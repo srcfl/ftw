@@ -1,22 +1,66 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
 
+const (
+	// maxTunnelBodyBytes caps a single tunneled request body so a hostile
+	// client can't exhaust relay memory. Dashboards + MCP payloads are well
+	// under this.
+	maxTunnelBodyBytes = 16 << 20 // 16 MiB
+	// enqueueTimeout bounds how long the relay waits for a registered host to
+	// answer before giving up with an error. Longer than the poll timeout (so a
+	// live host between polls isn't cut off), short enough that a host that died
+	// mid-request doesn't pin a goroutine for minutes.
+	enqueueTimeout = 60 * time.Second
+	// homeStaleAfter is how long after a home Pi's last registration the relay
+	// treats it as offline and serves the offline page instead of hanging. The
+	// Pi re-registers every 60s, so 2.5× tolerates a missed beat without flapping.
+	homeStaleAfter = 150 * time.Second
+	// maxRelayBodyBytes is the hard ceiling the limitBody middleware puts on
+	// EVERY request body, so no handler — including the JSON control-plane
+	// decoders (/tunnel/register, /me/register, /tunnel/.../response, /h/.../approve)
+	// — can be made to buffer an unbounded body. Sized above the largest legit
+	// payload: a tunneled response carrying a ~16 MiB body base64-expands to ~21 MiB.
+	maxRelayBodyBytes = 32 << 20 // 32 MiB
+	// maxControlBodyBytes is a much tighter cap for the small, unauthenticated
+	// control-plane JSON endpoints (register, me-register, approve). Their
+	// payloads are a handful of fields, so anything larger is abuse — reject it
+	// before allocating/parsing.
+	maxControlBodyBytes = 64 << 10 // 64 KiB
+)
+
+var errBodyTooLarge = errors.New("tunneled body exceeds limit")
+
+// pairTokenRe bounds the routing token to a safe charset. The host generates
+// word-dash tokens (genWordToken: lowercase words joined by '-'); this tolerates
+// that plus digits but rejects anything with HTML/JS metacharacters, so the
+// token can be rendered into the landing page and so /tunnel/register — which is
+// open to the internet — can't be used to plant a token that breaks out of the
+// page context.
+var pairTokenRe = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+func validPairToken(s string) bool {
+	return len(s) >= 1 && len(s) <= 80 && pairTokenRe.MatchString(s)
+}
+
 // Relay is the in-memory state for one running relay process.
 type Relay struct {
 	Queue       *tunnel.Queue
 	Tokens      *TokenRegistry
 	Owners      *OwnerRegistry
+	Polls       *PollSecrets
 	PollTimeout time.Duration // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
@@ -38,10 +82,14 @@ type registerRequest struct {
 type registerResponse struct {
 	PublicURL   string `json:"public_url"`
 	ApprovalURL string `json:"approval_url"`
+	PollSecret  string `json:"poll_secret"`
 }
 
 // Handler returns the mux for this relay.
 func (r *Relay) Handler() http.Handler {
+	if r.Polls == nil {
+		r.Polls = NewPollSecrets()
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -70,7 +118,20 @@ func (r *Relay) Handler() http.Handler {
 	if r.HomeHost != "" && r.HomeSite != "" {
 		mux.HandleFunc(r.HomeHost+"/", r.homeForward)
 	}
-	return mux
+	return r.limitBody(mux)
+}
+
+// limitBody caps every request body so a hostile client can't exhaust relay
+// memory through ANY handler. The per-endpoint readBody discipline only covered
+// the tunnel-forward paths; this is the safety net that also bounds the
+// unauthenticated JSON control-plane decoders (register/approve/response).
+func (r *Relay) limitBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Body != nil {
+			req.Body = http.MaxBytesReader(w, req.Body, maxRelayBodyBytes)
+		}
+		next.ServeHTTP(w, req)
+	})
 }
 
 // homeForward forwards a bare-host request (HomeHost) verbatim to the single
@@ -81,24 +142,27 @@ func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
 		return
 	}
-	hostID, err := r.Owners.Lookup(r.HomeSite)
+	hostID, registered, fresh := r.Owners.Active(r.HomeSite, homeStaleAfter)
+	if !registered || !fresh {
+		// Never connected, or stopped re-registering: the Pi is offline. Show a
+		// reassuring styled page (not a raw timeout/503 that reads as "broken").
+		r.serveHomeOffline(w, req, registered)
+		return
+	}
+	body, err := readBody(req.Body)
 	if err != nil {
-		http.Error(w, "home not registered (Pi offline?)", http.StatusServiceUnavailable)
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 	innerPath := req.URL.Path
 	if q := req.URL.RawQuery; q != "" {
 		innerPath = innerPath + "?" + q
 	}
-	body, _ := readBody(req.Body)
-	resp, err := r.Queue.Enqueue(req.Context(), hostID, tunnel.TunneledRequest{
-		Method: req.Method,
-		Path:   innerPath,
-		Header: req.Header,
-		Body:   body,
-	})
+	resp, err := r.enqueue(req, hostID, innerPath, body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		// Fresh a moment ago but the tunnel didn't answer in time — the Pi most
+		// likely just dropped. Same reassuring page rather than a bare 502.
+		r.serveHomeOffline(w, req, true)
 		return
 	}
 	for k, vv := range resp.Header {
@@ -107,6 +171,71 @@ func (r *Relay) homeForward(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
 }
+
+// serveHomeOffline renders a calm, self-contained "home offline" page for the
+// home.* route when the Pi isn't reachable. It is self-contained (inline CSS,
+// no external assets) because the relay can't fetch the Pi's stylesheet while
+// the Pi is offline. registered distinguishes "never connected" from "was
+// connected, dropped" so the copy is honest. A gentle JS auto-retry reloads the
+// page so it recovers on its own once the Pi comes back.
+func (r *Relay) serveHomeOffline(w http.ResponseWriter, _ *http.Request, registered bool) {
+	headline := "We haven’t reached your home yet"
+	detail := "This home hasn’t checked in with the relay. If you just set it up, give it a minute — it connects automatically."
+	if registered {
+		detail = "It was connected recently but isn’t responding right now — it may be powered off or without internet. Your data stays on the device; nothing is lost."
+		headline = "Your home is offline right now"
+	}
+	page := strings.NewReplacer(
+		"{{HEADLINE}}", esc(headline),
+		"{{DETAIL}}", esc(detail),
+	).Replace(offlineHTML)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Retry-After", "30")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = io.WriteString(w, page)
+}
+
+// offlineHTML is the self-contained offline page. Brand-aligned (single amber
+// accent, near-black on-accent text, hairline borders, mono eyebrow) without
+// depending on theme.css, which lives on the offline Pi.
+const offlineHTML = `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forty-two-watts — home offline</title>
+<style>
+  :root { --accent: #f0c040; --ink: #1a1a1a; --muted: #6b6b6b; --line: #e6e3dd; --bg: #faf9f7; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--ink);
+         margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 1.5rem; }
+  .card { width: 100%; max-width: 30rem; background: #fff; border: 1px solid var(--line);
+          border-radius: .75rem; padding: 2rem; }
+  .eyebrow { font-family: ui-monospace, "SF Mono", Menlo, monospace; text-transform: uppercase;
+             letter-spacing: .18em; font-size: .7rem; color: var(--muted); display: flex; align-items: center; gap: .5rem; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+         box-shadow: 0 0 0 0 rgba(240,192,64,.6); animation: pulse 2s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(240,192,64,.5); } 70% { box-shadow: 0 0 0 .6rem rgba(240,192,64,0); } 100% { box-shadow: 0 0 0 0 rgba(240,192,64,0); } }
+  h1 { font-size: 1.4rem; margin: 1.25rem 0 .5rem; line-height: 1.25; }
+  p { color: var(--muted); line-height: 1.55; margin: 0 0 1.5rem; }
+  button { font: inherit; font-weight: 600; background: var(--accent); color: #0a0a0a; border: 0;
+           border-radius: .4rem; padding: .6rem 1.25rem; cursor: pointer; }
+  .retry { margin-top: 1rem; font-size: .8rem; color: var(--muted); }
+</style>
+</head><body>
+  <main class="card">
+    <div class="eyebrow"><span class="dot"></span> forty-two-watts</div>
+    <h1>{{HEADLINE}}</h1>
+    <p>{{DETAIL}}</p>
+    <button id="retry" type="button">Try again</button>
+    <div class="retry">Checking again in <span id="count">20</span>s…</div>
+  </main>
+<script>
+  document.getElementById('retry').addEventListener('click', () => location.reload());
+  let n = 20;
+  const el = document.getElementById('count');
+  setInterval(() => { n -= 1; if (n <= 0) { location.reload(); return; } el.textContent = n; }, 1000);
+</script>
+</body></html>`
 
 func (r *Relay) pollTimeout() time.Duration {
 	if r.PollTimeout > 0 {
@@ -121,9 +250,20 @@ func (r *Relay) healthz(w http.ResponseWriter, _ *http.Request) {
 
 func (r *Relay) tunnelNext(w http.ResponseWriter, req *http.Request) {
 	hostID := req.PathValue("host_id")
+	// Authenticate the poller against the token minted at registration, so a
+	// caller that only learned host_id can't poll for (and steal) this host's
+	// tunneled traffic. Unknown host / wrong token → 401. The host retries.
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
 	tr, err := r.Queue.Poll(req.Context(), hostID, r.pollTimeout())
 	if errors.Is(err, tunnel.ErrPollTimeout) {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if errors.Is(err, tunnel.ErrTooManyWaiters) {
+		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil {
@@ -135,6 +275,13 @@ func (r *Relay) tunnelNext(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) tunnelResponse(w http.ResponseWriter, req *http.Request) {
+	hostID := req.PathValue("host_id")
+	// Same poll-token auth as tunnelNext: only the real host may post responses,
+	// so a caller knowing only host_id (+ a guessed req_id) can't inject one.
+	if r.Polls == nil || !r.Polls.Check(hostID, req.Header.Get(tunnel.PollSecretHeader)) {
+		http.Error(w, "unauthorized poll", http.StatusUnauthorized)
+		return
+	}
 	reqID := req.PathValue("req_id")
 	var resp tunnel.TunneledResponse
 	if err := json.NewDecoder(req.Body).Decode(&resp); err != nil {
@@ -149,9 +296,20 @@ func (r *Relay) tunnelResponse(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var reg registerRequest
 	if err := json.NewDecoder(req.Body).Decode(&reg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// /tunnel/register is open to the internet. Reject any token that isn't a
+	// plain routing key so it can never carry HTML/JS into the landing page.
+	if !validPairToken(reg.Token) {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
+	if reg.TTLMs <= 0 {
+		http.Error(w, "ttl_ms must be positive", http.StatusBadRequest)
 		return
 	}
 	_, err := r.Tokens.Register(TokenRegistration{
@@ -162,14 +320,23 @@ func (r *Relay) tunnelRegister(w http.ResponseWriter, req *http.Request) {
 		Intent:       reg.Intent,
 		As:           reg.As,
 	})
+	if errors.Is(err, ErrTooManyTokens) {
+		http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
+	}
+	secret := ""
+	if r.Polls != nil {
+		secret = r.Polls.Issue(reg.HostID)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(registerResponse{
 		PublicURL:   fmt.Sprintf("/h/%s", reg.Token),
 		ApprovalURL: fmt.Sprintf("/h/%s/approve", reg.Token),
+		PollSecret:  secret,
 	})
 }
 
@@ -188,12 +355,16 @@ func (r *Relay) publicLanding(w http.ResponseWriter, req *http.Request) {
 	//   1. "From: %s"        — claimed identity (host-supplied "as")
 	//   2. "Intent: %s"      — what the host says the session is for
 	//   3. "State: %s"       — current token state
-	//   4. "const TOKEN = %q" — the actual session token, used by the JS
+	//   4. "const TOKEN = %s" — the actual session token, used by the JS
 	//      to POST to /h/<token>/approve. Getting this wrong is fatal:
 	//      the approve POST hits the wrong path and the relay returns
 	//      403, which the JS surfaces as "Wrong code" even when the
-	//      friend typed the correct 4-digit code.
-	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.State(), tok)
+	//      friend typed the correct 4-digit code. It is emitted via
+	//      json.Marshal (not %q), which \u-escapes <, > and & so a token
+	//      can never break out of the <script> context — defence in depth
+	//      behind validPairToken on /tunnel/register.
+	tokJSON, _ := json.Marshal(tok)
+	fmt.Fprintf(w, landingHTML, esc(t.As()), esc(t.Intent()), t.State(), tokJSON)
 }
 
 func (r *Relay) tunnelSessionInfo(w http.ResponseWriter, req *http.Request) {
@@ -271,7 +442,7 @@ const landingHTML = `<!doctype html>
 <p class="muted">State: <code id="state">%s</code></p>
 
 <script>
-const TOKEN = %q;
+const TOKEN = %s;
 const form = document.getElementById('approve-form');
 const codeInput = document.getElementById('code');
 const msg = document.getElementById('msg');
@@ -334,6 +505,7 @@ const grantCookie = "ftw_grant"
 
 func (r *Relay) publicApprove(w http.ResponseWriter, req *http.Request) {
 	tok := req.PathValue("token")
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var body struct {
 		Code string `json:"code"`
 	}
@@ -426,13 +598,12 @@ func (r *Relay) tunnelPublic(w http.ResponseWriter, req *http.Request, tok, inne
 		http.Error(w, "session expired", http.StatusGone)
 		return
 	}
-	body, _ := readBody(req.Body)
-	resp, err := r.Queue.Enqueue(req.Context(), t.HostID(), tunnel.TunneledRequest{
-		Method: req.Method,
-		Path:   innerPath,
-		Header: req.Header,
-		Body:   body,
-	})
+	body, err := readBody(req.Body)
+	if err != nil {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	resp, err := r.enqueue(req, t.HostID(), innerPath, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -449,10 +620,40 @@ func (r *Relay) tunnelPublic(w http.ResponseWriter, req *http.Request, tok, inne
 }
 
 func readBody(r io.Reader) ([]byte, error) {
+	return readBodyLimited(r, maxTunnelBodyBytes)
+}
+
+// readBodyLimited reads up to max bytes, returning errBodyTooLarge if the source
+// has more (rather than silently truncating). Split out so the cap is testable
+// without allocating a 16 MiB fixture.
+func readBodyLimited(r io.Reader, max int64) ([]byte, error) {
 	if r == nil {
 		return nil, nil
 	}
-	return io.ReadAll(r)
+	// Read one byte past the limit so we can tell "exactly at the cap" from
+	// "over it".
+	b, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, errBodyTooLarge
+	}
+	return b, nil
+}
+
+// enqueue forwards one request through the tunnel to hostID, bounded by
+// enqueueTimeout so a registered-but-dead host fails fast instead of pinning
+// the goroutine until the client gives up.
+func (r *Relay) enqueue(req *http.Request, hostID, innerPath string, body []byte) (tunnel.TunneledResponse, error) {
+	ctx, cancel := context.WithTimeout(req.Context(), enqueueTimeout)
+	defer cancel()
+	return r.Queue.Enqueue(ctx, hostID, tunnel.TunneledRequest{
+		Method: req.Method,
+		Path:   innerPath,
+		Header: req.Header,
+		Body:   body,
+	})
 }
 
 // ---- Owner remote access (Phase 3) ----
@@ -460,24 +661,65 @@ func readBody(r io.Reader) ([]byte, error) {
 type meRegisterRequest struct {
 	SiteID string `json:"site_id"`
 	HostID string `json:"host_id"`
+	// PublicKey is the owner Pi's ES256 identity key, hex X||Y (128 chars).
+	// TsMs is the registration time (ms since epoch). Sig is the raw R||S
+	// ES256 signature (hex) over MeRegisterSigningString(site,host,ts). These
+	// authenticate the registration so only the holder of the site's private
+	// key can set or change its host_id mapping.
+	PublicKey string `json:"public_key"`
+	TsMs      int64  `json:"ts_ms"`
+	Sig       string `json:"sig"`
 }
 
 func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var reg meRegisterRequest
 	if err := json.NewDecoder(req.Body).Decode(&reg); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if reg.SiteID == "" || reg.HostID == "" {
-		http.Error(w, "site_id and host_id required", http.StatusBadRequest)
+	if reg.SiteID == "" || reg.HostID == "" || reg.PublicKey == "" || reg.Sig == "" {
+		http.Error(w, "site_id, host_id, public_key and sig required", http.StatusBadRequest)
 		return
 	}
 	if r.Owners == nil {
 		http.Error(w, "owner registry not configured", http.StatusInternalServerError)
 		return
 	}
-	r.Owners.Register(reg.SiteID, reg.HostID)
-	w.WriteHeader(http.StatusNoContent)
+	// Reject stale/future registrations so a captured body cannot be replayed
+	// indefinitely. now() is read once; the skew window is symmetric.
+	now := time.Now().UnixMilli()
+	if d := now - reg.TsMs; d > tunnel.MeRegisterMaxSkewMs || d < -tunnel.MeRegisterMaxSkewMs {
+		http.Error(w, "registration timestamp out of range", http.StatusUnauthorized)
+		return
+	}
+	// Verify the signature binds (site_id, host_id, ts) to the presented key.
+	msg := tunnel.MeRegisterSigningString(reg.SiteID, reg.HostID, reg.TsMs)
+	if !verifyES256Hex(reg.PublicKey, msg, reg.Sig) {
+		http.Error(w, "invalid registration signature", http.StatusUnauthorized)
+		return
+	}
+	// Enforce key continuity: the site is pinned to the first key it saw (or to
+	// the operator-provisioned home key). A different key is refused so nobody
+	// can hijack an existing site's mapping.
+	if err := r.Owners.Register(reg.SiteID, reg.HostID, reg.PublicKey); err != nil {
+		if errors.Is(err, ErrTooManyOwners) {
+			http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	// Return the poll token this host must present on /tunnel/<host>/next. The
+	// ES256-verified registration above proves it owns host_id, so only it
+	// learns the token. Re-registration returns the same token (refreshes after
+	// a relay restart re-mints).
+	secret := ""
+	if r.Polls != nil {
+		secret = r.Polls.Issue(reg.HostID)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"poll_secret": secret})
 }
 
 // meRoot handles GET /me/<site_id> — the landing page when the operator
@@ -517,13 +759,12 @@ func (r *Relay) meForward(w http.ResponseWriter, req *http.Request, innerPath st
 	if q := req.URL.RawQuery; q != "" {
 		innerPath = innerPath + "?" + q
 	}
-	body, _ := readBody(req.Body)
-	resp, err := r.Queue.Enqueue(req.Context(), hostID, tunnel.TunneledRequest{
-		Method: req.Method,
-		Path:   innerPath,
-		Header: req.Header,
-		Body:   body,
-	})
+	body, err := readBody(req.Body)
+	if err != nil {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return
+	}
+	resp, err := r.enqueue(req, hostID, innerPath, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

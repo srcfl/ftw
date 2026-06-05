@@ -15,12 +15,26 @@ import (
 // success rate before the operator notices something is off.
 const MaxApprovalAttempts = 5
 
+const (
+	// maxTokenTTL clamps an attacker-supplied registration TTL so a pending
+	// token can't be pinned in memory indefinitely (GC only reclaims
+	// expired/revoked tokens, so a near-infinite TTL would never be collected).
+	maxTokenTTL = 24 * time.Hour
+	// maxLiveTokens bounds the in-memory token map against a /tunnel/register
+	// flood from the unauthenticated, internet-facing public endpoint.
+	maxLiveTokens = 4096
+	// maxPendingApprovals caps the per-token landing-page-hit counter so an
+	// unauthenticated GET /h/<token> flood can't grow it without bound.
+	maxPendingApprovals = 10000
+)
+
 var (
 	ErrTokenExists     = errors.New("token already registered")
 	ErrTokenNotFound   = errors.New("token not found")
 	ErrTokenNotPending = errors.New("token not in pending state")
 	ErrBadApprovalCode = errors.New("bad approval code")
 	ErrApprovalLocked  = errors.New("approval locked after too many bad attempts")
+	ErrTooManyTokens   = errors.New("too many active tokens")
 )
 
 type TokenState int
@@ -133,6 +147,24 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 	if _, ok := r.tokens[reg.Token]; ok {
 		return nil, ErrTokenExists
 	}
+	// Bound the map so the unauthenticated /tunnel/register can't exhaust relay
+	// memory with a flood of distinct tokens. First reclaim expired/revoked
+	// tokens (so a stale entry the janitor hasn't swept doesn't count); then, if
+	// still full, evict the oldest unapproved token so a flood can't permanently
+	// block real pair sessions. Only if every live token is an active session do
+	// we refuse.
+	if len(r.tokens) >= maxLiveTokens {
+		r.gcLocked()
+	}
+	if len(r.tokens) >= maxLiveTokens && !r.evictOldestPendingLocked() {
+		return nil, ErrTooManyTokens
+	}
+	// Clamp the TTL: an attacker-supplied near-infinite TTL would otherwise pin
+	// a pending token in memory forever.
+	ttl := reg.TTL
+	if ttl > maxTokenTTL {
+		ttl = maxTokenTTL
+	}
 	t := &Token{
 		hostID:       reg.HostID,
 		token:        reg.Token,
@@ -140,11 +172,55 @@ func (r *TokenRegistry) Register(reg TokenRegistration) (*Token, error) {
 		intent:       reg.Intent,
 		as:           reg.As,
 		createdAt:    time.Now(),
-		expiresAt:    time.Now().Add(reg.TTL),
+		expiresAt:    time.Now().Add(ttl),
 		state:        TokenPending,
 	}
 	r.tokens[reg.Token] = t
 	return t, nil
+}
+
+// GC removes tokens that have expired or been revoked, returning how many were
+// dropped. Called periodically by the relay so the in-memory map doesn't grow
+// unbounded across many short pair sessions. Pending/active tokens are kept.
+func (r *TokenRegistry) GC() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gcLocked()
+}
+
+// gcLocked removes expired/revoked tokens. Caller holds r.mu.
+func (r *TokenRegistry) gcLocked() int {
+	removed := 0
+	for tok, t := range r.tokens {
+		switch t.State() { // lazily transitions to Expired under its own lock
+		case TokenExpired, TokenRevoked:
+			delete(r.tokens, tok)
+			removed++
+		}
+	}
+	return removed
+}
+
+// evictOldestPendingLocked drops the oldest still-PENDING token (never an active
+// session), so a flood of unapproved registrations can't permanently lock out
+// legitimate ones once the cap is reached. Returns false if every live token is
+// an active session. Caller holds r.mu. createdAt is immutable after Register.
+func (r *TokenRegistry) evictOldestPendingLocked() bool {
+	var oldestTok string
+	var oldest time.Time
+	found := false
+	for tok, t := range r.tokens {
+		if t.State() != TokenPending {
+			continue
+		}
+		if !found || t.createdAt.Before(oldest) {
+			oldestTok, oldest, found = tok, t.createdAt, true
+		}
+	}
+	if found {
+		delete(r.tokens, oldestTok)
+	}
+	return found
 }
 
 func (r *TokenRegistry) Get(token string) (*Token, error) {
@@ -236,7 +312,7 @@ func (r *TokenRegistry) MarkPendingHit(token string) {
 		return
 	}
 	t.mu.Lock()
-	if t.state == TokenPending {
+	if t.state == TokenPending && t.pendingApprovals < maxPendingApprovals {
 		t.pendingApprovals++
 	}
 	t.mu.Unlock()

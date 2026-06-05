@@ -51,8 +51,21 @@ func (t *FtwAPITool) Handle(ctx context.Context, args map[string]any) (any, erro
 	if method == "" || path == "" {
 		return nil, fmt.Errorf("method and path are required")
 	}
-	if !strings.HasPrefix(path, "/") {
-		return nil, fmt.Errorf("path must start with / (got %q)", path)
+	// Normalize (decode percent-encoding, clean ./..//) before BOTH the allowlist
+	// checks and forwarding, so a friend can't smuggle e.g. /api/%70air/status
+	// past the denylist to the ungated sidecar status endpoint (the Pi decodes it
+	// back to /api/pair/status).
+	path = normalizeAPIPath(path)
+	if !strings.HasPrefix(path, "/api/") {
+		return nil, fmt.Errorf("path must start with /api/ (got %q)", path)
+	}
+	// The friend pair-flow must not reach owner-only control surfaces (pairing
+	// control + owner-access credential management): they are gated server-side,
+	// but refuse to forward them at all so a friend can't forge the owner's
+	// pair-card state or probe owner-access. The genuine sidecar posts its own
+	// status DIRECTLY to the Pi, not through this tool, so it is unaffected.
+	if isOwnerOnlyPath(path) {
+		return nil, fmt.Errorf("path %q is not permitted over a friend session", path)
 	}
 
 	var body io.Reader

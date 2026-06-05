@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -110,6 +111,12 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("register status %d: %s", resp.StatusCode, body)
 	}
+	var regResp struct {
+		PollSecret string `json:"poll_secret"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&regResp); err != nil {
+		return nil, fmt.Errorf("decode register response: %w", err)
+	}
 
 	// Router: dispatch /mcp to the local MCP server, everything else
 	// (the /web/* family already stripped of its prefix by the relay)
@@ -127,9 +134,12 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", mcpProxy)
 	mux.Handle("/mcp/", mcpProxy)
-	mux.Handle("/", dashProxy)
+	// The friend's browser must not reach owner-only control surfaces either —
+	// e.g. POST /api/pair/status would let a friend forge the owner's pair-card.
+	mux.Handle("/", denyOwnerOnly(dashProxy))
 
 	host := tunnel.NewHost(relayURL, hostID, mux)
+	host.SetPollSecret(regResp.PollSecret) // authenticate this host's polls
 
 	return &TunnelHandle{
 		Host:         host,
@@ -139,4 +149,35 @@ func StartTunnelHost(ctx context.Context, mcpAddr, apiBase string, ttl time.Dura
 		HostID:       hostID,
 		RelayBase:    relayURL,
 	}, nil
+}
+
+// normalizeAPIPath decodes percent-encoding once (matching what the Pi's HTTP
+// server does before routing) and cleans ./../// so the owner-only denylist
+// can't be bypassed with e.g. /api/%70air/status or /api/../api/pair/status.
+func normalizeAPIPath(p string) string {
+	if dec, err := url.PathUnescape(p); err == nil {
+		p = dec
+	}
+	return path.Clean(p)
+}
+
+// isOwnerOnlyPath reports whether a (normalized) path is an owner-only control
+// surface that a friend pair-flow request must never reach through the sidecar's
+// proxies: pairing control (a friend could forge the owner's pair-card state)
+// and owner-access credential management. Shared by the ftw_api tool and the
+// dashboard proxy. The genuine sidecar posts its own /api/pair/status DIRECTLY
+// to the Pi (not through these friend proxies), so it is unaffected.
+func isOwnerOnlyPath(p string) bool {
+	return strings.HasPrefix(p, "/api/pair/") || strings.HasPrefix(p, "/api/owner-access/")
+}
+
+// denyOwnerOnly wraps a handler to refuse any owner-only path before forwarding.
+func denyOwnerOnly(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isOwnerOnlyPath(normalizeAPIPath(r.URL.Path)) {
+			http.Error(w, "not permitted over a friend session", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

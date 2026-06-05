@@ -73,7 +73,12 @@ func TestHandleP2POffer_RoundTrip(t *testing.T) {
 	<-gather
 
 	reqBody, _ := json.Marshal(map[string]string{"type": "offer", "sdp": browser.LocalDescription().SDP})
-	resp, err := http.Post(ts.URL+"/api/p2p/offer", "application/json", bytes.NewReader(reqBody))
+	offerReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/p2p/offer", bytes.NewReader(reqBody))
+	offerReq.Header.Set("Content-Type", "application/json")
+	// Loopback is no longer auto-trusted by the gate, so authorize the offer
+	// POST with a real owner session, exactly as an authenticated browser would.
+	offerReq.AddCookie(ownerSessionCookie(t, srv))
+	resp, err := http.DefaultClient.Do(offerReq)
 	if err != nil {
 		t.Fatalf("post offer: %v", err)
 	}
@@ -118,7 +123,10 @@ func TestHandleP2POffer_Unavailable(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 	body, _ := json.Marshal(map[string]string{"type": "offer", "sdp": "v=0"})
-	resp, err := http.Post(ts.URL+"/api/p2p/offer", "application/json", bytes.NewReader(body))
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/p2p/offer", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(ownerSessionCookie(t, srv)) // loopback no longer auto-trusted
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -150,4 +158,44 @@ func TestHandleP2POffer_Unauthorized(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", resp.StatusCode)
 	}
+}
+
+// A friend pair-flow request reaches the Pi from loopback, unmarked, with no
+// owner session. It must NOT be able to open a P2P DataChannel — that channel
+// would outlive the time-boxed pair grant. Only a real session or genuine LAN
+// source may.
+func TestHandleP2POffer_FriendLoopbackRejected(t *testing.T) {
+	mgr := p2p.NewManager(nil, nil)
+	mgr.SetLocalAPI(http.NewServeMux())
+	deps := &Deps{TunnelMarker: "m", OwnerAccessLANBypass: true, P2P: mgr}
+	srv := New(deps)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	body, _ := json.Marshal(map[string]string{"type": "offer", "sdp": "v=0"})
+	// httptest client connects from loopback; no X-FTW-Tunnel, no cookie.
+	resp, err := http.Post(ts.URL+"/api/p2p/offer", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("friend loopback P2P offer: got %d, want 401", resp.StatusCode)
+	}
+}
+
+// ownerSessionCookie issues a real owner session on srv and returns its cookie.
+// The P2P tests drive a real loopback server (httptest.NewServer), and a
+// loopback source is no longer auto-trusted by the gate, so the offer POST must
+// carry a valid session exactly as an authenticated browser would.
+func ownerSessionCookie(t *testing.T, srv *Server) *http.Cookie {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("p2p-test-cred")); err != nil {
+		t.Fatalf("issue owner session: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no owner session cookie issued")
+	}
+	return cookies[0]
 }

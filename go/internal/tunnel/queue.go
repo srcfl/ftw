@@ -17,23 +17,35 @@ var (
 	// the queue doesn't know about (already responded, expired, or
 	// fabricated). Indicates a host bug or a stale relay restart.
 	ErrUnknownReqID = errors.New("tunnel: unknown req_id")
+	// ErrTooManyWaiters — the global live-waiter cap is reached. /tunnel/next
+	// is unauthenticated, so this bounds the goroutines/channels an attacker can
+	// pin by long-polling many host_ids. Hosts back off and retry.
+	ErrTooManyWaiters = errors.New("tunnel: too many waiters")
 )
+
+// defaultMaxWaiters bounds the total number of concurrently parked long-poll
+// waiters across all host_ids. Legitimate hosts hold ~1 in-flight poll each, so
+// this is far above real usage; it exists purely to cap an unauthenticated flood.
+const defaultMaxWaiters = 1024
 
 // Queue is the relay-internal request queue. One Queue per relay
 // process; it indexes pending requests per host-id.
 type Queue struct {
-	mu       sync.Mutex
-	pending  map[string][]TunneledRequest
-	waiters  map[string][]chan TunneledRequest
-	inflight map[string]chan TunneledResponse
+	mu          sync.Mutex
+	pending     map[string][]TunneledRequest
+	waiters     map[string][]chan TunneledRequest
+	inflight    map[string]chan TunneledResponse
+	waiterCount int // total live waiters across all hosts (bounded by maxWaiters)
+	maxWaiters  int // global parked-waiter ceiling (defaultMaxWaiters)
 }
 
 // NewQueue returns an initialized Queue.
 func NewQueue() *Queue {
 	return &Queue{
-		pending:  make(map[string][]TunneledRequest),
-		waiters:  make(map[string][]chan TunneledRequest),
-		inflight: make(map[string]chan TunneledResponse),
+		pending:    make(map[string][]TunneledRequest),
+		waiters:    make(map[string][]chan TunneledRequest),
+		inflight:   make(map[string]chan TunneledResponse),
+		maxWaiters: defaultMaxWaiters,
 	}
 }
 
@@ -50,6 +62,10 @@ func (q *Queue) Enqueue(ctx context.Context, hostID string, req TunneledRequest)
 	if waiters := q.waiters[hostID]; len(waiters) > 0 {
 		next := waiters[0]
 		q.waiters[hostID] = waiters[1:]
+		q.waiterCount--
+		if len(q.waiters[hostID]) == 0 {
+			delete(q.waiters, hostID) // don't leak an empty-slice entry per host_id
+		}
 		q.mu.Unlock()
 		next <- req
 	} else {
@@ -61,10 +77,29 @@ func (q *Queue) Enqueue(ctx context.Context, hostID string, req TunneledRequest)
 	case resp := <-respCh:
 		return resp, nil
 	case <-ctx.Done():
+		// The caller gave up (client disconnect or a deadline — see the relay's
+		// per-request timeout for a dead-but-registered host). Drop both the
+		// inflight channel and any still-queued copy of this request so a host
+		// that never polls can't make the pending slice grow without bound.
 		q.mu.Lock()
 		delete(q.inflight, req.ReqID)
+		q.removePendingLocked(hostID, req.ReqID)
 		q.mu.Unlock()
 		return TunneledResponse{}, ctx.Err()
+	}
+}
+
+// removePendingLocked drops a queued request by ReqID. Caller holds q.mu.
+func (q *Queue) removePendingLocked(hostID, reqID string) {
+	ps := q.pending[hostID]
+	for i, r := range ps {
+		if r.ReqID == reqID {
+			q.pending[hostID] = append(ps[:i], ps[i+1:]...)
+			break
+		}
+	}
+	if len(q.pending[hostID]) == 0 {
+		delete(q.pending, hostID)
 	}
 }
 
@@ -79,8 +114,15 @@ func (q *Queue) Poll(ctx context.Context, hostID string, timeout time.Duration) 
 		q.mu.Unlock()
 		return next, nil
 	}
+	// Bound the total parked waiters so an unauthenticated flood of long-polls
+	// (across arbitrary host_ids) can't pin unbounded goroutines/channels.
+	if q.waiterCount >= q.maxWaiters {
+		q.mu.Unlock()
+		return TunneledRequest{}, ErrTooManyWaiters
+	}
 	wait := make(chan TunneledRequest, 1)
 	q.waiters[hostID] = append(q.waiters[hostID], wait)
+	q.waiterCount++
 	q.mu.Unlock()
 
 	timer := time.NewTimer(timeout)
@@ -106,11 +148,23 @@ func (q *Queue) Poll(ctx context.Context, hostID string, timeout time.Duration) 
 func (q *Queue) abandonWaiter(hostID string, wait chan TunneledRequest) (TunneledRequest, error) {
 	q.mu.Lock()
 	ws := q.waiters[hostID]
+	found := false
 	for i, c := range ws {
 		if c == wait {
 			q.waiters[hostID] = append(ws[:i], ws[i+1:]...)
+			found = true
 			break
 		}
+	}
+	// Only decrement if WE removed it — if Enqueue already handed this waiter a
+	// request (the race the select below catches), it already decremented.
+	if found {
+		q.waiterCount--
+	}
+	// An unauthenticated client can long-poll arbitrary host_ids; without this
+	// the waiters map keeps one empty-slice entry per distinct host_id forever.
+	if len(q.waiters[hostID]) == 0 {
+		delete(q.waiters, hostID)
 	}
 	q.mu.Unlock()
 	select {

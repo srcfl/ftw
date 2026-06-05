@@ -139,7 +139,13 @@ func (s *PairStatusStore) Clear() {
 //
 // selfExe is the path to the running binary (os.Executable() result), used
 // to spawn "self pair --ttl <t> [--intent <i>]" as a detached child.
-func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe string) {
+// manage authorizes owner-only pairing control (start/abort). It is the strict
+// owner authorizer (a real session or genuine LAN presence, never the loopback
+// LAN-bypass), so a friend pair-flow request — which reverse-proxies from
+// loopback — can't spawn new pair sidecars or abort the session. POST
+// /api/pair/status is deliberately NOT gated this way: it is the sidecar's own
+// loopback status channel.
+func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe string, manage func(*http.Request) ([]byte, bool)) {
 	mux.HandleFunc("GET /api/pair/status", func(w http.ResponseWriter, r *http.Request) {
 		p, ok := store.Get()
 		if !ok {
@@ -169,13 +175,24 @@ func RegisterPairRoutes(mux *http.ServeMux, store *PairStatusStore, selfExe stri
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("POST /api/pair/abort", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := manage(r); !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		// Clearing the store is the signal — the sidecar polls
 		// GET /api/pair/status; when it returns 404 it calls
 		// sess.End("aborted_by_owner") and exits cleanly.
 		store.Clear()
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("POST /api/pair/start", handlePairStart(store, selfExe))
+	start := handlePairStart(store, selfExe)
+	mux.HandleFunc("POST /api/pair/start", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := manage(r); !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		start(w, r)
+	})
 }
 
 // handlePairStart returns an http.HandlerFunc that spawns
