@@ -265,15 +265,23 @@ until BOTH of these are closed. Until then the multi-tenant routes are not even
 registered, so the code is dormant.
 
 1. **PRF determinism spike** (above) — verify identical PRF output across a
-   synced passkey on real devices, or fall back to browser-carried-only.
-2. **Blob write authentication.** `PUT /wallet/{user_handle}/blob` is currently
-   NOT writer-authenticated: the ciphertext is useless without the owner's PRF
-   key and the version guard is bounded so a handle-knower cannot lock a wallet
-   out (`maxVersionJump`), but anyone who learns a `userHandle` could still
-   **overwrite or squat** a wallet's blob. Before cutover, gate the PUT with a
-   per-wallet write signature — a PRF-derived MAC over
-   `handle|version|nonce|ciphertext-hash`, verified against a write-verifier the
-   wallet registers at enrollment. (Codex review, 2026-06-05, HIGH.)
+   synced passkey on real devices, or fall back to browser-carried-only. **This is
+   the one remaining hard blocker.**
+2. ~~Blob write authentication.~~ **DONE (v0.119.0).** `PUT /wallet/{user_handle}/blob`
+   is now writer-authenticated: the client derives an **Ed25519 write key** from the
+   PRF secret (`HKDF(prf, info="ftw-blob-write:v1")` → seed), and each PUT carries
+   `write_pub` + an Ed25519 `sig` over `blobWriteMessage` =
+   `"ftw-blob:v1:" + handle + ":" + version + ":" + base64url(nonce) + ":" +
+   hex(sha256(ciphertext))`. The relay **TOFU-pins** `write_pub` on the first write
+   and rejects any later write whose key differs (constant-time) or whose signature
+   fails — so a `userHandle`-knower without the owner's passkey-derived write key
+   cannot overwrite or take over a blob. Wallet blobs are **not time-GC'd** (that
+   would drop the pin and reopen a squat window — Codex HIGH). Residual: a stranger
+   can still squat an **unused, high-entropy** handle before its first legitimate
+   write (TOFU), and an enrollment-capacity flood is bounded by the wallet-count cap;
+   a pin-preserving tombstone for abandoned-blob reclamation is a later refinement.
+   The web client (`instance-sync.js`, next slice) MUST construct `blobWriteMessage`
+   byte-identically.
 
 ## Honest residuals (documented, not over-built)
 

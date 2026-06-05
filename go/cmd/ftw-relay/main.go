@@ -78,7 +78,9 @@ func main() {
 			slog.Error("ftw-relay: -multi-tenant requires -wallet-blob-dir (the durable encrypted-blob store)")
 			os.Exit(1)
 		}
-		wb, err := NewWalletBlobStore(*walletBlobDir, *walletBlobMaxBytes, maxOwnerSites)
+		// maxBlobs 0 -> the store's generous default. Wallet blobs are not GC'd
+		// (see the janitor note), so the wallet-count cap is the sole bound.
+		wb, err := NewWalletBlobStore(*walletBlobDir, *walletBlobMaxBytes, 0)
 		if err != nil {
 			slog.Error("ftw-relay: wallet blob store", "err", err)
 			os.Exit(1)
@@ -164,14 +166,15 @@ func main() {
 						slog.Info("ftw-relay: offer-limit GC", "removed", n)
 					}
 				}
-				// Evict idle per-wallet encrypted blobs by last touch (same cadence
-				// as Owners/Polls), so an abandoned wallet directory doesn't pin
-				// durable relay state forever. A live wallet re-PUTs on every change.
-				if r.WalletBlobs != nil {
-					if n := r.WalletBlobs.GC(30 * time.Minute); n > 0 {
-						slog.Info("ftw-relay: wallet-blob GC", "removed", n)
-					}
-				}
+				// NB: wallet blobs are deliberately NOT time-GC'd. Unlike a site
+				// registration (which re-registers every ~60s, so staleness means
+				// "Pi gone"), a wallet directory is durable per-person and is only
+				// re-written when the owner changes it — which can be weeks apart.
+				// Evicting an idle blob would drop its TOFU-pinned write key, opening
+				// a squat window where an attacker who knows the userHandle pins THEIR
+				// key first and locks the owner out (Codex 2026-06-05, HIGH). The
+				// blob store is bounded by its wallet-count cap instead; abandoned-blob
+				// reclamation (a tombstone that keeps the pin) is a cutover concern.
 			}
 		}
 	}()
