@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,20 @@ type Relay struct {
 	// still works. On → an offer must carry a verified device-key proof or the Pi
 	// is never contacted. Flip on only once device-keys are enrolled.
 	RequireDeviceKey bool
+	// MultiTenant switches the home host from the single-tenant pin
+	// (-home-site/-home-pubkey) to the public multi-tenant front door:
+	// home.* serves ONLY the relay-disk landing/shell (never forwards to a Pi),
+	// per-wallet ciphertext blobs are served from WalletBlobs, and routing is
+	// driven entirely by the browser-supplied {site_id} on /signal/* (the C2
+	// device-key proof, forced on, authorises the relay→Pi forward). The relay
+	// never learns which Pi belongs to whom.
+	MultiTenant bool
+	// WalletBlobs is the durable per-wallet ENCRYPTED directory store. The relay
+	// never parses the ciphertext (all crypto is client-side via the WebAuthn-PRF
+	// derived key); it only stores {ciphertext, nonce, version} keyed by an opaque
+	// userHandle and serves it back over GET/PUT /wallet/{user_handle}/blob. Nil
+	// outside multi-tenant mode.
+	WalletBlobs *WalletBlobStore
 }
 
 type registerRequest struct {
@@ -161,6 +176,14 @@ func (r *Relay) Handler() http.Handler {
 	mux.HandleFunc("GET /signal/{host_id}/offer", r.signalHostOffer)
 	mux.HandleFunc("POST /signal/{host_id}/answer", r.signalHostAnswer)
 
+	// Multi-tenant per-wallet ENCRYPTED directory blob (opaque ciphertext in/out,
+	// never parsed by the relay) + the per-site public-key cross-check read. Like
+	// the browser /signal/* routes, these are re-registered on the HomeHost mux
+	// below so they aren't shadowed by the home-host catch-all.
+	mux.HandleFunc("GET /wallet/{user_handle}/blob", r.walletBlobGet)
+	mux.HandleFunc("PUT /wallet/{user_handle}/blob", r.walletBlobPut)
+	mux.HandleFunc("GET /signal/{site_id}/identity", r.signalIdentity)
+
 	// Owner remote access registration (Phase 3). The Pi POSTs its ES256-signed
 	// /me/register on startup; the relay pins the key and returns the per-host
 	// poll secret the Pi uses BOTH to drain the (friend-flow) tunnel and to
@@ -177,17 +200,21 @@ func (r *Relay) Handler() http.Handler {
 	// the relay — they ride the DTLS DataChannel only (P2P-only home route). The
 	// browser fetches the SPA shell here, then opens the P2P channel for all
 	// owner data + the login ceremony.
-	if r.HomeHost != "" && r.HomeSite != "" {
-		// The browser reaches the relay AS the home host, and Go's ServeMux gives
-		// a host-specific pattern precedence over a host-less one — so the
-		// host-less /signal/{site}/* browser routes above would be shadowed by the
-		// home-host catch-all below. Re-register the BROWSER signaling routes on
-		// the home host explicitly so the rendezvous works from the dashboard
-		// origin. (The Pi's /signal/{host}/* routes need no host pin: the Pi dials
-		// the relay by its own host, not the home host.)
+	// The home host registers when EITHER a single-tenant pin (-home-site) OR
+	// multi-tenant mode is configured. The browser reaches the relay AS the home
+	// host, and Go's ServeMux gives a host-specific pattern precedence over a
+	// host-less one — so the host-less /signal/* + /wallet/* routes above would be
+	// shadowed by the home-host catch-all below. Re-register every browser-facing
+	// route on the home host explicitly so they resolve from the dashboard origin.
+	// (The Pi's /signal/{host}/* routes need no host pin: the Pi dials the relay by
+	// its own host, not the home host.)
+	if r.HomeHost != "" && (r.HomeSite != "" || r.MultiTenant) {
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/challenge", r.signalChallenge)
 		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/identity", r.signalIdentity)
+		mux.HandleFunc("GET "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobGet)
+		mux.HandleFunc("PUT "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobPut)
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
 	return r.limitBody(mux)
@@ -228,6 +255,19 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 	// relay can never see (or be tricked into proxying) owner traffic.
 	if req.Method != http.MethodGet {
 		http.Error(w, "owner API is P2P-only; this relay serves static assets only", http.StatusMethodNotAllowed)
+		return
+	}
+	// MULTI-TENANT: there is no single -home-site to resolve and the relay must
+	// NEVER forward to a Pi. Serve ONLY the relay-disk landing/shell. The legacy
+	// /api/identity TOFU exception does NOT apply — under multi-tenant identity is
+	// per-site at GET /signal/{site_id}/identity, so /api/* (identity included) is
+	// uniformly refused here and the owner data plane stays strictly P2P.
+	if r.MultiTenant {
+		if strings.HasPrefix(req.URL.Path, "/api/") {
+			http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
+			return
+		}
+		r.serveHomeStaticFile(w, req)
 		return
 	}
 	// SLICE 2: serve GET /api/identity from the home pubkey the relay already
@@ -308,6 +348,142 @@ func (r *Relay) serveHomeIdentity(w http.ResponseWriter) {
 	}{
 		PublicKeyHex: r.HomePubKey,
 		SiteID:       r.HomeSite,
+		Algorithm:    "ES256",
+		Curve:        "P-256",
+	})
+}
+
+// walletBlobIO is the wire shape of GET/PUT /wallet/{user_handle}/blob. The
+// relay treats ciphertext + nonce as OPAQUE standard-base64 strings — it never
+// decodes the plaintext (all crypto is client-side, derived from a WebAuthn-PRF
+// secret). version drives optimistic concurrency: a PUT whose version is <= the
+// stored one is a 409 (lost-update / rollback guard).
+type walletBlobIO struct {
+	Ciphertext string `json:"ciphertext"`
+	Nonce      string `json:"nonce"`
+	Version    int    `json:"version"`
+}
+
+// walletBlobGet serves a wallet's encrypted directory blob. Public + unauthenticated
+// at the HTTP layer (the ciphertext is worthless without the user's PRF-derived
+// key) but the handle is strictly validated so it can never be used for path
+// traversal. Returns 400 (bad handle), 404 (no blob), or 200 with the opaque
+// {ciphertext, nonce, version}. The relay never parses the plaintext.
+func (r *Relay) walletBlobGet(w http.ResponseWriter, req *http.Request) {
+	handle := req.PathValue("user_handle")
+	if !validUserHandle(handle) {
+		http.Error(w, "invalid user_handle", http.StatusBadRequest)
+		return
+	}
+	if r.WalletBlobs == nil {
+		http.Error(w, "wallet blob store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	ct, nonce, version, ok := r.WalletBlobs.Get(handle)
+	if !ok {
+		http.NotFound(w, req)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(walletBlobIO{
+		Ciphertext: base64.StdEncoding.EncodeToString(ct),
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Version:    version,
+	})
+}
+
+// SECURITY — REQUIRED BEFORE THE MULTI-TENANT ROUTE GOES LIVE: this PUT is not
+// yet writer-authenticated. The blob ciphertext is useless without the owner's
+// PRF key, and the version guard is bounded so a handle-knower cannot lock a
+// wallet out (see WalletBlobStore.Put / maxVersionJump) — but anyone who learns a
+// userHandle can still OVERWRITE or squat a wallet's blob. Before -multi-tenant is
+// enabled in production, gate this with a per-wallet write signature (e.g. a
+// PRF-derived MAC over handle|version|nonce|ciphertext-hash verified against a
+// write-verifier the wallet registers at enrollment). This handler is unreachable
+// until -multi-tenant is passed (routes unregistered otherwise), so it is dormant
+// today; do NOT flip the flag until this is closed. See
+// docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md.
+//
+// walletBlobPut stores a wallet's encrypted directory blob under optimistic
+// concurrency. The body is JSON {ciphertext, nonce, version} with standard-base64
+// ciphertext/nonce the relay never decrypts. It validates the handle, the
+// transport encoding, and delegates the size + version checks to the store:
+//   - 400  invalid handle / malformed JSON / non-base64 ciphertext-or-nonce
+//   - 409  version <= stored (lost-update / rollback)
+//   - 413  ciphertext over the per-blob byte cap
+//   - 503  too many distinct wallets (store cap)
+//   - 200  stored
+func (r *Relay) walletBlobPut(w http.ResponseWriter, req *http.Request) {
+	handle := req.PathValue("user_handle")
+	if !validUserHandle(handle) {
+		http.Error(w, "invalid user_handle", http.StatusBadRequest)
+		return
+	}
+	if r.WalletBlobs == nil {
+		http.Error(w, "wallet blob store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
+	var in walletBlobIO
+	if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
+		http.Error(w, "malformed blob body", http.StatusBadRequest)
+		return
+	}
+	ct, err := base64.StdEncoding.DecodeString(in.Ciphertext)
+	if err != nil {
+		http.Error(w, "ciphertext is not valid base64", http.StatusBadRequest)
+		return
+	}
+	nonce, err := base64.StdEncoding.DecodeString(in.Nonce)
+	if err != nil {
+		http.Error(w, "nonce is not valid base64", http.StatusBadRequest)
+		return
+	}
+	if err := r.WalletBlobs.Put(handle, ct, nonce, in.Version); err != nil {
+		switch {
+		case errors.Is(err, ErrVersionConflict):
+			http.Error(w, "stale version", http.StatusConflict)
+		case errors.Is(err, ErrBlobTooLarge):
+			http.Error(w, "blob too large", http.StatusRequestEntityTooLarge)
+		case errors.Is(err, ErrTooManyBlobs):
+			http.Error(w, "relay at capacity", http.StatusServiceUnavailable)
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// signalIdentity serves GET /signal/{site_id}/identity: the PUBLIC ES256 key the
+// relay holds for a site (from OwnerRegistry), in the same shape /api/identity
+// returns. It is a convenience cross-check only — the browser already learns the
+// Pi pubkey from the Pi-SIGNED directory entry and pins from there, so a tampering
+// relay cannot use this read to MITM the first connection (closing the old
+// /api/identity TOFU gap). Public key only: no secret, no host_id, no routing. An
+// unknown site (or empty site_id) is a 404 — anonymous callers learn nothing.
+func (r *Relay) signalIdentity(w http.ResponseWriter, req *http.Request) {
+	siteID := req.PathValue("site_id")
+	if siteID == "" || r.Owners == nil {
+		http.NotFound(w, req)
+		return
+	}
+	pub, ok := r.Owners.PublicKeyForSite(siteID)
+	if !ok {
+		http.NotFound(w, req)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(struct {
+		PublicKeyHex string `json:"public_key_hex"`
+		SiteID       string `json:"site_id"`
+		Algorithm    string `json:"algorithm"`
+		Curve        string `json:"curve"`
+	}{
+		PublicKeyHex: pub,
+		SiteID:       siteID,
 		Algorithm:    "ES256",
 		Curve:        "P-256",
 	})

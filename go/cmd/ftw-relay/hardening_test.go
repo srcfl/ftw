@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -225,5 +227,145 @@ func TestHomeForwardServesOfflinePage(t *testing.T) {
 	html := string(body[:n])
 	if !strings.Contains(html, "forty-two-watts") || !strings.Contains(html, `id="retry"`) {
 		t.Fatalf("offline page missing brand/retry affordance:\n%s", html)
+	}
+}
+
+// PublicKeyForSite returns the pinned/TOFU'd ES256 key for a site (the public
+// key the relay holds), or ok=false when the site has no key. signalIdentity
+// (the per-site /signal/{site}/identity convenience read) is built on it.
+func TestOwnerRegistryPublicKeyForSite(t *testing.T) {
+	reg := NewOwnerRegistry()
+	if _, ok := reg.PublicKeyForSite("site:unknown"); ok {
+		t.Fatal("unknown site must report ok=false")
+	}
+	// TOFU register pins the key.
+	if err := reg.Register("site:A", "host-1", "deadbeefkey"); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	got, ok := reg.PublicKeyForSite("site:A")
+	if !ok || got != "deadbeefkey" {
+		t.Fatalf("PublicKeyForSite(site:A) = %q,%v want deadbeefkey,true", got, ok)
+	}
+	// Pin (operator) is also visible even with no host mapping yet.
+	reg.Pin("site:P", "pinnedkey")
+	if got, ok := reg.PublicKeyForSite("site:P"); !ok || got != "pinnedkey" {
+		t.Fatalf("PublicKeyForSite(site:P) = %q,%v want pinnedkey,true", got, ok)
+	}
+}
+
+// The Relay carries the multi-tenant toggle and the wallet-blob store so the
+// handler layer can branch on them. This compiles only once the fields exist.
+func TestRelayMultiTenantFields(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewWalletBlobStore(dir, 65536, 1024)
+	if err != nil {
+		t.Fatalf("NewWalletBlobStore: %v", err)
+	}
+	r := &Relay{MultiTenant: true, WalletBlobs: store}
+	if !r.MultiTenant {
+		t.Fatal("MultiTenant field not set")
+	}
+	if r.WalletBlobs == nil {
+		t.Fatal("WalletBlobs field not set")
+	}
+}
+
+// Under -multi-tenant the relay must fail closed: device-key enforcement is
+// REQUIRED (a forged site_id must fail C2 so the relay never contacts the wrong
+// Pi) and -home-web is REQUIRED (the landing/shell must be relay-served so an
+// anonymous GET never reaches a Pi). -home-site/-home-pubkey are NOT required.
+func TestRequireMultiTenant(t *testing.T) {
+	cases := []struct {
+		name             string
+		multiTenant      bool
+		requireDeviceKey bool
+		homeWeb          string
+		wantErr          bool
+	}{
+		{"off — not multi-tenant", false, false, "", false},
+		{"multi-tenant + device-key + web → ok", true, true, "/web", false},
+		{"multi-tenant WITHOUT device-key → refuse", true, false, "/web", true},
+		{"multi-tenant WITHOUT -home-web → refuse", true, true, "", true},
+		{"multi-tenant missing both → refuse", true, false, "", true},
+	}
+	for _, c := range cases {
+		err := requireMultiTenant(c.multiTenant, c.requireDeviceKey, c.homeWeb)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}
+
+// user_handle is an opaque base64url token (WebAuthn userHandle): [A-Za-z0-9_-],
+// length 43..86. Anything else is rejected BEFORE it is used as a store/file key
+// (no path traversal, no oversize).
+func TestValidUserHandle(t *testing.T) {
+	ok43 := strings.Repeat("a", 43)
+	ok86 := strings.Repeat("Z", 86)
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{ok43, true},
+		{ok86, true},
+		{strings.Repeat("a", 42), false},         // too short
+		{strings.Repeat("a", 87), false},         // too long
+		{"", false},                              // empty
+		{strings.Repeat("a", 42) + ".", false},   // '.' not in charset
+		{strings.Repeat("a", 42) + "/", false},   // '/' traversal char
+		{"../" + strings.Repeat("a", 40), false}, // traversal attempt
+		{strings.Repeat("a", 42) + "+", false},   // std-b64 '+' not allowed
+		{strings.Repeat("-", 43), true},          // '-' and '_' allowed
+		{strings.Repeat("_", 43), true},
+	}
+	for _, c := range cases {
+		if got := validUserHandle(c.in); got != c.want {
+			t.Errorf("validUserHandle(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// Smoke: a multi-tenant Relay built the way main() builds it serves the landing,
+// the wallet endpoints, and the per-site identity together — the full multi-tenant
+// surface wired on one mux.
+func TestMultiTenantSurfaceWiredTogether(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>LANDING</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewWalletBlobStore(t.TempDir(), 65536, 1024)
+	if err != nil {
+		t.Fatalf("NewWalletBlobStore: %v", err)
+	}
+	id := newTestIdentity(t)
+	owners := NewOwnerRegistry()
+	if err := owners.Register("site:Z", "host-z", id.PublicKeyHex()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	relay := &Relay{
+		Queue: tunnel.NewQueue(), Tokens: NewTokenRegistry(), Owners: owners,
+		Polls: NewPollSecrets(), Signals: NewSignalMailbox(), Challenges: NewSignalChallenges(),
+		MultiTenant: true, RequireDeviceKey: true, HomeHost: "home.test", HomeWeb: dir, WalletBlobs: store,
+	}
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+	get := func(path string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		req.Host = "home.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if c := get("/"); c != 200 {
+		t.Fatalf(`"/" = %d, want 200`, c)
+	}
+	if c := get("/signal/site:Z/identity"); c != 200 {
+		t.Fatalf("/signal/site:Z/identity = %d, want 200", c)
+	}
+	if c := get("/api/identity"); c != http.StatusForbidden {
+		t.Fatalf("/api/identity = %d, want 403", c)
 	}
 }

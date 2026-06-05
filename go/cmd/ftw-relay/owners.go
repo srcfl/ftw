@@ -135,6 +135,20 @@ func (r *OwnerRegistry) HasDeviceKey(siteID, pubKeyHex string) bool {
 	return set != nil && set[pubKeyHex]
 }
 
+// PublicKeyForSite returns the ES256 public key (hex X||Y) the relay holds for a
+// site — its operator-pinned key or the key it TOFU'd on first registration — and
+// ok=false when the site has none. It exposes ONLY the public key (no host_id, no
+// secret), so the per-site convenience read GET /signal/{site_id}/identity can
+// answer it without leaking routing or secrets. The browser already learns this
+// key from the (Pi-signed) directory entry, so this endpoint is a cross-check,
+// not the trust anchor.
+func (r *OwnerRegistry) PublicKeyForSite(siteID string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k, ok := r.keyBySite[siteID]
+	return k, ok
+}
+
 // GC drops self-registered sites whose last registration is older than maxAge
 // (a Pi re-registers periodically, so a stale mapping means it is gone). Returns
 // how many were evicted. Operator-pinned sites (e.g. the home site) are never

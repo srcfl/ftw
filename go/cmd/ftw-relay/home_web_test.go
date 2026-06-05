@@ -257,3 +257,104 @@ func TestMeRegister_DeviceKeysTamperRejected(t *testing.T) {
 		t.Fatal("attacker key must NOT be trusted after a tampered register")
 	}
 }
+
+// Under multi-tenant the browser reaches the relay AS the home host, so the
+// /wallet/* and /signal/{site}/identity routes must be re-registered on the
+// HomeHost mux (Go gives a host pattern precedence over a host-less one). This
+// asserts they resolve to the real handlers — not the home-host static catch-all.
+func TestMultiTenantRoutesOnHomeHost(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	id := newTestIdentity(t)
+	if err := relay.Owners.Register("site:Bob", "host-bob", id.PublicKeyHex()); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+
+	doHost := func(method, path string, body []byte) (int, []byte) {
+		req, _ := http.NewRequest(method, srv.URL+path, bytes.NewReader(body))
+		req.Host = "home.test" // reach the relay AS the home host
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, b
+	}
+
+	// /signal/{site}/identity resolves on the home host → 200 (not the static 404/shell).
+	if code, _ := doHost(http.MethodGet, "/signal/site:Bob/identity", nil); code != http.StatusOK {
+		t.Fatalf("home-host /signal/site:Bob/identity = %d, want 200 (route shadowed by catch-all?)", code)
+	}
+	// PUT /wallet/{handle}/blob resolves on the home host → 200 (not 405 from the
+	// GET-only static forwarder).
+	body, _ := json.Marshal(walletBlobIO{Ciphertext: "Y2lwaA==", Nonce: "bm9uYw==", Version: 1})
+	if code, b := doHost(http.MethodPut, "/wallet/"+testHandle+"/blob", body); code != http.StatusOK {
+		t.Fatalf("home-host PUT /wallet/.../blob = %d (%s), want 200", code, b)
+	}
+	// GET /wallet/{handle}/blob round-trips on the home host.
+	if code, _ := doHost(http.MethodGet, "/wallet/"+testHandle+"/blob", nil); code != http.StatusOK {
+		t.Fatalf("home-host GET /wallet/.../blob = %d, want 200", code)
+	}
+}
+
+// Under -multi-tenant the home host serves ONLY the relay-disk landing/shell —
+// it never resolves a -home-site and never forwards to a Pi. The landing is
+// served for "/", /api/* is 403 (owner data is P2P-only), and a non-GET is 405.
+// Crucially this holds with NO -home-site and NO -home-pubkey configured.
+func TestMultiTenantHomeServesLandingNeverForwards(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>LANDING</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewWalletBlobStore(t.TempDir(), 65536, 1024)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	relay := &Relay{
+		Queue:            tunnel.NewQueue(),
+		Tokens:           NewTokenRegistry(),
+		Owners:           NewOwnerRegistry(),
+		Polls:            NewPollSecrets(),
+		Signals:          NewSignalMailbox(),
+		Challenges:       NewSignalChallenges(),
+		MultiTenant:      true,
+		RequireDeviceKey: true,
+		HomeHost:         "home.test",
+		HomeWeb:          dir,
+		WalletBlobs:      store,
+		// NOTE: no HomeSite, no HomePubKey — multi-tenant has neither.
+	}
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+
+	do := func(method, path string) (int, string) {
+		req, _ := http.NewRequest(method, srv.URL+path, nil)
+		req.Host = "home.test"
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(b)
+	}
+
+	// Anonymous "/" → the relay-disk landing, no Pi involved.
+	if code, body := do(http.MethodGet, "/"); code != 200 || body != "<h1>LANDING</h1>" {
+		t.Fatalf(`GET "/" = %d %q, want 200 "<h1>LANDING</h1>" from -home-web`, code, body)
+	}
+	// /api/* is still refused (owner data is P2P-only) — even /api/identity, which
+	// under multi-tenant is per-site at /signal/{site}/identity, NOT here.
+	if code, _ := do(http.MethodGet, "/api/owner-access/whoami"); code != http.StatusForbidden {
+		t.Fatalf("/api/* = %d, want 403 under multi-tenant", code)
+	}
+	if code, _ := do(http.MethodGet, "/api/identity"); code != http.StatusForbidden {
+		t.Fatalf("/api/identity over home host = %d, want 403 under multi-tenant (use /signal/{site}/identity)", code)
+	}
+	// A non-GET to the home host is refused (static assets are GET-only).
+	if code, _ := do(http.MethodPost, "/anything"); code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST to home host = %d, want 405", code)
+	}
+}

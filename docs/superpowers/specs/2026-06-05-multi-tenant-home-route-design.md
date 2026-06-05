@@ -258,6 +258,23 @@ relay stores (opaque): { userHandle: W, ciphertext, nonce, version, updatedAtMs 
    fresh-synced = remote bootstrap works. No-PRF (Firefox) or fresh-without-synced
    passkey = enroll on-LAN; surfaced plainly in the UI as a security property.
 
+## Before the relay flag is flipped in production (HARD blockers)
+
+`-multi-tenant` ships **default OFF** and the relay's home route stays disabled
+until BOTH of these are closed. Until then the multi-tenant routes are not even
+registered, so the code is dormant.
+
+1. **PRF determinism spike** (above) — verify identical PRF output across a
+   synced passkey on real devices, or fall back to browser-carried-only.
+2. **Blob write authentication.** `PUT /wallet/{user_handle}/blob` is currently
+   NOT writer-authenticated: the ciphertext is useless without the owner's PRF
+   key and the version guard is bounded so a handle-knower cannot lock a wallet
+   out (`maxVersionJump`), but anyone who learns a `userHandle` could still
+   **overwrite or squat** a wallet's blob. Before cutover, gate the PUT with a
+   per-wallet write signature — a PRF-derived MAC over
+   `handle|version|nonce|ciphertext-hash`, verified against a write-verifier the
+   wallet registers at enrollment. (Codex review, 2026-06-05, HIGH.)
+
 ## Honest residuals (documented, not over-built)
 
 - **PRF support + sync stability is the load-bearing unknown.** Firefox ships no

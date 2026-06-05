@@ -34,6 +34,9 @@ func main() {
 	requireDeviceKey := flag.Bool("require-device-key", false, "ENFORCE the device-key signaling gate (C2): an offer must carry a verified device-key proof or the Pi is never contacted. Off (default) keeps the pre-C2 behaviour so the relay can serve the shell + identity (slices 1+2) while a home Pi that doesn't yet publish device-keys keeps working. Turn on once device-keys are enrolled.")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
+	multiTenant := flag.Bool("multi-tenant", false, "public multi-tenant home route: home.* serves only the relay-disk landing/shell (never forwards to a Pi), routes each signed-in wallet to its own Pi via the browser-decrypted directory, and stores per-wallet ENCRYPTED directory blobs the relay never parses. Implies -require-device-key (fail closed) and requires -home-web; -home-site/-home-pubkey become no-ops.")
+	walletBlobDir := flag.String("wallet-blob-dir", "", "directory holding the per-wallet encrypted directory blobs (one <user_handle>.blob file each). Required under -multi-tenant; the one piece of durable relay state. The relay never decrypts the contents.")
+	walletBlobMaxBytes := flag.Int("wallet-blob-max-bytes", 65536, "per-wallet ciphertext byte cap; a PUT over this is rejected 413 so a hostile client can't grow the blob store without bound")
 	flag.Parse()
 
 	if *version {
@@ -48,6 +51,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// -multi-tenant implies -require-device-key (fail closed) and still requires
+	// -home-web. -home-site/-home-pubkey are NOT required and become no-ops.
+	if err := requireMultiTenant(*multiTenant, *requireDeviceKey, *homeWeb); err != nil {
+		slog.Error("ftw-relay: " + err.Error())
+		os.Exit(1)
+	}
+
 	owners := NewOwnerRegistry()
 	// Pre-pin the home site's key so the internet-exposed home route is
 	// authoritative from boot and a racing attacker can never TOFU-claim it
@@ -56,6 +66,25 @@ func main() {
 	if *homeSite != "" && *homePubKey != "" {
 		owners.Pin(*homeSite, *homePubKey)
 		slog.Info("ftw-relay: pinned home-site key", "site", *homeSite, "pubkey_prefix", safePrefix(*homePubKey))
+	}
+
+	// Under multi-tenant, build the durable per-wallet encrypted-blob store. It is
+	// loaded from -wallet-blob-dir at boot so blobs survive a relay restart. The
+	// store caps the number of distinct wallets and the per-blob size; the janitor
+	// GCs idle wallets below.
+	var walletBlobs *WalletBlobStore
+	if *multiTenant {
+		if *walletBlobDir == "" {
+			slog.Error("ftw-relay: -multi-tenant requires -wallet-blob-dir (the durable encrypted-blob store)")
+			os.Exit(1)
+		}
+		wb, err := NewWalletBlobStore(*walletBlobDir, *walletBlobMaxBytes, maxOwnerSites)
+		if err != nil {
+			slog.Error("ftw-relay: wallet blob store", "err", err)
+			os.Exit(1)
+		}
+		walletBlobs = wb
+		slog.Info("ftw-relay: multi-tenant mode", "wallet_blob_dir", *walletBlobDir, "max_bytes", *walletBlobMaxBytes)
 	}
 
 	r := &Relay{
@@ -72,6 +101,8 @@ func main() {
 		HomeWeb:          *homeWeb,
 		HomePubKey:       *homePubKey,
 		RequireDeviceKey: *requireDeviceKey,
+		MultiTenant:      *multiTenant,
+		WalletBlobs:      walletBlobs,
 	}
 
 	srv := &http.Server{
@@ -133,6 +164,14 @@ func main() {
 						slog.Info("ftw-relay: offer-limit GC", "removed", n)
 					}
 				}
+				// Evict idle per-wallet encrypted blobs by last touch (same cadence
+				// as Owners/Polls), so an abandoned wallet directory doesn't pin
+				// durable relay state forever. A live wallet re-PUTs on every change.
+				if r.WalletBlobs != nil {
+					if n := r.WalletBlobs.GC(30 * time.Minute); n > 0 {
+						slog.Info("ftw-relay: wallet-blob GC", "removed", n)
+					}
+				}
 			}
 		}
 	}()
@@ -167,6 +206,28 @@ func requireHomePin(homeHost, homeSite, homePubKey, homeWeb string, allowTOFU bo
 		if homeWeb == "" {
 			return errors.New("-home-host/-home-site requires -home-web — the relay must serve the sign-in shell + /api/identity itself and NEVER forward an anonymous request to the Pi (forwarding would let an unauthenticated internet visitor reach the home network). Pass the path to the web/ bundle on the relay VM, or -home-allow-tofu to override for testing")
 		}
+	}
+	return nil
+}
+
+// requireMultiTenant enforces the fail-closed rules for the public multi-tenant
+// home route. -multi-tenant IMPLIES -require-device-key: with device-key
+// enforcement off, a forged site_id would skip the C2 gate and the relay could be
+// tricked into contacting the wrong Pi — so we refuse to boot. It also still
+// REQUIRES -home-web: the landing + SPA shell must be served from the relay's own
+// disk so an anonymous GET never reaches a Pi. -home-site/-home-pubkey are NOT
+// required (and become no-ops) under multi-tenant — the destination comes from the
+// browser's decrypted directory, not a relay pin. Extracted from main so the rule
+// is unit-testable, like requireHomePin.
+func requireMultiTenant(multiTenant, requireDeviceKey bool, homeWeb string) error {
+	if !multiTenant {
+		return nil
+	}
+	if !requireDeviceKey {
+		return errors.New("-multi-tenant requires -require-device-key — refusing to run the public multi-tenant home route with the C2 device-key gate OFF (a forged site_id would skip the proof and the relay could contact the wrong Pi). Pass -require-device-key")
+	}
+	if homeWeb == "" {
+		return errors.New("-multi-tenant requires -home-web — the relay must serve the public landing + SPA shell itself and NEVER forward an anonymous request to a Pi. Pass the path to the web/ bundle on the relay VM")
 	}
 	return nil
 }
