@@ -7,6 +7,7 @@
 package state
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -53,7 +54,17 @@ func openRaw(path string) (*sql.DB, error) {
 // quickCheck runs `PRAGMA quick_check` and reports whether the database is
 // structurally sound. A healthy DB returns exactly one row, "ok".
 func quickCheck(db *sql.DB) (bool, error) {
-	rows, err := db.Query("PRAGMA quick_check")
+	return quickCheckContext(context.Background(), db)
+}
+
+// quickCheckContext is quickCheck with a cancellable context. The background
+// integrity scan (Store.verifyOnce) uses it so a shutdown can interrupt the
+// (multi-minute, on a large DB) scan instead of letting db.Close() block on it —
+// which would otherwise stop the clean-shutdown marker from being written and
+// make the NEXT boot slow. modernc.org/sqlite honours ctx cancellation via
+// sqlite3_interrupt, so the in-flight quick_check aborts promptly.
+func quickCheckContext(ctx context.Context, db *sql.DB) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA quick_check")
 	if err != nil {
 		return false, err
 	}

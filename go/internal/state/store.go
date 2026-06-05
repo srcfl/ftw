@@ -52,11 +52,16 @@ type Store struct {
 	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
 	mainDBPath string
 
-	// healMu guards corrupt, set by VerifyInBackground when the off-hot-path
-	// integrity scan fails. Close consults it: a corrupt DB must NOT be marked
-	// clean, so the next boot runs the full check + heals.
-	healMu  sync.Mutex
-	corrupt bool
+	// healMu guards corrupt + verifyCancel. corrupt is set by the background
+	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
+	// marked clean). verifyCancel interrupts the in-flight background scan so
+	// Close can stop it before closing the DB — otherwise db.Close() blocks on
+	// the (multi-minute) scan, the clean marker never gets written, and the next
+	// boot is slow. verifyWG lets Close wait for the scan goroutine to unwind.
+	healMu       sync.Mutex
+	corrupt      bool
+	verifyCancel context.CancelFunc
+	verifyWG     sync.WaitGroup
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -113,6 +118,18 @@ func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	// Stop the background integrity scan first: db.Close() blocks until every
+	// in-flight query finishes, and the scan's quick_check can run for minutes on
+	// a large DB. Cancelling it (sqlite3_interrupt) lets the close — and the clean
+	// marker write below — happen promptly, which is what keeps the NEXT boot fast.
+	s.healMu.Lock()
+	cancel := s.verifyCancel
+	s.healMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.verifyWG.Wait()
+
 	var err error
 	if s.cache != nil {
 		err = s.cache.Close()
@@ -143,17 +160,32 @@ func (s *Store) VerifyInBackground() {
 	if s == nil || s.db == nil {
 		return
 	}
-	go s.verifyOnce()
+	ctx, cancel := context.WithCancel(context.Background())
+	s.healMu.Lock()
+	s.verifyCancel = cancel
+	s.healMu.Unlock()
+	s.verifyWG.Add(1)
+	go func() {
+		defer s.verifyWG.Done()
+		s.verifyOnce(ctx)
+	}()
 }
 
 // verifyOnce is the synchronous body of VerifyInBackground (split out so it is
 // directly testable). It runs quick_check on state.db and, on failure, arms a
-// heal for the next boot.
-func (s *Store) verifyOnce() {
+// heal for the next boot. A ctx cancellation (Close interrupting the scan on
+// shutdown) is NOT a failure — the check simply didn't finish, so we leave the
+// DB's clean status untouched.
+func (s *Store) verifyOnce(ctx context.Context) {
 	t0 := time.Now()
-	ok, err := quickCheck(s.db)
+	ok, err := quickCheckContext(ctx, s.db)
 	if err == nil && ok {
 		slog.Info("state: background integrity check passed",
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+		return
+	}
+	if ctx.Err() != nil {
+		slog.Info("state: background integrity check aborted (shutdown)",
 			"elapsed", time.Since(t0).Round(time.Millisecond))
 		return
 	}

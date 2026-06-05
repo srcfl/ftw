@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -140,7 +141,7 @@ func TestVerifyOnceArmsHealOnCorruption(t *testing.T) {
 	s := &Store{db: db, mainDBPath: path}
 	writeCleanMarker(path) // pretend the previous shutdown was "clean"
 
-	s.verifyOnce()
+	s.verifyOnce(context.Background())
 
 	s.healMu.Lock()
 	corrupt := s.corrupt
@@ -162,12 +163,60 @@ func TestVerifyOnceCleanDBStaysHealthy(t *testing.T) {
 	}
 	defer st.Close()
 
-	st.verifyOnce()
+	st.verifyOnce(context.Background())
 
 	st.healMu.Lock()
 	corrupt := st.corrupt
 	st.healMu.Unlock()
 	if corrupt {
 		t.Error("verifyOnce flagged a healthy DB as corrupt")
+	}
+}
+
+// A cancelled context means the scan was interrupted on shutdown, NOT that the
+// DB is corrupt — verifyOnce must leave the clean status untouched so Close can
+// still write the marker (the whole point of the cancellation).
+func TestVerifyOnceCanceledIsNotCorruption(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.db")
+	st, err := Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	writeCleanMarker(statePath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled → quick_check errors with a context error
+
+	st.verifyOnce(ctx)
+
+	st.healMu.Lock()
+	corrupt := st.corrupt
+	st.healMu.Unlock()
+	if corrupt {
+		t.Error("a cancelled (aborted) scan must NOT be treated as corruption")
+	}
+	if !consumeCleanMarker(statePath) {
+		t.Error("a cancelled scan must leave the clean marker in place")
+	}
+}
+
+// Close must cancel the background scan, then still write the clean marker — even
+// though VerifyInBackground was started right before. This is the deploy path
+// (restart inside the scan window) that previously left no marker.
+func TestCloseCancelsBackgroundVerifyThenMarks(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.db")
+	st, err := Open(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.VerifyInBackground()
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(cleanMarkerPath(statePath)); err != nil {
+		t.Errorf("Close after VerifyInBackground did not write the clean marker: %v", err)
 	}
 }

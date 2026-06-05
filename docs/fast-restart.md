@@ -40,6 +40,13 @@ looked dead.
   it arms a heal for the next boot (leaves no clean marker) — so at-rest SD-card
   rot is still caught, control just isn't held hostage to it. Recovery becomes
   two boots instead of one, and never blocks.
+  - **It must not block the shutdown marker.** `db.Close()` waits for in-flight
+    queries, and this scan can run for minutes on a large DB — so a restart inside
+    the scan window would let the close be SIGKILLed before the clean marker is
+    written, making the *next* boot slow again (this actually bit the first
+    redeploy). `Close` therefore cancels the scan (`sqlite3_interrupt` via a
+    cancellable context) before closing, so the marker is written reliably and a
+    cancelled scan is treated as "didn't finish", never as corruption.
 - **Phase-timed startup logs.** `state: integrity gate complete elapsed=…` and
   `state: migrations complete elapsed=…` make any slow phase visible instead of a
   silent gap after `config loaded`.

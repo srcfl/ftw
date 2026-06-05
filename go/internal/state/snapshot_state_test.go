@@ -1,6 +1,7 @@
 package state
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,7 +145,7 @@ func TestCleanShutdownDefersCorruptionToNextBoot(t *testing.T) {
 		t.Fatalf("clean-marker boot should skip the check, got heal events: %+v", evs)
 	}
 	// Background verify detects the rot and arms a heal for the next boot.
-	st1.verifyOnce()
+	st1.verifyOnce(context.Background())
 	st1.Close() // corrupt flagged → no clean marker written
 
 	// Boot 2: no marker → full check → restore from snapshot.
