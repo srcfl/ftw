@@ -2072,6 +2072,7 @@
   // ---- Setup banner (bootstrap mode — no config yet) ----
   function showSetupBanner() {
     if (setupBannerShown) return;
+    if (ownerNotAuthed) return; // a logged-out viewer's empty status ≠ "no devices"
     var banner = document.createElement("div");
     banner.id = "setup-banner";
     banner.className = "setup-banner";
@@ -2089,6 +2090,7 @@
   // ---- "Add a device" prompt when drivers object is empty ----
   function updateNoDevicesPrompt(drivers) {
     var existing = document.getElementById("no-devices-prompt");
+    if (ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge when logged out
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
     if (hasDrivers) {
       if (existing) existing.remove();
@@ -3476,19 +3478,24 @@
   }
 
   // ---- P2P transport indicator ----
-  // Reflects window.ftwP2P state (direct / relay / connecting); click toggles
-  // direct P2P on/off (persisted). Hidden only when WebRTC is unsupported.
+  // Reflects window.ftwP2P state (direct / relay / connecting). PURELY
+  // INFORMATIONAL — it explains how your browser is talking to your Pi; it is
+  // NOT a toggle. (The old click-to-toggle "disable direct P2P" made no sense on
+  // the P2P-only home route — there's no cleartext relay fallback for owner data,
+  // so disabling it just broke the channel. Tap/hover now only reveals the
+  // explanation.)
   function setupP2PIndicator() {
     var el = document.getElementById("p2p-status");
     if (!el || !window.ftwP2P) return;
     var label = el.querySelector(".p2p-label");
     var titles = {
-      direct: "Direct P2P — end-to-end encrypted, bypassing the relay",
-      relay: "Via relay — click to toggle direct P2P",
-      connecting: "Connecting direct P2P…",
-      off: "Direct P2P unavailable",
+      direct: "Direct & end-to-end encrypted between your browser and your Pi — the relay sees nothing.",
+      relay: "Relayed via a blind TURN server — still end-to-end encrypted; the relay only forwards ciphertext.",
+      connecting: "Opening a direct, encrypted channel to your Pi…",
+      off: "Direct channel unavailable.",
     };
-    var text = { direct: "Direct", relay: "Relay", connecting: "P2P…", off: "" };
+    var text = { direct: "Direct", relay: "Relayed", connecting: "Connecting…", off: "" };
+    el.style.cursor = "default";
     window.ftwP2P.onState(function (s) {
       if (s === "off") { el.hidden = true; return; }
       el.hidden = false;
@@ -3496,10 +3503,6 @@
       el.classList.add("p2p-" + s);
       if (label) label.textContent = text[s] || "";
       el.title = titles[s] || "Transport";
-    });
-    el.addEventListener("click", function () {
-      var disabled = localStorage.getItem("ftw.p2p") === "off";
-      window.ftwP2P.setEnabled(disabled); // toggle
     });
   }
 
@@ -3551,13 +3554,21 @@
     };
   }
 
-  function showSignIn() {
-    var b = document.getElementById("signin-banner"); if (b) b.hidden = false;
-    var k = document.getElementById("signin-btn"); if (k) k.hidden = false;
+  // The sign-in GATE replaces the dashboard when the viewer isn't signed in on a
+  // remote origin — so a logged-out visitor sees a clean "sign in to reach your
+  // home", never the empty dashboard chrome (which falsely reads as an
+  // unconfigured instance). On the LAN (bypass) the gate never shows. ownerNotAuthed
+  // also suppresses the "no devices configured" prompt for logged-out viewers.
+  var ownerNotAuthed = false;
+  function showGate(mode) {
+    var g = document.getElementById("signin-gate");
+    if (g) { g.hidden = false; g.setAttribute("data-mode", mode || "signin"); }
+    ownerNotAuthed = (mode !== "connecting");
+    if (ownerNotAuthed && typeof hideSetupBanner === "function") { try { hideSetupBanner(); } catch (e) {} }
   }
-  function hideSignIn() {
-    var b = document.getElementById("signin-banner"); if (b) b.hidden = true;
-    var k = document.getElementById("signin-btn"); if (k) k.hidden = true;
+  function hideGate() {
+    var g = document.getElementById("signin-gate"); if (g) g.hidden = true;
+    ownerNotAuthed = false;
   }
 
   // runSignIn: the passkey login ceremony, over the dashboard's strict P2P
@@ -3600,25 +3611,23 @@
       .then(function (ok) {
         signInBusy = false;
         if (ok) {
-          hideSignIn();
+          hideGate();
           fetchStatus();
           fetchLiveHistory(true);
           loadHistory(chartRange);
-          setupAuth(); // flip signin → signout
+          setupAuth(); // reflect the signed-in state (signout button)
         }
         return ok;
       });
   }
 
-  // setupAuth wires the buttons once, then reflects the current whoami state.
-  // Safe to call repeatedly (on load and whenever the P2P channel (re)connects),
-  // since whoami needs the channel up to answer on a remote origin.
+  // setupAuth wires the gate/signout buttons once, then reflects the current
+  // whoami state. Safe to call repeatedly (on load and whenever the P2P channel
+  // (re)connects), since whoami needs the channel up to answer on a remote origin.
   function setupAuth() {
     var signoutBtn = document.getElementById("signout-btn");
-    var signinBtn = document.getElementById("signin-btn");
-    var bannerBtn = document.getElementById("signin-banner-btn");
-    if (signinBtn && !signinBtn._wired) { signinBtn._wired = true; signinBtn.onclick = function () { runSignIn(); }; }
-    if (bannerBtn && !bannerBtn._wired) { bannerBtn._wired = true; bannerBtn.onclick = function () { runSignIn(); }; }
+    var gateBtn = document.getElementById("signin-gate-btn");
+    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn(); }; }
     if (signoutBtn && !signoutBtn._wired) {
       signoutBtn._wired = true;
       signoutBtn.onclick = function () {
@@ -3632,19 +3641,24 @@
       .then(function (me) {
         if (me && me.can_sign_out) {            // signed-in remote session
           if (signoutBtn) signoutBtn.hidden = false;
-          hideSignIn();
+          hideGate();
         } else if (me && me.authenticated) {    // genuine-LAN bypass — full access
           if (signoutBtn) signoutBtn.hidden = true;
-          hideSignIn();
-        } else {                                // not signed in (remote) → reveal sign-in
+          hideGate();
+        } else {                                // not signed in (remote) → show the gate
           if (signoutBtn) signoutBtn.hidden = true;
-          showSignIn();
+          showGate("signin");
         }
       })
-      .catch(function () { /* channel down → leave as-is; re-checked on reconnect */ });
+      .catch(function () { /* channel down → leave the gate as-is (connecting) */ });
   }
 
   // ---- Init ----
+  // On a remote/public origin, cover the dashboard with the gate ("connecting…")
+  // BEFORE any data fetch renders, so a logged-out visitor never sees the empty
+  // dashboard chrome. setupAuth() resolves it to the dashboard (signed in) or the
+  // sign-in card (not). On the LAN (bypass) the gate never shows.
+  if (typeof isLanFallbackOrigin === "function" && !isLanFallbackOrigin()) showGate("connecting");
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();

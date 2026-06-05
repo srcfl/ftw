@@ -249,36 +249,55 @@ body.ftw-next .icon-btn[aria-pressed="true"]:hover {
   background: color-mix(in oklab, var(--accent-e) 24%, transparent);
 }
 
-/* Inline sign-in prompt — setupAuth() reveals it when whoami reports the
-   viewer isn't signed in on a remote origin (the dashboard IS the door).
-   Discreet hairline bar, single amber accent on the action; on-accent text
-   is near-black per DESIGN.md. Tokens flip cleanly in the light theme. */
-body.ftw-next .signin-banner {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  background: var(--ink-raised);
+/* Sign-in GATE — a full-screen lock over the dashboard for logged-out remote
+   visitors (the dashboard IS the door; locked, it shows only the door, never
+   the empty dashboard chrome). setupAuth() reveals it; data-mode flips between
+   "connecting" and "signin". Single amber accent; on-accent text near-black per
+   DESIGN.md; tokens flip cleanly in the light theme. */
+body.ftw-next .signin-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
   font-family: var(--sans);
-  font-size: 13px;
 }
-body.ftw-next .signin-banner[hidden] { display: none; }
-body.ftw-next .signin-banner-text { color: var(--fg); }
-body.ftw-next .signin-banner-btn {
+body.ftw-next .signin-gate[hidden] { display: none; }
+body.ftw-next .signin-gate-card {
+  width: min(92vw, 380px);
+  padding: 30px 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--ink-raised);
+}
+body.ftw-next .signin-gate-brand {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin-bottom: 20px;
+}
+body.ftw-next .signin-gate-lead { color: var(--fg); font-size: 15px; margin: 0 0 18px; }
+body.ftw-next .signin-gate-btn {
   font: inherit;
   font-weight: 600;
-  padding: 6px 16px;
+  padding: 10px 18px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--accent-e);
   background: var(--accent-e);
   color: #0a0a0a;
   cursor: pointer;
 }
-body.ftw-next .signin-banner-btn:hover { filter: brightness(1.05); }
-body.ftw-next .signin-banner-msg { color: var(--fg-dim); font-size: 12px; }
-body.ftw-next .signin-banner-msg.err { color: var(--accent-e); }
+body.ftw-next .signin-gate-btn:hover { filter: brightness(1.05); }
+body.ftw-next .signin-gate-msg { color: var(--fg-dim); font-size: 12px; margin: 12px 0 0; min-height: 1em; }
+body.ftw-next .signin-gate-msg.err { color: var(--accent-e); }
+body.ftw-next .signin-gate-setup { color: var(--fg-dim); font-size: 12px; margin: 18px 0 0; }
+body.ftw-next .signin-gate-setup a { color: var(--accent-e); text-decoration: none; }
+/* Mode switch: "connecting" shows only the reaching-home line; "signin" the card. */
+body.ftw-next .signin-gate[data-mode="connecting"] .signin-gate-auth { display: none; }
+body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-connecting { display: none; }
 
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
