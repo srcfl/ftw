@@ -1,6 +1,12 @@
 #!/bin/bash
+# Archived legacy deploy helper.
+#
+# Archived on 2026-06-05. This script targets the old ~/home-ems-app layout
+# and preserves state.redb. Current deploy paths use scripts/install.sh,
+# scripts/deploy-go.sh, docker-compose, or the GitHub release workflow.
+#
 # Deploy latest release to a remote host
-# Usage: ./scripts/deploy.sh homelab-rpi [version]
+# Usage: ./docs/archive/scripts/deploy-legacy-home-ems-app.sh homelab-rpi [version]
 
 set -euo pipefail
 

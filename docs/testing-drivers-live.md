@@ -103,23 +103,18 @@ From the repo root:
 cd go && go test -count=1 -run TestLua ./internal/drivers/
 ```
 
-This runs the three Lua-driver tests in
-`go/internal/drivers/lua_test.go` (`TestLuaDriverLifecycle`,
-`TestLuaDriverMissingFile`, `TestLuaDriverSyntaxError`). There is no
-dedicated catalog test yet — the scanner is exercised indirectly by
-the integration tests.
+This runs the Lua runtime tests in `go/internal/drivers/lua_test.go`.
+Catalog parsing has dedicated tests in the same package.
 
 Full suite:
 
 ```bash
 cd go && go test ./...
-make test        # same, but also builds WASM drivers first
+make test        # repo default test target
 make e2e         # full-stack end-to-end with both sims
 ```
 
-If you just added a `.wasm` driver, `make test` is the right entry
-point because it builds the WASM artefacts first (`Makefile:44-48`).
-Pure Lua drivers have no build step — `go test` is enough.
+Lua drivers have no build step.
 
 ## 3. Testing on a Raspberry Pi
 
@@ -130,9 +125,8 @@ make build-arm64   # → bin/forty-two-watts-linux-arm64
 make release       # → release/forty-two-watts-linux-{arm64,amd64}.tar.gz
 ```
 
-The tarball bundles `drivers-wasm/`, `web/`, and `config.example.yaml`
-but **not** `drivers/` — Lua drivers are currently operator-maintained
-on the Pi (rsync them yourself). See `Makefile:83-91`.
+The tarball bundles the binary, `drivers/`, `web/`, and
+`config.example.yaml`.
 
 ### 3.2 Push + restart
 

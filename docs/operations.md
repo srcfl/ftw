@@ -2,13 +2,6 @@
 
 The operator's guide. From "I have a fresh Raspberry Pi" to "I can debug a hung driver at 3am".
 
-> This doc covers the **native-binary + systemd** deploy and the
-> platform-independent runbook (logs, backup, troubleshooting). If you'd
-> rather run the **Docker** stack — the default for most installs — see
-> [deploy-platforms.md](deploy-platforms.md) for the Mac mini and
-> generic-Linux (Ubuntu/NUC/VM) guides, or [rpi-image.md](rpi-image.md)
-> for the turnkey Raspberry Pi SD-card image.
-
 Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (buying from grid), `grid_w < 0` means **export** (selling). Battery `bat_w > 0` means **charging** (load, draws from grid), `bat_w < 0` means **discharging** (source, reduces import). PV `pv_w` is always ≤ 0 (generation pushes energy into the site). See [site-convention.md](site-convention.md) for the full convention.
 
 ## 1. Build + cross-compile
@@ -32,10 +25,12 @@ The Makefile has the usual pair of targets. Prefer these when iterating:
 ```bash
 make build-arm64   # → bin/forty-two-watts-linux-arm64
 make build-amd64   # → bin/forty-two-watts-linux-amd64
-make release       # → release/forty-two-watts-linux-{arm64,amd64}.tar.gz (bundles binary + WASM + web + config.example.yaml)
+make release       # → local tarballs with binary + drivers + web + config.example.yaml
 ```
 
 `make release` bakes in the git tag via `-ldflags "-X main.Version=..."`, so the running binary reports its version in the startup log.
+Official tags, release notes, binaries, docker images, and Raspberry Pi images
+are produced by the Changesets + GitHub Actions release flow.
 
 ## 2. Files to deploy
 
@@ -43,7 +38,7 @@ The Pi needs:
 
 - **The binary** — single file, no runtime dependencies.
 - **`web/`** — static UI assets (`index.html`, `app.js`, `style.css`, `models.js`, `settings.js`, `plan.js`, `twins.js`, `favicon.svg`).
-- **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …) if you run the Lua runtime, or **`drivers-wasm/`** for the WASM-based drivers.
+- **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …).
 - **`config.yaml`** — operator-edited; see [`config.example.yaml`](../config.example.yaml) for the schema and [configuration.md](configuration.md) for every field.
 
 Suggested layout on the Pi:
@@ -54,7 +49,6 @@ Suggested layout on the Pi:
 ├── config.yaml              # local config (don't commit)
 ├── web/                     # static UI
 ├── drivers/                 # Lua drivers
-├── drivers-wasm/            # WASM drivers (optional)
 ├── state.db                 # created on first run
 ├── state.db-wal
 ├── state.db-shm
@@ -67,7 +61,8 @@ The binary only takes two command-line flags:
 - `-config config.yaml` — path to the config file.
 - `-web web` — path to the static UI directory.
 
-Relative WASM driver paths in `config.yaml` are resolved against the config file's directory, so keep them side-by-side.
+Relative Lua driver paths in `config.yaml` are resolved against the config
+file's directory, so keep `drivers/` side by side with the config.
 
 ## 3. systemd unit
 
@@ -75,7 +70,7 @@ The repo ships [`deploy/forty-two-watts.service`](../deploy/forty-two-watts.serv
 
 ```ini
 [Unit]
-Description=forty-two-watts EMS (Go + WASM port)
+Description=forty-two-watts EMS
 After=network-online.target
 Wants=network-online.target
 
@@ -188,10 +183,9 @@ For the `docker-compose.yml` deployment, the web UI's version badge and "Update"
 
 ## 7. Backup + restore
 
-State is split across two SQLite files by criticality:
+Three things hold state:
 
-- **`state.db`** — precious data (config, battery/PV/load models, devices, energy history, recent TSDB tier). Highest priority. A daily `state.db.snapshot` is written automatically (see §8 "Database corrupt") as a restore source.
-- **`cache.db`** — disposable, re-fetchable data (spot prices, weather forecasts). Lowest priority — safe to delete; it rebuilds and re-fetches within the hour.
+- **`state.db`** — SQLite (config, battery models, devices, prices, forecasts, recent TSDB tier). Highest priority.
 - **`cold/YYYY/MM/DD.parquet`** — long-format TS history for data > 14 days old. Medium priority (losing it loses history, not control).
 - **`config.yaml`** — operator-edited config. High priority; may not be reproducible from git.
 
@@ -201,8 +195,7 @@ Backup (stop for a consistent SQLite snapshot):
 # On the Pi
 cd ~/forty-two-watts-go
 sudo systemctl stop forty-two-watts
-tar czf ~/backup-$(date +%F).tgz state.db state.db-wal state.db-shm \
-        state.db.snapshot cache.db cold/ config.yaml
+tar czf ~/backup-$(date +%F).tgz state.db state.db-wal state.db-shm cold/ config.yaml
 sudo systemctl start forty-two-watts
 ```
 
@@ -211,33 +204,6 @@ Online backup is possible (SQLite is WAL-mode and survives `cp`), but cold backu
 Restore: stop the service, extract into `WorkingDirectory`, start the service. On first startup after restore, device-identity reconciliation and battery-model key migration are idempotent — nothing to do manually.
 
 ## 8. Troubleshooting runbook
-
-### Database corrupt (no prices / blank dashboard data)
-
-Symptom: spot prices (or other data) stop appearing; logs show
-`price save failed err="database disk image is malformed (11)"` or similar
-SQLITE_CORRUPT errors. Almost always SD-card corruption after a power loss.
-
-The service now self-heals at boot and surfaces the result on
-`GET /api/health` under `storage`:
-
-```json
-"storage": { "state": "ok", "cache": "rebuilt", "detail": "cache.db was corrupt — rebuilt empty, re-fetching" }
-```
-
-- `storage.cache: "rebuilt"` — the disposable `cache.db` was corrupt and was
-  quarantined + rebuilt empty. Prices/forecasts re-fetch within the hour. No
-  action needed.
-- `storage.state: "restored"` — the precious `state.db` was corrupt and was
-  restored from the daily `state.db.snapshot`. You lose at most a day of
-  history/model training. No action needed.
-- `storage.state: "rebuilt"` — `state.db` was corrupt **and** no snapshot
-  existed, so it started fresh (history + trained models lost). Restore from a
-  backup (§7) if you have one.
-
-Quarantined corrupt files are kept as `<db>.corrupt-<ms>` for inspection.
-`cache.db` is always safe to delete manually. If corruption recurs, the SD
-card is likely failing — reflash/replace it and ensure clean shutdowns.
 
 ### Driver hung (tick_count not advancing)
 
@@ -252,7 +218,7 @@ for i in 1 2 3 4 5; do
 done
 ```
 
-The tick should advance every control interval (default 5 s). If it doesn't, the driver VM is wedged.
+The tick should advance every control interval (default 2 s). If it doesn't, the driver VM is wedged.
 
 **Fix:** The watchdog (`site.watchdog_timeout_s`, default 60 s) auto-reverts stuck drivers to their autonomous defaults — you'll see `driver telemetry stale — marking offline + reverting to autonomous` in the log. For a full reset of MQTT/Modbus client state:
 
@@ -383,10 +349,8 @@ The rolloff loop runs once per hour and is cheap when nothing is due (a single `
 
 | File | Owner | Purpose | Backup priority |
 |---|---|---|---|
-| `state.db` | sqlite (WAL) | Config, models, devices, energy history, recent TSDB | High |
+| `state.db` | sqlite (WAL) | Config, models, devices, prices, forecasts, recent TSDB | High |
 | `state.db-wal`, `state.db-shm` | sqlite | WAL sidecars — include in backup | High |
-| `state.db.snapshot` | snapshotLoop | Daily recovery copy; restore source if `state.db` corrupts | Medium |
-| `cache.db` | sqlite (WAL) | Disposable, re-fetchable spot prices + weather forecasts | Low (safe to delete) |
 | `cold/YYYY/MM/DD.parquet` | rolloffLoop | Long-format TS history > 14 days | Medium |
 | `config.yaml` | operator | All operator-tunable settings | High |
 | `forty-two-watts.log` | service | Diagnostic log (stdout redirect) | Low |

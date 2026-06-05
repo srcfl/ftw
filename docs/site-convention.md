@@ -40,6 +40,7 @@ this one thing were the only thing running.
 | **Grid meter** | importing (grid → site) | exporting (site → grid) |
 | **PV** | (never positive) | generating (pushes to site → reduces import) |
 | **Battery** | charging (load, adds to import) | discharging (source, reduces import) |
+| **V2X charger** | charging vehicle (load, adds to import) | discharging vehicle (source, reduces import) |
 | **Load** | (always positive) | — |
 
 Balance equation (all signed):
@@ -82,7 +83,7 @@ always use the base SI unit.
 - A future OEM using whatever convention: driver translates.
 
 The driver **MUST** translate to the site convention before calling
-`host.emit_telemetry()`. Likewise for commands: the controller sends
+`host.emit(...)`. Likewise for commands: the controller sends
 `power_w` in site convention, the driver translates to native commands.
 
 This is the **only** place sign conversion happens. Everything above the
@@ -134,7 +135,7 @@ So we pick: **grid-meter-positive, view the site from the boundary**.
 
 - Each driver's telemetry emission is covered by tests that assert the sign
   (e.g., `emit_pv` always produces `w <= 0`)
-- Integration tests between the driver, WASM runtime, and a simulator verify
+- Integration tests between Lua drivers and simulators verify
   that a `+N` charge command produces an actual reading with `bat_w > 0`
 - The control loop's own tests assert both sides of the contract:
   self-consumption discharges on import to hold grid near zero, while planner
