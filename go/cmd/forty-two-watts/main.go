@@ -1526,7 +1526,11 @@ func main() {
 		TunnelMarker:         tunnelMarker,
 		SiteIdentityPubHex:   siteIdentityPubHex,
 		SiteID:               "site:" + cfg.Site.Name,
-		P2P:                  p2pMgr,
+		// InstanceSigner signs the owner-access instance descriptor with the same
+		// self-sovereign ES256 key. nil-safe: if identity load failed above,
+		// siteIdentity is nil and the descriptor endpoint returns 503.
+		InstanceSigner: instanceSignerOrNil(siteIdentity),
+		P2P:            p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
@@ -2843,6 +2847,16 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// instanceSignerOrNil returns id as an api.InstanceSigner, or a genuine nil
+// interface when id is nil — so api's `InstanceSigner == nil` 503 guard fires
+// (a typed-nil *nova.Identity boxed into the interface would be non-nil).
+func instanceSignerOrNil(id *nova.Identity) api.InstanceSigner {
+	if id == nil {
+		return nil
+	}
+	return id
 }
 
 // envBool returns true iff the env var is set to a positive value

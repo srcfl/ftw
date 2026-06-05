@@ -225,30 +225,118 @@
   }
 
   var _pinPromise = null;
-  // pinnedIdentity TOFU-fetches + pins {pubkey, site_id} from /api/identity on
-  // first connect (keyed per home origin / me-prefix), then reuses it. The first
-  // fetch trusts the path once (SSH known-hosts model); every later answer is
-  // verified against the pinned key, so the relay can't MITM after that.
+
+  // directoryEntry returns the chosen instance from the decrypted directory
+  // (window.ftwInstanceSync, attached by instance-sync.js). v1: the directory is
+  // a 1-entry list, so we take the first. Returns null when no directory exists
+  // yet (anonymous, pre-decrypt, or a not-yet-migrated single-home user). The
+  // directory's pi_pubkey is Pi-signed (instance-sync verifyEntry), so trusting
+  // it needs NO relay /api/identity round-trip.
+  function directoryEntry() {
+    try {
+      var sync = window.ftwInstanceSync;
+      if (!sync || typeof sync.getCachedInstances !== "function") return null;
+      var list = sync.getCachedInstances() || [];
+      var e = list[0];
+      if (e && e.site_id && e.pi_pubkey) return { pub: e.pi_pubkey, site: e.site_id };
+    } catch (_) {}
+    return null;
+  }
+
+  // legacyRecord reads the pre-multi-tenant single pin written at
+  // "ftw.identity:<apiBase>" ({pub, site}). Used once to seed the first per-site
+  // record so an existing single-home user doesn't re-TOFU.
+  function legacyRecord() {
+    try {
+      var raw = localStorage.getItem("ftw.identity:" + apiBase());
+      var rec = raw ? JSON.parse(raw) : null;
+      if (rec && rec.pub && rec.site) return rec;
+    } catch (_) {}
+    return null;
+  }
+
+  // pinKey is the per-(origin, site_id) localStorage key. The site_id is part of
+  // the key so two tenants reached through the same origin pin independently and
+  // can never clobber each other's Pi identity.
+  function pinKey(site) { return "ftw.identity:" + apiBase() + ":" + site; }
+
+  // persistPin enforces FIRST-KEY-WINS per (origin, site_id): the first Pi key
+  // pinned for a site is authoritative; a later DIFFERENT key is a hard error (an
+  // identity change / possible relay MITM), NEVER a silent overwrite — even when
+  // it arrives in a validly Pi-signed directory entry (a signature proves the key
+  // signed that descriptor, not that it may replace the known-good pin). Returns
+  // the record to use (the existing pin if present, else the freshly written one).
+  function persistPin(site, pub) {
+    var existing = null;
+    try { existing = JSON.parse(localStorage.getItem(pinKey(site)) || "null"); } catch (e) {}
+    if (!existing || !existing.pub) {
+      // No per-site pin yet — but a LEGACY single-home pin (ftw.identity:<apiBase>,
+      // no site suffix) for the SAME site is equally authoritative. First-key-wins
+      // must span the migration, or a directory entry could silently replace the
+      // identity an existing user already trusts before it was migrated.
+      var legacy = legacyRecord();
+      if (legacy && legacy.site === site && legacy.pub) existing = legacy;
+    }
+    if (existing && existing.pub) {
+      if (existing.pub !== pub) {
+        throw new Error("home identity for " + site + " changed — refusing to connect (re-pair on your home network if this was intentional)");
+      }
+      // Persist/refresh the per-site record (also migrates a legacy pin forward).
+      var kept = { pub: existing.pub, site: site };
+      try { localStorage.setItem(pinKey(site), JSON.stringify(kept)); } catch (e) {}
+      return kept;
+    }
+    var rec = { pub: pub, site: site };
+    try { localStorage.setItem(pinKey(site), JSON.stringify(rec)); } catch (e) {}
+    return rec;
+  }
+
+  // pinnedIdentity resolves {key, site} for the chosen instance, pinning per
+  // (origin, site_id). Source priority — NO relay round-trip until the last:
+  //   1. the decrypted directory entry (Pi pubkey is Pi-signed there);
+  //   2. the legacy single-pin record (migrate it into a per-site record);
+  //   3. relay /api/identity TOFU (only when nothing is cached at all).
+  // Every later answer is verified against the pinned key, so the relay can't
+  // MITM after that. The pubkey is imported once and the promise cached.
   function pinnedIdentity() {
     if (_pinPromise) return _pinPromise;
-    var p = (function () {
-      var storeKey = "ftw.identity:" + apiBase();
-      var stored = null;
-      try { stored = JSON.parse(localStorage.getItem(storeKey) || "null"); } catch (e) {}
-      var got = stored
-        ? Promise.resolve(stored)
-        : fetch(relayURL("/api/identity"), { credentials: "same-origin" })
-            .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
-            .then(function (id) {
-              if (!id.public_key_hex || !id.site_id) throw new Error("identity response missing fields");
-              var rec = { pub: id.public_key_hex, site: id.site_id };
-              try { localStorage.setItem(storeKey, JSON.stringify(rec)); } catch (e) {}
-              return rec;
-            });
-      return got.then(function (rec) {
+    var p;
+    try {
+      p = (function () {
+      // 1. The decrypted directory entry (its Pi pubkey is Pi-signed) — first-key-wins.
+      var dir = directoryEntry();
+      if (dir) {
+        var rec = persistPin(dir.site, dir.pub);
         return importP256Pub(rec.pub).then(function (key) { return { key: key, site: rec.site }; });
-      });
-    })();
+      }
+      // 2. The legacy single-home pin, migrated into a per-site record (first-key-wins).
+      var legacy = legacyRecord();
+      if (legacy) {
+        var rec2 = persistPin(legacy.site, legacy.pub);
+        return importP256Pub(rec2.pub).then(function (key) { return { key: key, site: rec2.site }; });
+      }
+      // 3. No directory and no legacy pin. On a GENUINE LAN origin the Pi serves
+      // /api/identity ITSELF (no relay in the path), so a one-time TOFU there is the
+      // SSH-known-hosts model and safe. On the PUBLIC relay route, trusting
+      // /api/identity would mean trusting a RELAY-supplied identity — a MITM vector
+      // — so we FAIL CLOSED: the user must sign in, which loads the Pi-signed
+      // directory, before any channel is verified. (Codex 2026-06-05, BLOCKER.)
+      if (!isLanOrigin()) {
+        return Promise.reject(new Error("no pinned home identity yet — sign in with your passkey first (the relay's /api/identity is never trusted on the public route)"));
+      }
+      return fetch(relayURL("/api/identity"), { credentials: "same-origin" })
+        .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
+        .then(function (id) {
+          if (!id.public_key_hex || !id.site_id) throw new Error("identity response missing fields");
+          var rec3 = persistPin(id.site_id, id.public_key_hex);
+          return importP256Pub(rec3.pub).then(function (key) { return { key: key, site: rec3.site }; });
+        });
+      })();
+    } catch (e) {
+      // A synchronous throw (e.g. a first-key-wins identity change) becomes a
+      // rejection so callers fail closed via .catch rather than crashing.
+      p = Promise.reject(e);
+    }
     // Cache only on success — a transient fetch failure must not poison later
     // verifications (the pinned record persists in localStorage regardless).
     p.catch(function () { if (_pinPromise === p) _pinPromise = null; });
@@ -650,7 +738,8 @@
     // "set up this device on your home network first" path (C2) rather than a
     // perpetual "connecting".
     isUnenrolled: function () { return unenrolled; },
-    // site() resolves the pinned site_id (TOFU /api/identity, then localStorage).
+    // site() resolves the pinned site_id (directory entry, then the migrated
+    // legacy record, then last-resort TOFU /api/identity — see pinnedIdentity).
     // next-app.js needs it to build the C3 device-PoP signing string
     // "ftw-device-pop:v1:<site>:<challenge>" — the SAME site p2p.js signs the
     // signal proof over, so both ends agree.

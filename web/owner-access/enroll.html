@@ -86,10 +86,12 @@
        window.p2pFetch when a channel is up. -->
   <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
-    import { decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    import { decodeCreationOptions, encodeRegistrationResult, bufToB64url } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
     import { ownerFetch } from "./owner-fetch.js";
     import { exportPubHex } from "./device-key.js";
+    import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
+    import { saveDirectory, verifyEntry } from "./instance-sync.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
@@ -126,8 +128,13 @@
         }
         const { ceremony_token, options } = await start.json();
 
-        // 2. Browser ceremony.
+        // 2. Browser ceremony. Request the PRF extension so THIS credential can
+        //    later derive the per-wallet directory ENCRYPTION key (prf.js): the
+        //    same passkey the owner taps to sign in yields the key that decrypts
+        //    their list of 42W homes from the relay, with no LAN visit. Harmless
+        //    on authenticators without PRF — they just return no prf result.
         const credOpts = decodeCreationOptions(options);
+        credOpts.extensions = Object.assign({}, credOpts.extensions, extensionInput());
         const cred = await navigator.credentials.create({ publicKey: credOpts });
 
         // 2b. Mint this device's silent-login key (C4). Enrollment is the ONLY
@@ -166,6 +173,40 @@
         }
         const out = await finish.json();
         msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Redirecting…</div>';
+
+        // 4. FIRST ENROLLMENT — seed the per-wallet directory. Now that a passkey
+        //    exists, fetch the Pi-signed instance descriptor over the owner channel
+        //    and write a 1-entry directory (browser-carried copy + the relay's
+        //    encrypted blob) so a FRESH device with the synced passkey can discover
+        //    this home remotely. Best-effort: a failure here never blocks the
+        //    enrollment that already succeeded — the directory also self-heals from
+        //    the legacy single-home pin on first sign-in (p2p.js migration).
+        try {
+          // W = base64url(user.id) — the opaque wallet handle the relay keys the
+          // encrypted blob on. On a create ceremony the handle is the user.id we
+          // were given in the options (the assertion's userHandle echoes it later).
+          const W = credOpts.user && credOpts.user.id ? bufToB64url(credOpts.user.id) : null;
+          const prfOut = outputFrom(cred); // null on authenticators without PRF
+          const desc = await ownerFetch("/api/owner-access/instance-descriptor", { credentials: "same-origin" });
+          if (W && desc.ok) {
+            const entry = await desc.json(); // { site_id, pi_pubkey, label, sig }
+            if (await verifyEntry(entry)) {
+              entry.added_ms = Date.now();
+              // encKey = PRF-derived when available; null falls back to the
+              // browser-carried copy only (no relay blob written, but the home is
+              // still cached locally so this device routes correctly).
+              const encKey = prfOut ? await deriveEncKey(prfOut) : null;
+              await saveDirectory(W, encKey, location.origin, {
+                instances: [entry], version: 0, writeKey: null,
+              });
+            }
+          }
+        } catch (e) {
+          // Non-fatal: log only. The passkey is enrolled; directory seeding can
+          // retry on the next sign-in.
+          try { console.warn("instance directory seed failed: " + (e && e.message)); } catch (_) {}
+        }
+
         setTimeout(() => location.href = "./", 1500);
       } catch (e) {
         msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;

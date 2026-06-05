@@ -53,6 +53,18 @@ const (
 	maskedPlaceholder = "••••••••"
 )
 
+// InstanceSigner signs the owner-access instance descriptor with the Pi's
+// self-sovereign ES256 identity. *nova.Identity satisfies it. PublicKeyHex
+// returns the uncompressed P-256 public key (X||Y, 128 lowercase hex chars);
+// SignRawHex returns the raw r||s 64-byte signature as a 128-char hex string
+// (the handler re-encodes it to base64url for the wire). Declared as an
+// interface here so internal/api does not import internal/nova (matches the
+// relaySigner pattern in cmd/forty-two-watts/owner_relay_register.go).
+type InstanceSigner interface {
+	PublicKeyHex() string
+	SignRawHex(msg string) (string, error)
+}
+
 // Deps is the full set of runtime dependencies the API handlers need.
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
@@ -188,6 +200,13 @@ type Deps struct {
 	// /api/identity so the browser can pin it and rebuild the canonical DTLS
 	// fingerprint signing string (which binds the signature to this site).
 	SiteID string
+
+	// InstanceSigner is the Pi's self-sovereign ES256 identity used to sign the
+	// owner-access instance descriptor (GET /api/owner-access/instance-descriptor)
+	// over the P2P channel. Satisfied by *nova.Identity — the same key behind
+	// SiteIdentityPubHex. Nil when identity load failed on boot; the descriptor
+	// endpoint then returns 503.
+	InstanceSigner InstanceSigner
 
 	// P2P is the Pi-side WebRTC manager (Phase 5). It answers browser SDP
 	// offers (POST /api/p2p/offer) and serves the resulting direct DataChannel
@@ -365,6 +384,9 @@ func (s *Server) routes() {
 	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).
 	s.handle("GET  /api/owner-access/device-challenge", s.handleOwnerDeviceChallenge)
 	s.handle("POST /api/owner-access/device-pop", s.handleOwnerDevicePoP)
+	// Multi-tenant home route: Pi-signed instance descriptor, owner-authed,
+	// served over the P2P channel (see api_owner_instance_descriptor.go).
+	s.handle("GET  /api/owner-access/instance-descriptor", s.handleOwnerInstanceDescriptor)
 
 	// ---- Self-sovereign site identity (Phase 2) ----
 	s.handle("GET  /api/identity", s.handleIdentity)

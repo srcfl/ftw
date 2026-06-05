@@ -345,6 +345,27 @@ body.ftw-next .signin-gate[data-mode="setup"] .signin-gate-connecting { display:
 /* The trust line is meaningless while still "connecting" — hide it there. */
 body.ftw-next .signin-gate[data-mode="connecting"] .signin-gate-trust { display: none; }
 
+/* Public landing (multi-tenant): the anonymous front door. Brand + passkey +
+   a discreet "Learn more" — no instance data pre-auth. Shown ONLY in
+   data-mode="public-landing"; it suppresses the "reaching your home" line, the
+   single-tenant auth/setup panels, and the trust line (no home reached yet).
+   Reuses the existing gate tokens — single amber accent, near-black on-accent
+   text, mono eyebrow — so light theme flips cleanly. No hard-coded hex. */
+body.ftw-next .signin-gate-landing { display: none; }
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-landing { display: block; }
+/* No "reaching your home" line on the public front door — the visitor hasn't
+   chosen a home yet. */
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-connecting { display: none; }
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-auth,
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-needs-setup,
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-trust { display: none; }
+/* The landing carries its OWN brand inside .signin-gate-landing; hide the
+   card-level brand (a direct child of the card, not the landing's nested one)
+   so the public front door shows a single masthead, not a doubled one. */
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-card > .signin-gate-brand { display: none; }
+body.ftw-next .signin-gate-learn-row { color: var(--fg-dim); font-size: 12px; margin: 18px 0 0; }
+body.ftw-next .signin-gate-learn { color: var(--accent-e); text-decoration: none; }
+
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */

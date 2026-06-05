@@ -3577,6 +3577,19 @@
     };
   }
 
+  // hasDecryptableDirectory reports whether instance-sync has a usable directory
+  // cached (the user already authenticated + PRF-decrypted this session, or a
+  // migrated single-home record seeded the browser-carried copy). When false the
+  // visitor is anonymous and gets the PUBLIC landing — never any instance data.
+  function hasDecryptableDirectory() {
+    try {
+      var sync = window.ftwInstanceSync;
+      if (!sync || typeof sync.getCachedInstances !== "function") return false;
+      var list = sync.getCachedInstances() || [];
+      return list.length >= 1;
+    } catch (e) { return false; }
+  }
+
   // The sign-in GATE replaces the dashboard when the viewer isn't signed in on a
   // remote origin — so a logged-out visitor sees a clean "sign in to reach your
   // home", never the empty dashboard chrome (which falsely reads as an
@@ -3663,8 +3676,19 @@
   function runSignIn() {
     if (signInBusy) return Promise.resolve(false);
     signInBusy = true;
-    var msgEl = document.getElementById("signin-banner-msg");
-    function say(t, cls) { if (msgEl) { msgEl.textContent = t || ""; msgEl.className = "signin-banner-msg" + (cls ? " " + cls : ""); } }
+    // say updates whichever message line is on screen. The same ceremony runs
+    // from both the returning-visitor gate (#signin-banner-msg) and the public
+    // landing (#signin-landing-msg); writing both keeps feedback visible without
+    // forking the flow.
+    var msgEls = ["signin-banner-msg", "signin-landing-msg"]
+      .map(function (id) { return document.getElementById(id); })
+      .filter(function (el) { return !!el; });
+    function say(t, cls) {
+      for (var i = 0; i < msgEls.length; i++) {
+        msgEls[i].textContent = t || "";
+        msgEls[i].className = "signin-gate-msg" + (cls ? " " + cls : "");
+      }
+    }
     // Silent first: if this device is remembered, no passkey prompt at all.
     say("Reaching your home…");
     return runDevicePoP().then(function (silentOk) {
@@ -3678,9 +3702,69 @@
     });
   }
 
+  // openDirectoryAfterAssertion derives the directory ENCRYPTION key from THIS
+  // login assertion's PRF output (prf.js: outputFrom → deriveEncKey), loads +
+  // decrypts the relay directory blob (instance-sync.js: loadDirectory), and
+  // routes. v1 contract: the directory is a LIST. Exactly 1 entry → auto-open
+  // (no picker). >1 → auto-open the FIRST and leave a clearly-marked picker TODO.
+  // 0 → "finish setup on your home network" guidance (no error). When the PRF
+  // output is absent (Firefox, or a passkey enrolled without prf), we fall back to
+  // loadDirectory(W, null, origin) — the browser-carried copy — and surface that
+  // encrypted home sync is unavailable here. A PRF/decrypt failure is NEVER fatal:
+  // the dashboard still opens; instance-sync's local cache is the source of truth.
+  function openDirectoryAfterAssertion(cred, say) {
+    var prf = window.ftwPrf, sync = window.ftwInstanceSync;
+    if (!prf || typeof prf.outputFrom !== "function" || typeof prf.deriveEncKey !== "function" ||
+        !sync || typeof sync.loadDirectory !== "function") {
+      return Promise.resolve(); // crypto modules absent → carry-local only
+    }
+    // W = base64url(assertion.response.userHandle) — the opaque wallet handle the
+    // relay keys the encrypted blob on.
+    var W = null;
+    try {
+      var uh = cred && cred.response ? cred.response.userHandle : null;
+      if (uh) W = bufToB64url(uh);
+    } catch (e) {}
+    if (!W) return Promise.resolve(); // no wallet handle → nothing to fetch
+    var origin = location.origin;
+    function route(dir) {
+      var list = (dir && dir.instances) || [];
+      if (list.length === 1) {
+        // Exactly one home — auto-open. The pin re-resolves from the freshly
+        // cached directory entry (p2p.js::pinnedIdentity), so the next owner
+        // fetch connects to the right site with no relay round-trip.
+        return;
+      }
+      if (list.length > 1) {
+        // TODO(multi-instance picker): v1 has no picker, so auto-open the FIRST
+        // entry. instance-sync's getCachedInstances()[0] is what p2p.js pins, so
+        // "the first" is already the chosen one. Replace this with a picker UI
+        // when multi-home support lands.
+        try { console.log("ftw: " + list.length + " homes in directory; auto-opening the first (picker TODO)"); } catch (e) {}
+        return;
+      }
+      // 0 entries — the wallet has no home registered yet. This isn't an error;
+      // the user just hasn't finished setup on their home network.
+      say("Finish setting up 42W on your home network, then return here.", "ok");
+    }
+    var prfOut = null;
+    try { prfOut = prf.outputFrom(cred); } catch (e) { prfOut = null; }
+    if (!prfOut) {
+      // No PRF on this browser/passkey — fall back to the browser-carried copy.
+      say("Signed in. (Encrypted home sync isn’t available on this browser.)", "ok");
+      return sync.loadDirectory(W, null, origin).then(route).catch(function () {});
+    }
+    return prf.deriveEncKey(prfOut)
+      .then(function (encKey) { return sync.loadDirectory(W, encKey, origin); })
+      .then(route)
+      .catch(function () { /* PRF/decrypt failure → carry-local; never blocks login */ });
+  }
+
   // runPasskeySignIn is the explicit passkey ceremony — the fallback when the
   // silent device path isn't available. Kept as its own function so runSignIn can
-  // try silent first without duplicating the WebAuthn flow.
+  // try silent first without duplicating the WebAuthn flow. The assertion requests
+  // the PRF extension (prf.extensionInput): the same passkey tap yields the
+  // directory-decryption key, so after finish we load + route the directory.
   function runPasskeySignIn(say) {
     say("Waiting for your passkey…");
     return ownerFetch("/api/owner-access/login/start", { method: "POST" })
@@ -3691,7 +3775,18 @@
       })
       .then(function (data) {
         if (!data) return false;
-        return navigator.credentials.get({ publicKey: decodeAssertionOptions(data.options) }).then(function (cred) {
+        var getOpts = { publicKey: decodeAssertionOptions(data.options) };
+        // Request the PRF extension so the authenticator evaluates the per-wallet
+        // secret we HKDF into the directory key (prf.js). Harmless on browsers /
+        // authenticators that don't support it — they simply return no prf result
+        // and we fall back to the browser-carried directory copy.
+        try {
+          if (window.ftwPrf && typeof window.ftwPrf.extensionInput === "function") {
+            getOpts.publicKey.extensions = Object.assign(
+              {}, getOpts.publicKey.extensions, window.ftwPrf.extensionInput());
+          }
+        } catch (e) {}
+        return navigator.credentials.get(getOpts).then(function (cred) {
           if (!cred) { say(""); return false; }
           return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
             method: "POST",
@@ -3700,8 +3795,14 @@
             credentials: "same-origin",
           }).then(function (finish) {
             if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
-            say("Signed in.", "ok");
-            return true;
+            // Session minted. Now derive the directory key from this SAME
+            // assertion's PRF output, load + decrypt the relay directory, and
+            // route (auto-open on exactly 1). Non-fatal: a PRF/decrypt failure
+            // still signs the user in against the browser-carried copy.
+            return openDirectoryAfterAssertion(cred, say).then(function () {
+              say("Signed in.", "ok");
+              return true;
+            });
           });
         });
       })
@@ -3724,6 +3825,11 @@
     var signoutBtn = document.getElementById("signout-btn");
     var gateBtn = document.getElementById("signin-gate-btn");
     if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn(); }; }
+    // The public-landing button runs the SAME ceremony as the gate button — one
+    // runSignIn(), not a fork — so the landing and the returning-visitor card
+    // converge on the identical passkey + PRF + directory flow.
+    var landingBtn = document.getElementById("signin-landing-btn");
+    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn(); }; }
     if (signoutBtn && !signoutBtn._wired) {
       signoutBtn._wired = true;
       signoutBtn.onclick = function () {
@@ -3768,12 +3874,16 @@
   // load (it's idempotent but pointless to repeat on every reconnect).
   var silentAuthTried = false;
 
-  // showSignInGate reveals the passkey gate, choosing the copy by whether this
-  // device is even capable of being remembered. If p2p.js reports the origin is
-  // UNENROLLED (no device key — never set up on the LAN), we surface the explicit
-  // "set up this device on your home network first" path (C2) instead of a passkey
-  // prompt the user can't satisfy here.
+  // showSignInGate routes the gate. The multi-tenant PUBLIC home route is purely
+  // ADDITIVE: a visitor with NO decryptable directory (anonymous, fresh browser)
+  // gets the public landing — brand + passkey + Learn more, and NO instance data.
+  // Once a directory is cached (this session's PRF decrypt, or a migrated
+  // single-home record) the existing single-tenant copy applies: the normal
+  // "signin" card, or the "setup" card when p2p.js reports this origin is
+  // UNENROLLED (no device key — never set up on the LAN). On the LAN the gate
+  // never shows at all, so the existing flow there is untouched.
   function showSignInGate() {
+    if (!hasDecryptableDirectory()) { showGate("public-landing"); return; }
     var unEnrolled = false;
     try {
       unEnrolled = !!(window.ftwP2P && window.ftwP2P.isUnenrolled && window.ftwP2P.isUnenrolled());

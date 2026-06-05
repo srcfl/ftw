@@ -119,6 +119,21 @@
        served unauthenticated — the gate is purely the lock's UI. -->
   <div id="signin-gate" class="signin-gate" data-mode="connecting">
     <div class="signin-gate-card">
+      <!-- PUBLIC landing: shown to an anonymous visitor with no decryptable
+           directory. Brand + one passkey button + a discreet "Learn more" link
+           ONLY. Per the multi-tenant spec it reveals NOTHING about any home
+           (no count, label, site_id, or Pi key) before the user authenticates —
+           home.fortytwowatts.com is a public front door for everyone. -->
+      <div class="signin-gate-landing">
+        <div class="signin-gate-brand">&#9889; forty-two watts</div>
+        <p class="signin-gate-lead">This is your forty-two-watts home. Sign in with your passkey to reach it.</p>
+        <button id="signin-landing-btn" class="signin-gate-btn">Sign in with your passkey</button>
+        <p class="signin-gate-msg" id="signin-landing-msg" role="status" aria-live="polite"></p>
+        <p class="signin-gate-learn-row">Don&rsquo;t have a 42W yet?
+          <a class="signin-gate-learn" href="https://fortytwowatts.com" rel="noopener">Learn more &rarr;</a></p>
+      </div>
+      <!-- /signin-gate-landing -->
+
       <div class="signin-gate-brand">&#9889; forty-two watts</div>
       <p class="signin-gate-lead signin-gate-connecting">Reaching your home&hellip;</p>
 
@@ -738,8 +753,19 @@
        (C3). A module, so it's deferred — p2p.js's warm-up connect soft-fails once
        if it races ahead and retries promptly once the global is present. -->
   <script type="module" src="/owner-access/device-key.js?v=devkey1"></script>
-  <script src="/p2p.js?v=p2p5"></script>
-  <script src="/next-app.js?v=next6"></script>
+  <!-- Multi-tenant home route (ADDITIVE — only active on the public home host).
+       prf.js derives the per-wallet directory ENCRYPTION key from the passkey's
+       PRF output; instance-sync.js manages the encrypted per-wallet directory of
+       42W homes against the relay. Both are ES modules that ALSO attach
+       window.ftwPrf / window.ftwInstanceSync for the classic scripts (p2p.js,
+       next-app.js) to consume. Deferred like device-key.js: every consumer reads
+       the globals from inside async handlers (whoami / sign-in / connect), never
+       at top-level, so the module-load race is harmless — an anonymous visitor
+       with no directory simply gets the public landing until they sign in. -->
+  <script type="module" src="/owner-access/prf.js?v=prf1"></script>
+  <script type="module" src="/owner-access/instance-sync.js?v=isync1"></script>
+  <script src="/p2p.js?v=p2p6"></script>
+  <script src="/next-app.js?v=next7"></script>
   <script src="/settings.js?v=diag1"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit1"></script>

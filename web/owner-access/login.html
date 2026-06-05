@@ -36,8 +36,10 @@
        cookie is minted INSIDE DTLS and never crosses the relay. -->
   <script src="/p2p.js?v=p2p1"></script>
   <script type="module">
-    import { apiBase, decodeAssertionOptions, encodeAssertionResult } from "./webauthn.js";
+    import { apiBase, decodeAssertionOptions, encodeAssertionResult, bufToB64url } from "./webauthn.js";
     import { ownerFetch } from "./owner-fetch.js";
+    import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
+    import { loadDirectory } from "./instance-sync.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
 
@@ -73,6 +75,11 @@
         }
         const { ceremony_token, options } = await start.json();
         const credOpts = decodeAssertionOptions(options);
+        // Request the PRF extension so this assertion also yields the per-wallet
+        // directory ENCRYPTION key (prf.js) — the same passkey tap that signs in
+        // can decrypt the owner's list of 42W homes from the relay. Harmless where
+        // unsupported (no prf result → browser-carried directory only).
+        credOpts.extensions = Object.assign({}, credOpts.extensions, extensionInput());
         const getOpts = { publicKey: credOpts, signal: abort.signal };
         if (mediation) getOpts.mediation = mediation;
         const cred = await navigator.credentials.get(getOpts);
@@ -91,6 +98,21 @@
           return;
         }
         msg.innerHTML = '<div class="ok">Signed in. Redirecting…</div>';
+
+        // Seed the browser-carried directory from THIS assertion's PRF output so
+        // the dashboard (next-app.js) routes to the right home after the redirect.
+        // Best-effort: a PRF/decrypt/network failure never blocks the redirect —
+        // the dashboard re-derives the directory on its own sign-in path too.
+        try {
+          const uh = cred.response && cred.response.userHandle ? cred.response.userHandle : null;
+          const W = uh ? bufToB64url(uh) : null;
+          if (W) {
+            const prfOut = outputFrom(cred);
+            const encKey = prfOut ? await deriveEncKey(prfOut) : null;
+            await loadDirectory(W, encKey, location.origin); // caches instances for routing
+          }
+        } catch (e) { /* non-fatal — directory self-heals on the dashboard */ }
+
         setTimeout(() => location.href = base + "/", 800);
       } catch (e) {
         if (e.name === "AbortError") return; // cancelled / superseded — silent
