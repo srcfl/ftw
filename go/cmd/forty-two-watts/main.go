@@ -1594,6 +1594,12 @@ func main() {
 			slog.Error("http server", "err", err)
 		}
 	}()
+
+	// Belt-and-suspenders integrity scan, off the startup hot path: a clean
+	// restart skips the blocking boot check (so a multi-GB DB starts in seconds),
+	// and this still catches at-rest corruption without making control wait. It
+	// self-arms a heal on the next boot if it finds rot.
+	st.VerifyInBackground()
 	defer func() {
 		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -2610,13 +2616,13 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		disEff = 0.95
 	}
 	params := mpc.Params{
-		Mode:                         mode,
-		SoCLevels:                    41,
-		CapacityWh:                   totalCap,
-		SoCMinPct:                    socMin,
-		SoCMaxPct:                    socMax,
-		PVChargeBonusOreKwh:          pvBonus,
-		InitialSoCPct:                50,
+		Mode:                mode,
+		SoCLevels:           41,
+		CapacityWh:          totalCap,
+		SoCMinPct:           socMin,
+		SoCMaxPct:           socMax,
+		PVChargeBonusOreKwh: pvBonus,
+		InitialSoCPct:       50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose
 		// borderline-PV slots: on a 273 W net surplus the 450 W min

@@ -76,6 +76,41 @@ func quickCheck(db *sql.DB) (bool, error) {
 	return n == 1 && first == "ok", nil
 }
 
+// cleanMarkerSuffix names the sidecar file written next to a DB on a clean
+// Close. Its presence means the previous run shut the DB down cleanly, so the
+// boot integrity check can be skipped — which matters because `PRAGMA
+// quick_check` scans the whole file and takes MINUTES on a multi-GB DB, making
+// every restart look hung. The marker is single-use (consumed on open) so a
+// crash before the next clean Close forces a real check next boot, and
+// Store.VerifyInBackground still scans for at-rest corruption off the hot path.
+const cleanMarkerSuffix = ".clean"
+
+// cleanMarkerPath returns the clean-shutdown marker sidecar for a DB path.
+func cleanMarkerPath(dbPath string) string { return dbPath + cleanMarkerSuffix }
+
+// consumeCleanMarker reports whether a clean-shutdown marker exists for dbPath,
+// removing it in the same step (the marker is owned by exactly one boot).
+func consumeCleanMarker(dbPath string) bool {
+	m := cleanMarkerPath(dbPath)
+	if _, err := os.Stat(m); err != nil {
+		return false
+	}
+	_ = os.Remove(m)
+	return true
+}
+
+// writeCleanMarker records that dbPath was closed cleanly so the next boot can
+// skip the integrity check. Best-effort: on failure the next boot simply runs
+// the (correct, slower) check.
+func writeCleanMarker(dbPath string) {
+	f, err := os.Create(cleanMarkerPath(dbPath))
+	if err != nil {
+		slog.Warn("state: could not write clean-shutdown marker", "path", dbPath, "err", err)
+		return
+	}
+	_ = f.Close()
+}
+
 // openChecked opens path, verifies integrity, and heals on corruption. Returns
 // the live DB, an optional HealEvent (nil = clean), and an error only when even
 // the fresh fallback fails.
@@ -83,9 +118,22 @@ func quickCheck(db *sql.DB) (bool, error) {
 //   - tierCache: corrupt → quarantine + rebuild empty (data re-fetchable).
 //   - tierState: corrupt → restore from "<path>.snapshot" if valid, else
 //     quarantine + fresh.
+//
+// A clean-shutdown marker (see cleanMarkerSuffix) short-circuits the quick_check
+// so a clean restart of a large DB is fast.
 func openChecked(path, tier string, nowMs int64) (*sql.DB, *HealEvent, error) {
 	db, err := openRaw(path)
 	if err == nil {
+		// The clean-shutdown fast path is scoped to the precious state DB: only it
+		// grows large enough for quick_check to be slow, and only it has a snapshot
+		// to heal from. cache.db is tiny (checked in microseconds) and disposable
+		// (rebuilt empty on corruption), so it is ALWAYS checked — no marker, no
+		// skip — and its rebuild-on-corruption safety net is never bypassed.
+		if tier == tierState && consumeCleanMarker(path) {
+			slog.Info("state: clean-shutdown marker present, skipping boot integrity check",
+				"path", path, "tier", tier)
+			return db, nil, nil // trusted clean shutdown
+		}
 		ok, qerr := quickCheck(db)
 		if qerr == nil && ok {
 			return db, nil, nil // clean
