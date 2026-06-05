@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.117.0
+
+### Minor Changes
+
+- dff16b5: Hardened relay + device-key remote access: no anonymous path to a home Pi.
+
+  The relay now serves the sign-in shell (`-home-web`) and `/api/identity` (from its
+  pinned `-home-pubkey`) **itself** — an anonymous internet visitor never causes the
+  relay to contact the Pi. To even open a signaling channel, the browser must prove a
+  **device-key**: the relay issues a single-use nonce, the browser signs it with a
+  non-extractable ECDSA P-256 key (WebCrypto, IndexedDB, minted at LAN enrollment),
+  and the relay verifies it against the device-pubkeys the Pi publishes on
+  `/me/register` — anything else is 403'd and the Pi is never woken. The same
+  device-key mints the owner session **silently** over the channel (device-PoP), so a
+  returning device signs in with no Face ID; step-up still requires a passkey, and
+  revoking a device drops its key on both Pi and relay. The gate UI now conveys the
+  posture (direct + end-to-end + relay-blind + "this device is remembered"). LAN-first
+  enrollment; see `docs/superpowers/specs/2026-06-05-hardened-relay-device-key-design.md`.
+
+- dff16b5: Home route: a real sign-in **gate** + inline passkey login (the dashboard IS the
+  door). When you open `home.fortytwowatts.com` and aren't signed in, the dashboard
+  is fully covered by a clean sign-in card ("Reaching your home…" → "Sign in with
+  your passkey") instead of the empty dashboard chrome — which previously rendered
+  "No devices configured / run the setup wizard" to logged-out visitors and falsely
+  read as an unconfigured instance. The passkey ceremony runs in place over the same
+  strict P2P channel (`ownerFetch` / FIX-B) — no redirect to
+  `/owner-access/login.html`. Never shown on the LAN (bypass) or once signed in; the
+  "no devices" prompt is suppressed while logged out. No owner DATA is ever served
+  unauthenticated — the gate is purely the lock's UI.
+
+  Also: the transport indicator is now purely informational (it explains direct vs
+  relayed vs connecting) rather than a click-to-toggle that, on the P2P-only route,
+  just broke the channel. Part of the #438 seamless-UX layer (device-key silent
+  re-auth still to come).
+
 ## 0.116.0
 
 ### Minor Changes
