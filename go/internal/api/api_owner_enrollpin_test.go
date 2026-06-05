@@ -21,6 +21,7 @@ func TestEnrollPinLANvsTunnel(t *testing.T) {
 	// Genuine LAN (unmarked) → 200 with a pin.
 	req := httptest.NewRequest("GET", "/api/owner-access/enroll-pin", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -61,6 +62,7 @@ func mintEnrollPin(t *testing.T, srv *Server) string {
 	t.Helper()
 	req := httptest.NewRequest("GET", "/api/owner-access/enroll-pin", nil)
 	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {
@@ -133,6 +135,45 @@ func TestEnrollPinTunnelBootstrapWrongPin(t *testing.T) {
 	}
 }
 
+// A friend-flow request reaches the Pi via the ftw-pair sidecar from loopback,
+// unmarked (it carries no X-FTW-Tunnel marker — only the owner long-poll proxy
+// stamps that). On an un-enrolled Pi such a request must NOT be able to
+// bootstrap-enroll itself as the owner: the PIN-less LAN bootstrap requires a
+// genuine private-range LAN source, which loopback (the relay/sidecar proxy) is
+// not. This is what stops a "friend" from hijacking owner enrollment.
+func TestOwnerAccessBootstrapRefusedFromLoopbackProxy(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
+	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:55555" // loopback: the ftw-pair / relay proxy source
+	// deliberately no X-FTW-Tunnel marker — a friend-flow request is unmarked
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("loopback-proxy bootstrap must be refused, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+// The matching guard for the PIN: a loopback-proxy (friend-flow) request must
+// not be able to mint the enrollment PIN either.
+func TestOwnerEnrollPinRefusedFromLoopbackProxy(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	srv := New(d)
+	req := httptest.NewRequest("GET", "/api/owner-access/enroll-pin", nil)
+	req.Host = "127.0.0.1:8080"
+	req.RemoteAddr = "127.0.0.1:55555" // loopback proxy source, unmarked
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("loopback-proxy enroll-pin must be refused, got %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
 // LAN (unmarked) bootstrap enroll/start still works without any pin — the PIN
 // requirement is only for the internet-exposed tunnel path.
 func TestEnrollPinLANBootstrapNoPinStillWorks(t *testing.T) {
@@ -141,7 +182,8 @@ func TestEnrollPinLANBootstrapNoPinStillWorks(t *testing.T) {
 	d.TunnelMarker = "marker"
 	srv := New(d)
 	req := httptest.NewRequest("POST", "/api/owner-access/enroll/start", nil)
-	req.Host = "127.0.0.1:8080" // unmarked → LAN
+	req.Host = "127.0.0.1:8080"          // unmarked → LAN
+	req.RemoteAddr = "192.168.1.50:1234" // genuine private-range LAN source
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != 200 {

@@ -86,7 +86,7 @@ This defeats threats #1–#3 with one mechanism. Threat #4 needs separate handli
   
 - Relay rate-limits token validation: a single token gets N failed approval-code attempts before it's blacklisted for the rest of its TTL. Brute force is already infeasible (2^66) but rate-limit costs nothing.
   
-- Approval rate-limit on host side too: max M pending approvals per minute per token. After M, token enters "abuse-suspected" state and host gets a single consolidated toast instead of M separate ones.
+- Landing-page hits on a pending token are counted (and capped, so a hit flood can't grow the counter without bound) and surfaced to the host dashboard as "friend opened the URL — call you with the code". A per-minute rate-limit with a consolidated "abuse-suspected" state is a possible future enhancement — not yet implemented.
   
 - HSTS + HSTS preload + TLS 1.3 only on the relay. No HTTP fallback. Apex `fortytwowatts.com` redirects to canonical relay paths so typo-squatters can't claim the bare apex.
   

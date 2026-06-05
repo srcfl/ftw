@@ -14,7 +14,16 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
+
+// relaySigner is the ES256 identity used to authenticate owner-access relay
+// registrations. Satisfied by *nova.Identity (the self-sovereign site key
+// loaded in main, independent of whether Nova federation is enabled).
+type relaySigner interface {
+	PublicKeyHex() string
+	SignRawHex(msg string) (string, error)
+}
 
 // deriveOwnerHostID returns a stable host_id for the owner-access
 // relay registration. It looks up (or creates) a row in the
@@ -82,11 +91,34 @@ func sanitizeSiteName(s string) string {
 //
 // Also starts the long-poll loop that drains those requests and
 // forwards them to the local API server.
-func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string) {
+func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tunnelMarker string, apiPort int, signer relaySigner) {
 	relayURL = strings.TrimRight(relayURL, "/")
 
+	// The public key is not a secret; log it in full so an operator can pin it
+	// on the relay with -home-pubkey (closes the post-restart TOFU race).
+	slog.Info("owner-access: relay registration identity",
+		"site_id", siteID, "public_key", signer.PublicKeyHex())
+
+	// Build the long-poll host up front so the registration loop can hand it the
+	// relay-minted poll token. It starts polling immediately; until the first
+	// registration sets the token its polls are 401'd and it backs off + retries.
+	host := buildOwnerHost(relayURL, hostID, tunnelMarker, apiPort)
+	go host.Run(ctx)
+
 	registerOnce := func() {
-		body, _ := json.Marshal(map[string]string{"site_id": siteID, "host_id": hostID})
+		tsMs := time.Now().UnixMilli()
+		sig, err := signer.SignRawHex(tunnel.MeRegisterSigningString(siteID, hostID, tsMs))
+		if err != nil {
+			slog.Warn("owner-access: sign register", "err", err)
+			return
+		}
+		body, _ := json.Marshal(map[string]any{
+			"site_id":    siteID,
+			"host_id":    hostID,
+			"public_key": signer.PublicKeyHex(),
+			"ts_ms":      tsMs,
+			"sig":        sig,
+		})
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, relayURL+"/me/register", bytes.NewReader(body))
 		if err != nil {
 			slog.Warn("owner-access: build register request", "err", err)
@@ -99,20 +131,26 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 			return
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusNoContent {
+		if resp.StatusCode != http.StatusOK {
 			slog.Warn("owner-access: relay rejected register", "status", resp.StatusCode)
 			return
 		}
+		var out struct {
+			PollSecret string `json:"poll_secret"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			slog.Warn("owner-access: decode register response", "err", err)
+			return
+		}
+		// Update the host's poll token (a relay restart re-mints it, so refresh
+		// on every registration).
+		host.SetPollSecret(out.PollSecret)
 		slog.Info("owner-access: registered with relay", "site_id", siteID, "host_id", hostID)
 	}
 
-	// Start the long-poll loop in a goroutine so the registration
-	// retries continue independently.
-	go runOwnerLongPoll(ctx, relayURL, hostID, tunnelMarker)
-
 	// Register immediately, then every 60s. A relay restart drops all
-	// registrations, so we re-register periodically to recover without
-	// host intervention.
+	// registrations, so we re-register periodically to recover (and refresh the
+	// poll token) without host intervention.
 	registerOnce()
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
@@ -126,21 +164,19 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 	}
 }
 
-// runOwnerLongPoll runs the host-side long-poll loop for the
-// owner-access tunnel. It pulls tunneled requests for this hostID and
-// reverse-proxies them to the local API server on localhost. The local
-// server's /api/owner-access/* handlers + cookie-based middleware
-// validate WebAuthn assertions and gate access to /web /mcp paths.
+// buildOwnerHost constructs (but does not run) the host-side long-poll host for
+// the owner-access tunnel. It pulls tunneled requests for this hostID and
+// reverse-proxies them to the local API server on localhost. The local server's
+// /api/owner-access/* handlers + cookie-based middleware validate WebAuthn
+// assertions and gate access to /web /mcp paths.
 //
-// We use a fresh net/http/httputil.ReverseProxy so cookies (Set-Cookie
-// on /login/finish, Cookie on subsequent requests) survive the tunnel
-// roundtrip — the JSON wire format already preserves headers, so the
-// ReverseProxy is technically optional, but it's clearer than
-// re-implementing the forwarding logic here.
-func runOwnerLongPoll(ctx context.Context, relayURL, hostID, tunnelMarker string) {
-	// Connect to the local API server. cfg.API.Port isn't available
-	// here without restructuring; use the standard :8080 default.
-	target, _ := url.Parse("http://127.0.0.1:8080")
+// We use a fresh net/http/httputil.ReverseProxy so cookies (Set-Cookie on
+// /login/finish, Cookie on subsequent requests) survive the tunnel roundtrip.
+// The caller starts host.Run and feeds it the relay-minted poll token via
+// host.SetPollSecret once registration returns it.
+func buildOwnerHost(relayURL, hostID, tunnelMarker string, apiPort int) *tunnel.Host {
+	// Connect to the local API server on its configured port.
+	target, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", apiPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	// Stamp every forwarded (relay-tunnelled) request with the per-process
 	// marker so the local API auth-gate treats it as remote, not LAN. Set()
@@ -154,11 +190,7 @@ func runOwnerLongPoll(ctx context.Context, relayURL, hostID, tunnelMarker string
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, fmt.Sprintf("local api unavailable: %v", err), http.StatusBadGateway)
 	}
-	// Wrap as the tunnel.Host's handler.
-	relayBaseURL := relayURL
-	h := &ownerProxyHandler{proxy: proxy}
-	host := newOwnerTunnelHost(relayBaseURL, hostID, h)
-	host.Run(ctx)
+	return newOwnerTunnelHost(relayURL, hostID, &ownerProxyHandler{proxy: proxy})
 }
 
 type ownerProxyHandler struct {

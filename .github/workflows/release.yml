@@ -65,6 +65,16 @@ jobs:
           # which changesets have already been consumed by past
           # Version PRs (it walks .changeset/ vs CHANGELOG.md).
           fetch-depth: 0
+          # Default GITHUB_TOKEN credentials, persisted for the publish
+          # step's own git ops (ls-remote + tag push). We deliberately do
+          # NOT persist the CI_TOKEN PAT here. The cascade that unblocks the
+          # Version PR's required checks is driven entirely by the changesets
+          # step's GITHUB_TOKEN env (it pushes the branch + opens the PR as
+          # the PAT — see there); persisting a job-wide PAT would only widen
+          # blast radius (readable by npm ci and every later step) and, worse,
+          # its http.extraheader would silently re-auth the publish step's
+          # GITHUB_TOKEN tag push back as the PAT — double-firing
+          # release-assets.yml (which listens on `push: tags`).
           persist-credentials: true
 
       - name: Setup Node
@@ -90,15 +100,20 @@ jobs:
           title:  "chore(release): version packages"
           commit: "chore(release): version packages"
         env:
-          # Pushes to the "Version Packages" branch use GITHUB_TOKEN.
-          # GitHub deliberately does NOT cascade `pull_request` /
-          # `push` workflow runs from GITHUB_TOKEN events, so checks
-          # like `test.yml` and `changeset-check.yml` won't fire on
-          # the auto-generated Version PR. If branch protection
-          # requires those checks, push an empty commit to the
-          # `changeset-release/master` branch from a user account
-          # (or admin-merge the PR) — same pattern u-front uses.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # THE load-bearing line. changesets/action uses this token to both
+          # open the Version PR (Octokit) and push its branch, using its own
+          # auth derived from this env var — independent of the checkout
+          # credentials. Using the CI_TOKEN PAT (not the default GITHUB_TOKEN)
+          # means the PR `opened` + `synchronize` events come from a real
+          # account, which GitHub cascades into `pull_request` workflow runs —
+          # so `test.yml` / `changeset-check.yml` fire on the auto-generated
+          # Version PR and its required-checks merge button unblocks on its
+          # own (GITHUB_TOKEN-authored events never cascade — that was the bug).
+          #
+          # CI_TOKEN should be a fine-grained PAT scoped to THIS repo with
+          # `contents: write` + `pull-requests: write` only — nothing here
+          # needs broader scope, and a narrow token bounds the blast radius.
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
 
       - name: Tag and create GitHub Release
         id: publish
@@ -149,6 +164,11 @@ jobs:
 
           if [ "${TAG_EXISTS}" = "false" ]; then
             git tag -a "${TAG}" -m "Release ${TAG}"
+            # Pushed over origin's persisted GITHUB_TOKEN creds. GITHUB_TOKEN
+            # pushes don't cascade workflows, so release-assets.yml's
+            # `push: tags` trigger stays dormant and the manual dispatch below
+            # remains its single trigger. (This is why checkout must NOT
+            # persist the CI_TOKEN PAT — see the Checkout step.)
             git push origin "${TAG}"
           fi
 

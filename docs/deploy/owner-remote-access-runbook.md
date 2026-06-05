@@ -14,21 +14,23 @@ This runbook is the operator-facing companion to:
 - `docs/superpowers/specs/2026-06-03-home-route-passkey-design.md` — the
   design (RP-ID rules, security must-fixes §8, phasing §14).
 
-> **Scope note.** Phases 1–3 are **built and committed** — PR #414 (the
-> safe-floor auth-gate + the forge-proof per-process tunnel marker, the
-> always-on ES256 identity + wallet handle, and usernameless Conditional-UI
-> login), plus the **LAN-PIN first-enrollment** mechanism (§4, committed on
-> top). Everything in this runbook is **deploy/ops** — no code left to
-> write. (Phases 4–5 are design docs only, not deployed here.) Build the Pi
-> binary from branch `home-route-phase45`.
+> **⚠️ Updated after the Phase-4 cutover — read this first.** This runbook was
+> written for the Phases 1–3 throwaway deploy under `relay.fortytwowatts.com`.
+> That cutover has since **shipped in code**: the owner WebAuthn RP-ID now
+> defaults to **`home.fortytwowatts.com`** (`go/cmd/forty-two-watts/main.go`),
+> the relay gained the single-home route (`-home-host`/`-home-site`) with a
+> **mandatory `-home-pubkey` pin** (`requireHomePin` — it refuses to start a
+> public home host without it), and `POST /me/register` is now **ES256-signed**.
+> For a REAL owner deployment, serve enrollment from `home.fortytwowatts.com` and
+> set `FTW_OWNER_ACCESS_RPID=home.fortytwowatts.com` — **do NOT override it back
+> to `relay.fortytwowatts.com`**, or every passkey you enrol is bound to a
+> throwaway origin (one-way door). The relay-host steps below (DNS, TLS, systemd)
+> remain correct — only the owner RP-ID/origin values change to the home host;
+> see `docs/relay-deploy.md` for the home-host relay flags.
 
 > **RP-ID is a one-way door.** Every passkey is bound to the RP-ID it was
-> created under. This runbook deploys under **`relay.fortytwowatts.com`**
-> (the value `forty-two-watts` already defaults to). If you ever move to
-> the dedicated `home.fortytwowatts.com` host (spec D6), **every passkey
-> enrolled here is invalidated** and owners must re-enroll. Do not enroll
-> real owner passkeys you care about until the final RP-ID is pinned.
-> Spec §3 R3.
+> created under. Enrol real owner passkeys only under the final
+> **`home.fortytwowatts.com`** RP-ID (the shipped default). Spec §3 R3.
 
 ---
 
@@ -197,9 +199,11 @@ The mux (`go/cmd/ftw-relay/handlers.go` `Handler()`) exposes the
 owner-route family this runbook uses:
 
 - `GET /healthz` — liveness.
-- `POST /me/register` — the Pi posts `{site_id, host_id}` here every 60 s
-  (in-memory `OwnerRegistry`; a relay restart drops it, the Pi
-  re-registers within 60 s).
+- `POST /me/register` — the Pi posts `{site_id, host_id, public_key, ts_ms,
+  sig}` here every 60 s; the relay **verifies the ES256 signature** and
+  TOFU/operator-pins the key per site (in-memory `OwnerRegistry`; a relay restart
+  drops it, the Pi re-registers within 60 s). An unsigned `{site_id, host_id}`
+  body is rejected.
 - `/me/{site_id}` and `/me/{site_id}/{rest...}` — forward verbatim through
   the tunnel to the registered host's long-poll loop, **preserving the
   query string** (login redirects, ceremony tokens land intact).
@@ -227,14 +231,17 @@ until the Pi registers in §3.
 ### 3.1 Environment
 
 Set these for the `forty-two-watts` process on the Pi. Defaults come from
-`go/cmd/forty-two-watts/main.go` (`OwnerAccessRPID` default is already
-`relay.fortytwowatts.com`; `LANBypass` default is already `true`) — but
-set them explicitly so the deploy is self-documenting:
+`go/cmd/forty-two-watts/main.go` (`OwnerAccessRPID` now defaults to
+`home.fortytwowatts.com`; `LANBypass` default is `true`) — set them explicitly
+so the deploy is self-documenting. **`FTW_RELAY_URL` is the relay HOST** (still
+`relay.fortytwowatts.com`); **the RP-ID/origins are the home HOST the browser
+visits** (`home.fortytwowatts.com`) — these are different and must not be
+conflated:
 
 ```ini
 FTW_RELAY_URL=https://relay.fortytwowatts.com
-FTW_OWNER_ACCESS_RPID=relay.fortytwowatts.com
-FTW_OWNER_ACCESS_ORIGINS=https://relay.fortytwowatts.com
+FTW_OWNER_ACCESS_RPID=home.fortytwowatts.com
+FTW_OWNER_ACCESS_ORIGINS=https://home.fortytwowatts.com
 FTW_OWNER_ACCESS_LAN_BYPASS=true
 ```
 
@@ -245,13 +252,13 @@ What each does:
   + a stable `host_id` to `POST /me/register` and runs the long-poll loop.
   Unset = no remote access at all.
 - **`FTW_OWNER_ACCESS_RPID`** — WebAuthn Relying Party ID. **Must equal
-  the host in the URL the browser uses** (`relay.fortytwowatts.com`), or
+  the host in the URL the browser uses** (`home.fortytwowatts.com`), or
   every passkey ceremony fails the origin check. This is the one-way-door
-  value (spec D6 / §3 R3).
+  value (spec D6 / §3 R3) — never set it to the relay host.
 - **`FTW_OWNER_ACCESS_ORIGINS`** — comma-separated allowed WebAuthn
   origins. If unset, the Pi derives `https://<RPID>` automatically, so
   this is belt-and-suspenders. Set it explicitly to
-  `https://relay.fortytwowatts.com`.
+  `https://home.fortytwowatts.com`.
 - **`FTW_OWNER_ACCESS_LAN_BYPASS=true`** — on a **genuine loopback/LAN**
   request the dashboard is open without a passkey (so you are never locked
   out of your own LAN). **This is safe only because the Pi has no inbound
@@ -294,9 +301,10 @@ Example `EnvironmentFile` drop-in:
 
 ```ini
 # /etc/forty-two-watts/owner-access.env
+# Relay HOST stays relay.*; owner RP-ID/origins are the home HOST the browser visits.
 FTW_RELAY_URL=https://relay.fortytwowatts.com
-FTW_OWNER_ACCESS_RPID=relay.fortytwowatts.com
-FTW_OWNER_ACCESS_ORIGINS=https://relay.fortytwowatts.com
+FTW_OWNER_ACCESS_RPID=home.fortytwowatts.com
+FTW_OWNER_ACCESS_ORIGINS=https://home.fortytwowatts.com
 FTW_OWNER_ACCESS_LAN_BYPASS=true
 ```
 
@@ -434,11 +442,12 @@ session.
    ```
 2. **From any browser** (phone or laptop, on or off the home WiFi) open:
    ```
-   https://relay.fortytwowatts.com/me/site:<YourSiteName>/owner-access/enroll.html
+   https://home.fortytwowatts.com/owner-access/enroll.html
    ```
+   (Legacy phase-1–3 path: `https://relay.fortytwowatts.com/me/site:<YourSiteName>/owner-access/enroll.html`.)
    Run the passkey enrollment (Face ID / Touch ID / Windows Hello),
    entering the 6-digit PIN when prompted. The browser creates the
-   credential at RP-ID `relay.fortytwowatts.com`; the start call carries
+   credential at RP-ID `home.fortytwowatts.com`; the start call carries
    `?pin=123456`; the Pi validates it (tunnelled + valid PIN → allowed),
    `FinishRegistration` persists the credential, and the `ftw_owner`
    session cookie is set.
@@ -577,10 +586,10 @@ in-memory, so a restart self-heals within 60 s (the Pi re-registers).
 | Relay health | `GET /healthz` → `OK` |
 | Pi LAN dashboard | `http://192.168.192.40:8080/` |
 | Pi `site_id` | `site:<YourSiteName>` (from `config.yaml` `site.name`) |
-| Enroll (through relay) | `https://relay.fortytwowatts.com/me/site:<YourSiteName>/owner-access/enroll.html` |
-| Login (through relay) | `https://relay.fortytwowatts.com/me/site:<YourSiteName>/owner-access/login.html` |
-| LAN PIN (LAN only) | `GET http://192.168.192.40:8080/api/owner-access/enroll-pin` |
-| RP-ID | `relay.fortytwowatts.com` (immutable once passkeys exist) |
+| Enroll (home host) | `https://home.fortytwowatts.com/owner-access/enroll.html` (legacy: `…relay.fortytwowatts.com/me/site:<YourSiteName>/owner-access/enroll.html`) |
+| Login (home host) | `https://home.fortytwowatts.com/owner-access/login.html` |
+| LAN PIN (genuine LAN source, **not** localhost/loopback) | `GET http://192.168.192.40:8080/api/owner-access/enroll-pin` |
+| RP-ID | `home.fortytwowatts.com` (immutable once passkeys exist) |
 | Disable remote access | unset `FTW_RELAY_URL`, restart `forty-two-watts` |
 
 Source of truth: `go/cmd/ftw-relay/handlers.go` (relay routes),

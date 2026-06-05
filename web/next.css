@@ -229,6 +229,9 @@ body.ftw-next .icon-btn {
   display: grid;
   place-items: center;
   cursor: pointer;
+  /* text-decoration:none keeps the <a id="setup-wizard-btn"> variant from
+     showing a default link underline; harmless for <button> icon-btns. */
+  text-decoration: none;
   transition: background .15s, color .15s, border-color .15s;
 }
 body.ftw-next .icon-btn:hover {

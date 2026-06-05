@@ -405,6 +405,58 @@
 
   var integrationListenersBound = false;
 
+  // Known EV charger providers, keyed by the `provider` string the Go
+  // config (EVCharger.Provider) accepts. `transport` selects which field
+  // block (#ev-fields-http vs #ev-fields-modbus) the wizard reveals:
+  //   - easee: cloud HTTP, needs username/password + serial lookup.
+  //   - ctek:  local Modbus/TCP, needs host/port/unit, no auth.
+  // Mirrors go/internal/config/config.go EVCharger.Validate.
+  var EV_PROVIDERS = [
+    { value: 'easee', label: 'Easee', transport: 'http' },
+    { value: 'ctek', label: 'CTEK', transport: 'modbus' }
+  ];
+
+  function evProviderTransport(value) {
+    for (var i = 0; i < EV_PROVIDERS.length; i++) {
+      if (EV_PROVIDERS[i].value === value) return EV_PROVIDERS[i].transport;
+    }
+    return null;
+  }
+
+  function evProviderLabel(value) {
+    for (var i = 0; i < EV_PROVIDERS.length; i++) {
+      if (EV_PROVIDERS[i].value === value) return EV_PROVIDERS[i].label;
+    }
+    return value;
+  }
+
+  function populateEVProviders() {
+    var sel = document.getElementById('ev-provider');
+    if (!sel || sel.dataset.populated === '1') return;
+    // Keep the existing "None" option (value="") as the first child.
+    EV_PROVIDERS.forEach(function (p) {
+      var opt = document.createElement('option');
+      opt.value = p.value;
+      opt.textContent = p.label;
+      sel.appendChild(opt);
+    });
+    sel.dataset.populated = '1';
+  }
+
+  // Reveal the field block matching the selected provider's transport.
+  function syncEVFields() {
+    var provider = document.getElementById('ev-provider').value;
+    var transport = evProviderTransport(provider);
+    document.getElementById('ev-fields').style.display = provider ? 'block' : 'none';
+    document.getElementById('ev-fields-http').style.display = transport === 'http' ? 'block' : 'none';
+    document.getElementById('ev-fields-modbus').style.display = transport === 'modbus' ? 'block' : 'none';
+    // Charger-serial lookup is an HTTP/cloud-only affordance.
+    document.getElementById('ev-load-chargers').style.display = transport === 'http' ? '' : 'none';
+    if (transport !== 'http') {
+      document.getElementById('ev-serial-group').style.display = 'none';
+    }
+  }
+
   function prepareIntegrations() {
     var zone = document.getElementById('price-zone').value;
     document.getElementById('price-zone-readonly').value = zone;
@@ -414,11 +466,12 @@
       providerSel.value = 'elprisetjustnu';
     }
 
+    populateEVProviders();
+    syncEVFields();
+
     if (!integrationListenersBound) {
       integrationListenersBound = true;
-      document.getElementById('ev-provider').addEventListener('change', function () {
-        document.getElementById('ev-fields').style.display = this.value ? 'block' : 'none';
-      });
+      document.getElementById('ev-provider').addEventListener('change', syncEVFields);
       document.getElementById('ha-enabled').addEventListener('change', function () {
         document.getElementById('ha-fields').style.display = this.checked ? 'block' : 'none';
       });
@@ -431,7 +484,7 @@
   // after a successful call returns at least one device.
   window.loadEVChargers = function () {
     var provider = document.getElementById('ev-provider').value || 'easee';
-    var email = document.getElementById('ev-email').value.trim();
+    var username = document.getElementById('ev-username').value.trim();
     var password = document.getElementById('ev-password').value;
     var btn = document.getElementById('ev-load-chargers');
     var statusEl = document.getElementById('ev-chargers-status');
@@ -439,8 +492,8 @@
     var sel = document.getElementById('ev-serial');
 
     statusEl.style.display = 'inline';
-    statusEl.style.color = 'var(--text-dim)';
-    if (!email) { statusEl.textContent = 'Enter email first'; return; }
+    statusEl.style.color = 'var(--fg-muted)';
+    if (!username) { statusEl.textContent = 'Enter username first'; return; }
     if (!password) { statusEl.textContent = 'Enter password first'; return; }
 
     statusEl.textContent = 'Connecting…';
@@ -449,14 +502,14 @@
     fetch('/api/ev/chargers', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider: provider, email: email, password: password })
+      body: JSON.stringify({ provider: provider, email: username, password: password })
     })
       .then(function (r) {
         return r.json().then(function (j) { return { ok: r.ok, body: j }; });
       })
       .then(function (res) {
         if (!res.ok) {
-          statusEl.style.color = 'var(--red)';
+          statusEl.style.color = 'var(--red-e)';
           statusEl.textContent = (res.body && res.body.error) || 'Failed to load chargers';
           return;
         }
@@ -474,11 +527,11 @@
           sel.appendChild(opt);
         });
         group.style.display = 'block';
-        statusEl.style.color = 'var(--green)';
+        statusEl.style.color = 'var(--green-e)';
         statusEl.textContent = chargers.length + ' charger' + (chargers.length === 1 ? '' : 's') + ' found';
       })
       .catch(function (e) {
-        statusEl.style.color = 'var(--red)';
+        statusEl.style.color = 'var(--red-e)';
         statusEl.textContent = 'Error: ' + e.message;
       })
       .finally(function () {
@@ -516,10 +569,15 @@
     // EV
     var evProvider = document.getElementById('ev-provider').value;
     if (evProvider) {
-      var evSerial = document.getElementById('ev-serial').value;
       html += '<div class="review-section"><h3>EV Charger</h3><div class="review-item">';
-      html += 'Easee';
-      if (evSerial) html += ' (' + esc(evSerial) + ')';
+      html += esc(evProviderLabel(evProvider));
+      if (evProviderTransport(evProvider) === 'modbus') {
+        var mbHost = document.getElementById('ev-mb-host').value.trim();
+        if (mbHost) html += ' (' + esc(mbHost) + ')';
+      } else {
+        var evSerial = document.getElementById('ev-serial').value;
+        if (evSerial) html += ' (' + esc(evSerial) + ')';
+      }
       html += '</div></div>';
     }
 
@@ -623,15 +681,26 @@
       };
     }
 
-    // EV Charger
+    // EV Charger — shape the block to match the provider's transport
+    // (see go/internal/config/config.go EVCharger). Cloud HTTP providers
+    // (easee) carry username/password/serial; local Modbus providers
+    // (ctek) carry a modbus{host,port,unit_id} block and reject auth.
     var evProvider = document.getElementById('ev-provider').value;
     if (evProvider) {
-      cfg.ev_charger = {
-        provider: evProvider,
-        email: document.getElementById('ev-email').value.trim(),
-        password: document.getElementById('ev-password').value,
-        serial: document.getElementById('ev-serial').value.trim()
-      };
+      var ev = { provider: evProvider };
+      if (evProviderTransport(evProvider) === 'modbus') {
+        var mbHost = document.getElementById('ev-mb-host').value.trim();
+        var mbPort = parseInt(document.getElementById('ev-mb-port').value, 10);
+        var mbUnit = parseInt(document.getElementById('ev-mb-unit').value, 10);
+        ev.modbus = { host: mbHost };
+        if (mbPort) ev.modbus.port = mbPort;
+        if (!isNaN(mbUnit)) ev.modbus.unit_id = mbUnit;
+      } else {
+        ev.username = document.getElementById('ev-username').value.trim();
+        ev.password = document.getElementById('ev-password').value;
+        ev.serial = document.getElementById('ev-serial').value.trim();
+      }
+      cfg.ev_charger = ev;
     }
 
     // Home Assistant
@@ -659,6 +728,25 @@
   }
 
   // --- Init ---
+  // Honor a `?step=N` deep-link (the dashboard links to /setup?step=3 from
+  // its "no devices" prompt). Clamp into the valid 1..TOTAL_STEPS range so a
+  // hand-typed or stale param can't land on a non-existent step. Default to
+  // step 1 when absent or unparseable.
+  //
+  // NOTE: this wizard's Save REPLACES config — it does not yet pre-load and
+  // merge the existing config, so deep-linking to a later step is navigation
+  // only, not a safe additive "add a device" flow. The dashboard copy is kept
+  // honest ("Run setup wizard") to match.
+  function initialStep() {
+    var raw = new URLSearchParams(window.location.search).get('step');
+    if (raw == null) return 1;
+    var n = parseInt(raw, 10);
+    if (isNaN(n)) return 1;
+    if (n < 1) return 1;
+    if (n > TOTAL_STEPS) return TOTAL_STEPS;
+    return n;
+  }
+
   renderDots();
-  goStep(1);
+  goStep(initialStep());
 })();

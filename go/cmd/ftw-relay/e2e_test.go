@@ -39,6 +39,7 @@ func TestE2EHostAndFriendRoundtripThroughRelay(t *testing.T) {
 
 	host := tunnel.NewHost(srv.URL, "host-a", mcpBackend)
 	host.PollTimeout = 1 * time.Second
+	host.SetPollSecret(relay.Polls.Issue("host-a")) // authenticate the host's polls
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go host.Run(ctx)
@@ -120,6 +121,7 @@ func TestE2EWebReverseProxy(t *testing.T) {
 
 	host := tunnel.NewHost(srv.URL, "host-b", dashboard)
 	host.PollTimeout = 1 * time.Second
+	host.SetPollSecret(relay.Polls.Issue("host-b")) // authenticate the host's polls
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go host.Run(ctx)

@@ -18,6 +18,45 @@
     .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
     .muted { color: var(--fg-muted, #888); font-size: .9em; }
     .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
+
+    /* Enrollment-PIN affordance (enroll-pin.js). Mono + tabular for the
+       digits, hairline border, single amber accent — per DESIGN.md. */
+    .pin-panel { margin: 1rem 0 0; }
+    .pin-show-btn {
+      font: inherit; margin-top: 0; padding: .5rem 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .pin-show-btn:hover { border-color: var(--accent-e); }
+    .pin-result {
+      margin-top: .8rem; padding: 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: var(--ink-raised);
+    }
+    .pin-digits {
+      font-family: var(--mono), monospace;
+      font-variant-numeric: tabular-nums;
+      font-size: 2.4rem; font-weight: 700; letter-spacing: .22em;
+      color: var(--accent-e); text-align: center; line-height: 1.1;
+    }
+    .pin-meta {
+      display: flex; align-items: center; justify-content: center;
+      gap: 1rem; margin-top: .8rem;
+    }
+    .pin-copy-btn {
+      font: inherit; margin-top: 0; padding: .35rem .8rem; font-size: .85em;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .pin-copy-btn:hover { border-color: var(--fg-dim); }
+    .pin-countdown {
+      font-family: var(--mono), monospace; font-variant-numeric: tabular-nums;
+      font-size: .78rem; text-transform: uppercase; letter-spacing: .14em;
+      color: var(--fg-muted);
+    }
+    .pin-note { margin: 0; color: var(--fg-dim); font-size: .9em; }
+    .pin-err { margin: 0; color: var(--red-e); font-size: .9em; }
+    .pin-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
   </style>
 </head>
 <body>
@@ -31,7 +70,9 @@
 
     <label for="pin">First-time enrollment PIN <span class="muted">(only for your first passkey)</span></label>
     <input id="pin" inputmode="numeric" autocomplete="off" placeholder="6 digits — shown on the Pi's LAN dashboard">
-    <p class="muted">Leave blank if you already have a passkey, or if you're enrolling on the local network. For the very first passkey via the relay, read the PIN on the Pi at <span class="code">/api/owner-access/enroll-pin</span> (or its logs).</p>
+    <p class="muted">Leave blank if you already have a passkey, or if you're enrolling on the local network. For the very first passkey via the relay, get the PIN below from a device on your home network, then type it here.</p>
+
+    <div id="pin-panel" class="pin-panel"></div>
 
     <button id="enroll" class="primary">Enroll passkey</button>
     <button onclick="location.href='./'">Cancel</button>
@@ -41,10 +82,14 @@
 
   <script type="module">
     import { apiBase, decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    import { mountEnrollPin } from "./enroll-pin.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
+
+    // "Show enrollment PIN" — LAN-only; gracefully degrades over the relay.
+    mountEnrollPin(document.getElementById("pin-panel"));
 
     document.getElementById("enroll").onclick = async () => {
       msg.innerHTML = "";
@@ -62,7 +107,7 @@
         if (!start.ok) {
           const body = await start.text();
           const hint = (start.status === 403 && /pin/i.test(body))
-            ? ' — your first passkey through the relay needs the LAN PIN (read it on the Pi at /api/owner-access/enroll-pin or in its logs).'
+            ? ' — your first passkey through the relay needs the LAN PIN. Use "Show enrollment PIN" above from a device on your home network, then enter it here.'
             : '';
           msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}${hint}</div>`;
           return;

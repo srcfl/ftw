@@ -19,6 +19,44 @@
     .ok { color: #060; }
     .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; }
     .row { margin: .45rem 0; }
+
+    /* Enrollment-PIN affordance (enroll-pin.js) — mono/tabular digits,
+       hairline border, single amber accent. Mirrors enroll.html. */
+    .pin-panel { margin: .8rem 0 0; }
+    .pin-show-btn {
+      font: inherit; width: 100%; padding: .55rem 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .pin-show-btn:hover { border-color: var(--accent-e); }
+    .pin-result {
+      margin-top: .8rem; padding: 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: var(--ink-raised);
+    }
+    .pin-digits {
+      font-family: var(--mono), monospace; font-variant-numeric: tabular-nums;
+      font-size: 2.2rem; font-weight: 700; letter-spacing: .22em;
+      color: var(--accent-e); text-align: center; line-height: 1.1;
+    }
+    .pin-meta {
+      display: flex; align-items: center; justify-content: center;
+      gap: 1rem; margin-top: .8rem;
+    }
+    .pin-copy-btn {
+      font: inherit; width: auto; padding: .35rem .8rem; font-size: .85em;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .pin-copy-btn:hover { border-color: var(--fg-dim); }
+    .pin-countdown {
+      font-family: var(--mono), monospace; font-variant-numeric: tabular-nums;
+      font-size: .78rem; text-transform: uppercase; letter-spacing: .14em;
+      color: var(--fg-muted);
+    }
+    .pin-note { margin: 0; color: var(--fg-dim); font-size: .9em; }
+    .pin-err { margin: 0; color: var(--red-e); font-size: .9em; }
+    .pin-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
   </style>
 </head>
 <body>
@@ -43,12 +81,18 @@
     <p class="muted">Already set up on this device? Face&nbsp;ID / Touch&nbsp;ID.</p>
     <hr class="sep">
     <div class="row"><a class="block" href="./enroll.html"><button>Set up this device</button></a></div>
-    <p class="muted">First time here? Enroll a passkey. The very first device needs the LAN&nbsp;PIN shown on your Pi.</p>
+    <p class="muted">First time here? Enroll a passkey. The very first device needs the LAN&nbsp;PIN — read it below while you're on your home network.</p>
+    <div id="pin-panel" class="pin-panel"></div>
   </div>
 
   <script type="module">
     import { apiBase } from "./webauthn.js";
+    import { mountEnrollPin } from "./enroll-pin.js";
     const base = apiBase();
+
+    // "Show enrollment PIN" lives in the first-time "choose" panel; it's
+    // inert until clicked and gracefully degrades over the relay (LAN-only).
+    mountEnrollPin(document.getElementById("pin-panel"));
 
     async function whoami() {
       const r = await fetch(base + "/api/owner-access/whoami", { credentials: "same-origin" });

@@ -1498,12 +1498,15 @@ func main() {
 		Events:        bus,
 		Notifications: notifSvc,
 		SelfUpdate:    selfUpdater,
-		// ---- Owner remote access (Phase 3) ----
-		// rp.id defaults to the production relay; override with
-		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). LAN bypass
-		// is on by default — the dashboard served on the local
-		// network is already implicitly trusted (no other auth on /api).
-		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "relay.fortytwowatts.com"),
+		// ---- Owner remote access ----
+		// rp.id defaults to the production home host (home.fortytwowatts.com),
+		// the origin the owner actually visits. Override with
+		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). NOTE: the RP-ID is a
+		// one-way door — passkeys enrolled under one RP-ID only work on that
+		// host's registrable suffix, so this must match the public origin before
+		// any passkey is enrolled. LAN bypass is on by default — the dashboard
+		// served on the local network is already implicitly trusted.
+		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "home.fortytwowatts.com"),
 		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
 		TunnelMarker:         tunnelMarker,
@@ -1590,7 +1593,14 @@ func main() {
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker)
+		if siteIdentity == nil {
+			// The relay now requires an ES256-signed registration. Without a
+			// site identity we cannot sign, so we must not register (an
+			// unsigned mapping would be refused anyway) — fail loud, not silent.
+			slog.Error("owner-access: FTW_RELAY_URL set but no site identity; skipping relay registration", "key_path", identityKeyPath)
+		} else {
+			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity)
+		}
 	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
