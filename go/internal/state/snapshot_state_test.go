@@ -83,13 +83,12 @@ func TestStateRecoversViaSnapshotStateAndOpen(t *testing.T) {
 	st.Close()
 
 	corruptAt(t, statePath, 8192) // damage a page in the live (non-snapshot) file
-	// Model an UNCLEAN shutdown: with no clean-shutdown marker, openChecked runs
-	// the boot integrity check and restores from snapshot. (After a CLEAN
-	// shutdown the marker makes the boot skip the check — corruption is then
-	// caught by the background verify and healed on the boot after; see
-	// TestCleanShutdownDefersCorruptionToNextBoot.)
+	// Remove the verified-good marker so openChecked actually runs the boot check
+	// and restores from snapshot — this is the state a background verify leaves
+	// behind when it finds corruption (it removes the marker; see
+	// TestMarkerSkipThenBackgroundVerifyHealsNextBoot for the full cycle).
 	if err := os.Remove(cleanMarkerPath(statePath)); err != nil {
-		t.Fatalf("remove clean marker: %v", err)
+		t.Fatalf("remove marker: %v", err)
 	}
 
 	st2, err := Open(statePath)
@@ -108,12 +107,12 @@ func TestStateRecoversViaSnapshotStateAndOpen(t *testing.T) {
 	}
 }
 
-// TestCleanShutdownDefersCorruptionToNextBoot documents the clean-shutdown fast
-// path: corruption that appears AFTER a clean close is intentionally NOT caught
-// on the next boot — the marker makes openChecked skip the (multi-minute on a
-// large DB) integrity check so startup stays fast. The background verify catches
-// the rot and arms a heal, so the boot AFTER that restores from snapshot.
-func TestCleanShutdownDefersCorruptionToNextBoot(t *testing.T) {
+// TestMarkerSkipThenBackgroundVerifyHealsNextBoot documents the full cycle:
+// with a verified-good marker present, openChecked SKIPS the (multi-minute on a
+// large DB) boot check so startup stays fast even if the DB has rotted since.
+// The background verify catches the rot and removes the marker, so the boot
+// AFTER that runs the full check and restores from snapshot.
+func TestMarkerSkipThenBackgroundVerifyHealsNextBoot(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "state.db")
 
@@ -132,21 +131,24 @@ func TestCleanShutdownDefersCorruptionToNextBoot(t *testing.T) {
 	if err := st.SnapshotState(); err != nil {
 		t.Fatalf("SnapshotState: %v", err)
 	}
-	st.Close() // clean close → writes clean markers
+	st.Close() // Open armed the marker; it persists across Close
 
-	corruptAt(t, statePath, 8192) // SD-rot after a clean shutdown
+	corruptAt(t, statePath, 8192) // SD-rot after the DB was last verified good
 
-	// Boot 1: clean marker present → boot check skipped → no heal yet.
+	// Boot 1: marker present → boot check skipped → no heal yet (Open re-arms it).
 	st1, err := Open(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if evs := st1.HealEvents(); len(evs) != 0 {
-		t.Fatalf("clean-marker boot should skip the check, got heal events: %+v", evs)
+		t.Fatalf("marker boot should skip the check, got heal events: %+v", evs)
 	}
-	// Background verify detects the rot and arms a heal for the next boot.
+	// Background verify detects the rot and removes the marker.
 	st1.verifyOnce(context.Background())
-	st1.Close() // corrupt flagged → no clean marker written
+	if markerPresent(statePath) {
+		t.Fatal("background verify should have removed the marker on corruption")
+	}
+	st1.Close()
 
 	// Boot 2: no marker → full check → restore from snapshot.
 	st2, err := Open(statePath)

@@ -30,23 +30,27 @@ looked dead.
 
 ## Shipped (this change)
 
-- **Skip-on-clean-shutdown.** `Store.Close` drops a `<db>.clean` marker on a
-  clean close; `openChecked` consumes it and skips the boot `quick_check`. On the
-  1.3 GB field DB this took the integrity gate from **>5 min → 48 ms** (measured).
-  The marker is single-use, so a crash before the next clean `Close` forces a
-  real check next boot.
-- **Background verify keeps the safety net.** `Store.VerifyInBackground` runs the
-  full check *off* the hot path after the app is serving. On detected corruption
-  it arms a heal for the next boot (leaves no clean marker) — so at-rest SD-card
-  rot is still caught, control just isn't held hostage to it. Recovery becomes
-  two boots instead of one, and never blocks.
-  - **It must not block the shutdown marker.** `db.Close()` waits for in-flight
-    queries, and this scan can run for minutes on a large DB — so a restart inside
-    the scan window would let the close be SIGKILLed before the clean marker is
-    written, making the *next* boot slow again (this actually bit the first
-    redeploy). `Close` therefore cancels the scan (`sqlite3_interrupt` via a
-    cancellable context) before closing, so the marker is written reliably and a
-    cancelled scan is treated as "didn't finish", never as corruption.
+- **A persistent "verified-good" marker.** `Open` arms a `<db>.clean` marker once
+  `state.db` has opened + migrated successfully; `openChecked` skips the boot
+  `quick_check` whenever the marker is present. On the 1.3 GB field DB this took
+  the integrity gate from **>5 min → ~40 ms** (measured).
+  - **It is NOT a clean-shutdown flag — and that's deliberate.** The first design
+    wrote the marker in `Close` and consumed it on boot. That tied fast restarts
+    to a clean exit, and it broke immediately: the background scan (below) holds
+    the DB busy for minutes, so a redeploy inside that window got the close
+    SIGKILLed before the marker was written → the next boot was slow again. The
+    marker now *persists* across both clean shutdowns and crashes (a crash doesn't
+    corrupt a WAL DB, so it must never force a slow re-scan). Nothing at shutdown
+    touches it.
+- **Background verify is the one thing that removes it.**
+  `Store.VerifyInBackground` runs the full check *off* the hot path after the app
+  is serving. On a clean result the marker stays; on detected corruption it
+  removes the marker, so the *next* boot runs the full check and heals from
+  snapshot. At-rest SD-card rot is still caught — recovery just takes the next
+  boot instead of blocking this one. The scan is cancellable (`Close` interrupts
+  it via `sqlite3_interrupt`) so a shutdown is never blocked by an in-flight
+  multi-minute scan, and a cancelled scan is treated as "didn't finish", never as
+  corruption.
 - **Phase-timed startup logs.** `state: integrity gate complete elapsed=…` and
   `state: migrations complete elapsed=…` make any slow phase visible instead of a
   silent gap after `config loaded`.

@@ -106,22 +106,29 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
+
+	// Arm the verified-good marker: state.db opened + migrated successfully (it
+	// either passed quick_check, was restored from snapshot, or rebuilt fresh), so
+	// the next boot can SKIP the (slow on a large DB) integrity check. The marker
+	// persists across restarts and crashes — it does NOT depend on a clean Close.
+	// Only VerifyInBackground finding corruption removes it, which forces the next
+	// boot to run the full check + heal. This is what makes restarts reliably fast.
+	writeCleanMarker(path)
 	return s, nil
 }
 
-// Close releases both DB files. Safe to call multiple times. On a clean close it
-// drops a clean-shutdown marker beside state.db so the next boot can skip the
-// integrity check on it — unless a background verify flagged corruption, in which
-// case we deliberately leave no marker so the next boot runs the full check +
-// heals. (cache.db gets no marker; it's tiny + disposable, always checked.)
+// Close releases both DB files. Safe to call multiple times. The verified-good
+// marker is NOT managed here — it is armed by Open and removed only by a
+// background verify that finds corruption, so fast restarts never depend on this
+// running cleanly (a SIGKILLed shutdown still leaves a fast next boot).
 func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
 	// Stop the background integrity scan first: db.Close() blocks until every
 	// in-flight query finishes, and the scan's quick_check can run for minutes on
-	// a large DB. Cancelling it (sqlite3_interrupt) lets the close — and the clean
-	// marker write below — happen promptly, which is what keeps the NEXT boot fast.
+	// a large DB. Cancelling it (sqlite3_interrupt) lets the close happen promptly
+	// instead of being SIGKILLed mid-close.
 	s.healMu.Lock()
 	cancel := s.verifyCancel
 	s.healMu.Unlock()
@@ -138,13 +145,6 @@ func (s *Store) Close() error {
 		if e := s.db.Close(); e != nil {
 			err = e
 		}
-	}
-
-	s.healMu.Lock()
-	corrupt := s.corrupt
-	s.healMu.Unlock()
-	if err == nil && !corrupt && s.mainDBPath != "" {
-		writeCleanMarker(s.mainDBPath) // cache.db is always checked, so no marker
 	}
 	return err
 }
