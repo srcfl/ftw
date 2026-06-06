@@ -245,18 +245,58 @@ registered only under `-multi-tenant`:
   relay-private `claim_key`** to the box (url-encoded, so values can't inject
   stray query params). That carries `?pin` — which the box validates (5-try
   burn), the relay never inspecting it — and, on `enroll/finish`, the
-  `?ceremony_token` + `?name` the box's finish handler reads (the browser sends
-  those only in the query, not the body; dropping them would make the box `400`
-  "ceremony_token required" and enrollment could never complete). The forward is
-  single-use: a `200` enroll/finish atomically consumes the blob, closing the
-  window. The box's owner session cookie is stripped at the relay boundary. A
+  `?ceremony_token` + `?name` + `?bootstrap_proof` the box's finish handler reads
+  (the browser sends those only in the query, not the body; dropping them would
+  make the box `400` "ceremony_token required" and enrollment could never
+  complete). The box's owner session cookie is stripped at the relay boundary. A
   missing or dead `claim_key` is the same `403` (an anonymous caller learns
   nothing about which sites have an open window).
 
+**`bootstrap_proof` — ceremony-bound possession proof (closes the relay-visible
+PIN).** Because the relay forwards `?pin`, a *compromised* relay would see the
+6-digit PIN in transit. So the browser also sends, on `enroll/finish` only,
+```
+bootstrap_proof = hex( HMAC-SHA256( key = utf8(bootstrap_id), msg = utf8(ceremony_token) ) )
+```
+where `ceremony_token` is the opaque token the box issued at `enroll/start`. The
+box recomputes the HMAC over the same `(bootstrap_id, ceremony_token)` and
+constant-time compares it; a missing, empty, or mismatched proof is a `403` and
+no device is saved. This check fires **only on the tunneled (relay-forwarded)
+path** — an untunneled LAN finish needs no proof. The relay holds only
+`sha256(bootstrap_id)`, so it can neither forge a proof for its own
+`ceremony_token` nor reuse the user's (single-use) one. A relay that captured
+the PIN therefore still cannot run its own WebAuthn enrollment in the
+zero-device window. The proof is a **third, separate** HMAC — not the inner
+descriptor signature (base64url) and not the outer publish signature (ES256 hex).
+
+**Single-use before side effects (closes a concurrent-double-finish race).** On
+`enroll/finish` the relay atomically **RESERVES** the bootstrap (a test-and-set
+on the store) **before** forwarding the request to the box. A concurrent second
+finish that also passed the live gate loses the latch and is refused `403`
+*before* its enroll could ever reach the box. The box `200` then **burns** the
+window (single-use); any non-`200`/tunnel error **releases** the reservation so
+the user can retry without the box re-publishing. As a source-of-truth backstop,
+the box also **re-checks the zero-device window at finish time** on the tunneled
+path: if any trusted device already exists it refuses `403` even with a correct
+proof — so the lost-response edge (the relay never hears the `200`) can never
+enroll a second device.
+
+**The production enroll-forward host.** The two `enroll/{start,finish}` POSTs are
+enqueued onto the box's tunnel queue. The box drains them with a narrow
+multi-tenant tunnel host (`cmd/forty-two-watts/owner_relay_register.go`,
+`staticAssetHandler` under `FTW_MULTI_TENANT`) that serves **only** those two
+POSTs, stamps the per-process `X-FTW-Tunnel` marker so the box's `isTunneled`
+gate fires (PIN + possession-proof + zero-device recheck + owner-cookie
+suppression), and strips `Set-Cookie` on the way back. Every other `/api/*` path
+and every non-`GET` method stays fail-closed. Single-tenant deploys never wire
+these routes and the host is byte-identical to the static-only behaviour.
+
 **Two secrets, two checkers, by design:** the relay gate is the high-entropy
-`claim_key`; the PIN is the box's separate LAN-presence factor. A leaked store
-key never reveals a guessable PIN, and the relay can't ride the enroll forward
-without the PIN the box still demands.
+`claim_key`; the PIN is the box's separate LAN-presence factor; the
+`bootstrap_proof` binds the ceremony to possession of the raw `bootstrap_id`. A
+leaked store key never reveals a guessable PIN, and the relay can't ride the
+enroll forward without both the PIN *and* a proof only the genuine browser can
+compute.
 
 ## Migration from the old subetha relay
 

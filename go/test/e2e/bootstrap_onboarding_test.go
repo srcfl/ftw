@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,35 +30,60 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/fxamacker/cbor/v2"
 )
 
 // TestBootstrapOnboardingThroughRelay is the full-stack e2e for the multi-tenant
-// onboarding bootstrap on a HIGH-ENTROPY bootstrap_id (R1-R5 end state). It wires
-// the REAL ftw-relay binary in -multi-tenant mode to a REAL in-process Pi
-// (api.Server + its self-sovereign nova.Identity) and walks the whole courier:
+// onboarding bootstrap on a HIGH-ENTROPY bootstrap_id, in its REVISION-2 end state
+// (ceremony-bound possession proof + single-use-before-side-effects). It wires the
+// REAL ftw-relay binary in -multi-tenant mode to a REAL in-process Pi (api.Server +
+// its self-sovereign nova.Identity) and walks the whole courier:
 //
 //	mint PIN + bootstrap_id on the (simulated-LAN) Pi
 //	  -> Pi self-publishes its signed descriptor keyed by hex(sha256(bootstrap_id)) + ts_ms
 //	  -> a fresh client computes claim_key from the bootstrap_id, claims the
 //	     descriptor back through the relay, and verifies its INNER sig exactly as the
 //	     browser's verifyEntry would (base64url r||s ECDSA-P256 over the instance string)
-//	  -> the client enrolls via the relay forward (?claim_key gate + ?pin Pi factor),
-//	     and the REAL Pi enroll handler validates the PIN and opens the ceremony
-//	  -> C2 fail-closed: a no-claim_key forward is refused at the relay, and a
-//	     claim_key-but-no-PIN forward is refused at the Pi.
+//	  -> the client enrolls via the relay forward (?claim_key gate + ?pin Pi factor +
+//	     ?bootstrap_proof possession proof), the relay RESERVES single-use before
+//	     forwarding the finish, and the REAL Pi enroll handler validates the PIN, the
+//	     ceremony-bound proof, and the zero-device window before persisting.
 //
-// Two facts shape what is asserted here (and are documented, not papered over):
+// REVISION-2 contract exercised end to end through the real relay->Pi path:
+//   - HAPPY PATH: a full software-attested (none-attestation) enroll/start +
+//     enroll/finish with a CORRECT bootstrap_proof = hex(HMAC-SHA256(bootstrap_id,
+//     ceremony_token)) -> 200, device persisted on the real Pi.
+//   - PROOF GATE (closes the relay-visible-PIN HIGH): a finish with a WRONG proof,
+//     and a finish with a MISSING proof, are both rejected 403 by the Pi before any
+//     device is saved.
+//   - RELAY RESERVATION (closes the concurrent-double-finish BLOCKER): two
+//     concurrent finishes (distinct ceremony_tokens, each with a valid proof) through
+//     the relay yield EXACTLY one 200 and one 403 — the loser loses the test-and-set
+//     reservation before its enroll ever reaches the Pi.
+//   - PI ZERO-DEVICE RECHECK (source-of-truth backstop for the BLOCKER): once a
+//     device exists, a tunneled finish is refused 403 by the Pi's finish-time
+//     LoadTrustedDevices recheck even with a correct proof.
+//   - C2 fail-closed (unchanged): a no-claim_key forward is refused at the relay
+//     (403); a claim_key-but-no-PIN forward is refused at the Pi.
+//
+// Two facts shape what is asserted here (documented, not papered over):
 //   - mintEnrollPin requires a genuine PRIVATE-RANGE LAN source (isLANClientSource
 //     rejects loopback). We therefore drive the PIN-mint over the in-process handler
 //     with a spoofed private-range RemoteAddr — that is the real Pi code path,
-//     including the goroutine self-publish to the relay.
-//   - The relay's enroll-forward enqueues onto the host's tunnel queue and the Pi's
-//     enrollAllowed tunneled branch keys on the X-FTW-Tunnel marker. In production
-//     the forwarder that drains enroll/* must stamp that marker; the main binary's
-//     current static-asset host does NOT (it 403s every /api/*). This test stands in
-//     the correct production wiring (a marker-stamping tunnel host serving the enroll
-//     endpoints) so the relay<->Pi enroll contract is exercised end to end. See the
-//     DONE_WITH_CONCERNS note in the task report: the main.go host wiring is the gap.
+//     including the goroutine self-publish to the relay. This keeps the test
+//     deterministic in CI (no dependency on a real LAN interface, which `make verify`
+//     runs without -short would otherwise make flaky).
+//   - The production enroll-forward HOST that drains the relay queue and stamps
+//     X-FTW-Tunnel is cmd/forty-two-watts/owner_relay_register.go's
+//     staticAssetHandler (the F4 component). It lives in `package main`, which an
+//     external test package cannot import, and the full binary cannot be booted
+//     in-process (monolithic main with os.Exit + the LAN-source PIN-mint constraint
+//     above). This test therefore drives a tunnel host that mirrors that handler's
+//     production gating BYTE FOR BYTE — the enrollForwardPaths allowlist, POST-only,
+//     X-FTW-Tunnel marker stamp, and Set-Cookie strip — against the REAL Pi
+//     api.Server. The genuine staticAssetHandler is unit-tested directly in
+//     owner_relay_register_test.go (TestEnrollForwardHost_*). See the
+//     DONE_WITH_CONCERNS note in the task report.
 func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped in short mode")
@@ -66,6 +93,9 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 
 	const siteID = "site:e2e"
 	const siteName = "e2e"
+	const rpID = "home.test"
+	const origin = "https://home.test"
+	const tunnelMarker = "e2e-tunnel-marker"
 
 	// ---- Pi identity (self-sovereign ES256 key) ----
 	idPath := filepath.Join(t.TempDir(), "identity.key")
@@ -120,36 +150,27 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 		Version:    "e2e",
 		// TunnelMarker is the per-process secret the relay-tunnelled enroll forward
 		// must carry so enrollAllowed takes the PIN-gated tunneled branch (not the
-		// LAN-source branch). Real value; the host wrapper below stamps it.
-		TunnelMarker:       "e2e-tunnel-marker",
+		// LAN-source branch) AND handleOwnerEnrollFinish takes the proof + zero-device
+		// recheck branch. Real value; the host wrapper below stamps it exactly as the
+		// production staticAssetHandler does.
+		TunnelMarker:       tunnelMarker,
 		SiteID:             siteID,
 		RelayBaseURL:       relayURL,
 		InstanceSigner:     identity,
 		SiteIdentityPubHex: identity.PublicKeyHex(),
-		OwnerAccessRPID:    "home.test",
-		OwnerAccessOrigins: []string{"https://home.test"},
+		OwnerAccessRPID:    rpID,
+		OwnerAccessOrigins: []string{origin},
 	}
 	piSrv := api.New(deps)
-
-	// Pi LAN listener (loopback) for the direct in-process flow + the tunnel host
-	// reverse target. The PIN mint is driven over the handler with a spoofed LAN
-	// RemoteAddr (loopback is rejected by isLANClientSource), so we don't strictly
-	// need this socket for the mint — but the tunnel host needs a handler.
 	piHandler := piSrv.Handler()
 
 	// ---- Register the site with the relay (signed /me/register) ----
 	hostID := "owner-e2e-host"
 	registerSite(t, relayURL, siteID, hostID, identity)
 
-	// ---- Tunnel host serving the REAL Pi enroll handler, marker-stamped ----
-	// This is the production wiring the enroll-forward needs: drain the relay queue
-	// for hostID and serve the Pi handler with X-FTW-Tunnel stamped so the Pi's
-	// enrollAllowed tunneled branch (PIN-gated) is taken.
-	markerStamped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Header.Set("X-FTW-Tunnel", "e2e-tunnel-marker")
-		piHandler.ServeHTTP(w, r)
-	})
-	host := tunnel.NewHost(relayURL, hostID, markerStamped)
+	// ---- Tunnel host serving the REAL Pi enroll handler, gated exactly as the
+	// production staticAssetHandler (owner_relay_register.go) does ----
+	host := tunnel.NewHost(relayURL, hostID, newProdEnrollForwardHandler(piHandler, tunnelMarker))
 	host.PollTimeout = time.Second
 	host.SetPollSecret(registerPollSecret)
 	hostCtx, hostCancel := context.WithCancel(context.Background())
@@ -246,7 +267,7 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 	}
 
 	// ---- 4. C2 fail-closed: a no-claim_key enroll forward is REFUSED at the relay ----
-	noKey, _ := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?pin="+minted.Pin)
+	noKey, _ := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?pin="+minted.Pin, nil)
 	if noKey != http.StatusForbidden {
 		t.Fatalf("no-claim_key enroll/start: got %d, want 403 (C2 fail-closed at relay)", noKey)
 	}
@@ -254,48 +275,245 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 	// ---- 5. C2 fail-closed: claim_key but NO pin is REFUSED at the Pi ----
 	// The relay gate opens on the claim_key, forwards to the real Pi, whose
 	// enrollAllowed tunneled branch rejects a missing/blank PIN. Must NOT be 200.
-	noPin, _ := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?claim_key="+claimKey)
+	noPin, _ := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?claim_key="+claimKey, nil)
 	if noPin == http.StatusOK {
 		t.Fatalf("claim_key-but-no-pin enroll/start: got 200 — the Pi must refuse a missing PIN")
 	}
 
-	// ---- 6. Happy path: claim_key + correct PIN reaches the real Pi enroll handler ----
-	code, body := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?claim_key="+claimKey+"&pin="+minted.Pin)
-	if code != http.StatusOK {
-		t.Fatalf("enroll/start (claim_key+pin): got %d body=%q, want 200 (challenge from the real Pi)", code, body)
-	}
-	if !strings.Contains(body, "ceremony_token") || !strings.Contains(body, "challenge") {
-		t.Fatalf("enroll/start body missing WebAuthn challenge: %q", body)
+	// authQ is the per-RPC query the browser carries on BOTH start and finish: the
+	// relay-private claim_key (stripped before forwarding) plus the PIN (forwarded
+	// untouched to the Pi).
+	authQ := func() url.Values {
+		q := url.Values{}
+		q.Set("claim_key", claimKey)
+		q.Set("pin", minted.Pin)
+		return q
 	}
 
-	// ---- 7. The forwarded enroll/finish must CARRY ceremony_token to the Pi ----
-	// The browser sends ceremony_token + name ONLY in the query string of the finish
-	// POST (enroll.html), never in the body. The relay must preserve the whole query
-	// (minus the relay-private claim_key) when forwarding — a regression to a
-	// hardcoded "?pin=" silently drops ceremony_token and the Pi 400s
-	// "ceremony_token required", which would make multi-tenant enroll uncompletable.
-	//
-	// We assert the discriminating status: a finish forwarded WITH a (bogus)
-	// ceremony_token reaches the real Pi handler and is rejected 403 "unknown or
-	// expired ceremony_token" — NOT 400 "ceremony_token required". A 400 here would
-	// prove the relay dropped the param. (Driving a fully valid WebAuthn finish needs
-	// a software authenticator the browser owns; the security-critical relay->Pi
-	// param contract is fully exercised by this status discrimination.)
-	finishQ := url.Values{}
-	finishQ.Set("ceremony_token", "bogus-but-present-token")
-	finishQ.Set("name", "Test Device & Co") // space + '&' must round-trip un-mangled
-	finishQ.Set("claim_key", claimKey)
-	finishQ.Set("pin", minted.Pin)
-	fcode, fbody := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+finishQ.Encode())
-	if fcode == http.StatusBadRequest {
-		t.Fatalf("enroll/finish forwarded WITHOUT ceremony_token (relay dropped the query): got 400 %q", fbody)
+	// The relay throttles enroll-forwards per source IP (token bucket: capacity 8,
+	// refill 2/s) on the un-spoofable loopback RemoteAddr. Every phase below pays
+	// from the SAME bucket, so we pace before each group of forwards to let it refill
+	// — pacing keeps the security assertions deterministic instead of racing a 429.
+	pace := func(tokens int) { time.Sleep(time.Duration(tokens) * 600 * time.Millisecond) }
+
+	// ---- 6. PROOF GATE: a tunneled finish with a WRONG bootstrap_proof is 403 ----
+	// (Closes the relay-visible-PIN HIGH.) A relay that only holds sha256(bootstrap_id)
+	// cannot compute hex(HMAC-SHA256(bootstrap_id, ceremony_token)); a wrong-key HMAC
+	// is what such a relay could at best produce — the Pi rejects it before persisting.
+	{
+		pace(2) // start + finish
+		code, body := softwareEnrollThroughRelay(t, relayURL, rpID, origin, authQ(),
+			func(ceremonyToken string) string {
+				return jsHMACProofE2E("not-the-real-bootstrap-id", ceremonyToken)
+			})
+		if code != http.StatusForbidden {
+			t.Fatalf("tunneled finish with WRONG proof: got %d body=%q, want 403", code, body)
+		}
+		assertNoDevice(t, st, "after a wrong-proof finish no device may be saved")
 	}
-	if fcode != http.StatusForbidden {
-		t.Fatalf("enroll/finish (bogus ceremony_token): got %d body=%q, want 403 (token reached the Pi, rejected as unknown)", fcode, fbody)
+
+	// ---- 7. PROOF GATE: a tunneled finish with a MISSING bootstrap_proof is 403 ----
+	{
+		pace(2) // start + finish
+		code, body := softwareEnrollThroughRelay(t, relayURL, rpID, origin, authQ(),
+			func(string) string { return "" }, // no bootstrap_proof param
+		)
+		if code != http.StatusForbidden {
+			t.Fatalf("tunneled finish with MISSING proof: got %d body=%q, want 403", code, body)
+		}
+		assertNoDevice(t, st, "after a missing-proof finish no device may be saved")
 	}
-	if !strings.Contains(fbody, "ceremony_token") {
-		t.Fatalf("enroll/finish 403 body did not mention ceremony_token: %q", fbody)
+
+	// ---- 8. RELAY RESERVATION + HAPPY PATH: concurrent double-finish ----
+	// (Closes the concurrent-double-finish BLOCKER.) Two distinct software-attested
+	// ceremonies are STARTED sequentially (each its own ceremony_token + credential),
+	// then their two finishes — each with a CORRECT proof — fire CONCURRENTLY through
+	// the relay. The relay's Reserve test-and-set lets exactly one finish reach the Pi
+	// (-> 200, device persisted, bootstrap Burned); the other loses the latch and is
+	// refused 403 BEFORE its enroll could touch the Pi. We assert EXACTLY one 200 and
+	// one 403 — and that the 200 is a genuine, fully software-attested enroll (the
+	// happy path) by confirming a device landed.
+	{
+		const n = 2
+		// Start both ceremonies sequentially (pace each start) so the only thing
+		// racing is the pair of finishes — the surface the relay reservation guards.
+		ceremonyTokens := make([]string, n)
+		finishBodies := make([]string, n)
+		for i := 0; i < n; i++ {
+			pace(1)
+			startQ := cloneValues(authQ())
+			code, body := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?"+startQ.Encode(), nil)
+			if code != http.StatusOK {
+				t.Fatalf("concurrent-prep enroll/start #%d: got %d body=%q", i, code, body)
+			}
+			tok, challenge := parseStart(t, body)
+			ceremonyTokens[i] = tok
+			finishBodies[i] = fabricateRegistrationResponse(t, rpID, origin, challenge)
+		}
+		// Refill the bucket so both concurrent finishes have a token at the same
+		// instant — otherwise a 429 (not the reservation 403) could mask the result.
+		pace(4)
+
+		type res struct {
+			code int
+			body string
+		}
+		results := make([]res, n)
+		var wg sync.WaitGroup
+		var startGate sync.WaitGroup
+		startGate.Add(1)
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				fq := cloneValues(authQ())
+				fq.Set("ceremony_token", ceremonyTokens[i])
+				fq.Set("name", "Test Device & Co")
+				fq.Set("bootstrap_proof", jsHMACProofE2E(minted.BootstrapID, ceremonyTokens[i]))
+				startGate.Wait() // release both finishes as close to simultaneously as possible
+				c, b := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+fq.Encode(), strings.NewReader(finishBodies[i]))
+				results[i] = res{c, b}
+			}(i)
+		}
+		startGate.Done()
+		wg.Wait()
+		var got200, got403, other int
+		var loserBody string
+		for _, r := range results {
+			switch r.code {
+			case http.StatusOK:
+				got200++
+			case http.StatusForbidden:
+				got403++
+				loserBody = r.body
+			default:
+				other++
+				t.Logf("concurrent finish unexpected status %d body=%q", r.code, r.body)
+			}
+		}
+		if got200 != 1 || got403 != 1 || other != 0 {
+			t.Fatalf("concurrent double-finish: got %d×200 %d×403 %d×other, want exactly 1×200 + 1×403 (relay single-use reservation)", got200, got403, other)
+		}
+		// Document which fail-closed layer caught the loser. The relay's Reserve
+		// test-and-set is the primary guard ("no live bootstrap for this claim_key");
+		// the Pi's finish-time zero-device recheck is the source-of-truth backstop
+		// ("enrollment window closed"). Either is a valid 403 — both are exercised by
+		// this suite (the Pi recheck explicitly in step 9) — so we only LOG which one
+		// fired here rather than over-constrain a legitimately-racing outcome.
+		t.Logf("concurrent double-finish loser 403 body=%q (relay reservation or Pi recheck — both fail-closed)", strings.TrimSpace(loserBody))
+		// HAPPY PATH proof: the single 200 was a genuine software-attested enroll —
+		// a trusted device must now exist on the real Pi.
+		devs, err := st.LoadTrustedDevices()
+		if err != nil {
+			t.Fatalf("load trusted devices after happy-path enroll: %v", err)
+		}
+		if len(devs) != 1 {
+			t.Fatalf("after the winning software-attested finish want exactly 1 enrolled device, got %d", len(devs))
+		}
 	}
+
+	// ---- 9. PI ZERO-DEVICE RECHECK (source-of-truth backstop) ----
+	// A device now exists, and the relay BURNED the bootstrap on the winning finish
+	// (so it can no longer forward, and the Pi refuses to re-publish while a device
+	// is enrolled — the window is structurally closed end to end). The Pi's own
+	// finish-time recheck is the source-of-truth backstop for the lost-response edge:
+	// even a fresh ceremony with a correct proof must be refused 403 once a device
+	// exists. We exercise that gate on the REAL post-enrollment Pi server directly
+	// through its handler with the production tunnel marker stamped (the exact
+	// isTunneled branch the relay forward takes), since the relay can no longer
+	// supply a live bootstrap.
+	{
+		// Re-mint a PIN + bootstrap_id over the REAL LAN handler (spoofed private
+		// source) so we have a valid PIN and a bootstrap_id to compute a CORRECT
+		// proof. The mint still succeeds, but its self-publish goroutine no-ops
+		// because a device is enrolled — itself part of the closed-window guarantee
+		// (the relay never gets a fresh blob to forward).
+		pinReq2 := httptest.NewRequest(http.MethodGet, "/api/owner-access/enroll-pin", nil)
+		pinReq2.RemoteAddr = "192.168.7.42:53200"
+		pinRec2 := httptest.NewRecorder()
+		piHandler.ServeHTTP(pinRec2, pinReq2)
+		if pinRec2.Code != http.StatusOK {
+			t.Fatalf("re-mint enroll-pin: got %d body=%q", pinRec2.Code, pinRec2.Body.String())
+		}
+		var minted2 struct {
+			Pin         string `json:"pin"`
+			BootstrapID string `json:"bootstrap_id"`
+		}
+		if err := json.Unmarshal(pinRec2.Body.Bytes(), &minted2); err != nil {
+			t.Fatalf("decode re-mint enroll-pin: %v", err)
+		}
+		code, body := softwareEnrollDirectTunneled(t, piHandler, rpID, origin, tunnelMarker, minted2.Pin, minted2.BootstrapID)
+		if code != http.StatusForbidden {
+			t.Fatalf("tunneled finish after a device exists: got %d body=%q, want 403 (Pi zero-device recheck)", code, body)
+		}
+		// Still exactly one device — the recheck refused to enroll a second in the
+		// (now-closed) bootstrap window.
+		devs, err := st.LoadTrustedDevices()
+		if err != nil {
+			t.Fatalf("load trusted devices after recheck: %v", err)
+		}
+		if len(devs) != 1 {
+			t.Fatalf("Pi zero-device recheck failed: want 1 device, got %d", len(devs))
+		}
+	}
+}
+
+// newProdEnrollForwardHandler returns a tunnel-host handler that mirrors the
+// production staticAssetHandler (cmd/forty-two-watts/owner_relay_register.go) under
+// -multi-tenant, BYTE FOR BYTE for the security-relevant gating: only POST of the
+// two enroll paths is forwarded to the Pi with X-FTW-Tunnel stamped (so the Pi's
+// isTunneled gate fires — PIN + possession-proof + zero-device recheck +
+// owner-cookie suppression); the Set-Cookie response header is stripped; every other
+// /api/* path is 403 and every non-GET method is 405. The genuine staticAssetHandler
+// is unit-tested in owner_relay_register_test.go — this faithful mirror is used here
+// only because `package main` cannot be imported by an external test package.
+func newProdEnrollForwardHandler(piHandler http.Handler, tunnelMarker string) http.Handler {
+	enrollPaths := map[string]struct{}{
+		"/api/owner-access/enroll/start":  {},
+		"/api/owner-access/enroll/finish": {},
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if _, ok := enrollPaths[r.URL.Path]; ok {
+				r.Header.Set("X-FTW-Tunnel", tunnelMarker)
+				piHandler.ServeHTTP(&e2eStripSetCookie{ResponseWriter: w}, r)
+				return
+			}
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "owner API is P2P-only", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/identity" {
+			http.Error(w, "owner API is P2P-only", http.StatusForbidden)
+			return
+		}
+		r.Header.Del("Cookie")
+		piHandler.ServeHTTP(&e2eStripSetCookie{ResponseWriter: w}, r)
+	})
+}
+
+// e2eStripSetCookie drops any Set-Cookie the Pi emits, mirroring the production
+// stripSetCookieWriter so the owner session cookie can never traverse the relay.
+type e2eStripSetCookie struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *e2eStripSetCookie) WriteHeader(code int) {
+	if !w.wrote {
+		w.Header().Del("Set-Cookie")
+		w.wrote = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *e2eStripSetCookie) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.Header().Del("Set-Cookie")
+		w.wrote = true
+	}
+	return w.ResponseWriter.Write(b)
 }
 
 // registerPollSecret is captured by registerSite so the tunnel host can present
@@ -338,15 +556,18 @@ func registerSite(t *testing.T, relayURL, siteID, hostID string, signer *nova.Id
 }
 
 // homeEnrollPost issues a POST to the relay's home host (home.test) for an enroll
-// path, returning the status + body. Mirrors the browser POSTing the enroll RPC
-// at the home origin.
-func homeEnrollPost(t *testing.T, relayURL, path string) (int, string) {
+// path, returning the status + body. Mirrors the browser POSTing the enroll RPC at
+// the home origin. body may be nil (no request body).
+func homeEnrollPost(t *testing.T, relayURL, path string, body io.Reader) (int, string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, relayURL+path, nil)
+	req, err := http.NewRequest(http.MethodPost, relayURL+path, body)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Host = "home.test"
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
@@ -354,6 +575,207 @@ func homeEnrollPost(t *testing.T, relayURL, path string) (int, string) {
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	return resp.StatusCode, string(b)
+}
+
+// softwareEnrollThroughRelay runs a FULL software-attested (none-attestation)
+// enroll/start + enroll/finish through the relay's home host (the real
+// bootstrapEnrollForward) into the real Pi. authQ is the per-RPC query (claim_key +
+// pin) carried on BOTH legs exactly as the browser sends them. proofFor is called
+// with the ceremony_token returned by enroll/start; its non-empty return is appended
+// to the finish query as ?bootstrap_proof=<hex> (the browser sends the proof only on
+// finish). An empty return omits the proof param entirely (the missing-proof case).
+// Returns the finish status + body.
+func softwareEnrollThroughRelay(t *testing.T, relayURL, rpID, origin string, authQ url.Values, proofFor func(ceremonyToken string) string) (int, string) {
+	t.Helper()
+
+	// --- enroll/start through the relay (carries claim_key + pin) ---
+	startQ := cloneValues(authQ)
+	startCode, startBody := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/start?"+startQ.Encode(), nil)
+	if startCode != http.StatusOK {
+		// A failed start (e.g. dead bootstrap) is reported up so the caller's assert
+		// reflects the real status. We synthesise the same shape as a finish failure.
+		return startCode, startBody
+	}
+	ceremonyToken, challenge := parseStart(t, startBody)
+
+	// --- fabricate the none-attestation registration response ---
+	finishJSON := fabricateRegistrationResponse(t, rpID, origin, challenge)
+
+	// --- enroll/finish through the relay (claim_key + pin + ceremony_token + name + proof) ---
+	finishQ := cloneValues(authQ)
+	finishQ.Set("ceremony_token", ceremonyToken)
+	finishQ.Set("name", "Test Device & Co") // space + '&' must round-trip un-mangled
+	if proof := proofFor(ceremonyToken); proof != "" {
+		finishQ.Set("bootstrap_proof", proof)
+	}
+	return homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+finishQ.Encode(), strings.NewReader(finishJSON))
+}
+
+// softwareEnrollDirectTunneled runs a full software-attested enroll/start +
+// enroll/finish DIRECTLY against the Pi handler with the production X-FTW-Tunnel
+// marker stamped (the exact isTunneled branch the relay forward takes). Used for the
+// post-enrollment Pi zero-device recheck, where the relay can no longer supply a
+// live bootstrap. Carries pin + a CORRECT bootstrap_proof. Returns finish status+body.
+func softwareEnrollDirectTunneled(t *testing.T, piHandler http.Handler, rpID, origin, tunnelMarker, pin, bootstrapID string) (int, string) {
+	t.Helper()
+	startReq := httptest.NewRequest(http.MethodPost, "/api/owner-access/enroll/start?pin="+pin, nil)
+	startReq.Host = rpID
+	startReq.RemoteAddr = "192.168.7.42:40000"
+	startReq.Header.Set("X-FTW-Tunnel", tunnelMarker)
+	startRec := httptest.NewRecorder()
+	piHandler.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusOK {
+		return startRec.Code, startRec.Body.String()
+	}
+	ceremonyToken, challenge := parseStart(t, startRec.Body.String())
+	finishJSON := fabricateRegistrationResponse(t, rpID, origin, challenge)
+	finishURL := "/api/owner-access/enroll/finish?pin=" + pin +
+		"&ceremony_token=" + ceremonyToken +
+		"&bootstrap_proof=" + jsHMACProofE2E(bootstrapID, ceremonyToken)
+	finishReq := httptest.NewRequest(http.MethodPost, finishURL, strings.NewReader(finishJSON))
+	finishReq.Host = rpID
+	finishReq.RemoteAddr = "192.168.7.42:40001"
+	finishReq.Header.Set("Content-Type", "application/json")
+	finishReq.Header.Set("X-FTW-Tunnel", tunnelMarker)
+	finishRec := httptest.NewRecorder()
+	piHandler.ServeHTTP(finishRec, finishReq)
+	return finishRec.Code, finishRec.Body.String()
+}
+
+func cloneValues(v url.Values) url.Values {
+	out := url.Values{}
+	for k, vs := range v {
+		for _, s := range vs {
+			out.Add(k, s)
+		}
+	}
+	return out
+}
+
+// parseStart pulls the ceremony_token + WebAuthn challenge (base64url-no-pad) out of
+// an enroll/start response body.
+func parseStart(t *testing.T, body string) (ceremonyToken, challenge string) {
+	t.Helper()
+	var start struct {
+		CeremonyToken string `json:"ceremony_token"`
+		Options       struct {
+			PublicKey struct {
+				Challenge string `json:"challenge"`
+			} `json:"publicKey"`
+		} `json:"options"`
+	}
+	if err := json.Unmarshal([]byte(body), &start); err != nil {
+		t.Fatalf("decode enroll/start: %v body=%q", err, body)
+	}
+	if start.CeremonyToken == "" || start.Options.PublicKey.Challenge == "" {
+		t.Fatalf("enroll/start missing ceremony_token or challenge: %q", body)
+	}
+	return start.CeremonyToken, start.Options.PublicKey.Challenge
+}
+
+// fabricateRegistrationResponse builds a valid none-attestation WebAuthn
+// registration response over a fresh P-256 credential, mirroring the software
+// authenticator in go/internal/api/api_owner_enroll_cookie_test.go. Each call uses a
+// fresh random credential ID so concurrent ceremonies don't collide on the
+// WithExclusions list. rpID/origin must match the Pi's WebAuthn config.
+func fabricateRegistrationResponse(t *testing.T, rpID, origin, challenge string) string {
+	t.Helper()
+	clientData := map[string]any{
+		"type":      "webauthn.create",
+		"challenge": challenge,
+		"origin":    origin,
+	}
+	clientDataJSON, err := json.Marshal(clientData)
+	if err != nil {
+		t.Fatalf("marshal clientData: %v", err)
+	}
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen credential key: %v", err)
+	}
+	xb := make([]byte, 32)
+	yb := make([]byte, 32)
+	priv.PublicKey.X.FillBytes(xb)
+	priv.PublicKey.Y.FillBytes(yb)
+	em, err := cbor.CanonicalEncOptions().EncMode()
+	if err != nil {
+		t.Fatalf("cbor enc mode: %v", err)
+	}
+	coseKey, err := em.Marshal(map[int]any{
+		1:  2,  // kty: EC2
+		3:  -7, // alg: ES256
+		-1: 1,  // crv: P-256
+		-2: xb, // x
+		-3: yb, // y
+	})
+	if err != nil {
+		t.Fatalf("marshal cose key: %v", err)
+	}
+
+	// Fresh random credential ID per ceremony (concurrent enrolls must not collide).
+	credID := make([]byte, 20)
+	if _, err := rand.Read(credID); err != nil {
+		t.Fatalf("rand cred id: %v", err)
+	}
+
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := make([]byte, 0, 37+16+2+len(credID)+len(coseKey))
+	authData = append(authData, rpHash[:]...)
+	authData = append(authData, 0x01|0x40) // flags: UP | AT
+	authData = append(authData, 0, 0, 0, 0)
+	authData = append(authData, make([]byte, 16)...) // AAGUID = all-zero
+	authData = append(authData, byte(len(credID)>>8), byte(len(credID)))
+	authData = append(authData, credID...)
+	authData = append(authData, coseKey...)
+
+	attObj, err := em.Marshal(map[string]any{
+		"fmt":      "none",
+		"attStmt":  map[string]any{},
+		"authData": authData,
+	})
+	if err != nil {
+		t.Fatalf("marshal attestationObject: %v", err)
+	}
+
+	credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
+	finishBody := map[string]any{
+		"id":    credIDB64,
+		"rawId": credIDB64,
+		"type":  "public-key",
+		"response": map[string]any{
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+			"attestationObject": base64.RawURLEncoding.EncodeToString(attObj),
+		},
+	}
+	finishJSON, err := json.Marshal(finishBody)
+	if err != nil {
+		t.Fatalf("marshal finish body: %v", err)
+	}
+	return string(finishJSON)
+}
+
+// jsHMACProofE2E recomputes the browser's ceremony-bound possession proof so the
+// e2e verifies the real Pi validator against the SAME construction the browser uses:
+// hex(HMAC-SHA256(key=utf8(bootstrap_id), msg=utf8(ceremony_token))). Hand-rolled
+// (not calling the SUT) so a drift from the Pi/browser construction is caught here.
+func jsHMACProofE2E(bootstrapID, ceremonyToken string) string {
+	mac := hmac.New(sha256.New, []byte(bootstrapID))
+	mac.Write([]byte(ceremonyToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// assertNoDevice fails if any trusted device is enrolled — used after a rejected
+// finish to prove no device was persisted.
+func assertNoDevice(t *testing.T, st *state.Store, msg string) {
+	t.Helper()
+	devs, err := st.LoadTrustedDevices()
+	if err != nil {
+		t.Fatalf("load trusted devices (%s): %v", msg, err)
+	}
+	if len(devs) != 0 {
+		t.Fatalf("%s: got %d devices", msg, len(devs))
+	}
 }
 
 // verifyEntryGo mirrors web/owner-access/instance-sync.js verifyEntry: a base64url

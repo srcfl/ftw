@@ -70,12 +70,18 @@ stranger can be involved.
 Done. Your phone (or laptop) is now a key to your home, and `home.fortytwowatts.com`
 knows which box is yours.
 
-> **Two locks, on purpose.** The link carries a long, unguessable handle that
-> lets the relay find your box's parked invitation; the **PIN is checked by your
-> box, never by the relay**. So even the relay can't ride your first enrollment —
-> it doesn't know the PIN, and the PIN alone can't be turned into the handle. The
-> invitation is single-use and expires in ten minutes; finishing enrollment (or
-> the timer) closes the window.
+> **Locked three ways, on purpose.** The link carries a long, unguessable handle
+> that lets the relay find your box's parked invitation; the **PIN is checked by
+> your box, never by the relay**; and when you confirm the passkey your browser
+> also sends a one-time **proof** that it really holds the handle from the link
+> (a keyed hash tying that exact enrollment attempt to the secret in the `#` part
+> of the URL). Your box checks the proof, and the relay can't compute it — it only
+> ever sees a *hash* of the handle, never the handle itself. So even a relay that
+> somehow saw your PIN in transit still can't ride your first enrollment: it can't
+> forge the proof. The invitation is **single-use**: your box claims the slot
+> before it does any work, so two attempts can never both enroll, and once one
+> device is in, the window is closed even if a reply got lost. It also expires in
+> ten minutes; finishing enrollment (or the timer) closes the window.
 
 > **Tip:** enroll on each device you'll actually use — your phone *and* your
 > laptop, say. Each gets its own passkey. You can add or remove them any time
