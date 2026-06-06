@@ -52,6 +52,48 @@ channel. Circular.
    Pi-TOFU-pinned via `/me/register`. A pin-preserving tombstone for reclamation is
    deferred.
 
+## REVISION (2026-06-06, post-Codex-audit) — high-entropy bootstrap-id
+
+A Codex audit of the first implementation found a **BLOCKER** plus four HIGH/MED
+issues. The fixes below SUPERSEDE the 6-digit-PIN-as-relay-key parts of the flow
+above; the rest of the flow (descriptor courier, claim→verify→enroll→seed) stands.
+
+- **BLOCKER — a 6-digit PIN can never be the relay's routing key.** Sending
+  `sha256(PIN)` to the relay lets the relay (or anyone who sees it) brute-force the
+  ~10⁶ space in milliseconds, recover the PIN, and ride the enroll-forward to
+  enroll *their own* passkey during the zero-device window. **Fix (Fredrik chose):**
+  the Pi generates a **high-entropy `bootstrap_id`** (≥32 bytes CSPRNG) when it
+  mints the enroll-PIN. The relay keys the bootstrap store + claim + enroll-forward
+  on `sha256(bootstrap_id)` — not on the PIN. The `bootstrap_id` travels LAN→`home.*`
+  via a **QR (scan, cross-device) + a clickable link (same-device)** carrying it in
+  the URL **`#fragment`** (never in the path/referer). The LAN page is plain HTTP but
+  a QR/link is display-only — no secure context needed. The 6-digit PIN becomes an
+  OPTIONAL second factor the **Pi** validates online (its existing `validateEnrollPin`
+  with the 5-try burn); the relay never sees a brute-forceable PIN verifier.
+- **HIGH — claim/forward keyed globally + misses didn't burn → fixed:** the
+  `bootstrap_id` is per-site and unique, so claim/forward look up the exact entry
+  (no PIN collisions, no parking-to-hijack). The Pi's PIN attempt-counter sees the
+  misses (the PIN is validated Pi-side now).
+- **HIGH — single-use not atomic → fixed:** add an atomic `Consume(siteID)` on the
+  store; `enroll/finish` reserves/consumes the bootstrap so concurrent in-flight
+  finishes can't both pass.
+- **HIGH — publish replay → fixed:** `bootstrapPublishSigningString` gains a
+  `ts_ms` (and the relay rejects skew > a small window), so a captured PUT can't
+  re-park a burned/expired blob.
+- **HIGH — `Set-Cookie` stripped too late → fixed:** the relay's
+  `writeTunneledNoCookie` strips it for the browser, but the Pi's tunneled response
+  already carried `ftw_owner` to the relay. **Fix:** the **Pi suppresses** the
+  `ftw_owner` session cookie on a bootstrap-forwarded enroll (it isn't needed — the
+  directory seed is Ed25519-write-sig-authed, and steady-state sign-in mints the
+  session over the P2P channel). Strip Pi-side before posting the tunneled response.
+- **MED — relay didn't enforce zero-device → fixed:** when a site publishes device
+  keys via `/me/register` (C1), the relay **burns** any live bootstrap for that site,
+  so a replayed/stale bootstrap can never reach an already-enrolled Pi. (The Pi's
+  `enrollAllowed` zero-device check remains as defense in depth.)
+
+Net: the relay routes only on high-entropy secrets; the human-friendly 6-digit PIN
+stays as a Pi-validated factor; the QR/link removes the typing step entirely.
+
 ## The five hard invariants (must hold throughout)
 
 1. **Relay stays blind** — never sees plaintext, never co-presents
