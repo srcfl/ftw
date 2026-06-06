@@ -469,6 +469,90 @@ mux.HandleFunc("POST "+r.HomeHost+"/api/owner-access/enroll/finish", r.bootstrap
 
 ---
 
+## REVISION (post-Codex-audit) — rework Tasks 2–6 to the high-entropy `bootstrap_id` model
+
+Tasks 1–5 are committed + green but on the SUPERSEDED 6-digit-`pin_hash`-as-relay-key
+model. A Codex audit found a BLOCKER (PIN is offline-brute-forceable by the relay)
++ 4 HIGH/MED (global PIN lookup, non-atomic single-use, publish replay, late
+Set-Cookie strip, no zero-device enforcement). See the spec's REVISION section.
+Fredrik chose the **QR + `#fragment` link** fix. Rework as follows (the committed
+code is the starting point — transform it, don't rebuild from scratch).
+
+**Contract changes (apply consistently):**
+- The Pi mints a HIGH-ENTROPY `bootstrap_id` (≥32 B CSPRNG, base64url) when it mints
+  the enroll-PIN. The relay keys the bootstrap store on `claimKey = sha256(bootstrap_id)`
+  — NOT on the PIN. The browser sends `claimKey` (it computes `sha256(bootstrap_id)`
+  from the `#fragment`) to `/bootstrap/claim` and to the enroll-forward, so the relay
+  never holds the raw secret and `claimKey` is unguessable.
+- `bootstrapPublishSigningString` becomes `"ftw-bootstrap:v1:" + site_id + ":" +
+  claimKey + ":" + ts_ms + ":" + hex(sha256(descriptor))`; the relay rejects
+  `|now - ts_ms| > 30s` (replay guard). Keep both sig encodings (inner descriptor
+  sig base64url; outer publish sig hex).
+- The 6-digit PIN stays, validated by the **Pi** (`validateEnrollPin`, 5-try burn) on
+  the forwarded enroll — NOT by the relay.
+
+### Task R1 — `BootstrapStore`: rename `pinHash`→`claimKey`; add atomic `Consume`
+**Files:** `go/cmd/ftw-relay/bootstrap.go` + `bootstrap_test.go`.
+- [ ] Rename the `pinHash` field/params to `claimKey` (mechanical; the value is now
+  `sha256(bootstrap_id)`). Behaviour identical.
+- [ ] Add `func (s *BootstrapStore) Consume(siteID, claimKey string) ([]byte, bool)` —
+  under the lock, verify the live entry's `claimKey` matches (constant-time) then
+  delete-and-return atomically (so two concurrent `enroll/finish` can't both pass).
+- [ ] Test: `Consume` returns the descriptor + removes it; a second `Consume`/`Claim`
+  misses; a non-matching key never consumes. Run `go test ./cmd/ftw-relay/ -run TestBootstrap` → green. Commit.
+
+### Task R2 — `/bootstrap` publish + claim: `claimKey` + `ts_ms` replay guard
+**Files:** `go/cmd/ftw-relay/bootstrap_http.go` + test.
+- [ ] `bootstrapPublishIO` gains `ts_ms int64`; `bootstrapPublishSigningString` gains
+  `claimKey` + `ts_ms` (as above). `bootstrapPut`: reject skew > 30 s; store keyed by
+  the `claimKey` the PUT carries (verify the outer sig over the new string first).
+- [ ] `bootstrapClaim` body becomes `{claim_key}` (the browser-computed
+  `sha256(bootstrap_id)` hex); look up by `claimKey` (still per-site unique).
+- [ ] Tests: a stale `ts_ms` PUT → rejected; claim by `claim_key` → descriptor; wrong
+  key → 404. Commit.
+
+### Task R3 — enroll-forward: gate on `claimKey`, single-use via `Consume`
+**Files:** `bootstrap_http.go` + test.
+- [ ] `bootstrapEnrollForward` reads `claim_key` (query or header), resolves the live
+  bootstrap by it (`Claim`/`Live` read, no burn on `start`); on `enroll/finish` 200 use
+  `Consume(site, claimKey)` instead of `Burn` (atomic single-use).
+- [ ] Add the zero-device relay guard: in `meRegister`, when a site's `/me/register`
+  publishes a non-empty `device_pubkeys` set (C1), call `r.Bootstrap.Burn(site)` — so a
+  replayed/stale bootstrap can never reach an already-enrolled Pi.
+- [ ] Tests: the existing 8 + (a) concurrent double-finish only one succeeds; (b) after
+  a `/me/register` with device keys, the forward 403s. Commit.
+
+### Task R4 — Pi: generate `bootstrap_id`, publish keyed by it, suppress the cookie
+**Files:** `go/internal/api/bootstrap_publish.go`, `api_owner_access.go`, the enroll-finish handler.
+- [ ] On enroll-PIN mint, generate a `bootstrap_id` (CSPRNG, base64url), stash it with
+  the PIN (so the LAN page can show it). `publishBootstrapDescriptor` publishes keyed by
+  `sha256(bootstrap_id)` with `ts_ms`.
+- [ ] Return the `bootstrap_id` from the enroll-PIN endpoint (so the LAN page builds the
+  QR + `#fragment` link). It NEVER goes to the relay raw — only its sha256 does, from the
+  browser.
+- [ ] On a bootstrap-forwarded enroll (the request arrived via the relay tunnel for the
+  zero-device window), SUPPRESS the `ftw_owner` Set-Cookie (don't issue it — the seed is
+  write-sig-authed; steady-state sign-in mints the session over P2P). Strip it Pi-side
+  before the tunneled response is posted.
+- [ ] Tests: publish keyed by `sha256(bootstrap_id)`; the cookie is absent on a
+  tunnel-forwarded enroll-finish. Commit.
+
+### Task R5 — web: QR + `#fragment` link (replaces the typed PIN as the courier)
+**Files:** `web/owner-access/index.html` (LAN), `web/owner-access/enroll.html` (home.*).
+- [ ] LAN page: on a genuine-LAN origin, GET the enroll-PIN endpoint → render a **QR**
+  (vendor a tiny zero-dep QR module under `web/vendor/`, or draw on a canvas) encoding
+  `https://<rp.id>/owner-access/enroll.html#b=<bootstrap_id>`, PLUS a clickable link with
+  the same URL, PLUS the 6-digit PIN (shown for the optional manual factor). Display-only —
+  no WebAuthn here.
+- [ ] `home.*` `enroll.html`: read `bootstrap_id` from `location.hash` (`#b=`); compute
+  `claim_key = hex(sha256(bootstrap_id))`; `POST /bootstrap/claim {claim_key}` → verify
+  the descriptor (`verifyEntry`) → run enroll with `?claim_key=` on the forwarded
+  start/finish (+ the optional PIN the Pi validates) → seed. Remove the typed-PIN-as-relay
+  path. Clear the hash after reading (don't leave the secret in history).
+- [ ] Node tests for the hash-parse + claim_key derivation + the verify-before-trust gate. Commit.
+
+### Task R6 — e2e + interop + docs + changeset (as the original Task 7, updated for `bootstrap_id`)
+
 ## Before the flag is flipped in production (manual gates — NOT code tasks)
 
 1. **Codex audit** of `bootstrap.go` + `bootstrap_http.go` (especially `bootstrapEnrollForward`): confirm the forward is unreachable without a live PIN, single-use, rate-limited, refused post-enrollment, and never reachable over the friend loopback tunnel.
