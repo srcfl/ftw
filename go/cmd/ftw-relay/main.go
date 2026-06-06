@@ -44,11 +44,15 @@ func main() {
 		return
 	}
 
-	// Fail closed: the internet-exposed home route must never run on
-	// trust-on-first-use (see requireHomePin).
-	if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeWeb, *homeAllowTOFU); err != nil {
-		slog.Error("ftw-relay: " + err.Error())
-		os.Exit(1)
+	// Fail closed: the internet-exposed SINGLE-TENANT home route must never run on
+	// trust-on-first-use (see requireHomePin). Under -multi-tenant there is no
+	// single -home-site to pin, so requireHomePin does NOT apply — requireMultiTenant
+	// (below) is the boot rule instead (it forces -require-device-key + -home-web).
+	if !*multiTenant {
+		if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeWeb, *homeAllowTOFU); err != nil {
+			slog.Error("ftw-relay: " + err.Error())
+			os.Exit(1)
+		}
 	}
 
 	// -multi-tenant implies -require-device-key (fail closed) and still requires

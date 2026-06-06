@@ -185,6 +185,7 @@ func (r *Relay) Handler() http.Handler {
 	if r.MultiTenant {
 		mux.HandleFunc("GET /wallet/{user_handle}/blob", r.walletBlobGet)
 		mux.HandleFunc("PUT /wallet/{user_handle}/blob", r.walletBlobPut)
+		mux.HandleFunc("OPTIONS /wallet/{user_handle}/blob", r.walletBlobOptions)
 		mux.HandleFunc("GET /signal/{site_id}/identity", r.signalIdentity)
 	}
 
@@ -222,6 +223,7 @@ func (r *Relay) Handler() http.Handler {
 			mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/identity", r.signalIdentity)
 			mux.HandleFunc("GET "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobGet)
 			mux.HandleFunc("PUT "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobPut)
+			mux.HandleFunc("OPTIONS "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobOptions)
 		}
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
@@ -388,12 +390,34 @@ type walletBlobIO struct {
 	Sig        string `json:"sig,omitempty"`
 }
 
+// walletBlobCORS sets permissive CORS on the per-wallet blob endpoints. They are
+// safe to expose cross-origin: the blob is opaque ciphertext (worthless without
+// the owner's PRF-derived key), a write is authenticated by the Ed25519 write
+// signature (NOT by any cookie/credential), and the handle is strictly validated.
+// The LAN enrollment page — served from the owner's OWN Pi origin — writes the
+// first directory blob here cross-origin, so a permissive ACAO is required. No
+// credentials are ever read, so "*" is safe (and credentials are not allowed).
+func walletBlobCORS(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Access-Control-Allow-Origin", "*")
+	h.Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
+	h.Set("Access-Control-Allow-Headers", "Content-Type")
+	h.Set("Access-Control-Max-Age", "600")
+}
+
+// walletBlobOptions answers the CORS preflight for the blob endpoints.
+func (r *Relay) walletBlobOptions(w http.ResponseWriter, req *http.Request) {
+	walletBlobCORS(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // walletBlobGet serves a wallet's encrypted directory blob. Public + unauthenticated
 // at the HTTP layer (the ciphertext is worthless without the user's PRF-derived
 // key) but the handle is strictly validated so it can never be used for path
 // traversal. Returns 400 (bad handle), 404 (no blob), or 200 with the opaque
 // {ciphertext, nonce, version}. The relay never parses the plaintext.
 func (r *Relay) walletBlobGet(w http.ResponseWriter, req *http.Request) {
+	walletBlobCORS(w)
 	handle := req.PathValue("user_handle")
 	if !validUserHandle(handle) {
 		http.Error(w, "invalid user_handle", http.StatusBadRequest)
@@ -432,6 +456,7 @@ func (r *Relay) walletBlobGet(w http.ResponseWriter, req *http.Request) {
 //   - 503  too many distinct wallets (store cap)
 //   - 200  stored
 func (r *Relay) walletBlobPut(w http.ResponseWriter, req *http.Request) {
+	walletBlobCORS(w)
 	handle := req.PathValue("user_handle")
 	if !validUserHandle(handle) {
 		http.Error(w, "invalid user_handle", http.StatusBadRequest)

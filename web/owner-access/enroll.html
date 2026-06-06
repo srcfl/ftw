@@ -196,7 +196,12 @@
               // browser-carried copy only (no relay blob written, but the home is
               // still cached locally so this device routes correctly).
               const encKey = prfOut ? await deriveEncKey(prfOut) : null;
-              await saveDirectory(W, encKey, location.origin, {
+              // The encrypted blob must live on the RELAY (so a fresh device can
+              // fetch it remotely), NOT on this LAN Pi origin. Derive the relay/home
+              // base from the WebAuthn RP-ID (e.g. home.fortytwowatts.com) — generic
+              // per deployment — and fall back to the page origin only for LAN dev.
+              const relayBase = (credOpts.rp && credOpts.rp.id) ? ("https://" + credOpts.rp.id) : location.origin;
+              await saveDirectory(W, encKey, relayBase, {
                 instances: [entry], version: 0, writeKey: null,
               });
             }

@@ -171,6 +171,32 @@ func TestWalletRoutesAbsentWhenFlagOff(t *testing.T) {
 	}
 }
 
+// The blob endpoints are CORS-enabled so the LAN enrollment page (served from the
+// Pi's own origin) can write the first directory blob to the relay cross-origin.
+func TestWalletBlobCORS(t *testing.T) {
+	srv := httptest.NewServer(newMultiTenantRelay(t).Handler())
+	defer srv.Close()
+	// Preflight → 204 with permissive ACAO + the methods/headers it'll use.
+	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/wallet/"+testHandle+"/blob", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("OPTIONS preflight = %d, want 204", resp.StatusCode)
+	}
+	if resp.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("preflight ACAO = %q, want *", resp.Header.Get("Access-Control-Allow-Origin"))
+	}
+	// A GET also carries the header (so the cross-origin fetch can read the body).
+	r2, _ := http.Get(srv.URL + "/wallet/" + testHandle + "/blob")
+	r2.Body.Close()
+	if r2.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("GET ACAO = %q, want *", r2.Header.Get("Access-Control-Allow-Origin"))
+	}
+}
+
 // An over-max ciphertext is rejected with 413, never buffered into the store
 // (the size cap is enforced before the write-auth check).
 func TestWalletBlobPutTooLargeHTTP(t *testing.T) {
