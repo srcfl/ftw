@@ -35,6 +35,7 @@ func newMultiTenantRelay(t *testing.T) *Relay {
 		HomeHost:         "home.test",
 		HomeWeb:          t.TempDir(),
 		WalletBlobs:      store,
+		Bootstrap:        NewBootstrapStore(65536, 4096),
 	}
 }
 

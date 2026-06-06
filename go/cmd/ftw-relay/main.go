@@ -77,6 +77,7 @@ func main() {
 	// store caps the number of distinct wallets and the per-blob size; the janitor
 	// GCs idle wallets below.
 	var walletBlobs *WalletBlobStore
+	var bootstrap *BootstrapStore
 	if *multiTenant {
 		if *walletBlobDir == "" {
 			slog.Error("ftw-relay: -multi-tenant requires -wallet-blob-dir (the durable encrypted-blob store)")
@@ -90,6 +91,10 @@ func main() {
 			os.Exit(1)
 		}
 		walletBlobs = wb
+		// Ephemeral first-enrollment store: 64 KiB per descriptor, 4096 concurrent
+		// bootstraps. Each entry self-expires (bootstrapTTL) and the janitor GCs the
+		// stragglers, so this is purely an in-memory onboarding scratchpad.
+		bootstrap = NewBootstrapStore(65536, 4096)
 		slog.Info("ftw-relay: multi-tenant mode", "wallet_blob_dir", *walletBlobDir, "max_bytes", *walletBlobMaxBytes)
 	}
 
@@ -109,6 +114,7 @@ func main() {
 		RequireDeviceKey: *requireDeviceKey,
 		MultiTenant:      *multiTenant,
 		WalletBlobs:      walletBlobs,
+		Bootstrap:        bootstrap,
 	}
 
 	srv := &http.Server{
@@ -168,6 +174,14 @@ func main() {
 				if r.OfferLimit != nil {
 					if n := r.OfferLimit.GC(offerBucketIdleTTL); n > 0 {
 						slog.Info("ftw-relay: offer-limit GC", "removed", n)
+					}
+				}
+				// Reap expired first-enrollment bootstraps so an abandoned onboarding
+				// (Pi published, browser never claimed) can't pin memory; each entry
+				// also self-expires after bootstrapTTL, so this just trims proactively.
+				if r.Bootstrap != nil {
+					if n := r.Bootstrap.GC(); n > 0 {
+						slog.Info("ftw-relay: bootstrap GC", "removed", n)
 					}
 				}
 				// NB: wallet blobs are deliberately NOT time-GC'd. Unlike a site

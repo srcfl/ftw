@@ -118,6 +118,13 @@ type Relay struct {
 	// userHandle and serves it back over GET/PUT /wallet/{user_handle}/blob. Nil
 	// outside multi-tenant mode.
 	WalletBlobs *WalletBlobStore
+	// Bootstrap is the EPHEMERAL, BLIND first-enrollment store: during the brief
+	// onboarding window the Pi parks its own ES256-signed directory descriptor here
+	// (keyed for claim by sha256(PIN)) so a fresh browser that knows the PIN can pull
+	// it before the durable wallet blob exists. In-memory, TTL'd, and never
+	// trust-parsed by the relay — see bootstrap.go / bootstrap_http.go. Nil outside
+	// multi-tenant mode.
+	Bootstrap *BootstrapStore
 }
 
 type registerRequest struct {
@@ -187,6 +194,12 @@ func (r *Relay) Handler() http.Handler {
 		mux.HandleFunc("PUT /wallet/{user_handle}/blob", r.walletBlobPut)
 		mux.HandleFunc("OPTIONS /wallet/{user_handle}/blob", r.walletBlobOptions)
 		mux.HandleFunc("GET /signal/{site_id}/identity", r.signalIdentity)
+		// First-enrollment bootstrap: the Pi parks its signed directory descriptor
+		// (PUT, site-key-authenticated) and a fresh browser claims it back by PIN
+		// (POST, rate-limited). See bootstrap_http.go.
+		mux.HandleFunc("PUT /bootstrap/{site_id}", r.bootstrapPut)
+		mux.HandleFunc("POST /bootstrap/claim", r.bootstrapClaim)
+		mux.HandleFunc("OPTIONS /bootstrap/claim", r.walletBlobOptions)
 	}
 
 	// Owner remote access registration (Phase 3). The Pi POSTs its ES256-signed
@@ -224,6 +237,9 @@ func (r *Relay) Handler() http.Handler {
 			mux.HandleFunc("GET "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobGet)
 			mux.HandleFunc("PUT "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobPut)
 			mux.HandleFunc("OPTIONS "+r.HomeHost+"/wallet/{user_handle}/blob", r.walletBlobOptions)
+			mux.HandleFunc("PUT "+r.HomeHost+"/bootstrap/{site_id}", r.bootstrapPut)
+			mux.HandleFunc("POST "+r.HomeHost+"/bootstrap/claim", r.bootstrapClaim)
+			mux.HandleFunc("OPTIONS "+r.HomeHost+"/bootstrap/claim", r.walletBlobOptions)
 		}
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
