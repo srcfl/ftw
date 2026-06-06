@@ -57,15 +57,36 @@ stranger can be involved.
 
 1. At home, open your box's dashboard the way you normally do (e.g.
    `http://forty-two-watts.local` or its IP address).
-2. Find **Sign in / Add passkey** on the landing.
-3. Create a passkey. Your browser will offer Face ID / Touch ID / a fingerprint
-   / a security key — pick whatever you use. Confirm.
+2. Find **Set up remote access**. Your box shows a **QR code**, a one-tap
+   **link**, and a **6-digit PIN**.
+3. Either **scan the QR with your phone** or **tap the link** — it opens
+   `home.fortytwowatts.com` and brings the box's signed identity along with it
+   (carried in the part of the link after the `#`, which never leaves your
+   browser and never reaches the relay).
+4. The page asks for the **6-digit PIN** shown on your box, then offers to
+   **create a passkey** (Face ID / Touch ID / a fingerprint / a security key).
+   Confirm.
 
-Done. Your phone (or laptop) is now a key to your home.
+Done. Your phone (or laptop) is now a key to your home, and `home.fortytwowatts.com`
+knows which box is yours.
+
+> **Two locks, on purpose.** The link carries a long, unguessable handle that
+> lets the relay find your box's parked invitation; the **PIN is checked by your
+> box, never by the relay**. So even the relay can't ride your first enrollment —
+> it doesn't know the PIN, and the PIN alone can't be turned into the handle. The
+> invitation is single-use and expires in ten minutes; finishing enrollment (or
+> the timer) closes the window.
 
 > **Tip:** enroll on each device you'll actually use — your phone *and* your
 > laptop, say. Each gets its own passkey. You can add or remove them any time
 > from the same screen, and removing one instantly locks that device out.
+
+> **Operators:** the multi-tenant front door (one `home.*` address routing many
+> owners to their own boxes) is gated behind the relay's `-multi-tenant` flag and
+> is **off by default**. With it off, a box reaches its owner over the
+> single-tenant home route. The onboarding courier (QR + PIN + the parked
+> invitation) is the `-multi-tenant` path — see
+> [`relay-deploy.md`](relay-deploy.md) for the relay-side surface and flags.
 
 ---
 

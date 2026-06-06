@@ -181,6 +181,83 @@ dashboard, redo "Cert + key" section above. The CF edge cert in
 front of the relay is auto-renewed by Cloudflare with no action
 required.
 
+## Multi-tenant home route + onboarding bootstrap
+
+The relay can run as a **public multi-tenant front door**: one `home.*` host that
+serves only the relay-disk SPA shell and routes each signed-in wallet to its own
+Pi. It never forwards owner data to a Pi — owner traffic rides the DTLS
+DataChannel (P2P-only). It is **off by default**; turn it on with:
+
+```
+ftw-relay \
+  -addr :443 -cert … -key … \
+  -multi-tenant \              # implies -require-device-key (fail closed)
+  -require-device-key \        # C2 signaling gate: an offer must carry a device-key proof
+  -home-host home.fortytwowatts.com \
+  -home-web /usr/local/share/ftw-web \   # the web/ bundle served from the relay disk
+  -wallet-blob-dir /var/lib/ftw-relay/blobs   # per-wallet ENCRYPTED directory blobs (relay never decrypts)
+```
+
+`-multi-tenant` refuses to start without `-require-device-key` (a forged
+`site_id` would otherwise skip the proof and the relay could contact the wrong
+Pi). `-home-site` / `-home-pubkey` become no-ops under `-multi-tenant`.
+
+### What the relay stores (and never reads)
+
+- **`-wallet-blob-dir`** — one `<user_handle>.blob` file per wallet: the wallet's
+  AES-GCM-encrypted directory of its boxes. The relay stores ciphertext, pins a
+  per-wallet Ed25519 write key (TOFU), and never decrypts. `-wallet-blob-max-bytes`
+  (default 65536) caps each blob so a hostile client can't grow the store.
+- **Bootstrap store** — in-memory, TTL'd (10 min), blind. Holds, per site, the
+  Pi-signed instance descriptor during the brief first-enrollment window, keyed
+  by `claim_key = hex(sha256(bootstrap_id))`.
+
+### The onboarding bootstrap surface
+
+When an owner taps **Set up remote access** on the LAN, the box mints a 6-digit
+PIN **and** a high-entropy `bootstrap_id` (≥32 bytes CSPRNG, base64url). The raw
+`bootstrap_id` is shown to the LAN browser only (it travels in the onboarding
+link's `#fragment`); the relay only ever sees its digest. Three endpoints, all
+registered only under `-multi-tenant`:
+
+- **`PUT /bootstrap/{site_id}`** — the box parks its signed descriptor.
+  Writer-authenticated against the site's pinned ES256 key (the one
+  `/me/register` pinned). Body: `{descriptor, claim_key, ts_ms, sig}` where
+  `claim_key = hex(sha256(bootstrap_id))` (64-char lowercase hex), `ts_ms` is the
+  box's mint time, and `sig` is the ES256 raw `r||s` **hex** signature over
+  ```
+  "ftw-bootstrap:v1:" + site_id + ":" + claim_key + ":" + ts_ms + ":" + hex(sha256(descriptor))
+  ```
+  The relay rejects `|now_ms − ts_ms| > 30000` (replay guard) **after** the
+  signature verifies. `401` on a bad sig, `400` on a malformed `claim_key` /
+  stale `ts_ms`, `404` for an unknown site, `413`/`503` on the size/store caps.
+- **`POST /bootstrap/claim`** — a fresh browser that holds the `bootstrap_id`
+  (from the link `#fragment`) computes the same `claim_key` and pulls the parked
+  descriptor back: `{claim_key}` → `{site_id, descriptor}`. Unauthenticated (the
+  `claim_key` is a 256-bit unguessable bearer handle, **not** the PIN) but
+  rate-limited per source IP. A miss is a clean `404`. The browser verifies the
+  descriptor's inner Pi signature client-side before trusting it.
+- **`POST home.*/api/owner-access/enroll/{start,finish}`** — the **one** narrow
+  owner-API exception to P2P-only. A first-time user has no device key yet, so
+  they can't open the P2P channel to enroll one; this bridges exactly that gap
+  and only that. The relay gates on `?claim_key` (resolving a live bootstrap
+  blob), then forwards the browser's **entire query string minus the
+  relay-private `claim_key`** to the box (url-encoded, so values can't inject
+  stray query params). That carries `?pin` — which the box validates (5-try
+  burn), the relay never inspecting it — and, on `enroll/finish`, the
+  `?ceremony_token` + `?name` the box's finish handler reads (the browser sends
+  those only in the query, not the body; dropping them would make the box `400`
+  "ceremony_token required" and enrollment could never complete). The forward is
+  single-use: a `200` enroll/finish atomically consumes the blob, closing the
+  window. The box's owner session cookie is stripped at the relay boundary. A
+  missing or dead `claim_key` is the same `403` (an anonymous caller learns
+  nothing about which sites have an open window).
+
+**Two secrets, two checkers, by design:** the relay gate is the high-entropy
+`claim_key`; the PIN is the box's separate LAN-presence factor. A leaked store
+key never reveals a guessable PIN, and the relay can't ride the enroll forward
+without the PIN the box still demands.
+
 ## Migration from the old subetha relay
 
 `subetha.fortytwowatts.com:7777` runs the raw-TCP byte-pipe relay

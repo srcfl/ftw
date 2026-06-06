@@ -249,9 +249,9 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 			return
 		}
 		// The relay gates on claim_key (high-entropy handle); the pin rides through to
-		// the Pi unread. A missing claim_key is the same 403 as a dead one (§ doc).
+		// the Pi unread (the relay NEVER inspects it — see the forward below). A
+		// missing claim_key is the same 403 as a dead one (§ doc).
 		claimKey := req.URL.Query().Get("claim_key")
-		pin := req.URL.Query().Get("pin")
 		if claimKey == "" {
 			http.Error(w, "claim_key required", http.StatusForbidden)
 			return
@@ -275,7 +275,18 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		inner := "/api/owner-access/enroll/" + which + "?pin=" + pin
+		// Preserve the browser's full query when forwarding, dropping ONLY the
+		// relay-private claim_key (the Pi never sees it). The finish ceremony carries
+		// ceremony_token + name in the query string (not the body); hardcoding
+		// "?pin=" here would silently drop them and the Pi's enroll/finish would 400
+		// "ceremony_token required", so a real multi-tenant enroll could never
+		// complete. url.Values.Encode also percent-escapes every value, so the pin
+		// (and any other param) round-trips cleanly through the tunnel host's URL
+		// re-parse instead of a raw string concat injecting stray '&'/'#'/'%'/space
+		// into the inner query.
+		q := req.URL.Query()
+		q.Del("claim_key")
+		inner := "/api/owner-access/enroll/" + which + "?" + q.Encode()
 		resp, err := r.enqueue(req, hostID, inner, body)
 		if err != nil {
 			http.Error(w, "home did not answer", http.StatusBadGateway)

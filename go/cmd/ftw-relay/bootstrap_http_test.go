@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -357,6 +358,62 @@ func TestBootstrapEnrollForwardHappyPath(t *testing.T) {
 	got := seen()
 	if len(got) != 1 || got[0] != "/api/owner-access/enroll/start?pin="+pin {
 		t.Fatalf("Pi saw %v, want exactly [/api/owner-access/enroll/start?pin=%s]", got, pin)
+	}
+}
+
+// TestBootstrapEnrollForwardPreservesFinishQuery (a'): the browser sends
+// ceremony_token + name (and pin) ONLY in the query string of the enroll/finish
+// POST — never in the body. The relay must forward the FULL query (minus the
+// relay-private claim_key) so the Pi's handleOwnerEnrollFinish can read
+// ceremony_token; a regression to a hardcoded "?pin=" silently drops it and the
+// Pi 400s "ceremony_token required", so multi-tenant enroll can never complete.
+// We drive a real enroll/finish with all four params and assert the Pi saw every
+// browser param (url-decoded) and did NOT see claim_key. The values include a
+// space + reserved char in `name` to prove q.Encode() escapes them cleanly across
+// the tunnel host's URL re-parse (the latent query-injection footgun).
+func TestBootstrapEnrollForwardPreservesFinishQuery(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	const site, hostID, pin = "site:A", "host-a", "123456"
+	const ceremony = "ceremony-tok-abc123"
+	const name = "Erik's iPhone & iPad" // space + '&' must NOT inject extra params
+	claimKey := claimKeyHex("bootstrap-secret-finishq")
+	srv, seen := enrollStubPi(t, relay, hostID)
+	publishLiveBootstrap(t, relay, site, hostID, claimKey)
+
+	q := url.Values{}
+	q.Set("ceremony_token", ceremony)
+	q.Set("name", name)
+	q.Set("claim_key", claimKey)
+	q.Set("pin", pin)
+	resp, body := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?"+q.Encode())
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("enroll/finish: got %d (%s), want 200", resp.StatusCode, body)
+	}
+	got := seen()
+	if len(got) != 1 {
+		t.Fatalf("Pi saw %v, want exactly one forwarded path", got)
+	}
+	// Parse the forwarded inner path back to its query so we assert on decoded
+	// values (not on a byte-exact encoding, which url.Values.Encode key-sorts).
+	u, err := url.Parse(got[0])
+	if err != nil {
+		t.Fatalf("forwarded inner path not parseable: %q (%v)", got[0], err)
+	}
+	if u.Path != "/api/owner-access/enroll/finish" {
+		t.Fatalf("forwarded path = %q, want /api/owner-access/enroll/finish", u.Path)
+	}
+	fq := u.Query()
+	if fq.Get("ceremony_token") != ceremony {
+		t.Fatalf("forwarded ceremony_token = %q, want %q (relay dropped it — Pi would 400)", fq.Get("ceremony_token"), ceremony)
+	}
+	if fq.Get("name") != name {
+		t.Fatalf("forwarded name = %q, want %q (escaping mangled it across the tunnel re-parse)", fq.Get("name"), name)
+	}
+	if fq.Get("pin") != pin {
+		t.Fatalf("forwarded pin = %q, want %q", fq.Get("pin"), pin)
+	}
+	if fq.Has("claim_key") {
+		t.Fatalf("relay-private claim_key leaked to the Pi in %q", got[0])
 	}
 }
 
