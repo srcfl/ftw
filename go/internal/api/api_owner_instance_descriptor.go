@@ -17,6 +17,8 @@ package api
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 )
@@ -27,6 +29,44 @@ import (
 // is the entire point.
 func instanceDescriptorSigningString(siteID, piPubkey, label string) string {
 	return "ftw-instance:v1:" + siteID + ":" + piPubkey + ":" + label
+}
+
+// buildInstanceDescriptor materializes the Pi-signed instance descriptor as the
+// marshaled JSON {site_id, pi_pubkey, label, sig}. It is the SINGLE source of the
+// descriptor bytes the browser's verifyEntry trusts, shared by the GET endpoint
+// (handleOwnerInstanceDescriptor) and the /bootstrap self-publish
+// (publishBootstrapDescriptor) so both produce byte-identical, identically-signed
+// descriptors. The inner `sig` is base64url (no padding) of the raw r||s
+// signature — the WebCrypto-native form, NOT hex. Returns an error if no signer
+// is wired or signing/encoding fails; callers map that to 503 / a skipped publish.
+func (s *Server) buildInstanceDescriptor() ([]byte, error) {
+	if s.deps.InstanceSigner == nil {
+		return nil, errors.New("site identity unavailable")
+	}
+	piPubkey := s.deps.InstanceSigner.PublicKeyHex()
+	siteID := s.deps.SiteID
+	label := siteID
+	if s.deps.Cfg != nil && s.deps.Cfg.Site.Name != "" {
+		label = s.deps.Cfg.Site.Name
+	}
+	msg := instanceDescriptorSigningString(siteID, piPubkey, label)
+	sigHex, err := s.deps.InstanceSigner.SignRawHex(msg)
+	if err != nil {
+		return nil, err
+	}
+	// SignRawHex returns raw r||s as hex; the CONTRACT wire form is base64url
+	// (no padding) so the browser can verify with WebCrypto (P-256 native r||s).
+	// Re-encode.
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(map[string]any{
+		"site_id":   siteID,
+		"pi_pubkey": piPubkey,
+		"label":     label,
+		"sig":       base64.RawURLEncoding.EncodeToString(sigBytes),
+	})
 }
 
 // handleOwnerInstanceDescriptor returns the Pi-signed instance descriptor. Owner
@@ -41,32 +81,13 @@ func (s *Server) handleOwnerInstanceDescriptor(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "site identity unavailable"})
 		return
 	}
-	piPubkey := s.deps.InstanceSigner.PublicKeyHex()
-	siteID := s.deps.SiteID
-	label := siteID
-	if s.deps.Cfg != nil && s.deps.Cfg.Site.Name != "" {
-		label = s.deps.Cfg.Site.Name
-	}
-	msg := instanceDescriptorSigningString(siteID, piPubkey, label)
-	sigHex, err := s.deps.InstanceSigner.SignRawHex(msg)
+	descJSON, err := s.buildInstanceDescriptor()
 	if err != nil {
-		slog.Error("instance-descriptor: sign failed", "site_id", siteID, "err", err)
+		slog.Error("instance-descriptor: build failed", "site_id", s.deps.SiteID, "err", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sign descriptor"})
 		return
 	}
-	// SignRawHex returns raw r||s as hex; the CONTRACT wire form is base64url
-	// (no padding) so the browser can verify with WebCrypto (P-256 native r||s).
-	// Re-encode.
-	sigBytes, err := hex.DecodeString(sigHex)
-	if err != nil {
-		slog.Error("instance-descriptor: malformed signature hex", "site_id", siteID, "err", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "encode descriptor"})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"site_id":   siteID,
-		"pi_pubkey": piPubkey,
-		"label":     label,
-		"sig":       base64.RawURLEncoding.EncodeToString(sigBytes),
-	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(descJSON)
 }

@@ -201,6 +201,13 @@ type Deps struct {
 	// fingerprint signing string (which binds the signature to this site).
 	SiteID string
 
+	// RelayBaseURL is the base URL of the owner-access relay this Pi registers
+	// with (FTW_RELAY_URL in main.go). Used to self-publish the signed instance
+	// descriptor to PUT {RelayBaseURL}/bootstrap/{site_id} during the brief
+	// first-enrollment window (see bootstrap_publish.go). Empty on LAN-only
+	// deploys (no relay wired) — the self-publish is then a no-op.
+	RelayBaseURL string
+
 	// InstanceSigner is the Pi's self-sovereign ES256 identity used to sign the
 	// owner-access instance descriptor (GET /api/owner-access/instance-descriptor)
 	// over the P2P channel. Satisfied by *nova.Identity — the same key behind

@@ -590,6 +590,12 @@ func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Info("owner-access enrollment PIN minted",
 		"pin", pin, "expires_in_s", expiresIn)
+	// Self-publish the signed descriptor to the relay so a fresh browser holding
+	// this PIN can claim it and enroll its first passkey (multi-tenant onboarding,
+	// Task 5). Best-effort + off the response path: publishBootstrapDescriptor is
+	// a no-op when no relay is wired or any device is already enrolled, so the PIN
+	// response never waits on (or fails because of) the relay.
+	go s.publishBootstrapDescriptor(pin)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"pin":          pin,

@@ -1526,6 +1526,13 @@ func main() {
 		TunnelMarker:         tunnelMarker,
 		SiteIdentityPubHex:   siteIdentityPubHex,
 		SiteID:               "site:" + cfg.Site.Name,
+		// RelayBaseURL lets the API self-publish its signed instance descriptor to
+		// {relay}/bootstrap during the first-enrollment window (multi-tenant
+		// onboarding). Same source the relay registration uses; empty (LAN-only)
+		// makes the self-publish a no-op. Gating on remote_access happens at the
+		// publish call site via the zero-device window — a Pi that isn't dialing
+		// the relay simply never has its descriptor claimed.
+		RelayBaseURL: os.Getenv("FTW_RELAY_URL"),
 		// InstanceSigner signs the owner-access instance descriptor with the same
 		// self-sovereign ES256 key. nil-safe: if identity load failed above,
 		// siteIdentity is nil and the descriptor endpoint returns 503.
