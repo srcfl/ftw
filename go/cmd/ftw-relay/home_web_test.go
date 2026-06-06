@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -112,6 +114,125 @@ func TestMeRegister_DeviceKeys_ReplaceOnReRegister(t *testing.T) {
 	if !relay.Owners.HasDeviceKey("site:Home", now.pubKeyHex) {
 		t.Fatal("new device key not published on re-register")
 	}
+}
+
+// TestMeRegister_BurnsBootstrapOnDeviceKeys (R3 / C1) proves a /me/register that
+// publishes a NON-EMPTY device-key set burns any live bootstrap blob for that
+// site: once a device is enrolled the first-enrollment window MUST close, so a
+// stale/replayed claim_key can never reach an already-enrolled Pi. Defence in
+// depth on top of the Pi's own enrollAllowed zero-device check.
+func TestMeRegister_BurnsBootstrapOnDeviceKeys(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+
+	id := newTestIdentity(t)
+	const site, hostID = "site:Home", "host-owner"
+	claimKey := claimKeyForHW("bootstrap-secret-meregister")
+
+	// Pin the site key first (a bare Register) so the bootstrap PUT path / Active
+	// could resolve it, then park a live bootstrap window for the site.
+	if err := relay.Owners.Register(site, hostID, id.PublicKeyHex()); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+	if err := relay.Bootstrap.Put(site, []byte(`{"site":"site:Home"}`), claimKey, time.Minute); err != nil {
+		t.Fatalf("bootstrap put: %v", err)
+	}
+	if !relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap not Live after Put; test precondition broken")
+	}
+
+	// A device gets enrolled: the Pi re-registers carrying its now-non-empty
+	// trusted device-key set.
+	dev := newDeviceKey(t)
+	keys := []string{dev.pubKeyHex}
+	tsMs := time.Now().UnixMilli()
+	sig, err := id.SignRawHex(tunnel.MeRegisterSigningStringV2(site, hostID, tsMs, keys))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, _ := json.Marshal(meRegisterRequest{
+		SiteID: site, HostID: hostID,
+		PublicKey: id.PublicKeyHex(), TsMs: tsMs, Sig: sig,
+		DevicePubkeys: keys,
+	})
+	resp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register status=%d want 200", resp.StatusCode)
+	}
+
+	// The bootstrap window must be gone now that a device is enrolled.
+	if relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap still Live after /me/register published a device key; must be burned")
+	}
+	// And the enroll-forward gate is now closed for that claim_key: the live-blob
+	// check fires (and 403s) before the home-reachability check, so a 403 here is
+	// the burned window — no tunnel host needed.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/owner-access/enroll/start?claim_key="+claimKey+"&pin=123456", nil)
+	req.Host = "home.test"
+	r2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusForbidden {
+		t.Fatalf("enroll/start after device-key register: got %d, want 403 (burned)", r2.StatusCode)
+	}
+}
+
+// TestMeRegister_EmptyDeviceKeysDoesNotBurn (R3) proves the burn is gated on a
+// NON-EMPTY device-key set: a registration with no device keys (e.g. a Pi that
+// hasn't enrolled anyone yet, re-registering for any reason) must NOT close an
+// open bootstrap window — otherwise a routine re-registration during onboarding
+// would lock the user out of their own first enrollment.
+func TestMeRegister_EmptyDeviceKeysDoesNotBurn(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	srv := httptest.NewServer(relay.Handler())
+	defer srv.Close()
+
+	id := newTestIdentity(t)
+	const site, hostID = "site:Home", "host-owner"
+	claimKey := claimKeyForHW("bootstrap-secret-no-burn")
+	if err := relay.Owners.Register(site, hostID, id.PublicKeyHex()); err != nil {
+		t.Fatalf("pre-register: %v", err)
+	}
+	if err := relay.Bootstrap.Put(site, []byte(`{"site":"site:Home"}`), claimKey, time.Minute); err != nil {
+		t.Fatalf("bootstrap put: %v", err)
+	}
+
+	// Re-register WITHOUT device keys (v1 signing string, empty set).
+	tsMs := time.Now().UnixMilli()
+	sig, err := id.SignRawHex(tunnel.MeRegisterSigningString(site, hostID, tsMs))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	body, _ := json.Marshal(meRegisterRequest{
+		SiteID: site, HostID: hostID,
+		PublicKey: id.PublicKeyHex(), TsMs: tsMs, Sig: sig,
+	})
+	resp, err := http.Post(srv.URL+"/me/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("register status=%d want 200", resp.StatusCode)
+	}
+	if !relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap was burned by a register with NO device keys; window must stay open during onboarding")
+	}
+}
+
+// claimKeyForHW mirrors the relay/browser claimKey = hex(sha256(bootstrap_id))
+// for the home_web register tests (claimKeyHex lives in bootstrap_http_test.go;
+// both compute the same digest).
+func claimKeyForHW(bootstrapID string) string {
+	h := sha256.Sum256([]byte(bootstrapID))
+	return hex.EncodeToString(h[:])
 }
 
 // TestHomeIdentity_ServedFromPin (SLICE 2) proves GET /api/identity on the home

@@ -284,11 +284,14 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 		// Copy the Pi's response with the owner cookie stripped — the same chokepoint
 		// homeStaticForward uses, so ftw_owner can never traverse the relay.
 		writeTunneledNoCookie(w, resp)
-		// Single-use: a completed enrollment closes the window. Only burn on a
+		// Single-use: a completed enrollment closes the window. Only consume on a
 		// finish that the Pi accepted (200) — a failed finish leaves the window open
-		// so the user can retry without the Pi re-publishing.
+		// so the user can retry without the Pi re-publishing. Consume verifies the
+		// claim_key still matches and deletes the entry ATOMICALLY under the store
+		// lock, so two concurrent in-flight finishes that both passed the live-gate
+		// above can never both close the window (read-then-Burn would have raced).
 		if which == "finish" && resp.Status == http.StatusOK {
-			r.Bootstrap.Burn(site)
+			r.Bootstrap.Consume(site, claimKey)
 		}
 	}
 }

@@ -1269,6 +1269,14 @@ func (r *Relay) meRegister(w http.ResponseWriter, req *http.Request) {
 		dev = append(dev, k)
 	}
 	r.Owners.SetDeviceKeys(reg.SiteID, dev)
+	// C1 → R3 zero-device burn: a non-empty device-key set means a device is now
+	// enrolled for this site, so the first-enrollment bootstrap window MUST be
+	// closed. Burning it here means a replayed/stale claim_key can never reach an
+	// already-enrolled Pi via the enroll-forward — defence in depth on top of the
+	// Pi's own enrollAllowed zero-device check. Guard for single-tenant (no store).
+	if r.Bootstrap != nil && len(dev) > 0 {
+		r.Bootstrap.Burn(reg.SiteID)
+	}
 	// Return the poll token this host must present on /tunnel/<host>/next and the
 	// /signal/* rendezvous. The ES256-verified registration above proves it owns
 	// host_id, so only it learns the token. The secret is bound to the verified

@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -400,6 +401,52 @@ func TestBootstrapEnrollForwardBurnAfterFinish(t *testing.T) {
 	resp2, _ := enrollPost(t, srv.URL, "/api/owner-access/enroll/start?claim_key="+claimKey+"&pin="+pin)
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Fatalf("enroll/start after burn: got %d, want 403", resp2.StatusCode)
+	}
+	// A second enroll/finish with the same claim_key also 403s at the gate — the
+	// window closed atomically on the first accepted finish (Consume).
+	resp3, _ := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?claim_key="+claimKey+"&pin="+pin)
+	if resp3.StatusCode != http.StatusForbidden {
+		t.Fatalf("second enroll/finish after consume: got %d, want 403", resp3.StatusCode)
+	}
+}
+
+// TestBootstrapEnrollForwardConcurrentDoubleFinish (b): two concurrent in-flight
+// enroll/finish forwards must not BOTH close the window — the atomic Consume
+// guarantees exactly one succeeds. We exercise the store directly (deterministic,
+// no tunnel timing races): two Consume calls for the same (site, claimKey) yield
+// exactly one ok=true. This is the invariant bootstrapEnrollForward relies on to
+// replace the racy read-then-Burn with an atomic delete-and-return.
+func TestBootstrapEnrollForwardConcurrentDoubleFinish(t *testing.T) {
+	s := NewBootstrapStore(256, 8)
+	const site = "site:A"
+	claimKey := claimKeyHex("bootstrap-secret-concurrent")
+	if err := s.Put(site, []byte(`{"site":"site:A"}`), claimKey, time.Minute); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	const racers = 16
+	var wg sync.WaitGroup
+	var oks int32
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // line everyone up so the Consumes truly contend
+			if _, ok := s.Consume(site, claimKey); ok {
+				atomic.AddInt32(&oks, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if oks != 1 {
+		t.Fatalf("concurrent Consume succeeded %d times, want exactly 1", oks)
+	}
+	// And the window is gone — a follow-up Consume/Claim misses.
+	if _, ok := s.Consume(site, claimKey); ok {
+		t.Fatal("Consume succeeded after the window was already consumed")
 	}
 }
 
