@@ -94,7 +94,7 @@
     import { exportPubHex } from "./device-key.js";
     import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
     import { saveDirectory, verifyEntry } from "./instance-sync.js";
-    import { bootstrapIdFromHash, claimKeyFromBootstrapId, claimAndVerify } from "./bootstrap-enroll.js";
+    import { bootstrapIdFromHash, claimKeyFromBootstrapId, bootstrapProof, claimAndVerify } from "./bootstrap-enroll.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
@@ -201,10 +201,22 @@
         // 3. Finish. The device_pubkey rides INSIDE the WebAuthn registration JSON
         //    body (C4): the Pi pins it on the NEW credential's trusted_devices row.
         //    Bootstrap re-sends claim_key (the relay re-gates + single-use-burns the
-        //    window on a 200) AND pin (the Pi re-validates).
+        //    window on a 200) AND pin (the Pi re-validates) AND a CEREMONY-BOUND
+        //    possession proof. The proof = HMAC-SHA256(key=bootstrap_id,
+        //    msg=ceremony_token): it proves WE hold the raw bootstrap_id that opened
+        //    THIS ceremony. The relay only ever sees sha256(bootstrap_id), so it can
+        //    neither forge a proof for its own ceremony_token nor reuse ours — this
+        //    closes the "compromised relay sees the PIN and runs its own enrollment"
+        //    hole. The raw bootstrap_id NEVER leaves the browser; only its HMAC does.
+        let proof = "";
+        if (bootstrapId) proof = await bootstrapProof(bootstrapId, ceremony_token);
         const finishQuery = "ceremony_token=" + encodeURIComponent(ceremony_token)
           + "&name=" + encodeURIComponent(name)
-          + (bootstrapId ? ("&claim_key=" + encodeURIComponent(claimKey) + (pin ? ("&pin=" + encodeURIComponent(pin)) : "")) : "");
+          + (bootstrapId
+              ? ("&claim_key=" + encodeURIComponent(claimKey)
+                 + "&bootstrap_proof=" + encodeURIComponent(proof)
+                 + (pin ? ("&pin=" + encodeURIComponent(pin)) : ""))
+              : "");
         const finishBody = encodeRegistrationResult(cred);
         if (devicePubHex) finishBody.device_pubkey = devicePubHex;
         const finish = await enrollFetch("finish", finishQuery, {

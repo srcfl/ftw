@@ -58,6 +58,28 @@ export async function claimKeyFromBootstrapId(bootstrapId) {
   return toHex(digest);
 }
 
+// bootstrapProof is the ceremony-bound proof-of-possession of the RAW bootstrap_id:
+//   bootstrap_proof = hex(HMAC-SHA256(key = utf8(bootstrap_id), msg = utf8(ceremony_token)))
+// The browser sends it as ?bootstrap_proof=<hex> on enroll/FINISH so the Pi can
+// prove the finisher actually holds the secret bootstrap_id that opened THIS
+// ceremony. The relay only ever holds hex(sha256(bootstrap_id)) (the claim_key
+// digest), so it can neither forge this proof for its own ceremony_token nor reuse
+// the user's (the ceremony_token is single-use). MUST stay byte-identical to the Pi
+// (go/internal/api/api_owner_access.go bootstrapEnrollProof): key = utf8 bytes of
+// the bootstrap_id, message = utf8 bytes of the ceremony_token, lowercase-hex out.
+export async function bootstrapProof(bootstrapId, ceremonyToken) {
+  const enc = new TextEncoder();
+  const key = await globalThis.crypto.subtle.importKey(
+    "raw",
+    enc.encode(String(bootstrapId)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(String(ceremonyToken)));
+  return toHex(mac);
+}
+
 // claimAndVerify POSTs {home}/bootstrap/claim {claim_key} and returns the
 // VERIFIED, parsed entry: { site_id, pi_pubkey, label, sig } merged with the
 // relay-reported site_id. It performs the verify-before-trust gate:
@@ -96,5 +118,5 @@ export async function claimAndVerify(homeBase, claimKey, fetchImpl) {
 }
 
 if (typeof window !== "undefined") {
-  window.ftwBootstrapEnroll = { bootstrapIdFromHash, claimKeyFromBootstrapId, claimAndVerify };
+  window.ftwBootstrapEnroll = { bootstrapIdFromHash, claimKeyFromBootstrapId, bootstrapProof, claimAndVerify };
 }

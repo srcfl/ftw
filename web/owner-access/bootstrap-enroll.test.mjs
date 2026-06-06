@@ -32,7 +32,7 @@ function toHex(b) {
   return s;
 }
 
-const { bootstrapIdFromHash, claimKeyFromBootstrapId, claimAndVerify } =
+const { bootstrapIdFromHash, claimKeyFromBootstrapId, claimAndVerify, bootstrapProof } =
   await import("./bootstrap-enroll.js");
 
 // Build a Pi-signed instance descriptor (ES256 over the canonical message), the
@@ -67,6 +67,28 @@ test("claimKeyFromBootstrapId = hex(sha256(bootstrap_id)) — known vector", asy
   // Output is always 64 lowercase-hex chars (the relay's isLowerHex64 gate shape).
   const ck = await claimKeyFromBootstrapId(bytesToB64url(new Uint8Array(32).fill(7)));
   assert.match(ck, /^[0-9a-f]{64}$/);
+});
+
+test("bootstrapProof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token)) — Go-verified vector", async () => {
+  // Cross-checked against Go bootstrapEnrollProof + openssl:
+  //   printf '%s' 'ceremony-token-XYZ' | openssl dgst -sha256 -hmac 'the-raw-bootstrap-id'
+  assert.equal(
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ"),
+    "b6fca5186f6f7120d3f275c881233f84cf8f84202c63ae7624c57715de3fd04f",
+  );
+  // A second Go-verified vector (key="ABC123", msg="tok-1").
+  assert.equal(
+    await bootstrapProof("ABC123", "tok-1"),
+    "5450b963c146c2334c7911660ee6016770ad361fde01526af84325ddaf70f3cc",
+  );
+  // Output is always 64 lowercase-hex chars (matches Go hex.EncodeToString of a 32-byte MAC).
+  assert.match(await bootstrapProof("any", "thing"), /^[0-9a-f]{64}$/);
+  // The proof is ceremony-bound: a different ceremony_token yields a different proof
+  // (so a relay cannot reuse a captured proof for its own ceremony).
+  assert.notEqual(
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ"),
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-OTHER"),
+  );
 });
 
 test("claimAndVerify accepts a Pi-signed descriptor (verify-before-trust passes)", async () => {
@@ -135,4 +157,23 @@ test("enroll.html sends claim_key (relay gate) AND pin (Pi factor) on start AND 
 test("enroll.html bootstrap path raw-fetches the relay (NOT ownerFetch/P2P) — keyless device", () => {
   // The selector falls back to a raw fetch when a bootstrap_id is present.
   assert.match(ENROLL, /if \(bootstrapId\) \{\s*return fetch\(/s);
+});
+
+test("enroll.html sends a ceremony-bound bootstrap_proof on FINISH (closes the relay-sees-PIN HIGH)", () => {
+  // The finish query must carry bootstrap_proof, computed via the exported helper
+  // over (bootstrap_id, ceremony_token) — NOT over claim_key or pin.
+  assert.match(ENROLL, /bootstrapProof\(/, "must compute the possession proof with bootstrapProof()");
+  assert.match(ENROLL, /bootstrap_proof=/, "finish must send &bootstrap_proof=");
+  // The proof is bound to the ceremony_token the Pi issued at start.
+  assert.match(ENROLL, /bootstrapProof\(\s*bootstrapId\s*,\s*ceremony_token\s*\)/);
+});
+
+test("enroll.html keeps bootstrap_id for the whole ceremony but the raw id NEVER leaves the browser", () => {
+  // The URL hash is still cleared immediately on read (no regression).
+  assert.match(ENROLL, /history\.replaceState/);
+  // The raw bootstrap_id must NOT be appended to any request query. Only its
+  // sha256 digest (claim_key) and its HMAC (bootstrap_proof) leave the browser.
+  assert.doesNotMatch(ENROLL, /bootstrap_id=/, "the raw bootstrap_id must never be sent on the wire");
+  // The finish-query builder must include the proof alongside the existing factors.
+  assert.match(ENROLL, /encodeURIComponent\(proof\)/, "the proof is url-encoded into the finish query");
 });
