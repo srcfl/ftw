@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -129,6 +131,140 @@ func TestBootstrapStore_Consume(t *testing.T) {
 		s := NewBootstrapStore(128, 8)
 		if _, ok := s.Consume("site:none", claimKeyFor("boot-E")); ok {
 			t.Fatal("unknown site must not consume")
+		}
+	})
+}
+
+func TestBootstrapStore_Reserve(t *testing.T) {
+	// Atomicity: N goroutines race to Reserve the same (site, claimKey); exactly
+	// one wins. This is the invariant bootstrapEnrollForward relies on so a
+	// concurrent second finish is refused BEFORE any Pi side effect.
+	t.Run("atomic exactly-one wins", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:R"
+		ck := claimKeyFor("boot-reserve")
+		desc := []byte(`{"site":"site:R"}`)
+		if err := s.Put(site, desc, ck, time.Minute); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		const racers = 16
+		var wg sync.WaitGroup
+		var oks int32
+		start := make(chan struct{})
+		for i := 0; i < racers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if d, ok := s.Reserve(site, ck); ok {
+					if string(d) != string(desc) {
+						t.Errorf("Reserve descriptor = %q, want %q", d, desc)
+					}
+					atomic.AddInt32(&oks, 1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if oks != 1 {
+			t.Fatalf("concurrent Reserve succeeded %d times, want exactly 1", oks)
+		}
+	})
+
+	// A reserved entry is still Claimable (a probing read does not depend on the
+	// reserved flag) but a second Reserve refuses it.
+	t.Run("reserved entry still claimable, second reserve refused", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:R"
+		ck := claimKeyFor("boot-reserve2")
+		desc := []byte(`{"site":"site:R"}`)
+		if err := s.Put(site, desc, ck, time.Minute); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if _, ok := s.Reserve(site, ck); !ok {
+			t.Fatal("first Reserve must succeed")
+		}
+		if got, gotSite, ok := s.Claim(ck); !ok || gotSite != site || string(got) != string(desc) {
+			t.Fatalf("Claim on a reserved entry = %q,%q,%v want it still claimable", got, gotSite, ok)
+		}
+		if _, ok := s.Reserve(site, ck); ok {
+			t.Fatal("second Reserve on an already-reserved entry must refuse")
+		}
+	})
+
+	// Release clears the flag so Reserve succeeds again (the Pi-rejected retry path).
+	t.Run("release re-opens for reserve", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:R"
+		ck := claimKeyFor("boot-reserve3")
+		if err := s.Put(site, []byte("d"), ck, time.Minute); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if _, ok := s.Reserve(site, ck); !ok {
+			t.Fatal("first Reserve must succeed")
+		}
+		if _, ok := s.Reserve(site, ck); ok {
+			t.Fatal("second Reserve before Release must refuse")
+		}
+		s.Release(site, ck)
+		if _, ok := s.Reserve(site, ck); !ok {
+			t.Fatal("Reserve after Release must succeed")
+		}
+	})
+
+	// Release with a non-matching claim_key must not clear the flag (a stray
+	// rollback from the wrong key can't re-open a window someone else reserved).
+	t.Run("release ignores non-matching key", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:R"
+		ck := claimKeyFor("boot-reserve4")
+		if err := s.Put(site, []byte("d"), ck, time.Minute); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if _, ok := s.Reserve(site, ck); !ok {
+			t.Fatal("first Reserve must succeed")
+		}
+		s.Release(site, claimKeyFor("boot-WRONG"))
+		if _, ok := s.Reserve(site, ck); ok {
+			t.Fatal("Reserve must still refuse after a non-matching Release")
+		}
+	})
+
+	// Reserve on an expired entry refuses.
+	t.Run("expired never reserves", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:RE"
+		ck := claimKeyFor("boot-reserve-exp")
+		if err := s.Put(site, []byte("d"), ck, -time.Second); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if _, ok := s.Reserve(site, ck); ok {
+			t.Fatal("expired entry must not reserve")
+		}
+	})
+
+	// Reserve on an unknown site refuses.
+	t.Run("unknown site never reserves", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		if _, ok := s.Reserve("site:none", claimKeyFor("boot-reserve-x")); ok {
+			t.Fatal("unknown site must not reserve")
+		}
+	})
+
+	// A constant-time non-matching key refuses AND leaves the entry un-reserved
+	// (so the correct key can still Reserve it).
+	t.Run("non-matching key refuses and leaves un-reserved", func(t *testing.T) {
+		s := NewBootstrapStore(256, 8)
+		const site = "site:R"
+		ck := claimKeyFor("boot-reserve5")
+		if err := s.Put(site, []byte("d"), ck, time.Minute); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		if _, ok := s.Reserve(site, claimKeyFor("boot-WRONG")); ok {
+			t.Fatal("non-matching claim key must not reserve")
+		}
+		if _, ok := s.Reserve(site, ck); !ok {
+			t.Fatal("correct key must still Reserve after a non-matching attempt")
 		}
 	})
 }

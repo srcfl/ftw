@@ -212,8 +212,14 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 // handler bridges exactly that gap and NOTHING else: it forwards ONLY the two enroll
 // RPCs (/api/owner-access/enroll/start and /enroll/finish) to the Pi over the tunnel,
 // and ONLY while a live bootstrap blob exists for the resolved site — a blob the Pi
-// publishes ONLY while a live LAN PIN is showing on its console. The forward is
-// single-use: a successful enroll/finish burns the blob, closing the window.
+// publishes ONLY while a live LAN PIN is showing on its console.
+//
+// SINGLE-USE BEFORE SIDE EFFECTS: a finish RESERVES the bootstrap atomically
+// BEFORE forwarding to the Pi (test-and-set on the store), so a concurrent second
+// finish loses the latch and is refused 403 before its enroll could ever reach the
+// Pi. A Pi 200 then BURNS the blob (window closed); any non-200 / tunnel error
+// RELEASES the reservation so the user can retry without the Pi re-publishing. A
+// start is a non-burning probe and never reserves.
 //
 // Every other owner-API path stays strictly P2P (homeStaticForward 403s /api/* under
 // multi-tenant). `which` is "start" or "finish".
@@ -227,15 +233,17 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 //   - 503  bootstrap store not configured
 //   - 429  per-source-IP rate limit (memory-flood backstop)
 //   - 403  no claim_key query param
+//   - 403  claim_key not 64-char lowercase hex (malformed handle, before any lookup)
 //   - 403  claim_key resolves to no LIVE bootstrap blob (the resolved site has no open window)
+//   - 403  (finish) the bootstrap is already RESERVED by a concurrent in-flight finish
 //   - 503  the resolved site's Pi is offline (not registered / stale)
 //   - 413  request body over the control-body cap
-//   - 502  the tunnel RPC to the Pi failed
+//   - 502  the tunnel RPC to the Pi failed (reservation released)
 //   - else the Pi's status, with Set-Cookie STRIPPED (the owner session cookie the Pi
 //     mints on a successful enroll must never traverse the relay)
 //
-// The 403 for a missing-or-dead claim_key is identical to the no-claim_key 403 on
-// purpose: an anonymous caller learns nothing about which sites have an open window.
+// Every 403 above is byte-identical on purpose: an anonymous caller learns nothing
+// about whether a claim_key is malformed, dead, or racing another finish.
 func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if r.Bootstrap == nil {
@@ -254,6 +262,14 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 		claimKey := req.URL.Query().Get("claim_key")
 		if claimKey == "" {
 			http.Error(w, "claim_key required", http.StatusForbidden)
+			return
+		}
+		// Shape-gate the claim_key (= hex(sha256(bootstrap_id))) BEFORE the store
+		// lookup. A malformed handle is the SAME 403 as a dead one (uniform,
+		// anti-enumeration) so an attacker can't distinguish "wrong shape" from "no
+		// open window" from "wrong key".
+		if !isLowerHex64(claimKey) {
+			http.Error(w, "no live bootstrap for this claim_key", http.StatusForbidden)
 			return
 		}
 		// Resolve the site WITHOUT burning: Claim is a read here. The window only
@@ -287,22 +303,41 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 		q := req.URL.Query()
 		q.Del("claim_key")
 		inner := "/api/owner-access/enroll/" + which + "?" + q.Encode()
+		// SINGLE-USE BEFORE SIDE EFFECTS (the BLOCKER fix). For a finish, RESERVE the
+		// bootstrap ATOMICALLY before forwarding it to the Pi: a concurrent second
+		// finish that also passed the live-gate above now loses the test-and-set and
+		// is refused 403 BEFORE its enroll ever reaches the Pi — closing the
+		// gate→forward→enroll→close window that a read-then-close (Consume after a
+		// 200) left open. A start is a non-burning probe and never reserves.
+		if which == "finish" {
+			if _, ok := r.Bootstrap.Reserve(site, claimKey); !ok {
+				http.Error(w, "no live bootstrap for this claim_key", http.StatusForbidden)
+				return
+			}
+		}
 		resp, err := r.enqueue(req, hostID, inner, body)
 		if err != nil {
+			// The forward never reached (or never heard back from) the Pi, so no enroll
+			// could have happened. Release the reservation so the user can retry without
+			// the Pi re-publishing.
+			if which == "finish" {
+				r.Bootstrap.Release(site, claimKey)
+			}
 			http.Error(w, "home did not answer", http.StatusBadGateway)
 			return
 		}
 		// Copy the Pi's response with the owner cookie stripped — the same chokepoint
 		// homeStaticForward uses, so ftw_owner can never traverse the relay.
 		writeTunneledNoCookie(w, resp)
-		// Single-use: a completed enrollment closes the window. Only consume on a
-		// finish that the Pi accepted (200) — a failed finish leaves the window open
-		// so the user can retry without the Pi re-publishing. Consume verifies the
-		// claim_key still matches and deletes the entry ATOMICALLY under the store
-		// lock, so two concurrent in-flight finishes that both passed the live-gate
-		// above can never both close the window (read-then-Burn would have raced).
-		if which == "finish" && resp.Status == http.StatusOK {
-			r.Bootstrap.Consume(site, claimKey)
+		// Resolve the reservation for a finish: a Pi 200 BURNS the window (single-use,
+		// the enrollment landed); any non-200 RELEASES it so the user can retry without
+		// the Pi re-publishing.
+		if which == "finish" {
+			if resp.Status == http.StatusOK {
+				r.Bootstrap.Burn(site)
+			} else {
+				r.Bootstrap.Release(site, claimKey)
+			}
 		}
 	}
 }

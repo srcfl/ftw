@@ -460,50 +460,174 @@ func TestBootstrapEnrollForwardBurnAfterFinish(t *testing.T) {
 		t.Fatalf("enroll/start after burn: got %d, want 403", resp2.StatusCode)
 	}
 	// A second enroll/finish with the same claim_key also 403s at the gate — the
-	// window closed atomically on the first accepted finish (Consume).
+	// window closed on the first accepted finish (Reserve-then-Burn).
 	resp3, _ := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?claim_key="+claimKey+"&pin="+pin)
 	if resp3.StatusCode != http.StatusForbidden {
 		t.Fatalf("second enroll/finish after consume: got %d, want 403", resp3.StatusCode)
 	}
 }
 
-// TestBootstrapEnrollForwardConcurrentDoubleFinish (b): two concurrent in-flight
-// enroll/finish forwards must not BOTH close the window — the atomic Consume
-// guarantees exactly one succeeds. We exercise the store directly (deterministic,
-// no tunnel timing races): two Consume calls for the same (site, claimKey) yield
-// exactly one ok=true. This is the invariant bootstrapEnrollForward relies on to
-// replace the racy read-then-Burn with an atomic delete-and-return.
-func TestBootstrapEnrollForwardConcurrentDoubleFinish(t *testing.T) {
-	s := NewBootstrapStore(256, 8)
-	const site = "site:A"
-	claimKey := claimKeyHex("bootstrap-secret-concurrent")
-	if err := s.Put(site, []byte(`{"site":"site:A"}`), claimKey, time.Minute); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+// configurableStubPi spins a fake Pi behind the tunnel whose response status is
+// controlled by `status` and whose handler optionally blocks on `gate` (closed by
+// the test) before answering. This lets a test stage two concurrent finishes that
+// truly contend at the relay's Reserve gate, or stage a Pi non-200 so the relay
+// must Release. It records every inner path it served.
+func configurableStubPi(t *testing.T, relay *Relay, hostID string, status *atomic.Int32, gate <-chan struct{}) (*httptest.Server, func() []string) {
+	t.Helper()
+	srv := httptest.NewServer(relay.Handler())
+	t.Cleanup(srv.Close)
 
-	const racers = 16
+	var mu sync.Mutex
+	var seen []string
+	backend := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		p := req.URL.Path
+		if req.URL.RawQuery != "" {
+			p += "?" + req.URL.RawQuery
+		}
+		mu.Lock()
+		seen = append(seen, p)
+		mu.Unlock()
+		if gate != nil {
+			<-gate
+		}
+		w.WriteHeader(int(status.Load()))
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+
+	host := tunnel.NewHost(srv.URL, hostID, backend)
+	host.PollTimeout = time.Second
+	host.SetPollSecret(mustIssue(t, relay.Polls, hostID))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go host.Run(ctx)
+
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]string, len(seen))
+		copy(out, seen)
+		return out
+	}
+}
+
+// TestBootstrapEnrollForwardConcurrentDoubleFinish (b): two concurrent in-flight
+// enroll/finish forwards through the relay must not BOTH enroll — the relay
+// RESERVES the bootstrap BEFORE forwarding, so exactly one finish forwards to the
+// Pi (200) and the other is refused 403 at the reserve gate, never reaching the
+// Pi. We hold the Pi's response open with a gate so the second finish is forced to
+// contend with the first while the first is still in flight.
+func TestBootstrapEnrollForwardConcurrentDoubleFinish(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	const site, hostID, pin = "site:A", "host-a", "123456"
+	claimKey := claimKeyHex("bootstrap-secret-concurrent")
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	gate := make(chan struct{})
+	srv, seen := configurableStubPi(t, relay, hostID, &status, gate)
+	publishLiveBootstrap(t, relay, site, hostID, claimKey)
+
+	const racers = 8
 	var wg sync.WaitGroup
-	var oks int32
-	start := make(chan struct{})
+	codes := make([]int, racers)
+	begin := make(chan struct{})
 	for i := 0; i < racers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			<-start // line everyone up so the Consumes truly contend
-			if _, ok := s.Consume(site, claimKey); ok {
-				atomic.AddInt32(&oks, 1)
-			}
-		}()
+			<-begin
+			resp, _ := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?claim_key="+claimKey+"&pin="+pin)
+			codes[i] = resp.StatusCode
+		}(i)
 	}
-	close(start)
+	close(begin)
+	// Give the racers a beat to all hit the relay's Reserve gate; exactly one
+	// reserves and forwards to the (still-gated) Pi, the rest 403 immediately.
+	time.Sleep(100 * time.Millisecond)
+	close(gate) // let the single forwarded finish complete
 	wg.Wait()
 
-	if oks != 1 {
-		t.Fatalf("concurrent Consume succeeded %d times, want exactly 1", oks)
+	var ok, forbidden int
+	for _, c := range codes {
+		switch c {
+		case http.StatusOK:
+			ok++
+		case http.StatusForbidden:
+			forbidden++
+		default:
+			t.Fatalf("unexpected finish status %d (codes=%v)", c, codes)
+		}
 	}
-	// And the window is gone — a follow-up Consume/Claim misses.
-	if _, ok := s.Consume(site, claimKey); ok {
-		t.Fatal("Consume succeeded after the window was already consumed")
+	if ok != 1 || forbidden != racers-1 {
+		t.Fatalf("concurrent finishes: %d×200 / %d×403, want exactly 1×200 / %d×403 (codes=%v)", ok, forbidden, racers-1, codes)
+	}
+	// The Pi must have been forwarded the finish exactly once — the reserve gate
+	// kept the losers off the Pi entirely.
+	if got := seen(); len(got) != 1 {
+		t.Fatalf("Pi was forwarded %d finishes, want exactly 1: %v", len(got), got)
+	}
+	// And the window is burned (the single accepted finish closed it).
+	if relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap still Live after the accepted finish; must be burned")
+	}
+}
+
+// TestBootstrapEnrollForwardReleaseOnPiReject: a Pi non-200 finish must RELEASE the
+// reserved flag so the user can retry without the Pi re-publishing. We drive a
+// finish that the Pi rejects (500), then a second finish (Pi now 200) must still
+// be allowed through and succeed — proving the first reserve was rolled back.
+func TestBootstrapEnrollForwardReleaseOnPiReject(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	const site, hostID, pin = "site:A", "host-a", "123456"
+	claimKey := claimKeyHex("bootstrap-secret-release")
+	var status atomic.Int32
+	status.Store(http.StatusInternalServerError) // Pi rejects the first finish
+	srv, seen := configurableStubPi(t, relay, hostID, &status, nil)
+	publishLiveBootstrap(t, relay, site, hostID, claimKey)
+
+	resp, body := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?claim_key="+claimKey+"&pin="+pin)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("first finish: got %d (%s), want 500 (Pi rejected)", resp.StatusCode, body)
+	}
+	// The relay must have RELEASED, not burned — the window is still Live.
+	if !relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap not Live after a Pi-rejected finish; the relay must Release (not Burn) so the user can retry")
+	}
+	// Retry: the Pi now accepts (200). The reserve gate must let it through.
+	status.Store(http.StatusOK)
+	resp2, body2 := enrollPost(t, srv.URL, "/api/owner-access/enroll/finish?claim_key="+claimKey+"&pin="+pin)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("retry finish: got %d (%s), want 200 (reserve was released)", resp2.StatusCode, body2)
+	}
+	if relay.Bootstrap.Live(site, claimKey) {
+		t.Fatal("bootstrap still Live after the accepted retry; must be burned")
+	}
+	if got := seen(); len(got) != 2 {
+		t.Fatalf("Pi saw %d finishes, want 2 (reject + accepted retry): %v", len(got), got)
+	}
+}
+
+// TestBootstrapEnrollForwardNonHexClaimKey: a ?claim_key that is not 64-char
+// lowercase hex is rejected 403 (uniform anti-enumeration) before any store
+// lookup, and nothing is forwarded to the Pi.
+func TestBootstrapEnrollForwardNonHexClaimKey(t *testing.T) {
+	relay := newMultiTenantRelay(t)
+	const site, hostID, pin = "site:A", "host-a", "123456"
+	claimKey := claimKeyHex("bootstrap-secret-nonhex")
+	srv, seen := enrollStubPi(t, relay, hostID)
+	publishLiveBootstrap(t, relay, site, hostID, claimKey)
+
+	for name, bad := range map[string]string{
+		"too-short": "abcd",
+		"not-hex":   strings.Repeat("zz", 32),
+		"uppercase": strings.ToUpper(strings.Repeat("ab", 32)),
+	} {
+		resp, _ := enrollPost(t, srv.URL, "/api/owner-access/enroll/start?claim_key="+bad+"&pin="+pin)
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s claim_key on enroll-forward: got %d, want 403", name, resp.StatusCode)
+		}
+	}
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("Pi was forwarded %v on a malformed claim_key; want nothing", got)
 	}
 }
 

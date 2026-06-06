@@ -28,6 +28,11 @@ type bootstrapEntry struct {
 	descriptor []byte
 	claimKey   string
 	expiresAt  time.Time
+	// reserved is the single-use latch: set true by Reserve when the relay claims
+	// the enroll/finish forward BEFORE forwarding it to the Pi, so a concurrent
+	// second finish is refused before any Pi side effect. Cleared by Release on a
+	// Pi rejection (retry path); the whole entry is deleted by Burn on success.
+	reserved bool
 }
 
 var (
@@ -96,6 +101,45 @@ func (s *BootstrapStore) Consume(siteID, claimKey string) (descriptor []byte, ok
 	}
 	delete(s.m, siteID)
 	return append([]byte(nil), e.descriptor...), true
+}
+
+// Reserve atomically marks a live, matching, not-yet-reserved bootstrap as
+// reserved and returns its descriptor copy; used to claim single-use BEFORE the
+// relay forwards enroll/finish so a concurrent second finish is refused. Under
+// s.mu: entry present && !expired && constant-time claimKey match && !reserved ->
+// set reserved, return copy+true; otherwise nil,false (leaving any existing
+// reservation untouched).
+func (s *BootstrapStore) Reserve(siteID, claimKey string) (descriptor []byte, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, present := s.m[siteID]
+	if !present || time.Now().After(e.expiresAt) {
+		return nil, false
+	}
+	if subtle.ConstantTimeCompare([]byte(e.claimKey), []byte(claimKey)) != 1 {
+		return nil, false
+	}
+	if e.reserved {
+		return nil, false
+	}
+	e.reserved = true
+	return append([]byte(nil), e.descriptor...), true
+}
+
+// Release clears the reserved flag (rollback when the Pi rejects the forwarded
+// finish) iff the claimKey still matches the live entry — so a stray Release with
+// the wrong key can't re-open a window someone else reserved.
+func (s *BootstrapStore) Release(siteID, claimKey string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, present := s.m[siteID]
+	if !present || time.Now().After(e.expiresAt) {
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(e.claimKey), []byte(claimKey)) != 1 {
+		return
+	}
+	e.reserved = false
 }
 
 func (s *BootstrapStore) Burn(siteID string) {
