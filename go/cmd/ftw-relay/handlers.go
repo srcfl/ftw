@@ -240,6 +240,14 @@ func (r *Relay) Handler() http.Handler {
 			mux.HandleFunc("PUT "+r.HomeHost+"/bootstrap/{site_id}", r.bootstrapPut)
 			mux.HandleFunc("POST "+r.HomeHost+"/bootstrap/claim", r.bootstrapClaim)
 			mux.HandleFunc("OPTIONS "+r.HomeHost+"/bootstrap/claim", r.walletBlobOptions)
+			// Hardened first-enrollment bridge: the ONLY owner-API paths the relay
+			// forwards to the Pi, and only while a live PIN-gated bootstrap blob
+			// exists for the resolved site (single-use, rate-limited). These patterns
+			// are MORE SPECIFIC than the home-host catch-all below, so Go's ServeMux
+			// routes them here rather than to homeStaticForward's /api/* → 403. See
+			// bootstrapEnrollForward.
+			mux.HandleFunc("POST "+r.HomeHost+"/api/owner-access/enroll/start", r.bootstrapEnrollForward("start"))
+			mux.HandleFunc("POST "+r.HomeHost+"/api/owner-access/enroll/finish", r.bootstrapEnrollForward("finish"))
 		}
 		mux.HandleFunc(r.HomeHost+"/", r.homeStaticForward)
 	}
@@ -357,6 +365,15 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 	// Defence in depth: never relay a Set-Cookie from the Pi for the home host —
 	// a static asset has no business setting the owner cookie, and the owner
 	// session must never appear on a relay-visible response.
+	writeTunneledNoCookie(w, resp)
+}
+
+// writeTunneledNoCookie copies a tunneled Pi response to the client with
+// Set-Cookie STRIPPED. The owner session cookie (ftw_owner) lives only inside
+// the DTLS DataChannel; it must NEVER appear on a relay-visible response, on any
+// path that forwards to the Pi (static assets AND the bootstrap enroll-forward).
+// This is the single chokepoint so the no-cookie-on-relay invariant is structural.
+func writeTunneledNoCookie(w http.ResponseWriter, resp tunnel.TunneledResponse) {
 	resp.Header.Del("Set-Cookie")
 	for k, vv := range resp.Header {
 		w.Header()[k] = vv

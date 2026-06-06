@@ -155,3 +155,85 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 		Descriptor: string(desc),
 	})
 }
+
+// bootstrapEnrollForward is the ONE narrow exception to the P2P-only home route:
+// the single most security-sensitive new surface of multi-tenant onboarding.
+//
+// Under -multi-tenant the relay forces -require-device-key ON, so signalBrowserOffer
+// hard-fails any WebRTC offer lacking a published device-key proof. But a FIRST-TIME
+// user has no device key yet, so they can't open the P2P channel to enroll one. This
+// handler bridges exactly that gap and NOTHING else: it forwards ONLY the two enroll
+// RPCs (/api/owner-access/enroll/start and /enroll/finish) to the Pi over the tunnel,
+// and ONLY while a live bootstrap blob exists for the resolved site — a blob the Pi
+// publishes ONLY while a live LAN PIN is showing on its console. The forward is
+// single-use: a successful enroll/finish burns the blob, closing the window.
+//
+// Every other owner-API path stays strictly P2P (homeStaticForward 403s /api/* under
+// multi-tenant). `which` is "start" or "finish". Gates, in order:
+//   - 503  bootstrap store not configured
+//   - 429  per-source-IP rate limit (PIN brute-force / memory-flood backstop)
+//   - 403  no pin query param
+//   - 403  pin hashes to no LIVE bootstrap blob (the resolved site has no open window)
+//   - 503  the resolved site's Pi is offline (not registered / stale)
+//   - 413  request body over the control-body cap
+//   - 502  the tunnel RPC to the Pi failed
+//   - else the Pi's status, with Set-Cookie STRIPPED (the owner session cookie the Pi
+//     mints on a successful enroll must never traverse the relay)
+//
+// The 403 for a missing-or-dead PIN is identical to the no-pin 403 on purpose: an
+// anonymous caller learns nothing about which sites have an open enrollment window.
+func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if r.Bootstrap == nil {
+			http.Error(w, "bootstrap store not configured", http.StatusServiceUnavailable)
+			return
+		}
+		// Bound a PIN brute-force / memory-flood on the un-spoofable source IP, the
+		// same throttle the unauthenticated claim endpoint uses.
+		if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
+			http.Error(w, "too many enroll attempts from your address", http.StatusTooManyRequests)
+			return
+		}
+		pin := req.URL.Query().Get("pin")
+		if pin == "" {
+			http.Error(w, "pin required", http.StatusForbidden)
+			return
+		}
+		h := sha256.Sum256([]byte(pin))
+		ph := hex.EncodeToString(h[:])
+		// Resolve the site WITHOUT burning: Claim is a read here. The window only
+		// closes on a successful finish (single-use), never on a probe.
+		_, site, ok := r.Bootstrap.Claim(ph)
+		if !ok || !r.Bootstrap.Live(site, ph) {
+			http.Error(w, "no live bootstrap for this pin", http.StatusForbidden)
+			return
+		}
+		// Resolve the Pi's host_id. A site with an open enrollment window whose Pi
+		// has gone offline can't be enrolled against → 503.
+		hostID, registered, fresh := r.Owners.Active(site, homeStaleAfter)
+		if !registered || !fresh {
+			http.Error(w, "home offline", http.StatusServiceUnavailable)
+			return
+		}
+		body, err := readBodyLimited(req.Body, maxControlBodyBytes)
+		if err != nil {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		inner := "/api/owner-access/enroll/" + which + "?pin=" + pin
+		resp, err := r.enqueue(req, hostID, inner, body)
+		if err != nil {
+			http.Error(w, "home did not answer", http.StatusBadGateway)
+			return
+		}
+		// Copy the Pi's response with the owner cookie stripped — the same chokepoint
+		// homeStaticForward uses, so ftw_owner can never traverse the relay.
+		writeTunneledNoCookie(w, resp)
+		// Single-use: a completed enrollment closes the window. Only burn on a
+		// finish that the Pi accepted (200) — a failed finish leaves the window open
+		// so the user can retry without the Pi re-publishing.
+		if which == "finish" && resp.Status == http.StatusOK {
+			r.Bootstrap.Burn(site)
+		}
+	}
+}
