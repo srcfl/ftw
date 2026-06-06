@@ -558,3 +558,47 @@ code is the starting point — transform it, don't rebuild from scratch).
 1. **Codex audit** of `bootstrap.go` + `bootstrap_http.go` (especially `bootstrapEnrollForward`): confirm the forward is unreachable without a live PIN, single-use, rate-limited, refused post-enrollment, and never reachable over the friend loopback tunnel.
 2. **PRF determinism device test** on real synced devices (iPhone iCloud Keychain + Android Google Password Manager): a synced passkey yields an identical PRF output, so `deriveEncKey` reproduces `K_dir` on a fresh device. If it fails, ship browser-carried-only and surface "encrypted home sync unavailable".
 3. Then: deploy the web bundle as `-home-web`, set `-multi-tenant` (+ forced `-require-device-key`) + `-wallet-blob-dir`, and do a live owner onboarding before announcing.
+
+## REVISION 2 (post-audit-2) — fix tasks F1–F5
+
+The second Codex audit (see the spec's REVISION 2) found a BLOCKER (single-use
+consumed after the Pi's enroll side effects; `handleOwnerEnrollFinish` never
+re-ran the zero-device check) + a HIGH (relay sees the reusable plaintext PIN →
+a compromised relay can run its own enrollment) + INFO items. Fredrik chose the
+**ceremony-bound possession proof** fix. New contract pieces (apply consistently):
+`bootstrap_proof = hex(HMAC-SHA256(key=utf8(bootstrap_id), msg=utf8(ceremony_token)))`,
+validated Pi-side at finish on the `isTunneled` path; relay `Reserve`s the
+bootstrap before forwarding finish (`Burn` on 200, `Release` on non-200); Pi
+re-checks zero-device at finish. Keep the two-sig contract unchanged; the proof
+is a THIRD, separate HMAC.
+
+### Task F1 — relay: reserved-flag single-use + `isLowerHex64` gate
+**Files:** `go/cmd/ftw-relay/bootstrap.go` + `bootstrap_test.go`; `go/cmd/ftw-relay/bootstrap_http.go` + `bootstrap_http_test.go`.
+- [ ] BootstrapStore: add a `reserved bool` to `bootstrapEntry` + `Reserve(siteID, claimKey string) (descriptor []byte, ok bool)` (atomic: live + constant-time claimKey match + not already reserved → set reserved, return descriptor copy + true; else false) and `Release(siteID, claimKey string)` (clear the flag iff claimKey matches). Keep `Burn`. (`Consume` may stay or be removed — the forward no longer uses it.)
+- [ ] `bootstrapEnrollForward`: add `if !isLowerHex64(claimKey) { 403 }` before the store lookup (uniform 403). On `finish`: `Reserve` BEFORE `r.enqueue`; on Pi 200 → `Burn(site)`; on non-200 (or enqueue error) → `Release(site, claimKey)`. `start` stays a non-burning `Claim/Live` read.
+- [ ] Tests: Reserve atomicity (N goroutines → exactly one ok); a reserved entry can't be claimed/reserved again; Release reopens it; second concurrent finish → 403; non-200 finish releases (retry works); non-hex claim_key → 403. Full `go test ./cmd/ftw-relay/...` green. Commit.
+
+### Task F2 — Pi: validate the possession proof at finish + zero-device recheck + clear bootstrap_id
+**Files:** `go/internal/api/api_owner_access.go` + tests (`api_owner_enroll_cookie_test.go` has a software authenticator to reuse).
+- [ ] Add a helper `bootstrapEnrollProof(bootstrapID, ceremonyToken string) string` = `hex(HMAC-SHA256(key=[]byte(bootstrapID), msg=[]byte(ceremonyToken)))` (crypto/hmac + crypto/sha256).
+- [ ] `handleOwnerEnrollFinish`, when `s.isTunneled(r)` (the bootstrap path): require `?bootstrap_proof`; constant-time-compare it against `bootstrapEnrollProof(oa.enrollBootstrapID, tok)` — mismatch/empty → 403, no save. Read `enrollBootstrapID` under `oa.mu`. ALSO re-check the zero-device window (LoadTrustedDevices empty) on this path before `SaveTrustedDevice` — non-empty → 403. (Untunneled LAN finish unchanged: no proof, no recheck.)
+- [ ] Clear `oa.enrollBootstrapID` in `validateEnrollPin`'s burn/expiry branches (next to `oa.enrollPin = ""`) and after a successful tunneled enroll.
+- [ ] Tests: tunneled finish with a valid proof + zero devices → 200; missing/wrong proof → 403; tunneled finish when a device already exists → 403; untunneled LAN finish needs no proof (still 200 + cookie). Reuse the software-authenticator ceremony. Full `go test ./internal/api/...` green. Commit.
+
+### Task F3 — web: compute + send the possession proof at finish
+**Files:** `web/owner-access/bootstrap-enroll.js` + `bootstrap-enroll.test.mjs`; `web/owner-access/enroll.html`.
+- [ ] Keep `bootstrap_id` in memory through the ceremony (the hash is still cleared from the URL immediately). At finish: `bootstrap_proof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token))` via `crypto.subtle.importKey('raw', utf8(bootstrap_id), {name:'HMAC',hash:'SHA-256'}, …)` + `sign`; send `?bootstrap_proof=<hex>` on `enroll/finish` (alongside the existing `?claim_key=`, `?pin=`, `?ceremony_token=`). `enroll/start` unchanged.
+- [ ] Node tests: proof derivation matches a Go-computed vector for a fixed (bootstrap_id, ceremony_token); the finish request carries `bootstrap_proof`. `node --test` green. Commit.
+
+### Task F4 — Pi production wiring: multi-tenant enroll-forward tunnel host
+**Files:** `go/cmd/forty-two-watts/owner_relay_register.go` (+ test).
+- [ ] Under `-multi-tenant`, drain the relay tunnel with a host that serves ONLY `POST /api/owner-access/enroll/start` + `/finish` (route to the real `api.Server` handlers), stamps `X-FTW-Tunnel=<tunnelMarker>` so `isTunneled` is true (gating the proof + cookie-suppression + PIN), and keeps Set-Cookie stripped on the response. Everything else stays on the static-asset host (still 403/405). Do NOT broaden the static host.
+- [ ] Test: a POST enroll/start over this host reaches the handler with the marker stamped; a non-enroll path is still refused. `go test ./cmd/forty-two-watts/...` green (or the nearest existing test target). Commit.
+
+### Task F5 — e2e + interop + docs + changeset update
+**Files:** `go/test/e2e/bootstrap_onboarding_test.go`; docs; `.changeset/onboarding-bootstrap-id.md`.
+- [ ] e2e: drive the REAL `main.go` enroll-forward host (F4) instead of the bespoke stand-in; complete a finish with a software-authenticator attestation + a valid `bootstrap_proof` → 200; assert a missing/wrong proof → 403, a second finish after a device exists → 403, and the relay reservation (concurrent double-finish → one 200 / one 403). Keep the C2 no-claim_key/no-PIN refusals.
+- [ ] docs: `docs/relay-deploy.md` + `docs/remote-access.md` — document the `bootstrap_proof` (HMAC over ceremony_token), the relay Reserve/Burn/Release single-use, the Pi finish-time zero-device recheck, and the new enroll-forward host. Update the `.changeset` summary to note the proof + single-use-before-side-effects and that the relay↔Pi enroll path is now end-to-end (still `-multi-tenant` default OFF).
+- [ ] `make verify` green. Commit.
+
+### After F1–F5: re-audit (Codex) + the existing manual gates (PRF device test + Fredrik's validation) before any go-live. `home.fortytwowatts.com` stays 404 throughout.

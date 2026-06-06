@@ -279,3 +279,75 @@ the single deliberate exception. It MUST:
   refused (C2 still fail-closed).
 - **Manual gate:** the PRF real-device determinism test before the flag is flipped.
 - **Codex audit** of the enroll-forward + `/bootstrap` before go-live.
+
+## REVISION 2 (2026-06-06, post-audit-2) — ceremony-bound possession proof + single-use-before-side-effects
+
+A second Codex audit of the high-entropy-`bootstrap_id` rework (commits R1–R6,
+`8257e09..9e032fa`) confirmed four of the five original findings CLOSED (PIN
+brute-force, claim-collision hijack, publish replay, cookie-traversal) but
+found **two serious NEW issues** the rework itself introduced, and re-opened
+finding 3 at the handler level:
+
+- **BLOCKER — single-use is consumed AFTER the Pi's enrollment side effects.**
+  `bootstrapEnrollForward` did a *non-burning* `Claim/Live` read, forwarded the
+  request, then `Consume`d only after a 200. `handleOwnerEnrollFinish` never
+  re-ran `enrollAllowed`. Two `enroll/finish` requests with distinct valid
+  ceremony tokens could both pass the relay gate before either burn ran → both
+  enroll. `BootstrapStore.Consume` was atomic *as a store op*, but the
+  gate→forward→enroll→consume window was not. (The R3 test only exercised the
+  store-level race, so the workflow's reviewers missed the handler-level one.)
+- **HIGH — the relay sees the 6-digit PIN in transit and it is reusable.** The
+  forward vidarebefordrade `?pin` to the Pi, so the relay observes the PIN;
+  `validateEnrollPin` returns true *without burning* on a correct guess. A
+  compromised relay holding the stored `claimKey` **plus** the in-transit PIN
+  could run its OWN WebAuthn enrollment in the zero-device window. This
+  contradicts invariant 1 (relay stays blind).
+
+**Fix (Fredrik chose, 2026-06-06): ceremony-bound possession proof.** The
+browser proves possession of the RAW `bootstrap_id` — which the relay NEVER
+holds (it only ever sees `hex(sha256(bootstrap_id))`) — bound to the specific
+enrollment ceremony, so a relay can neither forge a proof for its own ceremony
+nor replay the user's. The 6-digit PIN stays as a Pi-validated LAN-presence
+factor (defence in depth); since enrollment now requires the proof, the PIN
+being relay-visible is no longer exploitable.
+
+**Corrected wire (supersedes the relevant parts of the flow above):**
+
+1. **Possession proof (closes HIGH).** On `enroll/finish` the browser sends
+   `bootstrap_proof = hex(HMAC-SHA256(key = utf8(bootstrap_id), msg = utf8(ceremony_token)))`
+   as `?bootstrap_proof=…` (alongside `?claim_key=` (relay gate, stripped before
+   the Pi) and `?pin=` and `?ceremony_token=`). `bootstrap_id` is the base64url
+   string from the `#b=` fragment; `ceremony_token` is the opaque token the Pi
+   issued at `enroll/start`. The **Pi validates the proof at finish, ONLY on the
+   tunneled (`isTunneled`) bootstrap path**: it recomputes
+   `HMAC-SHA256(enrollBootstrapID, ceremony_token)` and constant-time-compares.
+   A mismatch is 403 and no device is saved. A LAN-only (untunneled) enroll has
+   no relay/courier and requires no proof. The relay holds only
+   `sha256(bootstrap_id)`, so it cannot compute the HMAC for its own ceremony
+   (different `ceremony_token`) nor reuse the user's (single-use ceremony).
+2. **Single-use before side effects (closes BLOCKER).**
+   - *Relay:* `bootstrapEnrollForward` **reserves** the bootstrap (atomic
+     reserved-flag test-and-set on the store) BEFORE forwarding `enroll/finish`;
+     a concurrent second finish sees it reserved → 403. On a Pi 200 the relay
+     **burns** (deletes) it; on a non-200 it **releases** (clears the flag) so
+     the user can retry without the Pi re-publishing.
+   - *Pi:* `handleOwnerEnrollFinish` re-checks the zero-device window on the
+     tunneled path (refuses if any device is already enrolled) before persisting
+     — the source-of-truth backstop for the lost-response edge.
+3. **Hardening (the audit's INFO items).** The enroll-forward validates the
+   `claim_key` shape with `isLowerHex64` before the store lookup (uniform 403,
+   consistent with `bootstrapPut`/`bootstrapClaim`). `enrollBootstrapID` is
+   cleared whenever the PIN burns/expires and on a successful enroll. The
+   production Pi grows a narrow multi-tenant tunnel host that serves ONLY
+   `POST /api/owner-access/enroll/{start,finish}`, stamps `X-FTW-Tunnel`, and
+   keeps Set-Cookie stripped — closing the fail-closed functionality gap
+   (`main.go` previously drained the tunnel only with the static-asset host,
+   which 405s POST) so the relay↔Pi enroll path is end-to-end (still behind
+   `-multi-tenant`, default OFF; `home.*` stays 404 until the manual gates pass).
+
+Net: the relay routes only on the 256-bit `claimKey`; enrollment requires a
+proof of raw-`bootstrap_id` possession the relay structurally cannot produce;
+single-use is enforced before the Pi's irreversible save and re-checked Pi-side.
+The two-signature contract is unchanged (descriptor INNER sig base64url via
+`verifyEntry`; publish OUTER sig hex via `verifyES256Hex`); the proof is a third,
+separate HMAC and must not be conflated with either signature.
