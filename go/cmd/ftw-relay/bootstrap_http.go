@@ -7,8 +7,32 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 )
+
+// bootstrapPublishMaxSkewMs bounds how far in the past or future a publish's ts_ms
+// may sit (symmetric). The Pi mints ts_ms at PUT time; the relay rejects anything
+// outside this window so a captured publish body can't be replayed once it lapses.
+const bootstrapPublishMaxSkewMs = 30000
+
+// isLowerHex64 reports whether s is exactly 64 lowercase hex chars — the shape of a
+// hex(sha256(...)) digest. The claim_key MUST be a sha256 digest (the browser has
+// already hashed the high-entropy bootstrap_id), so a malformed handle is a 400
+// before any store lookup or crypto.
+func isLowerHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 // bootstrapTTL bounds how long a Pi-published first-enrollment descriptor stays
 // claimable. Short on purpose: the browser claims it within the onboarding flow,
@@ -19,23 +43,29 @@ const bootstrapTTL = 10 * time.Minute
 // bootstrapPublishSigningString is the canonical message the Pi signs (ES256, raw
 // r||s hex via nova.Identity.SignRawHex) to authorise parking its descriptor under
 // a site, and the relay reconstructs to verify against the site's PINNED key. It is
-// versioned and binds (site_id, pin_hash, sha256(descriptor)) so a captured
-// signature can't be lifted to another site, re-keyed to a different PIN, or
-// swapped onto a tampered descriptor. The descriptor itself is hashed (not inlined)
-// so the signing string stays bounded regardless of descriptor size.
-func bootstrapPublishSigningString(siteID, pinHash string, descriptor []byte) string {
+// versioned and binds (site_id, claim_key, ts_ms, sha256(descriptor)) so a captured
+// signature can't be lifted to another site, re-keyed to a different claim_key,
+// replayed after its window, or swapped onto a tampered descriptor. claim_key is
+// hex(sha256(bootstrap_id)) — the relay never sees the raw bootstrap secret. The
+// descriptor itself is hashed (not inlined) so the signing string stays bounded
+// regardless of descriptor size. MUST be byte-identical to the Pi's reconstruction
+// in go/internal/api/bootstrap_publish.go.
+func bootstrapPublishSigningString(siteID, claimKey string, tsMs int64, descriptor []byte) string {
 	dh := sha256.Sum256(descriptor)
-	return "ftw-bootstrap:v1:" + siteID + ":" + pinHash + ":" + hex.EncodeToString(dh[:])
+	return "ftw-bootstrap:v1:" + siteID + ":" + claimKey + ":" + strconv.FormatInt(tsMs, 10) + ":" + hex.EncodeToString(dh[:])
 }
 
 // bootstrapPublishIO is the PUT /bootstrap/{site_id} body. descriptor is the
 // Pi-signed cleartext directory descriptor (standard-base64, never parsed by the
-// relay); pin_hash is hex(sha256(PIN)) — the claim key; sig is the ES256 raw r||s
-// hex signature over bootstrapPublishSigningString, the SAME wire format the Pi's
-// /me/register uses (verified with verifyES256Hex against the site's pinned key).
+// relay); claim_key is hex(sha256(bootstrap_id)) — the 256-bit unguessable claim
+// handle (NEVER the 6-digit PIN); ts_ms is the Pi's mint time for the replay guard;
+// sig is the ES256 raw r||s hex signature over bootstrapPublishSigningString, the
+// SAME wire format the Pi's /me/register uses (verified with verifyES256Hex against
+// the site's pinned key).
 type bootstrapPublishIO struct {
 	Descriptor string `json:"descriptor"`
-	PinHash    string `json:"pin_hash"`
+	ClaimKey   string `json:"claim_key"`
+	TsMs       int64  `json:"ts_ms"`
 	Sig        string `json:"sig"`
 }
 
@@ -51,9 +81,9 @@ type bootstrapClaimIO struct {
 // descriptor for the brief first-enrollment window. WRITER-AUTHENTICATED against the
 // site's pinned ES256 key (the same key /me/register pinned), so only the owning Pi
 // can publish under its site. The relay stores the descriptor BLIND (never parses
-// it) keyed for claim by pin_hash. Statuses:
+// it) keyed for claim by claim_key = hex(sha256(bootstrap_id)). Statuses:
 //   - 404  unknown site (no pinned key) OR bootstrap store not configured
-//   - 400  malformed JSON / non-base64 descriptor / missing pin_hash
+//   - 400  malformed JSON / non-base64 descriptor / claim_key not 64-char hex / stale ts_ms
 //   - 401  signature does not verify against the site's pinned key
 //   - 413  descriptor over the per-blob byte cap
 //   - 503  too many concurrent bootstraps (store cap)
@@ -78,8 +108,11 @@ func (r *Relay) bootstrapPut(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "malformed bootstrap body", http.StatusBadRequest)
 		return
 	}
-	if in.PinHash == "" {
-		http.Error(w, "pin_hash required", http.StatusBadRequest)
+	// claim_key must be a sha256 hex digest (the browser hashed the high-entropy
+	// bootstrap_id; the relay never sees the secret). Reject any other shape before
+	// touching crypto so a malformed handle can never become a store key.
+	if !isLowerHex64(in.ClaimKey) {
+		http.Error(w, "claim_key must be 64-char lowercase hex", http.StatusBadRequest)
 		return
 	}
 	desc, err := base64.StdEncoding.DecodeString(in.Descriptor)
@@ -87,14 +120,25 @@ func (r *Relay) bootstrapPut(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "descriptor is not valid base64", http.StatusBadRequest)
 		return
 	}
-	// Verify the Pi signature binds (site_id, pin_hash, descriptor) to the site's
-	// pinned key — exactly the /me/register wire format (raw r||s hex over
+	// Order: verify-sig-THEN-skew. The signature binds ts_ms, so a failed sig means
+	// the ts_ms is unauthenticated noise — there is nothing to replay-guard. Only an
+	// authentic publish reaches the skew window check.
+	//
+	// Verify the Pi signature binds (site_id, claim_key, ts_ms, descriptor) to the
+	// site's pinned key — exactly the /me/register wire format (raw r||s hex over
 	// SHA-256(msg)). A mismatch is 401 and nothing is parked.
-	if !verifyES256Hex(pub, bootstrapPublishSigningString(siteID, in.PinHash, desc), in.Sig) {
+	if !verifyES256Hex(pub, bootstrapPublishSigningString(siteID, in.ClaimKey, in.TsMs, desc), in.Sig) {
 		http.Error(w, "invalid bootstrap signature", http.StatusUnauthorized)
 		return
 	}
-	if err := r.Bootstrap.Put(siteID, desc, in.PinHash, bootstrapTTL); err != nil {
+	// Replay guard: a captured (but authentic) publish body must not be re-parkable
+	// once its window lapses. now() is read once; the skew window is symmetric.
+	now := time.Now().UnixMilli()
+	if d := now - in.TsMs; d > bootstrapPublishMaxSkewMs || d < -bootstrapPublishMaxSkewMs {
+		http.Error(w, "stale bootstrap publish", http.StatusBadRequest)
+		return
+	}
+	if err := r.Bootstrap.Put(siteID, desc, in.ClaimKey, bootstrapTTL); err != nil {
 		switch {
 		case errors.Is(err, ErrBootstrapTooLarge):
 			http.Error(w, "bootstrap descriptor too large", http.StatusRequestEntityTooLarge)
@@ -108,15 +152,17 @@ func (r *Relay) bootstrapPut(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// bootstrapClaim handles POST /bootstrap/claim: a fresh browser that knows the PIN
-// pulls the Pi-parked descriptor. Unauthenticated (the PIN is the bearer secret)
-// but rate-limited PER SOURCE IP so a flood can't brute-force PINs or grow memory.
-// The claim is by hex(sha256(pin)); a miss is a clean 404 (the browser learns
-// nothing about whether the site exists or the PIN was merely wrong). Statuses:
+// bootstrapClaim handles POST /bootstrap/claim: a fresh browser that holds the
+// claim_key (hex(sha256(bootstrap_id)), derived from the URL fragment) pulls the
+// Pi-parked descriptor. Unauthenticated (the claim_key is the bearer secret — a
+// 256-bit unguessable handle, NOT the 6-digit PIN) but rate-limited PER SOURCE IP
+// so a flood can't grow memory. The claim is a DIRECT lookup by claim_key; the
+// relay does NOT hash anything (the browser already hashed bootstrap_id). A miss is
+// a clean 404 (the browser learns nothing about whether the site exists). Statuses:
 //   - 503  bootstrap store not configured
 //   - 429  too many claim attempts from this address
-//   - 400  malformed JSON / missing pin
-//   - 404  no parked descriptor for this PIN
+//   - 400  malformed JSON / claim_key not 64-char hex
+//   - 404  no parked descriptor for this claim_key
 //   - 200  {site_id, descriptor}
 func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 	walletBlobCORS(w)
@@ -124,26 +170,27 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "bootstrap store not configured", http.StatusServiceUnavailable)
 		return
 	}
-	// Reuse the per-source-IP offer throttle: a brute-force of the 6-digit PIN space
-	// is bounded here on the un-spoofable client IP (CF-aware via offerClientIP).
+	// Per-source-IP throttle on the un-spoofable client IP (CF-aware via
+	// offerClientIP) bounds a memory-flood; the claim_key itself is unguessable.
 	if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
 		http.Error(w, "too many claim attempts from your address", http.StatusTooManyRequests)
 		return
 	}
 	req.Body = http.MaxBytesReader(w, req.Body, maxControlBodyBytes)
 	var in struct {
-		Pin string `json:"pin"`
+		ClaimKey string `json:"claim_key"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&in); err != nil {
 		http.Error(w, "malformed claim body", http.StatusBadRequest)
 		return
 	}
-	if in.Pin == "" {
-		http.Error(w, "pin required", http.StatusBadRequest)
+	if !isLowerHex64(in.ClaimKey) {
+		http.Error(w, "claim_key must be 64-char lowercase hex", http.StatusBadRequest)
 		return
 	}
-	h := sha256.Sum256([]byte(in.Pin))
-	desc, siteID, ok := r.Bootstrap.Claim(hex.EncodeToString(h[:]))
+	// Direct lookup — the browser already hashed bootstrap_id, so the relay holds
+	// only the digest and never the raw secret.
+	desc, siteID, ok := r.Bootstrap.Claim(in.ClaimKey)
 	if !ok {
 		http.NotFound(w, req)
 		return
@@ -169,43 +216,51 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 // single-use: a successful enroll/finish burns the blob, closing the window.
 //
 // Every other owner-API path stays strictly P2P (homeStaticForward 403s /api/* under
-// multi-tenant). `which` is "start" or "finish". Gates, in order:
+// multi-tenant). `which` is "start" or "finish".
+//
+// TWO secrets, TWO checkers: the relay GATE is the high-entropy ?claim_key (=
+// hex(sha256(bootstrap_id))) — a 256-bit unguessable handle the relay can resolve a
+// live blob by. The 6-digit ?pin is forwarded UNTOUCHED to the Pi, which validates
+// it (ownerAccessState.validateEnrollPin, 5-try burn). The relay NEVER inspects the
+// PIN — so a leaked store key never reveals a guessable PIN, and the relay can't
+// ride the enroll forward without the PIN the Pi still demands. Gates, in order:
 //   - 503  bootstrap store not configured
-//   - 429  per-source-IP rate limit (PIN brute-force / memory-flood backstop)
-//   - 403  no pin query param
-//   - 403  pin hashes to no LIVE bootstrap blob (the resolved site has no open window)
+//   - 429  per-source-IP rate limit (memory-flood backstop)
+//   - 403  no claim_key query param
+//   - 403  claim_key resolves to no LIVE bootstrap blob (the resolved site has no open window)
 //   - 503  the resolved site's Pi is offline (not registered / stale)
 //   - 413  request body over the control-body cap
 //   - 502  the tunnel RPC to the Pi failed
 //   - else the Pi's status, with Set-Cookie STRIPPED (the owner session cookie the Pi
 //     mints on a successful enroll must never traverse the relay)
 //
-// The 403 for a missing-or-dead PIN is identical to the no-pin 403 on purpose: an
-// anonymous caller learns nothing about which sites have an open enrollment window.
+// The 403 for a missing-or-dead claim_key is identical to the no-claim_key 403 on
+// purpose: an anonymous caller learns nothing about which sites have an open window.
 func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if r.Bootstrap == nil {
 			http.Error(w, "bootstrap store not configured", http.StatusServiceUnavailable)
 			return
 		}
-		// Bound a PIN brute-force / memory-flood on the un-spoofable source IP, the
-		// same throttle the unauthenticated claim endpoint uses.
+		// Bound a memory-flood on the un-spoofable source IP, the same throttle the
+		// unauthenticated claim endpoint uses.
 		if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
 			http.Error(w, "too many enroll attempts from your address", http.StatusTooManyRequests)
 			return
 		}
+		// The relay gates on claim_key (high-entropy handle); the pin rides through to
+		// the Pi unread. A missing claim_key is the same 403 as a dead one (§ doc).
+		claimKey := req.URL.Query().Get("claim_key")
 		pin := req.URL.Query().Get("pin")
-		if pin == "" {
-			http.Error(w, "pin required", http.StatusForbidden)
+		if claimKey == "" {
+			http.Error(w, "claim_key required", http.StatusForbidden)
 			return
 		}
-		h := sha256.Sum256([]byte(pin))
-		ph := hex.EncodeToString(h[:])
 		// Resolve the site WITHOUT burning: Claim is a read here. The window only
 		// closes on a successful finish (single-use), never on a probe.
-		_, site, ok := r.Bootstrap.Claim(ph)
-		if !ok || !r.Bootstrap.Live(site, ph) {
-			http.Error(w, "no live bootstrap for this pin", http.StatusForbidden)
+		_, site, ok := r.Bootstrap.Claim(claimKey)
+		if !ok || !r.Bootstrap.Live(site, claimKey) {
+			http.Error(w, "no live bootstrap for this claim_key", http.StatusForbidden)
 			return
 		}
 		// Resolve the Pi's host_id. A site with an open enrollment window whose Pi
