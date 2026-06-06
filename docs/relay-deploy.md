@@ -252,20 +252,35 @@ registered only under `-multi-tenant`:
   missing or dead `claim_key` is the same `403` (an anonymous caller learns
   nothing about which sites have an open window).
 
-**`bootstrap_proof` — ceremony-bound possession proof (closes the relay-visible
-PIN).** Because the relay forwards `?pin`, a *compromised* relay would see the
-6-digit PIN in transit. So the browser also sends, on `enroll/finish` only,
+**`bootstrap_proof` — ceremony-bound, body-bound possession proof (closes the
+relay-visible PIN **and** a `device_pubkey`-substitution attack).** Because the
+relay forwards `?pin`, a *compromised* relay would see the 6-digit PIN in transit.
+So the browser also sends, on `enroll/finish` only,
 ```
-bootstrap_proof = hex( HMAC-SHA256( key = utf8(bootstrap_id), msg = utf8(ceremony_token) ) )
+bootstrap_proof = hex( HMAC-SHA256(
+    key = utf8(bootstrap_id),
+    msg = utf8( ceremony_token + "|" + hex(sha256(finish_body)) ) ) )
 ```
-where `ceremony_token` is the opaque token the box issued at `enroll/start`. The
-box recomputes the HMAC over the same `(bootstrap_id, ceremony_token)` and
-constant-time compares it; a missing, empty, or mismatched proof is a `403` and
-no device is saved. This check fires **only on the tunneled (relay-forwarded)
-path** — an untunneled LAN finish needs no proof. The relay holds only
-`sha256(bootstrap_id)`, so it can neither forge a proof for its own
-`ceremony_token` nor reuse the user's (single-use) one. A relay that captured
-the PIN therefore still cannot run its own WebAuthn enrollment in the
+where `ceremony_token` is the opaque token the box issued at `enroll/start` and
+`finish_body` is the **exact byte string the browser POSTs** (the browser hashes
+the body string once and sends it verbatim; the box hashes the exact bytes it
+buffers before handing them to WebAuthn). The box recomputes the HMAC over the
+same `(bootstrap_id, ceremony_token, sha256(finish_body))` and constant-time
+compares it; a missing, empty, or mismatched proof is a `403` and no device is
+saved. This check fires **only on the tunneled (relay-forwarded) path** — an
+untunneled LAN finish needs no proof.
+
+Binding a hash of the finish body authenticates the **entire** payload — the
+WebAuthn attestation, the friendly `name`, and crucially the top-level
+`device_pubkey` (the C4 silent-login key the box pins as a trusted device). Without
+it, a MITM relay could pass the user's valid attestation and valid proof through
+while replacing `device_pubkey` with its OWN P-256 key; that key would become
+trusted and device-PoP would mint `ftw_owner` for the relay. With it, any tamper
+changes the body hash, so the relay would have to recompute the HMAC — which needs
+the raw `bootstrap_id` it never holds (it has only `sha256(bootstrap_id)`). The
+relay can therefore neither forge a proof for its own `ceremony_token`, nor reuse
+the user's (single-use) one, nor alter any forwarded byte. A relay that captured the
+PIN still cannot run its own WebAuthn enrollment nor substitute a device key in the
 zero-device window. The proof is a **third, separate** HMAC — not the inner
 descriptor signature (base64url) and not the outer publish signature (ES256 hex).
 
@@ -293,10 +308,11 @@ these routes and the host is byte-identical to the static-only behaviour.
 
 **Two secrets, two checkers, by design:** the relay gate is the high-entropy
 `claim_key`; the PIN is the box's separate LAN-presence factor; the
-`bootstrap_proof` binds the ceremony to possession of the raw `bootstrap_id`. A
-leaked store key never reveals a guessable PIN, and the relay can't ride the
-enroll forward without both the PIN *and* a proof only the genuine browser can
-compute.
+`bootstrap_proof` binds the ceremony — and the exact finish body — to possession of
+the raw `bootstrap_id`. A leaked store key never reveals a guessable PIN, and the
+relay can't ride the enroll forward without both the PIN *and* a proof only the
+genuine browser can compute — and even then it cannot alter a single forwarded byte
+(including `device_pubkey`) without invalidating that proof.
 
 ## Migration from the old subetha relay
 

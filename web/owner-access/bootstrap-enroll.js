@@ -58,17 +58,29 @@ export async function claimKeyFromBootstrapId(bootstrapId) {
   return toHex(digest);
 }
 
-// bootstrapProof is the ceremony-bound proof-of-possession of the RAW bootstrap_id:
-//   bootstrap_proof = hex(HMAC-SHA256(key = utf8(bootstrap_id), msg = utf8(ceremony_token)))
+// bootstrapProof is the ceremony-bound, BODY-bound proof-of-possession of the RAW
+// bootstrap_id:
+//   bootstrap_proof = hex(HMAC-SHA256(
+//       key = utf8(bootstrap_id),
+//       msg = utf8(ceremony_token + "|" + hex(sha256(bodyString))) ))
 // The browser sends it as ?bootstrap_proof=<hex> on enroll/FINISH so the Pi can
 // prove the finisher actually holds the secret bootstrap_id that opened THIS
-// ceremony. The relay only ever holds hex(sha256(bootstrap_id)) (the claim_key
-// digest), so it can neither forge this proof for its own ceremony_token nor reuse
-// the user's (the ceremony_token is single-use). MUST stay byte-identical to the Pi
-// (go/internal/api/api_owner_access.go bootstrapEnrollProof): key = utf8 bytes of
-// the bootstrap_id, message = utf8 bytes of the ceremony_token, lowercase-hex out.
-export async function bootstrapProof(bootstrapId, ceremonyToken) {
+// ceremony AND that the EXACT finish body (the WebAuthn attestation, the C4
+// device_pubkey, the name) was authored by that finisher. Binding the body hash
+// stops a compromised relay from MITM-swapping device_pubkey for its own key after
+// the proof was computed. The relay only ever holds hex(sha256(bootstrap_id)) (the
+// claim_key digest), so it can neither forge this proof for its own ceremony_token
+// nor reuse the user's (the ceremony_token is single-use). MUST stay byte-identical
+// to the Pi (go/internal/api/api_owner_access.go bootstrapEnrollProof): key = utf8
+// bytes of the bootstrap_id; message = utf8 bytes of (ceremony_token + "|" +
+// lowercase hex of sha256 over the EXACT body bytes posted); lowercase-hex out.
+//
+// bodyString MUST be the EXACT string the browser POSTs as the request body — hash
+// it once and send it verbatim; do not re-stringify a different object.
+export async function bootstrapProof(bootstrapId, ceremonyToken, bodyString) {
   const enc = new TextEncoder();
+  const bodyDigest = await globalThis.crypto.subtle.digest("SHA-256", enc.encode(String(bodyString)));
+  const msg = String(ceremonyToken) + "|" + toHex(bodyDigest);
   const key = await globalThis.crypto.subtle.importKey(
     "raw",
     enc.encode(String(bootstrapId)),
@@ -76,7 +88,7 @@ export async function bootstrapProof(bootstrapId, ceremonyToken) {
     false,
     ["sign"],
   );
-  const mac = await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(String(ceremonyToken)));
+  const mac = await globalThis.crypto.subtle.sign("HMAC", key, enc.encode(msg));
   return toHex(mac);
 }
 

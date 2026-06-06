@@ -303,8 +303,8 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 	{
 		pace(2) // start + finish
 		code, body := softwareEnrollThroughRelay(t, relayURL, rpID, origin, authQ(),
-			func(ceremonyToken string) string {
-				return jsHMACProofE2E("not-the-real-bootstrap-id", ceremonyToken)
+			func(ceremonyToken string, finishBody []byte) string {
+				return jsHMACProofE2E("not-the-real-bootstrap-id", ceremonyToken, finishBody)
 			})
 		if code != http.StatusForbidden {
 			t.Fatalf("tunneled finish with WRONG proof: got %d body=%q, want 403", code, body)
@@ -316,12 +316,45 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 	{
 		pace(2) // start + finish
 		code, body := softwareEnrollThroughRelay(t, relayURL, rpID, origin, authQ(),
-			func(string) string { return "" }, // no bootstrap_proof param
+			func(string, []byte) string { return "" }, // no bootstrap_proof param
 		)
 		if code != http.StatusForbidden {
 			t.Fatalf("tunneled finish with MISSING proof: got %d body=%q, want 403", code, body)
 		}
 		assertNoDevice(t, st, "after a missing-proof finish no device may be saved")
+	}
+
+	// ---- 7b. PROOF GATE (closes the device_pubkey-swap HIGH): a MITM relay that
+	// swaps the top-level device_pubkey in the forwarded finish body — AFTER the
+	// browser computed a VALID proof over the honest body — is refused 403 by the Pi.
+	// The proof binds a hash of the exact body, so the relay would have to recompute
+	// the HMAC (which needs the raw bootstrap_id it never holds). The honest path
+	// (step 8) still 200s, proving this isn't a blanket rejection.
+	{
+		pace(2) // start + finish
+		attackerKey := freshCanonicalDeviceKeyHexE2E(t)
+		code, body := softwareEnrollThroughRelayTamper(t, relayURL, rpID, origin, authQ(),
+			func(ceremonyToken string, finishBody []byte) string {
+				// Honest browser: valid proof over the body it actually authored.
+				return jsHMACProofE2E(minted.BootstrapID, ceremonyToken, finishBody)
+			},
+			func(finishBody []byte) []byte {
+				// MITM relay: inject its OWN device_pubkey into the forwarded body.
+				var m map[string]any
+				if err := json.Unmarshal(finishBody, &m); err != nil {
+					t.Fatalf("tamper: unmarshal honest finish body: %v", err)
+				}
+				m["device_pubkey"] = attackerKey
+				out, err := json.Marshal(m)
+				if err != nil {
+					t.Fatalf("tamper: marshal swapped body: %v", err)
+				}
+				return out
+			})
+		if code != http.StatusForbidden {
+			t.Fatalf("tunneled finish with a device_pubkey SWAPPED by a MITM relay: got %d body=%q, want 403", code, body)
+		}
+		assertNoDevice(t, st, "after a device_pubkey-swap finish no device may be saved")
 	}
 
 	// ---- 8. RELAY RESERVATION + HAPPY PATH: concurrent double-finish ----
@@ -369,7 +402,8 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 				fq := cloneValues(authQ())
 				fq.Set("ceremony_token", ceremonyTokens[i])
 				fq.Set("name", "Test Device & Co")
-				fq.Set("bootstrap_proof", jsHMACProofE2E(minted.BootstrapID, ceremonyTokens[i]))
+				// The proof binds the EXACT body this goroutine POSTs (finishBodies[i]).
+				fq.Set("bootstrap_proof", jsHMACProofE2E(minted.BootstrapID, ceremonyTokens[i], []byte(finishBodies[i])))
 				startGate.Wait() // release both finishes as close to simultaneously as possible
 				c, b := homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+fq.Encode(), strings.NewReader(finishBodies[i]))
 				results[i] = res{c, b}
@@ -581,11 +615,21 @@ func homeEnrollPost(t *testing.T, relayURL, path string, body io.Reader) (int, s
 // enroll/start + enroll/finish through the relay's home host (the real
 // bootstrapEnrollForward) into the real Pi. authQ is the per-RPC query (claim_key +
 // pin) carried on BOTH legs exactly as the browser sends them. proofFor is called
-// with the ceremony_token returned by enroll/start; its non-empty return is appended
-// to the finish query as ?bootstrap_proof=<hex> (the browser sends the proof only on
-// finish). An empty return omits the proof param entirely (the missing-proof case).
-// Returns the finish status + body.
-func softwareEnrollThroughRelay(t *testing.T, relayURL, rpID, origin string, authQ url.Values, proofFor func(ceremonyToken string) string) (int, string) {
+// with the ceremony_token returned by enroll/start AND the EXACT finish body bytes
+// the browser POSTs; its non-empty return is appended to the finish query as
+// ?bootstrap_proof=<hex> (the browser sends the proof only on finish, computed over
+// the body it sends). An empty return omits the proof param entirely (the
+// missing-proof case). Returns the finish status + body.
+func softwareEnrollThroughRelay(t *testing.T, relayURL, rpID, origin string, authQ url.Values, proofFor func(ceremonyToken string, body []byte) string) (int, string) {
+	t.Helper()
+	return softwareEnrollThroughRelayTamper(t, relayURL, rpID, origin, authQ, proofFor, nil)
+}
+
+// softwareEnrollThroughRelayTamper is softwareEnrollThroughRelay with a tamper hook
+// that models a MITM relay rewriting the forwarded finish body AFTER the browser
+// computed the proof over the honest body. The body-bound proof must make the Pi
+// reject the tampered forward.
+func softwareEnrollThroughRelayTamper(t *testing.T, relayURL, rpID, origin string, authQ url.Values, proofFor func(ceremonyToken string, body []byte) string, tamper func(body []byte) []byte) (int, string) {
 	t.Helper()
 
 	// --- enroll/start through the relay (carries claim_key + pin) ---
@@ -605,10 +649,17 @@ func softwareEnrollThroughRelay(t *testing.T, relayURL, rpID, origin string, aut
 	finishQ := cloneValues(authQ)
 	finishQ.Set("ceremony_token", ceremonyToken)
 	finishQ.Set("name", "Test Device & Co") // space + '&' must round-trip un-mangled
-	if proof := proofFor(ceremonyToken); proof != "" {
+	// The browser computes the proof over the EXACT body it POSTs (the honest body).
+	if proof := proofFor(ceremonyToken, []byte(finishJSON)); proof != "" {
 		finishQ.Set("bootstrap_proof", proof)
 	}
-	return homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+finishQ.Encode(), strings.NewReader(finishJSON))
+	// A MITM relay swaps device_pubkey in the forwarded body AFTER the proof was
+	// computed: the bytes the Pi receives differ from the proven body, so it 403s.
+	sendJSON := finishJSON
+	if tamper != nil {
+		sendJSON = string(tamper([]byte(finishJSON)))
+	}
+	return homeEnrollPost(t, relayURL, "/api/owner-access/enroll/finish?"+finishQ.Encode(), strings.NewReader(sendJSON))
 }
 
 // softwareEnrollDirectTunneled runs a full software-attested enroll/start +
@@ -631,7 +682,7 @@ func softwareEnrollDirectTunneled(t *testing.T, piHandler http.Handler, rpID, or
 	finishJSON := fabricateRegistrationResponse(t, rpID, origin, challenge)
 	finishURL := "/api/owner-access/enroll/finish?pin=" + pin +
 		"&ceremony_token=" + ceremonyToken +
-		"&bootstrap_proof=" + jsHMACProofE2E(bootstrapID, ceremonyToken)
+		"&bootstrap_proof=" + jsHMACProofE2E(bootstrapID, ceremonyToken, []byte(finishJSON))
 	finishReq := httptest.NewRequest(http.MethodPost, finishURL, strings.NewReader(finishJSON))
 	finishReq.Host = rpID
 	finishReq.RemoteAddr = "192.168.7.42:40001"
@@ -755,14 +806,36 @@ func fabricateRegistrationResponse(t *testing.T, rpID, origin, challenge string)
 	return string(finishJSON)
 }
 
-// jsHMACProofE2E recomputes the browser's ceremony-bound possession proof so the
-// e2e verifies the real Pi validator against the SAME construction the browser uses:
-// hex(HMAC-SHA256(key=utf8(bootstrap_id), msg=utf8(ceremony_token))). Hand-rolled
-// (not calling the SUT) so a drift from the Pi/browser construction is caught here.
-func jsHMACProofE2E(bootstrapID, ceremonyToken string) string {
+// jsHMACProofE2E recomputes the browser's ceremony-bound, BODY-bound possession
+// proof so the e2e verifies the real Pi validator against the SAME construction the
+// browser uses: hex(HMAC-SHA256(key=utf8(bootstrap_id),
+// msg=utf8(ceremony_token + "|" + hex(sha256(body))))). Binding the body hash means
+// a MITM relay cannot swap device_pubkey (or the attestation, or the name) in the
+// forwarded finish body without breaking the proof. Hand-rolled (not calling the
+// SUT) so a drift from the Pi/browser construction is caught here. body MUST be the
+// EXACT finish body bytes POSTed.
+func jsHMACProofE2E(bootstrapID, ceremonyToken string, body []byte) string {
+	sum := sha256.Sum256(body)
+	msg := ceremonyToken + "|" + hex.EncodeToString(sum[:])
 	mac := hmac.New(sha256.New, []byte(bootstrapID))
-	mac.Write([]byte(ceremonyToken))
+	mac.Write([]byte(msg))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// freshCanonicalDeviceKeyHexE2E returns a fresh, canonical-form (lowercase, on-curve)
+// 128-hex uncompressed P-256 public key — the exact shape the Pi's canonicalDevicePubkey
+// accepts and would store. Models the key a MITM relay would substitute on the forward.
+func freshCanonicalDeviceKeyHexE2E(t *testing.T) string {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen device key: %v", err)
+	}
+	xb := make([]byte, 32)
+	yb := make([]byte, 32)
+	priv.PublicKey.X.FillBytes(xb)
+	priv.PublicKey.Y.FillBytes(yb)
+	return hex.EncodeToString(xb) + hex.EncodeToString(yb)
 }
 
 // assertNoDevice fails if any trusted device is enrolled — used after a rejected

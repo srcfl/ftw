@@ -201,15 +201,26 @@
         // 3. Finish. The device_pubkey rides INSIDE the WebAuthn registration JSON
         //    body (C4): the Pi pins it on the NEW credential's trusted_devices row.
         //    Bootstrap re-sends claim_key (the relay re-gates + single-use-burns the
-        //    window on a 200) AND pin (the Pi re-validates) AND a CEREMONY-BOUND
-        //    possession proof. The proof = HMAC-SHA256(key=bootstrap_id,
-        //    msg=ceremony_token): it proves WE hold the raw bootstrap_id that opened
-        //    THIS ceremony. The relay only ever sees sha256(bootstrap_id), so it can
-        //    neither forge a proof for its own ceremony_token nor reuse ours — this
-        //    closes the "compromised relay sees the PIN and runs its own enrollment"
-        //    hole. The raw bootstrap_id NEVER leaves the browser; only its HMAC does.
+        //    window on a 200) AND pin (the Pi re-validates) AND a CEREMONY-BOUND,
+        //    BODY-BOUND possession proof. The proof = HMAC-SHA256(key=bootstrap_id,
+        //    msg=ceremony_token + "|" + sha256(body)): it proves WE hold the raw
+        //    bootstrap_id that opened THIS ceremony AND that we authored THIS exact
+        //    finish body. The relay only ever sees sha256(bootstrap_id), so it can
+        //    neither forge a proof for its own ceremony_token nor reuse ours — and
+        //    binding the body hash stops a MITM relay swapping device_pubkey (or the
+        //    attestation, or the name) for its own after we computed the proof. This
+        //    closes both the "relay sees the PIN and runs its own enrollment" hole and
+        //    the device_pubkey-substitution hole. The raw bootstrap_id NEVER leaves
+        //    the browser; only its HMAC does.
+        //
+        //    We serialize the body string ONCE, hash THAT exact string for the proof,
+        //    and POST it VERBATIM — never re-stringify a different object, or the Pi's
+        //    body hash (over the bytes it receives) would diverge from ours.
+        const finishBody = encodeRegistrationResult(cred);
+        if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+        const bodyString = JSON.stringify(finishBody);
         let proof = "";
-        if (bootstrapId) proof = await bootstrapProof(bootstrapId, ceremony_token);
+        if (bootstrapId) proof = await bootstrapProof(bootstrapId, ceremony_token, bodyString);
         const finishQuery = "ceremony_token=" + encodeURIComponent(ceremony_token)
           + "&name=" + encodeURIComponent(name)
           + (bootstrapId
@@ -217,12 +228,10 @@
                  + "&bootstrap_proof=" + encodeURIComponent(proof)
                  + (pin ? ("&pin=" + encodeURIComponent(pin)) : ""))
               : "");
-        const finishBody = encodeRegistrationResult(cred);
-        if (devicePubHex) finishBody.device_pubkey = devicePubHex;
         const finish = await enrollFetch("finish", finishQuery, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(finishBody),
+          body: bodyString,
           credentials: "same-origin",
         });
         if (!finish.ok) {

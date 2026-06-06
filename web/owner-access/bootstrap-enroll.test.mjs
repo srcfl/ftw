@@ -69,26 +69,43 @@ test("claimKeyFromBootstrapId = hex(sha256(bootstrap_id)) — known vector", asy
   assert.match(ck, /^[0-9a-f]{64}$/);
 });
 
-test("bootstrapProof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token)) — Go-verified vector", async () => {
+test("bootstrapProof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token + '|' + sha256(body))) — Go-verified vector", async () => {
   // Cross-checked against Go bootstrapEnrollProof + openssl:
-  //   printf '%s' 'ceremony-token-XYZ' | openssl dgst -sha256 -hmac 'the-raw-bootstrap-id'
+  //   BODY='{"id":"abc","device_pubkey":"deadbeef"}'
+  //   HASH=$(printf '%s' "$BODY" | openssl dgst -sha256 -r | cut -d' ' -f1)
+  //   printf '%s' "ceremony-token-XYZ|$HASH" | openssl dgst -sha256 -hmac 'the-raw-bootstrap-id'
+  const body1 = '{"id":"abc","device_pubkey":"deadbeef"}';
   assert.equal(
-    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ"),
-    "b6fca5186f6f7120d3f275c881233f84cf8f84202c63ae7624c57715de3fd04f",
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ", body1),
+    "315fef2626c2dc66e5bfc58851bef92f937f530e00d93238bf1f95e40781aba1",
   );
-  // A second Go-verified vector (key="ABC123", msg="tok-1").
+  // A second Go-verified vector (key="ABC123", msg ceremony="tok-1", body='{"x":1}').
   assert.equal(
-    await bootstrapProof("ABC123", "tok-1"),
-    "5450b963c146c2334c7911660ee6016770ad361fde01526af84325ddaf70f3cc",
+    await bootstrapProof("ABC123", "tok-1", '{"x":1}'),
+    "019aa77bc1bad1c8e7cf7fa5faafb72b58fe6a65650839708d3a131aac31e055",
   );
   // Output is always 64 lowercase-hex chars (matches Go hex.EncodeToString of a 32-byte MAC).
-  assert.match(await bootstrapProof("any", "thing"), /^[0-9a-f]{64}$/);
+  assert.match(await bootstrapProof("any", "thing", "body"), /^[0-9a-f]{64}$/);
   // The proof is ceremony-bound: a different ceremony_token yields a different proof
   // (so a relay cannot reuse a captured proof for its own ceremony).
   assert.notEqual(
-    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ"),
-    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-OTHER"),
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ", body1),
+    await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-OTHER", body1),
   );
+});
+
+test("bootstrapProof is BODY-bound — a swapped device_pubkey yields a different proof (closes the MITM-relay device_pubkey swap)", async () => {
+  // The honest browser proves over the body it POSTs. A MITM relay that swaps the
+  // top-level device_pubkey for its OWN key produces a DIFFERENT body, so the proof
+  // the Pi recomputes over the received body no longer matches the forwarded proof.
+  const honest = '{"id":"abc","device_pubkey":"deadbeef"}';
+  const tampered = '{"id":"abc","device_pubkey":"feedface"}';
+  const proofHonest = await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ", honest);
+  const proofTampered = await bootstrapProof("the-raw-bootstrap-id", "ceremony-token-XYZ", tampered);
+  assert.notEqual(proofHonest, proofTampered);
+  // Cross-checked against Go (diffbodyB): the relay can't recompute proofTampered
+  // without the raw bootstrap_id, and proofHonest doesn't match the tampered body.
+  assert.equal(proofTampered, "0dac0839816e7100a37e51598d9bd466f929179b7f3f76cd8b0c7d2025323ad9");
 });
 
 test("claimAndVerify accepts a Pi-signed descriptor (verify-before-trust passes)", async () => {
@@ -159,13 +176,24 @@ test("enroll.html bootstrap path raw-fetches the relay (NOT ownerFetch/P2P) — 
   assert.match(ENROLL, /if \(bootstrapId\) \{\s*return fetch\(/s);
 });
 
-test("enroll.html sends a ceremony-bound bootstrap_proof on FINISH (closes the relay-sees-PIN HIGH)", () => {
+test("enroll.html sends a ceremony-bound, BODY-bound bootstrap_proof on FINISH (closes the relay-sees-PIN + device_pubkey-swap HIGHs)", () => {
   // The finish query must carry bootstrap_proof, computed via the exported helper
-  // over (bootstrap_id, ceremony_token) — NOT over claim_key or pin.
+  // over (bootstrap_id, ceremony_token, bodyString) — NOT over claim_key or pin.
   assert.match(ENROLL, /bootstrapProof\(/, "must compute the possession proof with bootstrapProof()");
   assert.match(ENROLL, /bootstrap_proof=/, "finish must send &bootstrap_proof=");
-  // The proof is bound to the ceremony_token the Pi issued at start.
-  assert.match(ENROLL, /bootstrapProof\(\s*bootstrapId\s*,\s*ceremony_token\s*\)/);
+  // The proof now binds the ceremony_token AND the exact finish body string.
+  assert.match(ENROLL, /bootstrapProof\(\s*bootstrapId\s*,\s*ceremony_token\s*,\s*bodyString\s*\)/);
+});
+
+test("enroll.html serializes the finish body ONCE and POSTs it VERBATIM (the proof hashes the exact bytes sent)", () => {
+  // bodyString is JSON.stringify'd once...
+  assert.match(ENROLL, /const\s+bodyString\s*=\s*JSON\.stringify\(\s*finishBody\s*\)/);
+  // ...and the SAME string is the request body (not a re-stringify of a different
+  // object), so the Pi's hash over the received bytes equals the browser's.
+  assert.match(ENROLL, /body:\s*bodyString\b/, "the finish POST body must be the verbatim bodyString");
+  // device_pubkey is attached to finishBody BEFORE it is serialized + hashed, so the
+  // proof binds the C4 key a MITM relay would otherwise swap.
+  assert.match(ENROLL, /finishBody\.device_pubkey\s*=\s*devicePubHex/);
 });
 
 test("enroll.html keeps bootstrap_id for the whole ceremony but the raw id NEVER leaves the browser", () => {

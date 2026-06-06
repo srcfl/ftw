@@ -168,15 +168,25 @@ func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
 }
 
 // bootstrapEnrollProof binds proof-of-possession of the RAW bootstrap_id to one
-// enrollment ceremony: hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token)).
-// The relay only ever holds hex(sha256(bootstrap_id)), so it can neither forge
-// this proof for its own ceremony_token nor reuse the user's (the ceremony_token
-// is single-use). MUST stay byte-identical to the browser
-// (web/owner-access/bootstrap-enroll.js): key = utf8(bootstrap_id) bytes, message
-// = utf8(ceremony_token) bytes, lowercase hex output.
-func bootstrapEnrollProof(bootstrapID, ceremonyToken string) string {
+// enrollment ceremony AND to the exact finish body bytes:
+//
+//	hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token + "|" + hex(sha256(body))))
+//
+// Binding the body hash authenticates the ENTIRE finish payload — the top-level
+// device_pubkey (the C4 silent-login key), the WebAuthn attestation, and the
+// friendly name — so a compromised relay that MITMs the forward cannot swap any of
+// them without breaking the proof (it would have to recompute the HMAC, which needs
+// the raw bootstrap_id it never sees). The relay only ever holds
+// hex(sha256(bootstrap_id)), so it can neither forge this proof for its own
+// ceremony_token nor reuse the user's (the ceremony_token is single-use). MUST stay
+// byte-identical to the browser (web/owner-access/bootstrap-enroll.js): key =
+// utf8(bootstrap_id) bytes; message = utf8(ceremony_token) + "|" + lowercase hex of
+// sha256 over the EXACT body bytes the browser POSTs; lowercase hex output.
+func bootstrapEnrollProof(bootstrapID, ceremonyToken string, body []byte) string {
+	sum := sha256.Sum256(body)
+	msg := ceremonyToken + "|" + hex.EncodeToString(sum[:])
 	mac := hmac.New(sha256.New, []byte(bootstrapID))
-	mac.Write([]byte(ceremonyToken))
+	mac.Write([]byte(msg))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -719,19 +729,35 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unknown or expired ceremony_token", http.StatusForbidden)
 		return
 	}
+	// Buffer the finish body ONCE up front. The C4 device_pubkey rides as an extra
+	// top-level field on the SAME body the WebAuthn library parses; go-webauthn's
+	// decoder ignores unknown fields, so we buffer here, pull device_pubkey out, and
+	// later hand the library a fresh reader over the identical bytes. Buffering also
+	// enforces the ceremony size cap AND — crucially — gives us the EXACT bytes the
+	// possession proof must bind (the body-bound proof below hashes these bytes, so a
+	// MITM relay cannot swap device_pubkey/attestation/name after the browser proved
+	// the honest body).
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
+	if err != nil {
+		http.Error(w, "finish registration: read body", http.StatusBadRequest)
+		return
+	}
 	// Tunneled (relay-forwarded) finish only: bind this enrollment to proof of
-	// possession of the RAW bootstrap_id, and re-check the zero-device window —
-	// BEFORE any WebAuthn work or device persistence. An untunneled LAN finish is
-	// trusted by genuine source and keeps working with NO proof + NO recheck.
+	// possession of the RAW bootstrap_id AND to the exact finish body — and re-check
+	// the zero-device window — BEFORE any WebAuthn work or device persistence. An
+	// untunneled LAN finish is trusted by genuine source and keeps working with NO
+	// proof + NO recheck.
 	if s.isTunneled(r) {
-		// (a) Ceremony-bound possession proof. The relay holds only
-		// sha256(bootstrap_id), so it cannot compute this; only the genuine
-		// browser (holding the raw #b= bootstrap_id) can. Constant-time compare.
+		// (a) Ceremony-bound, BODY-bound possession proof. The relay holds only
+		// sha256(bootstrap_id), so it cannot compute this; only the genuine browser
+		// (holding the raw #b= bootstrap_id) can. Binding the body hash also stops a
+		// MITM relay from swapping the top-level device_pubkey (or the attestation, or
+		// the name) after the browser proved the honest body. Constant-time compare.
 		proof := r.URL.Query().Get("bootstrap_proof")
 		oa.mu.Lock()
 		bid := oa.enrollBootstrapID
 		oa.mu.Unlock()
-		expected := bootstrapEnrollProof(bid, tok)
+		expected := bootstrapEnrollProof(bid, tok, bodyBytes)
 		if proof == "" || bid == "" || subtle.ConstantTimeCompare([]byte(proof), []byte(expected)) != 1 {
 			http.Error(w, "bootstrap proof required", http.StatusForbidden)
 			return
@@ -758,16 +784,8 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// The C4 device_pubkey rides as an extra top-level field on the SAME finish
-	// body the WebAuthn library parses. go-webauthn's decoder ignores unknown
-	// fields, so we buffer the body once, pull device_pubkey out of it, then hand
-	// the library a fresh reader over the identical bytes. Buffering also enforces
-	// the ceremony size cap.
-	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
-	if err != nil {
-		http.Error(w, "finish registration: read body", http.StatusBadRequest)
-		return
-	}
+	// device_pubkey is extracted from the SAME buffered bytes the proof bound, then a
+	// fresh reader over those identical bytes is handed to the WebAuthn library.
 	devicePubkey := extractDevicePubkeyField(bodyBytes)
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	cred, err := wa.FinishRegistration(user, *sess.data, r)

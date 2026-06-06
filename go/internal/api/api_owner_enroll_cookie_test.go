@@ -38,14 +38,26 @@ func softwareEnrollFinish(t *testing.T, srv *Server, rpID, origin string, extraH
 	return softwareEnrollFinishProof(t, srv, rpID, origin, extraHeaders, authQuery, nil)
 }
 
-// softwareEnrollFinishProof is softwareEnrollFinish with an extra finishQuery
-// callback: the ceremony_token isn't known until enroll/start returns, so the
-// ceremony-bound bootstrap_proof (HMAC over the ceremony_token) can only be
-// computed for the finish leg. finishQuery, if non-nil, is called with the
-// ceremony_token and its return value (e.g. "bootstrap_proof=<hex>") is appended
-// to the finish path ONLY — never to start. This mirrors the real browser, which
-// sends ?bootstrap_proof only on finish.
-func softwareEnrollFinishProof(t *testing.T, srv *Server, rpID, origin string, extraHeaders map[string]string, authQuery string, finishQuery func(ceremonyToken string) string) *httptest.ResponseRecorder {
+// softwareEnrollFinishProof is softwareEnrollFinish with an extra proofFor
+// callback: the ceremony_token isn't known until enroll/start returns, and the
+// ceremony-bound bootstrap_proof now binds BOTH the ceremony_token AND a hash of
+// the exact finish body bytes, so the proof can only be computed for the finish
+// leg once both are known. proofFor, if non-nil, is called with the ceremony_token
+// and the EXACT finish body bytes the browser POSTs; its return value (e.g.
+// "bootstrap_proof=<hex>") is appended to the finish path ONLY — never to start.
+// This mirrors the real browser, which sends ?bootstrap_proof only on finish.
+func softwareEnrollFinishProof(t *testing.T, srv *Server, rpID, origin string, extraHeaders map[string]string, authQuery string, proofFor func(ceremonyToken string, body []byte) string) *httptest.ResponseRecorder {
+	t.Helper()
+	return softwareEnrollFinishTamper(t, srv, rpID, origin, extraHeaders, authQuery, proofFor, nil)
+}
+
+// softwareEnrollFinishTamper is softwareEnrollFinishProof with an extra tamper
+// hook: after the honest finish body is fabricated and the proof is computed over
+// it, tamper (if non-nil) rewrites the body bytes that are actually POSTed. This
+// models a man-in-the-middle relay that swaps the top-level device_pubkey AFTER the
+// browser computed the proof over the honest body — the body-bound proof must make
+// that finish fail 403.
+func softwareEnrollFinishTamper(t *testing.T, srv *Server, rpID, origin string, extraHeaders map[string]string, authQuery string, proofFor func(ceremonyToken string, body []byte) string, tamper func(body []byte) []byte) *httptest.ResponseRecorder {
 	t.Helper()
 
 	// --- enroll/start: pull the challenge out of the WebAuthn options. ---
@@ -159,16 +171,25 @@ func softwareEnrollFinishProof(t *testing.T, srv *Server, rpID, origin string, e
 		t.Fatalf("marshal finish body: %v", err)
 	}
 
+	// The proof binds the EXACT body the browser hashes. Compute it over the
+	// honest body BEFORE any tamper rewrites the bytes actually sent — exactly as
+	// the browser hashes the body string once, then POSTs it verbatim.
 	path := "/api/owner-access/enroll/finish?ceremony_token=" + start.CeremonyToken
 	if authQuery != "" {
 		path += "&" + authQuery
 	}
-	if finishQuery != nil {
-		if fq := finishQuery(start.CeremonyToken); fq != "" {
+	if proofFor != nil {
+		if fq := proofFor(start.CeremonyToken, finishJSON); fq != "" {
 			path += "&" + fq
 		}
 	}
-	finishReq := httptest.NewRequest("POST", path, strings.NewReader(string(finishJSON)))
+	// A MITM relay swaps device_pubkey AFTER the proof was computed: the body
+	// actually POSTed differs from the body the proof bound, so the Pi must 403.
+	sendJSON := finishJSON
+	if tamper != nil {
+		sendJSON = tamper(finishJSON)
+	}
+	finishReq := httptest.NewRequest("POST", path, strings.NewReader(string(sendJSON)))
 	finishReq.Host = "127.0.0.1:8080"
 	finishReq.RemoteAddr = "192.168.1.50:1234"
 	finishReq.Header.Set("Content-Type", "application/json")
@@ -223,7 +244,7 @@ func TestEnrollFinishTunneledSuppressesCookie(t *testing.T) {
 
 	headers := map[string]string{"X-FTW-Tunnel": "tunnel-marker-secret"}
 	rec := softwareEnrollFinishProof(t, srv, "localhost", "http://localhost", headers, "pin="+pin,
-		func(tok string) string { return "bootstrap_proof=" + jsHMACProof(bid, tok) })
+		func(tok string, body []byte) string { return "bootstrap_proof=" + jsHMACProof(bid, tok, body) })
 	if rec.Code != 200 {
 		t.Fatalf("tunneled enroll/finish: status=%d body=%q", rec.Code, rec.Body.String())
 	}
@@ -233,14 +254,19 @@ func TestEnrollFinishTunneledSuppressesCookie(t *testing.T) {
 	}
 }
 
-// jsHMACProof recomputes the browser's ceremony-bound possession proof so the
-// tests verify the Go validator against the SAME construction the browser uses:
-// hex(HMAC-SHA256(key=utf8(bootstrap_id), msg=utf8(ceremony_token))). If this
-// ever drifts from bootstrapEnrollProof the interop with bootstrap-enroll.js
-// breaks, so the tests deliberately hand-roll it instead of calling the SUT.
-func jsHMACProof(bootstrapID, ceremonyToken string) string {
+// jsHMACProof recomputes the browser's ceremony-bound, BODY-BOUND possession proof
+// so the tests verify the Go validator against the SAME construction the browser
+// uses: hex(HMAC-SHA256(key=utf8(bootstrap_id),
+// msg=utf8(ceremony_token + "|" + hex(sha256(body))))). Binding the body hash means
+// a MITM relay cannot swap device_pubkey (or the attestation, or the name) without
+// breaking the proof. If this ever drifts from bootstrapEnrollProof the interop with
+// bootstrap-enroll.js breaks, so the tests deliberately hand-roll it instead of
+// calling the SUT.
+func jsHMACProof(bootstrapID, ceremonyToken string, body []byte) string {
+	sum := sha256.Sum256(body)
+	msg := ceremonyToken + "|" + hex.EncodeToString(sum[:])
 	mac := hmac.New(sha256.New, []byte(bootstrapID))
-	mac.Write([]byte(ceremonyToken))
+	mac.Write([]byte(msg))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -269,13 +295,76 @@ func TestEnrollFinishTunneledValidProof(t *testing.T) {
 	pin := srv.ownerAccess().enrollPin
 	headers := map[string]string{"X-FTW-Tunnel": "tunnel-marker-secret"}
 	rec := softwareEnrollFinishProof(t, srv, "localhost", "http://localhost", headers, "pin="+pin,
-		func(tok string) string { return "bootstrap_proof=" + jsHMACProof(bid, tok) })
+		func(tok string, body []byte) string { return "bootstrap_proof=" + jsHMACProof(bid, tok, body) })
 	if rec.Code != 200 {
 		t.Fatalf("tunneled enroll/finish with valid proof: status=%d body=%q", rec.Code, rec.Body.String())
 	}
 	if hasOwnerCookie(rec) {
 		t.Fatalf("tunneled enroll/finish must not set the %s cookie", ownerAccessCookieName)
 	}
+}
+
+// A TUNNEL-FORWARDED enroll/finish whose body's top-level device_pubkey was SWAPPED
+// after the proof was computed is rejected 403 — closes the device_pubkey-swap HIGH.
+// A compromised relay (MITM of the forward) can pass through the user's valid
+// WebAuthn attestation and a valid (ceremony-bound) proof while replacing the C4
+// device_pubkey with its OWN key. Binding the proof to a hash of the EXACT finish
+// body bytes makes that tamper break the proof: the Pi recomputes the HMAC over the
+// body it actually received and the compare fails, so the relay-controlled key never
+// becomes a trusted device. The honest browser computes the proof over the SAME body
+// it POSTs, so it still passes (TestEnrollFinishTunneledValidProof).
+func TestEnrollFinishTunneledTamperedDevicePubkey(t *testing.T) {
+	srv, bid := tunneledProofSrv(t)
+	pin := srv.ownerAccess().enrollPin
+	headers := map[string]string{"X-FTW-Tunnel": "tunnel-marker-secret"}
+	// The honest browser proof binds the honest body bytes...
+	proofFor := func(tok string, body []byte) string {
+		return "bootstrap_proof=" + jsHMACProof(bid, tok, body)
+	}
+	// ...but a MITM relay injects its OWN device_pubkey into the body it forwards,
+	// AFTER the proof was computed. The attacker key is a canonical (on-curve) P-256
+	// key so it would otherwise be stored verbatim by canonicalDevicePubkey.
+	attackerKey := freshCanonicalDeviceKeyHex(t)
+	tamper := func(body []byte) []byte {
+		var m map[string]any
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("tamper: unmarshal honest body: %v", err)
+		}
+		m["device_pubkey"] = attackerKey
+		out, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("tamper: marshal swapped body: %v", err)
+		}
+		return out
+	}
+	rec := softwareEnrollFinishTamper(t, srv, "localhost", "http://localhost", headers, "pin="+pin, proofFor, tamper)
+	if rec.Code != 403 {
+		t.Fatalf("tunneled enroll/finish with a device_pubkey swapped after the proof must be 403; status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	// No device may have been persisted with the relay's key.
+	devs, err := srv.deps.State.LoadTrustedDevices()
+	if err != nil {
+		t.Fatalf("load trusted devices: %v", err)
+	}
+	if len(devs) != 0 {
+		t.Fatalf("a tampered finish must persist NO device; got %d", len(devs))
+	}
+}
+
+// freshCanonicalDeviceKeyHex returns a fresh, canonical-form (lowercase, on-curve)
+// 128-hex uncompressed P-256 public key — the exact shape canonicalDevicePubkey
+// accepts and stores. Used to model the key a MITM relay would substitute.
+func freshCanonicalDeviceKeyHex(t *testing.T) string {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen device key: %v", err)
+	}
+	xb := make([]byte, 32)
+	yb := make([]byte, 32)
+	priv.PublicKey.X.FillBytes(xb)
+	priv.PublicKey.Y.FillBytes(yb)
+	return hex.EncodeToString(xb) + hex.EncodeToString(yb)
 }
 
 // A TUNNEL-FORWARDED enroll/finish with NO bootstrap_proof is rejected 403 — the
@@ -296,10 +385,10 @@ func TestEnrollFinishTunneledWrongProof(t *testing.T) {
 	pin := srv.ownerAccess().enrollPin
 	headers := map[string]string{"X-FTW-Tunnel": "tunnel-marker-secret"}
 	rec := softwareEnrollFinishProof(t, srv, "localhost", "http://localhost", headers, "pin="+pin,
-		func(tok string) string {
+		func(tok string, body []byte) string {
 			// HMAC computed with the WRONG key (a relay that only knows the
 			// sha256 digest, not the raw bootstrap_id, produces something like this).
-			return "bootstrap_proof=" + jsHMACProof("not-the-real-bootstrap-id", tok)
+			return "bootstrap_proof=" + jsHMACProof("not-the-real-bootstrap-id", tok, body)
 		})
 	if rec.Code != 403 {
 		t.Fatalf("tunneled enroll/finish with wrong proof must be 403; status=%d body=%q", rec.Code, rec.Body.String())
@@ -321,7 +410,7 @@ func TestEnrollFinishTunneledWindowClosed(t *testing.T) {
 		t.Fatalf("wallet handle: %v", err)
 	}
 	rec := softwareEnrollFinishProof(t, srv, "localhost", "http://localhost", headers, "pin="+pin,
-		func(tok string) string {
+		func(tok string, body []byte) string {
 			// A concurrent ceremony just won the race and saved the first device.
 			if err := srv.deps.State.SaveTrustedDevice(state.TrustedDevice{
 				CredentialID: []byte("already-enrolled"), PublicKey: []byte("k"),
@@ -330,7 +419,7 @@ func TestEnrollFinishTunneledWindowClosed(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("seed device: %v", err)
 			}
-			return "bootstrap_proof=" + jsHMACProof(bid, tok)
+			return "bootstrap_proof=" + jsHMACProof(bid, tok, body)
 		})
 	if rec.Code != 403 {
 		t.Fatalf("tunneled enroll/finish after the zero-device window closed must be 403; status=%d body=%q", rec.Code, rec.Body.String())

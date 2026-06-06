@@ -97,9 +97,12 @@ describe("C4 — enroll.html pins the device key at LAN enrollment", () => {
       "enroll/finish body must carry device_pubkey (128hex) for the Pi to pin");
   });
 
-  it("merges device_pubkey INTO the WebAuthn registration JSON (one body, C4)", () => {
+  it("merges device_pubkey INTO the WebAuthn registration JSON (one body, C4) and POSTs it verbatim", () => {
     assert.match(ENROLL, /const\s+finishBody\s*=\s*encodeRegistrationResult\(cred\)/);
-    assert.match(ENROLL, /body:\s*JSON\.stringify\(finishBody\)/);
+    // The body is serialized ONCE (so the body-bound bootstrap_proof hashes the exact
+    // bytes sent) and POSTed verbatim as bodyString — not re-stringified inline.
+    assert.match(ENROLL, /const\s+bodyString\s*=\s*JSON\.stringify\(\s*finishBody\s*\)/);
+    assert.match(ENROLL, /body:\s*bodyString\b/);
   });
 });
 
