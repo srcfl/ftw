@@ -57,6 +57,46 @@
     .pin-note { margin: 0; color: var(--fg-dim); font-size: .9em; }
     .pin-err { margin: 0; color: var(--red-e); font-size: .9em; }
     .pin-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
+
+    /* "Set up remote access" affordance (setup-remote.js) — QR + link + the
+       optional PIN. Reuses the .pin-* digit/copy styles above; adds the QR + link
+       chrome. Hairline border, one amber accent, mono eyebrows — per DESIGN.md. */
+    .setup-remote { margin: .8rem 0 0; }
+    .setup-remote-btn {
+      font: inherit; width: 100%; padding: .55rem 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .setup-remote-btn:hover { border-color: var(--accent-e); }
+    .setup-remote-result {
+      margin-top: .8rem; padding: 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: var(--ink-raised); text-align: center;
+    }
+    .setup-remote-result .eyebrow {
+      font-family: var(--mono), monospace; font-size: .68rem; font-weight: 500;
+      text-transform: uppercase; letter-spacing: .18em;
+      color: var(--accent-e); margin: 0 0 .6rem;
+    }
+    .setup-qr {
+      display: flex; justify-content: center; margin: 0 0 .6rem;
+    }
+    .setup-qr canvas {
+      /* QR carries its own light quiet zone; a hairline frames it on dark bg. */
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+    }
+    .setup-link-row {
+      margin: 0; font-size: .82rem; color: var(--fg-dim); word-break: break-all;
+    }
+    .setup-link {
+      font-family: var(--mono), monospace; color: var(--accent-e);
+      text-decoration: none; word-break: break-all;
+    }
+    .setup-link:hover { text-decoration: underline; }
+    .setup-sep { border: 0; border-top: 1px solid var(--line); margin: 1rem 0; }
+    .setup-note { margin: .6rem 0 0; color: var(--fg-dim); font-size: .82rem; }
+    .setup-err { margin: 0; color: var(--red-e); font-size: .9em; }
+    .setup-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
   </style>
 </head>
 <body>
@@ -81,7 +121,10 @@
     <p class="muted">Already set up on this device? Face&nbsp;ID / Touch&nbsp;ID.</p>
     <hr class="sep">
     <div class="row"><a class="block" href="./enroll.html"><button>Set up this device</button></a></div>
-    <p class="muted">First time here? Enroll a passkey. The very first device needs the LAN&nbsp;PIN — read it below while you're on your home network.</p>
+    <p class="muted">First time here? Enroll a passkey on this device.</p>
+    <hr class="sep">
+    <p class="muted">Setting up a phone or another computer? Scan a QR or open a one-time link — no need to type anything there.</p>
+    <div id="setup-remote-panel" class="setup-remote"></div>
     <div id="pin-panel" class="pin-panel"></div>
   </div>
 
@@ -92,6 +135,7 @@
   <script type="module">
     import { apiBase } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
+    import { mountSetupRemote } from "./setup-remote.js";
     import { ownerFetch } from "./owner-fetch.js";
     const base = apiBase();
 
@@ -102,8 +146,13 @@
     // the channel is down AND when p2p.js never loaded (FIX-B); only a genuine-LAN
     // origin raw-fetches.
 
-    // "Show enrollment PIN" lives in the first-time "choose" panel; it's
-    // inert until clicked and gracefully degrades over the relay (LAN-only).
+    // The "choose" panel carries two LAN-only, click-to-reveal affordances:
+    //   - "Set up remote access" — the QR + one-time link + optional PIN courier
+    //     for the high-entropy bootstrap_id (setup-remote.js). This is the primary
+    //     way to onboard another device.
+    //   - "Show enrollment PIN" — the bare PIN (enroll-pin.js), kept as a manual
+    //     fallback. Both gracefully degrade to a LAN-only notice over the relay.
+    mountSetupRemote(document.getElementById("setup-remote-panel"));
     mountEnrollPin(document.getElementById("pin-panel"));
 
     async function whoami() {

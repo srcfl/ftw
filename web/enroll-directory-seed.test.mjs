@@ -158,11 +158,15 @@ describe("enroll.html seeds the directory on first enrollment", () => {
     assert.match(ENROLL, /extensionInput\(\)/);
     assert.match(ENROLL, /credOpts\.extensions\s*=/);
   });
-  it("fetches the Pi-signed instance descriptor over the owner channel", () => {
+  it("fetches the Pi-signed instance descriptor over the owner channel (existing-session path)", () => {
+    // The keyless bootstrap path can't reach this P2P-only endpoint, so the fetch
+    // is now conditional — but the existing-session add-device path still uses it.
     assert.match(ENROLL, /ownerFetch\("\/api\/owner-access\/instance-descriptor"/);
   });
   it("verifies the entry, then saveDirectory with a 1-entry list (version 0, writeKey null)", () => {
-    assert.match(ENROLL, /verifyEntry\(entry\)/);
+    // Verify-before-trust: the bootstrap path pre-verifies via claimAndVerify; the
+    // fallback path verifies the freshly-fetched descriptor with verifyEntry.
+    assert.match(ENROLL, /verifyEntry\(e\)|claimAndVerify\(/);
     assert.match(ENROLL, /saveDirectory\(/);
     assert.match(ENROLL, /instances:\s*\[entry\],\s*version:\s*0,\s*writeKey:\s*null/);
   });
