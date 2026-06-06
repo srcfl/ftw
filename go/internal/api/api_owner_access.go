@@ -23,9 +23,12 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -148,6 +151,7 @@ func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
 	}
 	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
 		oa.enrollPin = "" // already burned — require a fresh mint
+		oa.enrollBootstrapID = ""
 		return false
 	}
 	if subtle.ConstantTimeCompare([]byte(candidate), []byte(oa.enrollPin)) == 1 {
@@ -158,8 +162,22 @@ func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
 	oa.enrollPinTries++
 	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
 		oa.enrollPin = ""
+		oa.enrollBootstrapID = ""
 	}
 	return false
+}
+
+// bootstrapEnrollProof binds proof-of-possession of the RAW bootstrap_id to one
+// enrollment ceremony: hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token)).
+// The relay only ever holds hex(sha256(bootstrap_id)), so it can neither forge
+// this proof for its own ceremony_token nor reuse the user's (the ceremony_token
+// is single-use). MUST stay byte-identical to the browser
+// (web/owner-access/bootstrap-enroll.js): key = utf8(bootstrap_id) bytes, message
+// = utf8(ceremony_token) bytes, lowercase hex output.
+func bootstrapEnrollProof(bootstrapID, ceremonyToken string) string {
+	mac := hmac.New(sha256.New, []byte(bootstrapID))
+	mac.Write([]byte(ceremonyToken))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 type ceremonySession struct {
@@ -701,6 +719,35 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unknown or expired ceremony_token", http.StatusForbidden)
 		return
 	}
+	// Tunneled (relay-forwarded) finish only: bind this enrollment to proof of
+	// possession of the RAW bootstrap_id, and re-check the zero-device window —
+	// BEFORE any WebAuthn work or device persistence. An untunneled LAN finish is
+	// trusted by genuine source and keeps working with NO proof + NO recheck.
+	if s.isTunneled(r) {
+		// (a) Ceremony-bound possession proof. The relay holds only
+		// sha256(bootstrap_id), so it cannot compute this; only the genuine
+		// browser (holding the raw #b= bootstrap_id) can. Constant-time compare.
+		proof := r.URL.Query().Get("bootstrap_proof")
+		oa.mu.Lock()
+		bid := oa.enrollBootstrapID
+		oa.mu.Unlock()
+		expected := bootstrapEnrollProof(bid, tok)
+		if proof == "" || bid == "" || subtle.ConstantTimeCompare([]byte(proof), []byte(expected)) != 1 {
+			http.Error(w, "bootstrap proof required", http.StatusForbidden)
+			return
+		}
+		// (b) Re-check the zero-device window. Source-of-truth backstop for the
+		// concurrent-finish race: two ceremonies can both pass enroll/start in the
+		// zero-device window, but only the first to persist wins — any later
+		// tunneled finish sees a non-empty device set and is refused.
+		if devices, derr := s.deps.State.LoadTrustedDevices(); derr != nil {
+			http.Error(w, derr.Error(), http.StatusInternalServerError)
+			return
+		} else if len(devices) > 0 {
+			http.Error(w, "enrollment window closed", http.StatusForbidden)
+			return
+		}
+	}
 	wa, err := oa.webauthnLib(s.deps)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -773,6 +820,13 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	} else {
+		// Tunneled first-enroll succeeded: clear the bootstrap_id so the
+		// bearer-adjacent value (and its derived proof) cannot linger to be
+		// reused by a stale/duplicate finish or leak from process memory.
+		oa.mu.Lock()
+		oa.enrollBootstrapID = ""
+		oa.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
