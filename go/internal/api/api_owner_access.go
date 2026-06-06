@@ -98,22 +98,43 @@ type ownerAccessState struct {
 	enrollPin       string
 	enrollPinExpiry time.Time
 	enrollPinTries  int // wrong attempts since mint; PIN is burned past the cap
+
+	// enrollBootstrapID is the high-entropy (>=32-byte CSPRNG, base64url) handle
+	// minted ALONGSIDE the PIN. The relay keys its bootstrap store on
+	// hex(sha256(bootstrapID)); the RAW value is shown to the LAN browser ONLY
+	// (never to the relay) so it can derive the same claim_key from the URL
+	// fragment. Replaced on each mint, cleared with the PIN.
+	enrollBootstrapID string
 }
 
-// mintEnrollPin generates a fresh 6-digit numeric PIN, stores it with a
-// 10-minute TTL, and returns it together with the remaining seconds. Any
-// previously-minted PIN is replaced.
-func (oa *ownerAccessState) mintEnrollPin() (pin string, expiresInS int, err error) {
+// enrollBootstrapIDBytes is the CSPRNG width of the bootstrap_id (>=32 bytes so
+// the derived claim_key handle is 256-bit unguessable). base64url-no-pad keeps it
+// URL-fragment-safe for the onboarding link.
+const enrollBootstrapIDBytes = 32
+
+// mintEnrollPin generates a fresh 6-digit numeric PIN together with a
+// high-entropy bootstrap_id (>=32-byte CSPRNG, base64url-no-pad), stores both with
+// a 10-minute TTL, and returns them with the remaining seconds. Any previously
+// minted PIN + bootstrap_id is replaced. The PIN is the LAN-presence proof the Pi
+// validates on the forwarded enroll; the bootstrap_id is the relay's unguessable
+// claim handle (the relay only ever sees hex(sha256(bootstrapID))).
+func (oa *ownerAccessState) mintEnrollPin() (pin, bootstrapID string, expiresInS int, err error) {
 	p, err := randomDigits(6)
 	if err != nil {
-		return "", 0, err
+		return "", "", 0, err
 	}
+	b := make([]byte, enrollBootstrapIDBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", 0, err
+	}
+	bid := base64.RawURLEncoding.EncodeToString(b)
 	oa.mu.Lock()
 	oa.enrollPin = p
+	oa.enrollBootstrapID = bid
 	oa.enrollPinExpiry = time.Now().Add(ownerAccessEnrollPinTTL)
 	oa.enrollPinTries = 0
 	oa.mu.Unlock()
-	return p, int(ownerAccessEnrollPinTTL.Seconds()), nil
+	return p, bid, int(ownerAccessEnrollPinTTL.Seconds()), nil
 }
 
 // validateEnrollPin reports whether candidate matches the currently-minted,
@@ -583,22 +604,27 @@ func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "enrollment PIN is only available on the local network", http.StatusForbidden)
 		return
 	}
-	pin, expiresIn, err := s.ownerAccess().mintEnrollPin()
+	pin, bootstrapID, expiresIn, err := s.ownerAccess().mintEnrollPin()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Log only the PIN — the RAW bootstrap_id is a bearer secret and must not land
+	// in logs; it travels only in this response to the LAN browser.
 	slog.Info("owner-access enrollment PIN minted",
 		"pin", pin, "expires_in_s", expiresIn)
 	// Self-publish the signed descriptor to the relay so a fresh browser holding
-	// this PIN can claim it and enroll its first passkey (multi-tenant onboarding,
-	// Task 5). Best-effort + off the response path: publishBootstrapDescriptor is
-	// a no-op when no relay is wired or any device is already enrolled, so the PIN
-	// response never waits on (or fails because of) the relay.
-	go s.publishBootstrapDescriptor(pin)
+	// this bootstrap_id can claim it and enroll its first passkey (multi-tenant
+	// onboarding, Task 5). The relay keys its store on hex(sha256(bootstrap_id)) —
+	// the raw value never leaves the Pi except in this LAN response. Best-effort +
+	// off the response path: publishBootstrapDescriptor is a no-op when no relay is
+	// wired or any device is already enrolled, so the response never waits on (or
+	// fails because of) the relay.
+	go s.publishBootstrapDescriptor(bootstrapID)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"pin":          pin,
+		"bootstrap_id": bootstrapID,
 		"expires_in_s": expiresIn,
 	})
 }
@@ -733,9 +759,20 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, fmt.Sprintf("save device: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := s.issueOwnerSession(w, cred.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Suppress the owner session on a tunnel-forwarded (bootstrap) enroll: the
+	// relay's bootstrapEnrollForward is the ONE path that carries enroll/finish over
+	// the relay tunnel, and the ftw_owner session cookie must NEVER traverse it (the
+	// relay already strips Set-Cookie, but we also refuse to mint the session here so
+	// it never leaves the Pi). The directory seed is Ed25519-write-sig-authed and
+	// steady-state sign-in mints the session over P2P, so a tunneled first-enroll
+	// needs no session. A DIRECT LAN enroll/finish is unmarked, so it still issues the
+	// cookie (the on-LAN operator gets an immediate session). The login/finish path
+	// is untouched.
+	if !s.isTunneled(r) {
+		if err := s.issueOwnerSession(w, cred.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{

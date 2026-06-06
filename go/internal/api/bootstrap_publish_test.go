@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -21,10 +22,12 @@ import (
 
 // bootstrapPublishSigningStringForTest reconstructs the relay's canonical signing
 // string (cmd/ftw-relay/bootstrap_http.go bootstrapPublishSigningString) so the
-// test verifies the OUTER publish sig over exactly the bytes the relay checks.
-func bootstrapPublishSigningStringForTest(siteID, pinHash string, descriptor []byte) string {
+// test verifies the OUTER publish sig over exactly the bytes the relay checks. It
+// binds (site_id, claim_key, ts_ms, sha256(descriptor)) — claim_key is the
+// high-entropy handle hex(sha256(bootstrap_id)), NEVER the PIN.
+func bootstrapPublishSigningStringForTest(siteID, claimKey string, tsMs int64, descriptor []byte) string {
 	dh := sha256.Sum256(descriptor)
-	return "ftw-bootstrap:v1:" + siteID + ":" + pinHash + ":" + hex.EncodeToString(dh[:])
+	return "ftw-bootstrap:v1:" + siteID + ":" + claimKey + ":" + strconv.FormatInt(tsMs, 10) + ":" + hex.EncodeToString(dh[:])
 }
 
 // verifyES256HexForTest mirrors the relay's verifyES256Hex: a raw r||s HEX sig of
@@ -97,8 +100,11 @@ func TestBootstrapPublishSignsBothWireForms(t *testing.T) {
 	d.RelayBaseURL = relaySrv.URL
 	srv := New(d)
 
-	const pin = "042315"
-	srv.publishBootstrapDescriptor(pin)
+	// The Pi keys the relay store on the high-entropy bootstrap_id, NOT the PIN.
+	const bootstrapID = "Zm9vYmFyLWhpZ2gtZW50cm9weS1ib290c3RyYXAtaWQtMzJieXRlcw"
+	before := time.Now().UnixMilli()
+	srv.publishBootstrapDescriptor(bootstrapID)
+	after := time.Now().UnixMilli()
 
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
@@ -109,10 +115,19 @@ func TestBootstrapPublishSignsBothWireForms(t *testing.T) {
 		t.Fatalf("PUT site_id=%q want site:test-site", fr.siteID)
 	}
 
-	// pin_hash is hex(sha256(pin)).
-	wantPinHash := sha256.Sum256([]byte(pin))
-	if fr.body.PinHash != hex.EncodeToString(wantPinHash[:]) {
-		t.Fatalf("pin_hash=%q want %q", fr.body.PinHash, hex.EncodeToString(wantPinHash[:]))
+	// claim_key is hex(sha256(bootstrap_id)) — the 256-bit unguessable handle, and
+	// MUST never be derivable from the PIN.
+	wantClaimKey := sha256.Sum256([]byte(bootstrapID))
+	if fr.body.ClaimKey != hex.EncodeToString(wantClaimKey[:]) {
+		t.Fatalf("claim_key=%q want %q", fr.body.ClaimKey, hex.EncodeToString(wantClaimKey[:]))
+	}
+
+	// ts_ms is the Pi's mint time for the relay's ±30s replay guard.
+	if fr.body.TsMs < before || fr.body.TsMs > after {
+		t.Fatalf("ts_ms=%d not within publish window [%d,%d]", fr.body.TsMs, before, after)
+	}
+	if d := time.Now().UnixMilli() - fr.body.TsMs; d > 30000 || d < -30000 {
+		t.Fatalf("ts_ms=%d outside the relay's ±30s skew window (now-ts=%d)", fr.body.TsMs, d)
 	}
 
 	// descriptor is std-base64 of the marshaled descriptor JSON.
@@ -122,7 +137,7 @@ func TestBootstrapPublishSignsBothWireForms(t *testing.T) {
 	}
 
 	// --- OUTER sig (HEX) verifies over the relay's signing string. ---
-	outerMsg := bootstrapPublishSigningStringForTest("site:test-site", fr.body.PinHash, descJSON)
+	outerMsg := bootstrapPublishSigningStringForTest("site:test-site", fr.body.ClaimKey, fr.body.TsMs, descJSON)
 	if !verifyES256HexForTest(t, signer.PublicKeyHex(), outerMsg, fr.body.Sig) {
 		t.Fatalf("OUTER publish sig (hex) does not verify over %q (sig=%q)", outerMsg, fr.body.Sig)
 	}
@@ -176,7 +191,7 @@ func TestBootstrapPublishSkippedWhenDevicesEnrolled(t *testing.T) {
 	}
 	srv := New(d)
 
-	srv.publishBootstrapDescriptor("042315")
+	srv.publishBootstrapDescriptor("Zm9vYmFyLWhpZ2gtZW50cm9weS1ib290c3RyYXAtaWQ")
 
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
@@ -200,5 +215,5 @@ func TestBootstrapPublishSkippedWhenNoRelay(t *testing.T) {
 
 	// Must not panic / block. No relay to assert against; the contract is just
 	// "returns cleanly".
-	srv.publishBootstrapDescriptor("042315")
+	srv.publishBootstrapDescriptor("Zm9vYmFyLWhpZ2gtZW50cm9weS1ib290c3RyYXAtaWQ")
 }

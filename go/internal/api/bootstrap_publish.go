@@ -2,12 +2,16 @@
 //
 // Pi-side self-publish of the signed instance descriptor to the relay's
 // /bootstrap during the brief FIRST-ENROLLMENT window (multi-tenant onboarding,
-// Task 5). When a LAN operator mints an enroll PIN (handleOwnerEnrollPin) and
-// the Pi has ZERO trusted devices yet, the Pi parks its descriptor under its
-// site so a fresh browser that knows the PIN can claim it and open the enroll
-// channel without first holding a device key. The window is self-closing: the
-// relay GCs the blob after its TTL, a completed enrollment burns it, and the Pi
-// refuses to re-publish once any device is enrolled.
+// Task 5). When a LAN operator mints an enroll PIN (handleOwnerEnrollPin) the Pi
+// also mints a high-entropy bootstrap_id; while the Pi has ZERO trusted devices
+// yet, it parks its descriptor under its site keyed on claimKey =
+// hex(sha256(bootstrap_id)) so a fresh browser that holds the bootstrap_id (from
+// the URL fragment) can claim it and open the enroll channel without first holding
+// a device key. The relay keys the store on the unguessable claimKey, NEVER on the
+// PIN — the PIN stays a separate LAN-presence proof the Pi validates on the
+// forwarded enroll. The window is self-closing: the relay GCs the blob after its
+// TTL, a completed enrollment burns it, and the Pi refuses to re-publish once any
+// device is enrolled.
 //
 // TWO signatures, TWO encodings — this is the whole point of the file:
 //   - INNER descriptor `sig` (base64url, no padding): built by the shared
@@ -27,30 +31,36 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // bootstrapPublishIO is the PUT {relay}/bootstrap/{site_id} body. It MUST match
 // the relay's struct (cmd/ftw-relay/bootstrap_http.go bootstrapPublishIO):
-// descriptor is std-base64 of the Pi-signed descriptor JSON; pin_hash is
-// hex(sha256(PIN)); sig is the ES256 raw r||s HEX signature over
+// descriptor is std-base64 of the Pi-signed descriptor JSON; claim_key is
+// hex(sha256(bootstrap_id)) — the 256-bit unguessable handle the relay keys the
+// store on (NEVER the 6-digit PIN); ts_ms is this Pi's mint time for the relay's
+// replay guard; sig is the ES256 raw r||s HEX signature over
 // bootstrapPublishSigningString (the same wire form /me/register uses).
 type bootstrapPublishIO struct {
 	Descriptor string `json:"descriptor"`
-	PinHash    string `json:"pin_hash"`
+	ClaimKey   string `json:"claim_key"`
+	TsMs       int64  `json:"ts_ms"`
 	Sig        string `json:"sig"`
 }
 
 // bootstrapPublishSigningString is the canonical message the Pi signs to authorise
 // parking its descriptor under a site. It MUST be byte-identical to the relay's
-// reconstruction (cmd/ftw-relay/bootstrap_http.go) — versioned and binding
-// (site_id, pin_hash, sha256(descriptor)) so a captured signature can't be lifted
-// to another site, re-keyed to a different PIN, or swapped onto a tampered
-// descriptor. The descriptor is hashed (not inlined) to keep the string bounded.
-func bootstrapPublishSigningString(siteID, pinHash string, descriptor []byte) string {
+// reconstruction (cmd/ftw-relay/bootstrap_http.go bootstrapPublishSigningString) —
+// versioned and binding (site_id, claim_key, ts_ms, sha256(descriptor)) so a
+// captured signature can't be lifted to another site, re-keyed to a different
+// claim_key, replayed after its window, or swapped onto a tampered descriptor.
+// claim_key is hex(sha256(bootstrap_id)) — the relay never sees the raw bootstrap
+// secret. The descriptor is hashed (not inlined) to keep the string bounded.
+func bootstrapPublishSigningString(siteID, claimKey string, tsMs int64, descriptor []byte) string {
 	dh := sha256.Sum256(descriptor)
-	return "ftw-bootstrap:v1:" + siteID + ":" + pinHash + ":" + hex.EncodeToString(dh[:])
+	return "ftw-bootstrap:v1:" + siteID + ":" + claimKey + ":" + strconv.FormatInt(tsMs, 10) + ":" + hex.EncodeToString(dh[:])
 }
 
 // bootstrapPublishTimeout bounds the single best-effort PUT so a slow/dead relay
@@ -58,16 +68,19 @@ func bootstrapPublishSigningString(siteID, pinHash string, descriptor []byte) st
 const bootstrapPublishTimeout = 10 * time.Second
 
 // publishBootstrapDescriptor parks this Pi's signed instance descriptor under its
-// site on the relay so a fresh browser holding the freshly-minted enroll PIN can
-// claim it and enroll its first passkey. Best-effort and NON-BLOCKING by design:
-// every failure path logs and returns; it never errors back to the PIN response.
+// site on the relay so a fresh browser holding the freshly-minted bootstrap_id can
+// claim it and enroll its first passkey. The relay keys the store on
+// claimKey = hex(sha256(bootstrap_id)); the RAW bootstrap_id never leaves the Pi
+// (it goes only to the LAN browser, which derives the same claimKey from the URL
+// fragment). Best-effort and NON-BLOCKING by design: every failure path logs and
+// returns; it never errors back to the PIN response.
 //
 // It self-gates to the zero-device first-enrollment window: if ANY trusted device
 // is already enrolled, the bootstrap window is closed and we publish nothing
 // (re-publishing then would re-open an internet-claimable window for an already
 // owned Pi). It also no-ops when no relay is wired (LAN-only deploy) or no signer
 // is available (identity load failed on boot).
-func (s *Server) publishBootstrapDescriptor(pin string) {
+func (s *Server) publishBootstrapDescriptor(bootstrapID string) {
 	relayBase := strings.TrimRight(s.deps.RelayBaseURL, "/")
 	if relayBase == "" {
 		return // LAN-only: no relay to publish to.
@@ -93,12 +106,18 @@ func (s *Server) publishBootstrapDescriptor(pin string) {
 		return
 	}
 
-	pinHashBytes := sha256.Sum256([]byte(pin))
-	pinHash := hex.EncodeToString(pinHashBytes[:])
+	// claim_key is the relay store key: hex(sha256(bootstrap_id)). The relay never
+	// sees the raw bootstrap_id (the browser derives the same digest from the URL
+	// fragment), so a leaked store key reveals nothing guessable.
+	claimKeyBytes := sha256.Sum256([]byte(bootstrapID))
+	claimKey := hex.EncodeToString(claimKeyBytes[:])
+	// ts_ms is minted at PUT time so the relay's ±30s replay guard can expire a
+	// captured publish body.
+	tsMs := time.Now().UnixMilli()
 
 	// OUTER sig: HEX raw r||s over the relay-canonical signing string. This is the
 	// /me/register wire form the relay's verifyES256Hex expects — do NOT re-encode.
-	sigHex, err := s.deps.InstanceSigner.SignRawHex(bootstrapPublishSigningString(siteID, pinHash, descJSON))
+	sigHex, err := s.deps.InstanceSigner.SignRawHex(bootstrapPublishSigningString(siteID, claimKey, tsMs, descJSON))
 	if err != nil {
 		slog.Warn("bootstrap-publish: sign publish", "site_id", siteID, "err", err)
 		return
@@ -106,7 +125,8 @@ func (s *Server) publishBootstrapDescriptor(pin string) {
 
 	body, err := json.Marshal(bootstrapPublishIO{
 		Descriptor: base64.StdEncoding.EncodeToString(descJSON),
-		PinHash:    pinHash,
+		ClaimKey:   claimKey,
+		TsMs:       tsMs,
 		Sig:        sigHex,
 	})
 	if err != nil {

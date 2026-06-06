@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -28,8 +29,9 @@ func TestEnrollPinLANvsTunnel(t *testing.T) {
 		t.Fatalf("LAN enroll-pin should be 200, got %d body=%q", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		Pin       string `json:"pin"`
-		ExpiresIn int    `json:"expires_in_s"`
+		Pin         string `json:"pin"`
+		BootstrapID string `json:"bootstrap_id"`
+		ExpiresIn   int    `json:"expires_in_s"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode pin response: %v body=%q", err, rec.Body.String())
@@ -44,6 +46,16 @@ func TestEnrollPinLANvsTunnel(t *testing.T) {
 	}
 	if out.ExpiresIn <= 0 || out.ExpiresIn > 600 {
 		t.Fatalf("expected expires_in_s in (0,600], got %d", out.ExpiresIn)
+	}
+	// The response MUST carry a high-entropy bootstrap_id (>=32 bytes CSPRNG,
+	// base64url-no-pad) — the relay's unguessable claim handle. It must NOT be
+	// derivable from the 6-digit PIN.
+	bid, err := base64.RawURLEncoding.DecodeString(out.BootstrapID)
+	if err != nil {
+		t.Fatalf("bootstrap_id is not base64url-no-pad: %q (%v)", out.BootstrapID, err)
+	}
+	if len(bid) < 32 {
+		t.Fatalf("bootstrap_id must be >=32 bytes of entropy, got %d", len(bid))
 	}
 
 	// Relay-tunnelled (marked) → 403, never hand out the PIN over the tunnel.

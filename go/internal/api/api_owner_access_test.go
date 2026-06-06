@@ -132,7 +132,7 @@ func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
 func TestEnrollPinBurnsAfterMaxTries(t *testing.T) {
 	srv := New(minDeps(t))
 	oa := srv.ownerAccess()
-	pin, _, err := oa.mintEnrollPin()
+	pin, _, _, err := oa.mintEnrollPin()
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
