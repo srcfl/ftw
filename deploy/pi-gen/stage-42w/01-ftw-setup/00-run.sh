@@ -26,6 +26,11 @@ DEBIAN_FRONTEND=noninteractive apt-get -y -qq install --no-install-recommends \
 systemctl enable docker.service
 systemctl enable avahi-daemon.service
 systemctl enable NetworkManager.service
+# pi-gen's export-image stage runs another apt update under qemu. Leaving
+# Docker's third-party apt source enabled has repeatedly OOMed that step on
+# GitHub hosted runners after Docker is already installed. App updates pull
+# containers from GHCR, so the image build does not need this repo afterward.
+rm -f /etc/apt/sources.list.d/docker.list
 # /etc/hosts entry prevents sudo's "unable to resolve host 42w"
 # warning on first boot. pi-gen writes /etc/hostname from
 # TARGET_HOSTNAME but leaves /etc/hosts at the stock Raspberry Pi
