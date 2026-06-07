@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.120.1
+
+### Patch Changes
+
+- f89bfe6: Fix the Raspberry Pi SD-card image release build so pi-gen does not OOM on Docker's apt repository during export.
+
 ## 0.120.0
 
 ### Minor Changes
