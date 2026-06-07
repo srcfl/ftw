@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,6 +47,32 @@ func apiPortFromServer(t *testing.T, ts *httptest.Server) int {
 		t.Fatalf("parse port: %v", err)
 	}
 	return p
+}
+
+func TestOwnerRelayMultiTenantEnabled_DefaultsOn(t *testing.T) {
+	old, hadOld := os.LookupEnv("FTW_MULTI_TENANT")
+	t.Cleanup(func() {
+		if hadOld {
+			_ = os.Setenv("FTW_MULTI_TENANT", old)
+		} else {
+			_ = os.Unsetenv("FTW_MULTI_TENANT")
+		}
+	})
+
+	_ = os.Unsetenv("FTW_MULTI_TENANT")
+	if !ownerRelayMultiTenantEnabled() {
+		t.Fatal("unset FTW_MULTI_TENANT must default to true so official releases can run first-device setup")
+	}
+
+	_ = os.Setenv("FTW_MULTI_TENANT", "off")
+	if ownerRelayMultiTenantEnabled() {
+		t.Fatal("FTW_MULTI_TENANT=off must disable the bootstrap enroll-forward escape hatch")
+	}
+
+	_ = os.Setenv("FTW_MULTI_TENANT", "1")
+	if !ownerRelayMultiTenantEnabled() {
+		t.Fatal("FTW_MULTI_TENANT=1 must enable bootstrap enroll-forward")
+	}
 }
 
 // Under multi-tenant the enroll-forward host MUST route the two enroll POSTs to
@@ -114,8 +141,39 @@ func TestEnrollForwardHost_MultiTenant_NonEnrollPostRefused(t *testing.T) {
 	}
 }
 
-// Single-tenant (multiTenant=false) must be byte-identical to today: every POST
-// is 405, including the enroll routes — no enroll-forward host exists.
+func TestEnrollForwardHost_DefaultMode_AllowsFirstDeviceSetup(t *testing.T) {
+	old, hadOld := os.LookupEnv("FTW_MULTI_TENANT")
+	t.Cleanup(func() {
+		if hadOld {
+			_ = os.Setenv("FTW_MULTI_TENANT", old)
+		} else {
+			_ = os.Unsetenv("FTW_MULTI_TENANT")
+		}
+	})
+	_ = os.Unsetenv("FTW_MULTI_TENANT")
+
+	fake := &fakeLocalAPI{}
+	ts := httptest.NewServer(fake)
+	defer ts.Close()
+	h := buildStaticAssetHandler(apiPortFromServer(t, ts), ownerRelayMultiTenantEnabled(), "marker")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/owner-access/enroll/start?pin=123456", strings.NewReader("{}"))
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default-mode enroll/start: got %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if fake.hits != 1 {
+		t.Fatalf("default-mode enroll/start hit local API %d times, want 1", fake.hits)
+	}
+	if fake.gotMarker != "marker" {
+		t.Fatalf("default-mode enroll/start marker = %q, want marker", fake.gotMarker)
+	}
+}
+
+// Explicit single-tenant (multiTenant=false) must refuse every POST, including
+// the enroll routes — no enroll-forward host exists.
 func TestEnrollForwardHost_SingleTenant_EnrollPostStill405(t *testing.T) {
 	fake := &fakeLocalAPI{}
 	ts := httptest.NewServer(fake)
@@ -129,9 +187,33 @@ func TestEnrollForwardHost_SingleTenant_EnrollPostStill405(t *testing.T) {
 		if rec.Code != http.StatusMethodNotAllowed {
 			t.Fatalf("single-tenant POST enroll/%s: got %d, want 405", which, rec.Code)
 		}
+		if got := rec.Header().Get("X-FTW-Error-Code"); got != "FTW_REMOTE_P2P_ONLY" {
+			t.Fatalf("single-tenant POST enroll/%s error code = %q, want FTW_REMOTE_P2P_ONLY", which, got)
+		}
 		if fake.hits != 0 {
 			t.Fatalf("single-tenant POST enroll/%s leaked to the local API", which)
 		}
+	}
+}
+
+func TestEnrollForwardHost_OwnerAPIGetHasDiagnosticCode(t *testing.T) {
+	fake := &fakeLocalAPI{}
+	ts := httptest.NewServer(fake)
+	defer ts.Close()
+	h := buildStaticAssetHandler(apiPortFromServer(t, ts), true, "marker")
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("GET /api/status: got %d, want 403", rec.Code)
+	}
+	if got := rec.Header().Get("X-FTW-Error-Code"); got != "FTW_REMOTE_API_P2P_ONLY" {
+		t.Fatalf("GET /api/status error code = %q, want FTW_REMOTE_API_P2P_ONLY", got)
+	}
+	if fake.hits != 0 {
+		t.Fatal("GET /api/status leaked to the local API")
 	}
 }
 

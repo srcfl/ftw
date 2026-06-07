@@ -192,11 +192,11 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 	// they can't open the P2P channel to enroll one — this is the one HTTP bridge
 	// across that gap). The host below additionally accepts those two POSTs and
 	// stamps X-FTW-Tunnel so the Pi's isTunneled gate fires (PIN + possession-proof
-	// + zero-device recheck + owner-cookie suppression). Default OFF: single-tenant
-	// deploys never wire the enroll routes and the host stays byte-identical to the
-	// static-only behaviour. (-multi-tenant lives on the relay; remote access
-	// opt-in lives in the Pi config.)
-	multiTenant := envBoolDefault("FTW_MULTI_TENANT", false)
+	// + zero-device recheck + owner-cookie suppression). Enabled by default for
+	// the official home.fortytwowatts.com flow; remote access still remains opt-in
+	// in the Pi config, and FTW_MULTI_TENANT=off is a hardening escape hatch for a
+	// self-hosted relay that never serves first-device bootstrap.
+	multiTenant := ownerRelayMultiTenantEnabled()
 	staticHost := buildStaticAssetHost(relayURL, hostID, apiPort, multiTenant, tunnelMarker)
 	go staticHost.Run(ctx)
 
@@ -327,6 +327,10 @@ func buildStaticAssetHost(relayURL, hostID string, apiPort int, multiTenant bool
 	return tunnel.NewHost(relayURL, hostID, buildStaticAssetHandler(apiPort, multiTenant, tunnelMarker))
 }
 
+func ownerRelayMultiTenantEnabled() bool {
+	return envBoolDefault("FTW_MULTI_TENANT", true)
+}
+
 // buildStaticAssetHandler constructs the fail-closed tunnel handler. It is split
 // out from buildStaticAssetHost so it can be exercised directly against a fake
 // local API in tests (the reverse proxy targets 127.0.0.1:<apiPort>).
@@ -379,11 +383,13 @@ func (h *staticAssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if r.Method != http.MethodGet {
-		http.Error(w, "owner API is P2P-only", http.StatusMethodNotAllowed)
+		writeStaticHostP2POnly(w, r, http.StatusMethodNotAllowed, "FTW_REMOTE_P2P_ONLY",
+			"owner API is P2P-only; this Pi tunnel serves static assets and first-device setup only")
 		return
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/identity" {
-		http.Error(w, "owner API is P2P-only", http.StatusForbidden)
+		writeStaticHostP2POnly(w, r, http.StatusForbidden, "FTW_REMOTE_API_P2P_ONLY",
+			"owner API is P2P-only; wait for the secure channel")
 		return
 	}
 	// Strip any owner cookie before proxying to the local API: a static asset
@@ -394,6 +400,17 @@ func (h *staticAssetHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("Cookie")
 	rec := &stripSetCookieWriter{ResponseWriter: w}
 	h.proxy.ServeHTTP(rec, r)
+}
+
+func writeStaticHostP2POnly(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
+	w.Header().Set("X-FTW-Error-Code", code)
+	slog.Warn("owner-access tunnel request rejected",
+		"code", code,
+		"status", status,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"remote", r.RemoteAddr)
+	http.Error(w, code+": "+msg, status)
 }
 
 // stripSetCookieWriter drops any Set-Cookie the local API emits on the static

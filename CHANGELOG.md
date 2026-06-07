@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.120.4
+
+### Patch Changes
+
+- Fix first-device Remote Access setup for normal Pi releases: the Pi-side tunnel now allows the claim-key-gated enroll start/finish bridge by default, while all other owner API calls remain P2P-only. The tunnel also returns stable `FTW_*` diagnostic codes when it refuses a request.
+
 ## 0.120.3
 
 ### Patch Changes

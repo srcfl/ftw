@@ -310,14 +310,15 @@ proof — so the lost-response edge (the relay never hears the `200`) can never
 enroll a second device.
 
 **The production enroll-forward host.** The two `enroll/{start,finish}` POSTs are
-enqueued onto the box's tunnel queue. The box drains them with a narrow
-multi-tenant tunnel host (`cmd/forty-two-watts/owner_relay_register.go`,
-`staticAssetHandler` under `FTW_MULTI_TENANT`) that serves **only** those two
-POSTs, stamps the per-process `X-FTW-Tunnel` marker so the box's `isTunneled`
-gate fires (PIN + possession-proof + zero-device recheck + owner-cookie
-suppression), and strips `Set-Cookie` on the way back. Every other `/api/*` path
-and every non-`GET` method stays fail-closed. Single-tenant deploys never wire
-these routes and the host is byte-identical to the static-only behaviour.
+enqueued onto the box's tunnel queue. The box drains them with a narrow tunnel
+host (`cmd/forty-two-watts/owner_relay_register.go`, `staticAssetHandler`) that
+serves **only** those two POSTs, stamps the per-process `X-FTW-Tunnel` marker so
+the box's `isTunneled` gate fires (PIN + possession-proof + zero-device recheck +
+owner-cookie suppression), and strips `Set-Cookie` on the way back. Every other
+`/api/*` path and every non-`GET` method stays fail-closed. This is enabled by
+default in official releases because first-device setup needs it; set
+`FTW_MULTI_TENANT=off` only for a self-hosted relay that will never use public
+first-device bootstrap.
 
 **Two secrets, two checkers, by design:** the relay gate is the high-entropy
 `claim_key`; the PIN is the box's separate LAN-presence factor; the
