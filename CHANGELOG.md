@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.120.0
+
+### Minor Changes
+
+- 0174f14: Multi-tenant home-route client + Pi instance descriptor — still behind the relay's `-multi-tenant` flag (NOT yet live in production).
+
+  Completes the browser + Pi half of the multi-tenant home route (the relay half shipped in v0.118.x):
+
+  - **Web:** a PUBLIC landing for anonymous visitors (brand + passkey button only — no instance data); passkey sign-in that derives the directory key from the WebAuthn **PRF** extension, fetches + AES-GCM-decrypts the per-wallet directory blob from the relay, verifies each entry's Pi signature, and routes to the chosen instance's **own** Pi. Identity is pinned **first-key-wins** per `(origin, site_id)` and the relay's `/api/identity` is **never trusted on the public route** (anti-MITM); the Ed25519 directory write key is generated once and synced inside the encrypted blob.
+  - **Pi:** `GET /api/owner-access/instance-descriptor` (owner-authed, served over the P2P channel) returns the Pi's signed `{site_id, pi_pubkey, label}` so the browser can build + verify its directory entry; first enrollment seeds the encrypted directory blob.
+  - The single-tenant / LAN sign-in flow is **untouched** — the multi-tenant path is additive and only active on the public home route.
+
+  Codex-reviewed: two anti-MITM findings (relay-identity TOFU on the public route; pin-overwrite) found and fixed. Cross-language interop is locked by tests: JS-signed blob PUTs verify in Go, and Go-signed descriptors verify in the browser.
+
+  Cutover (flipping `-multi-tenant` on the relay + deploying this web bundle as `-home-web`) still needs the WebAuthn-PRF determinism device test on real synced devices + live browser validation. See `docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md`.
+
+- 0174f14: Multi-tenant onboarding bootstrap on a high-entropy `bootstrap_id` — behind the relay's `-multi-tenant` flag (default OFF, not yet live in production).
+
+  A first-time user with no device key can enroll their first passkey on `home.*` without a prior P2P channel. On the LAN the box mints a 6-digit PIN **and** a high-entropy `bootstrap_id` (≥32 bytes CSPRNG, base64url); the raw secret travels only in the onboarding link's `#fragment` (QR or tap). The relay keys its blind, TTL'd bootstrap store on `claim_key = hex(sha256(bootstrap_id))` — **never** the PIN — so it never holds a guessable secret. The browser derives the same `claim_key`, claims the box's signed descriptor back, verifies its Pi signature, and enrolls through the relay's single enroll-forward (`?claim_key` relay gate + `?pin` validated by the box, 5-try burn). The publish carries `ts_ms` (±30s replay guard) and the enroll-forward is atomic single-use (a 200 finish consumes the window).
+
+  Reworked from the earlier `sha256(PIN)`-keyed store (a Codex audit found the ~10⁶ PIN space brute-forceable offline). A second Codex re-audit then found two more issues, both now closed:
+
+  - **Ceremony-bound, body-bound possession proof** (closes a relay-visible-PIN HIGH **and** a device_pubkey-substitution HIGH). The relay forwards `?pin` to the box, so a compromised relay would see the 6-digit PIN. The browser now also sends `bootstrap_proof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token + "|" + hex(sha256(finish_body))))` on enroll/finish; the box validates it (constant-time) on the tunneled path before saving any device. Binding a hash of the **exact finish body** authenticates the whole payload — including the top-level `device_pubkey` (the C4 silent-login key), the WebAuthn attestation, and the friendly name — so a MITM relay can no longer swap `device_pubkey` for its own key (which would have made the relay-controlled key a trusted device and let device-PoP mint `ftw_owner` for the relay). The relay holds only `sha256(bootstrap_id)`, so it can neither forge a proof for its own `ceremony_token` nor reuse the user's single-use one, and it cannot recompute the HMAC after tampering with the body. A relay that captured the PIN still cannot run its own WebAuthn enrollment nor substitute a key. An untunneled LAN finish requires no proof.
+  - **Single-use before side effects** (closes a concurrent-double-finish BLOCKER). The relay now atomically RESERVES the bootstrap (test-and-set) BEFORE forwarding enroll/finish to the box — a concurrent second finish loses the latch and is refused before its enroll can reach the box. A box 200 burns the window; a box rejection releases it for retry. As a source-of-truth backstop, the box re-checks the zero-device window at finish time and refuses if any device already exists.
+
+  Cross-language interop is locked by tests (Go-signed bootstrap descriptor verifies in the browser `verifyEntry`; the browser's `claim_key` and the body-bound `bootstrap_proof` derivations match the box/relay byte for byte, against Go- and openssl-verified vectors). The relay↔box enroll path is now end-to-end: a full-stack e2e drives the real `ftw-relay` enroll-forward host into the real box enroll handler — software-attested enroll/finish with a valid proof (200), wrong/missing proof (403), a MITM relay that swaps `device_pubkey` in the forwarded body (403, no device saved), concurrent double-finish (exactly one 200 + one 403 via the relay reservation), the box zero-device recheck (403 once a device exists), and the C2 fail-closed cases. Still gated by `-multi-tenant` (default OFF); `home.*` stays a 404 in production.
+
+- 0174f14: Route public dashboard price, history, savings, plan, and loadpoint reads through the strict owner P2P transport so they render on the relay-backed home route.
+
+  Remember multiple browser-local device keys for a synced passkey, so Safari on Mac can silent-login after an iPhone-enrolled passkey has already pinned its own key.
+
+  Add a Settings Access tab for the opt-in remote access switch, passkey management, remembered browser keys, and active session revocation.
+
+  Make `remote_access.enabled` the only remote-access opt-in; `FTW_REMOTE_ACCESS_ENABLED` no longer enables remote access by itself.
+
+  Keep the home-route sign-in gate retrying while the owner P2P channel is still opening, and give Chrome/WebRTC a longer handshake window before retrying.
+
+  Clear stale browser-local `ftw.p2p=off` toggles from older builds on the public home route, where strict owner traffic must use the P2P channel.
+
+  Generate or rotate to a persistent high-entropy owner `site_id`; guessable `site:<name>` routing is not preserved.
+
+  Stop bootstrapping fresh public browsers to `site:Home`; without a cached directory the home route now shows the setup/sign-in landing instead of guessing a site.
+
+  Stop serving the dashboard app bundle from the relay in multi-tenant mode. The relay now serves only a small remote loader/login allowlist; after the browser decrypts its directory, static app GETs are routed to the selected Pi while owner APIs remain P2P-only.
+
+  Publish `ftw-relay-web.tar.gz` as a minimal relay bootstrap asset so relay deploys no longer copy the Pi dashboard `web/` bundle.
+
+  Cache Pi-routed static dashboard assets privately in the browser and pause advanced-panel polling until Advanced is visible, improving repeat-load and remote-route responsiveness.
+
 ## 0.119.0
 
 ### Minor Changes
