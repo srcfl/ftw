@@ -184,23 +184,36 @@ required.
 ## Multi-tenant home route + onboarding bootstrap
 
 The relay can run as a **public multi-tenant front door**: one `home.*` host that
-serves only the relay-disk SPA shell and routes each signed-in wallet to its own
-Pi. It never forwards owner data to a Pi — owner traffic rides the DTLS
-DataChannel (P2P-only). It is **off by default**; turn it on with:
+serves only a tiny relay-disk loader/login bundle. After the browser decrypts
+its directory, dashboard static GETs are routed to the selected Pi; owner data
+traffic rides the DTLS DataChannel (P2P-only). It is **off by default**.
+
+Do **not** point `-home-web` at the Pi dashboard `web/` directory. Use the
+release asset `ftw-relay-web.tar.gz`, which is built from
+`web/relay-bootstrap-files.txt` and intentionally excludes dashboard app files
+such as `next-app.js`, settings tabs, charts, and component modules.
+
+Install the relay bootstrap bundle:
+
+```
+sudo mkdir -p /usr/local/share/ftw-relay-web
+curl -fsSL -o /tmp/ftw-relay-web.tar.gz \
+  https://github.com/frahlg/forty-two-watts/releases/latest/download/ftw-relay-web.tar.gz
+sudo tar -C /usr/local/share/ftw-relay-web -xzf /tmp/ftw-relay-web.tar.gz
+```
+
+Then start the relay with:
 
 ```
 ftw-relay \
   -addr :443 -cert … -key … \
-  -multi-tenant \              # implies -require-device-key (fail closed)
-  -require-device-key \        # C2 signaling gate: an offer must carry a device-key proof
+  -multi-tenant \
   -home-host home.fortytwowatts.com \
-  -home-web /usr/local/share/ftw-web \   # the web/ bundle served from the relay disk
+  -home-web /usr/local/share/ftw-relay-web \
   -wallet-blob-dir /var/lib/ftw-relay/blobs   # per-wallet ENCRYPTED directory blobs (relay never decrypts)
 ```
 
-`-multi-tenant` refuses to start without `-require-device-key` (a forged
-`site_id` would otherwise skip the proof and the relay could contact the wrong
-Pi). `-home-site` / `-home-pubkey` become no-ops under `-multi-tenant`.
+`-home-site` / `-home-pubkey` become no-ops under `-multi-tenant`.
 
 ### What the relay stores (and never reads)
 

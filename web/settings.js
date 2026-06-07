@@ -51,7 +51,7 @@
   var currentTab = "control";
 
   openBtn.addEventListener("click", function () {
-    fetch("/api/config")
+    ownerFetch("/api/config")
       .then(function (r) { return r.json(); })
       .then(function (cfg) {
         currentConfig = cfg;
@@ -282,6 +282,7 @@
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
       renderTab: renderTab,
+      ownerFetch: ownerFetch,
     };
     var html = "";
     try {

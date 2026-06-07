@@ -91,4 +91,12 @@ describe("p2p.js owner-fetch wiring (FIX-B)", () => {
       "the wiring must be a direct alias of p2pFetchStrict, not a second implementation",
     );
   });
+
+  it("ignores stale browser-local P2P-off toggles on the public owner route", () => {
+    assert.match(
+      P2P_SRC,
+      /localStorage\.getItem\("ftw\.p2p"\)\s*===\s*"off"[\s\S]*?localStorage\.removeItem\("ftw\.p2p"\)/,
+      "a stale ftw.p2p=off from older UI must be cleared, not leave home stuck on the connecting gate",
+    );
+  });
 });

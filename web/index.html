@@ -69,7 +69,7 @@
     }
   }
   </script>
-  <script type="module" src="/components/index.js?v=histwrap3"></script>
+  <script type="module" src="/components/index.js?v=histwrap5"></script>
 </head>
 <body class="ftw-next">
   <header>
@@ -174,6 +174,7 @@
       </div>
       <div class="modal-tabs" id="settings-tabs">
         <button data-tab="control" class="active">Control</button>
+        <button data-tab="access">Access</button>
         <button data-tab="devices">Devices</button>
         <button data-tab="loadpoints">Loadpoints</button>
         <button data-tab="price">Price</button>
@@ -764,10 +765,11 @@
        with no directory simply gets the public landing until they sign in. -->
   <script type="module" src="/owner-access/prf.js?v=prf1"></script>
   <script type="module" src="/owner-access/instance-sync.js?v=isync1"></script>
-  <script src="/p2p.js?v=p2p6"></script>
-  <script src="/next-app.js?v=next7"></script>
-  <script src="/settings.js?v=diag1"></script>
+  <script src="/p2p.js?v=p2p14"></script>
+  <script src="/next-app.js?v=next19"></script>
+  <script src="/settings.js?v=diag2"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
+  <script src="/settings/tabs/access.js?v=access1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit1"></script>
   <script src="/settings/tabs/loadpoints.js?v=lp1"></script>
   <script src="/settings/tabs/price.js?v=tabsplit1"></script>
@@ -779,10 +781,10 @@
   <script src="/settings/tabs/ev.js?v=tabsplit1"></script>
   <script src="/settings/tabs/system.js?v=tabsplit1"></script>
   <script src="/diagnostics-modal.js?v=diag2"></script>
-  <script src="/models.js?v=diag1"></script>
-  <script src="/plan.js?v=diag1"></script>
-  <script src="/twins.js?v=diag1"></script>
-  <script src="/loadpoints.js?v=lp1"></script>
+  <script src="/models.js?v=diag2"></script>
+  <script src="/plan.js?v=diag2"></script>
+  <script src="/twins.js?v=diag2"></script>
+  <script src="/loadpoints.js?v=lp3"></script>
   <script src="/diagnose.js?v=diag1"></script>
   <script src="/update-badge.js?v=modal1" defer></script>
   <script>
@@ -825,6 +827,7 @@
       function apply(mode) {
         document.body.classList.remove('simple', 'advanced');
         document.body.classList.add(mode);
+        document.dispatchEvent(new CustomEvent('ftw-ui-mode-change', { detail: { mode: mode } }));
         if (!btn) return;
         btn.textContent = mode === 'advanced' ? '★ Advanced' : 'Advanced';
         btn.title = mode === 'advanced' ? 'Switch to simple view' : 'Show advanced controls + diagnostics';

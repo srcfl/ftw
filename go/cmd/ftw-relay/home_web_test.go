@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,17 +12,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
 
-// home_web_test.go — SLICE 1 (serve the home shell from the relay's -home-web
-// dir), SLICE 2 (answer /api/identity from the pinned home pubkey), and C1
-// (/me/register publishes the site's trusted device keys).
+// home_web_test.go — single-tenant SLICE 1 (serve the home shell from
+// -home-web), multi-tenant remote loader/static routing, SLICE 2 (answer
+// /api/identity from the pinned home pubkey), and C1 (/me/register publishes
+// the site's trusted device keys).
 
 // TestMeRegister_PublishesDeviceKeys (C1) proves a device_pubkeys array on the
 // ES256-signed /me/register is stored per-site, canonicalised + de-duped, and
@@ -468,13 +472,63 @@ func TestMultiTenantRoutesOnHomeHost(t *testing.T) {
 	}
 }
 
-// Under -multi-tenant the home host serves ONLY the relay-disk landing/shell —
-// it never resolves a -home-site and never forwards to a Pi. The landing is
-// served for "/", /api/* is 403 (owner data is P2P-only), and a non-GET is 405.
-// Crucially this holds with NO -home-site and NO -home-pubkey configured.
-func TestMultiTenantHomeServesLandingNeverForwards(t *testing.T) {
+// Under -multi-tenant the anonymous home host serves ONLY the relay-disk
+// bootstrap allowlist. Once the browser decrypts its directory it writes the
+// opaque site_id routing cookie, and only then do static app GETs forward to the
+// chosen Pi. /api/* remains refused in both states.
+func TestRelayBootstrapManifestMatchesAllowlist(t *testing.T) {
+	b, err := os.ReadFile("../../../web/relay-bootstrap-files.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		rel := strings.TrimSpace(line)
+		if rel == "" || strings.HasPrefix(rel, "#") {
+			continue
+		}
+		got, ok := homeBootstrapRelPath("/" + rel)
+		if !ok {
+			t.Fatalf("%s is in web/relay-bootstrap-files.txt but homeBootstrapRelPath rejects it", rel)
+		}
+		if got != rel {
+			t.Fatalf("%s maps to %s, want exact manifest path", rel, got)
+		}
+	}
+	for _, p := range []string{
+		"/next-app.js",
+		"/next.css",
+		"/app.js",
+		"/settings.js",
+		"/components/index.js",
+		"/components/ftw-price-chart.js",
+		"/settings/tabs/access.js",
+		"/plan.js",
+		"/loadpoints.js",
+	} {
+		if rel, ok := homeBootstrapRelPath(p); ok {
+			t.Fatalf("%s unexpectedly allowed in relay bootstrap as %s", p, rel)
+		}
+	}
+}
+
+func TestMultiTenantHomeBootstrapThenPiStaticForward(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>LANDING</h1>"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "remote-loader.html"), []byte("<h1>LOADER</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p2p.js"), []byte("// bootstrap p2p"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Prove the allowlist, not the filesystem, controls app serving: even though
+	// next-app.js exists on relay disk in this test, anonymous clients must not get
+	// it from the relay.
+	if err := os.WriteFile(filepath.Join(dir, "next-app.js"), []byte("RELAY APP"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "owner-access"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "owner-access", "enroll.html"), []byte("LOCAL ENROLL"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	store, err := NewWalletBlobStore(t.TempDir(), 65536, 1024)
@@ -495,35 +549,89 @@ func TestMultiTenantHomeServesLandingNeverForwards(t *testing.T) {
 		WalletBlobs:      store,
 		// NOTE: no HomeSite, no HomePubKey — multi-tenant has neither.
 	}
+	if err := relay.Owners.Register("site:Pi", "host-pi", "deadbeef"); err != nil {
+		t.Fatalf("register owner: %v", err)
+	}
 	srv := httptest.NewServer(relay.Handler())
 	defer srv.Close()
 
-	do := func(method, path string) (int, string) {
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Inner-Path", r.URL.Path)
+		w.Header().Set("X-Saw-Cookie", r.Header.Get("Cookie"))
+		http.SetCookie(w, &http.Cookie{Name: "ftw_owner", Value: "must-not-leak", Path: "/"})
+		_, _ = w.Write([]byte("PI:" + r.URL.Path))
+	})
+	host := tunnel.NewHost(srv.URL, "host-pi", backend)
+	host.PollTimeout = time.Second
+	host.SetPollSecret(mustIssue(t, relay.Polls, "host-pi"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go host.Run(ctx)
+
+	routeCookie := &http.Cookie{Name: homeRouteSiteCookieName, Value: url.QueryEscape("site:Pi")}
+	do := func(method, path string, cookies ...*http.Cookie) (int, string, http.Header) {
 		req, _ := http.NewRequest(method, srv.URL+path, nil)
 		req.Host = "home.test"
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, path, err)
 		}
 		b, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return resp.StatusCode, string(b)
+		return resp.StatusCode, string(b), resp.Header
 	}
 
-	// Anonymous "/" → the relay-disk landing, no Pi involved.
-	if code, body := do(http.MethodGet, "/"); code != 200 || body != "<h1>LANDING</h1>" {
-		t.Fatalf(`GET "/" = %d %q, want 200 "<h1>LANDING</h1>" from -home-web`, code, body)
+	// Anonymous "/" → the relay-disk loader, no Pi involved.
+	if code, body, _ := do(http.MethodGet, "/"); code != 200 || body != "<h1>LOADER</h1>" {
+		t.Fatalf(`GET "/" = %d %q, want 200 "<h1>LOADER</h1>" from bootstrap`, code, body)
+	}
+	// Anonymous app asset → not served from relay disk, even if the file exists.
+	if code, body, _ := do(http.MethodGet, "/next-app.js"); code != http.StatusNotFound || strings.Contains(body, "RELAY APP") {
+		t.Fatalf("anonymous /next-app.js = %d %q, want 404 and no relay app bytes", code, body)
+	}
+	// Routing cookie set by the loader → static app GETs forward to the selected Pi.
+	if code, body, hdr := do(http.MethodGet, "/next-app.js", routeCookie); code != 200 || body != "PI:/next-app.js" {
+		t.Fatalf("routed /next-app.js = %d %q, want Pi asset", code, body)
+	} else {
+		if hdr.Get("X-Saw-Cookie") != "" {
+			t.Fatalf("relay forwarded browser cookies to Pi static request: %q", hdr.Get("X-Saw-Cookie"))
+		}
+		if got := hdr.Get("Cache-Control"); !strings.Contains(got, "private") || !strings.Contains(got, "max-age=300") {
+			t.Fatalf("unversioned static Cache-Control = %q, want short private browser cache", got)
+		}
+		for _, sc := range hdr.Values("Set-Cookie") {
+			if strings.HasPrefix(sc, "ftw_owner=") {
+				t.Fatalf("relay leaked Pi owner cookie on static response: %q", sc)
+			}
+		}
+	}
+	if code, body, hdr := do(http.MethodGet, "/next-app.js?v=next18", routeCookie); code != 200 || body != "PI:/next-app.js" {
+		t.Fatalf("routed versioned /next-app.js = %d %q, want Pi asset", code, body)
+	} else if got := hdr.Get("Cache-Control"); !strings.Contains(got, "private") || !strings.Contains(got, "max-age=86400") {
+		t.Fatalf("versioned static Cache-Control = %q, want long private browser cache", got)
+	}
+	if code, body, hdr := do(http.MethodGet, "/", routeCookie); code != 200 || body != "PI:/" {
+		t.Fatalf("routed / = %d %q, want Pi shell", code, body)
+	} else if got := hdr.Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("routed shell Cache-Control = %q, want no-store", got)
+	}
+	// Owner-access bootstrap files stay local even with the route cookie.
+	if code, body, _ := do(http.MethodGet, "/owner-access/enroll.html", routeCookie); code != 200 || body != "LOCAL ENROLL" {
+		t.Fatalf("owner-access bootstrap = %d %q, want local relay bootstrap page", code, body)
 	}
 	// /api/* is still refused (owner data is P2P-only) — even /api/identity, which
 	// under multi-tenant is per-site at /signal/{site}/identity, NOT here.
-	if code, _ := do(http.MethodGet, "/api/owner-access/whoami"); code != http.StatusForbidden {
+	if code, _, _ := do(http.MethodGet, "/api/owner-access/whoami", routeCookie); code != http.StatusForbidden {
 		t.Fatalf("/api/* = %d, want 403 under multi-tenant", code)
 	}
-	if code, _ := do(http.MethodGet, "/api/identity"); code != http.StatusForbidden {
+	if code, _, _ := do(http.MethodGet, "/api/identity", routeCookie); code != http.StatusForbidden {
 		t.Fatalf("/api/identity over home host = %d, want 403 under multi-tenant (use /signal/{site}/identity)", code)
 	}
 	// A non-GET to the home host is refused (static assets are GET-only).
-	if code, _ := do(http.MethodPost, "/anything"); code != http.StatusMethodNotAllowed {
+	if code, _, _ := do(http.MethodPost, "/anything", routeCookie); code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST to home host = %d, want 405", code)
 	}
 }

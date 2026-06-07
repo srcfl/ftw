@@ -239,6 +239,9 @@ func (s *Server) handleOwnerDevicePoP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// Best-effort observability for the access UI; a failed timestamp update must
+	// not turn a valid device proof into a login failure.
+	_ = s.deps.State.TouchTrustedDevicePubkey(body.DevicePubkey, time.Now().UnixMilli())
 
 	// Bind the minted session to the SAME credential_id the device key pins, so a
 	// later device-delete revokes this session exactly like a passkey one. (See

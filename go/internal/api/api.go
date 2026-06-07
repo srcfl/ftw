@@ -72,24 +72,24 @@ type Deps struct {
 	Tel *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing    *telemetry.LogRing
-	Ctrl       *control.State
-	CtrlMu     *sync.Mutex
-	State      *state.Store
-	CapMu      *sync.RWMutex
-	Capacities map[string]float64 // driver → battery_capacity_wh
-	CfgMu      *sync.RWMutex
-	Cfg        *config.Config
-	ConfigPath string
-	DriverDir      string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir  string // persistent user-drivers overlay; searched before DriverDir
-	Models     map[string]*battery.Model
-	ModelsMu   *sync.Mutex
-	SelfTune   *selftune.Coordinator
-	DtS        float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig func(path string, c *config.Config) error // injection for testability
-	WebDir     string                                    // static assets root (default "web")
-	ColdDir    string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	LogRing       *telemetry.LogRing
+	Ctrl          *control.State
+	CtrlMu        *sync.Mutex
+	State         *state.Store
+	CapMu         *sync.RWMutex
+	Capacities    map[string]float64 // driver → battery_capacity_wh
+	CfgMu         *sync.RWMutex
+	Cfg           *config.Config
+	ConfigPath    string
+	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
+	Models        map[string]*battery.Model
+	ModelsMu      *sync.Mutex
+	SelfTune      *selftune.Coordinator
+	DtS           float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig    func(path string, c *config.Config) error // injection for testability
+	WebDir        string                                    // static assets root (default "web")
+	ColdDir       string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -196,9 +196,11 @@ type Deps struct {
 	// identity load failed; the /api/identity endpoint then returns 503.
 	SiteIdentityPubHex string
 
-	// SiteID is this Pi's site identifier ("site:<name>"). Published via
-	// /api/identity so the browser can pin it and rebuild the canonical DTLS
-	// fingerprint signing string (which binds the signature to this site).
+	// SiteID is this Pi's stable owner-routing identifier. New installs use an
+	// opaque high-entropy "site:<token>"; legacy installs may keep "site:<name>"
+	// until their encrypted directory is migrated. Published via /api/identity so
+	// the browser can pin it and rebuild the canonical DTLS fingerprint signing
+	// string (which binds the signature to this site).
 	SiteID string
 
 	// RelayBaseURL is the base URL of the owner-access relay this Pi registers
@@ -386,6 +388,10 @@ func (s *Server) routes() {
 	s.handle("POST /api/owner-access/login/finish", s.handleOwnerLoginFinish)
 	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
+	s.handle("GET  /api/owner-access/browser-keys", s.handleOwnerBrowserKeysList)
+	s.handle("DELETE /api/owner-access/browser-keys/{browser_key_id}", s.handleOwnerBrowserKeyDelete)
+	s.handle("GET  /api/owner-access/sessions", s.handleOwnerSessionsList)
+	s.handle("DELETE /api/owner-access/sessions/{session_id}", s.handleOwnerSessionDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
 	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
 	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).

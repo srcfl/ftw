@@ -34,14 +34,18 @@
        DataChannel (P2P-only home route). ownerFetch() below routes owner API
        calls through window.p2pFetch when a channel is up, so the owner session
        cookie is minted INSIDE DTLS and never crosses the relay. -->
-  <script src="/p2p.js?v=p2p1"></script>
+  <script src="/p2p.js?v=p2p14"></script>
   <script type="module">
     import { apiBase, decodeAssertionOptions, encodeAssertionResult, bufToB64url } from "./webauthn.js";
-    import { ownerFetch } from "./owner-fetch.js";
+    import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
     import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
     import { loadDirectory } from "./instance-sync.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
+
+    if (!isLanOrigin()) {
+      location.replace("/");
+    } else {
 
     // ownerFetch (shared, owner-fetch.js) routes the owner login ceremony over the
     // P2P DataChannel in STRICT mode (FIX-2): the WebAuthn assertion + ceremony
@@ -133,6 +137,7 @@
         }
       } catch { /* feature-detect failure → button only */ }
     })();
+    }
   </script>
 </body>
 </html>

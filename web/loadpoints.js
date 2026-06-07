@@ -1,7 +1,7 @@
 // loadpoints.js — advanced-mode panel: per-loadpoint configuration
 // summary + the planner's per-slot charging schedule. Refreshes every
-// 10 s. Mirrors twins.js's lifecycle: only visible when body.advanced
-// is set, but the fetches run regardless so toggling in is instant.
+// 10 s only while advanced mode is visible; remote routes pay for every
+// owner request over the P2P channel.
 //
 // Data sources:
 //   GET /api/loadpoints  — array of LP states (id, driver, surplus_only,
@@ -18,6 +18,7 @@
   'use strict';
 
   const REFRESH_MS = 10000;
+  let refreshTimer = null;
   // How many forward slots of the schedule to render. The plan is
   // 193 slots × 15 min = 48 h. 4 h was too narrow — operators looking
   // at "why does the plan chart show grid burst at 13:00 but my schedule
@@ -25,10 +26,15 @@
   // typical overnight charging window plus the next afternoon.
   const SCHEDULE_SLOTS = 96;
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   async function fetchAll() {
     const [lps, plan] = await Promise.all([
-      fetch('/api/loadpoints').then(r => r.json()).catch(() => ({ loadpoints: [] })),
-      fetch('/api/mpc/plan').then(r => r.json()).catch(() => null),
+      ownerFetch('/api/loadpoints').then(r => r.json()).catch(() => ({ loadpoints: [] })),
+      ownerFetch('/api/mpc/plan').then(r => r.json()).catch(() => null),
     ]);
     render(lps && lps.loadpoints ? lps.loadpoints : [], plan);
   }
@@ -223,8 +229,37 @@
   }
 
   function init() {
-    fetchAll();
-    setInterval(fetchAll, REFRESH_MS);
+    function advancedVisible() {
+      return !!(document.body && document.body.classList.contains('advanced'));
+    }
+    function startPolling() {
+      if (refreshTimer) return;
+      fetchAll();
+      refreshTimer = setInterval(fetchAll, REFRESH_MS);
+    }
+    function stopPolling() {
+      if (!refreshTimer) return;
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    function syncPolling() {
+      if (advancedVisible()) startPolling();
+      else stopPolling();
+    }
+    document.addEventListener('ftw-ui-mode-change', syncPolling);
+    syncPolling();
+    if (window.ftwP2P && typeof window.ftwP2P.onState === 'function') {
+      var waitingForDirect = false;
+      window.ftwP2P.onState(function (s) {
+        if (s !== 'direct') {
+          waitingForDirect = true;
+          return;
+        }
+        if (!waitingForDirect) return;
+        waitingForDirect = false;
+        if (advancedVisible()) fetchAll();
+      });
+    }
   }
 
   if (document.readyState === 'loading') {

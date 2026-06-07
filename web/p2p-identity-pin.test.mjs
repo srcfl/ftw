@@ -3,8 +3,7 @@
 // Multi-tenant pin (Task Group 6): pinnedIdentity()/site() must key the pin per
 // (origin, site_id) at localStorage "ftw.identity:<apiBase>:<site_id>", taking the
 // site_id + pi_pubkey from the decrypted instance directory (window.ftwInstanceSync)
-// with NO relay /api/identity round-trip. A pre-existing single-home user is
-// migrated: the legacy "ftw.identity:<apiBase>" record seeds the first per-site key.
+// with NO relay /api/identity round-trip.
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +18,9 @@ const P2P_SRC = readFileSync(join(__dirname, "p2p.js"), "utf8");
 // A 128-hex (X||Y) public key whose value is irrelevant to the pin-keying logic:
 // importP256Pub() is stubbed in the sandbox so we never run real WebCrypto here.
 const PUB_A = "a".repeat(128);
-const PUB_LEGACY = "b".repeat(128);
+const PUB_B = "b".repeat(128);
+const SITE_A = "site:" + "a".repeat(32);
+const SITE_LAN = "site:" + "b".repeat(32);
 
 // loadP2P evaluates p2p.js inside a vm sandbox. fetchCalls records every fetched
 // URL so a test can assert the relay /api/identity endpoint was (not) hit.
@@ -58,7 +59,10 @@ function loadP2P({
         ok: true,
         status: 200,
         json: () =>
-          Promise.resolve({ public_key_hex: PUB_LEGACY, site_id: "site:Relay" }),
+          Promise.resolve({
+            public_key_hex: PUB_B,
+            site_id: SITE_LAN,
+          }),
       });
     },
     setTimeout: () => 0,
@@ -79,7 +83,7 @@ describe("p2p.js per-(origin, site_id) pin from the directory", () => {
   let h;
   beforeEach(() => {
     h = loadP2P({
-      instances: [{ site_id: "site:Home", pi_pubkey: PUB_A, label: "Home" }],
+      instances: [{ site_id: SITE_A, pi_pubkey: PUB_A, label: "Home" }],
     });
   });
   afterEach(() => {
@@ -88,7 +92,7 @@ describe("p2p.js per-(origin, site_id) pin from the directory", () => {
 
   it("site() resolves the directory entry's site_id with no relay round-trip", async () => {
     const site = await h.win.ftwP2P.site();
-    assert.equal(site, "site:Home");
+    assert.equal(site, SITE_A);
     assert.equal(
       h.fetchCalls.filter((u) => u.indexOf("/api/identity") !== -1).length,
       0,
@@ -99,44 +103,19 @@ describe("p2p.js per-(origin, site_id) pin from the directory", () => {
   it("pins per (origin, site_id) at ftw.identity:<apiBase>:<site_id>", async () => {
     await h.win.ftwP2P.site(); // triggers pinnedIdentity()
     assert.ok(
-      h.store.has("ftw.identity::site:Home"),
+      h.store.has("ftw.identity::" + SITE_A),
       "pin key must be ftw.identity:<apiBase>:<site_id> (apiBase is '' on the bare home host)",
     );
-    const rec = JSON.parse(h.store.get("ftw.identity::site:Home"));
+    const rec = JSON.parse(h.store.get("ftw.identity::" + SITE_A));
     assert.equal(rec.pub, PUB_A);
-    assert.equal(rec.site, "site:Home");
+    assert.equal(rec.site, SITE_A);
   });
 });
 
-describe("p2p.js legacy single-home migration", () => {
-  it("seeds the first per-site pin from the legacy ftw.identity:<apiBase> record", async () => {
-    // Existing single-home user: legacy record present, NO directory yet (the
-    // directory is empty because instance-sync hasn't decrypted anything this
-    // session). The per-site key is migrated from the legacy record WITHOUT a
-    // relay fetch.
-    const h = loadP2P({
-      seedStore: {
-        "ftw.identity:": JSON.stringify({ pub: PUB_LEGACY, site: "site:Home" }),
-      },
-      instances: [],
-    });
-    const site = await h.win.ftwP2P.site();
-    assert.equal(site, "site:Home");
-    const rec = JSON.parse(h.store.get("ftw.identity::site:Home"));
-    assert.equal(rec.pub, PUB_LEGACY, "migrated pubkey matches the legacy record");
-    assert.equal(
-      h.fetchCalls.filter((u) => u.indexOf("/api/identity") !== -1).length,
-      0,
-      "migration must not re-TOFU against the relay",
-    );
-  });
-
-  it("PUBLIC route: fails closed when nothing is pinned — NEVER trusts relay /api/identity", async () => {
-    // home.fortytwowatts.com is a public (relay) origin. With no directory and no
-    // legacy pin, the relay's /api/identity must NOT be trusted (it could be a MITM)
-    // — pinnedIdentity rejects and the endpoint is never even fetched.
-    const h = loadP2P({ hostname: "home.fortytwowatts.com", instances: [] });
-    await assert.rejects(() => h.win.ftwP2P.site(), /sign in with your passkey/);
+describe("p2p.js public-route identity bootstrap", () => {
+  it("PUBLIC non-home route: fails closed when nothing is pinned — NEVER trusts relay /api/identity", async () => {
+    const h = loadP2P({ hostname: "relay.example.com", instances: [] });
+    await assert.rejects(() => h.win.ftwP2P.site(), /no pinned home identity/);
     assert.equal(
       h.fetchCalls.filter((u) => u.indexOf("/api/identity") !== -1).length,
       0,
@@ -144,10 +123,35 @@ describe("p2p.js legacy single-home migration", () => {
     );
   });
 
+  it("PUBLIC home route does not guess a universal site_id", async () => {
+    const h = loadP2P({ hostname: "home.fortytwowatts.com", instances: [] });
+    await assert.rejects(() => h.win.ftwP2P.site(), /no pinned home identity/);
+    assert.equal(
+      h.fetchCalls.filter((u) => u.indexOf("/signal/site%3AHome/identity") !== -1).length,
+      0,
+      "home.* fresh browsers must not be hard-routed to site:Home",
+    );
+    assert.equal(
+      h.fetchCalls.filter((u) => u.indexOf("/api/identity") !== -1).length,
+      0,
+      "home.* must not use anonymous /api/identity",
+    );
+  });
+
+  it("PUBLIC route ignores the old single-key identity record", async () => {
+    const h = loadP2P({
+      hostname: "home.fortytwowatts.com",
+      seedStore: { "ftw.identity:": JSON.stringify({ pub: PUB_A, site: "site:Home" }) },
+      instances: [],
+    });
+    await assert.rejects(() => h.win.ftwP2P.site(), /no pinned home identity/);
+    assert.equal(h.store.has("ftw.identity::site:Home"), false);
+  });
+
   it("LAN origin: /api/identity TOFU is the safe last resort (the Pi serves it directly)", async () => {
     const h = loadP2P({ hostname: "192.168.1.50", instances: [] });
     const site = await h.win.ftwP2P.site();
-    assert.equal(site, "site:Relay", "on the LAN the Pi answers /api/identity directly — TOFU is safe");
+    assert.equal(site, SITE_LAN, "on the LAN the Pi answers /api/identity directly — TOFU is safe");
     assert.equal(
       h.fetchCalls.filter((u) => u.indexOf("/api/identity") !== -1).length,
       1,
@@ -159,32 +163,20 @@ describe("p2p.js first-key-wins pin", () => {
   it("a directory entry with a DIFFERENT key than the existing pin hard-fails (identity change)", async () => {
     const h = loadP2P({
       hostname: "home.fortytwowatts.com",
-      seedStore: { "ftw.identity::site:Home": JSON.stringify({ pub: PUB_A, site: "site:Home" }) },
-      instances: [{ site_id: "site:Home", pi_pubkey: PUB_LEGACY, label: "Home" }], // different key
+      seedStore: { ["ftw.identity::" + SITE_A]: JSON.stringify({ pub: PUB_A, site: SITE_A }) },
+      instances: [{ site_id: SITE_A, pi_pubkey: PUB_B, label: "Home" }], // different key
     });
-    await assert.rejects(() => h.win.ftwP2P.site(), /identity for site:Home changed/);
+    await assert.rejects(() => h.win.ftwP2P.site(), /home identity .* changed/);
     // The known-good pin is NOT overwritten.
-    assert.equal(JSON.parse(h.store.get("ftw.identity::site:Home")).pub, PUB_A);
-  });
-
-  it("a LEGACY pin can't be silently replaced by a directory entry with a different key", async () => {
-    // Existing single-home user with only the legacy ftw.identity:<apiBase> pin
-    // (no per-site key yet). A directory entry for the same site but a DIFFERENT
-    // key must hard-fail — first-key-wins spans the migration.
-    const h = loadP2P({
-      hostname: "home.fortytwowatts.com",
-      seedStore: { "ftw.identity:": JSON.stringify({ pub: PUB_A, site: "site:Home" }) },
-      instances: [{ site_id: "site:Home", pi_pubkey: PUB_LEGACY, label: "Home" }],
-    });
-    await assert.rejects(() => h.win.ftwP2P.site(), /identity for site:Home changed/);
+    assert.equal(JSON.parse(h.store.get("ftw.identity::" + SITE_A)).pub, PUB_A);
   });
 
   it("an identical directory key reuses the pin without error", async () => {
     const h = loadP2P({
       hostname: "home.fortytwowatts.com",
-      seedStore: { "ftw.identity::site:Home": JSON.stringify({ pub: PUB_A, site: "site:Home" }) },
-      instances: [{ site_id: "site:Home", pi_pubkey: PUB_A, label: "Home" }],
+      seedStore: { ["ftw.identity::" + SITE_A]: JSON.stringify({ pub: PUB_A, site: SITE_A }) },
+      instances: [{ site_id: SITE_A, pi_pubkey: PUB_A, label: "Home" }],
     });
-    assert.equal(await h.win.ftwP2P.site(), "site:Home");
+    assert.equal(await h.win.ftwP2P.site(), SITE_A);
   });
 });

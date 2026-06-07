@@ -15,7 +15,7 @@
 
   var STUN = [{ urls: "stun:stun.l.google.com:19302" }]; // mirrors p2p.DefaultSTUNServers
   var LABEL = "ftw";                                     // must match the Pi Bridge
-  var CONNECT_TIMEOUT_MS = 8000;   // give up on the handshake, fall back to relay
+  var CONNECT_TIMEOUT_MS = 15000;  // give Chrome/WebRTC enough time before retrying
   var REQUEST_TIMEOUT_MS = 10000;  // per-request budget over the channel
   var RETRY_COOLDOWN_MS = 30000;   // after a failed connect, hold off this long
 
@@ -87,7 +87,7 @@
   // The /signal/* mailbox lives at the relay ROOT (it is keyed by site_id, never
   // under the /me/<site> tunnel prefix), so signaling URLs are origin-absolute
   // and never carry the apiBase prefix. site is URL-encoded — it can contain a
-  // colon ("site:Home"). The nonce (?n=) keys a per-(site,nonce) mailbox so an
+  // colon ("site:<token>"). The nonce (?n=) keys a per-(site,nonce) mailbox so an
   // attacker's offers can't displace/steal this browser's answer (FIX-4a); it is
   // an OPAQUE routing key, never the SDP.
   function signalURL(site, leaf, nonce) {
@@ -113,17 +113,15 @@
     return "/signal/" + encodeURIComponent(site) + "/challenge";
   }
 
-  // ---- device-key proof for the relay (C2) ----------------------------------
-  // Before an offer ever reaches the Pi, the browser must prove it holds a key
-  // the Pi has published to the relay (C1). The relay refuses (403) — and the Pi
-  // is NEVER contacted — for any offer without a valid proof. We:
+  // ---- optional device-key proof for the relay (C2) --------------------------
+  // When the relay is started with -require-device-key, the browser must prove it
+  // holds a key the Pi has published to the relay (C1). We:
   //   1. GET /signal/<site>/challenge  -> {nonce, exp_ms}
   //   2. sign "ftw-signal:v1:<site>:<nonce>" with the device key
   //   3. include {device_pubkey, nonce, sig} in the offer POST.
-  // If this device has no key (never enrolled on the LAN), there is nothing to
-  // prove with — we set the "unenrolled" state so the gate can tell the user to
-  // set up this device on their home network first, and abort the attempt rather
-  // than firing a doomed offer.
+  // If this device has no key, we still send a proofless raw-SDP offer. A relay
+  // with the gate off accepts it and the Pi gates via passkey over the E2E
+  // channel; a relay with the gate on returns 403.
   function deviceKeyHandle() {
     // Use the same per-origin device-key store the ceremony pages mint into. It's
     // attached to window by device-key.js (loaded as a classic script before this
@@ -145,10 +143,7 @@
   }
 
   // signalProof fetches a fresh challenge nonce and signs it, returning the
-  // {device_pubkey, nonce, sig} the offer POST attaches. Fails closed: any error
-  // (no key, challenge fetch failure, sign failure) rejects so the offer is never
-  // sent — the relay would reject it anyway, and an unenrolled device must not
-  // wake the Pi.
+  // {device_pubkey, nonce, sig} the offer POST attaches when available.
   function signalProof(site) {
     return deviceKeyHandle().then(function (key) {
       return fetch(challengeURL(site), { method: "GET" })
@@ -229,9 +224,9 @@
   // directoryEntry returns the chosen instance from the decrypted directory
   // (window.ftwInstanceSync, attached by instance-sync.js). v1: the directory is
   // a 1-entry list, so we take the first. Returns null when no directory exists
-  // yet (anonymous, pre-decrypt, or a not-yet-migrated single-home user). The
-  // directory's pi_pubkey is Pi-signed (instance-sync verifyEntry), so trusting
-  // it needs NO relay /api/identity round-trip.
+  // yet or before it has been decrypted. The directory's pi_pubkey is Pi-signed
+  // (instance-sync verifyEntry), so trusting it needs NO relay /api/identity
+  // round-trip.
   function directoryEntry() {
     try {
       var sync = window.ftwInstanceSync;
@@ -239,18 +234,6 @@
       var list = sync.getCachedInstances() || [];
       var e = list[0];
       if (e && e.site_id && e.pi_pubkey) return { pub: e.pi_pubkey, site: e.site_id };
-    } catch (_) {}
-    return null;
-  }
-
-  // legacyRecord reads the pre-multi-tenant single pin written at
-  // "ftw.identity:<apiBase>" ({pub, site}). Used once to seed the first per-site
-  // record so an existing single-home user doesn't re-TOFU.
-  function legacyRecord() {
-    try {
-      var raw = localStorage.getItem("ftw.identity:" + apiBase());
-      var rec = raw ? JSON.parse(raw) : null;
-      if (rec && rec.pub && rec.site) return rec;
     } catch (_) {}
     return null;
   }
@@ -269,19 +252,11 @@
   function persistPin(site, pub) {
     var existing = null;
     try { existing = JSON.parse(localStorage.getItem(pinKey(site)) || "null"); } catch (e) {}
-    if (!existing || !existing.pub) {
-      // No per-site pin yet — but a LEGACY single-home pin (ftw.identity:<apiBase>,
-      // no site suffix) for the SAME site is equally authoritative. First-key-wins
-      // must span the migration, or a directory entry could silently replace the
-      // identity an existing user already trusts before it was migrated.
-      var legacy = legacyRecord();
-      if (legacy && legacy.site === site && legacy.pub) existing = legacy;
-    }
     if (existing && existing.pub) {
       if (existing.pub !== pub) {
         throw new Error("home identity for " + site + " changed — refusing to connect (re-pair on your home network if this was intentional)");
       }
-      // Persist/refresh the per-site record (also migrates a legacy pin forward).
+      // Persist/refresh the per-site record.
       var kept = { pub: existing.pub, site: site };
       try { localStorage.setItem(pinKey(site), JSON.stringify(kept)); } catch (e) {}
       return kept;
@@ -294,8 +269,7 @@
   // pinnedIdentity resolves {key, site} for the chosen instance, pinning per
   // (origin, site_id). Source priority — NO relay round-trip until the last:
   //   1. the decrypted directory entry (Pi pubkey is Pi-signed there);
-  //   2. the legacy single-pin record (migrate it into a per-site record);
-  //   3. relay /api/identity TOFU (only when nothing is cached at all).
+  //   2. LAN /api/identity TOFU when nothing is cached at all.
   // Every later answer is verified against the pinned key, so the relay can't
   // MITM after that. The pubkey is imported once and the promise cached.
   function pinnedIdentity() {
@@ -309,20 +283,13 @@
         var rec = persistPin(dir.site, dir.pub);
         return importP256Pub(rec.pub).then(function (key) { return { key: key, site: rec.site }; });
       }
-      // 2. The legacy single-home pin, migrated into a per-site record (first-key-wins).
-      var legacy = legacyRecord();
-      if (legacy) {
-        var rec2 = persistPin(legacy.site, legacy.pub);
-        return importP256Pub(rec2.pub).then(function (key) { return { key: key, site: rec2.site }; });
-      }
-      // 3. No directory and no legacy pin. On a GENUINE LAN origin the Pi serves
-      // /api/identity ITSELF (no relay in the path), so a one-time TOFU there is the
-      // SSH-known-hosts model and safe. On the PUBLIC relay route, trusting
-      // /api/identity would mean trusting a RELAY-supplied identity — a MITM vector
-      // — so we FAIL CLOSED: the user must sign in, which loads the Pi-signed
-      // directory, before any channel is verified. (Codex 2026-06-05, BLOCKER.)
+      // 2. No directory. On a GENUINE LAN origin the Pi serves
+      // /api/identity ITSELF (no relay in the path), so a one-time TOFU there is
+      // the SSH-known-hosts model. On the PUBLIC home route we fail closed: a
+      // fresh browser must first claim a Pi-signed descriptor from the bootstrap
+      // flow or decrypt its directory. Never guess a universal site_id here.
       if (!isLanOrigin()) {
-        return Promise.reject(new Error("no pinned home identity yet — sign in with your passkey first (the relay's /api/identity is never trusted on the public route)"));
+        return Promise.reject(new Error("no pinned home identity yet"));
       }
       return fetch(relayURL("/api/identity"), { credentials: "same-origin" })
         .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
@@ -417,11 +384,15 @@
   }
 
   function enabled() {
-    // Opt-in defaults ON (the feature's whole point); set localStorage
-    // "ftw.p2p" = "off" to force the relay path. Skip non-relay (direct-LAN)
-    // contexts entirely — there's no relay to bypass and the handshake would
-    // only waste a WAN round-trip.
-    return supported() && isRelayContext() && localStorage.getItem("ftw.p2p") !== "off";
+    // P2P is mandatory on the public owner route: strict owner calls have no
+    // cleartext relay fallback. Older builds exposed a browser-local
+    // localStorage toggle ("ftw.p2p" = "off"); if Chrome still carries it, clear
+    // it instead of leaving the sign-in gate stuck on "Reaching your home".
+    if (!supported() || !isRelayContext()) return false;
+    try {
+      if (localStorage.getItem("ftw.p2p") === "off") localStorage.removeItem("ftw.p2p");
+    } catch (e) {}
+    return true;
   }
 
   function teardown() {
@@ -529,21 +500,30 @@
       pinnedIdentity()
         .then(function (pin) {
           var site = pin.site;
-          // C2: prove this device to the RELAY before the offer can reach the Pi.
-          // signalProof fetches a fresh challenge nonce and signs
-          // "ftw-signal:v1:<site>:<nonce>" with the device key. Done in parallel
-          // with the SDP/ICE work so it adds no latency on the happy path.
-          var proofP = signalProof(site);
+          // C2, optional: prove this device to the RELAY when a persisted device
+          // key exists. Missing device key no longer aborts the attempt; the relay
+          // can accept raw SDP when its gate is off, while -require-device-key still
+          // rejects it with 403.
+          var proofP = signalProof(site).catch(function (e) {
+            if (e && (e.code === "no-device-key" || e.code === "store-pending")) return null;
+            throw e;
+          });
           return pc.createOffer()
             .then(function (offer) { return pc.setLocalDescription(offer); })
             .then(function () { return waitIceComplete(pc); })
             .then(function () { return proofP; })
             .then(function (proof) {
-              // The offer body is now a JSON envelope carrying the raw SDP PLUS the
-              // device-key proof (C2). The relay verifies {device_pubkey, nonce,
-              // sig} against the site's published key set + consumes the nonce, then
-              // parks the SDP for the Pi exactly as before. Field names are fixed by
-              // the contract — do not rename.
+              if (!proof) {
+                return fetch(signalURL(site, "offer", nonce), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/sdp" },
+                  body: pc.localDescription.sdp
+                });
+              }
+              // With a proof, the offer body is a JSON envelope carrying raw SDP
+              // PLUS the device-key proof (C2). The relay verifies it when the gate
+              // is on, then parks the SDP for the Pi exactly as before. Field names
+              // are fixed by the contract — do not rename.
               return fetch(signalURL(site, "offer", nonce), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -574,14 +554,7 @@
         })
         .catch(function (e) {
           if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
-          // No device key on this origin (never enrolled on the LAN): there is
-          // nothing to prove to the relay, so a direct channel can never open from
-          // here. Remember it so the sign-in gate shows "set up this device on your
-          // home network first" instead of a misleading endless "connecting".
-          if (e && e.code === "no-device-key") { unenrolled = true; }
-          // Soft-fail (store-pending): the device-key module hasn't run yet — retry
-          // soon instead of arming the long cooldown.
-          finish(false, e && e.code === "store-pending");
+          finish(false);
         });
     });
     return connecting;
@@ -613,7 +586,9 @@
   }
 
   // makeResponse adapts a ResponseFrame.response into a fetch-Response subset
-  // (ok / status / headers / json() / text()) — enough for the dashboard.
+  // (ok / status / headers / json() / text() / arrayBuffer() / blob()) — enough
+  // for owner APIs and for remote bootstrap code that treats static app assets as
+  // normal fetch responses.
   function makeResponse(path, resp) {
     var status = resp.status || 0;
     var bytes = resp.body_b64 ? b64decode(resp.body_b64) : new Uint8Array(0);
@@ -637,7 +612,16 @@
       url: path,
       headers: headers,
       json: function () { return Promise.resolve(JSON.parse(text)); },
-      text: function () { return Promise.resolve(text); }
+      text: function () { return Promise.resolve(text); },
+      arrayBuffer: function () {
+        var copy = new Uint8Array(bytes.length);
+        copy.set(bytes);
+        return Promise.resolve(copy.buffer);
+      },
+      blob: function () {
+        var type = headers.get("content-type") || "";
+        return Promise.resolve(new Blob([bytes], { type: type }));
+      }
     };
   }
 
@@ -738,8 +722,8 @@
     // "set up this device on your home network first" path (C2) rather than a
     // perpetual "connecting".
     isUnenrolled: function () { return unenrolled; },
-    // site() resolves the pinned site_id (directory entry, then the migrated
-    // legacy record, then last-resort TOFU /api/identity — see pinnedIdentity).
+    // site() resolves the pinned site_id (directory entry, then last-resort LAN
+    // TOFU /api/identity — see pinnedIdentity).
     // next-app.js needs it to build the C3 device-PoP signing string
     // "ftw-device-pop:v1:<site>:<challenge>" — the SAME site p2p.js signs the
     // signal proof over, so both ends agree.

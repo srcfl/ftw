@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -57,6 +58,14 @@ var errBodyTooLarge = errors.New("tunneled body exceeds limit")
 // namespaces are disjoint by this prefix.
 const ownerHostIDPrefix = "owner-"
 
+// homeRouteSiteCookieName is a browser-local routing hint written by the public
+// remote loader after it decrypts the owner's directory. It contains only the
+// opaque site_id. With it present, the relay can forward STATIC app GETs to the
+// chosen Pi without storing or shipping the app bundle itself. It is deliberately
+// not an auth signal: /api/* remains refused at the relay and owner data still
+// rides P2P.
+const homeRouteSiteCookieName = "ftw_home_site"
+
 // pairTokenRe bounds the routing token to a safe charset. The host generates
 // word-dash tokens (genWordToken: lowercase words joined by '-'); this tolerates
 // that plus digits but rejects anything with HTML/JS metacharacters, so the
@@ -86,12 +95,13 @@ type Relay struct {
 	// paths resolve. The Phase 4 single-home cutover.
 	HomeHost string
 	HomeSite string
-	// HomeWeb, when set, is a directory on the relay VM holding the same web/
-	// bundle the Pi serves. With it set, the home host's static GETs are served
-	// from disk at the relay (SLICE 1) instead of being forwarded to the Pi over
-	// the tunnel — the SPA shell loads even while the Pi is mid-connect, and the
-	// Pi's uplink only ever carries owner DATA (over DTLS), never asset GETs.
-	// Unset → the old forward-to-Pi behaviour (back-compat).
+	// HomeWeb is the relay VM's tiny bootstrap bundle for the public home host.
+	// In multi-tenant mode it is NOT the app bundle: only the landing/login/loader
+	// allowlist is served from disk. Once the browser decrypts its directory, a
+	// routing cookie tells the relay which registered Pi should receive static app
+	// GETs. Owner /api traffic stays forbidden here and goes over P2P only.
+	// In single-tenant mode HomeWeb keeps its older meaning: serve static files
+	// from disk instead of forwarding them to the Pi.
 	HomeWeb string
 	// HomePubKey is the pinned home-site ES256 public key (hex X||Y). When set,
 	// the relay answers GET /api/identity for the home host directly from this
@@ -106,11 +116,12 @@ type Relay struct {
 	RequireDeviceKey bool
 	// MultiTenant switches the home host from the single-tenant pin
 	// (-home-site/-home-pubkey) to the public multi-tenant front door:
-	// home.* serves ONLY the relay-disk landing/shell (never forwards to a Pi),
-	// per-wallet ciphertext blobs are served from WalletBlobs, and routing is
-	// driven entirely by the browser-supplied {site_id} on /signal/* (the C2
-	// device-key proof, forced on, authorises the relay→Pi forward). The relay
-	// never learns which Pi belongs to whom.
+	// anonymous home.* serves only the relay-disk bootstrap loader; after the
+	// browser decrypts its directory, static app GETs are forwarded to the chosen
+	// Pi by opaque site_id. Per-wallet ciphertext blobs are served from
+	// WalletBlobs, and owner data routing is driven by /signal/* + P2P. The relay
+	// never learns the passkey↔Pi mapping; it only sees the opaque site selected
+	// by the browser once the owner has unlocked it.
 	MultiTenant bool
 	// WalletBlobs is the durable per-wallet ENCRYPTED directory store. The relay
 	// never parses the ciphertext (all crypto is client-side via the WebAuthn-PRF
@@ -211,13 +222,12 @@ func (r *Relay) Handler() http.Handler {
 	// data exists ONLY as DTLS DataChannel frames now.
 	mux.HandleFunc("POST /me/register", r.meRegister)
 
-	// Single-home cutover: a bare host (home.fortytwowatts.com) serves the
-	// dashboard's STATIC assets from the owner Pi so the SPA, login page, and
-	// p2p.js load at the root with working absolute paths. It is restricted to
-	// GET of NON-/api/ paths: the owner API + the ftw_owner cookie never traverse
-	// the relay — they ride the DTLS DataChannel only (P2P-only home route). The
-	// browser fetches the SPA shell here, then opens the P2P channel for all
-	// owner data + the login ceremony.
+	// Home-host cutover: a bare host (home.fortytwowatts.com) serves the stable
+	// public bootstrap at the root. In multi-tenant mode the dashboard's STATIC
+	// assets are forwarded to the browser-selected Pi only after the local
+	// directory has supplied an opaque site_id routing cookie. In all modes this
+	// catch-all is restricted to GET of NON-/api/ paths: owner API + the ftw_owner
+	// cookie never traverse the relay — they ride the DTLS DataChannel only.
 	// The home host registers when EITHER a single-tenant pin (-home-site) OR
 	// multi-tenant mode is configured. The browser reaches the relay AS the home
 	// host, and Go's ServeMux gives a host-specific pattern precedence over a
@@ -267,18 +277,18 @@ func (r *Relay) limitBody(next http.Handler) http.Handler {
 	})
 }
 
-// homeStaticForward serves the dashboard's STATIC assets for the bare home host
-// from the owner Pi, over the friend-flow tunnel queue, but FAIL-CLOSED for the
-// owner data plane: it forwards only GET requests for NON-/api/ paths. The owner
-// API and the ftw_owner session cookie therefore NEVER traverse the relay — they
-// ride the DTLS DataChannel only (the P2P-only home route). The browser loads
-// the SPA shell + login page + p2p.js here, then opens the P2P channel for all
-// owner traffic and the login ceremony.
+// homeStaticForward serves the bare home host. In multi-tenant mode anonymous
+// browsers get only the relay-disk bootstrap allowlist; once the bootstrap has
+// decrypted the owner's directory it writes ftw_home_site=<opaque site_id>, and
+// this handler forwards STATIC app GETs to that Pi. In single-tenant mode the
+// older -home-site/-home-web rules still apply.
 //
-// This keeps the app loadable without shipping the web bundle into the relay,
-// while structurally guaranteeing (path + method gate) that no cleartext owner
-// request or cookie can be tunneled through this host route.
+// FAIL-CLOSED owner-data gate: it forwards only GET requests for NON-/api/ paths.
+// The owner API and the ftw_owner session cookie therefore NEVER traverse the
+// relay — they ride the DTLS DataChannel only (the P2P-only home route).
 func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Cookie")
 	if r.Owners == nil {
 		http.Error(w, "owner registry not configured", http.StatusServiceUnavailable)
 		return
@@ -302,17 +312,42 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 		http.NotFound(w, req)
 		return
 	}
-	// MULTI-TENANT: there is no single -home-site to resolve and the relay must
-	// NEVER forward to a Pi. Serve ONLY the relay-disk landing/shell. The legacy
-	// /api/identity TOFU exception does NOT apply — under multi-tenant identity is
-	// per-site at GET /signal/{site_id}/identity, so /api/* (identity included) is
-	// uniformly refused here and the owner data plane stays strictly P2P.
+	// MULTI-TENANT: anonymous clients get only the relay-disk bootstrap allowlist.
+	// After local directory unlock, ftw_home_site routes static app GETs to the
+	// chosen Pi. The legacy /api/identity TOFU exception does NOT apply — under
+	// multi-tenant identity is per-site at GET /signal/{site_id}/identity, so
+	// /api/* (identity included) is uniformly refused here and the owner data
+	// plane stays strictly P2P.
 	if r.MultiTenant {
 		if strings.HasPrefix(req.URL.Path, "/api/") {
 			http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
 			return
 		}
-		r.serveHomeStaticFile(w, req)
+		if req.URL.Query().Get("reset_remote") == "1" {
+			clearHomeRouteSiteCookie(w)
+			r.serveHomeBootstrapFile(w, req)
+			return
+		}
+		if homeBootstrapAlwaysLocal(req.URL.Path) {
+			r.serveHomeBootstrapFile(w, req)
+			return
+		}
+		if siteID := homeRouteSiteFromCookie(req); siteID != "" {
+			registered, ok := r.forwardHomeStaticGET(w, req, siteID)
+			if ok {
+				return
+			}
+			if registered {
+				r.serveHomeOffline(w, req, true)
+				return
+			}
+			clearHomeRouteSiteCookie(w)
+			if req.URL.Path != "/" && req.URL.Path != "/index.html" {
+				http.NotFound(w, req)
+				return
+			}
+		}
+		r.serveHomeBootstrapFile(w, req)
 		return
 	}
 	// SLICE 2: serve GET /api/identity from the home pubkey the relay already
@@ -330,42 +365,47 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "owner API is P2P-only; not served over the relay", http.StatusForbidden)
 		return
 	}
-	// SLICE 1: when -home-web is set, serve the static shell from the relay's own
-	// disk instead of forwarding the GET to the Pi. The SPA loads even while the
-	// Pi is mid-connect, and the Pi's uplink only ever carries owner DATA (over
-	// DTLS), never asset GETs. Unset → the old forward-to-Pi path below.
+	// SINGLE-TENANT SLICE 1: when -home-web is set, serve the static shell from
+	// the relay's own disk instead of forwarding the GET to the Pi. Multi-tenant
+	// returned above and only serves the bootstrap allowlist from disk.
 	if r.HomeWeb != "" {
 		r.serveHomeStaticFile(w, req)
 		return
 	}
-	hostID, registered, fresh := r.Owners.Active(r.HomeSite, homeStaleAfter)
-	if !registered || !fresh {
-		// Never connected, or stopped re-registering: the Pi is offline. Show a
+	registered, ok := r.forwardHomeStaticGET(w, req, r.HomeSite)
+	if !ok {
+		// Never connected, stopped re-registering, or failed mid-request: show a
 		// reassuring styled page (not a raw timeout/503 that reads as "broken").
 		r.serveHomeOffline(w, req, registered)
-		return
 	}
-	// GET assets have no meaningful body; do not read/forward one.
+}
+
+// forwardHomeStaticGET forwards a safe static GET to the registered Pi for
+// siteID. It returns registered=false when the site is unknown, and ok=false when
+// the site is offline/stale or the tunnel request failed. The caller owns the
+// fallback UI. /api and method checks are intentionally outside this helper so
+// the fail-closed gate stays visually obvious in homeStaticForward.
+func (r *Relay) forwardHomeStaticGET(w http.ResponseWriter, req *http.Request, siteID string) (registered bool, ok bool) {
+	hostID, registered, fresh := r.Owners.Active(siteID, homeStaleAfter)
+	if !registered || !fresh {
+		return registered, false
+	}
 	innerPath := req.URL.Path
 	if q := req.URL.RawQuery; q != "" {
 		innerPath = innerPath + "?" + q
 	}
 	// Strip any inbound cookies: the owner session lives only inside DTLS, so a
-	// stray ftw_owner on a static-asset GET must never reach the Pi over the relay
-	// (it would be ignored, but stripping it keeps the no-owner-cookie-on-relay
-	// invariant structural rather than incidental).
+	// stray ftw_owner on a static-asset GET must never reach the Pi over the relay.
 	req.Header.Del("Cookie")
 	resp, err := r.enqueue(req, hostID, innerPath, nil)
 	if err != nil {
-		// Fresh a moment ago but the tunnel didn't answer in time — the Pi most
-		// likely just dropped. Same reassuring page rather than a bare 502.
-		r.serveHomeOffline(w, req, true)
-		return
+		return true, false
 	}
 	// Defence in depth: never relay a Set-Cookie from the Pi for the home host —
 	// a static asset has no business setting the owner cookie, and the owner
 	// session must never appear on a relay-visible response.
-	writeTunneledNoCookie(w, resp)
+	writeTunneledNoCookie(w, resp, homeStaticCacheControl(req.URL))
+	return true, true
 }
 
 // writeTunneledNoCookie copies a tunneled Pi response to the client with
@@ -373,13 +413,45 @@ func (r *Relay) homeStaticForward(w http.ResponseWriter, req *http.Request) {
 // the DTLS DataChannel; it must NEVER appear on a relay-visible response, on any
 // path that forwards to the Pi (static assets AND the bootstrap enroll-forward).
 // This is the single chokepoint so the no-cookie-on-relay invariant is structural.
-func writeTunneledNoCookie(w http.ResponseWriter, resp tunnel.TunneledResponse) {
+func writeTunneledNoCookie(w http.ResponseWriter, resp tunnel.TunneledResponse, cacheControl string) {
 	resp.Header.Del("Set-Cookie")
 	for k, vv := range resp.Header {
 		w.Header()[k] = vv
 	}
+	if cacheControl == "" {
+		cacheControl = "no-store"
+	}
+	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Add("Vary", "Cookie")
 	w.WriteHeader(resp.Status)
 	_, _ = w.Write(resp.Body)
+}
+
+// homeStaticCacheControl keeps owner HTML/API surfaces uncached, but allows the
+// browser to privately cache Pi-routed static assets. The relay remains blind and
+// shared caches still stay out of it ("private" + Vary: Cookie); this just stops
+// Safari from re-downloading the full dashboard bundle on every reload.
+func homeStaticCacheControl(u *url.URL) string {
+	if u == nil {
+		return "no-store"
+	}
+	clean := path.Clean("/" + u.Path)
+	if clean == "/" || clean == "/index.html" || strings.HasSuffix(clean, ".html") {
+		return "no-store"
+	}
+	ext := strings.ToLower(path.Ext(clean))
+	if ext == "" {
+		return "no-store"
+	}
+	switch ext {
+	case ".js", ".css", ".mjs", ".map", ".json", ".svg", ".png", ".jpg", ".jpeg", ".webp", ".ico", ".woff", ".woff2":
+	default:
+		return "no-store"
+	}
+	if u.Query().Get("v") != "" {
+		return "private, max-age=86400"
+	}
+	return "private, max-age=300"
 }
 
 // serveHomeIdentity answers GET /api/identity for the home host from the pinned
@@ -632,6 +704,128 @@ func (r *Relay) serveHomeStaticFile(w http.ResponseWriter, req *http.Request) {
 	// session lives only in DTLS) — http.ServeFile sets no cookies itself.
 	req.Header.Del("Cookie")
 	http.ServeFile(w, req, full)
+}
+
+// serveHomeBootstrapFile serves ONLY the stable multi-tenant bootstrap allowlist
+// from -home-web. It deliberately has no SPA fallback: a request for /next-app.js,
+// /components/index.js, or any other dashboard asset without a chosen Pi must be
+// 404, proving the relay is not shipping the app bundle. "/" maps to the remote
+// loader, whose job is to decrypt the directory, set ftw_home_site, and reload so
+// the real app shell is fetched from the Pi.
+func (r *Relay) serveHomeBootstrapFile(w http.ResponseWriter, req *http.Request) {
+	rel, ok := homeBootstrapRelPath(req.URL.Path)
+	if !ok {
+		http.NotFound(w, req)
+		return
+	}
+	root := filepath.Clean(r.HomeWeb)
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	if full != root && !strings.HasPrefix(full, root+string(filepath.Separator)) {
+		http.NotFound(w, req)
+		return
+	}
+	resolvedRoot, rerr := filepath.EvalSymlinks(root)
+	resolved, ferr := filepath.EvalSymlinks(full)
+	if rerr != nil || ferr != nil ||
+		(resolved != resolvedRoot && !strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))) {
+		http.NotFound(w, req)
+		return
+	}
+	req.Header.Del("Cookie")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Add("Vary", "Cookie")
+	http.ServeFile(w, req, resolved)
+}
+
+func homeBootstrapAlwaysLocal(p string) bool {
+	clean := path.Clean("/" + p)
+	if clean == "/owner-access" || strings.HasPrefix(clean, "/owner-access/") {
+		return true
+	}
+	switch clean {
+	case "/p2p.js", "/remote-loader.js", "/vendor/qrcode.js":
+		return true
+	default:
+		return false
+	}
+}
+
+func homeBootstrapRelPath(p string) (string, bool) {
+	clean := path.Clean("/" + p)
+	switch clean {
+	case "/", "/index.html", "/remote-loader.html":
+		return "remote-loader.html", true
+	case "/remote-loader.js":
+		return "remote-loader.js", true
+	case "/p2p.js":
+		return "p2p.js", true
+	case "/components/theme.css":
+		return "components/theme.css", true
+	case "/logo.jpg":
+		return "logo.jpg", true
+	case "/favicon.svg":
+		return "favicon.svg", true
+	case "/vendor/qrcode.js":
+		return "vendor/qrcode.js", true
+	case "/owner-access", "/owner-access/":
+		return "owner-access/index.html", true
+	}
+	if strings.HasPrefix(clean, "/owner-access/") {
+		rel := strings.TrimPrefix(clean, "/")
+		switch rel {
+		case "owner-access/index.html",
+			"owner-access/enroll.html",
+			"owner-access/login.html",
+			"owner-access/webauthn.js",
+			"owner-access/owner-fetch.js",
+			"owner-access/device-key.js",
+			"owner-access/prf.js",
+			"owner-access/instance-sync.js",
+			"owner-access/bootstrap-enroll.js",
+			"owner-access/enroll-pin.js",
+			"owner-access/setup-remote.js":
+			return rel, true
+		}
+	}
+	return "", false
+}
+
+func homeRouteSiteFromCookie(req *http.Request) string {
+	c, err := req.Cookie(homeRouteSiteCookieName)
+	if err != nil || c == nil || c.Value == "" {
+		return ""
+	}
+	siteID, err := url.QueryUnescape(c.Value)
+	if err != nil {
+		return ""
+	}
+	if !validHomeRouteSiteID(siteID) {
+		return ""
+	}
+	return siteID
+}
+
+func validHomeRouteSiteID(siteID string) bool {
+	if len(siteID) < len("site:")+1 || len(siteID) > 200 || !strings.HasPrefix(siteID, "site:") {
+		return false
+	}
+	for i := 0; i < len(siteID); i++ {
+		c := siteID[i]
+		if c <= 0x20 || c == 0x7f || c == '/' || c == '\\' || c == ';' || c == '"' {
+			return false
+		}
+	}
+	return true
+}
+
+func clearHomeRouteSiteCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     homeRouteSiteCookieName,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 // isOwnerAPIPath reports whether a request path is part of the owner API surface
@@ -1437,6 +1631,12 @@ func (r *Relay) signalBrowserOffer(w http.ResponseWriter, req *http.Request) {
 	// to PUBLISH device-keys (C1) keeps working. Turn the flag on once device-keys
 	// are enrolled to close the anonymous-SIGNALING surface too.
 	if !r.RequireDeviceKey {
+		var env struct {
+			SDP string `json:"sdp"`
+		}
+		if err := json.Unmarshal(body, &env); err == nil && env.SDP != "" {
+			body = []byte(env.SDP)
+		}
 		if err := r.Signals.ParkOffer(siteID, nonce, body); err != nil {
 			if err == errSignalRateLimited {
 				http.Error(w, "too many offers", http.StatusTooManyRequests)

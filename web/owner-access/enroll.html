@@ -75,7 +75,7 @@
     <div id="pin-panel" class="pin-panel"></div>
 
     <button id="enroll" class="primary">Enroll passkey</button>
-    <button onclick="location.href='./'">Cancel</button>
+    <button id="cancel" type="button">Cancel</button>
 
     <div id="msg"></div>
   </div>
@@ -86,11 +86,11 @@
        a channel is up. The FIRST-time bootstrap path below does NOT use P2P — a
        keyless device can't open the channel — it uses the relay's narrow
        claim_key-gated enroll-forward instead. -->
-  <script src="/p2p.js?v=p2p1"></script>
+  <script src="/p2p.js?v=p2p14"></script>
   <script type="module">
     import { decodeCreationOptions, encodeRegistrationResult, bufToB64url } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
-    import { ownerFetch } from "./owner-fetch.js";
+    import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
     import { exportPubHex } from "./device-key.js";
     import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
     import { saveDirectory, verifyEntry } from "./instance-sync.js";
@@ -119,9 +119,30 @@
     // hits the relay's claim_key-gated enroll-forward, which the relay forwards to
     // the Pi over the tunnel ONLY while a live bootstrap window is open.
 
-    // "Show enrollment PIN" — LAN-only; gracefully degrades over the relay. In the
-    // bootstrap flow the PIN already came alongside the QR, so it's just a hint here.
-    mountEnrollPin(document.getElementById("pin-panel"));
+    // "Show enrollment PIN" is LAN-only. On the public home route the bootstrap
+    // PIN already came next to the QR on the Pi; trying to mint/reveal it here is
+    // both impossible and confusing.
+    const pinPanel = document.getElementById("pin-panel");
+    if (!bootstrapId && isLanOrigin()) {
+      mountEnrollPin(pinPanel);
+    } else if (pinPanel) {
+      pinPanel.remove();
+    }
+
+    function publicHomeTarget() {
+      return (!isLanOrigin() || bootstrapId) ? "/" : "./";
+    }
+
+    function setHomeRouteCookie(siteID) {
+      if (!siteID || isLanOrigin()) return;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = "ftw_home_site=" + encodeURIComponent(siteID) +
+        "; Path=/; Max-Age=2592000; SameSite=Lax" + secure;
+    }
+
+    document.getElementById("cancel").onclick = () => {
+      location.href = publicHomeTarget();
+    };
 
     // enrollFetch picks the transport for the two enroll RPCs:
     //   - bootstrap (first device, has bootstrap_id): RAW fetch to the relay's
@@ -190,6 +211,7 @@
         //     drop the field — it would leave the device un-rememberable without
         //     any signal — so we surface it.
         let devicePubHex;
+        let routeEntry = verifiedEntry;
         try {
           devicePubHex = await exportPubHex();
         } catch (e) {
@@ -240,7 +262,7 @@
           return;
         }
         const out = await finish.json();
-        msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Redirecting…</div>';
+        msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Opening your home…</div>';
 
         // 4. Seed the per-wallet directory so a FRESH device with the synced passkey
         //    can discover this home remotely. The entry is the VERIFIED descriptor:
@@ -263,6 +285,7 @@
               if (await verifyEntry(e)) entry = e;
             }
           }
+          routeEntry = entry || routeEntry;
           if (W && entry) {
             entry.added_ms = Date.now();
             // encKey = PRF-derived when available; null falls back to the
@@ -285,8 +308,9 @@
           // retry on the next sign-in.
           try { console.warn("instance directory seed failed: " + (e && e.message)); } catch (_) {}
         }
+        if (routeEntry) setHomeRouteCookie(routeEntry.site_id);
 
-        setTimeout(() => location.href = "./", 1500);
+        setTimeout(() => location.href = publicHomeTarget(), 800);
       } catch (e) {
         msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;
       }

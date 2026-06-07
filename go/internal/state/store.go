@@ -586,6 +586,19 @@ func (s *Store) migrate() error {
 			credential_id BLOB    NOT NULL DEFAULT x'',
 			expires_at_ms INTEGER NOT NULL
 		) STRICT`,
+		// One WebAuthn credential can be synced across several browsers/devices
+		// (for example iCloud passkeys on iPhone + Safari on Mac). Each browser has
+		// its own local device key, so keep a one-to-many table instead of the
+		// legacy single trusted_devices.device_pubkey slot.
+		`CREATE TABLE IF NOT EXISTS trusted_device_pubkeys (
+			device_pubkey TEXT    PRIMARY KEY NOT NULL,
+			credential_id BLOB    NOT NULL,
+			created_at_ms INTEGER NOT NULL DEFAULT 0,
+			last_used_ms  INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (credential_id) REFERENCES trusted_devices(credential_id) ON DELETE CASCADE
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_trusted_device_pubkeys_credential
+			ON trusted_device_pubkeys(credential_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -610,6 +623,16 @@ func (s *Store) migrate() error {
 		if err := s.addColumnIfMissing("trusted_devices", col.name, col.ddl); err != nil {
 			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)
 		}
+	}
+	// Seed the multi-device-key table from the legacy single-key column. This is
+	// idempotent and keeps existing remembered browsers working after upgrade.
+	if _, err := s.db.Exec(`
+		INSERT OR IGNORE INTO trusted_device_pubkeys
+			(device_pubkey, credential_id, created_at_ms, last_used_ms)
+		SELECT device_pubkey, credential_id, created_at_ms, last_used_ms
+		FROM trusted_devices
+		WHERE device_pubkey <> ''`); err != nil {
+		return fmt.Errorf("migrate trusted_device_pubkeys seed: %w", err)
 	}
 
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a

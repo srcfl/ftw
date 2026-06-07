@@ -1,13 +1,14 @@
 // twins.js — advanced-mode ML diagnostics panel.
 // Renders a small card per twin (PV, load, price forecaster) with
-// sample count, MAE, quality bar, and last-updated time. Refreshes
-// every 10s. Only mounted when body.advanced is active, but the
-// fetches run regardless so switching to advanced is instant.
+// sample count, MAE, quality bar, and last-updated time. Polls only
+// while advanced mode is visible; remote routes pay for every owner
+// request over the P2P channel.
 
 (function () {
   'use strict';
 
   const REFRESH_MS = 10000;
+  let refreshTimer = null;
 
   // ownerFetch routes state-changing owner/CONTROL calls (load-twin profile
   // switch, PV/load twin reset) over the STRICT P2P transport so their body never
@@ -21,10 +22,31 @@
 
   async function fetchAll() {
     const [pv, load] = await Promise.all([
-      fetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
-      fetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      ownerFetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      ownerFetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
     ]);
     render(pv, load);
+  }
+
+  function advancedVisible() {
+    return !!(document.body && document.body.classList.contains('advanced'));
+  }
+
+  function startPolling() {
+    if (refreshTimer) return;
+    fetchAll();
+    refreshTimer = setInterval(fetchAll, REFRESH_MS);
+  }
+
+  function stopPolling() {
+    if (!refreshTimer) return;
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function syncPolling() {
+    if (advancedVisible()) startPolling();
+    else stopPolling();
   }
 
   function fmtAge(ms) {
@@ -125,10 +147,10 @@
   }
 
   function init() {
-    fetchAll();
-    setInterval(fetchAll, REFRESH_MS);
     const grid = document.getElementById('twins-grid');
     if (grid) grid.addEventListener('click', onGridClick);
+    document.addEventListener('ftw-ui-mode-change', syncPolling);
+    syncPolling();
   }
 
   if (document.readyState === 'loading') {

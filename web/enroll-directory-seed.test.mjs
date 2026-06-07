@@ -174,6 +174,12 @@ describe("enroll.html seeds the directory on first enrollment", () => {
     assert.match(ENROLL, /outputFrom\(cred\)/);
     assert.match(ENROLL, /prfOut\s*\?\s*await\s+deriveEncKey\(prfOut\)\s*:\s*null/);
   });
+  it("after public enrollment it pins the route cookie and opens the root dashboard gate", () => {
+    assert.match(ENROLL, /function setHomeRouteCookie\(siteID\)/);
+    assert.match(ENROLL, /ftw_home_site=/);
+    assert.match(ENROLL, /function publicHomeTarget\(\)[\s\S]*\?\s*"\/"\s*:\s*"\.\/"/);
+    assert.match(ENROLL, /setTimeout\(\(\)\s*=>\s*location\.href\s*=\s*publicHomeTarget\(\),\s*800\)/);
+  });
 });
 
 describe("login.html requests PRF and seeds the routing directory", () => {

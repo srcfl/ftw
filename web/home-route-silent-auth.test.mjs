@@ -34,8 +34,9 @@ describe("C2 — p2p.js proves the device to the relay before the offer", () => 
       "signing string must be ftw-signal:v1:<site>:<nonce> byte-for-byte");
   });
 
-  it("attaches {device_pubkey, nonce, sig} to the offer POST body", () => {
-    // The offer body is now a JSON envelope carrying the SDP + the proof fields.
+  it("attaches {device_pubkey, nonce, sig} to the offer POST body when a proof exists", () => {
+    // With a device-key proof, the offer body is a JSON envelope carrying the SDP
+    // + proof fields. This keeps -require-device-key compatible when explicitly on.
     assert.match(P2P, /sdp:\s*pc\.localDescription\.sdp/, "offer JSON carries the raw SDP");
     assert.match(P2P, /device_pubkey:\s*proof\.device_pubkey/);
     assert.match(P2P, /nonce:\s*proof\.nonce/);
@@ -44,10 +45,14 @@ describe("C2 — p2p.js proves the device to the relay before the offer", () => 
       "offer POST is application/json (envelope), not raw application/sdp");
   });
 
-  it("fails closed (no offer) when this device has no key — sets the unenrolled state", () => {
+  it("posts a proofless raw-SDP offer when this device has no key", () => {
     assert.match(P2P, /hasDeviceKey\(\)/, "must check for a device key (without minting)");
     assert.match(P2P, /code\s*=\s*"no-device-key"/);
-    assert.match(P2P, /unenrolled\s*=\s*true/);
+    assert.match(P2P, /e\.code\s*===\s*"no-device-key"[\s\S]*e\.code\s*===\s*"store-pending"[\s\S]*return null;/);
+    assert.match(P2P, /"Content-Type":\s*"application\/sdp"/,
+      "missing device key should send raw SDP for relays with the gate off");
+    assert.doesNotMatch(P2P, /code\s*===\s*"no-device-key"[\s\S]{0,80}unenrolled\s*=\s*true/,
+      "missing device key must not abort the offer path");
     assert.match(P2P, /isUnenrolled:/, "exposes isUnenrolled() for the gate");
   });
 
@@ -75,18 +80,87 @@ describe("C3 — next-app.js mints the session silently (device-PoP), passkey on
     assert.match(APP, /sig:\s*sig/);
   });
 
-  it("tries the SILENT path FIRST and falls back to the passkey ceremony", () => {
-    // runSignIn calls runDevicePoP() before runPasskeySignIn().
-    assert.match(APP, /runDevicePoP\(\)\.then\(function\s*\(silentOk\)/);
-    assert.match(APP, /return runPasskeySignIn\(say\)/,
-      "passkey ceremony is the fallback, not the first move");
-    // setupAuth attempts silent auth before showing the gate.
+  it("tries silent auth automatically before showing the gate", () => {
     assert.match(APP, /runDevicePoP\(\)\.then\(function\s*\(ok\)\s*\{[\s\S]*?showSignInGate\(\)/,
       "setupAuth must try silent device-PoP before showing the sign-in gate");
   });
 
+  it("the explicit passkey buttons do not silently log in a remembered browser", () => {
+    assert.match(APP, /gateBtn\.onclick\s*=\s*function\s*\(\)\s*\{\s*runSignIn\(\{\s*allowSilent:\s*false\s*\}\)/,
+      "the returning-visitor button says passkey, so it must not run C3 first");
+    assert.match(APP, /landingBtn\.onclick\s*=\s*function\s*\(\)\s*\{\s*runSignIn\(\{\s*allowSilent:\s*false\s*\}\)/,
+      "the public landing button says passkey, so it must not run C3 first");
+    assert.match(APP, /var allowSilent\s*=\s*opts\.allowSilent\s*===\s*true\s*&&\s*!manualSignoutActive\(\)/);
+    assert.match(APP, /if \(!allowSilent\) return runPasskeySignIn\(say\)/);
+  });
+
+  it("manual logout suppresses silent device auth until a passkey succeeds", () => {
+    assert.match(APP, /MANUAL_SIGNOUT_KEY\s*=\s*"ftw\.owner\.manual_signout\.v1"/);
+    assert.match(APP, /function markManualSignout\(\)[\s\S]*localStorage\.setItem\(MANUAL_SIGNOUT_KEY,\s*"1"\)/);
+    assert.match(APP, /signoutBtn\.onclick[\s\S]*markManualSignout\(\)[\s\S]*ownerFetch\("\/api\/owner-access\/logout"/);
+    assert.match(APP, /if \(manualSignoutActive\(\)\)\s*\{\s*showSignInGate\(\);[\s\S]*?return;\s*\}[\s\S]*?if \(!silentAuthTried\)/,
+      "setupAuth must not run C3 while the user is explicitly signed out");
+    assert.match(APP, /clearManualSignout\(\);[\s\S]*say\("Signed in\.",\s*"ok"\)/,
+      "a successful passkey ceremony re-enables remembered-device login for later reloads");
+  });
+
+  it("waits briefly for the device-key module before burning the silent-auth attempt", () => {
+    assert.match(APP, /function waitForDeviceKeyStore\(timeoutMs\)/,
+      "module-script device-key.js can load after next-app.js; silent auth must wait for it");
+    assert.match(APP, /return waitForDeviceKeyStore\(3000\)/,
+      "runDevicePoP must wait for window.ftwDeviceKey before falling back to passkey");
+  });
+
+  it("does not burn the one silent-auth attempt before P2P is direct", () => {
+    assert.match(APP, /function ownerTransportReady\(\)/,
+      "setupAuth needs a cheap readiness check before consuming silentAuthTried");
+    assert.match(APP, /if \(!ownerTransportReady\(\)\)\s*\{\s*showWaitingOrLandingGate\(\);[\s\S]*?return;\s*\}[\s\S]*?silentAuthTried\s*=\s*true/,
+      "setupAuth must stay in connecting until direct transport exists, then try silent auth");
+    assert.match(APP, /function showWaitingOrLandingGate\(\)[\s\S]*?!hasDecryptableDirectory\(\)[\s\S]*?showSignInGate\(\)/,
+      "fresh public browsers without a directory must land on setup/sign-in instead of guessing a site_id");
+    assert.match(APP, /function scheduleAuthRetry\(delayMs\)/,
+      "connecting auth checks must retry so Chrome cannot stay on the initial gate forever");
+    assert.match(APP, /return waitForOwnerTransport\(10000\)[\s\S]*?return waitForDeviceKeyStore\(3000\)/,
+      "runDevicePoP itself must wait for direct owner transport before challenge/pop");
+  });
+
+  it("suppresses setup/no-devices prompts while the auth gate is connecting", () => {
+    assert.match(APP, /var authGateActive\s*=\s*false/,
+      "the dashboard needs a separate auth-pending state, not just ownerNotAuthed");
+    assert.match(APP, /if \(authGateActive \|\| ownerNotAuthed\) return;/,
+      "setup banner must not flash while remote auth is still connecting");
+    assert.match(APP, /if \(authGateActive \|\| ownerNotAuthed\)\s*\{ if \(existing\) existing\.remove\(\); return; \}/,
+      "no-devices prompt must be removed while auth is pending or logged out");
+    assert.match(APP, /authGateActive\s*=\s*true;[\s\S]*?hideSetupBanner\(\)/,
+      "showGate must actively clear stale setup chrome");
+  });
+
+  it("does not poll owner data behind the remote auth gate", () => {
+    assert.match(APP, /function ownerDataAllowed\(\)[\s\S]*!authGateActive\s*&&\s*!ownerNotAuthed/,
+      "owner data fetches should be paused until remote auth is resolved");
+    assert.match(APP, /function fetchStatus\(\)\s*\{\s*if \(!ownerDataAllowed\(\)\) return Promise\.resolve\(false\);/,
+      "hot status poll must not run behind the gate");
+    assert.match(APP, /function loadHistory\(range\)\s*\{\s*if \(!ownerDataAllowed\(\)\) return Promise\.resolve\(null\);/,
+      "history load must not run behind the gate");
+    assert.match(APP, /function fetchLiveHistory\(force\)\s*\{\s*if \(!ownerDataAllowed\(\)\) return Promise\.resolve\(\);/,
+      "live history fetch must not run behind the gate");
+    assert.match(APP, /function primeOwnerData\(\)[\s\S]*refreshOwnerData\(true\)/,
+      "signed-in reloads should prime data exactly after auth");
+    assert.match(APP, /me && me\.can_sign_out[\s\S]*hideGate\(\);[\s\S]*primeOwnerData\(\)/,
+      "remote signed-in sessions must load data after the gate drops");
+  });
+
   it("does not mint a key just to probe (hasDeviceKey gate before getOrCreate)", () => {
-    assert.match(APP, /window\.ftwDeviceKey\.hasDeviceKey\(\)/);
+    assert.match(APP, /store\.hasDeviceKey\(\)/);
+  });
+
+  it("attaches this browser's device_pubkey on passkey login so reload can silent-login later", () => {
+    assert.match(APP, /window\.ftwDeviceKey\.exportPubHex\(\)/,
+      "passkey login must mint/read the browser device key");
+    assert.match(APP, /finishBody\.device_pubkey\s*=\s*devicePubHex/,
+      "login/finish must attach device_pubkey for the Pi's device-key upgrade path");
+    assert.match(APP, /body:\s*JSON\.stringify\(finishBody\)/,
+      "login/finish must POST the augmented finish body, not a fresh assertion-only object");
   });
 });
 
@@ -130,5 +204,13 @@ describe("UI clarity — the gate makes the security legible (Fredrik's ask)", (
     assert.match(APP, /showGate\(unEnrolled\s*\?\s*"setup"\s*:\s*"signin"\)/);
     assert.match(INDEX, /signin-gate-needs-setup/);
     assert.match(INDEX, /Set up this device/i);
+  });
+
+  it("keeps the passkey wait state neutral while the P2P channel is still opening", () => {
+    assert.match(APP, /waitForOwnerTransport\(25000\)/,
+      "explicit passkey login should allow slow Safari/Chrome WebRTC setup");
+    assert.match(APP, /Still opening the encrypted channel to your Pi\. Try again in a moment\./);
+    assert.doesNotMatch(APP, /Secure channel unavailable — retry in a moment\./,
+      "the first visible feedback should not look like a hard failure");
   });
 });

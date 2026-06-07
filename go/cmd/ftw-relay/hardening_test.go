@@ -270,10 +270,11 @@ func TestRelayMultiTenantFields(t *testing.T) {
 	}
 }
 
-// Under -multi-tenant the relay must fail closed: device-key enforcement is
-// REQUIRED (a forged site_id must fail C2 so the relay never contacts the wrong
-// Pi) and -home-web is REQUIRED (the landing/shell must be relay-served so an
-// anonymous GET never reaches a Pi). -home-site/-home-pubkey are NOT required.
+// Under -multi-tenant the relay still requires -home-web (the tiny bootstrap
+// loader must be relay-served so an anonymous GET never reaches a Pi), but
+// device-key enforcement is optional: when it is off, the relay forwards
+// signaling by site_id and the Pi gates access via passkey over the E2E channel.
+// -home-site/-home-pubkey are NOT required.
 func TestRequireMultiTenant(t *testing.T) {
 	cases := []struct {
 		name             string
@@ -284,7 +285,7 @@ func TestRequireMultiTenant(t *testing.T) {
 	}{
 		{"off — not multi-tenant", false, false, "", false},
 		{"multi-tenant + device-key + web → ok", true, true, "/web", false},
-		{"multi-tenant WITHOUT device-key → refuse", true, false, "/web", true},
+		{"multi-tenant WITHOUT device-key → ok", true, false, "/web", false},
 		{"multi-tenant WITHOUT -home-web → refuse", true, true, "", true},
 		{"multi-tenant missing both → refuse", true, false, "", true},
 	}
@@ -330,7 +331,7 @@ func TestValidUserHandle(t *testing.T) {
 // surface wired on one mux.
 func TestMultiTenantSurfaceWiredTogether(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<h1>LANDING</h1>"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "remote-loader.html"), []byte("<h1>LOADER</h1>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	store, err := NewWalletBlobStore(t.TempDir(), 65536, 1024)

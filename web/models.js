@@ -6,6 +6,7 @@
 
   const POLL_INTERVAL = 3000;
   const TUNE_POLL = 1000;
+  let modelPollHandle = null;
 
   const grid = document.getElementById("models-grid");
   const openBtn = document.getElementById("self-tune-btn");
@@ -37,7 +38,7 @@
   // ---- Model cache: refreshed once per /api/battery_models poll ----
 
   function fetchModels() {
-    fetch("/api/battery_models")
+    ownerFetch("/api/battery_models")
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) return;
@@ -65,8 +66,9 @@
   function openModal() {
     modal.classList.remove("hidden");
     setStatus("");
+    fetchModels();
     // Decide what to render: idle (checklist), active (progress), or done (diff)
-    fetch("/api/self_tune/status")
+    ownerFetch("/api/self_tune/status")
       .then(function (r) { return r.json(); })
       .then(function (s) {
         if (s.active) {
@@ -191,7 +193,7 @@
   function startTunePolling() {
     if (tunePollHandle) return;
     tunePollHandle = setInterval(function () {
-      fetch("/api/self_tune/status")
+      ownerFetch("/api/self_tune/status")
         .then(function (r) { return r.json(); })
         .then(function (s) {
           if (s.active) {
@@ -275,7 +277,28 @@
     return d.innerHTML;
   }
 
+  function advancedVisible() {
+    return !!(document.body && document.body.classList.contains("advanced"));
+  }
+
+  function startModelPolling() {
+    if (modelPollHandle) return;
+    fetchModels();
+    modelPollHandle = setInterval(fetchModels, POLL_INTERVAL);
+  }
+
+  function stopModelPolling() {
+    if (!modelPollHandle) return;
+    clearInterval(modelPollHandle);
+    modelPollHandle = null;
+  }
+
+  function syncModelPolling() {
+    if (advancedVisible()) startModelPolling();
+    else stopModelPolling();
+  }
+
   // ---- Init ----
-  fetchModels();
-  setInterval(fetchModels, POLL_INTERVAL);
+  document.addEventListener("ftw-ui-mode-change", syncModelPolling);
+  syncModelPolling();
 })();

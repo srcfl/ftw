@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -129,6 +130,79 @@ func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
 	}
 }
 
+func TestOwnerAccessSessionsListAndDelete(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+
+	recA := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(recA, []byte("cred-a")); err != nil {
+		t.Fatalf("issue A: %v", err)
+	}
+	cookieA := recA.Result().Cookies()[0]
+	recB := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(recB, []byte("cred-b")); err != nil {
+		t.Fatalf("issue B: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/owner-access/sessions", nil)
+	req.Host = "1.2.3.4"
+	req.AddCookie(cookieA)
+	listRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRec, req)
+	if listRec.Code != 200 {
+		t.Fatalf("list sessions status=%d body=%q", listRec.Code, listRec.Body.String())
+	}
+	var list struct {
+		Sessions []struct {
+			ID      string `json:"id"`
+			Current bool   `json:"current"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode sessions: %v", err)
+	}
+	if len(list.Sessions) != 2 {
+		t.Fatalf("sessions len=%d want 2: %q", len(list.Sessions), listRec.Body.String())
+	}
+	var currentID string
+	for _, s := range list.Sessions {
+		if s.Current {
+			currentID = s.ID
+		}
+	}
+	if currentID == "" {
+		t.Fatalf("current session not marked: %q", listRec.Body.String())
+	}
+
+	del := httptest.NewRequest("DELETE", "/api/owner-access/sessions/"+currentID, nil)
+	del.Host = "1.2.3.4"
+	del.AddCookie(cookieA)
+	delRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delRec, del)
+	if delRec.Code != 204 {
+		t.Fatalf("delete current session status=%d body=%q", delRec.Code, delRec.Body.String())
+	}
+	cleared := false
+	for _, c := range delRec.Result().Cookies() {
+		if c.Name == ownerAccessCookieName && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("deleting current session did not expire the owner cookie")
+	}
+	// The other session remains.
+	oa := srv.ownerAccess()
+	oa.mu.Lock()
+	remaining := len(oa.authSessions)
+	oa.mu.Unlock()
+	if remaining != 1 {
+		t.Fatalf("remaining sessions=%d want 1", remaining)
+	}
+	_ = recB
+}
+
 func TestEnrollPinBurnsAfterMaxTries(t *testing.T) {
 	srv := New(minDeps(t))
 	oa := srv.ownerAccess()
@@ -185,6 +259,43 @@ func TestDeviceDeleteRevokesSessions(t *testing.T) {
 	}
 }
 
+func TestDeviceDeleteLastCredentialRotatesWalletHandle(t *testing.T) {
+	d := minDeps(t)
+	if err := d.State.SaveConfig(ownerWalletHandleKey, "old-wallet"); err != nil {
+		t.Fatal(err)
+	}
+	credID := []byte("cred-last")
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: credID,
+		PublicKey:    []byte("public-key"),
+		FriendlyName: "last",
+		CreatedAtMs:  time.Now().UnixMilli(),
+		WalletHandle: "old-wallet",
+	}); err != nil {
+		t.Fatalf("save trusted device: %v", err)
+	}
+	srv := New(d)
+	credB64 := base64.RawURLEncoding.EncodeToString(credID)
+	del := httptest.NewRequest("DELETE", "/api/owner-access/devices/"+credB64, nil)
+	del.Host = "127.0.0.1:8080"
+	del.RemoteAddr = "192.168.1.50:1234"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, del)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if v, ok := d.State.LoadConfig(ownerWalletHandleKey); !ok || v != "" {
+		t.Fatalf("wallet handle config after final delete = %q/%v, want empty row", v, ok)
+	}
+	next, err := srv.ownerWalletHandle()
+	if err != nil {
+		t.Fatalf("next wallet handle: %v", err)
+	}
+	if string(next) == "old-wallet" || len(next) == 0 {
+		t.Fatalf("next wallet handle = %q, want fresh non-empty handle", next)
+	}
+}
+
 func TestOwnerAccessDevicesListEmpty(t *testing.T) {
 	d := minDeps(t)
 	srv := New(d)
@@ -198,6 +309,61 @@ func TestOwnerAccessDevicesListEmpty(t *testing.T) {
 	}
 	if !contains(rec.Body.String(), `"devices":[]`) && !contains(rec.Body.String(), `"devices":null`) {
 		t.Fatalf("expected empty devices: %q", rec.Body.String())
+	}
+}
+
+func TestOwnerAccessBrowserKeysListAndDelete(t *testing.T) {
+	d := minDeps(t)
+	const pk1 = "ab11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
+	const pk2 = "ac11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("cred"), PublicKey: []byte("k"), FriendlyName: "Iphone", DevicePubkey: pk1,
+	}); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if err := d.State.SetTrustedDevicePubkey([]byte("cred"), pk2, false); err != nil {
+		t.Fatalf("seed second key: %v", err)
+	}
+	srv := New(d)
+
+	req := httptest.NewRequest("GET", "/api/owner-access/browser-keys", nil)
+	req.Host = "127.0.0.1"
+	req.RemoteAddr = "192.168.1.50:1234"
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("list browser keys status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		BrowserKeys []struct {
+			ID           string `json:"id"`
+			FriendlyName string `json:"friendly_name"`
+		} `json:"browser_keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode browser keys: %v", err)
+	}
+	if len(list.BrowserKeys) != 2 {
+		t.Fatalf("browser keys len=%d want 2: %q", len(list.BrowserKeys), rec.Body.String())
+	}
+	if list.BrowserKeys[0].ID == "" || list.BrowserKeys[0].FriendlyName != "Iphone" {
+		t.Fatalf("browser key missing id/name: %+v", list.BrowserKeys[0])
+	}
+
+	del := httptest.NewRequest("DELETE", "/api/owner-access/browser-keys/"+list.BrowserKeys[0].ID, nil)
+	del.Host = "127.0.0.1"
+	del.RemoteAddr = "192.168.1.50:1234"
+	delRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(delRec, del)
+	if delRec.Code != 204 {
+		t.Fatalf("delete browser key status=%d body=%q", delRec.Code, delRec.Body.String())
+	}
+	pks, err := d.State.TrustedDevicePubkeys()
+	if err != nil {
+		t.Fatalf("pubkeys after delete: %v", err)
+	}
+	if len(pks) != 1 {
+		t.Fatalf("pubkeys after delete len=%d want 1: %v", len(pks), pks)
 	}
 }
 
@@ -489,7 +655,7 @@ func TestFriendLoopbackCannotManageOwner(t *testing.T) {
 		srv.Handler().ServeHTTP(rec, req)
 		return rec.Code
 	}
-	const friend = "127.0.0.1:55555"    // ftw-pair / relay reverse-proxy origin
+	const friend = "127.0.0.1:55555"     // ftw-pair / relay reverse-proxy origin
 	const lanOwner = "192.168.1.50:1234" // genuine private-range LAN owner
 	credB64 := base64.RawURLEncoding.EncodeToString([]byte("owner-cred"))
 

@@ -206,13 +206,12 @@ func (r *Relay) bootstrapClaim(w http.ResponseWriter, req *http.Request) {
 // bootstrapEnrollForward is the ONE narrow exception to the P2P-only home route:
 // the single most security-sensitive new surface of multi-tenant onboarding.
 //
-// Under -multi-tenant the relay forces -require-device-key ON, so signalBrowserOffer
-// hard-fails any WebRTC offer lacking a published device-key proof. But a FIRST-TIME
-// user has no device key yet, so they can't open the P2P channel to enroll one. This
-// handler bridges exactly that gap and NOTHING else: it forwards ONLY the two enroll
-// RPCs (/api/owner-access/enroll/start and /enroll/finish) to the Pi over the tunnel,
-// and ONLY while a live bootstrap blob exists for the resolved site — a blob the Pi
-// publishes ONLY while a live LAN PIN is showing on its console.
+// A FIRST-TIME user has no passkey yet, so they can't authenticate over the P2P
+// channel to enroll one. This handler bridges exactly that gap and NOTHING else:
+// it forwards ONLY the two enroll RPCs (/api/owner-access/enroll/start and
+// /enroll/finish) to the Pi over the tunnel, and ONLY while a live bootstrap blob
+// exists for the resolved site — a blob the Pi publishes ONLY while a live LAN PIN
+// is showing on its console.
 //
 // SINGLE-USE BEFORE SIDE EFFECTS: a finish RESERVES the bootstrap atomically
 // BEFORE forwarding to the Pi (test-and-set on the store), so a concurrent second
@@ -328,7 +327,7 @@ func (r *Relay) bootstrapEnrollForward(which string) http.HandlerFunc {
 		}
 		// Copy the Pi's response with the owner cookie stripped — the same chokepoint
 		// homeStaticForward uses, so ftw_owner can never traverse the relay.
-		writeTunneledNoCookie(w, resp)
+		writeTunneledNoCookie(w, resp, "no-store")
 		// Resolve the reservation for a finish: a Pi 200 BURNS the window (single-use,
 		// the enrollment landed); any non-200 RELEASES it so the user can retry without
 		// the Pi re-publishing.

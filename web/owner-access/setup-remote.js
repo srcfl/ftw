@@ -87,19 +87,26 @@ export function drawQR(text, target) {
 //
 //   host  — element to render into.
 //   label — toggle button text (default "Set up remote access").
-export function mountSetupRemote(host, label) {
+//   opts  — string (toggle label, back-compat) OR { label, auto, qrSize }.
+//           auto:true mints + shows the QR immediately (no toggle button) — used
+//           for the LAN "hero", where reaching your home from your phone is THE
+//           primary action. qrSize overrides the canvas target px.
+export function mountSetupRemote(host, opts) {
   if (!host) return;
+  const o = (typeof opts === "string") ? { label: opts } : (opts || {});
 
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "setup-remote-btn";
-  btn.textContent = label || "Set up remote access";
+  btn.textContent = o.label || "Set up remote access";
 
   const out = document.createElement("div");
   out.className = "setup-remote-result";
   out.hidden = true;
 
-  host.appendChild(btn);
+  // auto (the LAN hero): mint + render the QR on mount, no toggle button. Otherwise
+  // keep the click-to-reveal button (the secondary / relay-page affordance).
+  if (!o.auto) host.appendChild(btn);
   host.appendChild(out);
 
   let timer = null;
@@ -139,7 +146,7 @@ export function mountSetupRemote(host, label) {
 
     // QR canvas.
     try {
-      out.querySelector(".setup-qr").appendChild(drawQR(url, 240));
+      out.querySelector(".setup-qr").appendChild(drawQR(url, o.qrSize || 240));
     } catch (e) {
       out.querySelector(".setup-qr").innerHTML =
         '<p class="setup-err">Couldn\'t render the QR — use the link below.</p>';
@@ -196,7 +203,7 @@ export function mountSetupRemote(host, label) {
     }
   }
 
-  btn.onclick = fetchSetup;
+  if (o.auto) fetchSetup(); else btn.onclick = fetchSetup;
 }
 
 if (typeof window !== "undefined") {

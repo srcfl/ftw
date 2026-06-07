@@ -92,8 +92,9 @@ func TestUpdateMissingDeviceReturnsErrNoRows(t *testing.T) {
 
 func TestDeleteTrustedDevice(t *testing.T) {
 	s := openTempStore(t)
+	const pk = "af11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
 	dev := TrustedDevice{
-		CredentialID: []byte("zap"), PublicKey: []byte("k"), FriendlyName: "x",
+		CredentialID: []byte("zap"), PublicKey: []byte("k"), FriendlyName: "x", DevicePubkey: pk,
 	}
 	_ = s.SaveTrustedDevice(dev)
 	if err := s.DeleteTrustedDevice(dev.CredentialID); err != nil {
@@ -103,14 +104,17 @@ func TestDeleteTrustedDevice(t *testing.T) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("want sql.ErrNoRows after delete, got %v", err)
 	}
+	if pks, err := s.TrustedDevicePubkeys(); err != nil || len(pks) != 0 {
+		t.Fatalf("browser keys should be deleted with credential, pks=%v err=%v", pks, err)
+	}
 }
 
 func TestSaveRejectsMissingRequiredFields(t *testing.T) {
 	s := openTempStore(t)
 	cases := []TrustedDevice{
-		{PublicKey: []byte("k"), FriendlyName: "x"},                  // no credential_id
-		{CredentialID: []byte("c"), FriendlyName: "x"},               // no public_key
-		{CredentialID: []byte("c"), PublicKey: []byte("k")},          // no friendly_name
+		{PublicKey: []byte("k"), FriendlyName: "x"},         // no credential_id
+		{CredentialID: []byte("c"), FriendlyName: "x"},      // no public_key
+		{CredentialID: []byte("c"), PublicKey: []byte("k")}, // no friendly_name
 	}
 	for i, dev := range cases {
 		if err := s.SaveTrustedDevice(dev); err == nil {
@@ -221,20 +225,87 @@ func TestTrustedDevicePubkeyEmptyAndUpgrade(t *testing.T) {
 		t.Fatalf("upgrade did not persist: %q", got.DevicePubkey)
 	}
 
-	// A second no-overwrite upgrade with a DIFFERENT key must NOT clobber the
-	// already-pinned one (defence in depth against silent repointing).
+	// A second no-overwrite upgrade with a DIFFERENT key adds another browser key
+	// for the same synced passkey, but must NOT clobber the legacy single-key slot.
 	const pk2 = "cc11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
 	if err := s.SetTrustedDevicePubkey([]byte("legacy"), pk2, false); err != nil {
 		t.Fatalf("no-overwrite upgrade returned err: %v", err)
 	}
 	got2, _ := s.LookupTrustedDevice([]byte("legacy"))
 	if got2.DevicePubkey != pk {
-		t.Fatalf("no-overwrite upgrade clobbered pinned key: %q", got2.DevicePubkey)
+		t.Fatalf("no-overwrite upgrade clobbered legacy pinned key: %q", got2.DevicePubkey)
+	}
+	pks2, err := s.TrustedDevicePubkeys()
+	if err != nil {
+		t.Fatalf("pubkeys after second browser key: %v", err)
+	}
+	wantPks2 := []string{pk, pk2}
+	if !reflect.DeepEqual(pks2, wantPks2) {
+		t.Fatalf("TrustedDevicePubkeys after second browser key = %v, want %v", pks2, wantPks2)
+	}
+	byPk2, err := s.LookupTrustedDeviceByPubkey(pk2)
+	if err != nil {
+		t.Fatalf("lookup second browser key: %v", err)
+	}
+	if string(byPk2.CredentialID) != "legacy" {
+		t.Fatalf("second browser key returned wrong credential: %q", byPk2.CredentialID)
 	}
 
 	// Upgrading an unknown credential reports ErrNoRows.
 	if err := s.SetTrustedDevicePubkey([]byte("ghost"), pk, false); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("upgrade of unknown credential: want sql.ErrNoRows, got %v", err)
+	}
+}
+
+func TestTrustedDevicePubkeyRecordsTouchAndDelete(t *testing.T) {
+	s := openTempStore(t)
+	const pk1 = "dd11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
+	const pk2 = "ee11bb22cc33dd44ee55ff66007788990011223344556677889900aabbccddeeff0011223344556677889900aabbccddeeff00112233445566778899aabbccdd"
+	if err := s.SaveTrustedDevice(TrustedDevice{
+		CredentialID: []byte("cred"), PublicKey: []byte("k"), FriendlyName: "sync passkey",
+		CreatedAtMs: 1000, LastUsedMs: 2000, DevicePubkey: pk1,
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := s.SetTrustedDevicePubkey([]byte("cred"), pk2, false); err != nil {
+		t.Fatalf("add second browser key: %v", err)
+	}
+	if err := s.TouchTrustedDevicePubkey(pk2, 9000); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	recs, err := s.TrustedDevicePubkeyRecords()
+	if err != nil {
+		t.Fatalf("records: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("records len = %d, want 2: %+v", len(recs), recs)
+	}
+	var sawTouched bool
+	for _, r := range recs {
+		if r.DevicePubkey == pk2 && r.LastUsedMs == 9000 && string(r.CredentialID) == "cred" {
+			sawTouched = true
+		}
+	}
+	if !sawTouched {
+		t.Fatalf("touched browser key not reflected: %+v", recs)
+	}
+
+	if err := s.DeleteTrustedDevicePubkey(pk1); err != nil {
+		t.Fatalf("delete legacy/browser key: %v", err)
+	}
+	dev, err := s.LookupTrustedDevice([]byte("cred"))
+	if err != nil {
+		t.Fatalf("lookup credential after key delete: %v", err)
+	}
+	if dev.DevicePubkey != "" {
+		t.Fatalf("legacy slot should be cleared after deleting pk1, got %q", dev.DevicePubkey)
+	}
+	pks, err := s.TrustedDevicePubkeys()
+	if err != nil {
+		t.Fatalf("pubkeys after delete: %v", err)
+	}
+	if !reflect.DeepEqual(pks, []string{pk2}) {
+		t.Fatalf("pubkeys after delete = %v, want [%q]", pks, pk2)
 	}
 }
 

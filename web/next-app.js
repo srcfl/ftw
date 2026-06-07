@@ -90,6 +90,42 @@
     return fetch(path, opts);
   }
 
+  function waitForOwnerTransport(timeoutMs) {
+    if (!window.ftwP2P || isLanFallbackOrigin()) return Promise.resolve(true);
+    if (typeof window.ftwP2P.state === "function" && window.ftwP2P.state() === "direct") {
+      return Promise.resolve(true);
+    }
+    var connectP = typeof window.ftwP2P.connect === "function"
+      ? window.ftwP2P.connect().catch(function () { return false; })
+      : Promise.resolve(false);
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(false);
+      }, timeoutMs || 9000);
+      function finish(ok) {
+        if (done) return;
+        if (!ok) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(true);
+      }
+      if (typeof window.ftwP2P.onState === "function") {
+        window.ftwP2P.onState(function (s) { finish(s === "direct"); });
+      }
+      connectP.then(finish);
+    });
+  }
+
+  function ownerTransportReady() {
+    if (isLanFallbackOrigin()) return true;
+    return !!(window.ftwP2P &&
+      typeof window.ftwP2P.state === "function" &&
+      window.ftwP2P.state() === "direct");
+  }
+
   // ---- Chart data ----
   var chartHistory = {
     grid: [],
@@ -1945,6 +1981,7 @@
   // ---- API ----
   var firstLoad = true;
   var setupBannerShown = false;
+  var ownerDataPrimed = false;
   // Loadpoint cache — keyed by driver_name so the EV-planet builder
   // in render() can look up vehicle SoC + charge-limit without a
   // second round of fetches per status tick. Refreshed in parallel
@@ -1957,7 +1994,11 @@
   // facts like siteHasPV() without re-fetching. `null` until the
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
+  function ownerDataAllowed() {
+    return isLanFallbackOrigin() || (!authGateActive && !ownerNotAuthed);
+  }
   function fetchStatus() {
+    if (!ownerDataAllowed()) return Promise.resolve(false);
     // Route the hot poll over the direct P2P DataChannel when it's up. STRICT
     // mode (FIX-2): the owner API (/api/status etc.) must never ride the cleartext
     // relay on the public home route — strict fails closed (synthetic 503) if the
@@ -1969,7 +2010,7 @@
     // available rather than sending the cookie to the relay. A 503 here just shows
     // "reconnecting" until the channel recovers (p2p.js auto-retries).
     var xfetch = ownerFetch;
-    Promise.all([
+    return Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
       xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       xfetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
@@ -2072,7 +2113,7 @@
   // ---- Setup banner (bootstrap mode — no config yet) ----
   function showSetupBanner() {
     if (setupBannerShown) return;
-    if (ownerNotAuthed) return; // a logged-out viewer's empty status ≠ "no devices"
+    if (authGateActive || ownerNotAuthed) return; // auth-pending/logged-out empty status is not config state
     var banner = document.createElement("div");
     banner.id = "setup-banner";
     banner.className = "setup-banner";
@@ -2090,7 +2131,7 @@
   // ---- "Add a device" prompt when drivers object is empty ----
   function updateNoDevicesPrompt(drivers) {
     var existing = document.getElementById("no-devices-prompt");
-    if (ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge when logged out
+    if (authGateActive || ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge before auth
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
     if (hasDrivers) {
       if (existing) existing.remove();
@@ -3126,6 +3167,7 @@
 
   // ---- History loader ----
   function loadHistory(range) {
+    if (!ownerDataAllowed()) return Promise.resolve(null);
     var points = CHART_POINTS;
     // Owner read (carries the session cookie) — strict (FIX-B).
     return ownerFetch("/api/history?range=" + (range || "5m") + "&points=" + points)
@@ -3468,6 +3510,7 @@
 
   var lastLiveHistFetch = 0;
   function fetchLiveHistory(force) {
+    if (!ownerDataAllowed()) return Promise.resolve();
     lastLiveHistFetch = Date.now();
     return fetchHistory("24h", 288, force) // 5-min cadence
       .then(function (d) {
@@ -3596,15 +3639,22 @@
   // unconfigured instance). On the LAN (bypass) the gate never shows. ownerNotAuthed
   // also suppresses the "no devices configured" prompt for logged-out viewers.
   var ownerNotAuthed = false;
+  var authGateActive = false;
   function showGate(mode) {
     document.documentElement.classList.add("ftw-gated"); // CSS shows the gate, hides nothing else needed (opaque overlay)
     var g = document.getElementById("signin-gate");
     if (g) g.setAttribute("data-mode", mode || "signin");
+    authGateActive = true;
     ownerNotAuthed = (mode !== "connecting");
-    if (ownerNotAuthed && typeof hideSetupBanner === "function") { try { hideSetupBanner(); } catch (e) {} }
+    try { hideSetupBanner(); } catch (e) {}
+    try {
+      var noDevices = document.getElementById("no-devices-prompt");
+      if (noDevices) noDevices.remove();
+    } catch (e) {}
   }
   function hideGate() {
     document.documentElement.classList.remove("ftw-gated");
+    authGateActive = false;
     ownerNotAuthed = false;
   }
 
@@ -3620,36 +3670,63 @@
   // throws) for "no device key", "no site", or any PoP failure — the caller then
   // falls back to the passkey ceremony.
   var devicePoPBusy = false;
+  function waitForDeviceKeyStore(timeoutMs) {
+    if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+      return Promise.resolve(window.ftwDeviceKey);
+    }
+    return new Promise(function (resolve) {
+      var deadline = Date.now() + (timeoutMs || 3000);
+      function tick() {
+        if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+          resolve(window.ftwDeviceKey);
+          return;
+        }
+        if (Date.now() >= deadline) { resolve(null); return; }
+        setTimeout(tick, 50);
+      }
+      tick();
+    });
+  }
+
   function runDevicePoP() {
     if (devicePoPBusy) return Promise.resolve(false);
     // Need both the device-key store and the pinned site (for the signing string).
-    if (!window.ftwDeviceKey || typeof window.ftwDeviceKey.hasDeviceKey !== "function") {
-      return Promise.resolve(false);
-    }
+    // device-key.js is an ES module loaded before this classic script, but modules
+    // are deferred and can still finish after setupAuth's first direct-channel
+    // tick. Wait briefly so a reload does not burn the one silent-auth attempt
+    // before window.ftwDeviceKey exists.
     if (!window.ftwP2P || typeof window.ftwP2P.site !== "function") {
       return Promise.resolve(false);
     }
     devicePoPBusy = true;
-    return window.ftwDeviceKey.hasDeviceKey()
-      .then(function (has) {
-        if (!has) return false; // never enrolled on this device → passkey path
-        return Promise.all([window.ftwDeviceKey.getOrCreate(), window.ftwP2P.site()])
-          .then(function (pair) {
-            var key = pair[0], site = pair[1];
-            if (!site) return false;
-            return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
-              .then(function (r) { return r.ok ? r.json() : null; })
-              .then(function (ch) {
-                if (!ch || !ch.challenge) return false;
-                var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
-                return key.sign(msg).then(function (sig) {
-                  return ownerFetch("/api/owner-access/device-pop", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
-                    credentials: "same-origin",
-                  }).then(function (pop) { return !!(pop && pop.ok); });
-                });
+    return waitForOwnerTransport(10000)
+      .then(function (transportOk) {
+        if (!transportOk) return false;
+        return waitForDeviceKeyStore(3000);
+      })
+      .then(function (store) {
+        if (!store) return false;
+        return store.hasDeviceKey()
+          .then(function (has) {
+            if (!has) return false; // never enrolled on this device → passkey path
+            return Promise.all([store.getOrCreate(), window.ftwP2P.site()])
+              .then(function (pair) {
+                var key = pair[0], site = pair[1];
+                if (!site) return false;
+                return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
+                  .then(function (r) { return r.ok ? r.json() : null; })
+                  .then(function (ch) {
+                    if (!ch || !ch.challenge) return false;
+                    var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
+                    return key.sign(msg).then(function (sig) {
+                      return ownerFetch("/api/owner-access/device-pop", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
+                        credentials: "same-origin",
+                      }).then(function (pop) { return !!(pop && pop.ok); });
+                    });
+                  });
               });
           });
       })
@@ -3659,21 +3736,55 @@
 
   // applySignedIn refreshes the dashboard in place once a session is minted
   // (passkey OR silent device-PoP). Shared so both paths converge.
+  function refreshOwnerData(forceHistory) {
+    ownerDataPrimed = true;
+    fetchStatus();
+    fetchLiveHistory(!!forceHistory);
+    loadHistory(chartRange);
+  }
+  function primeOwnerData() {
+    if (ownerDataPrimed) return;
+    refreshOwnerData(true);
+  }
   function applySignedIn() {
     hideGate();
-    fetchStatus();
-    fetchLiveHistory(true);
-    loadHistory(chartRange);
-    setupAuth(); // reflect the signed-in state (signout button)
+    var signoutBtn = document.getElementById("signout-btn");
+    if (signoutBtn && !isLanFallbackOrigin()) signoutBtn.hidden = false;
+    refreshOwnerData(true);
+    announceOwnerAuthenticated();
   }
 
-  // runSignIn: sign in over the dashboard's strict P2P transport. Tries the SILENT
-  // device-key path FIRST (C3) — a returning device signs in with no Face ID — and
-  // only falls back to the passkey ceremony when there's no device key or the PoP
-  // fails. On success the Pi sets the owner session cookie (captured in-process by
-  // the channel Bridge); we just refresh the data in place.
+  function announceOwnerAuthenticated() {
+    window.dispatchEvent(new CustomEvent("ftw-owner-authenticated"));
+  }
+
+  // Explicit logout is a local browser intent, not just a server session revoke:
+  // if we let C3 run immediately afterwards, the remembered device-key silently
+  // mints a fresh session and "logout" appears to do nothing. Keep a local guard
+  // until the next successful passkey ceremony; normal reloads still auto-remember
+  // as long as the user did not press Sign out.
+  var MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
+  function manualSignoutActive() {
+    try { return localStorage.getItem(MANUAL_SIGNOUT_KEY) === "1"; }
+    catch (e) { return false; }
+  }
+  function markManualSignout() {
+    try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (e) {}
+    silentAuthTried = true;
+  }
+  function clearManualSignout() {
+    try { localStorage.removeItem(MANUAL_SIGNOUT_KEY); } catch (e) {}
+  }
+
+  // runSignIn: explicit button-driven sign-in over the dashboard's strict P2P
+  // transport. The button says "passkey", so it must run the passkey ceremony
+  // directly; the SILENT device-key path is only for automatic remembered-device
+  // checks in setupAuth(), and is disabled after an explicit logout until passkey
+  // auth succeeds.
   var signInBusy = false;
-  function runSignIn() {
+  function runSignIn(opts) {
+    opts = opts || {};
+    var allowSilent = opts.allowSilent === true && !manualSignoutActive();
     if (signInBusy) return Promise.resolve(false);
     signInBusy = true;
     // say updates whichever message line is on screen. The same ceremony runs
@@ -3689,7 +3800,8 @@
         msgEls[i].className = "signin-gate-msg" + (cls ? " " + cls : "");
       }
     }
-    // Silent first: if this device is remembered, no passkey prompt at all.
+    if (!allowSilent) return runPasskeySignIn(say);
+
     say("Reaching your home…");
     return runDevicePoP().then(function (silentOk) {
       if (silentOk) {
@@ -3766,9 +3878,19 @@
   // the PRF extension (prf.extensionInput): the same passkey tap yields the
   // directory-decryption key, so after finish we load + route the directory.
   function runPasskeySignIn(say) {
-    say("Waiting for your passkey…");
-    return ownerFetch("/api/owner-access/login/start", { method: "POST" })
+    say("Opening secure channel…");
+    return waitForOwnerTransport(25000)
+      .then(function (ok) {
+        if (!ok) {
+          say("Still opening the encrypted channel to your Pi. Try again in a moment.");
+          scheduleAuthRetry(1000);
+          return null;
+        }
+        say("Waiting for your passkey…");
+        return ownerFetch("/api/owner-access/login/start", { method: "POST" });
+      })
       .then(function (start) {
+        if (!start) return null;
         if (start.status === 404) { say("No passkey here yet — set up this device on your home network first.", "err"); return null; }
         if (!start.ok) { say("Sign-in unavailable (" + start.status + ").", "err"); return null; }
         return start.json();
@@ -3788,11 +3910,19 @@
         } catch (e) {}
         return navigator.credentials.get(getOpts).then(function (cred) {
           if (!cred) { say(""); return false; }
-          return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(encodeAssertionResult(cred)),
-            credentials: "same-origin",
+          var finishBody = encodeAssertionResult(cred);
+          var devicePubP = Promise.resolve(null);
+          if (window.ftwDeviceKey && typeof window.ftwDeviceKey.exportPubHex === "function") {
+            devicePubP = window.ftwDeviceKey.exportPubHex().catch(function () { return null; });
+          }
+          return devicePubP.then(function (devicePubHex) {
+            if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+            return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(finishBody),
+              credentials: "same-origin",
+            });
           }).then(function (finish) {
             if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
             // Session minted. Now derive the directory key from this SAME
@@ -3800,6 +3930,7 @@
             // route (auto-open on exactly 1). Non-fatal: a PRF/decrypt failure
             // still signs the user in against the browser-carried copy.
             return openDirectoryAfterAssertion(cred, say).then(function () {
+              clearManualSignout();
               say("Signed in.", "ok");
               return true;
             });
@@ -3821,18 +3952,41 @@
   // setupAuth wires the gate/signout buttons once, then reflects the current
   // whoami state. Safe to call repeatedly (on load and whenever the P2P channel
   // (re)connects), since whoami needs the channel up to answer on a remote origin.
+  var authRetryTimer = null;
+  function scheduleAuthRetry(delayMs) {
+    if (authRetryTimer || isLanFallbackOrigin()) return;
+    authRetryTimer = setTimeout(function () {
+      authRetryTimer = null;
+      setupAuth();
+    }, delayMs || 1500);
+  }
+
+  function showWaitingOrLandingGate() {
+    if (!hasDecryptableDirectory()) {
+      showSignInGate();
+      return;
+    }
+    showGate("connecting");
+    scheduleAuthRetry(1500);
+  }
+
   function setupAuth() {
+    if (authRetryTimer) {
+      clearTimeout(authRetryTimer);
+      authRetryTimer = null;
+    }
     var signoutBtn = document.getElementById("signout-btn");
     var gateBtn = document.getElementById("signin-gate-btn");
-    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn(); }; }
+    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
     // The public-landing button runs the SAME ceremony as the gate button — one
     // runSignIn(), not a fork — so the landing and the returning-visitor card
     // converge on the identical passkey + PRF + directory flow.
     var landingBtn = document.getElementById("signin-landing-btn");
-    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn(); }; }
+    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
     if (signoutBtn && !signoutBtn._wired) {
       signoutBtn._wired = true;
       signoutBtn.onclick = function () {
+        markManualSignout();
         ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
           .catch(function () {})
           .then(function () { location.reload(); });
@@ -3844,11 +3998,15 @@
         if (me && me.can_sign_out) {            // signed-in remote session
           if (signoutBtn) signoutBtn.hidden = false;
           hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
           return;
         }
         if (me && me.authenticated) {           // genuine-LAN bypass — full access
           if (signoutBtn) signoutBtn.hidden = true;
           hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
           return;
         }
         // Not signed in (remote). Try the SILENT device-key path (C3) ONCE before
@@ -3857,6 +4015,14 @@
         // gate. silentAuthTried guards against re-running it on every channel
         // reconnect.
         if (signoutBtn) signoutBtn.hidden = true;
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        if (manualSignoutActive()) {
+          showSignInGate();
+          return;
+        }
         if (!silentAuthTried) {
           silentAuthTried = true;
           runDevicePoP().then(function (ok) {
@@ -3867,7 +4033,13 @@
         }
         showSignInGate();
       })
-      .catch(function () { /* channel down → leave the gate as-is (connecting) */ });
+      .catch(function () {
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        showSignInGate();
+      });
   }
 
   // silentAuthTried: the C3 silent device-PoP is attempted at most once per page

@@ -52,7 +52,7 @@ function resolveModuleGraph(entryRel, seen) {
   const re = /\bimport\s+(?:[^"']*?\bfrom\s+)?["'](\.\.?\/[^"']+)["']/g;
   let m;
   while ((m = re.exec(src))) {
-    const childAbs = resolve(dir, m[1]);
+    const childAbs = resolve(dir, m[1].split("?")[0]);
     const childRel = childAbs.slice(WEB.length + 1);
     resolveModuleGraph(childRel, seen);
   }
@@ -86,6 +86,23 @@ const STATE_CHANGING_METHOD = /method\s*:\s*["'`](POST|PUT|DELETE|PATCH)\b/i;
 // fetch(`/api…`). A dynamic-URL fetch (signaling /signal/*, or a var holding a
 // non-/api URL) is out of scope: the threat is a literal owner/CONTROL /api call.
 const API_PATH_LITERAL = /^\s*["'`](\/api\/[A-Za-z0-9_./-]*)/;
+const OWNER_READ_FILES = [
+  "plan.js",
+  "loadpoints.js",
+  "components/ftw-price-chart.js",
+  "components/ftw-history-card.js",
+  "components/ftw-savings-card.js",
+];
+const OWNER_READ_PATHS = new Set([
+  "/api/prices",
+  "/api/forecast",
+  "/api/mpc/plan",
+  "/api/config",
+  "/api/status",
+  "/api/loadpoints",
+  "/api/energy/daily",
+  "/api/savings/daily",
+]);
 
 function scanForBareStateChangingFetch(src) {
   const findings = [];
@@ -102,6 +119,23 @@ function scanForBareStateChangingFetch(src) {
     if (ALLOWED_PATHS.some((re) => re.test(path))) continue;
     // The call must carry a state-changing method to be a leak risk.
     if (!STATE_CHANGING_METHOD.test(win)) continue;
+    const line = src.slice(0, m.index).split("\n").length;
+    findings.push({ line, path });
+  }
+  return findings;
+}
+
+function scanForBareOwnerReadFetch(src) {
+  const findings = [];
+  let m;
+  BARE_FETCH.lastIndex = 0;
+  while ((m = BARE_FETCH.exec(src))) {
+    const open = m.index + m[0].length;
+    const win = src.slice(open, open + 400);
+    const pathM = API_PATH_LITERAL.exec(win);
+    if (!pathM) continue;
+    const path = pathM[1];
+    if (!OWNER_READ_PATHS.has(path)) continue;
     const line = src.slice(0, m.index).split("\n").length;
     findings.push({ line, path });
   }
@@ -143,6 +177,22 @@ describe("public-route fetch guard (FIX-B)", () => {
       offenders,
       [],
       "state-changing owner/CONTROL calls must use window.ownerFetch, not bare fetch():\n" +
+        offenders.join("\n"),
+    );
+  });
+
+  it("owner dashboard reads that must render on the public route use ownerFetch", () => {
+    const offenders = [];
+    for (const rel of OWNER_READ_FILES) {
+      const src = readFileSync(join(WEB, rel), "utf8");
+      for (const f of scanForBareOwnerReadFetch(src)) {
+        offenders.push(`${rel}:${f.line} -> bare fetch(${f.path})`);
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "public-route owner reads must use window.ownerFetch so the relay cannot block them:\n" +
         offenders.join("\n"),
     );
   });

@@ -124,6 +124,21 @@ build-windows-amd64:
 
 # ---- Release archives ----
 
+RELAY_WEB_MANIFEST := web/relay-bootstrap-files.txt
+
+relay-web:
+	@rm -rf bin/ftw-relay-web
+	@mkdir -p bin/ftw-relay-web release
+	@while IFS= read -r f; do \
+		[ -n "$$f" ] || continue; \
+		case "$$f" in \#*) continue ;; esac; \
+		mkdir -p "bin/ftw-relay-web/$$(dirname "$$f")"; \
+		cp "web/$$f" "bin/ftw-relay-web/$$f"; \
+	done < "$(RELAY_WEB_MANIFEST)"
+	@COPYFILE_DISABLE=1 tar --no-xattrs -czf release/ftw-relay-web.tar.gz -C bin/ftw-relay-web .
+	@printf "built release/ftw-relay-web.tar.gz (%s bytes)\n" \
+		"$$(wc -c <release/ftw-relay-web.tar.gz)"
+
 release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
 	@# Per-arch staging dirs so the tarballs ship forty-two-watts +

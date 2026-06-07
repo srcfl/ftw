@@ -404,3 +404,35 @@ func TestSignalOffer_RolloutGateOff(t *testing.T) {
 		t.Fatalf("drained offer = %q, want RAW-OFFER-SDP parked verbatim", off)
 	}
 }
+
+func TestSignalOffer_RolloutGateOffUnwrapsProofEnvelope(t *testing.T) {
+	owners := NewOwnerRegistry()
+	if err := owners.Register("site:Home", "host-xyz", "deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	r := &Relay{
+		Owners:      owners,
+		Polls:       NewPollSecrets(),
+		Signals:     NewSignalMailbox(),
+		Challenges:  NewSignalChallenges(),
+		PollTimeout: time.Second,
+	}
+	secret := mustIssue(t, r.Polls, "host-xyz")
+	ts := httptest.NewServer(r.Handler())
+	defer ts.Close()
+	const nonce = "00112233445566778899aabbccddeeff"
+
+	body := `{"sdp":"RAW-OFFER-SDP","device_pubkey":"ignored","nonce":"ignored","sig":"ignored"}`
+	resp, err := http.Post(ts.URL+"/signal/site:Home/offer?n="+nonce, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("rollout-off envelope offer status = %d, want 204", resp.StatusCode)
+	}
+	off, _ := mustGetWithNonce(t, ts.URL+"/signal/host-xyz/offer", secret)
+	if string(off) != "RAW-OFFER-SDP" {
+		t.Fatalf("drained offer = %q, want raw SDP unwrapped from envelope", off)
+	}
+}

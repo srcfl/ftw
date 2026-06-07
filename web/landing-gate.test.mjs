@@ -31,8 +31,8 @@ describe("next-app.js — public landing for the anonymous visitor", () => {
 
   it("wires the landing button to the SAME runSignIn ceremony as the gate button", () => {
     assert.match(APP, /getElementById\("signin-landing-btn"\)/);
-    assert.match(APP, /landingBtn[\s\S]{0,120}runSignIn\(\)/,
-      "the landing button must call runSignIn() — one ceremony, not a fork");
+    assert.match(APP, /landingBtn[\s\S]{0,180}runSignIn\(\{\s*allowSilent:\s*false\s*\}\)/,
+      "the landing button must call the shared runSignIn ceremony, but never silently after an explicit click");
   });
 });
 

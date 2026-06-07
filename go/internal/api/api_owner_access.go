@@ -4,17 +4,17 @@
 // the relay (see docs/goals/relay-as-tunnel.md Phase 3).
 //
 // Flow:
-//   1. /api/owner-access/enroll/start   — operator's browser (relay or LAN)
-//      requests a WebAuthn registration challenge.
-//   2. /api/owner-access/enroll/finish  — browser POSTs the attestation;
-//      host validates, persists in trusted_devices, sets session cookie.
-//   3. /api/owner-access/login/start    — browser requests an assertion
-//      challenge (allowedCredentials populated from trusted_devices).
-//   4. /api/owner-access/login/finish   — browser POSTs the assertion;
-//      host validates against the matching credential, sets session
-//      cookie, returns success.
-//   5. /api/owner-access/devices        — GET lists enrolled devices,
-//      DELETE removes one. Both require an authenticated session cookie.
+//  1. /api/owner-access/enroll/start   — operator's browser (relay or LAN)
+//     requests a WebAuthn registration challenge.
+//  2. /api/owner-access/enroll/finish  — browser POSTs the attestation;
+//     host validates, persists in trusted_devices, sets session cookie.
+//  3. /api/owner-access/login/start    — browser requests an assertion
+//     challenge (allowedCredentials populated from trusted_devices).
+//  4. /api/owner-access/login/finish   — browser POSTs the assertion;
+//     host validates against the matching credential, sets session
+//     cookie, returns success.
+//  5. /api/owner-access/devices        — GET lists enrolled devices,
+//     DELETE removes one. Both require an authenticated session cookie.
 //
 // The relay forwards the same /api/owner-access/* paths through the
 // tunnel as any other dashboard request (see Phase 2 web proxy).
@@ -83,9 +83,9 @@ const maxCeremoniesPerKind = 64
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
-	mu            sync.Mutex
-	wa            *webauthn.WebAuthn
-	wsErr         error
+	mu             sync.Mutex
+	wa             *webauthn.WebAuthn
+	wsErr          error
 	enrollSessions map[string]ceremonySession
 	loginSessions  map[string]ceremonySession
 	authSessions   map[string]authSession
@@ -261,9 +261,9 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 		origins = []string{"https://" + rpID}
 	}
 	wa, err := webauthn.New(&webauthn.Config{
-		RPID:          rpID,
-		RPDisplayName: "forty-two-watts",
-		RPOrigins:     origins,
+		RPID:                  rpID,
+		RPDisplayName:         "forty-two-watts",
+		RPOrigins:             origins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
 			ResidentKey:      protocol.ResidentKeyRequirementRequired,
@@ -327,6 +327,9 @@ func (s *Server) resolveDiscoverableOwner(rawID, userHandle []byte) (webauthn.Us
 }
 
 func ownerUserID(deps *Deps) []byte {
+	if deps != nil && deps.SiteID != "" {
+		return []byte(deps.SiteID)
+	}
 	if deps != nil && deps.Cfg != nil && deps.Cfg.Site.Name != "" {
 		return []byte("site:" + deps.Cfg.Site.Name)
 	}
@@ -917,12 +920,11 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Optional C4 upgrade: a credential enrolled before the device-key feature
-	// can attach its device key on a later passkey login by riding device_pubkey
-	// on this finish body (same buffer-and-replay trick as enroll/finish). Only an
-	// empty slot is filled — a passkey login can never silently REPOINT a key
-	// that's already pinned (that would let a fresh-but-valid passkey assertion
-	// hijack the silent-login key). Buffering also enforces the ceremony cap.
+	// Optional C4 upgrade: a passkey login can attach this browser's local
+	// device key by riding device_pubkey on the finish body (same buffer-and-replay
+	// trick as enroll/finish). The legacy single-key slot is not overwritten, but
+	// the multi-key table can remember another browser for the same synced passkey.
+	// Buffering also enforces the ceremony cap.
 	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
 	if err != nil {
 		http.Error(w, "finish login: read body", http.StatusBadRequest)
@@ -943,9 +945,8 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("update sign count: %v", err), http.StatusInternalServerError)
 		return
 	}
-	// Fill the device-key slot only if empty (allowOverwrite=false). Best-effort:
-	// the login itself already succeeded, so a failed upgrade must not 500 the
-	// operator out of a valid session.
+	// Add this browser's device key best-effort. The login itself already succeeded,
+	// so a failed upgrade must not 500 the operator out of a valid session.
 	if devicePubkey != "" {
 		if err := s.deps.State.SetTrustedDevicePubkey(cred.ID, devicePubkey, false); err != nil {
 			slog.Warn("owner-access: device-key upgrade on login failed", "err", err)
@@ -974,6 +975,12 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	keyCounts := map[string]int{}
+	if keys, err := s.deps.State.TrustedDevicePubkeyRecords(); err == nil {
+		for _, k := range keys {
+			keyCounts[string(k.CredentialID)]++
+		}
+	}
 	type devOut struct {
 		CredentialIDB64 string   `json:"credential_id_b64"`
 		FriendlyName    string   `json:"friendly_name"`
@@ -985,20 +992,201 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 		// raw key itself is public, but the UI only needs the boolean to show an
 		// "upgrade for one-tap login" affordance, so we don't ship the 128 hex.
 		HasDeviceKey bool `json:"has_device_key"`
+		BrowserKeys  int  `json:"browser_keys"`
 	}
 	out := make([]devOut, 0, len(devices))
 	for _, d := range devices {
+		browserKeys := keyCounts[string(d.CredentialID)]
+		if browserKeys == 0 && d.DevicePubkey != "" {
+			browserKeys = 1
+		}
 		out = append(out, devOut{
 			CredentialIDB64: base64.RawURLEncoding.EncodeToString(d.CredentialID),
 			FriendlyName:    d.FriendlyName,
 			CreatedAtMs:     d.CreatedAtMs,
 			LastUsedMs:      d.LastUsedMs,
 			Transports:      d.Transports,
-			HasDeviceKey:    d.DevicePubkey != "",
+			HasDeviceKey:    browserKeys > 0,
+			BrowserKeys:     browserKeys,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"devices": out})
+}
+
+func ownerAccessOpaqueID(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func (s *Server) handleOwnerBrowserKeysList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	devices, err := s.deps.State.LoadTrustedDevices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names := map[string]string{}
+	for _, d := range devices {
+		names[string(d.CredentialID)] = d.FriendlyName
+	}
+	keys, err := s.deps.State.TrustedDevicePubkeyRecords()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type keyOut struct {
+		ID              string `json:"id"`
+		CredentialIDB64 string `json:"credential_id_b64"`
+		FriendlyName    string `json:"friendly_name"`
+		CreatedAtMs     int64  `json:"created_at_ms"`
+		LastUsedMs      int64  `json:"last_used_ms"`
+		KeyHint         string `json:"key_hint"`
+		Legacy          bool   `json:"legacy"`
+	}
+	out := make([]keyOut, 0, len(keys))
+	for _, k := range keys {
+		hint := k.DevicePubkey
+		if len(hint) > 12 {
+			hint = hint[len(hint)-12:]
+		}
+		out = append(out, keyOut{
+			ID:              ownerAccessOpaqueID(k.DevicePubkey),
+			CredentialIDB64: base64.RawURLEncoding.EncodeToString(k.CredentialID),
+			FriendlyName:    names[string(k.CredentialID)],
+			CreatedAtMs:     k.CreatedAtMs,
+			LastUsedMs:      k.LastUsedMs,
+			KeyHint:         hint,
+			Legacy:          k.Legacy,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"browser_keys": out})
+}
+
+func (s *Server) handleOwnerBrowserKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("browser_key_id")
+	keys, err := s.deps.State.TrustedDevicePubkeyRecords()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, k := range keys {
+		if ownerAccessOpaqueID(k.DevicePubkey) != id {
+			continue
+		}
+		if err := s.deps.State.DeleteTrustedDevicePubkey(k.DevicePubkey); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "browser key not found", http.StatusNotFound)
+}
+
+func (s *Server) handleOwnerSessionsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var current string
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil {
+		current = c.Value
+	}
+	devices, err := s.deps.State.LoadTrustedDevices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names := map[string]string{}
+	for _, d := range devices {
+		names[string(d.CredentialID)] = d.FriendlyName
+	}
+	type sessCopy struct {
+		token string
+		authSession
+	}
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	oa.gcAuths()
+	copies := make([]sessCopy, 0, len(oa.authSessions))
+	for tok, sess := range oa.authSessions {
+		copies = append(copies, sessCopy{token: tok, authSession: sess})
+	}
+	oa.mu.Unlock()
+	type sessOut struct {
+		ID              string `json:"id"`
+		CredentialIDB64 string `json:"credential_id_b64"`
+		FriendlyName    string `json:"friendly_name"`
+		ExpiresAtMs     int64  `json:"expires_at_ms"`
+		Current         bool   `json:"current"`
+	}
+	out := make([]sessOut, 0, len(copies))
+	for _, c := range copies {
+		out = append(out, sessOut{
+			ID:              ownerAccessOpaqueID(c.token),
+			CredentialIDB64: base64.RawURLEncoding.EncodeToString(c.credentialID),
+			FriendlyName:    names[string(c.credentialID)],
+			ExpiresAtMs:     c.expiresAt.UnixMilli(),
+			Current:         c.token == current,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": out})
+}
+
+func (s *Server) handleOwnerSessionDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("session_id")
+	var current string
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil {
+		current = c.Value
+	}
+	var deleted, deletedCurrent bool
+	var token string
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	for tok := range oa.authSessions {
+		if ownerAccessOpaqueID(tok) != id {
+			continue
+		}
+		token = tok
+		deleted = true
+		deletedCurrent = tok == current
+		delete(oa.authSessions, tok)
+		break
+	}
+	oa.mu.Unlock()
+	if !deleted {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if s.deps.State != nil {
+		_ = s.deps.State.DeleteOwnerSession(token)
+	}
+	if deletedCurrent {
+		http.SetCookie(w, &http.Cookie{
+			Name:     ownerAccessCookieName,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request) {
@@ -1034,6 +1222,12 @@ func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if s.deps.State != nil {
 		for _, tok := range revoked {
 			_ = s.deps.State.DeleteOwnerSession(tok)
+		}
+		if devices, err := s.deps.State.LoadTrustedDevices(); err == nil && len(devices) == 0 {
+			// Removing the final passkey means the next enrollment is a new owner
+			// bootstrap. Rotate the wallet handle so the new passkey does not reuse
+			// a stale relay wallet-blob/write-key from the previous owner set.
+			_ = s.deps.State.SaveConfig(ownerWalletHandleKey, "")
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

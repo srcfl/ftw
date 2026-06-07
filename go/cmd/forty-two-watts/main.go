@@ -1455,6 +1455,7 @@ func main() {
 		siteIdentityPubHex = siteIdentity.PublicKeyHex()
 		slog.Info("site identity ready", "pubkey_prefix", siteIdentityPubHex[:16])
 	}
+	ownerSiteID := deriveOwnerSiteID(st)
 
 	// Browser P2P (Phase 5): the manager answers WebRTC SDP offers
 	// (POST /api/p2p/offer) and serves the resulting direct DataChannel with a
@@ -1475,7 +1476,7 @@ func main() {
 	// this Pi's — closing relay MITM of the signaling. Skip if there's no identity
 	// (then answers are unsigned and a verifying browser treats them as such).
 	if siteIdentity != nil {
-		p2pMgr.SetSigner("site:"+cfg.Site.Name, siteIdentity)
+		p2pMgr.SetSigner(ownerSiteID, siteIdentity)
 	}
 
 	deps = &api.Deps{
@@ -1525,7 +1526,7 @@ func main() {
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
 		TunnelMarker:         tunnelMarker,
 		SiteIdentityPubHex:   siteIdentityPubHex,
-		SiteID:               "site:" + cfg.Site.Name,
+		SiteID:               ownerSiteID,
 		// RelayBaseURL lets the API self-publish its signed instance descriptor to
 		// {relay}/bootstrap during the first-enrollment window (multi-tenant
 		// onboarding). Same source the relay registration uses; empty (LAN-only)
@@ -1626,13 +1627,12 @@ func main() {
 	// host_id is derived once from site_id + a stable random suffix.
 	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
 		// OPT-IN, DEFAULT OFF: never dial out on FTW_RELAY_URL alone. Opt in via
-		// config (remote_access.enabled) OR the explicit FTW_REMOTE_ACCESS_ENABLED
-		// env (sibling of the other FTW_OWNER_ACCESS_* overrides). A Pi that merely
-		// inherits FTW_RELAY_URL from an image default stays local.
-		enabled := cfg.RemoteAccessEnabled() || envBoolDefault("FTW_REMOTE_ACCESS_ENABLED", false)
+		// config (remote_access.enabled). Environment alone must not opt a Pi into
+		// dialing the relay.
+		enabled := ownerRemoteAccessEnabled(cfg)
 		switch {
 		case !enabled:
-			slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled or FTW_REMOTE_ACCESS_ENABLED=true)")
+			slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled=true)")
 		case siteIdentity == nil:
 			// The relay requires an ES256-signed registration. Without a site
 			// identity we cannot sign, so we must not register (an unsigned
@@ -1651,7 +1651,7 @@ func main() {
 				}
 				return pks
 			}
-			go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
+			go runOwnerRelayRegistration(ctx, relayURL, ownerSiteID, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
 		}
 	}
 
@@ -2854,6 +2854,10 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func ownerRemoteAccessEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.RemoteAccess != nil && cfg.RemoteAccess.Enabled
 }
 
 // instanceSignerOrNil returns id as an api.InstanceSigner, or a genuine nil

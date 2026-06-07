@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,8 @@ type relaySigner interface {
 // stays closed, which is the correct fail-closed default before wiring.
 var trustedDevicePubkeysLoader func() []string
 
+const ownerSiteIDKey = "owner_site_id"
+
 // loadTrustedDevicePubkeys returns the device-key set to publish, or nil when no
 // loader is wired or it errors. Always returns a non-nil-safe slice the caller
 // only marshals when len>0, so the field is omitted rather than sent as [].
@@ -51,6 +54,50 @@ func loadTrustedDevicePubkeys() []string {
 		return nil
 	}
 	return trustedDevicePubkeysLoader()
+}
+
+// deriveOwnerSiteID returns the stable, relay-routed site_id for owner remote
+// access. It is opaque and high-entropy so two default "Home" Pis cannot collide
+// on the public relay and the relay never routes by a human-readable label.
+func deriveOwnerSiteID(st *state.Store) string {
+	if st != nil {
+		if existing, ok := st.LoadConfig(ownerSiteIDKey); ok && existing != "" {
+			if isOpaqueOwnerSiteID(existing) {
+				return existing
+			}
+		}
+	}
+
+	b := make([]byte, 24)
+	_, _ = randomRead(b)
+	siteID := "site:" + base64.RawURLEncoding.EncodeToString(b)
+	if st != nil {
+		_ = st.SaveConfig(ownerSiteIDKey, siteID)
+	}
+	return siteID
+}
+
+func isOpaqueOwnerSiteID(siteID string) bool {
+	const prefix = "site:"
+	if !strings.HasPrefix(siteID, prefix) {
+		return false
+	}
+	token := strings.TrimPrefix(siteID, prefix)
+	if len(token) < 32 {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		c := token[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= 'A' && c <= 'Z',
+			c >= '0' && c <= '9',
+			c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // deriveOwnerHostID returns a stable host_id for the owner-access
@@ -147,8 +194,8 @@ func runOwnerRelayRegistration(ctx context.Context, relayURL, siteID, hostID, tu
 	// stamps X-FTW-Tunnel so the Pi's isTunneled gate fires (PIN + possession-proof
 	// + zero-device recheck + owner-cookie suppression). Default OFF: single-tenant
 	// deploys never wire the enroll routes and the host stays byte-identical to the
-	// static-only behaviour. (-multi-tenant lives on the relay; the Pi opts in via
-	// FTW_MULTI_TENANT alongside FTW_REMOTE_ACCESS_ENABLED.)
+	// static-only behaviour. (-multi-tenant lives on the relay; remote access
+	// opt-in lives in the Pi config.)
 	multiTenant := envBoolDefault("FTW_MULTI_TENANT", false)
 	staticHost := buildStaticAssetHost(relayURL, hostID, apiPort, multiTenant, tunnelMarker)
 	go staticHost.Run(ctx)

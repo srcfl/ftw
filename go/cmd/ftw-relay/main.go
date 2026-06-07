@@ -30,11 +30,11 @@ func main() {
 	homeHost := flag.String("home-host", "", "bare host that maps to a single owner Pi (e.g. home.fortytwowatts.com); requires -home-site")
 	homeSite := flag.String("home-site", "", "site_id the -home-host forwards to (e.g. site:Home)")
 	homePubKey := flag.String("home-pubkey", "", "operator-provisioned ES256 public key (hex X||Y) the -home-site must register with; pins the home mapping across relay restarts so it is never first-come TOFU")
-	homeWeb := flag.String("home-web", "", "path to the web/ bundle on the relay VM; when set, the home host's static GETs are served from here instead of forwarded to the Pi (SLICE 1). Unset → forward static GETs to the Pi (back-compat).")
+	homeWeb := flag.String("home-web", "", "path to the relay bootstrap web files. In multi-tenant mode this is a small allowlisted loader/login bundle; dashboard app assets are fetched from the chosen Pi.")
 	requireDeviceKey := flag.Bool("require-device-key", false, "ENFORCE the device-key signaling gate (C2): an offer must carry a verified device-key proof or the Pi is never contacted. Off (default) keeps the pre-C2 behaviour so the relay can serve the shell + identity (slices 1+2) while a home Pi that doesn't yet publish device-keys keeps working. Turn on once device-keys are enrolled.")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
-	multiTenant := flag.Bool("multi-tenant", false, "public multi-tenant home route: home.* serves only the relay-disk landing/shell (never forwards to a Pi), routes each signed-in wallet to its own Pi via the browser-decrypted directory, and stores per-wallet ENCRYPTED directory blobs the relay never parses. Implies -require-device-key (fail closed) and requires -home-web; -home-site/-home-pubkey become no-ops.")
+	multiTenant := flag.Bool("multi-tenant", false, "public multi-tenant home route: home.* serves only a tiny relay-disk loader until the browser decrypts its directory; dashboard static GETs then forward to the selected Pi, while owner data stays P2P. Requires -home-web; -require-device-key remains an optional extra gate; -home-site/-home-pubkey become no-ops.")
 	walletBlobDir := flag.String("wallet-blob-dir", "", "directory holding the per-wallet encrypted directory blobs (one <user_handle>.blob file each). Required under -multi-tenant; the one piece of durable relay state. The relay never decrypts the contents.")
 	walletBlobMaxBytes := flag.Int("wallet-blob-max-bytes", 65536, "per-wallet ciphertext byte cap; a PUT over this is rejected 413 so a hostile client can't grow the blob store without bound")
 	flag.Parse()
@@ -47,7 +47,7 @@ func main() {
 	// Fail closed: the internet-exposed SINGLE-TENANT home route must never run on
 	// trust-on-first-use (see requireHomePin). Under -multi-tenant there is no
 	// single -home-site to pin, so requireHomePin does NOT apply — requireMultiTenant
-	// (below) is the boot rule instead (it forces -require-device-key + -home-web).
+	// (below) is the boot rule instead.
 	if !*multiTenant {
 		if err := requireHomePin(*homeHost, *homeSite, *homePubKey, *homeWeb, *homeAllowTOFU); err != nil {
 			slog.Error("ftw-relay: " + err.Error())
@@ -55,8 +55,10 @@ func main() {
 		}
 	}
 
-	// -multi-tenant implies -require-device-key (fail closed) and still requires
-	// -home-web. -home-site/-home-pubkey are NOT required and become no-ops.
+	// -multi-tenant requires the tiny relay bootstrap bundle (-home-web). The
+	// dashboard app itself is fetched from the chosen Pi after the browser decrypts
+	// its directory. -require-device-key stays available as an explicit hardening
+	// flag, but is no longer forced by multi-tenant mode.
 	if err := requireMultiTenant(*multiTenant, *requireDeviceKey, *homeWeb); err != nil {
 		slog.Error("ftw-relay: " + err.Error())
 		os.Exit(1)
@@ -231,25 +233,23 @@ func requireHomePin(homeHost, homeSite, homePubKey, homeWeb string, allowTOFU bo
 	return nil
 }
 
-// requireMultiTenant enforces the fail-closed rules for the public multi-tenant
-// home route. -multi-tenant IMPLIES -require-device-key: with device-key
-// enforcement off, a forged site_id would skip the C2 gate and the relay could be
-// tricked into contacting the wrong Pi — so we refuse to boot. It also still
-// REQUIRES -home-web: the landing + SPA shell must be served from the relay's own
-// disk so an anonymous GET never reaches a Pi. -home-site/-home-pubkey are NOT
-// required (and become no-ops) under multi-tenant — the destination comes from the
-// browser's decrypted directory, not a relay pin. Extracted from main so the rule
-// is unit-testable, like requireHomePin.
+// requireMultiTenant enforces the boot rules for the public multi-tenant home
+// route. -multi-tenant REQUIRES -home-web: the tiny landing/login/loader bundle
+// must be served from the relay's own disk so an anonymous GET never reaches a Pi.
+// -require-device-key is optional: when off, the relay forwards signaling by
+// site_id and the Pi authenticates with passkey over the E2E channel.
+// -home-site/-home-pubkey are NOT required (and become no-ops) under
+// multi-tenant — the destination comes from the browser's decrypted directory,
+// not a relay pin. Extracted from main so the rule is unit-testable, like
+// requireHomePin.
 func requireMultiTenant(multiTenant, requireDeviceKey bool, homeWeb string) error {
 	if !multiTenant {
 		return nil
 	}
-	if !requireDeviceKey {
-		return errors.New("-multi-tenant requires -require-device-key — refusing to run the public multi-tenant home route with the C2 device-key gate OFF (a forged site_id would skip the proof and the relay could contact the wrong Pi). Pass -require-device-key")
-	}
 	if homeWeb == "" {
-		return errors.New("-multi-tenant requires -home-web — the relay must serve the public landing + SPA shell itself and NEVER forward an anonymous request to a Pi. Pass the path to the web/ bundle on the relay VM")
+		return errors.New("-multi-tenant requires -home-web — the relay must serve the public landing/login loader itself and NEVER forward an anonymous request to a Pi. Pass the path to the relay bootstrap bundle")
 	}
+	_ = requireDeviceKey
 	return nil
 }
 

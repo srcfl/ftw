@@ -7,10 +7,9 @@
 
   const PLAN_REFRESH_MS = 30000;
 
-  // ownerFetch routes state-changing owner/CONTROL calls (MPC replan) over the
-  // STRICT P2P transport so their body never traverses the untrusted relay on the
-  // public home route. Wired in p2p.js to the shared fail-closed strict function;
-  // falls back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
+  // ownerFetch routes owner API calls over the STRICT P2P transport on the public
+  // home route. Wired in p2p.js to the shared fail-closed strict function; falls
+  // back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
   function ownerFetch(path, opts) {
     if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
     return fetch(path, opts);
@@ -78,10 +77,10 @@
 
   async function fetchAll() {
     const [p, f, m, c] = await Promise.all([
-      fetch('/api/prices').then(r => r.json()).catch(() => ({})),
-      fetch('/api/forecast').then(r => r.json()).catch(() => ({})),
-      fetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
-      fetch('/api/config').then(r => r.json()).catch(() => ({})),
+      ownerFetch('/api/prices').then(r => r.json()).catch(() => ({})),
+      ownerFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
+      ownerFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
+      ownerFetch('/api/config').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
@@ -798,7 +797,7 @@
     idle: 'Battery idle — no dispatch.',
   };
   function renderStrategyHint() {
-    fetch('/api/status')
+    ownerFetch('/api/status')
       .then(function (r) { return r.json(); })
       .then(function (d) {
         const el = document.getElementById('strategy-hint');
@@ -817,6 +816,19 @@
     window.addEventListener('resize', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
+    if (window.ftwP2P && typeof window.ftwP2P.onState === 'function') {
+      var waitingForDirect = false;
+      window.ftwP2P.onState(function (s) {
+        if (s !== 'direct') {
+          waitingForDirect = true;
+          return;
+        }
+        if (!waitingForDirect) return;
+        waitingForDirect = false;
+        fetchAll();
+        renderStrategyHint();
+      });
+    }
 
     // Horizon toggle wiring. Each click flips state.horizon, persists
     // the choice, marks the right button active, and re-renders. The

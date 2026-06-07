@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/frahlg/forty-two-watts/go/internal/state"
 )
 
 // TestOwnerGateThroughRelay reproduces the home.fortytwowatts.com path end to
@@ -35,15 +37,19 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	_ = os.MkdirAll(stateDir, 0o755)
 	apiPort := freePort(t)
 	apiURL := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
-	cfgPath := writeMinimalConfig(t, work, stateDir, apiPort) // site.name = e2e → site:e2e
+	cfgPath := writeMinimalConfig(t, work, stateDir, apiPort)
+	enableRemoteAccess(t, cfgPath)
+	ownerSiteID := "site:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	preseedOwnerSiteID(t, filepath.Join(stateDir, "state.db"), ownerSiteID)
 
-	// Relay with home-host routing → site:e2e.
+	// Relay with home-host routing to the same opaque site_id the Pi has
+	// persisted in state.db.
 	relayAddr := fmt.Sprintf("127.0.0.1:%d", freePort(t))
 	// -home-allow-tofu: this test exercises the Pi's signed registration + the
 	// relay's trust-on-first-use pin (it can't know the Pi's pubkey up front), so
 	// it opts into TOFU rather than passing -home-pubkey.
 	relayCmd := exec.Command(relayBin, "-addr", relayAddr, "-poll-timeout", "5s",
-		"-home-host", "home.test", "-home-site", "site:e2e", "-home-allow-tofu")
+		"-home-host", "home.test", "-home-site", ownerSiteID, "-home-allow-tofu")
 	relayCmd.Stdout = os.Stdout
 	relayCmd.Stderr = os.Stderr
 	if err := relayCmd.Start(); err != nil {
@@ -53,12 +59,13 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	relayURL := "http://" + relayAddr
 	waitForAPI(t, relayURL+"/healthz")
 
-	// Main service registers with the relay as the owner. LAN bypass ON (the
-	// production default); the gate must STILL refuse the relay (remote) path.
+	// Main service registers with the relay as the owner. Remote access is
+	// explicitly opted in through config (FTW_RELAY_URL alone must not dial out).
+	// LAN bypass ON (the production default); the gate must STILL refuse the
+	// relay (remote) path.
 	mainCmd := exec.Command(mainBin, "-config", cfgPath, "-web", filepath.Join(repo, "web"))
 	mainCmd.Env = append(os.Environ(),
 		"FTW_RELAY_URL="+relayURL,
-		"FTW_REMOTE_ACCESS_ENABLED=true", // opt in (default off; FTW_RELAY_URL alone no longer dials)
 		"FTW_OWNER_ACCESS_LAN_BYPASS=true",
 		"FTW_OWNER_ACCESS_RPID=home.test",
 	)
@@ -129,5 +136,29 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	}
 	if idCode != http.StatusOK {
 		t.Fatalf("/api/identity over relay: got %d, want 200 (TOFU anchor). body=%q", idCode, idBody)
+	}
+}
+
+func enableRemoteAccess(t *testing.T, cfgPath string) {
+	t.Helper()
+	f, err := os.OpenFile(cfgPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open config for remote_access append: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("\nremote_access:\n  enabled: true\n"); err != nil {
+		t.Fatalf("append remote_access config: %v", err)
+	}
+}
+
+func preseedOwnerSiteID(t *testing.T, dbPath, siteID string) {
+	t.Helper()
+	st, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open state for owner_site_id seed: %v", err)
+	}
+	defer st.Close()
+	if err := st.SaveConfig("owner_site_id", siteID); err != nil {
+		t.Fatalf("seed owner_site_id: %v", err)
 	}
 }

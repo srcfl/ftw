@@ -103,13 +103,29 @@ describe("ceremony pages route owner calls through the shared strict ownerFetch"
 
   for (const [name, html] of [["login.html", LOGIN], ["enroll.html", ENROLL], ["index.html", INDEX]]) {
     it(`${name} imports the shared ownerFetch and has no inline raw-fetch fallback`, () => {
-      assert.match(html, /import\s*\{\s*ownerFetch\s*\}\s*from\s*["']\.\/owner-fetch\.js["']/,
+      assert.match(html, /import\s*\{[^}]*\bownerFetch\b[^}]*\}\s*from\s*["']\.\/owner-fetch\.js["']/,
         "must import the shared ownerFetch");
       // The old leaky fallback was: return fetch(base + path, ...). It must be gone.
       assert.doesNotMatch(html, /return\s+fetch\(\s*base\s*\+\s*path/,
         "must NOT raw-fetch the owner body to the relay when p2p.js is absent");
     });
   }
+
+  it("public owner-access sign-in converges on the dashboard gate, not legacy login.html", () => {
+    assert.match(INDEX, /id="signin-link"/, "landing link must be addressable");
+    assert.match(INDEX, /const\s+onLan\s*=\s*isLanOrigin\(\)/,
+      "public-vs-LAN must use origin detection, not apiBase()==='' which is true on home.*");
+    assert.match(INDEX, /signinLink\.href\s*=\s*"\/"/,
+      "public owner-access sign-in should route to the root gate");
+    assert.match(LOGIN, /if\s*\(!isLanOrigin\(\)\)\s*\{\s*location\.replace\("\/"\)/,
+      "direct public hits to legacy login.html should redirect to the root gate");
+  });
+
+  it("owner-access signout sets the same local manual-signout guard as the dashboard", () => {
+    assert.match(INDEX, /MANUAL_SIGNOUT_KEY\s*=\s*"ftw\.owner\.manual_signout\.v1"/);
+    assert.match(INDEX, /function markManualSignout\(\)[\s\S]*localStorage\.setItem\(MANUAL_SIGNOUT_KEY,\s*"1"\)/);
+    assert.match(INDEX, /document\.getElementById\("signout"\)\.onclick[\s\S]*markManualSignout\(\)[\s\S]*ownerFetch\("\/api\/owner-access\/logout"/);
+  });
 });
 
 describe("dashboard control + owner writes route through strict (FIX-B)", () => {

@@ -116,6 +116,32 @@ positive W means energy flowing into the site across the grid-meter
 boundary. Read [`docs/site-convention.md`](docs/site-convention.md) before
 touching power math.
 
+## Remote Access
+
+Remote access is opt-in and still keeps the home site local-first. Enable it
+from the local dashboard under **Settings -> Access**. The Pi then registers an
+opaque, high-entropy `site_id` with the public relay and publishes only the
+minimal information needed for a browser to find that Pi.
+
+The public `home.fortytwowatts.com` route works in three layers:
+
+1. The relay serves a small loader and owner-access pages from the
+   `ftw-relay-web.tar.gz` release asset.
+2. After a browser unlocks its encrypted local directory, static dashboard
+   files are fetched from the selected Pi through the relay route.
+3. Owner API calls, login, status, prices, history, plans, settings, and
+   control commands go over the strict WebRTC DataChannel to the Pi.
+
+The relay is therefore only a blind router and bootstrap host. It does not
+store the dashboard app bundle, does not terminate owner sessions, does not
+receive `ftw_owner` cookies, and does not inspect passkeys or owner data.
+Passkeys, remembered browser keys, and active sessions are managed locally in
+the Access tab, where they can also be revoked.
+
+Relay operators should install the relay bootstrap bundle from each release,
+not copy the Pi dashboard `web/` directory to the relay. Deployment details:
+[`docs/relay-deploy.md`](docs/relay-deploy.md).
+
 ## Documentation
 
 **Get started**
@@ -162,9 +188,21 @@ make ci
 make build-arm64
 ```
 
-Releases are driven by Changesets and GitHub Actions. Do not hand-edit
-`CHANGELOG.md` or manually bump `package.json`; pending release notes live
-in `.changeset/*.md`.
+## Release Process
+
+Releases are driven by Changesets and GitHub Actions:
+
+1. Add a `.changeset/*.md` entry for each user-visible change.
+2. Merge the feature PR to `master`.
+3. The `release` workflow opens or updates the "Version Packages" PR.
+4. Merge that Version PR to bump `package.json`, update `CHANGELOG.md`, create
+   the `vX.Y.Z` tag, and publish the GitHub Release.
+5. The `release-assets` workflow builds and uploads Linux/Windows binaries,
+   `ftw-relay` binaries, Docker images, the Raspberry Pi image, and
+   `ftw-relay-web.tar.gz`.
+
+Do not hand-edit `CHANGELOG.md` or manually bump `package.json`; pending
+release notes live in `.changeset/*.md`.
 
 ## Community
 

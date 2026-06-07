@@ -14,6 +14,7 @@
     button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
     a.block { text-decoration: none; display: block; }
     .muted { color: var(--fg-muted, #888); font-size: .9em; margin: .6rem 0 1.1rem; }
+    .eyebrow-hero { font-family: var(--mono), monospace; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .18em; color: var(--accent-e, #f0c040); margin: 0 0 .5rem; }
     .sep { border: 0; border-top: 1px solid var(--line, #eee); margin: 1.3rem 0; }
     .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .15rem .4rem; border-radius: .2rem; }
     .ok { color: #060; }
@@ -101,7 +102,17 @@
 </head>
 <body>
   <h1>forty-two&nbsp;watts</h1>
-  <p class="muted">Your home, one URL. Sign in with your passkey — or set up this device.</p>
+  <p class="muted" id="tagline">Your home, one URL.</p>
+
+  <!-- LAN hero — shown ONLY on a genuine-LAN origin (your Pi itself). The QR to
+       reach this home from your phone is THE primary action: auto-rendered, always
+       visible, above the sign-in/manage panels. Hidden on the relay/home.* origin
+       (the bootstrap_id is minted LAN-side, so there's nothing to show there). -->
+  <div id="lan-setup" class="panel" style="display:none">
+    <p class="eyebrow-hero">Reach this home from anywhere</p>
+    <p class="muted" style="margin:.2rem 0 0">Scan with your phone to create your passkey. After that, open <span class="code">home.fortytwowatts.com</span> on any device — your passkey takes you straight here.</p>
+    <div id="setup-remote-panel" class="setup-remote"></div>
+  </div>
 
   <div id="loading" class="panel">Loading…</div>
 
@@ -117,26 +128,21 @@
   </div>
 
   <div id="choose" class="panel" style="display:none">
-    <div class="row"><a class="block" href="./login.html"><button class="primary">Sign in with passkey</button></a></div>
+    <div class="row"><a class="block" id="signin-link" href="./login.html"><button class="primary">Sign in with passkey</button></a></div>
     <p class="muted">Already set up on this device? Face&nbsp;ID / Touch&nbsp;ID.</p>
     <hr class="sep">
     <div class="row"><a class="block" href="./enroll.html"><button>Set up this device</button></a></div>
     <p class="muted">First time here? Enroll a passkey on this device.</p>
-    <hr class="sep">
-    <p class="muted">Setting up a phone or another computer? Scan a QR or open a one-time link — no need to type anything there.</p>
-    <div id="setup-remote-panel" class="setup-remote"></div>
-    <div id="pin-panel" class="pin-panel"></div>
   </div>
 
   <!-- Load the P2P transport so the landing page's owner API calls (whoami,
        devices, logout) ride the DTLS DataChannel — the owner API is P2P-only
        over the relay. ownerFetch() routes through window.p2pFetch when up. -->
-  <script src="/p2p.js?v=p2p1"></script>
+  <script src="/p2p.js?v=p2p14"></script>
   <script type="module">
     import { apiBase } from "./webauthn.js";
-    import { mountEnrollPin } from "./enroll-pin.js";
     import { mountSetupRemote } from "./setup-remote.js";
-    import { ownerFetch } from "./owner-fetch.js";
+    import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
     const base = apiBase();
 
     // ownerFetch (shared, owner-fetch.js) routes owner API calls — whoami, the
@@ -146,14 +152,25 @@
     // the channel is down AND when p2p.js never loaded (FIX-B); only a genuine-LAN
     // origin raw-fetches.
 
-    // The "choose" panel carries two LAN-only, click-to-reveal affordances:
-    //   - "Set up remote access" — the QR + one-time link + optional PIN courier
-    //     for the high-entropy bootstrap_id (setup-remote.js). This is the primary
-    //     way to onboard another device.
-    //   - "Show enrollment PIN" — the bare PIN (enroll-pin.js), kept as a manual
-    //     fallback. Both gracefully degrade to a LAN-only notice over the relay.
-    mountSetupRemote(document.getElementById("setup-remote-panel"));
-    mountEnrollPin(document.getElementById("pin-panel"));
+    // LAN hero: on your Pi's OWN origin, the QR to reach this home
+    // from your phone is THE primary action — auto-shown, always visible, above the
+    // sign-in/manage panels, regardless of the whoami state below. On the relay/home.*
+    // origin there is nothing to mint (the bootstrap_id is LAN-side), so it stays hidden.
+    const onLan = isLanOrigin();
+    const signinLink = document.getElementById("signin-link");
+    if (!onLan && signinLink) signinLink.href = "/";
+    if (onLan) {
+      document.getElementById("tagline").textContent = "Reach this home from anywhere — scan with your phone.";
+      document.getElementById("lan-setup").style.display = "block";
+      mountSetupRemote(document.getElementById("setup-remote-panel"), { auto: true, qrSize: 260 });
+    } else {
+      document.getElementById("tagline").textContent = "Your home, one URL. Sign in with your passkey.";
+    }
+
+    const MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
+    function markManualSignout() {
+      try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (_) {}
+    }
 
     async function whoami() {
       const r = await ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" });
@@ -167,6 +184,7 @@
     document.getElementById("signout").onclick = async () => {
       // The ftw_owner cookie is HttpOnly, so JS can't clear it — POST the
       // server logout to revoke the session AND expire the cookie properly.
+      markManualSignout();
       try { await ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
       catch (e) { /* best-effort — fall through to the choose panel regardless */ }
       show("choose");
