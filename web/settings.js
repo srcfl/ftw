@@ -178,7 +178,7 @@
     var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
     function tick() {
       // Cache-bust so an intermediate proxy can't lie about reachability.
-      fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
+      ownerFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
         .then(function (r) {
           if (r.ok) {
             progressTextEl.textContent = "Reloading…";

@@ -20,6 +20,7 @@
 // modal element, so an open modal is not destroyed by a background poll.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 import "./ftw-pair-card.js";
 import "./ftw-modal.js";
 
@@ -114,7 +115,7 @@ class FtwPairLauncher extends FtwElement {
 
   async _poll() {
     try {
-      const r = await fetch("/api/pair/status");
+      const r = await ownerFetch("/api/pair/status");
       this._session = r.ok ? await r.json() : null;
     } catch (_) {
       this._session = null;

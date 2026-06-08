@@ -282,12 +282,6 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	// ROWID survive unchanged because the substring is purely
 	// "TABLE name" → "TABLE snap.name", before any column / option
 	// clauses.
-	type schemaRow struct {
-		objType string
-		name    string
-		tblName string
-		sqlText string
-	}
 	rows, err := conn.QueryContext(ctx,
 		`SELECT type, name, tbl_name, sql FROM main.sqlite_master
 		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
@@ -295,9 +289,9 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("snapshot: list schema: %w", err)
 	}
-	var items []schemaRow
+	var items []snapshotSchemaRow
 	for rows.Next() {
-		var r schemaRow
+		var r snapshotSchemaRow
 		if err := rows.Scan(&r.objType, &r.name, &r.tblName, &r.sqlText); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("snapshot: scan schema: %w", err)
@@ -324,15 +318,15 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 
-	// Copy each essential table's rows over. Order doesn't matter for
-	// the INSERTs because all FK constraints are deferred (and we don't
-	// declare any in our schema). Tables created without rows above
-	// stay empty if the source had no data.
-	for _, r := range items {
+	// Copy each essential table's rows over in parent-before-child order. Some
+	// state tables carry real FK constraints (trusted_device_pubkeys ->
+	// trusted_devices), so alphabetic sqlite_master order is not safe.
+	copyItems, err := snapshotTableCopyOrder(ctx, conn, items, snapshotExcludedTables)
+	if err != nil {
+		return fmt.Errorf("snapshot: order tables: %w", err)
+	}
+	for _, r := range copyItems {
 		if r.objType != "table" {
-			continue
-		}
-		if snapshotExcludedTables[r.name] {
 			continue
 		}
 		if _, err := conn.ExecContext(ctx,
@@ -341,6 +335,84 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 	return nil
+}
+
+type snapshotSchemaRow struct {
+	objType string
+	name    string
+	tblName string
+	sqlText string
+}
+
+func snapshotTableCopyOrder(ctx context.Context, conn *sql.Conn, items []snapshotSchemaRow, excluded map[string]bool) ([]snapshotSchemaRow, error) {
+	tables := make([]snapshotSchemaRow, 0)
+	byName := make(map[string]snapshotSchemaRow)
+	for _, r := range items {
+		if r.objType != "table" || excluded[r.name] {
+			continue
+		}
+		tables = append(tables, r)
+		byName[r.name] = r
+	}
+
+	deps := make(map[string][]string, len(tables))
+	for _, r := range tables {
+		rows, err := conn.QueryContext(ctx, "PRAGMA main.foreign_key_list("+sqliteIdent(r.name)+")")
+		if err != nil {
+			return nil, fmt.Errorf("foreign_key_list %s: %w", r.name, err)
+		}
+		for rows.Next() {
+			var id, seq int
+			var parent, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &parent, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan foreign_key_list %s: %w", r.name, err)
+			}
+			if parent != r.name && !excluded[parent] {
+				deps[r.name] = append(deps[r.name], parent)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close foreign_key_list %s: %w", r.name, err)
+		}
+	}
+
+	visiting := make(map[string]bool, len(tables))
+	visited := make(map[string]bool, len(tables))
+	ordered := make([]snapshotSchemaRow, 0, len(tables))
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		if visiting[name] {
+			return fmt.Errorf("foreign-key cycle involving %s", name)
+		}
+		row, ok := byName[name]
+		if !ok {
+			return nil
+		}
+		visiting[name] = true
+		for _, dep := range deps[name] {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		ordered = append(ordered, row)
+		return nil
+	}
+	for _, r := range tables {
+		if err := visit(r.name); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
+}
+
+func sqliteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // rewriteCreateForAttachedDB rewrites the leading object identifier

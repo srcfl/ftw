@@ -11,6 +11,7 @@
 // on :host via light-DOM; callers can restyle by targeting the element.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 export class FtwNotifStatus extends FtwElement {
   static styles = `
@@ -53,7 +54,7 @@ export class FtwNotifStatus extends FtwElement {
   async _refresh() {
     const url = this.getAttribute("endpoint") || "/api/notifications/status";
     try {
-      const r = await fetch(url);
+      const r = await ownerFetch(url);
       const d = await r.json();
       if (!d.enabled) {
         this._state = { kind: "off", text: "○  disabled in config" };

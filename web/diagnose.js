@@ -16,6 +16,11 @@
 (function () {
   'use strict';
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // ---- Tab routing ----
   const tabs = document.getElementById('app-tabs');
   const viewLive = document.getElementById('view-live');
@@ -105,7 +110,7 @@
     const until = Date.now();
     const since = until - state.rangeMs;
     try {
-      const r = await fetch(`/api/mpc/diagnose/history?since=${since}&until=${until}&limit=2000`);
+      const r = await ownerFetch(`/api/mpc/diagnose/history?since=${since}&until=${until}&limit=2000`);
       const j = await r.json();
       state.timeline = (j && j.snapshots) || [];
       renderTimeline();
@@ -160,7 +165,7 @@
     if (el) el.innerHTML = '<div class="diagnose-empty">Loading snapshot…</div>';
     renderTimeline();  // refresh "active" class
     try {
-      const r = await fetch('/api/mpc/diagnose/at?ts=' + tsMs);
+      const r = await ownerFetch('/api/mpc/diagnose/at?ts=' + tsMs);
       const j = await r.json();
       // Discard stale responses: if the user clicked a different
       // snapshot while this fetch was in flight, state.selectedTs

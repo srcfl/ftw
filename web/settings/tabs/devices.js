@@ -258,7 +258,7 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
-      fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      ownerFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
         // on drivers whose catalog entry advertises BOTH meter and pv.

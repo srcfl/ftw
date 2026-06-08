@@ -89,9 +89,26 @@ const API_PATH_LITERAL = /^\s*["'`](\/api\/[A-Za-z0-9_./-]*)/;
 const OWNER_READ_FILES = [
   "plan.js",
   "loadpoints.js",
+  "diagnose.js",
+  "diagnostics-modal.js",
+  "settings.js",
+  "update-badge.js",
+  "settings/tabs/devices.js",
+  "settings/tabs/ev.js",
+  "settings/tabs/ha.js",
+  "settings/tabs/loadpoints.js",
+  "settings/tabs/notifications.js",
+  "settings/tabs/system.js",
+  "components/ftw-battery-control.js",
   "components/ftw-price-chart.js",
   "components/ftw-history-card.js",
+  "components/ftw-pv-control.js",
   "components/ftw-savings-card.js",
+  "components/ftw-update-check.js",
+  "components/ftw-pair-card.js",
+  "components/ftw-pair-launcher.js",
+  "components/ftw-notif-status.js",
+  "components/ftw-notif-history.js",
 ];
 const OWNER_READ_PATHS = new Set([
   "/api/prices",
@@ -102,7 +119,33 @@ const OWNER_READ_PATHS = new Set([
   "/api/loadpoints",
   "/api/energy/daily",
   "/api/savings/daily",
+  "/api/version/check",
+  "/api/version/update/status",
+  "/api/pair/status",
+  "/api/notifications/defaults",
+  "/api/notifications/status",
+  "/api/notifications/history",
+  "/api/version/snapshots",
+  "/api/ha/status",
+  "/api/system/info",
+  "/api/health",
+  "/api/drivers/catalog",
+  "/api/battery/manual_hold",
+  "/api/pv/manual_hold",
+  "/api/mpc/diagnose/history",
+  "/api/mpc/diagnose/at",
+  "/api/support/dump",
+  "/api/research/load/dump",
 ]);
+const OWNER_DYNAMIC_READ_COMPONENTS = [
+  "components/ftw-update-check.js",
+  "components/ftw-battery-control.js",
+  "components/ftw-pv-control.js",
+  "components/ftw-pair-card.js",
+  "components/ftw-pair-launcher.js",
+  "components/ftw-notif-status.js",
+  "components/ftw-notif-history.js",
+];
 
 function scanForBareStateChangingFetch(src) {
   const findings = [];
@@ -194,6 +237,35 @@ describe("public-route fetch guard (FIX-B)", () => {
       [],
       "public-route owner reads must use window.ownerFetch so the relay cannot block them:\n" +
         offenders.join("\n"),
+    );
+  });
+
+  it("dynamic public-route owner read pollers do not use bare fetch", () => {
+    const offenders = [];
+    for (const rel of OWNER_DYNAMIC_READ_COMPONENTS) {
+      const src = readFileSync(join(WEB, rel), "utf8");
+      BARE_FETCH.lastIndex = 0;
+      if (BARE_FETCH.test(src)) offenders.push(rel);
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      "dynamic public-route owner read pollers must use ownerFetch, not bare fetch:\n" +
+        offenders.join("\n"),
+    );
+  });
+
+  it("diagnostics bundle downloads use ownerFetch on the public route", () => {
+    const src = readFileSync(join(WEB, "diagnostics-modal.js"), "utf8");
+    assert.match(
+      src,
+      /function\s+downloadWithFeedback[\s\S]*?\bownerFetch\s*\(\s*url\s*\)/,
+      "diagnostics downloads must use ownerFetch(url)",
+    );
+    assert.doesNotMatch(
+      src,
+      /function\s+downloadWithFeedback[\s\S]*?\bfetch\s*\(\s*url\s*\)/,
+      "diagnostics downloads must not raw-fetch support/research bundles on home.fortytwowatts.com",
     );
   });
 });

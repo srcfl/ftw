@@ -12,6 +12,7 @@
 // Drop anywhere in the header/toolbar; keeps its own state and is safe
 // to mount alongside other persistent header bits.
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 // Shared, deduped notification-history fetch, keyed on the full URL
 // (endpoint + limit). When several callers hit the SAME key in a short
@@ -37,7 +38,7 @@ function fetchNotifRows(url, force) {
   // entry that still references THIS request may write it, so a slow older
   // request can't clobber a newer (e.g. forced-refresh) entry that replaced it.
   const owns = () => { const cur = notifFetchCache.get(url); return cur && cur.promise === promise; };
-  const promise = fetch(url)
+  const promise = ownerFetch(url)
     .then((r) => {
       // Don't cache a non-OK response — drop our entry so the next call
       // retries instead of serving a stale empty list for the TTL.

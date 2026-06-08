@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.120.6
+
+### Patch Changes
+
+- Fix self-update snapshots after Remote Access passkeys have been enrolled, and route more public-home dashboard reads through the strict owner transport.
+
+  The state snapshotter now copies SQLite tables in foreign-key dependency order, so remembered browser keys in `trusted_device_pubkeys` no longer make pre-update snapshots fail. Dashboard, update, diagnostics, notification, pair, HA, EV, system, and loadpoint reads used by the public home route now use `ownerFetch`, preventing raw `/api/*` calls from hitting the relay and producing 403 noise while the P2P channel is opening.
+
 ## 0.120.5
 
 ### Patch Changes
