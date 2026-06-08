@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.120.7
+
+### Patch Changes
+
+- 05932a3: Fix Home Assistant logging "Invalid option for select.forty_two_watts_mode"
+  for the planner modes. The MQTT discovery for the Mode `select` only
+  advertised six modes, but the bridge publishes the live mode as state — and
+  the default UI choices (`planner_passive_arbitrage` / `planner_arbitrage`)
+  weren't in the advertised list, so HA rejected them every cycle. The discovery
+  options and the API mode validator now both derive from a single
+  `control.AllModes` source of truth, so all ten modes are advertised and the
+  two lists can't drift again.
+
+  Also fixes the matching command path: selecting a planner mode from the Home
+  Assistant dropdown previously returned "unknown mode" because the HA `SetMode`
+  callback (and the boot-time mode restore) carried their own hand-maintained
+  mode lists that omitted the planner modes. Both now validate through
+  `control.IsValidMode`, and the HA setter mirrors the full `/api/mode`
+  side-effects (battery manual-hold clear, PI reset, MPC strategy propagation)
+  via a shared `control.PlannerMPCMode` mapping — so a planner mode picked in HA
+  behaves identically to one picked in the web UI.
+
+- 9f4eab0: Fix surplus-only EV charging never starting on 3-phase-only chargers (e.g.
+  CTEK Chargestorm — 3Φ, 6 A minimum, no phase-switch register). The surplus
+  controller's 1Φ fallback assumed every charger can trickle on a single phase
+  (true for Easee, false for CTEK): on any day the PV forecast couldn't sustain
+  the 3Φ minimum it locked the loadpoint to 1Φ for the day and handed the
+  charger a ~1380 W offer, which a 3Φ-only unit can only answer by writing 0 A —
+  so it never charged. `pickSurplusSteps` now keeps the 3Φ-only step set and
+  never commits the day-long 1Φ lock when the loadpoint is pinned to
+  `phase_mode: "3p"`, and `resolvePhaseMode` no longer lets a stale 1Φ lock
+  override an explicit `"3p"`. A 3Φ-only charger now pauses cleanly below the
+  ~4.1 kW floor and charges in 3Φ steps above it. Configure such chargers with
+  `phase_mode: "3p"`, `min_charge_w: 4140`, and 3Φ-only `allowed_steps_w`.
+
 ## 0.120.6
 
 ### Patch Changes
