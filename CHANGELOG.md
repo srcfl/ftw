@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.120.5
+
+### Patch Changes
+
+- Fix Remote Access browser persistence and Home Assistant mode discovery.
+
+  Remote owner sessions now last 30 days, and the legacy passkey login page stores
+  the browser's remembered device key after a successful passkey login so reloads
+  and bookmarks can reuse silent sign-in. The public home loader also explains the
+  current synced-passkey limitation when a browser cannot recover the encrypted
+  home directory from WebAuthn PRF.
+
+  Home Assistant MQTT discovery now advertises every mode the service can publish,
+  including planner modes, and MQTT mode commands accept the same planner values as
+  the HTTP API.
+
 ## 0.120.4
 
 ### Patch Changes

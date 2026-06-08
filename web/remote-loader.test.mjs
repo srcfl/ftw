@@ -47,7 +47,12 @@ describe("remote loader auto-open guard", () => {
     assert.match(LOADER, /reset_remote=1/);
   });
 
+  it("explains synced-passkey directory gaps without implying the passkey is broken", () => {
+    assert.match(LOADER, /Some synced passkeys do not share the encrypted home key/);
+    assert.match(LOADER, /local 42W Settings -> Access/);
+  });
+
   it("bumps the loader script URL when bootstrap behavior changes", () => {
-    assert.match(HTML, /remote-loader\.js\?v=loader4/);
+    assert.match(HTML, /remote-loader\.js\?v=loader5/);
   });
 });

@@ -52,9 +52,10 @@ import (
 // and the host's auth middleware validates it.
 const ownerAccessCookieName = "ftw_owner"
 
-// ownerAccessSessionTTL is how long an authenticated session is valid
-// after the last successful login.
-const ownerAccessSessionTTL = 24 * time.Hour
+// ownerAccessSessionTTL is how long an authenticated browser session is valid
+// after login. Remembered browser keys can mint a fresh session silently, but
+// the cookie itself should feel stable across normal bookmark/PWA use.
+const ownerAccessSessionTTL = 30 * 24 * time.Hour
 
 // ownerAccessCeremonyTTL bounds the time between /enroll/start and
 // /enroll/finish (or login start/finish). Browsers typically complete

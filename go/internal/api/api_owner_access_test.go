@@ -130,6 +130,26 @@ func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
 	}
 }
 
+func TestOwnerSessionCookieLastsThirtyDays(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("cred-ttl")); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no session cookie issued")
+	}
+	got := cookies[0].MaxAge
+	want := int((30 * 24 * time.Hour).Seconds())
+	if got != want {
+		t.Fatalf("session cookie MaxAge = %d, want %d", got, want)
+	}
+}
+
 func TestOwnerAccessSessionsListAndDelete(t *testing.T) {
 	d := minDeps(t)
 	d.OwnerAccessLANBypass = false
