@@ -74,19 +74,6 @@ type Bridge struct {
 
 const defaultConnectTimeout = 10 * time.Second
 
-var modeOptions = []string{
-	string(control.ModeIdle),
-	string(control.ModeSelfConsumption),
-	string(control.ModePeakShaving),
-	string(control.ModeCharge),
-	string(control.ModePriority),
-	string(control.ModeWeighted),
-	string(control.ModePlannerSelf),
-	string(control.ModePlannerCheap),
-	string(control.ModePlannerPassiveArbitrage),
-	string(control.ModePlannerArbitrage),
-}
-
 // IsConnected returns true if the Paho MQTT client currently has an
 // active connection to the broker.
 func (b *Bridge) IsConnected() bool {
@@ -302,6 +289,22 @@ func (b *Bridge) discoveryDevice() map[string]any {
 	}
 }
 
+// modeSelectOptions is the option list for the HA mode `select`. It MUST
+// cover every value publishState can emit on the mode state topic (which is
+// string(ctrl.Mode)), otherwise HA logs "Invalid option for select" the
+// moment the active mode falls outside the list (e.g. any planner_* mode,
+// which is the default UI choice). Derived from control.AllModes so the enum
+// is the single source of truth and the two lists can't drift again — see
+// TestModeSelectOptionsMatchAllModes for the guard.
+func modeSelectOptions() []string {
+	modes := control.AllModes()
+	opts := make([]string, len(modes))
+	for i, m := range modes {
+		opts[i] = string(m)
+	}
+	return opts
+}
+
 // publishDiscovery registers all sensors and controls with HA. Called on
 // every reconnect — HA de-dupes by unique_id so it's safe to re-publish.
 func (b *Bridge) publishDiscovery() {
@@ -339,7 +342,7 @@ func (b *Bridge) publishDiscovery() {
 		"unique_id":     b.deviceID + "_mode",
 		"state_topic":   b.stateTopic("mode"),
 		"command_topic": b.cmdTopic("mode"),
-		"options":       modeOptions,
+		"options":       modeSelectOptions(),
 		"device":        dev,
 	}
 	data, _ := json.Marshal(modeMsg)

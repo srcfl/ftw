@@ -24,6 +24,9 @@ func TestResolvePhaseMode(t *testing.T) {
 
 		// No schedule: the surplus 1Φ lock applies as before.
 		{"1p lock applies without schedule", "auto", false, true, true, "3p", "1p"},
+		// A 3Φ-only charger must never be forced to 1Φ by the surplus
+		// lock — it physically cannot trickle single-phase (e.g. CTEK).
+		{"3p charger overrides 1p lock", "3p", false, true, true, "1p", "3p"},
 		// No schedule, surplus-active, auto → dwell verdict.
 		{"dwell verdict when surplus auto", "auto", false, false, true, "3p", "3p"},
 		{"auto default when no dwell", "auto", false, false, true, "", "auto"},

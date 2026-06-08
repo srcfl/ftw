@@ -331,6 +331,45 @@ func TestPickSurplusSteps_PhaseLockAndDayRollover(t *testing.T) {
 	}
 }
 
+// TestPickSurplusSteps_ThreePhaseOnlyNeverLocks1P verifies that a charger
+// pinned to "3p" (no single-phase capability — e.g. CTEK Chargestorm) never
+// gets the 1Φ-eligible step set and never commits the day-long 1Φ lock, even
+// when the day's peak forecast can't sustain a 3Φ minimum. Such a charger must
+// simply pause below the 3Φ floor instead of being handed a 1380 W offer it
+// can only answer by writing 0 A.
+func TestPickSurplusSteps_ThreePhaseOnlyNeverLocks1P(t *testing.T) {
+	c := NewController(NewManager(), nil, nil, nil)
+	cfg := surplusTestConfig()
+	cfg.PhaseMode = "3p"
+
+	steps3 := surplus3PhaseSteps(cfg)
+
+	// Forecast is bad — an "auto" loadpoint would lock 1Φ here.
+	c.SetPeakRemainingSurplusW(func() (float64, bool) { return 1000, true })
+	c.SetNearTermPeakSurplusW(func(time.Duration) (float64, bool) { return 1000, true })
+	day1 := time.Date(2026, 5, 3, 9, 0, 0, 0, time.Local)
+
+	got := c.pickSurplusSteps(day1, cfg)
+	if len(got) != len(steps3) {
+		t.Fatalf("3p charger must keep the 3Φ-only step set on a bad-forecast day, got=%v want len %d", got, len(steps3))
+	}
+	if c.surplusLockedTo1P(cfg.ID) {
+		t.Fatalf("3p charger must never set the 1Φ day-lock")
+	}
+
+	// A stale lock from a prior "auto" config must be cleared the moment
+	// the loadpoint is evaluated as "3p".
+	c.phaseLocked1P = map[string]bool{cfg.ID: true}
+	c.phaseLockedAt = map[string]time.Time{cfg.ID: day1}
+	got = c.pickSurplusSteps(day1.Add(time.Minute), cfg)
+	if len(got) != len(steps3) {
+		t.Fatalf("3p charger must return 3Φ-only steps even with a stale lock, got=%v", got)
+	}
+	if c.surplusLockedTo1P(cfg.ID) {
+		t.Fatalf("stale 1Φ lock must be cleared for a 3p charger")
+	}
+}
+
 // surplusPausedFor is a test-only accessor for the per-loadpoint paused
 // flag. Avoids exporting getSurplusPause from production code.
 func (c *Controller) surplusPausedFor(id string) bool {

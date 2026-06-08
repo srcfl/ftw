@@ -83,12 +83,13 @@ func TestModeOptionsIncludePublishedPlannerModes(t *testing.T) {
 		"planner_passive_arbitrage",
 		"planner_arbitrage",
 	}
-	if len(modeOptions) != len(want) {
-		t.Fatalf("modeOptions length = %d, want %d: %#v", len(modeOptions), len(want), modeOptions)
+	got := modeSelectOptions()
+	if len(got) != len(want) {
+		t.Fatalf("modeSelectOptions() length = %d, want %d: %#v", len(got), len(want), got)
 	}
 	for i := range want {
-		if modeOptions[i] != want[i] {
-			t.Fatalf("modeOptions[%d] = %q, want %q (all: %#v)", i, modeOptions[i], want[i], modeOptions)
+		if got[i] != want[i] {
+			t.Fatalf("modeSelectOptions()[%d] = %q, want %q (all: %#v)", i, got[i], want[i], got)
 		}
 	}
 }

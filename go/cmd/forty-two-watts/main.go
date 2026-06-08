@@ -195,12 +195,8 @@ func main() {
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
 	// dropped on restart and the dashboard appears to forget the selection.
 	if v, ok := st.LoadConfig("mode"); ok {
-		switch control.Mode(v) {
-		case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-			control.ModeCharge, control.ModePriority, control.ModeWeighted,
-			control.ModePlannerSelf, control.ModePlannerCheap,
-			control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-			ctrl.Mode = control.Mode(v)
+		if m := control.Mode(v); control.IsValidMode(m) {
+			ctrl.Mode = m
 		}
 	}
 	if v, ok := st.LoadConfig("grid_target_w"); ok {
@@ -550,7 +546,7 @@ func main() {
 				deps.HA = nil
 				slog.Info("HA bridge stopped (disabled in config)")
 			case haBridge == nil && haEnabled:
-				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc)); err != nil {
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc)); err != nil {
 					slog.Warn("HA bridge start failed", "err", err)
 				} else {
 					haBridge = bridge
@@ -1016,18 +1012,9 @@ func main() {
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.
-		if ctrl.Mode.IsPlannerMode() {
-			var mm mpc.Mode
-			switch ctrl.Mode {
-			case control.ModePlannerSelf:
-				mm = mpc.ModeSelfConsumption
-			case control.ModePlannerCheap:
-				mm = mpc.ModeCheapCharge
-			case control.ModePlannerPassiveArbitrage:
-				mm = mpc.ModePassiveArbitrage
-			case control.ModePlannerArbitrage:
-				mm = mpc.ModeArbitrage
-			}
+		// control.PlannerMPCMode is the shared mapping (same one the API
+		// and HA setters use), so the three paths can't drift.
+		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
 			mpcSvc.SetMode(ctx, mm)
 		}
 		if mpcSvc.Latest() == nil {
@@ -1735,7 +1722,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st, mpcSvc))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -2806,39 +2793,33 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 // path can share the exact same wiring — drift between them would mean
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
-func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service) ha.CommandCallbacks {
+func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service) ha.CommandCallbacks {
 	return ha.CommandCallbacks{
 		SetMode: func(m string) error {
 			mode := control.Mode(m)
+			// Accept exactly the set the HA discovery `select` advertises —
+			// control.AllModes via IsValidMode — so a planner_* option an
+			// operator picks in Home Assistant isn't silently rejected here.
+			// Mirror the full /api/mode side-effects (manual-hold + PI reset
+			// + MPC propagation); the two setters must behave identically or
+			// HA mode changes diverge from web-UI ones (#mode-drift).
+			if !control.IsValidMode(mode) {
+				return fmt.Errorf("unknown mode: %s", m)
+			}
 			ctrlMu.Lock()
-			switch mode {
-			case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-				control.ModeCharge, control.ModePriority, control.ModeWeighted,
-				control.ModePlannerSelf, control.ModePlannerCheap,
-				control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-				ctrl.Mode = mode
-				ctrlMu.Unlock()
-				if err := st.SaveConfig("mode", m); err != nil {
-					return err
-				}
-				if mode.IsPlannerMode() && mpcSvc != nil {
-					var mm mpc.Mode
-					switch mode {
-					case control.ModePlannerSelf:
-						mm = mpc.ModeSelfConsumption
-					case control.ModePlannerCheap:
-						mm = mpc.ModeCheapCharge
-					case control.ModePlannerPassiveArbitrage:
-						mm = mpc.ModePassiveArbitrage
-					case control.ModePlannerArbitrage:
-						mm = mpc.ModeArbitrage
-					}
-					mpcSvc.SetMode(context.Background(), mm)
-				}
-				return nil
+			ctrl.Mode = mode
+			ctrl.ClearBatteryManualHold()
+			if ctrl.PI != nil {
+				ctrl.PI.Reset()
 			}
 			ctrlMu.Unlock()
-			return fmt.Errorf("unknown mode: %s", m)
+			if err := st.SaveConfig("mode", m); err != nil {
+				return err
+			}
+			if mm, ok := control.PlannerMPCMode(mode); ok && mpcSvc != nil {
+				mpcSvc.SetMode(ctx, mm)
+			}
+			return nil
 		},
 		SetGridTarget: func(w float64) error {
 			ctrlMu.Lock()

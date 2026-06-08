@@ -1662,6 +1662,23 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	steps3 := surplus3PhaseSteps(lpCfg)
 	minStep3 := smallestNonZero(steps3)
 
+	// 3Φ-only charger: an operator who pinned "3p" is telling us the
+	// wallbox can't fall back to single-phase (e.g. CTEK Chargestorm —
+	// 3Φ, 6 A minimum, no phase-switch register). Never offer a 1Φ-
+	// eligible step and never commit the day-long 1Φ lock; the charger
+	// simply pauses below the 3Φ minimum and charges in 3Φ steps above
+	// it. Without this the surplus 1Φ fallback hands such a charger a
+	// ~1380 W offer it can only answer by writing 0 A → it never charges
+	// on any day the PV forecast can't sustain 3Φ. Clear any stale lock
+	// so flipping the config to "3p" takes effect immediately.
+	if lpCfg.PhaseMode == "3p" {
+		c.phaseLockMu.Lock()
+		delete(c.phaseLocked1P, lpCfg.ID)
+		delete(c.phaseLockedAt, lpCfg.ID)
+		c.phaseLockMu.Unlock()
+		return steps3
+	}
+
 	c.phaseLockMu.Lock()
 	locked := c.phaseLocked1P[lpCfg.ID]
 	lockedAt := c.phaseLockedAt[lpCfg.ID]
@@ -1871,6 +1888,14 @@ func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surp
 		}
 		return operatorMode
 	case surplusLocked1P:
+		// A 3Φ-only charger (operator pinned "3p") physically cannot
+		// trickle at 1Φ, so the surplus 1Φ lock must never override it —
+		// defends against a stale lock left from a previous "auto"/"1p"
+		// config. pickSurplusSteps also refuses to set the lock for a
+		// "3p" loadpoint, so this is belt-and-braces.
+		if operatorMode == "3p" {
+			return "3p"
+		}
 		return "1p"
 	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
 		if dwell != "" {
