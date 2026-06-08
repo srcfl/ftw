@@ -304,6 +304,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
+	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
 	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
 	s.handle("POST /api/peak_import_ceiling", s.handleSetPeakImportCeiling)
