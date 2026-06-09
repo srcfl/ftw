@@ -64,7 +64,8 @@
     if (h === "localhost" || h === "::1" || h === "[::1]") return true;
     if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true; // *.local / single-label
     if (/^10\./.test(h) || /^127\./.test(h) || /^192\.168\./.test(h) ||
-        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+        /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // 100.64/10 CGNAT (Tailscale)
     var hv6 = h.replace(/^\[|\]$/g, "");
     if (/^f[cd][0-9a-f]{2}:/.test(hv6) || /^fe[89ab][0-9a-f]:/.test(hv6)) return true;
     return false; // dotted public host → NOT LAN → fail closed
