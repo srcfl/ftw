@@ -3,6 +3,52 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // strategyLabel maps a control-mode string to the operator-facing
+  // label. Prefers the /api/modes catalog (PR #468) when provided so we
+  // don't become yet another hard-coded copy of the mode list; falls
+  // back to a local table, then to prettifying the raw mode string.
+  // Non-planner modes get a "(manual …)" suffix: the planner computes a
+  // plan but the dispatcher isn't following it.
+  var STRATEGY_LABELS = {
+    planner_passive_arbitrage: "Passive arbitrage",
+    planner_arbitrage: "Active arbitrage",
+    planner_self: "Self-consumption (planner, legacy)",
+    planner_cheap: "Cheap charge (planner, legacy)",
+  };
+
+  function strategyLabel(mode, catalog) {
+    if (!mode) return "—";
+    var label = null;
+    if (catalog && catalog.length) {
+      for (var i = 0; i < catalog.length; i++) {
+        if (catalog[i] && catalog[i].key === mode && catalog[i].label) {
+          label = catalog[i].label;
+          break;
+        }
+      }
+    }
+    if (!label) label = STRATEGY_LABELS[mode];
+    if (!label) {
+      label = mode.replace(/_/g, " ");
+      label = label.charAt(0).toUpperCase() + label.slice(1);
+    }
+    if (mode.indexOf("planner_") !== 0) label += " (manual — planner not dispatching)";
+    return label;
+  }
+
+  // hedgeLine renders the live "what does k actually do" readout under
+  // the k input: σ (the live PV-forecast error std from /api/pvmodel)
+  // and the resulting hedge k·σ in watts. Returns null when σ is
+  // missing/invalid — the caller keeps the line hidden.
+  function hedgeLine(k, sigmaW) {
+    if (sigmaW == null || typeof sigmaW !== "number" || isNaN(sigmaW) || sigmaW < 0) return null;
+    var sigma = Math.round(sigmaW);
+    if (sigma < 1) return "σ right now ≈ 0 W — no hedge";
+    var kn = parseFloat(k);
+    if (isNaN(kn) || kn < 0) kn = 0;
+    return "σ right now ≈ " + sigma + " W → hedge = k·σ ≈ " + Math.round(kn * sigma) + " W";
+  }
+
   S.tabs.planner = {
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
@@ -54,4 +100,7 @@
         '</p>';
     },
   };
+
+  // Escape hatch for node --test (planner.test.mjs); not a public API.
+  S.tabs.planner._pure = { strategyLabel: strategyLabel, hedgeLine: hedgeLine };
 })();
