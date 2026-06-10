@@ -524,7 +524,23 @@ func isLANClientSource(r *http.Request) bool {
 	if ip == nil || ip.IsLoopback() {
 		return false
 	}
-	return ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast() || isCGNAT(ip)
+}
+
+// isCGNAT reports whether ip is in RFC 6598 shared address space
+// (100.64.0.0/10) — the range Tailscale and zerotier hand out for their
+// overlays. Go's net.IP.IsPrivate covers RFC1918 + IPv6 ULA (so a Tailscale
+// IPv6 fd7a:… address already reads as private) but NOT the IPv4 CGNAT block,
+// so it is checked here. A source in this range reached the Pi over an overlay
+// the owner explicitly joined to the machine — an authenticated, encrypted path
+// with the relay NOT in it — so it counts as genuine LAN presence, exactly like
+// an RFC1918 client. Mirrors isPrivateIPv4 / isDirectLAN in web/p2p.js.
+func isCGNAT(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
 }
 
 // isTunneled reports whether the request arrived via the relay long-poll
