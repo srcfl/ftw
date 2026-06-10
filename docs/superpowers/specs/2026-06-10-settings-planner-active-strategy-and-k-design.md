@@ -39,15 +39,21 @@ Set from the Plan card on the dashboard — not editable here.
 - The value is filled in the tab's `after(ctx)` hook from `GET /api/status`
   → `mode`. Until the fetch resolves (or on fetch failure) the value shows
   `—`.
-- Mode → label mapping mirrors the dashboard Strategy picker:
+- Mode → label mapping: PR [#468](https://github.com/frahlg/forty-two-watts/pull/468)
+  introduces `GET /api/modes` (`{key, label, tooltip, tier}` from
+  `control.ModeCatalog()`) precisely to kill hard-coded mode lists. To avoid
+  adding a fifth copy: `strategyLabel(mode, catalog)` takes an optional
+  catalog (fetched from `/api/modes` in the same `after` hook; ignored on
+  404/failure so this works whether or not #468 has landed) and falls back
+  to a local mapping:
   - `planner_passive_arbitrage` → `Passive arbitrage`
   - `planner_arbitrage` → `Active arbitrage`
   - `planner_self` / `planner_cheap` → `Self-consumption (planner, legacy)` /
     `Cheap charge (planner, legacy)`
-  - any non-planner mode (e.g. `self_consumption`, `idle`, `charge`) →
-    `<Mode> (manual — planner not dispatching)`, where `<Mode>` is the mode
-    string with underscores replaced by spaces and the first letter
-    capitalised.
+  - any other mode → the mode string with underscores replaced by spaces and
+    the first letter capitalised.
+  - Non-`planner_*` modes get the suffix `(manual — planner not dispatching)`
+    appended regardless of which source provided the label.
 - The YAML field `planner.mode` keeps existing as the first-boot/headless
   default. It is simply no longer exposed in the UI. Operators who saved a
   config through the modal keep whatever value is in their YAML — saving the
