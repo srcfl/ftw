@@ -68,3 +68,26 @@ describe("hedgeLine", () => {
     assert.equal(hedgeLine("1", -5), null);
   });
 });
+
+describe("render", () => {
+  function stubCtx() {
+    return {
+      config: { planner: {} },
+      field: (label, path) => "[field:" + path + "]",
+      selectField: (label, path) => "[select:" + path + "]",
+      help: () => "[?]",
+    };
+  }
+
+  it("no longer renders the planner.mode dropdown", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(!html.includes("planner.mode"), "planner.mode must not be bound in the form");
+  });
+
+  it("renders the active-strategy placeholder and hedge line containers", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(html.includes('id="planner-active-strategy"'));
+    assert.ok(html.includes('id="planner-hedge-line"'));
+    assert.ok(html.includes("Set from the Plan card on the dashboard"));
+  });
+});

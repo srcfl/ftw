@@ -51,13 +51,16 @@
 
   S.tabs.planner = {
     render: function (ctx) {
-      var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
+      var field = ctx.field, help = ctx.help, config = ctx.config;
       if (!config.planner) config.planner = {};
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
         help('Enable the MPC planner. When active it overrides manual mode with an optimised schedule.') + '</label>' +
-        selectField("Mode", "planner.mode", ["passive_arbitrage", "arbitrage", "self_consumption", "cheap_charge"], "passive_arbitrage",
-          "passive_arbitrage = charge from cheapest source (PV or cheap grid), never export from battery. arbitrage = full timing arbitrage including battery export. self_consumption / cheap_charge = legacy (use passive_arbitrage instead).") +
+        '<label>Active strategy ' +
+        help("The strategy the planner is running right now. It is chosen with the Strategy buttons on the dashboard Plan card and persists across restarts. The config file's planner.mode is only the first-boot default and is not editable here.") +
+        '</label>' +
+        '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 0">—</div>' +
+        '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 12px">Set from the Plan card on the dashboard — not editable here.</p>' +
         '<div class="field-row"><div>' +
         field("SoC min (%)", "planner.soc_min_pct", "number", 10,
           "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +
@@ -98,6 +101,28 @@
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
         'The planner requires working price + weather forecasts. When disabled the system runs in the manual mode set on the Control page.' +
         '</p>';
+    },
+    after: function (ctx) {
+      var ownerFetch = ctx.ownerFetch || window.fetch.bind(window);
+
+      // ---- Active strategy (read-only, from the runtime, not the YAML) ----
+      var stratEl = document.getElementById("planner-active-strategy");
+      if (stratEl) {
+        // /api/modes is the server-side mode catalog from PR #468; older
+        // hosts 404 it — treat any failure as "no catalog" and fall back
+        // to the local label table.
+        var catalogP = ownerFetch("/api/modes")
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) { return d && d.modes ? d.modes : null; })
+          .catch(function () { return null; });
+        var modeP = ownerFetch("/api/status")
+          .then(function (r) { return r.json(); })
+          .then(function (d) { return d && d.mode; })
+          .catch(function () { return null; });
+        Promise.all([modeP, catalogP]).then(function (res) {
+          stratEl.textContent = strategyLabel(res[0], res[1]);
+        });
+      }
     },
   };
 
