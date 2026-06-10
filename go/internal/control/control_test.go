@@ -3718,6 +3718,38 @@ func TestPlannerSelfIdleGateLeavesSurplusOnlyEVReserve(t *testing.T) {
 	}
 }
 
+// Regression: the surplus-only EV reserve must never DISCHARGE the home
+// battery to manufacture the reserved export. When PV surplus is below the
+// reserve, the within-reserve grid bias (biasedGridW=0 in the −reserve..0
+// band) drove the PI to discharge the pack to grid — observed live on
+// Stefan's site: ~4 kW drain while a plugged EV reserved 4.14 kW but PV was
+// only ~1.7 kW, and the EV still couldn't start. The reserve must only
+// REDUCE charging, never force discharge: self_consumption battery floored
+// at idle (≥ 0) while the grid is exporting/balanced.
+func TestSelfConsumptionEVReserveNeverDischargesToExport(t *testing.T) {
+	// Meter exporting only 700 W — well below the 4.14 kW reserve.
+	store := seedStore(-700, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3Φ min; PV below it
+	st.EVChargingW = 0
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -1 {
+		t.Errorf("TargetW = %.0f W — EV reserve must not discharge the battery to manufacture export; want >= 0 (idle)", targets[0].TargetW)
+	}
+}
+
 func TestPlannerSelfIdleGateSplitsLiveSurplusAcrossBatteries(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
