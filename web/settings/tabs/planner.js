@@ -70,7 +70,8 @@
         '</div></div>' +
         '<div class="field-row"><div>' +
         field("PV forecast safety (k)", "planner.pv_forecast_safety_k", "number", 1.0,
-          "How conservative the planner is about solar that might not arrive. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k keeps more battery reserve on uncertain/cloudy days; 1.0 is the default; 0 = use the full battery (no hedge). On clear days and in winter the hedge is ~0 automatically.") +
+          "How much the planner trusts the solar forecast. It plans against forecast − k×σ, where σ is the live PV-forecast error. Higher k = trust the forecast less: the battery holds more reserve and charges earlier, drifting toward self-consumption behaviour. 0 = trust the forecast fully (no hedge). On clear, stable days σ shrinks toward zero and k has little effect — the hedge sizes itself to the real risk.") +
+        '<div id="planner-hedge-line" style="display:none;color:var(--text-dim);font-size:0.8rem;margin-top:4px"></div>' +
         '</div></div>' +
         '<div class="field-row"><div>' +
         field("Base load (W)", "planner.base_load_w", "number", 0,
@@ -122,6 +123,27 @@
         Promise.all([modeP, catalogP]).then(function (res) {
           stratEl.textContent = strategyLabel(res[0], res[1]);
         });
+      }
+
+      // ---- Live σ/hedge readout under the k field ----
+      var hedgeEl = document.getElementById("planner-hedge-line");
+      var kInput = document.querySelector('input[data-path="planner.pv_forecast_safety_k"]');
+      if (hedgeEl && kInput) {
+        ownerFetch("/api/pvmodel")
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!d || d.enabled === false) return; // pvmodel off → line stays hidden
+            var sigma = d.pv_residual_std_w;
+            function update() {
+              var text = hedgeLine(kInput.value, sigma);
+              if (text == null) return;
+              hedgeEl.textContent = text;
+              hedgeEl.style.display = "";
+            }
+            update();
+            kInput.addEventListener("input", update);
+          })
+          .catch(function () {}); // unreachable → line stays hidden
       }
     },
   };
