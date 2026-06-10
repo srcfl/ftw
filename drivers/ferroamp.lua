@@ -180,23 +180,29 @@ local last_eso_charge_capable    = 0
 -- ~650 W share still reads "charging"), we scale the on-wire setpoint by
 -- the inverse of the pack's *delivery efficiency*:
 --     eff   = |delivered battery W| / |last on-wire setpoint W|
---     scale = clamp(1 / eff, 1.0, MAX_DISPATCH_SCALE)
--- A pack absorbing only 55 % of what we ask gets the command scaled ~1.8x
--- so the units that CAN take more make up the deficit — converging on the
--- commanded power regardless of WHICH units under-pull, and counting a
--- saturated unit's trickle in the sum rather than as a binary vote. The
--- estimate is EMA-smoothed (EFF_EMA_ALPHA) against measurement lag, only
--- updated when the on-wire command exceeds SCALE_FB_MIN_W, reset on
--- idle/auto and on a charge↔discharge flip, and hard-bounded by
--- MAX_DISPATCH_SCALE. The SoC-capable counts below are still used, but only
--- for the "every unit floored/ceilinged → idle" guard. Verified on Stefan's
--- 4×ESO site 2026-06-10: 2×5.1 kWh units saturated (~85→170 W) while 2×
--- 15.35 kWh units carried the load; threshold-toggling spilled surplus to
--- grid, delivery-ratio absorbed it.
-local EFF_EMA_ALPHA  = 0.4    -- smoothing for the delivery-efficiency estimate
-local SCALE_FB_MIN_W = 200    -- only measure efficiency when on-wire command >= this
-local accept_eff_ema = nil    -- smoothed |delivered|/|on_wire|, nil until measured
-local last_on_wire_w = 0      -- magnitude of the last charge/discharge setpoint sent
+--     scale = N_eso / N_active   (clamped to MAX_DISPATCH_SCALE)
+-- where N_active counts the units that ACTUALLY DELIVERED power in the
+-- commanded direction last tick — measured from per-ESO ubat*ibat, NOT from
+-- SoC. An ESO at its limit (full on charge, empty on discharge) delivers ~0
+-- and is excluded; the up-scale then lifts the delivering units to cover the
+-- stuck unit's even share. Because the active units split exactly the
+-- commanded power between them, the pack delivers the commanded total and
+-- NEVER more — scale is 1.0 when all units deliver, so this can't over-
+-- discharge/over-charge (unlike a delivery-efficiency ratio, whose estimate
+-- got dragged low by full units during charge and, applied to discharge,
+-- drove a 1.66x over-discharge dumping ~2.7 kW to grid — Stefan 2026-06-10).
+-- An ESO is "active" if it delivers at least half its 1/N share of the
+-- on-wire setpoint (ACTIVE_SHARE_FRAC). The SoC-capable counts below remain,
+-- but ONLY for the "every unit floored/ceilinged → idle" guard.
+local ACTIVE_SHARE_FRAC = 0.5   -- min fraction of the 1/N share to count a unit "active"
+local SCALE_FB_MIN_W = 200      -- only measure delivery when on-wire command >= this
+local last_eso_active_charge    = nil  -- units delivering charge last tick (nil until measured)
+local last_eso_active_discharge = nil  -- units delivering discharge last tick
+local last_on_wire_w = 0        -- magnitude of the last (scaled) on-wire setpoint sent
+local last_commanded_w = 0      -- magnitude of the last DISPATCH command (pre-scale); the
+                                -- active threshold keys off THIS, not the scaled on-wire
+                                -- value, so a rising scale can't inflate the threshold and
+                                -- spuriously exclude units that are delivering (feedback bug)
 -- Cumulative count of Ferroamp extapi `nak` responses since driver
 -- start. Surfaced as the `extapi_nak_count` metric so an operator can
 -- alert on any non-zero rate. NAKs are early signals of EMS-side
@@ -635,6 +641,7 @@ function driver_poll()
         local relay_worst, fault_worst = nil, nil
         local n_eso = 0
         local n_discharge_capable, n_charge_capable = 0, 0
+        local eso_pbat = {}  -- per-ESO ubat*ibat (+=discharge, -=charge) for the active detector
 
         -- Fallback weight for ESOs not listed in ESO_CAPACITY_KWH: the
         -- mean of the configured weights. Picking the mean (not 0, not 1)
@@ -655,6 +662,7 @@ function driver_poll()
             if u and i then
                 pbat_sum = pbat_sum + (u * i)
                 pbat_has_any = true
+                eso_pbat[#eso_pbat + 1] = u * i  -- +discharge / -charge (per-ESO)
             end
             if u then v_sum = v_sum + u; v_n = v_n + 1 end
             if i then a_sum = a_sum + i; a_n = a_n + 1 end
@@ -719,25 +727,38 @@ function driver_poll()
             if ehub_pbat then battery = { w = -ehub_pbat } end
         end
 
-        -- Delivery-ratio feedback: how much of our last on-wire setpoint the
-        -- pack actually absorbed, EMA-smoothed, for the up-scale in
-        -- driver_command. Only meaningful while we're forcing a setpoint
-        -- above the noise floor; cleared when idle/auto so a fresh dispatch
-        -- starts at 1.0x and re-converges.
-        if battery and (last_control_mode == "charge" or last_control_mode == "discharge")
-           and last_on_wire_w >= SCALE_FB_MIN_W then
-            local eff = math.abs(battery.w) / last_on_wire_w
-            if eff < 0.05 then eff = 0.05 elseif eff > 1.0 then eff = 1.0 end
-            if accept_eff_ema == nil then
-                accept_eff_ema = eff
-            else
-                accept_eff_ema = EFF_EMA_ALPHA * eff + (1 - EFF_EMA_ALPHA) * accept_eff_ema
+        -- Per-ESO delivery detector: count how many units actually delivered
+        -- power in the direction of our last on-wire setpoint. A unit at its
+        -- SoC limit (full on charge, empty on discharge) delivers ~0 and is
+        -- counted out; driver_command then scales N_eso/N_active so the
+        -- delivering units cover the stuck unit's even share. Measured from
+        -- per-ESO ubat*ibat (+discharge / -charge), not SoC, so a unit just
+        -- above the floor that still won't dispatch is correctly excluded.
+        -- A unit counts as "active" only if it carries at least half its 1/N
+        -- share of the on-wire setpoint. Only measured above the noise floor;
+        -- a fresh dispatch / direction flip / idle clears the counts so the
+        -- next command starts at 1.0x and re-converges within a tick.
+        if (last_control_mode == "charge" or last_control_mode == "discharge")
+           and last_commanded_w >= SCALE_FB_MIN_W and n_eso > 0 and #eso_pbat > 0 then
+            -- Threshold = half a unit's 1/N share of the COMMANDED power (not
+            -- the scaled on-wire value): a delivering unit carries >= 1/N of
+            -- commanded (more once scaled), comfortably above this, while a
+            -- stuck unit reads ~0. Keying off commanded keeps the threshold
+            -- fixed as scale climbs, so it can't exclude real deliverers.
+            local thresh = ACTIVE_SHARE_FRAC * (last_commanded_w / n_eso)
+            local nc, nd = 0, 0
+            for _, p in ipairs(eso_pbat) do
+                if p <= -thresh then nc = nc + 1 end   -- charging at/above share
+                if p >=  thresh then nd = nd + 1 end   -- discharging at/above share
             end
+            last_eso_active_charge    = nc
+            last_eso_active_discharge = nd
         elseif last_control_mode == "idle" or last_control_mode == "auto" then
-            accept_eff_ema = nil
+            last_eso_active_charge    = nil
+            last_eso_active_discharge = nil
         end
-        host.emit_metric("eso_accept_eff_x1000",
-            accept_eff_ema and math.floor(accept_eff_ema * 1000 + 0.5) or 1000)
+        host.emit_metric("eso_active_charge",    last_eso_active_charge    or 0)
+        host.emit_metric("eso_active_discharge", last_eso_active_discharge or 0)
 
         if battery then
             if v_n   > 0 then battery.v = v_sum / v_n end
@@ -897,22 +918,21 @@ function driver_command(action, power_w, cmd)
     elseif action == "battery" then
         local now = host.millis()
         local tid = "ems-" .. tostring(now)
-        -- Up-scale the on-wire setpoint by the inverse of the pack's
-        -- delivery efficiency (see the delivery-ratio note near
-        -- MAX_DISPATCH_SCALE): the EHub splits evenly across all ESOs, so a
-        -- saturated unit's unused share is recovered by commanding extra,
-        -- bounded by MAX_DISPATCH_SCALE. The SoC-capable count is used ONLY
-        -- to detect "every unit floored/ceilinged → idle" — don't waste an
-        -- EHub round-trip on a command nothing can honour. We act only when
-        -- the per-ESO counts are fresh (<= STALE_AFTER_MS) so a broker stall
-        -- can't scale off a stale snapshot.
+        -- Up-scale the on-wire setpoint so the units that ARE delivering cover
+        -- the even share of any unit stuck at 0 (the EHub splits the setpoint
+        -- evenly across all ESOs). Inactive units are detected by actual power
+        -- delivery, not SoC (see the active-detector note near
+        -- MAX_DISPATCH_SCALE). The SoC-capable count is used ONLY to detect
+        -- "every unit floored/ceilinged → idle". We act only when the per-ESO
+        -- snapshot is fresh (<= STALE_AFTER_MS) so a broker stall can't scale
+        -- off a stale snapshot.
         --
-        -- Reset the efficiency estimate on a direction flip so each
-        -- direction re-converges from 1.0x instead of inheriting the other's
-        -- ratio.
+        -- Reset the active counts on a direction flip so each direction
+        -- re-converges from 1.0x instead of inheriting the other's count.
         if (power_w > 0 and last_control_mode ~= "charge") or
            (power_w < 0 and last_control_mode ~= "discharge") then
-            accept_eff_ema = nil
+            last_eso_active_charge    = nil
+            last_eso_active_discharge = nil
         end
         local on_wire_w = power_w
         local scale     = 1.0
@@ -931,28 +951,32 @@ function driver_command(action, power_w, cmd)
                 host.emit_metric("eso_dispatch_scale_x1000", 0)
                 host.emit_metric("eso_dispatch_commanded_w", 0)
                 last_on_wire_w = 0
+                last_commanded_w = 0
                 -- Re-publish every tick (see the zero branch below): a
                 -- one-shot idle lets the EHub's forced mode expire and
                 -- revert to autonomous charging from grid.
                 return publish_idle(tid)
             end
-            -- Delivery-ratio up-scale applies to CHARGE ONLY. On charge, a
-            -- saturated/full ESO can't take its even split so the pack
-            -- under-delivers and we scale up so the units with headroom make
-            -- up the deficit. Discharge has no such under-delivery here (the
-            -- full small ESOs discharge fine), so amplifying a discharge
-            -- command only over-discharges the pack to grid: the full smalls
-            -- drag the efficiency EMA to ~0.6, and 1/0.6≈1.66x applied to a
-            -- discharge drained the battery ~2.7 kW to grid (Stefan
-            -- 2026-06-10). Never scale discharge — leave it at 1.0.
-            if power_w > 0 and accept_eff_ema ~= nil and accept_eff_ema > 0 then
-                scale = 1.0 / accept_eff_ema
-                if scale < 1.0 then scale = 1.0 end
+            -- Scale by N_eso / N_active in the commanded direction, where
+            -- N_active is how many units actually DELIVERED power last tick
+            -- (measured, not SoC). Same detector both directions: a full unit
+            -- on charge and an empty unit on discharge both read "0 delivered"
+            -- → excluded → the rest cover their share. The active units split
+            -- the commanded power exactly, so the pack delivers the commanded
+            -- total and never more (scale 1.0 when all deliver). nil active
+            -- (fresh dispatch / direction flip / sub-noise command) → 1.0x and
+            -- re-measure next tick.
+            local active
+            if power_w > 0 then active = last_eso_active_charge
+            else                 active = last_eso_active_discharge end
+            if active ~= nil and active > 0 and active < last_eso_count then
+                scale = last_eso_count / active
                 if scale > MAX_DISPATCH_SCALE then scale = MAX_DISPATCH_SCALE end
             end
             on_wire_w = power_w * scale
         end
-        last_on_wire_w = math.abs(on_wire_w)   -- feeds the efficiency loop next poll
+        last_on_wire_w = math.abs(on_wire_w)   -- scaled setpoint actually sent
+        last_commanded_w = math.abs(power_w)   -- dispatch command — the active threshold base
         host.emit_metric("eso_dispatch_scale_x1000",  math.floor(scale * 1000 + 0.5))
         host.emit_metric("eso_dispatch_commanded_w",  math.floor(power_w))
         if power_w > 0 then
@@ -1049,4 +1073,7 @@ function driver_cleanup()
     last_eso_discharge_capable = 0
     last_eso_charge_capable    = 0
     last_eso_counts_ms         = -1
+    last_eso_active_charge     = nil
+    last_eso_active_discharge  = nil
+    last_on_wire_w             = 0
 end
