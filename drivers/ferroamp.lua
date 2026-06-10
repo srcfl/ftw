@@ -171,6 +171,21 @@ local MAX_DISPATCH_SCALE  = 2.0
 local last_eso_count             = 0
 local last_eso_discharge_capable = 0
 local last_eso_charge_capable    = 0
+-- Acceptance-based charge gate. An ESO can sit below the SoC ceiling yet
+-- refuse charge — CV taper near full, voltage/thermal limit, or the EHub
+-- balancing toward lower-SoC units. While we're actively commanding
+-- charge, an ESO drawing less than CHARGE_ACCEPT_MIN_W is not honouring
+-- its even split of the setpoint, so we drop it from n_charge_capable;
+-- that makes the N_total/N_capable up-scale (capped at MAX_DISPATCH_SCALE)
+-- redirect the surplus to the units that CAN take it. Debounced over
+-- CHARGE_ACCEPT_MISS_POLLS polls so a charge ramp or a one-off low sample
+-- doesn't drop a unit. Power-based (not SoC) by design: verified on
+-- Stefan's 4×ESO site 2026-06-10, where 2×5.1 kWh units sat at ~86 W
+-- (73 % SoC, CV taper) while 2×15.35 kWh units took ~2.1 kW each, capping
+-- an 8.3 kW command at 4.3 kW and spilling the rest to grid.
+local CHARGE_ACCEPT_MIN_W      = 100
+local CHARGE_ACCEPT_MISS_POLLS = 3
+local eso_charge_miss          = {}   -- per-ESO consecutive non-accept polls
 -- Cumulative count of Ferroamp extapi `nak` responses since driver
 -- start. Surfaced as the `extapi_nak_count` metric so an operator can
 -- alert on any non-zero rate. NAKs are early signals of EMS-side
@@ -609,6 +624,7 @@ function driver_poll()
         local relay_worst, fault_worst = nil, nil
         local n_eso = 0
         local n_discharge_capable, n_charge_capable = 0, 0
+        local n_charge_not_accepting = 0
 
         -- Fallback weight for ESOs not listed in ESO_CAPACITY_KWH: the
         -- mean of the configured weights. Picking the mean (not 0, not 1)
@@ -646,7 +662,30 @@ function driver_poll()
                     n_discharge_capable = n_discharge_capable + 1
                 end
                 if soc <= CHARGE_CEIL_SOC then
-                    n_charge_capable = n_charge_capable + 1
+                    -- Acceptance gate (see CHARGE_ACCEPT_MIN_W note above):
+                    -- below the SoC ceiling but drawing ~no charge power
+                    -- while charge is commanded ⇒ saturated / balancing ⇒
+                    -- can't take its even split ⇒ exclude so the up-scale
+                    -- redirects surplus to the units that can. ibat is
+                    -- negative while charging, so charge_w = -(u*i).
+                    local accepting = true
+                    if last_control_mode == "charge" then
+                        local cw = (u ~= nil and i ~= nil) and -(u * i) or nil
+                        if cw ~= nil and cw < CHARGE_ACCEPT_MIN_W then
+                            local m = (eso_charge_miss[id] or 0) + 1
+                            eso_charge_miss[id] = m
+                            if m >= CHARGE_ACCEPT_MISS_POLLS then accepting = false end
+                        else
+                            eso_charge_miss[id] = 0
+                        end
+                    else
+                        eso_charge_miss[id] = 0
+                    end
+                    if accepting then
+                        n_charge_capable = n_charge_capable + 1
+                    else
+                        n_charge_not_accepting = n_charge_not_accepting + 1
+                    end
                 end
             else
                 -- Missing SoC: treat as capable in both directions. The
@@ -747,6 +786,7 @@ function driver_poll()
                 host.emit_metric("eso_count", n_eso)
                 host.emit_metric("eso_discharge_capable", n_discharge_capable)
                 host.emit_metric("eso_charge_capable",    n_charge_capable)
+                host.emit_metric("eso_charge_not_accepting", n_charge_not_accepting)
                 if udc_n > 0     then host.emit_metric("eso_dc_link_v",   udc_sum / udc_n) end
                 if relay_worst ~= nil then host.emit_metric("eso_relaystatus", relay_worst) end
                 if fault_worst ~= nil then host.emit_metric("eso_faultcode",   fault_worst) end
