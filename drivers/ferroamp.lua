@@ -936,8 +936,16 @@ function driver_command(action, power_w, cmd)
                 -- revert to autonomous charging from grid.
                 return publish_idle(tid)
             end
-            -- Delivery-ratio up-scale: 1 / efficiency, bounded.
-            if accept_eff_ema ~= nil and accept_eff_ema > 0 then
+            -- Delivery-ratio up-scale applies to CHARGE ONLY. On charge, a
+            -- saturated/full ESO can't take its even split so the pack
+            -- under-delivers and we scale up so the units with headroom make
+            -- up the deficit. Discharge has no such under-delivery here (the
+            -- full small ESOs discharge fine), so amplifying a discharge
+            -- command only over-discharges the pack to grid: the full smalls
+            -- drag the efficiency EMA to ~0.6, and 1/0.6≈1.66x applied to a
+            -- discharge drained the battery ~2.7 kW to grid (Stefan
+            -- 2026-06-10). Never scale discharge — leave it at 1.0.
+            if power_w > 0 and accept_eff_ema ~= nil and accept_eff_ema > 0 then
                 scale = 1.0 / accept_eff_ema
                 if scale < 1.0 then scale = 1.0 end
                 if scale > MAX_DISPATCH_SCALE then scale = MAX_DISPATCH_SCALE end
