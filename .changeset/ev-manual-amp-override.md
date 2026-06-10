@@ -19,3 +19,8 @@ accepts `hold_s: 0` (or omitted) to mean a persistent hold; `hold_s > 0` is
 still the bounded diagnostic hold. `GET /api/loadpoints` gains `phases`,
 `voltage_v`, `manual_active`, and `manual_charge_w` so the UI can render the
 amp slider and reflect the current override.
+
+The now-redundant Start / Pause / Resume footer buttons in the EV modal are
+removed — the amp slider's Start/Stop supersedes them (Start is strictly more
+capable: it pins a chosen amperage instead of always MaxChargeW). The
+`POST /api/ev/command` endpoint is retained for Home Assistant / scripts.

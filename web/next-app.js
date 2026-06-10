@@ -2168,7 +2168,7 @@
   }
 
   // Fire-and-forget wrappers around postJson. postJson itself rethrows
-  // so callers that chain .then/.finally (evCommand) behave correctly;
+  // so callers that chain .then/.finally behave correctly;
   // here we explicitly mark the rejection handled so the browser
   // doesn't log "Uncaught (in promise)" on every network hiccup.
   // postJson has already console.warn'd the failure.
@@ -3121,11 +3121,6 @@
 
   var evRefreshTimer = null;
   if (evModal) {
-    var evBtnStart = document.getElementById("ev-btn-start");
-    var evBtnPause = document.getElementById("ev-btn-pause");
-    var evBtnResume = document.getElementById("ev-btn-resume");
-    var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
-
     function openEvModal(driver) {
       evModalDriver = driver || null;
       evModal.open();
@@ -3215,20 +3210,11 @@
       });
     }
 
-    function evCommand(action) {
-      evActionBtns.forEach(function (b) { b.disabled = true; });
-      var body = { action: action };
-      if (evModalDriver) body.driver = evModalDriver;
-      postJson("/api/ev/command", body)
-        .catch(function () { /* postJson already logs */ })
-        .finally(function () {
-          refreshEvModal();
-          evActionBtns.forEach(function (b) { b.disabled = false; });
-        });
-    }
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+    // Legacy Start/Pause/Resume footer buttons were removed in favour of
+    // the in-body Manual Charge control (buildManualControl): an amp slider
+    // + Start/Stop that pins a persistent manual hold at a chosen current
+    // (Start, overrides surplus) or clears it (Stop, back to automatic).
+    // The POST /api/ev/command endpoint stays for HA / scripts.
   }
 
 
