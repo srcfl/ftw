@@ -5646,3 +5646,31 @@ func TestChargeCeilingReleasesReserveWhenEVCannotStart(t *testing.T) {
 		t.Errorf("ceiling=%.0f, want 0 (EV drawing — protect its ramp reserve)", got)
 	}
 }
+
+// Full-dispatch check for the EV-surplus fix: EV plugged + surplus_only but
+// NOT drawing, reserving 4140 W, and the meter exports 2000 W — below the
+// reserve, so the EV can't start. Both reserve hold-backs (grid bias + charge
+// ceiling) must release so the home battery ABSORBS the surplus instead of
+// leaving it reserved and exporting. Pre-fix the bias pinned the PI at idle
+// (~0). (Stefan 2026-06-10: surplus exporting while battery sat at 0.)
+func TestSelfConsumptionEVReserveReleasesToBatteryWhenEVCannotStart(t *testing.T) {
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3φ min; export (2000) below it
+	st.EVChargingW = 0              // not drawing → can't start on 2000 W
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < 500 {
+		t.Errorf("TargetW=%.0f — battery must absorb the sub-reserve surplus the EV can't use; want a positive charge (~1100), got idle", targets[0].TargetW)
+	}
+}

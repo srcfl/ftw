@@ -1739,7 +1739,14 @@ func ComputeDispatch(
 		// DISCHARGE battery into the EV's reserved export space — the
 		// opposite of what we want.
 		biasedGridW := gridW
-		if state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption {
+		// Only bias the grid signal (hold export back for the EV) when the EV
+		// can actually use the reserve. When it can't — stopped AND surplus
+		// below its start power — leave biasedGridW = gridW so the PI sees the
+		// real export and the home battery absorbs the surplus instead of
+		// reserving it for an EV that can't take it. Mirrors the charge
+		// ceiling's evCanUseReserve() release so both hold-backs lift together.
+		if state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption &&
+			surplus.evCanUseReserve() {
 			reserveRemaining := surplus.evReserveRemainingW
 			if gridW < -reserveRemaining {
 				biasedGridW = gridW + reserveRemaining
@@ -2899,18 +2906,26 @@ func (a surplusAccounting) effectiveChargeSurplusW() float64 {
 	return surplusW
 }
 
+// evCanUseReserve reports whether the surplus-only EV can actually consume
+// the reserved export right now: either it's already drawing (evActive), or
+// the available PV surplus is at least the reserved amount so the EV could
+// start on it. When false (EV stopped AND surplus below its start power) the
+// reserve is futile — holding it back would just export surplus the EV can't
+// take — so callers release it and let the home battery absorb the surplus.
+// This is what makes "surplus flows into the home battery when the EV can't
+// assimilate it" work; the difference the EV DOES take is handled by the
+// reserve tracking its actual draw (evReserveRemainingW shrinks as it ramps).
+func (a surplusAccounting) evCanUseReserve() bool {
+	if a.evReserveRemainingW <= 0 {
+		return false
+	}
+	return a.evActive || a.effectiveChargeSurplusW() >= a.evReserveRemainingW
+}
+
 func (a surplusAccounting) chargeCeilingAfterEVReserveW() float64 {
 	surplus := a.effectiveChargeSurplusW()
-	// When the EV is NOT drawing and the available PV surplus is below the
-	// reserved amount, the EV cannot start on it: a plugged-but-stopped EV
-	// reserves its MinChargeW, so surplus < reserve means surplus is below
-	// the EV's start power and it can't begin charging no matter what. Left
-	// reserved, that surplus just exports to grid. Release it so the home
-	// battery absorbs the surplus instead. Once the EV is actually drawing
-	// (evActive) — or once surplus rises to the reserve so the EV CAN start —
-	// the reserve applies normally and protects the EV's slice.
-	if !a.evActive && surplus < a.evReserveRemainingW {
-		return surplus
+	if !a.evCanUseReserve() {
+		return surplus // EV can't use the reserve → battery absorbs it all
 	}
 	ceiling := surplus - a.evReserveRemainingW
 	if ceiling < 0 {
