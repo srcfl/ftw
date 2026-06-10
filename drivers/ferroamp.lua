@@ -171,21 +171,32 @@ local MAX_DISPATCH_SCALE  = 2.0
 local last_eso_count             = 0
 local last_eso_discharge_capable = 0
 local last_eso_charge_capable    = 0
--- Acceptance-based charge gate. An ESO can sit below the SoC ceiling yet
--- refuse charge — CV taper near full, voltage/thermal limit, or the EHub
--- balancing toward lower-SoC units. While we're actively commanding
--- charge, an ESO drawing less than CHARGE_ACCEPT_MIN_W is not honouring
--- its even split of the setpoint, so we drop it from n_charge_capable;
--- that makes the N_total/N_capable up-scale (capped at MAX_DISPATCH_SCALE)
--- redirect the surplus to the units that CAN take it. Debounced over
--- CHARGE_ACCEPT_MISS_POLLS polls so a charge ramp or a one-off low sample
--- doesn't drop a unit. Power-based (not SoC) by design: verified on
--- Stefan's 4×ESO site 2026-06-10, where 2×5.1 kWh units sat at ~86 W
--- (73 % SoC, CV taper) while 2×15.35 kWh units took ~2.1 kW each, capping
--- an 8.3 kW command at 4.3 kW and spilling the rest to grid.
-local CHARGE_ACCEPT_MIN_W      = 100
-local CHARGE_ACCEPT_MISS_POLLS = 3
-local eso_charge_miss          = {}   -- per-ESO consecutive non-accept polls
+-- Delivery-ratio scaling. The EnergyHub splits a charge/discharge setpoint
+-- evenly across ALL ESOs; a unit that's saturated (CV taper near full, the
+-- EHub balancing toward lower-SoC units, voltage/thermal limit) absorbs
+-- almost none of its even share, so the pack delivers far less than we ask.
+-- Instead of toggling units active/inactive on a power threshold (which
+-- flaps when a saturated unit trickles a little — e.g. 170 W against a
+-- ~650 W share still reads "charging"), we scale the on-wire setpoint by
+-- the inverse of the pack's *delivery efficiency*:
+--     eff   = |delivered battery W| / |last on-wire setpoint W|
+--     scale = clamp(1 / eff, 1.0, MAX_DISPATCH_SCALE)
+-- A pack absorbing only 55 % of what we ask gets the command scaled ~1.8x
+-- so the units that CAN take more make up the deficit — converging on the
+-- commanded power regardless of WHICH units under-pull, and counting a
+-- saturated unit's trickle in the sum rather than as a binary vote. The
+-- estimate is EMA-smoothed (EFF_EMA_ALPHA) against measurement lag, only
+-- updated when the on-wire command exceeds SCALE_FB_MIN_W, reset on
+-- idle/auto and on a charge↔discharge flip, and hard-bounded by
+-- MAX_DISPATCH_SCALE. The SoC-capable counts below are still used, but only
+-- for the "every unit floored/ceilinged → idle" guard. Verified on Stefan's
+-- 4×ESO site 2026-06-10: 2×5.1 kWh units saturated (~85→170 W) while 2×
+-- 15.35 kWh units carried the load; threshold-toggling spilled surplus to
+-- grid, delivery-ratio absorbed it.
+local EFF_EMA_ALPHA  = 0.4    -- smoothing for the delivery-efficiency estimate
+local SCALE_FB_MIN_W = 200    -- only measure efficiency when on-wire command >= this
+local accept_eff_ema = nil    -- smoothed |delivered|/|on_wire|, nil until measured
+local last_on_wire_w = 0      -- magnitude of the last charge/discharge setpoint sent
 -- Cumulative count of Ferroamp extapi `nak` responses since driver
 -- start. Surfaced as the `extapi_nak_count` metric so an operator can
 -- alert on any non-zero rate. NAKs are early signals of EMS-side
@@ -624,7 +635,6 @@ function driver_poll()
         local relay_worst, fault_worst = nil, nil
         local n_eso = 0
         local n_discharge_capable, n_charge_capable = 0, 0
-        local n_charge_not_accepting = 0
 
         -- Fallback weight for ESOs not listed in ESO_CAPACITY_KWH: the
         -- mean of the configured weights. Picking the mean (not 0, not 1)
@@ -661,31 +671,12 @@ function driver_poll()
                 if soc >= DISCHARGE_FLOOR_SOC then
                     n_discharge_capable = n_discharge_capable + 1
                 end
+                -- SoC-capable counts are used only for the "every unit
+                -- floored/ceilinged → idle" guard in driver_command. The
+                -- magnitude up-scale is handled by the delivery-ratio loop
+                -- (see note near MAX_DISPATCH_SCALE), not a per-unit vote.
                 if soc <= CHARGE_CEIL_SOC then
-                    -- Acceptance gate (see CHARGE_ACCEPT_MIN_W note above):
-                    -- below the SoC ceiling but drawing ~no charge power
-                    -- while charge is commanded ⇒ saturated / balancing ⇒
-                    -- can't take its even split ⇒ exclude so the up-scale
-                    -- redirects surplus to the units that can. ibat is
-                    -- negative while charging, so charge_w = -(u*i).
-                    local accepting = true
-                    if last_control_mode == "charge" then
-                        local cw = (u ~= nil and i ~= nil) and -(u * i) or nil
-                        if cw ~= nil and cw < CHARGE_ACCEPT_MIN_W then
-                            local m = (eso_charge_miss[id] or 0) + 1
-                            eso_charge_miss[id] = m
-                            if m >= CHARGE_ACCEPT_MISS_POLLS then accepting = false end
-                        else
-                            eso_charge_miss[id] = 0
-                        end
-                    else
-                        eso_charge_miss[id] = 0
-                    end
-                    if accepting then
-                        n_charge_capable = n_charge_capable + 1
-                    else
-                        n_charge_not_accepting = n_charge_not_accepting + 1
-                    end
+                    n_charge_capable = n_charge_capable + 1
                 end
             else
                 -- Missing SoC: treat as capable in both directions. The
@@ -727,6 +718,26 @@ function driver_poll()
             local ehub_pbat = tonumber(extract_val(ehub_data, "pbat"))
             if ehub_pbat then battery = { w = -ehub_pbat } end
         end
+
+        -- Delivery-ratio feedback: how much of our last on-wire setpoint the
+        -- pack actually absorbed, EMA-smoothed, for the up-scale in
+        -- driver_command. Only meaningful while we're forcing a setpoint
+        -- above the noise floor; cleared when idle/auto so a fresh dispatch
+        -- starts at 1.0x and re-converges.
+        if battery and (last_control_mode == "charge" or last_control_mode == "discharge")
+           and last_on_wire_w >= SCALE_FB_MIN_W then
+            local eff = math.abs(battery.w) / last_on_wire_w
+            if eff < 0.05 then eff = 0.05 elseif eff > 1.0 then eff = 1.0 end
+            if accept_eff_ema == nil then
+                accept_eff_ema = eff
+            else
+                accept_eff_ema = EFF_EMA_ALPHA * eff + (1 - EFF_EMA_ALPHA) * accept_eff_ema
+            end
+        elseif last_control_mode == "idle" or last_control_mode == "auto" then
+            accept_eff_ema = nil
+        end
+        host.emit_metric("eso_accept_eff_x1000",
+            accept_eff_ema and math.floor(accept_eff_ema * 1000 + 0.5) or 1000)
 
         if battery then
             if v_n   > 0 then battery.v = v_sum / v_n end
@@ -786,7 +797,6 @@ function driver_poll()
                 host.emit_metric("eso_count", n_eso)
                 host.emit_metric("eso_discharge_capable", n_discharge_capable)
                 host.emit_metric("eso_charge_capable",    n_charge_capable)
-                host.emit_metric("eso_charge_not_accepting", n_charge_not_accepting)
                 if udc_n > 0     then host.emit_metric("eso_dc_link_v",   udc_sum / udc_n) end
                 if relay_worst ~= nil then host.emit_metric("eso_relaystatus", relay_worst) end
                 if fault_worst ~= nil then host.emit_metric("eso_faultcode",   fault_worst) end
@@ -887,22 +897,23 @@ function driver_command(action, power_w, cmd)
     elseif action == "battery" then
         local now = host.millis()
         local tid = "ems-" .. tostring(now)
-        -- Scale outgoing power to compensate for the EHub dividing the
-        -- setpoint across ALL ESOs (including the floored ones, which
-        -- contribute 0). See the multi-ESO comment near the top of the
-        -- file. We only scale when:
-        --   1. per-ESO counts are fresh (<= STALE_AFTER_MS old) —
-        --      partial broker stalls between polls would otherwise
-        --      leave an inflated last_eso_count scaling later commands;
-        --   2. a strict subset of units is capable of the requested
-        --      direction;
-        --   3. capable > 0 — if EVERY unit is floored we deliberately
-        --      idle instead of publishing a non-zero command nothing
-        --      can honour.
-        -- The scale is capped at MAX_DISPATCH_SCALE so a transient
-        -- "only 1 of 4 capable" snapshot can't quadruple the on-wire
-        -- setpoint past inverter rating / fuse guard before the next
-        -- poll corrects.
+        -- Up-scale the on-wire setpoint by the inverse of the pack's
+        -- delivery efficiency (see the delivery-ratio note near
+        -- MAX_DISPATCH_SCALE): the EHub splits evenly across all ESOs, so a
+        -- saturated unit's unused share is recovered by commanding extra,
+        -- bounded by MAX_DISPATCH_SCALE. The SoC-capable count is used ONLY
+        -- to detect "every unit floored/ceilinged → idle" — don't waste an
+        -- EHub round-trip on a command nothing can honour. We act only when
+        -- the per-ESO counts are fresh (<= STALE_AFTER_MS) so a broker stall
+        -- can't scale off a stale snapshot.
+        --
+        -- Reset the efficiency estimate on a direction flip so each
+        -- direction re-converges from 1.0x instead of inheriting the other's
+        -- ratio.
+        if (power_w > 0 and last_control_mode ~= "charge") or
+           (power_w < 0 and last_control_mode ~= "discharge") then
+            accept_eff_ema = nil
+        end
         local on_wire_w = power_w
         local scale     = 1.0
         local fresh     = last_eso_counts_ms >= 0
@@ -912,28 +923,26 @@ function driver_command(action, power_w, cmd)
             if power_w > 0 then capable = last_eso_charge_capable
             else                 capable = last_eso_discharge_capable end
             if capable == 0 then
-                -- All units refuse this direction — publish idle so we
-                -- don't waste an EHub round-trip on a command nothing
-                -- can fulfil, and surface the condition to the operator.
+                -- Every unit floored/ceilinged for this direction — publish
+                -- idle rather than command something nothing can honour.
                 host.log("warn", string.format(
                     "Ferroamp: all %d ESOs at SoC limit for requested %d W — idling",
                     last_eso_count, math.floor(power_w)))
                 host.emit_metric("eso_dispatch_scale_x1000", 0)
                 host.emit_metric("eso_dispatch_commanded_w", 0)
+                last_on_wire_w = 0
                 if last_control_mode == "idle" then return true end
                 return publish_idle(tid)
             end
-            if capable < last_eso_count then
-                scale = last_eso_count / capable
-                if scale > MAX_DISPATCH_SCALE then
-                    host.log("warn", string.format(
-                        "Ferroamp: dispatch scale %.2fx clamped to %.1fx (%d of %d ESOs capable)",
-                        scale, MAX_DISPATCH_SCALE, capable, last_eso_count))
-                    scale = MAX_DISPATCH_SCALE
-                end
-                on_wire_w = power_w * scale
+            -- Delivery-ratio up-scale: 1 / efficiency, bounded.
+            if accept_eff_ema ~= nil and accept_eff_ema > 0 then
+                scale = 1.0 / accept_eff_ema
+                if scale < 1.0 then scale = 1.0 end
+                if scale > MAX_DISPATCH_SCALE then scale = MAX_DISPATCH_SCALE end
             end
+            on_wire_w = power_w * scale
         end
+        last_on_wire_w = math.abs(on_wire_w)   -- feeds the efficiency loop next poll
         host.emit_metric("eso_dispatch_scale_x1000",  math.floor(scale * 1000 + 0.5))
         host.emit_metric("eso_dispatch_commanded_w",  math.floor(power_w))
         if power_w > 0 then

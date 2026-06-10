@@ -2,22 +2,23 @@
 "forty-two-watts": patch
 ---
 
-Fix the Ferroamp battery under-charging (and spilling PV surplus to grid) when
-one battery in a multi-ESO site is saturated. The EnergyHub splits a charge
-setpoint evenly across all ESOs; an ESO in CV taper near full — or held back by
-the EHub's own SoC balancing — accepts almost none of its share, so the pack
-caps well below the commanded power. The driver's N_total/N_capable up-scale
-only counted ESOs by SoC ceiling, so a unit saturated at a *mid-range* SoC
-(observed on Stefan's 4×ESO site: 2×5.1 kWh units stuck at ~86 W while at 73 %
-SoC) still counted as capable and the scale stayed 1.0 — an 8.3 kW command
-delivered only 4.3 kW, the rest exported.
+Fix the Ferroamp battery under-charging (and spilling PV surplus to grid) on
+multi-ESO sites where one battery is saturated. The EnergyHub splits a charge
+setpoint evenly across all ESOs; a unit in CV taper near full — or held back by
+the EHub's own SoC balancing — absorbs almost none of its share, so the pack
+caps well below the commanded power (observed on Stefan's 4×ESO site: an 8.3 kW
+command delivered only 4.3 kW, the rest exported).
 
-The charge-capability test is now **acceptance-based**: while charge is
-commanded, an ESO drawing less than 100 W (debounced over 3 polls) is excluded
-from `n_charge_capable`, so the existing up-scale (capped at 2.0×) redirects the
-surplus to the units that can take it. Exclusion is debounced to avoid dropping
-a unit during ramp; re-inclusion is immediate, so the moment a saturated unit
-starts accepting again the multiplier drops and power redistributes evenly. New
-`eso_charge_not_accepting` metric surfaces how many units are being skipped.
-Verified live: battery charge rose 4.3 kW → ~8.7 kW and grid export of the
-surplus stopped.
+Replaces the previous per-unit acceptance threshold (which flapped: a saturated
+ESO trickling ~170 W against a ~650 W share still read "charging", dropping the
+up-scale and re-spilling surplus) with a **delivery-ratio loop**: the driver
+measures how much of its last on-wire setpoint the pack actually absorbed
+(`eff = |delivered| / |on-wire|`, EMA-smoothed) and scales the next command by
+`1/eff`, bounded by `MAX_DISPATCH_SCALE` (2.0×). A saturated unit's trickle is
+simply summed in rather than voted on, so the command rises until the units
+that *can* take more cover the deficit — converging on the commanded power
+regardless of which units under-pull, with no threshold to flap on. The
+SoC-capable count is retained only for the "every unit floored/ceilinged → idle"
+guard. New `eso_accept_eff_x1000` metric exposes the measured efficiency.
+Verified live: battery charge rose 4.3 kW → ~8 kW and the surplus stopped
+spilling.
