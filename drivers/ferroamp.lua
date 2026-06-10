@@ -931,7 +931,9 @@ function driver_command(action, power_w, cmd)
                 host.emit_metric("eso_dispatch_scale_x1000", 0)
                 host.emit_metric("eso_dispatch_commanded_w", 0)
                 last_on_wire_w = 0
-                if last_control_mode == "idle" then return true end
+                -- Re-publish every tick (see the zero branch below): a
+                -- one-shot idle lets the EHub's forced mode expire and
+                -- revert to autonomous charging from grid.
                 return publish_idle(tid)
             end
             -- Delivery-ratio up-scale: 1 / efficiency, bounded.
@@ -964,12 +966,15 @@ function driver_command(action, power_w, cmd)
             if not err then last_control_mode = "discharge" end
             return err
         else
-            -- Zero: force idle at 0 W. Do NOT fall back to autonomous
-            -- self-consumption — that would let the EnergyHub discharge
-            -- to cover load and silently override the planner.
-            if last_control_mode == "idle" then
-                return true
-            end
+            -- Zero: force idle at 0 W, re-published EVERY tick. The EHub's
+            -- forced-mode command (discharge arg=0) EXPIRES if not
+            -- refreshed — a one-shot idle let the EHub revert to autonomous
+            -- self-consumption and charge the battery ~2.6 kW from the GRID
+            -- while FtW believed it was idling (observed on Stefan's site
+            -- 2026-06-10: dispatch target 0, battery charging 2.6 kW anyway,
+            -- FtW silent on the control topic for 12 s). Re-publishing each
+            -- tick keeps the EHub under our control, exactly as the
+            -- charge/discharge branches above already refresh their setpoints.
             return publish_idle(tid)
         end
     elseif action == "curtail" then
