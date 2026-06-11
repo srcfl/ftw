@@ -275,8 +275,8 @@ func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 
 	files := readTarGz(t, rr.Body.Bytes())
 	csv := string(files["timeseries_15m.csv"])
-	if !strings.Contains(csv, ",300,1500,1800,") {
-		t.Fatalf("timeseries does not carry ev_w=300, house_load_w=1500, recorded_load_w=1800:\n%s", csv)
+	if !strings.Contains(csv, ",300,0,1500,1800,") {
+		t.Fatalf("timeseries does not carry ev_w=300, v2x_w=0, house_load_w=1500, recorded_load_w=1800:\n%s", csv)
 	}
 	siteJSON := string(files["site.json"])
 	if !strings.Contains(siteJSON, `"has_ev": true`) {

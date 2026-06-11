@@ -87,6 +87,239 @@ func newTestFerroampDriver(t *testing.T, tel *telemetry.Store, mqtt *fakeMQTT) (
 	return d, env
 }
 
+func newBundledMQTTDriver(t *testing.T, filename, name string, tel *telemetry.Store, mqtt *fakeMQTT, cfg map[string]any) *LuaDriver {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	luaPath := filepath.Join(wd, "..", "..", "..", "drivers", filename)
+	if _, err := os.Stat(luaPath); err != nil {
+		t.Fatalf("%s not found at %s: %v", filename, luaPath, err)
+	}
+	env := NewHostEnv(name, tel).WithMQTT(mqtt)
+	d, err := NewLuaDriver(luaPath, env)
+	if err != nil {
+		t.Fatalf("load %s: %v", filename, err)
+	}
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init %s: %v", filename, err)
+	}
+	t.Cleanup(d.Cleanup)
+	return d
+}
+
+func TestFerroampDC2V2XDriverTelemetryAndCommand(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ferroamp_dc2_v2x.lua", "dc2", tel, mqtt, nil)
+
+	mqtt.Push("dc2/connector/1/pe/measured_voltage", "400")
+	mqtt.Push("dc2/connector/1/pe/measured_current", "-12.5")
+	mqtt.Push("dc2/connector/1/ev/soc", "64")
+	mqtt.Push("dc2/connector/1/ev/id_state", "mated")
+	mqtt.Push("dc2/connector/1/ev/limits/max_power", "20000")
+	mqtt.Push("dc2/connector/1/ev/limits/max_discharge_power", "15000")
+	mqtt.Push("dc2/connector/1/em/transferred_energy", "1.25")
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	r := tel.Get("dc2", telemetry.DerV2X)
+	if r == nil {
+		t.Fatal("expected v2x telemetry")
+	}
+	if r.RawW != -5000 {
+		t.Fatalf("v2x w = %v, want -5000", r.RawW)
+	}
+	if r.SoC == nil || *r.SoC != 0.64 {
+		t.Fatalf("vehicle soc = %v, want 0.64", r.SoC)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"v2x_set_power","power_w":-5000}`)); err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	pubs := mqtt.Published()
+	if len(pubs) == 0 || pubs[len(pubs)-1].Topic != "dc2/ui/control" || pubs[len(pubs)-1].Payload != "-5.00" {
+		t.Fatalf("unexpected publish: %+v", pubs)
+	}
+}
+
+func TestAmbiboxV2XDriverTelemetryAndCommand(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ambibox_v2x.lua", "ambibox", tel, mqtt, nil)
+
+	mqtt.Push("device/evCharger/0/powerAc", "-3200")
+	mqtt.Push("device/evCharger/0/powerDc", "-3300")
+	mqtt.Push("device/evCharger/0/soc", "58")
+	mqtt.Push("device/evCharger/0/evConnected", "true")
+	mqtt.Push("device/evCharger/0/dischargePowerMax", "11000")
+
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	r := tel.Get("ambibox", telemetry.DerV2X)
+	if r == nil {
+		t.Fatal("expected v2x telemetry")
+	}
+	if r.RawW != -3200 {
+		t.Fatalf("v2x w = %v, want -3200", r.RawW)
+	}
+	if r.SoC == nil || *r.SoC != 0.58 {
+		t.Fatalf("vehicle soc = %v, want 0.58", r.SoC)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"v2x_set_power","power_w":-2500}`)); err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	pubs := mqtt.Published()
+	if len(pubs) == 0 || pubs[len(pubs)-1].Topic != "device/ess/0/targetPower" || pubs[len(pubs)-1].Payload != "-2500" {
+		t.Fatalf("unexpected publish: %+v", pubs)
+	}
+}
+
+func TestAmbiboxV2XDriverSoCOnlyUpdateKeepsPowerSnapshot(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ambibox_v2x.lua", "ambibox", tel, mqtt, nil)
+
+	mqtt.Push("device/evCharger/0/soc", "58")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll soc-only before power: %v", err)
+	}
+	if r := tel.Get("ambibox", telemetry.DerV2X); r != nil {
+		t.Fatalf("expected no v2x telemetry before powerAc exists, got %+v", r)
+	}
+
+	mqtt.Push("device/evCharger/0/powerAc", "3200")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll power: %v", err)
+	}
+	r := tel.Get("ambibox", telemetry.DerV2X)
+	if r == nil || r.RawW != 3200 || r.SoC == nil || *r.SoC != 0.58 {
+		t.Fatalf("initial v2x telemetry = %+v, want w=3200 soc=0.58", r)
+	}
+
+	mqtt.Push("device/evCharger/0/soc", "59")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll soc-only after power: %v", err)
+	}
+	r = tel.Get("ambibox", telemetry.DerV2X)
+	if r == nil || r.RawW != 3200 || r.SoC == nil || *r.SoC != 0.59 {
+		t.Fatalf("soc-only v2x telemetry = %+v, want cached w=3200 soc=0.59", r)
+	}
+}
+
+func TestAmbiboxV2XDriverDoesNotRefreshStalePowerSnapshot(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ambibox_v2x.lua", "ambibox", tel, mqtt, map[string]any{
+		"telemetry_max_age_ms": 1,
+	})
+
+	mqtt.Push("device/evCharger/0/powerAc", "3200")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll power: %v", err)
+	}
+	first := tel.Get("ambibox", telemetry.DerV2X)
+	if first == nil || first.RawW != 3200 {
+		t.Fatalf("initial v2x telemetry = %+v, want w=3200", first)
+	}
+	firstUpdatedAt := first.UpdatedAt
+
+	time.Sleep(3 * time.Millisecond)
+	mqtt.Push("device/evCharger/0/soc", "60")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll stale soc-only: %v", err)
+	}
+	after := tel.Get("ambibox", telemetry.DerV2X)
+	if after == nil || !after.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("stale power should not be refreshed by soc-only update: before=%v after=%+v", firstUpdatedAt, after)
+	}
+
+	mqtt.Push("device/evCharger/0/powerAc", "")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll retained delete: %v", err)
+	}
+	afterDelete := tel.Get("ambibox", telemetry.DerV2X)
+	if afterDelete == nil || !afterDelete.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("retained delete should not emit 0W telemetry: before=%v after=%+v", firstUpdatedAt, afterDelete)
+	}
+}
+
+func TestAmbiboxV2XDriverClampsSetpointToLimits(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ambibox_v2x.lua", "ambibox", tel, mqtt, nil)
+
+	mqtt.Push("device/evCharger/0/powerAc", "0")
+	mqtt.Push("device/evCharger/0/chargePowerMax", "3200")
+	mqtt.Push("device/evCharger/0/dischargePowerMax", "2500")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll limits: %v", err)
+	}
+
+	if err := d.Command(context.Background(), []byte(`{"action":"v2x_set_power","power_w":5000}`)); err != nil {
+		t.Fatalf("charge command: %v", err)
+	}
+	if err := d.Command(context.Background(), []byte(`{"action":"v2x_set_power","power_w":-5000}`)); err != nil {
+		t.Fatalf("discharge command: %v", err)
+	}
+	pubs := mqtt.Published()
+	if len(pubs) < 2 {
+		t.Fatalf("expected two publishes, got %+v", pubs)
+	}
+	if pubs[len(pubs)-2].Payload != "3200" || pubs[len(pubs)-1].Payload != "-2500" {
+		t.Fatalf("unexpected clamped publishes: %+v", pubs)
+	}
+}
+
+func TestFerroampDC2V2XRequiresFreshPowerPairAndIgnoresControlEcho(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d := newBundledMQTTDriver(t, "ferroamp_dc2_v2x.lua", "dc2", tel, mqtt, map[string]any{
+		"telemetry_max_age_ms": 1,
+	})
+
+	mqtt.Push("dc2/connector/1/pe/measured_voltage", "400")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll voltage-only: %v", err)
+	}
+	if r := tel.Get("dc2", telemetry.DerV2X); r != nil {
+		t.Fatalf("expected no v2x telemetry from partial power pair, got %+v", r)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	mqtt.Push("dc2/connector/1/pe/measured_current", "-10")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll current with stale voltage: %v", err)
+	}
+	if r := tel.Get("dc2", telemetry.DerV2X); r != nil {
+		t.Fatalf("expected no v2x telemetry from stale voltage/current pair, got %+v", r)
+	}
+
+	mqtt.Push("dc2/connector/1/pe/measured_voltage", "400")
+	mqtt.Push("dc2/connector/1/pe/measured_current", "-10")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll full pair: %v", err)
+	}
+	first := tel.Get("dc2", telemetry.DerV2X)
+	if first == nil || first.RawW != -4000 {
+		t.Fatalf("full pair v2x telemetry = %+v, want -4000W", first)
+	}
+	firstUpdatedAt := first.UpdatedAt
+
+	mqtt.Push("dc2/ui/control", "-4.00")
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll control echo: %v", err)
+	}
+	after := tel.Get("dc2", telemetry.DerV2X)
+	if after == nil || !after.UpdatedAt.Equal(firstUpdatedAt) {
+		t.Fatalf("control echo should not refresh cached power: before=%v after=%+v", firstUpdatedAt, after)
+	}
+}
+
 // Regression: ferroamp.lua used to cache the last MQTT payload per
 // topic and emit from cache on every poll, regardless of how long
 // ago the last message arrived. When the EnergyHub lost power on a

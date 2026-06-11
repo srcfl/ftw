@@ -130,6 +130,66 @@ const MaxCommandW = 5000
 // elsewhere in this package for sign decisions.
 const evActiveThresholdW = 100.0
 
+type vehiclePowerFlow struct {
+	Live          bool
+	EVChargeW     float64
+	V2XSignedW    float64
+	V2XChargeW    float64
+	V2XDischargeW float64
+}
+
+func onlineVehiclePowerFlow(store *telemetry.Store) vehiclePowerFlow {
+	var out vehiclePowerFlow
+	for _, r := range store.ReadingsByType(telemetry.DerEV) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		out.Live = true
+		if r.SmoothedW > 0 {
+			out.EVChargeW += r.SmoothedW
+		}
+	}
+	for _, r := range store.ReadingsByType(telemetry.DerV2X) {
+		h := store.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		out.Live = true
+		out.V2XSignedW += r.SmoothedW
+		if r.SmoothedW > 0 {
+			out.V2XChargeW += r.SmoothedW
+		} else if r.SmoothedW < 0 {
+			out.V2XDischargeW += r.SmoothedW
+		}
+	}
+	if math.Abs(out.EVChargeW) < 1 {
+		out.EVChargeW = 0
+	}
+	if math.Abs(out.V2XSignedW) < 1 {
+		out.V2XSignedW = 0
+	}
+	if math.Abs(out.V2XChargeW) < 1 {
+		out.V2XChargeW = 0
+	}
+	if math.Abs(out.V2XDischargeW) < 1 {
+		out.V2XDischargeW = 0
+	}
+	return out
+}
+
+func (s *State) SetManualEVCharging(w float64, active bool) {
+	if s == nil {
+		return
+	}
+	if active && w > 0 {
+		s.ManualEVChargingW = w
+	} else {
+		s.ManualEVChargingW = 0
+	}
+	s.EVChargingW = s.ManualEVChargingW + s.liveEVChargingW
+}
+
 // PowerLimits holds the per-driver charge/discharge ceiling. Zero on
 // either field means "use the global MaxCommandW default" — the value
 // an unset config key carries through the YAML → Driver struct →
@@ -224,8 +284,13 @@ type State struct {
 	// an aggregate import-only concept (tariff). Persisted in state.db
 	// under "peak_import_ceiling_w".
 	PeakImportCeilingW float64
-	// EV charging signal — batteries won't try to cover this much of import
-	EVChargingW float64
+	// EVChargingW is the effective aggregate vehicle charging load the
+	// control loop excludes when BatteryCoversEV=false. It is recomputed
+	// from ManualEVChargingW plus live EV/V2X charger telemetry each dispatch
+	// tick, so manual uninstrumented EV load can coexist with live V2X.
+	EVChargingW       float64
+	ManualEVChargingW float64
+	liveEVChargingW   float64
 
 	// EVSurplusOnlyReserveW is the aggregate PV headroom that must be
 	// kept available for EVs under surplus_only loadpoints. When > 0:
@@ -348,10 +413,10 @@ type State struct {
 	// resulting counters surface on /api/status so operators can spot
 	// systemic forecast vs reality drift. Site-signed: negative = the
 	// fleet discharged Wh during the slot.
-	slotActualWh         float64
-	slotActualLastTs     time.Time
-	slotActualSlotStart  time.Time
-	slotActualPlannedWh  float64 // planned BatteryEnergyWh cached for the slot in flight
+	slotActualWh        float64
+	slotActualLastTs    time.Time
+	slotActualSlotStart time.Time
+	slotActualPlannedWh float64 // planned BatteryEnergyWh cached for the slot in flight
 
 	// SlotDeliveryStats counts how many slots ended with the actual
 	// fleet delivery falling outside ±50 % of the planned magnitude.
@@ -1222,27 +1287,35 @@ func ComputeDispatch(
 	if r := store.Get(state.SiteMeterDriver, telemetry.DerMeter); r != nil {
 		rawGridW = r.SmoothedW
 	}
-	// Live EV charger readings override the manual slider on each tick —
-	// hardware truth beats guesses. Only override when something >0 is
-	// actually being reported, so an offline / stale EV driver doesn't
-	// silently zero out a user-set manual value.
-	evSum := store.SumOnlineEVW()
-	if evSum > 0 {
-		state.EVChargingW = evSum
+	// Live EV/V2X charger readings override the manual slider on each tick —
+	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
+	// negative V2X is kept separate so the default controller does not
+	// opportunistically fill the house battery from the car.
+	vehicleFlow := onlineVehiclePowerFlow(store)
+	if state.ManualEVChargingW == 0 && state.liveEVChargingW == 0 && state.EVChargingW > 0 {
+		state.ManualEVChargingW = state.EVChargingW
 	}
-	// EV signal: subtract EV load from grid so batteries don't try to cover
-	// it. EV is always a positive import at the meter; subtracting it makes
-	// the "effective grid" the controller works on the house-side portion
-	// only — a sensible default that avoids shuffling energy through the
-	// inverter twice on a normal day.
+	if vehicleFlow.Live {
+		state.liveEVChargingW = vehicleFlow.EVChargeW + vehicleFlow.V2XChargeW
+	} else {
+		state.liveEVChargingW = 0
+	}
+	state.EVChargingW = state.ManualEVChargingW + state.liveEVChargingW
+	// Vehicle signal: subtract vehicle power from grid so batteries don't
+	// try to cover EV/V2X charging or absorb V2X discharge by default.
+	// This makes the effective grid the controller works on the house-side
+	// portion only — a sensible default that avoids shuffling energy through
+	// stationary storage and vehicles twice on a normal day.
 	//
 	// BatteryCoversEV (default false) flips this in modes where the
-	// operator wants batteries to cover EV draw. In normal self-consumption
-	// the EV import is left to the grid unless BatteryCoversEV is enabled.
+	// operator wants batteries to cover vehicle draw/interactions. In normal
+	// self-consumption the EV/V2X import/export is left outside stationary
+	// battery dispatch unless BatteryCoversEV is enabled.
 	gridW := rawGridW
 	coverEV := state.BatteryCoversEV
 	if !coverEV {
 		gridW -= state.EVChargingW
+		gridW -= vehicleFlow.V2XDischargeW
 	}
 
 	// ---- Gather online batteries ----
@@ -1456,8 +1529,7 @@ func ComputeDispatch(
 		// and the DP rule, so a future change to the accounting can't
 		// drift between plan and runtime.
 		if !state.BatteryCoversEV && evActive && targetTotalW < 0 {
-			houseGridW := rawGridW - state.EVChargingW
-			reactiveTotal := currentTotal - houseGridW
+			reactiveTotal := currentTotal - gridW
 			if targetTotalW < reactiveTotal {
 				targetTotalW = reactiveTotal
 			}
@@ -1493,7 +1565,7 @@ func ComputeDispatch(
 			}
 			if avgSoCPct < state.PVSurplusAbsorbSoCCapPct {
 				// Grid level if dispatch ran the plan as-is.
-				projectedGridW := rawGridW + (targetTotalW - currentTotal)
+				projectedGridW := gridW + (targetTotalW - currentTotal)
 				extraExportW := -projectedGridW
 				if extraExportW > threshold {
 					// Remaining headroom in Wh, converted to a power
@@ -1576,7 +1648,7 @@ func ComputeDispatch(
 		// path keeps following plan.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
-			projectedGridW := rawGridW + (targetTotalW - currentTotal)
+			projectedGridW := gridW + (targetTotalW - currentTotal)
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
@@ -2217,7 +2289,7 @@ func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, boo
 
 // siteLoadW reads the household load (W) from the site meter when
 // available. Mirrors the formula main.go uses for status: load =
-// gridW − battery − PV (site convention). Falls back to 0 on
+// gridW - battery - PV - EV - V2X (site convention). Falls back to 0 on
 // missing telemetry, which makes protectiveCurtailLimitW degrade
 // safely to "don't engage" rather than to a bogus tiny limit.
 func siteLoadW(state *State, store *telemetry.Store) float64 {
@@ -2236,7 +2308,7 @@ func siteLoadW(state *State, store *telemetry.Store) float64 {
 	for _, r := range store.ReadingsByType(telemetry.DerPV) {
 		pvW += r.SmoothedW
 	}
-	load := gridW - batW - pvW
+	load := gridW - batW - pvW - store.SumOnlineEVW() - store.SumOnlineV2XW()
 	if load < 0 {
 		return 0
 	}

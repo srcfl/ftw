@@ -12,7 +12,7 @@
 // the Lua VM:
 //
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
-//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
+//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"|"v2x_charger"
 //	host.millis()                   -- ms since driver start
 //	host.sleep(ms)                  -- block driver goroutine for ms (inter-write pacing)
 //	host.set_poll_interval(ms)
@@ -217,7 +217,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery"|"ev"|"vehicle", { w=…, soc=…, … })
+	// host.emit("meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", { w=…, soc=…, … })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
@@ -230,6 +230,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              session_wh (optional, kWh for current session * 1000),
 	//              max_a (optional, charger current limit),
 	//              phases (optional, 1 or 3)
+	//   v2x_charger -> w (positive = vehicle charging, negative = V2X discharge),
+	//              vehicle_soc (0..1 fraction), connected,
+	//              dc_w, dc_v, dc_a, session_charge_wh, session_discharge_wh,
+	//              rated_power_w, status, control_mode
 	//   vehicle -> soc (required, vehicle battery level % 0-100),
 	//              charge_limit_pct (optional, vehicle-configured limit),
 	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),

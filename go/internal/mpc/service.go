@@ -68,12 +68,12 @@ type BatteryFleetMember struct {
 // forecast from the SQLite store, reads current SoC from the telemetry
 // store, and re-plans on a ticker. The latest plan is cached.
 type Service struct {
-	Store     *state.Store
-	Tele      *telemetry.Store
-	Zone      string
-	BaseLoad  float64 // baseline household load (W). 0 disables load assumption.
-	Horizon   time.Duration
-	Interval  time.Duration
+	Store             *state.Store
+	Tele              *telemetry.Store
+	Zone              string
+	BaseLoad          float64 // baseline household load (W). 0 disables load assumption.
+	Horizon           time.Duration
+	Interval          time.Duration
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
 	Load              LoadPredictor       // optional — overrides flat BaseLoad
@@ -544,7 +544,8 @@ func (s *Service) checkDivergence(ctx context.Context) {
 		pvW += r.SmoothedW
 	}
 
-	// Live load = grid − pv − bat when we have a site meter wired.
+	// Live load = grid - pv - bat - vehicle charging/storage when we
+	// have a site meter wired.
 	var loadW float64
 	haveLoad := false
 	if s.SiteMeter != "" && s.driverOnline(s.SiteMeter) {
@@ -557,10 +558,11 @@ func (s *Service) checkDivergence(ctx context.Context) {
 				batW += r.SmoothedW
 			}
 			evW := s.Tele.SumOnlineEVW()
+			v2xW := s.Tele.SumOnlineV2XW()
 			// House-only load: subtract EV so the divergence detector
 			// compares actual house consumption against the plan's
-			// house-load forecast, not a moving "house + EV" target.
-			loadW = m.SmoothedW - pvW - batW - evW
+			// house-load forecast, not a moving "house + vehicle" target.
+			loadW = m.SmoothedW - pvW - batW - evW - v2xW
 			if loadW < 0 {
 				loadW = 0
 			}

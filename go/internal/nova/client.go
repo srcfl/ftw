@@ -63,7 +63,7 @@ func (c *Client) Claim(ctx context.Context, req ClaimRequest) error {
 // DERDefinition mirrors Nova's body schema for DERs inside /devices/provision.
 // The Type field uses NOVA's vocabulary (solar, battery, meter, ev_port)
 // — the caller is responsible for translating from forty-two-watts'
-// native DER type (pv, battery, meter, ev) via TranslateDerTypeToLegacy.
+// native DER type (pv, battery, meter, ev, v2x_charger) via TranslateDerTypeToLegacy.
 type DERDefinition struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
@@ -115,8 +115,8 @@ func (c *Client) Provision(ctx context.Context, req ProvisionRequest) (*Provisio
 }
 
 // TranslateDerTypeToLegacy maps forty-two-watts' native clean DER type
-// (pv/ev) to Nova's current vocabulary (solar/ev_port). Meter and
-// battery are identical in both. This is the same translation the
+// (pv/ev/v2x_charger) to Nova's current vocabulary (solar/ev_port/v2x_charger).
+// Meter and battery are identical in both. This is the same translation the
 // wire adapter does — centralised here so the provisioning payload
 // stays consistent with what the telemetry adapter produces on the
 // wire. Flip to identity when Nova's unified schema lands.
@@ -126,6 +126,8 @@ func TranslateDerTypeToLegacy(t string) string {
 		return "solar"
 	case KindEV:
 		return "ev_port"
+	case KindV2X:
+		return "v2x_charger"
 	default:
 		return t
 	}

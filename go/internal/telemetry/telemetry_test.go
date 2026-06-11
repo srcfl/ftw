@@ -201,7 +201,7 @@ func TestEmitMetricRejectsNonFinite(t *testing.T) {
 // ---- DerType ----
 
 func TestDerTypeRoundtrip(t *testing.T) {
-	for _, name := range []string{"meter", "pv", "battery", "ev"} {
+	for _, name := range []string{"meter", "pv", "battery", "ev", "v2x_charger", "vehicle"} {
 		d, err := ParseDerType(name)
 		if err != nil {
 			t.Fatal(err)
@@ -364,6 +364,34 @@ func TestSumOnlineEVWFloorsSubWattReadings(t *testing.T) {
 	s2.DriverHealthMut("easee").RecordSuccess()
 	if got := s2.SumOnlineEVW(); got != 3600 {
 		t.Errorf("real EV reading must pass through, got %g", got)
+	}
+}
+
+func TestV2XAcceptsSignedPowerAndVehicleSoC(t *testing.T) {
+	s := NewStore()
+	soc := 0.58
+	s.Update("dc2", DerV2X, -4200, &soc, nil)
+	r := s.Get("dc2", DerV2X)
+	if r == nil || r.RawW != -4200 || r.SoC == nil || *r.SoC != 0.58 {
+		t.Fatalf("v2x signed reading not stored as expected: %+v", r)
+	}
+	badSoC := 58.0
+	s.Update("bad-dc2", DerV2X, 1000, &badSoC, nil)
+	if r := s.Get("bad-dc2", DerV2X); r != nil {
+		t.Fatalf("v2x percent SoC should be rejected, got %+v", r)
+	}
+}
+
+func TestSumOnlineV2XWIsSignedAndSkipsOffline(t *testing.T) {
+	s := NewStore()
+	s.Update("charging", DerV2X, 3000, nil, nil)
+	s.Update("discharging", DerV2X, -1200, nil, nil)
+	s.Update("offline", DerV2X, 9000, nil, nil)
+	s.DriverHealthMut("charging").RecordSuccess()
+	s.DriverHealthMut("discharging").RecordSuccess()
+	s.DriverHealthMut("offline").SetOffline()
+	if got := s.SumOnlineV2XW(); got != 1800 {
+		t.Fatalf("signed online V2X sum: got %f, want 1800", got)
 	}
 }
 

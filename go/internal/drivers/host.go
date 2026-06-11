@@ -205,15 +205,17 @@ func (h *HostEnv) setPollInterval(ms int32) {
 // emitTelemetry accepts a JSON telemetry blob from the driver and routes it
 // into the telemetry store. Expected shape:
 //
-//	{"type": "meter"|"pv"|"battery", "w": 123.4, "soc": 0.5 (optional), ...}
+//	{"type": "meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", "w": 123.4, "soc": 0.5 (optional), ...}
 //
 // Extra fields are preserved in the reading's Data payload so the UI/API can
 // surface them verbatim.
 func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	var env struct {
-		Type string   `json:"type"`
-		W    *float64 `json:"w"`
-		SoC  *float64 `json:"soc,omitempty"`
+		Type            string   `json:"type"`
+		W               *float64 `json:"w"`
+		SoC             *float64 `json:"soc,omitempty"`
+		VehicleSoC      *float64 `json:"vehicle_soc,omitempty"`
+		VehicleSoCFract *float64 `json:"vehicle_soc_fract,omitempty"`
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
@@ -227,6 +229,15 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		rawW = *env.W
 	} else if t != telemetry.DerVehicle {
 		return fmt.Errorf("emit_telemetry: %s missing required w", t)
+	}
+	soc := env.SoC
+	if t == telemetry.DerV2X && soc == nil {
+		switch {
+		case env.VehicleSoC != nil:
+			soc = env.VehicleSoC
+		case env.VehicleSoCFract != nil:
+			soc = env.VehicleSoCFract
+		}
 	}
 	// Drop battery emits from drivers the operator declared as no-battery
 	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
@@ -242,11 +253,11 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		}
 		return nil
 	}
-	if err := telemetry.ValidateReading(t, rawW, env.SoC); err != nil {
+	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
 		return fmt.Errorf("emit_telemetry: %w", err)
 	}
 	if h.Telemetry != nil {
-		h.Telemetry.Update(h.DriverName, t, rawW, env.SoC, rawJSON)
+		h.Telemetry.Update(h.DriverName, t, rawW, soc, rawJSON)
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {

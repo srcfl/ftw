@@ -77,6 +77,26 @@ func TestAssemble_BatterySoCFromDerReading(t *testing.T) {
 	}
 }
 
+func TestAssemble_V2XVehicleSoCFromDerReading(t *testing.T) {
+	soc := 0.58
+	r := &telemetry.DerReading{
+		Driver:    "ambibox",
+		DerType:   telemetry.DerV2X,
+		RawW:      3200,
+		SoC:       &soc,
+		Data:      json.RawMessage(`{"w": 3200}`),
+		UpdatedAt: time.UnixMilli(1713610245123),
+	}
+	dev := state.Device{DeviceID: "ambibox:V2X", Make: "Ambibox", Serial: "V2X"}
+	got := assemble(r, dev, 1713610245123)
+	if got.VehicleSoC == nil || *got.VehicleSoC != 0.58 {
+		t.Fatalf("vehicle_soc not picked up for V2X: %+v", got.VehicleSoC)
+	}
+	if got.SoC != nil {
+		t.Fatalf("V2X vehicle SoC should not be encoded as battery soc: %+v", got.SoC)
+	}
+}
+
 func TestAssemble_EmptyDataDoesNotPanic(t *testing.T) {
 	r := &telemetry.DerReading{
 		Driver: "x", DerType: telemetry.DerPV, RawW: -2500,

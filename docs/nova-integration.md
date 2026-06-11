@@ -69,9 +69,12 @@ forty-two-watts compatible with every deployed ZAP gateway.
 | SoC (0..1)      | `soc`                   | `SoC_nom_fract`        |
 | PV vocabulary   | `pv`                    | `solar`                |
 | EV vocabulary   | `ev`                    | `ev_port`              |
+| V2X vocabulary  | `v2x_charger`           | `v2x_charger`          |
 | DC bus          | `dc_v` `dc_a`           | `V` `A` (battery)      |
 | EV plug         | `connected`             | `plug_connected`       |
 | EV vehicle SoC  | `vehicle_soc`           | `vehicle_soc_fract`    |
+| V2X limits      | `charge_power_{min,max}_w`, `discharge_power_{min,max}_w` | `upper_limit_W`, `lower_limit_W` |
+| V2X energy reqs | `ev_{min,max}_energy_req_wh` | `ev_{min,max}_energy_req_Wh` |
 | Lifetime energy | `total_{import,export,charge,discharge,generation}_wh` | `total_..._Wh` (same, different case) |
 
 To switch to the unified schema once it ships on Nova:

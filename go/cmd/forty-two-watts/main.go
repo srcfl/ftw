@@ -2515,7 +2515,8 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		avgSoC = sumSoC / float64(socCount)
 	}
 	evW := tel.SumOnlineEVW()
-	loadW := gridW - batW - pvW - evW
+	v2xW := tel.SumOnlineV2XW()
+	loadW := gridW - batW - pvW - evW - v2xW
 	if loadW < 0 {
 		loadW = 0
 	}
@@ -2546,6 +2547,12 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		if r := tel.Get(name, telemetry.DerEV); r != nil {
 			row["ev_w"] = r.SmoothedW
 		}
+		if r := tel.Get(name, telemetry.DerV2X); r != nil {
+			row["v2x_w"] = r.SmoothedW
+			if r.SoC != nil {
+				row["v2x_vehicle_soc"] = *r.SoC
+			}
+		}
 		_ = h
 		perDriver[name] = row
 	}
@@ -2557,6 +2564,7 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		"drivers":      perDriver,
 		"targets":      targets,
 		"ev_w":         evW,
+		"v2x_w":        v2xW,
 		"load_house_w": loadW,
 	})
 	if err := st.RecordHistory(state.HistoryPoint{
@@ -2630,11 +2638,7 @@ func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store) ha.Co
 		SetEVCharging: func(w float64, active bool) error {
 			ctrlMu.Lock()
 			defer ctrlMu.Unlock()
-			if active {
-				ctrl.EVChargingW = w
-			} else {
-				ctrl.EVChargingW = 0
-			}
+			ctrl.SetManualEVCharging(w, active)
 			return nil
 		},
 		SetBatteryCoversEV: func(enabled bool) error {

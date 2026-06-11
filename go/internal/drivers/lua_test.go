@@ -262,12 +262,13 @@ function driver_poll()
     assert(bat_err ~= nil, "battery soc percent should be rejected")
     local missing_w_err = host.emit("meter", { l1_w = 10 })
     assert(missing_w_err ~= nil, "meter without w should be rejected")
-    local metric_err = host.emit_metric("bad_metric", 0/0)
-    assert(metric_err ~= nil, "non-finite metric should be rejected")
-    host.emit("vehicle", { soc = 55 })
-    host.emit("pv", { w = -500 })
-    return 1000
-end
+	    local metric_err = host.emit_metric("bad_metric", 0/0)
+	    assert(metric_err ~= nil, "non-finite metric should be rejected")
+	    host.emit("vehicle", { soc = 55 })
+	    host.emit("v2x_charger", { w = -2500, vehicle_soc = 0.44, connected = true, dc_w = -2600 })
+	    host.emit("pv", { w = -500 })
+	    return 1000
+	end
 `
 	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
 		t.Fatal(err)
@@ -300,6 +301,9 @@ end
 	}
 	if got := tel.Get("boundary", telemetry.DerVehicle); got == nil || got.SoC == nil || *got.SoC != 55 {
 		t.Fatalf("vehicle percent soc should pass, got %+v", got)
+	}
+	if got := tel.Get("boundary", telemetry.DerV2X); got == nil || got.RawW != -2500 || got.SoC == nil || *got.SoC != 0.44 {
+		t.Fatalf("v2x signed reading should pass and expose vehicle_soc, got %+v", got)
 	}
 	for _, sample := range tel.FlushSamples() {
 		if sample.Metric == "bad_metric" {

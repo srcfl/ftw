@@ -64,10 +64,10 @@ func sanitizeTopicSegment(s string) string {
 //     battery + pv + meter cases we see in the field)
 //   - emits only pv                        → "inverter"
 //   - emits only meter                     → "meter"
-//   - emits only ev                        → "charger"
+//   - emits only ev/v2x                    → "charger"
 //
 // derKinds is the set of forty-two-watts clean DER kinds (pv, battery,
-// meter, ev) observed for this device.
+// meter, ev, v2x_charger) observed for this device.
 func DeviceTypeFor(derKinds []string) string {
 	has := map[string]bool{}
 	for _, k := range derKinds {
@@ -76,7 +76,7 @@ func DeviceTypeFor(derKinds []string) string {
 	switch {
 	case has[KindBattery], has[KindPV]:
 		return "inverter"
-	case has[KindEV]:
+	case has[KindEV], has[KindV2X]:
 		return "charger"
 	case has[KindMeter]:
 		return "meter"
