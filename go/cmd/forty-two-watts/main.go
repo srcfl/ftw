@@ -1977,7 +1977,17 @@ func main() {
 			var wakeKickActiveIDs map[string]bool
 			if lpController != nil {
 				now := time.Now()
-				for _, st := range lpStatesSnapshot {
+				for i := range lpStatesSnapshot {
+					st := &lpStatesSnapshot[i]
+					// Populate ManualActive on the dispatch-path snapshot
+					// (lpMgr.States() doesn't set it — only the API does) so
+					// SurplusReserveW can drop the reserve for a force-charging
+					// LP. Without this the manual/schedule override in
+					// SurplusReserveW never sees a manual hold and the
+					// no-discharge floor flaps the battery support.
+					if _, ok := lpController.GetManualHold(st.ID, now); ok {
+						st.ManualActive = true
+					}
 					if !st.PluggedIn || !st.SurplusOnly {
 						continue
 					}
