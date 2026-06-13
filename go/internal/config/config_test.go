@@ -123,6 +123,17 @@ func TestLoadMinimalYAML(t *testing.T) {
 // opt-in / default-off. A config with no remote_access block must NOT dial out
 // (a Pi that merely inherits FTW_RELAY_URL stays local); only an explicit
 // enabled:true opts in. The blind TURN knob must parse while staying off.
+func TestSiteTroubleshootingModeParses(t *testing.T) {
+	raw := strings.Replace(minimalYAML, "name: Test", "name: Test\n  troubleshooting_mode: true", 1)
+	c, err := Parse([]byte(raw), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Site.TroubleshootingMode {
+		t.Fatal("expected troubleshooting_mode=true")
+	}
+}
+
 func TestRemoteAccessOptInDefaultsOff(t *testing.T) {
 	off, err := Parse([]byte(minimalYAML), "/tmp")
 	if err != nil {

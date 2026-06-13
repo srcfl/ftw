@@ -96,9 +96,9 @@ type NtfyConfig struct {
 
 // NotificationRule is one event type the operator can toggle.
 type NotificationRule struct {
-	Type          string `yaml:"type" json:"type"`
-	Enabled       bool   `yaml:"enabled" json:"enabled"`
-	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	Type       string `yaml:"type" json:"type"`
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	ThresholdS int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
 	// ThresholdN is a count-based threshold used by event types that
 	// aggregate across drivers (concurrent_drivers_offline). Ignored
 	// by per-driver events. Default behaviour per event documented
@@ -122,12 +122,12 @@ type NotificationRule struct {
 //
 // SchemaMode controls the wire format sent to Nova:
 //   - "legacy"  (default): translate forty-two-watts' native clean payload
-//                to the current Nova wire shape (battery sign flip,
-//                PascalCase fields, pv→solar, ev→ev_port). The translation
-//                layer is in internal/nova and is designed to be deleted
-//                once Nova adopts the unified schema.
+//     to the current Nova wire shape (battery sign flip,
+//     PascalCase fields, pv→solar, ev→ev_port). The translation
+//     layer is in internal/nova and is designed to be deleted
+//     once Nova adopts the unified schema.
 //   - "unified": publish forty-two-watts' clean payload directly. Enable
-//                once the Nova schema-alignment PR lands.
+//     once the Nova schema-alignment PR lands.
 type Nova struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	URL                string `yaml:"url" json:"url"`
@@ -282,13 +282,13 @@ func (e *EVCharger) Validate() error {
 // Planner configures the MPC scheduler (optional — disabled if omitted).
 // Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
 type Planner struct {
-	Enabled             bool    `yaml:"enabled" json:"enabled"`
-	Mode                string  `yaml:"mode,omitempty" json:"mode,omitempty"`
-	BaseLoadW           float64 `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
-	HorizonHours        int     `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
-	IntervalMin         int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
-	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
-	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+	Enabled      bool    `yaml:"enabled" json:"enabled"`
+	Mode         string  `yaml:"mode,omitempty" json:"mode,omitempty"`
+	BaseLoadW    float64 `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
+	HorizonHours int     `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
+	IntervalMin  int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMinPct    float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
+	SoCMaxPct    float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
 	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
 	// SoC-percentage safety floor was replaced by downside-PV planning
@@ -363,6 +363,7 @@ func (p *Planner) PVSafetyK() float64 {
 
 // Site is the top-level control loop config.
 type Site struct {
+	TroubleshootingMode  bool    `yaml:"troubleshooting_mode,omitempty" json:"troubleshooting_mode,omitempty"`
 	Name                 string  `yaml:"name" json:"name"`
 	ControlIntervalS     int     `yaml:"control_interval_s" json:"control_interval_s"`
 	GridTargetW          float64 `yaml:"grid_target_w" json:"grid_target_w"`
@@ -481,10 +482,10 @@ func (f Fuse) EffectiveSafetyMarginA() float64 {
 // Driver is one driver entry. Each driver is a Lua script loaded by
 // the driver host at startup (or on hot-reload via the file watcher).
 type Driver struct {
-	Name               string  `yaml:"name" json:"name"`
-	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
-	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
-	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	Name              string  `yaml:"name" json:"name"`
+	Lua               string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
+	IsSiteMeter       bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
+	BatteryCapacityWh float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
 	// MaxChargeW + MaxDischargeW set this driver's per-command power
 	// ceiling (site-signed +/-). Both optional; zero = fall through to
 	// the global MaxCommandW = 5 kW default the dispatcher has shipped
@@ -539,11 +540,11 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT      *MQTTConfig      `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus    *ModbusConfig    `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP      *HTTPCapability  `yaml:"http,omitempty" json:"http,omitempty"`
-	WebSocket *WSCapability    `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	TCP       *TCPCapability   `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	MQTT      *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus    *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	HTTP      *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP       *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -557,7 +558,7 @@ type MQTTConfig struct {
 // ModbusConfig grants access to one Modbus TCP endpoint.
 type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
-	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`   // default 502
+	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
 }
 
@@ -1030,15 +1031,23 @@ func applyDefaults(c *Config) {
 			cap.Port = 1883
 		}
 		if cap := d.Capabilities.Modbus; cap != nil {
-			if cap.Port == 0 { cap.Port = 502 }
-			if cap.UnitID == 0 { cap.UnitID = 1 }
+			if cap.Port == 0 {
+				cap.Port = 502
+			}
+			if cap.UnitID == 0 {
+				cap.UnitID = 1
+			}
 		}
 		if cap := d.MQTT; cap != nil && cap.Port == 0 {
 			cap.Port = 1883
 		}
 		if cap := d.Modbus; cap != nil {
-			if cap.Port == 0 { cap.Port = 502 }
-			if cap.UnitID == 0 { cap.UnitID = 1 }
+			if cap.Port == 0 {
+				cap.Port = 502
+			}
+			if cap.UnitID == 0 {
+				cap.UnitID = 1
+			}
 		}
 	}
 	if c.HomeAssistant != nil {

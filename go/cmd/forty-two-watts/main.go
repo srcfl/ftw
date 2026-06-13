@@ -262,6 +262,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reg := drivers.NewRegistry(tel)
+	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
 	}
@@ -434,7 +435,7 @@ func main() {
 			}
 			// Driver paths are already resolved by config.Load; no extra
 			// work needed here.
-			reg.Reload(ctx, newCfg.Drivers)
+			reg.Reload(ctx, newCfg.Drivers, newCfg.Site.TroubleshootingMode)
 			// Refresh capacities — mutate the existing map in place so
 			// Deps.Capacities (a map header captured at init) sees the
 			// update. Rebinding the local variable would orphan the
@@ -1892,6 +1893,9 @@ func main() {
 			if watchdogTimeout <= 0 {
 				watchdogTimeout = 60 * time.Second
 			}
+			cfgMu.RLock()
+			troubleshootingMode := cfg.Site.TroubleshootingMode
+			cfgMu.RUnlock()
 			for _, tr := range tel.WatchdogScan(watchdogTimeout) {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
@@ -1940,6 +1944,10 @@ func main() {
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
 					"driver", ctrl.SiteMeterDriver)
+				if troubleshootingMode {
+					slog.Info("troubleshooting: site meter stale, dispatch skipped",
+						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
+				}
 				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
 					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
@@ -2006,15 +2014,41 @@ func main() {
 
 			// ---- Self-tune override: force commanded battery, hold others at 0 ----
 			finalTargets := targets
-			if name, cmd, active := selfTune.CurrentCommand(); active {
+			selfTuneName, selfTuneCmd, selfTuneActive := selfTune.CurrentCommand()
+			if selfTuneActive {
 				finalTargets = make([]control.DispatchTarget, 0, len(reg.Names()))
 				for _, n := range reg.Names() {
-					if n == name {
-						finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: cmd})
+					if n == selfTuneName {
+						finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: selfTuneCmd})
 					} else {
 						finalTargets = append(finalTargets, control.DispatchTarget{Driver: n, TargetW: 0})
 					}
 				}
+			}
+			if troubleshootingMode {
+				gridW, haveGrid := troubleshootingGridW(tel, siteMeterDriver)
+				pvW := troubleshootingSumOnlineW(tel, telemetry.DerPV)
+				batW := troubleshootingSumOnlineW(tel, telemetry.DerBattery)
+				evW := tel.SumOnlineEVW()
+				attrs := []any{
+					"mode", ctrl.Mode,
+					"plan_stale", planMissingNow,
+					"site_meter", siteMeterDriver,
+					"grid_known", haveGrid,
+					"grid_w", gridW,
+					"pv_w", pvW,
+					"bat_w", batW,
+					"ev_w", evW,
+					"self_tune_active", selfTuneActive,
+					"self_tune_driver", selfTuneName,
+					"self_tune_command_w", selfTuneCmd,
+					"targets", targets,
+					"final_targets", finalTargets,
+				}
+				if haveGrid {
+					attrs = append(attrs, "load_w", gridW-batW-pvW-evW)
+				}
+				slog.Info("troubleshooting: dispatch decision", attrs...)
 			}
 
 			// ---- Dispatch to drivers ----
@@ -2882,6 +2916,29 @@ func instanceSignerOrNil(id *nova.Identity) api.InstanceSigner {
 		return nil
 	}
 	return id
+}
+
+func troubleshootingGridW(tel *telemetry.Store, siteMeterDriver string) (float64, bool) {
+	if siteMeterDriver == "" {
+		return 0, false
+	}
+	r := tel.Get(siteMeterDriver, telemetry.DerMeter)
+	if r == nil {
+		return 0, false
+	}
+	return r.SmoothedW, true
+}
+
+func troubleshootingSumOnlineW(tel *telemetry.Store, typ telemetry.DerType) float64 {
+	var sum float64
+	for _, r := range tel.ReadingsByType(typ) {
+		h := tel.DriverHealth(r.Driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
+		sum += r.SmoothedW
+	}
+	return sum
 }
 
 // envBool returns true iff the env var is set to a positive value

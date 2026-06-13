@@ -781,6 +781,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doesn't need a second /api/config fetch, and pull per-phase readings
 	// from the site meter driver's raw emit payload.
 	s.deps.CfgMu.RLock()
+	troubleshootingMode := s.deps.Cfg.Site.TroubleshootingMode
 	fuseCfg := map[string]any{
 		"max_amps": s.deps.Cfg.Fuse.MaxAmps,
 		"phases":   s.deps.Cfg.Fuse.Phases,
@@ -793,6 +794,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
 		"grid_w":                gridW,
 		"pv_w":                  pvW,
@@ -1142,6 +1144,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
 	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	s.deps.CtrlMu.Unlock()
+	if s.deps.Registry != nil {
+		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+	}
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
@@ -1440,7 +1445,7 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 	}
 	// Apply immediately via Reload — it filters disabled drivers and
 	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers)
+	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
 
 	action := "disabled"
 	if !disabled {
