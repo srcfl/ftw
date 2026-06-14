@@ -703,7 +703,10 @@
         <span class="ftw-toggle-slider"></span>
         <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
       </label>
-      <div class="card-sub card-hint">On = home battery discharges into the EV. Off = battery stays out of EV charging.</div>
+      <div class="card-sub card-hint">Default off. On lets the home battery discharge into EV charging. Surplus-only loadpoints still use real PV surplus only.</div>
+      <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
+        This can drain the home battery into the car. Use it only when EV charging should be part of the site battery plan.
+      </div>
     </div>
     <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
       <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>

@@ -980,14 +980,15 @@ func main() {
 				return control.SlotDirective{}, false
 			}
 			return control.SlotDirective{
-				SlotStart:       d.SlotStart,
-				SlotEnd:         d.SlotEnd,
-				BatteryEnergyWh: d.BatteryEnergyWh,
-				SoCTargetPct:    d.SoCTargetPct,
-				Strategy:        string(d.Strategy),
-				PVLimitW:        d.PVLimitW,
-				PlannedGridW:    d.GridW,
-				HasPlannedGridW: true,
+				SlotStart:         d.SlotStart,
+				SlotEnd:           d.SlotEnd,
+				BatteryEnergyWh:   d.BatteryEnergyWh,
+				SoCTargetPct:      d.SoCTargetPct,
+				Strategy:          string(d.Strategy),
+				PVLimitW:          d.PVLimitW,
+				PlannedGridW:      d.GridW,
+				HasPlannedGridW:   true,
+				LoadpointEnergyWh: d.LoadpointEnergyWh,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a

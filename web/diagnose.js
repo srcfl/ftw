@@ -201,6 +201,13 @@
     // would never see the SoC trajectory.
     const lpActive = d.slots && d.slots.some(x =>
       x.loadpoint_w || x.loadpoint_soc_pct);
+    const lpBadges = lpActive ? [
+      '<span class="diag-pill diag-ev">EV in plan</span>',
+      params.loadpoint_surplus_only ? '<span class="diag-pill diag-lp-policy">surplus only</span>' : '',
+      params.loadpoint_blocks_battery_to_ev
+        ? '<span class="diag-pill diag-lp-policy" title="Home battery discharge cannot satisfy planned EV charging in this plan.">battery to EV blocked</span>'
+        : '<span class="diag-pill diag-lp-warn" title="This plan may let home battery discharge satisfy EV charging.">battery may cover EV</span>'
+    ].join('') : '';
     const header = `
       <div class="diagnose-detail-header">
         <div>
@@ -217,7 +224,7 @@
           <span title="Mode"><b>${escapeHtml(params.mode || '—')}</b></span>
           <span title="Initial SoC">SoC start ${params.initial_soc_pct != null ? params.initial_soc_pct.toFixed(1) : '—'}%</span>
           <span title="Battery capacity">${params.capacity_wh ? (params.capacity_wh/1000).toFixed(1)+' kWh' : ''}</span>
-          ${lpActive ? '<span class="diag-pill diag-ev">EV in plan</span>' : ''}
+          ${lpBadges}
         </div>
       </div>
       <div class="diagnose-chart-wrap">

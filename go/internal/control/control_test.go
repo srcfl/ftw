@@ -1034,6 +1034,40 @@ func TestSurplusOnlyEVDoesNotAutoEnableBatteryCoversEV(t *testing.T) {
 	}
 }
 
+func TestSurplusOnlyEVPlanBlocksBatteryToEVEvenWhenCoverEVEnabled(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:         now,
+		SlotEnd:           now.Add(15 * time.Minute),
+		BatteryEnergyWh:   -1250, // stale/pre-fix plan: discharge ~5 kW this slot.
+		Strategy:          "arbitrage",
+		LoadpointEnergyWh: map[string]float64{"garage": 1250},
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.7},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.BatteryCoversEV = true
+	st.EVSurplusOnlyReserveW = 5000
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -50 {
+		t.Errorf("surplus_only planned EV must block battery-to-EV discharge even with BatteryCoversEV=true, got %.0f W",
+			targets[0].TargetW)
+	}
+}
+
 // TestBatteryCoversEV_OnIncludesEVInPeakShaving covers the opt-in scenario
 // outside self-consumption: peak-shaving may discharge to protect an import
 // ceiling, and BatteryCoversEV=true means the full EV draw participates.

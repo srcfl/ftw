@@ -345,6 +345,7 @@
   const evSend = $("ev-send");
   const bceToggle = $("battery-covers-ev-toggle");
   const bceLabel = $("battery-covers-ev-label");
+  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -931,6 +932,7 @@
     if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
       bceToggle.checked = !!data.battery_covers_ev;
       if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
     }
 
     // Energy today
@@ -2321,6 +2323,7 @@
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
       if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
       setBatteryCoversEV(bceToggle.checked);
     });
   }
@@ -2585,7 +2588,7 @@
     soCb.checked = !!(lp && lp.surplus_only);
     soCb.style.accentColor = "var(--accent-e)";
     var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV exports only — never imports grid)";
+    soText.textContent = "Surplus only (PV only — no grid or battery)";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
 
@@ -2676,7 +2679,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
