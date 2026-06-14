@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.120.9
+
+### Patch Changes
+
+- 4af0caf: Add a UI-controlled global troubleshooting mode for incident diagnostics. It exposes its state in `/api/status`, logs dispatch-decision snapshots without changing control behavior, and passes a reserved troubleshooting flag into Lua drivers. Pixii now uses that flag to emit calibration/control status and setpoint readback metrics, while still supporting its legacy per-driver troubleshooting flag. Invalid Pixii SoC values now omit `soc` from the battery emit instead of dropping the whole battery reading.
+- a0ad92a: Prevent surplus-only EV loadpoints from using home battery discharge as synthetic PV surplus, even when "Let battery cover EV" is enabled, and surface the policy in planner diagnostics.
+
 ## 0.120.8
 
 ### Patch Changes
