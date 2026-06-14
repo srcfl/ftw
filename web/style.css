@@ -1222,6 +1222,18 @@ footer {
   color: var(--text-dim);
 }
 
+.modal-body label.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  color: var(--text);
+}
+
+.modal-body label.checkbox-row input[type="checkbox"] {
+  width: auto;
+}
+
 .modal-body input[type="text"],
 .modal-body input[type="number"],
 .modal-body input[type="password"],
