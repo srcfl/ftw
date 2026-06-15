@@ -41,6 +41,53 @@ const (
 	ModePlannerArbitrage        Mode = "planner_arbitrage"
 )
 
+// AllModes is the canonical, ordered list of every operator-selectable
+// Mode. It is the single source of truth: the API mode validator and the
+// Home Assistant discovery `select` options both derive from it, so a new
+// mode can't be added to the enum without automatically appearing in both
+// places. Order is operator-facing (simple → advanced → planner), so it's
+// also a safe order to render in a UI dropdown.
+func AllModes() []Mode {
+	return []Mode{
+		ModeIdle, ModeSelfConsumption, ModePeakShaving,
+		ModeCharge, ModePriority, ModeWeighted,
+		ModePlannerSelf, ModePlannerCheap,
+		ModePlannerPassiveArbitrage, ModePlannerArbitrage,
+	}
+}
+
+// IsValidMode reports whether s names a known Mode.
+func IsValidMode(m Mode) bool {
+	for _, valid := range AllModes() {
+		if m == valid {
+			return true
+		}
+	}
+	return false
+}
+
+// PlannerMPCMode maps a planner Mode to the mpc.Mode strategy the planner
+// should build its plan with. ok is false for every non-planner mode, so a
+// caller can gate MPC propagation on it without a separate IsPlannerMode
+// check and without risking a zero-value mpc.Mode("") being pushed for an
+// unmapped planner mode. It is the single source of truth for the
+// control.ModePlanner* → mpc.Mode mapping: the API mode setter, the HA
+// command callback, and the startup mode-restore all derive from it, so a
+// new planner mode can't be wired into one path and forgotten in another.
+func PlannerMPCMode(m Mode) (mpc.Mode, bool) {
+	switch m {
+	case ModePlannerSelf:
+		return mpc.ModeSelfConsumption, true
+	case ModePlannerCheap:
+		return mpc.ModeCheapCharge, true
+	case ModePlannerPassiveArbitrage:
+		return mpc.ModePassiveArbitrage, true
+	case ModePlannerArbitrage:
+		return mpc.ModeArbitrage, true
+	}
+	return "", false
+}
+
 // IsPlannerMode reports whether the mode is one of the planner modes.
 func (m Mode) IsPlannerMode() bool {
 	return m == ModePlannerSelf ||
@@ -103,6 +150,11 @@ type SlotDirective struct {
 	// has HasPlannedGridW=false → cap opts out by default.
 	PlannedGridW    float64
 	HasPlannedGridW bool
+
+	// LoadpointEnergyWh is the current slot's planned EV charging budget.
+	// Runtime uses planned EV energy to keep surplus-only EV from being
+	// satisfied by home-battery discharge if a stale plan tries.
+	LoadpointEnergyWh map[string]float64
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for
@@ -1503,7 +1555,14 @@ func ComputeDispatch(
 		// predicate into a small helper consumed by both this clamp
 		// and the DP rule, so a future change to the accounting can't
 		// drift between plan and runtime.
-		if !state.BatteryCoversEV && evActive && targetTotalW < 0 {
+		var plannedLoadpointEnergyWh float64
+		for _, wh := range currentDirective.LoadpointEnergyWh {
+			if wh > 0 {
+				plannedLoadpointEnergyWh += wh
+			}
+		}
+		surplusOnlyPlannedEV := state.EVSurplusOnlyReserveW > 0 && plannedLoadpointEnergyWh > 0
+		if ((!state.BatteryCoversEV && evActive) || surplusOnlyPlannedEV) && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW
 			if targetTotalW < reactiveTotal {

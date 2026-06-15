@@ -178,7 +178,7 @@
     var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
     function tick() {
       // Cache-bust so an intermediate proxy can't lie about reachability.
-      fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
+      ownerFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
         .then(function (r) {
           if (r.ok) {
             progressTextEl.textContent = "Reloading…";
@@ -217,6 +217,9 @@
       // Preserve a stored password when the user hasn't typed over it.
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
+    });
+    bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (input) {
+      setByPath(currentConfig, input.dataset.checkboxPath, input.checked);
     });
   }
 

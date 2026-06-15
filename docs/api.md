@@ -188,6 +188,7 @@ Valid values (from `go/internal/control/dispatch.go:14`):
 - `weighted`
 - `planner_self`
 - `planner_cheap`
+- `planner_passive_arbitrage`
 - `planner_arbitrage`
 
 **Response (200):**

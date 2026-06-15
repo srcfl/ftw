@@ -364,7 +364,7 @@ class FtwBatteryControl extends FtwElement {
   }
 
   _refresh() {
-    fetch("/api/battery/manual_hold")
+    ownerFetch("/api/battery/manual_hold")
       .then((r) => r.json())
       .then((d) => this._renderActive(d))
       .catch(() => { /* network blip — leave previous state */ });

@@ -193,7 +193,7 @@ class FtwUpdateCheck extends FtwElement {
 
   // ---- data ----
   _check() {
-    fetch("/api/version/check")
+    ownerFetch("/api/version/check")
       .then((r) => {
         // 503 = self-update disabled by deploy. Stay invisible — this
         // is config, not an error.
@@ -260,7 +260,7 @@ class FtwUpdateCheck extends FtwElement {
 
   _tick() {
     const signal = this._pollAbort ? this._pollAbort.signal : undefined;
-    fetch("/api/version/update/status", { signal })
+    ownerFetch("/api/version/update/status", { signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((st) => {
         // Belt-and-braces: if the phase was reset while the fetch was in

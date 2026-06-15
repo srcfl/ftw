@@ -314,7 +314,7 @@ class FtwPvControl extends FtwElement {
     // drivers explicitly opted in via supports_pv_curtail: true should
     // appear. The catalog endpoint advertises what the lua *can* do;
     // the YAML says what the operator *wants* dispatched.
-    return fetch("/api/config")
+    return ownerFetch("/api/config")
       .then((r) => r.json())
       .then((cfg) => {
         const drivers = (cfg && cfg.drivers) || [];
@@ -384,7 +384,7 @@ class FtwPvControl extends FtwElement {
   }
 
   _refresh() {
-    fetch("/api/pv/manual_hold")
+    ownerFetch("/api/pv/manual_hold")
       .then((r) => r.json())
       .then((d) => this._renderActive(d))
       .catch(() => { /* network blip */ });

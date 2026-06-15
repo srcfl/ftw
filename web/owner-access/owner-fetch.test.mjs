@@ -93,6 +93,27 @@ describe("ownerFetch — transport selection (FIX-B)", () => {
     globalThis.window.ftwP2P = { isLanOrigin: () => true }; // p2p.js says LAN
     assert.equal(isLanOrigin(), true, "must defer to p2p.js's isLanOrigin");
   });
+
+  it("treats a Tailscale CGNAT 100.64/10 host as LAN (direct, relay not in path)", async () => {
+    // Tailscale assigns every node a 100.64.0.0/10 (RFC 6598) address. Reaching
+    // the Pi on one is a direct WireGuard connection — the relay is NOT in the
+    // path — so it must read as LAN, exactly like zerotier's 192.168/16. The bug:
+    // isPrivateIPv4 omitted CGNAT, so Tailscale users got the passkey sign-in gate
+    // while zerotier users sailed through.
+    for (const ip of ["100.64.0.0", "100.97.0.112", "100.120.141.49", "100.127.255.255"]) {
+      setOrigin("/", ip);
+      assert.equal(isLanOrigin(), true, `${ip} (CGNAT) must read as LAN`);
+    }
+  });
+
+  it("does NOT treat non-CGNAT 100.x hosts as LAN (boundary)", async () => {
+    // 100.0.0.0/10 below and 100.128.0.0 above the CGNAT block are ordinary
+    // public space and must still fail closed.
+    for (const ip of ["100.63.255.255", "100.128.0.0", "100.0.0.1"]) {
+      setOrigin("/", ip);
+      assert.equal(isLanOrigin(), false, `${ip} is public, must NOT read as LAN`);
+    }
+  });
 });
 
 // --- source hygiene: no owner/control call may regress to a bare fetch ------
@@ -131,6 +152,26 @@ describe("ceremony pages route owner calls through the shared strict ownerFetch"
     assert.match(INDEX, /MANUAL_SIGNOUT_KEY\s*=\s*"ftw\.owner\.manual_signout\.v1"/);
     assert.match(INDEX, /function markManualSignout\(\)[\s\S]*localStorage\.setItem\(MANUAL_SIGNOUT_KEY,\s*"1"\)/);
     assert.match(INDEX, /document\.getElementById\("signout"\)\.onclick[\s\S]*markManualSignout\(\)[\s\S]*ownerFetch\("\/api\/owner-access\/logout"/);
+  });
+});
+
+// --- CGNAT/Tailscale LAN detection must agree across all three copies --------
+// p2p.js's isDirectLAN already recognised 100.64/10, but the parallel
+// isPrivateIPv4 (used by isLanOrigin) and next-app.js's isLanFallbackOrigin did
+// not — so a Tailscale-reached dashboard saw the sign-in gate while the same Pi
+// over zerotier (192.168/16) did not. These guard the three copies in lockstep.
+describe("CGNAT (Tailscale 100.64/10) is recognised as LAN in every copy", () => {
+  const P2P = readFileSync(join(__dirname, "..", "p2p.js"), "utf8");
+  const APP = readFileSync(join(__dirname, "..", "next-app.js"), "utf8");
+
+  it("p2p.js isPrivateIPv4 (the isLanOrigin helper) handles 100.64/10", () => {
+    assert.match(P2P, /a === 100 && b >= 64 && b <= 127/,
+      "p2p.js isPrivateIPv4 must recognise the CGNAT block, matching its own isDirectLAN");
+  });
+
+  it("next-app.js isLanFallbackOrigin handles 100.64/10", () => {
+    assert.match(APP, /\^100\\\.\(6\[4-9\]\|\[7-9\]\[0-9\]\|1\[01\]\[0-9\]\|12\[0-7\]\)\\\./,
+      "next-app.js inline LAN fallback must recognise the CGNAT block");
   });
 });
 

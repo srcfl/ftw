@@ -130,6 +130,26 @@ func TestOwnerAccessLogoutRevokesSession(t *testing.T) {
 	}
 }
 
+func TestOwnerSessionCookieLastsThirtyDays(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("cred-ttl")); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no session cookie issued")
+	}
+	got := cookies[0].MaxAge
+	want := int((30 * 24 * time.Hour).Seconds())
+	if got != want {
+		t.Fatalf("session cookie MaxAge = %d, want %d", got, want)
+	}
+}
+
 func TestOwnerAccessSessionsListAndDelete(t *testing.T) {
 	d := minDeps(t)
 	d.OwnerAccessLANBypass = false
@@ -673,6 +693,45 @@ func TestFriendLoopbackCannotManageOwner(t *testing.T) {
 	// Genuine private-LAN owner can still list devices (manage path open to LAN).
 	if code := send(lanOwner, "GET", "/api/owner-access/devices"); code != 200 {
 		t.Errorf("LAN owner devices list: got %d, want 200", code)
+	}
+}
+
+// TestTailscaleCGNATCountsAsLAN: an overlay (Tailscale/zerotier) you joined to
+// your Pi is genuine LAN presence — the owner explicitly, authenticatedly opted
+// in — so owner-manage actions must work over it, exactly like RFC1918. Tailscale
+// (and zerotier) hand out 100.64.0.0/10 (RFC 6598 CGNAT); only that /10, never
+// all of 100.0.0.0/8, is the overlay range. The relay path stays excluded by the
+// X-FTW-Tunnel marker + loopback check, untouched by this.
+func TestTailscaleCGNATCountsAsLAN(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = true
+	d.TunnelMarker = "marker"
+	if err := d.State.SaveTrustedDevice(state.TrustedDevice{
+		CredentialID: []byte("owner-cred"), PublicKey: []byte("k"),
+		FriendlyName: "owner phone", CreatedAtMs: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed owner device: %v", err)
+	}
+	srv := New(d)
+	get := func(remoteAddr string) int {
+		req := httptest.NewRequest("GET", "/api/owner-access/devices", nil)
+		req.Host = "127.0.0.1:8080"
+		req.RemoteAddr = remoteAddr // direct overlay source, no X-FTW-Tunnel marker
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	// CGNAT (Tailscale) source manages like LAN.
+	for _, addr := range []string{"100.64.0.1:1234", "100.97.0.112:1234", "100.127.255.255:1234"} {
+		if code := get(addr); code != 200 {
+			t.Errorf("CGNAT owner %s devices list: got %d, want 200", addr, code)
+		}
+	}
+	// Public 100.x outside the /10 is ordinary internet space — stays blocked.
+	for _, addr := range []string{"100.63.255.255:1234", "100.128.0.1:1234"} {
+		if code := get(addr); code != 401 {
+			t.Errorf("public %s devices list: got %d, want 401 (not LAN)", addr, code)
+		}
 	}
 }
 

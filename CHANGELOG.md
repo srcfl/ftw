@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.120.9
+
+### Patch Changes
+
+- 4af0caf: Add a UI-controlled global troubleshooting mode for incident diagnostics. It exposes its state in `/api/status`, logs dispatch-decision snapshots without changing control behavior, and passes a reserved troubleshooting flag into Lua drivers. Pixii now uses that flag to emit calibration/control status and setpoint readback metrics, while still supporting its legacy per-driver troubleshooting flag. Invalid Pixii SoC values now omit `soc` from the battery emit instead of dropping the whole battery reading.
+- a0ad92a: Prevent surplus-only EV loadpoints from using home battery discharge as synthetic PV surplus, even when "Let battery cover EV" is enabled, and surface the policy in planner diagnostics.
+
+## 0.120.8
+
+### Patch Changes
+
+- 6238d2d: Settings → Planner: the Mode dropdown is gone — it edited a config field that the runtime strategy (set from the dashboard Plan card) overrides, so it showed stale values and confused operators. In its place a read-only "Active strategy" row shows what the planner is actually running. The "PV forecast safety (k)" help text now explains the real mechanism (plans against forecast − k·σ; higher k holds more reserve and charges earlier, it never forces charging), with a live σ/hedge readout under the field.
+- 9e5635a: Reaching your dashboard over Tailscale no longer shows the passkey sign-in
+  gate. The browser's LAN-origin detection treated Tailscale's CGNAT addresses
+  (100.64.0.0/10, RFC 6598) as a public/relay origin, so it waited for a P2P
+  channel that a direct connection never opens and fell back to the sign-in gate
+  — while the same Pi reached over zerotier (192.168.0.0/16) sailed straight
+  through. The CGNAT range is now recognised as a direct-LAN origin in all three
+  copies of the check (`p2p.js`, `next-app.js`, `owner-access/owner-fetch.js`),
+  matching `p2p.js`'s own `isDirectLAN`. Direct IP access — LAN, zerotier, or
+  Tailscale — reaches the dashboard without a passkey prompt.
+
+  The Pi-side LAN-presence check (`isLANClientSource`) now recognises the same
+  CGNAT range, so owner-admin actions (manage passkeys, mint the setup PIN,
+  bootstrap the first passkey) work over Tailscale exactly as over an RFC1918 LAN.
+  An overlay you joined to your Pi is an explicit, authenticated owner decision —
+  genuine LAN presence — while the relay path stays excluded by the X-FTW-Tunnel
+  marker and the loopback check, so the friend pair-flow still cannot reach
+  owner-admin.
+
+## 0.120.7
+
+### Patch Changes
+
+- 05932a3: Fix Home Assistant logging "Invalid option for select.forty_two_watts_mode"
+  for the planner modes. The MQTT discovery for the Mode `select` only
+  advertised six modes, but the bridge publishes the live mode as state — and
+  the default UI choices (`planner_passive_arbitrage` / `planner_arbitrage`)
+  weren't in the advertised list, so HA rejected them every cycle. The discovery
+  options and the API mode validator now both derive from a single
+  `control.AllModes` source of truth, so all ten modes are advertised and the
+  two lists can't drift again.
+
+  Also fixes the matching command path: selecting a planner mode from the Home
+  Assistant dropdown previously returned "unknown mode" because the HA `SetMode`
+  callback (and the boot-time mode restore) carried their own hand-maintained
+  mode lists that omitted the planner modes. Both now validate through
+  `control.IsValidMode`, and the HA setter mirrors the full `/api/mode`
+  side-effects (battery manual-hold clear, PI reset, MPC strategy propagation)
+  via a shared `control.PlannerMPCMode` mapping — so a planner mode picked in HA
+  behaves identically to one picked in the web UI.
+
+- 9f4eab0: Fix surplus-only EV charging never starting on 3-phase-only chargers (e.g.
+  CTEK Chargestorm — 3Φ, 6 A minimum, no phase-switch register). The surplus
+  controller's 1Φ fallback assumed every charger can trickle on a single phase
+  (true for Easee, false for CTEK): on any day the PV forecast couldn't sustain
+  the 3Φ minimum it locked the loadpoint to 1Φ for the day and handed the
+  charger a ~1380 W offer, which a 3Φ-only unit can only answer by writing 0 A —
+  so it never charged. `pickSurplusSteps` now keeps the 3Φ-only step set and
+  never commits the day-long 1Φ lock when the loadpoint is pinned to
+  `phase_mode: "3p"`, and `resolvePhaseMode` no longer lets a stale 1Φ lock
+  override an explicit `"3p"`. A 3Φ-only charger now pauses cleanly below the
+  ~4.1 kW floor and charges in 3Φ steps above it. Configure such chargers with
+  `phase_mode: "3p"`, `min_charge_w: 4140`, and 3Φ-only `allowed_steps_w`.
+
+## 0.120.6
+
+### Patch Changes
+
+- Fix self-update snapshots after Remote Access passkeys have been enrolled, and route more public-home dashboard reads through the strict owner transport.
+
+  The state snapshotter now copies SQLite tables in foreign-key dependency order, so remembered browser keys in `trusted_device_pubkeys` no longer make pre-update snapshots fail. Dashboard, update, diagnostics, notification, pair, HA, EV, system, and loadpoint reads used by the public home route now use `ownerFetch`, preventing raw `/api/*` calls from hitting the relay and producing 403 noise while the P2P channel is opening.
+
+## 0.120.5
+
+### Patch Changes
+
+- Fix Remote Access browser persistence and Home Assistant mode discovery.
+
+  Remote owner sessions now last 30 days, and the legacy passkey login page stores
+  the browser's remembered device key after a successful passkey login so reloads
+  and bookmarks can reuse silent sign-in. The public home loader also explains the
+  current synced-passkey limitation when a browser cannot recover the encrypted
+  home directory from WebAuthn PRF.
+
+  Home Assistant MQTT discovery now advertises every mode the service can publish,
+  including planner modes, and MQTT mode commands accept the same planner values as
+  the HTTP API.
+
 ## 0.120.4
 
 ### Patch Changes

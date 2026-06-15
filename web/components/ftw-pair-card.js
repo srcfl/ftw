@@ -335,7 +335,7 @@ class FtwPairCard extends FtwElement {
 
   async _refresh() {
     try {
-      const r = await fetch("/api/pair/status");
+      const r = await ownerFetch("/api/pair/status");
       if (r.status === 404) {
         this._state = null;
       } else if (r.ok) {

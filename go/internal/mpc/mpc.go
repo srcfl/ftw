@@ -616,9 +616,10 @@ func Optimize(slots []Slot, p Params) Plan {
 							continue
 						}
 
-						// NoBatteryToEV: operator has BatteryCoversEV=false
-						// (the default), meaning the home battery's energy
-						// is allowed to cover house load but never the EV.
+						// Battery-to-EV block: operator has BatteryCoversEV=false
+						// (the default), or this loadpoint is surplus-only. In
+						// both cases, the home battery's energy may cover house
+						// load but must not become synthetic EV surplus.
 						// Reject any allocation where the battery's
 						// discharge exceeds the PV-residual house demand
 						// — i.e. where, by conservation, some of the
@@ -636,7 +637,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// constraints. TODO(refactor): the
 						// houseResidualW math + feasibility predicate
 						// is duplicated; extract a shared helper.
-						if evActive && lp.NoBatteryToEV && evW > 0 && battW < 0 {
+						if evActive && lp.blocksBatteryToEV() && evW > 0 && battW < 0 {
 							houseResidualW := slot.LoadW + slot.PVW // PVW is negative
 							if houseResidualW < 0 {
 								houseResidualW = 0

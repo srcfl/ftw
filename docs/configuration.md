@@ -51,6 +51,17 @@ self-consumption around the site meter. `slew_rate_w` is a soft per-cycle
 ramp ceiling; per-driver power caps and the fuse guard remain the hard
 dispatch constraints.
 
+### Global Troubleshooting Mode
+
+Use **Settings → Control → Troubleshooting mode** when diagnosing a live
+system issue. It does not change planner, dispatch, clamp, or driver command
+behavior. It adds dispatch-decision log lines, exposes the active flag in
+`/api/status`, and passes a reserved `_troubleshooting_mode` flag to Lua
+drivers so driver-specific diagnostics can emit richer status/readback data.
+
+Turn it off in Settings after the incident; logs and long-format metrics are
+noisier while it is enabled.
+
 ## `fuse`
 
 ```yaml
@@ -130,6 +141,14 @@ drivers:
 Driver-specific fields are parsed by the Lua driver, not by the generic
 config schema. See the driver source and
 [`docs/driver-catalog.md`](driver-catalog.md) for expected keys.
+
+### Pixii Diagnostics
+
+When Troubleshooting mode is enabled from Settings, the Pixii driver emits
+extra SunSpec battery diagnostics: charge status, control mode, battery state,
+vendor state, event bits, and setpoint readback. `charge_status=testing` is
+the useful signal for suspected Pixii calibration/testing sessions that may
+ignore external setpoints.
 
 ## `api`
 

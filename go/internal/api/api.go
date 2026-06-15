@@ -781,6 +781,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doesn't need a second /api/config fetch, and pull per-phase readings
 	// from the site meter driver's raw emit payload.
 	s.deps.CfgMu.RLock()
+	troubleshootingMode := s.deps.Cfg.Site.TroubleshootingMode
 	fuseCfg := map[string]any{
 		"max_amps": s.deps.Cfg.Fuse.MaxAmps,
 		"phases":   s.deps.Cfg.Fuse.Phases,
@@ -793,6 +794,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
 		"grid_w":                gridW,
 		"pv_w":                  pvW,
@@ -1142,6 +1144,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
 	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	s.deps.CtrlMu.Unlock()
+	if s.deps.Registry != nil {
+		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+	}
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
@@ -1174,52 +1179,43 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := control.Mode(req.Mode)
-	// Validate mode string
-	switch m {
-	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-		control.ModeCharge, control.ModePriority, control.ModeWeighted,
-		control.ModePlannerSelf, control.ModePlannerCheap,
-		control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-		s.deps.CtrlMu.Lock()
-		s.deps.Ctrl.Mode = m
-		// An explicit mode change is a reset signal: drop any active
-		// battery manual hold so the new mode takes effect on the very
-		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-		s.deps.Ctrl.ClearBatteryManualHold()
-		// Reset the PI integrator. The integral accumulated under the
-		// previous mode's error signal is meaningless to the new mode
-		// — keeping it caused integrator windup → wrong-direction stuck
-		// output across the 2026-05-24 evening mode switch (live
-		// regression: discharged the fleet to 7 % overnight while the
-		// PI integral was pinned in the wrong direction). Mode change
-		// is a discrete event; start the new regime from a clean PI.
-		if s.deps.Ctrl.PI != nil {
-			s.deps.Ctrl.PI.Reset()
-		}
-		s.deps.CtrlMu.Unlock()
-		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
-			slog.Warn("failed to persist mode", "err", err)
-		}
-		// Propagate to MPC if switching to a planner mode. Map
-		// control.ModePlanner* → mpc.Mode and force an immediate replan.
-		if m.IsPlannerMode() && s.deps.MPC != nil {
-			var mm mpc.Mode
-			switch m {
-			case control.ModePlannerSelf:
-				mm = mpc.ModeSelfConsumption
-			case control.ModePlannerCheap:
-				mm = mpc.ModeCheapCharge
-			case control.ModePlannerPassiveArbitrage:
-				mm = mpc.ModePassiveArbitrage
-			case control.ModePlannerArbitrage:
-				mm = mpc.ModeArbitrage
-			}
-			s.deps.MPC.SetMode(r.Context(), mm)
-		}
-		writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
-	default:
+	// Validate against the canonical mode list. control.AllModes is the
+	// single source of truth — the same list the HA discovery `select`
+	// options derive from — so the validator and the HA bridge can't drift.
+	if !control.IsValidMode(m) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
+		return
 	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.Mode = m
+	// An explicit mode change is a reset signal: drop any active
+	// battery manual hold so the new mode takes effect on the very
+	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
+	s.deps.Ctrl.ClearBatteryManualHold()
+	// Reset the PI integrator. The integral accumulated under the
+	// previous mode's error signal is meaningless to the new mode
+	// — keeping it caused integrator windup → wrong-direction stuck
+	// output across the 2026-05-24 evening mode switch (live
+	// regression: discharged the fleet to 7 % overnight while the
+	// PI integral was pinned in the wrong direction). Mode change
+	// is a discrete event; start the new regime from a clean PI.
+	if s.deps.Ctrl.PI != nil {
+		s.deps.Ctrl.PI.Reset()
+	}
+	s.deps.CtrlMu.Unlock()
+	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
+		slog.Warn("failed to persist mode", "err", err)
+	}
+	// Propagate to MPC if switching to a planner mode and force an
+	// immediate replan. control.PlannerMPCMode is the single source of the
+	// ModePlanner* → mpc.Mode mapping; ok is false for non-planner modes (and
+	// for any planner mode that hasn't been wired into the mapping), so an
+	// unmapped mode skips the MPC push instead of silently coercing it to the
+	// zero-value mpc.Mode("").
+	if mm, ok := control.PlannerMPCMode(m); ok && s.deps.MPC != nil {
+		s.deps.MPC.SetMode(r.Context(), mm)
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 }
 
 // ---- /api/target ----
@@ -1449,7 +1445,7 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 	}
 	// Apply immediately via Reload — it filters disabled drivers and
 	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers)
+	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
 
 	action := "disabled"
 	if !disabled {
@@ -2390,6 +2386,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Tel != nil {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
 	}
+	s.decorateLoadpointsWithManual(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

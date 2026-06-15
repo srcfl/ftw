@@ -212,6 +212,8 @@ header h1 {
   margin-right: 0.4rem;
 }
 .diag-ev { background: rgba(6,182,212,0.18); color: #67e8f9; }
+.diag-lp-policy { background: rgba(34,197,94,0.16); color: #86efac; }
+.diag-lp-warn { background: rgba(251,191,36,0.18); color: #fde68a; }
 
 /* Detail pane — single scroll container so the chart can roll out
    of view on short viewports (small laptops); the sticky thead still
@@ -1220,6 +1222,18 @@ footer {
   margin: 12px 0 4px;
   font-size: 0.8rem;
   color: var(--text-dim);
+}
+
+.modal-body label.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  color: var(--text);
+}
+
+.modal-body label.checkbox-row input[type="checkbox"] {
+  width: auto;
 }
 
 .modal-body input[type="text"],

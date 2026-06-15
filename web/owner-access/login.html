@@ -45,6 +45,7 @@
     import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
     import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
     import { loadDirectory } from "./instance-sync.js";
+    import { exportPubHex } from "./device-key.js";
     const base = apiBase();
     const msg = document.getElementById("msg");
 
@@ -144,12 +145,18 @@
         if (mediation) getOpts.mediation = mediation;
         const cred = await navigator.credentials.get(getOpts);
         if (!cred) return; // no selection
+        const finishBody = encodeAssertionResult(cred);
+        try {
+          const devicePubHex = await exportPubHex();
+          if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+        } catch (_) { /* passkey login still works; this browser just won't silent-login */ }
+
         const finish = await ownerFetch(
           "/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(ceremony_token),
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(encodeAssertionResult(cred)),
+            body: JSON.stringify(finishBody),
             credentials: "same-origin",
           }
 	        );

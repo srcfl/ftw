@@ -77,7 +77,7 @@
     // 404s silently — the UI simply hides the section.
     _refreshSnapshots() {
       if (this._disabled) return;
-      fetch("/api/version/snapshots")
+      ownerFetch("/api/version/snapshots")
         .then((r) => (r.ok ? r.json() : null))
         .then((body) => {
           if (!body) return;
@@ -149,7 +149,7 @@
     _refresh(force) {
       if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
-      fetch(url)
+      ownerFetch(url)
         .then((r) => {
           // 503 = feature disabled by the backend. Stop polling and get out
           // of the way entirely — this is deployment config, not a bug.
@@ -271,7 +271,7 @@
 
     _tickStatus() {
       // 1) Poll sidecar state.json.
-      fetch("/api/version/update/status")
+      ownerFetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (st && this._statusMatchesCurrentRun(st)) {

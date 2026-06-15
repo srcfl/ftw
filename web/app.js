@@ -1535,14 +1535,14 @@
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!lp.surplus_only;
-    cb.title = "Charge only when PV exports exceed local load. No deadline planning, no grid import. Add a schedule below to also catch up via grid when prices are cheap.";
+    cb.title = "Charge only from real PV surplus. No grid import and no home-battery discharge. Add a schedule below to also catch up via grid when prices are cheap.";
     var text = document.createElement("span");
-    text.textContent = "Surplus only (PV exports only — never imports grid)";
+    text.textContent = "Surplus only (PV only — no grid or battery)";
     var hint = document.createElement("div");
     hint.style.fontSize = "0.72rem";
     hint.style.color = "var(--text-dim)";
     hint.style.marginLeft = "1.4rem";
-    hint.textContent = "Charges only when PV exports exceed your load. No deadline planning — no grid import. Optional: add a schedule below to also catch up via grid when cheap.";
+    hint.textContent = "Charges only from real PV surplus. No deadline planning, no grid import, and no home-battery discharge. Optional: add a schedule below to also catch up via grid when cheap.";
     cb.addEventListener("change", function () {
       cb.disabled = true;
       var body = { surplus_only: cb.checked };
