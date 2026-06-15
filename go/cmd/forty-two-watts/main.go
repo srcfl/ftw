@@ -3015,6 +3015,14 @@ func (b mpcPlanBridge) LatestActions() []ha.PlanAction {
 			BatteryW:    a.BatteryW,
 			GridW:       a.GridW,
 			SoCPct:      a.SoCPct,
+			PriceOre:    a.PriceOre,
+			SpotOre:     a.SpotOre,
+			CostOre:     a.CostOre,
+			Confidence:  a.Confidence,
+			Reason:      a.Reason,
+			EMSMode:     a.EMSMode,
+			PVW:         a.PVW,
+			LoadW:       a.LoadW,
 		}
 	}
 	return out
