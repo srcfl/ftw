@@ -60,6 +60,16 @@
 -- never tries to pre-heat on cheap electricity (not implemented here).
 -- For NIBE: find your exact parameter IDs via
 --   GET https://api.myuplink.com/v2/devices/{deviceId}/points
+--
+-- TWO device_ids for one physical pump
+-- =====================================
+-- Because each instance calls host.set_sn(device_id .. "-" .. mode),
+-- the hot-water and heating instances are registered as two separate
+-- device_ids in /api/devices (e.g. "myuplink:ABC123-hotwater" and
+-- "myuplink:ABC123-heating"). This is expected: each instance controls
+-- a logically independent thermal store. Operators who see two entries
+-- for the same physical pump can confirm they belong together by checking
+-- that the base device ID prefix is identical.
 
 DRIVER = {
   id           = "myuplink",
@@ -106,12 +116,20 @@ local HEAT_BLOCK_DROP_C = -5   -- add this to heating curve offset to block
 local original_hw_stop     = nil
 local original_heat_offset = nil
 
+-- ---- Helpers -------------------------------------------------------------
+
+local function url_encode(s)
+    return (s:gsub("[^%w%-%.%_%~]", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end))
+end
+
 -- ---- Auth ----------------------------------------------------------------
 
 local function fetch_token()
     local body = "grant_type=client_credentials"
-        .. "&client_id=" .. client_id
-        .. "&client_secret=" .. client_secret
+        .. "&client_id=" .. url_encode(client_id)
+        .. "&client_secret=" .. url_encode(client_secret)
         .. "&scope=READSYSTEM%20WRITESYSTEM"
     local resp, err = host.http_post(
         BASE_URL .. "/oauth/token", body,
