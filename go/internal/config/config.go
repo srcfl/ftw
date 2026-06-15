@@ -30,8 +30,60 @@ type Config struct {
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	FlexLoads     []FlexLoad         `yaml:"flexloads,omitempty" json:"flexloads,omitempty"`
 	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+}
+
+// FlexLoad declares a price-responsive flexible load the flex-load
+// scheduler optimizes against the MPC price/PV forecast — independently of
+// the battery DP. Two types:
+//
+//   - "thermostat": a Matter thermostat (or any driver accepting a
+//     setpoint-write command). The scheduler pre-heats toward MaxC in cheap
+//     / PV-surplus hours and coasts toward MinC in expensive ones, with a
+//     learned RC model guaranteeing the comfort floor. Requires a driver
+//     metric carrying the measured indoor temperature.
+//   - "deferrable": an interruptible on/off load on a smart plug (water
+//     heater, pool pump, dehumidifier). The scheduler runs it in the
+//     cheapest slots that meet its daily energy budget before the deadline.
+//
+// DriverName must match a running driver (typically drivers/matter.lua). The
+// action names map to that driver's `config.commands` entries.
+type FlexLoad struct {
+	Type       string `yaml:"type" json:"type"` // "thermostat" | "deferrable"
+	DriverName string `yaml:"driver_name" json:"driver_name"`
+
+	// ---- thermostat fields ----
+	// HeatingKind selects the power model:
+	//   "electric"  (default) — direct electric radiator or resistive floor
+	//                heating; electricity → heat 1:1 (COP=1). MaxHeatW is the
+	//                electrical nameplate and the load is directly meterable.
+	//   "hydronic"  — a thermostatic valve on a water loop fed by a heat
+	//                pump. MaxHeatW is the zone's *thermal* output; the
+	//                electrical draw the EMS pays for is MaxHeatW/COP. The
+	//                per-zone valve isn't itself an electrical load — the
+	//                shiftable power lives at the central heat source, so
+	//                set HeatSourceDriver to attribute it (see notes).
+	HeatingKind     string  `yaml:"heating_kind,omitempty" json:"heating_kind,omitempty"`
+	COP             float64 `yaml:"cop,omitempty" json:"cop,omitempty"` // hydronic only; default 3.0 when kind=hydronic, 1.0 electric
+	HeatSourceDriver string `yaml:"heat_source_driver,omitempty" json:"heat_source_driver,omitempty"` // hydronic: central HP/boiler driver the electrical load is attributed to
+	MinC            float64 `yaml:"min_c,omitempty" json:"min_c,omitempty"`
+	MaxC            float64 `yaml:"max_c,omitempty" json:"max_c,omitempty"`
+	MaxHeatW        float64 `yaml:"max_heat_w,omitempty" json:"max_heat_w,omitempty"`
+	IndoorMetric    string  `yaml:"indoor_metric,omitempty" json:"indoor_metric,omitempty"`
+	HeatMetric      string  `yaml:"heat_metric,omitempty" json:"heat_metric,omitempty"` // optional: metered heating power for RC training
+	SetpointAction  string  `yaml:"setpoint_action,omitempty" json:"setpoint_action,omitempty"`
+	PreHeatFraction float64 `yaml:"preheat_fraction,omitempty" json:"preheat_fraction,omitempty"`
+
+	// ---- deferrable fields ----
+	EnergyWh     float64 `yaml:"energy_wh,omitempty" json:"energy_wh,omitempty"`
+	PowerW       float64 `yaml:"power_w,omitempty" json:"power_w,omitempty"`
+	OnAction     string  `yaml:"on_action,omitempty" json:"on_action,omitempty"`
+	OffAction    string  `yaml:"off_action,omitempty" json:"off_action,omitempty"`
+	PreferPV     bool    `yaml:"prefer_pv,omitempty" json:"prefer_pv,omitempty"`
+	EarliestHour int     `yaml:"earliest_hour,omitempty" json:"earliest_hour,omitempty"` // local hour-of-day window start (0 = none)
+	DeadlineHour int     `yaml:"deadline_hour,omitempty" json:"deadline_hour,omitempty"` // local hour-of-day deadline (0 = none)
 }
 
 // Notifications configures outbound push notifications. Exactly one

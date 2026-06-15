@@ -32,6 +32,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/arp"
 	"github.com/frahlg/forty-two-watts/go/internal/devtools"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/frahlg/forty-two-watts/go/internal/flexload"
 	"github.com/frahlg/forty-two-watts/go/internal/forecast"
 	"github.com/frahlg/forty-two-watts/go/internal/ha"
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
@@ -761,6 +762,98 @@ func main() {
 			_ = mpcSvc.Replan(ctx)
 			slog.Info("mpc: startup replan completed")
 		}()
+	}
+
+	// ---- Flexible-load scheduler (thermostats + deferrable loads) ----
+	// Optimizes Matter thermostats and smart-plug loads against the MPC
+	// price/PV curve, independently of the battery DP (avoids the DP's
+	// state-space blow-up). Only starts when the operator declares
+	// `flexloads:` in config. See go/internal/flexload + drivers/matter.lua.
+	if len(cfg.FlexLoads) > 0 {
+		devices := make([]flexload.Device, 0, len(cfg.FlexLoads))
+		for _, f := range cfg.FlexLoads {
+			cop := f.COP
+			if cop <= 0 {
+				if f.HeatingKind == "hydronic" {
+					cop = 3.0 // sensible heat-pump default
+				} else {
+					cop = 1.0 // direct electric
+				}
+			}
+			devices = append(devices, flexload.Device{
+				Type:            f.Type,
+				DriverName:      f.DriverName,
+				HeatingKind:     f.HeatingKind,
+				COP:             cop,
+				MinC:            f.MinC,
+				MaxC:            f.MaxC,
+				MaxHeatW:        f.MaxHeatW,
+				IndoorMetric:    f.IndoorMetric,
+				HeatMetric:      f.HeatMetric,
+				SetpointAction:  f.SetpointAction,
+				PreHeatFraction: f.PreHeatFraction,
+				EnergyWh:        f.EnergyWh,
+				PowerW:          f.PowerW,
+				OnAction:        f.OnAction,
+				OffAction:       f.OffAction,
+				PreferPV:        f.PreferPV,
+				EarliestHour:    f.EarliestHour,
+				DeadlineHour:    f.DeadlineHour,
+			})
+		}
+		flexSvc := flexload.NewService(st, tel, devices)
+		if flexSvc != nil {
+			// Slots come from the live MPC plan's price/PV curve, so the
+			// scheduler shares the exact forecast the battery DP planned on.
+			flexSvc.Slots = func() []flexload.PriceSlot {
+				if mpcSvc == nil {
+					return nil
+				}
+				plan := mpcSvc.Latest()
+				if plan == nil || len(plan.Actions) == 0 {
+					return nil
+				}
+				out := make([]flexload.PriceSlot, 0, len(plan.Actions))
+				for _, a := range plan.Actions {
+					// PV surplus = generation beyond house load (site sign:
+					// PVW ≤ 0 generating, LoadW ≥ 0 consuming).
+					surplus := -a.PVW - a.LoadW
+					if surplus < 0 {
+						surplus = 0
+					}
+					out = append(out, flexload.PriceSlot{
+						StartMs:    a.SlotStartMs,
+						LenMin:     a.SlotLenMin,
+						PriceOre:   a.PriceOre,
+						PVSurplusW: surplus,
+					})
+				}
+				return out
+			}
+			// Outdoor temperature forecast — same forecast cache the load
+			// twin reads.
+			flexSvc.Outdoor = func(slotStartMs int64) float64 {
+				rows, err := st.LoadForecasts(slotStartMs-2*3600*1000, slotStartMs+2*3600*1000)
+				if err != nil || len(rows) == 0 {
+					return 0
+				}
+				for _, r := range rows {
+					slotLen := r.SlotLenMin
+					if slotLen <= 0 {
+						slotLen = 60
+					}
+					end := r.SlotTsMs + int64(slotLen)*60*1000
+					if slotStartMs >= r.SlotTsMs && slotStartMs < end && r.TempC != nil {
+						return *r.TempC
+					}
+				}
+				return 0
+			}
+			flexSvc.Dispatch = reg.Send
+			flexSvc.Start(ctx)
+			defer flexSvc.Stop()
+			slog.Info("flexload scheduler started", "devices", len(devices))
+		}
 	}
 
 	// ---- EV loadpoint controller ----

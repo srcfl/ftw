@@ -211,20 +211,22 @@ function driver_command(action, _power_w, tbl)
     -- Named command defined in config.
     local spec = cmds[action]
     if spec then
-        local value = tonumber(tbl.value)
-        if value == nil then
-            host.log("warn", "matter: command '" .. action .. "': missing tbl.value")
-            return
-        end
         if spec.invoke then
-            -- Invoke a cluster command (e.g. On/Off Toggle, Thermostat Setpoint).
+            -- Invoke a cluster command (e.g. On/Off On/Off, Thermostat
+            -- SetpointRaiseLower). No value required — these are stateless
+            -- commands. tbl.payload (optional) carries cluster command args.
             local payload = host.json_encode(tbl.payload or {})
             local _, err = host.matter_invoke(node_id, spec.endpoint, spec.cluster, spec.invoke, payload)
             if err then
                 host.log("warn", "matter: invoke '" .. spec.invoke .. "': " .. tostring(err))
             end
         else
-            -- Write an attribute (e.g. OccupiedHeatingSetpoint).
+            -- Write an attribute (e.g. OccupiedHeatingSetpoint) — needs a value.
+            local value = tonumber(tbl.value)
+            if value == nil then
+                host.log("warn", "matter: command '" .. action .. "': missing tbl.value for attribute write")
+                return
+            end
             local raw = math.floor(value * spec.scale + 0.5)
             local err = host.matter_write(node_id, spec.endpoint, spec.cluster, spec.attribute, raw)
             if err then
