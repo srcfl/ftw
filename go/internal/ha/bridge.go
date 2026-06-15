@@ -41,6 +41,23 @@ type PlanSource interface {
 	LatestActions() []PlanAction
 }
 
+// EnergySource is the minimal interface for today's running Wh totals.
+// Pass an adapter wrapping *state.Store at construction; nil disables energy sensors.
+type EnergySource interface {
+	TodayEnergy() (TodayEnergySnapshot, bool)
+}
+
+// TodayEnergySnapshot is today's accumulated energy since midnight (local time).
+// All values are in Wh, site convention (ExportWh and PVWh are positive magnitudes).
+type TodayEnergySnapshot struct {
+	ImportWh        float64
+	ExportWh        float64
+	PVWh            float64
+	BatChargedWh    float64
+	BatDischargedWh float64
+	LoadWh          float64
+}
+
 // PlanAction is one slot in the MPC plan as seen by the HA bridge.
 type PlanAction struct {
 	SlotStartMs int64
@@ -74,7 +91,8 @@ type Bridge struct {
 	ctrl   *control.State
 	ctrlMu *sync.Mutex
 	cb     CommandCallbacks
-	plan   PlanSource // nil when MPC is not configured
+	plan   PlanSource   // nil when MPC is not configured
+	energy EnergySource // nil when state.Store is not available
 
 	topicPrefix string // e.g. "forty-two-watts"
 	discoPrefix string // e.g. "homeassistant"
@@ -171,6 +189,7 @@ func Start(
 	driverNames []string,
 	cb CommandCallbacks,
 	plan PlanSource,
+	energy EnergySource,
 ) (*Bridge, error) {
 	b := &Bridge{
 		tel:                     tel,
@@ -178,6 +197,7 @@ func Start(
 		ctrlMu:                  ctrlMu,
 		cb:                      cb,
 		plan:                    plan,
+		energy:                  energy,
 		topicPrefix:             "forty-two-watts",
 		discoPrefix:             "homeassistant",
 		deviceID:                "forty_two_watts",
@@ -380,17 +400,38 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Site-level sensors ----
 	sensors := []struct {
-		id, name, unit, devClass string
-		state                    string
+		id, name, unit, devClass, stateClass string
+		state                                string
 	}{
-		{"grid_power", "Grid Power", "W", "power", b.stateTopic("grid_w")},
-		{"pv_power", "PV Power", "W", "power", b.stateTopic("pv_w")},
-		{"battery_power", "Battery Power", "W", "power", b.stateTopic("bat_w")},
-		{"load_power", "Load Power", "W", "power", b.stateTopic("load_w")},
-		{"battery_soc", "Battery SoC", "%", "battery", b.stateTopic("bat_soc_pct")},
-		{"grid_target", "Grid Target", "W", "power", b.stateTopic("grid_target_w")},
-		{"peak_limit", "Peak Limit", "W", "power", b.stateTopic("peak_limit_w")},
-		{"ev_charging", "EV Charging Power", "W", "power", b.stateTopic("ev_charging_w")},
+		// Real-time power flow
+		{"grid_power", "Grid Power", "W", "power", "measurement", b.stateTopic("grid_w")},
+		{"pv_power", "PV Power", "W", "power", "measurement", b.stateTopic("pv_w")},
+		{"battery_power", "Battery Power", "W", "power", "measurement", b.stateTopic("bat_w")},
+		{"load_power", "Load Power", "W", "power", "measurement", b.stateTopic("load_w")},
+		{"battery_soc", "Battery SoC", "%", "battery", "measurement", b.stateTopic("bat_soc_pct")},
+		// Control setpoints
+		{"grid_target", "Grid Target", "W", "power", "", b.stateTopic("grid_target_w")},
+		{"peak_limit", "Peak Limit", "W", "power", "", b.stateTopic("peak_limit_w")},
+		{"peak_import_ceiling", "Peak Import Ceiling", "W", "power", "", b.stateTopic("peak_import_ceiling_w")},
+		{"ev_charging", "EV Charging Power", "W", "power", "", b.stateTopic("ev_charging_w")},
+		// Forecast from current MPC slot (only populated when plan is wired)
+		{"pv_predicted", "PV Power Predicted", "W", "power", "measurement", b.stateTopic("pv_w_predicted")},
+		{"load_predicted", "Load Power Predicted", "W", "power", "measurement", b.stateTopic("load_w_predicted")},
+		// Per-phase power (site meter, available when driver emits l1_w/l2_w/l3_w)
+		{"phase_1_power", "Phase L1 Power", "W", "power", "measurement", b.stateTopic("phase_1_w")},
+		{"phase_2_power", "Phase L2 Power", "W", "power", "measurement", b.stateTopic("phase_2_w")},
+		{"phase_3_power", "Phase L3 Power", "W", "power", "measurement", b.stateTopic("phase_3_w")},
+		// Per-phase current (site meter, available when driver emits l1_a/l2_a/l3_a)
+		{"phase_1_current", "Phase L1 Current", "A", "current", "measurement", b.stateTopic("phase_1_a")},
+		{"phase_2_current", "Phase L2 Current", "A", "current", "measurement", b.stateTopic("phase_2_a")},
+		{"phase_3_current", "Phase L3 Current", "A", "current", "measurement", b.stateTopic("phase_3_a")},
+		// Today's energy totals (accumulated since midnight, reset daily)
+		{"today_import", "Today Grid Import", "Wh", "energy", "measurement", b.stateTopic("today_import_wh")},
+		{"today_export", "Today Grid Export", "Wh", "energy", "measurement", b.stateTopic("today_export_wh")},
+		{"today_pv", "Today PV Generation", "Wh", "energy", "measurement", b.stateTopic("today_pv_wh")},
+		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "measurement", b.stateTopic("today_bat_charged_wh")},
+		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "measurement", b.stateTopic("today_bat_discharged_wh")},
+		{"today_load", "Today Load", "Wh", "energy", "measurement", b.stateTopic("today_load_wh")},
 	}
 	for _, s := range sensors {
 		msg := b.withAvail(map[string]any{
@@ -401,6 +442,9 @@ func (b *Bridge) publishDiscovery() {
 			"device_class":        s.devClass,
 			"device":              dev,
 		})
+		if s.stateClass != "" {
+			msg["state_class"] = s.stateClass
+		}
 		data, _ := json.Marshal(msg)
 		topic := fmt.Sprintf("%s/sensor/%s/%s/config", b.discoPrefix, b.deviceID, s.id)
 		b.publish(topic, data, true)
@@ -739,6 +783,7 @@ func (b *Bridge) publishState() {
 	mode := string(b.ctrl.Mode)
 	gridTarget := b.ctrl.GridTargetW
 	peakLimit := b.ctrl.PeakLimitW
+	peakCeiling := b.ctrl.PeakImportCeilingW
 	evCharging := b.ctrl.EVChargingW
 	batteryCoversEV := b.ctrl.BatteryCoversEV
 	planStale := b.ctrl.PlanStale
@@ -776,6 +821,7 @@ func (b *Bridge) publishState() {
 	b.publishValue("bat_soc_pct", avgSoC*100)
 	b.publishValue("grid_target_w", gridTarget)
 	b.publishValue("peak_limit_w", peakLimit)
+	b.publishValue("peak_import_ceiling_w", peakCeiling)
 	b.publishValue("ev_charging_w", evCharging)
 	b.publishString("mode", mode)
 	bceState := "OFF"
@@ -783,6 +829,50 @@ func (b *Bridge) publishState() {
 		bceState = "ON"
 	}
 	b.publishString("battery_covers_ev", bceState)
+
+	// ---- Per-phase power + current (from site meter DerReading.Data) ----
+	if r := b.tel.Get(siteMeter, telemetry.DerMeter); r != nil && len(r.Data) > 0 {
+		var phase struct {
+			L1W *float64 `json:"l1_w"`
+			L2W *float64 `json:"l2_w"`
+			L3W *float64 `json:"l3_w"`
+			L1A *float64 `json:"l1_a"`
+			L2A *float64 `json:"l2_a"`
+			L3A *float64 `json:"l3_a"`
+		}
+		if json.Unmarshal(r.Data, &phase) == nil {
+			if phase.L1W != nil {
+				b.publishValue("phase_1_w", *phase.L1W)
+			}
+			if phase.L2W != nil {
+				b.publishValue("phase_2_w", *phase.L2W)
+			}
+			if phase.L3W != nil {
+				b.publishValue("phase_3_w", *phase.L3W)
+			}
+			if phase.L1A != nil {
+				b.publishValue("phase_1_a", *phase.L1A)
+			}
+			if phase.L2A != nil {
+				b.publishValue("phase_2_a", *phase.L2A)
+			}
+			if phase.L3A != nil {
+				b.publishValue("phase_3_a", *phase.L3A)
+			}
+		}
+	}
+
+	// ---- Today's energy totals (since midnight local time) ----
+	if b.energy != nil {
+		if snap, ok := b.energy.TodayEnergy(); ok {
+			b.publishValue("today_import_wh", snap.ImportWh)
+			b.publishValue("today_export_wh", snap.ExportWh)
+			b.publishValue("today_pv_wh", snap.PVWh)
+			b.publishValue("today_bat_charged_wh", snap.BatChargedWh)
+			b.publishValue("today_bat_discharged_wh", snap.BatDischargedWh)
+			b.publishValue("today_load_wh", snap.LoadWh)
+		}
+	}
 
 	// ---- MPC plan + price + plan-stale ----
 	if b.plan != nil {
@@ -971,6 +1061,7 @@ func (b *Bridge) publishPlan() {
 
 	currentAction := "unavailable"
 	var curBatW, curGridW, curSoCPct float64
+	var curPVW, curLoadW float64
 	var curStart, curEnd string
 	var curPriceOre, curSpotOre, curCostOre, curConfidence float64
 	var curReason, curEMSMode string
@@ -1000,6 +1091,8 @@ func (b *Bridge) publishPlan() {
 			curBatW = a.BatteryW
 			curGridW = a.GridW
 			curSoCPct = a.SoCPct
+			curPVW = a.PVW
+			curLoadW = a.LoadW
 			curStart = start
 			curEnd = end
 			curPriceOre = a.PriceOre
@@ -1061,6 +1154,11 @@ func (b *Bridge) publishPlan() {
 	if d, err := json.Marshal(priceAttrs); err == nil {
 		b.publish(b.stateTopic("price_json"), d, false)
 	}
+
+	// Predicted PV and load from the current MPC slot — exposed as standalone
+	// sensors so HA dashboards can compare forecast vs. actual in real time.
+	b.publishValue("pv_w_predicted", curPVW)
+	b.publishValue("load_w_predicted", curLoadW)
 }
 
 // planActionLabel converts a signed battery power to a human-readable label.

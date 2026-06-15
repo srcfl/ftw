@@ -547,7 +547,7 @@ func main() {
 				deps.HA = nil
 				slog.Info("HA bridge stopped (disabled in config)")
 			case haBridge == nil && haEnabled:
-				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc)); err != nil {
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
 					slog.Warn("HA bridge start failed", "err", err)
 				} else {
 					haBridge = bridge
@@ -1724,7 +1724,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -2929,6 +2929,33 @@ func mpcPlanSource(svc *mpc.Service) ha.PlanSource {
 		return nil
 	}
 	return mpcPlanBridge{svc: svc}
+}
+
+// stateEnergyBridge adapts *state.Store to ha.EnergySource.
+type stateEnergyBridge struct{ st *state.Store }
+
+func (b stateEnergyBridge) TodayEnergy() (ha.TodayEnergySnapshot, bool) {
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	d, err := b.st.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return ha.TodayEnergySnapshot{}, false
+	}
+	return ha.TodayEnergySnapshot{
+		ImportWh:        d.ImportWh,
+		ExportWh:        d.ExportWh,
+		PVWh:            d.PVWh,
+		BatChargedWh:    d.BatChargedWh,
+		BatDischargedWh: d.BatDischargedWh,
+		LoadWh:          d.LoadWh,
+	}, true
+}
+
+func haEnergySource(st *state.Store) ha.EnergySource {
+	if st == nil {
+		return nil
+	}
+	return stateEnergyBridge{st: st}
 }
 
 func envOr(key, def string) string {
