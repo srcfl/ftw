@@ -89,6 +89,20 @@ type FlexLoad struct {
 	HeatingKind     string  `yaml:"heating_kind,omitempty" json:"heating_kind,omitempty"`
 	COP             float64 `yaml:"cop,omitempty" json:"cop,omitempty"` // hydronic only; default 3.0 when kind=hydronic, 1.0 electric
 	HeatSourceDriver string `yaml:"heat_source_driver,omitempty" json:"heat_source_driver,omitempty"` // hydronic: central HP/boiler driver the electrical load is attributed to
+
+	// FlowDriver/FlowMetric read the heat pump's supply (flow) temperature
+	// (°C), typically from a Nibe/Thermia/etc integration. It refines the
+	// reheat-cost side of the pause economics: a hot loop means the heat pump
+	// already produced the heat, so recovering after a pause is nearly free;
+	// a cold loop means reheating must run the compressor and is costly.
+	// FlowDriver empty = read FlowMetric off DriverName. Only meaningful for
+	// hydronic zones.
+	FlowDriver string `yaml:"flow_driver,omitempty" json:"flow_driver,omitempty"`
+	FlowMetric string `yaml:"flow_metric,omitempty" json:"flow_metric,omitempty"`
+	// NominalFlowDeltaC is the design flow-above-room temperature delta at
+	// which the loop holds a full charge of usable heat (floor heating ≈ 15,
+	// radiators ≈ 25-30). Used to scale the stored-heat credit. Default 15.
+	NominalFlowDeltaC float64 `yaml:"nominal_flow_delta_c,omitempty" json:"nominal_flow_delta_c,omitempty"`
 	MinC            float64 `yaml:"min_c,omitempty" json:"min_c,omitempty"`
 	MaxC            float64 `yaml:"max_c,omitempty" json:"max_c,omitempty"`
 	MaxHeatW        float64 `yaml:"max_heat_w,omitempty" json:"max_heat_w,omitempty"`

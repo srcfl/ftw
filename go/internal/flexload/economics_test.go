@@ -24,7 +24,7 @@ func TestPauseIsNetWin(t *testing.T) {
 			return 300, true
 		},
 	}
-	worth, reason := svcCheaperLater.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli())
+	worth, reason := svcCheaperLater.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli(), 0, false, 0)
 	if !worth {
 		t.Errorf("expected net-win pause when reheat is cheaper: %s", reason)
 	}
@@ -39,15 +39,45 @@ func TestPauseIsNetWin(t *testing.T) {
 			return 200, true
 		},
 	}
-	worth, reason = svcPricierLater.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli())
+	worth, reason = svcPricierLater.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli(), 0, false, 0)
 	if worth {
 		t.Errorf("must not pause when reheat is pricier than now: %s", reason)
 	}
 
+	// Case 2b: SAME pricier-later prices, but the heat pump's flow temp is
+	// high (loop holds a full charge) → reheat is nearly free, so pausing
+	// becomes a net win after all. This is the operator's "good flow temp →
+	// reheating costs nothing" case.
+	worth, reason = svcPricierLater.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli(),
+		21+15 /*flow 15°C above room = full charge*/, true, 15)
+	if !worth {
+		t.Errorf("high flow temp should make the pause a win despite pricier reheat: %s", reason)
+	}
+
 	// Case 3: no price model → never a speculative reduction.
 	svcNoPrice := &Service{}
-	if worth, _ := svcNoPrice.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli()); worth {
+	if worth, _ := svcNoPrice.pauseIsNetWin(m, 21, 0, 1, pauseH, time.Now().UnixMilli(), 0, false, 0); worth {
 		t.Error("no price model must block any reduction")
+	}
+}
+
+// TestReheatFactor checks the stored-heat credit from flow temperature.
+func TestReheatFactor(t *testing.T) {
+	// No flow signal → assume full reheat cost.
+	if f := reheatFactor(0, 21, 15, false); f != 1.0 {
+		t.Errorf("no flow → factor 1, got %.2f", f)
+	}
+	// Flow at room temp → no usable stored heat → full cost.
+	if f := reheatFactor(21, 21, 15, true); f != 1.0 {
+		t.Errorf("flow==room → factor 1, got %.2f", f)
+	}
+	// Flow a full nominal delta above room → free reheat.
+	if f := reheatFactor(36, 21, 15, true); f != 0.0 {
+		t.Errorf("full charge → factor 0, got %.2f", f)
+	}
+	// Half the nominal delta → half cost.
+	if f := reheatFactor(21+7.5, 21, 15, true); f < 0.49 || f > 0.51 {
+		t.Errorf("half charge → factor ~0.5, got %.2f", f)
 	}
 }
 

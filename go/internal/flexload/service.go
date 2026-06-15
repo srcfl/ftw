@@ -20,8 +20,11 @@ type Device struct {
 	Mode       string // "planner" (default) | "simple" — thermostats only
 
 	// thermostat
-	HeatingKind     string  // "electric" (default) | "hydronic"
-	COP             float64 // electrical→thermal multiplier (1 electric, ~3 heat pump)
+	HeatingKind       string  // "electric" (default) | "hydronic"
+	COP               float64 // electrical→thermal multiplier (1 electric, ~3 heat pump)
+	FlowDriver        string  // optional: heat-pump driver exposing supply (flow) temp
+	FlowMetric        string  // metric carrying flow temperature (°C)
+	NominalFlowDeltaC float64 // design flow-above-room delta for a full heat charge (default 15)
 	MinC            float64
 	MaxC            float64
 	MaxHeatW        float64 // zone thermal output cap (W)
@@ -377,16 +380,60 @@ func (s *Service) stoveDecision(d Device, indoorC, comfortTargetC float64, outdo
 		return setpoint, true, reason + " (fire ending soon — hold comfort)"
 	}
 
-	// Gate the deeper reduction on CALCULATION: reheat cost vs saving.
+	// Gate the deeper reduction on CALCULATION: reheat cost vs saving,
+	// discounted by any heat the loop is already storing (flow temp).
 	cop := d.COP
 	if cop <= 0 {
 		cop = 1
 	}
-	worth, reasonCalc := s.pauseIsNetWin(m, comfortTargetC, outdoorC, cop, remainingH, nowMs)
+	flowC, hasFlow := s.readFlowTemp(d)
+	worth, reasonCalc := s.pauseIsNetWin(m, comfortTargetC, outdoorC, cop, remainingH, nowMs,
+		flowC, hasFlow, d.NominalFlowDeltaC)
 	if !worth {
 		return setpoint, true, reason + " (" + reasonCalc + ")"
 	}
 	return d.MinC, true, "stove active + trained + " + reasonCalc + " → deep pause to MinC"
+}
+
+// readFlowTemp returns the heat pump's supply (flow) temperature for a zone.
+func (s *Service) readFlowTemp(d Device) (float64, bool) {
+	if d.FlowMetric == "" {
+		return 0, false
+	}
+	src := d.FlowDriver
+	if src == "" {
+		src = d.DriverName
+	}
+	v, _, ok := s.Tele.LatestMetric(src, d.FlowMetric)
+	return v, ok
+}
+
+// reheatFactor scales reheat cost by how much usable heat the hydronic loop
+// is already storing. A flow temperature well above the room (a full charge)
+// means the loop can deliver heat without running the compressor, so reheat
+// is nearly free (factor → 0). A flow temperature at/below the room means no
+// stored heat is available and reheat costs the full compressor energy
+// (factor → 1). With no flow signal we assume the worst (1) so the credit is
+// never applied speculatively.
+func reheatFactor(flowTempC, targetRoomC, nominalDeltaC float64, hasFlow bool) float64 {
+	if !hasFlow {
+		return 1.0
+	}
+	if nominalDeltaC <= 0 {
+		nominalDeltaC = 15.0 // floor-heating default
+	}
+	headroom := flowTempC - targetRoomC
+	if headroom <= 0 {
+		return 1.0
+	}
+	f := 1.0 - headroom/nominalDeltaC
+	if f < 0 {
+		f = 0
+	}
+	if f > 1 {
+		f = 1
+	}
+	return f
 }
 
 // pauseIsNetWin runs the economic cost-benefit for letting a zone ride down
@@ -395,7 +442,8 @@ func (s *Service) stoveDecision(d Device, indoorC, comfortTargetC float64, outdo
 // forecast price at the reheat moment. Captures the operator's floor-heating
 // checklist: demand (HeatToHoldW vs outdoor), price now, inertia (the energy
 // is integrated over the learned coast), COP, and the reheat price.
-func (s *Service) pauseIsNetWin(m thermalmodel.Model, targetC, outdoorC, cop, pauseH float64, nowMs int64) (bool, string) {
+func (s *Service) pauseIsNetWin(m thermalmodel.Model, targetC, outdoorC, cop, pauseH float64, nowMs int64,
+	flowTempC float64, hasFlow bool, nominalFlowDeltaC float64) (bool, string) {
 	if s.PriceAt == nil || pauseH <= 0 {
 		return false, "no price model"
 	}
@@ -414,11 +462,17 @@ func (s *Service) pauseIsNetWin(m thermalmodel.Model, targetC, outdoorC, cop, pa
 	}
 	// First-order energy balance: the heat allowed to escape during the pause
 	// must be put back to return to target → roughly the same energy, billed
-	// at the reheat-time price.
+	// at the reheat-time price. The reheat is discounted by heat the loop is
+	// already storing (high flow temp from the heat pump): a hot loop reheats
+	// the room for nearly free, a cold loop pays the full compressor cost.
+	rf := reheatFactor(flowTempC, targetC, nominalFlowDeltaC, hasFlow)
 	savingOre := avoidedKWh * priceNow
-	reheatOre := avoidedKWh * priceReheat
+	reheatOre := avoidedKWh * priceReheat * rf
 	if savingOre <= reheatOre {
-		return false, "reheat not cheaper than now"
+		return false, "reheat cost (flow-adjusted) not below saving"
+	}
+	if hasFlow && rf < 0.5 {
+		return true, "loop holds heat (high flow temp) — reheat cheap"
 	}
 	return true, "reheat cheaper than now (save vs reheat positive)"
 }
