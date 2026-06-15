@@ -198,6 +198,11 @@ type SimpleSpec struct {
 	MaxHeatW       float64       // zone thermal output cap
 	COP            float64       // electrical/thermal ratio (≤0 → 1)
 	Confidence     float64       // model quality [0,1]; below MinBlockConfidence we never block
+	// CoastOverrideH lets the caller supply a coast-to-target estimate from a
+	// better model (the two-mass floor-heating model) instead of the
+	// single-mass fit. Used when HasCoastOverride is true.
+	CoastOverrideH   float64
+	HasCoastOverride bool
 }
 
 // MinBlockConfidence is the learned-model quality required before the simple
@@ -230,7 +235,12 @@ func EvaluateSimple(spec SimpleSpec) SimpleDecision {
 		}
 	}
 
-	coast := coastHoursToTarget(spec.Model, spec.CurrentC, spec.TargetC, spec.Outdoor, 24*time.Hour)
+	// Prefer the two-mass floor-heating coast estimate when supplied — it
+	// accounts for the slab's stored heat the single-mass fit can't see.
+	coast := spec.CoastOverrideH
+	if !spec.HasCoastOverride {
+		coast = coastHoursToTarget(spec.Model, spec.CurrentC, spec.TargetC, spec.Outdoor, 24*time.Hour)
+	}
 	expensive := spec.PriceThreshold > 0 && spec.PriceNow > spec.PriceThreshold
 	bufferEnough := coast >= spec.BlockHorizon.Hours()
 	// No reduction without a trustworthy, learned model: an untrained zone

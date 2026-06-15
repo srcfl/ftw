@@ -132,6 +132,26 @@ func (m Model) ThermalWForRate(rateCPerS float64) float64 {
 	return rateCPerS / b
 }
 
+// CoastHoursToTarget returns how many hours the zone stays at or above
+// targetC with no heating, starting from indoorC. cap bounds the search.
+func (m Model) CoastHoursToTarget(indoorC, targetC, outdoorC float64, cap time.Duration) float64 {
+	if indoorC <= targetC {
+		return 0
+	}
+	const step = 300.0
+	maxS := cap.Seconds()
+	t := 0.0
+	temp := indoorC
+	for t < maxS {
+		temp = m.PredictNext(temp, outdoorC, 0, step)
+		t += step
+		if temp <= targetC {
+			break
+		}
+	}
+	return t / 3600.0
+}
+
 // HeatToHoldW returns the steady-state heating power (W, ≥0) needed to
 // hold the zone at targetC against the given outdoor temperature — the
 // power at which dT/dt = 0. Useful as a baseline for the scheduler.

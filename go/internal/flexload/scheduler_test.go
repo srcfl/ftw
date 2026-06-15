@@ -60,6 +60,30 @@ func TestSimpleNeverBlocksUntrainedModel(t *testing.T) {
 	}
 }
 
+// TestSimpleUsesCoastOverride verifies the two-mass coast estimate is used
+// when supplied: a small single-mass buffer would refuse the block, but the
+// floor-heating slab gives a long coast → block is allowed.
+func TestSimpleUsesCoastOverride(t *testing.T) {
+	m := trainedModel()
+	// Tiny inherent buffer (close to target, cold out) → single-mass coast < 1h.
+	spec := SimpleSpec{
+		Model: m, CurrentC: 20.2, TargetC: 20.0, MinC: 18.0,
+		Outdoor: -5.0, PriceNow: 300, PriceThreshold: 150,
+		BlockHorizon: time.Hour, MaxHeatW: 2000, COP: 1, Confidence: 1.0,
+	}
+	// Without override → heats (insufficient buffer).
+	if d := EvaluateSimple(spec); !d.Heat {
+		t.Fatalf("precondition: single-mass should refuse block, coast=%.2f", d.CoastHours)
+	}
+	// With a 3h two-mass coast override (hot slab) → blocks.
+	spec.HasCoastOverride = true
+	spec.CoastOverrideH = 3.0
+	d := EvaluateSimple(spec)
+	if d.Heat {
+		t.Errorf("two-mass coast override should permit the block, got heat=%v reason=%s", d.Heat, d.Reason)
+	}
+}
+
 // TestSimpleProtectsFloor verifies a zone at/below the floor always heats,
 // regardless of price.
 func TestSimpleProtectsFloor(t *testing.T) {

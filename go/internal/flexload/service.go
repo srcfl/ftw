@@ -31,6 +31,8 @@ type Device struct {
 	IndoorDriver    string  // optional: separate driver (temp sensor) for indoor temp
 	IndoorMetric    string  // driver metric carrying measured indoor temp (°C)
 	HeatMetric      string  // optional: metered heating power (W) for RC training
+	SlabDriver      string  // optional: floor-probe / flow-temp driver (→ two-mass model)
+	SlabMetric      string  // metric carrying slab/floor temperature (°C)
 	SetpointAction  string  // driver command action that writes the setpoint
 	PreHeatFraction float64
 
@@ -84,8 +86,10 @@ type Service struct {
 	ReplanInterval time.Duration // schedule + dispatch cadence (default 5m)
 
 	mu         sync.RWMutex
-	thermal    map[string]*thermalmodel.Model    // by driver name
+	thermal    map[string]*thermalmodel.Model    // by driver name (single-mass RC)
+	twomass    map[string]*thermalmodel.TwoMass  // by driver name (slab+room, floor heating)
 	lastIndoor map[string]tempSample             // last indoor reading for delta training
+	lastSlab   map[string]tempSample             // last slab reading for two-mass training
 	plug       map[string]*PlugProfile           // by driver name (deferrable load learning)
 	stove      map[string]*ExternalHeatDetector  // by driver name (wood-stove / free-heat detection)
 
@@ -99,6 +103,7 @@ type tempSample struct {
 }
 
 const thermalStateKeyPrefix = "flexload/thermal/"
+const twoMassStateKeyPrefix = "flexload/twomass/"
 const plugStateKeyPrefix = "flexload/plug/"
 const stoveStateKeyPrefix = "flexload/stove/"
 
@@ -115,7 +120,9 @@ func NewService(st *state.Store, tel *telemetry.Store, devices []Device) *Servic
 		SampleInterval: 60 * time.Second,
 		ReplanInterval: 5 * time.Minute,
 		thermal:        map[string]*thermalmodel.Model{},
+		twomass:        map[string]*thermalmodel.TwoMass{},
 		lastIndoor:     map[string]tempSample{},
+		lastSlab:       map[string]tempSample{},
 		plug:           map[string]*PlugProfile{},
 		stove:          map[string]*ExternalHeatDetector{},
 		stop:           make(chan struct{}),
@@ -138,6 +145,24 @@ func NewService(st *state.Store, tel *telemetry.Store, devices []Device) *Servic
 				}
 			}
 			s.thermal[d.DriverName] = m
+			// For floor heating with a slab/floor probe, also keep a two-mass
+			// model and prefer it for coast/forecast once trained.
+			if d.SlabMetric != "" {
+				tmm := thermalmodel.NewTwoMass()
+				if st != nil {
+					if js, ok := st.LoadConfig(twoMassStateKeyPrefix + d.DriverName); ok && js != "" {
+						var loaded thermalmodel.TwoMass
+						if err := json.Unmarshal([]byte(js), &loaded); err == nil && loaded.Forgetting > 0 {
+							tmm = &loaded
+							slog.Info("flexload two-mass model restored",
+								"driver", d.DriverName, "samples", tmm.Samples,
+								"tau_room_h", tmm.TauRoomSeconds()/3600,
+								"tau_slab_h", tmm.TauSlabSeconds()/3600, "quality", tmm.Quality())
+						}
+					}
+				}
+				s.twomass[d.DriverName] = tmm
+			}
 			// Restore the external-heat (wood-stove) detector's learned stats.
 			det := &ExternalHeatDetector{}
 			if st != nil {
@@ -191,6 +216,18 @@ func (s *Service) ThermalModel(driver string) (thermalmodel.Model, bool) {
 	m, ok := s.thermal[driver]
 	if !ok {
 		return thermalmodel.Model{}, false
+	}
+	return *m, true
+}
+
+// TwoMassModel returns a copy of the learned floor-heating model for a
+// driver (for the API / diagnostics), and whether one exists.
+func (s *Service) TwoMassModel(driver string) (thermalmodel.TwoMass, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m, ok := s.twomass[driver]
+	if !ok {
+		return thermalmodel.TwoMass{}, false
 	}
 	return *m, true
 }
@@ -312,6 +349,21 @@ func (s *Service) sample() {
 					if m.Update(prev.c, indoorC, outdoor, heatThermalW, dt, now.UnixMilli()) {
 						if m.Samples%10 == 0 {
 							s.persist(d.DriverName, m)
+						}
+					}
+					// Two-mass (floor heating) training needs the slab reading
+					// at both ends of the step.
+					if tmm := s.twomass[d.DriverName]; tmm != nil && d.SlabMetric != "" {
+						if slabC, slabOk := s.readSlab(d); slabOk {
+							prevSlab, hasPrevSlab := s.lastSlab[d.DriverName]
+							s.lastSlab[d.DriverName] = tempSample{c: slabC, tsMs: now.UnixMilli()}
+							if hasPrevSlab {
+								if tmm.Update(prev.c, indoorC, prevSlab.c, slabC, outdoor, heatThermalW, dt, now.UnixMilli()) {
+									if tmm.Samples%10 == 0 {
+										s.persistTwoMass(d.DriverName, tmm)
+									}
+								}
+							}
 						}
 					}
 				}
@@ -595,6 +647,7 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 
 	s.mu.RLock()
 	tm := s.thermal[d.DriverName]
+	tmm := s.twomass[d.DriverName]
 	s.mu.RUnlock()
 	if tm == nil {
 		return SimpleSpec{}, false
@@ -609,18 +662,34 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 	if target == 0 {
 		target = (d.MinC + d.MaxC) / 2
 	}
+
+	// Floor heating: when a slab reading is available, use the two-mass model
+	// for both the coast estimate and the confidence gate — it knows the slab
+	// keeps the room warm long after the element cuts out.
+	coastOverride, hasOverride := 0.0, false
+	confidence := model.Quality()
+	if tmm != nil {
+		if slabC, okSlab := s.readSlab(d); okSlab {
+			coastOverride = tmm.CoastHoursToRoomTarget(indoorC, slabC, target, outdoor, 24*time.Hour)
+			hasOverride = true
+			confidence = tmm.Quality()
+		}
+	}
+
 	return SimpleSpec{
-		Model:          model,
-		CurrentC:       indoorC,
-		TargetC:        target,
-		MinC:           d.MinC,
-		Outdoor:        outdoor,
-		PriceNow:       priceNow,
-		PriceThreshold: threshold,
-		BlockHorizon:   time.Duration(bh * float64(time.Hour)),
-		MaxHeatW:       d.MaxHeatW,
-		COP:            d.COP,
-		Confidence:     model.Quality(), // gate blocking on learned confidence
+		Model:            model,
+		CurrentC:         indoorC,
+		TargetC:          target,
+		MinC:             d.MinC,
+		Outdoor:          outdoor,
+		PriceNow:         priceNow,
+		PriceThreshold:   threshold,
+		BlockHorizon:     time.Duration(bh * float64(time.Hour)),
+		MaxHeatW:         d.MaxHeatW,
+		COP:              d.COP,
+		Confidence:       confidence, // gate blocking on learned confidence
+		CoastOverrideH:   coastOverride,
+		HasCoastOverride: hasOverride,
 	}, true
 }
 
@@ -636,6 +705,20 @@ func (s *Service) readIndoor(d Device) (float64, bool) {
 		return 0, false
 	}
 	v, _, ok := s.Tele.LatestMetric(src, d.IndoorMetric)
+	return v, ok
+}
+
+// readSlab returns the zone's slab/floor temperature (floor probe or flow
+// temp), used to drive the two-mass floor-heating model.
+func (s *Service) readSlab(d Device) (float64, bool) {
+	if d.SlabMetric == "" {
+		return 0, false
+	}
+	src := d.SlabDriver
+	if src == "" {
+		src = d.DriverName
+	}
+	v, _, ok := s.Tele.LatestMetric(src, d.SlabMetric)
 	return v, ok
 }
 
@@ -844,6 +927,19 @@ func (s *Service) persistPlug(driver string, p *PlugProfile) {
 	}
 }
 
+func (s *Service) persistTwoMass(driver string, m *thermalmodel.TwoMass) {
+	if s.Store == nil {
+		return
+	}
+	js, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	if err := s.Store.SaveConfig(twoMassStateKeyPrefix+driver, string(js)); err != nil {
+		slog.Warn("flexload two-mass persist failed", "driver", driver, "err", err)
+	}
+}
+
 func (s *Service) persistStove(driver string, det *ExternalHeatDetector) {
 	if s.Store == nil {
 		return
@@ -862,6 +958,9 @@ func (s *Service) persistAll() {
 	defer s.mu.RUnlock()
 	for driver, m := range s.thermal {
 		s.persist(driver, m)
+	}
+	for driver, m := range s.twomass {
+		s.persistTwoMass(driver, m)
 	}
 	for driver, p := range s.plug {
 		s.persistPlug(driver, p)

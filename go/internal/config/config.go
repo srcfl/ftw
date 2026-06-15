@@ -111,6 +111,16 @@ type FlexLoad struct {
 	SetpointAction  string  `yaml:"setpoint_action,omitempty" json:"setpoint_action,omitempty"`
 	PreHeatFraction float64 `yaml:"preheat_fraction,omitempty" json:"preheat_fraction,omitempty"`
 
+	// SlabDriver/SlabMetric provide the floor/slab temperature — a floor probe
+	// (common on electric floor thermostats) or the hydronic flow temperature
+	// as a proxy. When set, the zone uses a two-mass (slab + room) thermal
+	// model instead of the single-mass RC fit, which captures how a charged
+	// slab keeps the room warm for hours after the element switches off — a
+	// far more accurate coast/forecast for floor heating. SlabDriver empty =
+	// read SlabMetric off DriverName.
+	SlabDriver string `yaml:"slab_driver,omitempty" json:"slab_driver,omitempty"`
+	SlabMetric string `yaml:"slab_metric,omitempty" json:"slab_metric,omitempty"`
+
 	// ---- deferrable fields ----
 	// PowerMetric is the driver metric carrying the plug's measured power
 	// (W) — e.g. a Matter smart plug's ActivePower. When set, the scheduler

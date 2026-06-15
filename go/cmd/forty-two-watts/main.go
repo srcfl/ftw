@@ -795,6 +795,8 @@ func main() {
 				IndoorDriver:      f.IndoorDriver,
 				IndoorMetric:      f.IndoorMetric,
 				HeatMetric:        f.HeatMetric,
+				SlabDriver:        f.SlabDriver,
+				SlabMetric:        f.SlabMetric,
 				SetpointAction:    f.SetpointAction,
 				PreHeatFraction:   f.PreHeatFraction,
 				TargetC:           f.TargetC,
