@@ -566,7 +566,7 @@ func main() {
 				deps.HA = nil
 				slog.Info("HA bridge stopped (disabled in config)")
 			case haBridge == nil && haEnabled:
-				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc)); err != nil {
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc)); err != nil {
 					slog.Warn("HA bridge start failed", "err", err)
 				} else {
 					haBridge = bridge
@@ -1788,7 +1788,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -2993,6 +2993,38 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 			return st.SaveConfig("battery_covers_ev", val)
 		},
 	}
+}
+
+// mpcPlanBridge adapts *mpc.Service to ha.PlanSource without creating an
+// import cycle between ha and mpc.
+type mpcPlanBridge struct{ svc *mpc.Service }
+
+func (b mpcPlanBridge) LatestActions() []ha.PlanAction {
+	if b.svc == nil {
+		return nil
+	}
+	plan := b.svc.Latest()
+	if plan == nil {
+		return nil
+	}
+	out := make([]ha.PlanAction, len(plan.Actions))
+	for i, a := range plan.Actions {
+		out[i] = ha.PlanAction{
+			SlotStartMs: a.SlotStartMs,
+			SlotLenMin:  a.SlotLenMin,
+			BatteryW:    a.BatteryW,
+			GridW:       a.GridW,
+			SoCPct:      a.SoCPct,
+		}
+	}
+	return out
+}
+
+func mpcPlanSource(svc *mpc.Service) ha.PlanSource {
+	if svc == nil {
+		return nil
+	}
+	return mpcPlanBridge{svc: svc}
 }
 
 func envOr(key, def string) string {
