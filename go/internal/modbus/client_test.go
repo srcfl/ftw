@@ -6,6 +6,9 @@ import (
 	"net"
 	"syscall"
 	"testing"
+	"time"
+
+	sv "github.com/simonvetter/modbus"
 
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 )
@@ -26,6 +29,12 @@ func TestIsTransportError(t *testing.T) {
 		{errors.New("use of closed network connection"), true},
 		{errors.New("i/o timeout"), true},
 		{errors.New("EOF"), true},
+		// simonvetter's own deadline sentinel. The TCP socket can still be
+		// ESTABLISHED while the device goes mute on the session (CTEK CSOS
+		// chargers do this — a fresh connection answers fine), so a redial is
+		// the correct response. See TestReadReconnectsAfterServerTimesOut.
+		{sv.ErrRequestTimedOut, true},
+		{errors.New("request timed out"), true},
 		// Modbus protocol errors — live peer, connection usable, no reconnect.
 		{errors.New("illegal data address"), false},
 		{errors.New("illegal function"), false},
@@ -132,6 +141,79 @@ func TestReadReconnectsAfterServerClosesConnection(t *testing.T) {
 	}
 	if len(regs) != 1 || regs[0] != 222 {
 		t.Errorf("second read after reconnect = %v, want [222]", regs)
+	}
+}
+
+// TestReadReconnectsAfterServerTimesOut covers the CTEK CSOS incident
+// (2026-06-10, Stefan's Pi): the charger kept the TCP socket ESTABLISHED
+// but stopped answering requests on that long-lived session, so every
+// WriteRegister returned simonvetter's ErrRequestTimedOut ("request timed
+// out") rather than a closed-socket error. The first server connection
+// here accepts the request and never replies (forcing the client timeout);
+// the second connection answers normally. The Capability must classify the
+// timeout as transport, redial, and succeed on the retry.
+func TestReadReconnectsAfterServerTimesOut(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	var accepted int
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted++
+			mute := accepted == 1
+			go func(c net.Conn, mute bool) {
+				defer c.Close()
+				hdr := make([]byte, 12)
+				if _, err := io.ReadFull(c, hdr); err != nil {
+					return
+				}
+				if mute {
+					// Mimic the CTEK: read the request, answer nothing, keep
+					// the socket open until the client gives up and redials.
+					time.Sleep(8 * time.Second)
+					return
+				}
+				resp := []byte{
+					hdr[0], hdr[1], // tx id
+					0, 0, // protocol
+					0, 5, // length
+					hdr[6],   // unit id
+					hdr[7],   // function code
+					2,        // byte count
+					0, 222,   // value = 222
+				}
+				_, _ = c.Write(resp)
+			}(c, mute)
+		}
+	}()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	if _, err := fmtSscan(portStr, &port); err != nil {
+		t.Fatalf("bad listener port: %v", err)
+	}
+
+	cap, err := Dial(host, port, 1)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cap.Close()
+
+	// First read times out on the mute connection; Capability must reconnect
+	// and the retry hits the second (responsive) connection.
+	regs, err := cap.Read(0, 1, drivers.ModbusInput)
+	if err != nil {
+		t.Fatalf("read (timeout→reconnect path): %v", err)
+	}
+	if len(regs) != 1 || regs[0] != 222 {
+		t.Errorf("read after reconnect = %v, want [222]", regs)
 	}
 }
 
