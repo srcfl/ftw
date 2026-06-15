@@ -83,6 +83,11 @@ type Controller struct {
 	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
+	// manualHoldSaver, if non-nil, persists operator (Persistent) manual
+	// holds so they survive a reboot / firmware update and the EV keeps
+	// charging across the restart. Called on Set (persistent) and Clear.
+	// Timed/diagnostic holds are intentionally NOT persisted (ephemeral).
+	manualHoldSaver func(id string, h ManualHold, cleared bool)
 
 	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
 	// state that smooths the surplus_only pause/resume decision over
@@ -338,6 +343,12 @@ type ManualHold struct {
 	MaxAmpsPerPhase float64
 	SitePhases      int
 	ExpiresAt       time.Time
+	// Persistent marks an operator "Start" / amp-slider override that
+	// never expires on time — it is released only by ClearManualHold
+	// ("Stop") or on unplug. A persistent hold carries a zero ExpiresAt;
+	// the flag is what distinguishes it from the zero-ExpiresAt "clear"
+	// sentinel that SetManualHold honours.
+	Persistent bool
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -1007,23 +1018,37 @@ func (c *Controller) siteFuse() SiteFuse {
 // behaviour without fighting the 5-second control tick.
 //
 // A zero ExpiresAt clears any hold for this loadpoint (same as
-// ClearManualHold). Setting a hold for an unknown loadpoint ID is
-// silently allowed — the hold has no effect because tickOne only
-// runs for configured loadpoints.
+// ClearManualHold) UNLESS h.Persistent is set, in which case it
+// installs a never-expiring override. Setting a hold for an unknown
+// loadpoint ID is silently allowed — the hold has no effect because
+// tickOne only runs for configured loadpoints.
 func (c *Controller) SetManualHold(id string, h ManualHold) {
 	if c == nil {
 		return
 	}
 	c.holdMu.Lock()
-	defer c.holdMu.Unlock()
 	if c.holds == nil {
 		c.holds = map[string]ManualHold{}
 	}
-	if h.ExpiresAt.IsZero() {
+	cleared := false
+	if h.ExpiresAt.IsZero() && !h.Persistent {
 		delete(c.holds, id)
-		return
+		cleared = true
+	} else {
+		c.holds[id] = h
 	}
-	c.holds[id] = h
+	saver := c.manualHoldSaver
+	c.holdMu.Unlock()
+	// Persist outside the lock (saver may do disk I/O). Only persistent
+	// operator holds survive a restart; clearing or a timed hold writes the
+	// "cleared" sentinel so a stale persistent hold isn't resurrected.
+	if saver != nil {
+		if cleared || !h.Persistent {
+			saver(id, ManualHold{}, true)
+		} else {
+			saver(id, h, false)
+		}
+	}
 }
 
 // ClearManualHold removes any active hold for the given loadpoint,
@@ -1033,13 +1058,34 @@ func (c *Controller) ClearManualHold(id string) {
 		return
 	}
 	c.holdMu.Lock()
-	defer c.holdMu.Unlock()
+	_, existed := c.holds[id]
 	delete(c.holds, id)
+	saver := c.manualHoldSaver
+	c.holdMu.Unlock()
+	// Only persist the clear if a hold actually existed — ClearManualHold is
+	// called on every unplugged tick, and we must not hammer the store.
+	if saver != nil && existed {
+		saver(id, ManualHold{}, true)
+	}
+}
+
+// SetManualHoldSaver wires the persistence callback for operator manual
+// holds. Pass nil to disable. Wire it AFTER restoring persisted holds at
+// startup so the restore doesn't immediately re-write what it just read.
+func (c *Controller) SetManualHoldSaver(fn func(id string, h ManualHold, cleared bool)) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	c.manualHoldSaver = fn
+	c.holdMu.Unlock()
 }
 
 // GetManualHold returns the current hold for a loadpoint. The bool
-// is false when no hold is active. Expired holds are not returned —
-// they're lazily evicted on the next read.
+// is false when no hold is active. Time-bounded holds past their
+// ExpiresAt are lazily evicted on the next read. A Persistent hold
+// (operator "Start" / amp-slider override) never expires on time and
+// is only released by ClearManualHold ("Stop") or on unplug (tickOne).
 func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) {
 	if c == nil {
 		return ManualHold{}, false
@@ -1050,7 +1096,7 @@ func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) 
 	if !ok {
 		return ManualHold{}, false
 	}
-	if !now.Before(h.ExpiresAt) {
+	if !h.Persistent && !now.Before(h.ExpiresAt) {
 		delete(c.holds, id)
 		return ManualHold{}, false
 	}
@@ -1128,6 +1174,11 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
+		// Release any manual override when the vehicle unplugs. A
+		// persistent "Start" hold (zero ExpiresAt) would otherwise
+		// survive the session and silently re-apply to the next car;
+		// "until Stop or unplug" is the operator's mental model.
+		c.ClearManualHold(lpCfg.ID)
 		return
 	}
 	if !wasPlugged {
@@ -1152,20 +1203,14 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// minimal hold (just `power_w`) still carries the per-phase
 		// fuse clamp inputs the driver needs to stay safe.
 		holdW := hold.PowerW
-		// Surplus-only is a hard promise even against a diagnostic
-		// hold: if the operator left surplus_only on while pinning a
-		// manual amperage, we still refuse to import grid for the EV.
-		// The hold's other fields (phase mode, hold time) are still
-		// honoured — only the W setpoint is clamped, and we log it so
-		// the operator notices the conflict.
-		if surplusOn && holdW > 0 {
-			clamped := c.computeSurplusCmd(now, lpCfg, holdW, sample.PowerW)
-			if clamped < holdW {
-				slog.Warn("loadpoint manual hold clamped by surplus_only",
-					"lp", lpCfg.ID, "hold_w", holdW, "clamped_w", clamped)
-				holdW = clamped
-			}
-		}
+		// An explicit manual hold ("Start" / amp slider) takes priority
+		// over surplus_only: when the operator deliberately pins a charge
+		// rate we honour it even if that means importing from the grid.
+		// surplus_only still governs *automatic* dispatch (the non-hold
+		// branch below) — releasing the hold ("Stop") drops straight back
+		// into PV-surplus-only charging. The fuse clamp below is the one
+		// guard a manual hold can never override. (surplusOn still drives
+		// the phase-mode fallback further down.)
 		// Fuse protection: even an operator-pinned hold must not bust
 		// the fuse. Apply the joint allocator's FuseEVMax cap and the
 		// pause-cooldown guard before sending. A sticky 11 kW Start

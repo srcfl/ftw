@@ -218,6 +218,9 @@
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
     });
+    bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (input) {
+      setByPath(currentConfig, input.dataset.checkboxPath, input.checked);
+    });
   }
 
   function setByPath(obj, path, val) {

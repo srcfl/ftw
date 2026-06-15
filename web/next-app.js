@@ -345,6 +345,7 @@
   const evSend = $("ev-send");
   const bceToggle = $("battery-covers-ev-toggle");
   const bceLabel = $("battery-covers-ev-label");
+  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -931,6 +932,7 @@
     if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
       bceToggle.checked = !!data.battery_covers_ev;
       if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
     }
 
     // Energy today
@@ -2168,7 +2170,7 @@
   }
 
   // Fire-and-forget wrappers around postJson. postJson itself rethrows
-  // so callers that chain .then/.finally (evCommand) behave correctly;
+  // so callers that chain .then/.finally behave correctly;
   // here we explicitly mark the rejection handled so the browser
   // doesn't log "Uncaught (in promise)" on every network hiccup.
   // postJson has already console.warn'd the failure.
@@ -2321,6 +2323,7 @@
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
       if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
       setBatteryCoversEV(bceToggle.checked);
     });
   }
@@ -2386,6 +2389,11 @@
   var schedSectionEl = null;
   var schedLpId = null;
   var schedNeedsRebuild = false;
+  // Manual amp-slider override section — same once-per-LP lifecycle as
+  // the schedule section so the slider keeps focus/value between polls.
+  var manualSectionEl = null;
+  var manualLpId = null;
+  var manualNeedsRebuild = false;
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2507,16 +2515,192 @@
           // cached section is still valid — re-attach.
           evModalBody.appendChild(schedSectionEl);
         }
+        // Manual amp-slider override — built once per LP (or after a
+        // Start/Stop). Mounted above the schedule so "charge now"
+        // controls sit closest to the live status.
+        var manualChanged = manualSectionEl == null || manualLpId !== matched.id;
+        if (manualChanged || manualNeedsRebuild) {
+          if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
+            evModalBody.removeChild(manualSectionEl);
+          }
+          manualSectionEl = buildManualControl(matched);
+          manualLpId = matched.id;
+          manualNeedsRebuild = false;
+          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+        } else if (manualSectionEl.parentNode !== evModalBody) {
+          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+        }
       } else {
         if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
           evModalBody.removeChild(schedSectionEl);
         }
+        if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
+          evModalBody.removeChild(manualSectionEl);
+        }
         schedSectionEl = null;
         schedLpId = null;
+        manualSectionEl = null;
+        manualLpId = null;
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
+  }
+
+  // buildManualControl renders the Tesla-style manual override: an amp
+  // slider (range = the charger's min/max charge current) plus Start /
+  // Stop. Start pins a persistent manual hold at the slider's amps,
+  // which overrides surplus_only and the plan (the fuse clamp still
+  // applies); Stop clears the hold and drops back to whatever mode the
+  // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
+  // is sent as watts (power_w = A × phases × voltage); the driver
+  // converts back to amps given the wallbox it's talking to.
+  function buildManualControl(lp) {
+    var phases = (lp && lp.phases) || 3;
+    var voltage = (lp && lp.voltage_v) || 230;
+    var perA = phases * voltage; // watts per amp
+    function wToA(w) { return perA > 0 ? w / perA : 0; }
+    function aToW(a) { return Math.round(a * perA); }
+
+    var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
+    var maxA = Math.round(wToA((lp && lp.max_charge_w) || 0)) || 16;
+    if (maxA <= minA) { maxA = minA + 1; }
+
+    var active = !!(lp && lp.manual_active);
+    var curA = active ? Math.round(wToA((lp && lp.manual_charge_w) || 0)) : maxA;
+    if (curA < minA) { curA = minA; }
+    if (curA > maxA) { curA = maxA; }
+
+    var box = document.createElement("div");
+    box.style.marginTop = "0.75rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Manual Charge";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.45rem";
+    box.appendChild(eyebrow);
+
+    // Slider + live readout.
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.6rem";
+
+    var slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(minA);
+    slider.max = String(maxA);
+    slider.step = "1";
+    slider.value = String(curA);
+    slider.style.flex = "1";
+    slider.style.accentColor = "var(--accent-e)";
+
+    var readout = document.createElement("div");
+    readout.style.fontFamily = "var(--mono)";
+    readout.style.fontSize = "0.9rem";
+    readout.style.minWidth = "6.5em";
+    readout.style.textAlign = "right";
+    readout.style.color = "var(--fg)";
+    function renderReadout() {
+      var a = parseInt(slider.value, 10) || minA;
+      readout.textContent = a + " A · " + (aToW(a) / 1000).toFixed(1) + " kW";
+    }
+    renderReadout();
+    slider.addEventListener("input", renderReadout);
+
+    row.appendChild(slider);
+    row.appendChild(readout);
+    box.appendChild(row);
+
+    // Status line.
+    var status = document.createElement("small");
+    status.style.display = "block";
+    status.style.color = "var(--text-dim)";
+    status.style.marginTop = "0.35rem";
+    status.style.minHeight = "1em";
+    status.textContent = active
+      ? "Manual override active — overriding PV surplus (fuse still limits)."
+      : "Stopped = automatic (PV-surplus-only if enabled below). Start overrides it.";
+    box.appendChild(status);
+
+    // Start / Stop buttons.
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.marginTop = "0.5rem";
+
+    var startBtn = document.createElement("button");
+    startBtn.type = "button";
+    startBtn.textContent = active ? "Update" : "Start";
+    startBtn.style.flex = "1";
+    startBtn.style.padding = "0.4rem 0.6rem";
+    startBtn.style.border = "none";
+    startBtn.style.borderRadius = "4px";
+    startBtn.style.cursor = "pointer";
+    startBtn.style.fontWeight = "600";
+    startBtn.style.background = "var(--accent-e)";
+    startBtn.style.color = "#0a0a0a";
+
+    var stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop";
+    stopBtn.style.flex = "1";
+    stopBtn.style.padding = "0.4rem 0.6rem";
+    stopBtn.style.border = "1px solid var(--line)";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.style.background = "transparent";
+    stopBtn.style.color = "var(--fg)";
+    stopBtn.disabled = !active;
+    stopBtn.style.opacity = active ? "1" : "0.5";
+
+    btnRow.appendChild(startBtn);
+    btnRow.appendChild(stopBtn);
+    box.appendChild(btnRow);
+
+    startBtn.addEventListener("click", function () {
+      startBtn.disabled = true;
+      status.textContent = "Starting…";
+      var a = parseInt(slider.value, 10) || minA;
+      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0).
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          power_w: aToW(a),
+          hold_s: 0,
+          phase_mode: phases === 1 ? "1p" : "3p",
+        }),
+      }).then(function () {
+        status.textContent = "Charging at " + a + " A — overriding PV surplus.";
+        manualNeedsRebuild = true; // reflect active state on next poll
+      }).catch(function () {
+        startBtn.disabled = false;
+        status.textContent = "Start failed — try again.";
+      });
+    });
+
+    stopBtn.addEventListener("click", function () {
+      stopBtn.disabled = true;
+      status.textContent = "Stopping…";
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "DELETE",
+      }).then(function () {
+        status.textContent = "Released — back to automatic charging.";
+        manualNeedsRebuild = true;
+      }).catch(function () {
+        stopBtn.disabled = false;
+        status.textContent = "Stop failed — try again.";
+      });
+    });
+
+    return box;
   }
 
   // buildScheduleControl renders the persistent charging schedule
@@ -2585,7 +2769,7 @@
     soCb.checked = !!(lp && lp.surplus_only);
     soCb.style.accentColor = "var(--accent-e)";
     var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV exports only — never imports grid)";
+    soText.textContent = "Surplus only (PV only — no grid or battery)";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
 
@@ -2676,7 +2860,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
@@ -2940,11 +3124,6 @@
 
   var evRefreshTimer = null;
   if (evModal) {
-    var evBtnStart = document.getElementById("ev-btn-start");
-    var evBtnPause = document.getElementById("ev-btn-pause");
-    var evBtnResume = document.getElementById("ev-btn-resume");
-    var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
-
     function openEvModal(driver) {
       evModalDriver = driver || null;
       evModal.open();
@@ -3034,20 +3213,11 @@
       });
     }
 
-    function evCommand(action) {
-      evActionBtns.forEach(function (b) { b.disabled = true; });
-      var body = { action: action };
-      if (evModalDriver) body.driver = evModalDriver;
-      postJson("/api/ev/command", body)
-        .catch(function () { /* postJson already logs */ })
-        .finally(function () {
-          refreshEvModal();
-          evActionBtns.forEach(function (b) { b.disabled = false; });
-        });
-    }
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+    // Legacy Start/Pause/Resume footer buttons were removed in favour of
+    // the in-body Manual Charge control (buildManualControl): an amp slider
+    // + Start/Stop that pins a persistent manual hold at a chosen current
+    // (Start, overrides surplus) or clears it (Stop, back to automatic).
+    // The POST /api/ev/command endpoint stays for HA / scripts.
   }
 
 
