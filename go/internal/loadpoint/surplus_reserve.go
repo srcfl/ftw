@@ -51,6 +51,20 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 		if !st.SurplusOnly || !st.PluggedIn {
 			continue
 		}
+		// Manual / schedule override: when the operator is force-charging
+		// (manual hold, or an active schedule forcing the setpoint), the EV
+		// is NOT surplus-gated — it charges at the forced power and the home
+		// battery is EXPECTED to discharge to cover it ("battery covers EV"
+		// is the intended mode here). Contribute no reserve for such an LP:
+		// (a) reserving surplus export for it is pointless (it isn't waiting
+		// on surplus), and (b) a non-zero reserve arms the dispatch
+		// no-discharge floor, which cuts the battery the instant it covers
+		// the EV (grid→0) and flaps the battery support 0↔full (observed on
+		// Stefan's CTEK 2026-06-11 during a manual charge). surplus_only stays
+		// on so automatic surplus charging resumes when the force-charge ends.
+		if st.ManualActive {
+			continue
+		}
 		// Tie the reserve to the EV's ACTUAL draw, not just "plugged in
 		// + surplus_only". A car that's Complete, refusing the offer,
 		// or whose vehicle driver has gone offline (Tesla proxy flake

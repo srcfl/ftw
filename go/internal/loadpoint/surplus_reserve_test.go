@@ -207,3 +207,26 @@ func TestSurplusReserveWPluggedStoppedSoCUnknownNoReserve(t *testing.T) {
 		t.Errorf("SurplusReserveW = %.0f, want 0 (SoC unknown, conservative)", got)
 	}
 }
+
+// Manual/schedule override: a force-charging (manual hold) surplus_only EV
+// must contribute NO reserve — the battery is meant to cover it, and a
+// non-zero reserve arms the dispatch no-discharge floor which flaps the
+// battery support 0↔full (Stefan 2026-06-11 manual charge). surplus_only
+// stays on so automatic surplus charging resumes when the hold ends.
+func TestSurplusReserveWManualActiveSkipped(t *testing.T) {
+	// Drawing 6.2 kW under a manual hold → would normally reserve
+	// current+headroom; with ManualActive it must reserve 0.
+	states := []State{{
+		ID: "garage", SurplusOnly: true, PluggedIn: true,
+		CurrentPowerW: 6210, MaxChargeW: 11000, ManualActive: true,
+	}}
+	if got := SurplusReserveW(states, nil); got != 0 {
+		t.Errorf("SurplusReserveW = %.0f, want 0 (manual-active LP must not reserve)", got)
+	}
+	// Sanity: same LP WITHOUT the manual hold still reserves (proves the
+	// skip is what zeroed it, not some other gate).
+	states[0].ManualActive = false
+	if got := SurplusReserveW(states, nil); got <= 0 {
+		t.Errorf("SurplusReserveW = %.0f, want >0 without manual hold (control)", got)
+	}
+}

@@ -708,11 +708,11 @@
         This can drain the home battery into the car. Use it only when EV charging should be part of the site battery plan.
       </div>
     </div>
-    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
-      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
-    </div>
+    <!-- Start/Pause/Resume footer buttons removed: the in-body Manual
+         Charge control (amp slider + Start/Stop, built by buildManualControl)
+         supersedes them. Start pins a persistent hold at a chosen amperage
+         (overriding surplus); Stop reverts to automatic / PV-surplus-only.
+         The /api/ev/command endpoint stays for HA / scripts. -->
   </ftw-modal>
 
   <!-- Grid detail popup — peak import ceiling + grid target. Open from

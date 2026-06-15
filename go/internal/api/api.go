@@ -2386,6 +2386,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Tel != nil {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
 	}
+	s.decorateLoadpointsWithManual(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

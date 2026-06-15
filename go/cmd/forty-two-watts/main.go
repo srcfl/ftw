@@ -1122,6 +1122,51 @@ func main() {
 			}
 			return ctrl.FuseEVMaxW, true
 		})
+		// Persist operator manual holds (the amp-slider "Start") so they
+		// survive reboot / firmware update and the EV keeps charging across
+		// the restart — the in-memory hold would otherwise be lost (Stefan
+		// 2026-06-11: a binary deploy dropped the live manual charge). Mirrors
+		// the loadpoint_schedule k/v pattern: one row per LP keyed
+		// `loadpoint_manual_hold:<id>`, "{}" = cleared.
+		const lpManualHoldKeyPrefix = "loadpoint_manual_hold:"
+		// Restore FIRST (before wiring the saver) so re-applying a persisted
+		// hold doesn't immediately re-write what we just read. A stale hold
+		// for a car unplugged during downtime self-clears on the first tick
+		// (tickOne unplug → ClearManualHold).
+		for _, lpState := range lpMgr.States() {
+			v, ok := st.LoadConfig(lpManualHoldKeyPrefix + lpState.ID)
+			if !ok || v == "" || v == "{}" {
+				continue
+			}
+			var h loadpoint.ManualHold
+			if err := json.Unmarshal([]byte(v), &h); err != nil {
+				slog.Warn("failed to parse persisted manual hold", "lp", lpState.ID, "err", err)
+				continue
+			}
+			if !h.Persistent {
+				continue // only operator (never-expiring) holds persist
+			}
+			lpController.SetManualHold(lpState.ID, h)
+			slog.Info("restored persistent manual hold across restart",
+				"lp", lpState.ID, "power_w", h.PowerW, "phase_mode", h.PhaseMode)
+		}
+		lpController.SetManualHoldSaver(func(id string, h loadpoint.ManualHold, cleared bool) {
+			key := lpManualHoldKeyPrefix + id
+			if cleared {
+				if err := st.SaveConfig(key, "{}"); err != nil {
+					slog.Warn("failed to clear persisted manual hold", "lp", id, "err", err)
+				}
+				return
+			}
+			b, err := json.Marshal(h)
+			if err != nil {
+				slog.Warn("failed to marshal manual hold", "lp", id, "err", err)
+				return
+			}
+			if err := st.SaveConfig(key, string(b)); err != nil {
+				slog.Warn("failed to persist manual hold", "lp", id, "err", err)
+			}
+		})
 		// Wire the live per-phase site-meter current reader. The control
 		// package's fuse guard is site-TOTAL only (sum across phases);
 		// a single phase can still trip from house-load imbalance (e.g.
@@ -1986,7 +2031,17 @@ func main() {
 			var wakeKickActiveIDs map[string]bool
 			if lpController != nil {
 				now := time.Now()
-				for _, st := range lpStatesSnapshot {
+				for i := range lpStatesSnapshot {
+					st := &lpStatesSnapshot[i]
+					// Populate ManualActive on the dispatch-path snapshot
+					// (lpMgr.States() doesn't set it — only the API does) so
+					// SurplusReserveW can drop the reserve for a force-charging
+					// LP. Without this the manual/schedule override in
+					// SurplusReserveW never sees a manual hold and the
+					// no-discharge floor flaps the battery support.
+					if _, ok := lpController.GetManualHold(st.ID, now); ok {
+						st.ManualActive = true
+					}
 					if !st.PluggedIn || !st.SurplusOnly {
 						continue
 					}

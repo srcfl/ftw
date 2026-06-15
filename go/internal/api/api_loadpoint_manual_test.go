@@ -60,8 +60,11 @@ func TestManualHoldValidatesBody(t *testing.T) {
 		body string
 		want int
 	}{
-		{"missing hold_s", `{"power_w":1380}`, http.StatusBadRequest},
-		{"zero hold_s", `{"power_w":1380,"hold_s":0}`, http.StatusBadRequest},
+		// hold_s == 0 (or omitted) now means a persistent override
+		// (operator "Start" / amp slider) — accepted, not rejected.
+		{"missing hold_s is persistent", `{"power_w":1380}`, http.StatusOK},
+		{"zero hold_s is persistent", `{"power_w":1380,"hold_s":0}`, http.StatusOK},
+		{"negative hold_s", `{"power_w":1380,"hold_s":-1}`, http.StatusBadRequest},
 		{"hold_s too large", `{"power_w":1380,"hold_s":99999}`, http.StatusBadRequest},
 		{"negative power", `{"power_w":-1,"hold_s":30}`, http.StatusBadRequest},
 		{"bad phase_mode", `{"power_w":1380,"hold_s":30,"phase_mode":"5p"}`, http.StatusBadRequest},

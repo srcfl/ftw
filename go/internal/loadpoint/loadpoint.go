@@ -155,6 +155,19 @@ type State struct {
 	MaxChargeW    float64   `json:"max_charge_w"`
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
 
+	// Phases / VoltageV let the UI convert between watts and amps for the
+	// manual amp slider (A = W / (Phases × VoltageV)). Populated by the
+	// API layer from the loadpoint's phase_mode and the site fuse voltage.
+	Phases   int     `json:"phases,omitempty"`
+	VoltageV float64 `json:"voltage_v,omitempty"`
+
+	// ManualActive is true when an operator manual hold ("Start" / amp
+	// slider) is pinned on this loadpoint, overriding surplus/plan.
+	// ManualChargeW is the held setpoint in watts. Populated by the API
+	// layer from the loadpoint controller.
+	ManualActive  bool    `json:"manual_active"`
+	ManualChargeW float64 `json:"manual_charge_w,omitempty"`
+
 	// SurplusOnly mirrors Config.SurplusOnly with any runtime override
 	// (set via POST /api/loadpoints/{id}/target). Always emitted (no
 	// omitempty) so a polling client can distinguish "explicitly off"
