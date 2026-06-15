@@ -1162,6 +1162,15 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		wasPlugged = st.PluggedIn
 		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
+	// As of last tick, were we pausing this surplus loadpoint below its
+	// floor? (computeSurplusCmd for THIS tick runs later.) A charger that
+	// reports "not requesting current" while we're withholding power is
+	// responding to our own pause, not declining — so it must not count
+	// toward session completion, and the same signal drives the resume
+	// wallbox-cycle in maybeWakeVehicle below.
+	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
+	selfWithheld := surplusOn && enteringSurplusPaused
+	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
@@ -1420,12 +1429,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	// unlock is opportunistic and tick-level; it must not poke a sleeping
 	// car at night just because the bat is full. Pass the configured flag,
 	// not the runtime-armed one.
-	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, cmd)
+	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, sample.RequestActive, selfWithheld, cmd)
 }
 
-func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn bool, cmd map[string]any) {
+func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn, chargerRequesting, selfPaused bool, cmd map[string]any) {
 	lpID := lpCfg.ID
-	if c == nil || c.vehicleStatus == nil || c.send == nil {
+	if c == nil || c.send == nil {
 		return
 	}
 	pw, _ := cmd["power_w"].(float64)
@@ -1436,8 +1445,25 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	if !wantWake {
 		return
 	}
-	driver, state, ok := c.vehicleStatus(lpID)
+	var driver, state string
+	var ok bool
+	if c.vehicleStatus != nil {
+		driver, state, ok = c.vehicleStatus(lpID)
+	}
 	if !ok || driver == "" {
+		// No vehicle-API binding (e.g. a bare CTEK with no Tesla/cloud
+		// vehicle driver). We can't read a vehicle charging state, but the
+		// charger itself reports "not requesting current" (NCRQ) via
+		// request_active. When a surplus loadpoint is being offered power
+		// yet the charger sits in NCRQ from our own earlier sub-floor
+		// pause, cycle the contactor so the vehicle renegotiates — there's
+		// no vehicle driver for charge_start to land on, so the wallbox
+		// cycle is the only lever. Throttled to once per cooldown.
+		if c.shouldKickWallboxForResume(now, lpID, surplusOn, chargerRequesting, selfPaused, pw) {
+			slog.Info("loadpoint wallbox-cycle: charger not requesting while surplus offered — renegotiating",
+				"lp", lpID, "driver", lpCfg.DriverName)
+			c.cycleWallbox(lpID, lpCfg.DriverName)
+		}
 		return
 	}
 	// "Complete" is intentionally NOT in the wake set: the car says
@@ -1512,31 +1538,67 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	// driver implementing the standard ev_pause / ev_resume actions
 	// gets this for free.
 	//
-	// Runs in a goroutine so the dispatch tick doesn't block on the
-	// pause→sleep→resume sequence (~3 s).
-	if lpCfg.DriverName != "" && c.send != nil {
-		go func(driverName string) {
-			pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
-			resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
-			if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
-				slog.Warn("loadpoint wallbox-cycle pause failed",
-					"lp", lpID, "driver", driverName, "err", err)
-				return
-			}
-			slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
-			// 3 s is enough for Tesla to register the contactor
-			// open as a plug-cycle. Shorter risks the car missing
-			// the transition; longer eats into the wake-kick
-			// window and prolongs the grid-import.
-			time.Sleep(3 * time.Second)
-			if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
-				slog.Warn("loadpoint wallbox-cycle resume failed",
-					"lp", lpID, "driver", driverName, "err", err)
-				return
-			}
-			slog.Info("loadpoint wallbox-cycle: resumed", "lp", lpID, "driver", driverName)
-		}(lpCfg.DriverName)
+	c.cycleWallbox(lpID, lpCfg.DriverName)
+}
+
+// wallboxCycleGap is the dwell between ev_pause and ev_resume in a contactor
+// cycle. 3 s is enough for a car to register the contactor open as a
+// plug-cycle (shorter risks the car missing the transition; longer eats into
+// the wake-kick window and prolongs grid import). A var, not a const, so tests
+// can shrink it.
+var wallboxCycleGap = 3 * time.Second
+
+// cycleWallbox opens and re-closes the charger's contactor (ev_pause →
+// ev_resume), which a car interprets as a plug-cycle and accepts as a fresh
+// session boundary — the only software lever that drags a vehicle out of a
+// "Stopped"/NCRQ state that rejects charge_start. Driver-agnostic: any EV
+// charger driver implementing ev_pause / ev_resume gets it. Runs in a
+// goroutine so the dispatch tick doesn't block on the pause→sleep→resume.
+func (c *Controller) cycleWallbox(lpID, driverName string) {
+	if driverName == "" || c.send == nil {
+		return
 	}
+	go func() {
+		pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
+		resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
+		if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
+			slog.Warn("loadpoint wallbox-cycle pause failed",
+				"lp", lpID, "driver", driverName, "err", err)
+			return
+		}
+		slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
+		time.Sleep(wallboxCycleGap)
+		if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
+			slog.Warn("loadpoint wallbox-cycle resume failed",
+				"lp", lpID, "driver", driverName, "err", err)
+			return
+		}
+		slog.Info("loadpoint wallbox-cycle: resumed", "lp", lpID, "driver", driverName)
+	}()
+}
+
+// shouldKickWallboxForResume decides whether to fire a contactor cycle to drag
+// an offline charger (no vehicle-API binding) out of a self-induced NCRQ once
+// PV surplus has recovered. Returns true only when we're a surplus loadpoint
+// offering power (offeredW > 0) into a charger that isn't requesting current
+// because WE paused it (selfPaused) — and at most once per vehicleWakeCooldown
+// per loadpoint so a flapping resume can't storm the contactor.
+func (c *Controller) shouldKickWallboxForResume(now time.Time, lpID string, surplusOn, chargerRequesting, selfPaused bool, offeredW float64) bool {
+	if !surplusOn || !selfPaused || chargerRequesting || offeredW <= 0 {
+		return false
+	}
+	c.wakeMu.Lock()
+	defer c.wakeMu.Unlock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	if last := c.wakeLast[lpID]; !last.IsZero() && now.Sub(last) < vehicleWakeCooldown {
+		return false
+	}
+	c.wakeLast[lpID] = now
+	return true
 }
 
 // computeSurplusCmd applies the surplus_only live clamp to the

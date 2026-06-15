@@ -266,6 +266,16 @@ type loadpointRuntime struct {
 	// "completed" when sessionComplete is latched so operators can
 	// see why the inferred SoC pinned at target.
 	socSource string
+
+	// surplusWithheld is set by the controller each tick: true when WE
+	// are intentionally withholding power from this loadpoint (a
+	// surplus_only pause below the 3-phase floor). While set, a vehicle
+	// reporting "not requesting current" is responding to our own pause,
+	// not declining charge — so Observe must not count it toward session
+	// completion. Without this a cloudy spell below the floor latches the
+	// session done and the planner stops offering PV surplus for the rest
+	// of the day. Transient per-tick; the controller refreshes it.
+	surplusWithheld bool
 }
 
 // NewManager returns an empty manager. Configure with Load().
@@ -385,6 +395,19 @@ func (m *Manager) Configs() []Config {
 //
 // No-op for unknown IDs — a misconfigured driver shouldn't crash the
 // manager.
+// SetSurplusWithheld records whether the controller is intentionally
+// withholding power from this loadpoint this tick (a surplus_only pause below
+// the 3-phase floor). When true, the next Observe treats a "not requesting
+// current" report as self-induced and does not advance the session-completion
+// timer. No-op for an unknown id.
+func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp, ok := m.byID[id]; ok {
+		lp.surplusWithheld = withheld
+	}
+}
+
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -415,9 +438,19 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
 
-	if pluggedIn && !requestActive {
-		// Vehicle has explicitly stopped requesting current. Start
-		// (or continue) the completion timer; latch once it elapses.
+	if pluggedIn && !requestActive && lp.surplusWithheld {
+		// Self-induced "not requesting": we paused this surplus_only
+		// loadpoint below its floor, so the vehicle dropping current is
+		// our doing, not a vehicle-side decline. Do not start/advance the
+		// completion timer — otherwise a sub-floor spell would latch the
+		// session done and the planner would stop offering surplus all
+		// day. Reset the clock so a genuine refusal (once we resume
+		// offering power) is timed from a clean start.
+		lp.notRequestingSince = time.Time{}
+	} else if pluggedIn && !requestActive {
+		// Vehicle has explicitly stopped requesting current while we ARE
+		// offering power. Start (or continue) the completion timer; latch
+		// once it elapses.
 		if lp.notRequestingSince.IsZero() {
 			lp.notRequestingSince = now
 		}
