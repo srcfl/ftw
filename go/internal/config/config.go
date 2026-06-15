@@ -70,6 +70,15 @@ type FlexLoad struct {
 	// by its mounting location. Empty = read IndoorMetric off DriverName.
 	IndoorDriver string `yaml:"indoor_driver,omitempty" json:"indoor_driver,omitempty"`
 
+	// WindowDriver/WindowMetric gate heating on a contact/occupancy signal
+	// (e.g. a Matter contact sensor, cluster 0x0045, or occupancy 0x0406).
+	// When the metric is non-zero (window open / room unoccupied) the zone
+	// drops to frost protection (MinC) and the RC model stops training, so
+	// an open window neither wastes pre-heat nor teaches the model a falsely
+	// leaky building. WindowDriver empty = read WindowMetric off DriverName.
+	WindowDriver string `yaml:"window_driver,omitempty" json:"window_driver,omitempty"`
+	WindowMetric string `yaml:"window_metric,omitempty" json:"window_metric,omitempty"`
+
 	// ---- simple-mode fields ----
 	TargetC           float64 `yaml:"target_c,omitempty" json:"target_c,omitempty"`                         // comfort target to maintain
 	PriceThresholdOre float64 `yaml:"price_threshold_ore,omitempty" json:"price_threshold_ore,omitempty"` // "expensive" cutoff; 0 = derive from forecast

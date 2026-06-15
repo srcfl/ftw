@@ -118,32 +118,39 @@ func PlanThermal(slots []PriceSlot, spec ThermalSpec) ThermalSchedule {
 		pvCovers := sl.PVSurplusW > 0 && sl.PVSurplusW >= pvCoverW
 		preHeat := sl.PriceOre <= threshold || pvCovers
 
+		// The setpoint we write is the target; the thermostat's own loop
+		// holds it, so the comfort floor is physically guaranteed by never
+		// writing a setpoint below MinC (target ∈ {MinC, MaxC}).
 		target := minC
 		if preHeat {
 			target = maxC
 		}
 
-		// Comfort-floor guard: if coasting (no heat) would let the zone
-		// fall below MinC by the end of this slot, raise the target to at
-		// least MinC so the thermostat heats to hold it.
+		// Model the thermostat's behaviour over the slot to get a
+		// self-consistent next temperature AND a faithful electrical
+		// estimate. Three regimes:
+		//   1. below setpoint  → pull up at full output, capped at setpoint
+		//   2. above setpoint, stays above all slot → no heat (pure coast)
+		//   3. above setpoint, decays to it mid-slot → holds at setpoint
 		dt := sl.hours() * 3600.0
 		coastTemp := spec.Model.PredictNext(indoor, outdoor, 0, dt)
-		if coastTemp < minC && target < minC {
-			target = minC
-		}
-
-		// Estimate the THERMAL power delivered to the zone this slot to
-		// reach/hold target. If we're pulling the temperature UP toward
-		// target, assume near-full output; if just holding, use the
-		// steady-state hold power.
-		var thermalW float64
-		if target > indoor+0.1 {
+		var thermalW, nextIndoor float64
+		switch {
+		case indoor < target-0.1:
 			thermalW = spec.MaxHeatW
-		} else {
+			nextIndoor = spec.Model.PredictNext(indoor, outdoor, thermalW, dt)
+			if nextIndoor > target {
+				nextIndoor = target // thermostat won't overshoot its setpoint
+			}
+		case coastTemp >= target:
+			thermalW = 0
+			nextIndoor = coastTemp
+		default:
 			thermalW = spec.Model.HeatToHoldW(target, outdoor)
-		}
-		if thermalW > spec.MaxHeatW {
-			thermalW = spec.MaxHeatW
+			if thermalW > spec.MaxHeatW {
+				thermalW = spec.MaxHeatW
+			}
+			nextIndoor = target // held at setpoint (the comfort floor)
 		}
 		if thermalW < 0 {
 			thermalW = 0
@@ -156,12 +163,12 @@ func PlanThermal(slots []PriceSlot, spec ThermalSpec) ThermalSchedule {
 			PreHeat:  preHeat,
 		})
 
-		// Roll the zone temperature forward using the THERMAL power so the
-		// next slot's decision sees a self-consistent state.
-		indoor = spec.Model.PredictNext(indoor, outdoor, thermalW, dt)
-		// Clamp to the band the thermostat would itself enforce.
+		indoor = nextIndoor
 		if indoor > maxC {
 			indoor = maxC
+		}
+		if indoor < minC {
+			indoor = minC // thermostat floor — can't physically drop below setpoint
 		}
 	}
 	return out
@@ -267,12 +274,20 @@ func coastHoursToTarget(m thermalmodel.Model, indoorC, targetC, outdoorC float64
 
 // ArbitrateSimple resolves competition between simple-mode zones under a
 // shared electrical power budget (e.g. the site fuse headroom reserved for
-// heating). When the sum of heating draws would exceed budgetW, it blocks
-// the highest-power zones *that can afford it* (coast ≥ their block
-// horizon) first — realising "block the higher-consumption load when its
-// target will still be satisfied" rather than tripping the breaker or
-// blocking a zone that actually needs the heat. Zones at their comfort
-// floor are never blocked. budgetW ≤ 0 disables arbitration.
+// heating). When the summed heating draw exceeds budgetW it blocks zones
+// *that can afford it* (coast ≥ their block horizon, above the comfort
+// floor) until the total fits.
+//
+// Block order is by cost-effectiveness, not raw power. The value of a zone's
+// heating is heat delivered per electrical watt — i.e. its COP. Shedding a
+// watt of low-COP resistive heat loses little (you reheat it cheaply later);
+// shedding a watt of high-COP heat-pump heat loses a lot. So we block the
+// LEAST efficient zones first (lowest COP), tie-broken by higher power (frees
+// the budget in fewer blocks) and then longer coast buffer (most comfort
+// margin). System inertia is already captured in the coast buffer via each
+// zone's learned time constant — a high-inertia water loop yields a long
+// coast and is preferred for blocking over a twitchy electric panel.
+// budgetW ≤ 0 disables arbitration.
 func ArbitrateSimple(decisions []SimpleDecision, specs []SimpleSpec, budgetW float64) {
 	if budgetW <= 0 || len(decisions) != len(specs) {
 		return
@@ -286,9 +301,11 @@ func ArbitrateSimple(decisions []SimpleDecision, specs []SimpleSpec, budgetW flo
 	if total <= budgetW {
 		return
 	}
-	// Candidates we may block: currently heating, above the floor, and with
-	// enough coast buffer to ride out a block.
-	type cand struct{ idx int; powerW, coast float64 }
+	type cand struct {
+		idx          int
+		cop, powerW  float64
+		coast        float64
+	}
 	var cands []cand
 	for i, d := range decisions {
 		if !d.Heat {
@@ -301,10 +318,18 @@ func ArbitrateSimple(decisions []SimpleDecision, specs []SimpleSpec, budgetW flo
 		if d.CoastHours < s.BlockHorizon.Hours() {
 			continue // needs the heat now
 		}
-		cands = append(cands, cand{idx: i, powerW: d.EstHeatW, coast: d.CoastHours})
+		cop := s.COP
+		if cop <= 0 {
+			cop = 1
+		}
+		cands = append(cands, cand{idx: i, cop: cop, powerW: d.EstHeatW, coast: d.CoastHours})
 	}
-	// Block highest-power (then longest-coast) first until under budget.
+	// Least cost-effective (lowest COP) first; then highest power; then
+	// longest coast.
 	sort.SliceStable(cands, func(a, b int) bool {
+		if cands[a].cop != cands[b].cop {
+			return cands[a].cop < cands[b].cop
+		}
 		if cands[a].powerW != cands[b].powerW {
 			return cands[a].powerW > cands[b].powerW
 		}
@@ -319,7 +344,7 @@ func ArbitrateSimple(decisions []SimpleDecision, specs []SimpleSpec, budgetW flo
 		d.Heat = false
 		d.SetpointC = specs[c.idx].MinC
 		d.EstHeatW = 0
-		d.Reason = "deferred under shared power budget (target still satisfiable)"
+		d.Reason = "deferred under shared power budget (least cost-effective, target still satisfiable)"
 	}
 }
 

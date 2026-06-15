@@ -25,7 +25,8 @@ type Capability struct {
 	wsURL  string
 	logger *slog.Logger
 
-	mu      sync.Mutex
+	mu      sync.Mutex // guards conn + pending
+	writeMu sync.Mutex // serializes WriteMessage (gorilla disallows concurrent writes)
 	conn    *websocket.Conn
 	pending map[string]chan wsResponse
 
@@ -154,13 +155,20 @@ func (c *Capability) call(ctx context.Context, command string, args any) (json.R
 		return nil, fmt.Errorf("matter: not connected")
 	}
 	c.pending[id] = ch
+	c.mu.Unlock()
+	// Write OUTSIDE c.mu so a slow/half-open socket can't block the readLoop
+	// (which needs c.mu to deliver responses or handle a read error). A
+	// dedicated writeMu still serializes concurrent writes per gorilla's
+	// contract.
+	c.writeMu.Lock()
 	err = conn.WriteMessage(websocket.TextMessage, b)
+	c.writeMu.Unlock()
 	if err != nil {
+		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
 		return nil, fmt.Errorf("matter: write: %w", err)
 	}
-	c.mu.Unlock()
 	select {
 	case resp := <-ch:
 		if resp.ErrorCode != nil {

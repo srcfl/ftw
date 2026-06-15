@@ -28,6 +28,8 @@ type Device struct {
 	IndoorDriver    string  // optional: separate driver (temp sensor) for indoor temp
 	IndoorMetric    string  // driver metric carrying measured indoor temp (°C)
 	HeatMetric      string  // optional: metered heating power (W) for RC training
+	WindowDriver    string  // optional: contact/occupancy driver gating heating
+	WindowMetric    string  // metric that is non-zero when window open / unoccupied
 	SetpointAction  string  // driver command action that writes the setpoint
 	PreHeatFraction float64
 
@@ -78,9 +80,10 @@ type Service struct {
 	ReplanInterval time.Duration // schedule + dispatch cadence (default 5m)
 
 	mu         sync.RWMutex
-	thermal    map[string]*thermalmodel.Model // by driver name
-	lastIndoor map[string]tempSample          // last indoor reading for delta training
-	plug       map[string]*PlugProfile        // by driver name (deferrable load learning)
+	thermal    map[string]*thermalmodel.Model    // by driver name
+	lastIndoor map[string]tempSample             // last indoor reading for delta training
+	plug       map[string]*PlugProfile           // by driver name (deferrable load learning)
+	stove      map[string]*ExternalHeatDetector  // by driver name (wood-stove / free-heat detection)
 
 	stop chan struct{}
 	done chan struct{}
@@ -93,6 +96,7 @@ type tempSample struct {
 
 const thermalStateKeyPrefix = "flexload/thermal/"
 const plugStateKeyPrefix = "flexload/plug/"
+const stoveStateKeyPrefix = "flexload/stove/"
 
 // NewService builds a flex-load service. Returns nil if there are no
 // devices configured, so the caller can skip starting it entirely.
@@ -109,6 +113,7 @@ func NewService(st *state.Store, tel *telemetry.Store, devices []Device) *Servic
 		thermal:        map[string]*thermalmodel.Model{},
 		lastIndoor:     map[string]tempSample{},
 		plug:           map[string]*PlugProfile{},
+		stove:          map[string]*ExternalHeatDetector{},
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
@@ -129,6 +134,17 @@ func NewService(st *state.Store, tel *telemetry.Store, devices []Device) *Servic
 				}
 			}
 			s.thermal[d.DriverName] = m
+			// Restore the external-heat (wood-stove) detector's learned stats.
+			det := &ExternalHeatDetector{}
+			if st != nil {
+				if js, ok := st.LoadConfig(stoveStateKeyPrefix + d.DriverName); ok && js != "" {
+					var loaded ExternalHeatDetector
+					if err := json.Unmarshal([]byte(js), &loaded); err == nil {
+						det = &loaded
+					}
+				}
+			}
+			s.stove[d.DriverName] = det
 		case "deferrable":
 			// Restore or initialize a plug load profile when metering is wired.
 			if d.PowerMetric == "" {
@@ -239,6 +255,8 @@ func (s *Service) sample() {
 			}
 			continue
 		}
+		// Thermal training + external-heat detection both need metered heat
+		// to be honest (we must know our own electrical contribution).
 		if d.Type != "thermostat" || d.IndoorMetric == "" || d.HeatMetric == "" {
 			continue
 		}
@@ -246,32 +264,53 @@ func (s *Service) sample() {
 		if !ok {
 			continue
 		}
-		heatW, _, ok := s.Tele.LatestMetric(d.DriverName, d.HeatMetric)
+		heatElecW, _, ok := s.Tele.LatestMetric(d.DriverName, d.HeatMetric)
 		if !ok {
-			heatW = 0
+			heatElecW = 0
 		}
 		// HeatMetric is metered ELECTRICAL power; the RC model needs the
 		// THERMAL power delivered to the zone. For direct electric COP=1;
 		// for a hydronic zone metered at the heat pump, thermal = elec×COP.
+		heatThermalW := heatElecW
 		if d.COP > 0 {
-			heatW *= d.COP
+			heatThermalW *= d.COP
 		}
 		outdoor := 0.0
 		if s.Outdoor != nil {
 			outdoor = s.Outdoor(now.UnixMilli())
 		}
+		windowOpen := s.windowOpen(d)
 
 		s.mu.Lock()
 		prev, hasPrev := s.lastIndoor[d.DriverName]
 		s.lastIndoor[d.DriverName] = tempSample{c: indoorC, tsMs: now.UnixMilli()}
 		m := s.thermal[d.DriverName]
+		det := s.stove[d.DriverName]
 		if hasPrev && m != nil {
 			dt := float64(now.UnixMilli()-prev.tsMs) / 1000.0
 			// Guard against long gaps (driver outage) producing a bogus delta.
 			if dt > 0 && dt <= 4*float64(s.SampleInterval)/float64(time.Second) {
-				if m.Update(prev.c, indoorC, outdoor, heatW, dt, now.UnixMilli()) {
-					if m.Samples%10 == 0 {
-						s.persist(d.DriverName, m)
+				// External-heat (wood-stove) detection: compare the observed
+				// warming to what the model expects from our known heating.
+				if det != nil {
+					expDelta := m.ExpectedDeltaC(prev.c, outdoor, heatThermalW, dt)
+					obsDelta := indoorC - prev.c
+					wasActive := det.Active(now.UnixMilli())
+					det.Update(obsDelta, expDelta, heatElecW, dt, now.UnixMilli(), m.ThermalWForRate)
+					if det.Active(now.UnixMilli()) != wasActive {
+						s.persistStove(d.DriverName, det)
+					}
+				}
+				// Train the RC model only when nothing is corrupting the
+				// signal: an open window (extra heat-loss) or an external
+				// heat source (extra heat-gain) would teach the model a
+				// false building.
+				externalActive := det != nil && det.Active(now.UnixMilli())
+				if !windowOpen && !externalActive {
+					if m.Update(prev.c, indoorC, outdoor, heatThermalW, dt, now.UnixMilli()) {
+						if m.Samples%10 == 0 {
+							s.persist(d.DriverName, m)
+						}
 					}
 				}
 			}
@@ -280,15 +319,51 @@ func (s *Service) sample() {
 	}
 }
 
+// windowOpen reports whether the zone's contact/occupancy gate is asserted
+// (non-zero), meaning heating should be suppressed and training paused.
+func (s *Service) windowOpen(d Device) bool {
+	if d.WindowMetric == "" {
+		return false
+	}
+	src := d.WindowDriver
+	if src == "" {
+		src = d.DriverName
+	}
+	v, _, ok := s.Tele.LatestMetric(src, d.WindowMetric)
+	return ok && v != 0
+}
+
+// heatingSuppressed reports whether a zone's electric heating should be
+// paused right now — either a window is open / room unoccupied, or a free
+// external heat source (wood stove, strong solar gain) is firing. Returns a
+// human reason for logging.
+func (s *Service) heatingSuppressed(d Device, nowMs int64) (bool, string) {
+	if s.windowOpen(d) {
+		return true, "window open / unoccupied"
+	}
+	s.mu.RLock()
+	det := s.stove[d.DriverName]
+	s.mu.RUnlock()
+	if det != nil && det.Active(nowMs) {
+		return true, "external heat source active (e.g. wood stove)"
+	}
+	return false, ""
+}
+
 // replan rebuilds schedules from the current forecast and dispatches the
 // directive for the slot covering "now" to each device.
 func (s *Service) replan(ctx context.Context) {
-	if s.Slots == nil || s.Dispatch == nil {
+	if s.Dispatch == nil {
 		return
 	}
-	slots := s.Slots()
-	if len(slots) == 0 {
-		return
+	// Slots come from the MPC plan and may be empty (planner disabled or not
+	// yet warmed up). Simple-mode thermostats run off PriceNow + the learned
+	// model, so we must NOT bail here — only planner-mode thermostats and
+	// deferrables actually need a slot curve, and they no-op gracefully
+	// without one.
+	var slots []PriceSlot
+	if s.Slots != nil {
+		slots = s.Slots()
 	}
 	now := time.Now()
 	nowMs := now.UnixMilli()
@@ -301,6 +376,12 @@ func (s *Service) replan(ctx context.Context) {
 	for _, d := range s.Devices {
 		switch d.Type {
 		case "thermostat":
+			// Window-open / external-heat pause overrides every mode.
+			if suppressed, reason := s.heatingSuppressed(d, nowMs); suppressed {
+				s.dispatchSetpoint(ctx, d, d.MinC)
+				slog.Debug("flexload heating paused", "driver", d.DriverName, "reason", reason)
+				continue
+			}
 			if d.Mode == "simple" {
 				spec, ok := s.buildSimpleSpec(d, slots, now)
 				if ok {
@@ -368,8 +449,12 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 	_ = havePrice
 
 	s.mu.RLock()
-	model := *s.thermal[d.DriverName]
+	tm := s.thermal[d.DriverName]
 	s.mu.RUnlock()
+	if tm == nil {
+		return SimpleSpec{}, false
+	}
+	model := *tm
 
 	bh := d.BlockHorizonH
 	if bh <= 0 {
@@ -428,6 +513,13 @@ func priceForNow(slots []PriceSlot, nowMs int64) (float64, bool) {
 }
 
 func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceSlot, nowMs int64) {
+	// Pause electric heating when a window is open or a free external heat
+	// source is firing — drop to the frost-protection floor and stop.
+	if suppressed, reason := s.heatingSuppressed(d, nowMs); suppressed {
+		s.dispatchSetpoint(ctx, d, d.MinC)
+		slog.Debug("flexload heating paused", "driver", d.DriverName, "reason", reason)
+		return
+	}
 	indoorC, ok := s.readIndoor(d)
 	if !ok {
 		// No live temperature → assume mid-band so the scheduler still
@@ -435,8 +527,12 @@ func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceS
 		indoorC = (d.MinC + d.MaxC) / 2
 	}
 	s.mu.RLock()
-	model := *s.thermal[d.DriverName]
+	tm := s.thermal[d.DriverName]
 	s.mu.RUnlock()
+	if tm == nil {
+		return
+	}
+	model := *tm
 
 	spec := ThermalSpec{
 		DriverName:      d.DriverName,
@@ -457,11 +553,17 @@ func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceS
 	if !ok {
 		return
 	}
+	s.dispatchSetpoint(ctx, d, sp.TargetC)
+}
+
+// dispatchSetpoint writes a setpoint to a thermostat via its configured
+// command action (default "setpoint").
+func (s *Service) dispatchSetpoint(ctx context.Context, d Device, targetC float64) {
 	action := d.SetpointAction
 	if action == "" {
 		action = "setpoint"
 	}
-	payload, _ := json.Marshal(map[string]any{"action": action, "value": sp.TargetC})
+	payload, _ := json.Marshal(map[string]any{"action": action, "value": targetC})
 	if err := s.Dispatch(ctx, d.DriverName, payload); err != nil {
 		slog.Warn("flexload thermostat dispatch failed", "driver", d.DriverName, "err", err)
 	}
@@ -475,6 +577,19 @@ func (s *Service) replanDeferrable(ctx context.Context, d Device, slots []PriceS
 	if p, ok := s.PlugProfileFor(d.DriverName); ok {
 		powerW = p.EffectivePowerW(d.PowerW)
 		energyWh = p.EffectiveEnergyWh(d.EnergyWh)
+	}
+	// Cold-start guard: a metered plug with nothing configured can't be
+	// scheduled until it has learned its load — but it can only learn by
+	// running. Sending "off" now would lock it off forever (never runs →
+	// never learns → never runs). So while the profile is still blank, leave
+	// the appliance on its own native control (dispatch nothing) and just
+	// keep observing until RunningW / DailyEnergyWh are known.
+	if powerW <= 0 || energyWh <= 0 {
+		if d.PowerMetric != "" {
+			return // observe-only until learned
+		}
+		// No metering and nothing configured → nothing to schedule.
+		return
 	}
 	spec := DeferrableSpec{
 		DriverName: d.DriverName,
@@ -588,6 +703,19 @@ func (s *Service) persistPlug(driver string, p *PlugProfile) {
 	}
 }
 
+func (s *Service) persistStove(driver string, det *ExternalHeatDetector) {
+	if s.Store == nil {
+		return
+	}
+	js, err := json.Marshal(det)
+	if err != nil {
+		return
+	}
+	if err := s.Store.SaveConfig(stoveStateKeyPrefix+driver, string(js)); err != nil {
+		slog.Warn("flexload stove persist failed", "driver", driver, "err", err)
+	}
+}
+
 func (s *Service) persistAll() {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -596,6 +724,9 @@ func (s *Service) persistAll() {
 	}
 	for driver, p := range s.plug {
 		s.persistPlug(driver, p)
+	}
+	for driver, det := range s.stove {
+		s.persistStove(driver, det)
 	}
 }
 

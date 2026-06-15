@@ -113,6 +113,25 @@ func (m Model) PredictNext(indoorC, outdoorC, heatW, dtSeconds float64) float64 
 	return indoorC + dtSeconds*rate
 }
 
+// ExpectedDeltaC returns the temperature change (°C) the model predicts over
+// dtSeconds for the given conditions — used to compute the unexplained
+// residual when detecting an external heat source (e.g. a wood stove).
+func (m Model) ExpectedDeltaC(indoorC, outdoorC, heatW, dtSeconds float64) float64 {
+	return m.PredictNext(indoorC, outdoorC, heatW, dtSeconds) - indoorC
+}
+
+// ThermalWForRate returns the heating power (W) that would produce the given
+// warming rate (°C/s) in this zone, i.e. rate/b. Used to size an inferred
+// external heat source from its unexplained warming residual. Returns 0 when
+// the heating gain is non-positive.
+func (m Model) ThermalWForRate(rateCPerS float64) float64 {
+	_, b := m.effectiveCoef()
+	if b <= 0 {
+		return 0
+	}
+	return rateCPerS / b
+}
+
 // HeatToHoldW returns the steady-state heating power (W, ≥0) needed to
 // hold the zone at targetC against the given outdoor temperature — the
 // power at which dT/dt = 0. Useful as a baseline for the scheduler.
