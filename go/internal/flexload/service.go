@@ -28,8 +28,6 @@ type Device struct {
 	IndoorDriver    string  // optional: separate driver (temp sensor) for indoor temp
 	IndoorMetric    string  // driver metric carrying measured indoor temp (°C)
 	HeatMetric      string  // optional: metered heating power (W) for RC training
-	WindowDriver    string  // optional: contact/occupancy driver gating heating
-	WindowMetric    string  // metric that is non-zero when window open / unoccupied
 	SetpointAction  string  // driver command action that writes the setpoint
 	PreHeatFraction float64
 
@@ -67,10 +65,13 @@ type Service struct {
 	Slots    func() []PriceSlot              // current horizon price/PV slots
 	Outdoor  func(slotStartMs int64) float64 // outdoor temp forecast (°C)
 	Dispatch DispatchFunc
-	// PriceNow returns the current price (öre/kWh) for simple-mode zones,
-	// independently of the MPC. Optional — when nil, simple mode derives the
-	// current price from Slots() if available, else degrades to comfort-only.
-	PriceNow func(now time.Time) (float64, bool)
+	// PriceAt returns the price (öre/kWh) at an arbitrary time, independently
+	// of the MPC. Used for simple-mode "now" pricing AND for the reheat-cost
+	// side of the economic pause calculation (price at the future moment the
+	// zone will need to be reheated). Optional — when nil, simple mode
+	// derives the current price from Slots() and the pause economics fall
+	// back to "hold comfort" (never a speculative reduction).
+	PriceAt func(t time.Time) (float64, bool)
 	// FuseBudgetW is the shared electrical headroom (W) simple-mode zones
 	// arbitrate under (block highest-power zones first when comfort allows).
 	// 0 disables arbitration.
@@ -279,7 +280,6 @@ func (s *Service) sample() {
 		if s.Outdoor != nil {
 			outdoor = s.Outdoor(now.UnixMilli())
 		}
-		windowOpen := s.windowOpen(d)
 
 		s.mu.Lock()
 		prev, hasPrev := s.lastIndoor[d.DriverName]
@@ -302,11 +302,10 @@ func (s *Service) sample() {
 					}
 				}
 				// Train the RC model only when nothing is corrupting the
-				// signal: an open window (extra heat-loss) or an external
-				// heat source (extra heat-gain) would teach the model a
-				// false building.
+				// signal: an external heat source (a wood stove's extra
+				// heat-gain) would teach the model a false, too-warm building.
 				externalActive := det != nil && det.Active(now.UnixMilli())
-				if !windowOpen && !externalActive {
+				if !externalActive {
 					if m.Update(prev.c, indoorC, outdoor, heatThermalW, dt, now.UnixMilli()) {
 						if m.Samples%10 == 0 {
 							s.persist(d.DriverName, m)
@@ -319,35 +318,109 @@ func (s *Service) sample() {
 	}
 }
 
-// windowOpen reports whether the zone's contact/occupancy gate is asserted
-// (non-zero), meaning heating should be suppressed and training paused.
-func (s *Service) windowOpen(d Device) bool {
-	if d.WindowMetric == "" {
-		return false
-	}
-	src := d.WindowDriver
-	if src == "" {
-		src = d.DriverName
-	}
-	v, _, ok := s.Tele.LatestMetric(src, d.WindowMetric)
-	return ok && v != 0
-}
+// stovePauseMinConfidence is the model quality required before we'll reduce
+// heat below the comfort target on the strength of the learned dynamics. No
+// reduction happens on an unvalidated model.
+const stovePauseMinConfidence = 0.4
 
-// heatingSuppressed reports whether a zone's electric heating should be
-// paused right now — either a window is open / room unoccupied, or a free
-// external heat source (wood stove, strong solar gain) is firing. Returns a
-// human reason for logging.
-func (s *Service) heatingSuppressed(d Device, nowMs int64) (bool, string) {
-	if s.windowOpen(d) {
-		return true, "window open / unoccupied"
-	}
+// stoveDecision computes the setpoint for a zone while a free external heat
+// source (wood stove, strong solar gain) is firing. It is strictly per-zone:
+// the detector reads only this zone's own indoor temperature, so a stove in
+// the living room never lowers the bathroom.
+//
+// The action is graded by how much we actually know, so we never make a
+// "dumb" reduction:
+//
+//   - Always safe (no learning needed): suppress pre-heat and hold the zone's
+//     comfort target. The stove keeps the room warm so electric stays off
+//     naturally; we never let the room overcool.
+//   - Deeper saving (let the room ride down toward MinC) ONLY when (a) the RC
+//     model is trained enough to trust its inertia, (b) we've learned the
+//     stove's typical firing energy/duration, and (c) an economic check shows
+//     pausing is a net win — i.e. the cost to reheat once the fire ends (at
+//     the forecast price then) is less than what we save now. If reheating
+//     later is pricier than heating now, we hold comfort instead.
+//
+// Returns (setpoint, active, reason). active=false means no stove → caller
+// proceeds with the normal planner/simple logic.
+func (s *Service) stoveDecision(d Device, indoorC, comfortTargetC float64, outdoorC float64, nowMs int64) (float64, bool, string) {
 	s.mu.RLock()
 	det := s.stove[d.DriverName]
+	tm := s.thermal[d.DriverName]
 	s.mu.RUnlock()
-	if det != nil && det.Active(nowMs) {
-		return true, "external heat source active (e.g. wood stove)"
+	if det == nil || !det.Active(nowMs) {
+		return 0, false, ""
 	}
-	return false, ""
+	// Safe default: hold comfort, suppress pre-heat. Never a reduction below
+	// what comfort requires.
+	setpoint := comfortTargetC
+	reason := "stove active — pre-heat suppressed, comfort held"
+
+	// Nothing deeper possible if we're already at the floor.
+	if comfortTargetC <= d.MinC+1e-9 || tm == nil {
+		return setpoint, true, reason
+	}
+	m := *tm
+
+	// Gate the deeper reduction on LEARNING: trustworthy model + observed
+	// firing cycles.
+	if m.Quality() < stovePauseMinConfidence || det.Cycles < 1 ||
+		det.EstThermalW <= 0 || det.AvgCycleWh <= 0 {
+		return setpoint, true, reason + " (insufficient learning for deeper pause)"
+	}
+
+	// Estimate remaining firing time from learned per-cycle energy and power.
+	sessionH := det.AvgCycleWh / det.EstThermalW
+	elapsedH := float64(nowMs-det.FiringSinceMs()) / 3_600_000.0
+	remainingH := sessionH - elapsedH
+	if remainingH < 0.25 {
+		return setpoint, true, reason + " (fire ending soon — hold comfort)"
+	}
+
+	// Gate the deeper reduction on CALCULATION: reheat cost vs saving.
+	cop := d.COP
+	if cop <= 0 {
+		cop = 1
+	}
+	worth, reasonCalc := s.pauseIsNetWin(m, comfortTargetC, outdoorC, cop, remainingH, nowMs)
+	if !worth {
+		return setpoint, true, reason + " (" + reasonCalc + ")"
+	}
+	return d.MinC, true, "stove active + trained + " + reasonCalc + " → deep pause to MinC"
+}
+
+// pauseIsNetWin runs the economic cost-benefit for letting a zone ride down
+// instead of holding its target, over a pause of pauseH hours. It compares
+// the electricity saved now against the cost to reheat later, using the
+// forecast price at the reheat moment. Captures the operator's floor-heating
+// checklist: demand (HeatToHoldW vs outdoor), price now, inertia (the energy
+// is integrated over the learned coast), COP, and the reheat price.
+func (s *Service) pauseIsNetWin(m thermalmodel.Model, targetC, outdoorC, cop, pauseH float64, nowMs int64) (bool, string) {
+	if s.PriceAt == nil || pauseH <= 0 {
+		return false, "no price model"
+	}
+	now := time.UnixMilli(nowMs)
+	priceNow, ok1 := s.PriceAt(now)
+	priceReheat, ok2 := s.PriceAt(now.Add(time.Duration(pauseH * float64(time.Hour))))
+	if !ok1 || !ok2 {
+		return false, "no price signal"
+	}
+	// Thermal power we'd otherwise spend to hold the target against the
+	// outdoor demand → electrical via COP → energy over the pause.
+	holdThermalW := m.HeatToHoldW(targetC, outdoorC)
+	avoidedKWh := (holdThermalW / cop) * pauseH / 1000.0
+	if avoidedKWh <= 0 {
+		return false, "no avoidable load"
+	}
+	// First-order energy balance: the heat allowed to escape during the pause
+	// must be put back to return to target → roughly the same energy, billed
+	// at the reheat-time price.
+	savingOre := avoidedKWh * priceNow
+	reheatOre := avoidedKWh * priceReheat
+	if savingOre <= reheatOre {
+		return false, "reheat not cheaper than now"
+	}
+	return true, "reheat cheaper than now (save vs reheat positive)"
 }
 
 // replan rebuilds schedules from the current forecast and dispatches the
@@ -376,10 +449,27 @@ func (s *Service) replan(ctx context.Context) {
 	for _, d := range s.Devices {
 		switch d.Type {
 		case "thermostat":
-			// Window-open / external-heat pause overrides every mode.
-			if suppressed, reason := s.heatingSuppressed(d, nowMs); suppressed {
-				s.dispatchSetpoint(ctx, d, d.MinC)
-				slog.Debug("flexload heating paused", "driver", d.DriverName, "reason", reason)
+			// External-heat (wood-stove) override takes precedence in every
+			// mode — strictly per-zone and never a reduction below comfort
+			// unless the economic check says it's a net win.
+			ct := d.MinC
+			if d.Mode == "simple" {
+				ct = d.TargetC
+				if ct == 0 {
+					ct = (d.MinC + d.MaxC) / 2
+				}
+			}
+			indoorForZone, ok := s.readIndoor(d)
+			if !ok {
+				indoorForZone = ct
+			}
+			outdoorForZone := 0.0
+			if s.Outdoor != nil {
+				outdoorForZone = s.Outdoor(nowMs)
+			}
+			if sp, active, reason := s.stoveDecision(d, indoorForZone, ct, outdoorForZone, nowMs); active {
+				s.dispatchSetpoint(ctx, d, sp)
+				slog.Debug("flexload stove override", "driver", d.DriverName, "setpoint_c", sp, "reason", reason)
 				continue
 			}
 			if d.Mode == "simple" {
@@ -429,24 +519,25 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 	}
 	// Current price: prefer the independent hook so simple mode works with
 	// no MPC; fall back to the slot covering now.
-	priceNow, havePrice := 0.0, false
-	if s.PriceNow != nil {
-		priceNow, havePrice = s.PriceNow(now)
+	priceNow := 0.0
+	if s.PriceAt != nil {
+		if p, ok := s.PriceAt(now); ok {
+			priceNow = p
+		}
 	}
-	if !havePrice && len(slots) > 0 {
+	if priceNow == 0 && len(slots) > 0 {
 		if p, ok := priceForNow(slots, now.UnixMilli()); ok {
-			priceNow, havePrice = p, true
+			priceNow = p
 		}
 	}
 	// Threshold: explicit fixed cutoff, else the 60th-percentile of the
-	// horizon prices when a curve is available.
+	// horizon prices when a curve is available. With no price signal at all
+	// the threshold stays 0, which makes "expensive" never fire, so simple
+	// mode degrades safely to comfort-only.
 	threshold := d.PriceThresholdOre
 	if threshold <= 0 && len(slots) > 0 {
 		threshold = priceQuantile(slots, 0.6)
 	}
-	// Without any price signal, simple mode degrades to comfort-only: a zero
-	// threshold makes "expensive" never fire, so we always heat to target.
-	_ = havePrice
 
 	s.mu.RLock()
 	tm := s.thermal[d.DriverName]
@@ -475,6 +566,7 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 		BlockHorizon:   time.Duration(bh * float64(time.Hour)),
 		MaxHeatW:       d.MaxHeatW,
 		COP:            d.COP,
+		Confidence:     model.Quality(), // gate blocking on learned confidence
 	}, true
 }
 
@@ -513,13 +605,8 @@ func priceForNow(slots []PriceSlot, nowMs int64) (float64, bool) {
 }
 
 func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceSlot, nowMs int64) {
-	// Pause electric heating when a window is open or a free external heat
-	// source is firing — drop to the frost-protection floor and stop.
-	if suppressed, reason := s.heatingSuppressed(d, nowMs); suppressed {
-		s.dispatchSetpoint(ctx, d, d.MinC)
-		slog.Debug("flexload heating paused", "driver", d.DriverName, "reason", reason)
-		return
-	}
+	// Stove override is handled by the caller (replan loop) before this is
+	// reached.
 	indoorC, ok := s.readIndoor(d)
 	if !ok {
 		// No live temperature → assume mid-band so the scheduler still

@@ -25,6 +25,7 @@ func TestSimpleBlocksWhenBufferCovers(t *testing.T) {
 		Model: m, CurrentC: 22.5, TargetC: 20.0, MinC: 18.0,
 		Outdoor: 15.0, PriceNow: 300, PriceThreshold: 150,
 		BlockHorizon: time.Hour, MaxHeatW: 2000, COP: 1,
+		Confidence: 1.0, // trained model → blocking permitted
 	}
 	d := EvaluateSimple(expensive)
 	if d.Heat {
@@ -39,6 +40,23 @@ func TestSimpleBlocksWhenBufferCovers(t *testing.T) {
 	cheap.PriceNow = 50
 	if dd := EvaluateSimple(cheap); !dd.Heat {
 		t.Error("cheap price should heat to target")
+	}
+}
+
+// TestSimpleNeverBlocksUntrainedModel verifies the core safety guarantee:
+// even when it's expensive and the (prior-only) model claims a big buffer,
+// a zone whose model isn't trained is NOT blocked — it maintains target.
+func TestSimpleNeverBlocksUntrainedModel(t *testing.T) {
+	m := *thermalmodel.NewModel() // fresh → Quality()==0
+	spec := SimpleSpec{
+		Model: m, CurrentC: 22.5, TargetC: 20.0, MinC: 18.0,
+		Outdoor: 15.0, PriceNow: 300, PriceThreshold: 150,
+		BlockHorizon: time.Hour, MaxHeatW: 2000, COP: 1,
+		Confidence: m.Quality(), // 0 → below MinBlockConfidence
+	}
+	d := EvaluateSimple(spec)
+	if !d.Heat {
+		t.Error("untrained model must never trigger a block — maintain target")
 	}
 }
 

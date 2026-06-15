@@ -792,8 +792,6 @@ func main() {
 				IndoorDriver:      f.IndoorDriver,
 				IndoorMetric:      f.IndoorMetric,
 				HeatMetric:        f.HeatMetric,
-				WindowDriver:      f.WindowDriver,
-				WindowMetric:      f.WindowMetric,
 				SetpointAction:    f.SetpointAction,
 				PreHeatFraction:   f.PreHeatFraction,
 				TargetC:           f.TargetC,
@@ -858,12 +856,13 @@ func main() {
 				return 0
 			}
 			flexSvc.Dispatch = reg.Send
-			// Independent price source for simple (non-MPC) mode + the fuse
-			// headroom simple zones arbitrate under.
+			// Independent price source (any time) for simple (non-MPC) mode
+			// AND the reheat-cost side of the economic pause calc, plus the
+			// fuse headroom simple zones arbitrate under.
 			if cfg.Price != nil && cfg.Price.Zone != "" {
 				zone := cfg.Price.Zone
-				flexSvc.PriceNow = func(now time.Time) (float64, bool) {
-					p := priceFc.Predict(zone, now)
+				flexSvc.PriceAt = func(t time.Time) (float64, bool) {
+					p := priceFc.Predict(zone, t)
 					return p, p > 0
 				}
 			}

@@ -197,7 +197,14 @@ type SimpleSpec struct {
 	BlockHorizon   time.Duration // target must stay satisfied this long to allow a block
 	MaxHeatW       float64       // zone thermal output cap
 	COP            float64       // electrical/thermal ratio (≤0 → 1)
+	Confidence     float64       // model quality [0,1]; below MinBlockConfidence we never block
 }
+
+// MinBlockConfidence is the learned-model quality required before the simple
+// controller will block heating on the strength of its coast prediction. No
+// price-based reduction happens on an unvalidated model — an untrained zone
+// just maintains its target.
+const MinBlockConfidence = 0.4
 
 // SimpleDecision is the output: whether to heat and to what setpoint.
 type SimpleDecision struct {
@@ -226,8 +233,11 @@ func EvaluateSimple(spec SimpleSpec) SimpleDecision {
 	coast := coastHoursToTarget(spec.Model, spec.CurrentC, spec.TargetC, spec.Outdoor, 24*time.Hour)
 	expensive := spec.PriceThreshold > 0 && spec.PriceNow > spec.PriceThreshold
 	bufferEnough := coast >= spec.BlockHorizon.Hours()
+	// No reduction without a trustworthy, learned model: an untrained zone
+	// can't be relied on to coast as predicted, so we hold the target.
+	confident := spec.Confidence >= MinBlockConfidence
 
-	if expensive && bufferEnough {
+	if expensive && bufferEnough && confident {
 		return SimpleDecision{
 			Heat: false, SetpointC: spec.MinC,
 			EstHeatW:   0,
@@ -241,7 +251,9 @@ func EvaluateSimple(spec SimpleSpec) SimpleDecision {
 		holdThermal = spec.MaxHeatW
 	}
 	reason := "maintaining target"
-	if expensive {
+	if expensive && !confident {
+		reason = "expensive but model not trained enough to risk a block — heating to protect target"
+	} else if expensive {
 		reason = "expensive but buffer insufficient — heating to protect target"
 	}
 	return SimpleDecision{

@@ -94,6 +94,10 @@ func (e *ExternalHeatDetector) Update(
 	}
 }
 
+// FiringSinceMs returns the timestamp the current firing was first detected
+// (0 when not active), so callers can estimate elapsed firing time.
+func (e *ExternalHeatDetector) FiringSinceMs() int64 { return e.sinceMs }
+
 // Active reports whether an external heat source is currently firing (within
 // the hold window of the last detection).
 func (e *ExternalHeatDetector) Active(nowMs int64) bool {
