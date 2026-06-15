@@ -2387,32 +2387,20 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
 		chg, dis := d.MaxChargeW, d.MaxDischargeW
-		// blockCharge is true when the operator explicitly wrote max_charge_w: 0
-		// on a driver that is also registered as a battery (battery_capacity_wh > 0).
-		// Because MaxChargeW is a float64 with omitempty, an absent field and an
-		// explicit 0 are indistinguishable at the struct level. We use
-		// BatteryCapacityWh > 0 as the signal that this driver is intentionally
-		// participating in dispatch — making MaxChargeW == 0 a deliberate cap.
-		blockCharge := d.MaxChargeW == 0 && d.BatteryCapacityWh > 0
 		if b, ok := batteries[d.Name]; ok {
 			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
 				chg = *b.MaxChargeW
-				blockCharge = false // batteries section overrides the zero
 			}
 			if dis == 0 && b.MaxDischargeW != nil && *b.MaxDischargeW > 0 {
 				dis = *b.MaxDischargeW
 			}
 		}
-		// Include driver in the map if any limit is set, or if blockCharge is
-		// active — previously a (0, 0) pair was silently skipped, which meant
-		// max_charge_w: 0 had no effect when max_discharge_w was also absent.
-		if chg == 0 && dis == 0 && !blockCharge {
+		if chg == 0 && dis == 0 {
 			continue
 		}
 		out[d.Name] = control.PowerLimits{
 			MaxChargeW:    chg,
 			MaxDischargeW: dis,
-			BlockCharge:   blockCharge,
 		}
 	}
 	return out
