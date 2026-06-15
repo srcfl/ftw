@@ -1739,7 +1739,14 @@ func ComputeDispatch(
 		// DISCHARGE battery into the EV's reserved export space — the
 		// opposite of what we want.
 		biasedGridW := gridW
-		if state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption {
+		// Only bias the grid signal (hold export back for the EV) when the EV
+		// can actually use the reserve. When it can't — stopped AND surplus
+		// below its start power — leave biasedGridW = gridW so the PI sees the
+		// real export and the home battery absorbs the surplus instead of
+		// reserving it for an EV that can't take it. Mirrors the charge
+		// ceiling's evCanUseReserve() release so both hold-backs lift together.
+		if state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption &&
+			surplus.evCanUseReserve() {
 			reserveRemaining := surplus.evReserveRemainingW
 			if gridW < -reserveRemaining {
 				biasedGridW = gridW + reserveRemaining
@@ -1924,6 +1931,19 @@ func ComputeDispatch(
 				if targetTotal2 > ceiling {
 					totalCorrection = ceiling - currentTotal
 				}
+			} else if targetTotal2 < 0 && gridW <= 0 {
+				// No-discharge floor: while the EV reserve is active the
+				// battery must never DISCHARGE into an exporting/balanced grid
+				// — that only drains the pack to grid (observed: PI windup +
+				// the reserve bias drove a 7.5 kW discharge exporting ~4 kW
+				// while PV was <1 kW). Fires only when gridW <= 0; household-
+				// import load coverage (gridW > 0) is left untouched, so this
+				// never blocks the battery from covering house load — only
+				// discharge-to-export. NOT gated on evCanUseReserve: the drain
+				// must be caught whenever the reserve is active. The CHARGE
+				// side (battery absorbs surplus the EV can't use) is handled
+				// separately by the bias/ceiling evCanUseReserve release.
+				totalCorrection = -currentTotal
 			}
 		}
 		if noSelfDischarge {
@@ -2833,6 +2853,7 @@ type surplusAccounting struct {
 	effectiveGridW      float64
 	currentBatteryW     float64
 	evReserveRemainingW float64
+	evActive            bool // EV is actually drawing current (not just plugged)
 }
 
 func newSurplusAccounting(rawGridW, effectiveGridW, currentBatteryW float64, state *State) surplusAccounting {
@@ -2841,6 +2862,7 @@ func newSurplusAccounting(rawGridW, effectiveGridW, currentBatteryW float64, sta
 		effectiveGridW:      effectiveGridW,
 		currentBatteryW:     currentBatteryW,
 		evReserveRemainingW: evReserveRemainingW(state),
+		evActive:            state != nil && state.EVChargingW > evActiveThresholdW,
 	}
 }
 
@@ -2883,8 +2905,28 @@ func (a surplusAccounting) effectiveChargeSurplusW() float64 {
 	return surplusW
 }
 
+// evCanUseReserve reports whether the surplus-only EV can actually consume
+// the reserved export right now: either it's already drawing (evActive), or
+// the available PV surplus is at least the reserved amount so the EV could
+// start on it. When false (EV stopped AND surplus below its start power) the
+// reserve is futile — holding it back would just export surplus the EV can't
+// take — so callers release it and let the home battery absorb the surplus.
+// This is what makes "surplus flows into the home battery when the EV can't
+// assimilate it" work; the difference the EV DOES take is handled by the
+// reserve tracking its actual draw (evReserveRemainingW shrinks as it ramps).
+func (a surplusAccounting) evCanUseReserve() bool {
+	if a.evReserveRemainingW <= 0 {
+		return false
+	}
+	return a.evActive || a.effectiveChargeSurplusW() >= a.evReserveRemainingW
+}
+
 func (a surplusAccounting) chargeCeilingAfterEVReserveW() float64 {
-	ceiling := a.effectiveChargeSurplusW() - a.evReserveRemainingW
+	surplus := a.effectiveChargeSurplusW()
+	if !a.evCanUseReserve() {
+		return surplus // EV can't use the reserve → battery absorbs it all
+	}
+	ceiling := surplus - a.evReserveRemainingW
 	if ceiling < 0 {
 		return 0
 	}

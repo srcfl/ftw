@@ -112,14 +112,28 @@ func SurplusReserveW(states []State, wakeKickActiveIDs map[string]bool) float64 
 			// times back to Stopped, the auto-wake cycle retries, and
 			// the EV never gets to charge.
 			//
-			// Gating requires BOTH soc and limit to be > 0: a vehicle
-			// driver that never reports SoC (or has gone offline)
-			// preserves the strict pre-existing behavior of "no
-			// reserve for a not-drawing EV", so a single missing
-			// vehicle driver can't hold the battery back forever.
-			hasHeadroom := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
-				st.VehicleSoCPct < st.VehicleChargeLimitPct
-			if !hasHeadroom {
+			// Reserve a bootstrap floor unless the car is KNOWN to be
+			// full. Two cases want the reserve:
+			//   1. Smart charger / paired vehicle: SoC is known and below
+			//      its charge limit — the car is waiting for surplus.
+			//   2. Dumb charger (CTEK and other AC wallboxes with no BMS
+			//      readout): SoC is unknown entirely. Be optimistic and
+			//      treat "plugged + surplus_only + not drawing" as "wants
+			//      to charge" — otherwise an EV on a dumb charger can NEVER
+			//      bootstrap surplus charging: the home battery absorbs
+			//      every watt of PV, the loadpoint sees no surplus to
+			//      claim, the EV stays at 0 W, and the reserve stays 0 W
+			//      (chicken-and-egg). Prioritising PV into the EV ahead of
+			//      the home battery is the intended behaviour.
+			// We skip ONLY when SoC is known AND at/above the charge limit
+			// (a genuinely full car). Trade-off for case 2: a finished-but-
+			// still-plugged car on a dumb charger holds the reserve
+			// (exporting instead of charging the home battery) until it's
+			// unplugged — surfacing the charger's own "done" state into the
+			// loadpoint State would let us skip that too (follow-up).
+			knownFull := st.VehicleSoCPct > 0 && st.VehicleChargeLimitPct > 0 &&
+				st.VehicleSoCPct >= st.VehicleChargeLimitPct
+			if knownFull {
 				continue
 			}
 			floor := st.MinChargeW
