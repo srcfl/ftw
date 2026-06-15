@@ -31,9 +31,9 @@ type LoadpointSpec struct {
 
 	// SoC grid. Coarser than battery (11 is typical — EV loads are
 	// lumpy anyway).
-	Levels  int
-	MinPct  float64 // usually 0
-	MaxPct  float64 // usually 100
+	Levels int
+	MinPct float64 // usually 0
+	MaxPct float64 // usually 100
 
 	// Plan-start conditions.
 	InitialSoCPct float64 // EV SoC at the first slot
@@ -41,29 +41,24 @@ type LoadpointSpec struct {
 
 	// User intent. Zero target (< 1%) = no deadline — charge
 	// opportunistically based on price/PV surplus only.
-	TargetSoCPct    float64
-	TargetSlotIdx   int // slot index by which target must be met; 0 or negative = no deadline
+	TargetSoCPct  float64
+	TargetSlotIdx int // slot index by which target must be met; 0 or negative = no deadline
 
 	// Electrical constraints. AllowedStepsW MUST include 0 (off) and
 	// should enumerate the discrete charger power levels. If empty,
 	// defaults to {0, MaxChargeW}.
-	MaxChargeW      float64
-	AllowedStepsW   []float64
+	MaxChargeW    float64
+	AllowedStepsW []float64
 
 	// Charge-side efficiency (AC → battery). Typical 0.90 for a
 	// modern 3-phase EV charger. 0 defaults to 0.90.
 	ChargeEfficiency float64
 
-	// SurplusOnly forbids EV actions that would turn the site into a
-	// net importer. Hard constraint in the DP feasibility loop: any
-	// (battW, evW) combination with gridW > 50 AND evW > 0 is rejected
-	// (mpc.go:474). The 50 W epsilon absorbs grid-discretisation and
-	// FP dither so we don't reject solutions that are zero-import in
-	// every operationally meaningful sense. evW = 0 is always
-	// feasible, so the DP degrades gracefully when no PV surplus
-	// exists — the deadline shortfall penalty handles the
-	// lexicographic "miss target rather than break constraint"
-	// preference.
+	// SurplusOnly forbids EV actions that need grid import or home-battery
+	// discharge. The loadpoint may use real site surplus only: PV already
+	// covering house load, or PV left after the battery's own planned charge.
+	// It must not treat battery discharge as synthetic PV surplus, even when
+	// the global BatteryCoversEV opt-in is enabled.
 	SurplusOnly bool
 
 	// NoBatteryToEV mirrors ctrl.State.BatteryCoversEV inverted: when
@@ -83,6 +78,10 @@ type LoadpointSpec struct {
 	// shared houseResidualW + feasibility predicate into a helper so
 	// the two sites can't drift.
 	NoBatteryToEV bool
+}
+
+func (l *LoadpointSpec) blocksBatteryToEV() bool {
+	return l != nil && (l.NoBatteryToEV || l.SurplusOnly)
 }
 
 // normalizedSteps returns a non-nil, 0-included, dedup'd + sorted

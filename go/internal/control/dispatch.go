@@ -150,6 +150,11 @@ type SlotDirective struct {
 	// has HasPlannedGridW=false → cap opts out by default.
 	PlannedGridW    float64
 	HasPlannedGridW bool
+
+	// LoadpointEnergyWh is the current slot's planned EV charging budget.
+	// Runtime uses planned EV energy to keep surplus-only EV from being
+	// satisfied by home-battery discharge if a stale plan tries.
+	LoadpointEnergyWh map[string]float64
 }
 
 // SlotDirectiveFunc returns the plan's energy-allocation directive for
@@ -1550,7 +1555,14 @@ func ComputeDispatch(
 		// predicate into a small helper consumed by both this clamp
 		// and the DP rule, so a future change to the accounting can't
 		// drift between plan and runtime.
-		if !state.BatteryCoversEV && evActive && targetTotalW < 0 {
+		var plannedLoadpointEnergyWh float64
+		for _, wh := range currentDirective.LoadpointEnergyWh {
+			if wh > 0 {
+				plannedLoadpointEnergyWh += wh
+			}
+		}
+		surplusOnlyPlannedEV := state.EVSurplusOnlyReserveW > 0 && plannedLoadpointEnergyWh > 0
+		if ((!state.BatteryCoversEV && evActive) || surplusOnlyPlannedEV) && targetTotalW < 0 {
 			houseGridW := rawGridW - state.EVChargingW
 			reactiveTotal := currentTotal - houseGridW
 			if targetTotalW < reactiveTotal {

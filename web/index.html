@@ -703,7 +703,10 @@
         <span class="ftw-toggle-slider"></span>
         <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
       </label>
-      <div class="card-sub card-hint">On = home battery discharges into the EV. Off = battery stays out of EV charging.</div>
+      <div class="card-sub card-hint">Default off. On lets the home battery discharge into EV charging. Surplus-only loadpoints still use real PV surplus only.</div>
+      <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
+        This can drain the home battery into the car. Use it only when EV charging should be part of the site battery plan.
+      </div>
     </div>
     <!-- Start/Pause/Resume footer buttons removed: the in-body Manual
          Charge control (amp slider + Start/Stop, built by buildManualControl)
@@ -775,7 +778,7 @@
   <script src="/settings/tabs/price.js?v=tabsplit1"></script>
   <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/planner.js?v=pvsafetyk"></script>
+  <script src="/settings/tabs/planner.js?v=strategy479"></script>
   <script src="/settings/tabs/ha.js?v=tabsplit2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
