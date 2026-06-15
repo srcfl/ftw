@@ -291,9 +291,10 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	MQTT   *MQTTConfig    `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus *ModbusConfig  `yaml:"modbus,omitempty" json:"modbus,omitempty"`
 	HTTP   *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	Matter *MatterConfig  `yaml:"matter,omitempty" json:"matter,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -314,6 +315,13 @@ type ModbusConfig struct {
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+}
+
+// MatterConfig grants access to a python-matter-server instance.
+// Host is required; Port defaults to 5580.
+type MatterConfig struct {
+	Host string `yaml:"host" json:"host"`
+	Port int    `yaml:"port,omitempty" json:"port,omitempty"` // default 5580
 }
 
 // EffectiveMQTT returns the driver's MQTT config, preferring capabilities over legacy.
@@ -820,8 +828,8 @@ func (c *Config) Validate() error {
 		if d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `lua`", d.Name)
 		}
-		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil {
-			return fmt.Errorf("driver %q: must have mqtt, modbus, or http capability", d.Name)
+		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil && d.Capabilities.Matter == nil {
+			return fmt.Errorf("driver %q: must have mqtt, modbus, http, or matter capability", d.Name)
 		}
 	}
 	if len(c.Drivers) > 0 && siteMeters == 0 {

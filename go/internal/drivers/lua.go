@@ -29,6 +29,9 @@
 //	host.http_get(url, headers)          -- HTTP GET, returns (body, nil) or (nil, err)
 //	host.http_post(url, body, headers)   -- HTTP POST, returns (body, nil) or (nil, err)
 //	host.http_patch(url, body, headers)  -- HTTP PATCH, returns (body, nil) or (nil, err)
+//	host.matter_read(node_id, endpoint, cluster_id, attribute_id)           -- returns (value, nil) or (nil, err)
+//	host.matter_write(node_id, endpoint, cluster_id, attribute_id, value)   -- returns nil or err
+//	host.matter_invoke(node_id, endpoint, cluster_id, command, payload_json) -- returns (result, nil) or (nil, err)
 //
 // Lua 5.1 via yuin/gopher-lua — pure Go, zero CGo, one allocation-aware
 // interpreter per driver.
@@ -636,6 +639,81 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			return 2
 		}
 		L.Push(lua.LString(string(body)))
+		return 1
+	}))
+
+	// ---- Matter capability ----
+	// host.matter_read(node_id, endpoint, cluster_id, attribute_id)
+	//   → (value, nil) or (nil, error_string)
+	// host.matter_write(node_id, endpoint, cluster_id, attribute_id, value)
+	//   → nil or error_string
+	// host.matter_invoke(node_id, endpoint, cluster_id, command_name, payload_json)
+	//   → (result, nil) or (nil, error_string)
+	// Cluster and attribute IDs may be passed as decimal or hex integers.
+	// payload_json is a JSON string (use host.json_encode to build it).
+
+	host.RawSetString("matter_read", L.NewFunction(func(L *lua.LState) int {
+		if env.Matter == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("matter: capability not granted"))
+			return 2
+		}
+		nodeID := uint32(L.CheckInt(1))
+		endpoint := uint32(L.CheckInt(2))
+		clusterID := uint32(L.CheckInt(3))
+		attributeID := uint32(L.CheckInt(4))
+		val, err := env.matterRead(nodeID, endpoint, clusterID, attributeID)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(goToLua(L, val))
+		return 1
+	}))
+
+	host.RawSetString("matter_write", L.NewFunction(func(L *lua.LState) int {
+		if env.Matter == nil {
+			L.Push(lua.LString("matter: capability not granted"))
+			return 1
+		}
+		nodeID := uint32(L.CheckInt(1))
+		endpoint := uint32(L.CheckInt(2))
+		clusterID := uint32(L.CheckInt(3))
+		attributeID := uint32(L.CheckInt(4))
+		value := luaToGo(L.Get(5))
+		if err := env.matterWrite(nodeID, endpoint, clusterID, attributeID, value); err != nil {
+			L.Push(lua.LString(err.Error()))
+			return 1
+		}
+		return 0
+	}))
+
+	host.RawSetString("matter_invoke", L.NewFunction(func(L *lua.LState) int {
+		if env.Matter == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("matter: capability not granted"))
+			return 2
+		}
+		nodeID := uint32(L.CheckInt(1))
+		endpoint := uint32(L.CheckInt(2))
+		clusterID := uint32(L.CheckInt(3))
+		commandName := L.CheckString(4)
+		var payload any
+		if s := L.OptString(5, ""); s != "" {
+			if err := json.Unmarshal([]byte(s), &payload); err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString("matter_invoke: bad payload json: "+err.Error()))
+				return 2
+			}
+		}
+		result, err := env.matterInvoke(nodeID, endpoint, clusterID, commandName, payload)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(goToLua(L, result))
 		return 1
 	}))
 

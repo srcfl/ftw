@@ -23,6 +23,8 @@ type Registry struct {
 	MQTTFactory func(name string, c *config.MQTTConfig) (MQTTCap, error)
 	// ModbusFactory creates a Modbus capability.
 	ModbusFactory func(name string, c *config.ModbusConfig) (ModbusCap, error)
+	// MatterFactory creates a Matter capability backed by python-matter-server.
+	MatterFactory func(name string, c *config.MatterConfig) (MatterCap, error)
 	// ARPLookup resolves a hostname/IP to a MAC for L2-stable identity.
 	// Optional — when nil, devices fall back to endpoint-hash IDs.
 	ARPLookup func(host string) (mac string, ok bool)
@@ -128,6 +130,16 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			env.WithHTTPAllowedHosts(hosts)
 		}
 	}
+	if mt := cfg.Capabilities.Matter; mt != nil && r.MatterFactory != nil {
+		cap, err := r.MatterFactory(cfg.Name, mt)
+		if err != nil {
+			return fmt.Errorf("matter capability: %w", err)
+		}
+		env.WithMatter(cap)
+		p := mt.Port
+		if p == 0 { p = 5580 }
+		env.SetEndpoint(fmt.Sprintf("matter://%s:%d", mt.Host, p))
+	}
 
 	luaDrv, err := NewLuaDriver(cfg.Lua, env)
 	if err != nil {
@@ -194,6 +206,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.Modbus != nil {
 				_ = rd.env.Modbus.Close()
+			}
+			if rd.env.Matter != nil {
+				_ = rd.env.Matter.Close()
 			}
 			return
 		case cmd := <-rd.cmdCh:
@@ -411,6 +426,11 @@ func sameDriverConfig(a, b config.Driver) bool {
 	aMb, bMb := a.EffectiveModbus(), b.EffectiveModbus()
 	if (aMb == nil) != (bMb == nil) { return false }
 	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
+		return false
+	}
+	aMt, bMt := a.Capabilities.Matter, b.Capabilities.Matter
+	if (aMt == nil) != (bMt == nil) { return false }
+	if aMt != nil && (aMt.Host != bMt.Host || aMt.Port != bMt.Port) {
 		return false
 	}
 	// Compare the free-form Config map. Previously omitted, so a changed

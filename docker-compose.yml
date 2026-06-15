@@ -101,6 +101,29 @@ services:
       - update-ipc:/run/ftw-update
 
   # ---------------------------------------------------------------------
+  # Matter server (python-matter-server)
+  #
+  # Handles Matter fabric management and device commissioning. The main
+  # app reaches it at localhost:5580 (host networking) via the Matter
+  # capability. Drivers declare `capabilities: matter: host: localhost`
+  # to get access. BLE is required for commissioning new devices (hence
+  # privileged); after pairing, all communication is over IP.
+  #
+  # Fabric credentials and commissioned device state persist in
+  # ./data/matter — backed up alongside state.db.
+  #
+  # Remove this service block if you have no Matter devices.
+  # ---------------------------------------------------------------------
+  matter-server:
+    image: ghcr.io/home-assistant-libs/python-matter-server:stable
+    container_name: ftw-matter-server
+    restart: unless-stopped
+    network_mode: host
+    privileged: true            # required for BLE commissioning
+    volumes:
+      - ./data/matter:/data
+
+  # ---------------------------------------------------------------------
   # MQTT broker (Eclipse Mosquitto)
   #
   # Lets on-LAN devices — notably the Pixii PowerShaper's MQTT uplink —

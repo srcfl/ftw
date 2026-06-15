@@ -44,6 +44,19 @@ type ModbusCap interface {
 	Close() error
 }
 
+// MatterCap is the interface for Matter protocol access via python-matter-server.
+// Each driver gets its own WebSocket connection to the configured server instance.
+type MatterCap interface {
+	// ReadAttribute reads a cluster attribute from a commissioned Matter node.
+	ReadAttribute(nodeID, endpoint, clusterID, attributeID uint32) (any, error)
+	// WriteAttribute writes a value to a cluster attribute.
+	WriteAttribute(nodeID, endpoint, clusterID, attributeID uint32, value any) error
+	// InvokeCommand sends a cluster command (e.g. thermostat setpoint raise/lower).
+	InvokeCommand(nodeID, endpoint, clusterID uint32, commandName string, payload any) (any, error)
+	// Close disconnects from python-matter-server. Called on driver remove.
+	Close() error
+}
+
 // HostEnv is the per-driver runtime context. Captures capabilities (potentially
 // nil if not granted), the shared telemetry store, and identifying info.
 type HostEnv struct {
@@ -52,6 +65,7 @@ type HostEnv struct {
 	Telemetry  *telemetry.Store
 	MQTT       MQTTCap    // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap  // nil → modbus_* calls return ErrNoCapability
+	Matter     MatterCap  // nil → matter_* calls return ErrNoCapability
 	HTTP       bool       // false → http_* calls return ErrNoCapability
 	// HTTPAllowedHosts, when non-empty, restricts which hosts this
 	// driver can reach via host.http_get / host.http_post. Each entry
@@ -103,6 +117,9 @@ func (h *HostEnv) WithMQTT(m MQTTCap) *HostEnv { h.MQTT = m; return h }
 
 // WithModbus binds a Modbus capability.
 func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
+
+// WithMatter binds a Matter capability.
+func (h *HostEnv) WithMatter(m MatterCap) *HostEnv { h.Matter = m; return h }
 
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
@@ -286,4 +303,21 @@ func (h *HostEnv) modbusWriteSingle(addr, value uint16) error {
 func (h *HostEnv) modbusWriteMulti(addr uint16, values []uint16) error {
 	if h.Modbus == nil { return ErrNoCapability }
 	return h.Modbus.WriteMulti(addr, values)
+}
+
+// ---- Matter proxy ----
+
+func (h *HostEnv) matterRead(nodeID, endpoint, clusterID, attributeID uint32) (any, error) {
+	if h.Matter == nil { return nil, ErrNoCapability }
+	return h.Matter.ReadAttribute(nodeID, endpoint, clusterID, attributeID)
+}
+
+func (h *HostEnv) matterWrite(nodeID, endpoint, clusterID, attributeID uint32, value any) error {
+	if h.Matter == nil { return ErrNoCapability }
+	return h.Matter.WriteAttribute(nodeID, endpoint, clusterID, attributeID, value)
+}
+
+func (h *HostEnv) matterInvoke(nodeID, endpoint, clusterID uint32, commandName string, payload any) (any, error) {
+	if h.Matter == nil { return nil, ErrNoCapability }
+	return h.Matter.InvokeCommand(nodeID, endpoint, clusterID, commandName, payload)
 }

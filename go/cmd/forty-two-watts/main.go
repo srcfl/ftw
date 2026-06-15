@@ -38,6 +38,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
 	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
+	mattercli "github.com/frahlg/forty-two-watts/go/internal/matter"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
@@ -234,6 +235,9 @@ func main() {
 	}
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
 		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
+	}
+	reg.MatterFactory = func(name string, c *config.MatterConfig) (drivers.MatterCap, error) {
+		return mattercli.Dial(c.Host, c.Port)
 	}
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers. config.Load has already joined relative Lua
