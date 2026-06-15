@@ -48,6 +48,14 @@ type PlanAction struct {
 	BatteryW    float64
 	GridW       float64
 	SoCPct      float64
+	PriceOre    float64 // total consumer price (öre/kWh)
+	SpotOre     float64 // raw wholesale spot price (öre/kWh)
+	CostOre     float64 // expected cost this slot (öre, negative = revenue)
+	Confidence  float64 // forecast confidence 0–1
+	Reason      string  // human-readable DP reason
+	EMSMode     string  // effective EMS mode the planner chose
+	PVW         float64 // planned PV output (site-sign, ≤ 0)
+	LoadW       float64 // planned load (site-sign, ≥ 0)
 }
 
 // Bridge is an instance of the HA MQTT bridge.
@@ -84,10 +92,13 @@ type Bridge struct {
 	sensorsAnnounced int
 	stopped          bool
 
-	// announcedMetrics tracks emit_metric sensors already registered with HA
-	// so we only publish discovery once per metric, not every publish tick.
+	// announcedMetrics tracks emit_metric sensors already registered with HA.
 	// Keys are "driverName:metricName". Reset on Reload so reconnect re-announces.
 	announcedMetrics map[string]struct{}
+	// announcedEVDrivers / announcedVehicleDrivers track lazily-discovered
+	// EV charger and vehicle readers. Keys are driver names.
+	announcedEVDrivers      map[string]struct{}
+	announcedVehicleDrivers map[string]struct{}
 
 	// connectTimeout is the WaitTimeout passed to paho's Connect token.
 	// 0 means "use defaultConnectTimeout"; tests override to keep the
@@ -162,15 +173,17 @@ func Start(
 	plan PlanSource,
 ) (*Bridge, error) {
 	b := &Bridge{
-		tel:              tel,
-		ctrl:             ctrl,
-		ctrlMu:           ctrlMu,
-		cb:               cb,
-		plan:             plan,
-		topicPrefix:      "forty-two-watts",
-		discoPrefix:      "homeassistant",
-		deviceID:         "forty_two_watts",
-		announcedMetrics: make(map[string]struct{}),
+		tel:                     tel,
+		ctrl:                    ctrl,
+		ctrlMu:                  ctrlMu,
+		cb:                      cb,
+		plan:                    plan,
+		topicPrefix:             "forty-two-watts",
+		discoPrefix:             "homeassistant",
+		deviceID:                "forty_two_watts",
+		announcedMetrics:        make(map[string]struct{}),
+		announcedEVDrivers:      make(map[string]struct{}),
+		announcedVehicleDrivers: make(map[string]struct{}),
 	}
 	if err := b.connectAndStart(cfg, driverNames); err != nil {
 		return nil, err
@@ -193,6 +206,8 @@ func (b *Bridge) Reload(newCfg *config.HomeAssistant, driverNames []string) erro
 	}
 	b.mu.Lock()
 	b.announcedMetrics = make(map[string]struct{})
+	b.announcedEVDrivers = make(map[string]struct{})
+	b.announcedVehicleDrivers = make(map[string]struct{})
 	b.mu.Unlock()
 	b.teardown()
 	return b.connectAndStart(newCfg, driverNames)
@@ -472,21 +487,50 @@ func (b *Bridge) publishDiscovery() {
 	b.publish(fmt.Sprintf("%s/switch/%s/battery_covers_ev/config", b.discoPrefix, b.deviceID), data, true)
 	total++
 
-	// ---- MPC plan sensor ----
-	// State topic carries the current slot's action string ("charge" / "discharge" / "idle").
-	// JSON-attributes topic carries the full day schedule so HA automations and
-	// template sensors can inspect upcoming slots.
+	// ---- MPC plan + price + plan-stale sensors (only when planner is wired) ----
 	if b.plan != nil {
+		// Plan action sensor: state = "charge"/"discharge"/"idle", attrs = full 24h schedule.
 		planMsg := b.withAvail(map[string]any{
-			"name":                   "Plan",
-			"unique_id":              b.deviceID + "_plan",
-			"state_topic":            b.stateTopic("plan_action"),
-			"json_attributes_topic":  b.stateTopic("plan_json"),
-			"icon":                   "mdi:calendar-clock",
-			"device":                 dev,
+			"name":                  "Plan",
+			"unique_id":             b.deviceID + "_plan",
+			"state_topic":           b.stateTopic("plan_action"),
+			"json_attributes_topic": b.stateTopic("plan_json"),
+			"icon":                  "mdi:calendar-clock",
+			"device":                dev,
 		})
 		data, _ = json.Marshal(planMsg)
 		b.publish(fmt.Sprintf("%s/sensor/%s/plan/config", b.discoPrefix, b.deviceID), data, true)
+		total++
+
+		// Current electricity price sensor: state = total consumer price (öre/kWh),
+		// attrs = spot_ore, cost_ore, confidence, reason, ems_mode.
+		priceMsg := b.withAvail(map[string]any{
+			"name":                  "Electricity Price",
+			"unique_id":             b.deviceID + "_price_ore",
+			"state_topic":           b.stateTopic("price_ore"),
+			"json_attributes_topic": b.stateTopic("price_json"),
+			"unit_of_measurement":   "öre/kWh",
+			"icon":                  "mdi:cash-multiple",
+			"device":                dev,
+		})
+		data, _ = json.Marshal(priceMsg)
+		b.publish(fmt.Sprintf("%s/sensor/%s/price/config", b.discoPrefix, b.deviceID), data, true)
+		total++
+
+		// Plan-stale binary_sensor: "on" = planner fell back to self_consumption
+		// because the plan was missing or older than 30 min.
+		staleMsg := b.withAvail(map[string]any{
+			"name":         "Plan Stale",
+			"unique_id":    b.deviceID + "_plan_stale",
+			"state_topic":  b.stateTopic("plan_stale"),
+			"payload_on":   "true",
+			"payload_off":  "false",
+			"device_class": "problem",
+			"icon":         "mdi:calendar-alert",
+			"device":       dev,
+		})
+		data, _ = json.Marshal(staleMsg)
+		b.publish(fmt.Sprintf("%s/binary_sensor/%s/plan_stale/config", b.discoPrefix, b.deviceID), data, true)
 		total++
 	}
 
@@ -495,6 +539,14 @@ func (b *Bridge) publishDiscovery() {
 	knownMetrics := make(map[string]struct{}, len(b.announcedMetrics))
 	for k, v := range b.announcedMetrics {
 		knownMetrics[k] = v
+	}
+	knownEVs := make(map[string]struct{}, len(b.announcedEVDrivers))
+	for k, v := range b.announcedEVDrivers {
+		knownEVs[k] = v
+	}
+	knownVehicles := make(map[string]struct{}, len(b.announcedVehicleDrivers))
+	for k, v := range b.announcedVehicleDrivers {
+		knownVehicles[k] = v
 	}
 	b.mu.Unlock()
 
@@ -520,16 +572,17 @@ func (b *Bridge) publishDiscovery() {
 		}
 		total += 4
 
-		// Health binary_sensor: online/offline.
+		// Health binary_sensor: online/offline with JSON attributes for rich diagnostics.
 		healthMsg := b.withAvail(map[string]any{
-			"name":         name + " Online",
-			"unique_id":    b.deviceID + "_" + name + "_online",
-			"state_topic":  b.driverTopic(name, "online"),
-			"payload_on":   "true",
-			"payload_off":  "false",
-			"device_class": "connectivity",
-			"icon":         "mdi:lan-connect",
-			"device":       dev,
+			"name":                  name + " Online",
+			"unique_id":             b.deviceID + "_" + name + "_online",
+			"state_topic":           b.driverTopic(name, "online"),
+			"json_attributes_topic": b.driverTopic(name, "health_json"),
+			"payload_on":            "true",
+			"payload_off":           "false",
+			"device_class":          "connectivity",
+			"icon":                  "mdi:lan-connect",
+			"device":                dev,
 		})
 		d, _ := json.Marshal(healthMsg)
 		b.publish(fmt.Sprintf("%s/binary_sensor/%s/%s_online/config", b.discoPrefix, b.deviceID, name), d, true)
@@ -545,6 +598,16 @@ func (b *Bridge) publishDiscovery() {
 			b.announceMetric(dev, name, metricName)
 			total++
 		}
+	}
+
+	// Re-announce EV charger and vehicle sensors lazily discovered before reconnect.
+	for name := range knownEVs {
+		b.announceEVDriver(dev, name)
+		total++
+	}
+	for name := range knownVehicles {
+		b.announceVehicleDriver(dev, name)
+		total++
 	}
 
 	b.mu.Lock()
@@ -678,6 +741,7 @@ func (b *Bridge) publishState() {
 	peakLimit := b.ctrl.PeakLimitW
 	evCharging := b.ctrl.EVChargingW
 	batteryCoversEV := b.ctrl.BatteryCoversEV
+	planStale := b.ctrl.PlanStale
 	b.ctrlMu.Unlock()
 
 	gridW := 0.0
@@ -720,8 +784,9 @@ func (b *Bridge) publishState() {
 	}
 	b.publishString("battery_covers_ev", bceState)
 
-	// ---- MPC plan ----
+	// ---- MPC plan + price + plan-stale ----
 	if b.plan != nil {
+		b.publish(b.stateTopic("plan_stale"), []byte(strconv.FormatBool(planStale)), false)
 		b.publishPlan()
 	}
 
@@ -741,10 +806,22 @@ func (b *Bridge) publishState() {
 			}
 		}
 
-		// Health
+		// Health: boolean state + rich JSON attributes.
 		online := false
 		if h := b.tel.DriverHealth(name); h != nil {
 			online = h.IsOnline()
+			attrs := map[string]any{
+				"status":             h.Status.String(),
+				"consecutive_errors": h.ConsecutiveErrors,
+				"last_error":         h.LastError,
+				"tick_count":         h.TickCount,
+			}
+			if h.LastSuccess != nil {
+				attrs["last_seen"] = h.LastSuccess.UTC().Format(time.RFC3339)
+			}
+			if d, err := json.Marshal(attrs); err == nil {
+				b.publish(b.driverTopic(name, "health_json"), d, false)
+			}
 		}
 		b.publish(b.driverTopic(name, "online"), []byte(strconv.FormatBool(online)), false)
 
@@ -763,32 +840,144 @@ func (b *Bridge) publishState() {
 			b.publishDriver(name, snap.Name, snap.Value)
 		}
 	}
+
+	// ---- EV charger readings (DerEV) ----
+	// Lazily discovered: on first sighting of a driver we register it with HA.
+	for _, r := range b.tel.ReadingsByType(telemetry.DerEV) {
+		name := r.Driver
+		b.mu.Lock()
+		_, known := b.announcedEVDrivers[name]
+		if !known {
+			b.announcedEVDrivers[name] = struct{}{}
+		}
+		b.mu.Unlock()
+		if !known {
+			b.announceEVDriver(dev, name)
+		}
+		b.publishDriver(name, "ev_w", r.SmoothedW)
+		// Publish raw Data as JSON attributes so HA can surface charging_state,
+		// charge_limit_pct, and any other fields the driver emits.
+		attrs := map[string]any{
+			"power_w":    r.SmoothedW,
+			"updated_at": r.UpdatedAt.UTC().Format(time.RFC3339),
+		}
+		if len(r.Data) > 0 {
+			var extra map[string]any
+			if json.Unmarshal(r.Data, &extra) == nil {
+				for k, v := range extra {
+					attrs[k] = v
+				}
+			}
+		}
+		if d, err := json.Marshal(attrs); err == nil {
+			b.publish(b.driverTopic(name, "ev_json"), d, false)
+		}
+	}
+
+	// ---- Vehicle readings (DerVehicle) ----
+	// Vehicle SoC + charging metadata from the vehicle itself (e.g. Tesla BLE).
+	for _, r := range b.tel.ReadingsByType(telemetry.DerVehicle) {
+		name := r.Driver
+		b.mu.Lock()
+		_, known := b.announcedVehicleDrivers[name]
+		if !known {
+			b.announcedVehicleDrivers[name] = struct{}{}
+		}
+		b.mu.Unlock()
+		if !known {
+			b.announceVehicleDriver(dev, name)
+		}
+		if r.SoC != nil {
+			b.publishDriver(name, "vehicle_soc_pct", *r.SoC*100)
+		}
+		attrs := map[string]any{
+			"updated_at": r.UpdatedAt.UTC().Format(time.RFC3339),
+		}
+		if r.SoC != nil {
+			attrs["soc_pct"] = *r.SoC * 100
+		}
+		if len(r.Data) > 0 {
+			var extra map[string]any
+			if json.Unmarshal(r.Data, &extra) == nil {
+				for k, v := range extra {
+					attrs[k] = v
+				}
+			}
+		}
+		if d, err := json.Marshal(attrs); err == nil {
+			b.publish(b.driverTopic(name, "vehicle_json"), d, false)
+		}
+	}
 }
 
-// publishPlan reads the current MPC plan and publishes the current-slot
-// action string plus a JSON-attributes payload with the day schedule.
+// announceEVDriver publishes HA discovery for an EV charger reader.
+func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
+	msg := b.withAvail(map[string]any{
+		"name":                  driver + " EV Power",
+		"unique_id":             b.deviceID + "_" + driver + "_ev_w",
+		"state_topic":           b.driverTopic(driver, "ev_w"),
+		"json_attributes_topic": b.driverTopic(driver, "ev_json"),
+		"unit_of_measurement":   "W",
+		"device_class":          "power",
+		"icon":                  "mdi:car-electric",
+		"device":                dev,
+	})
+	d, _ := json.Marshal(msg)
+	b.publish(fmt.Sprintf("%s/sensor/%s/%s_ev_w/config", b.discoPrefix, b.deviceID, driver), d, true)
+}
+
+// announceVehicleDriver publishes HA discovery for a vehicle SoC reader.
+func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
+	msg := b.withAvail(map[string]any{
+		"name":                  driver + " Vehicle SoC",
+		"unique_id":             b.deviceID + "_" + driver + "_vehicle_soc",
+		"state_topic":           b.driverTopic(driver, "vehicle_soc_pct"),
+		"json_attributes_topic": b.driverTopic(driver, "vehicle_json"),
+		"unit_of_measurement":   "%",
+		"device_class":          "battery",
+		"icon":                  "mdi:car-electric",
+		"device":                dev,
+	})
+	d, _ := json.Marshal(msg)
+	b.publish(fmt.Sprintf("%s/sensor/%s/%s_vehicle_soc/config", b.discoPrefix, b.deviceID, driver), d, true)
+}
+
+// publishPlan reads the current MPC plan and publishes:
+//   - plan_action: current slot action string (charge/discharge/idle)
+//   - plan_json: full attributes including 24 h schedule with price/cost data
+//   - price_ore: current consumer electricity price (öre/kWh)
+//   - price_json: price attributes (spot_ore, cost_ore, confidence, reason, ems_mode)
 func (b *Bridge) publishPlan() {
 	actions := b.plan.LatestActions()
 	now := time.Now()
 	nowMs := now.UnixMilli()
 
 	type slotJSON struct {
-		Start    string  `json:"start"`
-		End      string  `json:"end"`
-		Action   string  `json:"action"`
-		BatteryW float64 `json:"battery_w"`
-		GridW    float64 `json:"grid_w"`
-		SoCPct   float64 `json:"soc_pct"`
+		Start      string  `json:"start"`
+		End        string  `json:"end"`
+		Action     string  `json:"action"`
+		BatteryW   float64 `json:"battery_w"`
+		GridW      float64 `json:"grid_w"`
+		SoCPct     float64 `json:"soc_pct"`
+		PVW        float64 `json:"pv_w,omitempty"`
+		LoadW      float64 `json:"load_w,omitempty"`
+		PriceOre   float64 `json:"price_ore,omitempty"`
+		SpotOre    float64 `json:"spot_ore,omitempty"`
+		CostOre    float64 `json:"cost_ore,omitempty"`
+		Confidence float64 `json:"confidence,omitempty"`
+		Reason     string  `json:"reason,omitempty"`
+		EMSMode    string  `json:"ems_mode,omitempty"`
 	}
 
 	currentAction := "unavailable"
-	var currentBatteryW, currentGridW, currentSoCPct float64
-	var currentStart, currentEnd string
+	var curBatW, curGridW, curSoCPct float64
+	var curStart, curEnd string
+	var curPriceOre, curSpotOre, curCostOre, curConfidence float64
+	var curReason, curEMSMode string
 
 	var schedule []slotJSON
 	horizon := nowMs + 24*60*60*1000 // 24 h ahead
 
-	// Sort by start time for deterministic output.
 	sort.Slice(actions, func(i, j int) bool {
 		return actions[i].SlotStartMs < actions[j].SlotStartMs
 	})
@@ -807,37 +996,70 @@ func (b *Bridge) publishPlan() {
 		end := time.UnixMilli(endMs).UTC().Format(time.RFC3339)
 
 		if a.SlotStartMs <= nowMs && nowMs < endMs {
-			// This is the current slot.
 			currentAction = label
-			currentBatteryW = a.BatteryW
-			currentGridW = a.GridW
-			currentSoCPct = a.SoCPct
-			currentStart = start
-			currentEnd = end
+			curBatW = a.BatteryW
+			curGridW = a.GridW
+			curSoCPct = a.SoCPct
+			curStart = start
+			curEnd = end
+			curPriceOre = a.PriceOre
+			curSpotOre = a.SpotOre
+			curCostOre = a.CostOre
+			curConfidence = a.Confidence
+			curReason = a.Reason
+			curEMSMode = a.EMSMode
 		}
 		schedule = append(schedule, slotJSON{
-			Start:    start,
-			End:      end,
-			Action:   label,
-			BatteryW: a.BatteryW,
-			GridW:    a.GridW,
-			SoCPct:   a.SoCPct,
+			Start:      start,
+			End:        end,
+			Action:     label,
+			BatteryW:   a.BatteryW,
+			GridW:      a.GridW,
+			SoCPct:     a.SoCPct,
+			PVW:        a.PVW,
+			LoadW:      a.LoadW,
+			PriceOre:   a.PriceOre,
+			SpotOre:    a.SpotOre,
+			CostOre:    a.CostOre,
+			Confidence: a.Confidence,
+			Reason:     a.Reason,
+			EMSMode:    a.EMSMode,
 		})
 	}
 
 	b.publishString("plan_action", currentAction)
 
-	attrPayload := map[string]any{
-		"action":    currentAction,
-		"battery_w": currentBatteryW,
-		"grid_w":    currentGridW,
-		"soc_pct":   currentSoCPct,
-		"slot_start": currentStart,
-		"slot_end":   currentEnd,
-		"schedule":  schedule,
+	planAttrs := map[string]any{
+		"action":     currentAction,
+		"battery_w":  curBatW,
+		"grid_w":     curGridW,
+		"soc_pct":    curSoCPct,
+		"slot_start": curStart,
+		"slot_end":   curEnd,
+		"price_ore":  curPriceOre,
+		"spot_ore":   curSpotOre,
+		"cost_ore":   curCostOre,
+		"confidence": curConfidence,
+		"reason":     curReason,
+		"ems_mode":   curEMSMode,
+		"schedule":   schedule,
 	}
-	if d, err := json.Marshal(attrPayload); err == nil {
+	if d, err := json.Marshal(planAttrs); err == nil {
 		b.publish(b.stateTopic("plan_json"), d, false)
+	}
+
+	// Price sensor: standalone value + rich attributes for HA energy dashboard.
+	b.publishValue("price_ore", curPriceOre)
+	priceAttrs := map[string]any{
+		"price_ore":  curPriceOre,
+		"spot_ore":   curSpotOre,
+		"cost_ore":   curCostOre,
+		"confidence": curConfidence,
+		"reason":     curReason,
+		"ems_mode":   curEMSMode,
+	}
+	if d, err := json.Marshal(priceAttrs); err == nil {
+		b.publish(b.stateTopic("price_json"), d, false)
 	}
 }
 
