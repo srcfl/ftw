@@ -781,24 +781,30 @@ func main() {
 				}
 			}
 			devices = append(devices, flexload.Device{
-				Type:            f.Type,
-				DriverName:      f.DriverName,
-				HeatingKind:     f.HeatingKind,
-				COP:             cop,
-				MinC:            f.MinC,
-				MaxC:            f.MaxC,
-				MaxHeatW:        f.MaxHeatW,
-				IndoorMetric:    f.IndoorMetric,
-				HeatMetric:      f.HeatMetric,
-				SetpointAction:  f.SetpointAction,
-				PreHeatFraction: f.PreHeatFraction,
-				EnergyWh:        f.EnergyWh,
-				PowerW:          f.PowerW,
-				OnAction:        f.OnAction,
-				OffAction:       f.OffAction,
-				PreferPV:        f.PreferPV,
-				EarliestHour:    f.EarliestHour,
-				DeadlineHour:    f.DeadlineHour,
+				Type:              f.Type,
+				DriverName:        f.DriverName,
+				Mode:              f.Mode,
+				HeatingKind:       f.HeatingKind,
+				COP:               cop,
+				MinC:              f.MinC,
+				MaxC:              f.MaxC,
+				MaxHeatW:          f.MaxHeatW,
+				IndoorDriver:      f.IndoorDriver,
+				IndoorMetric:      f.IndoorMetric,
+				HeatMetric:        f.HeatMetric,
+				SetpointAction:    f.SetpointAction,
+				PreHeatFraction:   f.PreHeatFraction,
+				TargetC:           f.TargetC,
+				PriceThresholdOre: f.PriceThresholdOre,
+				BlockHorizonH:     f.BlockHorizonH,
+				PowerMetric:       f.PowerMetric,
+				EnergyWh:          f.EnergyWh,
+				PowerW:            f.PowerW,
+				OnAction:          f.OnAction,
+				OffAction:         f.OffAction,
+				PreferPV:          f.PreferPV,
+				EarliestHour:      f.EarliestHour,
+				DeadlineHour:      f.DeadlineHour,
 			})
 		}
 		flexSvc := flexload.NewService(st, tel, devices)
@@ -850,6 +856,16 @@ func main() {
 				return 0
 			}
 			flexSvc.Dispatch = reg.Send
+			// Independent price source for simple (non-MPC) mode + the fuse
+			// headroom simple zones arbitrate under.
+			if cfg.Price != nil && cfg.Price.Zone != "" {
+				zone := cfg.Price.Zone
+				flexSvc.PriceNow = func(now time.Time) (float64, bool) {
+					p := priceFc.Predict(zone, now)
+					return p, p > 0
+				}
+			}
+			flexSvc.FuseBudgetW = cfg.Fuse.MaxPowerW()
 			flexSvc.Start(ctx)
 			defer flexSvc.Stop()
 			slog.Info("flexload scheduler started", "devices", len(devices))

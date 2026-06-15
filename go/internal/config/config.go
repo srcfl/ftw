@@ -54,6 +54,27 @@ type FlexLoad struct {
 	Type       string `yaml:"type" json:"type"` // "thermostat" | "deferrable"
 	DriverName string `yaml:"driver_name" json:"driver_name"`
 
+	// Mode selects the control strategy for a thermostat:
+	//   "planner" (default) — horizon-optimised setpoint schedule against
+	//                the MPC price/PV curve (pre-heat in cheap hours).
+	//   "simple"  — standalone block/heat rule needing no MPC: heat to keep
+	//                TargetC, but block heating while the price is above
+	//                PriceThresholdOre when the building's own inertia keeps
+	//                the target for BlockHorizonH hours. Works with a fixed
+	//                threshold and no forecast at all.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// IndoorDriver lets the indoor temperature come from a *separate* driver
+	// — e.g. a dedicated Matter Temperature Measurement sensor (cluster
+	// 0x0402) rather than the thermostat's own probe, which is often biased
+	// by its mounting location. Empty = read IndoorMetric off DriverName.
+	IndoorDriver string `yaml:"indoor_driver,omitempty" json:"indoor_driver,omitempty"`
+
+	// ---- simple-mode fields ----
+	TargetC           float64 `yaml:"target_c,omitempty" json:"target_c,omitempty"`                         // comfort target to maintain
+	PriceThresholdOre float64 `yaml:"price_threshold_ore,omitempty" json:"price_threshold_ore,omitempty"` // "expensive" cutoff; 0 = derive from forecast
+	BlockHorizonH     float64 `yaml:"block_horizon_h,omitempty" json:"block_horizon_h,omitempty"`         // target must hold this long to allow a block (default 1h)
+
 	// ---- thermostat fields ----
 	// HeatingKind selects the power model:
 	//   "electric"  (default) — direct electric radiator or resistive floor
@@ -77,8 +98,15 @@ type FlexLoad struct {
 	PreHeatFraction float64 `yaml:"preheat_fraction,omitempty" json:"preheat_fraction,omitempty"`
 
 	// ---- deferrable fields ----
-	EnergyWh     float64 `yaml:"energy_wh,omitempty" json:"energy_wh,omitempty"`
-	PowerW       float64 `yaml:"power_w,omitempty" json:"power_w,omitempty"`
+	// PowerMetric is the driver metric carrying the plug's measured power
+	// (W) — e.g. a Matter smart plug's ActivePower. When set, the scheduler
+	// learns the appliance's actual run power and daily energy from it, so
+	// EnergyWh / PowerW become optional (learned when left 0). This is what
+	// lets one generic "deferrable" handle a spa, a water heater, or a pump
+	// without the operator characterising each by hand.
+	PowerMetric string  `yaml:"power_metric,omitempty" json:"power_metric,omitempty"`
+	EnergyWh    float64 `yaml:"energy_wh,omitempty" json:"energy_wh,omitempty"`
+	PowerW      float64 `yaml:"power_w,omitempty" json:"power_w,omitempty"`
 	OnAction     string  `yaml:"on_action,omitempty" json:"on_action,omitempty"`
 	OffAction    string  `yaml:"off_action,omitempty" json:"off_action,omitempty"`
 	PreferPV     bool    `yaml:"prefer_pv,omitempty" json:"prefer_pv,omitempty"`

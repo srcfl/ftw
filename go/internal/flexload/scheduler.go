@@ -20,6 +20,7 @@ package flexload
 import (
 	"math"
 	"sort"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/thermalmodel"
 )
@@ -164,6 +165,162 @@ func PlanThermal(slots []PriceSlot, spec ThermalSpec) ThermalSchedule {
 		}
 	}
 	return out
+}
+
+// ---- Simple valuation (MPC-independent) ----
+//
+// The simple controller is a standalone, interpretable alternative to the
+// horizon scheduler for operators who don't run the MPC (or want a
+// degraded-mode fallback). It needs only: the current indoor temperature,
+// a target (comfort) temperature, the current price vs. a threshold, and
+// the learned thermal model. The rule is "block heating during expensive
+// periods when the building's own thermal inertia will keep the target
+// satisfied for the block horizon; otherwise heat." No forecast required
+// when a fixed price threshold is given.
+
+// SimpleSpec is the input to a single simple-mode evaluation.
+type SimpleSpec struct {
+	Model          thermalmodel.Model
+	CurrentC       float64       // measured indoor temp
+	TargetC        float64       // comfort target (the temp we must keep)
+	MinC           float64       // hard floor (never block below this)
+	Outdoor        float64       // current outdoor temp
+	PriceNow       float64       // current price (öre/kWh)
+	PriceThreshold float64       // "expensive" cutoff (öre/kWh)
+	BlockHorizon   time.Duration // target must stay satisfied this long to allow a block
+	MaxHeatW       float64       // zone thermal output cap
+	COP            float64       // electrical/thermal ratio (≤0 → 1)
+}
+
+// SimpleDecision is the output: whether to heat and to what setpoint.
+type SimpleDecision struct {
+	Heat       bool    // true = heat toward TargetC; false = block (coast)
+	SetpointC  float64 // setpoint to write (TargetC if heating, MinC if blocking)
+	EstHeatW   float64 // estimated electrical draw if heating (thermal/COP), else 0
+	CoastHours float64 // estimated hours of coast before temp falls to TargetC
+	Reason     string
+}
+
+// EvaluateSimple applies the block/heat rule for one zone.
+func EvaluateSimple(spec SimpleSpec) SimpleDecision {
+	cop := spec.COP
+	if cop <= 0 {
+		cop = 1
+	}
+	// Hard floor always wins.
+	if spec.CurrentC <= spec.MinC {
+		return SimpleDecision{
+			Heat: true, SetpointC: spec.TargetC,
+			EstHeatW: spec.MaxHeatW / cop,
+			Reason:   "at/below comfort floor",
+		}
+	}
+
+	coast := coastHoursToTarget(spec.Model, spec.CurrentC, spec.TargetC, spec.Outdoor, 24*time.Hour)
+	expensive := spec.PriceThreshold > 0 && spec.PriceNow > spec.PriceThreshold
+	bufferEnough := coast >= spec.BlockHorizon.Hours()
+
+	if expensive && bufferEnough {
+		return SimpleDecision{
+			Heat: false, SetpointC: spec.MinC,
+			EstHeatW:   0,
+			CoastHours: coast,
+			Reason:     "expensive + thermal buffer covers block horizon",
+		}
+	}
+	// Otherwise heat to keep the target.
+	holdThermal := spec.Model.HeatToHoldW(spec.TargetC, spec.Outdoor)
+	if holdThermal > spec.MaxHeatW {
+		holdThermal = spec.MaxHeatW
+	}
+	reason := "maintaining target"
+	if expensive {
+		reason = "expensive but buffer insufficient — heating to protect target"
+	}
+	return SimpleDecision{
+		Heat: true, SetpointC: spec.TargetC,
+		EstHeatW:   holdThermal / cop,
+		CoastHours: coast,
+		Reason:     reason,
+	}
+}
+
+// coastHoursToTarget rolls the RC model forward with no heating until the
+// indoor temp decays to targetC, returning the elapsed hours (capped).
+func coastHoursToTarget(m thermalmodel.Model, indoorC, targetC, outdoorC float64, cap time.Duration) float64 {
+	if indoorC <= targetC {
+		return 0
+	}
+	const step = 300.0 // 5-min integration step (s)
+	maxS := cap.Seconds()
+	t := 0.0
+	temp := indoorC
+	for t < maxS {
+		temp = m.PredictNext(temp, outdoorC, 0, step)
+		t += step
+		if temp <= targetC {
+			break
+		}
+	}
+	return t / 3600.0
+}
+
+// ArbitrateSimple resolves competition between simple-mode zones under a
+// shared electrical power budget (e.g. the site fuse headroom reserved for
+// heating). When the sum of heating draws would exceed budgetW, it blocks
+// the highest-power zones *that can afford it* (coast ≥ their block
+// horizon) first — realising "block the higher-consumption load when its
+// target will still be satisfied" rather than tripping the breaker or
+// blocking a zone that actually needs the heat. Zones at their comfort
+// floor are never blocked. budgetW ≤ 0 disables arbitration.
+func ArbitrateSimple(decisions []SimpleDecision, specs []SimpleSpec, budgetW float64) {
+	if budgetW <= 0 || len(decisions) != len(specs) {
+		return
+	}
+	var total float64
+	for _, d := range decisions {
+		if d.Heat {
+			total += d.EstHeatW
+		}
+	}
+	if total <= budgetW {
+		return
+	}
+	// Candidates we may block: currently heating, above the floor, and with
+	// enough coast buffer to ride out a block.
+	type cand struct{ idx int; powerW, coast float64 }
+	var cands []cand
+	for i, d := range decisions {
+		if !d.Heat {
+			continue
+		}
+		s := specs[i]
+		if s.CurrentC <= s.MinC {
+			continue // protect the floor
+		}
+		if d.CoastHours < s.BlockHorizon.Hours() {
+			continue // needs the heat now
+		}
+		cands = append(cands, cand{idx: i, powerW: d.EstHeatW, coast: d.CoastHours})
+	}
+	// Block highest-power (then longest-coast) first until under budget.
+	sort.SliceStable(cands, func(a, b int) bool {
+		if cands[a].powerW != cands[b].powerW {
+			return cands[a].powerW > cands[b].powerW
+		}
+		return cands[a].coast > cands[b].coast
+	})
+	for _, c := range cands {
+		if total <= budgetW {
+			break
+		}
+		d := &decisions[c.idx]
+		total -= d.EstHeatW
+		d.Heat = false
+		d.SetpointC = specs[c.idx].MinC
+		d.EstHeatW = 0
+		d.Reason = "deferred under shared power budget (target still satisfiable)"
+	}
 }
 
 // ---- Deferrable (smart-plug) scheduling ----

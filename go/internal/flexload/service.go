@@ -17,6 +17,7 @@ import (
 type Device struct {
 	Type       string // "thermostat" | "deferrable"
 	DriverName string
+	Mode       string // "planner" (default) | "simple" — thermostats only
 
 	// thermostat
 	HeatingKind     string  // "electric" (default) | "hydronic"
@@ -24,12 +25,19 @@ type Device struct {
 	MinC            float64
 	MaxC            float64
 	MaxHeatW        float64 // zone thermal output cap (W)
+	IndoorDriver    string  // optional: separate driver (temp sensor) for indoor temp
 	IndoorMetric    string  // driver metric carrying measured indoor temp (°C)
 	HeatMetric      string  // optional: metered heating power (W) for RC training
 	SetpointAction  string  // driver command action that writes the setpoint
 	PreHeatFraction float64
 
+	// simple-mode
+	TargetC           float64 // comfort target to maintain
+	PriceThresholdOre float64 // "expensive" cutoff; 0 = derive from forecast
+	BlockHorizonH     float64 // hours the target must hold to allow a block
+
 	// deferrable
+	PowerMetric  string // optional: plug power metric → learn load + energy
 	EnergyWh     float64
 	PowerW       float64
 	OnAction     string
@@ -57,6 +65,14 @@ type Service struct {
 	Slots    func() []PriceSlot              // current horizon price/PV slots
 	Outdoor  func(slotStartMs int64) float64 // outdoor temp forecast (°C)
 	Dispatch DispatchFunc
+	// PriceNow returns the current price (öre/kWh) for simple-mode zones,
+	// independently of the MPC. Optional — when nil, simple mode derives the
+	// current price from Slots() if available, else degrades to comfort-only.
+	PriceNow func(now time.Time) (float64, bool)
+	// FuseBudgetW is the shared electrical headroom (W) simple-mode zones
+	// arbitrate under (block highest-power zones first when comfort allows).
+	// 0 disables arbitration.
+	FuseBudgetW float64
 
 	SampleInterval time.Duration // thermal training cadence (default 60s)
 	ReplanInterval time.Duration // schedule + dispatch cadence (default 5m)
@@ -64,6 +80,7 @@ type Service struct {
 	mu         sync.RWMutex
 	thermal    map[string]*thermalmodel.Model // by driver name
 	lastIndoor map[string]tempSample          // last indoor reading for delta training
+	plug       map[string]*PlugProfile        // by driver name (deferrable load learning)
 
 	stop chan struct{}
 	done chan struct{}
@@ -75,6 +92,7 @@ type tempSample struct {
 }
 
 const thermalStateKeyPrefix = "flexload/thermal/"
+const plugStateKeyPrefix = "flexload/plug/"
 
 // NewService builds a flex-load service. Returns nil if there are no
 // devices configured, so the caller can skip starting it entirely.
@@ -90,29 +108,59 @@ func NewService(st *state.Store, tel *telemetry.Store, devices []Device) *Servic
 		ReplanInterval: 5 * time.Minute,
 		thermal:        map[string]*thermalmodel.Model{},
 		lastIndoor:     map[string]tempSample{},
+		plug:           map[string]*PlugProfile{},
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
 	}
-	// Restore or initialize a thermal model per thermostat.
 	for _, d := range devices {
-		if d.Type != "thermostat" {
-			continue
-		}
-		m := thermalmodel.NewModel()
-		if st != nil {
-			if js, ok := st.LoadConfig(thermalStateKeyPrefix + d.DriverName); ok && js != "" {
-				var loaded thermalmodel.Model
-				if err := json.Unmarshal([]byte(js), &loaded); err == nil && loaded.Forgetting > 0 {
-					m = &loaded
-					slog.Info("flexload thermal model restored",
-						"driver", d.DriverName, "samples", m.Samples,
-						"tau_h", m.TauSeconds()/3600, "quality", m.Quality())
+		switch d.Type {
+		case "thermostat":
+			// Restore or initialize a thermal model per thermostat.
+			m := thermalmodel.NewModel()
+			if st != nil {
+				if js, ok := st.LoadConfig(thermalStateKeyPrefix + d.DriverName); ok && js != "" {
+					var loaded thermalmodel.Model
+					if err := json.Unmarshal([]byte(js), &loaded); err == nil && loaded.Forgetting > 0 {
+						m = &loaded
+						slog.Info("flexload thermal model restored",
+							"driver", d.DriverName, "samples", m.Samples,
+							"tau_h", m.TauSeconds()/3600, "quality", m.Quality())
+					}
 				}
 			}
+			s.thermal[d.DriverName] = m
+		case "deferrable":
+			// Restore or initialize a plug load profile when metering is wired.
+			if d.PowerMetric == "" {
+				continue
+			}
+			p := NewPlugProfile(0)
+			if st != nil {
+				if js, ok := st.LoadConfig(plugStateKeyPrefix + d.DriverName); ok && js != "" {
+					var loaded PlugProfile
+					if err := json.Unmarshal([]byte(js), &loaded); err == nil && loaded.OnThresholdW > 0 {
+						p = &loaded
+						slog.Info("flexload plug profile restored",
+							"driver", d.DriverName, "running_w", p.RunningW,
+							"daily_wh", p.DailyEnergyWh, "class", p.Classify())
+					}
+				}
+			}
+			s.plug[d.DriverName] = p
 		}
-		s.thermal[d.DriverName] = m
 	}
 	return s
+}
+
+// PlugProfileFor returns a copy of the learned plug profile for a driver.
+func (s *Service) PlugProfileFor(driver string) (PlugProfile, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.plug[driver]
+	if !ok {
+		return PlugProfile{}, false
+	}
+	return *p, true
 }
 
 // ThermalModel returns a copy of the learned model for a driver (for the
@@ -175,11 +223,26 @@ func (s *Service) loop(ctx context.Context) {
 // scheduler still pre-heats in cheap hours and honors the comfort floor).
 func (s *Service) sample() {
 	now := time.Now()
+	dtMax := 4 * float64(s.SampleInterval) / float64(time.Second)
 	for _, d := range s.Devices {
+		// Learn deferrable plug loads from their metered power.
+		if d.Type == "deferrable" && d.PowerMetric != "" {
+			if w, _, ok := s.Tele.LatestMetric(d.DriverName, d.PowerMetric); ok {
+				s.mu.Lock()
+				if p := s.plug[d.DriverName]; p != nil {
+					p.Update(w, now.UnixMilli(), dtMax)
+					if p.Samples%20 == 0 && p.Samples > 0 {
+						s.persistPlug(d.DriverName, p)
+					}
+				}
+				s.mu.Unlock()
+			}
+			continue
+		}
 		if d.Type != "thermostat" || d.IndoorMetric == "" || d.HeatMetric == "" {
 			continue
 		}
-		indoorC, _, ok := s.Tele.LatestMetric(d.DriverName, d.IndoorMetric)
+		indoorC, ok := s.readIndoor(d)
 		if !ok {
 			continue
 		}
@@ -230,18 +293,142 @@ func (s *Service) replan(ctx context.Context) {
 	now := time.Now()
 	nowMs := now.UnixMilli()
 
+	// Simple-mode thermostats are evaluated together so they can arbitrate
+	// under the shared fuse budget.
+	var simpleDevs []Device
+	var simpleSpecs []SimpleSpec
+
 	for _, d := range s.Devices {
 		switch d.Type {
 		case "thermostat":
+			if d.Mode == "simple" {
+				spec, ok := s.buildSimpleSpec(d, slots, now)
+				if ok {
+					simpleDevs = append(simpleDevs, d)
+					simpleSpecs = append(simpleSpecs, spec)
+				}
+				continue
+			}
 			s.replanThermostat(ctx, d, slots, nowMs)
 		case "deferrable":
 			s.replanDeferrable(ctx, d, slots, now, nowMs)
 		}
 	}
+
+	if len(simpleSpecs) > 0 {
+		decisions := make([]SimpleDecision, len(simpleSpecs))
+		for i := range simpleSpecs {
+			decisions[i] = EvaluateSimple(simpleSpecs[i])
+		}
+		ArbitrateSimple(decisions, simpleSpecs, s.FuseBudgetW)
+		for i, d := range simpleDevs {
+			action := d.SetpointAction
+			if action == "" {
+				action = "setpoint"
+			}
+			payload, _ := json.Marshal(map[string]any{"action": action, "value": decisions[i].SetpointC})
+			if err := s.Dispatch(ctx, d.DriverName, payload); err != nil {
+				slog.Warn("flexload simple dispatch failed", "driver", d.DriverName, "err", err)
+			}
+		}
+	}
+}
+
+// buildSimpleSpec assembles the inputs for a simple-mode evaluation,
+// resolving the current price (PriceNow hook → Slots fallback) and live
+// indoor/outdoor temperatures.
+func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (SimpleSpec, bool) {
+	indoorC, ok := s.readIndoor(d)
+	if !ok {
+		indoorC = (d.MinC + d.MaxC) / 2
+	}
+	outdoor := 0.0
+	if s.Outdoor != nil {
+		outdoor = s.Outdoor(now.UnixMilli())
+	}
+	// Current price: prefer the independent hook so simple mode works with
+	// no MPC; fall back to the slot covering now.
+	priceNow, havePrice := 0.0, false
+	if s.PriceNow != nil {
+		priceNow, havePrice = s.PriceNow(now)
+	}
+	if !havePrice && len(slots) > 0 {
+		if p, ok := priceForNow(slots, now.UnixMilli()); ok {
+			priceNow, havePrice = p, true
+		}
+	}
+	// Threshold: explicit fixed cutoff, else the 60th-percentile of the
+	// horizon prices when a curve is available.
+	threshold := d.PriceThresholdOre
+	if threshold <= 0 && len(slots) > 0 {
+		threshold = priceQuantile(slots, 0.6)
+	}
+	// Without any price signal, simple mode degrades to comfort-only: a zero
+	// threshold makes "expensive" never fire, so we always heat to target.
+	_ = havePrice
+
+	s.mu.RLock()
+	model := *s.thermal[d.DriverName]
+	s.mu.RUnlock()
+
+	bh := d.BlockHorizonH
+	if bh <= 0 {
+		bh = 1.0
+	}
+	target := d.TargetC
+	if target == 0 {
+		target = (d.MinC + d.MaxC) / 2
+	}
+	return SimpleSpec{
+		Model:          model,
+		CurrentC:       indoorC,
+		TargetC:        target,
+		MinC:           d.MinC,
+		Outdoor:        outdoor,
+		PriceNow:       priceNow,
+		PriceThreshold: threshold,
+		BlockHorizon:   time.Duration(bh * float64(time.Hour)),
+		MaxHeatW:       d.MaxHeatW,
+		COP:            d.COP,
+	}, true
+}
+
+// readIndoor returns the zone's measured indoor temperature, reading from a
+// dedicated sensor driver (IndoorDriver) when configured, else the
+// thermostat itself.
+func (s *Service) readIndoor(d Device) (float64, bool) {
+	src := d.IndoorDriver
+	if src == "" {
+		src = d.DriverName
+	}
+	if d.IndoorMetric == "" {
+		return 0, false
+	}
+	v, _, ok := s.Tele.LatestMetric(src, d.IndoorMetric)
+	return v, ok
+}
+
+// priceForNow returns the price of the slot covering nowMs.
+func priceForNow(slots []PriceSlot, nowMs int64) (float64, bool) {
+	for i, sl := range slots {
+		var end int64
+		if i+1 < len(slots) {
+			end = slots[i+1].StartMs
+		} else {
+			end = sl.StartMs + int64(sl.LenMin)*60_000
+		}
+		if nowMs >= sl.StartMs && nowMs < end {
+			return sl.PriceOre, true
+		}
+	}
+	if len(slots) > 0 {
+		return slots[0].PriceOre, true
+	}
+	return 0, false
 }
 
 func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceSlot, nowMs int64) {
-	indoorC, _, ok := s.Tele.LatestMetric(d.DriverName, d.IndoorMetric)
+	indoorC, ok := s.readIndoor(d)
 	if !ok {
 		// No live temperature → assume mid-band so the scheduler still
 		// produces a sane setpoint rather than skipping the zone.
@@ -282,10 +469,17 @@ func (s *Service) replanThermostat(ctx context.Context, d Device, slots []PriceS
 
 func (s *Service) replanDeferrable(ctx context.Context, d Device, slots []PriceSlot, now time.Time, nowMs int64) {
 	earliest, deadline := dailyWindow(now, d.EarliestHour, d.DeadlineHour)
+	// Fall back to the learned plug profile for power / energy the operator
+	// didn't pin, so a spa vs. a water heater self-calibrate.
+	powerW, energyWh := d.PowerW, d.EnergyWh
+	if p, ok := s.PlugProfileFor(d.DriverName); ok {
+		powerW = p.EffectivePowerW(d.PowerW)
+		energyWh = p.EffectiveEnergyWh(d.EnergyWh)
+	}
 	spec := DeferrableSpec{
 		DriverName: d.DriverName,
-		EnergyWh:   d.EnergyWh,
-		PowerW:     d.PowerW,
+		EnergyWh:   energyWh,
+		PowerW:     powerW,
 		EarliestMs: earliest,
 		DeadlineMs: deadline,
 		PreferPV:   d.PreferPV,
@@ -381,11 +575,27 @@ func (s *Service) persist(driver string, m *thermalmodel.Model) {
 	}
 }
 
+func (s *Service) persistPlug(driver string, p *PlugProfile) {
+	if s.Store == nil {
+		return
+	}
+	js, err := json.Marshal(p)
+	if err != nil {
+		return
+	}
+	if err := s.Store.SaveConfig(plugStateKeyPrefix+driver, string(js)); err != nil {
+		slog.Warn("flexload plug persist failed", "driver", driver, "err", err)
+	}
+}
+
 func (s *Service) persistAll() {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for driver, m := range s.thermal {
 		s.persist(driver, m)
+	}
+	for driver, p := range s.plug {
+		s.persistPlug(driver, p)
 	}
 }
 

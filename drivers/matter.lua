@@ -61,6 +61,31 @@
 --         cluster: 0x0006   # On/Off
 --         invoke: "Toggle"  # cluster command name (instead of attribute write)
 --
+-- Config example — standalone temperature sensor (Matter Temperature
+-- Measurement cluster). Pair a cheap Matter room sensor and feed its reading
+-- to a thermostat zone via flexloads `indoor_driver` so the thermal model
+-- uses true room temperature, not the thermostat's mounting-biased probe:
+--
+--   drivers:
+--     - name: bedroom_temp
+--       lua: drivers/matter.lua
+--       capabilities:
+--         matter: { host: localhost }
+--       config:
+--         node_id: 9012
+--         reads:
+--           - name: indoor_temp_c
+--             endpoint: 1
+--             cluster: 0x0402   # Temperature Measurement
+--             attribute: 0x0000 # MeasuredValue
+--             scale: 0.01       # raw is °C × 100
+--   flexloads:
+--     - type: thermostat
+--       driver_name: living_room      # the thermostat we command
+--       indoor_driver: bedroom_temp   # but read temperature from the sensor
+--       indoor_metric: indoor_temp_c
+--       ...
+--
 -- Cluster IDs may be written as hex (0x0201) or decimal (513) — YAML parses
 -- both as integers, so the driver receives them as numbers either way.
 --

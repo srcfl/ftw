@@ -2,9 +2,120 @@ package flexload
 
 import (
 	"testing"
+	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/thermalmodel"
 )
+
+func trainedModel() thermalmodel.Model {
+	m := thermalmodel.NewModel()
+	m.Samples = thermalmodel.WarmupSamples
+	return *m
+}
+
+// TestSimpleBlocksWhenBufferCovers verifies the simple controller blocks
+// heating during an expensive period when the building's inertia keeps the
+// target for the block horizon — and heats otherwise.
+func TestSimpleBlocksWhenBufferCovers(t *testing.T) {
+	m := trainedModel() // τ = 4h prior → slow decay
+
+	// 2.5°C margin over target at a mild 15°C outdoor → ~1.6h of coast with
+	// the τ=4h prior, comfortably over the 1h block horizon.
+	expensive := SimpleSpec{
+		Model: m, CurrentC: 22.5, TargetC: 20.0, MinC: 18.0,
+		Outdoor: 15.0, PriceNow: 300, PriceThreshold: 150,
+		BlockHorizon: time.Hour, MaxHeatW: 2000, COP: 1,
+	}
+	d := EvaluateSimple(expensive)
+	if d.Heat {
+		t.Errorf("expected block (coast %.1fh ≥ 1h, price 300>150): %s", d.CoastHours, d.Reason)
+	}
+	if d.SetpointC != expensive.MinC {
+		t.Errorf("blocked zone setpoint = %.1f, want MinC %.1f", d.SetpointC, expensive.MinC)
+	}
+
+	// Cheap price → heat to target even though buffer exists.
+	cheap := expensive
+	cheap.PriceNow = 50
+	if dd := EvaluateSimple(cheap); !dd.Heat {
+		t.Error("cheap price should heat to target")
+	}
+}
+
+// TestSimpleProtectsFloor verifies a zone at/below the floor always heats,
+// regardless of price.
+func TestSimpleProtectsFloor(t *testing.T) {
+	m := trainedModel()
+	spec := SimpleSpec{
+		Model: m, CurrentC: 17.9, TargetC: 20.0, MinC: 18.0,
+		Outdoor: -10.0, PriceNow: 999, PriceThreshold: 100,
+		BlockHorizon: time.Hour, MaxHeatW: 3000, COP: 1,
+	}
+	d := EvaluateSimple(spec)
+	if !d.Heat {
+		t.Error("zone below floor must heat regardless of price")
+	}
+}
+
+// TestSimpleHeatsWhenBufferInsufficient verifies that even at a high price,
+// a zone close to its target (little buffer) heats to protect comfort.
+func TestSimpleHeatsWhenBufferInsufficient(t *testing.T) {
+	m := trainedModel()
+	m.Beta[0] = 1.0 / 1200.0 // τ = 20min, very leaky → tiny buffer
+	spec := SimpleSpec{
+		Model: m, CurrentC: 20.1, TargetC: 20.0, MinC: 18.0,
+		Outdoor: -15.0, PriceNow: 400, PriceThreshold: 100,
+		BlockHorizon: time.Hour, MaxHeatW: 3000, COP: 1,
+	}
+	d := EvaluateSimple(spec)
+	if !d.Heat {
+		t.Errorf("leaky zone with <1h buffer should heat despite high price (coast %.2fh)", d.CoastHours)
+	}
+}
+
+// TestArbitrateBlocksHighestPowerFirst verifies that under a shared power
+// budget, the highest-power zone that can afford to coast is blocked first.
+func TestArbitrateBlocksHighestPowerFirst(t *testing.T) {
+	m := trainedModel()
+	// Two zones, both want to heat, both have ample buffer. Budget only
+	// fits one. The 3 kW zone should be blocked before the 1 kW zone.
+	specs := []SimpleSpec{
+		{Model: m, CurrentC: 21.5, TargetC: 20, MinC: 18, Outdoor: 5, MaxHeatW: 1000, COP: 1, BlockHorizon: time.Hour},
+		{Model: m, CurrentC: 21.5, TargetC: 20, MinC: 18, Outdoor: 5, MaxHeatW: 3000, COP: 1, BlockHorizon: time.Hour},
+	}
+	decisions := []SimpleDecision{
+		{Heat: true, SetpointC: 20, EstHeatW: 1000, CoastHours: 5},
+		{Heat: true, SetpointC: 20, EstHeatW: 3000, CoastHours: 5},
+	}
+	ArbitrateSimple(decisions, specs, 1500) // budget fits the 1kW zone only
+	if !decisions[0].Heat {
+		t.Error("1 kW zone should keep heating under budget")
+	}
+	if decisions[1].Heat {
+		t.Error("3 kW zone should be blocked first (highest power, comfort allows)")
+	}
+}
+
+// TestArbitrateProtectsZoneNeedingHeat verifies arbitration never blocks a
+// zone that lacks the buffer to coast, even if it's the highest power.
+func TestArbitrateProtectsZoneNeedingHeat(t *testing.T) {
+	m := trainedModel()
+	specs := []SimpleSpec{
+		{Model: m, CurrentC: 20.05, TargetC: 20, MinC: 18, Outdoor: 5, MaxHeatW: 3000, COP: 1, BlockHorizon: time.Hour},
+		{Model: m, CurrentC: 22.0, TargetC: 20, MinC: 18, Outdoor: 5, MaxHeatW: 1000, COP: 1, BlockHorizon: time.Hour},
+	}
+	decisions := []SimpleDecision{
+		{Heat: true, SetpointC: 20, EstHeatW: 3000, CoastHours: 0.1}, // no buffer
+		{Heat: true, SetpointC: 20, EstHeatW: 1000, CoastHours: 6},   // ample buffer
+	}
+	ArbitrateSimple(decisions, specs, 1000)
+	if !decisions[0].Heat {
+		t.Error("3 kW zone with no buffer must not be blocked")
+	}
+	if decisions[1].Heat {
+		t.Error("1 kW zone with buffer should yield instead")
+	}
+}
 
 // buildSlots makes a horizon with the given per-slot prices, 60-min slots.
 func buildSlots(prices []float64) []PriceSlot {
