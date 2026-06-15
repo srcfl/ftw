@@ -12,7 +12,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +35,21 @@ type CommandCallbacks struct {
 	SetBatteryCoversEV func(bool) error
 }
 
+// PlanSource is the minimal interface the bridge needs to read the MPC plan.
+// Pass an adapter wrapping *mpc.Service at construction; nil disables plan sensors.
+type PlanSource interface {
+	LatestActions() []PlanAction
+}
+
+// PlanAction is one slot in the MPC plan as seen by the HA bridge.
+type PlanAction struct {
+	SlotStartMs int64
+	SlotLenMin  int
+	BatteryW    float64
+	GridW       float64
+	SoCPct      float64
+}
+
 // Bridge is an instance of the HA MQTT bridge.
 //
 // Lifecycle invariants:
@@ -49,6 +66,7 @@ type Bridge struct {
 	ctrl   *control.State
 	ctrlMu *sync.Mutex
 	cb     CommandCallbacks
+	plan   PlanSource // nil when MPC is not configured
 
 	topicPrefix string // e.g. "forty-two-watts"
 	discoPrefix string // e.g. "homeassistant"
@@ -65,6 +83,11 @@ type Bridge struct {
 	lastPublishMs    int64
 	sensorsAnnounced int
 	stopped          bool
+
+	// announcedMetrics tracks emit_metric sensors already registered with HA
+	// so we only publish discovery once per metric, not every publish tick.
+	// Keys are "driverName:metricName". Reset on Reload so reconnect re-announces.
+	announcedMetrics map[string]struct{}
 
 	// connectTimeout is the WaitTimeout passed to paho's Connect token.
 	// 0 means "use defaultConnectTimeout"; tests override to keep the
@@ -127,21 +150,27 @@ func (b *Bridge) SensorsAnnounced() int {
 // Start connects to the HA broker, publishes autodiscovery, and begins
 // periodic state publishes. Returns immediately; the goroutine runs until
 // Stop() is called.
+//
+// plan may be nil when the MPC planner is not configured; plan sensors
+// are skipped in that case.
 func Start(
 	cfg *config.HomeAssistant,
 	tel *telemetry.Store,
 	ctrl *control.State, ctrlMu *sync.Mutex,
 	driverNames []string,
 	cb CommandCallbacks,
+	plan PlanSource,
 ) (*Bridge, error) {
 	b := &Bridge{
-		tel:         tel,
-		ctrl:        ctrl,
-		ctrlMu:      ctrlMu,
-		cb:          cb,
-		topicPrefix: "forty-two-watts",
-		discoPrefix: "homeassistant",
-		deviceID:    "forty_two_watts",
+		tel:              tel,
+		ctrl:             ctrl,
+		ctrlMu:           ctrlMu,
+		cb:               cb,
+		plan:             plan,
+		topicPrefix:      "forty-two-watts",
+		discoPrefix:      "homeassistant",
+		deviceID:         "forty_two_watts",
+		announcedMetrics: make(map[string]struct{}),
 	}
 	if err := b.connectAndStart(cfg, driverNames); err != nil {
 		return nil, err
@@ -153,14 +182,8 @@ func Start(
 // requiring a process restart. The current MQTT client is disconnected,
 // the publish loop drained, then a fresh paho client is built from
 // newCfg and a new loop is started. Diagnostic counters reset because
-// the new connection is its own thing — operators reading
-// LastPublishMs / SensorsAnnounced after a reload should see "fresh
-// connection" semantics, not stale figures from the previous broker.
-//
-// driverNames is the current driver registry as of reload time. The
-// applier in cmd/forty-two-watts/main.go passes in reg.Names() so a
-// driver added or removed in the same config-reload tick is reflected
-// in HA discovery without a second round-trip.
+// the new connection is its own thing. announcedMetrics is also reset
+// so dynamic emit_metric sensors are re-announced on the new connection.
 func (b *Bridge) Reload(newCfg *config.HomeAssistant, driverNames []string) error {
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
@@ -168,6 +191,9 @@ func (b *Bridge) Reload(newCfg *config.HomeAssistant, driverNames []string) erro
 	if b.stopped {
 		return fmt.Errorf("ha: bridge stopped, cannot reload")
 	}
+	b.mu.Lock()
+	b.announcedMetrics = make(map[string]struct{})
+	b.mu.Unlock()
 	b.teardown()
 	return b.connectAndStart(newCfg, driverNames)
 }
@@ -177,10 +203,6 @@ func (b *Bridge) Reload(newCfg *config.HomeAssistant, driverNames []string) erro
 // and Reload (after a teardown). Caller is responsible for serializing
 // access via lifecycleMu.
 func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string) error {
-	// Swap data fields BEFORE Connect: paho fires OnConnectHandler from
-	// inside Connect() and that handler calls publishDiscovery, which
-	// reads b.driverNames. Updating after Connect would publish discovery
-	// for the previous driver list.
 	b.mu.Lock()
 	b.cfg = cfg
 	b.driverNames = driverNames
@@ -196,8 +218,14 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
 		SetConnectRetryInterval(10 * time.Second).
+		// LWT: broker publishes "offline" if the EMS vanishes without a clean disconnect.
+		// QoS 1 + retained so HA sees it immediately after reconnecting to the broker.
+		SetWill(b.availTopic(), "offline", 1, true).
 		SetOnConnectHandler(func(_ paho.Client) {
 			slog.Info("HA MQTT connected", "broker", cfg.Broker)
+			// Mark EMS as online before discovery so HA doesn't briefly
+			// show entities as unavailable on the same connect.
+			b.publish(b.availTopic(), []byte("online"), true)
 			b.publishDiscovery()
 			b.subscribeCommands()
 		})
@@ -213,8 +241,6 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 	b.client = cli
 	b.mu.Unlock()
 
-	// We own b.done until publishLoop takes over — close it on any
-	// early return so the next teardown() doesn't block on <-doneCh.
 	started := false
 	defer func() {
 		if !started {
@@ -258,6 +284,15 @@ func (b *Bridge) teardown() {
 		<-doneCh
 	}
 	if cli != nil {
+		// Publish "offline" synchronously before disconnecting so HA
+		// sees the EMS go away cleanly (e.g. on a planned restart).
+		// Use IsConnectionOpen (not IsConnected): with ConnectRetry=true,
+		// IsConnected() returns true even while retrying, so Publish would
+		// block for WaitTimeout. Only publish "offline" when the TCP link
+		// is actually up.
+		if cli.IsConnectionOpen() {
+			cli.Publish(b.availTopic(), 1, true, []byte("offline")).WaitTimeout(2 * time.Second)
+		}
 		cli.Disconnect(500)
 	}
 }
@@ -274,6 +309,15 @@ func (b *Bridge) Stop() {
 	}
 	b.teardown()
 	b.stopped = true
+}
+
+// ---- Topic helpers ----
+
+func (b *Bridge) availTopic() string  { return b.topicPrefix + "/status" }
+func (b *Bridge) stateTopic(name string) string { return b.topicPrefix + "/state/" + name }
+func (b *Bridge) cmdTopic(name string) string   { return b.topicPrefix + "/cmd/" + name }
+func (b *Bridge) driverTopic(driver, field string) string {
+	return fmt.Sprintf("%s/driver/%s/%s", b.topicPrefix, driver, field)
 }
 
 // ---- Autodiscovery ----
@@ -305,15 +349,24 @@ func modeSelectOptions() []string {
 	return opts
 }
 
+// withAvail adds the availability topic keys to a discovery message map.
+func (b *Bridge) withAvail(m map[string]any) map[string]any {
+	m["availability_topic"] = b.availTopic()
+	m["payload_available"] = "online"
+	m["payload_not_available"] = "offline"
+	return m
+}
+
 // publishDiscovery registers all sensors and controls with HA. Called on
 // every reconnect — HA de-dupes by unique_id so it's safe to re-publish.
 func (b *Bridge) publishDiscovery() {
 	dev := b.discoveryDevice()
+	total := 0
 
-	// ---- Sensors (site level) ----
+	// ---- Site-level sensors ----
 	sensors := []struct {
 		id, name, unit, devClass string
-		state                    string // the topic to read from
+		state                    string
 	}{
 		{"grid_power", "Grid Power", "W", "power", b.stateTopic("grid_w")},
 		{"pv_power", "PV Power", "W", "power", b.stateTopic("pv_w")},
@@ -321,35 +374,39 @@ func (b *Bridge) publishDiscovery() {
 		{"load_power", "Load Power", "W", "power", b.stateTopic("load_w")},
 		{"battery_soc", "Battery SoC", "%", "battery", b.stateTopic("bat_soc_pct")},
 		{"grid_target", "Grid Target", "W", "power", b.stateTopic("grid_target_w")},
+		{"peak_limit", "Peak Limit", "W", "power", b.stateTopic("peak_limit_w")},
+		{"ev_charging", "EV Charging Power", "W", "power", b.stateTopic("ev_charging_w")},
 	}
 	for _, s := range sensors {
-		msg := map[string]any{
+		msg := b.withAvail(map[string]any{
 			"name":                s.name,
 			"unique_id":           b.deviceID + "_" + s.id,
 			"state_topic":         s.state,
 			"unit_of_measurement": s.unit,
 			"device_class":        s.devClass,
 			"device":              dev,
-		}
+		})
 		data, _ := json.Marshal(msg)
 		topic := fmt.Sprintf("%s/sensor/%s/%s/config", b.discoPrefix, b.deviceID, s.id)
-		b.publish(topic, data, true) // retained
+		b.publish(topic, data, true)
 	}
+	total += len(sensors)
 
 	// ---- Mode as HA select ----
-	modeMsg := map[string]any{
+	modeMsg := b.withAvail(map[string]any{
 		"name":          "Mode",
 		"unique_id":     b.deviceID + "_mode",
 		"state_topic":   b.stateTopic("mode"),
 		"command_topic": b.cmdTopic("mode"),
 		"options":       modeSelectOptions(),
 		"device":        dev,
-	}
+	})
 	data, _ := json.Marshal(modeMsg)
 	b.publish(fmt.Sprintf("%s/select/%s/mode/config", b.discoPrefix, b.deviceID), data, true)
+	total++
 
 	// ---- Grid target as HA number ----
-	targetMsg := map[string]any{
+	targetMsg := b.withAvail(map[string]any{
 		"name":                "Grid Target",
 		"unique_id":           b.deviceID + "_grid_target_cmd",
 		"state_topic":         b.stateTopic("grid_target_w"),
@@ -359,14 +416,47 @@ func (b *Bridge) publishDiscovery() {
 		"step":                50,
 		"unit_of_measurement": "W",
 		"device":              dev,
-	}
+	})
 	data, _ = json.Marshal(targetMsg)
 	b.publish(fmt.Sprintf("%s/number/%s/grid_target/config", b.discoPrefix, b.deviceID), data, true)
+	total++
+
+	// ---- Peak limit as HA number ----
+	peakMsg := b.withAvail(map[string]any{
+		"name":                "Peak Limit",
+		"unique_id":           b.deviceID + "_peak_limit_cmd",
+		"state_topic":         b.stateTopic("peak_limit_w"),
+		"command_topic":       b.cmdTopic("peak_limit_w"),
+		"min":                 0,
+		"max":                 25000,
+		"step":                100,
+		"unit_of_measurement": "W",
+		"icon":                "mdi:gauge",
+		"device":              dev,
+	})
+	data, _ = json.Marshal(peakMsg)
+	b.publish(fmt.Sprintf("%s/number/%s/peak_limit/config", b.discoPrefix, b.deviceID), data, true)
+	total++
+
+	// ---- EV charging target as HA number ----
+	evMsg := b.withAvail(map[string]any{
+		"name":                "EV Charging Power",
+		"unique_id":           b.deviceID + "_ev_charging_cmd",
+		"state_topic":         b.stateTopic("ev_charging_w"),
+		"command_topic":       b.cmdTopic("ev_charging_w"),
+		"min":                 0,
+		"max":                 22000,
+		"step":                100,
+		"unit_of_measurement": "W",
+		"icon":                "mdi:car-electric",
+		"device":              dev,
+	})
+	data, _ = json.Marshal(evMsg)
+	b.publish(fmt.Sprintf("%s/number/%s/ev_charging/config", b.discoPrefix, b.deviceID), data, true)
+	total++
 
 	// ---- Battery-covers-EV as HA switch ----
-	// Operator-facing override: when ON, the control loop lets the battery
-	// discharge into the EV (price-arbitrage scenarios). Default OFF.
-	bceMsg := map[string]any{
+	bceMsg := b.withAvail(map[string]any{
 		"name":          "Battery Covers EV",
 		"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
 		"state_topic":   b.stateTopic("battery_covers_ev"),
@@ -377,35 +467,135 @@ func (b *Bridge) publishDiscovery() {
 		"state_off":     "OFF",
 		"icon":          "mdi:car-battery",
 		"device":        dev,
-	}
+	})
 	data, _ = json.Marshal(bceMsg)
 	b.publish(fmt.Sprintf("%s/switch/%s/battery_covers_ev/config", b.discoPrefix, b.deviceID), data, true)
+	total++
 
-	// ---- Per-driver sensors ----
+	// ---- MPC plan sensor ----
+	// State topic carries the current slot's action string ("charge" / "discharge" / "idle").
+	// JSON-attributes topic carries the full day schedule so HA automations and
+	// template sensors can inspect upcoming slots.
+	if b.plan != nil {
+		planMsg := b.withAvail(map[string]any{
+			"name":                   "Plan",
+			"unique_id":              b.deviceID + "_plan",
+			"state_topic":            b.stateTopic("plan_action"),
+			"json_attributes_topic":  b.stateTopic("plan_json"),
+			"icon":                   "mdi:calendar-clock",
+			"device":                 dev,
+		})
+		data, _ = json.Marshal(planMsg)
+		b.publish(fmt.Sprintf("%s/sensor/%s/plan/config", b.discoPrefix, b.deviceID), data, true)
+		total++
+	}
+
+	// ---- Per-driver sensors + health ----
+	b.mu.Lock()
+	knownMetrics := make(map[string]struct{}, len(b.announcedMetrics))
+	for k, v := range b.announcedMetrics {
+		knownMetrics[k] = v
+	}
+	b.mu.Unlock()
+
 	for _, name := range b.driverNames {
+		// Data sensors
 		for _, s := range []struct{ id, label, unit, class string }{
-			{"_meter_w", " Meter Power", "W", "power"},
-			{"_pv_w", " PV Power", "W", "power"},
-			{"_bat_w", " Battery Power", "W", "power"},
-			{"_bat_soc_pct", " Battery SoC", "%", "battery"},
+			{"meter_w", " Meter Power", "W", "power"},
+			{"pv_w", " PV Power", "W", "power"},
+			{"bat_w", " Battery Power", "W", "power"},
+			{"bat_soc_pct", " Battery SoC", "%", "battery"},
 		} {
-			msg := map[string]any{
+			msg := b.withAvail(map[string]any{
 				"name":                name + s.label,
 				"unique_id":           b.deviceID + "_" + name + s.id,
-				"state_topic":         b.driverTopic(name, s.id[1:]),
+				"state_topic":         b.driverTopic(name, s.id),
 				"unit_of_measurement": s.unit,
 				"device_class":        s.class,
 				"device":              dev,
+			})
+			d, _ := json.Marshal(msg)
+			topic := fmt.Sprintf("%s/sensor/%s/%s_%s/config", b.discoPrefix, b.deviceID, name, s.id)
+			b.publish(topic, d, true)
+		}
+		total += 4
+
+		// Health binary_sensor: online/offline.
+		healthMsg := b.withAvail(map[string]any{
+			"name":         name + " Online",
+			"unique_id":    b.deviceID + "_" + name + "_online",
+			"state_topic":  b.driverTopic(name, "online"),
+			"payload_on":   "true",
+			"payload_off":  "false",
+			"device_class": "connectivity",
+			"icon":         "mdi:lan-connect",
+			"device":       dev,
+		})
+		d, _ := json.Marshal(healthMsg)
+		b.publish(fmt.Sprintf("%s/binary_sensor/%s/%s_online/config", b.discoPrefix, b.deviceID, name), d, true)
+		total++
+
+		// Re-announce any emit_metric sensors already known from a previous cycle.
+		for key := range knownMetrics {
+			prefix := name + ":"
+			if !strings.HasPrefix(key, prefix) {
+				continue
 			}
-			data, _ := json.Marshal(msg)
-			topic := fmt.Sprintf("%s/sensor/%s/%s%s/config", b.discoPrefix, b.deviceID, name, s.id)
-			b.publish(topic, data, true)
+			metricName := key[len(prefix):]
+			b.announceMetric(dev, name, metricName)
+			total++
 		}
 	}
-	// Count total sensors announced (site + per-driver).
+
 	b.mu.Lock()
-	b.sensorsAnnounced = len(sensors) + len(b.driverNames)*5 // 5 per driver
+	b.sensorsAnnounced = total
 	b.mu.Unlock()
+}
+
+// announceMetric publishes a single HA discovery message for a driver emit_metric.
+// Called when a metric is seen for the first time and on every reconnect.
+func (b *Bridge) announceMetric(dev map[string]any, driver, metricName string) {
+	unit, devClass := metricUnitAndClass(metricName)
+	uid := b.deviceID + "_" + driver + "_" + metricName
+	msg := b.withAvail(map[string]any{
+		"name":      driver + " " + strings.ReplaceAll(metricName, "_", " "),
+		"unique_id": uid,
+		"state_topic": b.driverTopic(driver, metricName),
+		"device":    dev,
+	})
+	if unit != "" {
+		msg["unit_of_measurement"] = unit
+	}
+	if devClass != "" {
+		msg["device_class"] = devClass
+	}
+	d, _ := json.Marshal(msg)
+	topic := fmt.Sprintf("%s/sensor/%s/%s_%s/config", b.discoPrefix, b.deviceID, driver, metricName)
+	b.publish(topic, d, true)
+}
+
+// metricUnitAndClass infers HA unit and device_class from an emit_metric name suffix.
+func metricUnitAndClass(name string) (unit, devClass string) {
+	switch {
+	case strings.HasSuffix(name, "_w"):
+		return "W", "power"
+	case strings.HasSuffix(name, "_wh"):
+		return "Wh", "energy"
+	case strings.HasSuffix(name, "_c"):
+		return "°C", "temperature"
+	case strings.HasSuffix(name, "_soc_pct"), strings.HasSuffix(name, "_soc"):
+		return "%", "battery"
+	case strings.HasSuffix(name, "_pct"):
+		return "%", ""
+	case strings.HasSuffix(name, "_v"):
+		return "V", "voltage"
+	case strings.HasSuffix(name, "_a"):
+		return "A", "current"
+	case strings.HasSuffix(name, "_hz"):
+		return "Hz", "frequency"
+	default:
+		return "", ""
+	}
 }
 
 // ---- Command subscriber ----
@@ -476,15 +666,17 @@ func (b *Bridge) publishLoop() {
 }
 
 func (b *Bridge) publishState() {
-	// Record the publish tick so /api/ha/status can show liveness.
 	b.mu.Lock()
 	b.lastPublishMs = time.Now().UnixMilli()
 	b.mu.Unlock()
-	// Site-level aggregates
+
+	// ---- Site-level aggregates ----
 	b.ctrlMu.Lock()
 	siteMeter := b.ctrl.SiteMeterDriver
 	mode := string(b.ctrl.Mode)
 	gridTarget := b.ctrl.GridTargetW
+	peakLimit := b.ctrl.PeakLimitW
+	evCharging := b.ctrl.EVChargingW
 	batteryCoversEV := b.ctrl.BatteryCoversEV
 	b.ctrlMu.Unlock()
 
@@ -519,6 +711,8 @@ func (b *Bridge) publishState() {
 	b.publishValue("load_w", loadW)
 	b.publishValue("bat_soc_pct", avgSoC*100)
 	b.publishValue("grid_target_w", gridTarget)
+	b.publishValue("peak_limit_w", peakLimit)
+	b.publishValue("ev_charging_w", evCharging)
 	b.publishString("mode", mode)
 	bceState := "OFF"
 	if batteryCoversEV {
@@ -526,7 +720,13 @@ func (b *Bridge) publishState() {
 	}
 	b.publishString("battery_covers_ev", bceState)
 
-	// Per-driver
+	// ---- MPC plan ----
+	if b.plan != nil {
+		b.publishPlan()
+	}
+
+	// ---- Per-driver ----
+	dev := b.discoveryDevice()
 	for _, name := range b.driverNames {
 		if r := b.tel.Get(name, telemetry.DerMeter); r != nil {
 			b.publishDriver(name, "meter_w", r.SmoothedW)
@@ -540,16 +740,120 @@ func (b *Bridge) publishState() {
 				b.publishDriver(name, "bat_soc_pct", *r.SoC*100)
 			}
 		}
+
+		// Health
+		online := false
+		if h := b.tel.DriverHealth(name); h != nil {
+			online = h.IsOnline()
+		}
+		b.publish(b.driverTopic(name, "online"), []byte(strconv.FormatBool(online)), false)
+
+		// Emit_metric sensors — discover new ones, publish all.
+		for _, snap := range b.tel.LatestMetricsByDriver(name) {
+			key := name + ":" + snap.Name
+			b.mu.Lock()
+			_, known := b.announcedMetrics[key]
+			if !known {
+				b.announcedMetrics[key] = struct{}{}
+			}
+			b.mu.Unlock()
+			if !known {
+				b.announceMetric(dev, name, snap.Name)
+			}
+			b.publishDriver(name, snap.Name, snap.Value)
+		}
 	}
 }
 
-// ---- Helpers ----
+// publishPlan reads the current MPC plan and publishes the current-slot
+// action string plus a JSON-attributes payload with the day schedule.
+func (b *Bridge) publishPlan() {
+	actions := b.plan.LatestActions()
+	now := time.Now()
+	nowMs := now.UnixMilli()
 
-func (b *Bridge) stateTopic(name string) string { return b.topicPrefix + "/state/" + name }
-func (b *Bridge) cmdTopic(name string) string   { return b.topicPrefix + "/cmd/" + name }
-func (b *Bridge) driverTopic(driver, field string) string {
-	return fmt.Sprintf("%s/driver/%s/%s", b.topicPrefix, driver, field)
+	type slotJSON struct {
+		Start    string  `json:"start"`
+		End      string  `json:"end"`
+		Action   string  `json:"action"`
+		BatteryW float64 `json:"battery_w"`
+		GridW    float64 `json:"grid_w"`
+		SoCPct   float64 `json:"soc_pct"`
+	}
+
+	currentAction := "unavailable"
+	var currentBatteryW, currentGridW, currentSoCPct float64
+	var currentStart, currentEnd string
+
+	var schedule []slotJSON
+	horizon := nowMs + 24*60*60*1000 // 24 h ahead
+
+	// Sort by start time for deterministic output.
+	sort.Slice(actions, func(i, j int) bool {
+		return actions[i].SlotStartMs < actions[j].SlotStartMs
+	})
+
+	for _, a := range actions {
+		endMs := a.SlotStartMs + int64(a.SlotLenMin)*60*1000
+		if endMs <= nowMs {
+			continue // past slot
+		}
+		if a.SlotStartMs > horizon {
+			break // beyond 24 h
+		}
+
+		label := planActionLabel(a.BatteryW)
+		start := time.UnixMilli(a.SlotStartMs).UTC().Format(time.RFC3339)
+		end := time.UnixMilli(endMs).UTC().Format(time.RFC3339)
+
+		if a.SlotStartMs <= nowMs && nowMs < endMs {
+			// This is the current slot.
+			currentAction = label
+			currentBatteryW = a.BatteryW
+			currentGridW = a.GridW
+			currentSoCPct = a.SoCPct
+			currentStart = start
+			currentEnd = end
+		}
+		schedule = append(schedule, slotJSON{
+			Start:    start,
+			End:      end,
+			Action:   label,
+			BatteryW: a.BatteryW,
+			GridW:    a.GridW,
+			SoCPct:   a.SoCPct,
+		})
+	}
+
+	b.publishString("plan_action", currentAction)
+
+	attrPayload := map[string]any{
+		"action":    currentAction,
+		"battery_w": currentBatteryW,
+		"grid_w":    currentGridW,
+		"soc_pct":   currentSoCPct,
+		"slot_start": currentStart,
+		"slot_end":   currentEnd,
+		"schedule":  schedule,
+	}
+	if d, err := json.Marshal(attrPayload); err == nil {
+		b.publish(b.stateTopic("plan_json"), d, false)
+	}
 }
+
+// planActionLabel converts a signed battery power to a human-readable label.
+// Mirrors the logic in mpc.Service.SlotAt.
+func planActionLabel(batteryW float64) string {
+	if batteryW > 100 {
+		return "charge"
+	}
+	if batteryW < -100 {
+		return "discharge"
+	}
+	return "idle"
+}
+
+// ---- Publish helpers ----
 
 func (b *Bridge) publishValue(name string, v float64) {
 	b.publish(b.stateTopic(name), []byte(strconv.FormatFloat(v, 'f', 2, 64)), false)
