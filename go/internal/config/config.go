@@ -88,7 +88,10 @@ type FlexLoad struct {
 	//                set HeatSourceDriver to attribute it (see notes).
 	HeatingKind     string  `yaml:"heating_kind,omitempty" json:"heating_kind,omitempty"`
 	COP             float64 `yaml:"cop,omitempty" json:"cop,omitempty"` // hydronic only; default 3.0 when kind=hydronic, 1.0 electric
-	HeatSourceDriver string `yaml:"heat_source_driver,omitempty" json:"heat_source_driver,omitempty"` // hydronic: central HP/boiler driver the electrical load is attributed to
+	// HeatSourceDriver is reserved for a future feature: attributing a
+	// hydronic zone's electrical load to the central HP/boiler driver.
+	// It is declared in config but not yet read or wired in the service.
+	HeatSourceDriver string `yaml:"heat_source_driver,omitempty" json:"heat_source_driver,omitempty"`
 
 	// FlowDriver/FlowMetric read the heat pump's supply (flow) temperature
 	// (°C), typically from a Nibe/Thermia/etc integration. It refines the
@@ -993,6 +996,31 @@ func (c *Config) Validate() error {
 			}
 			if ev.CooldownS < 0 {
 				return fmt.Errorf("notifications.events[%d]: cooldown_s must be >= 0", i)
+			}
+		}
+	}
+	for i, fl := range c.FlexLoads {
+		if fl.DriverName == "" {
+			return fmt.Errorf("flexloads[%d]: driver_name is required", i)
+		}
+		switch fl.Type {
+		case "thermostat", "deferrable":
+		default:
+			return fmt.Errorf("flexloads[%d] %q: type must be \"thermostat\" or \"deferrable\"", i, fl.DriverName)
+		}
+		if fl.Type == "thermostat" {
+			if fl.MinC != 0 || fl.MaxC != 0 {
+				if fl.MinC >= fl.MaxC {
+					return fmt.Errorf("flexloads[%d] %q: min_c (%.1f) must be < max_c (%.1f)", i, fl.DriverName, fl.MinC, fl.MaxC)
+				}
+			}
+			if fl.COP < 0 {
+				return fmt.Errorf("flexloads[%d] %q: cop must be >= 0", i, fl.DriverName)
+			}
+			switch fl.Mode {
+			case "", "planner", "simple":
+			default:
+				return fmt.Errorf("flexloads[%d] %q: mode must be \"planner\" or \"simple\"", i, fl.DriverName)
 			}
 		}
 	}

@@ -184,9 +184,10 @@ func (c *Capability) call(ctx context.Context, command string, args any) (json.R
 }
 
 // ReadAttribute reads a cluster attribute from a Matter node.
-// Attribute path is formatted as "endpoint/0xCLUSTER/0xATTRIBUTE".
+// Attribute path is formatted as "endpoint/cluster/attribute" with decimal integers,
+// matching the python-matter-server WebSocket API contract.
 func (c *Capability) ReadAttribute(nodeID, endpoint, clusterID, attributeID uint32) (any, error) {
-	path := fmt.Sprintf("%d/0x%04X/0x%04X", endpoint, clusterID, attributeID)
+	path := fmt.Sprintf("%d/%d/%d", endpoint, clusterID, attributeID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := c.call(ctx, "read_attribute", map[string]any{
@@ -205,7 +206,7 @@ func (c *Capability) ReadAttribute(nodeID, endpoint, clusterID, attributeID uint
 
 // WriteAttribute writes a value to a cluster attribute on a Matter node.
 func (c *Capability) WriteAttribute(nodeID, endpoint, clusterID, attributeID uint32, value any) error {
-	path := fmt.Sprintf("%d/0x%04X/0x%04X", endpoint, clusterID, attributeID)
+	path := fmt.Sprintf("%d/%d/%d", endpoint, clusterID, attributeID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := c.call(ctx, "write_attribute", map[string]any{

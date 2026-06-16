@@ -122,8 +122,12 @@ function driver_init(cfg)
         return
     end
 
-    if cfg.make  then host.set_make(tostring(cfg.make))  end
-    if cfg.model then host.set_sn(tostring(cfg.model))   end
+    if cfg.make then host.set_make(tostring(cfg.make)) end
+    -- Anchor device identity on the fabric-unique node_id, not the model name.
+    -- Two identical Wiser thermostats share the same make+model but have
+    -- distinct node_ids, so using model would cause a device_id collision and
+    -- one device would overwrite the other's learned state.
+    host.set_sn(tostring(node_id))
 
     local interval = parse_number(cfg.poll_interval_ms or 30000)
     host.set_poll_interval(interval)

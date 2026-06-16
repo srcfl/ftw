@@ -618,6 +618,7 @@ func (s *Service) buildSimpleSpec(d Device, slots []PriceSlot, now time.Time) (S
 	indoorC, ok := s.readIndoor(d)
 	if !ok {
 		indoorC = (d.MinC + d.MaxC) / 2
+		slog.Warn("flexload indoor sensor unavailable, using mid-band", "driver", d.DriverName, "assumed_c", indoorC)
 	}
 	outdoor := 0.0
 	if s.Outdoor != nil {
@@ -735,8 +736,10 @@ func priceForNow(slots []PriceSlot, nowMs int64) (float64, bool) {
 			return sl.PriceOre, true
 		}
 	}
+	// now is past all slots — return the most recent slot price as the best
+	// available stale estimate (slots[0] would be the oldest, which is worse).
 	if len(slots) > 0 {
-		return slots[0].PriceOre, true
+		return slots[len(slots)-1].PriceOre, true
 	}
 	return 0, false
 }
