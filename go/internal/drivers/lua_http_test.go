@@ -186,7 +186,7 @@ func runPATCHTestDriver(t *testing.T, allowed []string, targetURL, patchBody str
 	src := `
 		function driver_init() end
 		function driver_poll()
-			local body, err = host.http_patch("` + targetURL + `", "` + patchBody + `")
+			local body, err = host.http_patch("` + targetURL + `", [[` + patchBody + `]])
 			if err then
 				host.emit_metric("result_err", 1)
 				host.log("info", "ERR:" .. tostring(err))
