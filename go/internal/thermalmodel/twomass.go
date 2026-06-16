@@ -254,7 +254,7 @@ func rls2(beta *[2]float64, P *[2][2]float64, x [2]float64, y, lambda float64) f
 		Px[i] = P[i][0]*x[0] + P[i][1]*x[1]
 	}
 	denom := lambda + x[0]*Px[0] + x[1]*Px[1]
-	if denom == 0 {
+	if denom < 1e-9 {
 		return e
 	}
 	var K [2]float64

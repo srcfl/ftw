@@ -105,7 +105,10 @@ func PlanThermal(slots []PriceSlot, spec ThermalSpec) ThermalSchedule {
 	if cop <= 0 {
 		cop = 1.0
 	}
-	// PV "covers" the load when the surplus meets the *electrical* draw.
+	// Treat a slot as PV-covered when surplus exceeds 50% of the zone's
+	// electrical draw. Full coverage (100%) is too conservative — rooftop PV
+	// production is noisy and the thermostat self-regulates at the setpoint,
+	// so partial surplus still meaningfully reduces grid draw.
 	pvCoverW := 0.5 * spec.MaxHeatW / cop
 	// Price threshold = the frac-th percentile of horizon prices. Slots at
 	// or below it are "cheap" → pre-heat.
@@ -398,8 +401,11 @@ type DeferrableSlot struct {
 type DeferrableSchedule struct {
 	DriverName string
 	Slots      []DeferrableSlot
-	// ScheduledWh is the energy the plan actually places (may be less than
-	// requested if the window can't hold it).
+	// ScheduledWh is the energy the plan actually places. Because the
+	// scheduler works with whole ON/OFF slots (no partial-slot control),
+	// it may exceed EnergyWh by up to one slot's worth — rounding up to
+	// the smallest discrete unit that covers the budget. It may also be
+	// less than EnergyWh if the deadline window runs out of eligible slots.
 	ScheduledWh float64
 }
 
@@ -489,9 +495,14 @@ func priceQuantile(slots []PriceSlot, q float64) float64 {
 	if len(slots) == 0 {
 		return 0
 	}
-	prices := make([]float64, len(slots))
-	for i, s := range slots {
-		prices[i] = s.PriceOre
+	prices := make([]float64, 0, len(slots))
+	for _, s := range slots {
+		if !math.IsNaN(s.PriceOre) && !math.IsInf(s.PriceOre, 0) {
+			prices = append(prices, s.PriceOre)
+		}
+	}
+	if len(prices) == 0 {
+		return 0
 	}
 	sort.Float64s(prices)
 	if q <= 0 {

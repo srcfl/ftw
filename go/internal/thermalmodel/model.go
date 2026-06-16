@@ -245,7 +245,10 @@ func (m *Model) Update(indoorC, nextIndoorC, outdoorC, heatW, dtSeconds float64,
 	for i := 0; i < NFeat; i++ {
 		denom += x[i] * Px[i]
 	}
-	if denom == 0 {
+	// Guard against zero or near-zero denominator. In a healthy RLS,
+	// denom = λ + xᵀPx ≥ λ = 0.997, so this only fires if P has been
+	// corrupted by numerical drift into near-negative-definiteness.
+	if denom < 1e-9 {
 		return false
 	}
 	// Gain K = Px / denom
