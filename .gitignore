@@ -10,6 +10,10 @@ data/
 *.test
 *.out
 
+# matter-sidecar (Node.js) build artifacts
+/matter-sidecar/node_modules/
+/matter-sidecar/dist/
+
 # Local config for simulators
 config.local.yaml
 

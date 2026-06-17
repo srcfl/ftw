@@ -1,0 +1,24 @@
+{
+  "name": "ftw-matter-sidecar",
+  "version": "1.0.0",
+  "description": "42W Matter controller sidecar — joins devices shared from another Matter fabric and exposes attribute read/write/invoke over a WebSocket JSON-RPC protocol consumed by go/internal/matter.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@matter/main": "^0.17.3",
+    "@matter/node": "^0.17.3",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
+  }
+}

@@ -101,35 +101,35 @@ services:
       - update-ipc:/run/ftw-update
 
   # ---------------------------------------------------------------------
-  # Matter sidecar — BACKEND UNDER RECONSIDERATION, commented out.
+  # Matter sidecar (matter-sidecar/, built on matter.js — replaces the
+  # earlier python-matter-server draft per maintainer review on PR #1).
   #
-  # Original draft pinned python-matter-server, but per maintainer
-  # review (PR #1) it's no longer actively maintained — the replacement
-  # is matter.js or the official Matter SDK, image/build TBD.
-  #
-  # Scope also narrowed: 42W will NOT perform initial commissioning
-  # (BLE/Thread/Wi-Fi provisioning of a brand-new device — that's why
-  # the old block needed `privileged: true`). That stays the job of
-  # whichever controller the device shipped with (Apple Home, Google
-  # Home, Home Assistant, ...). Once commissioned there, you open that
-  # controller's multi-admin "share device" flow to mint a pairing
-  # code, and hand that code to 42W, which joins as an additional
-  # fabric admin over plain IP — no BLE needed on this side.
+  # 42W does NOT perform initial commissioning (BLE/Thread/Wi-Fi
+  # provisioning of a brand-new device, which is why the old draft
+  # needed `privileged: true`). That stays the job of whichever
+  # controller the device shipped with (Apple Home, Google Home, Home
+  # Assistant, ...). Once commissioned there, open that controller's
+  # multi-admin "share device" flow to mint a pairing code, then hand
+  # that code to 42W via the sidecar's `commission` command, which
+  # joins as an additional fabric admin over plain IP — no BLE needed
+  # on this side. network_mode: host is required for mDNS discovery of
+  # the shared device.
   #
   # 42W is also planned to run the other direction: as a Matter
   # *server*, exposing energy-management clusters (price/forecast) for
   # other controllers to consume, and as a *bridge* surfacing
   # non-Matter DERs (EVSE, inverters) as Matter devices to other
-  # ecosystems. Tracked in PR #1; uncomment + fill in the image once
-  # the sidecar is built.
+  # ecosystems. Tracked in PR #1, not yet built.
   # ---------------------------------------------------------------------
-  # matter-server:
-  #   image: TBD
-  #   container_name: ftw-matter-server
-  #   restart: unless-stopped
-  #   network_mode: host
-  #   volumes:
-  #     - ./data/matter:/data
+  matter-sidecar:
+    build: ./matter-sidecar
+    container_name: ftw-matter-sidecar
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - FTW_MATTER_STORAGE_PATH=/data
+    volumes:
+      - ./data/matter:/data
 
   # ---------------------------------------------------------------------
   # MQTT broker (Eclipse Mosquitto)

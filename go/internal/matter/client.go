@@ -1,16 +1,13 @@
-// Package matter provides a capability client for a Matter sidecar process.
-//
-// PROVISIONAL: this client speaks python-matter-server's WebSocket wire
-// protocol (JSON, request/response correlation via message_id). Per
-// maintainer review (PR #1), python-matter-server is no longer actively
-// maintained and the sidecar is moving to matter.js (or the official
-// Matter SDK) — that sidecar's actual wire protocol is TBD and this
-// client will need to change to match it once it's built. Kept as-is
-// for now so the call/readLoop/reconnect plumbing below (which is
-// protocol-agnostic) doesn't get thrown away.
+// Package matter provides a capability client for the 42W Matter sidecar
+// (matter-sidecar/, built on matter.js). Speaks a JSON-over-WebSocket
+// request/response protocol with correlation via message_id:
 //
 //	→ {"message_id":"1","command":"read_attribute","args":{...}}
 //	← {"message_id":"1","result":<value>,"error_code":null}
+//
+// 42W does not commission devices itself — see matter-sidecar/src/index.ts
+// and drivers/matter.lua's header comment for the multi-fabric "share
+// device into 42W" onboarding flow.
 package matter
 
 import (
@@ -25,7 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// Capability implements drivers.MatterCap backed by python-matter-server.
+// Capability implements drivers.MatterCap backed by matter-sidecar.
 type Capability struct {
 	wsURL  string
 	logger *slog.Logger
@@ -55,7 +52,7 @@ type wsResponse struct {
 	ErrorMsg  string          `json:"error_message,omitempty"`
 }
 
-// Dial connects to python-matter-server and returns a ready Capability.
+// Dial connects to the matter-sidecar process and returns a ready Capability.
 // Port defaults to 5580 if zero.
 func Dial(host string, port int) (*Capability, error) {
 	if port == 0 {
@@ -190,7 +187,7 @@ func (c *Capability) call(ctx context.Context, command string, args any) (json.R
 
 // ReadAttribute reads a cluster attribute from a Matter node.
 // Attribute path is formatted as "endpoint/cluster/attribute" with decimal integers,
-// matching the python-matter-server WebSocket API contract.
+// matching the matter-sidecar wire protocol (matter-sidecar/src/index.ts).
 func (c *Capability) ReadAttribute(nodeID, endpoint, clusterID, attributeID uint32) (any, error) {
 	path := fmt.Sprintf("%d/%d/%d", endpoint, clusterID, attributeID)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -243,7 +240,7 @@ func (c *Capability) InvokeCommand(nodeID, endpoint, clusterID uint32, commandNa
 	return val, nil
 }
 
-// Close disconnects from python-matter-server. Safe to call multiple times.
+// Close disconnects from the matter-sidecar. Safe to call multiple times.
 func (c *Capability) Close() error {
 	c.cancel()
 	c.mu.Lock()
