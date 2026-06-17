@@ -101,27 +101,35 @@ services:
       - update-ipc:/run/ftw-update
 
   # ---------------------------------------------------------------------
-  # Matter server (python-matter-server)
+  # Matter sidecar — BACKEND UNDER RECONSIDERATION, commented out.
   #
-  # Handles Matter fabric management and device commissioning. The main
-  # app reaches it at localhost:5580 (host networking) via the Matter
-  # capability. Drivers declare `capabilities: matter: host: localhost`
-  # to get access. BLE is required for commissioning new devices (hence
-  # privileged); after pairing, all communication is over IP.
+  # Original draft pinned python-matter-server, but per maintainer
+  # review (PR #1) it's no longer actively maintained — the replacement
+  # is matter.js or the official Matter SDK, image/build TBD.
   #
-  # Fabric credentials and commissioned device state persist in
-  # ./data/matter — backed up alongside state.db.
+  # Scope also narrowed: 42W will NOT perform initial commissioning
+  # (BLE/Thread/Wi-Fi provisioning of a brand-new device — that's why
+  # the old block needed `privileged: true`). That stays the job of
+  # whichever controller the device shipped with (Apple Home, Google
+  # Home, Home Assistant, ...). Once commissioned there, you open that
+  # controller's multi-admin "share device" flow to mint a pairing
+  # code, and hand that code to 42W, which joins as an additional
+  # fabric admin over plain IP — no BLE needed on this side.
   #
-  # Remove this service block if you have no Matter devices.
+  # 42W is also planned to run the other direction: as a Matter
+  # *server*, exposing energy-management clusters (price/forecast) for
+  # other controllers to consume, and as a *bridge* surfacing
+  # non-Matter DERs (EVSE, inverters) as Matter devices to other
+  # ecosystems. Tracked in PR #1; uncomment + fill in the image once
+  # the sidecar is built.
   # ---------------------------------------------------------------------
-  matter-server:
-    image: ghcr.io/home-assistant-libs/python-matter-server:stable
-    container_name: ftw-matter-server
-    restart: unless-stopped
-    network_mode: host
-    privileged: true            # required for BLE commissioning
-    volumes:
-      - ./data/matter:/data
+  # matter-server:
+  #   image: TBD
+  #   container_name: ftw-matter-server
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   volumes:
+  #     - ./data/matter:/data
 
   # ---------------------------------------------------------------------
   # MQTT broker (Eclipse Mosquitto)

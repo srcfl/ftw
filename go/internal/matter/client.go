@@ -1,8 +1,13 @@
-// Package matter provides a capability client for python-matter-server.
+// Package matter provides a capability client for a Matter sidecar process.
 //
-// python-matter-server exposes a WebSocket API on ws://<host>:<port>/ws.
-// Each Capability is one persistent connection owned by one driver.
-// Protocol is JSON with request/response correlation via message_id:
+// PROVISIONAL: this client speaks python-matter-server's WebSocket wire
+// protocol (JSON, request/response correlation via message_id). Per
+// maintainer review (PR #1), python-matter-server is no longer actively
+// maintained and the sidecar is moving to matter.js (or the official
+// Matter SDK) — that sidecar's actual wire protocol is TBD and this
+// client will need to change to match it once it's built. Kept as-is
+// for now so the call/readLoop/reconnect plumbing below (which is
+// protocol-agnostic) doesn't get thrown away.
 //
 //	→ {"message_id":"1","command":"read_attribute","args":{...}}
 //	← {"message_id":"1","result":<value>,"error_code":null}
