@@ -1,5 +1,5 @@
 -- matter.lua
--- Generic Matter device driver via python-matter-server.
+-- Generic Matter device driver via the 42W Matter controller sidecar.
 -- Works with any Matter-certified device: thermostats, smart plugs,
 -- energy meters, on/off switches, etc. All behaviour is config-driven.
 --
@@ -9,10 +9,22 @@
 -- Commands from the dispatch layer are mapped to attribute writes or
 -- cluster command invocations via the `commands` config block.
 --
--- Prerequisites: python-matter-server must be running and reachable
--- (bundled as `matter-server` in docker-compose.yml or as a systemd
--- unit on Pi deploys). Devices must be commissioned onto the fabric
--- before the driver can reach them (pairing UI coming soon).
+-- Device onboarding (multi-fabric — 42W does NOT commission):
+--   1. Commission the device with whatever controller it shipped with
+--      (Apple Home, Google Home, Home Assistant, SmartThings, ...).
+--   2. In that controller, use "share device" / "add to another network"
+--      / "pair to another Matter controller" to mint a one-time pairing
+--      code (a Manual Pairing Code or QR setup code).
+--   3. Hand that code to 42W. Its Matter sidecar joins the device as an
+--      additional fabric admin over plain IP (no BLE on our side, so the
+--      whole Thread-vs-Wi-Fi transport question is moot for us) and
+--      assigns it a node_id.
+--   4. Put that node_id in this driver's config below.
+--
+-- Prerequisites: the Matter sidecar (see docker-compose.yml) must be
+-- running and reachable. Backend is being moved off python-matter-server
+-- to matter.js / the official SDK — node_id config is stable across that
+-- change; only the sidecar's wire protocol underneath this driver moves.
 --
 -- Config example — Wiser thermostat (Schneider Electric):
 --
@@ -21,9 +33,9 @@
 --       lua: drivers/matter.lua
 --       capabilities:
 --         matter:
---           host: localhost   # python-matter-server address
+--           host: localhost   # Matter sidecar address
 --       config:
---         node_id: 1234
+--         node_id: 1234       # assigned by the sidecar after the share-code join
 --         make: "Schneider Electric"
 --         model: "Wiser"
 --         poll_interval_ms: 30000
@@ -89,16 +101,16 @@
 -- Cluster IDs may be written as hex (0x0201) or decimal (513) — YAML parses
 -- both as integers, so the driver receives them as numbers either way.
 --
--- Protocol: Matter (via python-matter-server WebSocket)
+-- Protocol: Matter (via the 42W Matter controller sidecar)
 
 DRIVER = {
   id           = "matter-generic",
   name         = "Matter (generic)",
   version      = "1.0.0",
   protocols    = { "matter" },
-  description  = "Generic Matter device driver. Config-driven attribute reads and commands. Works with any Matter-certified device.",
+  description  = "Generic Matter device driver. Config-driven attribute reads and commands. Works with any Matter-certified device shared to 42W multi-fabric.",
   authors      = { "forty-two-watts contributors" },
-  verification_status = "beta",
+  verification_status = "experimental",
 }
 
 local node_id = nil

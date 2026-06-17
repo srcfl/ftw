@@ -44,16 +44,20 @@ type ModbusCap interface {
 	Close() error
 }
 
-// MatterCap is the interface for Matter protocol access via python-matter-server.
-// Each driver gets its own WebSocket connection to the configured server instance.
+// MatterCap is the interface for Matter protocol access via a Matter
+// controller sidecar (backend TBD — see go/internal/matter). 42W acts as
+// an additional fabric admin: devices are commissioned by whatever
+// controller they shipped with, then shared to us multi-fabric, so the
+// nodeID here is one 42W's controller was granted access to — not one we
+// provisioned. This interface is deliberately backend-agnostic.
 type MatterCap interface {
-	// ReadAttribute reads a cluster attribute from a commissioned Matter node.
+	// ReadAttribute reads a cluster attribute from a Matter node 42W shares.
 	ReadAttribute(nodeID, endpoint, clusterID, attributeID uint32) (any, error)
 	// WriteAttribute writes a value to a cluster attribute.
 	WriteAttribute(nodeID, endpoint, clusterID, attributeID uint32, value any) error
 	// InvokeCommand sends a cluster command (e.g. thermostat setpoint raise/lower).
 	InvokeCommand(nodeID, endpoint, clusterID uint32, commandName string, payload any) (any, error)
-	// Close disconnects from python-matter-server. Called on driver remove.
+	// Close disconnects from the Matter sidecar. Called on driver remove.
 	Close() error
 }
 

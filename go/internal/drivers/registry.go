@@ -23,7 +23,7 @@ type Registry struct {
 	MQTTFactory func(name string, c *config.MQTTConfig) (MQTTCap, error)
 	// ModbusFactory creates a Modbus capability.
 	ModbusFactory func(name string, c *config.ModbusConfig) (ModbusCap, error)
-	// MatterFactory creates a Matter capability backed by python-matter-server.
+	// MatterFactory creates a Matter capability backed by the Matter sidecar.
 	MatterFactory func(name string, c *config.MatterConfig) (MatterCap, error)
 	// ARPLookup resolves a hostname/IP to a MAC for L2-stable identity.
 	// Optional — when nil, devices fall back to endpoint-hash IDs.

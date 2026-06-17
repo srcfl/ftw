@@ -424,8 +424,12 @@ type HTTPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
 }
 
-// MatterConfig grants access to a python-matter-server instance.
-// Host is required; Port defaults to 5580.
+// MatterConfig grants a driver access to the Matter controller sidecar
+// (backend TBD — see go/internal/matter). Host is required; Port defaults
+// to 5580. 42W joins shared devices as an additional fabric admin rather
+// than commissioning them itself, so there is no pairing/BLE config here —
+// the per-device node_id (set in the driver's own config block) is what
+// the sidecar's multi-fabric join hands back.
 type MatterConfig struct {
 	Host string `yaml:"host" json:"host"`
 	Port int    `yaml:"port,omitempty" json:"port,omitempty"` // default 5580
