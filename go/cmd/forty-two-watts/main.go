@@ -1001,6 +1001,13 @@ func main() {
 			matterAdmin = m
 			defer matterAdmin.Close()
 		}
+	} else {
+		for _, d := range cfg.Drivers {
+			if d.MatterBridge {
+				slog.Warn("driver has matter_bridge: true but matter: is not configured at the config root — it will not be bridged", "driver", d.Name)
+				break
+			}
+		}
 	}
 
 	deps := &api.Deps{
@@ -1558,22 +1565,25 @@ func matterBridgeLoop(ctx context.Context, m *mattercli.Capability, tel *telemet
 
 func pushMatterBridge(m *mattercli.Capability, tel *telemetry.Store, cfgMu *sync.RWMutex, cfg *config.Config) {
 	cfgMu.RLock()
-	bridged := make(map[string]bool, len(cfg.Drivers))
+	bridged := make([]string, 0, len(cfg.Drivers))
 	for _, d := range cfg.Drivers {
 		if d.MatterBridge {
-			bridged[d.Name] = true
+			bridged = append(bridged, d.Name)
 		}
 	}
 	cfgMu.RUnlock()
-	if len(bridged) == 0 {
-		return
-	}
+	// Always call SyncBridge, even with an empty/shrunk list — bridge.ts
+	// marks devices absent from the call `reachable: false` rather than
+	// removing them, so a config change that drops matter_bridge from
+	// every driver (or just one of several) still needs this push to go
+	// out, or the sidecar keeps reporting stale devices as reachable.
 	devices := make([]mattercli.BridgedDevice, 0, len(bridged))
-	for driver := range bridged {
+	for _, driver := range bridged {
+		h := tel.DriverHealth(driver)
+		if h == nil || !h.IsOnline() {
+			continue
+		}
 		for _, r := range tel.ReadingsByDriver(driver) {
-			if h := tel.DriverHealth(driver); h == nil || !h.IsOnline() {
-				continue
-			}
 			devices = append(devices, mattercli.BridgedDevice{
 				ID:         driver + ":" + r.DerType.String(),
 				Name:       driver + " " + r.DerType.String(),

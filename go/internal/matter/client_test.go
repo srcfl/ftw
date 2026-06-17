@@ -400,6 +400,46 @@ func TestReconnect(t *testing.T) {
 	t.Errorf("ReadAttribute still failing 5 s after disconnect: %v", lastErr)
 }
 
+// TestSyncBridge_Success verifies the sync_bridge round-trip and that a
+// nil devices slice is sent as an empty array, not JSON null (sync.ts's
+// handler expects an array to iterate).
+func TestSyncBridge_Success(t *testing.T) {
+	var capturedArgs map[string]any
+	ts := newTestServer(t, func(req wsRequest) *wsResponse {
+		if req.Command != "sync_bridge" {
+			t.Errorf("unexpected command: %q", req.Command)
+		}
+		b, _ := json.Marshal(req.Args)
+		json.Unmarshal(b, &capturedArgs)
+		return okResp(req.MessageID, nil)
+	})
+	c := dialTest(t, ts)
+
+	if err := c.SyncBridge(nil); err != nil {
+		t.Fatalf("SyncBridge(nil): %v", err)
+	}
+	devices, ok := capturedArgs["devices"].([]any)
+	if !ok {
+		t.Fatalf("devices = %T, want array", capturedArgs["devices"])
+	}
+	if len(devices) != 0 {
+		t.Errorf("expected empty devices array, got %v", devices)
+	}
+
+	want := []BridgedDevice{{ID: "ferroamp:battery", Name: "ferroamp battery", DeviceType: "battery", PowerMW: 1234567}}
+	if err := c.SyncBridge(want); err != nil {
+		t.Fatalf("SyncBridge: %v", err)
+	}
+	devices, ok = capturedArgs["devices"].([]any)
+	if !ok || len(devices) != 1 {
+		t.Fatalf("devices = %v, want one entry", capturedArgs["devices"])
+	}
+	got, _ := devices[0].(map[string]any)
+	if got["id"] != "ferroamp:battery" || got["device_type"] != "battery" {
+		t.Errorf("unexpected device payload: %v", got)
+	}
+}
+
 // TestPendingCleared_OnDisconnect verifies that in-flight calls receive a
 // "connection_lost" error (not hang indefinitely) when the server drops the
 // connection.
