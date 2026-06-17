@@ -349,6 +349,32 @@ func (c *Capability) InvokeCommand(nodeID, endpoint, clusterID uint32, commandNa
 	return val, nil
 }
 
+// BridgedDevice is one non-Matter DER 42W surfaces onto the bridge's
+// Aggregator endpoint (Phase 3 — see matter-sidecar/src/bridge.ts). ID
+// must be stable across syncs (it's used to map to a persistent bridged
+// endpoint); PowerMW is site-signed power in milliwatts.
+type BridgedDevice struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	DeviceType string `json:"device_type"`
+	PowerMW    int64  `json:"power_mw"`
+}
+
+// SyncBridge pushes the full current set of bridged devices to the
+// sidecar. Devices missing from a given call (vs. the previous one) are
+// marked unreachable rather than removed — see bridge.ts's `sync`.
+func (c *Capability) SyncBridge(devices []BridgedDevice) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if devices == nil {
+		devices = []BridgedDevice{}
+	}
+	_, err := c.call(ctx, "sync_bridge", map[string]any{
+		"devices": devices,
+	})
+	return err
+}
+
 // Close disconnects from the matter-sidecar. Safe to call multiple times.
 func (c *Capability) Close() error {
 	c.cancel()

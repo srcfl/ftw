@@ -118,9 +118,12 @@ services:
   # 42W also runs the other direction (Phase 2): as a Matter *server*,
   # exposing a CommodityPrice cluster (spot price + forecast) other
   # controllers can read. GET /api/matter/pairing_code returns the codes
-  # to add 42W onto a third-party fabric. Phase 3 — a *bridge* surfacing
-  # non-Matter DERs (EVSE, inverters) as Matter devices to other
-  # ecosystems — is tracked in PR #1, not yet built.
+  # to add 42W onto a third-party fabric.
+  #
+  # Phase 3 — a *bridge* surfacing non-Matter DERs (EVSE, inverters,
+  # batteries) as Matter devices to other ecosystems. Opt in per driver
+  # with `matter_bridge: true` in config.yaml; see
+  # matter-sidecar/src/bridge.ts and docs/configuration.md.
   # ---------------------------------------------------------------------
   matter-sidecar:
     build: ./matter-sidecar

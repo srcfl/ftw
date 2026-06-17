@@ -72,6 +72,7 @@ drivers:
     max_charge_w: 10000           # per-driver cap; 0/unset → 5 kW default
     max_discharge_w: 10000
     inverter_group: ferroamp      # optional — see "Inverter affinity" below
+    matter_bridge: true           # optional — surface this driver's power on the Matter bridge
     mqtt:
       host: 192.168.1.153
       port: 1883
@@ -208,6 +209,16 @@ batteries:
 
 Keys must match `drivers[].name`. Leave blank to use BMS defaults.
 
+#### Matter bridge (`matter_bridge`)
+
+Set `matter_bridge: true` on any driver to surface its live power reading
+as a bridged Matter device under the sidecar's Aggregator endpoint (Phase
+3 — see `matter-sidecar/src/bridge.ts`), so other Matter ecosystems
+(Apple Home, Home Assistant, ...) can see it. Off by default — this is a
+deliberate per-driver opt-in, not automatic for every configured driver.
+Requires the `matter:` block below to be configured. State of charge is
+not bridged (left for a follow-up); only power.
+
 ### `matter` — Matter sidecar admin connection (optional)
 
 ```yaml
@@ -252,6 +263,7 @@ third-party controller needs to add 42W to their own fabric.
 | `price.*` | ✅ | Picked up next price-fetch cycle |
 | `weather.*` | ✅ | Picked up next weather-fetch cycle |
 | `batteries.*` | ✅ | Read fresh each control cycle |
+| `drivers[].matter_bridge` | ✅ | Picked up by `matterBridgeLoop`'s next 5-min push |
 
 ## Atomic writes
 

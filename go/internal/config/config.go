@@ -384,6 +384,13 @@ type Driver struct {
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// MatterBridge opts this driver's live power reading into the Matter
+	// sidecar's bridge (Phase 3 — see matter-sidecar/src/bridge.ts):
+	// surfaced as a bridged Matter device so other Matter ecosystems
+	// (Apple Home, Home Assistant, ...) can see it. Off by default —
+	// exposing a driver onto another controller's fabric is a deliberate
+	// per-driver choice, not automatic for every configured driver.
+	MatterBridge bool `yaml:"matter_bridge,omitempty" json:"matter_bridge,omitempty"`
 	// HasPassword is a JSON-only signal to the UI that Config["password"]
 	// holds a non-empty value on disk. Populated by MaskSecrets after the
 	// real password is blanked out so the operator can still tell apart

@@ -1259,6 +1259,12 @@ func main() {
 		go matterPriceFeedLoop(ctx, matterAdmin, priceSvc)
 	}
 
+	// ---- Background: push bridged DERs to the Matter sidecar (Phase 3 —
+	// 42W as a Matter bridge) ----
+	if matterAdmin != nil {
+		go matterBridgeLoop(ctx, matterAdmin, tel, cfgMu, cfg)
+	}
+
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
@@ -1528,6 +1534,56 @@ func pushMatterPriceFeed(m *mattercli.Capability, priceSvc *prices.Service) {
 	}
 	if err := m.SetPriceFeed(current, forecast); err != nil {
 		slog.Warn("matter price feed: push failed", "err", err)
+	}
+}
+
+// matterBridgeLoop periodically pushes the live power reading of every
+// driver opted into `matter_bridge: true` to the sidecar's Aggregator
+// endpoint (Phase 3 — 42W as a Matter bridge for non-Matter DERs). Runs
+// on the same 5-minute cadence as the price feed; bridged values aren't
+// dispatch-critical so this doesn't need control-loop frequency.
+func matterBridgeLoop(ctx context.Context, m *mattercli.Capability, tel *telemetry.Store, cfgMu *sync.RWMutex, cfg *config.Config) {
+	tick := time.NewTicker(5 * time.Minute)
+	defer tick.Stop()
+	pushMatterBridge(m, tel, cfgMu, cfg)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			pushMatterBridge(m, tel, cfgMu, cfg)
+		}
+	}
+}
+
+func pushMatterBridge(m *mattercli.Capability, tel *telemetry.Store, cfgMu *sync.RWMutex, cfg *config.Config) {
+	cfgMu.RLock()
+	bridged := make(map[string]bool, len(cfg.Drivers))
+	for _, d := range cfg.Drivers {
+		if d.MatterBridge {
+			bridged[d.Name] = true
+		}
+	}
+	cfgMu.RUnlock()
+	if len(bridged) == 0 {
+		return
+	}
+	devices := make([]mattercli.BridgedDevice, 0, len(bridged))
+	for driver := range bridged {
+		for _, r := range tel.ReadingsByDriver(driver) {
+			if h := tel.DriverHealth(driver); h == nil || !h.IsOnline() {
+				continue
+			}
+			devices = append(devices, mattercli.BridgedDevice{
+				ID:         driver + ":" + r.DerType.String(),
+				Name:       driver + " " + r.DerType.String(),
+				DeviceType: r.DerType.String(),
+				PowerMW:    int64(math.Round(r.SmoothedW * 1000)),
+			})
+		}
+	}
+	if err := m.SyncBridge(devices); err != nil {
+		slog.Warn("matter bridge: push failed", "err", err)
 	}
 }
 

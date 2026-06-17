@@ -585,6 +585,16 @@ not configured.
 
 Handler: `go/internal/api/api_matter.go`
 
+### Phase 3 — Matter bridge (no REST endpoint)
+
+42W as a Matter *bridge*: drivers with `matter_bridge: true` (see
+`docs/configuration.md`) get their live power reading surfaced as a
+bridged Matter device under the sidecar's Aggregator endpoint, so other
+Matter ecosystems can see it. This is config-driven and push-only — a
+background loop (`matterBridgeLoop` in `go/cmd/forty-two-watts/main.go`)
+calls the sidecar's `sync_bridge` command every 5 minutes; there is no
+operator-facing HTTP surface for it.
+
 ---
 
 ## MPC planner

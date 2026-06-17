@@ -17,6 +17,11 @@
 // itself is a commissionable Matter device exposing a CommodityPrice server
 // endpoint (see priceserver.ts), joinable by any other Matter controller via
 // the codes `get_pairing_code` returns.
+//
+// Phase 3 (`sync_bridge`): 42W as a Matter *bridge* — non-Matter DERs
+// (inverters, batteries, EVSE chargers) appear as bridged Matter devices
+// under a single Aggregator endpoint, so other Matter ecosystems can see
+// their live power draw. See bridge.ts.
 // Storage path must be set via the MATTER_STORAGE_PATH env var (mapped to
 // matter.js's "storage.path" variable), not @matter/nodejs/config's
 // defaultStoragePath setter — that setter throws NodeJsAlreadyInitializedError
@@ -34,6 +39,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { attributeNameFor, clusterFor } from "./clusters.js";
 import { NodeMap } from "./nodemap.js";
 import { createPriceEndpoint, setPriceFeed, type PricePeriod } from "./priceserver.js";
+import { Bridge, type BridgedDeviceInput } from "./bridge.js";
 
 const WS_PORT = Number(process.env.FTW_MATTER_WS_PORT ?? 5580);
 const MATTER_PORT = Number(process.env.FTW_MATTER_PORT ?? 5540);
@@ -61,10 +67,11 @@ function errorResponse(messageId: string, code: string, err: unknown): WsRespons
 
 async function main() {
   const priceEndpoint = createPriceEndpoint();
+  const bridge = new Bridge();
   const server = await ServerNode.create(ServerNode.RootEndpoint, {
     id: "ftw-matter-controller",
     network: { port: MATTER_PORT },
-    parts: [priceEndpoint],
+    parts: [priceEndpoint, bridge.endpoint],
   });
   await server.start();
 
@@ -168,6 +175,12 @@ async function main() {
     return { manual_pairing_code: codes.manualPairingCode, qr_pairing_code: codes.qrPairingCode };
   }
 
+  async function handleSyncBridge(args: Record<string, unknown>) {
+    const devices = Array.isArray(args.devices) ? (args.devices as BridgedDeviceInput[]) : [];
+    await bridge.sync(devices);
+    return null;
+  }
+
   async function dispatch(req: WsRequest): Promise<WsResponse> {
     const args = req.args ?? {};
     try {
@@ -186,6 +199,8 @@ async function main() {
           return { message_id: req.message_id, result: await handleSetPriceFeed(args) };
         case "get_pairing_code":
           return { message_id: req.message_id, result: handleGetPairingCode() };
+        case "sync_bridge":
+          return { message_id: req.message_id, result: await handleSyncBridge(args) };
         default:
           return errorResponse(req.message_id, "unknown_command", `unknown command '${req.command}'`);
       }
