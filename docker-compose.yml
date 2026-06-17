@@ -115,11 +115,12 @@ services:
   # on this side. network_mode: host is required for mDNS discovery of
   # the shared device.
   #
-  # 42W is also planned to run the other direction: as a Matter
-  # *server*, exposing energy-management clusters (price/forecast) for
-  # other controllers to consume, and as a *bridge* surfacing
+  # 42W also runs the other direction (Phase 2): as a Matter *server*,
+  # exposing a CommodityPrice cluster (spot price + forecast) other
+  # controllers can read. GET /api/matter/pairing_code returns the codes
+  # to add 42W onto a third-party fabric. Phase 3 — a *bridge* surfacing
   # non-Matter DERs (EVSE, inverters) as Matter devices to other
-  # ecosystems. Tracked in PR #1, not yet built.
+  # ecosystems — is tracked in PR #1, not yet built.
   # ---------------------------------------------------------------------
   matter-sidecar:
     build: ./matter-sidecar

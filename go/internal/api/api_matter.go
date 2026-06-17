@@ -58,3 +58,20 @@ func (s *Server) handleMatterNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, nodes)
 }
+
+// handleMatterPairingCode returns the one-time codes a third-party
+// controller (Apple Home, Home Assistant, ...) needs to commission 42W
+// itself onto their fabric — Phase 2's inverse of /api/matter/commission,
+// where 42W is the device being joined rather than the one joining.
+func (s *Server) handleMatterPairingCode(w http.ResponseWriter, r *http.Request) {
+	if s.deps.Matter == nil {
+		writeJSON(w, 503, map[string]string{"error": "matter sidecar not configured"})
+		return
+	}
+	code, err := s.deps.Matter.GetPairingCode()
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, code)
+}

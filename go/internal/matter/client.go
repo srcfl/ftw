@@ -230,6 +230,70 @@ func (c *Capability) ListNodes() ([]NodeInfo, error) {
 	return nodes, nil
 }
 
+// matterEpochOffsetS is 2000-01-01T00:00:00Z expressed in Unix seconds —
+// the base Matter uses for its "epoch-s" timestamp fields (see
+// CommodityPriceStruct.PeriodStart/PeriodEnd in the Matter 1.5 spec).
+const matterEpochOffsetS = 946684800
+
+// UnixMsToMatterEpochS converts a Unix millisecond timestamp to Matter's
+// epoch-s base, as required by PricePeriod.PeriodStartS/PeriodEndS.
+func UnixMsToMatterEpochS(unixMs int64) int64 {
+	return unixMs/1000 - matterEpochOffsetS
+}
+
+// PricePeriod mirrors the Matter CommodityPriceStruct (one period's price)
+// exposed by matter-sidecar/src/priceserver.ts's CommodityPrice server
+// endpoint. PeriodStartS/PeriodEndS use the Matter epoch — convert with
+// UnixMsToMatterEpochS. PriceMinorUnits is price per the cluster's
+// TariffUnit (kWh) in the currency's minor unit — for SEK/öre this is
+// simply öre/kWh, since SetPriceFeed's currency is configured with
+// decimalPoints=2.
+type PricePeriod struct {
+	PeriodStartS    int64  `json:"periodStart"`
+	PeriodEndS      *int64 `json:"periodEnd"`
+	PriceMinorUnits int64  `json:"price"`
+}
+
+// SetPriceFeed pushes 42W's current price and forecast into the sidecar's
+// CommodityPrice server endpoint (Phase 2 — 42W exposed as a Matter
+// energy-management device other controllers can read). current may be nil
+// if no price is known right now; forecast may be empty.
+func (c *Capability) SetPriceFeed(current *PricePeriod, forecast []PricePeriod) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if forecast == nil {
+		forecast = []PricePeriod{}
+	}
+	_, err := c.call(ctx, "set_price_feed", map[string]any{
+		"current":  current,
+		"forecast": forecast,
+	})
+	return err
+}
+
+// PairingCode is the one-time code a third-party controller (Apple Home,
+// Home Assistant, ...) needs to commission 42W itself onto their fabric —
+// the inverse of Commission, where 42W joins someone else's device.
+type PairingCode struct {
+	ManualPairingCode string `json:"manual_pairing_code"`
+	QRPairingCode     string `json:"qr_pairing_code"`
+}
+
+// GetPairingCode returns 42W's own commissioning codes.
+func (c *Capability) GetPairingCode() (PairingCode, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := c.call(ctx, "get_pairing_code", map[string]any{})
+	if err != nil {
+		return PairingCode{}, err
+	}
+	var pc PairingCode
+	if err := json.Unmarshal(result, &pc); err != nil {
+		return PairingCode{}, err
+	}
+	return pc, nil
+}
+
 // ReadAttribute reads a cluster attribute from a Matter node.
 // Attribute path is formatted as "endpoint/cluster/attribute" with decimal integers,
 // matching the matter-sidecar wire protocol (matter-sidecar/src/index.ts).

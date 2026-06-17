@@ -12,8 +12,19 @@
 // one-time pairing code. The `commission` command below joins the device
 // using that code and hands back a small logical node_id for the operator
 // to paste into the driver's YAML config — see drivers/matter.lua.
-import { config as nodeJsConfig } from "@matter/nodejs/config";
-nodeJsConfig.defaultStoragePath = process.env.FTW_MATTER_STORAGE_PATH ?? "/data";
+//
+// Phase 2 (`get_pairing_code` / `set_price_feed`): the inverse role — 42W
+// itself is a commissionable Matter device exposing a CommodityPrice server
+// endpoint (see priceserver.ts), joinable by any other Matter controller via
+// the codes `get_pairing_code` returns.
+// Storage path must be set via the MATTER_STORAGE_PATH env var (mapped to
+// matter.js's "storage.path" variable), not @matter/nodejs/config's
+// defaultStoragePath setter — that setter throws NodeJsAlreadyInitializedError
+// because importing @matter/main elsewhere in this file initializes the
+// default Environment before this module's own top-level code would run
+// (ESM hoists all imports ahead of any importing module's body).
+const STORAGE_PATH = process.env.FTW_MATTER_STORAGE_PATH ?? "/data";
+process.env.MATTER_STORAGE_PATH = STORAGE_PATH;
 
 import { join } from "path";
 import { ServerNode } from "@matter/main";
@@ -22,6 +33,7 @@ import { EndpointNumber, ClusterId, AttributeId } from "@matter/types";
 import { WebSocket, WebSocketServer } from "ws";
 import { attributeNameFor, clusterFor } from "./clusters.js";
 import { NodeMap } from "./nodemap.js";
+import { createPriceEndpoint, setPriceFeed, type PricePeriod } from "./priceserver.js";
 
 const WS_PORT = Number(process.env.FTW_MATTER_WS_PORT ?? 5580);
 const MATTER_PORT = Number(process.env.FTW_MATTER_PORT ?? 5540);
@@ -48,13 +60,15 @@ function errorResponse(messageId: string, code: string, err: unknown): WsRespons
 }
 
 async function main() {
+  const priceEndpoint = createPriceEndpoint();
   const server = await ServerNode.create(ServerNode.RootEndpoint, {
     id: "ftw-matter-controller",
     network: { port: MATTER_PORT },
+    parts: [priceEndpoint],
   });
   await server.start();
 
-  const nodeMap = new NodeMap(join(nodeJsConfig.defaultStoragePath as string, "ftw-node-map.json"));
+  const nodeMap = new NodeMap(join(STORAGE_PATH, "ftw-node-map.json"));
 
   function peerFor(logicalNodeId: number) {
     const realId = nodeMap.realFor(logicalNodeId);
@@ -142,6 +156,18 @@ async function main() {
     return nodeMap.list();
   }
 
+  async function handleSetPriceFeed(args: Record<string, unknown>) {
+    const current = (args.current ?? null) as PricePeriod | null;
+    const forecast = Array.isArray(args.forecast) ? (args.forecast as PricePeriod[]) : [];
+    await setPriceFeed(priceEndpoint, current, forecast);
+    return null;
+  }
+
+  function handleGetPairingCode() {
+    const codes = server.state.commissioning.pairingCodes;
+    return { manual_pairing_code: codes.manualPairingCode, qr_pairing_code: codes.qrPairingCode };
+  }
+
   async function dispatch(req: WsRequest): Promise<WsResponse> {
     const args = req.args ?? {};
     try {
@@ -156,6 +182,10 @@ async function main() {
           return { message_id: req.message_id, result: await handleSendCommand(args) };
         case "list_nodes":
           return { message_id: req.message_id, result: handleListNodes() };
+        case "set_price_feed":
+          return { message_id: req.message_id, result: await handleSetPriceFeed(args) };
+        case "get_pairing_code":
+          return { message_id: req.message_id, result: handleGetPairingCode() };
         default:
           return errorResponse(req.message_id, "unknown_command", `unknown command '${req.command}'`);
       }

@@ -233,6 +233,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("GET  /api/matter/nodes", s.handleMatterNodes)
 	s.handle("POST /api/matter/commission", s.handleMatterCommission)
+	s.handle("GET  /api/matter/pairing_code", s.handleMatterPairingCode)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

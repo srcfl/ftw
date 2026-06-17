@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -1252,6 +1253,12 @@ func main() {
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
 	go rolloffLoop(ctx, st, coldDir)
 
+	// ---- Background: push price feed to the Matter sidecar (Phase 2 — 42W
+	// as a Matter server) ----
+	if matterAdmin != nil && priceSvc != nil {
+		go matterPriceFeedLoop(ctx, matterAdmin, priceSvc)
+	}
+
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
 	// fuseMaxW is recomputed per tick from ctrl.SiteFuse* under ctrlMu —
@@ -1472,6 +1479,55 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string) {
 		case <-ctx.Done(): return
 		case <-tick.C: doRolloff(ctx, st, coldDir)
 		}
+	}
+}
+
+// matterPriceFeedLoop periodically pushes 42W's current price + forecast
+// into the Matter sidecar's CommodityPrice server endpoint (Phase 2 — 42W
+// exposed as a Matter energy-management device other controllers can read).
+func matterPriceFeedLoop(ctx context.Context, m *mattercli.Capability, priceSvc *prices.Service) {
+	tick := time.NewTicker(5 * time.Minute)
+	defer tick.Stop()
+	pushMatterPriceFeed(m, priceSvc)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			pushMatterPriceFeed(m, priceSvc)
+		}
+	}
+}
+
+func pushMatterPriceFeed(m *mattercli.Capability, priceSvc *prices.Service) {
+	nowMs := time.Now().UnixMilli()
+	rows, err := priceSvc.Load(nowMs-1*3600*1000, nowMs+48*3600*1000)
+	if err != nil {
+		slog.Warn("matter price feed: load prices failed", "err", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	var current *mattercli.PricePeriod
+	forecast := make([]mattercli.PricePeriod, 0, len(rows))
+	for _, row := range rows {
+		startMs := row.SlotTsMs
+		endMs := startMs + int64(row.SlotLenMin)*60*1000
+		endS := mattercli.UnixMsToMatterEpochS(endMs)
+		period := mattercli.PricePeriod{
+			PeriodStartS:    mattercli.UnixMsToMatterEpochS(startMs),
+			PeriodEndS:      &endS,
+			PriceMinorUnits: int64(math.Round(row.TotalOreKwh)),
+		}
+		forecast = append(forecast, period)
+		if current == nil && startMs <= nowMs && nowMs < endMs {
+			c := period
+			current = &c
+		}
+	}
+	if err := m.SetPriceFeed(current, forecast); err != nil {
+		slog.Warn("matter price feed: push failed", "err", err)
 	}
 }
 

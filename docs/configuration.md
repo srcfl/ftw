@@ -224,6 +224,13 @@ to an already-joined `node_id`); the two normally point at the same
 sidecar. See `drivers/matter.lua`'s header comment for the full
 onboarding flow, and `docs/api.md`'s Matter section for the endpoints.
 
+This same `matter:` block also turns on Phase 2 — 42W exposing its own
+spot price + forecast as a Matter CommodityPrice server endpoint, so other
+Matter controllers can read it directly. If `price:` is also configured,
+a background loop pushes fresh data to the sidecar every 5 minutes; no
+extra config needed. `GET /api/matter/pairing_code` returns the codes a
+third-party controller needs to add 42W to their own fabric.
+
 ## Hot-reload matrix
 
 | Field | Hot? | Notes |

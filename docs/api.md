@@ -563,6 +563,28 @@ before pasting it into driver config.
 
 Handler: `go/internal/api/api_matter.go`
 
+### GET /api/matter/pairing_code
+
+Phase 2 — the inverse of `/api/matter/commission`: 42W itself is a
+commissionable Matter device (exposing a CommodityPrice server endpoint
+with spot price + forecast — see `matter-sidecar/src/priceserver.ts`).
+This returns the one-time codes a third-party controller (Apple Home,
+Home Assistant, ...) needs to add 42W onto their own fabric.
+
+**Response (200):**
+
+```json
+{
+  "manual_pairing_code": "34970112332",
+  "qr_pairing_code": "MT:Y.K9042C00KA0648G00"
+}
+```
+
+**Errors:** `502` sidecar reachable but the request failed; `503` sidecar
+not configured.
+
+Handler: `go/internal/api/api_matter.go`
+
 ---
 
 ## MPC planner
