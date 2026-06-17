@@ -988,6 +988,20 @@ func main() {
 	// Forward-declare haBridge so Deps can reference it; the bridge
 	// gets wired further down (HA is optional + depends on reg.Names()).
 	var haBridge *ha.Bridge
+
+	// Optional admin connection to the Matter sidecar, separate from any
+	// per-driver capability dial — see config.Config.Matter's doc comment.
+	var matterAdmin *mattercli.Capability
+	if cfg.Matter != nil {
+		m, err := mattercli.Dial(cfg.Matter.Host, cfg.Matter.Port)
+		if err != nil {
+			slog.Warn("matter admin sidecar unreachable at startup — /api/matter/* disabled (restart 42W once the sidecar is up)", "err", err)
+		} else {
+			matterAdmin = m
+			defer matterAdmin.Close()
+		}
+	}
+
 	deps := &api.Deps{
 		Tel: tel, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1018,6 +1032,7 @@ func main() {
 		Events:     bus,
 		Notifications: notifSvc,
 		SelfUpdate: selfUpdater,
+		Matter:     matterAdmin,
 		Version:    Version,
 	}
 	srv := api.New(deps)

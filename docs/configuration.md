@@ -208,6 +208,22 @@ batteries:
 
 Keys must match `drivers[].name`. Leave blank to use BMS defaults.
 
+### `matter` — Matter sidecar admin connection (optional)
+
+```yaml
+matter:
+  host: localhost                 # matter-sidecar address
+  port: 5580                      # default 5580
+```
+
+Enables `POST /api/matter/commission` and `GET /api/matter/nodes` — the
+one-time pairing-code join for devices shared from another Matter
+controller's fabric, and a listing of nodes already joined. This is
+separate from each driver's own `capabilities.matter` block (which talks
+to an already-joined `node_id`); the two normally point at the same
+sidecar. See `drivers/matter.lua`'s header comment for the full
+onboarding flow, and `docs/api.md`'s Matter section for the endpoints.
+
 ## Hot-reload matrix
 
 | Field | Hot? | Notes |

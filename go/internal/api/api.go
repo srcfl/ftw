@@ -31,6 +31,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
+	"github.com/frahlg/forty-two-watts/go/internal/matter"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
@@ -120,6 +121,11 @@ type Deps struct {
 	// Optional: outbound push-notification service. Nil disables
 	// /api/notifications/* endpoints.
 	Notifications *notifications.Service
+
+	// Optional: admin connection to the Matter sidecar (matter-sidecar/)
+	// for the one-time pairing-code join + node listing — see
+	// config.Config.Matter's doc comment. Nil disables /api/matter/*.
+	Matter *matter.Capability
 
 	Version string
 }
@@ -225,6 +231,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
+	s.handle("GET  /api/matter/nodes", s.handleMatterNodes)
+	s.handle("POST /api/matter/commission", s.handleMatterCommission)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

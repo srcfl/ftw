@@ -15,13 +15,14 @@
 --   2. In that controller, use "share device" / "add to another network"
 --      / "pair to another Matter controller" to mint a one-time pairing
 --      code (a Manual Pairing Code or QR setup code).
---   3. Hand that code to 42W's Matter sidecar (matter-sidecar/, built on
---      matter.js) by sending it a `commission` request over its WebSocket
---      API with {"pairing_code": "<code>"} — there is no UI for this yet;
---      use e.g. `websocat ws://localhost:5580/ws` or a small script. The
---      sidecar joins the device as an additional fabric admin over plain
---      IP (no BLE on our side, so the whole Thread-vs-Wi-Fi transport
---      question is moot for us) and returns a small integer node_id.
+--   3. Hand that code to 42W: POST /api/matter/commission with
+--      {"pairing_code": "<code>"} (requires top-level `matter:` config —
+--      see docs/configuration.md). The sidecar (matter-sidecar/, built on
+--      matter.js) joins the device as an additional fabric admin over
+--      plain IP (no BLE on our side, so the whole Thread-vs-Wi-Fi
+--      transport question is moot for us) and the response carries a
+--      small integer node_id. GET /api/matter/nodes lists nodes already
+--      joined if you need to look one up again.
 --   4. Put that node_id in this driver's config below.
 --
 -- Prerequisites: the Matter sidecar (see docker-compose.yml's

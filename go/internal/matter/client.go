@@ -185,6 +185,51 @@ func (c *Capability) call(ctx context.Context, command string, args any) (json.R
 	}
 }
 
+// NodeInfo describes one node the sidecar has joined, as returned by
+// list_nodes. NodeID is the small logical id matter-sidecar/src/nodemap.ts
+// hands out — the value drivers/matter.lua's config.node_id expects.
+type NodeInfo struct {
+	NodeID       int    `json:"node_id"`
+	MatterNodeID string `json:"matter_node_id"`
+}
+
+// Commission joins a device shared from another controller's fabric using
+// a one-time pairing code minted by that controller's "share device" /
+// multi-admin flow. Returns the logical node_id to put in the driver's
+// config.node_id field.
+func (c *Capability) Commission(pairingCode string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	result, err := c.call(ctx, "commission", map[string]any{
+		"pairing_code": pairingCode,
+	})
+	if err != nil {
+		return 0, err
+	}
+	var res struct {
+		NodeID int `json:"node_id"`
+	}
+	if err := json.Unmarshal(result, &res); err != nil {
+		return 0, err
+	}
+	return res.NodeID, nil
+}
+
+// ListNodes returns every node the sidecar has joined so far.
+func (c *Capability) ListNodes() ([]NodeInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := c.call(ctx, "list_nodes", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var nodes []NodeInfo
+	if err := json.Unmarshal(result, &nodes); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
 // ReadAttribute reads a cluster attribute from a Matter node.
 // Attribute path is formatted as "endpoint/cluster/attribute" with decimal integers,
 // matching the matter-sidecar wire protocol (matter-sidecar/src/index.ts).

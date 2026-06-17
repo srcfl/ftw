@@ -33,6 +33,15 @@ type Config struct {
 	FlexLoads     []FlexLoad         `yaml:"flexloads,omitempty" json:"flexloads,omitempty"`
 	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+
+	// Matter is the site-wide Matter sidecar address used for *admin*
+	// actions (POST /api/matter/commission, GET /api/matter/nodes) — the
+	// one-time pairing-code join and node listing, which aren't tied to
+	// any single driver. Per-driver Matter access (reads/writes/invokes
+	// against an already-joined node_id) is configured separately under
+	// each driver's `capabilities.matter` block; the two typically point
+	// at the same sidecar. Nil disables the /api/matter/* endpoints.
+	Matter *MatterConfig `yaml:"matter,omitempty" json:"matter,omitempty"`
 }
 
 // FlexLoad declares a price-responsive flexible load the flex-load
@@ -425,11 +434,12 @@ type HTTPCapability struct {
 }
 
 // MatterConfig grants a driver access to the Matter controller sidecar
-// (backend TBD — see go/internal/matter). Host is required; Port defaults
-// to 5580. 42W joins shared devices as an additional fabric admin rather
-// than commissioning them itself, so there is no pairing/BLE config here —
-// the per-device node_id (set in the driver's own config block) is what
-// the sidecar's multi-fabric join hands back.
+// (matter-sidecar/, built on matter.js — see go/internal/matter). Host is
+// required; Port defaults to 5580. 42W joins shared devices as an
+// additional fabric admin rather than commissioning them itself, so there
+// is no pairing/BLE config here — the per-device node_id (set in the
+// driver's own config block) is what the sidecar's multi-fabric join
+// hands back.
 type MatterConfig struct {
 	Host string `yaml:"host" json:"host"`
 	Port int    `yaml:"port,omitempty" json:"port,omitempty"` // default 5580
