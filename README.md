@@ -212,7 +212,7 @@ release notes live in `.changeset/*.md`.
 
 ## Community
 
-- Discord: [discord.gg/z7FxpQnk](https://discord.gg/z7FxpQnk)
+- Discord: [discord.gg/25xcBzQaux](https://discord.gg/25xcBzQaux)
 - Issues: [github.com/frahlg/forty-two-watts/issues](https://github.com/frahlg/forty-two-watts/issues)
 
 ## License
