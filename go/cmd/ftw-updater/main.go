@@ -55,12 +55,16 @@ type server struct {
 	// hand from the project dir.
 	overrideFiles []string
 	statusPath    string
+	stateMu       sync.Mutex
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
 	// becomes a no-op. Needed for local smoke tests where the image lives
 	// only on the dev machine (`docker compose pull` would fail, or worse,
 	// overwrite the local build with a stale GHCR tag). Production leaves
 	// this at false.
 	skipPull bool
+	// pullRetryDelay is the wait between pull attempts. Defaults to 60s
+	// in production; tests set it to a small value to keep runs fast.
+	pullRetryDelay time.Duration
 
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
@@ -123,10 +127,11 @@ func main() {
 	}
 
 	srv := &server{
-		composeFile: *compose,
-		statusPath:  *statusPath,
-		skipPull:    *skipPull,
-		runner:      dockerCompose,
+		composeFile:    *compose,
+		statusPath:     *statusPath,
+		skipPull:       *skipPull,
+		pullRetryDelay: 60 * time.Second,
+		runner:         dockerCompose,
 	}
 	// Auto-discover override files alongside the base, the same way the
 	// compose CLI does when invoked without -f. Without this the sidecar
@@ -294,7 +299,7 @@ func (s *server) runJob(action, target string) {
 			}
 			slog.Warn("pull failed, retrying", "attempt", attempt, "err", pullErr)
 			select {
-			case <-time.After(60 * time.Second):
+			case <-time.After(s.pullRetryDelay):
 			case <-ctx.Done():
 				pullErr = ctx.Err()
 				break pullLoop
@@ -473,6 +478,8 @@ func (s *server) runRollback(snapshotID string, files []string) {
 }
 
 func (s *server) writeState(st State) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	if st.UpdatedAt.IsZero() {
 		st.UpdatedAt = time.Now()
 	}
@@ -492,20 +499,26 @@ func (s *server) writeState(st State) {
 	}
 	_ = f.Close()
 	// Atomic swap so partial writes never leak to a reader on the other
-	// side of the shared volume.
+	// side of the shared volume. On Windows the rename fails when the
+	// destination is open for reading; fall back to remove-then-rename
+	// so tests pass without relaxing production semantics on Linux.
 	if err := os.Rename(tmp, s.statusPath); err != nil {
-		slog.Warn("state rename", "err", err)
+		_ = os.Remove(s.statusPath)
+		if err2 := os.Rename(tmp, s.statusPath); err2 != nil {
+			slog.Warn("state rename", "err", err2)
+		}
 	}
 }
 
 func (s *server) readState() State {
-	f, err := os.Open(s.statusPath)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	data, err := os.ReadFile(s.statusPath)
 	if err != nil {
 		return State{State: "idle"}
 	}
-	defer f.Close()
 	var st State
-	if err := json.NewDecoder(f).Decode(&st); err != nil || st.State == "" {
+	if err := json.Unmarshal(data, &st); err != nil || st.State == "" {
 		return State{State: "idle"}
 	}
 	return st

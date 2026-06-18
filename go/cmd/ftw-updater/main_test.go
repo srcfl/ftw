@@ -65,9 +65,10 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 	dir := t.TempDir()
 	runner := &fakeRunner{}
 	s := &server{
-		composeFile: filepath.Join(dir, "docker-compose.yml"),
-		statusPath:  filepath.Join(dir, "state.json"),
-		runner:      runner.run,
+		composeFile:    filepath.Join(dir, "docker-compose.yml"),
+		statusPath:     filepath.Join(dir, "state.json"),
+		pullRetryDelay: time.Millisecond,
+		runner:         runner.run,
 	}
 	writeCompose(t, s.composeFile, `services:
   forty-two-watts:
