@@ -22,19 +22,17 @@ echo "[$(date -Is)] ftw-firstboot starting"
 cd /home/ftw/forty-two-watts
 
 # Retry loop: GHCR and general LAN DHCP can be flaky for the first
-# couple of minutes after boot. Back off linearly rather than
-# exponentially — the failure mode we're covering (slow DHCP lease,
-# pending captive-portal login) resolves in single-digit minutes.
-for attempt in 1 2 3 4 5 6; do
+# couple of minutes after boot, and slow connections may need many
+# minutes per attempt. Retry indefinitely — the sentinel is only
+# written on success, so a reboot will pick up where this left off.
+attempt=0
+while true; do
+    attempt=$((attempt + 1))
     if docker compose pull; then
         break
     fi
-    echo "[$(date -Is)] pull attempt ${attempt}/6 failed, sleeping 15 s"
-    sleep 15
-    if [ "${attempt}" = "6" ]; then
-        echo "[$(date -Is)] pull gave up — service will retry on next boot"
-        exit 1
-    fi
+    echo "[$(date -Is)] pull attempt ${attempt} failed, retrying in 60 s"
+    sleep 60
 done
 
 docker compose up -d
