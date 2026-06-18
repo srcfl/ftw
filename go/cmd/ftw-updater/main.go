@@ -267,7 +267,7 @@ func (s *server) runJob(action, target string) {
 	now := time.Now()
 	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
 
 	var env []string
@@ -285,9 +285,24 @@ func (s *server) runJob(action, target string) {
 
 	if !s.skipPull {
 		pullArgs := s.composeArgs("pull", mainServiceName)
-		if err := s.runner(ctx, env, pullArgs...); err != nil {
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + err.Error()})
-			slog.Error("pull failed", "err", err)
+		var pullErr error
+	pullLoop:
+		for attempt := 1; attempt <= 3; attempt++ {
+			pullErr = s.runner(ctx, env, pullArgs...)
+			if pullErr == nil || attempt == 3 {
+				break
+			}
+			slog.Warn("pull failed, retrying", "attempt", attempt, "err", pullErr)
+			select {
+			case <-time.After(60 * time.Second):
+			case <-ctx.Done():
+				pullErr = ctx.Err()
+				break pullLoop
+			}
+		}
+		if pullErr != nil {
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
+			slog.Error("pull failed", "err", pullErr)
 			return
 		}
 	} else {
