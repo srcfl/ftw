@@ -1,5 +1,109 @@
 # Changelog
 
+## 0.121.0
+
+### Minor Changes
+
+- 941a81f: Add a Tesla-style manual charge control to the EV charging modal: an amp
+  slider (range = the loadpoint's min/max charge current) plus Start / Stop.
+  Start pins a **persistent** manual hold at the chosen amperage that now
+  **overrides `surplus_only`** — when the operator explicitly asks to charge,
+  we honour it and import from the grid if PV is short. Stop releases the hold
+  and drops straight back to automatic charging (PV-surplus-only when that
+  toggle is on).
+
+  Behaviour change: previously `surplus_only` clamped any manual hold down to
+  the available PV surplus (a manual "Start" with no sun did nothing). A manual
+  hold now takes priority over surplus; the per-phase fuse clamp remains the one
+  guard a manual hold can never override. Persistent holds carry no time expiry
+  and are auto-released when the vehicle unplugs. `POST .../manual_hold` now
+  accepts `hold_s: 0` (or omitted) to mean a persistent hold; `hold_s > 0` is
+  still the bounded diagnostic hold. `GET /api/loadpoints` gains `phases`,
+  `voltage_v`, `manual_active`, and `manual_charge_w` so the UI can render the
+  amp slider and reflect the current override.
+
+  The now-redundant Start / Pause / Resume footer buttons in the EV modal are
+  removed — the amp slider's Start/Stop supersedes them (Start is strictly more
+  capable: it pins a chosen amperage instead of always MaxChargeW). The
+  `POST /api/ev/command` endpoint is retained for Home Assistant / scripts.
+
+- caf07c3: Add a read-only MyUplink heat-pump telemetry driver (`drivers/myuplink.lua`).
+  Authenticates to the MyUplink Cloud REST API v2 (OAuth2 client_credentials,
+  READSYSTEM scope) and emits compressor power and hot-water / indoor / outdoor
+  temperatures into the time-series DB. Observe-only — no control. Configure the
+  Client ID in Settings → Devices; the Client Secret is stored as a masked
+  config secret.
+- 6ec93f8: Add manual V2X pilot support with experimental Ferroamp DC2 and Ambibox MQTT drivers, signed `v2x_charger` telemetry, `/api/v2x/command`, V2X policy readback, dashboard controls, and V2X-aware load/status accounting.
+
+### Patch Changes
+
+- c76ac32: Fix surplus-only EV charging never starting on a "dumb" charger (CTEK and
+  other AC wallboxes that don't report the vehicle's BMS SoC). In
+  self-consumption mode the home-battery PI absorbs all PV surplus, so the EV
+  loadpoint sees nothing to claim. `EVSurplusOnlyReserveW` is supposed to hold
+  back export headroom for the EV, but `SurplusReserveW` only reserved a
+  bootstrap floor for a plugged-but-not-drawing EV when the vehicle's SoC was
+  known and below its limit — a dumb charger reports no SoC, so the reserve was
+  0, the battery took everything, and the EV could never bootstrap (chicken-and-
+  egg, observed live on Stefan's CTEK).
+
+  `SurplusReserveW` now reserves the loadpoint's `MinChargeW` (or the ramp
+  headroom) for a plugged, surplus-only, not-drawing EV **unless the car is known
+  to be full** (SoC known and at/above its charge limit). This prioritises PV
+  into the EV ahead of the home battery, as intended. Trade-off: a finished-but-
+  still-plugged car on a dumb charger holds the reserve (exports rather than
+  charging the home battery) until unplugged — surfacing the charger's own "done"
+  state into the loadpoint would let us skip that case too (follow-up). Smart
+  chargers/paired vehicles are unaffected: a car known to be full still reserves
+  nothing.
+
+- 6ec93f8: Fix dashboard stalls on late-day loads by aggregating the `/api/status`
+  energy-today totals in SQLite instead of loading every history sample
+  since midnight into Go on every 2-second status poll.
+- 28080b5: Fix Modbus drivers getting stuck after a device goes mute on a long-lived
+  session. The reconnect classifier (`isTransportError`) recognised closed-socket
+  errors but not `simonvetter/modbus`'s own deadline sentinel `ErrRequestTimedOut`
+  ("request timed out") — a plain string-typed value that is neither a `net.Error`
+  nor wraps `syscall.ETIMEDOUT`. When a device kept the TCP socket `ESTABLISHED`
+  but stopped answering requests on it, every read/write timed out and the wrapper
+  reused the dead socket forever instead of redialing.
+
+  Seen in the field on a CTEK Chargestorm CSOS charger: 2907 consecutive
+  charge-limit writes timed out over ~43 h, so the controller could never set the
+  EV charge current and the loadpoint never followed PV surplus — while a fresh
+  connection to the same charger read and wrote the register instantly. The
+  classifier now treats the timeout sentinel as a transport error, so the next
+  call tears down the wedged socket and dials a fresh one.
+
+- 6ec93f8: Add a global `site.troubleshooting_mode` for incident diagnostics. The mode exposes its state in `/api/status`, logs dispatch-decision snapshots without changing control behavior, and passes a reserved troubleshooting flag into Lua drivers. Pixii now uses that flag to emit calibration/control status and setpoint readback metrics, while still supporting its legacy per-driver troubleshooting flag. Invalid Pixii SoC values now omit `soc` from the battery emit instead of dropping the whole battery reading.
+- bc9e473: fix(loadpoint): resume PV surplus after a self-induced charger stop (NCRQ)
+
+  When a surplus_only loadpoint was paused below its 3-phase floor on a sub-floor
+  PV dip, the charger reported the vehicle "not requesting current" (NCRQ). That
+  stop is self-induced — we withheld power, the car didn't decline — but it was
+  counted toward session completion. After the 90 s timeout the loadpoint latched
+  the session "complete" and the planner stopped offering PV surplus for the rest
+  of the day, so the charger never restarted when the sun returned (the home
+  battery soaked the surplus instead).
+
+  Two complementary fixes, both generic across EV-charger drivers:
+
+  - The controller now tells the loadpoint manager when it is withholding power
+    (`SetSurplusWithheld`). A "not requesting current" report during a
+    self-induced pause no longer advances the session-completion timer; a genuine
+    vehicle-side refusal once power is offered again still completes as before.
+  - Chargers with no vehicle-API binding (e.g. a bare CTEK) couldn't be woken
+    from NCRQ because the wake path required a bound vehicle driver. The
+    controller now drives the wake off the charger's own connector state: when
+    surplus recovers and we offer power but the charger is still in a
+    self-induced NCRQ, it cycles the contactor (ev_pause → ev_resume) to make the
+    vehicle renegotiate, throttled to once per cooldown.
+
+- 6ec93f8: Internal: add the `thermal` package — site-level asset contract types
+  (`TemperatureBand`, `MarginalPrice`, `DecideIntent`) for the upcoming heat-pump
+  workstream. Not yet wired into control or MPC, so there is no user-visible
+  behavior change; it lands as scaffolding the thermal-store model will consume.
+
 ## 0.120.9
 
 ### Patch Changes
