@@ -147,14 +147,6 @@ Driver-specific fields are parsed by the Lua driver, not by the generic
 config schema. See the driver source and
 [`docs/driver-catalog.md`](driver-catalog.md) for expected keys.
 
-### Pixii Diagnostics
-
-When Troubleshooting mode is enabled from Settings, the Pixii driver emits
-extra SunSpec battery diagnostics: charge status, control mode, battery state,
-vendor state, event bits, and setpoint readback. `charge_status=testing` is
-the useful signal for suspected Pixii calibration/testing sessions that may
-ignore external setpoints.
-
 The same `pplim_release_w` value (when set > 0) also arms a self-
 healing watchdog in the Ferroamp driver. If the SSO reports the
 sticky-pplim signature — DC bus voltage above 200 V, zero PV current,
