@@ -89,6 +89,69 @@ func TestSurplusCmd_PauseResumeHysteresis(t *testing.T) {
 	}
 }
 
+// TestSurplusCmd_UpStepGatedOnAverage is the anti-flap regression
+// (operator report 2026-05-30). The surplus_only setpoint magnitude must
+// only step UP when the rolling average sustains the higher step — a single-
+// tick instant-surplus spike (the home battery briefly backing off, a cloud
+// edge) must NOT ratchet the EV up a step it can't hold. Down-steps stay
+// instant so the no-import promise is preserved. Without the gate the EV
+// jumps steps every tick and the load swing whipsaws the home battery's PI
+// into windup, starving its planned discharge.
+func TestSurplusCmd_UpStepGatedOnAverage(t *testing.T) {
+	c := NewController(NewManager(), nil, nil, nil)
+	cfg := surplusTestConfig() // steps {0, 1380, 4140, 6900}
+	now := time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC)
+	// Force the 1Φ day-lock so pickSurplusSteps returns the full step set
+	// every tick (otherwise the forecast-driven phase logic would vary it).
+	c.phaseLocked1P = map[string]bool{cfg.ID: true}
+	c.phaseLockedAt = map[string]time.Time{cfg.ID: now}
+
+	var surplus float64
+	c.SetSiteSurplusForEV(func() (float64, bool) { return surplus, true })
+	step := func(s float64) float64 {
+		surplus = s
+		got := c.computeSurplusCmd(now, cfg, 11040, 0)
+		now = now.Add(5 * time.Second)
+		return got
+	}
+
+	// Settle on a sustained 2000 W surplus → snaps to the 1380 W step.
+	var settled float64
+	for i := 0; i < 5; i++ {
+		settled = step(2000)
+	}
+	if settled <= 0 {
+		t.Fatalf("expected a positive settled step, got %v", settled)
+	}
+
+	// A SINGLE-tick spike to 5000 W must not ratchet the EV up — the 4-tick
+	// rolling average has barely moved, so the higher step isn't sustained.
+	spike := step(5000)
+	if spike > settled {
+		t.Errorf("one-tick surplus spike ratcheted EV up: settled=%v spike=%v "+
+			"(up-step must be gated on the rolling average)", settled, spike)
+	}
+
+	// Now SUSTAIN 5000 W: once the average clears the higher step, the EV
+	// ramps up.
+	var sustained float64
+	for i := 0; i < 5; i++ {
+		sustained = step(5000)
+	}
+	if sustained <= settled {
+		t.Errorf("sustained surplus rise did not step EV up: settled=%v sustained=%v",
+			settled, sustained)
+	}
+
+	// Down-steps are immediate (no-import promise): drop the surplus and the
+	// EV sheds to a lower step on the very next tick, no avg gating.
+	down := step(2000)
+	if down >= sustained {
+		t.Errorf("down-step was not immediate: sustained=%v down=%v "+
+			"(down must track instant surplus)", sustained, down)
+	}
+}
+
 // TestSurplusCmd_MinPauseHold verifies that even with the rolling avg
 // instantly above the resume threshold, the loadpoint stays paused for
 // at least surplusMinPauseHold after a pause edge. Without this guard
@@ -265,6 +328,45 @@ func TestPickSurplusSteps_PhaseLockAndDayRollover(t *testing.T) {
 	}
 	if !c.surplusLockedTo1P(cfg.ID) {
 		t.Fatalf("expected 1Φ re-lock on a fresh bad-forecast day")
+	}
+}
+
+// TestPickSurplusSteps_ThreePhaseOnlyNeverLocks1P verifies that a charger
+// pinned to "3p" (no single-phase capability — e.g. CTEK Chargestorm) never
+// gets the 1Φ-eligible step set and never commits the day-long 1Φ lock, even
+// when the day's peak forecast can't sustain a 3Φ minimum. Such a charger must
+// simply pause below the 3Φ floor instead of being handed a 1380 W offer it
+// can only answer by writing 0 A.
+func TestPickSurplusSteps_ThreePhaseOnlyNeverLocks1P(t *testing.T) {
+	c := NewController(NewManager(), nil, nil, nil)
+	cfg := surplusTestConfig()
+	cfg.PhaseMode = "3p"
+
+	steps3 := surplus3PhaseSteps(cfg)
+
+	// Forecast is bad — an "auto" loadpoint would lock 1Φ here.
+	c.SetPeakRemainingSurplusW(func() (float64, bool) { return 1000, true })
+	c.SetNearTermPeakSurplusW(func(time.Duration) (float64, bool) { return 1000, true })
+	day1 := time.Date(2026, 5, 3, 9, 0, 0, 0, time.Local)
+
+	got := c.pickSurplusSteps(day1, cfg)
+	if len(got) != len(steps3) {
+		t.Fatalf("3p charger must keep the 3Φ-only step set on a bad-forecast day, got=%v want len %d", got, len(steps3))
+	}
+	if c.surplusLockedTo1P(cfg.ID) {
+		t.Fatalf("3p charger must never set the 1Φ day-lock")
+	}
+
+	// A stale lock from a prior "auto" config must be cleared the moment
+	// the loadpoint is evaluated as "3p".
+	c.phaseLocked1P = map[string]bool{cfg.ID: true}
+	c.phaseLockedAt = map[string]time.Time{cfg.ID: day1}
+	got = c.pickSurplusSteps(day1.Add(time.Minute), cfg)
+	if len(got) != len(steps3) {
+		t.Fatalf("3p charger must return 3Φ-only steps even with a stale lock, got=%v", got)
+	}
+	if c.surplusLockedTo1P(cfg.ID) {
+		t.Fatalf("stale 1Φ lock must be cleared for a 3p charger")
 	}
 }
 

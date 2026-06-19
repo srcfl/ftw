@@ -5,12 +5,14 @@ go 1.26.0
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/go-webauthn/webauthn v0.17.4
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/lorenzodonini/ocpp-go v0.19.0
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/parquet-go/parquet-go v0.29.0
+	github.com/pion/webrtc/v4 v4.2.14
 	github.com/shirou/gopsutil/v4 v4.26.3
 	github.com/simonvetter/modbus v1.6.4
 	github.com/yuin/gopher-lua v1.1.2
@@ -27,7 +29,6 @@ require (
 	github.com/go-playground/locales v0.12.1 // indirect
 	github.com/go-playground/universal-translator v0.16.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/go-webauthn/webauthn v0.17.4 // indirect
 	github.com/go-webauthn/x v0.2.6 // indirect
 	github.com/goburrow/serial v0.1.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
@@ -43,6 +44,21 @@ require (
 	github.com/parquet-go/jsonlite v1.0.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.21 // indirect
+	github.com/pion/datachannel v1.6.0 // indirect
+	github.com/pion/dtls/v3 v3.1.3 // indirect
+	github.com/pion/ice/v4 v4.2.7 // indirect
+	github.com/pion/interceptor v0.1.45 // indirect
+	github.com/pion/logging v0.2.4 // indirect
+	github.com/pion/mdns/v2 v2.1.0 // indirect
+	github.com/pion/randutil v0.1.0 // indirect
+	github.com/pion/rtcp v1.2.16 // indirect
+	github.com/pion/rtp v1.10.2 // indirect
+	github.com/pion/sctp v1.10.0 // indirect
+	github.com/pion/sdp/v3 v3.0.18 // indirect
+	github.com/pion/srtp/v3 v3.0.11 // indirect
+	github.com/pion/stun/v3 v3.1.4 // indirect
+	github.com/pion/transport/v4 v4.0.2 // indirect
+	github.com/pion/turn/v5 v5.0.7 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/relvacode/iso8601 v1.6.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -53,6 +69,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/twpayne/go-geom v1.6.1 // indirect
+	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
@@ -61,6 +78,7 @@ require (
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/time v0.14.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/go-playground/validator.v9 v9.30.0 // indirect
 	modernc.org/libc v1.70.0 // indirect

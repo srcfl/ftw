@@ -34,6 +34,7 @@
 //     in /next.html (redesign) without per-context styling.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
@@ -192,7 +193,7 @@ class FtwUpdateCheck extends FtwElement {
 
   // ---- data ----
   _check() {
-    fetch("/api/version/check")
+    ownerFetch("/api/version/check")
       .then((r) => {
         // 503 = self-update disabled by deploy. Stay invisible — this
         // is config, not an error.
@@ -214,7 +215,7 @@ class FtwUpdateCheck extends FtwElement {
     this._updateStartedAt = Date.now();
     this.update();
 
-    fetch("/api/version/update", {
+    ownerFetch("/api/version/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     })
@@ -259,7 +260,7 @@ class FtwUpdateCheck extends FtwElement {
 
   _tick() {
     const signal = this._pollAbort ? this._pollAbort.signal : undefined;
-    fetch("/api/version/update/status", { signal })
+    ownerFetch("/api/version/update/status", { signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((st) => {
         // Belt-and-braces: if the phase was reset while the fetch was in

@@ -106,8 +106,10 @@ Claude Code's HTTP MCP transport.
 The relay terminates TLS and sees plaintext MCP + dashboard traffic.
 This is a deliberate trade — the operator runs the relay (or trusts
 the operator who does), and end-to-end encryption was protecting
-against a threat the help-a-friend flow doesn't actually face. See
-`docs/goals/relay-as-tunnel.md` for the security model.
+against a threat the help-a-friend flow doesn't actually face. See the
+archived design note at
+[`archive/agent-artifacts/goals/relay-as-tunnel.md`](archive/agent-artifacts/goals/relay-as-tunnel.md)
+for the original security-model discussion.
 
 **Token format:** 6 short words. Example:
 `garage-coffee-river-bicycle-window-cat`. The token is a routing

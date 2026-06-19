@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -206,6 +207,147 @@ func TestENTSOERejectsUnknownZone(t *testing.T) {
 	_, err := p.Fetch(context.Background(), "ZZZ", time.Now())
 	if err == nil {
 		t.Error("expected error for unknown zone")
+	}
+}
+
+// entsoeServer returns an httptest server that always replies with the
+// given A44 XML body, plus a provider wired to it with an identity
+// EUR→native converter (so SEKPerKWh == EUR/kWh and assertions are exact).
+func entsoeServer(t *testing.T, body string) (*ENTSOEProvider, func()) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml")
+		fmt.Fprint(w, body)
+	}))
+	p := &ENTSOEProvider{
+		Client:      &http.Client{},
+		APIKey:      "test-key",
+		BaseURL:     srv.URL,
+		Currency:    "SEK",
+		EURToNative: func(eur float64) float64 { return eur }, // identity
+	}
+	return p, srv.Close
+}
+
+// A real day-ahead A44 document, trimmed to a 3-hour PT60M period. The
+// default xmlns + the dotted element names (price.amount) are exactly
+// what the live transparency platform emits.
+const entsoeHourlyXML = `<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:0">
+  <type>A44</type>
+  <TimeSeries>
+    <currency_Unit.name>EUR</currency_Unit.name>
+    <price_Measure_Unit.name>MWH</price_Measure_Unit.name>
+    <Period>
+      <timeInterval>
+        <start>2026-06-02T22:00Z</start>
+        <end>2026-06-03T01:00Z</end>
+      </timeInterval>
+      <resolution>PT60M</resolution>
+      <Point><position>1</position><price.amount>50.0</price.amount></Point>
+      <Point><position>2</position><price.amount>40.0</price.amount></Point>
+      <Point><position>3</position><price.amount>30.0</price.amount></Point>
+    </Period>
+  </TimeSeries>
+</Publication_MarketDocument>`
+
+func TestENTSOEParsesHourlyDayAhead(t *testing.T) {
+	p, closeFn := entsoeServer(t, entsoeHourlyXML)
+	defer closeFn()
+
+	day, _ := time.Parse("2006-01-02", "2026-06-03")
+	rows, err := p.Fetch(context.Background(), "SE3", day)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	wantStart, _ := time.Parse(time.RFC3339, "2026-06-02T22:00:00Z")
+	if !rows[0].SlotStart.UTC().Equal(wantStart) {
+		t.Errorf("slot[0] start: got %s, want %s", rows[0].SlotStart.UTC(), wantStart)
+	}
+	if rows[0].SlotLenMin != 60 {
+		t.Errorf("slot len: got %d, want 60", rows[0].SlotLenMin)
+	}
+	// EUR/MWh → EUR/kWh (÷1000), identity converter → SEKPerKWh.
+	for i, want := range []float64{0.050, 0.040, 0.030} {
+		if math.Abs(rows[i].SEKPerKWh-want) > 1e-9 {
+			t.Errorf("slot[%d] price: got %g, want %g", i, rows[i].SEKPerKWh, want)
+		}
+	}
+	// Consecutive slots are exactly one resolution apart.
+	if d := rows[1].SlotStart.Sub(rows[0].SlotStart); d != time.Hour {
+		t.Errorf("slot spacing: got %s, want 1h", d)
+	}
+}
+
+// ENTSOE omits a Point when the price is unchanged from the previous
+// position (A44 sparse representation). The parser must carry the last
+// price forward to fill the gap, otherwise slots silently vanish.
+const entsoeQuarterlySparseXML = `<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:0">
+  <TimeSeries>
+    <currency_Unit.name>EUR</currency_Unit.name>
+    <Period>
+      <timeInterval>
+        <start>2026-06-02T22:00Z</start>
+        <end>2026-06-02T23:00Z</end>
+      </timeInterval>
+      <resolution>PT15M</resolution>
+      <Point><position>1</position><price.amount>100.0</price.amount></Point>
+      <Point><position>3</position><price.amount>80.0</price.amount></Point>
+    </Period>
+  </TimeSeries>
+</Publication_MarketDocument>`
+
+func TestENTSOEFifteenMinCarriesForwardGaps(t *testing.T) {
+	p, closeFn := entsoeServer(t, entsoeQuarterlySparseXML)
+	defer closeFn()
+
+	day, _ := time.Parse("2006-01-02", "2026-06-02")
+	rows, err := p.Fetch(context.Background(), "SE3", day)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	// 1h / 15min = 4 slots, even though only positions 1 and 3 are given.
+	if len(rows) != 4 {
+		t.Fatalf("got %d rows, want 4 (15-min slots over 1h)", len(rows))
+	}
+	for i, r := range rows {
+		if r.SlotLenMin != 15 {
+			t.Errorf("slot[%d] len: got %d, want 15", i, r.SlotLenMin)
+		}
+	}
+	// pos1=100 → slots 1,2 carry 100; pos3=80 → slots 3,4 carry 80.
+	wantPrices := []float64{0.100, 0.100, 0.080, 0.080}
+	for i, want := range wantPrices {
+		if math.Abs(rows[i].SEKPerKWh-want) > 1e-9 {
+			t.Errorf("slot[%d] price: got %g, want %g", i, rows[i].SEKPerKWh, want)
+		}
+	}
+}
+
+// With no converter wired (NewENTSOE path before FromConfig sets one),
+// the parser must still produce a sane SEK figure rather than emitting
+// raw EUR. Falls back to the ballpark 11.5 SEK/EUR.
+func TestENTSOEFallsBackToBallparkFXWhenConverterNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, entsoeHourlyXML)
+	}))
+	defer srv.Close()
+	p := &ENTSOEProvider{Client: &http.Client{}, APIKey: "k", BaseURL: srv.URL} // EURToNative nil
+	day, _ := time.Parse("2006-01-02", "2026-06-03")
+	rows, err := p.Fetch(context.Background(), "SE3", day)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	// 50 EUR/MWh → 0.05 EUR/kWh × 11.5 ≈ 0.575 SEK/kWh
+	if math.Abs(rows[0].SEKPerKWh-0.575) > 1e-9 {
+		t.Errorf("fallback price: got %g, want 0.575", rows[0].SEKPerKWh)
 	}
 }
 

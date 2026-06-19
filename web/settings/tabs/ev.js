@@ -3,6 +3,11 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   S.tabs.ev = {
     render: function (ctx) {
       var field = ctx.field, selectField = ctx.selectField, help = ctx.help;
@@ -57,7 +62,7 @@
       var el = document.getElementById("ev-status-indicator");
       if (!el) return;
       function refresh() {
-        fetch("/api/status").then(function (r) { return r.json(); }).then(function (d) {
+        ownerFetch("/api/status").then(function (r) { return r.json(); }).then(function (d) {
           var badge = document.getElementById("ev-creds-badge");
           if (badge) {
             if (d.ev_credentials_saved) {

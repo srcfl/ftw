@@ -21,7 +21,9 @@ func freshStore(t *testing.T) *Store {
 func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 	dir := t.TempDir()
 	s1, err := Open(filepath.Join(dir, "one.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s1.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 1, Value: 10}}); err != nil {
 		t.Fatalf("record first store: %v", err)
 	}
@@ -31,7 +33,9 @@ func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 
 	secondPath := filepath.Join(dir, "two.db")
 	s2, err := Open(secondPath)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := s2.RecordSamples([]Sample{{Driver: "driver", Metric: "metric_w", TsMs: 2, Value: 20}}); err != nil {
 		t.Fatalf("record second store: %v", err)
 	}
@@ -50,7 +54,9 @@ func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 	}
 
 	reopened, err := Open(secondPath)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { reopened.Close() })
 	series, err := reopened.LoadSeries("driver", "metric_w", 0, 10, 0)
 	if err != nil {
@@ -198,12 +204,16 @@ func TestDailyEnergyIntervalsDistinguishesNoDataFromZero(t *testing.T) {
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	s1.SaveConfig("greeting", "hello")
 	s1.Close()
 
 	s2, err := Open(path)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s2.Close()
 	v, ok := s2.LoadConfig("greeting")
 	if !ok || v != "hello" {
@@ -214,10 +224,14 @@ func TestConfigPersistsAcrossReopen(t *testing.T) {
 func TestEventsRecorded(t *testing.T) {
 	s := freshStore(t)
 	for i := 0; i < 5; i++ {
-		if err := s.RecordEvent("evt"); err != nil { t.Fatal(err) }
+		if err := s.RecordEvent("evt"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	events, err := s.RecentEvents(10)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(events) < 1 {
 		t.Errorf("expected ≥1 events, got %d", len(events))
 	}
@@ -332,14 +346,18 @@ func TestBatteryModelStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	all, err := s.LoadAllBatteryModels()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(all) != 2 {
 		t.Errorf("expected 2 models, got %d", len(all))
 	}
 	if all["ferroamp"] != `{"a":0.7,"b":0.3}` {
 		t.Errorf("ferroamp: %s", all["ferroamp"])
 	}
-	if err := s.DeleteBatteryModel("sungrow"); err != nil { t.Fatal(err) }
+	if err := s.DeleteBatteryModel("sungrow"); err != nil {
+		t.Fatal(err)
+	}
 	all, _ = s.LoadAllBatteryModels()
 	if len(all) != 1 {
 		t.Errorf("after delete: got %d", len(all))
@@ -359,10 +377,14 @@ func TestHistoryRecordAndLoad(t *testing.T) {
 			BatSoC: 0.5,
 			JSON:   `{"i":` + "0" + `}`,
 		})
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	pts, err := s.LoadHistory(now, now+10000, 0)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pts) != 10 {
 		t.Errorf("expected 10 points, got %d", len(pts))
 	}
@@ -376,13 +398,15 @@ func TestHistoryDownsampling(t *testing.T) {
 	now := time.Now().UnixMilli()
 	for i := 0; i < 100; i++ {
 		s.RecordHistory(HistoryPoint{
-			TsMs: now + int64(i),
+			TsMs:  now + int64(i),
 			GridW: float64(i),
-			JSON: "{}",
+			JSON:  "{}",
 		})
 	}
 	pts, err := s.LoadHistory(now, now+200, 10)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pts) != 10 {
 		t.Errorf("expected 10 downsampled points, got %d", len(pts))
 	}
@@ -399,7 +423,9 @@ func TestHistoryCounts(t *testing.T) {
 		s.RecordHistory(HistoryPoint{TsMs: now + int64(i), JSON: "{}"})
 	}
 	hot, warm, cold, err := s.HistoryCounts()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if hot != 5 || warm != 0 || cold != 0 {
 		t.Errorf("counts: hot=%d warm=%d cold=%d (want 5/0/0)", hot, warm, cold)
 	}
@@ -411,9 +437,9 @@ func TestHistoryPruneAggregates(t *testing.T) {
 	oldMs := time.Now().UnixMilli() - int64(HotRetention.Milliseconds()) - 24*3600*1000
 	for i := 0; i < 20; i++ {
 		s.RecordHistory(HistoryPoint{
-			TsMs: oldMs + int64(i)*1000,
+			TsMs:  oldMs + int64(i)*1000,
 			GridW: float64(100 + i),
-			JSON: "{}",
+			JSON:  "{}",
 		})
 	}
 	if err := s.Prune(context.Background()); err != nil {
@@ -454,7 +480,9 @@ func TestHistoryMultiTierMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	pts, err := s.LoadHistory(now, now+10000, 0)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pts) != 2 {
 		t.Errorf("expected 2 unique timestamps after dedup, got %d: %+v", len(pts), pts)
 	}
@@ -508,6 +536,63 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	}
 }
 
+func TestSnapshotToPreservesTrustedDevicePubkeys(t *testing.T) {
+	s := freshStore(t)
+	credID := []byte("credential-with-browser-keys")
+	if err := s.SaveTrustedDevice(TrustedDevice{
+		CredentialID:   credID,
+		PublicKey:      []byte("credential-public-key"),
+		FriendlyName:   "Safari",
+		CreatedAtMs:    1700000000000,
+		DevicePubkey:   "browser-key-at-enroll",
+		WalletHandle:   "wallet",
+		BackupEligible: true,
+		BackupState:    true,
+	}); err != nil {
+		t.Fatalf("save trusted device: %v", err)
+	}
+	if err := s.SetTrustedDevicePubkey(credID, "browser-key-after-login", false); err != nil {
+		t.Fatalf("set trusted device pubkey: %v", err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "snap.db")
+	if err := s.SnapshotTo(dst); err != nil {
+		t.Fatalf("SnapshotTo with trusted_device_pubkeys: %v", err)
+	}
+
+	snap, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open snapshot: %v", err)
+	}
+	t.Cleanup(func() { snap.Close() })
+
+	records, err := snap.TrustedDevicePubkeyRecords()
+	if err != nil {
+		t.Fatalf("snapshot trusted device pubkeys: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range records {
+		got[r.DevicePubkey] = true
+	}
+	for _, want := range []string{"browser-key-at-enroll", "browser-key-after-login"} {
+		if !got[want] {
+			t.Fatalf("snapshot missing trusted device pubkey %q; records=%+v", want, records)
+		}
+	}
+
+	rows, err := snap.db.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("snapshot has foreign-key violations")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("foreign_key_check rows: %v", err)
+	}
+}
+
 // 2026-05-25 performance fix: snapshots now skip the bulky time-series
 // tables (history_hot/warm/cold + ts_samples) which are recoverable
 // from cold parquet roll-off anyway. Verify that essential tables
@@ -522,7 +607,7 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	// Seed a history_hot row so we can verify exclusion. RecordHistory
 	// writes into history_hot directly.
 	if err := s.RecordHistory(HistoryPoint{
-		TsMs: time.Now().UnixMilli(),
+		TsMs:  time.Now().UnixMilli(),
 		GridW: 1234, PVW: -2345, BatW: 567, LoadW: 890,
 	}); err != nil {
 		t.Fatal(err)

@@ -223,7 +223,12 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// Allowed fields per type:
 	//   meter   -> w, l1_w, l2_w, l3_w, l1_v, l2_v, l3_v, l1_a, l2_a, l3_a, freq_hz
 	//   pv      -> w, mppt1_v, mppt1_a, mppt2_v, mppt2_a, dc_v
-	//   battery -> w, soc, dc_v, dc_a, temp_c
+	//   battery -> w, soc, dc_v, dc_a, temp_c,
+	//              discharge_capable (optional bool), charge_capable (optional
+	//              bool) — set false when the pack physically can't move that
+	//              way right now (e.g. floored/full); the dispatcher then
+	//              hands its share to a capable sibling instead of leaking to
+	//              the grid. Absent → assumed capable (back-compat).
 	//   ev      -> w (charge power, positive when charging),
 	//              connected (bool, plug inserted),
 	//              charging (bool, current flowing),

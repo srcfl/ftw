@@ -104,6 +104,7 @@ type runningDriver struct {
 
 type driverCmd struct {
 	kind    string
+	ctx     context.Context
 	payload []byte
 	result  chan error
 }
@@ -259,11 +260,15 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			return
 		case cmd := <-rd.cmdCh:
 			var err error
+			cmdCtx := cmd.ctx
+			if cmdCtx == nil {
+				cmdCtx = ctx
+			}
 			switch cmd.kind {
 			case "command":
-				err = rd.driver.Command(ctx, cmd.payload)
+				err = rd.driver.Command(cmdCtx, cmd.payload)
 			case "default":
-				err = rd.driver.DefaultMode(ctx)
+				err = rd.driver.DefaultMode(cmdCtx)
 			}
 			if cmd.result != nil {
 				cmd.result <- err
@@ -332,7 +337,7 @@ func (r *Registry) Send(ctx context.Context, name string, payload []byte) error 
 	}
 	resCh := make(chan error, 1)
 	select {
-	case rd.cmdCh <- driverCmd{kind: "command", payload: payload, result: resCh}:
+	case rd.cmdCh <- driverCmd{kind: "command", ctx: ctx, payload: payload, result: resCh}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -359,7 +364,7 @@ func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	}
 	resCh := make(chan error, 1)
 	select {
-	case rd.cmdCh <- driverCmd{kind: "default", result: resCh}:
+	case rd.cmdCh <- driverCmd{kind: "default", ctx: ctx, result: resCh}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}

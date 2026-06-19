@@ -27,13 +27,30 @@
         'data-theme', saved || (osLight ? 'light' : 'dark'));
     })();
   </script>
+  <!-- Cover the dashboard with the sign-in gate from the FIRST paint on a remote
+       origin, so a reload never flashes the dashboard before next-app.js loads.
+       setupAuth() unlocks it once whoami confirms a signed-in owner (and the LAN
+       bypass never gates). Mirrors next-app.js's isLanFallbackOrigin, minimally. -->
+  <script>
+    (function () {
+      try {
+        var h = (location.hostname || '').toLowerCase();
+        var lan = h === 'localhost' || h === '::1' || h.indexOf('.') === -1 ||
+                  h.slice(-6) === '.local' ||
+                  /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+        if (!lan && !/^\/me\//.test(location.pathname)) {
+          document.documentElement.classList.add('ftw-gated');
+        }
+      } catch (e) {}
+    })();
+  </script>
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=lp2">
   <!-- /next-only visual redesign — layered on top of style.css and scoped
        to body.ftw-next so legacy /index.html is untouched. -->
-  <link rel="stylesheet" href="/next.css?v=next2">
+  <link rel="stylesheet" href="/next.css?v=next6">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so we have no supply-chain surface area and no SRI gap — an
@@ -52,7 +69,7 @@
     }
   }
   </script>
-  <script type="module" src="/components/index.js?v=histwrap1"></script>
+  <script type="module" src="/components/index.js?v=histwrap7"></script>
 </head>
 <body class="ftw-next">
   <header>
@@ -79,12 +96,74 @@
            drivers, models, manual mode buttons). The button still
            lives in the DOM as #ui-mode-toggle, just rendered there. -->
       <ftw-notif-history poll-ms="30000" data-menu-label="Notification history"></ftw-notif-history>
+      <!-- Always-available entry into the setup wizard. The wizard
+           currently REPLACES config on save, so the copy says "Run setup
+           wizard" rather than implying a safe additive "Add a device". -->
+      <a id="setup-wizard-btn" class="icon-btn" href="/setup" data-menu-label="Run setup wizard" title="Run setup wizard" aria-label="Run setup wizard" role="button">&#9874;</a>
       <button id="settings-btn" class="settings-btn" data-menu-label="Settings" title="Settings">⚙</button>
       <ftw-update-badge></ftw-update-badge>
       <span id="version" class="version" title="Click for version info" style="cursor:pointer">...</span>
+      <button id="signout-btn" class="icon-btn" data-menu-label="Sign out" title="Sign out" hidden>&#9211;</button>
+      <span id="p2p-status" class="p2p-status" title="How your browser is connected to your Pi" hidden><span class="p2p-dot"></span><span class="p2p-label"></span></span>
       <span id="conn-status" class="conn-status connected" title="Connected">&#9679;</span>
     </div>
   </header>
+
+  <!-- Sign-in GATE: the dashboard IS the door, and when locked it shows ONLY the
+       door — never the empty dashboard chrome (which falsely reads as an
+       unconfigured instance, and is the wrong thing to show a logged-out
+       visitor). next-app.js (setupAuth) covers the dashboard on a remote origin
+       until whoami confirms a signed-in owner; the passkey ceremony runs over the
+       SAME strict P2P channel (no redirect). data-mode = connecting | signin.
+       Never shown on the LAN (bypass) or once signed in. No owner DATA is ever
+       served unauthenticated — the gate is purely the lock's UI. -->
+  <div id="signin-gate" class="signin-gate" data-mode="connecting">
+    <div class="signin-gate-card">
+      <!-- PUBLIC landing: shown to an anonymous visitor with no decryptable
+           directory. Brand + one passkey button + a discreet "Learn more" link
+           ONLY. Per the multi-tenant spec it reveals NOTHING about any home
+           (no count, label, site_id, or Pi key) before the user authenticates —
+           home.fortytwowatts.com is a public front door for everyone. -->
+      <div class="signin-gate-landing">
+        <div class="signin-gate-brand">&#9889; forty-two watts</div>
+        <p class="signin-gate-lead">This is your forty-two-watts home. Sign in with your passkey to reach it.</p>
+        <button id="signin-landing-btn" class="signin-gate-btn">Sign in with your passkey</button>
+        <p class="signin-gate-msg" id="signin-landing-msg" role="status" aria-live="polite"></p>
+        <p class="signin-gate-learn-row">Don&rsquo;t have a 42W yet?
+          <a class="signin-gate-learn" href="https://fortytwowatts.com" rel="noopener">Learn more &rarr;</a></p>
+      </div>
+      <!-- /signin-gate-landing -->
+
+      <div class="signin-gate-brand">&#9889; forty-two watts</div>
+      <p class="signin-gate-lead signin-gate-connecting">Reaching your home&hellip;</p>
+
+      <!-- signin mode: passkey (or silent device) sign-in -->
+      <div class="signin-gate-auth">
+        <p class="signin-gate-lead">Sign in to reach your home.</p>
+        <button id="signin-gate-btn" class="signin-gate-btn">Sign in</button>
+        <p class="signin-gate-msg" id="signin-banner-msg" role="status" aria-live="polite"></p>
+        <p class="signin-gate-setup">First time on this device? <a href="/owner-access/">Set it up &rarr;</a></p>
+      </div>
+
+      <!-- setup mode: this device has no key — it was never set up on the LAN, so
+           it can't be remembered or proven to the relay. Send the user to the
+           home-network enrollment instead of a passkey prompt they can't satisfy. -->
+      <div class="signin-gate-needs-setup">
+        <p class="signin-gate-lead">Set up this device first.</p>
+        <p class="signin-gate-sub">This browser hasn&rsquo;t been set up to reach your home yet. Open this page on your home Wi&#8209;Fi, once, to add it &mdash; after that it signs in here automatically.</p>
+        <a class="signin-gate-btn" href="/owner-access/">Set up this device &rarr;</a>
+      </div>
+
+      <!-- Security clarity (Fredrik's ask): make the trust model legible. The
+           connection is direct & end-to-end encrypted to YOUR Pi; the relay only
+           forwards ciphertext and never sees your home. Reflected live by
+           next-app.js from the P2P transport state. -->
+      <div class="signin-gate-trust" id="signin-gate-trust">
+        <span class="signin-gate-trust-dot"></span>
+        <span class="signin-gate-trust-text" id="signin-gate-trust-text">End-to-end encrypted to your Pi. The relay never sees your home.</span>
+      </div>
+    </div>
+  </div>
 
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal hidden">
@@ -95,6 +174,7 @@
       </div>
       <div class="modal-tabs" id="settings-tabs">
         <button data-tab="control" class="active">Control</button>
+        <button data-tab="access">Access</button>
         <button data-tab="devices">Devices</button>
         <button data-tab="loadpoints">Loadpoints</button>
         <button data-tab="price">Price</button>
@@ -623,13 +703,16 @@
         <span class="ftw-toggle-slider"></span>
         <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
       </label>
-      <div class="card-sub card-hint">On = home battery discharges into the EV. Off = battery stays out of EV charging.</div>
+      <div class="card-sub card-hint">Default off. On lets the home battery discharge into EV charging. Surplus-only loadpoints still use real PV surplus only.</div>
+      <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
+        This can drain the home battery into the car. Use it only when EV charging should be part of the site battery plan.
+      </div>
     </div>
-    <div slot="footer" style="display:flex;gap:0.5rem;width:100%">
-      <button class="btn-add" id="ev-btn-start" style="flex:1">Start</button>
-      <button class="btn-add" id="ev-btn-pause" style="flex:1">Pause</button>
-      <button class="btn-add" id="ev-btn-resume" style="flex:1">Resume</button>
-    </div>
+    <!-- Start/Pause/Resume footer buttons removed: the in-body Manual
+         Charge control (amp slider + Start/Stop, built by buildManualControl)
+         supersedes them. Start pins a persistent hold at a chosen amperage
+         (overriding surplus); Stop reverts to automatic / PV-surplus-only.
+         The /api/ev/command endpoint stays for HA / scripts. -->
   </ftw-modal>
 
   <!-- Grid detail popup — peak import ceiling + grid target. Open from
@@ -669,26 +752,44 @@
     </div>
   </ftw-modal>
 
-  <script src="/next-app.js?v=next1"></script>
-  <script src="/settings.js?v=diag1"></script>
+  <!-- Device-key store (home-route Phase 5): mints / loads this device's silent
+       login key and exposes window.ftwDeviceKey for p2p.js (C2) + next-app.js
+       (C3). A module, so it's deferred — p2p.js's warm-up connect soft-fails once
+       if it races ahead and retries promptly once the global is present. -->
+  <script type="module" src="/owner-access/device-key.js?v=devkey1"></script>
+  <!-- Multi-tenant home route (ADDITIVE — only active on the public home host).
+       prf.js derives the per-wallet directory ENCRYPTION key from the passkey's
+       PRF output; instance-sync.js manages the encrypted per-wallet directory of
+       42W homes against the relay. Both are ES modules that ALSO attach
+       window.ftwPrf / window.ftwInstanceSync for the classic scripts (p2p.js,
+       next-app.js) to consume. Deferred like device-key.js: every consumer reads
+       the globals from inside async handlers (whoami / sign-in / connect), never
+       at top-level, so the module-load race is harmless — an anonymous visitor
+       with no directory simply gets the public landing until they sign in. -->
+  <script type="module" src="/owner-access/prf.js?v=prf1"></script>
+  <script type="module" src="/owner-access/instance-sync.js?v=isync1"></script>
+  <script src="/p2p.js?v=p2p14"></script>
+  <script src="/next-app.js?v=next19"></script>
+  <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/devices.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/loadpoints.js?v=lp1"></script>
+  <script src="/settings/tabs/access.js?v=access1"></script>
+  <script src="/settings/tabs/devices.js?v=tabsplit2"></script>
+  <script src="/settings/tabs/loadpoints.js?v=lp2"></script>
   <script src="/settings/tabs/price.js?v=tabsplit1"></script>
   <script src="/settings/tabs/weather.js?v=tabsplit1"></script>
   <script src="/settings/tabs/batteries.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/planner.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/ha.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/notifications.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/ev.js?v=tabsplit1"></script>
-  <script src="/settings/tabs/system.js?v=tabsplit1"></script>
-  <script src="/diagnostics-modal.js?v=diag2"></script>
-  <script src="/models.js?v=diag1"></script>
-  <script src="/plan.js?v=diag1"></script>
-  <script src="/twins.js?v=diag1"></script>
-  <script src="/loadpoints.js?v=lp1"></script>
-  <script src="/diagnose.js?v=diag1"></script>
-  <script src="/update-badge.js?v=modal1" defer></script>
+  <script src="/settings/tabs/planner.js?v=strategy479"></script>
+  <script src="/settings/tabs/ha.js?v=tabsplit2"></script>
+  <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
+  <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
+  <script src="/settings/tabs/system.js?v=tabsplit2"></script>
+  <script src="/diagnostics-modal.js?v=diag3"></script>
+  <script src="/models.js?v=diag2"></script>
+  <script src="/plan.js?v=diag2"></script>
+  <script src="/twins.js?v=diag2"></script>
+  <script src="/loadpoints.js?v=lp3"></script>
+  <script src="/diagnose.js?v=diag2"></script>
+  <script src="/update-badge.js?v=modal2" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
@@ -729,6 +830,7 @@
       function apply(mode) {
         document.body.classList.remove('simple', 'advanced');
         document.body.classList.add(mode);
+        document.dispatchEvent(new CustomEvent('ftw-ui-mode-change', { detail: { mode: mode } }));
         if (!btn) return;
         btn.textContent = mode === 'advanced' ? '★ Advanced' : 'Advanced';
         btn.title = mode === 'advanced' ? 'Switch to simple view' : 'Show advanced controls + diagnostics';

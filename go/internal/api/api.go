@@ -35,6 +35,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
 	"github.com/frahlg/forty-two-watts/go/internal/mpc"
 	"github.com/frahlg/forty-two-watts/go/internal/notifications"
+	"github.com/frahlg/forty-two-watts/go/internal/p2p"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
 	"github.com/frahlg/forty-two-watts/go/internal/scanner"
@@ -53,6 +54,18 @@ const (
 	// without revealing the actual value.
 	maskedPlaceholder = "••••••••"
 )
+
+// InstanceSigner signs the owner-access instance descriptor with the Pi's
+// self-sovereign ES256 identity. *nova.Identity satisfies it. PublicKeyHex
+// returns the uncompressed P-256 public key (X||Y, 128 lowercase hex chars);
+// SignRawHex returns the raw r||s 64-byte signature as a 128-char hex string
+// (the handler re-encodes it to base64url for the wire). Declared as an
+// interface here so internal/api does not import internal/nova (matches the
+// relaySigner pattern in cmd/forty-two-watts/owner_relay_register.go).
+type InstanceSigner interface {
+	PublicKeyHex() string
+	SignRawHex(msg string) (string, error)
+}
 
 // Deps is the full set of runtime dependencies the API handlers need.
 // One instance is shared across all handlers; mutations use the contained
@@ -156,7 +169,7 @@ type Deps struct {
 
 	// OwnerAccessRPID is the WebAuthn Relying Party ID for owner-access
 	// passkeys. Must match the hostname the browser sees. Defaults to
-	// "relay.fortytwowatts.com"; override to "localhost" for local dev.
+	// "home.fortytwowatts.com"; override to "localhost" for local dev.
 	OwnerAccessRPID string
 
 	// OwnerAccessOrigins is the list of permitted browser origins for
@@ -169,6 +182,49 @@ type Deps struct {
 	// home. NEVER enable when the server is reachable from the public
 	// internet directly (without the relay in front).
 	OwnerAccessLANBypass bool
+
+	// TunnelMarker is a per-process random secret. The relay long-poll
+	// reverse-proxy (cmd/forty-two-watts/owner_relay_register.go) sets it
+	// as the X-FTW-Tunnel header on every request it forwards from the
+	// relay to the local API server. A request carrying this exact value
+	// is therefore known to have arrived via the relay tunnel (remote) and
+	// MUST NOT inherit LAN-bypass — even though it lands on a loopback host.
+	// Empty disables tunnel detection (pure-LAN deployments with no relay).
+	TunnelMarker string
+
+	// SiteIdentityPubHex is the uncompressed P-256 public key (X||Y, 128 hex
+	// chars) of this Pi's self-sovereign ES256 identity — generated on first
+	// boot regardless of Nova (see cmd/forty-two-watts/main.go). Empty if
+	// identity load failed; the /api/identity endpoint then returns 503.
+	SiteIdentityPubHex string
+
+	// SiteID is this Pi's stable owner-routing identifier. New installs use an
+	// opaque high-entropy "site:<token>"; legacy installs may keep "site:<name>"
+	// until their encrypted directory is migrated. Published via /api/identity so
+	// the browser can pin it and rebuild the canonical DTLS fingerprint signing
+	// string (which binds the signature to this site).
+	SiteID string
+
+	// RelayBaseURL is the base URL of the owner-access relay this Pi registers
+	// with. main.go defaults it to the official relay after remote_access opt-in
+	// and lets FTW_RELAY_URL override it for self-hosted/dev relays. Used to
+	// self-publish the signed instance descriptor to PUT
+	// {RelayBaseURL}/bootstrap/{site_id} during the brief first-enrollment window
+	// (see bootstrap_publish.go). Empty means setup links cannot be published.
+	RelayBaseURL string
+
+	// InstanceSigner is the Pi's self-sovereign ES256 identity used to sign the
+	// owner-access instance descriptor (GET /api/owner-access/instance-descriptor)
+	// over the P2P channel. Satisfied by *nova.Identity — the same key behind
+	// SiteIdentityPubHex. Nil when identity load failed on boot; the descriptor
+	// endpoint then returns 503.
+	InstanceSigner InstanceSigner
+
+	// P2P is the Pi-side WebRTC manager (Phase 5). It answers browser SDP
+	// offers (POST /api/p2p/offer) and serves the resulting direct DataChannel
+	// with a p2p.Bridge over the ungated API mux (injected via SetLocalAPI in
+	// main.go after New). Nil is safe — the offer endpoint returns 503.
+	P2P *p2p.Manager
 
 	// ownerAccess is the lazy-initialised ceremony + session map. Built
 	// on first request via Server.ownerAccess().
@@ -229,13 +285,17 @@ func New(deps *Deps) *Server {
 }
 
 // Handler returns the http.Handler suitable for `http.ListenAndServe`.
-func (s *Server) Handler() http.Handler { return s.mux }
+// The mux is wrapped by the owner auth-gate so remote (relay-tunnelled)
+// requests can't reach the dashboard or control endpoints without a passkey
+// session; genuine LAN/loopback requests pass via LAN-bypass.
+func (s *Server) Handler() http.Handler { return s.gate(s.mux) }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
+	s.handle("POST /api/p2p/offer", s.handleP2POffer)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
@@ -323,16 +383,31 @@ func (s *Server) routes() {
 	if selfExe == "" {
 		selfExe = resolvedSelfExe()
 	}
-	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe)
+	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe, s.authorizeOwnerManage)
 
 	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
+	s.handle("GET  /api/owner-access/enroll-pin", s.handleOwnerEnrollPin)
 	s.handle("POST /api/owner-access/enroll/start", s.handleOwnerEnrollStart)
 	s.handle("POST /api/owner-access/enroll/finish", s.handleOwnerEnrollFinish)
 	s.handle("POST /api/owner-access/login/start", s.handleOwnerLoginStart)
 	s.handle("POST /api/owner-access/login/finish", s.handleOwnerLoginFinish)
 	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
+	s.handle("GET  /api/owner-access/browser-keys", s.handleOwnerBrowserKeysList)
+	s.handle("DELETE /api/owner-access/browser-keys/{browser_key_id}", s.handleOwnerBrowserKeyDelete)
+	s.handle("GET  /api/owner-access/sessions", s.handleOwnerSessionsList)
+	s.handle("DELETE /api/owner-access/sessions/{session_id}", s.handleOwnerSessionDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
+	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
+	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).
+	s.handle("GET  /api/owner-access/device-challenge", s.handleOwnerDeviceChallenge)
+	s.handle("POST /api/owner-access/device-pop", s.handleOwnerDevicePoP)
+	// Multi-tenant home route: Pi-signed instance descriptor, owner-authed,
+	// served over the P2P channel (see api_owner_instance_descriptor.go).
+	s.handle("GET  /api/owner-access/instance-descriptor", s.handleOwnerInstanceDescriptor)
+
+	// ---- Self-sovereign site identity (Phase 2) ----
+	s.handle("GET  /api/identity", s.handleIdentity)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.
@@ -391,12 +466,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if off > 0 {
 		status = "degraded"
 	}
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"status":           status,
 		"drivers_ok":       ok,
 		"drivers_degraded": deg,
 		"drivers_offline":  off,
-	})
+	}
+	// storage: surface DB corruption-recovery events from this boot so a
+	// corrupt database is never a silent, blank-dashboard failure again.
+	if s.deps.State != nil {
+		storage := map[string]any{"state": "ok", "cache": "ok"}
+		for _, ev := range s.deps.State.HealEvents() {
+			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
+			storage["last_event_ms"] = ev.AtMs
+			storage["detail"] = ev.Detail
+		}
+		resp["storage"] = storage
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---- /api/status ----
@@ -1206,52 +1293,43 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := control.Mode(req.Mode)
-	// Validate mode string
-	switch m {
-	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-		control.ModeCharge, control.ModePriority, control.ModeWeighted,
-		control.ModePlannerSelf, control.ModePlannerCheap,
-		control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-		s.deps.CtrlMu.Lock()
-		s.deps.Ctrl.Mode = m
-		// An explicit mode change is a reset signal: drop any active
-		// battery manual hold so the new mode takes effect on the very
-		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-		s.deps.Ctrl.ClearBatteryManualHold()
-		// Reset the PI integrator. The integral accumulated under the
-		// previous mode's error signal is meaningless to the new mode
-		// — keeping it caused integrator windup → wrong-direction stuck
-		// output across the 2026-05-24 evening mode switch (live
-		// regression: discharged the fleet to 7 % overnight while the
-		// PI integral was pinned in the wrong direction). Mode change
-		// is a discrete event; start the new regime from a clean PI.
-		if s.deps.Ctrl.PI != nil {
-			s.deps.Ctrl.PI.Reset()
-		}
-		s.deps.CtrlMu.Unlock()
-		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
-			slog.Warn("failed to persist mode", "err", err)
-		}
-		// Propagate to MPC if switching to a planner mode. Map
-		// control.ModePlanner* → mpc.Mode and force an immediate replan.
-		if m.IsPlannerMode() && s.deps.MPC != nil {
-			var mm mpc.Mode
-			switch m {
-			case control.ModePlannerSelf:
-				mm = mpc.ModeSelfConsumption
-			case control.ModePlannerCheap:
-				mm = mpc.ModeCheapCharge
-			case control.ModePlannerPassiveArbitrage:
-				mm = mpc.ModePassiveArbitrage
-			case control.ModePlannerArbitrage:
-				mm = mpc.ModeArbitrage
-			}
-			s.deps.MPC.SetMode(r.Context(), mm)
-		}
-		writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
-	default:
+	// Validate against the canonical mode list. control.AllModes is the
+	// single source of truth — the same list the HA discovery `select`
+	// options derive from — so the validator and the HA bridge can't drift.
+	if !control.IsValidMode(m) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
+		return
 	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.Mode = m
+	// An explicit mode change is a reset signal: drop any active
+	// battery manual hold so the new mode takes effect on the very
+	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
+	s.deps.Ctrl.ClearBatteryManualHold()
+	// Reset the PI integrator. The integral accumulated under the
+	// previous mode's error signal is meaningless to the new mode
+	// — keeping it caused integrator windup → wrong-direction stuck
+	// output across the 2026-05-24 evening mode switch (live
+	// regression: discharged the fleet to 7 % overnight while the
+	// PI integral was pinned in the wrong direction). Mode change
+	// is a discrete event; start the new regime from a clean PI.
+	if s.deps.Ctrl.PI != nil {
+		s.deps.Ctrl.PI.Reset()
+	}
+	s.deps.CtrlMu.Unlock()
+	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
+		slog.Warn("failed to persist mode", "err", err)
+	}
+	// Propagate to MPC if switching to a planner mode and force an
+	// immediate replan. control.PlannerMPCMode is the single source of the
+	// ModePlanner* → mpc.Mode mapping; ok is false for non-planner modes (and
+	// for any planner mode that hasn't been wired into the mapping), so an
+	// unmapped mode skips the MPC push instead of silently coercing it to the
+	// zero-value mpc.Mode("").
+	if mm, ok := control.PlannerMPCMode(m); ok && s.deps.MPC != nil {
+		s.deps.MPC.SetMode(r.Context(), mm)
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 }
 
 // ---- /api/target ----
@@ -2702,6 +2780,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Tel != nil {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
 	}
+	s.decorateLoadpointsWithManual(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

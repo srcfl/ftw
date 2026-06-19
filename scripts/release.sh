@@ -14,12 +14,13 @@ VERSION=${1:?Usage: $0 <version>}
 REPO="frahlg/forty-two-watts"
 
 echo "Building forty-two-watts ${VERSION} (linux arm64/amd64, windows amd64)…"
-make release
+make release relay-web
 
 ASSETS=(
     release/forty-two-watts-linux-arm64.tar.gz
     release/forty-two-watts-linux-amd64.tar.gz
     release/forty-two-watts-windows-amd64.zip
+    release/ftw-relay-web.tar.gz
 )
 
 for f in "${ASSETS[@]}"; do

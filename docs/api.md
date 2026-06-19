@@ -1,24 +1,23 @@
 # REST API reference
 
-Complete HTTP surface of forty-two-watts. Every endpoint listed here has a
-matching `s.handle(…)` line in `go/internal/api/api.go` — that file is the
-source of truth; this doc is a readable projection of it.
+Human-readable guide to the main HTTP surface of forty-two-watts.
+[`go/internal/api/api.go`](../go/internal/api/api.go) is the route source of
+truth; this document should be treated as a readable reference, not a
+generated route inventory.
 
 ## Conventions
 
-- **Base URL:** `http://<host>:8080` (default port from `api.port` in config;
-  see `go/internal/config/config.go:270`)
-- **Authentication:** none. The server assumes a trusted local network.
-  Do not expose it to the public internet without a reverse proxy that adds
-  auth and TLS
+- **Base URL:** `http://<host>:8080` by default; configured via `api.port`.
+- **Access model:** local deployments assume a trusted LAN. Remote/owner
+  access paths have their own pairing and tunnel flow. Do not expose the
+  local API directly to the public internet without auth and TLS.
 - **Content type:** `application/json` for both requests and responses
-- **CORS:** every response sets `Access-Control-Allow-Origin: *`
-  (`writeJSON` in `go/internal/api/api.go:144`)
+- **CORS:** JSON responses set permissive CORS headers for the local UI/API
+  workflow.
 - **WebSocket / SSE:** none. Clients poll `/api/status` and `/api/history`.
   The top comment in `go/internal/api/api.go:6` notes this explicitly
-- **Static UI:** any path not matched by a registered route is served from
-  `WebDir` (default `web/`) with `Cache-Control: no-cache, must-revalidate`
-  (`go/internal/api/api.go:867`)
+- **Static UI:** paths not matched by registered routes are served from
+  `WebDir` (default `web/`).
 
 ## Site sign convention
 
@@ -228,6 +227,7 @@ Valid values (from `go/internal/control/dispatch.go:14`):
 - `weighted`
 - `planner_self`
 - `planner_cheap`
+- `planner_passive_arbitrage`
 - `planner_arbitrage`
 
 **Response (200):**

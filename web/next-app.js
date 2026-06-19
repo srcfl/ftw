@@ -41,6 +41,92 @@
   let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
   let lastFlashAt = 0;               // browser-clock timestamp of last "new data" flash
 
+  // ---- Owner / CONTROL fetch (FIX-B) ----------------------------------------
+  // Every owner + state-changing API call (mode, target, peak limit, EV command,
+  // loadpoint schedule, driver lifecycle, sign-out, …) must ride the STRICT P2P
+  // transport so its body + the owner session cookie never traverse the untrusted
+  // relay on the public home route. p2pFetchStrict fails closed (synthetic 503)
+  // when the channel is down on a public origin; we additionally fail closed when
+  // p2p.js never LOADED at all on a non-LAN origin, instead of raw-fetching the
+  // owner/control body to the relay. Read-only GETs of non-secret data may still
+  // use plain fetch (no body, cookie stripped) — this is for OWNER + CONTROL calls
+  // only.
+  function isLanFallbackOrigin() {
+    // Genuine-LAN origin = the Pi serves this page directly (relay not in path),
+    // so a raw fetch is safe. Prefer p2p.js's own isLanOrigin (single source of
+    // truth); only when p2p.js never loaded do we conservatively treat a dotted
+    // public host as NOT-LAN and fail closed.
+    if (window.ftwP2P && typeof window.ftwP2P.isLanOrigin === "function") {
+      try { return window.ftwP2P.isLanOrigin(); } catch (e) { /* fall through */ }
+    }
+    if (/^\/me\/[^/]+\//.test(location.pathname)) return false; // relay tunnel prefix
+    var h = (location.hostname || "").toLowerCase();
+    if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true; // *.local / single-label
+    if (/^10\./.test(h) || /^127\./.test(h) || /^192\.168\./.test(h) ||
+        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+        /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // 100.64/10 CGNAT (Tailscale)
+    var hv6 = h.replace(/^\[|\]$/g, "");
+    if (/^f[cd][0-9a-f]{2}:/.test(hv6) || /^fe[89ab][0-9a-f]:/.test(hv6)) return true;
+    return false; // dotted public host → NOT LAN → fail closed
+  }
+  // ownerWriteFailClosed mimics enough of a fetch Response that callers handle it
+  // uniformly; the owner/control body NEVER leaves the browser.
+  function ownerWriteFailClosed(path) {
+    var msg = "Secure channel unavailable — reconnecting. This control request was NOT sent to the relay.";
+    return Promise.resolve({
+      ok: false, status: 503, url: path, headers: new Headers(),
+      json: function () { return Promise.resolve({ error: msg, retry: true }); },
+      text: function () { return Promise.resolve(msg); }
+    });
+  }
+  // ownerFetch is the single owner/CONTROL fetch entry point. Strict when the P2P
+  // transport is present; fail-closed on a public origin when it isn't; raw fetch
+  // only on a genuine LAN.
+  function ownerFetch(path, opts) {
+    opts = opts || {};
+    if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts);
+    if (window.p2pFetch) return window.p2pFetch(path, Object.assign({ strict: true }, opts));
+    if (!isLanFallbackOrigin()) return ownerWriteFailClosed(path);
+    return fetch(path, opts);
+  }
+
+  function waitForOwnerTransport(timeoutMs) {
+    if (!window.ftwP2P || isLanFallbackOrigin()) return Promise.resolve(true);
+    if (typeof window.ftwP2P.state === "function" && window.ftwP2P.state() === "direct") {
+      return Promise.resolve(true);
+    }
+    var connectP = typeof window.ftwP2P.connect === "function"
+      ? window.ftwP2P.connect().catch(function () { return false; })
+      : Promise.resolve(false);
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(false);
+      }, timeoutMs || 9000);
+      function finish(ok) {
+        if (done) return;
+        if (!ok) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(true);
+      }
+      if (typeof window.ftwP2P.onState === "function") {
+        window.ftwP2P.onState(function (s) { finish(s === "direct"); });
+      }
+      connectP.then(finish);
+    });
+  }
+
+  function ownerTransportReady() {
+    if (isLanFallbackOrigin()) return true;
+    return !!(window.ftwP2P &&
+      typeof window.ftwP2P.state === "function" &&
+      window.ftwP2P.state() === "direct");
+  }
+
   // ---- Chart data ----
   var chartHistory = {
     grid: [],
@@ -197,7 +283,8 @@
   // extending past "now").
   var chartPlan = null;
   function refreshChartPlan() {
-    fetch("/api/mpc/plan")
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/mpc/plan")
       .then(function (r) { return r.json(); })
       .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
       .catch(function () {});
@@ -258,6 +345,7 @@
   const evSend = $("ev-send");
   const bceToggle = $("battery-covers-ev-toggle");
   const bceLabel = $("battery-covers-ev-label");
+  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -370,16 +458,11 @@
     el.textContent = (soc * 100).toFixed(1) + " %";
     el.className = "live-stat-value is-neutral";
   }
-  function batteryStateLabel(w) {
-    var watts = Number(w) || 0;
-    var idleW = flowIdleKw() * 1000;
-    if (watts > idleW) return "charging";
-    if (watts < -idleW) return "discharging";
-    return "idle";
-  }
   function batteryTargetLine(targetW) {
     if (targetW == null || !isFinite(targetW)) return "";
-    return "target " + formatW(targetW) + " · " + batteryStateLabel(targetW);
+    // Just the target — the "· charging/discharging" suffix overflowed the
+    // node circle; the live W value + SoC% already convey direction.
+    return "target " + formatW(targetW);
   }
 
   function smoothDisplayNumber(key, value, now) {
@@ -849,6 +932,7 @@
     if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
       bceToggle.checked = !!data.battery_covers_ev;
       if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
     }
 
     // Energy today
@@ -1660,7 +1744,8 @@
   }
 
   function driverLifecycleCall(name, action) {
-    return fetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
+    // CONTROL write — strict (FIX-B): driver enable/disable/restart/diagnose.
+    return ownerFetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
       .then(function (res) {
         if (!res.ok) return res.text().then(function (t) { throw new Error(t || ("HTTP " + res.status)); });
         return res.json();
@@ -2047,6 +2132,7 @@
   // ---- API ----
   var firstLoad = true;
   var setupBannerShown = false;
+  var ownerDataPrimed = false;
   // Loadpoint cache — keyed by driver_name so the EV-planet builder
   // in render() can look up vehicle SoC + charge-limit without a
   // second round of fetches per status tick. Refreshed in parallel
@@ -2059,15 +2145,36 @@
   // facts like siteHasPV() without re-fetching. `null` until the
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
+  function ownerDataAllowed() {
+    return isLanFallbackOrigin() || (!authGateActive && !ownerNotAuthed);
+  }
   function fetchStatus() {
-    Promise.all([
-      fetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
-      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+    if (!ownerDataAllowed()) return Promise.resolve(false);
+    // Route the hot poll over the direct P2P DataChannel when it's up. STRICT
+    // mode (FIX-2): the owner API (/api/status etc.) must never ride the cleartext
+    // relay on the public home route — strict fails closed (synthetic 503) if the
+    // channel is down, while still allowing the relay fallback on a genuine-LAN
+    // origin where the Pi serves the page directly. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    // Owner reads carry the owner session cookie, so route them STRICT too (FIX-B):
+    // ownerFetch fails closed on a public origin when no channel/transport is
+    // available rather than sending the cookie to the relay. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    var xfetch = ownerFetch;
+    return Promise.all([
+      xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
+      xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      xfetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ])
       .then(function (results) {
         var data = results[0];
         var lp = results[1];
+        var health = results[2];
         lastStatusPayload = data;
+        // Surface DB corruption-recovery events (boot-time, immutable per
+        // process) as a top banner. Tolerant: health may be null.
+        try { updateStorageBanner(health && health.storage); }
+        catch (eSb) { /* silent */ }
         if (lp && Array.isArray(lp.loadpoints)) {
           var idx = {};
           lp.loadpoints.forEach(function (l) {
@@ -2094,9 +2201,70 @@
       });
   }
 
+  // ---- Storage-health banner (DB corruption auto-recovered) ----
+  // storage = { state, cache, last_event_ms, detail } from /api/health.
+  // Heal events are set once at boot and never change, so a session-scoped
+  // dismissal (keyed on the event) hides it without losing a fresh alert
+  // after a later restart.
+  function updateStorageBanner(storage) {
+    var existing = document.getElementById("storage-banner");
+    var bad = !!storage && (
+      (storage.state && storage.state !== "ok") ||
+      (storage.cache && storage.cache !== "ok")
+    );
+    if (!bad) { if (existing) existing.remove(); return; }
+
+    var key = String(storage.last_event_ms || storage.detail || "1");
+    try {
+      if (sessionStorage.getItem("ftw-storage-banner-dismissed") === key) {
+        if (existing) existing.remove();
+        return;
+      }
+    } catch (e) { /* sessionStorage unavailable — show anyway */ }
+
+    var detail = storage.detail || "Database recovered from a problem.";
+    if (existing) {
+      var t = existing.querySelector(".storage-banner-text");
+      if (t) t.textContent = detail;
+      existing.setAttribute("data-key", key);
+      return;
+    }
+
+    var banner = document.createElement("div");
+    banner.id = "storage-banner";
+    banner.className = "storage-banner";
+    banner.setAttribute("data-key", key);
+
+    var tag = document.createElement("span");
+    tag.className = "storage-banner-tag";
+    tag.textContent = "Storage";
+
+    var text = document.createElement("span");
+    text.className = "storage-banner-text";
+    text.textContent = detail;
+
+    var dismiss = document.createElement("button");
+    dismiss.className = "storage-banner-dismiss";
+    dismiss.type = "button";
+    dismiss.setAttribute("aria-label", "Dismiss");
+    dismiss.innerHTML = "&times;";
+    dismiss.addEventListener("click", function () {
+      try { sessionStorage.setItem("ftw-storage-banner-dismissed", banner.getAttribute("data-key") || "1"); }
+      catch (e) { /* ignore */ }
+      banner.remove();
+    });
+
+    banner.appendChild(tag);
+    banner.appendChild(text);
+    banner.appendChild(dismiss);
+    var main = document.querySelector("main");
+    if (main) main.parentNode.insertBefore(banner, main);
+  }
+
   // ---- Setup banner (bootstrap mode — no config yet) ----
   function showSetupBanner() {
     if (setupBannerShown) return;
+    if (authGateActive || ownerNotAuthed) return; // auth-pending/logged-out empty status is not config state
     var banner = document.createElement("div");
     banner.id = "setup-banner";
     banner.className = "setup-banner";
@@ -2114,6 +2282,7 @@
   // ---- "Add a device" prompt when drivers object is empty ----
   function updateNoDevicesPrompt(drivers) {
     var existing = document.getElementById("no-devices-prompt");
+    if (authGateActive || ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge before auth
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
     if (hasDrivers) {
       if (existing) existing.remove();
@@ -2123,13 +2292,17 @@
     var prompt = document.createElement("div");
     prompt.id = "no-devices-prompt";
     prompt.className = "no-devices-prompt";
-    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Add a device</a>';
+    // The wizard's Save replaces config (it doesn't merge yet), so the copy
+    // says "Run setup wizard" rather than "Add a device". ?step=3 is honored
+    // by setup.js init (deep-link → scan step).
+    prompt.innerHTML = 'No devices connected. <a href="/setup?step=3">Run setup wizard &rarr;</a>';
     var cards = document.querySelector(".summary-cards");
     if (cards) cards.parentNode.insertBefore(prompt, cards.nextSibling);
   }
 
   function setMode(mode) {
-    fetch("/api/mode", {
+    // CONTROL write — strict (FIX-B): never send the mode change to the relay.
+    ownerFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: mode }),
@@ -2145,7 +2318,7 @@
   }
 
   // Fire-and-forget wrappers around postJson. postJson itself rethrows
-  // so callers that chain .then/.finally (evCommand) behave correctly;
+  // so callers that chain .then/.finally behave correctly;
   // here we explicitly mark the rejection handled so the browser
   // doesn't log "Uncaught (in promise)" on every network hiccup.
   // postJson has already console.warn'd the failure.
@@ -2174,7 +2347,10 @@
   }
 
   function postJson(url, body) {
-    return fetch(url, {
+    // CONTROL write — strict (FIX-B). Covers /api/target, /api/peak_limit,
+    // /api/peak_import_ceiling, /api/ev_charging, /api/battery_covers_ev,
+    // /api/ev/command, … (every state-changing dashboard knob routes here).
+    return ownerFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -2295,6 +2471,7 @@
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
       if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
       setBatteryCoversEV(bceToggle.checked);
     });
   }
@@ -2360,6 +2537,11 @@
   var schedSectionEl = null;
   var schedLpId = null;
   var schedNeedsRebuild = false;
+  // Manual amp-slider override section — same once-per-LP lifecycle as
+  // the schedule section so the slider keeps focus/value between polls.
+  var manualSectionEl = null;
+  var manualLpId = null;
+  var manualNeedsRebuild = false;
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2385,8 +2567,9 @@
     // duplicate /api/status fetch on every 5 s modal tick. Falls back
     // to "no PV" until the dashboard's own fetchStatus lands once.
     Promise.all([
-      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      // Owner reads (carry the session cookie) — strict (FIX-B).
+      ownerFetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      ownerFetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var d = results[0];
       var lps = results[1];
@@ -2480,16 +2663,192 @@
           // cached section is still valid — re-attach.
           evModalBody.appendChild(schedSectionEl);
         }
+        // Manual amp-slider override — built once per LP (or after a
+        // Start/Stop). Mounted above the schedule so "charge now"
+        // controls sit closest to the live status.
+        var manualChanged = manualSectionEl == null || manualLpId !== matched.id;
+        if (manualChanged || manualNeedsRebuild) {
+          if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
+            evModalBody.removeChild(manualSectionEl);
+          }
+          manualSectionEl = buildManualControl(matched);
+          manualLpId = matched.id;
+          manualNeedsRebuild = false;
+          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+        } else if (manualSectionEl.parentNode !== evModalBody) {
+          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+        }
       } else {
         if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
           evModalBody.removeChild(schedSectionEl);
         }
+        if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
+          evModalBody.removeChild(manualSectionEl);
+        }
         schedSectionEl = null;
         schedLpId = null;
+        manualSectionEl = null;
+        manualLpId = null;
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
+  }
+
+  // buildManualControl renders the Tesla-style manual override: an amp
+  // slider (range = the charger's min/max charge current) plus Start /
+  // Stop. Start pins a persistent manual hold at the slider's amps,
+  // which overrides surplus_only and the plan (the fuse clamp still
+  // applies); Stop clears the hold and drops back to whatever mode the
+  // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
+  // is sent as watts (power_w = A × phases × voltage); the driver
+  // converts back to amps given the wallbox it's talking to.
+  function buildManualControl(lp) {
+    var phases = (lp && lp.phases) || 3;
+    var voltage = (lp && lp.voltage_v) || 230;
+    var perA = phases * voltage; // watts per amp
+    function wToA(w) { return perA > 0 ? w / perA : 0; }
+    function aToW(a) { return Math.round(a * perA); }
+
+    var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
+    var maxA = Math.round(wToA((lp && lp.max_charge_w) || 0)) || 16;
+    if (maxA <= minA) { maxA = minA + 1; }
+
+    var active = !!(lp && lp.manual_active);
+    var curA = active ? Math.round(wToA((lp && lp.manual_charge_w) || 0)) : maxA;
+    if (curA < minA) { curA = minA; }
+    if (curA > maxA) { curA = maxA; }
+
+    var box = document.createElement("div");
+    box.style.marginTop = "0.75rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Manual Charge";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.45rem";
+    box.appendChild(eyebrow);
+
+    // Slider + live readout.
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.6rem";
+
+    var slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(minA);
+    slider.max = String(maxA);
+    slider.step = "1";
+    slider.value = String(curA);
+    slider.style.flex = "1";
+    slider.style.accentColor = "var(--accent-e)";
+
+    var readout = document.createElement("div");
+    readout.style.fontFamily = "var(--mono)";
+    readout.style.fontSize = "0.9rem";
+    readout.style.minWidth = "6.5em";
+    readout.style.textAlign = "right";
+    readout.style.color = "var(--fg)";
+    function renderReadout() {
+      var a = parseInt(slider.value, 10) || minA;
+      readout.textContent = a + " A · " + (aToW(a) / 1000).toFixed(1) + " kW";
+    }
+    renderReadout();
+    slider.addEventListener("input", renderReadout);
+
+    row.appendChild(slider);
+    row.appendChild(readout);
+    box.appendChild(row);
+
+    // Status line.
+    var status = document.createElement("small");
+    status.style.display = "block";
+    status.style.color = "var(--text-dim)";
+    status.style.marginTop = "0.35rem";
+    status.style.minHeight = "1em";
+    status.textContent = active
+      ? "Manual override active — overriding PV surplus (fuse still limits)."
+      : "Stopped = automatic (PV-surplus-only if enabled below). Start overrides it.";
+    box.appendChild(status);
+
+    // Start / Stop buttons.
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.marginTop = "0.5rem";
+
+    var startBtn = document.createElement("button");
+    startBtn.type = "button";
+    startBtn.textContent = active ? "Update" : "Start";
+    startBtn.style.flex = "1";
+    startBtn.style.padding = "0.4rem 0.6rem";
+    startBtn.style.border = "none";
+    startBtn.style.borderRadius = "4px";
+    startBtn.style.cursor = "pointer";
+    startBtn.style.fontWeight = "600";
+    startBtn.style.background = "var(--accent-e)";
+    startBtn.style.color = "#0a0a0a";
+
+    var stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop";
+    stopBtn.style.flex = "1";
+    stopBtn.style.padding = "0.4rem 0.6rem";
+    stopBtn.style.border = "1px solid var(--line)";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.style.background = "transparent";
+    stopBtn.style.color = "var(--fg)";
+    stopBtn.disabled = !active;
+    stopBtn.style.opacity = active ? "1" : "0.5";
+
+    btnRow.appendChild(startBtn);
+    btnRow.appendChild(stopBtn);
+    box.appendChild(btnRow);
+
+    startBtn.addEventListener("click", function () {
+      startBtn.disabled = true;
+      status.textContent = "Starting…";
+      var a = parseInt(slider.value, 10) || minA;
+      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0).
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          power_w: aToW(a),
+          hold_s: 0,
+          phase_mode: phases === 1 ? "1p" : "3p",
+        }),
+      }).then(function () {
+        status.textContent = "Charging at " + a + " A — overriding PV surplus.";
+        manualNeedsRebuild = true; // reflect active state on next poll
+      }).catch(function () {
+        startBtn.disabled = false;
+        status.textContent = "Start failed — try again.";
+      });
+    });
+
+    stopBtn.addEventListener("click", function () {
+      stopBtn.disabled = true;
+      status.textContent = "Stopping…";
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "DELETE",
+      }).then(function () {
+        status.textContent = "Released — back to automatic charging.";
+        manualNeedsRebuild = true;
+      }).catch(function () {
+        stopBtn.disabled = false;
+        status.textContent = "Stop failed — try again.";
+      });
+    });
+
+    return box;
   }
 
   // buildScheduleControl renders the persistent charging schedule
@@ -2558,7 +2917,7 @@
     soCb.checked = !!(lp && lp.surplus_only);
     soCb.style.accentColor = "var(--accent-e)";
     var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV exports only — never imports grid)";
+    soText.textContent = "Surplus only (PV only — no grid or battery)";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
 
@@ -2583,7 +2942,8 @@
       }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ surplus_only: soCb.checked }),
@@ -2648,7 +3008,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
@@ -2854,7 +3214,8 @@
           surplus_unlock_bat_soc_pct: unlockVal,
         },
       };
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule save.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -2874,7 +3235,8 @@
       saveBtn.disabled = true;
       clearBtn.disabled = true;
       status.textContent = "Clearing…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule clear.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ schedule: null }),
@@ -2910,11 +3272,6 @@
 
   var evRefreshTimer = null;
   if (evModal) {
-    var evBtnStart = document.getElementById("ev-btn-start");
-    var evBtnPause = document.getElementById("ev-btn-pause");
-    var evBtnResume = document.getElementById("ev-btn-resume");
-    var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
-
     function openEvModal(driver) {
       evModalDriver = driver || null;
       evModal.open();
@@ -3004,20 +3361,11 @@
       });
     }
 
-    function evCommand(action) {
-      evActionBtns.forEach(function (b) { b.disabled = true; });
-      var body = { action: action };
-      if (evModalDriver) body.driver = evModalDriver;
-      postJson("/api/ev/command", body)
-        .catch(function () { /* postJson already logs */ })
-        .finally(function () {
-          refreshEvModal();
-          evActionBtns.forEach(function (b) { b.disabled = false; });
-        });
-    }
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+    // Legacy Start/Pause/Resume footer buttons were removed in favour of
+    // the in-body Manual Charge control (buildManualControl): an amp slider
+    // + Start/Stop that pins a persistent manual hold at a chosen current
+    // (Start, overrides surplus) or clears it (Stop, back to automatic).
+    // The POST /api/ev/command endpoint stays for HA / scripts.
   }
 
 
@@ -3138,8 +3486,10 @@
 
   // ---- History loader ----
   function loadHistory(range) {
+    if (!ownerDataAllowed()) return Promise.resolve(null);
     var points = CHART_POINTS;
-    return fetch("/api/history?range=" + (range || "5m") + "&points=" + points)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    return ownerFetch("/api/history?range=" + (range || "5m") + "&points=" + points)
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data || !data.items) return;
@@ -3231,6 +3581,7 @@
   var historyCakeWrap = $("history-cake");
   var historyCakeEl = $("history-cake-el");
   var historyCakeWaitingForUpgrade = false;
+  var historyCakeReqSeq = 0;
 
   // historyState mirrors both toggles so the Bars/Cakes view and
   // the Week/Month range stay coordinated. Only the cake re-fetches
@@ -3239,6 +3590,7 @@
   var historyState = { range: "week", view: "bars" };
 
   function fetchHistoryCake() {
+    var seq = ++historyCakeReqSeq;
     historyCakeEl = $("history-cake-el");
     if (!historyCakeEl || typeof historyCakeEl.setTotals !== "function") {
       if (!historyCakeWaitingForUpgrade && window.customElements && customElements.whenDefined) {
@@ -3253,11 +3605,14 @@
     if (historyCakeWrap) historyCakeWrap.classList.add("loading");
     var days = historyState.range === "month" ? 30 : 7;
     var clearLoading = function () {
+      if (seq !== historyCakeReqSeq) return;
       if (historyCakeWrap) historyCakeWrap.classList.remove("loading");
     };
-    fetch("/api/energy/daily?days=" + days)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/energy/daily?days=" + days)
       .then(function (r) { return r.json(); })
       .then(function (j) {
+        if (seq !== historyCakeReqSeq) return;
         var arr = (j && j.days) || [];
         var totals = { import_wh: 0, load_wh: 0, export_wh: 0, pv_wh: 0 };
         for (var i = 0; i < arr.length; i++) {
@@ -3440,11 +3795,43 @@
     ctx.fillText("now", pad.left + plotW, cssH - 4);
   }
 
-  var lastLiveHistFetch = 0;
-  function fetchLiveHistory() {
-    lastLiveHistFetch = Date.now();
-    return fetch("/api/history?range=24h&points=288") // 5-min cadence
+  // Shared, deduped /api/history fetch. Several triggers ask for the SAME
+  // range+points payload — boot, the 1-min poll, and (undebounced) every
+  // window resize — so on first load a layout-driven resize storm would
+  // otherwise fan out into many identical requests. Coalesce in-flight calls
+  // and reuse a fresh result for a short TTL; pass force=true to bypass the
+  // cache when a genuinely fresh sample is wanted (the periodic poll).
+  // Mirrors ftw-history-card.js's dailyFetchCache. Routed through ownerFetch
+  // (strict / FIX-B): /api/history is an owner read carrying the session cookie,
+  // so it must never traverse the relay in cleartext on the public home route
+  // (master used a plain fetch here; the P2P-only route keeps it strict).
+  var HISTORY_CACHE_TTL_MS = 15000;
+  var historyFetchCache = Object.create(null); // "range|points" -> { at, data?, promise? }
+  function fetchHistory(range, points, force) {
+    var key = range + "|" + points;
+    var now = Date.now();
+    var c = historyFetchCache[key];
+    if (!force && c && (now - c.at) < HISTORY_CACHE_TTL_MS) {
+      if (c.data) return Promise.resolve(c.data);
+      if (c.promise) return c.promise;
+    }
+    var promise = ownerFetch("/api/history?range=" + range + "&points=" + points)
       .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { historyFetchCache[key] = { at: Date.now(), data: data }; return data; })
+      .catch(function (err) {
+        var cur = historyFetchCache[key];
+        if (cur && cur.promise === promise) delete historyFetchCache[key];
+        throw err;
+      });
+    historyFetchCache[key] = { at: now, promise: promise };
+    return promise;
+  }
+
+  var lastLiveHistFetch = 0;
+  function fetchLiveHistory(force) {
+    if (!ownerDataAllowed()) return Promise.resolve();
+    lastLiveHistFetch = Date.now();
+    return fetchHistory("24h", 288, force) // 5-min cadence
       .then(function (d) {
         if (!d || !d.items) return;
         renderLiveHistory(d.items);
@@ -3452,16 +3839,572 @@
       .catch(function () { /* silent — chart just shows last state */ });
   }
 
+  // ---- P2P transport indicator ----
+  // Reflects window.ftwP2P state (direct / relay / connecting). PURELY
+  // INFORMATIONAL — it explains how your browser is talking to your Pi; it is
+  // NOT a toggle. (The old click-to-toggle "disable direct P2P" made no sense on
+  // the P2P-only home route — there's no cleartext relay fallback for owner data,
+  // so disabling it just broke the channel. Tap/hover now only reveals the
+  // explanation.)
+  function setupP2PIndicator() {
+    var el = document.getElementById("p2p-status");
+    if (!window.ftwP2P) return;
+    var label = el && el.querySelector(".p2p-label");
+    var titles = {
+      direct: "Direct & end-to-end encrypted between your browser and your Pi — the relay sees nothing.",
+      relay: "Relayed via a blind TURN server — still end-to-end encrypted; the relay only forwards ciphertext.",
+      connecting: "Opening a direct, encrypted channel to your Pi…",
+      off: "Direct channel unavailable.",
+    };
+    var text = { direct: "Direct", relay: "Relayed", connecting: "Connecting…", off: "" };
+    if (el) el.style.cursor = "default";
+
+    // The sign-in gate's trust line mirrors the same transport, so a visitor sees
+    // the security story BEFORE they're signed in. Direct = end-to-end to the Pi;
+    // Relayed = still E2E, relay forwards ciphertext only.
+    var trust = document.getElementById("signin-gate-trust");
+    var trustText = document.getElementById("signin-gate-trust-text");
+    var trustCopy = {
+      direct: "Direct & end-to-end encrypted to your Pi. The relay never sees your home.",
+      relay: "End-to-end encrypted. The relay only forwards ciphertext — it never sees your home.",
+      connecting: "Opening an encrypted channel to your Pi…",
+      off: "End-to-end encrypted to your Pi. The relay never sees your home.",
+    };
+
+    window.ftwP2P.onState(function (s) {
+      if (el) {
+        if (s === "off") { el.hidden = true; }
+        else {
+          el.hidden = false;
+          el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
+          el.classList.add("p2p-" + s);
+          if (label) label.textContent = text[s] || "";
+          el.title = titles[s] || "Transport";
+        }
+      }
+      if (trust) {
+        trust.classList.remove("is-relay", "is-connecting");
+        if (s === "relay") trust.classList.add("is-relay");
+        else if (s === "connecting") trust.classList.add("is-connecting");
+        if (trustText && trustCopy[s]) trustText.textContent = trustCopy[s];
+      }
+    });
+  }
+
+  // ---- Owner auth: inline sign-in + sign-out (the dashboard IS the door) ----
+  // whoami reports whether the viewer is signed in (and whether there's a
+  // session to revoke). On the LAN (bypass) there's nothing to sign in/out of.
+  // Remotely, when NOT signed in, we reveal an inline passkey sign-in (a discreet
+  // banner + a header key) and run the ceremony over the SAME strict P2P channel —
+  // no redirect to /owner-access/login.html, which would spawn a fresh channel
+  // with no session. All three calls (whoami, login/*, logout) ride ownerFetch
+  // (strict / FIX-B) so they never traverse the relay in cleartext.
+
+  // Minimal WebAuthn codec — mirrors owner-access/webauthn.js. next-app.js is a
+  // classic script, so it can't `import` the module; these few helpers are tiny.
+  function b64urlToBuf(s) {
+    if (typeof s !== "string") return s;
+    var pad = "=".repeat((4 - (s.length % 4)) % 4);
+    var b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/");
+    var bin = atob(b64), buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64url(buf) {
+    var bytes = new Uint8Array(buf), bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function decodeAssertionOptions(opts) {
+    opts = JSON.parse(JSON.stringify(opts));
+    if (opts.publicKey) opts = opts.publicKey;
+    opts.challenge = b64urlToBuf(opts.challenge);
+    if (Array.isArray(opts.allowCredentials)) {
+      opts.allowCredentials = opts.allowCredentials.map(function (c) {
+        return Object.assign({}, c, { id: b64urlToBuf(c.id) });
+      });
+    }
+    return opts;
+  }
+  function encodeAssertionResult(cred) {
+    return {
+      id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type,
+      response: {
+        clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        authenticatorData: bufToB64url(cred.response.authenticatorData),
+        signature: bufToB64url(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+      },
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    };
+  }
+
+  // hasDecryptableDirectory reports whether instance-sync has a usable directory
+  // cached (the user already authenticated + PRF-decrypted this session, or a
+  // migrated single-home record seeded the browser-carried copy). When false the
+  // visitor is anonymous and gets the PUBLIC landing — never any instance data.
+  function hasDecryptableDirectory() {
+    try {
+      var sync = window.ftwInstanceSync;
+      if (!sync || typeof sync.getCachedInstances !== "function") return false;
+      var list = sync.getCachedInstances() || [];
+      return list.length >= 1;
+    } catch (e) { return false; }
+  }
+
+  // The sign-in GATE replaces the dashboard when the viewer isn't signed in on a
+  // remote origin — so a logged-out visitor sees a clean "sign in to reach your
+  // home", never the empty dashboard chrome (which falsely reads as an
+  // unconfigured instance). On the LAN (bypass) the gate never shows. ownerNotAuthed
+  // also suppresses the "no devices configured" prompt for logged-out viewers.
+  var ownerNotAuthed = false;
+  var authGateActive = false;
+  function showGate(mode) {
+    document.documentElement.classList.add("ftw-gated"); // CSS shows the gate, hides nothing else needed (opaque overlay)
+    var g = document.getElementById("signin-gate");
+    if (g) g.setAttribute("data-mode", mode || "signin");
+    authGateActive = true;
+    ownerNotAuthed = (mode !== "connecting");
+    try { hideSetupBanner(); } catch (e) {}
+    try {
+      var noDevices = document.getElementById("no-devices-prompt");
+      if (noDevices) noDevices.remove();
+    } catch (e) {}
+  }
+  function hideGate() {
+    document.documentElement.classList.remove("ftw-gated");
+    authGateActive = false;
+    ownerNotAuthed = false;
+  }
+
+  // ---- C3: silent device-key sign-in (no passkey) ---------------------------
+  // A device that was set up on the LAN (C4) holds a NON-EXTRACTABLE key the Pi
+  // pinned. Once the channel is open we can prove that key to the Pi to mint the
+  // owner session SILENTLY — no Face ID. Flow:
+  //   GET  /api/owner-access/device-challenge -> {challenge, exp_ms}
+  //   sign "ftw-device-pop:v1:<site>:<challenge>" with the device key
+  //   POST /api/owner-access/device-pop {device_pubkey, challenge, sig}
+  // All over ownerFetch (strict P2P), so the proof never crosses the relay in
+  // cleartext. Resolves true iff the session was minted. Resolves false (never
+  // throws) for "no device key", "no site", or any PoP failure — the caller then
+  // falls back to the passkey ceremony.
+  var devicePoPBusy = false;
+  function waitForDeviceKeyStore(timeoutMs) {
+    if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+      return Promise.resolve(window.ftwDeviceKey);
+    }
+    return new Promise(function (resolve) {
+      var deadline = Date.now() + (timeoutMs || 3000);
+      function tick() {
+        if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+          resolve(window.ftwDeviceKey);
+          return;
+        }
+        if (Date.now() >= deadline) { resolve(null); return; }
+        setTimeout(tick, 50);
+      }
+      tick();
+    });
+  }
+
+  function runDevicePoP() {
+    if (devicePoPBusy) return Promise.resolve(false);
+    // Need both the device-key store and the pinned site (for the signing string).
+    // device-key.js is an ES module loaded before this classic script, but modules
+    // are deferred and can still finish after setupAuth's first direct-channel
+    // tick. Wait briefly so a reload does not burn the one silent-auth attempt
+    // before window.ftwDeviceKey exists.
+    if (!window.ftwP2P || typeof window.ftwP2P.site !== "function") {
+      return Promise.resolve(false);
+    }
+    devicePoPBusy = true;
+    return waitForOwnerTransport(10000)
+      .then(function (transportOk) {
+        if (!transportOk) return false;
+        return waitForDeviceKeyStore(3000);
+      })
+      .then(function (store) {
+        if (!store) return false;
+        return store.hasDeviceKey()
+          .then(function (has) {
+            if (!has) return false; // never enrolled on this device → passkey path
+            return Promise.all([store.getOrCreate(), window.ftwP2P.site()])
+              .then(function (pair) {
+                var key = pair[0], site = pair[1];
+                if (!site) return false;
+                return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
+                  .then(function (r) { return r.ok ? r.json() : null; })
+                  .then(function (ch) {
+                    if (!ch || !ch.challenge) return false;
+                    var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
+                    return key.sign(msg).then(function (sig) {
+                      return ownerFetch("/api/owner-access/device-pop", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
+                        credentials: "same-origin",
+                      }).then(function (pop) { return !!(pop && pop.ok); });
+                    });
+                  });
+              });
+          });
+      })
+      .catch(function () { return false; })
+      .then(function (ok) { devicePoPBusy = false; return ok; });
+  }
+
+  // applySignedIn refreshes the dashboard in place once a session is minted
+  // (passkey OR silent device-PoP). Shared so both paths converge.
+  function refreshOwnerData(forceHistory) {
+    ownerDataPrimed = true;
+    fetchStatus();
+    fetchLiveHistory(!!forceHistory);
+    loadHistory(chartRange);
+  }
+  function primeOwnerData() {
+    if (ownerDataPrimed) return;
+    refreshOwnerData(true);
+  }
+  function applySignedIn() {
+    hideGate();
+    var signoutBtn = document.getElementById("signout-btn");
+    if (signoutBtn && !isLanFallbackOrigin()) signoutBtn.hidden = false;
+    refreshOwnerData(true);
+    announceOwnerAuthenticated();
+  }
+
+  function announceOwnerAuthenticated() {
+    window.dispatchEvent(new CustomEvent("ftw-owner-authenticated"));
+  }
+
+  // Explicit logout is a local browser intent, not just a server session revoke:
+  // if we let C3 run immediately afterwards, the remembered device-key silently
+  // mints a fresh session and "logout" appears to do nothing. Keep a local guard
+  // until the next successful passkey ceremony; normal reloads still auto-remember
+  // as long as the user did not press Sign out.
+  var MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
+  function manualSignoutActive() {
+    try { return localStorage.getItem(MANUAL_SIGNOUT_KEY) === "1"; }
+    catch (e) { return false; }
+  }
+  function markManualSignout() {
+    try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (e) {}
+    silentAuthTried = true;
+  }
+  function clearManualSignout() {
+    try { localStorage.removeItem(MANUAL_SIGNOUT_KEY); } catch (e) {}
+  }
+
+  // runSignIn: explicit button-driven sign-in over the dashboard's strict P2P
+  // transport. The button says "passkey", so it must run the passkey ceremony
+  // directly; the SILENT device-key path is only for automatic remembered-device
+  // checks in setupAuth(), and is disabled after an explicit logout until passkey
+  // auth succeeds.
+  var signInBusy = false;
+  function runSignIn(opts) {
+    opts = opts || {};
+    var allowSilent = opts.allowSilent === true && !manualSignoutActive();
+    if (signInBusy) return Promise.resolve(false);
+    signInBusy = true;
+    // say updates whichever message line is on screen. The same ceremony runs
+    // from both the returning-visitor gate (#signin-banner-msg) and the public
+    // landing (#signin-landing-msg); writing both keeps feedback visible without
+    // forking the flow.
+    var msgEls = ["signin-banner-msg", "signin-landing-msg"]
+      .map(function (id) { return document.getElementById(id); })
+      .filter(function (el) { return !!el; });
+    function say(t, cls) {
+      for (var i = 0; i < msgEls.length; i++) {
+        msgEls[i].textContent = t || "";
+        msgEls[i].className = "signin-gate-msg" + (cls ? " " + cls : "");
+      }
+    }
+    if (!allowSilent) return runPasskeySignIn(say);
+
+    say("Reaching your home…");
+    return runDevicePoP().then(function (silentOk) {
+      if (silentOk) {
+        signInBusy = false;
+        say("Signed in — this device is remembered.", "ok");
+        applySignedIn();
+        return true;
+      }
+      return runPasskeySignIn(say);
+    });
+  }
+
+  // openDirectoryAfterAssertion derives the directory ENCRYPTION key from THIS
+  // login assertion's PRF output (prf.js: outputFrom → deriveEncKey), loads +
+  // decrypts the relay directory blob (instance-sync.js: loadDirectory), and
+  // routes. v1 contract: the directory is a LIST. Exactly 1 entry → auto-open
+  // (no picker). >1 → auto-open the FIRST and leave a clearly-marked picker TODO.
+  // 0 → "finish setup on your home network" guidance (no error). When the PRF
+  // output is absent (Firefox, or a passkey enrolled without prf), we fall back to
+  // loadDirectory(W, null, origin) — the browser-carried copy — and surface that
+  // encrypted home sync is unavailable here. A PRF/decrypt failure is NEVER fatal:
+  // the dashboard still opens; instance-sync's local cache is the source of truth.
+  function openDirectoryAfterAssertion(cred, say) {
+    var prf = window.ftwPrf, sync = window.ftwInstanceSync;
+    if (!prf || typeof prf.outputFrom !== "function" || typeof prf.deriveEncKey !== "function" ||
+        !sync || typeof sync.loadDirectory !== "function") {
+      return Promise.resolve(); // crypto modules absent → carry-local only
+    }
+    // W = base64url(assertion.response.userHandle) — the opaque wallet handle the
+    // relay keys the encrypted blob on.
+    var W = null;
+    try {
+      var uh = cred && cred.response ? cred.response.userHandle : null;
+      if (uh) W = bufToB64url(uh);
+    } catch (e) {}
+    if (!W) return Promise.resolve(); // no wallet handle → nothing to fetch
+    var origin = location.origin;
+    function route(dir) {
+      var list = (dir && dir.instances) || [];
+      if (list.length === 1) {
+        // Exactly one home — auto-open. The pin re-resolves from the freshly
+        // cached directory entry (p2p.js::pinnedIdentity), so the next owner
+        // fetch connects to the right site with no relay round-trip.
+        return;
+      }
+      if (list.length > 1) {
+        // TODO(multi-instance picker): v1 has no picker, so auto-open the FIRST
+        // entry. instance-sync's getCachedInstances()[0] is what p2p.js pins, so
+        // "the first" is already the chosen one. Replace this with a picker UI
+        // when multi-home support lands.
+        try { console.log("ftw: " + list.length + " homes in directory; auto-opening the first (picker TODO)"); } catch (e) {}
+        return;
+      }
+      // 0 entries — the wallet has no home registered yet. This isn't an error;
+      // the user just hasn't finished setup on their home network.
+      say("Finish setting up 42W on your home network, then return here.", "ok");
+    }
+    var prfOut = null;
+    try { prfOut = prf.outputFrom(cred); } catch (e) { prfOut = null; }
+    if (!prfOut) {
+      // No PRF on this browser/passkey — fall back to the browser-carried copy.
+      say("Signed in. (Encrypted home sync isn’t available on this browser.)", "ok");
+      return sync.loadDirectory(W, null, origin).then(route).catch(function () {});
+    }
+    return prf.deriveEncKey(prfOut)
+      .then(function (encKey) { return sync.loadDirectory(W, encKey, origin); })
+      .then(route)
+      .catch(function () { /* PRF/decrypt failure → carry-local; never blocks login */ });
+  }
+
+  // runPasskeySignIn is the explicit passkey ceremony — the fallback when the
+  // silent device path isn't available. Kept as its own function so runSignIn can
+  // try silent first without duplicating the WebAuthn flow. The assertion requests
+  // the PRF extension (prf.extensionInput): the same passkey tap yields the
+  // directory-decryption key, so after finish we load + route the directory.
+  function runPasskeySignIn(say) {
+    say("Opening secure channel…");
+    return waitForOwnerTransport(25000)
+      .then(function (ok) {
+        if (!ok) {
+          say("Still opening the encrypted channel to your Pi. Try again in a moment.");
+          scheduleAuthRetry(1000);
+          return null;
+        }
+        say("Waiting for your passkey…");
+        return ownerFetch("/api/owner-access/login/start", { method: "POST" });
+      })
+      .then(function (start) {
+        if (!start) return null;
+        if (start.status === 404) { say("No passkey here yet — set up this device on your home network first.", "err"); return null; }
+        if (!start.ok) { say("Sign-in unavailable (" + start.status + ").", "err"); return null; }
+        return start.json();
+      })
+      .then(function (data) {
+        if (!data) return false;
+        var getOpts = { publicKey: decodeAssertionOptions(data.options) };
+        // Request the PRF extension so the authenticator evaluates the per-wallet
+        // secret we HKDF into the directory key (prf.js). Harmless on browsers /
+        // authenticators that don't support it — they simply return no prf result
+        // and we fall back to the browser-carried directory copy.
+        try {
+          if (window.ftwPrf && typeof window.ftwPrf.extensionInput === "function") {
+            getOpts.publicKey.extensions = Object.assign(
+              {}, getOpts.publicKey.extensions, window.ftwPrf.extensionInput());
+          }
+        } catch (e) {}
+        return navigator.credentials.get(getOpts).then(function (cred) {
+          if (!cred) { say(""); return false; }
+          var finishBody = encodeAssertionResult(cred);
+          var devicePubP = Promise.resolve(null);
+          if (window.ftwDeviceKey && typeof window.ftwDeviceKey.exportPubHex === "function") {
+            devicePubP = window.ftwDeviceKey.exportPubHex().catch(function () { return null; });
+          }
+          return devicePubP.then(function (devicePubHex) {
+            if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+            return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(finishBody),
+              credentials: "same-origin",
+            });
+          }).then(function (finish) {
+            if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
+            // Session minted. Now derive the directory key from this SAME
+            // assertion's PRF output, load + decrypt the relay directory, and
+            // route (auto-open on exactly 1). Non-fatal: a PRF/decrypt failure
+            // still signs the user in against the browser-carried copy.
+            return openDirectoryAfterAssertion(cred, say).then(function () {
+              clearManualSignout();
+              say("Signed in.", "ok");
+              return true;
+            });
+          });
+        });
+      })
+      .catch(function (e) {
+        if (e && e.name === "AbortError") { say(""); return false; }
+        say((e && e.message) || "Sign-in error.", "err");
+        return false;
+      })
+      .then(function (ok) {
+        signInBusy = false;
+        if (ok) applySignedIn();
+        return ok;
+      });
+  }
+
+  // setupAuth wires the gate/signout buttons once, then reflects the current
+  // whoami state. Safe to call repeatedly (on load and whenever the P2P channel
+  // (re)connects), since whoami needs the channel up to answer on a remote origin.
+  var authRetryTimer = null;
+  function scheduleAuthRetry(delayMs) {
+    if (authRetryTimer || isLanFallbackOrigin()) return;
+    authRetryTimer = setTimeout(function () {
+      authRetryTimer = null;
+      setupAuth();
+    }, delayMs || 1500);
+  }
+
+  function showWaitingOrLandingGate() {
+    if (!hasDecryptableDirectory()) {
+      showSignInGate();
+      return;
+    }
+    showGate("connecting");
+    scheduleAuthRetry(1500);
+  }
+
+  function setupAuth() {
+    if (authRetryTimer) {
+      clearTimeout(authRetryTimer);
+      authRetryTimer = null;
+    }
+    var signoutBtn = document.getElementById("signout-btn");
+    var gateBtn = document.getElementById("signin-gate-btn");
+    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
+    // The public-landing button runs the SAME ceremony as the gate button — one
+    // runSignIn(), not a fork — so the landing and the returning-visitor card
+    // converge on the identical passkey + PRF + directory flow.
+    var landingBtn = document.getElementById("signin-landing-btn");
+    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
+    if (signoutBtn && !signoutBtn._wired) {
+      signoutBtn._wired = true;
+      signoutBtn.onclick = function () {
+        markManualSignout();
+        ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+          .catch(function () {})
+          .then(function () { location.reload(); });
+      };
+    }
+    ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (me) {
+        if (me && me.can_sign_out) {            // signed-in remote session
+          if (signoutBtn) signoutBtn.hidden = false;
+          hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
+          return;
+        }
+        if (me && me.authenticated) {           // genuine-LAN bypass — full access
+          if (signoutBtn) signoutBtn.hidden = true;
+          hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
+          return;
+        }
+        // Not signed in (remote). Try the SILENT device-key path (C3) ONCE before
+        // showing the gate — a remembered device signs in with no Face ID. Only
+        // when there's no device key / PoP fails do we fall back to the passkey
+        // gate. silentAuthTried guards against re-running it on every channel
+        // reconnect.
+        if (signoutBtn) signoutBtn.hidden = true;
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        if (manualSignoutActive()) {
+          showSignInGate();
+          return;
+        }
+        if (!silentAuthTried) {
+          silentAuthTried = true;
+          runDevicePoP().then(function (ok) {
+            if (ok) { applySignedIn(); return; }
+            showSignInGate();
+          });
+          return;
+        }
+        showSignInGate();
+      })
+      .catch(function () {
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        showSignInGate();
+      });
+  }
+
+  // silentAuthTried: the C3 silent device-PoP is attempted at most once per page
+  // load (it's idempotent but pointless to repeat on every reconnect).
+  var silentAuthTried = false;
+
+  // showSignInGate routes the gate. The multi-tenant PUBLIC home route is purely
+  // ADDITIVE: a visitor with NO decryptable directory (anonymous, fresh browser)
+  // gets the public landing — brand + passkey + Learn more, and NO instance data.
+  // Once a directory is cached (this session's PRF decrypt, or a migrated
+  // single-home record) the existing single-tenant copy applies: the normal
+  // "signin" card, or the "setup" card when p2p.js reports this origin is
+  // UNENROLLED (no device key — never set up on the LAN). On the LAN the gate
+  // never shows at all, so the existing flow there is untouched.
+  function showSignInGate() {
+    if (!hasDecryptableDirectory()) { showGate("public-landing"); return; }
+    var unEnrolled = false;
+    try {
+      unEnrolled = !!(window.ftwP2P && window.ftwP2P.isUnenrolled && window.ftwP2P.isUnenrolled());
+    } catch (e) { /* default to the normal sign-in gate */ }
+    showGate(unEnrolled ? "setup" : "signin");
+  }
+
   // ---- Init ----
+  // On a remote/public origin, cover the dashboard with the gate ("connecting…")
+  // BEFORE any data fetch renders, so a logged-out visitor never sees the empty
+  // dashboard chrome. setupAuth() resolves it to the dashboard (signed in) or the
+  // sign-in card (not). On the LAN (bypass) the gate never shows.
+  if (typeof isLanFallbackOrigin === "function" && !isLanFallbackOrigin()) showGate("connecting");
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();
+  setupP2PIndicator();
+  setupAuth();
+  // whoami needs the P2P channel up to answer on a remote origin, so the load-time
+  // call may race the connection — re-check whenever the channel (re)connects.
+  if (window.ftwP2P && typeof window.ftwP2P.onState === "function") {
+    window.ftwP2P.onState(function (s) { if (s === "direct" || s === "relay") setupAuth(); });
+  }
   setInterval(fetchStatus, POLL_INTERVAL);
-  setInterval(fetchLiveHistory, 60_000); // 1-min refresh
+  setInterval(function () { fetchLiveHistory(true); }, 60_000); // 1-min refresh — always fresh
   window.addEventListener("resize", function () {
-    // Last fetched points are not cached separately; trigger a fetch.
-    // 24h history is small (~288 points × ~50 bytes), zero-cost on
-    // every resize.
+    // Redraw the 24h chart at the new width. Reuses the cached payload
+    // (fetchHistory's short TTL) so a first-load resize storm doesn't
+    // fan out into identical /api/history requests — only the data is
+    // shared; renderLiveHistory still re-measures the canvas each call.
     fetchLiveHistory();
   });
   requestAnimationFrame(animationFrame);

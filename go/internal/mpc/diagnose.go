@@ -47,12 +47,10 @@ type DiagnosticSlot struct {
 type DiagnosticParams struct {
 	Mode                Mode     `json:"mode"`
 	InitialSoCPct       float64  `json:"initial_soc_pct"`
-	SoCMinPct                    float64 `json:"soc_min_pct"`
-	SoCMaxPct                    float64 `json:"soc_max_pct"`
-	SoCSafetyFloorPct            float64 `json:"soc_safety_floor_pct,omitempty"`
-	SafetyFloorPenaltyOreKwhHour float64 `json:"safety_floor_penalty_ore_kwh_hour,omitempty"`
-	PVChargeBonusOreKwh          float64 `json:"pv_charge_bonus_ore_kwh,omitempty"`
-	SoCLevels                    int     `json:"soc_levels"`
+	SoCMinPct           float64  `json:"soc_min_pct"`
+	SoCMaxPct           float64  `json:"soc_max_pct"`
+	PVChargeBonusOreKwh float64  `json:"pv_charge_bonus_ore_kwh,omitempty"`
+	SoCLevels           int      `json:"soc_levels"`
 	ActionLevels        int      `json:"action_levels"`
 	MaxChargeW          float64  `json:"max_charge_w"`
 	MaxDischargeW       float64  `json:"max_discharge_w"`
@@ -63,6 +61,10 @@ type DiagnosticParams struct {
 	ExportBonusOreKwh   float64  `json:"export_bonus_ore_kwh"`
 	ExportFeeOreKwh     float64  `json:"export_fee_ore_kwh"`
 	ExportFloorOreKwh   *float64 `json:"export_floor_ore_kwh,omitempty"`
+
+	LoadpointSurplusOnly       bool `json:"loadpoint_surplus_only"`
+	LoadpointNoBatteryToEV     bool `json:"loadpoint_no_battery_to_ev"`
+	LoadpointBlocksBatteryToEV bool `json:"loadpoint_blocks_battery_to_ev"`
 }
 
 // Diagnostic is the full post-mortem of the most recent Optimize call.
@@ -151,24 +153,25 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		Horizon:      plan.HorizonSlots,
 		TotalCostOre: plan.TotalCostOre,
 		Params: DiagnosticParams{
-			Mode:                         p.Mode,
-			InitialSoCPct:                p.InitialSoCPct,
-			SoCMinPct:                    p.SoCMinPct,
-			SoCMaxPct:                    p.SoCMaxPct,
-			SoCSafetyFloorPct:            p.SoCSafetyFloorPct,
-			SafetyFloorPenaltyOreKwhHour: p.SafetyFloorPenaltyOreKwhHour,
-			PVChargeBonusOreKwh:          p.PVChargeBonusOreKwh,
-			SoCLevels:                    p.SoCLevels,
-			ActionLevels:                 p.ActionLevels,
-			MaxChargeW:                   p.MaxChargeW,
-			MaxDischargeW:                p.MaxDischargeW,
-			ChargeEfficiency:             p.ChargeEfficiency,
-			DischargeEfficiency:          p.DischargeEfficiency,
-			CapacityWh:                   p.CapacityWh,
-			TerminalSoCPrice:             p.TerminalSoCPrice,
-			ExportBonusOreKwh:            p.ExportBonusOreKwh,
-			ExportFeeOreKwh:              p.ExportFeeOreKwh,
-			ExportFloorOreKwh:            p.ExportFloorOreKwh,
+			Mode:                       p.Mode,
+			InitialSoCPct:              p.InitialSoCPct,
+			SoCMinPct:                  p.SoCMinPct,
+			SoCMaxPct:                  p.SoCMaxPct,
+			PVChargeBonusOreKwh:        p.PVChargeBonusOreKwh,
+			SoCLevels:                  p.SoCLevels,
+			ActionLevels:               p.ActionLevels,
+			MaxChargeW:                 p.MaxChargeW,
+			MaxDischargeW:              p.MaxDischargeW,
+			ChargeEfficiency:           p.ChargeEfficiency,
+			DischargeEfficiency:        p.DischargeEfficiency,
+			CapacityWh:                 p.CapacityWh,
+			TerminalSoCPrice:           p.TerminalSoCPrice,
+			ExportBonusOreKwh:          p.ExportBonusOreKwh,
+			ExportFeeOreKwh:            p.ExportFeeOreKwh,
+			ExportFloorOreKwh:          p.ExportFloorOreKwh,
+			LoadpointSurplusOnly:       p.Loadpoint != nil && p.Loadpoint.SurplusOnly,
+			LoadpointNoBatteryToEV:     p.Loadpoint != nil && p.Loadpoint.NoBatteryToEV,
+			LoadpointBlocksBatteryToEV: p.Loadpoint != nil && p.Loadpoint.blocksBatteryToEV(),
 		},
 		LoadpointID:    loadpointID,
 		Slots:          out,
@@ -227,19 +230,10 @@ func (s *Service) RestoreDiagnostic(d *Diagnostic, now time.Time, reason string)
 	}
 	// Merge fields that exist in the current binary's Defaults but
 	// could be missing-or-zero in a persisted snapshot written by an
-	// older binary. Without this merge, a deploy that adds a new
-	// Params field (e.g. SoCSafetyFloorPct added in v0.82) lets the
-	// restored snapshot's zero overwrite the operator's intended
-	// default until the next successful replan rebuilds params from
-	// s.Defaults. Live regression 2026-05-25: a v0.82 deploy restored
-	// the v0.81 snapshot with SoCSafetyFloorPct=0; safety floor stayed
-	// inactive for ~10 minutes until manual /api/mpc/replan.
-	if params.SoCSafetyFloorPct == 0 && s.Defaults.SoCSafetyFloorPct > 0 {
-		params.SoCSafetyFloorPct = s.Defaults.SoCSafetyFloorPct
-	}
-	if params.SafetyFloorPenaltyOreKwhHour == 0 && s.Defaults.SafetyFloorPenaltyOreKwhHour > 0 {
-		params.SafetyFloorPenaltyOreKwhHour = s.Defaults.SafetyFloorPenaltyOreKwhHour
-	}
+	// older binary. Without this merge, a deploy that adds a new Params
+	// field lets the restored snapshot's zero overwrite the operator's
+	// intended default until the next successful replan rebuilds params
+	// from s.Defaults.
 	if params.PVChargeBonusOreKwh == 0 && s.Defaults.PVChargeBonusOreKwh > 0 {
 		params.PVChargeBonusOreKwh = s.Defaults.PVChargeBonusOreKwh
 	}
@@ -265,24 +259,22 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		replanAtMs = generatedAtMs
 	}
 	params := Params{
-		Mode:                         d.Params.Mode,
-		InitialSoCPct:                d.Params.InitialSoCPct,
-		SoCMinPct:                    d.Params.SoCMinPct,
-		SoCMaxPct:                    d.Params.SoCMaxPct,
-		SoCSafetyFloorPct:            d.Params.SoCSafetyFloorPct,
-		SafetyFloorPenaltyOreKwhHour: d.Params.SafetyFloorPenaltyOreKwhHour,
-		PVChargeBonusOreKwh:          d.Params.PVChargeBonusOreKwh,
-		SoCLevels:                    d.Params.SoCLevels,
-		ActionLevels:                 d.Params.ActionLevels,
-		MaxChargeW:                   d.Params.MaxChargeW,
-		MaxDischargeW:                d.Params.MaxDischargeW,
-		ChargeEfficiency:             d.Params.ChargeEfficiency,
-		DischargeEfficiency:          d.Params.DischargeEfficiency,
-		CapacityWh:                   d.Params.CapacityWh,
-		TerminalSoCPrice:             d.Params.TerminalSoCPrice,
-		ExportBonusOreKwh:            d.Params.ExportBonusOreKwh,
-		ExportFeeOreKwh:              d.Params.ExportFeeOreKwh,
-		ExportFloorOreKwh:            d.Params.ExportFloorOreKwh,
+		Mode:                d.Params.Mode,
+		InitialSoCPct:       d.Params.InitialSoCPct,
+		SoCMinPct:           d.Params.SoCMinPct,
+		SoCMaxPct:           d.Params.SoCMaxPct,
+		PVChargeBonusOreKwh: d.Params.PVChargeBonusOreKwh,
+		SoCLevels:           d.Params.SoCLevels,
+		ActionLevels:        d.Params.ActionLevels,
+		MaxChargeW:          d.Params.MaxChargeW,
+		MaxDischargeW:       d.Params.MaxDischargeW,
+		ChargeEfficiency:    d.Params.ChargeEfficiency,
+		DischargeEfficiency: d.Params.DischargeEfficiency,
+		CapacityWh:          d.Params.CapacityWh,
+		TerminalSoCPrice:    d.Params.TerminalSoCPrice,
+		ExportBonusOreKwh:   d.Params.ExportBonusOreKwh,
+		ExportFeeOreKwh:     d.Params.ExportFeeOreKwh,
+		ExportFloorOreKwh:   d.Params.ExportFloorOreKwh,
 	}
 	if params.Mode == "" {
 		params.Mode = ModeSelfConsumption

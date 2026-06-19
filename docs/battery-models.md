@@ -32,7 +32,7 @@ From these two parameters we derive the physically meaningful quantities:
 | Time constant `τ` | `−Δt / ln(a)` | Seconds to reach ~63% of a step change |
 | Steady-state gain `k` | `b / (1 − a)` | Actual power / commanded power at equilibrium |
 
-Examples (with `Δt` = 5s control interval):
+Examples (with `Δt` set to the current control interval):
 
 | `a` | `b` | `τ` | `k` | Interpretation |
 |---|---|---|---|---|
@@ -61,7 +61,7 @@ P  ← (P − K · φᵀ · P) / λ              # covariance update
 ```
 
 `λ = 0.99` is the **forgetting factor** — gives an effective window of ~100
-samples (~8 minutes at 5s cycles), so old data slowly fades. This makes the
+samples, so old data slowly fades. This makes the
 model adapt to gradual changes (battery aging, ambient temperature) without
 being too noisy.
 
@@ -250,9 +250,11 @@ Aborts an in-progress tune, restores normal control. No body required.
 
 ## Persistence
 
-Models live in `state.redb` under the `battery_models` table, keyed by driver
-name. The control loop saves all models every ~60s (every 12 cycles at 5s
-interval). On startup, models are loaded back so RLS state survives restarts.
+Models live in SQLite (`state.db` by default) in the `battery_models` table,
+keyed by stable `device_id` rather than the configured driver name. That keeps
+trained models attached to the physical device when a driver is renamed in
+YAML, as long as the driver reports stable make/serial identity. On startup,
+models are loaded back so RLS state survives restarts.
 
 ## Calibration UI
 
@@ -277,7 +279,7 @@ The **Self-tune** button opens a modal with:
 | `gain` drifts toward bound (0.3 or 1.5) | RLS struggling, possibly meter noise too high | Check telemetry; lower forgetting factor; run self-tune |
 | Self-tune step shows "no usable step responses" | Battery offline / saturated / commands within deadband | Check SoC (must be 30–70%), verify battery accepts commands |
 | `health_score` drops over weeks | Real battery degradation | Replace cells / inspect inverter |
-| Inner PI oscillates | `τ` estimate is wrong (model not converged) | Run self-tune; or temporarily disable cascade with `state.use_cascade = false` in code |
+| Inner PI oscillates | `τ` estimate is wrong (model not converged) | Run self-tune; if needed, disable the cascade path in code while investigating |
 
 ## When NOT to trust the model
 
@@ -287,4 +289,4 @@ The **Self-tune** button opens a modal with:
 
 The cascade is designed to **degrade gracefully**: when models are missing or
 implausible, the system behaves identically to the old direct-command mode. You
-can also force-disable it via `ControlState::use_cascade = false`.
+can also force-disable the cascade path in code while debugging.

@@ -63,3 +63,7 @@ deploy/secrets/*
 
 # superpowers brainstorm visual companion (local only)
 .superpowers/
+
+# Goalbuddy renders local review boards; keep the markdown/state, not the
+# generated static board assets.
+docs/**/.goalbuddy-board/

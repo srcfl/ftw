@@ -11,6 +11,16 @@
 (function () {
   "use strict";
 
+  // ownerFetch routes state-changing owner/CONTROL calls (snapshot delete, and the
+  // skip/unskip/rollback/update/restart POSTs funnelled through _postJSON) over the
+  // STRICT P2P transport so their body never traverses the untrusted relay on the
+  // public home route. Wired in p2p.js to the shared fail-closed strict function;
+  // falls back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // Upstream version checks don't change often; 3 h is plenty of
   // headroom to surface a new release on a normal workday without
   // hammering /api/version/check (which can hit GitHub each tick if
@@ -67,7 +77,7 @@
     // 404s silently — the UI simply hides the section.
     _refreshSnapshots() {
       if (this._disabled) return;
-      fetch("/api/version/snapshots")
+      ownerFetch("/api/version/snapshots")
         .then((r) => (r.ok ? r.json() : null))
         .then((body) => {
           if (!body) return;
@@ -82,7 +92,7 @@
       // Guard against rapid double-clicks while the request is pending.
       if (this._deletingSnapshot) return;
       this._deletingSnapshot = id;
-      fetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
+      ownerFetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
         .finally(() => {
           this._deletingSnapshot = null;
           this._refreshSnapshots();
@@ -139,7 +149,7 @@
     _refresh(force) {
       if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
-      fetch(url)
+      ownerFetch(url)
         .then((r) => {
           // 503 = feature disabled by the backend. Stop polling and get out
           // of the way entirely — this is deployment config, not a bug.
@@ -165,7 +175,7 @@
     }
 
     _postJSON(url, body) {
-      return fetch(url, {
+      return ownerFetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
@@ -261,7 +271,7 @@
 
     _tickStatus() {
       // 1) Poll sidecar state.json.
-      fetch("/api/version/update/status")
+      ownerFetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (st && this._statusMatchesCurrentRun(st)) {

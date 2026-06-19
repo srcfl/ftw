@@ -1,0 +1,13 @@
+{
+  "name": "ftw-e2e-tier2",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Tier-2 container-side Playwright test for the forty-two-watts home route: virtual-authenticator passkey login + direct container-to-container P2P DataChannel.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0"
+  }
+}

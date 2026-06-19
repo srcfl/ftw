@@ -6,6 +6,11 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function defaultEvents() {
     return [
       { type: "driver_offline", enabled: false, threshold_s: 600, priority: 4, cooldown_s: 3600, tags: "", title_template: "", body_template: "" },
@@ -22,7 +27,7 @@
       // is non-fatal — fields just render empty (blank falls back to
       // default at render time on the server anyway).
       if (!window._notifDefaults) {
-        fetch("/api/notifications/defaults")
+        ownerFetch("/api/notifications/defaults")
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (d) {
             if (!d) return;

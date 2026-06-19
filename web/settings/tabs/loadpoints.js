@@ -9,6 +9,11 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // Drivers eligible to back a loadpoint = ones the catalog tags with
   // the "ev" capability. We resolve via the same catalogByLua map the
   // Devices tab populates (loaded once per modal open).
@@ -164,7 +169,7 @@
       // The Devices tab also primes this; calling again is cheap because
       // the response is small and the browser caches it.
       if (!S.catalogByLua) {
-        fetch('/api/drivers/catalog')
+        ownerFetch('/api/drivers/catalog')
           .then(function (r) { return r.json(); })
           .then(function (data) {
             var byLua = {};

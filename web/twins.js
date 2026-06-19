@@ -1,20 +1,52 @@
 // twins.js — advanced-mode ML diagnostics panel.
 // Renders a small card per twin (PV, load, price forecaster) with
-// sample count, MAE, quality bar, and last-updated time. Refreshes
-// every 10s. Only mounted when body.advanced is active, but the
-// fetches run regardless so switching to advanced is instant.
+// sample count, MAE, quality bar, and last-updated time. Polls only
+// while advanced mode is visible; remote routes pay for every owner
+// request over the P2P channel.
 
 (function () {
   'use strict';
 
   const REFRESH_MS = 10000;
+  let refreshTimer = null;
+
+  // ownerFetch routes state-changing owner/CONTROL calls (load-twin profile
+  // switch, PV/load twin reset) over the STRICT P2P transport so their body never
+  // traverses the untrusted relay on the public home route. Wired in p2p.js to the
+  // shared fail-closed strict function; falls back to plain fetch only where
+  // p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
 
   async function fetchAll() {
     const [pv, load] = await Promise.all([
-      fetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
-      fetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      ownerFetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      ownerFetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
     ]);
     render(pv, load);
+  }
+
+  function advancedVisible() {
+    return !!(document.body && document.body.classList.contains('advanced'));
+  }
+
+  function startPolling() {
+    if (refreshTimer) return;
+    fetchAll();
+    refreshTimer = setInterval(fetchAll, REFRESH_MS);
+  }
+
+  function stopPolling() {
+    if (!refreshTimer) return;
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function syncPolling() {
+    if (advancedVisible()) startPolling();
+    else stopPolling();
   }
 
   function fmtAge(ms) {
@@ -88,7 +120,7 @@
     const profile = e.target && e.target.dataset && e.target.dataset.loadmodelProfile;
     if (profile) {
       if (e.target.classList.contains('active')) return;
-      fetch('/api/loadmodel/profile', {
+      ownerFetch('/api/loadmodel/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile })
@@ -108,17 +140,17 @@
       'predictions while it collects samples again.')) {
       return;
     }
-    fetch(endpoint, { method: 'POST' })
+    ownerFetch(endpoint, { method: 'POST' })
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(() => fetchAll())
       .catch(err => alert('Reset failed: ' + err.message));
   }
 
   function init() {
-    fetchAll();
-    setInterval(fetchAll, REFRESH_MS);
     const grid = document.getElementById('twins-grid');
     if (grid) grid.addEventListener('click', onGridClick);
+    document.addEventListener('ftw-ui-mode-change', syncPolling);
+    syncPolling();
   }
 
   if (document.readyState === 'loading') {

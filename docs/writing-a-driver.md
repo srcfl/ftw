@@ -17,25 +17,21 @@ function), `go/internal/drivers/host.go` (the env that backs them), and
 
 ## 1. Why Lua
 
-v2.1 switched the recommended driver path from Rust-compiled WASM to Lua
-via [gopher-lua](https://github.com/yuin/gopher-lua). The reasons, in
-order of how much they matter:
+Lua via [gopher-lua](https://github.com/yuin/gopher-lua) is the current
+driver runtime. The reasons, in order of how much they matter:
 
 - **Contributor-friendly**: no toolchain to install. Edit a `.lua` file
   and restart — no `cargo`, no `wasm-opt`, no cross-compile.
 - **Hot-editable on the device**: the operator can `ssh` into a Zap, tweak
   a register offset, restart, done. This is load-bearing for field work.
-- **Smaller host surface**: the Lua host is ~350 LOC in one file
-  (`go/internal/drivers/lua.go`) vs ~850 for the WASM runtime plus the
-  Rust scaffolding a WASM driver needs. Less code to trust.
+- **Small host surface**: the Lua host is one Go file plus the capability
+  environment, with no separate cross-compiled driver artifact.
 - **Good enough performance**: a poll at 1 Hz that reads a dozen Modbus
   registers and emits three telemetry tables is nowhere near the Lua VM
   budget. The EMS's hot loop is the controller, not the driver.
 
-WASM is still supported through the same `Registry` interface
-(`registry.go:137-153`) for performance-critical drivers or for anyone
-who already shipped a `.wasm` on v2.0. You pick per-driver in
-`config.yaml` with `lua:` or `wasm:`.
+The legacy WASM runtime has been removed. New and bundled drivers are
+plain `.lua` files.
 
 ## 2. The contract
 
@@ -131,8 +127,8 @@ see two callbacks racing for the same VM.
 ## 3. The host API
 
 Everything below is exposed as a `host.*` global. The authoritative list
-is `go/internal/drivers/lua.go` lines 163-403 — grep for `RawSetString`
-to see every entry. The function signatures here match that file exactly.
+is `go/internal/drivers/lua.go` — grep for `RawSetString` to see every
+entry. The function signatures here match that file exactly.
 
 ### 3.1 Logging and identity
 
@@ -188,6 +184,16 @@ host.emit("ev", {
     session_wh = 14500, -- optional. Energy delivered this plug session.
     max_a      = 16,    -- optional. Charger current cap.
     phases     = 3,     -- optional. 1 or 3.
+})
+
+host.emit("v2x_charger", {
+    w                  = -5000, -- required. Positive = charging vehicle,
+                                --           negative = V2X discharge.
+    vehicle_soc        = 0.64,  -- 0.0 to 1.0 fraction (NOT percent)
+    connected          = true,
+    dc_w               = -5200,
+    session_discharge_wh = 1250,
+    rated_power_w      = 20000,
 })
 ```
 
@@ -281,6 +287,8 @@ API all assume it.
 | `meter.w` | importing from grid | exporting to grid |
 | `pv.w`   | (never — always ≤ 0) | generating |
 | `battery.w` | charging (energy INTO battery) | discharging (energy OUT of battery) |
+| `ev.w` | vehicle charging | (never) |
+| `v2x_charger.w` | vehicle charging | vehicle discharging into site/grid |
 
 Drivers convert at the boundary. If your device reports PV as a positive
 number (almost all do), negate it before `host.emit`. If your device
@@ -315,14 +323,15 @@ in `docs/site-convention.md`.
        lua: drivers/my-device.lua
        is_site_meter: false
        battery_capacity_wh: 10000
-       modbus:
-         host: 192.168.1.50
-         port: 502
-         unit_id: 1
+       capabilities:
+         modbus:
+           host: 192.168.1.50
+           port: 502
+           unit_id: 1
    ```
 
-   For an MQTT driver, swap `modbus:` for `mqtt:` with `host`, `port`,
-   `username`, `password`.
+   For an MQTT driver, swap `capabilities.modbus` for
+   `capabilities.mqtt` with `host`, `port`, `username`, and `password`.
 
 6. Restart the service (or wait for `fsnotify` to hot-reload
    `config.yaml`).
@@ -346,7 +355,7 @@ in `docs/site-convention.md`.
   forced mode if the EMS crashes. Always revert.
 - **Emitting telemetry too often.** Poll cadence ≈ 1 Hz is plenty.
   Faster doesn't help control quality and saturates Modbus. The EMS
-  control loop runs at `control_interval_s` (default 5 s) — your
+  control loop runs at `control_interval_s` (default 2 s) — your
   driver doesn't need to outrun it.
 - **Using `soc` as a percent.** The EMS expects `soc` as a 0.0–1.0
   fraction. If the device reports 0–100, divide.

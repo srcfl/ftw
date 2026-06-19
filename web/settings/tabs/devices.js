@@ -5,6 +5,17 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // ownerFetch routes state-changing owner/CONTROL probes (EV-charger probe with
+  // email+password, Tesla verify with IP+VIN, driver test with the full driver
+  // config) over the STRICT P2P transport so those SENSITIVE bodies never traverse
+  // the untrusted relay on the public home route. Wired in p2p.js to the shared
+  // fail-closed strict function; falls back to plain fetch only where p2p.js never
+  // loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function catalogEntryForLua(lua) {
     return lua ? (S.catalogByLua || {})[lua] : null;
   }
@@ -90,6 +101,8 @@
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
+        var hasApiCredsField = Object.prototype.hasOwnProperty.call(dcfg, 'client_id') ||
+                               Object.prototype.hasOwnProperty.call(dcfg, 'client_secret');
         var catalogEntry = (S.catalogByLua || {})[d.lua];
         var caps = (catalogEntry && catalogEntry.capabilities) || [];
         var isVehicleDriver = cap.http != null &&
@@ -97,7 +110,9 @@
            Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
            Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
         var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
-        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+        // OAuth2 client_credentials drivers (e.g. MyUplink): identify via client_id/client_secret keys.
+        var isApiCredsDriver = !isVehicleDriver && cap.http != null && !hasHostField && hasApiCredsField;
+        var isCloudDriver = !isVehicleDriver && !isApiCredsDriver && cap.http != null && !hasHostField &&
           (hasAuthField || Object.keys(dcfg).length === 0);
         if (isVehicleDriver) {
           // TeslaBLEProxy-style drivers only need the LAN IP of the
@@ -136,6 +151,18 @@
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
             '</label>' +
+            '</fieldset>';
+        }
+        if (isApiCredsDriver) {
+          // OAuth2 client_credentials drivers (e.g. MyUplink).
+          // User registers an app at the provider's developer portal and
+          // pastes the Client ID here. The Client Secret is rendered by the
+          // config_secrets slot below (masked, never echoed into the DOM).
+          var acfg = d.config || {};
+          html += '<fieldset><legend>API credentials</legend>' +
+            '<p style="color:var(--text-dim);font-size:0.75rem;margin:0 0 8px">Register an application at the provider\'s developer portal to get a Client ID and Client Secret. Paste the secret in the Secrets section below.</p>' +
+            '<label>Client ID ' + help('Application identifier from the developer portal.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
             '</fieldset>';
         }
         // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
@@ -247,7 +274,7 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
-      fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      ownerFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
         // on drivers whose catalog entry advertises BOTH meter and pv.
@@ -357,6 +384,7 @@
         var sel = document.getElementById("driver-catalog-picker");
         var nameEl = document.getElementById("driver-catalog-name");
         if (!sel || !sel.value) return;
+        ctx.captureCurrentTab();
         var chosen = sel.options[sel.selectedIndex];
         var protocols = (chosen.dataset.protocols || "").split("+");
         var name = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
@@ -378,6 +406,9 @@
             driver.config = { ip: "", vin: "" };
           } else if (connHost) {
             driver.config = { host: connHost };
+          } else if (entryCaps.indexOf("apicreds") >= 0) {
+            // OAuth2 client_credentials drivers (e.g. MyUplink).
+            driver.config = { client_id: "", client_secret: "" };
           } else {
             driver.config = { email: "", password: "", serial: "" };
           }
@@ -408,7 +439,7 @@
               .replace(/_cloud$/i, "");
             if (!provider) provider = "easee";
           }
-          fetch("/api/ev/chargers", {
+          ownerFetch("/api/ev/chargers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ provider: provider, email: email, password: pw }),
@@ -464,7 +495,7 @@
           }
           if (statusEl) { statusEl.textContent = "Verifying…"; statusEl.style.color = "var(--text-dim)"; }
           vbtn.disabled = true;
-          fetch("/api/drivers/verify_tesla", {
+          ownerFetch("/api/drivers/verify_tesla", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ip: ip, vin: vin }),
@@ -513,7 +544,7 @@
             outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
           }
           testBtn.disabled = true;
-          fetch("/api/drivers/test", {
+          ownerFetch("/api/drivers/test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(driver),

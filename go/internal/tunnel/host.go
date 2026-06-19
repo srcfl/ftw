@@ -9,8 +9,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"time"
 )
+
+// PollSecretHeader carries the per-host poll token the relay minted at
+// registration. The host sends it on every poll/response so the relay can
+// authenticate it — a caller that merely knows host_id but not the secret
+// cannot race the host for tunneled traffic.
+const PollSecretHeader = "X-FTW-Poll"
 
 // Host runs a long-poll loop against a relay, dispatching tunneled
 // requests to the supplied http.Handler.
@@ -24,6 +31,31 @@ type Host struct {
 	// client timeout is slightly larger so a slow relay response is
 	// treated as a transport error, not a stuck loop.
 	PollTimeout time.Duration
+
+	mu         sync.Mutex
+	pollSecret string // relay-minted poll token (see PollSecretHeader)
+}
+
+// SetPollSecret sets the per-host poll token the relay returns at registration.
+// Safe to call concurrently with Run — re-registration refreshes it (e.g. after
+// a relay restart re-mints).
+func (h *Host) SetPollSecret(s string) {
+	h.mu.Lock()
+	h.pollSecret = s
+	h.mu.Unlock()
+}
+
+func (h *Host) getPollSecret() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.pollSecret
+}
+
+// PollSecret returns the current relay-minted poll token. Exported so a sibling
+// loop on the same host (e.g. the P2P signaling poller) can present the same
+// token the registration loop refreshes, without re-plumbing the secret.
+func (h *Host) PollSecret() string {
+	return h.getPollSecret()
 }
 
 // NewHost constructs a Host. relayURL is the base URL (no trailing
@@ -67,6 +99,9 @@ func (h *Host) pollOnce(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
+	}
+	if s := h.getPollSecret(); s != "" {
+		req.Header.Set(PollSecretHeader, s)
 	}
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -120,6 +155,9 @@ func (h *Host) postResponse(ctx context.Context, reqID string, resp TunneledResp
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if s := h.getPollSecret(); s != "" {
+		req.Header.Set(PollSecretHeader, s)
+	}
 	r, err := h.client.Do(req)
 	if err != nil {
 		// Quietly drop on cancellation — shutdown noise, not an error.

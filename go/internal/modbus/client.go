@@ -145,6 +145,15 @@ func isTransportError(err error) bool {
 		errors.Is(err, syscall.ETIMEDOUT) {
 		return true
 	}
+	// simonvetter's own deadline sentinel. It is a plain string-typed value,
+	// NOT a net.Error and not wrapping syscall.ETIMEDOUT, so neither check
+	// above catches it. A request that gets no reply before the client
+	// timeout can leave the TCP socket ESTABLISHED while the device has gone
+	// mute on that session — observed on CTEK CSOS chargers, where a fresh
+	// connection answers instantly. Redialing is the correct response.
+	if errors.Is(err, sv.ErrRequestTimedOut) {
+		return true
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return true
@@ -158,6 +167,7 @@ func isTransportError(err error) bool {
 		"broken pipe",
 		"use of closed network connection",
 		"i/o timeout",
+		"timed out",
 		"EOF",
 	} {
 		if containsFold(msg, s) {

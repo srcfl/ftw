@@ -1,5 +1,1013 @@
 # Changelog
 
+## 0.120.9
+
+### Patch Changes
+
+- 4af0caf: Add a UI-controlled global troubleshooting mode for incident diagnostics. It exposes its state in `/api/status`, logs dispatch-decision snapshots without changing control behavior, and passes a reserved troubleshooting flag into Lua drivers. Pixii now uses that flag to emit calibration/control status and setpoint readback metrics, while still supporting its legacy per-driver troubleshooting flag. Invalid Pixii SoC values now omit `soc` from the battery emit instead of dropping the whole battery reading.
+- a0ad92a: Prevent surplus-only EV loadpoints from using home battery discharge as synthetic PV surplus, even when "Let battery cover EV" is enabled, and surface the policy in planner diagnostics.
+
+## 0.120.8
+
+### Patch Changes
+
+- 6238d2d: Settings → Planner: the Mode dropdown is gone — it edited a config field that the runtime strategy (set from the dashboard Plan card) overrides, so it showed stale values and confused operators. In its place a read-only "Active strategy" row shows what the planner is actually running. The "PV forecast safety (k)" help text now explains the real mechanism (plans against forecast − k·σ; higher k holds more reserve and charges earlier, it never forces charging), with a live σ/hedge readout under the field.
+- 9e5635a: Reaching your dashboard over Tailscale no longer shows the passkey sign-in
+  gate. The browser's LAN-origin detection treated Tailscale's CGNAT addresses
+  (100.64.0.0/10, RFC 6598) as a public/relay origin, so it waited for a P2P
+  channel that a direct connection never opens and fell back to the sign-in gate
+  — while the same Pi reached over zerotier (192.168.0.0/16) sailed straight
+  through. The CGNAT range is now recognised as a direct-LAN origin in all three
+  copies of the check (`p2p.js`, `next-app.js`, `owner-access/owner-fetch.js`),
+  matching `p2p.js`'s own `isDirectLAN`. Direct IP access — LAN, zerotier, or
+  Tailscale — reaches the dashboard without a passkey prompt.
+
+  The Pi-side LAN-presence check (`isLANClientSource`) now recognises the same
+  CGNAT range, so owner-admin actions (manage passkeys, mint the setup PIN,
+  bootstrap the first passkey) work over Tailscale exactly as over an RFC1918 LAN.
+  An overlay you joined to your Pi is an explicit, authenticated owner decision —
+  genuine LAN presence — while the relay path stays excluded by the X-FTW-Tunnel
+  marker and the loopback check, so the friend pair-flow still cannot reach
+  owner-admin.
+
+## 0.120.7
+
+### Patch Changes
+
+- 05932a3: Fix Home Assistant logging "Invalid option for select.forty_two_watts_mode"
+  for the planner modes. The MQTT discovery for the Mode `select` only
+  advertised six modes, but the bridge publishes the live mode as state — and
+  the default UI choices (`planner_passive_arbitrage` / `planner_arbitrage`)
+  weren't in the advertised list, so HA rejected them every cycle. The discovery
+  options and the API mode validator now both derive from a single
+  `control.AllModes` source of truth, so all ten modes are advertised and the
+  two lists can't drift again.
+
+  Also fixes the matching command path: selecting a planner mode from the Home
+  Assistant dropdown previously returned "unknown mode" because the HA `SetMode`
+  callback (and the boot-time mode restore) carried their own hand-maintained
+  mode lists that omitted the planner modes. Both now validate through
+  `control.IsValidMode`, and the HA setter mirrors the full `/api/mode`
+  side-effects (battery manual-hold clear, PI reset, MPC strategy propagation)
+  via a shared `control.PlannerMPCMode` mapping — so a planner mode picked in HA
+  behaves identically to one picked in the web UI.
+
+- 9f4eab0: Fix surplus-only EV charging never starting on 3-phase-only chargers (e.g.
+  CTEK Chargestorm — 3Φ, 6 A minimum, no phase-switch register). The surplus
+  controller's 1Φ fallback assumed every charger can trickle on a single phase
+  (true for Easee, false for CTEK): on any day the PV forecast couldn't sustain
+  the 3Φ minimum it locked the loadpoint to 1Φ for the day and handed the
+  charger a ~1380 W offer, which a 3Φ-only unit can only answer by writing 0 A —
+  so it never charged. `pickSurplusSteps` now keeps the 3Φ-only step set and
+  never commits the day-long 1Φ lock when the loadpoint is pinned to
+  `phase_mode: "3p"`, and `resolvePhaseMode` no longer lets a stale 1Φ lock
+  override an explicit `"3p"`. A 3Φ-only charger now pauses cleanly below the
+  ~4.1 kW floor and charges in 3Φ steps above it. Configure such chargers with
+  `phase_mode: "3p"`, `min_charge_w: 4140`, and 3Φ-only `allowed_steps_w`.
+
+## 0.120.6
+
+### Patch Changes
+
+- Fix self-update snapshots after Remote Access passkeys have been enrolled, and route more public-home dashboard reads through the strict owner transport.
+
+  The state snapshotter now copies SQLite tables in foreign-key dependency order, so remembered browser keys in `trusted_device_pubkeys` no longer make pre-update snapshots fail. Dashboard, update, diagnostics, notification, pair, HA, EV, system, and loadpoint reads used by the public home route now use `ownerFetch`, preventing raw `/api/*` calls from hitting the relay and producing 403 noise while the P2P channel is opening.
+
+## 0.120.5
+
+### Patch Changes
+
+- Fix Remote Access browser persistence and Home Assistant mode discovery.
+
+  Remote owner sessions now last 30 days, and the legacy passkey login page stores
+  the browser's remembered device key after a successful passkey login so reloads
+  and bookmarks can reuse silent sign-in. The public home loader also explains the
+  current synced-passkey limitation when a browser cannot recover the encrypted
+  home directory from WebAuthn PRF.
+
+  Home Assistant MQTT discovery now advertises every mode the service can publish,
+  including planner modes, and MQTT mode commands accept the same planner values as
+  the HTTP API.
+
+## 0.120.4
+
+### Patch Changes
+
+- Fix first-device Remote Access setup for normal Pi releases: the Pi-side tunnel now allows the claim-key-gated enroll start/finish bridge by default, while all other owner API calls remain P2P-only. The tunnel also returns stable `FTW_*` diagnostic codes when it refuses a request.
+
+## 0.120.3
+
+### Patch Changes
+
+- Add Remote Access support diagnostics: stable `FTW_*` error codes on relay/Pi setup failures, clearer passkey enroll/login troubleshooting details, and a browser-local reset button for stale remote routing cache.
+
+## 0.120.2
+
+### Patch Changes
+
+- Fix Remote Access first-passkey setup so official installs use the public relay
+  after opt-in, only show a setup QR once the relay has accepted the live
+  invitation, and surface clearer Safari/passkey setup errors.
+
+## 0.120.1
+
+### Patch Changes
+
+- f89bfe6: Fix the Raspberry Pi SD-card image release build so pi-gen does not OOM on Docker's apt repository during export.
+
+## 0.120.0
+
+### Minor Changes
+
+- 0174f14: Multi-tenant home-route client + Pi instance descriptor — still behind the relay's `-multi-tenant` flag (NOT yet live in production).
+
+  Completes the browser + Pi half of the multi-tenant home route (the relay half shipped in v0.118.x):
+
+  - **Web:** a PUBLIC landing for anonymous visitors (brand + passkey button only — no instance data); passkey sign-in that derives the directory key from the WebAuthn **PRF** extension, fetches + AES-GCM-decrypts the per-wallet directory blob from the relay, verifies each entry's Pi signature, and routes to the chosen instance's **own** Pi. Identity is pinned **first-key-wins** per `(origin, site_id)` and the relay's `/api/identity` is **never trusted on the public route** (anti-MITM); the Ed25519 directory write key is generated once and synced inside the encrypted blob.
+  - **Pi:** `GET /api/owner-access/instance-descriptor` (owner-authed, served over the P2P channel) returns the Pi's signed `{site_id, pi_pubkey, label}` so the browser can build + verify its directory entry; first enrollment seeds the encrypted directory blob.
+  - The single-tenant / LAN sign-in flow is **untouched** — the multi-tenant path is additive and only active on the public home route.
+
+  Codex-reviewed: two anti-MITM findings (relay-identity TOFU on the public route; pin-overwrite) found and fixed. Cross-language interop is locked by tests: JS-signed blob PUTs verify in Go, and Go-signed descriptors verify in the browser.
+
+  Cutover (flipping `-multi-tenant` on the relay + deploying this web bundle as `-home-web`) still needs the WebAuthn-PRF determinism device test on real synced devices + live browser validation. See `docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md`.
+
+- 0174f14: Multi-tenant onboarding bootstrap on a high-entropy `bootstrap_id` — behind the relay's `-multi-tenant` flag (default OFF, not yet live in production).
+
+  A first-time user with no device key can enroll their first passkey on `home.*` without a prior P2P channel. On the LAN the box mints a 6-digit PIN **and** a high-entropy `bootstrap_id` (≥32 bytes CSPRNG, base64url); the raw secret travels only in the onboarding link's `#fragment` (QR or tap). The relay keys its blind, TTL'd bootstrap store on `claim_key = hex(sha256(bootstrap_id))` — **never** the PIN — so it never holds a guessable secret. The browser derives the same `claim_key`, claims the box's signed descriptor back, verifies its Pi signature, and enrolls through the relay's single enroll-forward (`?claim_key` relay gate + `?pin` validated by the box, 5-try burn). The publish carries `ts_ms` (±30s replay guard) and the enroll-forward is atomic single-use (a 200 finish consumes the window).
+
+  Reworked from the earlier `sha256(PIN)`-keyed store (a Codex audit found the ~10⁶ PIN space brute-forceable offline). A second Codex re-audit then found two more issues, both now closed:
+
+  - **Ceremony-bound, body-bound possession proof** (closes a relay-visible-PIN HIGH **and** a device_pubkey-substitution HIGH). The relay forwards `?pin` to the box, so a compromised relay would see the 6-digit PIN. The browser now also sends `bootstrap_proof = hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token + "|" + hex(sha256(finish_body))))` on enroll/finish; the box validates it (constant-time) on the tunneled path before saving any device. Binding a hash of the **exact finish body** authenticates the whole payload — including the top-level `device_pubkey` (the C4 silent-login key), the WebAuthn attestation, and the friendly name — so a MITM relay can no longer swap `device_pubkey` for its own key (which would have made the relay-controlled key a trusted device and let device-PoP mint `ftw_owner` for the relay). The relay holds only `sha256(bootstrap_id)`, so it can neither forge a proof for its own `ceremony_token` nor reuse the user's single-use one, and it cannot recompute the HMAC after tampering with the body. A relay that captured the PIN still cannot run its own WebAuthn enrollment nor substitute a key. An untunneled LAN finish requires no proof.
+  - **Single-use before side effects** (closes a concurrent-double-finish BLOCKER). The relay now atomically RESERVES the bootstrap (test-and-set) BEFORE forwarding enroll/finish to the box — a concurrent second finish loses the latch and is refused before its enroll can reach the box. A box 200 burns the window; a box rejection releases it for retry. As a source-of-truth backstop, the box re-checks the zero-device window at finish time and refuses if any device already exists.
+
+  Cross-language interop is locked by tests (Go-signed bootstrap descriptor verifies in the browser `verifyEntry`; the browser's `claim_key` and the body-bound `bootstrap_proof` derivations match the box/relay byte for byte, against Go- and openssl-verified vectors). The relay↔box enroll path is now end-to-end: a full-stack e2e drives the real `ftw-relay` enroll-forward host into the real box enroll handler — software-attested enroll/finish with a valid proof (200), wrong/missing proof (403), a MITM relay that swaps `device_pubkey` in the forwarded body (403, no device saved), concurrent double-finish (exactly one 200 + one 403 via the relay reservation), the box zero-device recheck (403 once a device exists), and the C2 fail-closed cases. Still gated by `-multi-tenant` (default OFF); `home.*` stays a 404 in production.
+
+- 0174f14: Route public dashboard price, history, savings, plan, and loadpoint reads through the strict owner P2P transport so they render on the relay-backed home route.
+
+  Remember multiple browser-local device keys for a synced passkey, so Safari on Mac can silent-login after an iPhone-enrolled passkey has already pinned its own key.
+
+  Add a Settings Access tab for the opt-in remote access switch, passkey management, remembered browser keys, and active session revocation.
+
+  Make `remote_access.enabled` the only remote-access opt-in; `FTW_REMOTE_ACCESS_ENABLED` no longer enables remote access by itself.
+
+  Keep the home-route sign-in gate retrying while the owner P2P channel is still opening, and give Chrome/WebRTC a longer handshake window before retrying.
+
+  Clear stale browser-local `ftw.p2p=off` toggles from older builds on the public home route, where strict owner traffic must use the P2P channel.
+
+  Generate or rotate to a persistent high-entropy owner `site_id`; guessable `site:<name>` routing is not preserved.
+
+  Stop bootstrapping fresh public browsers to `site:Home`; without a cached directory the home route now shows the setup/sign-in landing instead of guessing a site.
+
+  Stop serving the dashboard app bundle from the relay in multi-tenant mode. The relay now serves only a small remote loader/login allowlist; after the browser decrypts its directory, static app GETs are routed to the selected Pi while owner APIs remain P2P-only.
+
+  Publish `ftw-relay-web.tar.gz` as a minimal relay bootstrap asset so relay deploys no longer copy the Pi dashboard `web/` bundle.
+
+  Cache Pi-routed static dashboard assets privately in the browser and pause advanced-panel polling until Advanced is visible, improving repeat-load and remote-route responsiveness.
+
+## 0.119.0
+
+### Minor Changes
+
+- b9ab35b: Multi-tenant home-route client + Pi instance descriptor — still behind the relay's `-multi-tenant` flag (NOT yet live in production).
+
+  Completes the browser + Pi half of the multi-tenant home route (the relay half shipped in v0.118.x):
+
+  - **Web:** a PUBLIC landing for anonymous visitors (brand + passkey button only — no instance data); passkey sign-in that derives the directory key from the WebAuthn **PRF** extension, fetches + AES-GCM-decrypts the per-wallet directory blob from the relay, verifies each entry's Pi signature, and routes to the chosen instance's **own** Pi. Identity is pinned **first-key-wins** per `(origin, site_id)` and the relay's `/api/identity` is **never trusted on the public route** (anti-MITM); the Ed25519 directory write key is generated once and synced inside the encrypted blob.
+  - **Pi:** `GET /api/owner-access/instance-descriptor` (owner-authed, served over the P2P channel) returns the Pi's signed `{site_id, pi_pubkey, label}` so the browser can build + verify its directory entry; first enrollment seeds the encrypted directory blob.
+  - The single-tenant / LAN sign-in flow is **untouched** — the multi-tenant path is additive and only active on the public home route.
+
+  Codex-reviewed: two anti-MITM findings (relay-identity TOFU on the public route; pin-overwrite) found and fixed. Cross-language interop is locked by tests: JS-signed blob PUTs verify in Go, and Go-signed descriptors verify in the browser.
+
+  Cutover (flipping `-multi-tenant` on the relay + deploying this web bundle as `-home-web`) still needs the WebAuthn-PRF determinism device test on real synced devices + live browser validation. See `docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md`.
+
+## 0.118.1
+
+### Patch Changes
+
+- 7382139: Harden the (still dormant, behind `-multi-tenant`) relay wallet-blob endpoints.
+
+  - **Writer authentication on `PUT /wallet/{user_handle}/blob`** (closes a Codex HIGH from the v0.118.0 foundation). Each PUT now carries an Ed25519 `write_pub` + `sig`; the relay TOFU-pins the write key on the first write and rejects any later write whose key differs or whose signature fails to verify over a canonical `handle|version|nonce|sha256(ciphertext)` message. A `userHandle`-knower without the owner's passkey-derived write key can no longer overwrite or take over a blob. Wallet blobs are no longer time-GC'd (eviction would drop the pin and reopen a squat window).
+  - **Route gating:** the `/wallet/*` and `/signal/{site_id}/identity` routes are now registered ONLY in multi-tenant mode, and the single-tenant home-host catch-all reserves those paths (404) — so with the flag off the endpoints add no surface (a plain 404, not a 503 or a public-key answer).
+
+  Still dormant: `-multi-tenant` defaults off and the production home route stays disabled. The remaining cutover blocker is the WebAuthn-PRF determinism device test. See `docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md`.
+
+## 0.118.0
+
+### Minor Changes
+
+- b0e20da: Relay multi-tenant home-route foundation — behind `-multi-tenant` (default OFF, NOT active in production).
+
+  Server-side groundwork for `home.fortytwowatts.com` to become a public multi-tenant front door (anonymous visitor → landing; a signed-in wallet → its own Pi) instead of a single pinned instance. Adds: a BLIND per-wallet encrypted-directory store (`WalletBlobStore` — opaque ciphertext the relay never decrypts, durable, bounded, version-guarded), the `GET/PUT /wallet/{user_handle}/blob` endpoints, a per-site `GET /signal/{site_id}/identity` public-key read, and a fail-closed `-multi-tenant` mode that serves ONLY the relay-disk landing/shell (never forwards to a Pi), forces `-require-device-key` on, and requires `-home-web`.
+
+  Dormant scaffolding: the flag defaults off, the multi-tenant routes aren't registered unless it is passed, and the production home route stays disabled. Cutover is gated on a WebAuthn-PRF determinism device test and adding write-authentication to the blob PUT (see `docs/superpowers/specs/2026-06-05-multi-tenant-home-route-design.md`). No change to existing single-tenant behaviour.
+
+### Patch Changes
+
+- 1de3026: Clean up stale root documentation, archive retired planning artifacts, and move the legacy home-ems deploy helper out of the active scripts directory.
+
+## 0.117.0
+
+### Minor Changes
+
+- dff16b5: Hardened relay + device-key remote access: no anonymous path to a home Pi.
+
+  The relay now serves the sign-in shell (`-home-web`) and `/api/identity` (from its
+  pinned `-home-pubkey`) **itself** — an anonymous internet visitor never causes the
+  relay to contact the Pi. To even open a signaling channel, the browser must prove a
+  **device-key**: the relay issues a single-use nonce, the browser signs it with a
+  non-extractable ECDSA P-256 key (WebCrypto, IndexedDB, minted at LAN enrollment),
+  and the relay verifies it against the device-pubkeys the Pi publishes on
+  `/me/register` — anything else is 403'd and the Pi is never woken. The same
+  device-key mints the owner session **silently** over the channel (device-PoP), so a
+  returning device signs in with no Face ID; step-up still requires a passkey, and
+  revoking a device drops its key on both Pi and relay. The gate UI now conveys the
+  posture (direct + end-to-end + relay-blind + "this device is remembered"). LAN-first
+  enrollment; see `docs/superpowers/specs/2026-06-05-hardened-relay-device-key-design.md`.
+
+- dff16b5: Home route: a real sign-in **gate** + inline passkey login (the dashboard IS the
+  door). When you open `home.fortytwowatts.com` and aren't signed in, the dashboard
+  is fully covered by a clean sign-in card ("Reaching your home…" → "Sign in with
+  your passkey") instead of the empty dashboard chrome — which previously rendered
+  "No devices configured / run the setup wizard" to logged-out visitors and falsely
+  read as an unconfigured instance. The passkey ceremony runs in place over the same
+  strict P2P channel (`ownerFetch` / FIX-B) — no redirect to
+  `/owner-access/login.html`. Never shown on the LAN (bypass) or once signed in; the
+  "no devices" prompt is suppressed while logged out. No owner DATA is ever served
+  unauthenticated — the gate is purely the lock's UI.
+
+  Also: the transport indicator is now purely informational (it explains direct vs
+  relayed vs connecting) rather than a click-to-toggle that, on the P2P-only route,
+  just broke the channel. Part of the #438 seamless-UX layer (device-key silent
+  re-auth still to come).
+
+## 0.116.0
+
+### Minor Changes
+
+- 1dc6f35: Arbitrage cycle threshold: a new planner knob, **Min arbitrage spread
+  (öre/kWh)** (`planner.min_arbitrage_spread_ore_kwh`), stops the battery
+  cycling for marginal gains. The planner won't cycle for grid arbitrage
+  unless the price gain beats this many öre/kWh on top of round-trip losses.
+  It applies only to the arbitrage modes (`planner_arbitrage` /
+  `planner_passive_arbitrage`) — self-consumption is never affected — and
+  biases the planner's decision only, so the savings statistics stay on real
+  spot economics. Default 0 = off. Configurable from the Planner settings tab.
+- ed3cfc2: Capability-aware battery reallocation: when one battery can't move in the
+  demanded direction this cycle (e.g. a Ferroamp ESO floored at its discharge
+  SoC limit), the dispatcher now hands its share to a capable sibling instead
+  of leaking it to the grid. Drivers signal this with two optional battery-emit
+  fields, `discharge_capable` / `charge_capable`; absent → assumed capable, so
+  every existing driver is unaffected. The Ferroamp driver reports both from its
+  per-ESO floor/ceiling counts. Symmetric for charge (a full battery is excluded
+  from the charge split).
+- b586f09: Local docker E2E harness — tier 2: container-side P2P + passkey proof.
+
+  Adds an automated, fully-in-docker browser test that drives the real home route
+  through the relay and proves the WebRTC DataChannel forms **directly**
+  container-to-container (where there is no NAT, unlike a Mac-host browser):
+
+  - A headless-Chromium (Playwright) container on the tier-1 bridge net
+    (`docker-compose.e2e-tier2.yml`, profile `tier2`) enrolls and logs in with a
+    passkey via a **CDP virtual WebAuthn authenticator** (unattended), asserts
+    `window.ftwP2P.state()` reaches `direct` and that the selected ICE candidate
+    pair is host/srflx (never `relay`), then makes one authenticated owner API
+    call (`/api/status`) over `p2pFetch`.
+  - New `make e2e-docker-tier2` target brings the stack up, runs the test, and
+    exits non-zero on failure.
+  - New `FTW_P2P_STUN` env knob on the main app: unset keeps the production STUN
+    set; `none`/`off` gathers host candidates only (correct + fast on a closed
+    shared-L2 network like the docker bridge); a comma-separated list overrides
+    the default. No behaviour change when unset.
+
+  The harness runs the Pi with `FTW_OWNER_ACCESS_RPID=home.fortytwowatts.localhost`
+  so the WebAuthn origin check passes against the `*.localhost` secure-context home
+  host. Docs: `docs/local-e2e-docker.md`.
+
+- b586f09: Owner remote access: reach your own dashboard from anywhere via a single URL
+  (`home.fortytwowatts.com`) + a passkey — over a **direct, end-to-end-encrypted
+  browser↔Pi WebRTC DataChannel**. OPT-IN, default OFF (`remote_access.enabled` /
+  `FTW_REMOTE_ACCESS_ENABLED`); the Pi makes no outbound connection unless you turn
+  it on.
+
+  The relay is a **blind signaling rendezvous** — it brokers the connection and
+  serves the static shell, but owner traffic and the session cookie exist only as
+  DTLS-encrypted DataChannel frames and never traverse it in cleartext. Hardening
+  that shipped with it:
+
+  - **Signed DTLS-fingerprint handshake** (ES256 over the site identity key): the
+    browser TOFU-pins the Pi's key from `/api/identity` and verifies every answer,
+    so a relay that swaps the fingerprint can't MITM the channel (fail-closed).
+  - **Fail-closed gate**: an unauthenticated remote request can never reach owner
+    data or control endpoints; the relay forwards only `GET` static assets +
+    `/api/identity`, strips the owner cookie, and the Pi's tunnel marker blocks any
+    LAN-bypass on a tunnelled request. The LAN enrollment PIN is LAN-only.
+  - **Operator-pinned home site** (`-home-pubkey`): the public home host refuses to
+    run trust-on-first-use, so a racing attacker can't claim it across relay
+    restarts.
+  - **Blind TURN** (optional) as a ciphertext-only fallback for hard-NAT/CGNAT
+    peers — costs zero trustlessness.
+  - DoS-resilience on the relay: per-source-IP signaling throttle (Cloudflare-aware
+    via `-trust-cf-ip`), nonce-keyed signaling mailbox, fast unauth-peer reap, and
+    principal-bound poll secrets.
+
+### Patch Changes
+
+- b586f09: Dashboard: route every state-changing owner/CONTROL `/api/*` call through the
+  fail-closed strict transport (FIX-B).
+
+  The owner-access ceremony pages already rode `ownerFetch` (strict P2P, fail-closed
+  503 on a public / `/me/<site>` origin with no DataChannel, raw relay fetch ONLY on
+  a genuine LAN). This extends the SAME behaviour to the dashboard's classic scripts
+
+  - web components so a state-changing call's body + owner session can never traverse
+    the untrusted relay in cleartext on the public home route:
+
+  * `p2p.js` now exposes `window.ownerFetch = p2pFetchStrict` — the dashboard's one
+    shared, fail-closed entry point (not a fork; the identical function the ceremony
+    pages use).
+  * Converted the remaining bare state-changing calls: config save / restart
+    (`settings.js`), self-tune start/cancel (`models.js`), load-twin profile switch
+    - PV/load twin reset (`twins.js`), MPC replan (`plan.js`), EV-charger probe /
+      Tesla verify / driver test (`settings/tabs/devices.js`), battery + PV manual-hold
+      install/clear, pair start/abort, notification test, self-update trigger, and the
+      update-badge snapshot-delete + skip/unskip/rollback/update POSTs.
+  * Read-only GETs stay plain (no body; the relay strips the owner cookie on the
+    P2P-only route, so they can't leak).
+  * New web tests: a static guard that fails if any public-route module bare-fetches
+    a state-changing `/api` call, plus an `ownerFetch` wiring test. The tier-2 docker
+    e2e gains a `window.ownerFetch` fail-closed step + a relay-leak tripwire.
+
+- b586f09: State: skip the boot integrity check when the DB is already known-good so a large
+  `state.db` restarts in seconds instead of minutes.
+
+  `heal.go`'s boot-time `PRAGMA quick_check` scans the entire file, which on a
+  multi-GB `state.db` is minutes of disk I/O on a Pi — and it ran on every boot,
+  making a restart look like a hang. Now a persistent `<db>.clean` "verified-good"
+  marker is armed by `Open` after a successful open, and `openChecked` skips the
+  boot check whenever it is present. On a 1.3 GB field DB the integrity gate went
+  from >5 min to ~40 ms (measured).
+
+  The marker is deliberately NOT a clean-shutdown flag: it persists across both
+  clean shutdowns and crashes (a crash doesn't corrupt a WAL database, so it must
+  not force a slow re-scan), so fast restarts never depend on how the process
+  exited. The only thing that removes it is `Store.VerifyInBackground` finding real
+  corruption — that runs the full check off the startup hot path after the app is
+  already serving, and on failure removes the marker so the next boot runs the full
+  check and heals from snapshot. At-rest SD-card rot is therefore still caught,
+  recovery just takes the next boot instead of blocking this one. The background
+  scan is cancellable (`Close` interrupts it via `sqlite3_interrupt`) so a shutdown
+  isn't blocked by an in-flight multi-minute scan. Startup phases are now timed in
+  the logs (`integrity gate complete elapsed=…`, `migrations complete elapsed=…`)
+  so a slow phase is visible instead of a silent gap. See `docs/fast-restart.md`.
+
+## 0.115.0
+
+### Minor Changes
+
+- dcacd18: Owner remote-access + relay hardening (pre-release security pass) — closes the
+  home.\* exposure and the issues a multi-agent audit surfaced around it.
+
+  **Security**
+
+  - **Authenticated relay registration.** `POST /me/register` is now ES256-signed:
+    the Pi signs `(site_id, host_id, ts)` with its self-sovereign site identity and
+    the relay verifies it, pins the key per site (trust-on-first-use, or an
+    operator-provisioned `-home-pubkey` for the internet-exposed home host), and
+    refuses a conflicting key or a stale timestamp. Previously any internet client
+    could repoint a site's tunnel mapping to a host it controlled (owner-session
+    theft + dashboard MITM).
+  - **No friend-flow owner escalation.** The friend pair-flow reverse-proxies from
+    loopback and must never inherit owner authority. Owner-credential management
+    (enroll an additional passkey, list/delete devices) and pairing control
+    (`/api/pair/start`, `/api/pair/abort`) now require a real passkey session or a
+    genuine private-range LAN source — never the loopback bypass — so a temporary
+    friend grant can't be escalated into a permanent owner passkey, and a friend
+    can't lock the owner out by deleting their passkeys. The PIN-less LAN bootstrap
+    and the enrollment-PIN endpoint were already source-checked; this extends the
+    same discipline to the post-bootstrap credential surface. The owner-remote gate
+    continues to key off the unforgeable tunnel marker, regression-guarded by the
+    end-to-end `TestOwnerGateThroughRelay`.
+  - **Mandatory home-key pin.** The relay refuses to run a public home host
+    (`-home-host`/`-home-site`) without `-home-pubkey`, so the internet-exposed home
+    route is never left in trust-on-first-use mode (claimable by a racer after a
+    relay restart); `-home-allow-tofu` is an explicit testing-only override.
+  - **Correct passkey RP-ID default.** The WebAuthn RP-ID now defaults to
+    `home.fortytwowatts.com` (the origin the owner visits) instead of the relay
+    host, so a deploy that forgets the env var no longer enrolls passkeys bound to
+    the wrong, unusable origin (a one-way door).
+  - **Bounded request bodies.** Every relay request body is capped (with a tighter
+    ceiling on the small unauthenticated control endpoints), and the Pi's WebAuthn
+    finish handlers bound the attestation/assertion body, closing memory-exhaustion
+    vectors on the public JSON surfaces.
+  - **Relay reflected-XSS fix.** The pair-session landing page now charset-validates
+    the routing token on registration and JSON-encodes it into the page, so a token
+    planted via the open `POST /tunnel/register` can't break out of the page.
+  - **On-host liveness.** Loopback `GET /api/health` probes (deploy/CI/docker
+    HEALTHCHECK) are exempt from the gate without exposing health detail remotely.
+
+  **Robustness**
+
+  - Relay caps tunneled body size, bounds each forwarded request with a timeout so a
+    dead-but-registered host fails fast instead of pinning a goroutine, and GCs
+    expired/revoked pair tokens.
+  - `home.*` now serves a calm, self-contained **offline page** (with auto-retry)
+    when the Pi is offline or hasn't checked in recently, instead of a raw timeout.
+
+  **Onboarding & UX**
+
+  - A persistent **"Run setup wizard"** control in the dashboard (re-run setup
+    without a fresh install), an in-UI **"Show enrollment PIN"** affordance on the
+    LAN (with copy + live countdown) so first-passkey enrollment isn't a dead end,
+    and `/setup?step=N` deep-links now navigate to the requested step.
+  - **EV charger setup fix:** the provider dropdown is populated and the
+    username/field-id mismatch that made the whole EV section non-functional is
+    corrected.
+
+  **Further hardening (independent review)**
+
+  - Owner-credential surfaces fully closed to the friend pair-flow: the P2P offer
+    (`/api/p2p/offer`) now uses the strict authorizer (a friend could otherwise
+    open a WebRTC DataChannel that outlives the grant), and the ftw-pair
+    friend-proxy refuses to forward `/api/pair/*` and `/api/owner-access/*` (so a
+    friend can't forge the owner's pair-card or probe owner-access).
+  - Relay/Pi memory bounded against unauthenticated floods: the token registry
+    clamps TTL + caps live tokens, the owner registry caps TOFU sites and GCs
+    stale ones (never the pinned home site), the tunnel queue no longer leaks
+    waiter-map entries per polled host_id, and the Pi caps in-flight WebAuthn
+    ceremonies and the landing-page hit counter.
+  - Deploy docs corrected for the shipped RP-ID cutover (now
+    `home.fortytwowatts.com`), the ES256-signed `/me/register`, and the
+    `-home-pubkey` requirement — the runbook previously instructed the wrong,
+    one-way-door RP-ID.
+  - The friend-proxy denylist now normalizes (decodes + cleans) the path before
+    matching, so `/api/%70air/status`-style percent-encoding can't smuggle a
+    request past it; the relay's token registry evicts the oldest _unapproved_
+    token at capacity (a flood can't lock out real pair sessions) and the tunnel
+    queue caps total parked long-poll waiters against an unauthenticated flood.
+
+  Note for operators: upgrade the relay and the Pi together — the hardened relay
+  requires the signed registration the updated Pi sends.
+
+### Patch Changes
+
+- 36c2404: Fix dashboard stalls on late-day loads by aggregating the `/api/status`
+  energy-today totals in SQLite instead of loading every history sample
+  since midnight into Go on every 2-second status poll.
+- f6aca48: Dashboard: fix the 5–10 s first-load stall and collapse duplicate request
+  storms — three related changes to how the live dashboard talks to the backend.
+
+  **P2P no longer stalls the first paint.** The Phase 5 P2P transport
+  (`window.p2pFetch`) awaited the WebRTC handshake on the first request, so the
+  first `/api/status` poll — which gates the whole live render — blocked on the
+  8 s `CONNECT_TIMEOUT_MS` before falling back to plain `fetch`. Two fixes:
+  (1) `p2pFetch` is now non-blocking — it uses the DataChannel only once it's open
+  and otherwise serves the request over the relay immediately while connecting in
+  the background, so no request ever waits on the handshake (on the relay path
+  either); (2) P2P is skipped entirely on a direct-LAN connection — detected by
+  host (`isDirectLAN`: localhost, private/CGNAT IP, single-label or `*.local`
+  name), not by the pathname. The bare-host relay (e.g. `home.fortytwowatts.com`)
+  is a public FQDN reached through the relay, so it is correctly treated as a
+  remote context and keeps P2P — the earlier `apiBase() === ""` gate wrongly
+  disabled it there. On a direct-LAN visit the transport indicator stays hidden
+  instead of showing an un-toggleable "Relay" badge.
+
+  **Live 24 h history is deduped.** `/api/history?range=24h&points=288` was
+  fetched on boot, the 1-min poll, and every (undebounced) window resize, so a
+  first-load layout resize storm fanned out into many identical requests. A small
+  in-flight-coalescing + 15 s-TTL cache (`fetchHistory`, mirroring
+  `ftw-history-card`'s `dailyFetchCache`) now shares one payload across those
+  triggers; the periodic poll forces a fresh sample.
+
+  **Notification-history badge is deduped.** `<ftw-notif-history>` now shares one
+  in-flight request and a short-TTL cache for `/api/notifications/history` across
+  the badge poll and modal open, collapsing transient bursts to a single request.
+  The modal's manual Refresh button forces a fresh fetch, and non-OK responses are
+  never cached.
+
+- 64a6fe7: Relay: authenticate the host long-poll with a per-host **poll token** — closes
+  the `host_id`-race flagged during the owner-access hardening review.
+
+  `POST /me/register` (ES256-signed) and `POST /tunnel/register` now return a poll
+  token that the Pi / pair sidecar must present (header `X-FTW-Poll`) on
+  `GET /tunnel/{host_id}/next` and `POST /tunnel/{host_id}/response/{req_id}`. The
+  relay verifies it constant-time and rejects unknown-host / wrong-token polls. So
+  a caller that merely learns a host's `host_id` can no longer poll for (and steal)
+  its tunneled traffic — which carries the owner's session cookie — and an
+  unregistered `host_id` can't create long-poll waiters at all. Tokens are minted
+  on the verified registration, refresh on re-registration (so they survive a relay
+  restart re-mint), and are GC'd after going unused.
+
+  Operators: upgrade the relay and the Pi together — the hardened relay requires
+  the token the updated Pi/sidecar sends.
+
+## 0.114.0
+
+### Minor Changes
+
+- 2a67660: Owner remote access — **LAN-PIN first enrollment**. A short-lived 6-digit PIN,
+  readable only on the Pi's local network (`GET /api/owner-access/enroll-pin` —
+  `403` over the relay) and printed to the Pi's console, authorizes the very
+  first passkey enrollment through the relay origin. This resolves the deadlock
+  between the WebAuthn RP-ID origin requirement (the first passkey must be
+  created at `relay.fortytwowatts.com`) and the bootstrap hardening that blocks
+  un-authenticated first-enrollment over the tunnel. `enroll.html` gains an
+  optional PIN field. Once one passkey exists the PIN path is inert (further
+  enrollment requires a logged-in session).
+- 7efc9b3: Owner remote access — single-home **`home.fortytwowatts.com`** cutover. The relay
+  gains `-home-host` / `-home-site` flags that forward a bare host (e.g.
+  `home.fortytwowatts.com`) verbatim to the single owner Pi, so the dashboard loads
+  at the clean root URL with working absolute asset paths (no `/me/<site_id>`
+  prefix). The Pi auth-gate is refined to keep static assets (CSS/JS/images) public
+  so the login page renders styled, while `/api/*` and the dashboard HTML shell stay
+  gated.
+- 14f964f: Owner remote access — passkey foundation (home route, Phases 1–3):
+
+  - **Safe floor:** a per-process unforgeable tunnel marker excludes relay-tunnelled
+    (remote) requests from LAN-bypass, and a global auth-gate wraps the whole mux —
+    remote hits now require a passkey session, while genuine LAN/loopback stays
+    frictionless. First-enrollment bootstrap is denied over the tunnel (LAN-only).
+  - **Identity spine:** every Pi generates an always-on self-sovereign ES256 identity
+    on first boot (Nova reuses it when federation is enabled); `GET /api/identity`
+    exposes the public key; the owner's WebAuthn identity is now a stable opaque
+    wallet handle decoupled from the mutable site name (rename-safe).
+  - **Usernameless login:** discoverable resident-key passkeys + Conditional-UI
+    autofill (no username — just Face ID / Touch ID / Windows Hello) with a button
+    fallback, plus a backup-passkey recovery nudge.
+
+- ab238ee: Home route Phase 5: **direct browser↔Pi P2P transport**. The dashboard at
+  home.fortytwowatts.com now opens a direct, DTLS-end-to-end-encrypted WebRTC
+  DataChannel to the Pi and routes its live `/api/status` poll over it, bypassing
+  the relay on the data path. A `Direct / Relay` indicator in the header shows
+  which transport is live; if the DataChannel can't open (hard NAT, no STUN
+  reachability) it falls back to the relay fetch invisibly.
+
+  - **Signaling rides the existing authenticated owner tunnel** — `POST
+/api/p2p/offer` is owner-gated, so only an authenticated owner can open a
+    channel. No relay changes.
+  - **Pi side**: `p2p.Manager` answers SDP offers and serves the channel with a
+    `Bridge` over the local API mux; pure Go (`pion/webrtc/v4`, no CGo), with
+    PeerConnection lifecycle reaping and a connection cap.
+  - The DataChannel carries the existing `tunnel.TunneledRequest/Response`
+    frames, so the Pi's mux is unchanged. The data plane is ciphertext even over
+    a future TURN relay — closing the "cloud sees plaintext" gap for P2P-routed
+    traffic. STUN-only for now; TURN deferred.
+
+- e0eb84c: Owner remote access: **persist sessions** to `state.db` (a new `owner_sessions`
+  table) so a Pi restart no longer signs you out — the in-memory session map is
+  restored on boot. And the owner-access landing now **manages passkeys** when
+  signed in: list your enrolled passkeys, remove (revoke) one, or add a device.
+- 3702a27: **Relay: the 4-digit code is now a one-time exchange for a session grant,
+  not a standing password.** Previously, once a pair session was approved,
+  anyone who got hold of the `/h/<token>/…` URL had full access for the
+  rest of the TTL — and for MCP that means powerful tools
+  (`run_command`, `modbus_write`, `deploy_driver`, `write_file`). A
+  forwarded or leaked-from-history URL was effectively a host handover.
+
+  Now, accepting the code mints a high-entropy session grant (32 bytes,
+  CSPRNG). It is handed to the friend exactly once:
+
+  - **MCP**: the landing page prints
+    `claude mcp add ftw-friend --transport http <url>/h/<token>/mcp --header "Authorization: Bearer <grant>"`.
+    `/h/<token>/mcp` now requires that Bearer grant.
+  - **Browser/dashboard**: approval sets an `HttpOnly; Secure;
+SameSite=Strict` `ftw_grant` cookie scoped to the session path;
+    `/h/<token>/web/…` now requires it.
+
+  A leaked-but-already-active URL is useless without the grant — the
+  recipient lands back on the code-entry page and doesn't have the
+  out-of-band 4-digit code (5 wrong tries still locks it). The grant is
+  validated constant-time, never forwarded to the host, and expires with
+  the session. `POST /h/<token>/approve` now responds `200 {"grant":"…"}`
+  instead of `204`.
+
+  Works on the existing path-based routes — no subdomains or new domain
+  required (the browser-dashboard _rendering_ fix and any subdomain work
+  remain deferred; see `docs/goals/relay-subdomain-sessions.md`).
+
+### Patch Changes
+
+- 623a998: Fix the e2e pair-flow tests (`TestPairFlow`, `TestPairFlowThroughRelay`) so
+  they bind a dynamic API port instead of a hardcoded `:8080`. On a machine
+  where `:8080` is already taken (e.g. an OrbStack / docker control-plane
+  publishing `0.0.0.0:8080`), the test's main service couldn't bind, `waitForAPI`
+  silently latched onto the squatter, and the friend's request 404'd — a false
+  "grant broken" failure. The tests now use the same `freePort` helper
+  `stack_test.go` already relies on.
+- 5aa164f: Home route Phase 5 groundwork: add the CI-verifiable P2P transport core
+  (`go/internal/p2p`). A `Bridge` reads `tunnel.TunneledRequest` JSON frames off
+  an open WebRTC `DataChannel`, replays each against the local HTTP handler, and
+  writes back a `ResponseFrame` — the same tunnel protocol the relay long-poll
+  uses, so the Pi's mux is unchanged. Proven by an in-process pion↔pion loopback
+  test (DTLS DataChannel, no browser/network). Pure-Go (`pion/webrtc/v4`, no
+  CGo). Not yet wired to any user-facing surface — the relay signaling endpoints
+  and browser `p2pClient` are later slices that need a browser harness.
+- c333139: Persist the WebAuthn `BackupEligible` / `BackupState` credential flags on enrolled
+  passkeys and restore them at login. Without this, go-webauthn rejected logins from
+  synced / backed-up passkeys (iCloud Keychain, Google Password Manager) with
+  "BackupEligible flag inconsistency during login validation" — the stored credential
+  reported BE=false while the live assertion reported BE=true. Existing flag-less
+  credentials must be re-enrolled.
+- e91bbea: Fix the owner-access sign-in page throwing "OperationError: A request is
+  already pending." The page started a Conditional-UI (autofill) WebAuthn
+  ceremony on load and a second one on the "Sign in with passkey" button click
+  without cancelling the first — browsers allow only one credential request at a
+  time (a password manager like Bitwarden grabbing the autofill slot makes the
+  collision near-certain). The page now tracks an `AbortController` and aborts any
+  in-flight ceremony before starting the next, so the button and autofill no
+  longer collide.
+- 5a6d1be: Owner remote access: add a real server-side **sign out**. The `ftw_owner`
+  session cookie is HttpOnly, so the landing page's old client-side
+  `document.cookie` clear never actually logged you out — the session stayed alive
+  on the Pi. New `POST /api/owner-access/logout` revokes the session both in
+  memory and in the persisted store and expires the cookie; the landing's
+  Sign-out button now calls it. `whoami` also returns `can_sign_out` (false on
+  LAN-bypass) so the dashboard can show a Sign-out control only on a real remote
+  session.
+- 75f4579: Owner remote access hardening (security review): (1) deleting a passkey now
+  revokes its active sessions immediately, so revoking a lost device actually logs
+  it out instead of leaving its session alive until the 24 h TTL; (2) the LAN
+  bootstrap enrollment PIN is burned after 5 wrong guesses, so its 6-digit space
+  can't be brute-forced within the 10-minute window.
+- 2d7f3f1: ui: dashboard banner when the database auto-recovered from corruption
+
+  The dashboard now reads the `storage` field from `GET /api/health` (added in
+  the two-tier storage work) and shows a dismissible amber banner when
+  `state.db` or `cache.db` was found corrupt and healed at boot — e.g. "cache.db
+  was corrupt — rebuilt empty, re-fetching" or "state.db … restored from last
+  snapshot". Closes the loop so DB corruption is visible at a glance instead of
+  only in the logs.
+
+- 59e33aa: Fix a relay tunnel **poll-waiter** bug: a timed-out long-poll left a dead waiter
+  channel in the queue, so a later request was handed off to that dead poller and
+  **silently dropped — hanging the caller forever** (the remote dashboard would
+  "just load" once a host had idled long enough to accumulate dead waiters).
+  Timed-out and cancelled waiters are now removed from the queue, and the channel
+  is drained first so a request handed off in the race window is never lost.
+
+## 0.113.0
+
+### Minor Changes
+
+- bba0d1a: prices: implement the ENTSO-E day-ahead XML parser
+
+  The `entsoe` provider previously returned `"entsoe: XML parser not yet
+implemented"` for every fetch — selecting it in Settings → Price (or as a
+  fallback when elprisetjustnu fails) silently produced no prices at all.
+
+  It now decodes the A44 `Publication_MarketDocument` (TimeSeries > Period >
+  Point), handling both PT60M and PT15M resolutions and the sparse
+  carry-forward representation, and converts EUR/MWh to the configured
+  currency per kWh via the existing FX converter (ballpark 11.5 SEK/EUR when
+  rates aren't wired). A day the auction hasn't published yet returns no
+  rows, mirroring the elprisetjustnu path so the hourly scheduler just
+  retries.
+
+- 285cca0: state: resilient two-tier storage with auto-heal
+
+  Disposable, re-fetchable data (spot prices, weather forecasts) now lives in a
+  separate `cache.db`, isolated from the precious `state.db` (trained models,
+  energy history, device identity). At boot each database runs `PRAGMA
+quick_check`: a corrupt `cache.db` is quarantined and rebuilt empty
+  (re-fetched within the hour); a corrupt `state.db` is restored from a daily
+  recovery snapshot, or quarantined and started fresh if none exists. Every
+  recovery is surfaced on `GET /api/health` under `storage`, so DB corruption is
+  never a silent, blank-dashboard failure again. Existing installs migrate
+  automatically — `prices`/`forecasts` move from `state.db` to `cache.db` on
+  first boot.
+
+### Patch Changes
+
+- e046eb0: ui(flow): drop the "· charging/discharging" suffix on battery nodes
+
+  The battery node in the energy-flow view showed `target −83 W · discharging`,
+  which overflowed the node circle. The suffix is now removed — the live W value
+  and SoC% already convey direction — so the label reads just `target −83 W`.
+
+## 0.112.0
+
+### Minor Changes
+
+- 3e24a6e: **Settings UI: expose `pv_forecast_safety_k` on the Planner tab.** The
+  downside-PV safety factor (v0.111.0) was config-only; it now has a "PV forecast
+  safety (k)" field under Settings → Planner (default 1.0, with inline help).
+  Operators can dial it down to 0 to use the full battery, or up to keep more
+  reserve on uncertain days, without editing config.yaml.
+
+### Patch Changes
+
+- c359527: **planner_arbitrage: the battery now reactively covers a sudden load on a
+  charge-from-PV-surplus slot.** Previously, when the DP planned to "absorb PV
+  surplus" this slot (a charge slot with `PlannedGridW ≈ 0` — charge from PV,
+  not buy from the grid) and a large unforecast load came in, the battery sat
+  idle at 0 W while the house imported the deficit from the grid, waiting for the
+  slow reactive replan (60 s+ cooldown) to catch up. The existing PlannedGridW
+  soft cap correctly _backed the charge off_ toward available PV, but floored at
+  0 and never flipped to discharge, so the battery never supported the load.
+
+  The soft cap's back-off may now go **negative (discharge)** on a
+  charge-from-PV-surplus slot, driving projected grid back toward the plan's
+  `PlannedGridW` (~0) — i.e. the battery covers the load the moment PV can't,
+  instead of importing. This is the charge-side mirror of the existing
+  discharge-slot cover-load carve-out.
+
+  Three dispatch rails were aligned through a single `coverLoadChargeSlot`
+  predicate so the discharge isn't undone downstream: the soft-cap floor,
+  `planHasNonDischargeIntent` (so `noSelfDischarge` doesn't re-clamp it), and the
+  plan/exec sign floor (so it isn't treated as a sign mismatch).
+
+  **The same cover-load behaviour now also applies to `planner_arbitrage`
+  _idle_ slots.** An idle slot (the DP planned neither charge nor discharge,
+  expecting PV to cover the load) used to stay on the energy path — which yields
+  a 0 W target and can't react — so a forecast miss left the site importing while
+  the battery sat idle. Idle `planner_arbitrage` slots now fall through to the
+  reactive PI / grid=0 path, the same one `planner_passive_arbitrage` idle slots
+  already use: the battery discharges to cover a live import, and the existing
+  live-export gate still prevents it from reactively absorbing a live PV surplus
+  (the DP's idle choice is honoured on the charge side).
+
+  Scope is deliberately narrow and safe:
+
+  - Only `planner_arbitrage` (mirroring the existing `planner_passive_arbitrage`
+    behaviour). `planner_cheap` idle slots keep the non-discharge block — only
+    deliberate discharge slots are exempt there.
+  - Charge slots: a deliberate grid-charge (`PlannedGridW` ≥ the 100 W import
+    band) still floors at 0; only charge-from-PV-surplus and idle slots flip to
+    reactive cover-load.
+  - Normal sunny charge-from-surplus operation is unchanged (the cap only fires
+    on a live import divergence; absorbing surplus is untouched).
+  - The SoC floor, fuse guard, and slew limiter still bound the discharge.
+
+  Does not change PV forecasting or any planner mode other than
+  `planner_arbitrage`.
+
+- 49a3046: loadpoint: detect CTEK NCRQ (car-side refusal) and stop allocating PV to a phantom EV sink
+
+  When a vehicle hits its onboard SoC target mid-session, the CTEK driver reports
+  `CHRG → NCRQ` ("No Charge Request") — the car has decided it's done, even
+  though the cable is still plugged in. Before this fix `classify_state` had no
+  branch for NCRQ, the loadpoint manager kept inferring a low SoC from the
+  session's plug-in anchor, and the MPC kept allocating multi-kW of PV surplus
+  to a sink that would never accept it. With a saturated home battery and no
+  other dump load, the surplus spilled to the grid — sometimes at negative spot.
+
+  The fix wires car-side refusal end-to-end:
+
+  - `drivers/ctek_hybrid.lua` — `classify_state` recognises `NCRQ` and emits a
+    new `request_active` flag in the EV table (false on NCRQ, true otherwise).
+  - `internal/loadpoint` — `Manager.Observe` takes a `requestActive bool`. When
+    the vehicle holds NCRQ past `NCRQCompletionThreshold` (90 s) on a session
+    with a configured target, the inferred SoC pins to `targetSoCPct` and
+    `SoCSource` becomes `"ncrq"`. The latch clears on plug-out only — a transient
+    EVSE retry isn't enough to reopen the allocation.
+  - `cmd/forty-two-watts` — `telAdapter` parses `request_active` from
+    `DerReading.Data`, defaulting to `true` so non-NCRQ-aware drivers (Easee,
+    Zap, etc.) keep their existing behaviour.
+
+  The pinned SoC then flows naturally into `mpc.LoadpointSpec.InitialSoCPct`
+  on the next replan: `InitialSoCPct == TargetSoCPct` means the DP allocates
+  0 W to this loadpoint and the PV/battery curtail-vs-export trade-off no
+  longer competes against a fictional sink.
+
+- e0ba0bb: **A charge schedule now overrides the surplus 1-phase forecast lock.** On a
+  cloudy day the surplus_only logic can pin a loadpoint to 1-phase for the whole
+  day (`surplusLockedTo1P`, the "today's PV can't sustain 3Φ" verdict). That lock
+  is sticky and was applied even when the operator had set a **deadline-driven
+  charge schedule** that needs 3-phase grid power — so an "11 kW by 13:00"
+  schedule was silently throttled to ~3.7 kW (1-phase) and could miss its target.
+
+  Phase selection now puts an **active schedule first**: when a schedule SoC
+  target is set, the charger is given the operator's explicit phase pin or
+  `auto` (never forced to `1p` by the surplus optimisation), so a scheduled
+  charge can use 3-phase. With no schedule, the surplus 1-phase lock and the
+  30-minute near-term dwell verdict behave exactly as before. The precedence
+  lives in a single pure `resolvePhaseMode` helper with a table-driven test.
+
+## 0.111.0
+
+### Minor Changes
+
+- a129137: **Replace the SoC safety floor with downside-PV planning.** The MPC's forecast-
+  risk reserve was a `soc_safety_floor_pct` (default 25 %) — a soft cost penalty
+  that kept SoC above a percentage on PV-surplus slots. A percentage is the wrong
+  unit (25 % of a 5 kWh battery and a 40 kWh battery hedge wildly different
+  absolute risk), it couldn't be set low or disabled (`0` was forced back to
+  25 %), and as a separate penalty it could fight legitimate "run down now, refill
+  cheap later" decisions.
+
+  The planner now instead optimises against **downside PV**: `PV_plan = forecast −
+k·σ`, where σ is the live PV forecast-error std (the pvmodel residual std) and
+  `k = pv_forecast_safety_k` (default 1.0; `0` disables the hedge). The DP no
+  longer runs the battery down betting on PV that may not arrive, so a reserve
+  _emerges from the live forecast uncertainty itself_ — large on variable cloudy
+  days, ~zero on clear days, and naturally inert in winter / no-sun (so passive
+  runs its charge-cheap / discharge-for-self-consumption loop down to the hardware
+  floor). No separate magic floor; the robustness comes from the economics.
+
+  **Config:** new `pv_forecast_safety_k` (pointer; unset → 1.0, explicit `0` →
+  no hedge). `soc_safety_floor_pct` and `safety_floor_penalty_ore_kwh_hour` are
+  deprecated — still parsed so existing config loads, but ignored with a warning.
+  Remove them and set `pv_forecast_safety_k` instead.
+
+## 0.110.0
+
+### Minor Changes
+
+- 34335cf: **Document and support running off a Mac mini or a generic Linux server.**
+  The Docker stack already ran on any Linux box via `docker-compose.yml`,
+  but that file uses `network_mode: host` — a Linux-kernel feature that, on
+  macOS, binds to the Docker Desktop VM rather than the Mac, leaving the
+  dashboard unreachable and silently breaking device discovery.
+
+  - **`docker-compose.macos.yml`** — a self-contained macOS compose file
+    that swaps host networking for bridge networking with published ports
+    (`8080`, `1883`). The app reaches the embedded broker by service name
+    (`mosquitto:1883`), and the `ftw-updater` sidecar is wired to the
+    macOS file so the in-app Update/Restart buttons recreate the right
+    containers.
+  - **`scripts/install-macos.sh`** — one-shot macOS installer: verifies
+    Docker Desktop is up, lays out `~/forty-two-watts`, fetches the macOS
+    compose file + broker config, and brings the stack up. The Linux
+    installer now bails early with a pointer when run on macOS.
+  - **`docs/deploy-platforms.md`** — new guide covering both the generic
+    Linux server path (Ubuntu/NUC/VM: install, `ufw`, device-identity
+    caveats) and the Mac mini path (Docker Desktop networking caveats:
+    point MQTT at `mosquitto`, use explicit driver IPs since mDNS/broadcast
+    don't cross the VM boundary, keep-it-running tips). `docker-compose.yml`
+    and `operations.md` now cross-reference it.
+
+- f6935e4: **Add `site.max_export_w` — an opt-in site export ceiling below the
+  physical fuse.** Some inverters trip into a protective fault on
+  _sustained_ grid export well under the breaker rating: the Ferroamp
+  EnergyHub faults to state `0x8030` after ~8 kW of continuous midday
+  export (battery discharge stacked on PV surplus) and only recovers as PV
+  wanes — losing hours of solar. Recurred daily on a live
+  `planner_arbitrage` site whose plan discharged the battery into the
+  morning price peak while PV was already exporting; grid voltage and
+  frequency were both in spec at every trip, ruling out a normal grid
+  protection.
+
+  `max_export_w` (W, magnitude; `0` = disabled, the default) is enforced
+  on two layers:
+
+  - **Dispatch** — the fuse guard's export side now scales battery
+    discharge against `min(fuse − margin, max_export_w)` via the new
+    `(*State).effectiveExportCeilingW`, mirroring the import-side
+    `effectiveImportCeilingW` / `peak_import_ceiling_w`. Hot-reloadable.
+  - **MPC** — every plan slot's export limit becomes
+    `min(FuseMaxW, max_export_w)` (`clampSlotGridLimits`), so the DP never
+    _schedules_ a discharge that would over-export — fixing the root cause
+    rather than only clamping at execution time. Applied at startup
+    (parity with the existing per-slot fuse plumbing).
+
+  Off by default; existing sites are unaffected until they set the knob.
+  The full-battery, PV-only over-export case still needs PV curtailment —
+  the discharge clamp can only scale battery action, not PV.
+
+- b4d3db6: **Savings: baseline now includes EV charging priced at the day's average,
+  so EMS-scheduled EV laddning shows up as savings instead of zeroing out.**
+  Previously the `BaselineCostOre` returned by `state.DailyCostBreakdown`
+  (and surfaced by `/api/savings/daily` as `baseline_cost_ore`) was
+  `Σ slot ( house_load_w × spot_total )`, where `house_load_w` was
+  explicitly the meter reading minus EV (see
+  `main.go`'s `loadW := gridW − batW − pvW − evW`). Two consequences:
+
+  1. When the EMS scheduled EV charging onto a near-zero spot hour, that
+     energy contributed ~0 to baseline but the matching grid import still
+     went into `ActualCostOre`. Saved-tal looked flat or even negative.
+  2. When the EV was charged on a higher-priced hour (cold-start, no
+     override), actual rose while baseline didn't move — the metric was
+     systematically biased toward "lost" whenever the EV was active.
+
+  The breakdown now treats EV separately:
+
+  - `BaselineHouseOre` keeps the slot-by-slot house pricing (unchanged
+    behaviour for the EV-less case).
+  - `BaselineEvOre = EVWh × AvgImportOreKwh / 1000` prices the day's EV
+    energy at the day's time-weighted average spot. Interpretation: "a
+    dumb charger with no timing awareness would have paid the day's avg
+    per kWh". Smart scheduling onto cheap hours then surfaces as savings;
+    charging on a peak shows up as a penalty. Symmetric.
+  - `BaselineCostOre = BaselineHouseOre + BaselineEvOre` (sum exposed for
+    back-compat).
+  - `EVWh` is derived per history sample as
+    `grid_w − bat_w − pv_w − load_w` (clamped non-negative), the inverse
+    of `main.go`'s identity. No schema change.
+
+  The `/api/savings/daily` response gains `ev_wh`, `baseline_house_ore`,
+  and `baseline_ev_ore` fields so the UI can render the EV share of
+  savings separately. Existing fields (`baseline_cost_ore`, `saved_ore`,
+  `flat_cost_ore`) keep their names; their values now incorporate the EV
+  term.
+
+  Historical days will re-render with the new baseline once a process
+  restart clears the savings cache; volume columns are unchanged.
+
+### Patch Changes
+
+- 8df5c11: Fix backend safety edge cases around driver default timeouts, stale site-meter fallback, loadpoint surplus-only persistence, and MPC idle action selection with asymmetric power limits.
+- 1cca922: **Easee driver: pause+resume the contactor on a live phase flip so 1Φ→3Φ
+  actually takes effect.** The Easee only latches its phase count when a session
+  (re)starts — writing `phaseMode=3` while a session is actively charging at 1Φ
+  leaves the contactor on a single phase, so a loadpoint that crossed from 1Φ to
+  3Φ (e.g. a schedule ramping to 11 kW) stayed throttled to ~3.7 kW. Field-
+  confirmed: only a manual pause+resume flipped it.
+
+  The driver now pauses charging before writing the new `phaseMode` on a real
+  mid-session flip (`last_sent_phases` already set); the existing auto-resume
+  (offer > 0 while paused) re-closes the contactor on the new phase count. The
+  first command of a session is unaffected (no live contactor to recycle).
+
+- 32c238e: **surplus_only EV charging: smooth the step setpoint so the EV and home
+  battery stop fighting over the same PV surplus.** The surplus*only setpoint
+  magnitude tracked the \_instant* surplus and snapped to an `allowed_steps_w`
+  step every 5 s tick. Because `surplusW = −gridW + batW + evW` counts the home
+  battery's current charge power as EV-available, a single-tick wobble (the
+  battery briefly backing off, a cloud edge, a load twitch) ratcheted the EV up
+  a step it couldn't hold — it collapsed the next tick, and the repeated
+  multi-kW load swing whipsawed the home battery's reactive PI into integrator
+  windup, so the battery stopped delivering its planned discharge (an EV↔battery
+  limit cycle; observed live as `ev_w` swinging 0–4.7 kW and the battery
+  under-delivering to ~4% of plan).
+
+  The step setpoint now uses **asymmetric smoothing**: down-steps still track the
+  instant surplus (the no-import promise is unchanged), but an **up-step is gated
+  on the rolling average** — the EV only climbs to a higher step when the smoothed
+  surplus sustains it. This breaks the limit cycle: the EV ramps up only on a
+  genuine surplus rise and the home battery's PI stays stable. Pause/resume
+  hysteresis and the no-import guarantee are untouched.
+
+- 990457e: fix(mpc): include planned EV loadpoint power when computing PV curtailment limit
+
+  `annotateCurtailment` previously only considered house load + battery charge when deciding how much PV can be safely absorbed locally before recommending `pv_limit_w`. When the planner had scheduled EV charging (`LoadpointW > 0`) in a negative-export-revenue slot, the limit would be too low and a curtailment-capable driver could starve the EV session the DP itself had chosen.
+
+  The fix adds `max(0, LoadpointW)` to the local-consumption total, matching the accounting already used for battery charging. Updated godoc, docs, and added regression test.
+
+  This only affects sites using both planner strategies that can produce export + a PV-curtailment-capable driver + configured loadpoints.
+
+- 4f2e204: Fix dashboard UI state regressions around settings edits, notification history, history cakes, and the Plan Today horizon.
+- 9f10e91: fix(loadpoint): reactive per-phase fuse clamp for the EV charger
+
+  The site-level fuse guard only protects the three-phase _total_ — a single
+  phase can still trip from house-load imbalance (a vacuum, kettle or oven on
+  one leg) stacked on top of the EV's per-phase draw, which forced manual
+  ramp-downs in the Tesla app. The loadpoint now reads the site meter's live
+  per-phase currents (`meter_l1_a/l2_a/l3_a`) and reactively caps the EV's
+  `max_amps_per_phase`: the worst phase drops by the full overage the instant
+  it nears the breaker, and recovers at 1 A/tick once there is headroom
+  (fast-down / slow-up servo, deadband below the limit). Pure, table-tested
+  `nextFusePhaseCapA`; clamp disabled cleanly when per-phase telemetry is
+  absent.
+
+## 0.109.0
+
+### Minor Changes
+
+- af6435c: **Relay: the 4-digit code is now a one-time exchange for a session grant,
+  not a standing password.** Previously, once a pair session was approved,
+  anyone who got hold of the `/h/<token>/…` URL had full access for the
+  rest of the TTL — and for MCP that means powerful tools
+  (`run_command`, `modbus_write`, `deploy_driver`, `write_file`). A
+  forwarded or leaked-from-history URL was effectively a host handover.
+
+  Now, accepting the code mints a high-entropy session grant (32 bytes,
+  CSPRNG). It is handed to the friend exactly once:
+
+  - **MCP**: the landing page prints
+    `claude mcp add ftw-friend --transport http <url>/h/<token>/mcp --header "Authorization: Bearer <grant>"`.
+    `/h/<token>/mcp` now requires that Bearer grant.
+  - **Browser/dashboard**: approval sets an `HttpOnly; Secure;
+SameSite=Strict` `ftw_grant` cookie scoped to the session path;
+    `/h/<token>/web/…` now requires it.
+
+  A leaked-but-already-active URL is useless without the grant — the
+  recipient lands back on the code-entry page and doesn't have the
+  out-of-band 4-digit code (5 wrong tries still locks it). The grant is
+  validated constant-time, never forwarded to the host, and expires with
+  the session. `POST /h/<token>/approve` now responds `200 {"grant":"…"}`
+  instead of `204`.
+
+  Works on the existing path-based routes — no subdomains or new domain
+  required (the browser-dashboard _rendering_ fix and any subdomain work
+  remain deferred; see `docs/goals/relay-subdomain-sessions.md`).
+
+### Patch Changes
+
+- ce92b4a: **Fix: relay landing page rejected every approval code as "Wrong code"
+  even when the friend typed the right one.** The `fmt.Fprintf` that
+  renders the landing HTML in `ftw-relay`'s `publicLanding` passed format
+  arguments in the wrong order, so the embedded JS `const TOKEN` was
+  populated with the token state (`"pending"`) instead of the actual
+  session token. The Activate button then POSTed to
+  `/h/pending/approve`; the relay couldn't find that token and returned
+  `403 Forbidden`, which the page surfaced as "Wrong code" regardless of
+  what was typed. As a side effect "From:" showed the token, "Intent:"
+  was empty, and "State:" showed the intent.
+
+  Argument order is now `as → intent → state → token`, matching the
+  positional verbs in `landingHTML`. A regression test
+  (`TestLandingPageTokenConstMatchesPath`) pins the JS const + each label
+  row so a future reshuffle can't silently regress the approve POST path.
+
 ## 0.108.2
 
 ### Patch Changes

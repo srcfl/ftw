@@ -5,6 +5,11 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function fmtBytes(n) {
     if (!Number.isFinite(n) || n <= 0) return "—";
     var units = ["B", "KB", "MB", "GB", "TB"];
@@ -137,7 +142,7 @@
       if (v6cb) v6cb.addEventListener("change", renderNetwork);
 
       function refresh() {
-        fetch("/api/system/info").then(function (r) { return r.json(); }).then(function (d) {
+        ownerFetch("/api/system/info").then(function (r) { return r.json(); }).then(function (d) {
           setText("sys-hostname", d.hostname || "—");
           setText("sys-uptime", fmtUptime(d.uptime_s));
 

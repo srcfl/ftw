@@ -1,0 +1,81 @@
+# docker-compose.e2e-tier2.yml — TIER 2 of the local home-route harness.
+#
+# Layers a headless-Chromium (Playwright) test container onto the tier-1 stack
+# (relay + Pi). Run it MERGED with the base file:
+#
+#   docker compose -f docker-compose.e2e.yml -f docker-compose.e2e-tier2.yml \
+#     --profile tier2 up --build --abort-on-container-exit --exit-code-from playwright
+#
+# …or just `make e2e-docker-tier2`, which wraps that and tears down after.
+#
+# WHY A SEPARATE BROWSER CONTAINER: from a Mac-host browser the direct WebRTC
+# DataChannel to the Pi container can't form (Docker Desktop's Linux-VM NAT hides
+# the container's ICE host candidates), so P2P silently falls back to the relay.
+# Inside the bridge net there is NO NAT: container↔container host candidates are
+# directly routable, so the DataChannel reaches `direct` deterministically — no
+# STUN/TURN, no CGNAT variables. That is exactly the path tier 2 proves.
+#
+# This file ALSO patches the Pi (tier-1 service `forty-two-watts`) with the
+# WebAuthn RP-ID + origin for the harness host, so the passkey ceremony's
+# clientDataJSON.origin check passes. Without this the Pi defaults RP-ID to the
+# production host (home.fortytwowatts.com) and every enroll/login is rejected.
+
+services:
+  # --- Patch the Pi: WebAuthn RP-ID/origin = the harness home host -----------
+  forty-two-watts:
+    environment:
+      # RP-ID must match the registrable suffix of the origin the browser
+      # actually visits. The browser loads the home route as
+      # http://home.fortytwowatts.localhost:<port>, so RP-ID is that host and
+      # the accepted origin is that host over plain HTTP (a *.localhost secure
+      # context — WebAuthn ignores the port for both RP-ID and origin checks).
+      FTW_OWNER_ACCESS_RPID: "home.fortytwowatts.localhost"
+      FTW_OWNER_ACCESS_ORIGINS: "http://home.fortytwowatts.localhost,http://home.fortytwowatts.localhost:7378"
+      # No WAN inside the harness, so don't waste the ICE-gather budget resolving
+      # public STUN. Both peers share the docker bridge L2 → host candidates pair
+      # directly (no NAT), so host-candidate-only gathering is correct AND fast.
+      FTW_P2P_STUN: "none"
+
+  # --- Make the relay answer to the home host name on the bridge DNS ---------
+  # The Playwright test process (Node) fetches the home route by name; a network
+  # alias lets the docker embedded DNS resolve home.fortytwowatts.localhost to
+  # the relay container. The browser ALSO maps it via --host-resolver-rules, so
+  # both the page and the test runner reach the relay while the WebAuthn origin
+  # stays the home host.
+  relay:
+    networks:
+      default:
+        aliases:
+          - home.fortytwowatts.localhost
+
+  # --- The container-side browser test ---------------------------------------
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.60.0-noble
+    container_name: ftw-e2e-tier2
+    profiles: ["tier2"]
+    depends_on:
+      - relay
+      - forty-two-watts
+    environment:
+      # The home route, reached as the home host (resolved to the relay by the
+      # bridge DNS alias + Chromium host-resolver-rules). Port 7378 is the relay's
+      # in-container listen port; Go's ServeMux strips the port when matching the
+      # home-host pattern, so `home.fortytwowatts.localhost/` still routes.
+      HOME_ORIGIN: "http://home.fortytwowatts.localhost:7378"
+      # The Pi's LAN port on the bridge net — used only to mint the
+      # first-enrollment PIN (LAN-presence proof; 403 over the relay by design).
+      PI_LAN_URL: "http://forty-two-watts:8080"
+      # The docker service name the home host resolves to, for the browser's
+      # host-resolver-rules (see playwright.config.ts).
+      RELAY_HOST: "relay"
+      # Use the image's pre-installed browsers.
+      PLAYWRIGHT_BROWSERS_PATH: "/ms-playwright"
+    working_dir: /work
+    volumes:
+      - ./deploy/local-e2e/tier2:/work
+    # Install the test runner against the image's bundled browsers, then run the
+    # spec. --no-sandbox is required for Chromium inside an unprivileged
+    # container. Exit code propagates so `make e2e-docker-tier2` fails on a red test.
+    command: >
+      sh -c "npm install --no-audit --no-fund --silent &&
+             npx playwright test"

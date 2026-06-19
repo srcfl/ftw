@@ -15,6 +15,7 @@
 // collapses to a muted line and hides the sparkline.
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 class FtwSavingsCard extends FtwElement {
   static styles = `
@@ -236,16 +237,28 @@ class FtwSavingsCard extends FtwElement {
     this._abort = null;
     this._state = "loading"; // "loading" | "ready" | "empty" | "error"
     this._payload = null;
+    this._authListener = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._refresh();
     this._restartPolling();
+    if (typeof window !== "undefined") {
+      this._authListener = () => {
+        if (!this.isConnected) return;
+        this._refresh();
+      };
+      window.addEventListener("ftw-owner-authenticated", this._authListener);
+    }
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     if (this._abort) { this._abort.abort(); this._abort = null; }
+    if (this._authListener && typeof window !== "undefined") {
+      window.removeEventListener("ftw-owner-authenticated", this._authListener);
+      this._authListener = null;
+    }
   }
 
   attributeChangedCallback(name) {
@@ -356,7 +369,7 @@ class FtwSavingsCard extends FtwElement {
     const seq = ++this._reqSeq;
     const signal = this._abort.signal;
 
-    fetch("/api/savings/daily?days=" + days, { signal })
+    ownerFetch("/api/savings/daily?days=" + days, { signal })
       .then((r) => r.json())
       .then((resp) => {
         if (seq !== this._reqSeq) return;

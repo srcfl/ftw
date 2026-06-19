@@ -1,6 +1,9 @@
 package mpc
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // TestPowerLimitsDefaultIsUnlimited asserts the zero value places no
 // constraints on the DP — protecting backwards compatibility. Without
@@ -87,8 +90,8 @@ func TestOptimizeRespectsImportCap(t *testing.T) {
 		SoCMaxPct:           95,
 		InitialSoCPct:       20,
 		ActionLevels:        21,
-		MaxChargeW:           5000,
-		MaxDischargeW:        5000,
+		MaxChargeW:          5000,
+		MaxDischargeW:       5000,
 		ChargeEfficiency:    0.95,
 		DischargeEfficiency: 0.95,
 		TerminalSoCPrice:    50,
@@ -151,6 +154,34 @@ func TestOptimizeInfeasibleStatePicksNearIdle(t *testing.T) {
 	if a.BatteryW < -500 {
 		t.Errorf("infeasible fallback should be near-idle, "+
 			"got BatteryW=%.1f (full-discharge = −2000)", a.BatteryW)
+	}
+}
+
+func TestOptimizeInfeasibleStatePicksIdleWithAsymmetricLimits(t *testing.T) {
+	slots := []Slot{
+		{StartMs: 0, LenMin: 60, PriceOre: 50, SpotOre: 20,
+			LoadW: 500, Confidence: 1.0,
+			Limits: PowerLimits{MaxImportW: 1, MaxExportW: 1}},
+	}
+	p := Params{
+		Mode:                ModeSelfConsumption,
+		SoCLevels:           11,
+		CapacityWh:          5000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       50,
+		ActionLevels:        81,
+		MaxChargeW:          9000,
+		MaxDischargeW:       5000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+	}
+	plan := Optimize(slots, p)
+	if len(plan.Actions) != 1 {
+		t.Fatalf("expected 1 action, got %d", len(plan.Actions))
+	}
+	if math.Abs(plan.Actions[0].BatteryW) > 1e-9 {
+		t.Fatalf("infeasible fallback BatteryW = %.1f, want idle 0 W", plan.Actions[0].BatteryW)
 	}
 }
 

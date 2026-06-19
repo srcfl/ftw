@@ -77,6 +77,15 @@ type Service struct {
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
 	Load              LoadPredictor       // optional — overrides flat BaseLoad
+
+	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
+	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
+	// Optional; nil → no downside haircut.
+	PVUncertaintyW func() float64
+	// PVForecastSafetyK scales the downside-PV haircut: the DP plans against
+	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
+	// unset config to 1.0.
+	PVForecastSafetyK float64
 	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
 	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
 
@@ -142,6 +151,14 @@ type Service struct {
 	// execution time. Wired from main.go (cfg.Fuse → fuseMaxW).
 	FuseMaxW float64
 
+	// MaxExportW caps total site export (W, magnitude) below the fuse.
+	// When > 0, every slot's export limit becomes min(FuseMaxW, MaxExportW)
+	// so the DP never schedules a battery discharge that would over-export
+	// and trip an inverter that faults below the breaker rating (recurring
+	// Ferroamp 0x8030 fault). 0 = disabled (export bounded by the fuse).
+	// Wired from main.go (cfg.Site.MaxExportW).
+	MaxExportW float64
+
 	lastReplanAt time.Time
 	lastReason   string // "scheduled" | "reactive-pv" | "reactive-load" | "manual"
 
@@ -149,6 +166,11 @@ type Service struct {
 	// Used to compute default ExportOrePerKWh when Params doesn't set it.
 	ExportBonusOreKwh float64
 	ExportFeeOreKwh   float64
+
+	// MinArbitrageSpreadOreKwh flows in from config.Planner. Copied into
+	// Params so the DP applies the arbitrage cycle deadband. See
+	// mpc.Params.MinArbitrageSpreadOreKwh.
+	MinArbitrageSpreadOreKwh float64
 
 	// ExportFloorOreKwh, when non-nil, clamps the per-slot export ore
 	// at the floor. Wired from config.Price.ExportFloorOreKwh; nil =
@@ -818,27 +840,22 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if len(slots) == 0 {
 		return nil
 	}
+	// Plan against downside PV (forecast − k·σ) so the DP holds a reserve sized
+	// to the live forecast uncertainty instead of a flat SoC floor. See Alt 2,
+	// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
+	s.applyPVDownsideToSlots(slots)
 
-	// Plumb the site fuse into per-slot limits so the DP joint-plans
-	// battery + EV under the fuse constraint instead of producing plans
-	// that dispatch then has to scale at execution time. The DP already
-	// honours Slot.Limits.MaxImportW + MaxExportW (mpc.go:450); we just
-	// feed both directions — the fuse trips on |I| regardless of sign,
-	// and exporting 14 kW through an 11 kW breaker is just as bad as
-	// importing it (probably worse — the inverter's local current
-	// limiter trips first and the operator sees a sudden zero-output
-	// flap as PV+battery collapses). Pre-fix this only set MaxImportW,
-	// producing plans like 14:45 slot grid=-14.2 kW past an 11 kW fuse.
-	if s.FuseMaxW > 0 {
-		for i := range slots {
-			if slots[i].Limits.MaxImportW <= 0 || slots[i].Limits.MaxImportW > s.FuseMaxW {
-				slots[i].Limits.MaxImportW = s.FuseMaxW
-			}
-			if slots[i].Limits.MaxExportW <= 0 || slots[i].Limits.MaxExportW > s.FuseMaxW {
-				slots[i].Limits.MaxExportW = s.FuseMaxW
-			}
-		}
-	}
+	// Plumb the site fuse + export ceiling into per-slot limits so the DP
+	// joint-plans battery + EV under the grid constraints instead of
+	// producing plans dispatch then has to scale at execution time. The DP
+	// already honours Slot.Limits.MaxImportW + MaxExportW (mpc.go:450).
+	// Import is bounded by the fuse (the breaker trips on |I| regardless of
+	// sign); export by the tighter of the fuse and the operator's
+	// max_export_w — the latter protects inverters that trip on sustained
+	// export below the breaker rating (the recurring Ferroamp 0x8030
+	// fault). Pre-fix this only set MaxImportW, producing plans like a
+	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
+	clampSlotGridLimits(slots, s.FuseMaxW, s.MaxExportW)
 
 	s.mu.RLock()
 	p := s.Defaults
@@ -861,6 +878,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// to force a flat feed-in tariff).
 	p.ExportBonusOreKwh = s.ExportBonusOreKwh
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
+	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
 
 	// Default terminal valuation. Mode-dependent because self-consumption
@@ -1170,6 +1188,41 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		})
 	}
 	return out
+}
+
+// applyPVDownside reduces each slot's planned PV generation by k·σ (the recent
+// PV forecast error std, in W), flooring at zero. Planning the DP against this
+// downside is the Alt-2 safety mechanism: the optimizer won't run the battery
+// down betting on PV that may not arrive, so a reserve emerges from the
+// forecast uncertainty itself — sized to the real risk, not a flat SoC %.
+// On a clear, stable day σ is small (use the battery freely); on a variable
+// cloudy day σ grows (keep more reserve). k=0 or σ=0 → raw forecast (no hedge,
+// e.g. operators who want "use the battery you have"). Night slots (PVW=0) are
+// unaffected — the haircut only ever shaves real generation.
+// applyPVDownsideToSlots is the Service-level seam over applyPVDownside: it
+// reads the live σ from the PVUncertaintyW hook and the configured k, and
+// applies the downside haircut to the plan's slots. No-op when the hook is
+// unwired (PVUncertaintyW nil) or on a nil Service — the planner then runs
+// against the raw forecast.
+func (s *Service) applyPVDownsideToSlots(slots []Slot) {
+	if s == nil || s.PVUncertaintyW == nil {
+		return
+	}
+	applyPVDownside(slots, s.PVForecastSafetyK, s.PVUncertaintyW())
+}
+
+func applyPVDownside(slots []Slot, k, sigmaW float64) {
+	if k <= 0 || sigmaW <= 0 {
+		return
+	}
+	haircut := k * sigmaW
+	for i := range slots {
+		gen := -slots[i].PVW - haircut // PVW is site-signed (≤ 0); -PVW is generation
+		if gen < 0 {
+			gen = 0
+		}
+		slots[i].PVW = -gen
+	}
 }
 
 const (

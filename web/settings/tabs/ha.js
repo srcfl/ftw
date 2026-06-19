@@ -3,6 +3,11 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   S.tabs.ha = {
     render: function (ctx) {
       var field = ctx.field, config = ctx.config;
@@ -29,7 +34,7 @@
       var el = document.getElementById("ha-status-indicator");
       if (!el) return;
       function refresh() {
-        fetch("/api/ha/status").then(function (r) { return r.json(); }).then(function (d) {
+        ownerFetch("/api/ha/status").then(function (r) { return r.json(); }).then(function (d) {
           if (!d.enabled) {
             el.className = "ha-status-indicator ha-off";
             el.textContent = "○  disabled in config";

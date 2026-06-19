@@ -25,10 +25,12 @@ The Makefile has the usual pair of targets. Prefer these when iterating:
 ```bash
 make build-arm64   # → bin/forty-two-watts-linux-arm64
 make build-amd64   # → bin/forty-two-watts-linux-amd64
-make release       # → release/forty-two-watts-linux-{arm64,amd64}.tar.gz (bundles binary + WASM + web + config.example.yaml)
+make release       # → local tarballs with binary + drivers + web + config.example.yaml
 ```
 
 `make release` bakes in the git tag via `-ldflags "-X main.Version=..."`, so the running binary reports its version in the startup log.
+Official tags, release notes, binaries, docker images, and Raspberry Pi images
+are produced by the Changesets + GitHub Actions release flow.
 
 ## 2. Files to deploy
 
@@ -36,7 +38,7 @@ The Pi needs:
 
 - **The binary** — single file, no runtime dependencies.
 - **`web/`** — static UI assets (`index.html`, `app.js`, `style.css`, `models.js`, `settings.js`, `plan.js`, `twins.js`, `favicon.svg`).
-- **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …) if you run the Lua runtime, or **`drivers-wasm/`** for the WASM-based drivers.
+- **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …).
 - **`config.yaml`** — operator-edited; see [`config.example.yaml`](../config.example.yaml) for the schema and [configuration.md](configuration.md) for every field.
 
 Suggested layout on the Pi:
@@ -47,7 +49,6 @@ Suggested layout on the Pi:
 ├── config.yaml              # local config (don't commit)
 ├── web/                     # static UI
 ├── drivers/                 # Lua drivers
-├── drivers-wasm/            # WASM drivers (optional)
 ├── state.db                 # created on first run
 ├── state.db-wal
 ├── state.db-shm
@@ -60,7 +61,8 @@ The binary only takes two command-line flags:
 - `-config config.yaml` — path to the config file.
 - `-web web` — path to the static UI directory.
 
-Relative WASM driver paths in `config.yaml` are resolved against the config file's directory, so keep them side-by-side.
+Relative Lua driver paths in `config.yaml` are resolved against the config
+file's directory, so keep `drivers/` side by side with the config.
 
 ## 3. systemd unit
 
@@ -68,7 +70,7 @@ The repo ships [`deploy/forty-two-watts.service`](../deploy/forty-two-watts.serv
 
 ```ini
 [Unit]
-Description=forty-two-watts EMS (Go + WASM port)
+Description=forty-two-watts EMS
 After=network-online.target
 Wants=network-online.target
 
@@ -216,7 +218,7 @@ for i in 1 2 3 4 5; do
 done
 ```
 
-The tick should advance every control interval (default 5 s). If it doesn't, the driver VM is wedged.
+The tick should advance every control interval (default 2 s). If it doesn't, the driver VM is wedged.
 
 **Fix:** The watchdog (`site.watchdog_timeout_s`, default 60 s) auto-reverts stuck drivers to their autonomous defaults — you'll see `driver telemetry stale — marking offline + reverting to autonomous` in the log. For a full reset of MQTT/Modbus client state:
 

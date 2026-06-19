@@ -448,3 +448,11 @@ func (s *Service) ResidualDiagSnapshot() ResidualDiag {
 	}
 	return s.Residuals.Diag(time.Now())
 }
+
+// ResidualStdW returns the std (W) of recent PV-prediction residuals — the
+// live PV forecast-error magnitude. The MPC uses it as σ for downside-PV
+// safety planning (forecast − k·σ). 0 when there's no error history yet
+// (no hedge until the twin has learned how wrong it tends to be).
+func (s *Service) ResidualStdW() float64 {
+	return s.ResidualDiagSnapshot().StdW
+}

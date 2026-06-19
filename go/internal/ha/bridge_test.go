@@ -70,6 +70,30 @@ func TestBrokerAddrFormat(t *testing.T) {
 	}
 }
 
+func TestModeOptionsIncludePublishedPlannerModes(t *testing.T) {
+	want := []string{
+		"idle",
+		"self_consumption",
+		"peak_shaving",
+		"charge",
+		"priority",
+		"weighted",
+		"planner_self",
+		"planner_cheap",
+		"planner_passive_arbitrage",
+		"planner_arbitrage",
+	}
+	got := modeSelectOptions()
+	if len(got) != len(want) {
+		t.Fatalf("modeSelectOptions() length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("modeSelectOptions()[%d] = %q, want %q (all: %#v)", i, got[i], want[i], got)
+		}
+	}
+}
+
 // TestSensorsAnnouncedZeroWithoutStart verifies that SensorsAnnounced is
 // zero when the bridge has been constructed but discovery has not run (no
 // broker connection). This is the normal state when the API queries a

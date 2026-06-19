@@ -24,6 +24,75 @@ api:
   port: 8080
 `
 
+func TestPlannerPVSafetyKResolution(t *testing.T) {
+	var nilPlanner *Planner
+	if got := nilPlanner.PVSafetyK(); got != 1.0 {
+		t.Errorf("nil Planner → 1.0, got %v", got)
+	}
+	if got := (&Planner{}).PVSafetyK(); got != 1.0 {
+		t.Errorf("nil field → 1.0, got %v", got)
+	}
+	zero := 0.0
+	if got := (&Planner{PVForecastSafetyK: &zero}).PVSafetyK(); got != 0 {
+		t.Errorf("explicit 0 → 0 (no hedge), got %v", got)
+	}
+	two := 2.0
+	if got := (&Planner{PVForecastSafetyK: &two}).PVSafetyK(); got != 2.0 {
+		t.Errorf("explicit 2.0 → 2.0, got %v", got)
+	}
+}
+
+func TestPlannerPVForecastSafetyKParsing(t *testing.T) {
+	base := `
+site:
+  name: Test
+fuse:
+  max_amps: 16
+drivers:
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+planner:
+  mode: passive_arbitrage
+`
+	// Unset → nil pointer → default 1.0.
+	c, err := Parse([]byte(base), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Planner == nil {
+		t.Fatal("planner block should parse")
+	}
+	if c.Planner.PVForecastSafetyK != nil {
+		t.Errorf("unset pv_forecast_safety_k must stay nil, got %v", *c.Planner.PVForecastSafetyK)
+	}
+	if got := c.Planner.PVSafetyK(); got != 1.0 {
+		t.Errorf("unset → PVSafetyK 1.0, got %v", got)
+	}
+	// Explicit 0 must parse to *0 (distinct from unset) and be honored.
+	c0, err := Parse([]byte(base+"  pv_forecast_safety_k: 0\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c0.Planner.PVForecastSafetyK == nil || *c0.Planner.PVForecastSafetyK != 0 {
+		t.Errorf("explicit 0 must parse to *0, got %v", c0.Planner.PVForecastSafetyK)
+	}
+	if got := c0.Planner.PVSafetyK(); got != 0 {
+		t.Errorf("explicit 0 → PVSafetyK 0 (no hedge), got %v", got)
+	}
+	// Explicit non-default value.
+	c25, err := Parse([]byte(base+"  pv_forecast_safety_k: 2.5\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c25.Planner.PVSafetyK(); got != 2.5 {
+		t.Errorf("explicit 2.5 → PVSafetyK 2.5, got %v", got)
+	}
+}
+
 func TestLoadMinimalYAML(t *testing.T) {
 	c, err := Parse([]byte(minimalYAML), "/tmp")
 	if err != nil {
@@ -58,6 +127,42 @@ func TestSiteTroubleshootingModeParses(t *testing.T) {
 	}
 	if !c.Site.TroubleshootingMode {
 		t.Fatal("expected troubleshooting_mode=true")
+	}
+}
+
+// TestRemoteAccessOptInDefaultsOff: the owner remote-access home route is
+// opt-in / default-off. A config with no remote_access block must NOT dial out
+// (a Pi that merely inherits FTW_RELAY_URL stays local); only an explicit
+// enabled:true opts in. The blind TURN knob must parse while staying off.
+func TestRemoteAccessOptInDefaultsOff(t *testing.T) {
+	off, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.RemoteAccess != nil {
+		t.Errorf("remote_access should be nil when unset, got %+v", off.RemoteAccess)
+	}
+	if off.RemoteAccessEnabled() {
+		t.Error("remote access must default OFF when no block is set")
+	}
+
+	on, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: true must opt in")
+	}
+
+	turn, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: false\n  turn:\n    enabled: false\n    url: turn:relay.example:3478\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: false must stay off")
+	}
+	if turn.RemoteAccess == nil || turn.RemoteAccess.TURN == nil || turn.RemoteAccess.TURN.URL != "turn:relay.example:3478" {
+		t.Errorf("turn block did not parse: %+v", turn.RemoteAccess)
 	}
 }
 
@@ -204,6 +309,25 @@ v2x:
 `
 	if _, err := Parse([]byte(minimalYAML+body), "/tmp"); err != nil {
 		t.Fatalf("target == reserve should pass, got: %v", err)
+	}
+}
+
+func TestLoadpointSurplusOnlyParses(t *testing.T) {
+	yaml := minimalYAML + `
+loadpoints:
+  - id: garage
+    driver_name: easee
+    surplus_only: true
+`
+	c, err := Parse([]byte(yaml), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Loadpoints) != 1 {
+		t.Fatalf("loadpoints = %d, want 1", len(c.Loadpoints))
+	}
+	if !c.Loadpoints[0].SurplusOnly {
+		t.Fatal("loadpoint surplus_only was not parsed")
 	}
 }
 

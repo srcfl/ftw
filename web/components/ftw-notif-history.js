@@ -12,6 +12,50 @@
 // Drop anywhere in the header/toolbar; keeps its own state and is safe
 // to mount alongside other persistent header bits.
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
+
+// Shared, deduped notification-history fetch, keyed on the full URL
+// (endpoint + limit). When several callers hit the SAME key in a short
+// window — concurrent calls, or a transient re-connect that re-fires the
+// badge fetch on every connect — this collapses them into one in-flight
+// request and reuses a fresh result for a short TTL, instead of fanning out
+// into repeated identical GET /api/notifications/history. (The 30s badge
+// poll at limit=50 and a modal open at limit=100 are different keys, so the
+// cache coalesces bursts, not the steady-state poll.) Pass force=true (the
+// manual Refresh button) to bypass it. Mirrors next-app.js's fetchHistory /
+// ftw-history-card's dailyFetchCache.
+const NOTIF_CACHE_TTL_MS = 5000;
+const notifFetchCache = new Map(); // "endpoint?limit" -> { at, rows?, promise? }
+
+function fetchNotifRows(url, force) {
+  const now = Date.now();
+  const c = notifFetchCache.get(url);
+  if (!force && c && (now - c.at) < NOTIF_CACHE_TTL_MS) {
+    if (c.rows) return Promise.resolve(c.rows);
+    if (c.promise) return c.promise;
+  }
+  // Every cache mutation is guarded by `cur.promise === promise`: only the
+  // entry that still references THIS request may write it, so a slow older
+  // request can't clobber a newer (e.g. forced-refresh) entry that replaced it.
+  const owns = () => { const cur = notifFetchCache.get(url); return cur && cur.promise === promise; };
+  const promise = ownerFetch(url)
+    .then((r) => {
+      // Don't cache a non-OK response — drop our entry so the next call
+      // retries instead of serving a stale empty list for the TTL.
+      if (!r.ok) { if (owns()) notifFetchCache.delete(url); return []; }
+      return r.json().then((d) => {
+        const rows = Array.isArray(d) ? d : [];
+        if (owns()) notifFetchCache.set(url, { at: Date.now(), rows: rows });
+        return rows;
+      });
+    })
+    .catch(() => {
+      if (owns()) notifFetchCache.delete(url);
+      return [];
+    });
+  notifFetchCache.set(url, { at: now, promise: promise });
+  return promise;
+}
 
 export class FtwNotifHistory extends FtwElement {
   static styles = `
@@ -87,24 +131,38 @@ export class FtwNotifHistory extends FtwElement {
   _limit()    { return parseInt(this.getAttribute("limit") || "100", 10); }
   _failHours(){ return parseInt(this.getAttribute("fail-hours") || "24", 10); }
 
-  async _fetchRows(limit) {
-    try {
-      var r = await fetch(this._endpoint() + "?limit=" + encodeURIComponent(limit || this._limit()));
-      if (!r.ok) return [];
-      var d = await r.json();
-      return Array.isArray(d) ? d : [];
-    } catch (e) { return []; }
+  _fetchRows(limit, force) {
+    var url = this._endpoint() + "?limit=" + encodeURIComponent(limit || this._limit());
+    // Coalesced + short-TTL cached (see fetchNotifRows). Never rejects —
+    // resolves to [] on any error, matching the prior behaviour.
+    return fetchNotifRows(url, force);
   }
 
-  async _refreshBadge() {
+  async _refreshBadge(force) {
     // Only need the recent window to count failures — hit a small limit
-    // so the polling call is cheap.
-    var rows = await this._fetchRows(50);
+    // so the polling call is cheap. force=true (manual Refresh) bypasses
+    // the cache so the badge can't lag the freshly-rendered list.
+    var rows = await this._fetchRows(50, force);
     var windowMs = this._failHours() * 3600 * 1000;
     var cutoff = Date.now() - windowMs;
     var fails = rows.filter(r => r.status === "failed" && (r.ts_ms || 0) >= cutoff).length;
     this._failCount = fails;
-    this.update();
+    this._updateDot();
+  }
+
+  _updateDot() {
+    var dot = this.shadowRoot.querySelector(".dot");
+    if (!dot) {
+      this.update();
+      return;
+    }
+    if (this._failCount > 0) {
+      dot.textContent = this._failCount > 99 ? "99+" : String(this._failCount);
+      dot.classList.remove("hidden");
+    } else {
+      dot.textContent = "";
+      dot.classList.add("hidden");
+    }
   }
 
   async _open() {
@@ -125,9 +183,9 @@ export class FtwNotifHistory extends FtwElement {
     if (refresh) refresh.addEventListener("click", async () => {
       this._loading = true;
       this.update();
-      this._rows = await this._fetchRows();
+      this._rows = await this._fetchRows(this._limit(), true); // force: explicit refresh bypasses cache
       this._loading = false;
-      this._refreshBadge();
+      this._refreshBadge(true); // force the badge too so list + count agree
       this.update();
       var m = this.shadowRoot.querySelector("ftw-modal");
       if (m) m.setAttribute("open", ""); // keep open after re-render

@@ -79,6 +79,16 @@ drivers:
 api:
   port: 8080
 
+# Owner remote access — reach your dashboard from anywhere over a direct,
+# end-to-end-encrypted browser↔Pi WebRTC channel (the relay only brokers the
+# connection; it never sees your traffic). OPT-IN, DEFAULT OFF: the Pi makes no
+# outgoing connection unless you enable it. Omit this block to stay fully local.
+# remote_access:
+#   enabled: false
+#   turn:                 # optional blind ICE fallback for hard-NAT/CGNAT peers
+#     enabled: false      # relays ciphertext only — costs zero trustlessness
+#     url: ""
+
 # Home Assistant MQTT bridge (optional)
 homeassistant:
   enabled: false

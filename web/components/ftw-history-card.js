@@ -27,6 +27,7 @@
 // JS wiring needed beyond placing the element in HTML.
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 import "./ftw-bar-chart.js";
 
 const FIELD_BY_METRIC = {
@@ -63,7 +64,7 @@ function fetchDailyEnergy(days) {
     return cached.promise;
   }
 
-  const promise = fetch("/api/energy/daily?days=" + days)
+  const promise = ownerFetch("/api/energy/daily?days=" + days)
     .then((r) => {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
@@ -221,15 +222,48 @@ class FtwHistoryCard extends FtwElement {
     this._totalEl = null;
     this._toggleEl = null;
     this._reqSeq = 0;
+    this._p2pStateListener = null;
+    this._waitingForDirect = false;
+    this._authListener = null;
   }
 
   connectedCallback() {
     super.connectedCallback();
     this._refresh();
     this._restartPolling();
+    if (typeof window !== "undefined" &&
+        window.ftwP2P &&
+        typeof window.ftwP2P.onState === "function") {
+      const listener = (s) => {
+        if (this._p2pStateListener !== listener) return;
+        if (s !== "direct") {
+          this._waitingForDirect = true;
+          return;
+        }
+        if (!this._waitingForDirect || !this.isConnected) return;
+        this._waitingForDirect = false;
+        dailyFetchCache.clear();
+        this._refresh();
+      };
+      this._p2pStateListener = listener;
+      window.ftwP2P.onState(listener);
+    }
+    if (typeof window !== "undefined") {
+      this._authListener = () => {
+        if (!this.isConnected) return;
+        dailyFetchCache.clear();
+        this._refresh();
+      };
+      window.addEventListener("ftw-owner-authenticated", this._authListener);
+    }
   }
   disconnectedCallback() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._p2pStateListener = null;
+    if (this._authListener && typeof window !== "undefined") {
+      window.removeEventListener("ftw-owner-authenticated", this._authListener);
+      this._authListener = null;
+    }
   }
 
   attributeChangedCallback(name) {

@@ -1136,6 +1136,40 @@ func TestSurplusOnlyEVDoesNotAutoEnableBatteryCoversEV(t *testing.T) {
 	}
 }
 
+func TestSurplusOnlyEVPlanBlocksBatteryToEVEvenWhenCoverEVEnabled(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:         now,
+		SlotEnd:           now.Add(15 * time.Minute),
+		BatteryEnergyWh:   -1250, // stale/pre-fix plan: discharge ~5 kW this slot.
+		Strategy:          "arbitrage",
+		LoadpointEnergyWh: map[string]float64{"garage": 1250},
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.7},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.BatteryCoversEV = true
+	st.EVSurplusOnlyReserveW = 5000
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -50 {
+		t.Errorf("surplus_only planned EV must block battery-to-EV discharge even with BatteryCoversEV=true, got %.0f W",
+			targets[0].TargetW)
+	}
+}
+
 // TestBatteryCoversEV_OnIncludesEVInPeakShaving covers the opt-in scenario
 // outside self-consumption: peak-shaving may discharge to protect an import
 // ceiling, and BatteryCoversEV=true means the full EV draw participates.
@@ -1945,6 +1979,90 @@ func TestEnergyDispatchPlannedGridCapNoFireInsideDeadband(t *testing.T) {
 	if got < 4700 || got > 4900 {
 		t.Errorf("TargetW = %f W — inside the 100 W deadband the cap must stay off "+
 			"and battery follows raw plan (~4800 W)", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapCoversLoadSurgeOnSurplusSlot is the
+// symmetric companion to the charge-back-off cap (operator report
+// 2026-05-30, planner_arbitrage). On a charge-from-PV-surplus slot
+// (PlannedGridW ≈ 0 — the DP meant to soak surplus, NOT grid-charge), a
+// sudden load surge leaves the site importing. The old cap floored the
+// back-off at 0 (battery idle) and left the import to the slow reactive
+// replan, so the battery never supported the load. The cap must instead
+// flip to discharge, driving projected grid back to PlannedGridW (~0).
+//
+// Plan: arbitrage charge slot, 1200 Wh over 15 min ≈ 4800 W, PlannedGridW=0.
+// Live: battery at 0 W, load surged so the meter reads +682 W import.
+// Executing the +4800 W plan would project +5482 W import; covering the
+// load means a discharge of ~682 W (projected grid → 0).
+func TestEnergyDispatchPlannedGridCapCoversLoadSurgeOnSurplusSlot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average planned charge
+		Strategy:        "arbitrage",
+		PlannedGridW:    0, // plan expected ~zero grid (charge from PV surplus)
+		HasPlannedGridW: true,
+	}
+	// Live import of +682 W (load surged past PV) with the battery at 0 W.
+	store := seedStore(682, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -1797, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Cover-load discharge drives projected grid to PlannedGridW (0):
+	// adjusted = PlannedGridW − rawGridW + currentTotal = 0 − 682 + 0 = −682 W.
+	if got > -582 || got < -782 {
+		t.Errorf("TargetW = %f W — surplus-slot load surge must discharge to cover "+
+			"load (~−682 W, grid→0), not floor at 0 and import", got)
+	}
+}
+
+// TestEnergyDispatchPlannedGridCapKeepsFloorOnGridChargeSlot guards the
+// scope of the cover-load discharge above: on a DELIBERATE grid-charge
+// slot (PlannedGridW > 0 — the DP chose to buy from the grid to refill),
+// a load surge must still only back the charge off to 0, never flip to
+// discharge — undoing the planned refill would defeat the arbitrage.
+func TestEnergyDispatchPlannedGridCapKeepsFloorOnGridChargeSlot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 500, // ~2000 W planned charge
+		Strategy:        "arbitrage",
+		PlannedGridW:    2000, // plan: import 2 kW to grid-charge
+		HasPlannedGridW: true,
+	}
+	// Live import +3000 W (load surged beyond the planned 2 kW), battery 0.
+	store := seedStore(3000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	// Floor holds: charge backs off to 0, battery does NOT discharge.
+	if got < -50 || got > 50 {
+		t.Errorf("TargetW = %f W — deliberate grid-charge slot must floor at 0 on a "+
+			"load surge (no cover-load discharge)", got)
 	}
 }
 
@@ -3699,6 +3817,38 @@ func TestPlannerSelfIdleGateLeavesSurplusOnlyEVReserve(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW-1000) > 1 {
 		t.Errorf("TargetW = %f — idle gate must leave surplus-only EV reserve; want ~1000", targets[0].TargetW)
+	}
+}
+
+// Regression: the surplus-only EV reserve must never DISCHARGE the home
+// battery to manufacture the reserved export. When PV surplus is below the
+// reserve, the within-reserve grid bias (biasedGridW=0 in the −reserve..0
+// band) drove the PI to discharge the pack to grid — observed live on
+// Stefan's site: ~4 kW drain while a plugged EV reserved 4.14 kW but PV was
+// only ~1.7 kW, and the EV still couldn't start. The reserve must only
+// REDUCE charging, never force discharge: self_consumption battery floored
+// at idle (≥ 0) while the grid is exporting/balanced.
+func TestSelfConsumptionEVReserveNeverDischargesToExport(t *testing.T) {
+	// Meter exporting only 700 W — well below the 4.14 kW reserve.
+	store := seedStore(-700, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3Φ min; PV below it
+	st.EVChargingW = 0
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -1 {
+		t.Errorf("TargetW = %.0f W — EV reserve must not discharge the battery to manufacture export; want >= 0 (idle)", targets[0].TargetW)
 	}
 }
 
@@ -5488,5 +5638,171 @@ func TestSlotMetricsCounterSurvivesMultipleSlots(t *testing.T) {
 	if st.SlotDeliveryStats.OverDeliveryCount != 3 {
 		t.Errorf("after 3 over-delivery rollovers, OverDeliveryCount = %d, want 3",
 			st.SlotDeliveryStats.OverDeliveryCount)
+	}
+}
+
+// TestPlannerArbitrageIdleSlotCoversLiveImport is the planner_arbitrage
+// companion to TestPlannerPassiveArbitrageIdleSlotReactsToForecastMiss. On an
+// idle planner_arbitrage slot (BatteryEnergyWh ≈ 0 — the DP planned neither
+// charge nor discharge, expecting PV to cover load) a forecast miss that
+// leaves the meter importing must be covered reactively by the battery, not
+// imported. Before this fix the idle slot stayed on the energy path
+// (targetTotalW = 0) and the battery sat idle while the site imported.
+func TestPlannerArbitrageIdleSlotCoversLiveImport(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle — plan expected PV to cover load
+		Strategy:        "arbitrage",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// Live: meter importing 600 W (PV undershot / load overshot forecast).
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got >= 0 {
+		t.Errorf("TargetW = %.0f W — planner_arbitrage idle slot must discharge reactively to cover a live import (forecast miss), not sit at 0 and import", got)
+	}
+}
+
+// TestPlannerArbitrageIdleSlotDoesNotAbsorbLiveSurplus guards the charge side
+// of the idle-slot carve-out: an idle planner_arbitrage slot with a live PV
+// surplus must NOT reactively charge to swallow the export — the DP picked
+// idle on purpose. The arbitrage-family live-export gate ramps the battery
+// back to 0 and lets the surplus flow to grid.
+func TestPlannerArbitrageIdleSlotDoesNotAbsorbLiveSurplus(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // DP picked idle
+		Strategy:        "arbitrage",
+		PlannedGridW:    30,
+		HasPlannedGridW: true,
+	}
+	// Live: PV surplus exporting, battery already charging 1600 W.
+	store := seedStore(-100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 1600, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if math.Abs(targets[0].TargetW) > 1 {
+		t.Errorf("TargetW = %f W — planner_arbitrage idle slot with live PV surplus must NOT absorb (DP picked idle)", targets[0].TargetW)
+	}
+}
+
+// TestPlannerCheapIdleSlotStillBlocksReactiveDischarge pins the scope of the
+// idle-slot cover-load carve-out to the arbitrage family. planner_cheap idle
+// slots must keep the non-discharge block — cheap mode discharges per plan,
+// it does not chase grid=0 reactively on a forecast miss.
+func TestPlannerCheapIdleSlotStillBlocksReactiveDischarge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 0, // idle
+		Strategy:        "cheap",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// Live: meter importing 600 W.
+	store := seedStore(600, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.6},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerCheap
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	for _, tg := range targets {
+		if tg.TargetW < 0 {
+			t.Errorf("TargetW = %.0f W — planner_cheap idle slot must NOT discharge reactively (carve-out is arbitrage-only)", tg.TargetW)
+		}
+	}
+}
+
+// When the EV is plugged but NOT drawing and the available PV surplus is below
+// the reserved amount, the EV can't start on it — so the reserve is released to
+// the home battery instead of exported. Above the reserve (EV can start) and
+// while the EV is actively drawing, the reserve is protected. (Stefan 2026-06-10:
+// 1.5kW surplus was exporting while a 3φ EV that needs 4.14kW sat idle.)
+func TestChargeCeilingReleasesReserveWhenEVCannotStart(t *testing.T) {
+	// not drawing, surplus 1500 < reserve 4140 → release full surplus to battery
+	a := surplusAccounting{rawGridW: -1500, effectiveGridW: -1500, currentBatteryW: 0, evReserveRemainingW: 4140, evActive: false}
+	if got := a.chargeCeilingAfterEVReserveW(); got != 1500 {
+		t.Errorf("ceiling=%.0f, want 1500 (release reserve — EV can't start on sub-min surplus)", got)
+	}
+	// not drawing, surplus 5000 >= reserve 4140 → EV can start, reserve protected
+	a2 := surplusAccounting{rawGridW: -5000, effectiveGridW: -5000, currentBatteryW: 0, evReserveRemainingW: 4140, evActive: false}
+	if got := a2.chargeCeilingAfterEVReserveW(); got != 860 {
+		t.Errorf("ceiling=%.0f, want 860 (5000-4140, reserve protects EV start)", got)
+	}
+	// EV actively drawing, surplus 1000 < remaining 2000 → keep reserve (don't steal)
+	a3 := surplusAccounting{rawGridW: -1000, effectiveGridW: -1000, currentBatteryW: 0, evReserveRemainingW: 2000, evActive: true}
+	if got := a3.chargeCeilingAfterEVReserveW(); got != 0 {
+		t.Errorf("ceiling=%.0f, want 0 (EV drawing — protect its ramp reserve)", got)
+	}
+}
+
+// Full-dispatch check for the EV-surplus fix: EV plugged + surplus_only but
+// NOT drawing, reserving 4140 W, and the meter exports 2000 W — below the
+// reserve, so the EV can't start. Both reserve hold-backs (grid bias + charge
+// ceiling) must release so the home battery ABSORBS the surplus instead of
+// leaving it reserved and exporting. Pre-fix the bias pinned the PI at idle
+// (~0). (Stefan 2026-06-10: surplus exporting while battery sat at 0.)
+func TestSelfConsumptionEVReserveReleasesToBatteryWhenEVCannotStart(t *testing.T) {
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3φ min; export (2000) below it
+	st.EVChargingW = 0              // not drawing → can't start on 2000 W
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < 500 {
+		t.Errorf("TargetW=%.0f — battery must absorb the sub-reserve surplus the EV can't use; want a positive charge (~1100), got idle", targets[0].TargetW)
 	}
 }

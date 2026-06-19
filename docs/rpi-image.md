@@ -83,17 +83,7 @@ the file before flashing.**
 2. **CHOOSE OS** → scroll to bottom → **Use custom** → select your
    downloaded `42w-rpi4-arm64-*.img.xz`.
 3. **CHOOSE STORAGE** → pick the SD card.
-4. Click the **gear icon** (advanced options). Recommended settings:
-   - **Hostname**: leave as `42w` (so the dashboard URL stays
-     `http://42w.local:8080/`).
-   - **Set username and password**: optional. The image ships with
-     `ftw / fortytwowatts` for SSH recovery; override here if you
-     want something else.
-   - **Configure wireless LAN**: paste your WiFi SSID + password.
-     The Pi connects directly at first boot — no captive portal
-     needed. Skip this if you're using Ethernet.
-   - **Set locale settings**: pick your timezone.
-5. **WRITE**. Imager handles xz decompression + verification.
+4. **WRITE**. Imager handles xz decompression + verification.
 
 When it finishes, eject the card cleanly.
 
@@ -105,11 +95,9 @@ When it finishes, eject the card cleanly.
 3. **Select target** → SD card.
 4. **Flash!**
 
-Etcher doesn't have Imager's pre-configuration panel, so:
-- The Pi will boot with **default credentials** (`ftw` / `fortytwowatts`).
-- WiFi is configured at first boot via the **captive portal** flow
-  (see below). If you want to skip the portal, use Imager instead
-  and pre-configure WiFi.
+
+WiFi is configured at first boot via the **captive portal** flow
+(see below).
 
 > **Common pitfall — wrong file.** If Etcher complains about a
 > missing partition table or "not a valid disk image", you probably
@@ -143,12 +131,7 @@ After that, the dashboard is up and stays up across reboots.
 If the Pi is wired, nothing else to do. DHCP runs at boot, mDNS
 publishes `42w.local`, the dashboard is reachable.
 
-### WiFi — pre-configured in Imager (best)
-
-If you used Path A above with WiFi credentials filled in, the Pi
-joins your network at first boot. Skip to [Open the dashboard](#open-the-dashboard).
-
-### WiFi — captive portal (Etcher path or no Ethernet)
+### WiFi — captive portal (no Ethernet)
 
 If WiFi wasn't pre-configured, ~30 s after boot the Pi exposes its
 own access point named **`42w-setup`** (no password).

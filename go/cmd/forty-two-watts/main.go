@@ -41,6 +41,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/notifications"
 	"github.com/frahlg/forty-two-watts/go/internal/nova"
 	"github.com/frahlg/forty-two-watts/go/internal/ocpp"
+	"github.com/frahlg/forty-two-watts/go/internal/p2p"
 	"github.com/frahlg/forty-two-watts/go/internal/priceforecast"
 	"github.com/frahlg/forty-two-watts/go/internal/prices"
 	"github.com/frahlg/forty-two-watts/go/internal/proxy"
@@ -54,6 +55,8 @@ import (
 // Version gets injected at build time via -ldflags. Defaults to "dev" for
 // local runs.
 var Version = "dev"
+
+const defaultOwnerRelayURL = "https://relay.fortytwowatts.com"
 
 func main() {
 	// Subcommand dispatch — a bare first non-flag argument selects one
@@ -192,12 +195,8 @@ func main() {
 	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
 	// dropped on restart and the dashboard appears to forget the selection.
 	if v, ok := st.LoadConfig("mode"); ok {
-		switch control.Mode(v) {
-		case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-			control.ModeCharge, control.ModePriority, control.ModeWeighted,
-			control.ModePlannerSelf, control.ModePlannerCheap,
-			control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-			ctrl.Mode = control.Mode(v)
+		if m := control.Mode(v); control.IsValidMode(m) {
+			ctrl.Mode = m
 		}
 	}
 	if v, ok := st.LoadConfig("grid_target_w"); ok {
@@ -383,13 +382,16 @@ func main() {
 			slog.Warn("failed to persist loadpoint surplus_only", "lp", id, "err", err)
 		}
 	})
-	lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
-		v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
-		if !ok || v == "" {
-			return false, false
-		}
-		return v == "true", true
-	})
+	hydrateLoadpointSurplusOnly := func() {
+		lpMgr.HydrateSurplusOnly(func(id string) (bool, bool) {
+			v, ok := st.LoadConfig(lpSurplusKeyPrefix + id)
+			if !ok || v == "" {
+				return false, false
+			}
+			return v == "true", true
+		})
+	}
+	hydrateLoadpointSurplusOnly()
 	// Seed any recurring deadlines from boot — without this the first
 	// dispatch tick would race with an empty target_time and might
 	// miss the deadline penalty for ~5 s.
@@ -416,6 +418,11 @@ func main() {
 	// HA from disabled to enabled at runtime) keeps the API handler's
 	// pointer in sync without forcing a process restart.
 	var deps *api.Deps
+
+	// Forward-declared before the reload watcher so the reload callback
+	// can keep the loadpoint controller's per-phase EV fuse clamp in sync
+	// with hot-reloaded fuse params. Assigned later (loadpoint.NewController).
+	var lpController *loadpoint.Controller
 
 	// ---- Config hot-reload watcher ----
 	watcher, err := configreload.New(*configPath, cfgMu, cfg, ctrlMu, ctrl,
@@ -461,7 +468,22 @@ func main() {
 			// Mirror the startup-path default semantics — nil → 0.5,
 			// explicit 0 → disabled. See EffectiveSafetyMarginA.
 			ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
+			ctrl.MaxExportW = newCfg.Site.MaxExportW
 			ctrlMu.Unlock()
+
+			// Keep the loadpoint controller's per-phase EV fuse clamp in
+			// sync with hot-reloaded fuse params — previously startup-only,
+			// so an operator tuning max_amps / margin from the UI updated
+			// the control-package battery lever (above) but left the EV
+			// clamp on the stale startup value until restart. SetSiteFuse
+			// takes its own lock; call it outside ctrlMu.
+			if lpController != nil {
+				lpController.SetSiteFuse(loadpoint.SiteFuse{
+					MaxAmps:  newCfg.Fuse.MaxAmps,
+					Voltage:  newCfg.Fuse.Voltage,
+					PhaseCnt: newCfg.Fuse.Phases,
+				})
+			}
 
 			// Push the new pool totals into the planner so its next
 			// replan uses the right CapacityWh / MaxChargeW /
@@ -482,6 +504,7 @@ func main() {
 			// observed state across reloads (plug status, session
 			// anchor, current SoC estimate) — see loadpoint.Manager.Load.
 			lpMgr.Load(buildLoadpointConfigs(newCfg.Loadpoints))
+			hydrateLoadpointSurplusOnly()
 
 			// Notifications: rebuild the provider from fresh config
 			// (handles the cold-start case where the initial config
@@ -524,7 +547,7 @@ func main() {
 				deps.HA = nil
 				slog.Info("HA bridge stopped (disabled in config)")
 			case haBridge == nil && haEnabled:
-				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st)); err != nil {
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc)); err != nil {
 					slog.Warn("HA bridge start failed", "err", err)
 				} else {
 					haBridge = bridge
@@ -702,12 +725,6 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
-	// Forward-declared so the MPC spec builder closure (set below) can
-	// push grid-deferred state into the runtime controller. The
-	// controller itself is constructed further down once its
-	// dependencies (planAdapter, telAdapter, registry) are wired.
-	var lpController *loadpoint.Controller
-
 	// ---- Start MPC planner (optional) ----
 	mpcSvc = buildMPC(cfg, st, tel, capacities)
 	if mpcSvc != nil {
@@ -715,6 +732,11 @@ func main() {
 		// the fuse from the start (instead of producing plans that
 		// dispatch later has to scale via the joint allocator).
 		mpcSvc.FuseMaxW = cfg.Fuse.MaxPowerW()
+		// Cap planned export below the fuse when the operator set a site
+		// export ceiling, so the DP never schedules a discharge that would
+		// over-export and trip an inverter (the Ferroamp 0x8030 fault).
+		// Startup-only, matching FuseMaxW above.
+		mpcSvc.MaxExportW = cfg.Site.MaxExportW
 		if pvSvc != nil {
 			// Use the unanchored structural predictor here: the MPC also
 			// receives PVResidualCorrect, which captures the same
@@ -724,6 +746,13 @@ func main() {
 			// downward residual. See pvmodel.Service.PredictStructural.
 			mpcSvc.PV = pvSvc.PredictStructural
 			mpcSvc.PVResidualCorrect = pvSvc.ResidualCorrect
+			mpcSvc.PVUncertaintyW = pvSvc.ResidualStdW
+		}
+		// Downside-PV safety planning (forecast − k·σ) — replaces the old SoC
+		// safety floor. Unset config → default 1.0; explicit 0 → raw forecast.
+		mpcSvc.PVForecastSafetyK = cfg.Planner.PVSafetyK()
+		if cfg.Planner != nil {
+			mpcSvc.MinArbitrageSpreadOreKwh = cfg.Planner.MinArbitrageSpreadOreKwh
 		}
 		mpcSvc.Load = loadSvc.Predict
 		mpcSvc.Price = priceFc.Predict
@@ -952,14 +981,15 @@ func main() {
 				return control.SlotDirective{}, false
 			}
 			return control.SlotDirective{
-				SlotStart:       d.SlotStart,
-				SlotEnd:         d.SlotEnd,
-				BatteryEnergyWh: d.BatteryEnergyWh,
-				SoCTargetPct:    d.SoCTargetPct,
-				Strategy:        string(d.Strategy),
-				PVLimitW:        d.PVLimitW,
-				PlannedGridW:    d.GridW,
-				HasPlannedGridW: true,
+				SlotStart:         d.SlotStart,
+				SlotEnd:           d.SlotEnd,
+				BatteryEnergyWh:   d.BatteryEnergyWh,
+				SoCTargetPct:      d.SoCTargetPct,
+				Strategy:          string(d.Strategy),
+				PVLimitW:          d.PVLimitW,
+				PlannedGridW:      d.GridW,
+				HasPlannedGridW:   true,
+				LoadpointEnergyWh: d.LoadpointEnergyWh,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
@@ -984,18 +1014,9 @@ func main() {
 		// If the restored control mode is a planner variant, push the
 		// corresponding mpc.Mode so the plan is built with the strategy
 		// the user actually picked — not whatever cfg.planner.mode says.
-		if ctrl.Mode.IsPlannerMode() {
-			var mm mpc.Mode
-			switch ctrl.Mode {
-			case control.ModePlannerSelf:
-				mm = mpc.ModeSelfConsumption
-			case control.ModePlannerCheap:
-				mm = mpc.ModeCheapCharge
-			case control.ModePlannerPassiveArbitrage:
-				mm = mpc.ModePassiveArbitrage
-			case control.ModePlannerArbitrage:
-				mm = mpc.ModeArbitrage
-			}
+		// control.PlannerMPCMode is the shared mapping (same one the API
+		// and HA setters use), so the three paths can't drift.
+		if mm, ok := control.PlannerMPCMode(ctrl.Mode); ok {
 			mpcSvc.SetMode(ctx, mm)
 		}
 		if mpcSvc.Latest() == nil {
@@ -1058,15 +1079,26 @@ func main() {
 			if r == nil {
 				return loadpoint.EVSample{}, false
 			}
-			var d struct {
-				Connected bool    `json:"connected"`
-				SessionWh float64 `json:"session_wh"`
-			}
+			// RequestActive defaults to true so drivers that
+			// don't emit the field keep their pre-existing
+			// behaviour — only drivers that explicitly emit
+			// request_active=false will trip the
+			// session-completion detector.
+			d := struct {
+				Connected     bool    `json:"connected"`
+				SessionWh     float64 `json:"session_wh"`
+				RequestActive *bool   `json:"request_active"`
+			}{}
 			_ = json.Unmarshal(r.Data, &d)
+			reqActive := true
+			if d.RequestActive != nil {
+				reqActive = *d.RequestActive
+			}
 			return loadpoint.EVSample{
-				PowerW:    r.SmoothedW,
-				SessionWh: d.SessionWh,
-				Connected: d.Connected,
+				PowerW:        r.SmoothedW,
+				SessionWh:     d.SessionWh,
+				Connected:     d.Connected,
+				RequestActive: reqActive,
 			}, true
 		}
 		lpController = loadpoint.NewController(lpMgr, planAdapter, telAdapter, reg.Send)
@@ -1089,6 +1121,74 @@ func main() {
 				return 0, false
 			}
 			return ctrl.FuseEVMaxW, true
+		})
+		// Persist operator manual holds (the amp-slider "Start") so they
+		// survive reboot / firmware update and the EV keeps charging across
+		// the restart — the in-memory hold would otherwise be lost (Stefan
+		// 2026-06-11: a binary deploy dropped the live manual charge). Mirrors
+		// the loadpoint_schedule k/v pattern: one row per LP keyed
+		// `loadpoint_manual_hold:<id>`, "{}" = cleared.
+		const lpManualHoldKeyPrefix = "loadpoint_manual_hold:"
+		// Restore FIRST (before wiring the saver) so re-applying a persisted
+		// hold doesn't immediately re-write what we just read. A stale hold
+		// for a car unplugged during downtime self-clears on the first tick
+		// (tickOne unplug → ClearManualHold).
+		for _, lpState := range lpMgr.States() {
+			v, ok := st.LoadConfig(lpManualHoldKeyPrefix + lpState.ID)
+			if !ok || v == "" || v == "{}" {
+				continue
+			}
+			var h loadpoint.ManualHold
+			if err := json.Unmarshal([]byte(v), &h); err != nil {
+				slog.Warn("failed to parse persisted manual hold", "lp", lpState.ID, "err", err)
+				continue
+			}
+			if !h.Persistent {
+				continue // only operator (never-expiring) holds persist
+			}
+			lpController.SetManualHold(lpState.ID, h)
+			slog.Info("restored persistent manual hold across restart",
+				"lp", lpState.ID, "power_w", h.PowerW, "phase_mode", h.PhaseMode)
+		}
+		lpController.SetManualHoldSaver(func(id string, h loadpoint.ManualHold, cleared bool) {
+			key := lpManualHoldKeyPrefix + id
+			if cleared {
+				if err := st.SaveConfig(key, "{}"); err != nil {
+					slog.Warn("failed to clear persisted manual hold", "lp", id, "err", err)
+				}
+				return
+			}
+			b, err := json.Marshal(h)
+			if err != nil {
+				slog.Warn("failed to marshal manual hold", "lp", id, "err", err)
+				return
+			}
+			if err := st.SaveConfig(key, string(b)); err != nil {
+				slog.Warn("failed to persist manual hold", "lp", id, "err", err)
+			}
+		})
+		// Wire the live per-phase site-meter current reader. The control
+		// package's fuse guard is site-TOTAL only (sum across phases);
+		// a single phase can still trip from house-load imbalance (e.g.
+		// a vacuum or oven on L1) stacked on top of the EV's per-phase
+		// draw. This reader feeds the loadpoint's reactive per-phase EV
+		// clamp (applyPerPhaseFuseClamp), which lowers max_amps_per_phase
+		// the instant the worst phase approaches the breaker. Reads the
+		// same meter_lN_a metrics the fuse_over_limit notifier uses.
+		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
+			cfgMu.RLock()
+			siteMeter := cfg.SiteMeterDriver()
+			cfgMu.RUnlock()
+			if siteMeter == "" {
+				return 0, 0, 0, false
+			}
+			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
+			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
+			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
+			if !ok1 && !ok2 && !ok3 {
+				return 0, 0, 0, false
+			}
+			return l1, l2, l3, true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
@@ -1371,6 +1471,50 @@ func main() {
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
+	// Per-process secret stamped on every relay-tunnelled request so the API
+	// auth-gate can tell remote (relay) traffic from genuine LAN/loopback.
+	tunnelMarker := newTunnelMarker()
+
+	// Self-sovereign site identity: always generated on first boot, Nova-
+	// format (P-256 PEM) so federation can reuse it, but never dependent on
+	// Nova being enabled. Canonical path is the same nova.key default so
+	// existing federated gateways keep their claimed key.
+	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
+	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
+		identityKeyPath = cfg.Nova.KeyPath
+	}
+	var siteIdentityPubHex string
+	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+	if err != nil {
+		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
+	} else {
+		siteIdentityPubHex = siteIdentity.PublicKeyHex()
+		slog.Info("site identity ready", "pubkey_prefix", siteIdentityPubHex[:16])
+	}
+	ownerSiteID := deriveOwnerSiteID(st)
+
+	// Browser P2P (Phase 5): the manager answers WebRTC SDP offers
+	// (POST /api/p2p/offer) and serves the resulting direct DataChannel with a
+	// p2p.Bridge over the ungated API mux. Signaling rides the authenticated
+	// owner tunnel — no relay changes. The local-API handler is injected after
+	// api.New (srv.Mux()) since srv does not exist yet at this point.
+	//
+	// STUN set is overridable for closed networks (the local docker E2E harness
+	// has no WAN, so resolving public STUN just wastes the ICE-gather budget).
+	// Unset → DefaultSTUNServers (production). FTW_P2P_STUN="none"/"off" →
+	// host-candidate-only gathering, which is all that's needed when both peers
+	// share an L2 (e.g. the docker bridge — direct host pairing, no NAT).
+	// Otherwise a comma-separated list of stun: URLs replaces the default.
+	p2pMgr := p2p.NewManager(slog.Default(), p2pSTUNFromEnv())
+	defer p2pMgr.Close()
+	// Sign every answer's DTLS fingerprint with the site identity so the browser
+	// can verify (against the key it pinned at first connect) that the answer is
+	// this Pi's — closing relay MITM of the signaling. Skip if there's no identity
+	// (then answers are unsigned and a verifying browser treats them as such).
+	if siteIdentity != nil {
+		p2pMgr.SetSigner(ownerSiteID, siteIdentity)
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1405,14 +1549,32 @@ func main() {
 		Events:        bus,
 		Notifications: notifSvc,
 		SelfUpdate:    selfUpdater,
-		// ---- Owner remote access (Phase 3) ----
-		// rp.id defaults to the production relay; override with
-		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). LAN bypass
-		// is on by default — the dashboard served on the local
-		// network is already implicitly trusted (no other auth on /api).
-		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "relay.fortytwowatts.com"),
+		// ---- Owner remote access ----
+		// rp.id defaults to the production home host (home.fortytwowatts.com),
+		// the origin the owner actually visits. Override with
+		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). NOTE: the RP-ID is a
+		// one-way door — passkeys enrolled under one RP-ID only work on that
+		// host's registrable suffix, so this must match the public origin before
+		// any passkey is enrolled. LAN bypass is on by default — the dashboard
+		// served on the local network is already implicitly trusted.
+		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "home.fortytwowatts.com"),
 		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
 		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
+		TunnelMarker:         tunnelMarker,
+		SiteIdentityPubHex:   siteIdentityPubHex,
+		SiteID:               ownerSiteID,
+		// RelayBaseURL lets the API self-publish its signed instance descriptor to
+		// {relay}/bootstrap during the first-enrollment window (multi-tenant
+		// onboarding). Same source the relay registration uses; empty (LAN-only)
+		// makes the self-publish a no-op. Gating on remote_access happens at the
+		// publish call site via the zero-device window — a Pi that isn't dialing
+		// the relay simply never has its descriptor claimed.
+		RelayBaseURL: ownerRelayURL(cfg),
+		// InstanceSigner signs the owner-access instance descriptor with the same
+		// self-sovereign ES256 key. nil-safe: if identity load failed above,
+		// siteIdentity is nil and the descriptor endpoint returns 503.
+		InstanceSigner: instanceSignerOrNil(siteIdentity),
+		P2P:            p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
@@ -1441,6 +1603,11 @@ func main() {
 		Version: Version,
 	}
 	srv := api.New(deps)
+	// Wire the P2P bridge to the GATED API handler now that srv exists. The
+	// Bridge stamps each replayed request with the offer's auth context, so the
+	// gate authorizes them at the owner's real trust tier (remote over the
+	// relay, local on the LAN) — not an unconditional bypass.
+	p2pMgr.SetLocalAPI(srv.Handler())
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
 	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
 	// the local UI renders live data without owning the control loop.
@@ -1478,6 +1645,12 @@ func main() {
 			slog.Error("http server", "err", err)
 		}
 	}()
+
+	// Belt-and-suspenders integrity scan, off the startup hot path: a clean
+	// restart skips the blocking boot check (so a multi-GB DB starts in seconds),
+	// and this still catches at-rest corruption without making control wait. It
+	// self-arms a heal on the next boot if it finds rot.
+	st.VerifyInBackground()
 	defer func() {
 		shutdownCtx, c := context.WithTimeout(context.Background(), 5*time.Second)
 		defer c()
@@ -1485,11 +1658,40 @@ func main() {
 	}()
 
 	// ---- Relay registration for owner remote access (Phase 3) ----
-	// When FTW_RELAY_URL is set, post our (site_id, host_id) to the
+	// When Remote Access is enabled, post our (site_id, host_id) to the
 	// relay periodically so /me/<site_id>/* routes to this instance.
 	// host_id is derived once from site_id + a stable random suffix.
-	if relayURL := os.Getenv("FTW_RELAY_URL"); relayURL != "" {
-		go runOwnerRelayRegistration(ctx, relayURL, "site:"+cfg.Site.Name, deriveOwnerHostID(st, cfg.Site.Name))
+	// OPT-IN, DEFAULT OFF: the Pi only dials the relay when config opts in.
+	// Once opted in, the official relay is the default so a normal release image
+	// works without a local FTW_RELAY_URL override. Operators can still override
+	// FTW_RELAY_URL for self-hosted/dev relays, or set it explicitly empty to
+	// disable dialing despite an enabled config.
+	if relayURL := ownerRelayURL(cfg); relayURL != "" {
+		switch {
+		case siteIdentity == nil:
+			// The relay requires an ES256-signed registration. Without a site
+			// identity we cannot sign, so we must not register (an unsigned
+			// mapping would be refused anyway) — fail loud, not silent.
+			slog.Error("owner-access: remote_access enabled but no site identity; skipping relay registration", "key_path", identityKeyPath)
+		default:
+			// C1: publish this site's trusted device_pubkeys on every /me/register
+			// so the relay can gate signaling on a device-key proof (no published
+			// key → the relay forwards no signaling, fail-closed). Wired here so
+			// owner_relay_register.go stays free of a *Store dependency.
+			trustedDevicePubkeysLoader = func() []string {
+				pks, err := st.TrustedDevicePubkeys()
+				if err != nil {
+					slog.Warn("owner-access: could not load trusted device_pubkeys for relay publish", "err", err)
+					return nil
+				}
+				return pks
+			}
+			go runOwnerRelayRegistration(ctx, relayURL, ownerSiteID, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
+		}
+	} else if os.Getenv("FTW_RELAY_URL") != "" && !ownerRemoteAccessEnabled(cfg) {
+		slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled=true)")
+	} else if ownerRemoteAccessEnabled(cfg) {
+		slog.Info("owner-access: remote_access enabled but relay URL is empty — not dialing the relay")
 	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
@@ -1567,7 +1769,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctrl, ctrlMu, st))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -1591,14 +1793,11 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		keyPath := cfg.Nova.KeyPath
-		if keyPath == "" {
-			keyPath = filepath.Join(filepath.Dir(statePath), "nova.key")
-		}
-		novaID, err := nova.LoadOrCreateIdentity(keyPath)
-		if err != nil {
-			slog.Warn("nova identity load failed — federation disabled", "err", err)
-		} else if pub, err := nova.Start(cfg.Nova, novaID, st, tel); err != nil {
+		// Reuse the already-loaded self-sovereign identity (same canonical
+		// path) so federation and local identity are one and the same key.
+		if siteIdentity == nil {
+			slog.Warn("nova federation disabled — site identity unavailable")
+		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()
@@ -1632,6 +1831,9 @@ func main() {
 
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
 	go rolloffLoop(ctx, st, coldDir)
+
+	// ---- Background: daily state.db recovery snapshot ----
+	go snapshotLoop(ctx, st)
 
 	// ---- Control loop ----
 	controlInterval := time.Duration(cfg.Site.ControlIntervalS) * time.Second
@@ -1744,7 +1946,7 @@ func main() {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					_ = reg.SendDefault(ctx, tr.Name)
+					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
@@ -1792,21 +1994,8 @@ func main() {
 					slog.Info("troubleshooting: site meter stale, dispatch skipped",
 						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
 				}
-				for _, n := range reg.Names() {
-					// Skip the site-meter driver itself: when it's both
-					// the meter AND a battery (e.g. Pixii), its meter
-					// going stale is usually because its own modbus poll
-					// stalled. Writing setpoint 0 into that same hung
-					// session disrupts whatever it was already doing
-					// and creates a flap loop — the symptom the user
-					// actually sees is the battery cutting in/out
-					// every minute. The protection rationale (don't
-					// charge from a stale grid signal) only applies to
-					// OTHER batteries, not the meter owner itself.
-					if n == ctrl.SiteMeterDriver {
-						continue
-					}
-					_ = reg.SendDefault(ctx, n)
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
+					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
 			}
@@ -1842,7 +2031,17 @@ func main() {
 			var wakeKickActiveIDs map[string]bool
 			if lpController != nil {
 				now := time.Now()
-				for _, st := range lpStatesSnapshot {
+				for i := range lpStatesSnapshot {
+					st := &lpStatesSnapshot[i]
+					// Populate ManualActive on the dispatch-path snapshot
+					// (lpMgr.States() doesn't set it — only the API does) so
+					// SurplusReserveW can drop the reserve for a force-charging
+					// LP. Without this the manual/schedule override in
+					// SurplusReserveW never sees a manual hold and the
+					// no-discharge floor flaps the battery support.
+					if _, ok := lpController.GetManualHold(st.ID, now); ok {
+						st.ManualActive = true
+					}
 					if !st.PluggedIn || !st.SurplusOnly {
 						continue
 					}
@@ -2054,6 +2253,37 @@ func main() {
 	}
 }
 
+// snapshotLoop writes a recovery snapshot of state.db daily and once on
+// shutdown. The snapshot is the restore source if state.db corrupts (see
+// state.openChecked). cache.db needs none — it's re-fetchable. Daily (not
+// hourly) keeps SD-card write-wear low while bounding worst-case loss of
+// precious data to one day.
+func snapshotLoop(ctx context.Context, st *state.Store) {
+	// Initial snapshot shortly after boot so a fresh install gets one fast.
+	first := time.NewTimer(2 * time.Minute)
+	defer first.Stop()
+	tick := time.NewTicker(24 * time.Hour)
+	defer tick.Stop()
+	doSnap := func() {
+		if err := st.SnapshotState(); err != nil {
+			slog.Warn("state snapshot failed", "err", err)
+		} else {
+			slog.Info("state snapshot written")
+		}
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			doSnap() // best-effort on graceful shutdown
+			return
+		case <-first.C:
+			doSnap()
+		case <-tick.C:
+			doSnap()
+		}
+	}
+}
+
 // rolloffLoop runs the SQLite → Parquet roll-off once per hour. Cheap when
 // nothing is due (a single SELECT returns 0 rows); only does real work once
 // data crosses the 14-day boundary into cold storage.
@@ -2117,6 +2347,35 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 			slog.Debug("device registered", "name", name, "device_id", id, "make", make, "sn", sn, "mac", mac)
 		}
 	}
+}
+
+const driverDefaultTimeout = 2 * time.Second
+
+func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
+	defer cancel()
+	if err := reg.SendDefault(cmdCtx, name); err != nil {
+		slog.Warn("driver default command failed",
+			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
+	}
+}
+
+// driversToDefaultOnSiteMeterStale returns the driver names to revert to
+// DefaultMode when the site meter goes stale: every driver EXCEPT the
+// site-meter owner itself. Skipping the meter owner avoids a flap loop on
+// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
+// reading is usually their own hung modbus poll — writing DefaultMode into
+// that same session cuts the battery in/out every minute. The "don't act on
+// a stale grid signal" protection only applies to the OTHER batteries.
+func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == siteMeterDriver {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
@@ -2323,6 +2582,7 @@ func buildLoadpointConfigs(src []config.Loadpoint) []loadpoint.Config {
 			PhaseMode:         lp.PhaseMode,
 			PhaseSplitW:       lp.PhaseSplitW,
 			MinPhaseHoldS:     lp.MinPhaseHoldS,
+			SurplusOnly:       lp.SurplusOnly,
 		})
 	}
 	return out
@@ -2450,19 +2710,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	if socMax <= 0 || socMax > 100 {
 		socMax = 95
 	}
-	socSafety := pl.SoCSafetyFloorPct
-	if socSafety <= 0 {
-		// Default: 25 % absolute. Operational floor above the
-		// hardware min, leaves buffer against forecast risk (cloud,
-		// load surprise). Set to 0 in config to disable.
-		socSafety = 25
-	}
-	if socSafety < socMin {
-		socSafety = socMin
-	}
-	safetyPenalty := pl.SafetyFloorPenaltyOreKwhHour
-	if safetyPenalty <= 0 {
-		safetyPenalty = 100
+	if pl.SoCSafetyFloorPct != 0 || pl.SafetyFloorPenaltyOreKwhHour != 0 {
+		slog.Warn("config: soc_safety_floor_pct / safety_floor_penalty_ore_kwh_hour are deprecated and ignored — forecast-risk reserve is now handled by pv_forecast_safety_k (downside-PV planning)")
 	}
 	pvBonus := pl.PVChargeBonusOreKwh
 	if pvBonus < 0 {
@@ -2477,15 +2726,13 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		disEff = 0.95
 	}
 	params := mpc.Params{
-		Mode:                         mode,
-		SoCLevels:                    41,
-		CapacityWh:                   totalCap,
-		SoCMinPct:                    socMin,
-		SoCMaxPct:                    socMax,
-		SoCSafetyFloorPct:            socSafety,
-		SafetyFloorPenaltyOreKwhHour: safetyPenalty,
-		PVChargeBonusOreKwh:          pvBonus,
-		InitialSoCPct:                50,
+		Mode:                mode,
+		SoCLevels:           41,
+		CapacityWh:          totalCap,
+		SoCMinPct:           socMin,
+		SoCMaxPct:           socMax,
+		PVChargeBonusOreKwh: pvBonus,
+		InitialSoCPct:       50,
 		// ActionLevels = 81 → 225 W discretization step on a ±9 kW
 		// action range. Coarser values (21=900 W, 41=450 W) lose
 		// borderline-PV slots: on a 273 W net surplus the 450 W min
@@ -2646,18 +2893,33 @@ func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time
 // path can share the exact same wiring — drift between them would mean
 // HA commands behave one way after boot and a different way after a
 // hot-reload, which is the kind of silent skew that's hardest to debug.
-func haCallbacks(ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store) ha.CommandCallbacks {
+func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, st *state.Store, mpcSvc *mpc.Service) ha.CommandCallbacks {
 	return ha.CommandCallbacks{
 		SetMode: func(m string) error {
-			ctrlMu.Lock()
-			defer ctrlMu.Unlock()
-			switch control.Mode(m) {
-			case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-				control.ModeCharge, control.ModePriority, control.ModeWeighted:
-				ctrl.Mode = control.Mode(m)
-				return st.SaveConfig("mode", m)
+			mode := control.Mode(m)
+			// Accept exactly the set the HA discovery `select` advertises —
+			// control.AllModes via IsValidMode — so a planner_* option an
+			// operator picks in Home Assistant isn't silently rejected here.
+			// Mirror the full /api/mode side-effects (manual-hold + PI reset
+			// + MPC propagation); the two setters must behave identically or
+			// HA mode changes diverge from web-UI ones (#mode-drift).
+			if !control.IsValidMode(mode) {
+				return fmt.Errorf("unknown mode: %s", m)
 			}
-			return fmt.Errorf("unknown mode: %s", m)
+			ctrlMu.Lock()
+			ctrl.Mode = mode
+			ctrl.ClearBatteryManualHold()
+			if ctrl.PI != nil {
+				ctrl.PI.Reset()
+			}
+			ctrlMu.Unlock()
+			if err := st.SaveConfig("mode", m); err != nil {
+				return err
+			}
+			if mm, ok := control.PlannerMPCMode(mode); ok && mpcSvc != nil {
+				mpcSvc.SetMode(ctx, mm)
+			}
+			return nil
 		},
 		SetGridTarget: func(w float64) error {
 			ctrlMu.Lock()
@@ -2695,6 +2957,27 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func ownerRemoteAccessEnabled(cfg *config.Config) bool {
+	return cfg != nil && cfg.RemoteAccess != nil && cfg.RemoteAccess.Enabled
+}
+
+func ownerRelayURL(cfg *config.Config) string {
+	if !ownerRemoteAccessEnabled(cfg) {
+		return ""
+	}
+	return strings.TrimRight(envOr("FTW_RELAY_URL", defaultOwnerRelayURL), "/")
+}
+
+// instanceSignerOrNil returns id as an api.InstanceSigner, or a genuine nil
+// interface when id is nil — so api's `InstanceSigner == nil` 503 guard fires
+// (a typed-nil *nova.Identity boxed into the interface would be non-nil).
+func instanceSignerOrNil(id *nova.Identity) api.InstanceSigner {
+	if id == nil {
+		return nil
+	}
+	return id
 }
 
 func troubleshootingGridW(tel *telemetry.Store, siteMeterDriver string) (float64, bool) {
@@ -2743,6 +3026,33 @@ func envBoolDefault(key string, def bool) bool {
 		return false
 	}
 	return true
+}
+
+// p2pSTUNFromEnv resolves the WebRTC STUN server set from FTW_P2P_STUN.
+// Unset → p2p.DefaultSTUNServers (production NAT traversal). "none"/"off"/""
+// (explicit empty) → nil, i.e. host-candidate-only gathering for closed
+// networks like the docker E2E harness. Anything else is a comma-separated
+// list of stun: URLs that replaces the default.
+func p2pSTUNFromEnv() []string {
+	v, ok := os.LookupEnv("FTW_P2P_STUN")
+	if !ok {
+		return p2p.DefaultSTUNServers
+	}
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "none", "off":
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // parseOriginsEnv splits a comma-separated list of WebAuthn-acceptable

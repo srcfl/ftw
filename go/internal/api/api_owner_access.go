@@ -4,17 +4,17 @@
 // the relay (see docs/goals/relay-as-tunnel.md Phase 3).
 //
 // Flow:
-//   1. /api/owner-access/enroll/start   — operator's browser (relay or LAN)
-//      requests a WebAuthn registration challenge.
-//   2. /api/owner-access/enroll/finish  — browser POSTs the attestation;
-//      host validates, persists in trusted_devices, sets session cookie.
-//   3. /api/owner-access/login/start    — browser requests an assertion
-//      challenge (allowedCredentials populated from trusted_devices).
-//   4. /api/owner-access/login/finish   — browser POSTs the assertion;
-//      host validates against the matching credential, sets session
-//      cookie, returns success.
-//   5. /api/owner-access/devices        — GET lists enrolled devices,
-//      DELETE removes one. Both require an authenticated session cookie.
+//  1. /api/owner-access/enroll/start   — operator's browser (relay or LAN)
+//     requests a WebAuthn registration challenge.
+//  2. /api/owner-access/enroll/finish  — browser POSTs the attestation;
+//     host validates, persists in trusted_devices, sets session cookie.
+//  3. /api/owner-access/login/start    — browser requests an assertion
+//     challenge (allowedCredentials populated from trusted_devices).
+//  4. /api/owner-access/login/finish   — browser POSTs the assertion;
+//     host validates against the matching credential, sets session
+//     cookie, returns success.
+//  5. /api/owner-access/devices        — GET lists enrolled devices,
+//     DELETE removes one. Both require an authenticated session cookie.
 //
 // The relay forwards the same /api/owner-access/* paths through the
 // tunnel as any other dashboard request (see Phase 2 web proxy).
@@ -22,11 +22,20 @@
 package api
 
 import (
+	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -43,24 +52,144 @@ import (
 // and the host's auth middleware validates it.
 const ownerAccessCookieName = "ftw_owner"
 
-// ownerAccessSessionTTL is how long an authenticated session is valid
-// after the last successful login.
-const ownerAccessSessionTTL = 24 * time.Hour
+// ownerAccessSessionTTL is how long an authenticated browser session is valid
+// after login. Remembered browser keys can mint a fresh session silently, but
+// the cookie itself should feel stable across normal bookmark/PWA use.
+const ownerAccessSessionTTL = 30 * 24 * time.Hour
 
 // ownerAccessCeremonyTTL bounds the time between /enroll/start and
 // /enroll/finish (or login start/finish). Browsers typically complete
 // the ceremony in <30s; 5 min covers slow Touch-ID prompts.
 const ownerAccessCeremonyTTL = 5 * time.Minute
 
+// ownerAccessEnrollPinTTL is how long a LAN-minted enrollment PIN stays
+// valid. 10 min lets the owner read the code off the Pi's console and walk
+// to the relay origin in another tab.
+const ownerAccessEnrollPinTTL = 10 * time.Minute
+
+// ownerAccessEnrollPinMaxTries burns the PIN after this many wrong guesses so
+// the 6-digit space can't be brute-forced within the TTL window.
+const ownerAccessEnrollPinMaxTries = 5
+
+// maxOwnerCeremonyBody bounds the WebAuthn attestation/assertion body the
+// go-webauthn library decodes (its json.NewDecoder is otherwise unbounded).
+// Real ceremony payloads are a few KiB; 64 KiB is comfortable headroom.
+const maxOwnerCeremonyBody = 64 << 10
+
+// maxCeremoniesPerKind caps the in-flight enroll/login ceremony maps. login/start
+// and enroll/start are reachable unauthenticated (open paths), so without a cap
+// an internet client could grow Pi memory within the 5-minute ceremony TTL. A
+// real operator never has more than a couple of ceremonies open at once.
+const maxCeremoniesPerKind = 64
+
 // ownerAccessState is the in-process WebAuthn state. One instance per
 // API server; lazy-initialized on first ceremony request.
 type ownerAccessState struct {
-	mu            sync.Mutex
-	wa            *webauthn.WebAuthn
-	wsErr         error
+	mu             sync.Mutex
+	wa             *webauthn.WebAuthn
+	wsErr          error
 	enrollSessions map[string]ceremonySession
 	loginSessions  map[string]ceremonySession
 	authSessions   map[string]authSession
+
+	// devicePoPChallenges holds the in-flight single-use device-PoP challenges
+	// (C3). Value is the challenge's expiry; the entry is deleted on consume or
+	// when GC'd past TTL. See api_owner_device_pop.go.
+	devicePoPChallenges map[string]time.Time
+
+	// enrollPin is the in-memory LAN-first-enrollment PIN. Regenerated on
+	// demand (each GET /enroll-pin mints a fresh value), expires after
+	// ownerAccessEnrollPinTTL. Empty pin means "none minted".
+	enrollPin       string
+	enrollPinExpiry time.Time
+	enrollPinTries  int // wrong attempts since mint; PIN is burned past the cap
+
+	// enrollBootstrapID is the high-entropy (>=32-byte CSPRNG, base64url) handle
+	// minted ALONGSIDE the PIN. The relay keys its bootstrap store on
+	// hex(sha256(bootstrapID)); the RAW value is shown to the LAN browser ONLY
+	// (never to the relay) so it can derive the same claim_key from the URL
+	// fragment. Replaced on each mint, cleared with the PIN.
+	enrollBootstrapID string
+}
+
+// enrollBootstrapIDBytes is the CSPRNG width of the bootstrap_id (>=32 bytes so
+// the derived claim_key handle is 256-bit unguessable). base64url-no-pad keeps it
+// URL-fragment-safe for the onboarding link.
+const enrollBootstrapIDBytes = 32
+
+// mintEnrollPin generates a fresh 6-digit numeric PIN together with a
+// high-entropy bootstrap_id (>=32-byte CSPRNG, base64url-no-pad), stores both with
+// a 10-minute TTL, and returns them with the remaining seconds. Any previously
+// minted PIN + bootstrap_id is replaced. The PIN is the LAN-presence proof the Pi
+// validates on the forwarded enroll; the bootstrap_id is the relay's unguessable
+// claim handle (the relay only ever sees hex(sha256(bootstrapID))).
+func (oa *ownerAccessState) mintEnrollPin() (pin, bootstrapID string, expiresInS int, err error) {
+	p, err := randomDigits(6)
+	if err != nil {
+		return "", "", 0, err
+	}
+	b := make([]byte, enrollBootstrapIDBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", 0, err
+	}
+	bid := base64.RawURLEncoding.EncodeToString(b)
+	oa.mu.Lock()
+	oa.enrollPin = p
+	oa.enrollBootstrapID = bid
+	oa.enrollPinExpiry = time.Now().Add(ownerAccessEnrollPinTTL)
+	oa.enrollPinTries = 0
+	oa.mu.Unlock()
+	return p, bid, int(ownerAccessEnrollPinTTL.Seconds()), nil
+}
+
+// validateEnrollPin reports whether candidate matches the currently-minted,
+// unexpired PIN. Constant-time compare so a tunnelled attacker can't probe for
+// the digits. An empty stored PIN (none minted, or expired) never matches.
+func (oa *ownerAccessState) validateEnrollPin(candidate string) bool {
+	oa.mu.Lock()
+	defer oa.mu.Unlock()
+	if oa.enrollPin == "" || time.Now().After(oa.enrollPinExpiry) {
+		return false
+	}
+	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
+		oa.enrollPin = "" // already burned — require a fresh mint
+		oa.enrollBootstrapID = ""
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(candidate), []byte(oa.enrollPin)) == 1 {
+		return true
+	}
+	// Wrong guess: count it, and burn the PIN once the cap is hit so the
+	// 6-digit space can't be exhausted within the TTL.
+	oa.enrollPinTries++
+	if oa.enrollPinTries >= ownerAccessEnrollPinMaxTries {
+		oa.enrollPin = ""
+		oa.enrollBootstrapID = ""
+	}
+	return false
+}
+
+// bootstrapEnrollProof binds proof-of-possession of the RAW bootstrap_id to one
+// enrollment ceremony AND to the exact finish body bytes:
+//
+//	hex(HMAC-SHA256(key=bootstrap_id, msg=ceremony_token + "|" + hex(sha256(body))))
+//
+// Binding the body hash authenticates the ENTIRE finish payload — the top-level
+// device_pubkey (the C4 silent-login key), the WebAuthn attestation, and the
+// friendly name — so a compromised relay that MITMs the forward cannot swap any of
+// them without breaking the proof (it would have to recompute the HMAC, which needs
+// the raw bootstrap_id it never sees). The relay only ever holds
+// hex(sha256(bootstrap_id)), so it can neither forge this proof for its own
+// ceremony_token nor reuse the user's (the ceremony_token is single-use). MUST stay
+// byte-identical to the browser (web/owner-access/bootstrap-enroll.js): key =
+// utf8(bootstrap_id) bytes; message = utf8(ceremony_token) + "|" + lowercase hex of
+// sha256 over the EXACT body bytes the browser POSTs; lowercase hex output.
+func bootstrapEnrollProof(bootstrapID, ceremonyToken string, body []byte) string {
+	sum := sha256.Sum256(body)
+	msg := ceremonyToken + "|" + hex.EncodeToString(sum[:])
+	mac := hmac.New(sha256.New, []byte(bootstrapID))
+	mac.Write([]byte(msg))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 type ceremonySession struct {
@@ -93,11 +222,26 @@ func (s *Server) ownerAccess() *ownerAccessState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.deps.ownerAccess == nil {
-		s.deps.ownerAccess = &ownerAccessState{
-			enrollSessions: make(map[string]ceremonySession),
-			loginSessions:  make(map[string]ceremonySession),
-			authSessions:   make(map[string]authSession),
+		oa := &ownerAccessState{
+			enrollSessions:      make(map[string]ceremonySession),
+			loginSessions:       make(map[string]ceremonySession),
+			authSessions:        make(map[string]authSession),
+			devicePoPChallenges: make(map[string]time.Time),
 		}
+		// Restore persisted sessions so a process restart doesn't sign
+		// everyone out (sessions are otherwise in-memory only).
+		if s.deps.State != nil {
+			now := time.Now()
+			_ = s.deps.State.PruneOwnerSessions(now.UnixMilli())
+			if sess, err := s.deps.State.LoadOwnerSessions(); err == nil {
+				for _, p := range sess {
+					if exp := time.UnixMilli(p.ExpiresAtMs); exp.After(now) {
+						oa.authSessions[p.Token] = authSession{credentialID: p.CredentialID, expiresAt: exp}
+					}
+				}
+			}
+		}
+		s.deps.ownerAccess = oa
 	}
 	return s.deps.ownerAccess
 }
@@ -110,19 +254,21 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 	}
 	rpID := deps.OwnerAccessRPID
 	if rpID == "" {
-		rpID = "relay.fortytwowatts.com"
+		// The owner visits home.fortytwowatts.com; the RP-ID must match that
+		// origin's registrable suffix (one-way door — see main.go wiring).
+		rpID = "home.fortytwowatts.com"
 	}
 	origins := deps.OwnerAccessOrigins
 	if len(origins) == 0 {
 		origins = []string{"https://" + rpID}
 	}
 	wa, err := webauthn.New(&webauthn.Config{
-		RPID:          rpID,
-		RPDisplayName: "forty-two-watts",
-		RPOrigins:     origins,
+		RPID:                  rpID,
+		RPDisplayName:         "forty-two-watts",
+		RPOrigins:             origins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
+			ResidentKey:      protocol.ResidentKeyRequirementRequired,
 			UserVerification: protocol.VerificationPreferred,
 		},
 	})
@@ -145,13 +291,20 @@ func (s *Server) buildOwnerUser() (*ownerUser, error) {
 		creds = append(creds, webauthn.Credential{
 			ID:        d.CredentialID,
 			PublicKey: d.PublicKey,
+			Flags: webauthn.CredentialFlags{
+				BackupEligible: d.BackupEligible,
+				BackupState:    d.BackupState,
+			},
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    d.AAGUID,
 				SignCount: d.SignCount,
 			},
 		})
 	}
-	id := ownerUserID(s.deps)
+	id, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil, fmt.Errorf("owner wallet handle: %w", err)
+	}
 	return &ownerUser{
 		id:          id,
 		name:        "owner",
@@ -160,7 +313,25 @@ func (s *Server) buildOwnerUser() (*ownerUser, error) {
 	}, nil
 }
 
+// resolveDiscoverableOwner is the DiscoverableUserHandler for usernameless
+// login: it returns the single owner iff the assertion's userHandle matches
+// the stable wallet handle W. The library then matches the credential rawID
+// against that owner's enrolled credentials and verifies the signature.
+func (s *Server) resolveDiscoverableOwner(rawID, userHandle []byte) (webauthn.User, error) {
+	user, err := s.buildOwnerUser()
+	if err != nil {
+		return nil, err
+	}
+	if subtle.ConstantTimeCompare(userHandle, user.WebAuthnID()) != 1 {
+		return nil, errors.New("owner-access: unknown wallet handle")
+	}
+	return user, nil
+}
+
 func ownerUserID(deps *Deps) []byte {
+	if deps != nil && deps.SiteID != "" {
+		return []byte(deps.SiteID)
+	}
 	if deps != nil && deps.Cfg != nil && deps.Cfg.Site.Name != "" {
 		return []byte("site:" + deps.Cfg.Site.Name)
 	}
@@ -174,6 +345,30 @@ func ownerDisplayName(deps *Deps) string {
 	return "Operator"
 }
 
+// ownerWalletHandleKey is the state.db config key holding the stable opaque
+// wallet handle W. Minted once, never derived from the mutable site name, so
+// renames and name-collisions never orphan enrolled passkeys.
+const ownerWalletHandleKey = "owner_wallet_handle"
+
+// ownerWalletHandle returns the stable opaque wallet handle W, minting and
+// persisting it on first use.
+func (s *Server) ownerWalletHandle() ([]byte, error) {
+	if s.deps.State == nil {
+		return nil, errors.New("state store not configured")
+	}
+	if v, ok := s.deps.State.LoadConfig(ownerWalletHandleKey); ok && v != "" {
+		return []byte(v), nil
+	}
+	tok, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	if err := s.deps.State.SaveConfig(ownerWalletHandleKey, tok); err != nil {
+		return nil, err
+	}
+	return []byte(tok), nil
+}
+
 // ---- Helpers ----
 
 func randomToken() (string, error) {
@@ -182,6 +377,37 @@ func randomToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// randomDigits returns n cryptographically-random decimal digits as a string
+// (zero-padded, e.g. "042315"). Used for the LAN enrollment PIN.
+func randomDigits(n int) (string, error) {
+	out := make([]byte, n)
+	for i := range out {
+		d, err := rand.Int(rand.Reader, big.NewInt(10))
+		if err != nil {
+			return "", err
+		}
+		out[i] = byte('0' + d.Int64())
+	}
+	return string(out), nil
+}
+
+// capCeremonies evicts the oldest entries until the map is below the per-kind
+// cap, bounding it against an unauthenticated flood within the GC TTL window.
+// Caller holds oa.mu.
+func capCeremonies(m map[string]ceremonySession) {
+	for len(m) >= maxCeremoniesPerKind {
+		var oldestKey string
+		var oldest time.Time
+		first := true
+		for k, v := range m {
+			if first || v.createdAt.Before(oldest) {
+				oldestKey, oldest, first = k, v.createdAt, false
+			}
+		}
+		delete(m, oldestKey)
+	}
 }
 
 func (oa *ownerAccessState) gcCeremonies() {
@@ -210,11 +436,47 @@ func (oa *ownerAccessState) gcAuths() {
 // authorizeRequest returns the credential_id of the authenticated owner
 // for this request, or empty if not authenticated. Reads the session
 // cookie; honours LAN-bypass when Deps.OwnerAccessLANBypass is true and
-// the request came from a loopback address.
+// the request came from a genuine private-range LAN source IP (never
+// loopback and never the relay tunnel).
 func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) {
-	if s.deps.OwnerAccessLANBypass && isLoopback(r) {
+	// The X-FTW-Tunnel marker is the discriminator: the owner-remote long-poll
+	// proxy stamps it, so an owner-remote request is never LAN-bypassed and must
+	// carry a passkey session (this is what closes the home.* exposure — see the
+	// TestOwnerGateThroughRelay regression guard). Everything unmarked is treated
+	// as trusted-local: genuine LAN, AND the friend pair-flow, whose ftw-pair
+	// sidecar reverse-proxies from loopback and whose access is already gated by
+	// the relay grant. We deliberately do NOT additionally require a private
+	// source IP here, because that would break the friend flow (loopback). The
+	// fail-closed source check lives instead on the owner-only enrollment paths
+	// (enrollAllowed bootstrap, handleOwnerEnrollPin), which a friend-flow
+	// request must never be able to reach — see those call sites.
+	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) {
 		return []byte("lan-bypass"), true
 	}
+	return s.ownerSession(r)
+}
+
+// authorizeOwnerManage authorizes owner-ADMIN actions — credential management
+// (enroll an additional passkey, list/delete devices) and pairing control —
+// MORE strictly than authorizeOwner: the passwordless LAN-bypass here requires a
+// GENUINE private-range LAN source, never loopback. The friend pair-flow
+// reverse-proxies from loopback (unmarked), so it can read the dashboard via
+// authorizeOwner but can NEVER manage owner credentials, lock the owner out, or
+// escalate a time-boxed grant into a permanent owner passkey. A valid passkey
+// session also authorizes (the legitimate remote-owner path). Genuine LAN
+// presence (private source IP) authorizes too, so the on-LAN owner can manage
+// devices without first holding a session.
+func (s *Server) authorizeOwnerManage(r *http.Request) (credentialID []byte, ok bool) {
+	if s.deps.OwnerAccessLANBypass && !s.isTunneled(r) && isLANClientSource(r) {
+		return []byte("lan-bypass"), true
+	}
+	return s.ownerSession(r)
+}
+
+// ownerSession returns the credential_id for a request carrying a valid owner
+// session cookie, renewing the session TTL on use. No cookie / unknown session
+// → not authorized.
+func (s *Server) ownerSession(r *http.Request) (credentialID []byte, ok bool) {
 	c, err := r.Cookie(ownerAccessCookieName)
 	if err != nil {
 		return nil, false
@@ -233,12 +495,66 @@ func (s *Server) authorizeOwner(r *http.Request) (credentialID []byte, ok bool) 
 	return sess.credentialID, true
 }
 
-func isLoopback(r *http.Request) bool {
-	host := r.Host
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = host[:i]
+// isLoopbackSource reports whether the request's SOURCE address (RemoteAddr)
+// is a loopback IP. Used only for the narrow on-host liveness-probe exception
+// in the gate (deploy/CI healthchecks curl http://127.0.0.1). It is NOT a trust
+// signal for the API surface: the relay tunnel's reverse-proxy also connects
+// from loopback, so the gate pairs this with !isTunneled so a relay-forwarded
+// request can never satisfy it.
+func isLoopbackSource(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return host == "127.0.0.1" || host == "localhost" || host == "[::1]" || host == "::1"
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLANClientSource reports whether the request's SOURCE address (RemoteAddr,
+// never a spoofable X-Forwarded-For) is a genuine LAN client: a private-range
+// IPv4/IPv6 address that is NOT loopback. The relay tunnel's reverse-proxy
+// connects from loopback, so loopback is never a LAN client — this is the
+// fail-closed second line of defence behind the X-FTW-Tunnel marker.
+func isLANClientSource(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() {
+		return false
+	}
+	return ip.IsPrivate() || ip.IsLinkLocalUnicast() || isCGNAT(ip)
+}
+
+// isCGNAT reports whether ip is in RFC 6598 shared address space
+// (100.64.0.0/10) — the range Tailscale and zerotier hand out for their
+// overlays. Go's net.IP.IsPrivate covers RFC1918 + IPv6 ULA (so a Tailscale
+// IPv6 fd7a:… address already reads as private) but NOT the IPv4 CGNAT block,
+// so it is checked here. A source in this range reached the Pi over an overlay
+// the owner explicitly joined to the machine — an authenticated, encrypted path
+// with the relay NOT in it — so it counts as genuine LAN presence, exactly like
+// an RFC1918 client. Mirrors isPrivateIPv4 / isDirectLAN in web/p2p.js.
+func isCGNAT(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127
+}
+
+// isTunneled reports whether the request arrived via the relay long-poll
+// reverse-proxy, which stamps every forwarded request with the per-process
+// TunnelMarker secret. Constant-time compare so a direct client cannot probe
+// for the secret. A direct client that guesses wrong is simply treated as a
+// normal (trusted) LAN client — never an escalation.
+func (s *Server) isTunneled(r *http.Request) bool {
+	m := s.deps.TunnelMarker
+	if m == "" {
+		return false
+	}
+	got := r.Header.Get("X-FTW-Tunnel")
+	return subtle.ConstantTimeCompare([]byte(got), []byte(m)) == 1
 }
 
 func (s *Server) issueOwnerSession(w http.ResponseWriter, credentialID []byte) error {
@@ -246,13 +562,19 @@ func (s *Server) issueOwnerSession(w http.ResponseWriter, credentialID []byte) e
 	if err != nil {
 		return err
 	}
+	exp := time.Now().Add(ownerAccessSessionTTL)
 	oa := s.ownerAccess()
 	oa.mu.Lock()
 	oa.authSessions[tok] = authSession{
 		credentialID: credentialID,
-		expiresAt:    time.Now().Add(ownerAccessSessionTTL),
+		expiresAt:    exp,
 	}
 	oa.mu.Unlock()
+	// Persist so the session survives a restart (best-effort; the in-memory
+	// map is the hot path).
+	if s.deps.State != nil {
+		_ = s.deps.State.SaveOwnerSession(tok, credentialID, exp.UnixMilli())
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     ownerAccessCookieName,
 		Value:    tok,
@@ -276,16 +598,129 @@ func (s *Server) enrollAllowed(r *http.Request) error {
 		return fmt.Errorf("check trusted devices: %w", err)
 	}
 	if len(devices) == 0 {
-		return nil // bootstrap path — first device, no auth required
+		// Bootstrap (trust-on-first-use). When no relay tunnel is wired
+		// (TunnelMarker empty) there is no internet-exposed path at all, so the
+		// pre-relay LAN-only behaviour applies: bootstrap is allowed outright.
+		if s.deps.TunnelMarker == "" {
+			return nil
+		}
+		// A relay IS wired, so the bootstrap window is internet-reachable.
+		// Over the tunnel, require the LAN-minted PIN: a 6-digit code only a
+		// local user can read off the Pi's console. This lets the owner enroll
+		// the first passkey at the relay origin (needed for the relay RP-ID)
+		// while still proving LAN presence.
+		if s.isTunneled(r) {
+			pin := r.URL.Query().Get("pin")
+			if pin == "" || !s.ownerAccess().validateEnrollPin(pin) {
+				return ownerAccessError(http.StatusForbidden, errEnrollPinRequired,
+					"first enrollment requires the 6-digit PIN shown next to the setup QR on your local network")
+			}
+			return nil
+		}
+		// Not tunnelled. Defence in depth behind the marker: require a genuine
+		// private-range LAN source IP. A relay-forwarded request that somehow
+		// lost its marker still originates from loopback, so it fails here and
+		// can never open the bootstrap window from the internet.
+		if isLANClientSource(r) {
+			return nil
+		}
+		return ownerAccessError(http.StatusForbidden, errEnrollLANRequired,
+			"first enrollment must be performed on the local network")
 	}
-	if _, ok := s.authorizeOwner(r); ok {
+	// Adding a further passkey to an already-enrolled Pi is owner-credential
+	// management: authorize with the strict manager (a real session, or genuine
+	// LAN presence), NEVER the loopback bypass — so a friend pair-flow request
+	// (loopback, unmarked) can't enroll its own passkey and escalate a time-boxed
+	// grant into permanent owner access.
+	if _, ok := s.authorizeOwnerManage(r); ok {
 		return nil
 	}
-	return errors.New("enrollment requires an existing authenticated session")
+	return ownerAccessError(http.StatusForbidden, errEnrollSessionRequired,
+		"enrollment requires an existing authenticated session")
+}
+
+// handleOwnerEnrollPin mints (and returns) the LAN-first-enrollment PIN.
+// Reachable ONLY from genuine LAN/loopback requests: a relay-tunnelled
+// request (carrying the X-FTW-Tunnel marker) gets 403 — the PIN must never
+// leave the local network, since it's the very proof of LAN presence. The PIN
+// is also logged at Info level so it shows up on the Pi's console for an
+// operator standing at the machine.
+func (s *Server) handleOwnerEnrollPin(w http.ResponseWriter, r *http.Request) {
+	// Fail-closed: the PIN is the proof of LAN presence, so it is minted ONLY
+	// for a genuine private-range LAN source that did not arrive via the relay
+	// tunnel. Requiring isLANClientSource in addition to !isTunneled means that
+	// even if the tunnel marker is ever lost, a relay-forwarded request (which
+	// originates from loopback) can never satisfy isLANClientSource and so can
+	// never extract the PIN.
+	if s.isTunneled(r) || !isLANClientSource(r) {
+		writeOwnerAccessError(w, r, http.StatusForbidden, errEnrollPinLANOnly,
+			"enrollment PIN is only available on the local network", "tunneled", s.isTunneled(r))
+		return
+	}
+	if !s.remoteAccessEnabled() {
+		writeOwnerAccessError(w, r, http.StatusConflict, errRemoteAccessOff,
+			"remote access is off; enable it in Settings -> Access, save, and restart before creating a setup link")
+		return
+	}
+	if strings.TrimSpace(s.deps.RelayBaseURL) == "" {
+		writeOwnerAccessError(w, r, http.StatusConflict, errRemoteRestartRequired,
+			"remote access needs a service restart before setup links can be created")
+		return
+	}
+	if devices, err := s.deps.State.LoadTrustedDevices(); err != nil {
+		writeOwnerAccessError(w, r, http.StatusInternalServerError, errTrustedDevicesRead,
+			fmt.Sprintf("check trusted devices: %v", err))
+		return
+	} else if len(devices) > 0 {
+		writeOwnerAccessError(w, r, http.StatusConflict, errFirstSetupClosed,
+			"a passkey is already enrolled; sign in and add more passkeys from Access instead of using the first-setup QR", "devices", len(devices))
+		return
+	}
+	pin, bootstrapID, expiresIn, err := s.ownerAccess().mintEnrollPin()
+	if err != nil {
+		writeOwnerAccessError(w, r, http.StatusInternalServerError, errEnrollPinMintFailed,
+			err.Error())
+		return
+	}
+	// Log only the PIN — the RAW bootstrap_id is a bearer secret and must not land
+	// in logs; it travels only in this response to the LAN browser.
+	slog.Info("owner-access enrollment PIN minted",
+		"pin", pin, "expires_in_s", expiresIn)
+	// Publish before returning the QR/link. If the browser opens the setup link
+	// immediately (same Safari profile / new tab is very fast), a background PUT
+	// races and produces a false "no live setup link". Setup is only useful once
+	// the relay has accepted the parked descriptor, so surface publish failure here.
+	if err := s.publishBootstrapDescriptor(bootstrapID); err != nil {
+		writeOwnerAccessError(w, r, http.StatusBadGateway, errBootstrapPublishFailed,
+			"setup link unavailable: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"pin":          pin,
+		"bootstrap_id": bootstrapID,
+		"expires_in_s": expiresIn,
+	})
+}
+
+func (s *Server) remoteAccessEnabled() bool {
+	if s == nil || s.deps == nil || s.deps.Cfg == nil {
+		return false
+	}
+	if s.deps.CfgMu != nil {
+		s.deps.CfgMu.RLock()
+		defer s.deps.CfgMu.RUnlock()
+	}
+	return s.deps.Cfg.RemoteAccessEnabled()
 }
 
 func (s *Server) handleOwnerEnrollStart(w http.ResponseWriter, r *http.Request) {
 	if err := s.enrollAllowed(r); err != nil {
+		var oe ownerAccessHTTPError
+		if errors.As(err, &oe) {
+			writeOwnerAccessError(w, r, oe.status, oe.code, oe.msg, "tunneled", s.isTunneled(r))
+			return
+		}
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
@@ -324,6 +759,7 @@ func (s *Server) handleOwnerEnrollStart(w http.ResponseWriter, r *http.Request) 
 	}
 	oa.mu.Lock()
 	oa.gcCeremonies()
+	capCeremonies(oa.enrollSessions)
 	oa.enrollSessions[tok] = ceremonySession{data: sessionData, createdAt: time.Now()}
 	oa.mu.Unlock()
 	resp := map[string]any{
@@ -355,6 +791,54 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unknown or expired ceremony_token", http.StatusForbidden)
 		return
 	}
+	// Buffer the finish body ONCE up front. The C4 device_pubkey rides as an extra
+	// top-level field on the SAME body the WebAuthn library parses; go-webauthn's
+	// decoder ignores unknown fields, so we buffer here, pull device_pubkey out, and
+	// later hand the library a fresh reader over the identical bytes. Buffering also
+	// enforces the ceremony size cap AND — crucially — gives us the EXACT bytes the
+	// possession proof must bind (the body-bound proof below hashes these bytes, so a
+	// MITM relay cannot swap device_pubkey/attestation/name after the browser proved
+	// the honest body).
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
+	if err != nil {
+		http.Error(w, "finish registration: read body", http.StatusBadRequest)
+		return
+	}
+	// Tunneled (relay-forwarded) finish only: bind this enrollment to proof of
+	// possession of the RAW bootstrap_id AND to the exact finish body — and re-check
+	// the zero-device window — BEFORE any WebAuthn work or device persistence. An
+	// untunneled LAN finish is trusted by genuine source and keeps working with NO
+	// proof + NO recheck.
+	if s.isTunneled(r) {
+		// (a) Ceremony-bound, BODY-bound possession proof. The relay holds only
+		// sha256(bootstrap_id), so it cannot compute this; only the genuine browser
+		// (holding the raw #b= bootstrap_id) can. Binding the body hash also stops a
+		// MITM relay from swapping the top-level device_pubkey (or the attestation, or
+		// the name) after the browser proved the honest body. Constant-time compare.
+		proof := r.URL.Query().Get("bootstrap_proof")
+		oa.mu.Lock()
+		bid := oa.enrollBootstrapID
+		oa.mu.Unlock()
+		expected := bootstrapEnrollProof(bid, tok, bodyBytes)
+		if proof == "" || bid == "" || subtle.ConstantTimeCompare([]byte(proof), []byte(expected)) != 1 {
+			writeOwnerAccessError(w, r, http.StatusForbidden, errBootstrapProofRequired,
+				"bootstrap proof required")
+			return
+		}
+		// (b) Re-check the zero-device window. Source-of-truth backstop for the
+		// concurrent-finish race: two ceremonies can both pass enroll/start in the
+		// zero-device window, but only the first to persist wins — any later
+		// tunneled finish sees a non-empty device set and is refused.
+		if devices, derr := s.deps.State.LoadTrustedDevices(); derr != nil {
+			writeOwnerAccessError(w, r, http.StatusInternalServerError, errTrustedDevicesRead,
+				derr.Error())
+			return
+		} else if len(devices) > 0 {
+			writeOwnerAccessError(w, r, http.StatusForbidden, errEnrollWindowClosed,
+				"enrollment window closed", "devices", len(devices))
+			return
+		}
+	}
 	wa, err := oa.webauthnLib(s.deps)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -365,6 +849,10 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// device_pubkey is extracted from the SAME buffered bytes the proof bound, then a
+	// fresh reader over those identical bytes is handed to the WebAuthn library.
+	devicePubkey := extractDevicePubkeyField(bodyBytes)
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	cred, err := wa.FinishRegistration(user, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish registration: %v", err), http.StatusBadRequest)
@@ -374,22 +862,54 @@ func (s *Server) handleOwnerEnrollFinish(w http.ResponseWriter, r *http.Request)
 	for _, t := range cred.Transport {
 		transports = append(transports, string(t))
 	}
+	walletHandle, err := s.ownerWalletHandle()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	dev := state.TrustedDevice{
-		CredentialID: cred.ID,
-		PublicKey:    cred.PublicKey,
-		SignCount:    cred.Authenticator.SignCount,
-		AAGUID:       cred.Authenticator.AAGUID,
-		Transports:   transports,
-		FriendlyName: friendlyName,
-		CreatedAtMs:  time.Now().UnixMilli(),
+		CredentialID:   cred.ID,
+		PublicKey:      cred.PublicKey,
+		SignCount:      cred.Authenticator.SignCount,
+		AAGUID:         cred.Authenticator.AAGUID,
+		Transports:     transports,
+		FriendlyName:   friendlyName,
+		CreatedAtMs:    time.Now().UnixMilli(),
+		WalletHandle:   string(walletHandle),
+		BackupEligible: cred.Flags.BackupEligible,
+		BackupState:    cred.Flags.BackupState,
+		// Pin the freshly-minted device key (C4). Only a syntactically-valid
+		// canonical key is stored; a malformed value is dropped silently so the
+		// passkey still enrolls (the device key is an optional upgrade, not a
+		// hard requirement for the passkey itself). An empty/invalid value means
+		// "no silent device login yet" — the operator can still log in by passkey.
+		DevicePubkey: canonicalDevicePubkey(devicePubkey),
 	}
 	if err := s.deps.State.SaveTrustedDevice(dev); err != nil {
 		http.Error(w, fmt.Sprintf("save device: %v", err), http.StatusInternalServerError)
 		return
 	}
-	if err := s.issueOwnerSession(w, cred.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// Suppress the owner session on a tunnel-forwarded (bootstrap) enroll: the
+	// relay's bootstrapEnrollForward is the ONE path that carries enroll/finish over
+	// the relay tunnel, and the ftw_owner session cookie must NEVER traverse it (the
+	// relay already strips Set-Cookie, but we also refuse to mint the session here so
+	// it never leaves the Pi). The directory seed is Ed25519-write-sig-authed and
+	// steady-state sign-in mints the session over P2P, so a tunneled first-enroll
+	// needs no session. A DIRECT LAN enroll/finish is unmarked, so it still issues the
+	// cookie (the on-LAN operator gets an immediate session). The login/finish path
+	// is untouched.
+	if !s.isTunneled(r) {
+		if err := s.issueOwnerSession(w, cred.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// Tunneled first-enroll succeeded: clear the bootstrap_id so the
+		// bearer-adjacent value (and its derived proof) cannot linger to be
+		// reused by a stale/duplicate finish or leak from process memory.
+		oa.mu.Lock()
+		oa.enrollBootstrapID = ""
+		oa.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -405,18 +925,22 @@ func (s *Server) handleOwnerLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
+	// Still 404 when nothing is enrolled so the landing page shows the
+	// "enroll on LAN first" panel.
+	devices, err := s.deps.State.LoadTrustedDevices()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if len(user.credentials) == 0 {
+	if len(devices) == 0 {
 		http.Error(w, "no devices enrolled yet", http.StatusNotFound)
 		return
 	}
-	options, sessionData, err := wa.BeginLogin(user)
+	// Usernameless: empty allowCredentials, resolve the user from the
+	// assertion's userHandle at finish time.
+	options, sessionData, err := wa.BeginDiscoverableLogin()
 	if err != nil {
-		http.Error(w, fmt.Sprintf("begin login: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("begin discoverable login: %v", err), http.StatusInternalServerError)
 		return
 	}
 	tok, err := randomToken()
@@ -426,6 +950,7 @@ func (s *Server) handleOwnerLoginStart(w http.ResponseWriter, r *http.Request) {
 	}
 	oa.mu.Lock()
 	oa.gcCeremonies()
+	capCeremonies(oa.loginSessions)
 	oa.loginSessions[tok] = ceremonySession{data: sessionData, createdAt: time.Now()}
 	oa.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
@@ -457,12 +982,19 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	user, err := s.buildOwnerUser()
+	// Optional C4 upgrade: a passkey login can attach this browser's local
+	// device key by riding device_pubkey on the finish body (same buffer-and-replay
+	// trick as enroll/finish). The legacy single-key slot is not overwritten, but
+	// the multi-key table can remember another browser for the same synced passkey.
+	// Buffering also enforces the ceremony cap.
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxOwnerCeremonyBody))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "finish login: read body", http.StatusBadRequest)
 		return
 	}
-	cred, err := wa.FinishLogin(user, *sess.data, r)
+	devicePubkey := canonicalDevicePubkey(extractDevicePubkeyField(bodyBytes))
+	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	cred, err := wa.FinishDiscoverableLogin(s.resolveDiscoverableOwner, *sess.data, r)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("finish login: %v", err), http.StatusUnauthorized)
 		return
@@ -475,6 +1007,13 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, fmt.Sprintf("update sign count: %v", err), http.StatusInternalServerError)
 		return
 	}
+	// Add this browser's device key best-effort. The login itself already succeeded,
+	// so a failed upgrade must not 500 the operator out of a valid session.
+	if devicePubkey != "" {
+		if err := s.deps.State.SetTrustedDevicePubkey(cred.ID, devicePubkey, false); err != nil {
+			slog.Warn("owner-access: device-key upgrade on login failed", "err", err)
+		}
+	}
 	if err := s.issueOwnerSession(w, cred.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -486,7 +1025,10 @@ func (s *Server) handleOwnerLoginFinish(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeOwner(r); !ok {
+	// Owner-credential surface: strict authz (session or genuine LAN), never the
+	// loopback bypass — a friend pair-flow request must not enumerate the owner's
+	// passkeys (takeover recon).
+	if _, ok := s.authorizeOwnerManage(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -495,29 +1037,225 @@ func (s *Server) handleOwnerDevicesList(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	keyCounts := map[string]int{}
+	if keys, err := s.deps.State.TrustedDevicePubkeyRecords(); err == nil {
+		for _, k := range keys {
+			keyCounts[string(k.CredentialID)]++
+		}
+	}
 	type devOut struct {
-		CredentialIDB64 string `json:"credential_id_b64"`
-		FriendlyName    string `json:"friendly_name"`
-		CreatedAtMs     int64  `json:"created_at_ms"`
-		LastUsedMs      int64  `json:"last_used_ms"`
+		CredentialIDB64 string   `json:"credential_id_b64"`
+		FriendlyName    string   `json:"friendly_name"`
+		CreatedAtMs     int64    `json:"created_at_ms"`
+		LastUsedMs      int64    `json:"last_used_ms"`
 		Transports      []string `json:"transports,omitempty"`
+		// HasDeviceKey reports whether this credential carries a pinned device key
+		// (C4) — i.e. whether it can mint a silent device-PoP session (C3). The
+		// raw key itself is public, but the UI only needs the boolean to show an
+		// "upgrade for one-tap login" affordance, so we don't ship the 128 hex.
+		HasDeviceKey bool `json:"has_device_key"`
+		BrowserKeys  int  `json:"browser_keys"`
 	}
 	out := make([]devOut, 0, len(devices))
 	for _, d := range devices {
+		browserKeys := keyCounts[string(d.CredentialID)]
+		if browserKeys == 0 && d.DevicePubkey != "" {
+			browserKeys = 1
+		}
 		out = append(out, devOut{
 			CredentialIDB64: base64.RawURLEncoding.EncodeToString(d.CredentialID),
 			FriendlyName:    d.FriendlyName,
 			CreatedAtMs:     d.CreatedAtMs,
 			LastUsedMs:      d.LastUsedMs,
 			Transports:      d.Transports,
+			HasDeviceKey:    browserKeys > 0,
+			BrowserKeys:     browserKeys,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"devices": out})
 }
 
+func ownerAccessOpaqueID(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func (s *Server) handleOwnerBrowserKeysList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	devices, err := s.deps.State.LoadTrustedDevices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names := map[string]string{}
+	for _, d := range devices {
+		names[string(d.CredentialID)] = d.FriendlyName
+	}
+	keys, err := s.deps.State.TrustedDevicePubkeyRecords()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type keyOut struct {
+		ID              string `json:"id"`
+		CredentialIDB64 string `json:"credential_id_b64"`
+		FriendlyName    string `json:"friendly_name"`
+		CreatedAtMs     int64  `json:"created_at_ms"`
+		LastUsedMs      int64  `json:"last_used_ms"`
+		KeyHint         string `json:"key_hint"`
+		Legacy          bool   `json:"legacy"`
+	}
+	out := make([]keyOut, 0, len(keys))
+	for _, k := range keys {
+		hint := k.DevicePubkey
+		if len(hint) > 12 {
+			hint = hint[len(hint)-12:]
+		}
+		out = append(out, keyOut{
+			ID:              ownerAccessOpaqueID(k.DevicePubkey),
+			CredentialIDB64: base64.RawURLEncoding.EncodeToString(k.CredentialID),
+			FriendlyName:    names[string(k.CredentialID)],
+			CreatedAtMs:     k.CreatedAtMs,
+			LastUsedMs:      k.LastUsedMs,
+			KeyHint:         hint,
+			Legacy:          k.Legacy,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"browser_keys": out})
+}
+
+func (s *Server) handleOwnerBrowserKeyDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("browser_key_id")
+	keys, err := s.deps.State.TrustedDevicePubkeyRecords()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, k := range keys {
+		if ownerAccessOpaqueID(k.DevicePubkey) != id {
+			continue
+		}
+		if err := s.deps.State.DeleteTrustedDevicePubkey(k.DevicePubkey); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "browser key not found", http.StatusNotFound)
+}
+
+func (s *Server) handleOwnerSessionsList(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var current string
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil {
+		current = c.Value
+	}
+	devices, err := s.deps.State.LoadTrustedDevices()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	names := map[string]string{}
+	for _, d := range devices {
+		names[string(d.CredentialID)] = d.FriendlyName
+	}
+	type sessCopy struct {
+		token string
+		authSession
+	}
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	oa.gcAuths()
+	copies := make([]sessCopy, 0, len(oa.authSessions))
+	for tok, sess := range oa.authSessions {
+		copies = append(copies, sessCopy{token: tok, authSession: sess})
+	}
+	oa.mu.Unlock()
+	type sessOut struct {
+		ID              string `json:"id"`
+		CredentialIDB64 string `json:"credential_id_b64"`
+		FriendlyName    string `json:"friendly_name"`
+		ExpiresAtMs     int64  `json:"expires_at_ms"`
+		Current         bool   `json:"current"`
+	}
+	out := make([]sessOut, 0, len(copies))
+	for _, c := range copies {
+		out = append(out, sessOut{
+			ID:              ownerAccessOpaqueID(c.token),
+			CredentialIDB64: base64.RawURLEncoding.EncodeToString(c.credentialID),
+			FriendlyName:    names[string(c.credentialID)],
+			ExpiresAtMs:     c.expiresAt.UnixMilli(),
+			Current:         c.token == current,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": out})
+}
+
+func (s *Server) handleOwnerSessionDelete(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.authorizeOwnerManage(r); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	id := r.PathValue("session_id")
+	var current string
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil {
+		current = c.Value
+	}
+	var deleted, deletedCurrent bool
+	var token string
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	for tok := range oa.authSessions {
+		if ownerAccessOpaqueID(tok) != id {
+			continue
+		}
+		token = tok
+		deleted = true
+		deletedCurrent = tok == current
+		delete(oa.authSessions, tok)
+		break
+	}
+	oa.mu.Unlock()
+	if !deleted {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+	if s.deps.State != nil {
+		_ = s.deps.State.DeleteOwnerSession(token)
+	}
+	if deletedCurrent {
+		http.SetCookie(w, &http.Cookie{
+			Name:     ownerAccessCookieName,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authorizeOwner(r); !ok {
+	// Owner-credential surface: strict authz (session or genuine LAN), never the
+	// loopback bypass — a friend pair-flow request must not be able to delete the
+	// owner's passkeys (lockout / takeover).
+	if _, ok := s.authorizeOwnerManage(r); !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -530,6 +1268,29 @@ func (s *Server) handleOwnerDeviceDelete(w http.ResponseWriter, r *http.Request)
 	if err := s.deps.State.DeleteTrustedDevice(credID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	// Revoke any active sessions minted for that credential — otherwise
+	// "revoke a lost device" wouldn't actually log it out until the 24 h TTL.
+	oa := s.ownerAccess()
+	oa.mu.Lock()
+	var revoked []string
+	for tok, sess := range oa.authSessions {
+		if string(sess.credentialID) == string(credID) {
+			revoked = append(revoked, tok)
+			delete(oa.authSessions, tok)
+		}
+	}
+	oa.mu.Unlock()
+	if s.deps.State != nil {
+		for _, tok := range revoked {
+			_ = s.deps.State.DeleteOwnerSession(tok)
+		}
+		if devices, err := s.deps.State.LoadTrustedDevices(); err == nil && len(devices) == 0 {
+			// Removing the final passkey means the next enrollment is a new owner
+			// bootstrap. Rotate the wallet handle so the new passkey does not reuse
+			// a stale relay wallet-blob/write-key from the previous owner set.
+			_ = s.deps.State.SaveConfig(ownerWalletHandleKey, "")
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -553,9 +1314,50 @@ func (s *Server) handleOwnerWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"authenticated":     true,
-		"friendly_name":     name,
-		"devices_enrolled":  len(devices),
-		"site_id":           string(ownerUserID(s.deps)),
+		"authenticated":    true,
+		"friendly_name":    name,
+		"devices_enrolled": len(devices),
+		"site_id":          string(ownerUserID(s.deps)),
+		"wallet":           string(mustWalletHandle(s)),
+		// can_sign_out is false on LAN-bypass (no session cookie to revoke) — the
+		// dashboard hides its Sign-out control on the local network, where you're
+		// implicitly trusted and signing out would be meaningless.
+		"can_sign_out": string(credID) != "lan-bypass",
 	})
+}
+
+// handleOwnerLogout revokes the caller's owner session: deletes it in memory and
+// from the persisted store, then expires the cookie. It is an open path
+// (reachable without re-auth) because it only ever clears the cookie the caller
+// presents — it can never sign out a different owner, and no cookie is a no-op.
+func (s *Server) handleOwnerLogout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(ownerAccessCookieName); err == nil && c.Value != "" {
+		oa := s.ownerAccess()
+		oa.mu.Lock()
+		delete(oa.authSessions, c.Value)
+		oa.mu.Unlock()
+		if s.deps.State != nil {
+			_ = s.deps.State.DeleteOwnerSession(c.Value)
+		}
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     ownerAccessCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "signed out"})
+}
+
+// mustWalletHandle returns the wallet handle for response surfaces that must
+// not fail the whole request if state is momentarily unavailable.
+func mustWalletHandle(s *Server) []byte {
+	w, err := s.ownerWalletHandle()
+	if err != nil {
+		return nil
+	}
+	return w
 }

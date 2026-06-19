@@ -80,8 +80,12 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.HoldS <= 0 {
-		writeJSON(w, 400, map[string]string{"error": "hold_s must be > 0"})
+	// hold_s == 0 means a persistent override (operator "Start" / amp
+	// slider): no time expiry, released only by DELETE ("Stop") or on
+	// unplug. hold_s < 0 is invalid; hold_s > 0 is the bounded
+	// diagnostic hold capped at maxManualHoldS.
+	if req.HoldS < 0 {
+		writeJSON(w, 400, map[string]string{"error": "hold_s must be >= 0"})
 		return
 	}
 	if req.HoldS > maxManualHoldS {
@@ -103,7 +107,13 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	expires := time.Now().Add(time.Duration(req.HoldS) * time.Second)
+	// hold_s == 0 → persistent override (no time expiry); hold_s > 0 →
+	// bounded diagnostic hold expiring at now+hold_s.
+	var expires time.Time
+	persistent := req.HoldS == 0
+	if !persistent {
+		expires = time.Now().Add(time.Duration(req.HoldS) * time.Second)
+	}
 	hold := loadpoint.ManualHold{
 		PowerW:          req.PowerW,
 		PhaseMode:       req.PhaseMode,
@@ -113,6 +123,7 @@ func (s *Server) handleLoadpointManualHold(w http.ResponseWriter, r *http.Reques
 		MaxAmpsPerPhase: req.MaxAmpsPerPhase,
 		SitePhases:      req.SitePhases,
 		ExpiresAt:       expires,
+		Persistent:      persistent,
 	}
 	s.deps.LoadpointCtrl.SetManualHold(id, hold)
 	writeJSON(w, 200, manualHoldResponseFrom(hold, true))
@@ -165,6 +176,55 @@ func (s *Server) handleLoadpointManualHoldGet(w http.ResponseWriter, r *http.Req
 	}
 	h, active := s.deps.LoadpointCtrl.GetManualHold(id, time.Now())
 	writeJSON(w, 200, manualHoldResponseFrom(h, active))
+}
+
+// decorateLoadpointsWithManual fills the manual-override + amp-conversion
+// fields on each loadpoint state so the UI can render the manual amp
+// slider (range from min/max charge W ÷ phases ÷ voltage) and reflect
+// whether a manual hold is currently pinned. Phases come from the
+// loadpoint's phase_mode (1p/3p) or the site fuse; voltage from the
+// site fuse. Mutates states in place.
+func (s *Server) decorateLoadpointsWithManual(states []loadpoint.State) {
+	var fusePhases int
+	var voltage float64
+	if s.deps.CfgMu != nil && s.deps.Cfg != nil {
+		s.deps.CfgMu.RLock()
+		fusePhases = s.deps.Cfg.Fuse.Phases
+		voltage = s.deps.Cfg.Fuse.Voltage
+		s.deps.CfgMu.RUnlock()
+	}
+	if fusePhases <= 0 {
+		fusePhases = 3
+	}
+	if voltage <= 0 {
+		voltage = 230
+	}
+
+	phaseModeByID := map[string]string{}
+	if s.deps.Loadpoints != nil {
+		for _, c := range s.deps.Loadpoints.Configs() {
+			phaseModeByID[c.ID] = c.PhaseMode
+		}
+	}
+
+	now := time.Now()
+	for i := range states {
+		phases := fusePhases
+		switch phaseModeByID[states[i].ID] {
+		case "1p":
+			phases = 1
+		case "3p":
+			phases = 3
+		}
+		states[i].Phases = phases
+		states[i].VoltageV = voltage
+		if s.deps.LoadpointCtrl != nil {
+			if h, ok := s.deps.LoadpointCtrl.GetManualHold(states[i].ID, now); ok {
+				states[i].ManualActive = true
+				states[i].ManualChargeW = h.PowerW
+			}
+		}
+	}
 }
 
 func manualHoldResponseFrom(h loadpoint.ManualHold, active bool) manualHoldResponse {
