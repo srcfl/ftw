@@ -2,6 +2,8 @@ package drivers
 
 import (
 	"context"
+	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -114,13 +116,34 @@ func TestFerroampDC2V2XDriverTelemetryAndCommand(t *testing.T) {
 	mqtt := &fakeMQTT{}
 	d := newBundledMQTTDriver(t, "ferroamp_dc2_v2x.lua", "dc2", tel, mqtt, nil)
 
-	mqtt.Push("dc2/connector/1/pe/measured_voltage", "400")
-	mqtt.Push("dc2/connector/1/pe/measured_current", "-12.5")
-	mqtt.Push("dc2/connector/1/ev/soc", "64")
-	mqtt.Push("dc2/connector/1/ev/id_state", "mated")
-	mqtt.Push("dc2/connector/1/ev/limits/max_power", "20000")
-	mqtt.Push("dc2/connector/1/ev/limits/max_discharge_power", "15000")
-	mqtt.Push("dc2/connector/1/em/transferred_energy", "1.25")
+	mqtt.Push("dc2/v2x/system", `{
+		"timestamp": 1772745398,
+		"Host": "dc2-v2x-test",
+		"State": "discharging",
+		"Control": "mqtt",
+		"Power set": -25,
+		"Charged energy": "1.250 kWh",
+		"Discharged energy": "0.750 kWh"
+	}`)
+	mqtt.Push("dc2/v2x/pecc", `{
+		"timestamp": 1772746264,
+		"PECCStatus2": {
+			"measuredVoltage": 300,
+			"measuredCurrent": -12.5
+		},
+		"PECCLimits1": {
+			"limitPowerMax": 20000
+		},
+		"PECCLimits3": {
+			"limitDischargePowerMax": -15000
+		}
+	}`)
+	mqtt.Push("dc2/v2x/secc", `{
+		"VehicleStatus": {
+			"batteryStateOfCharge": 64,
+			"evConnectionState": "energyTransferAllowed"
+		}
+	}`)
 
 	if _, err := d.Poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -129,19 +152,55 @@ func TestFerroampDC2V2XDriverTelemetryAndCommand(t *testing.T) {
 	if r == nil {
 		t.Fatal("expected v2x telemetry")
 	}
-	if r.RawW != -5000 {
-		t.Fatalf("v2x w = %v, want -5000", r.RawW)
+	if r.RawW != -3750 {
+		t.Fatalf("v2x w = %v, want -3750", r.RawW)
 	}
 	if r.SoC == nil || *r.SoC != 0.64 {
 		t.Fatalf("vehicle soc = %v, want 0.64", r.SoC)
+	}
+	if !strings.Contains(string(r.Data), `"session_charge_wh":1250`) || !strings.Contains(string(r.Data), `"session_discharge_wh":750`) {
+		t.Fatalf("v2x data missing session energy: %s", string(r.Data))
 	}
 
 	if err := d.Command(context.Background(), []byte(`{"action":"v2x_set_power","power_w":-5000}`)); err != nil {
 		t.Fatalf("command: %v", err)
 	}
 	pubs := mqtt.Published()
-	if len(pubs) == 0 || pubs[len(pubs)-1].Topic != "dc2/ui/control" || pubs[len(pubs)-1].Payload != "-5.00" {
+	if len(pubs) < 2 {
 		t.Fatalf("unexpected publish: %+v", pubs)
+	}
+	assertDC2ControlPublish(t, pubs[len(pubs)-2], "dc2/ui/control/controller", "MQTT")
+	assertDC2ControlPublish(t, pubs[len(pubs)-1], "dc2/ui/control/power", -33.333333333333336)
+}
+
+func assertDC2ControlPublish(t *testing.T, msg MQTTMessage, wantTopic string, wantValue any) {
+	t.Helper()
+	if msg.Topic != wantTopic {
+		t.Fatalf("topic = %q, want %q; all msg=%+v", msg.Topic, wantTopic, msg)
+	}
+	var payload struct {
+		Timestamp float64 `json:"timestamp"`
+		Value     any     `json:"value"`
+	}
+	if err := json.Unmarshal([]byte(msg.Payload), &payload); err != nil {
+		t.Fatalf("decode %s payload %q: %v", wantTopic, msg.Payload, err)
+	}
+	if payload.Timestamp <= 0 {
+		t.Fatalf("timestamp = %v, want unix seconds", payload.Timestamp)
+	}
+	switch want := wantValue.(type) {
+	case string:
+		got, ok := payload.Value.(string)
+		if !ok || got != want {
+			t.Fatalf("%s value = %#v, want %q", wantTopic, payload.Value, want)
+		}
+	case float64:
+		got, ok := payload.Value.(float64)
+		if !ok || math.Abs(got-want) > 0.000001 {
+			t.Fatalf("%s value = %#v, want %v", wantTopic, payload.Value, want)
+		}
+	default:
+		t.Fatalf("unsupported wantValue type %T", wantValue)
 	}
 }
 

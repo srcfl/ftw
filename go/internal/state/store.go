@@ -733,13 +733,23 @@ type DayEnergy struct {
 	BatChargedWh    float64
 	BatDischargedWh float64
 	LoadWh          float64
+	// Intervals is the number of integration intervals that contributed to
+	// the totals — i.e. the count of rows that had a predecessor (prev_ts IS
+	// NOT NULL). Zero means there was at most one history row in the range, so
+	// nothing could be integrated and the totals are a vacuous 0 rather than a
+	// real measurement. Callers use this to tell "no data yet" apart from a
+	// genuine zero (mirrors the old `len(pts) > 1` guard).
+	Intervals int64
 }
 
 // DailyEnergy integrates history W columns over [sinceMs, untilMs] and returns
-// Wh totals in a single round-trip. The integration is a left-Riemann sum
-// (W[j] * (ts[j]-ts[j-1])), matching the previous Go loop in handleEnergyDaily.
-// Pushing the sums into SQL avoids shipping ~17k hot-tier rows per day back to
-// the application — month-view dashboards got slow once hot retention grew.
+// Wh totals in a single round-trip. The integration uses the value at the
+// LATER sample of each interval over that interval's width
+// (W[j] * (ts[j]-ts[j-1])) — i.e. a right-endpoint / right-Riemann sum. This
+// matches the previous Go loop in handleEnergyDaily exactly; do not "fix" it
+// to a left-endpoint sum. Pushing the sums into SQL avoids shipping ~17k
+// hot-tier rows per day back to the application — month-view dashboards got
+// slow once hot retention grew.
 func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	const q = `
 		WITH all_rows AS (
@@ -764,7 +774,8 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 			COALESCE(SUM((-pv_w) * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COALESCE(SUM((CASE WHEN bat_w > 0 THEN  bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COALESCE(SUM((CASE WHEN bat_w < 0 THEN -bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0)
+			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0),
+			COUNT(*)
 		FROM lagged
 		WHERE prev_ts IS NOT NULL
 	`
@@ -776,6 +787,7 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
+		&d.Intervals,
 	)
 	if err != nil {
 		return DayEnergy{}, err

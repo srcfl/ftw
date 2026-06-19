@@ -43,6 +43,18 @@ drivers:
         port: 502
         unit_id: 1
 
+  # Pixii PowerShaper. When troubleshooting mode is enabled in Settings,
+  # Pixii also exposes calibration/control status and setpoint readback metrics.
+  # - name: pixii
+  #   lua: drivers/pixii.lua
+  #   is_site_meter: true
+  #   battery_capacity_wh: 20000
+  #   capabilities:
+  #     modbus:
+  #       host: 192.168.1.50
+  #       port: 502
+  #       unit_id: 1
+
   # V2X chargers are modeled separately from stationary batteries.
   # They emit signed v2x_charger.w telemetry:
   #   +W = vehicle charging, -W = vehicle discharging into the site/grid.
@@ -55,7 +67,7 @@ drivers:
   #       host: 192.168.1.70
   #       port: 1883
   #       username: dc2
-  #       password: dc2mqtt
+  #       password: dc2mqtt!
   #
   # - name: ambibox
   #   lua: drivers/ambibox_v2x.lua

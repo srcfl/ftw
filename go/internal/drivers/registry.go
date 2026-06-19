@@ -18,7 +18,8 @@ import (
 // Registry manages running Lua driver instances — spawn, poll, command, stop.
 // Thread-safe.
 type Registry struct {
-	tel *telemetry.Store
+	tel                 *telemetry.Store
+	troubleshootingMode bool
 
 	// MQTTFactory creates an MQTT capability for a driver given its config.
 	// Called on Add; the returned MQTTCap belongs to that driver alone.
@@ -39,6 +40,14 @@ func NewRegistry(tel *telemetry.Store) *Registry {
 		tel: tel,
 		rec: map[string]*runningDriver{},
 	}
+}
+
+// SetTroubleshootingMode updates the global incident-diagnostics flag used for
+// subsequently started drivers. Use Reload to restart already-running drivers.
+func (r *Registry) SetTroubleshootingMode(enabled bool) {
+	r.mu.Lock()
+	r.troubleshootingMode = enabled
+	r.mu.Unlock()
 }
 
 // driverRuntime abstracts the Lua driver lifecycle so the registry's
@@ -67,6 +76,21 @@ func (l *luaRuntime) Init(ctx context.Context, cfg []byte) error {
 func (l *luaRuntime) DefaultMode(ctx context.Context) error { return l.LuaDriver.DefaultMode() }
 func (l *luaRuntime) Cleanup(ctx context.Context) error     { l.LuaDriver.Cleanup(); return nil }
 func (l *luaRuntime) Env() *HostEnv                         { return l.LuaDriver.Env }
+
+func driverInitConfigJSON(cfg config.Driver, troubleshootingMode bool) []byte {
+	if len(cfg.Config) == 0 && !troubleshootingMode {
+		return nil
+	}
+	m := make(map[string]any, len(cfg.Config)+1)
+	for k, v := range cfg.Config {
+		m[k] = v
+	}
+	if troubleshootingMode {
+		m["_troubleshooting_mode"] = true
+	}
+	b, _ := json.Marshal(m)
+	return b
+}
 
 type runningDriver struct {
 	driver driverRuntime
@@ -110,7 +134,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		// Best-effort MAC resolution. Cross-VLAN devices return ""; that's
 		// fine — device_id falls back to the endpoint.
 		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mq.Host); ok { env.SetMAC(mac) }
+			if mac, ok := r.ARPLookup(mq.Host); ok {
+				env.SetMAC(mac)
+			}
 		}
 	}
 	if mb := cfg.EffectiveModbus(); mb != nil && r.ModbusFactory != nil {
@@ -121,7 +147,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		env.WithModbus(cap)
 		env.SetEndpoint(fmt.Sprintf("modbus://%s:%d", mb.Host, mb.Port))
 		if r.ARPLookup != nil {
-			if mac, ok := r.ARPLookup(mb.Host); ok { env.SetMAC(mac) }
+			if mac, ok := r.ARPLookup(mb.Host); ok {
+				env.SetMAC(mac)
+			}
 		}
 	}
 	if cfg.Capabilities.HTTP != nil {
@@ -158,11 +186,13 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 	}
 	var drv driverRuntime = &luaRuntime{LuaDriver: luaDrv}
 
-	// Pass the driver's config map as JSON to driver_init.
-	var initCfg []byte
-	if cfg.Config != nil {
-		initCfg, _ = json.Marshal(cfg.Config)
-	}
+	r.mu.Lock()
+	troubleshootingMode := r.troubleshootingMode
+	r.mu.Unlock()
+
+	// Pass the driver's config map as JSON to driver_init, with reserved
+	// host-level keys injected only at runtime.
+	initCfg := driverInitConfigJSON(cfg, troubleshootingMode)
 	if err := drv.Init(ctx, initCfg); err != nil {
 		drv.Cleanup(ctx)
 		return fmt.Errorf("driver_init: %w", err)
@@ -324,7 +354,9 @@ func (r *Registry) SendDefault(ctx context.Context, name string) error {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	r.mu.Unlock()
-	if !ok { return fmt.Errorf("driver %q not found", name) }
+	if !ok {
+		return fmt.Errorf("driver %q not found", name)
+	}
 	resCh := make(chan error, 1)
 	select {
 	case rd.cmdCh <- driverCmd{kind: "default", result: resCh}:
@@ -332,8 +364,10 @@ func (r *Registry) SendDefault(ctx context.Context, name string) error {
 		return ctx.Err()
 	}
 	select {
-	case err := <-resCh: return err
-	case <-ctx.Done(): return ctx.Err()
+	case err := <-resCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -344,7 +378,9 @@ func (r *Registry) Env(name string) *HostEnv {
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	r.mu.Unlock()
-	if !ok { return nil }
+	if !ok {
+		return nil
+	}
 	return rd.env
 }
 
@@ -352,7 +388,9 @@ func (r *Registry) Names() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]string, 0, len(r.rec))
-	for n := range r.rec { out = append(out, n) }
+	for n := range r.rec {
+		out = append(out, n)
+	}
 	return out
 }
 
@@ -360,7 +398,9 @@ func (r *Registry) Names() []string {
 func (r *Registry) ShutdownAll() {
 	r.mu.Lock()
 	names := make([]string, 0, len(r.rec))
-	for n := range r.rec { names = append(names, n) }
+	for n := range r.rec {
+		names = append(names, n)
+	}
 	r.mu.Unlock()
 	for _, n := range names {
 		r.Remove(n)
@@ -371,7 +411,7 @@ func (r *Registry) ShutdownAll() {
 // remove/restart. Drivers with changed lua path, capabilities, or config
 // map are restarted. Drivers marked Disabled are treated as "not in the
 // new list" — running ones get stopped, missing ones are not added.
-func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
+func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troubleshootingMode bool) {
 	// Filter out disabled drivers — they behave like removed from the
 	// registry's perspective but remain in config.yaml for re-enable.
 	active := make([]config.Driver, 0, len(newDrivers))
@@ -383,6 +423,8 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 	}
 
 	r.mu.Lock()
+	troubleshootingChanged := r.troubleshootingMode != troubleshootingMode
+	r.troubleshootingMode = troubleshootingMode
 	oldNames := make(map[string]bool, len(r.rec))
 	oldCfgs := make(map[string]config.Driver, len(r.rec))
 	for n, rd := range r.rec {
@@ -392,12 +434,17 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 	r.mu.Unlock()
 
 	newNames := make(map[string]bool, len(active))
-	for _, d := range active { newNames[d.Name] = true }
+	for _, d := range active {
+		newNames[d.Name] = true
+	}
 
 	// Remove or restart
 	for n, old := range oldCfgs {
 		newCfg, stillThere := findDriver(active, n)
 		if !stillThere {
+			r.Remove(n)
+		} else if troubleshootingChanged {
+			slog.Info("driver troubleshooting mode changed, restarting", "name", n, "enabled", troubleshootingMode)
 			r.Remove(n)
 		} else if !sameDriverConfig(old, newCfg) {
 			slog.Info("driver config changed, restarting", "name", n)
@@ -409,7 +456,9 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver) {
 		r.mu.Lock()
 		_, exists := r.rec[d.Name]
 		r.mu.Unlock()
-		if exists { continue }
+		if exists {
+			continue
+		}
 		if err := r.Add(ctx, d); err != nil {
 			slog.Warn("add driver failed", "name", d.Name, "err", err)
 		}
@@ -523,7 +572,9 @@ func mergeAllowedHosts(explicit []string, drvCfg map[string]any) []string {
 
 func findDriver(list []config.Driver, name string) (config.Driver, bool) {
 	for _, d := range list {
-		if d.Name == name { return d, true }
+		if d.Name == name {
+			return d, true
+		}
 	}
 	return config.Driver{}, false
 }
@@ -536,18 +587,24 @@ func sameDriverConfig(a, b config.Driver) bool {
 		return false
 	}
 	aMq, bMq := a.EffectiveMQTT(), b.EffectiveMQTT()
-	if (aMq == nil) != (bMq == nil) { return false }
+	if (aMq == nil) != (bMq == nil) {
+		return false
+	}
 	if aMq != nil && (aMq.Host != bMq.Host || aMq.Port != bMq.Port ||
 		aMq.Username != bMq.Username || aMq.Password != bMq.Password) {
 		return false
 	}
 	aMb, bMb := a.EffectiveModbus(), b.EffectiveModbus()
-	if (aMb == nil) != (bMb == nil) { return false }
+	if (aMb == nil) != (bMb == nil) {
+		return false
+	}
 	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
 		return false
 	}
 	aTCP, bTCP := a.Capabilities.TCP, b.Capabilities.TCP
-	if (aTCP == nil) != (bTCP == nil) { return false }
+	if (aTCP == nil) != (bTCP == nil) {
+		return false
+	}
 	if aTCP != nil && !reflect.DeepEqual(aTCP.AllowedHosts, bTCP.AllowedHosts) {
 		return false
 	}

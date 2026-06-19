@@ -53,7 +53,23 @@ local REG_HEARTBEAT   = 39903  -- uint16, 0..100, must tick >= 1/min
 local REG_SETPOINT_HI = 39905  -- int32 MSB (big-endian, paired with 39906)
 local REG_SETPOINT_LO = 39906  -- int32 LSB
 
+-- SunSpec model 802 battery status points. Pixii's SoC is already read
+-- from this block at 40132, so these adjacent points are cheap diagnostics.
+local REG_BATTERY_SOC = 40132
+local REG_BATTERY_CHARGE_STATUS = 40137 -- ChaSt: OFF/EMPTY/DISCHARGING/...
+local REG_BATTERY_CONTROL_MODE = 40138 -- LocRemCtl: REMOTE/LOCAL
+local REG_BATTERY_STATE = 40143 -- State: CONNECTED/STANDBY/FAULT/...
+local REG_BATTERY_STATE_VENDOR = 40144 -- StateVnd: Pixii-specific
+local REG_BATTERY_EVT1 = 40147 -- Evt1 bitfield32
+
 local sn_read = false
+local troubleshooting = false
+local last_status_key = nil
+local last_command_ems_w = nil
+local last_command_pixii_w = nil
+local last_command_ms = nil
+local last_command_ok = nil
+
 -- Handshake counter, bumped every poll so the Pixii never times out to idle.
 -- Any change is sufficient; we just walk 0..99 and wrap.
 local hb_tick = 0
@@ -89,12 +105,135 @@ local function decode_ascii(regs, count)
     return s
 end
 
+local function config_bool(config, key)
+    if config == nil then return false end
+    local v = config[key]
+    return v == true or v == 1 or v == "1" or v == "true" or v == "yes" or v == "on"
+end
+
+local function read_u16(addr)
+    local ok, regs = pcall(host.modbus_read, addr, 1, "holding")
+    if ok and regs and regs[1] ~= nil then return regs[1] end
+    return nil
+end
+
+local function read_u32_be(addr)
+    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
+    if ok and regs and regs[1] ~= nil and regs[2] ~= nil then
+        return host.decode_u32_be(regs[1], regs[2])
+    end
+    return nil
+end
+
+local function read_i32_be(addr)
+    local ok, regs = pcall(host.modbus_read, addr, 2, "holding")
+    if ok and regs and regs[1] ~= nil and regs[2] ~= nil then
+        return host.decode_i32_be(regs[1], regs[2])
+    end
+    return nil
+end
+
+local charge_status_labels = {
+    [1] = "off",
+    [2] = "empty",
+    [3] = "discharging",
+    [4] = "charging",
+    [5] = "full",
+    [6] = "holding",
+    [7] = "testing",
+}
+
+local control_mode_labels = {
+    [0] = "remote",
+    [1] = "local",
+}
+
+local battery_state_labels = {
+    [1] = "disconnected",
+    [2] = "initializing",
+    [3] = "connected",
+    [4] = "standby",
+    [5] = "soc_protection",
+    [6] = "suspending",
+    [99] = "fault",
+}
+
+local function label_for(labels, value)
+    if value == nil then return "unknown" end
+    return labels[value] or ("unknown_" .. tostring(value))
+end
+
+local function read_battery_status()
+    local charge_status = read_u16(REG_BATTERY_CHARGE_STATUS)
+    local control_mode = read_u16(REG_BATTERY_CONTROL_MODE)
+    local battery_state = read_u16(REG_BATTERY_STATE)
+    local vendor_state = read_u16(REG_BATTERY_STATE_VENDOR)
+    local event1 = read_u32_be(REG_BATTERY_EVT1)
+
+    if charge_status ~= nil then host.emit_metric("battery_charge_status_code", charge_status) end
+    if control_mode ~= nil then host.emit_metric("battery_control_mode_code", control_mode) end
+    if battery_state ~= nil then host.emit_metric("battery_state_code", battery_state) end
+    if vendor_state ~= nil then host.emit_metric("battery_vendor_state_code", vendor_state) end
+    if event1 ~= nil then host.emit_metric("battery_event1_bits", event1) end
+
+    local charge_label = label_for(charge_status_labels, charge_status)
+    local control_label = label_for(control_mode_labels, control_mode)
+    local state_label = label_for(battery_state_labels, battery_state)
+    local key = charge_label .. "/" .. control_label .. "/" .. state_label .. "/" .. tostring(vendor_state) .. "/" .. tostring(event1)
+    if key ~= last_status_key then
+        host.log("info", "Pixii: status charge=" .. charge_label
+            .. " control=" .. control_label
+            .. " state=" .. state_label
+            .. " vendor_state=" .. tostring(vendor_state)
+            .. " event1=" .. tostring(event1))
+        if charge_status == 7 then
+            host.log("warn", "Pixii: charge status is TESTING; Pixii may be calibrating/testing and may ignore external setpoints")
+        end
+        last_status_key = key
+    end
+
+    return {
+        charge_status = charge_status,
+        charge_status_label = charge_label,
+        control_mode = control_mode,
+        control_mode_label = control_label,
+        battery_state = battery_state,
+        battery_state_label = state_label,
+        vendor_state = vendor_state,
+        event1 = event1,
+    }
+end
+
+local function emit_troubleshooting_metrics()
+    host.emit_metric("pixii_heartbeat_counter", hb_tick)
+    local setpoint_pixii_w = read_i32_be(REG_SETPOINT_HI)
+    if setpoint_pixii_w ~= nil then
+        host.emit_metric("pixii_setpoint_native_w", setpoint_pixii_w)
+        host.emit_metric("pixii_setpoint_ems_w", -setpoint_pixii_w)
+    end
+    if last_command_ems_w ~= nil then
+        host.emit_metric("pixii_last_command_ems_w", last_command_ems_w)
+        host.emit_metric("pixii_last_command_native_w", last_command_pixii_w)
+        host.emit_metric("pixii_last_command_ok", last_command_ok or 0)
+        if last_command_ms ~= nil then
+            host.emit_metric("pixii_last_command_age_s", (host.millis() - last_command_ms) / 1000)
+        end
+    end
+end
+
 ----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 
 function driver_init(config)
     host.set_make("Pixii")
+    troubleshooting = config_bool(config, "_troubleshooting_mode")
+        or config_bool(config, "troubleshooting_mode")
+        or config_bool(config, "troubleshooting")
+        or config_bool(config, "debug")
+    if troubleshooting then
+        host.log("info", "Pixii: troubleshooting mode enabled")
+    end
 
     -- Verify SunSpec signature at 40000 ("SunS") as a sanity check.
     local ok, sig = pcall(host.modbus_read, 40000, 2, "holding")
@@ -172,11 +311,27 @@ function driver_poll()
         temp_c = scale(host.decode_i16(temp_regs[1]), temp_sf)
     end
 
-    -- Battery SoC: 40132, U16 (percent → fraction 0..1)
-    local ok_soc, soc_regs = pcall(host.modbus_read, 40132, 1, "holding")
-    local bat_soc = 0
-    if ok_soc and soc_regs then
-        bat_soc = scale(soc_regs[1], soc_sf) / 100
+    -- Battery SoC: 40132, U16 (percent → fraction 0..1).
+    -- If Pixii returns a sentinel or otherwise impossible value, omit SoC
+    -- from the emit rather than invalidating the whole battery reading.
+    local ok_soc, soc_regs = pcall(host.modbus_read, REG_BATTERY_SOC, 1, "holding")
+    local bat_soc = nil
+    local bat_soc_pct = nil
+    if ok_soc and soc_regs and soc_regs[1] ~= nil then
+        bat_soc_pct = scale(soc_regs[1], soc_sf)
+        local candidate = bat_soc_pct / 100
+        if candidate >= 0 and candidate <= 1 then
+            bat_soc = candidate
+        else
+            host.log("warn", "Pixii: ignoring invalid battery SoC percent=" .. tostring(bat_soc_pct)
+                .. " raw=" .. tostring(soc_regs[1]) .. " sf=" .. tostring(soc_sf))
+        end
+    elseif troubleshooting then
+        host.log("warn", "Pixii: SoC read failed")
+    end
+    if bat_soc_pct ~= nil then
+        host.emit_metric("battery_soc_pct_raw", bat_soc_pct)
+        host.emit_metric("battery_soc_valid", bat_soc ~= nil and 1 or 0)
     end
 
     -- Battery voltage: 40155, I16
@@ -208,15 +363,26 @@ function driver_poll()
         bat_discharge_wh = host.decode_i32_be(cab_regs[3], cab_regs[4]) * 1000
     end
 
-    host.emit("battery", {
-        w            = bat_w,
-        v            = bat_v,
-        a            = bat_a,
-        soc          = bat_soc,
-        temp_c       = temp_c,
-        charge_wh    = bat_charge_wh,
-        discharge_wh = bat_discharge_wh,
-    })
+    local status = read_battery_status()
+    if troubleshooting then
+        emit_troubleshooting_metrics()
+    end
+
+    local battery = {
+        w                    = bat_w,
+        v                    = bat_v,
+        a                    = bat_a,
+        temp_c               = temp_c,
+        charge_wh            = bat_charge_wh,
+        discharge_wh         = bat_discharge_wh,
+        charge_status        = status.charge_status_label,
+        control_mode         = status.control_mode_label,
+        battery_state        = status.battery_state_label,
+        battery_vendor_state = status.vendor_state,
+        battery_event1       = status.event1,
+    }
+    if bat_soc ~= nil then battery.soc = bat_soc end
+    host.emit("battery", battery)
     -- Diagnostics: long-format TS DB
     host.emit_metric("battery_dc_v",      bat_v)
     host.emit_metric("battery_dc_a",      bat_a)
@@ -406,6 +572,17 @@ local function write_setpoint_w(pixii_w)
     if hb_err ~= nil and hb_err ~= "" then
         host.log("warn", "Pixii: heartbeat write failed: " .. tostring(hb_err))
     end
+    if troubleshooting then
+        local actual_pixii_w = read_i32_be(REG_SETPOINT_HI)
+        if actual_pixii_w ~= nil then
+            host.emit_metric("pixii_setpoint_native_w", actual_pixii_w)
+            host.emit_metric("pixii_setpoint_ems_w", -actual_pixii_w)
+            host.log("info", "Pixii: setpoint readback pixii_w=" .. tostring(actual_pixii_w)
+                .. " ems_w=" .. tostring(-actual_pixii_w))
+        else
+            host.log("warn", "Pixii: setpoint readback failed")
+        end
+    end
     return true
 end
 
@@ -414,7 +591,12 @@ local function set_battery_power(power_w)
     local pixii_w = -power_w
     host.log("info", "Pixii: setpoint ems_w=" .. tostring(power_w)
         .. " pixii_w=" .. tostring(pixii_w))
-    return write_setpoint_w(pixii_w)
+    last_command_ems_w = power_w
+    last_command_pixii_w = pixii_w
+    last_command_ms = host.millis()
+    local ok = write_setpoint_w(pixii_w)
+    last_command_ok = ok and 1 or 0
+    return ok
 end
 
 function driver_command(action, power_w, cmd)

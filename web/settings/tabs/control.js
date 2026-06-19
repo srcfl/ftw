@@ -27,6 +27,11 @@
         '</div><div>' +
         field("Min dispatch interval (s)", "site.min_dispatch_interval_s", "number", 5) +
         '</div></div>' +
+        '<label class="checkbox-row"><input type="checkbox" data-checkbox-path="site.troubleshooting_mode"' +
+          (getByPath(config, "site.troubleshooting_mode", false) ? ' checked' : '') +
+          '> Troubleshooting mode ' +
+          help("Incident diagnostics only. Adds dispatch-decision logs and driver readback metrics without changing control behavior.") +
+        '</label>' +
         '<div class="field-row"><div>' +
         field("Smoothing alpha", "site.smoothing_alpha", "number", 0.3,
           "EMA smoothing factor for the grid reading (0-1). Lower = smoother but slower response.") +

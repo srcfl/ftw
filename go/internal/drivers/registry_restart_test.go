@@ -18,9 +18,9 @@ import (
 // is what prevents the broker from leaving two clients fighting for
 // the same clientID across a restart cycle.
 type mockMQTT struct {
-	mu        sync.Mutex
-	subs      []string
-	closeN    atomic.Int32
+	mu     sync.Mutex
+	subs   []string
+	closeN atomic.Int32
 }
 
 func (m *mockMQTT) Subscribe(topic string) error {
@@ -30,7 +30,7 @@ func (m *mockMQTT) Subscribe(topic string) error {
 	return nil
 }
 func (m *mockMQTT) Publish(topic string, payload []byte) error { return nil }
-func (m *mockMQTT) PopMessages() []MQTTMessage                  { return nil }
+func (m *mockMQTT) PopMessages() []MQTTMessage                 { return nil }
 func (m *mockMQTT) Close() error {
 	m.closeN.Add(1)
 	return nil
@@ -44,7 +44,7 @@ type mockModbus struct {
 func (m *mockModbus) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	return nil, nil
 }
-func (m *mockModbus) WriteSingle(addr, value uint16) error   { return nil }
+func (m *mockModbus) WriteSingle(addr, value uint16) error { return nil }
 func (m *mockModbus) WriteMulti(addr uint16, vals []uint16) error {
 	return nil
 }
@@ -85,8 +85,29 @@ func writeTestDriver(t *testing.T, src string) string {
 	return path
 }
 
+func sawMetricValue(samples []telemetry.MetricSample, driver, metric string, value float64) bool {
+	for _, sample := range samples {
+		if sample.Driver == driver && sample.Metric == metric && sample.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
 const registryRestartTestDriver = `
 function driver_init(config) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd) end
+`
+
+const registryTroubleshootingTestDriver = `
+function driver_init(config)
+  local enabled = 0
+  if config ~= nil and config._troubleshooting_mode == true then
+    enabled = 1
+  end
+  host.emit_metric("troubleshooting_mode_enabled", enabled)
+end
 function driver_poll() return 1000 end
 function driver_command(action, w, cmd) end
 `
@@ -221,6 +242,44 @@ func TestAddCreatesHealthRecordImmediately(t *testing.T) {
 	all := r.tel.AllHealth()
 	if _, ok := all["d1"]; !ok {
 		t.Errorf("driver missing from AllHealth: %+v", all)
+	}
+}
+
+func TestAddInjectsGlobalTroubleshootingMode(t *testing.T) {
+	r := NewRegistry(telemetry.NewStore())
+	r.SetTroubleshootingMode(true)
+	path := writeTestDriver(t, registryTroubleshootingTestDriver)
+	cfg := config.Driver{
+		Name:   "d1",
+		Lua:    path,
+		Config: map[string]any{"local": true},
+	}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer r.ShutdownAll()
+	if _, ok := cfg.Config["_troubleshooting_mode"]; ok {
+		t.Fatal("global troubleshooting key leaked into driver config map")
+	}
+	if !sawMetricValue(r.tel.FlushSamples(), "d1", "troubleshooting_mode_enabled", 1) {
+		t.Fatal("expected troubleshooting_mode_enabled=1 metric")
+	}
+}
+
+func TestReloadRestartsDriversWhenTroubleshootingModeChanges(t *testing.T) {
+	r := NewRegistry(telemetry.NewStore())
+	path := writeTestDriver(t, registryTroubleshootingTestDriver)
+	cfg := config.Driver{Name: "d1", Lua: path}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer r.ShutdownAll()
+	if !sawMetricValue(r.tel.FlushSamples(), "d1", "troubleshooting_mode_enabled", 0) {
+		t.Fatal("expected initial troubleshooting_mode_enabled=0 metric")
+	}
+	r.Reload(context.Background(), []config.Driver{cfg}, true)
+	if !sawMetricValue(r.tel.FlushSamples(), "d1", "troubleshooting_mode_enabled", 1) {
+		t.Fatal("expected reload troubleshooting_mode_enabled=1 metric")
 	}
 }
 

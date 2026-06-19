@@ -42,6 +42,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	v2xpolicy "github.com/frahlg/forty-two-watts/go/internal/v2x"
 )
 
 const (
@@ -287,6 +288,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/scan", s.handleScan)
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
+	s.handle("GET  /api/v2x/policy", s.handleV2XPolicy)
 	s.handle("POST /api/v2x/command", s.handleV2XCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
 	s.handle("GET  /api/ev/providers", s.handleEVProviders)
@@ -767,13 +769,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		d, err := s.deps.State.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
 		if err == nil {
-			energyToday = map[string]any{
-				"import_wh":         d.ImportWh,
-				"export_wh":         d.ExportWh,
-				"pv_wh":             d.PVWh,
-				"bat_charged_wh":    d.BatChargedWh,
-				"bat_discharged_wh": d.BatDischargedWh,
-				"load_wh":           d.LoadWh,
+			// Only surface today's totals once at least one integration
+			// interval exists. Right after local midnight the range has
+			// 0–1 history rows, so the SQL COALESCEs every sum to a vacuous
+			// 0; rendering that as a hard "0 Wh" looks like a real reading
+			// instead of "no data yet". Mirror the old `len(pts) > 1` guard.
+			if d.Intervals > 0 {
+				energyToday = map[string]any{
+					"import_wh":         d.ImportWh,
+					"export_wh":         d.ExportWh,
+					"pv_wh":             d.PVWh,
+					"bat_charged_wh":    d.BatChargedWh,
+					"bat_discharged_wh": d.BatDischargedWh,
+					"load_wh":           d.LoadWh,
+				}
 			}
 		} else {
 			slog.Warn("failed to integrate today's energy", "err", err)
@@ -791,6 +800,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doesn't need a second /api/config fetch, and pull per-phase readings
 	// from the site meter driver's raw emit payload.
 	s.deps.CfgMu.RLock()
+	troubleshootingMode := s.deps.Cfg.Site.TroubleshootingMode
 	fuseCfg := map[string]any{
 		"max_amps": s.deps.Cfg.Fuse.MaxAmps,
 		"phases":   s.deps.Cfg.Fuse.Phases,
@@ -799,10 +809,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RUnlock()
 
 	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
+	var v2xGridW *float64
+	if haveGrid {
+		gridCopy := gridW
+		v2xGridW = &gridCopy
+	}
+	v2xPolicy := s.v2xPolicyStatus(v2xGridW)
 
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
 		"grid_w":                gridW,
 		"pv_w":                  pvW,
@@ -831,6 +848,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"fuse":         fuseCfg,
 		"phase_amps":   phaseAmps,
 		"phase_powers": siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
+		"v2x_policy":   v2xPolicy,
 		"drivers":      drivers,
 		"dispatch":     dispatch,
 		// Observability counters for the per-slot Wh tracker. Pure
@@ -1153,6 +1171,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
 	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	s.deps.CtrlMu.Unlock()
+	if s.deps.Registry != nil {
+		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+	}
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
@@ -1456,7 +1477,7 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 	}
 	// Apply immediately via Reload — it filters disabled drivers and
 	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers)
+	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
 
 	action := "disabled"
 	if !disabled {
@@ -2370,6 +2391,139 @@ func pickV2XDriver(requested string, configured, live map[string]bool) (string, 
 	return "", fmt.Errorf("no V2X driver configured")
 }
 
+type v2xPolicyTelemetry struct {
+	Connected          *bool    `json:"connected"`
+	PlugConnected      *bool    `json:"plug_connected"`
+	VehicleSoC         *float64 `json:"vehicle_soc"`
+	VehicleSoCFract    *float64 `json:"vehicle_soc_fract"`
+	CapacityWh         *float64 `json:"capacity_wh"`
+	RatedPowerW        *float64 `json:"rated_power_w"`
+	ChargePowerMaxW    *float64 `json:"charge_power_max_w"`
+	DischargePowerMaxW *float64 `json:"discharge_power_max_w"`
+}
+
+func (s *Server) v2xPolicyConfig() *config.V2XPolicy {
+	if s.deps == nil || s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return nil
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg.V2X == nil {
+		return nil
+	}
+	cp := *s.deps.Cfg.V2X
+	return &cp
+}
+
+func (s *Server) v2xPolicyStatus(gridW *float64) map[string]any {
+	policy := s.v2xPolicyConfig()
+	policyOut := config.V2XPolicy{}
+	if policy != nil {
+		policyOut = *policy
+	}
+
+	driversOut := map[string]v2xpolicy.Envelope{}
+	if s.deps == nil || s.deps.Tel == nil {
+		return map[string]any{
+			"policy":  policyOut,
+			"drivers": driversOut,
+		}
+	}
+
+	candidates := s.configuredV2XDrivers()
+	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerV2X) {
+		candidates[r.Driver] = true
+	}
+	if policy != nil && policy.DriverName != "" {
+		candidates[policy.DriverName] = true
+	}
+	for name := range candidates {
+		r := s.deps.Tel.Get(name, telemetry.DerV2X)
+		driversOut[name] = v2xpolicy.Evaluate(policy, s.v2xSnapshot(name, r, gridW))
+	}
+
+	return map[string]any{
+		"policy":  policyOut,
+		"drivers": driversOut,
+	}
+}
+
+func (s *Server) v2xSnapshot(name string, r *telemetry.DerReading, gridW *float64) v2xpolicy.Snapshot {
+	snap := v2xpolicy.Snapshot{
+		Driver: name,
+		GridW:  gridW,
+		Now:    time.Now(),
+	}
+	if s.deps != nil && s.deps.Tel != nil {
+		if h := s.deps.Tel.DriverHealth(name); h != nil {
+			snap.Online = h.IsOnline()
+		}
+	}
+	if r == nil {
+		return snap
+	}
+	if r.SoC != nil {
+		soc := *r.SoC
+		snap.SoC = &soc
+	}
+	var data v2xPolicyTelemetry
+	if r.Data != nil && json.Unmarshal(r.Data, &data) == nil {
+		if data.Connected != nil {
+			connected := *data.Connected
+			snap.Connected = &connected
+		} else if data.PlugConnected != nil {
+			connected := *data.PlugConnected
+			snap.Connected = &connected
+		}
+		if snap.SoC == nil {
+			if data.VehicleSoC != nil {
+				soc := *data.VehicleSoC
+				snap.SoC = &soc
+			} else if data.VehicleSoCFract != nil {
+				soc := *data.VehicleSoCFract
+				snap.SoC = &soc
+			}
+		}
+		if data.CapacityWh != nil {
+			snap.CapacityWh = *data.CapacityWh
+		}
+		if data.RatedPowerW != nil {
+			snap.RatedPowerW = *data.RatedPowerW
+		}
+		if data.ChargePowerMaxW != nil {
+			snap.ChargePowerMaxW = *data.ChargePowerMaxW
+		}
+		if data.DischargePowerMaxW != nil {
+			snap.DischargePowerMaxW = *data.DischargePowerMaxW
+		}
+	}
+	return snap
+}
+
+func (s *Server) currentV2XGridW() *float64 {
+	if s.deps == nil || s.deps.Tel == nil || s.deps.Ctrl == nil || s.deps.CtrlMu == nil {
+		return nil
+	}
+	s.deps.CtrlMu.Lock()
+	siteMeter := s.deps.Ctrl.SiteMeterDriver
+	s.deps.CtrlMu.Unlock()
+	if siteMeter == "" || !statusDriverOnline(s.deps.Tel, siteMeter) {
+		return nil
+	}
+	if r := s.deps.Tel.Get(siteMeter, telemetry.DerMeter); r != nil {
+		gridW := r.SmoothedW
+		return &gridW
+	}
+	return nil
+}
+
+// GET /api/v2x/policy — read back the configured V2X policy plus the live
+// allowed power envelope per V2X driver. This is observability only; automatic
+// dispatch remains disabled until a later planner integration consumes it.
+func (s *Server) handleV2XPolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.v2xPolicyStatus(s.currentV2XGridW()))
+}
+
 // POST /api/v2x/command — send a signed W setpoint to a V2X charger driver.
 // This is intentionally a thin manual/test surface; automatic optimizer
 // dispatch is kept out until the V2X policy layer has reserve/departure
@@ -2413,6 +2567,14 @@ func (s *Server) handleV2XCommand(w http.ResponseWriter, r *http.Request) {
 	powerW := req.PowerW
 	if action == "v2x_stop" {
 		action = "v2x_set_power"
+		powerW = 0
+	}
+	// Only the v2x_set_power action carries a setpoint. init / deinit (and
+	// the v2x_stop→set_power+0 remap above) are non-setpoint actions, so a
+	// caller-supplied power_w must never leak through to the driver on
+	// them — force it to 0. This also keeps the live-telemetry guard below
+	// from being bypassed by a non-setpoint action smuggling a setpoint.
+	if action != "v2x_set_power" {
 		powerW = 0
 	}
 	if action == "v2x_set_power" && powerW != 0 && !live[driverName] {

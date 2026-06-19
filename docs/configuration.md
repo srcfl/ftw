@@ -48,7 +48,23 @@ site:
   gain: 0.5                       # legacy proportional gain
   slew_rate_w: 500                # max change in dispatch target per cycle
   min_dispatch_interval_s: 5      # holdoff between successive dispatches
+  troubleshooting_mode: false     # extra incident diagnostics; no control changes
 ```
+
+#### Global troubleshooting mode (`site.troubleshooting_mode`)
+
+Operators should enable this from **Settings → Control → Troubleshooting
+mode** while diagnosing a live system issue. The setting is saved through the
+same config API as the rest of Settings; do not ask users to edit YAML for an
+incident.
+
+It does not change planner, dispatch, clamp, or driver command behavior. It
+adds one dispatch-decision log line per control cycle, exposes the flag in
+`/api/status`, and passes a reserved `_troubleshooting_mode` flag to Lua
+drivers so driver-specific diagnostics can emit richer status/readback data.
+
+Turn it off in Settings after the incident; logs and long-format metrics become
+noisier while it is enabled.
 
 ### `fuse` — shared breaker limit
 
@@ -214,6 +230,45 @@ The `stuck_pv_recovery_count` metric tracks how many auto-recoveries
 the driver has issued since startup; alert on any non-zero rate to
 catch a chronic sticky-pplim condition that needs operator attention.
 
+#### Pixii diagnostics in troubleshooting mode
+
+Pixii PowerShaper exposes standard SunSpec battery status points near
+the SoC registers. Enable **Settings → Control → Troubleshooting mode** when
+a site reports symptoms like "manual charge/discharge does nothing", "Pixii
+charges to 100 %", or the Pixii UI says batteries are calibrating/testing.
+
+```yaml
+- name: pixii
+  lua: drivers/pixii.lua
+  is_site_meter: true
+  battery_capacity_wh: 20000
+  capabilities:
+    modbus:
+      host: 192.168.1.50
+      port: 502
+      unit_id: 1
+```
+
+When global troubleshooting is enabled, the driver emits extra long-format
+metrics:
+
+- `battery_charge_status_code` — SunSpec 802 `ChaSt`; `7` means
+  `TESTING`, which is the best standard signal for Pixii
+  calibration/testing.
+- `battery_control_mode_code` — `0` remote, `1` local.
+- `battery_state_code`, `battery_vendor_state_code`,
+  `battery_event1_bits` — raw battery state/event diagnostics.
+- `pixii_setpoint_ems_w` / `pixii_setpoint_native_w` — readback of
+  Pixii's active setpoint registers after commands.
+- `pixii_last_command_*` — last command sent by 42W and whether the
+  Modbus write succeeded.
+
+The driver also logs status transitions as `Pixii: status ...`. If
+`charge_status=testing`, assume Pixii may be calibrating/testing and may
+ignore external setpoints until the battery exits that state. The legacy
+per-driver `config.troubleshooting_mode: true` flag still works, but the
+preferred operator path is the global site flag.
+
 ### `api` — REST + web UI
 
 ```yaml
@@ -267,6 +322,29 @@ weather:
 
 `met.no` is free and key-less. Default coordinates point at Stockholm.
 
+### `v2x` — bidirectional EV policy (optional)
+
+```yaml
+v2x:
+  enabled: false                  # default-off; planner does not command V2X yet
+  driver_name: ferroamp_dc2       # optional; empty applies to every V2X driver
+  vehicle_capacity_wh: 77000      # optional if the charger reports capacity
+  min_reserve_soc_pct: 35         # required >0 when enabled
+  departure_target_soc_pct: 80    # optional; pair with departure_time
+  departure_time: "07:30"         # HH:MM local next occurrence, or RFC3339
+  max_charge_w: 7000
+  max_discharge_w: 5000
+  export_allowed: false
+  grid_charging_allowed: false
+  cycle_cost_ore_kwh: 12
+```
+
+This policy is read-only input for `GET /api/v2x/policy` and the
+`v2x_policy` block in `/api/status`. It answers what V2X power range is safe
+right now from live connection state, vehicle SoC, reserve/departure rules,
+charger limits, and grid import/export state. It does not enable automatic
+planner dispatch; manual V2X commands still go through `POST /api/v2x/command`.
+
 ### `batteries` — per-battery overrides (optional)
 
 ```yaml
@@ -291,6 +369,7 @@ Keys must match `drivers[].name`. Leave blank to use BMS defaults.
 | `site.grid_tolerance_w` | ✅ | Deadband applied next cycle |
 | `site.slew_rate_w` | ✅ | Applied next dispatch |
 | `site.min_dispatch_interval_s` | ✅ | |
+| `site.troubleshooting_mode` | ✅ | Restarts active drivers to pass `_troubleshooting_mode`; no control behavior change |
 | `site.control_interval_s` | ⚠️ | Picked up next cycle (current cycle uses old value) |
 | `site.watchdog_timeout_s` | ✅ | |
 | `fuse.*` | ✅ | Read fresh each cycle |
@@ -298,6 +377,7 @@ Keys must match `drivers[].name`. Leave blank to use BMS defaults.
 | `drivers[].lua` change | ✅ | Driver thread restarts |
 | `drivers[].mqtt/modbus` change | ✅ | Driver thread restarts |
 | `drivers[].battery_capacity_wh` | ✅ | Driver thread restarts (capacity affects dispatch math) |
+| `v2x.*` | ✅ | API readback uses the current config; dispatch does not consume it yet |
 | `api.port` | ❌ | Restart required |
 | `homeassistant.*` | ❌ | Restart required (broker reconnect not implemented) |
 | `state.path` | ❌ | redb file opened at startup |

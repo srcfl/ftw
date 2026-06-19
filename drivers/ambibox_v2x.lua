@@ -188,9 +188,11 @@ function driver_command(action, power_w, cmd)
     elseif action == "v2x_stop" or action == "deinit" then
         return host.mqtt_publish("device/ess/0/targetPower", "0")
     elseif action == "curtail" then
-        return host.mqtt_publish("device/ess/0/limitChargePower", tostring(math.abs(power_w)))
+        local max = num(state.chargePowerMax) > 0 and snum("chargePowerMax") or rated_power_w
+        local limited = clamp(math.abs(power_w), 0, max)
+        return host.mqtt_publish("device/ess/0/limitChargePower", tostring(limited))
     elseif action == "curtail_disable" then
-        local max = state.chargePowerMax or 22000
+        local max = num(state.chargePowerMax) > 0 and snum("chargePowerMax") or rated_power_w
         return host.mqtt_publish("device/ess/0/limitChargePower", tostring(max))
     end
     return false

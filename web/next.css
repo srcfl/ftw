@@ -1397,6 +1397,66 @@ body.ftw-next .driver-test-output {
   flex-basis: 100%;
   padding: 10px 12px;
 }
+body.ftw-next .v2x-control-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(92px, 1fr) repeat(3, auto);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+body.ftw-next .v2x-power-label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-next .v2x-power-input {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  min-height: 32px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+body.ftw-next .v2x-power-input:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-next .v2x-power-input:disabled,
+body.ftw-next .v2x-command-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+body.ftw-next .v2x-command-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 1 / -1;
+  min-height: 1em;
+}
+body.ftw-next .v2x-command-status.ok {
+  color: var(--green-e);
+}
+body.ftw-next .v2x-command-status.error {
+  color: var(--red-e);
+}
+@media (max-width: 720px) {
+  body.ftw-next .v2x-control-panel {
+    grid-template-columns: 1fr 1fr;
+  }
+  body.ftw-next .v2x-power-label,
+  body.ftw-next .v2x-power-input,
+  body.ftw-next .v2x-command-status {
+    grid-column: 1 / -1;
+  }
+}
 body.ftw-next .driver-test-kv,
 body.ftw-next .driver-test-metrics {
   display: grid;

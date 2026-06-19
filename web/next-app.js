@@ -1667,6 +1667,35 @@
       });
   }
 
+  function parseResponseError(res) {
+    return res.text().then(function (t) {
+      if (!t) return "HTTP " + res.status;
+      try {
+        var j = JSON.parse(t);
+        return j && j.error ? j.error : t;
+      } catch (e) {
+        return t;
+      }
+    });
+  }
+
+  function v2xCommand(driver, powerW) {
+    return fetch("/api/v2x/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: powerW === 0 ? "v2x_stop" : "v2x_set_power",
+        driver: driver,
+        power_w: powerW,
+      }),
+    }).then(function (res) {
+      if (!res.ok) {
+        return parseResponseError(res).then(function (msg) { throw new Error(msg); });
+      }
+      return res.json();
+    });
+  }
+
   function renderDriverActions(name, d) {
     // Buttons per driver: Restart (if running), Disable (if running),
     // Enable (if disabled). Small, unobtrusive; rely on the existing
@@ -1684,10 +1713,92 @@
     return actions;
   }
 
+  function formatOptionalW(w) {
+    return w == null ? "—" : formatW(w);
+  }
+
+  // ---------------------------------------------------------------------
+  // SHARED V2X manual-command surface (parseResponseError, v2xCommand,
+  // formatOptionalW, renderV2XControls + the click handler and card body
+  // below) is intentionally kept byte-identical with the same block in
+  // web/app.js. There is no shared module system — each file is a
+  // standalone IIFE loaded on a different page (app.js → legacy.html,
+  // next-app.js → index.html) — so changes here MUST be mirrored there.
+  // ---------------------------------------------------------------------
+  function renderV2XControls(name, d) {
+    var isLive = d.status === "ok";
+    var chargeMax = d.v2x_charge_power_max_w || d.v2x_rated_power_w || 50000;
+    var dischargeMax = d.v2x_discharge_power_max_w || d.v2x_rated_power_w || 50000;
+    var maxW = Math.max(1, Math.min(50000, Math.max(chargeMax, dischargeMax)));
+    var suggested = Math.min(3000, maxW);
+    var disabled = isLive ? "" : " disabled";
+    // Mono eyebrow + caption styled inline from theme.css tokens so it reads
+    // identically on both dashboards (legacy style.css has no .v2x-* rules).
+    // Flags that this manual surface bypasses the dispatch policy envelope.
+    var note = '' +
+      '<div class="v2x-experimental-note" style="margin-top:8px">' +
+      '  <span style="font-family:var(--mono);font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e)">Experimentell</span>' +
+      '  <span style="display:block;font-family:var(--mono);font-size:10px;color:var(--fg-dim);margin-top:2px">manuell styrning utan säkerhetsenvelope</span>' +
+      '</div>';
+    return '' +
+      '<div class="v2x-control-panel" data-v2x-driver="' + escHtml(name) + '">' +
+      '  <label class="v2x-power-label" for="v2x-power-' + escHtml(name) + '">Manual W</label>' +
+      '  <input class="v2x-power-input" id="v2x-power-' + escHtml(name) + '" type="number" min="0" max="' + maxW + '" step="100" value="' + suggested + '"' + disabled + '>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="charge" data-drv="' + escHtml(name) + '"' + disabled + '>Charge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="discharge" data-drv="' + escHtml(name) + '"' + disabled + '>Discharge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="stop" data-drv="' + escHtml(name) + '"' + disabled + '>Stop</button>' +
+      '  <div class="v2x-command-status" role="status" aria-live="polite"></div>' +
+      note +
+      '</div>';
+  }
+
   // Event delegation — one listener for all driver-action buttons. Saves
   // re-binding on every re-render.
   if (driversGrid) {
     driversGrid.addEventListener("click", function (ev) {
+      var v2xBtn = ev.target.closest("[data-v2x-action]");
+      if (v2xBtn) {
+        var v2xName = v2xBtn.getAttribute("data-drv");
+        var v2xAction = v2xBtn.getAttribute("data-v2x-action");
+        var panel = v2xBtn.closest(".v2x-control-panel");
+        var input = panel ? panel.querySelector(".v2x-power-input") : null;
+        var status = panel ? panel.querySelector(".v2x-command-status") : null;
+        if (!v2xName || !v2xAction) return;
+
+        var requested = input ? Math.abs(Number(input.value || 0)) : 0;
+        var max = input ? Number(input.max || 50000) : 50000;
+        if (!Number.isFinite(requested)) requested = 0;
+        requested = Math.min(Math.max(requested, 0), max);
+        var powerW = v2xAction === "stop" ? 0 : requested;
+        if (v2xAction === "discharge") powerW = -powerW;
+        if (v2xAction === "discharge" && powerW < 0) {
+          if (!window.confirm("Discharge " + v2xName + " at " + formatW(powerW) + "?")) return;
+        }
+
+        v2xBtn.disabled = true;
+        if (status) {
+          status.className = "v2x-command-status";
+          status.textContent = "Sending " + formatW(powerW) + "…";
+        }
+        v2xCommand(v2xName, powerW)
+          .then(function () {
+            if (status) {
+              status.className = "v2x-command-status ok";
+              status.textContent = powerW === 0 ? "Stopped" : "Sent " + formatW(powerW);
+            }
+            setTimeout(fetchStatus, 600);
+          })
+          .catch(function (err) {
+            if (status) {
+              status.className = "v2x-command-status error";
+              status.textContent = err.message;
+            }
+            alert("V2X command failed: " + err.message);
+          })
+          .finally(function () { v2xBtn.disabled = false; });
+        return;
+      }
+
       var btn = ev.target.closest("[data-drv-action]");
       if (!btn) return;
       var name = btn.getAttribute("data-drv");
@@ -1730,6 +1841,7 @@
       // else falls through to the legacy meter/pv/battery layout.
       var isVehicle = (d.vehicle_soc != null || d.vehicle_charge_limit_pct != null);
       var isEV = !isVehicle && (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+      var isV2X = !isVehicle && (d.v2x_w != null || d.v2x_connected != null || d.v2x_vehicle_soc != null);
 
       var body;
       if (isVehicle) {
@@ -1778,6 +1890,42 @@
           (vSoc != null
             ? '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + vSoc + '%"></div></div>'
             : '');
+      } else if (isV2X) {
+        var v2xWVal = d.v2x_w != null ? d.v2x_w : 0;
+        var connected = d.v2x_connected === true;
+        var statusLabel = d.v2x_status
+          || (v2xWVal > 100 ? "charging" : (v2xWVal < -100 ? "discharging" : (connected ? "connected" : "idle")));
+        var v2xClass = v2xWVal < -100 ? "stat-ok" : (v2xWVal > 100 ? "stat-warn" : (connected ? "stat-warn" : "stat-dim"));
+        var vehicleSoc = d.v2x_vehicle_soc != null ? formatSoc(d.v2x_vehicle_soc) : "—";
+        var dcSummary = (d.v2x_dc_w != null || d.v2x_dc_v != null || d.v2x_dc_a != null)
+          ? formatOptionalW(d.v2x_dc_w) + " · " +
+            (d.v2x_dc_v != null ? d.v2x_dc_v.toFixed(0) + " V" : "—") + " · " +
+            (d.v2x_dc_a != null ? d.v2x_dc_a.toFixed(1) + " A" : "—")
+          : "—";
+        var sessionParts = [];
+        if (d.v2x_session_charge_wh != null) sessionParts.push("in " + formatKwh(d.v2x_session_charge_wh));
+        if (d.v2x_session_discharge_wh != null) sessionParts.push("out " + formatKwh(d.v2x_session_discharge_wh));
+        var session = sessionParts.length ? sessionParts.join(" / ") : "—";
+        var limitParts = [];
+        if (d.v2x_charge_power_max_w != null) limitParts.push("charge " + formatW(d.v2x_charge_power_max_w));
+        if (d.v2x_discharge_power_max_w != null) limitParts.push("discharge " + formatW(d.v2x_discharge_power_max_w));
+        if (!limitParts.length && d.v2x_rated_power_w != null) limitParts.push("rated " + formatW(d.v2x_rated_power_w));
+        var limits = limitParts.length ? limitParts.join(" / ") : "—";
+        var mode = d.v2x_control_mode || d.v2x_protocol || "—";
+
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value ' + v2xClass + '">' + escHtml(statusLabel) + '</span>' +
+          '  <span class="stat-label">Power</span><span class="stat-value">' + formatW(v2xWVal) + '</span>' +
+          '  <span class="stat-label">Vehicle SoC</span><span class="stat-value">' + vehicleSoc + '</span>' +
+          '  <span class="stat-label">DC</span><span class="stat-value">' + escHtml(dcSummary) + '</span>' +
+          '  <span class="stat-label">Session</span><span class="stat-value">' + escHtml(session) + '</span>' +
+          '  <span class="stat-label">Limits</span><span class="stat-value">' + escHtml(limits) + '</span>' +
+          '  <span class="stat-label">Mode</span><span class="stat-value">' + escHtml(mode) + '</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
+          '</div>' +
+          renderV2XControls(name, d);
       } else if (isEV) {
         var evWVal = d.ev_w != null ? d.ev_w : 0;
         // state_label + reason_no_current_label come from the driver —
