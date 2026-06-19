@@ -52,8 +52,15 @@ type wsResponse struct {
 	ErrorMsg  string          `json:"error_message,omitempty"`
 }
 
-// Dial connects to the matter-sidecar process and returns a ready Capability.
-// Port defaults to 5580 if zero.
+// Dial returns a Capability for the matter-sidecar process. Port defaults
+// to 5580 if zero. The initial connection attempt happens synchronously so
+// callers get an immediate signal in the common case (sidecar already up),
+// but a failed attempt does NOT make Dial return an error — readLoop's
+// existing retry-every-2s logic (for connections lost after a successful
+// dial) is reused to keep retrying the first connection too. Without this,
+// 42W started before the matter-sidecar container finished booting would
+// permanently disable /api/matter/* until a full restart, since the caller
+// has no way to retry a failed Dial later.
 func Dial(host string, port int) (*Capability, error) {
 	if port == 0 {
 		port = 5580
@@ -68,8 +75,7 @@ func Dial(host string, port int) (*Capability, error) {
 		done:    make(chan struct{}),
 	}
 	if err := c.connect(); err != nil {
-		cancel()
-		return nil, err
+		c.logger.Warn("matter: initial dial failed, will keep retrying in the background", "err", err)
 	}
 	go c.readLoop()
 	return c, nil
@@ -161,14 +167,32 @@ func (c *Capability) call(ctx context.Context, command string, args any) (json.R
 	// Write OUTSIDE c.mu so a slow/half-open socket can't block the readLoop
 	// (which needs c.mu to deliver responses or handle a read error). A
 	// dedicated writeMu still serializes concurrent writes per gorilla's
-	// contract.
+	// contract. A write deadline is set before WriteMessage (not just the
+	// ctx passed in) because ctx is only consulted AFTER WriteMessage
+	// returns — on a half-open socket the kernel send buffer can fill and
+	// WriteMessage blocks past the caller's timeout with no cancellation
+	// path otherwise.
+	deadline := time.Now().Add(10 * time.Second)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
 	c.writeMu.Lock()
+	_ = conn.SetWriteDeadline(deadline)
 	err = conn.WriteMessage(websocket.TextMessage, b)
 	c.writeMu.Unlock()
 	if err != nil {
+		// Per gorilla/websocket's contract, a connection must be considered
+		// broken after any write error — further writes on it are
+		// undefined. Drop it so readLoop's existing nil-conn branch
+		// reconnects, instead of leaving every subsequent call() to retry
+		// writing on the same dead socket.
 		c.mu.Lock()
 		delete(c.pending, id)
+		if c.conn == conn {
+			c.conn = nil
+		}
 		c.mu.Unlock()
+		_ = conn.Close()
 		return nil, fmt.Errorf("matter: write: %w", err)
 	}
 	select {

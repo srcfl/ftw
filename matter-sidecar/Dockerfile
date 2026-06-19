@@ -9,12 +9,12 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 COPY tsconfig.json ./
 COPY src/ ./src/
-RUN npm install --include=dev && npm run build && npm prune --omit=dev
+RUN npm ci --include=dev && npm run build && npm prune --omit=dev
 
 VOLUME ["/data"]
 EXPOSE 5540 5580

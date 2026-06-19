@@ -209,7 +209,13 @@ async function main() {
     }
   }
 
-  const wss = new WebSocketServer({ port: WS_PORT, path: "/ws" });
+  // Bind to loopback only. The control-plane WS protocol has no auth — it's
+  // the same RPC surface that can write_attribute/send_command to any
+  // commissioned device — and network_mode: host (required for mDNS) would
+  // otherwise put it on the LAN unauthenticated. 42W's main app reaches it
+  // over localhost anyway (it's also network_mode: host), so loopback-only
+  // costs nothing for the documented deployment.
+  const wss = new WebSocketServer({ port: WS_PORT, host: "127.0.0.1", path: "/ws" });
   wss.on("connection", (ws: WebSocket) => {
     ws.on("message", async (raw: Buffer) => {
       let req: WsRequest;

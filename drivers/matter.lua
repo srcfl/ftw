@@ -136,11 +136,16 @@ function driver_init(cfg)
         return
     end
 
-    if cfg.make then host.set_make(tostring(cfg.make)) end
-    -- Anchor device identity on the fabric-unique node_id, not the model name.
-    -- Two identical Wiser thermostats share the same make+model but have
-    -- distinct node_ids, so using model would cause a device_id collision and
-    -- one device would overwrite the other's learned state.
+    -- Anchor device identity on the fabric-unique node_id, not the model name
+    -- — two identical Wiser thermostats share make+model but have distinct
+    -- node_ids. Always set make (falling back to "matter" when the operator
+    -- didn't configure one) so ResolveDeviceID's make+serial path actually
+    -- fires: every matter.lua driver on a sidecar shares the same `endpoint`
+    -- (matter://host:port, set by the registry from capabilities.matter, not
+    -- per-node), so without a make the fallback to "ep:"+endpoint would
+    -- collide across every device behind that sidecar, overwriting each
+    -- other's learned/calibration state.
+    host.set_make(cfg.make and tostring(cfg.make) or "matter")
     host.set_sn(tostring(node_id))
 
     local interval = parse_number(cfg.poll_interval_ms or 30000)

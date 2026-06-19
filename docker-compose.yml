@@ -113,7 +113,11 @@ services:
   # that code to 42W via the sidecar's `commission` command, which
   # joins as an additional fabric admin over plain IP — no BLE needed
   # on this side. network_mode: host is required for mDNS discovery of
-  # the shared device.
+  # the shared device. The sidecar's control-plane WebSocket (port 5580,
+  # commission/write_attribute/send_command/...) has no auth of its own,
+  # so it binds to loopback only (matter-sidecar/src/index.ts) — host
+  # networking would otherwise put an unauthenticated device-control API
+  # on the LAN.
   #
   # 42W also runs the other direction (Phase 2): as a Matter *server*,
   # exposing a CommodityPrice cluster (spot price + forecast) other

@@ -959,6 +959,12 @@ func (c *Config) Validate() error {
 		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil && d.Capabilities.HTTP == nil && d.Capabilities.Matter == nil {
 			return fmt.Errorf("driver %q: must have mqtt, modbus, http, or matter capability", d.Name)
 		}
+		if mt := d.Capabilities.Matter; mt != nil && mt.Host == "" {
+			return fmt.Errorf("driver %q: capabilities.matter.host is required", d.Name)
+		}
+	}
+	if c.Matter != nil && c.Matter.Host == "" {
+		return errors.New("matter.host is required when matter: is configured")
 	}
 	if len(c.Drivers) > 0 && siteMeters == 0 {
 		return errors.New("at least one driver must be is_site_meter: true")
@@ -1030,10 +1036,11 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("flexloads[%d] %q: type must be \"thermostat\" or \"deferrable\"", i, fl.DriverName)
 		}
 		if fl.Type == "thermostat" {
-			if fl.MinC != 0 || fl.MaxC != 0 {
-				if fl.MinC >= fl.MaxC {
-					return fmt.Errorf("flexloads[%d] %q: min_c (%.1f) must be < max_c (%.1f)", i, fl.DriverName, fl.MinC, fl.MaxC)
-				}
+			if fl.MinC == 0 && fl.MaxC == 0 {
+				return fmt.Errorf("flexloads[%d] %q: min_c and max_c are required for type \"thermostat\"", i, fl.DriverName)
+			}
+			if fl.MinC >= fl.MaxC {
+				return fmt.Errorf("flexloads[%d] %q: min_c (%.1f) must be < max_c (%.1f)", i, fl.DriverName, fl.MinC, fl.MaxC)
 			}
 			if fl.COP < 0 {
 				return fmt.Errorf("flexloads[%d] %q: cop must be >= 0", i, fl.DriverName)
