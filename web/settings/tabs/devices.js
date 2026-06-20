@@ -154,15 +154,33 @@
             '</fieldset>';
         }
         if (isApiCredsDriver) {
-          // OAuth2 client_credentials drivers (e.g. MyUplink).
-          // User registers an app at the provider's developer portal and
-          // pastes the Client ID here. The Client Secret is rendered by the
-          // config_secrets slot below (masked, never echoed into the DOM).
+          // OAuth2 authorization-code drivers (e.g. MyUplink). The operator
+          // registers an app at the provider's developer portal (Callback
+          // URL + Client Identifier + Client Secret), pastes the Client ID
+          // here and the secret in the Secrets section below (masked, never
+          // echoed into the DOM), then clicks Connect to complete the
+          // one-time browser consent. The resulting refresh_token is stored
+          // server-side as a config_secret and the badge flips to Connected.
           var acfg = d.config || {};
+          // refresh_token is a config_secret: when saved it round-trips as a
+          // masked placeholder (non-empty string), so a non-empty value here
+          // means "consent completed".
+          var connected = typeof acfg.refresh_token === 'string' && acfg.refresh_token !== '';
+          var connBadge = connected
+            ? '<span class="creds-badge creds-saved">✓ Connected</span>'
+            : '<span class="creds-badge creds-missing">⚠ Not connected</span>';
+          var callbackURL = location.origin + '/api/oauth/myuplink/callback';
           html += '<fieldset><legend>API credentials</legend>' +
-            '<p style="color:var(--text-dim);font-size:0.75rem;margin:0 0 8px">Register an application at the provider\'s developer portal to get a Client ID and Client Secret. Paste the secret in the Secrets section below.</p>' +
+            '<p style="color:var(--text-dim);font-size:0.75rem;margin:0 0 8px">Register an application at the provider\'s developer portal to get a Client ID and Client Secret. Paste the secret in the Secrets section below, then click Connect.</p>' +
             '<label>Client ID ' + help('Application identifier from the developer portal.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+            '<label style="margin-top:8px">Callback URL ' + help('Register this exact URL as the Callback Url in the MyUplink developer portal. It must match the address you use to reach 42-watts.') + '</label>' +
+            '<input type="text" class="myuplink-callback-url" value="' + escHtml(callbackURL) + '" readonly onclick="this.select()" style="font-family:var(--mono);font-size:0.8rem">' +
+            '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+            '<button class="btn-add myuplink-connect-btn" type="button" data-driver-idx="' + idx + '" data-driver-name="' + escHtml(d.name || '') + '">Connect to MyUplink</button>' +
+            connBadge +
+            '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+            '</div>' +
             '</fieldset>';
         }
         // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
@@ -521,6 +539,41 @@
           }).finally(function () {
             vbtn.disabled = false;
           });
+        });
+      });
+
+      // MyUplink (and any OAuth authorization-code apicreds driver): open the
+      // provider consent in a new tab. /start reads the SAVED client_id, so
+      // the operator must save the row first; we pass the browser's own
+      // callback URL (location.origin) because on a relay origin the server
+      // can't derive it. The refresh_token lands server-side; the operator
+      // reloads to see the badge flip to Connected.
+      bodyEl.querySelectorAll(".myuplink-connect-btn").forEach(function (cbtn) {
+        cbtn.addEventListener("click", function () {
+          var dIdx = cbtn.dataset.driverIdx;
+          var name = cbtn.dataset.driverName || "";
+          var statusEl = bodyEl.querySelector('.myuplink-connect-status[data-driver-idx="' + dIdx + '"]');
+          function setStatus(msg, color) {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color || "var(--text-dim)"; }
+          }
+          if (!name) { setStatus("Save the driver name first", "var(--red-e)"); return; }
+          setStatus("Opening MyUplink…");
+          cbtn.disabled = true;
+          var redirectURI = location.origin + "/api/oauth/myuplink/callback";
+          var qs = "?driver=" + encodeURIComponent(name) +
+            "&redirect_uri=" + encodeURIComponent(redirectURI);
+          ownerFetch("/api/oauth/myuplink/start" + qs)
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+              if (!res.ok || !res.body || !res.body.authorize_url) {
+                setStatus("✗ " + ((res.body && res.body.error) || "could not start consent — save Client ID + Secret first"), "var(--red-e)");
+                return;
+              }
+              window.open(res.body.authorize_url, "_blank");
+              setStatus("Complete the consent in the new tab, then reload this page.", "var(--green-e)");
+            })
+            .catch(function (e) { setStatus("✗ " + e.message, "var(--red-e)"); })
+            .finally(function () { cbtn.disabled = false; });
         });
       });
 
