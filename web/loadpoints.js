@@ -19,6 +19,10 @@
 
   const REFRESH_MS = 10000;
   let refreshTimer = null;
+  // While an inline SoC editor is open, render() skips re-rendering so the
+  // poll doesn't clobber the input. Self-healing: cleared if the editor DOM
+  // is gone (see render()).
+  let socEditingId = null;
   // How many forward slots of the schedule to render. The plan is
   // 193 slots × 15 min = 48 h. 4 h was too narrow — operators looking
   // at "why does the plan chart show grid burst at 13:00 but my schedule
@@ -106,6 +110,15 @@
     } else if (lp.current_soc_pct != null) {
       soc = `${lp.current_soc_pct.toFixed(1)}%${lp.soc_source ? ' (' + lp.soc_source + ')' : ''}`;
     }
+    // Inline manual SoC correction. The backend (POST /api/loadpoints/{id}/soc)
+    // re-anchors the inferred SoC, so it only works during an active session —
+    // show the ✎ affordance only when plugged in.
+    let socCell = soc;
+    if (lp.plugged_in) {
+      const cur = (lp.current_soc_pct != null) ? lp.current_soc_pct.toFixed(1) : '';
+      socCell = `${soc} <button class="lp-soc-edit" type="button" data-lp="${lp.id}" data-cur="${cur}" title="Set SoC manually" ` +
+        `style="background:none;border:none;cursor:pointer;color:var(--accent-e);font-size:0.9em;padding:0 4px">✎</button>`;
+    }
     const rows = [
       ['Driver',       lp.driver_name || '—'],
       ['Plugged in',   badge(lp.plugged_in ? 'YES' : 'NO', lp.plugged_in)],
@@ -115,7 +128,7 @@
       ['Min',          fmtW(lp.min_charge_w)],
       ['Target',       target],
       ['Vehicle',      vehicle],
-      ['SoC',          soc],
+      ['SoC',          socCell],
     ];
     const html = rows.map(([k, v]) =>
       `<div class="lp-cfg-row"><span class="lp-cfg-key">${k}</span><span class="lp-cfg-val">${v}</span></div>`
@@ -183,6 +196,13 @@
     const grid = document.getElementById('loadpoints-grid');
     if (!grid) return;
 
+    // Don't clobber an open inline SoC editor. If the editor DOM is gone
+    // (mode toggled, card removed), resume normal rendering.
+    if (socEditingId) {
+      if (grid.querySelector('.lp-soc-input')) return;
+      socEditingId = null;
+    }
+
     // Capture scroll positions BEFORE swapping innerHTML — otherwise the
     // 5 s auto-refresh yanks the page (and any per-card schedule scroll)
     // back to the top mid-read. Page scroll comes from the document's
@@ -228,7 +248,73 @@
     }
   }
 
+  // ---- Inline manual SoC editing ----
+
+  function openSocEditor(btn) {
+    const cell = btn.closest('.lp-cfg-val');
+    if (!cell) return;
+    socEditingId = btn.dataset.lp;
+    const cur = btn.dataset.cur || '';
+    cell.innerHTML =
+      `<input type="number" class="lp-soc-input" min="0" max="100" step="0.1" value="${cur}" ` +
+      `style="width:64px;font-family:var(--mono)"> ` +
+      `<button class="lp-soc-save" type="button" data-lp="${socEditingId}" title="Save">✓</button> ` +
+      `<button class="lp-soc-cancel" type="button" title="Cancel">✗</button> ` +
+      `<span class="lp-soc-msg" style="color:var(--red-e,#c23b3b);font-size:0.8em;margin-left:6px"></span>`;
+    const inp = cell.querySelector('.lp-soc-input');
+    if (inp) { inp.focus(); inp.select(); }
+  }
+
+  function saveSoc(btn) {
+    const cell = btn.closest('.lp-cfg-val');
+    const inp = cell && cell.querySelector('.lp-soc-input');
+    const msg = cell && cell.querySelector('.lp-soc-msg');
+    if (!inp) return;
+    const val = parseFloat(inp.value);
+    if (!isFinite(val) || val < 0 || val > 100) { if (msg) msg.textContent = '0–100 only'; return; }
+    btn.disabled = true;
+    ownerFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/soc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soc_pct: val }),
+    })
+      .then(r => r.json().then(j => ({ ok: r.ok, body: j })))
+      .then(res => {
+        if (res.ok && res.body && res.body.ok) { socEditingId = null; fetchAll(); }
+        else { if (msg) msg.textContent = (res.body && res.body.error) || 'failed'; btn.disabled = false; }
+      })
+      .catch(e => { if (msg) msg.textContent = e.message; btn.disabled = false; });
+  }
+
+  function cancelSoc() { socEditingId = null; fetchAll(); }
+
+  function onGridClick(e) {
+    const edit = e.target.closest && e.target.closest('.lp-soc-edit');
+    if (edit) { openSocEditor(edit); return; }
+    const save = e.target.closest && e.target.closest('.lp-soc-save');
+    if (save) { saveSoc(save); return; }
+    const cancel = e.target.closest && e.target.closest('.lp-soc-cancel');
+    if (cancel) { cancelSoc(); return; }
+  }
+
+  function onGridKey(e) {
+    if (!e.target.classList || !e.target.classList.contains('lp-soc-input')) return;
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      const save = e.target.closest('.lp-cfg-val').querySelector('.lp-soc-save');
+      if (save) saveSoc(save);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelSoc();
+    }
+  }
+
   function init() {
+    const grid = document.getElementById('loadpoints-grid');
+    if (grid) {
+      grid.addEventListener('click', onGridClick);
+      grid.addEventListener('keydown', onGridKey);
+    }
     function advancedVisible() {
       return !!(document.body && document.body.classList.contains('advanced'));
     }
