@@ -18,15 +18,24 @@
   var CONNECT_TIMEOUT_MS = 15000;  // hard ceiling on a whole attempt (TURN allocs can be slow)
   var REQUEST_TIMEOUT_MS = 10000;  // per-request budget over the channel
   var ICE_FETCH_TIMEOUT_MS = 3000; // cap the /signal/ice fetch so it can never hang connect()
-  var RETRY_COOLDOWN_MS = 4000;    // after a HARD failed connect, hold off this long. Short:
-                                   // the relay fallback already serves data, so a quick retry is
-                                   // cheap and a logged-in owner shouldn't sit on a 30s lockout.
-                                   // Transient cold-load races use the SOFT path (no cooldown).
+  var GATHER_CAP_MS = 3000;        // backstop wait for ICE gathering when no TURN is configured
+  var GATHER_CAP_TURN_MS = 8000;   // longer backstop when a relay candidate is expected — a TURN
+                                   // Allocate on a slow/cellular path routinely takes >3s, and that
+                                   // relay candidate is exactly what a symmetric-NAT owner needs.
+                                   // Stays under CONNECT_TIMEOUT_MS so the rest of the handshake fits.
+                                   // (Mirrors the Pi's 12s handshakeTimeout grace for the same candidate.)
+  var RETRY_BACKOFF_BASE_MS = 2000;  // hard-failure backoff: doubles each CONSECUTIVE failure, so the
+  var RETRY_BACKOFF_MAX_MS = 30000;  // first retry is snappy (the relay fallback serves data meanwhile)
+                                     // but a persistent failure backs off instead of drumming the relay
+                                     // signaling bucket every few seconds (2s→4s→8s→16s→30s cap).
+  var SOFT_RETRY_FLOOR_MS = 800;     // tiny floor on the SOFT (warm-up race) path so a directory that
+                                     // never decrypts can't free-run connect() against the 2s poller.
 
   var pc = null, dc = null;
   var connecting = null;             // in-flight connect() promise
   var ready = false;
   var nextRetryAt = 0;
+  var hardFailCount = 0;             // consecutive hard-failure count → exponential backoff (reset on success)
   var pending = Object.create(null); // req_id -> { resolve, reject, timer }
   var seq = 0;
   var listeners = [];
@@ -122,6 +131,27 @@
     return DEFAULT_ICE.map(function (s) { return { urls: s.urls.slice() }; });
   }
 
+  // ftw.ice sessionStorage cache holds the last config that actually carried
+  // servers. A transient /signal/ice failure (timeout, a 429 from the relay's
+  // per-IP throttle, a relay blip) must NOT silently strip TURN and flip the
+  // connect path to STUN-only — that would leave a symmetric-NAT owner unable to
+  // traverse. So on failure we reuse the last good config (incl. its TURN entry;
+  // the coturn credential has a 12h TTL) instead of dropping to bare STUN.
+  // Per-tab; harmless if a stale credential no longer allocates (no relay
+  // candidate forms, same as STUN-only, but we keep wantRelay semantics).
+  var ICE_CACHE_KEY = "ftw.ice";
+  function cacheICE(list) {
+    try { sessionStorage.setItem(ICE_CACHE_KEY, JSON.stringify(list)); } catch (e) {}
+  }
+  function cachedICE() {
+    try {
+      var v = JSON.parse(sessionStorage.getItem(ICE_CACHE_KEY) || "null");
+      if (Array.isArray(v) && v.length) return v;
+    } catch (e) {}
+    return null;
+  }
+  function fallbackICE() { return cachedICE() || defaultICE(); }
+
   // iceServers fetches relay-provided STUN/TURN config. TURN credentials are
   // short-lived connectivity hints only: WebRTC still runs DTLS end-to-end and
   // verifyAnswerSignature keeps the relay/TURN service out of the trust chain.
@@ -130,7 +160,8 @@
   // /signal/ice that connects but never responds must NEVER hang here, because
   // connect() runs the rest of the handshake inside this promise's .then — a
   // hang would leave the cached `connecting` promise pending forever and poison
-  // every future attempt. On timeout / any error we fall back to default STUN.
+  // every future attempt. On timeout / any error we fall back to the cached
+  // config, or default STUN if there is none.
   function iceServers() {
     var ctl = (typeof AbortController === "function") ? new AbortController() : null;
     var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) {} }, ICE_FETCH_TIMEOUT_MS) : null;
@@ -138,13 +169,13 @@
     if (ctl) opts.signal = ctl.signal;
     return fetch("/signal/ice", opts)
       .then(function (r) {
-        if (!r.ok) return defaultICE();
+        if (!r.ok) throw new Error("ice http " + r.status);
         return r.json();
       })
       .then(function (cfg) {
         var list = cfg && cfg.ice_servers;
-        if (!Array.isArray(list) || list.length === 0) return defaultICE();
-        return list.map(function (s) {
+        if (!Array.isArray(list) || list.length === 0) throw new Error("ice empty");
+        var parsed = list.map(function (s) {
           if (!s || !s.urls) return null;
           var urls = Array.isArray(s.urls) ? s.urls.slice() : [String(s.urls)];
           var out = { urls: urls };
@@ -152,8 +183,11 @@
           if (s.credential) out.credential = s.credential;
           return out;
         }).filter(Boolean);
+        if (!parsed.length) throw new Error("ice empty");
+        cacheICE(parsed);
+        return parsed;
       })
-      .catch(function () { return defaultICE(); })
+      .catch(function () { return fallbackICE(); })
       .then(function (res) { if (timer) clearTimeout(timer); return res; });
   }
 
@@ -460,10 +494,12 @@
   // server-reflexive candidate are gathered, plus a relay candidate when TURN is
   // configured (wantRelay). The relay candidate matters: without it a both-ends
   // hard-NAT (symmetric) owner — the case TURN exists for — could never
-  // traverse. A TURN Allocate is ~1 RTT, so this stays well under the old 3s
-  // wait. The browser keeps localDescription.sdp updated with each candidate, so
-  // the offer POSTed right after carries them. The 3s cap backstops a needed
-  // candidate that never comes (STUN/TURN unreachable).
+  // traverse. The browser keeps localDescription.sdp updated with each
+  // candidate, so the offer POSTed right after carries them. The cap backstops a
+  // needed candidate that never comes (STUN/TURN unreachable); it is longer when
+  // a relay candidate is expected (GATHER_CAP_TURN_MS) so a slow-cellular TURN
+  // Allocate — routinely >3s — isn't cut off, otherwise the offer would go out
+  // relay-less and a symmetric-NAT owner could never traverse.
   function waitIceComplete(peer, wantRelay) {
     if (peer.iceGatheringState === "complete") return Promise.resolve();
     return new Promise(function (resolve) {
@@ -489,7 +525,7 @@
       }
       peer.addEventListener("icegatheringstatechange", onGather);
       peer.addEventListener("icecandidate", onCand);
-      capTimer = setTimeout(finish, 3000);
+      capTimer = setTimeout(finish, wantRelay ? GATHER_CAP_TURN_MS : GATHER_CAP_MS);
     });
   }
 
@@ -547,8 +583,16 @@
         settled = true;
         connecting = null;
         clearTimeout(to);
-        if (!ok) {
-          if (!soft) nextRetryAt = Date.now() + RETRY_COOLDOWN_MS;
+        if (ok) {
+          hardFailCount = 0;          // a working channel resets the backoff escalation
+        } else {
+          if (soft) {
+            nextRetryAt = Date.now() + SOFT_RETRY_FLOOR_MS;   // transient: retry almost immediately
+          } else {
+            hardFailCount++;
+            var backoff = Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, hardFailCount - 1), RETRY_BACKOFF_MAX_MS);
+            nextRetryAt = Date.now() + backoff;
+          }
           teardown();
           setState("relay");
         }
@@ -582,7 +626,10 @@
         };
         pc.onconnectionstatechange = function () {
           var st = pc && pc.connectionState;
-          if (st === "failed" || st === "closed" || st === "disconnected") finish(false);
+          // Abort only on TERMINAL states. "disconnected" routinely self-recovers
+          // via ICE restart (the Pi side reaps only on Failed/Closed too); aborting
+          // on it would force a needless full re-handshake on every transient blip.
+          if (st === "failed" || st === "closed") finish(false);
         };
 
         // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
@@ -832,7 +879,7 @@
     setEnabled: function (on) {
       localStorage.setItem("ftw.p2p", on ? "on" : "off");
       if (!on) { teardown(); setState("relay"); }
-      else { nextRetryAt = 0; connect(); } // explicit enable bypasses the backoff
+      else { nextRetryAt = 0; hardFailCount = 0; connect(); } // explicit enable bypasses the backoff
     }
   };
   window.p2pFetch = p2pFetch;

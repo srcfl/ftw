@@ -184,6 +184,11 @@ func main() {
 						slog.Info("ftw-relay: offer-limit GC", "removed", n)
 					}
 				}
+				if r.ICELimit != nil {
+					if n := r.ICELimit.GC(offerBucketIdleTTL); n > 0 {
+						slog.Info("ftw-relay: ice-limit GC", "removed", n)
+					}
+				}
 				// Reap expired first-enrollment bootstraps so an abandoned onboarding
 				// (Pi published, browser never claimed) can't pin memory; each entry
 				// also self-expires after bootstrapTTL, so this just trims proactively.

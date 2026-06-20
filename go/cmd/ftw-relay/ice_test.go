@@ -111,7 +111,7 @@ func TestSignalICE_PerIPThrottle(t *testing.T) {
 	h := r.Handler() // one handler so all requests share r.OfferLimit
 
 	var first, throttled int
-	for i := 0; i < int(offerBucketCapacity)+8; i++ {
+	for i := 0; i < int(iceBucketCapacity)+8; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/signal/ice", nil)
 		req.RemoteAddr = "203.0.113.9:5555" // same source IP for every request
 		rr := httptest.NewRecorder()

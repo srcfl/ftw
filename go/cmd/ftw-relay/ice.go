@@ -43,12 +43,13 @@ func parseURLList(v string) []string {
 // username is an expiry timestamp and credential is HMAC-SHA1(secret, username).
 //
 // Unauthenticated by design (a public reachability hint), but per-source-IP
-// throttled with the SAME limiter as the offer endpoint: the TURN entry mints a
-// fresh short-lived coturn credential on every call, so without a bound a single
-// IP could pull credentials in a tight loop and lean on the relay. offerClientIP
-// uses the un-spoofable RemoteAddr unless -trust-cf-ip validates a CF edge peer.
+// throttled: the TURN entry mints a fresh short-lived coturn credential on every
+// call, so without a bound a single IP could pull credentials in a tight loop and
+// lean on the relay. Uses its OWN limiter (ICELimit), not the offer bucket, so an
+// ICE fetch never spends an offer token. offerClientIP uses the un-spoofable
+// RemoteAddr unless -trust-cf-ip validates a CF edge peer.
 func (r *Relay) signalICE(w http.ResponseWriter, req *http.Request) {
-	if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
+	if r.ICELimit != nil && !r.ICELimit.Allow(r.offerClientIP(req)) {
 		http.Error(w, "too many requests from your address", http.StatusTooManyRequests)
 		return
 	}

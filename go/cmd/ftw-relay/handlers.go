@@ -80,15 +80,17 @@ func validPairToken(s string) bool {
 
 // Relay is the in-memory state for one running relay process.
 type Relay struct {
-	Queue       *tunnel.Queue
-	Tokens      *TokenRegistry
-	Owners      *OwnerRegistry
-	Polls       *PollSecrets
-	Signals     *SignalMailbox    // blind WebRTC signaling rendezvous (P2P-only home route)
-	Challenges  *SignalChallenges // single-use device-key proof nonces for the signaling offer (C2)
-	OfferLimit  *IPRateLimiter    // per-source-IP throttle on browser signaling offers (FIX-C)
-	TrustCFIP   bool              // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
-	PollTimeout time.Duration     // 0 → 25s default
+	Queue      *tunnel.Queue
+	Tokens     *TokenRegistry
+	Owners     *OwnerRegistry
+	Polls      *PollSecrets
+	Signals    *SignalMailbox    // blind WebRTC signaling rendezvous (P2P-only home route)
+	Challenges *SignalChallenges // single-use device-key proof nonces for the signaling offer (C2)
+	OfferLimit *IPRateLimiter    // per-source-IP throttle on browser signaling offers (FIX-C)
+	ICELimit   *IPRateLimiter    // SEPARATE per-source-IP throttle on GET /signal/ice so an ICE
+	// fetch never spends an offer token (avoids halving the offer burst)
+	TrustCFIP   bool          // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
+	PollTimeout time.Duration // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
@@ -174,6 +176,13 @@ func (r *Relay) Handler() http.Handler {
 		// (FIX-C): bounds one abusive IP without letting it lock out a legit browser
 		// on a different IP (which the old per-site limit did).
 		r.OfferLimit = newIPRateLimiter(offerBucketCapacity, offerBucketRefillPerSec)
+	}
+	if r.ICELimit == nil {
+		// SEPARATE bucket for GET /signal/ice (the TURN-credential mint) so an ICE
+		// fetch never draws down the offer burst — both the browser (once per connect)
+		// and the Pi (hourly) hit it, and a connect spends an ICE token AND an offer
+		// token. A more generous bucket keeps a legit reconnect loop from 429ing.
+		r.ICELimit = newIPRateLimiter(iceBucketCapacity, iceBucketRefillPerSec)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)

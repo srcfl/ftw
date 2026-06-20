@@ -58,6 +58,14 @@ async function loadP2PWithICE(iceResponse, opts) {
     }),
     crypto: { getRandomValues: (b) => (b.fill(7), b) },
     localStorage: win.localStorage,
+    sessionStorage: (() => {
+      const s = new Map();
+      return {
+        getItem: (k) => (s.has(k) ? s.get(k) : null),
+        setItem: (k, v) => s.set(k, String(v)),
+        removeItem: (k) => s.delete(k),
+      };
+    })(),
     setTimeout,
     clearTimeout,
     AbortController,
