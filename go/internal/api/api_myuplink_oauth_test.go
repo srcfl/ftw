@@ -85,6 +85,47 @@ func TestMyUplinkOAuthStartBuildsAuthorizeURL(t *testing.T) {
 	}
 }
 
+func TestMyUplinkOAuthStartHonoursBrowserRedirectURI(t *testing.T) {
+	srv, _, _ := buildMyUplinkOAuthServer(t)
+
+	// Browser on a relay origin supplies its own callback URL.
+	browserCb := "https://homelab.relay.example/api/oauth/myuplink/callback"
+	req := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/start?driver=myuplink&redirect_uri="+url.QueryEscape(browserCb), nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		AuthorizeURL string `json:"authorize_url"`
+		RedirectURI  string `json:"redirect_uri"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.RedirectURI != browserCb {
+		t.Errorf("redirect_uri = %q, want browser-supplied %q", resp.RedirectURI, browserCb)
+	}
+	u, _ := url.Parse(resp.AuthorizeURL)
+	if u.Query().Get("redirect_uri") != browserCb {
+		t.Errorf("authorize redirect_uri = %q, want %q", u.Query().Get("redirect_uri"), browserCb)
+	}
+}
+
+func TestMyUplinkOAuthStartRejectsBadRedirectURI(t *testing.T) {
+	srv, _, _ := buildMyUplinkOAuthServer(t)
+	for _, bad := range []string{
+		"https://evil.example/steal",                           // wrong path
+		"javascript:alert(1)",                                  // wrong scheme
+		"https://evil.example/api/oauth/myuplink/callback?x=1", // has query
+	} {
+		req := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/start?driver=myuplink&redirect_uri="+url.QueryEscape(bad), nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("redirect_uri %q: status = %d, want 400", bad, rec.Code)
+		}
+	}
+}
+
 func TestMyUplinkOAuthCallbackExchangesAndPersists(t *testing.T) {
 	// Stub MyUplink token endpoint: assert authorization_code grant + the
 	// client_secret from config, return a refresh_token.

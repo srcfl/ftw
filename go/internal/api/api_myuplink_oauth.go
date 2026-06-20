@@ -41,6 +41,28 @@ var myUplinkOAuthBase = "https://api.myuplink.com"
 // makes MyUplink return a refresh_token.
 const myUplinkScope = "READSYSTEM offline_access"
 
+// myUplinkCallbackPath is the 42w route MyUplink redirects back to. The
+// operator registers <origin>+this as the Callback Url in the portal.
+const myUplinkCallbackPath = "/api/oauth/myuplink/callback"
+
+// validMyUplinkCallback guards the browser-supplied redirect_uri so our
+// authorize state can't be turned into an open redirect: it must be an
+// absolute http(s) URL whose path is exactly the callback route, with no
+// query or fragment.
+func validMyUplinkCallback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if u.Host == "" {
+		return false
+	}
+	return u.Path == myUplinkCallbackPath && u.RawQuery == "" && u.Fragment == ""
+}
+
 // oauthPending is an in-flight authorization-code request, created by /start
 // and consumed (once) by /callback.
 type oauthPending struct {
@@ -110,7 +132,21 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	redirectURI := requestOrigin(r) + "/api/oauth/myuplink/callback"
+	// The redirect URI must match byte-for-byte across the portal
+	// registration, the authorize call, and the token exchange. Prefer an
+	// explicit redirect_uri from the browser (location.origin) — on a
+	// remote/relay origin the request Host the server sees is NOT the
+	// browser's origin, so deriving it server-side would be wrong. Fall
+	// back to the request origin for plain LAN access. Validate the passed
+	// value so our authorize state can't be used as an open redirect.
+	redirectURI := requestOrigin(r) + myUplinkCallbackPath
+	if ru := r.URL.Query().Get("redirect_uri"); ru != "" {
+		if !validMyUplinkCallback(ru) {
+			writeJSON(w, 400, map[string]string{"error": "invalid redirect_uri (must be <origin>" + myUplinkCallbackPath + ")"})
+			return
+		}
+		redirectURI = ru
+	}
 
 	stateBytes := make([]byte, 16)
 	if _, err := rand.Read(stateBytes); err != nil {
