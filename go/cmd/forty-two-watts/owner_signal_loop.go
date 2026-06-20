@@ -10,6 +10,7 @@ import (
 	neturl "net/url"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/p2p"
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
 
@@ -40,6 +41,10 @@ const maxSignalBodyBytes = 64 << 10
 type p2pAnswerer interface {
 	Answer(ctx context.Context, offerSDP string, replayHeaders http.Header) (string, error)
 	SignFingerprint(answerSDP string) (sig string, tsMs int64)
+}
+
+type p2pICESetter interface {
+	SetICEServers([]p2p.ICEServer)
 }
 
 // pollSecretSource yields the current relay-minted poll token. *tunnel.Host
@@ -138,6 +143,13 @@ const signalNonceHeaderClient = "X-FTW-Signal-Nonce"
 // handleSignalOffer answers one offer and parks the signed answer under the same
 // nonce the offer was drained with.
 func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, tunnelMarker, offerSDP, nonce string, p2p p2pAnswerer, polls pollSecretSource) {
+	if setter, ok := p2p.(p2pICESetter); ok {
+		if ice, err := fetchSignalICE(ctx, client, relayURL); err == nil && len(ice) > 0 {
+			setter.SetICEServers(ice)
+		} else if err != nil && ctx.Err() == nil {
+			slog.Warn("owner-access: fetch signal ICE config failed", "err", err, "host_id", hostID)
+		}
+	}
 	// FAIL-CLOSED replay headers: stamp the per-process tunnel marker so every
 	// DataChannel frame is REMOTE (the gate can never grant it LAN-bypass), and
 	// inject NO cookie — the channel is unauthenticated until the browser logs in
@@ -162,6 +174,30 @@ func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostI
 			slog.Warn("owner-access: post signal answer failed", "err", err, "host_id", hostID)
 		}
 	}
+}
+
+type signalICEWire struct {
+	ICEServers []p2p.ICEServer `json:"ice_servers"`
+}
+
+func fetchSignalICE(ctx context.Context, client *http.Client, relayURL string) ([]p2p.ICEServer, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, relayURL+"/signal/ice", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &signalHTTPError{status: resp.StatusCode}
+	}
+	var out signalICEWire
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSignalBodyBytes)).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.ICEServers, nil
 }
 
 func postSignalAnswer(ctx context.Context, client *http.Client, relayURL, hostID, nonce, pollSecret string, body []byte) error {

@@ -36,6 +36,50 @@ import (
 // a TURN-relayed DataChannel carries DTLS ciphertext only.
 var DefaultSTUNServers = []string{"stun:stun.l.google.com:19302"}
 
+// ICEServer is the small JSON-compatible ICE server shape shared by the
+// browser, relay and Pi. Username/Credential are set for TURN only.
+type ICEServer struct {
+	URLs       []string `json:"urls"`
+	Username   string   `json:"username,omitempty"`
+	Credential string   `json:"credential,omitempty"`
+}
+
+// ICEServersFromURLs adapts bare STUN/TURN URLs to the richer shape. It is
+// used by older call sites that only configured STUN URL lists.
+func ICEServersFromURLs(urls []string) []ICEServer {
+	if len(urls) == 0 {
+		return nil
+	}
+	out := make([]ICEServer, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		out = append(out, ICEServer{URLs: []string{u}})
+	}
+	return out
+}
+
+func cloneICEServers(in []ICEServer) []ICEServer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ICEServer, 0, len(in))
+	for _, s := range in {
+		if len(s.URLs) == 0 {
+			continue
+		}
+		cp := ICEServer{
+			URLs:       append([]string(nil), s.URLs...),
+			Username:   s.Username,
+			Credential: s.Credential,
+		}
+		out = append(out, cp)
+	}
+	return out
+}
+
 // ResponseFrame is one response written back over the DataChannel: the
 // originating request's ReqID (so a client with several in-flight requests can
 // correlate concurrent responses) plus the reused tunnel.TunneledResponse
@@ -326,9 +370,27 @@ func appendCookie(h http.Header, pair string) {
 // server URLs. Pass nil for host-candidate-only (e.g. an in-process loopback
 // test); pass DefaultSTUNServers for real NAT traversal.
 func NewPeer(iceServers []string) (*webrtc.PeerConnection, error) {
+	return NewPeerWithICE(ICEServersFromURLs(iceServers))
+}
+
+// NewPeerWithICE creates an RTCPeerConnection from full ICE configuration.
+// TURN credentials are still only connectivity hints: the DataChannel remains
+// DTLS encrypted end-to-end and browser-side signed-fingerprint verification
+// keeps the relay/TURN service from becoming a trust anchor.
+func NewPeerWithICE(iceServers []ICEServer) (*webrtc.PeerConnection, error) {
 	cfg := webrtc.Configuration{}
 	if len(iceServers) > 0 {
-		cfg.ICEServers = []webrtc.ICEServer{{URLs: iceServers}}
+		cfg.ICEServers = make([]webrtc.ICEServer, 0, len(iceServers))
+		for _, s := range iceServers {
+			if len(s.URLs) == 0 {
+				continue
+			}
+			cfg.ICEServers = append(cfg.ICEServers, webrtc.ICEServer{
+				URLs:       append([]string(nil), s.URLs...),
+				Username:   s.Username,
+				Credential: s.Credential,
+			})
+		}
 	}
 	return webrtc.NewPeerConnection(cfg)
 }

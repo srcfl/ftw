@@ -13,7 +13,7 @@
 (function () {
   "use strict";
 
-  var STUN = [{ urls: "stun:stun.l.google.com:19302" }]; // mirrors p2p.DefaultSTUNServers
+  var DEFAULT_ICE = [{ urls: ["stun:stun.l.google.com:19302"] }]; // mirrors p2p.DefaultSTUNServers
   var LABEL = "ftw";                                     // must match the Pi Bridge
   var CONNECT_TIMEOUT_MS = 15000;  // give Chrome/WebRTC enough time before retrying
   var REQUEST_TIMEOUT_MS = 10000;  // per-request budget over the channel
@@ -112,6 +112,34 @@
   // by site_id only — never under the /me/<site> tunnel prefix.
   function challengeURL(site) {
     return "/signal/" + encodeURIComponent(site) + "/challenge";
+  }
+
+  function defaultICE() {
+    return DEFAULT_ICE.map(function (s) { return { urls: s.urls.slice() }; });
+  }
+
+  // iceServers fetches relay-provided STUN/TURN config. TURN credentials are
+  // short-lived connectivity hints only: WebRTC still runs DTLS end-to-end and
+  // verifyAnswerSignature keeps the relay/TURN service out of the trust chain.
+  function iceServers() {
+    return fetch("/signal/ice", { method: "GET", cache: "no-store", credentials: "same-origin" })
+      .then(function (r) {
+        if (!r.ok) return defaultICE();
+        return r.json();
+      })
+      .then(function (cfg) {
+        var list = cfg && cfg.ice_servers;
+        if (!Array.isArray(list) || list.length === 0) return defaultICE();
+        return list.map(function (s) {
+          if (!s || !s.urls) return null;
+          var urls = Array.isArray(s.urls) ? s.urls.slice() : [String(s.urls)];
+          var out = { urls: urls };
+          if (s.username) out.username = s.username;
+          if (s.credential) out.credential = s.credential;
+          return out;
+        }).filter(Boolean);
+      })
+      .catch(function () { return defaultICE(); });
   }
 
   // ---- optional device-key proof for the relay (C2) --------------------------
@@ -467,38 +495,39 @@
         resolve(ok);
       }
 
-      try {
-        pc = new RTCPeerConnection({ iceServers: STUN });
-      } catch (e) { return finish(false); }
+      iceServers().then(function (ice) {
+        try {
+          pc = new RTCPeerConnection({ iceServers: ice });
+        } catch (e) { return finish(false); }
 
-      dc = pc.createDataChannel(LABEL, { ordered: true });
-      dc.onopen = function () { ready = true; setState("direct"); finish(true); };
-      dc.onclose = function () { var was = stateName; teardown(); if (was === "direct") setState("relay"); };
-      dc.onmessage = function (ev) {
-        var frame;
-        try { frame = JSON.parse(ev.data); } catch (e) { return; }
-        var p = pending[frame.req_id];
-        if (!p) return;
-        delete pending[frame.req_id];
-        clearTimeout(p.timer);
-        p.resolve(frame.response || {});
-      };
-      pc.onconnectionstatechange = function () {
-        var st = pc && pc.connectionState;
-        if (st === "failed" || st === "closed" || st === "disconnected") finish(false);
-      };
+        dc = pc.createDataChannel(LABEL, { ordered: true });
+        dc.onopen = function () { ready = true; setState("direct"); finish(true); };
+        dc.onclose = function () { var was = stateName; teardown(); if (was === "direct") setState("relay"); };
+        dc.onmessage = function (ev) {
+          var frame;
+          try { frame = JSON.parse(ev.data); } catch (e) { return; }
+          var p = pending[frame.req_id];
+          if (!p) return;
+          delete pending[frame.req_id];
+          clearTimeout(p.timer);
+          p.resolve(frame.response || {});
+        };
+        pc.onconnectionstatechange = function () {
+          var st = pc && pc.connectionState;
+          if (st === "failed" || st === "closed" || st === "disconnected") finish(false);
+        };
 
-      to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
+        to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
 
-      // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
-      // offer to /signal/<site>/offer, then long-poll /signal/<site>/answer. The
-      // relay forwards opaque SDP/signature blobs and never sees plaintext. We
-      // need the pinned site_id first (it keys the mailbox); pinnedIdentity also
-      // gives us the key we verify the answer signature against.
-      // One opaque rendezvous nonce per attempt — the offer is parked under it
-      // and we poll only its answer, so a hostile offer can't steal ours.
-      var nonce = randomNonce();
-      pinnedIdentity()
+        // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
+        // offer to /signal/<site>/offer, then long-poll /signal/<site>/answer. The
+        // relay forwards opaque SDP/signature blobs and never sees plaintext. We
+        // need the pinned site_id first (it keys the mailbox); pinnedIdentity also
+        // gives us the key we verify the answer signature against.
+        // One opaque rendezvous nonce per attempt — the offer is parked under it
+        // and we poll only its answer, so a hostile offer can't steal ours.
+        var nonce = randomNonce();
+        return pinnedIdentity()
         .then(function (pin) {
           var site = pin.site;
           // C2, optional: prove this device to the RELAY when a persisted device
@@ -553,10 +582,11 @@
               });
             });
         })
-        .catch(function (e) {
-          if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
-          finish(false);
-        });
+          .catch(function (e) {
+            if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
+            finish(false);
+          });
+      });
     });
     return connecting;
   }

@@ -79,11 +79,11 @@ const (
 // Manager owns the Pi side of the browser P2P path and the lifecycle of the
 // PeerConnections it answers. It is safe for concurrent use.
 type Manager struct {
-	log  *slog.Logger
-	stun []string
+	log *slog.Logger
 
 	mu        sync.Mutex
 	local     http.Handler          // ungated API mux; set via SetLocalAPI
+	ice       []ICEServer           // STUN/TURN servers for new PeerConnections
 	sessions  map[string]*pcSession // active connections by session id
 	maxOpen   int
 	maxUnauth int               // separate cap on not-yet-authenticated peers (FIX-4b)
@@ -109,11 +109,19 @@ func NewManager(log *slog.Logger, stun []string) *Manager {
 	}
 	return &Manager{
 		log:       log,
-		stun:      stun,
+		ice:       ICEServersFromURLs(stun),
 		sessions:  make(map[string]*pcSession),
 		maxOpen:   defaultMaxOpen,
 		maxUnauth: defaultMaxUnauth,
 	}
+}
+
+// SetICEServers updates the ICE server set used for future answers. Existing
+// PeerConnections keep the candidates they already gathered.
+func (m *Manager) SetICEServers(ice []ICEServer) {
+	m.mu.Lock()
+	m.ice = cloneICEServers(ice)
+	m.mu.Unlock()
 }
 
 // SetLocalAPI injects the handler that DataChannel-delivered requests replay
@@ -199,12 +207,13 @@ func (m *Manager) ActiveCount() int {
 func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders http.Header) (string, error) {
 	m.mu.Lock()
 	local := m.local
+	ice := cloneICEServers(m.ice)
 	m.mu.Unlock()
 	if local == nil {
 		return "", fmt.Errorf("p2p: local API not wired")
 	}
 
-	pc, err := NewPeer(m.stun)
+	pc, err := NewPeerWithICE(ice)
 	if err != nil {
 		return "", fmt.Errorf("p2p: new peer: %w", err)
 	}

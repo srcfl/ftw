@@ -159,6 +159,21 @@ sudo systemctl status ftw-relay
 root. The `ReadOnlyPaths` line means a relay compromise still cannot
 overwrite cert or key.
 
+### ICE / TURN for owner remote access
+
+`home.fortytwowatts.com` owner traffic uses a signed WebRTC DataChannel. Direct STUN works on many networks, but hard NAT / CGNAT / cellular paths need TURN for the feature to be usable. Configure TURN on the relay, not in the browser bundle:
+
+```bash
+Environment=FTW_TURN_SECRET=shared-with-coturn
+ExecStart=/usr/local/bin/ftw-relay \
+  -addr :443 \
+  -cert /etc/ssl/relay/cert.pem \
+  -key /etc/ssl/relay/key.pem \
+  -turn-url turn:relay.fortytwowatts.com:3478?transport=udp,turns:relay.fortytwowatts.com:5349
+```
+
+The relay serves `GET /signal/ice` with the default STUN URL plus short-lived coturn REST credentials derived from `FTW_TURN_SECRET` or `-turn-secret`. The browser and Pi both fetch this before WebRTC setup. TURN relays DTLS ciphertext only; the Pi-signed DTLS fingerprint remains the trust check.
+
 ## Verify end-to-end
 
 From your laptop:

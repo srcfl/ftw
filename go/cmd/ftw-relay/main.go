@@ -34,6 +34,9 @@ func main() {
 	requireDeviceKey := flag.Bool("require-device-key", false, "ENFORCE the device-key signaling gate (C2): an offer must carry a verified device-key proof or the Pi is never contacted. Off (default) keeps the pre-C2 behaviour so the relay can serve the shell + identity (slices 1+2) while a home Pi that doesn't yet publish device-keys keeps working. Turn on once device-keys are enrolled.")
 	homeAllowTOFU := flag.Bool("home-allow-tofu", false, "allow the home host to run WITHOUT -home-pubkey (trust-on-first-use); insecure across relay restarts — testing only")
 	trustCFIP := flag.Bool("trust-cf-ip", false, "behind Cloudflare: trust CF-Connecting-IP for the per-IP signaling throttle, but ONLY from validated Cloudflare edge peers (else the throttle keys on the shared CF edge IP). Also firewall the origin to Cloudflare's ranges.")
+	iceStun := flag.String("ice-stun", "stun:stun.l.google.com:19302", "comma-separated STUN URLs published from /signal/ice; empty disables STUN")
+	turnURL := flag.String("turn-url", "", "comma-separated TURN URLs published from /signal/ice (e.g. turn:relay.example:3478?transport=udp)")
+	turnSecret := flag.String("turn-secret", os.Getenv("FTW_TURN_SECRET"), "coturn static-auth-secret used to mint short-lived TURN REST credentials; may also be set with FTW_TURN_SECRET")
 	multiTenant := flag.Bool("multi-tenant", false, "public multi-tenant home route: home.* serves only a tiny relay-disk loader until the browser decrypts its directory; dashboard static GETs then forward to the selected Pi, while owner data stays P2P. Requires -home-web; -require-device-key remains an optional extra gate; -home-site/-home-pubkey become no-ops.")
 	walletBlobDir := flag.String("wallet-blob-dir", "", "directory holding the per-wallet encrypted directory blobs (one <user_handle>.blob file each). Required under -multi-tenant; the one piece of durable relay state. The relay never decrypts the contents.")
 	walletBlobMaxBytes := flag.Int("wallet-blob-max-bytes", 65536, "per-wallet ciphertext byte cap; a PUT over this is rejected 413 so a hostile client can't grow the blob store without bound")
@@ -114,6 +117,9 @@ func main() {
 		HomeWeb:          *homeWeb,
 		HomePubKey:       *homePubKey,
 		RequireDeviceKey: *requireDeviceKey,
+		ICEStunURLs:      parseURLList(*iceStun),
+		TURNURLs:         parseURLList(*turnURL),
+		TURNSecret:       *turnSecret,
 		MultiTenant:      *multiTenant,
 		WalletBlobs:      walletBlobs,
 		Bootstrap:        bootstrap,

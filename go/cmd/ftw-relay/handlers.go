@@ -114,6 +114,11 @@ type Relay struct {
 	// still works. On → an offer must carry a verified device-key proof or the Pi
 	// is never contacted. Flip on only once device-keys are enrolled.
 	RequireDeviceKey bool
+	// ICEStunURLs/TURNURLs are public connectivity hints for the signed
+	// browser<->Pi WebRTC channel. TURN only relays DTLS ciphertext.
+	ICEStunURLs []string
+	TURNURLs    []string
+	TURNSecret  string
 	// MultiTenant switches the home host from the single-tenant pin
 	// (-home-site/-home-pubkey) to the public multi-tenant front door:
 	// anonymous home.* serves only the relay-disk bootstrap loader; after the
@@ -221,6 +226,7 @@ func (r *Relay) Handler() http.Handler {
 	// /me/<site> forwarders were removed in the P2P-only cutover, slice 6). Owner
 	// data exists ONLY as DTLS DataChannel frames now.
 	mux.HandleFunc("POST /me/register", r.meRegister)
+	mux.HandleFunc("GET /signal/ice", r.signalICE)
 
 	// Home-host cutover: a bare host (home.fortytwowatts.com) serves the stable
 	// public bootstrap at the root. In multi-tenant mode the dashboard's STATIC
@@ -237,6 +243,7 @@ func (r *Relay) Handler() http.Handler {
 	// (The Pi's /signal/{host}/* routes need no host pin: the Pi dials the relay by
 	// its own host, not the home host.)
 	if r.HomeHost != "" && (r.HomeSite != "" || r.MultiTenant) {
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/ice", r.signalICE)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/challenge", r.signalChallenge)
 		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)
