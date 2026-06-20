@@ -299,6 +299,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
+	s.handle("GET /api/oauth/myuplink/start", s.handleMyUplinkOAuthStart)
+	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)
