@@ -218,6 +218,7 @@ type Store struct {
 
 type metricSnap struct {
 	Value     float64
+	Unit      string
 	UpdatedAt time.Time
 }
 
@@ -327,7 +328,11 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // Use for diagnostic data drivers want to record beyond the standard
 // pv/battery/meter shape (temperatures, voltages, frequencies, etc.).
 // Drained by the control loop via FlushSamples.
-func (s *Store) EmitMetric(driver, name string, value float64) {
+// EmitMetric records a scalar metric. unit is an optional display unit
+// (e.g. "°C", "Hz", "kW") carried into the live snapshot so the UI can group
+// and label metrics; pass "" when unknown. Existing callers updated to the
+// 4-arg form.
+func (s *Store) EmitMetric(driver, name string, value float64, unit string) {
 	if !finite(value) {
 		return
 	}
@@ -338,7 +343,7 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 	})
 	s.pendingMu.Unlock()
 	s.latestMu.Lock()
-	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now}
+	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit}
 	s.latestMu.Unlock()
 }
 
@@ -346,6 +351,7 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 type MetricSnapshot struct {
 	Name      string    `json:"name"`
 	Value     float64   `json:"value"`
+	Unit      string    `json:"unit,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -365,6 +371,7 @@ func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
 		out = append(out, MetricSnapshot{
 			Name:      k[len(prefix):],
 			Value:     v.Value,
+			Unit:      v.Unit,
 			UpdatedAt: v.UpdatedAt,
 		})
 	}
