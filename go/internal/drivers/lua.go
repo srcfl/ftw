@@ -329,6 +329,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// host.persist_secret(key, value) -> ok, err
+	// Durably writes a config secret back into the driver's own config
+	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
+	// Returns ok=false + an error string when the capability isn't wired.
+	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
+		key := L.CheckString(1)
+		val := L.CheckString(2)
+		if env.PersistSecret == nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString("persist_secret: capability not granted"))
+			return 2
+		}
+		if err := env.PersistSecret(key, val); err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		L.Push(lua.LNil)
+		return 2
+	}))
+
 	mqttSubscribe := L.NewFunction(func(L *lua.LState) int {
 		topic := L.CheckString(1)
 		if env.MQTT == nil {

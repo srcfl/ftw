@@ -112,6 +112,14 @@ type HostEnv struct {
 	SN       string
 	MAC      string // resolved by ARP after first connection (best-effort)
 	Endpoint string // e.g. "modbus://192.168.1.1:502" or "mqtt://broker:1883"
+
+	// PersistSecret, when non-nil, lets a driver durably write a config
+	// secret (e.g. a rotated OAuth refresh_token) back into its own
+	// config block so it survives a restart. nil → host.persist_secret
+	// returns ok=false + an error. Wired by the Registry to a per-driver
+	// closure (see registry.go SecretPersister). Keep the value small:
+	// it is round-tripped through config.yaml as a plain string.
+	PersistSecret func(key, value string) error
 }
 
 // NewHostEnv creates a fresh host environment for a driver.

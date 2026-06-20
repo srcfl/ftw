@@ -305,6 +305,25 @@ func main() {
 	cfgMu := &sync.RWMutex{}
 	modelsMu := &sync.Mutex{}
 
+	// Durable secret write-back for drivers (rotated OAuth refresh tokens).
+	// Drivers call host.persist_secret(key, value); the registry routes it
+	// here with the driver's name. We write to the state KV store — NOT
+	// config.yaml — on purpose: config.yaml is watched by configreload, and
+	// rewriting it on every token rotation would restart the driver, which
+	// re-auths, rotates again, and loops. SecretOverride then layers these
+	// KV values back over config.yaml at driver_init, so the freshest token
+	// always reaches the driver while config.yaml keeps the bootstrap seed
+	// the UI renders as "saved".
+	driverSecretKey := func(driverName, key string) string {
+		return "driver_secret:" + driverName + ":" + key
+	}
+	reg.SecretPersister = func(driverName, key, value string) error {
+		return st.SaveConfig(driverSecretKey(driverName, key), value)
+	}
+	reg.SecretOverride = func(driverName, key string) (string, bool) {
+		return st.LoadConfig(driverSecretKey(driverName, key))
+	}
+
 	// Pre-declare services that the hot-reload Applier needs to touch.
 	// The Applier closure captures these by reference; they're assigned
 	// further down when their packages are wired, and the Applier only
