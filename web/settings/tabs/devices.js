@@ -181,6 +181,17 @@
             connBadge +
             '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
             '</div>' +
+            // Manual fallback: when the automatic redirect can't reach this
+            // device (remote/relay access, or the portal rejected an http LAN
+            // callback), the operator copies the redirected URL from the
+            // address bar and pastes it here. The Pi exchanges the code over
+            // its own outbound HTTPS, so no inbound callback is needed.
+            '<details style="margin-top:10px">' +
+            '<summary style="cursor:pointer;font-size:0.8rem;color:var(--text-dim)">Not redirected back? Paste the URL instead</summary>' +
+            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here. Use this for remote/relay access or if the page didn\'t return to 42-watts.</p>' +
+            '<input type="text" class="myuplink-manual-url" data-driver-idx="' + idx + '" placeholder=".../api/oauth/myuplink/callback?code=...&amp;state=..." style="font-family:var(--mono);font-size:0.78rem">' +
+            '<button class="btn-add myuplink-manual-btn" type="button" data-driver-idx="' + idx + '" style="margin-top:6px">Complete connection</button>' +
+            '</details>' +
             '</fieldset>';
         }
         // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
@@ -570,10 +581,43 @@
                 return;
               }
               window.open(res.body.authorize_url, "_blank");
-              setStatus("Complete the consent in the new tab, then reload this page.", "var(--green-e)");
+              setStatus("Complete the consent in the new tab. If it returns here, reload; if not, paste the URL below.", "var(--green-e)");
             })
             .catch(function (e) { setStatus("✗ " + e.message, "var(--red-e)"); })
             .finally(function () { cbtn.disabled = false; });
+        });
+      });
+
+      // Manual fallback: exchange a pasted redirect URL (carries code + state)
+      // server-side. Works on any origin since the Pi exchanges the code over
+      // outbound HTTPS — no inbound callback required.
+      bodyEl.querySelectorAll(".myuplink-manual-btn").forEach(function (mbtn) {
+        mbtn.addEventListener("click", function () {
+          var dIdx = mbtn.dataset.driverIdx;
+          var input = bodyEl.querySelector('.myuplink-manual-url[data-driver-idx="' + dIdx + '"]');
+          var statusEl = bodyEl.querySelector('.myuplink-connect-status[data-driver-idx="' + dIdx + '"]');
+          function setStatus(msg, color) {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color || "var(--text-dim)"; }
+          }
+          var url = input ? input.value.trim() : "";
+          if (!url) { setStatus("Paste the redirect URL first", "var(--red-e)"); return; }
+          setStatus("Completing…");
+          mbtn.disabled = true;
+          ownerFetch("/api/oauth/myuplink/exchange", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ redirect_url: url }),
+          })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+              if (res.ok && res.body && res.body.status === "connected") {
+                setStatus("✓ Connected — reload to refresh the badge.", "var(--green-e)");
+              } else {
+                setStatus("✗ " + ((res.body && res.body.error) || "exchange failed"), "var(--red-e)");
+              }
+            })
+            .catch(function (e) { setStatus("✗ " + e.message, "var(--red-e)"); })
+            .finally(function () { mbtn.disabled = false; });
         });
       });
 

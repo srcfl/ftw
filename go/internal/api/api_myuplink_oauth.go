@@ -161,7 +161,10 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 	oauthPending_[stateTok] = oauthPending{
 		driver:      driver,
 		redirectURI: redirectURI,
-		expires:     now.Add(10 * time.Minute),
+		// 15 min: enough headroom for the manual-paste path (sign in, copy
+		// the redirected URL, paste it back) when the auto-callback can't
+		// reach the Pi (relay origin / http LAN rejected by the portal).
+		expires: now.Add(15 * time.Minute),
 	}
 	oauthMu.Unlock()
 
@@ -181,17 +184,69 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 }
 
 // handleMyUplinkOAuthCallback: GET /api/oauth/myuplink/callback?code=&state=
+//
+// The happy path on a LAN-direct origin: MyUplink redirects the browser here,
+// we complete the consent and render a result page. When the callback can't
+// reach the Pi (relay origin refuses /api/*, or the portal rejected an http
+// LAN callback), the operator instead copies the redirected URL and pastes it
+// into the manual exchange endpoint below — same completion logic.
 func (s *Server) handleMyUplinkOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	code := q.Get("code")
-	stateTok := q.Get("state")
-
 	if e := q.Get("error"); e != "" {
-		// MyUplink redirected back with a consent error.
 		renderOAuthResult(w, false, "MyUplink returned an error: "+e+" "+q.Get("error_description"))
 		return
 	}
+	driver, err := s.completeMyUplinkConsent(r, q.Get("state"), q.Get("code"))
+	if err != nil {
+		renderOAuthResult(w, false, err.Error())
+		return
+	}
+	renderOAuthResult(w, true, "MyUplink connected for driver \""+driver+"\". You can close this tab and return to 42-watts.")
+}
 
+// handleMyUplinkOAuthExchange: POST /api/oauth/myuplink/exchange
+// Manual fallback for origins where the auto-callback can't reach the Pi.
+// Body: {"redirect_url": "<full URL from the address bar after sign-in>"}
+// or {"code": "...", "state": "..."}. Completes the same consent flow.
+func (s *Server) handleMyUplinkOAuthExchange(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RedirectURL string `json:"redirect_url"`
+		Code        string `json:"code"`
+		State       string `json:"state"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	code, stateTok := req.Code, req.State
+	// Prefer parsing the full redirected URL — easiest for the operator (copy
+	// the whole address bar); it carries both code and state.
+	if req.RedirectURL != "" {
+		u, perr := url.Parse(strings.TrimSpace(req.RedirectURL))
+		if perr != nil {
+			writeJSON(w, 400, map[string]string{"error": "could not parse the pasted URL"})
+			return
+		}
+		if e := u.Query().Get("error"); e != "" {
+			writeJSON(w, 400, map[string]string{"error": "MyUplink returned an error: " + e})
+			return
+		}
+		code = u.Query().Get("code")
+		stateTok = u.Query().Get("state")
+	}
+	driver, err := s.completeMyUplinkConsent(r, stateTok, code)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "connected", "driver": driver})
+}
+
+// completeMyUplinkConsent validates+consumes the pending state, exchanges the
+// authorization code for a refresh_token, and persists it (config + KV) with a
+// driver restart. Shared by the auto-callback (GET) and the manual exchange
+// (POST). Returns the driver name on success. Errors are operator-facing.
+func (s *Server) completeMyUplinkConsent(r *http.Request, stateTok, code string) (string, error) {
 	oauthMu.Lock()
 	pruneOAuthStateLocked(time.Now())
 	pending, found := oauthPending_[stateTok]
@@ -201,33 +256,26 @@ func (s *Server) handleMyUplinkOAuthCallback(w http.ResponseWriter, r *http.Requ
 	oauthMu.Unlock()
 
 	if !found {
-		renderOAuthResult(w, false, "Invalid or expired state — start the connect again from Settings → Devices.")
-		return
+		return "", fmt.Errorf("invalid or expired state — start the connect again from Settings → Devices")
 	}
 	if code == "" {
-		renderOAuthResult(w, false, "No authorization code in the callback.")
-		return
+		return "", fmt.Errorf("no authorization code found")
 	}
 
 	clientID, _ := s.driverConfigValue(pending.driver, "client_id")
 	clientSecret, _ := s.driverConfigValue(pending.driver, "client_secret")
 	if clientID == "" || clientSecret == "" {
-		renderOAuthResult(w, false, "Missing Client ID / Secret for driver "+pending.driver+".")
-		return
+		return "", fmt.Errorf("missing Client ID / Secret for driver %q", pending.driver)
 	}
 
 	refreshToken, err := s.exchangeMyUplinkCode(code, clientID, clientSecret, pending.redirectURI)
 	if err != nil {
-		renderOAuthResult(w, false, "Token exchange failed: "+err.Error())
-		return
+		return "", fmt.Errorf("token exchange failed: %w", err)
 	}
-
 	if err := s.persistMyUplinkRefreshToken(r, pending.driver, refreshToken); err != nil {
-		renderOAuthResult(w, false, "Could not save the token: "+err.Error())
-		return
+		return "", fmt.Errorf("could not save the token: %w", err)
 	}
-
-	renderOAuthResult(w, true, "MyUplink connected for driver \""+pending.driver+"\". You can close this tab and return to 42-watts.")
+	return pending.driver, nil
 }
 
 // exchangeMyUplinkCode swaps an authorization code for a refresh_token.

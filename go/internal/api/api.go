@@ -301,6 +301,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
 	s.handle("GET /api/oauth/myuplink/start", s.handleMyUplinkOAuthStart)
 	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
+	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)

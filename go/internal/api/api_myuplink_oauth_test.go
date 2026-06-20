@@ -191,6 +191,67 @@ func TestMyUplinkOAuthCallbackExchangesAndPersists(t *testing.T) {
 	}
 }
 
+func TestMyUplinkOAuthManualExchange(t *testing.T) {
+	// Stub MyUplink token endpoint.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		vals, _ := url.ParseQuery(string(body))
+		if vals.Get("grant_type") != "authorization_code" {
+			t.Errorf("grant_type = %q", vals.Get("grant_type"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "AT", "refresh_token": "RT-manual", "expires_in": 3600,
+		})
+	}))
+	defer tokenSrv.Close()
+	old := myUplinkOAuthBase
+	myUplinkOAuthBase = tokenSrv.URL
+	defer func() { myUplinkOAuthBase = old }()
+
+	srv, cfg, st := buildMyUplinkOAuthServer(t)
+
+	// /start mints state.
+	startReq := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/start?driver=myuplink", nil)
+	startRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(startRec, startReq)
+	var sresp struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	_ = json.Unmarshal(startRec.Body.Bytes(), &sresp)
+	u, _ := url.Parse(sresp.AuthorizeURL)
+	stateTok := u.Query().Get("state")
+
+	// Operator pastes the full redirected URL (auto-callback never reached us).
+	redirectURL := "http://pi.local/api/oauth/myuplink/callback?code=MANUAL-CODE&state=" + stateTok
+	body, _ := json.Marshal(map[string]string{"redirect_url": redirectURL})
+	exReq := httptest.NewRequest("POST", "http://pi.local/api/oauth/myuplink/exchange", strings.NewReader(string(body)))
+	exReq.Header.Set("Content-Type", "application/json")
+	exRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(exRec, exReq)
+
+	if exRec.Code != 200 {
+		t.Fatalf("exchange status = %d, body=%s", exRec.Code, exRec.Body.String())
+	}
+	if got := cfg.Drivers[0].Config["refresh_token"]; got != "RT-manual" {
+		t.Errorf("config refresh_token = %v, want RT-manual", got)
+	}
+	if v, ok := st.LoadConfig("driver_secret:myuplink:refresh_token"); !ok || v != "RT-manual" {
+		t.Errorf("KV refresh_token = %q (ok=%v), want RT-manual", v, ok)
+	}
+}
+
+func TestMyUplinkOAuthManualExchangeBadState(t *testing.T) {
+	srv, _, _ := buildMyUplinkOAuthServer(t)
+	body, _ := json.Marshal(map[string]string{"code": "X", "state": "nope"})
+	req := httptest.NewRequest("POST", "http://pi.local/api/oauth/myuplink/exchange", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("status = %d, want 400 for unknown state", rec.Code)
+	}
+}
+
 func TestMyUplinkOAuthCallbackRejectsBadState(t *testing.T) {
 	srv, _, _ := buildMyUplinkOAuthServer(t)
 	req := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/callback?code=X&state=not-a-real-state", nil)

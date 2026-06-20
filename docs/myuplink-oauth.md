@@ -53,9 +53,25 @@ In **Settings → Devices**, on the MyUplink driver:
 ## Step 3 — connect
 
 Click **Connect to MyUplink**. A new tab opens MyUplink's sign-in; log in and
-grant access. You're redirected back to 42-watts, which exchanges the code for a
-refresh token, stores it, and restarts the driver. Return to Settings and
-**reload** — the badge flips to **✓ Connected**.
+grant access.
+
+**If you're redirected back to 42-watts** (typical for LAN-direct access): it
+exchanges the code, stores the refresh token, and restarts the driver. Return to
+Settings and **reload** — the badge flips to **✓ Connected**.
+
+**If you're _not_ redirected back** — you reach 42-watts over the relay / home
+route, or the portal rejected an `http` LAN callback — the browser still lands
+on a URL containing `?code=…&state=…` in the address bar. This is expected.
+Then:
+
+1. Copy the **full address** from your browser's address bar.
+2. Back in Settings → Devices, expand **"Not redirected back? Paste the URL
+   instead"**, paste it, and click **Complete connection**.
+
+42-watts exchanges the code over its own outbound HTTPS — no inbound callback
+needed — so this path works on any origin (relay, headless, http LAN). Reload to
+see the **✓ Connected** badge. Do this within ~15 minutes of clicking Connect
+(the consent state expires).
 
 Within a minute the **Heat pump** card appears on the dashboard with live
 compressor power and temperatures, plus a 24-hour power sparkline.
