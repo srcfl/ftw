@@ -46,6 +46,10 @@
     var css = [
       '#heating-grid{display:flex;flex-direction:column;gap:18px}',
       '.ftw-hp{display:flex;flex-direction:column;gap:12px}',
+      '.ftw-hp-clickable{cursor:pointer;border-radius:8px;margin:-6px;padding:6px;transition:background 0.12s}',
+      '.ftw-hp-clickable:hover,.ftw-hp-clickable:focus{background:var(--bg-hover,rgba(127,127,127,0.06));outline:none}',
+      '.ftw-hp-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px}',
+      '.ftw-hp-more{font-family:var(--mono);font-size:0.66rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent-e)}',
       '.ftw-hp-name{font-family:var(--mono);font-size:0.72rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--fg-muted)}',
       '.ftw-hp-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px 18px}',
       '.ftw-hp-tile{display:flex;flex-direction:column;gap:3px}',
@@ -127,8 +131,10 @@
     var sparkBlock = spark
       ? '<div class="ftw-hp-spark"><span class="ftw-hp-spark-label">Compressor power · 24h</span>' + spark + '</div>'
       : '';
-    return '<div class="ftw-hp">' +
-      '<span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
+    // The whole card is a button into the detail view (all signals grouped).
+    return '<div class="ftw-hp ftw-hp-clickable" data-hp-driver="' + escapeHtml(name) + '" role="button" tabindex="0" title="View all heat-pump signals">' +
+      '<div class="ftw-hp-head"><span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
+      '<span class="ftw-hp-more">All signals →</span></div>' +
       '<div class="ftw-hp-tiles">' + tiles + '</div>' +
       sparkBlock +
       '</div>';
@@ -174,8 +180,137 @@
     });
   }
 
+  // ---- Detail drill-in: all points grouped by unit ----
+
+  // Ordered unit groups. First matching predicate wins; anything unmatched
+  // falls into "State / other".
+  var UNIT_GROUPS = [
+    { title: 'Temperatures', match: function (u) { return u === '°C' || u === '°F' || u === 'K'; } },
+    { title: 'Power & energy', match: function (u) { return u === 'W' || u === 'kW' || u === 'Wh' || u === 'kWh'; } },
+    { title: 'Frequency', match: function (u) { return u === 'Hz'; } },
+    { title: 'Percent', match: function (u) { return u === '%'; } },
+    { title: 'Flow & pressure', match: function (u) { return u === 'l/m' || u === 'l/min' || u === 'bar' || u === 'kPa'; } },
+    { title: 'Electrical', match: function (u) { return u === 'A' || u === 'V'; } },
+    { title: 'Counters & degree-minutes', match: function (u) { return u === 'GM' || u === 'DM' || u === 'h' || u === 'min' || u === 's' || /count/i.test(u); } },
+  ];
+
+  function groupForUnit(unit) {
+    for (var i = 0; i < UNIT_GROUPS.length; i++) {
+      if (UNIT_GROUPS[i].match(unit || '')) return UNIT_GROUPS[i].title;
+    }
+    return 'State / other';
+  }
+
+  // hp_supply_line_bt2 → "Supply line bt2"
+  function prettyLabel(name) {
+    var s = String(name).replace(/^hp_/, '').replace(/_/g, ' ').trim();
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  function fmtValue(v, unit) {
+    if (v == null) return '—';
+    var n = Math.abs(v) >= 100 ? Math.round(v) : Math.round(v * 100) / 100;
+    return n + (unit ? ' ' + unit : '');
+  }
+
+  function injectDetailStyles() {
+    if (document.getElementById('ftw-heating-detail-styles')) return;
+    var css = [
+      '.ftw-hpd-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:flex-start;justify-content:center;z-index:1000;overflow:auto;padding:5vh 16px}',
+      '.ftw-hpd{background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;max-width:760px;width:100%;padding:20px 22px}',
+      '.ftw-hpd-top{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}',
+      '.ftw-hpd-title{font-family:var(--mono);font-size:0.74rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--fg-muted)}',
+      '.ftw-hpd-close{background:none;border:1px solid var(--line);color:var(--fg);border-radius:6px;cursor:pointer;font-size:1rem;line-height:1;padding:4px 9px}',
+      '.ftw-hpd-group{margin:16px 0 4px;font-family:var(--mono);font-size:0.68rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent-e)}',
+      '.ftw-hpd-row{display:grid;grid-template-columns:1fr auto 120px;gap:10px 14px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line-soft,var(--line))}',
+      '.ftw-hpd-label{color:var(--fg-muted);font-size:0.85rem}',
+      '.ftw-hpd-val{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--fg);text-align:right}',
+      '.ftw-hpd-spark svg{width:120px;height:24px;display:block}',
+      '.ftw-hpd-empty{color:var(--fg-muted);font-family:var(--mono);font-size:0.82rem}',
+    ].join('');
+    var el = document.createElement('style');
+    el.id = 'ftw-heating-detail-styles';
+    el.textContent = css;
+    document.head.appendChild(el);
+  }
+
+  function closeDetail() {
+    var b = document.getElementById('ftw-hpd-backdrop');
+    if (b) b.remove();
+    document.removeEventListener('keydown', onDetailKey);
+  }
+  function onDetailKey(e) { if (e.key === 'Escape') closeDetail(); }
+
+  function openDetail(name) {
+    injectDetailStyles();
+    closeDetail();
+    var backdrop = document.createElement('div');
+    backdrop.className = 'ftw-hpd-backdrop';
+    backdrop.id = 'ftw-hpd-backdrop';
+    backdrop.innerHTML = '<div class="ftw-hpd">' +
+      '<div class="ftw-hpd-top"><span class="ftw-hpd-title">Heat pump · ' + escapeHtml(name) + '</span>' +
+      '<button class="ftw-hpd-close" type="button" aria-label="Close">✕</button></div>' +
+      '<div id="ftw-hpd-body"><div class="ftw-hpd-empty">Loading signals…</div></div></div>';
+    backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeDetail(); });
+    backdrop.querySelector('.ftw-hpd-close').addEventListener('click', closeDetail);
+    document.body.appendChild(backdrop);
+    document.addEventListener('keydown', onDetailKey);
+
+    fetchJSON('/api/drivers/' + encodeURIComponent(name)).then(function (d) {
+      var body = document.getElementById('ftw-hpd-body');
+      if (!body) return;
+      var metrics = (d && d.metrics) || [];
+      if (!metrics.length) { body.innerHTML = '<div class="ftw-hpd-empty">No signals reported yet.</div>'; return; }
+      // Bucket metrics into ordered groups.
+      var buckets = {};
+      metrics.forEach(function (m) {
+        var g = groupForUnit(m.unit);
+        (buckets[g] = buckets[g] || []).push(m);
+      });
+      var order = UNIT_GROUPS.map(function (g) { return g.title; }).concat(['State / other']);
+      var html = '';
+      order.forEach(function (g) {
+        var rows = buckets[g];
+        if (!rows || !rows.length) return;
+        rows.sort(function (a, b) { return a.name < b.name ? -1 : 1; });
+        html += '<div class="ftw-hpd-group">' + escapeHtml(g) + '</div>';
+        rows.forEach(function (m) {
+          html += '<div class="ftw-hpd-row">' +
+            '<span class="ftw-hpd-label">' + escapeHtml(prettyLabel(m.name)) + '</span>' +
+            '<span class="ftw-hpd-val">' + escapeHtml(fmtValue(m.value, m.unit)) + '</span>' +
+            '<span class="ftw-hpd-spark" data-spark-metric="' + escapeHtml(m.name) + '"></span>' +
+            '</div>';
+        });
+      });
+      body.innerHTML = html;
+      // Lazily fill sparklines (one /api/series per metric) — values already
+      // shown, so a slow series fetch never blocks the table.
+      metrics.forEach(function (m) {
+        fetchJSON('/api/series?driver=' + encodeURIComponent(name) + '&metric=' + encodeURIComponent(m.name) + '&range=24h&points=120')
+          .then(function (s) {
+            var slot = body.querySelector('.ftw-hpd-spark[data-spark-metric="' + (window.CSS && CSS.escape ? CSS.escape(m.name) : m.name) + '"]');
+            if (slot) slot.innerHTML = sparkline((s && s.points) || []);
+          });
+      });
+    });
+  }
+
+  function onGridClick(e) {
+    var card = e.target.closest && e.target.closest('.ftw-hp-clickable');
+    if (card && card.dataset.hpDriver) openDetail(card.dataset.hpDriver);
+  }
+
   function start() {
     if (timer) return;
+    var grid = document.getElementById('heating-grid');
+    if (grid) {
+      grid.addEventListener('click', onGridClick);
+      grid.addEventListener('keydown', function (e) {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target.classList && e.target.classList.contains('ftw-hp-clickable')) {
+          e.preventDefault(); onGridClick(e);
+        }
+      });
+    }
     refresh();
     timer = setInterval(refresh, REFRESH_MS);
   }

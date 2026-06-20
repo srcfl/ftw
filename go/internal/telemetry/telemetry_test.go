@@ -186,15 +186,38 @@ func TestStoreRejectsInvalidReadings(t *testing.T) {
 
 func TestEmitMetricRejectsNonFinite(t *testing.T) {
 	s := NewStore()
-	s.EmitMetric("driver", "bad", math.Inf(1))
+	s.EmitMetric("driver", "bad", math.Inf(1), "")
 	if samples := s.FlushSamples(); len(samples) != 0 {
 		t.Fatalf("non-finite metric should be dropped, got %+v", samples)
 	}
 
-	s.EmitMetric("driver", "ok", 42)
+	s.EmitMetric("driver", "ok", 42, "")
 	samples := s.FlushSamples()
 	if len(samples) != 1 || samples[0].Metric != "ok" || samples[0].Value != 42 {
 		t.Fatalf("valid metric not buffered as expected: %+v", samples)
+	}
+}
+
+// TestEmitMetricCarriesUnit verifies the optional unit threads into the live
+// snapshot so the UI can group + label metrics (heat-pump drill-in).
+func TestEmitMetricCarriesUnit(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("hp", "hp_outdoor_temp_c", 7.3, "°C")
+	s.EmitMetric("hp", "hp_compressor_hz", 42, "Hz")
+	s.EmitMetric("hp", "hp_no_unit", 1, "")
+
+	got := map[string]string{}
+	for _, m := range s.LatestMetricsByDriver("hp") {
+		got[m.Name] = m.Unit
+	}
+	if got["hp_outdoor_temp_c"] != "°C" {
+		t.Errorf("outdoor temp unit = %q, want °C", got["hp_outdoor_temp_c"])
+	}
+	if got["hp_compressor_hz"] != "Hz" {
+		t.Errorf("compressor unit = %q, want Hz", got["hp_compressor_hz"])
+	}
+	if got["hp_no_unit"] != "" {
+		t.Errorf("no-unit metric unit = %q, want empty", got["hp_no_unit"])
 	}
 }
 

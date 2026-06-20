@@ -276,15 +276,16 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 
 // emitMetric buffers a scalar diagnostic metric for the long-format TS DB.
 // Driver authors call this for anything beyond the standard pv/battery/meter
-// shape — temperatures, voltages, frequencies, MPPT currents, etc.
-func (h *HostEnv) emitMetric(name string, value float64) error {
+// shape — temperatures, voltages, frequencies, MPPT currents, etc. unit is an
+// optional display unit (e.g. "°C", "Hz") used by the UI to group + label.
+func (h *HostEnv) emitMetric(name string, value float64, unit string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
 	}
 	if h.Telemetry == nil {
 		return nil
 	}
-	h.Telemetry.EmitMetric(h.DriverName, name, value)
+	h.Telemetry.EmitMetric(h.DriverName, name, value, unit)
 	// A metric emission is fresh telemetry just like a structured emit, so
 	// it counts as a health success. Without this, a read-only driver that
 	// only uses emit_metric (e.g. the MyUplink heat-pump telemetry driver)

@@ -156,6 +156,94 @@ func TestMyUplinkAutoDetectsDevice(t *testing.T) {
 	}
 }
 
+// TestMyUplinkEmitsAllPointsWithUnits verifies the driver fetches the full
+// points list and emits every numeric point as hp_<sanitized name> with its
+// unit, while still emitting the four canonical headline metrics from their
+// fixed parameter IDs (and not double-emitting those four as generic).
+func TestMyUplinkEmitsAllPointsWithUnits(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth/token" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "AT", "expires_in": 3600, "refresh_token": "RT",
+			})
+			return
+		}
+		// /v2/devices/DEV1/points — full list (driver must NOT send ?parameters)
+		if q := r.URL.RawQuery; q != "" {
+			t.Errorf("expected unfiltered points fetch, got query %q", q)
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"parameterId": "10012", "parameterName": "Compressor power", "value": "1500", "parameterUnit": "W"}, // canonical
+			{"parameterId": "40004", "parameterName": "Outdoor temp (BT1)", "value": "226", "parameterUnit": "°C"}, // canonical
+			{"parameterId": "40008", "parameterName": "Supply line (BT2)", "value": "455", "parameterUnit": "°C"},  // generic temp, ×10
+			{"parameterId": "43136", "parameterName": "Compressor frequency", "value": "42", "parameterUnit": "Hz"}, // generic
+			{"parameterId": "43005", "parameterName": "Degree minutes", "value": "-600", "parameterUnit": "GM"},     // generic, negative
+		})
+	}))
+	defer srv.Close()
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("myuplink", tel).WithHTTP()
+	env.PersistSecret = func(k, v string) error { return nil }
+
+	d, err := NewLuaDriver(myuplinkDriverPath(t), env)
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+	cfg := map[string]any{
+		"client_id": "cid", "client_secret": "csec", "refresh_token": "RT",
+		"device_id": "DEV1", "base_url": srv.URL,
+	}
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	byName := map[string]telemetry.MetricSnapshot{}
+	for _, m := range tel.LatestMetricsByDriver("myuplink") {
+		byName[m.Name] = m
+	}
+	// Canonical headline metrics still present.
+	if m, ok := byName["hp_power_w"]; !ok || m.Value != 1500 {
+		t.Errorf("hp_power_w = %+v, want value 1500", m)
+	}
+	if m, ok := byName["hp_outdoor_temp_c"]; !ok || m.Value != 22.6 {
+		t.Errorf("hp_outdoor_temp_c = %+v, want 22.6", m)
+	}
+	// Generic points emitted with sanitized names + units.
+	supply, ok := byName["hp_supply_line_bt2"]
+	if !ok {
+		t.Fatalf("missing generic metric hp_supply_line_bt2; got %v", keysOf(byName))
+	}
+	if supply.Unit != "°C" || supply.Value != 45.5 {
+		t.Errorf("supply = %+v, want 45.5 °C (×10 decode for °C unit)", supply)
+	}
+	if hz, ok := byName["hp_compressor_frequency"]; !ok || hz.Unit != "Hz" || hz.Value != 42 {
+		t.Errorf("compressor frequency = %+v, want 42 Hz (no scaling)", hz)
+	}
+	if dm, ok := byName["hp_degree_minutes"]; !ok || dm.Value != -600 {
+		t.Errorf("degree minutes = %+v, want -600 (no scaling for non-°C)", dm)
+	}
+	// Canonical IDs must NOT be double-emitted under generic names.
+	if _, ok := byName["hp_compressor_power"]; ok {
+		t.Errorf("canonical PARAM_POWER (10012) was double-emitted as hp_compressor_power")
+	}
+	if _, ok := byName["hp_outdoor_temp_bt1"]; ok {
+		t.Errorf("canonical PARAM_OUTDOOR (40004) was double-emitted as a generic name")
+	}
+}
+
+func keysOf(m map[string]telemetry.MetricSnapshot) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // TestMyUplinkNoRefreshTokenIdles verifies the driver degrades gracefully
 // when it has not been connected yet (no refresh_token in config): init must
 // not error or crash, and a poll must not panic — it simply emits nothing.
