@@ -2859,6 +2859,101 @@
       });
     });
 
+    // ---- State of charge (manual correction) ----
+    // The SoC is inferred from delivered energy when there's no vehicle BMS
+    // reading, so it can drift. Let the operator correct it via the existing
+    // POST /api/loadpoints/{id}/soc (re-anchors + replans). Only meaningful
+    // during an active session, so gate the editor on plugged_in.
+    var socBox = document.createElement("div");
+    socBox.style.marginTop = "0.75rem";
+    socBox.style.paddingTop = "0.6rem";
+    socBox.style.borderTop = "1px solid var(--line)";
+
+    var socEyebrow = document.createElement("div");
+    socEyebrow.textContent = "State of charge";
+    socEyebrow.style.fontFamily = "var(--mono)";
+    socEyebrow.style.fontSize = "0.7rem";
+    socEyebrow.style.letterSpacing = "0.18em";
+    socEyebrow.style.textTransform = "uppercase";
+    socEyebrow.style.color = "var(--text-dim)";
+    socEyebrow.style.marginBottom = "0.45rem";
+    socBox.appendChild(socEyebrow);
+
+    var curSoc = (lp && lp.current_soc_pct != null) ? lp.current_soc_pct : null;
+    var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
+
+    if (lp && lp.plugged_in) {
+      var socRow = document.createElement("div");
+      socRow.style.display = "flex";
+      socRow.style.alignItems = "center";
+      socRow.style.gap = "0.5rem";
+
+      var socInput = document.createElement("input");
+      socInput.type = "number";
+      socInput.min = "0"; socInput.max = "100"; socInput.step = "0.1";
+      socInput.value = (curSoc != null) ? curSoc.toFixed(1) : "";
+      socInput.style.width = "5.5em";
+      socInput.style.fontFamily = "var(--mono)";
+
+      var pctLabel = document.createElement("span");
+      pctLabel.textContent = "%";
+      pctLabel.style.color = "var(--text-dim)";
+
+      var socSetBtn = document.createElement("button");
+      socSetBtn.type = "button";
+      socSetBtn.textContent = "Set SoC";
+      socSetBtn.style.padding = "0.35rem 0.7rem";
+      socSetBtn.style.border = "1px solid var(--line)";
+      socSetBtn.style.borderRadius = "4px";
+      socSetBtn.style.cursor = "pointer";
+      socSetBtn.style.background = "transparent";
+      socSetBtn.style.color = "var(--fg)";
+
+      socRow.appendChild(socInput);
+      socRow.appendChild(pctLabel);
+      socRow.appendChild(socSetBtn);
+      socBox.appendChild(socRow);
+
+      var socStatus = document.createElement("small");
+      socStatus.style.display = "block";
+      socStatus.style.color = "var(--text-dim)";
+      socStatus.style.marginTop = "0.35rem";
+      socStatus.style.minHeight = "1em";
+      socStatus.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
+        (socSource ? " (" + socSource + ")" : "") + ". Correct it if the car's real SoC differs.";
+      socBox.appendChild(socStatus);
+
+      socSetBtn.addEventListener("click", function () {
+        var v = parseFloat(socInput.value);
+        if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
+        socSetBtn.disabled = true;
+        socStatus.textContent = "Saving…";
+        ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ soc_pct: v }),
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+          .then(function (res) {
+            socSetBtn.disabled = false;
+            if (res.ok && res.body && res.body.ok) {
+              socStatus.textContent = "Saved — SoC set to " + v.toFixed(1) + "%. Replanning.";
+              manualNeedsRebuild = true;
+            } else {
+              socStatus.textContent = (res.body && res.body.error) || "Set failed.";
+            }
+          }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
+      });
+    } else {
+      var socMuted = document.createElement("small");
+      socMuted.style.display = "block";
+      socMuted.style.color = "var(--text-dim)";
+      socMuted.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
+        (socSource ? " (" + socSource + ")" : "") + " · plug in to set manually.";
+      socBox.appendChild(socMuted);
+    }
+
+    box.appendChild(socBox);
+
     return box;
   }
 
