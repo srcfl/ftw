@@ -1765,7 +1765,7 @@
   }
 
   function v2xCommand(driver, powerW) {
-    return fetch("/api/v2x/command", {
+    return ownerFetch("/api/v2x/command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

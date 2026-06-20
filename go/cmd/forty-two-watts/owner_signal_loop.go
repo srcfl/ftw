@@ -10,6 +10,7 @@ import (
 	neturl "net/url"
 	"time"
 
+	"github.com/frahlg/forty-two-watts/go/internal/p2p"
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 )
 
@@ -42,6 +43,10 @@ type p2pAnswerer interface {
 	SignFingerprint(answerSDP string) (sig string, tsMs int64)
 }
 
+type p2pICESetter interface {
+	SetICEServers([]p2p.ICEServer)
+}
+
 // pollSecretSource yields the current relay-minted poll token. *tunnel.Host
 // satisfies it via PollSecret(), so the signaling loop shares the same token the
 // registration loop refreshes (a relay restart re-mints it).
@@ -64,6 +69,31 @@ type signalAnswerWire struct {
 // retried with a short backoff so a relay blip never kills the loop.
 func runOwnerSignalLoop(ctx context.Context, relayURL, hostID, tunnelMarker string, p2p p2pAnswerer, polls pollSecretSource) {
 	client := &http.Client{Timeout: 35 * time.Second}
+
+	// The relay's ICE/TURN config (a STUN URL plus a short-lived coturn
+	// credential) changes at most every few hours, so fetch it ONCE in the
+	// background and refresh on a timer rather than re-fetching on every offer —
+	// the per-offer fetch kept an extra relay round-trip on the critical path of
+	// every connect. The Manager is already seeded with STUN at construction, so
+	// an offer landing in the brief window before the first fetch still works; it
+	// just lacks TURN until the background fetch sets it. The relay credential TTL
+	// is 12h (turnCredentialTTL), so an hourly refresh keeps it comfortably fresh.
+	if setter, ok := p2p.(p2pICESetter); ok {
+		go func() {
+			refreshSignalICE(ctx, client, relayURL, hostID, setter)
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					refreshSignalICE(ctx, client, relayURL, hostID, setter)
+				}
+			}
+		}()
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -162,6 +192,46 @@ func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostI
 			slog.Warn("owner-access: post signal answer failed", "err", err, "host_id", hostID)
 		}
 	}
+}
+
+type signalICEWire struct {
+	ICEServers []p2p.ICEServer `json:"ice_servers"`
+}
+
+// refreshSignalICE fetches the relay ICE/TURN config once and pushes it onto the
+// Manager. Best-effort: on error the Manager keeps its existing (seeded or
+// previously-fetched) set, so a relay blip never leaves us without STUN.
+func refreshSignalICE(ctx context.Context, client *http.Client, relayURL, hostID string, setter p2pICESetter) {
+	ice, err := fetchSignalICE(ctx, client, relayURL)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("owner-access: fetch signal ICE config failed", "err", err, "host_id", hostID)
+		}
+		return
+	}
+	if len(ice) > 0 {
+		setter.SetICEServers(ice)
+	}
+}
+
+func fetchSignalICE(ctx context.Context, client *http.Client, relayURL string) ([]p2p.ICEServer, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, relayURL+"/signal/ice", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, &signalHTTPError{status: resp.StatusCode}
+	}
+	var out signalICEWire
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxSignalBodyBytes)).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.ICEServers, nil
 }
 
 func postSignalAnswer(ctx context.Context, client *http.Client, relayURL, hostID, nonce, pollSecret string, body []byte) error {
