@@ -15,9 +15,13 @@
 
   var DEFAULT_ICE = [{ urls: ["stun:stun.l.google.com:19302"] }]; // mirrors p2p.DefaultSTUNServers
   var LABEL = "ftw";                                     // must match the Pi Bridge
-  var CONNECT_TIMEOUT_MS = 15000;  // give Chrome/WebRTC enough time before retrying
+  var CONNECT_TIMEOUT_MS = 15000;  // hard ceiling on a whole attempt (TURN allocs can be slow)
   var REQUEST_TIMEOUT_MS = 10000;  // per-request budget over the channel
-  var RETRY_COOLDOWN_MS = 30000;   // after a failed connect, hold off this long
+  var ICE_FETCH_TIMEOUT_MS = 3000; // cap the /signal/ice fetch so it can never hang connect()
+  var RETRY_COOLDOWN_MS = 4000;    // after a HARD failed connect, hold off this long. Short:
+                                   // the relay fallback already serves data, so a quick retry is
+                                   // cheap and a logged-in owner shouldn't sit on a 30s lockout.
+                                   // Transient cold-load races use the SOFT path (no cooldown).
 
   var pc = null, dc = null;
   var connecting = null;             // in-flight connect() promise
@@ -121,8 +125,18 @@
   // iceServers fetches relay-provided STUN/TURN config. TURN credentials are
   // short-lived connectivity hints only: WebRTC still runs DTLS end-to-end and
   // verifyAnswerSignature keeps the relay/TURN service out of the trust chain.
+  //
+  // The fetch is hard-capped by ICE_FETCH_TIMEOUT_MS via AbortController: a
+  // /signal/ice that connects but never responds must NEVER hang here, because
+  // connect() runs the rest of the handshake inside this promise's .then — a
+  // hang would leave the cached `connecting` promise pending forever and poison
+  // every future attempt. On timeout / any error we fall back to default STUN.
   function iceServers() {
-    return fetch("/signal/ice", { method: "GET", cache: "no-store", credentials: "same-origin" })
+    var ctl = (typeof AbortController === "function") ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { try { ctl.abort(); } catch (e) {} }, ICE_FETCH_TIMEOUT_MS) : null;
+    var opts = { method: "GET", cache: "no-store", credentials: "same-origin" };
+    if (ctl) opts.signal = ctl.signal;
+    return fetch("/signal/ice", opts)
       .then(function (r) {
         if (!r.ok) return defaultICE();
         return r.json();
@@ -139,7 +153,8 @@
           return out;
         }).filter(Boolean);
       })
-      .catch(function () { return defaultICE(); });
+      .catch(function () { return defaultICE(); })
+      .then(function (res) { if (timer) clearTimeout(timer); return res; });
   }
 
   // ---- optional device-key proof for the relay (C2) --------------------------
@@ -318,7 +333,15 @@
       // fresh browser must first claim a Pi-signed descriptor from the bootstrap
       // flow or decrypt its directory. Never guess a universal site_id here.
       if (!isLanOrigin()) {
-        return Promise.reject(new Error("no pinned home identity yet"));
+        // TRANSIENT at warm-up: the directory is decrypted by instance-sync.js (a
+        // deferred module) while p2p.js (a classic script) fires connect() at load,
+        // so on a cold page the directory often isn't ready on the first attempt.
+        // Tag it SOFT so connect() retries promptly instead of arming the cooldown
+        // and parking the owner on the relay for no reason (the single biggest
+        // contributor to the old multi-second "Reaching your home" stall).
+        var ePend = new Error("no pinned home identity yet");
+        ePend.code = "identity-pending";
+        return Promise.reject(ePend);
       }
       return fetch(relayURL("/api/identity"), { credentials: "same-origin" })
         .then(function (r) { if (!r.ok) throw new Error("/api/identity " + r.status); return r.json(); })
@@ -430,21 +453,57 @@
     if (pc) { try { pc.close(); } catch (e) {} pc = null; }
   }
 
-  // waitIceComplete resolves once ICE gathering finishes (non-trickle), with a
-  // hard cap because some browsers never emit "complete" with only STUN.
-  function waitIceComplete(peer) {
+  // waitIceComplete resolves once the offer SDP carries the candidate set this
+  // config needs (non-trickle). Rather than always block for full gathering —
+  // which with only STUN frequently never emits "complete" and so eats the full
+  // 3s cap on EVERY connect — it returns early as soon as a host AND a
+  // server-reflexive candidate are gathered, plus a relay candidate when TURN is
+  // configured (wantRelay). The relay candidate matters: without it a both-ends
+  // hard-NAT (symmetric) owner — the case TURN exists for — could never
+  // traverse. A TURN Allocate is ~1 RTT, so this stays well under the old 3s
+  // wait. The browser keeps localDescription.sdp updated with each candidate, so
+  // the offer POSTed right after carries them. The 3s cap backstops a needed
+  // candidate that never comes (STUN/TURN unreachable).
+  function waitIceComplete(peer, wantRelay) {
     if (peer.iceGatheringState === "complete") return Promise.resolve();
     return new Promise(function (resolve) {
-      var done = false;
-      function finish() { if (!done) { done = true; resolve(); } }
-      peer.addEventListener("icegatheringstatechange", function check() {
-        if (peer.iceGatheringState === "complete") {
-          peer.removeEventListener("icegatheringstatechange", check);
-          finish();
-        }
-      });
-      setTimeout(finish, 3000);
+      var done = false, haveHost = false, haveSrflx = false, haveRelay = false, capTimer = null;
+      function ready() { return haveHost && haveSrflx && (!wantRelay || haveRelay); }
+      function finish() {
+        if (done) return;
+        done = true;
+        if (capTimer) clearTimeout(capTimer);
+        try { peer.removeEventListener("icegatheringstatechange", onGather); } catch (e) {}
+        try { peer.removeEventListener("icecandidate", onCand); } catch (e) {}
+        resolve();
+      }
+      function onGather() { if (peer.iceGatheringState === "complete") finish(); }
+      function onCand(ev) {
+        var c = ev && ev.candidate;
+        if (!c) { finish(); return; }            // null candidate = gathering done
+        var s = c.candidate || "";
+        if (s.indexOf(" typ host") !== -1) haveHost = true;
+        else if (s.indexOf(" typ srflx") !== -1) haveSrflx = true;
+        else if (s.indexOf(" typ relay") !== -1) haveRelay = true;
+        if (ready()) finish();
+      }
+      peer.addEventListener("icegatheringstatechange", onGather);
+      peer.addEventListener("icecandidate", onCand);
+      capTimer = setTimeout(finish, 3000);
     });
+  }
+
+  // iceWantsRelay reports whether the resolved ICE config includes a TURN server,
+  // so waitIceComplete knows to hold for a relay candidate (symmetric-NAT path).
+  function iceWantsRelay(ice) {
+    if (!ice || !ice.length) return false;
+    for (var i = 0; i < ice.length; i++) {
+      var urls = (ice[i] && ice[i].urls) || [];
+      for (var j = 0; j < urls.length; j++) {
+        if (/^turns?:/i.test(String(urls[j]))) return true;
+      }
+    }
+    return false;
   }
 
   // pollAnswer long-polls /signal/<site>/answer until the Pi parks its answer
@@ -478,10 +537,11 @@
     connecting = new Promise(function (resolve) {
       var settled = false;
       var to;
-      // finish(ok[, soft]): soft=true means "transient, retry soon" — used when the
-      // device-key store simply hasn't loaded yet at warm-up (a module-script load
-      // race), so we DON'T arm the long cooldown that would otherwise leave the page
-      // on the relay for 30 s for no reason.
+      // finish(ok[, soft]): soft=true means "transient, retry soon" — used when a
+      // warm-up race (the device-key store OR the decrypted directory not loaded
+      // yet) fails the attempt, so we DON'T arm the cooldown that would otherwise
+      // park the owner on the relay for no reason. A hard failure arms
+      // RETRY_COOLDOWN_MS.
       function finish(ok, soft) {
         if (settled) return;
         settled = true;
@@ -495,7 +555,15 @@
         resolve(ok);
       }
 
+      // Arm the attempt ceiling BEFORE any async work (the /signal/ice fetch
+      // included) so connect() can never hang: even if a step never settles,
+      // finish(false) fires and the cached `connecting` promise resolves instead
+      // of poisoning every future attempt for the page's lifetime.
+      to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
+
       iceServers().then(function (ice) {
+        if (settled) return;   // the ceiling already fired while fetching ICE
+        var wantRelay = iceWantsRelay(ice);
         try {
           pc = new RTCPeerConnection({ iceServers: ice });
         } catch (e) { return finish(false); }
@@ -516,8 +584,6 @@
           var st = pc && pc.connectionState;
           if (st === "failed" || st === "closed" || st === "disconnected") finish(false);
         };
-
-        to = setTimeout(function () { finish(false); }, CONNECT_TIMEOUT_MS);
 
         // Signaling now rides the BLIND rendezvous, not the owner tunnel: POST the
         // offer to /signal/<site>/offer, then long-poll /signal/<site>/answer. The
@@ -540,7 +606,7 @@
           });
           return pc.createOffer()
             .then(function (offer) { return pc.setLocalDescription(offer); })
-            .then(function () { return waitIceComplete(pc); })
+            .then(function () { return waitIceComplete(pc, wantRelay); })
             .then(function () { return proofP; })
             .then(function (proof) {
               if (!proof) {
@@ -584,9 +650,13 @@
         })
           .catch(function (e) {
             if (e && e.message) { try { console.warn("p2p: " + e.message); } catch (_) {} }
-            finish(false);
+            // SOFT retry for transient warm-up races (decrypted directory or the
+            // device-key store not loaded yet): don't arm the cooldown, just let
+            // the next caller retry. Everything else is a hard failure.
+            var soft = e && (e.code === "identity-pending" || e.code === "store-pending");
+            finish(false, soft);
           });
-      });
+      }).catch(function () { finish(false); });
     });
     return connecting;
   }

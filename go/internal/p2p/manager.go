@@ -286,13 +286,53 @@ func (m *Manager) Answer(ctx context.Context, offerSDP string, replayHeaders htt
 		m.remove(id)
 		return "", fmt.Errorf("p2p: create answer: %w", err)
 	}
+
+	// Early-return gather: don't block the answer on FULL gathering or the
+	// (often-never-firing-with-STUN) complete event. Return as soon as the answer
+	// carries the candidate set this config actually needs — host + srflx, plus a
+	// relay candidate when TURN is configured (see wantRelay). pion splices
+	// whatever candidates are gathered so far into LocalDescription()
+	// (populateLocalCandidates), so the SDP we return below already carries them.
+	// We still fall back to full GatheringCompletePromise / handshakeTimeout when
+	// a needed candidate never comes (STUN/TURN unreachable), so an answer is
+	// never lost — just no faster than before in that degraded case.
+	// wantRelay forces the early-return to also wait for a relay candidate when a
+	// TURN server is configured, so a symmetric-NAT owner stays reachable. A TURN
+	// Allocate is ~1 RTT, so this costs little over host+srflx and is still far
+	// faster than waiting for full gather / the often-never-firing complete event.
+	wantRelay := iceHasTURN(ice)
+	enough := make(chan struct{})
+	var gmu sync.Mutex
+	var haveHost, haveSrflx, haveRelay, enoughClosed bool
+	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
+		if c == nil {
+			return
+		}
+		gmu.Lock()
+		switch c.Typ {
+		case webrtc.ICECandidateTypeHost:
+			haveHost = true
+		case webrtc.ICECandidateTypeSrflx:
+			haveSrflx = true
+		case webrtc.ICECandidateTypeRelay:
+			haveRelay = true
+		}
+		if haveHost && haveSrflx && (!wantRelay || haveRelay) && !enoughClosed {
+			enoughClosed = true
+			close(enough)
+		}
+		gmu.Unlock()
+	})
+
 	gather := webrtc.GatheringCompletePromise(pc)
 	if err := pc.SetLocalDescription(answer); err != nil {
 		m.remove(id)
 		return "", fmt.Errorf("p2p: set local description: %w", err)
 	}
-	// Non-trickle: wait for gathering so the answer SDP carries ICE candidates.
+	// Non-trickle: wait until the answer SDP carries a usable candidate set —
+	// either the host+srflx early-return, full gather, or the timeout backstop.
 	select {
+	case <-enough:
 	case <-gather:
 	case <-ctx.Done():
 		m.remove(id)

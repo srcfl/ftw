@@ -69,6 +69,31 @@ type signalAnswerWire struct {
 // retried with a short backoff so a relay blip never kills the loop.
 func runOwnerSignalLoop(ctx context.Context, relayURL, hostID, tunnelMarker string, p2p p2pAnswerer, polls pollSecretSource) {
 	client := &http.Client{Timeout: 35 * time.Second}
+
+	// The relay's ICE/TURN config (a STUN URL plus a short-lived coturn
+	// credential) changes at most every few hours, so fetch it ONCE in the
+	// background and refresh on a timer rather than re-fetching on every offer —
+	// the per-offer fetch kept an extra relay round-trip on the critical path of
+	// every connect. The Manager is already seeded with STUN at construction, so
+	// an offer landing in the brief window before the first fetch still works; it
+	// just lacks TURN until the background fetch sets it. The relay credential TTL
+	// is 12h (turnCredentialTTL), so an hourly refresh keeps it comfortably fresh.
+	if setter, ok := p2p.(p2pICESetter); ok {
+		go func() {
+			refreshSignalICE(ctx, client, relayURL, hostID, setter)
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					refreshSignalICE(ctx, client, relayURL, hostID, setter)
+				}
+			}
+		}()
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -143,13 +168,6 @@ const signalNonceHeaderClient = "X-FTW-Signal-Nonce"
 // handleSignalOffer answers one offer and parks the signed answer under the same
 // nonce the offer was drained with.
 func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostID, tunnelMarker, offerSDP, nonce string, p2p p2pAnswerer, polls pollSecretSource) {
-	if setter, ok := p2p.(p2pICESetter); ok {
-		if ice, err := fetchSignalICE(ctx, client, relayURL); err == nil && len(ice) > 0 {
-			setter.SetICEServers(ice)
-		} else if err != nil && ctx.Err() == nil {
-			slog.Warn("owner-access: fetch signal ICE config failed", "err", err, "host_id", hostID)
-		}
-	}
 	// FAIL-CLOSED replay headers: stamp the per-process tunnel marker so every
 	// DataChannel frame is REMOTE (the gate can never grant it LAN-bypass), and
 	// inject NO cookie — the channel is unauthenticated until the browser logs in
@@ -178,6 +196,22 @@ func handleSignalOffer(ctx context.Context, client *http.Client, relayURL, hostI
 
 type signalICEWire struct {
 	ICEServers []p2p.ICEServer `json:"ice_servers"`
+}
+
+// refreshSignalICE fetches the relay ICE/TURN config once and pushes it onto the
+// Manager. Best-effort: on error the Manager keeps its existing (seeded or
+// previously-fetched) set, so a relay blip never leaves us without STUN.
+func refreshSignalICE(ctx context.Context, client *http.Client, relayURL, hostID string, setter p2pICESetter) {
+	ice, err := fetchSignalICE(ctx, client, relayURL)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn("owner-access: fetch signal ICE config failed", "err", err, "host_id", hostID)
+		}
+		return
+	}
+	if len(ice) > 0 {
+		setter.SetICEServers(ice)
+	}
 }
 
 func fetchSignalICE(ctx context.Context, client *http.Client, relayURL string) ([]p2p.ICEServer, error) {

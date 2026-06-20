@@ -98,3 +98,35 @@ func TestSignalICE_HomeHostRoute(t *testing.T) {
 		t.Fatalf("home-host /signal/ice status = %d, want 200", rr.Code)
 	}
 }
+
+// TestSignalICE_PerIPThrottle guards the per-source-IP rate limit on the
+// otherwise-unauthenticated /signal/ice: it mints a fresh coturn credential on
+// every call, so a single IP must not be able to pull them in an unbounded loop.
+func TestSignalICE_PerIPThrottle(t *testing.T) {
+	r := &Relay{
+		ICEStunURLs: []string{"stun:one.example:19302"},
+		TURNURLs:    []string{"turn:relay.example:3478?transport=udp"},
+		TURNSecret:  "shared-with-coturn",
+	}
+	h := r.Handler() // one handler so all requests share r.OfferLimit
+
+	var first, throttled int
+	for i := 0; i < int(offerBucketCapacity)+8; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/signal/ice", nil)
+		req.RemoteAddr = "203.0.113.9:5555" // same source IP for every request
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if i == 0 {
+			first = rr.Code
+		}
+		if rr.Code == http.StatusTooManyRequests {
+			throttled++
+		}
+	}
+	if first != http.StatusOK {
+		t.Fatalf("first request = %d, want 200", first)
+	}
+	if throttled == 0 {
+		t.Fatalf("expected at least one 429 once the per-IP burst was exhausted, got none")
+	}
+}

@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pion/ice/v4"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
@@ -59,6 +60,23 @@ func ICEServersFromURLs(urls []string) []ICEServer {
 		out = append(out, ICEServer{URLs: []string{u}})
 	}
 	return out
+}
+
+// iceHasTURN reports whether any configured ICE server is a TURN server (its URL
+// scheme is turn:/turns:). The non-trickle answer must carry a relay candidate
+// when TURN is configured — otherwise a both-ends-hard-NAT (symmetric) owner,
+// the case TURN exists for, could never traverse — so the early-return gather
+// waits for the relay candidate only in that case.
+func iceHasTURN(servers []ICEServer) bool {
+	for _, s := range servers {
+		for _, u := range s.URLs {
+			lu := strings.ToLower(strings.TrimSpace(u))
+			if strings.HasPrefix(lu, "turn:") || strings.HasPrefix(lu, "turns:") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cloneICEServers(in []ICEServer) []ICEServer {
@@ -377,6 +395,14 @@ func NewPeer(iceServers []string) (*webrtc.PeerConnection, error) {
 // TURN credentials are still only connectivity hints: the DataChannel remains
 // DTLS encrypted end-to-end and browser-side signed-fingerprint verification
 // keeps the relay/TURN service from becoming a trust anchor.
+//
+// When real ICE servers are configured (the production path) the peer is built
+// through iceAPI(), whose agents RESOLVE the browser's mDNS (.local) host
+// candidates — without that the same-LAN host<->host pair never forms and a
+// browser sitting on the same wifi as the Pi needlessly round-trips through
+// STUN/WAN. The host-candidate-only path (nil ICE, e.g. the in-process loopback
+// test) keeps the plain constructor: it exchanges raw-IP candidates and needs
+// no mDNS resolver.
 func NewPeerWithICE(iceServers []ICEServer) (*webrtc.PeerConnection, error) {
 	cfg := webrtc.Configuration{}
 	if len(iceServers) > 0 {
@@ -392,5 +418,30 @@ func NewPeerWithICE(iceServers []ICEServer) (*webrtc.PeerConnection, error) {
 			})
 		}
 	}
+	if len(cfg.ICEServers) > 0 {
+		return iceAPI().NewPeerConnection(cfg)
+	}
 	return webrtc.NewPeerConnection(cfg)
+}
+
+// mdnsAPI is a lazily-built pion API whose ICE agents resolve remote mDNS
+// (.local) host candidates. Chrome hides its host candidates behind per-session
+// <uuid>.local names; with no resolver the Pi silently drops them, so two
+// devices on the SAME LAN never form the direct host<->host pair and fall back
+// to a STUN/WAN round-trip. QueryOnly resolves the browser's .local names while
+// still gathering the Pi's own candidates as raw IPs — it publishes NO mDNS
+// hostname, so it can't clash with a Pi's avahi-daemon on :5353. The API is
+// reused across PeerConnections (safe for concurrent use).
+var (
+	mdnsAPIOnce sync.Once
+	mdnsAPI     *webrtc.API
+)
+
+func iceAPI() *webrtc.API {
+	mdnsAPIOnce.Do(func() {
+		se := webrtc.SettingEngine{}
+		se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
+		mdnsAPI = webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	})
+	return mdnsAPI
 }

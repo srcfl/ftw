@@ -14,7 +14,8 @@ import vm from "node:vm";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const P2P_SRC = readFileSync(join(__dirname, "p2p.js"), "utf8");
 
-async function loadP2PWithICE(iceResponse) {
+async function loadP2PWithICE(iceResponse, opts) {
+  opts = opts || {};
   const configs = [];
   const fetches = [];
   const store = new Map();
@@ -51,20 +52,22 @@ async function loadP2PWithICE(iceResponse) {
     window: win,
     RTCPeerConnection: FakeRTCPeerConnection,
     location: { pathname: "/", hostname: "home.fortytwowatts.com", origin: "https://home.fortytwowatts.com" },
-    fetch: async (url) => {
+    fetch: opts.fetchImpl || (async (url) => {
       fetches.push(String(url));
       return iceResponse;
-    },
+    }),
     crypto: { getRandomValues: (b) => (b.fill(7), b) },
     localStorage: win.localStorage,
     setTimeout,
     clearTimeout,
+    AbortController,
     console: { warn() {} },
   };
 
   vm.runInNewContext(P2P_SRC, sandbox, { filename: "p2p.js" });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
+  if (opts.waitMs) await new Promise((resolve) => setTimeout(resolve, opts.waitMs));
   return { configs, fetches };
 }
 
@@ -106,6 +109,28 @@ describe("p2p ICE config", () => {
     });
 
     assert.equal(configs.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(configs[0].iceServers)), [{ urls: ["stun:stun.l.google.com:19302"] }]);
+  });
+
+  // Regression: a /signal/ice that connects but NEVER responds must not hang
+  // connect() forever (which would poison every future attempt). The fetch is
+  // AbortController-capped at ICE_FETCH_TIMEOUT_MS; on abort it falls back to
+  // default STUN and the peer is still created.
+  it("does not hang when /signal/ice never responds — aborts and falls back to default STUN", async () => {
+    const fetches = [];
+    const { configs } = await loadP2PWithICE(null, {
+      waitMs: 3300, // > ICE_FETCH_TIMEOUT_MS (3000) so the abort timer fires
+      fetchImpl: (url, init) =>
+        new Promise((_resolve, reject) => {
+          fetches.push(String(url));
+          // Reject only when the caller's AbortController fires; otherwise hang.
+          if (init && init.signal) {
+            init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+          }
+        }),
+    });
+
+    assert.equal(configs.length, 1, "peer should still be created after the ICE fetch aborts");
     assert.deepEqual(JSON.parse(JSON.stringify(configs[0].iceServers)), [{ urls: ["stun:stun.l.google.com:19302"] }]);
   });
 });

@@ -41,7 +41,17 @@ func parseURLList(v string) []string {
 // signalICE publishes the ICE config browsers and Pis should use for the
 // signed WebRTC channel. TURN credentials follow coturn's REST API scheme:
 // username is an expiry timestamp and credential is HMAC-SHA1(secret, username).
-func (r *Relay) signalICE(w http.ResponseWriter, _ *http.Request) {
+//
+// Unauthenticated by design (a public reachability hint), but per-source-IP
+// throttled with the SAME limiter as the offer endpoint: the TURN entry mints a
+// fresh short-lived coturn credential on every call, so without a bound a single
+// IP could pull credentials in a tight loop and lean on the relay. offerClientIP
+// uses the un-spoofable RemoteAddr unless -trust-cf-ip validates a CF edge peer.
+func (r *Relay) signalICE(w http.ResponseWriter, req *http.Request) {
+	if r.OfferLimit != nil && !r.OfferLimit.Allow(r.offerClientIP(req)) {
+		http.Error(w, "too many requests from your address", http.StatusTooManyRequests)
+		return
+	}
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
