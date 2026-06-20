@@ -2,6 +2,8 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -68,7 +70,25 @@ func validMyUplinkCallback(raw string) bool {
 type oauthPending struct {
 	driver      string
 	redirectURI string
-	expires     time.Time
+	// codeVerifier is the PKCE (RFC 7636, S256) secret. We always send a
+	// code_challenge on /authorize and the verifier on token exchange:
+	// harmless if MyUplink ignores PKCE, required if it enforces it (Azure
+	// B2C can). Bound to the state so it never leaves the Pi.
+	codeVerifier string
+	expires      time.Time
+}
+
+// newPKCEPair returns a high-entropy code_verifier and its S256
+// code_challenge per RFC 7636 (base64url, no padding).
+func newPKCEPair() (verifier, challenge string, err error) {
+	b := make([]byte, 32)
+	if _, err = rand.Read(b); err != nil {
+		return "", "", err
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(b) // 43 chars, allowed charset
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
 }
 
 var (
@@ -155,12 +175,19 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 	}
 	stateTok := hex.EncodeToString(stateBytes)
 
+	verifier, challenge, err := newPKCEPair()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "could not generate PKCE challenge"})
+		return
+	}
+
 	now := time.Now()
 	oauthMu.Lock()
 	pruneOAuthStateLocked(now)
 	oauthPending_[stateTok] = oauthPending{
-		driver:      driver,
-		redirectURI: redirectURI,
+		driver:       driver,
+		redirectURI:  redirectURI,
+		codeVerifier: verifier,
 		// 15 min: enough headroom for the manual-paste path (sign in, copy
 		// the redirected URL, paste it back) when the auto-callback can't
 		// reach the Pi (relay origin / http LAN rejected by the portal).
@@ -174,6 +201,8 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 	q.Set("scope", myUplinkScope)
 	q.Set("redirect_uri", redirectURI)
 	q.Set("state", stateTok)
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
 	authorizeURL := myUplinkOAuthBase + "/oauth/authorize?" + q.Encode()
 
 	writeJSON(w, 200, map[string]string{
@@ -268,7 +297,7 @@ func (s *Server) completeMyUplinkConsent(r *http.Request, stateTok, code string)
 		return "", fmt.Errorf("missing Client ID / Secret for driver %q", pending.driver)
 	}
 
-	refreshToken, err := s.exchangeMyUplinkCode(code, clientID, clientSecret, pending.redirectURI)
+	refreshToken, err := s.exchangeMyUplinkCode(code, clientID, clientSecret, pending.redirectURI, pending.codeVerifier)
 	if err != nil {
 		return "", fmt.Errorf("token exchange failed: %w", err)
 	}
@@ -279,13 +308,16 @@ func (s *Server) completeMyUplinkConsent(r *http.Request, stateTok, code string)
 }
 
 // exchangeMyUplinkCode swaps an authorization code for a refresh_token.
-func (s *Server) exchangeMyUplinkCode(code, clientID, clientSecret, redirectURI string) (string, error) {
+func (s *Server) exchangeMyUplinkCode(code, clientID, clientSecret, redirectURI, codeVerifier string) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
 	form.Set("redirect_uri", redirectURI)
+	if codeVerifier != "" {
+		form.Set("code_verifier", codeVerifier) // PKCE (RFC 7636)
+	}
 
 	req, err := http.NewRequest("POST", myUplinkOAuthBase+"/oauth/token", strings.NewReader(form.Encode()))
 	if err != nil {

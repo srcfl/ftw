@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -42,6 +44,25 @@ func buildMyUplinkOAuthServer(t *testing.T) (*Server, *config.Config, *state.Sto
 	return srv, cfg, st
 }
 
+func TestNewPKCEPair(t *testing.T) {
+	v, c, err := newPKCEPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(v) < 43 || len(v) > 128 {
+		t.Errorf("verifier length %d outside RFC 7636 range 43..128", len(v))
+	}
+	// challenge MUST be base64url(SHA256(verifier)), no padding.
+	sum := sha256.Sum256([]byte(v))
+	want := base64.RawURLEncoding.EncodeToString(sum[:])
+	if c != want {
+		t.Errorf("challenge = %q, want S256(verifier) = %q", c, want)
+	}
+	if v2, _, _ := newPKCEPair(); v2 == v {
+		t.Errorf("verifier not random: two calls returned %q", v)
+	}
+}
+
 func TestMyUplinkOAuthStartBuildsAuthorizeURL(t *testing.T) {
 	srv, _, _ := buildMyUplinkOAuthServer(t)
 
@@ -75,6 +96,12 @@ func TestMyUplinkOAuthStartBuildsAuthorizeURL(t *testing.T) {
 	}
 	if q.Get("state") == "" {
 		t.Errorf("missing state")
+	}
+	if q.Get("code_challenge") == "" {
+		t.Errorf("missing PKCE code_challenge")
+	}
+	if q.Get("code_challenge_method") != "S256" {
+		t.Errorf("code_challenge_method = %q, want S256", q.Get("code_challenge_method"))
 	}
 	wantRedirect := "http://pi.local/api/oauth/myuplink/callback"
 	if resp.RedirectURI != wantRedirect {
@@ -136,6 +163,9 @@ func TestMyUplinkOAuthCallbackExchangesAndPersists(t *testing.T) {
 		gotGrant = vals.Get("grant_type")
 		gotRedirect = vals.Get("redirect_uri")
 		gotSecret = vals.Get("client_secret")
+		if vals.Get("code_verifier") == "" {
+			t.Errorf("missing PKCE code_verifier in token exchange")
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token":  "AT",
 			"refresh_token": "RT-from-consent",
