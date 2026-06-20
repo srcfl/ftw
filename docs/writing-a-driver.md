@@ -210,14 +210,18 @@ For anything that doesn't fit the pv/battery/meter shape — temperatures,
 DC voltages, MPPT currents, grid frequency — use:
 
 ```lua
-host.emit_metric("inverter_temp_c", 42.3)
-host.emit_metric("battery_dc_v",    48.7)
-host.emit_metric("grid_hz",         50.01)
+host.emit_metric("inverter_temp_c", 42.3, "°C")
+host.emit_metric("battery_dc_v",    48.7, "V")
+host.emit_metric("grid_hz",         50.01)         -- unit optional
 ```
 
-Naming convention: snake_case with a unit suffix. These land in the
-long-format TSDB where the UI charts them on demand. There's no
-allow-list — pick a stable name and keep using it.
+Naming convention: snake_case with a unit suffix. The optional 3rd
+argument is a display unit (`"°C"`, `"Hz"`, `"kW"`, …) carried into the
+live snapshot so the UI can group + label the metric (e.g. the heat-pump
+detail drill-in groups by unit class). These land in the long-format
+TSDB where the UI charts them on demand. There's no allow-list — pick a
+stable name and keep using it. Emitting a metric also counts as a driver
+health success (a metric-only driver stays online).
 
 ### 3.3 MQTT (granted only if the driver has `mqtt:` in its config)
 

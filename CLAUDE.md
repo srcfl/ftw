@@ -176,7 +176,8 @@ global exposes:
 - `host.log(level, msg)`, `host.millis()`, `host.set_poll_interval(ms)`
 - `host.set_make(s)`, `host.set_sn(s)` — anchors device identity
 - `host.emit("battery"|"pv"|"meter", {…})` — structured telemetry
-- `host.emit_metric(name, value)` — arbitrary scalar diagnostics into TS DB
+- `host.emit_metric(name, value [, unit])` — arbitrary scalar diagnostics into
+  TS DB; optional display unit feeds UI grouping/labels + counts as a health tick
 - `host.persist_secret(key, value)` — durably store a rotated secret (e.g. an
   OAuth refresh_token) in the unwatched state KV; layered back over
   `config.<key>` at next init via the registry's `SecretOverride`
