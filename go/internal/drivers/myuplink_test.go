@@ -95,6 +95,67 @@ func TestMyUplinkEmitsTelemetry(t *testing.T) {
 	}
 }
 
+// TestMyUplinkAutoDetectsDevice exercises the device auto-detection path
+// (no device_id in config) against the REAL MyUplink response shape:
+// GET /v2/systems/me returns {"systems":[{"devices":[{"id":...}]}]} — the
+// top-level key is "systems", not "objects" (the bug behind "connects but
+// finds nothing"). Points use "parameterUnit", not "unit".
+func TestMyUplinkAutoDetectsDevice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/oauth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "AT", "expires_in": 3600, "refresh_token": "RT",
+			})
+		case r.URL.Path == "/v2/systems/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"page": 1, "itemsPerPage": 10, "numItems": 1,
+				"systems": []map[string]any{
+					{"systemId": "sys-1", "name": "Home", "devices": []map[string]any{
+						{"id": "DEV-AUTO"},
+					}},
+				},
+			})
+		default: // /v2/devices/DEV-AUTO/points
+			if !strings.Contains(r.URL.Path, "DEV-AUTO") {
+				t.Errorf("points fetched for wrong device: %s", r.URL.Path)
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"parameterId": "10012", "value": "2", "parameterUnit": "kW"}, // 2 kW → 2000 W
+			})
+		}
+	}))
+	defer srv.Close()
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("myuplink", tel).WithHTTP()
+	env.PersistSecret = func(k, v string) error { return nil }
+
+	d, err := NewLuaDriver(myuplinkDriverPath(t), env)
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+
+	cfg := map[string]any{
+		"client_id":     "cid",
+		"client_secret": "csec",
+		"refresh_token": "RT",
+		// no device_id → must auto-detect via /v2/systems/me
+		"base_url": srv.URL,
+	}
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	// 2 kW must be converted to 2000 W via parameterUnit.
+	if v, _, ok := tel.LatestMetric("myuplink", "hp_power_w"); !ok || v != 2000 {
+		t.Errorf("hp_power_w = %v (ok=%v), want 2000 (2 kW via parameterUnit)", v, ok)
+	}
+}
+
 // TestMyUplinkNoRefreshTokenIdles verifies the driver degrades gracefully
 // when it has not been connected yet (no refresh_token in config): init must
 // not error or crash, and a poll must not panic — it simply emits nothing.

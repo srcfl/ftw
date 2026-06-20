@@ -147,7 +147,9 @@ local function detect_device_id()
         host.log("error", "MyUplink: /v2/systems/me failed: " .. err)
         return nil
     end
-    for _, system in ipairs(systems.objects or {}) do
+    -- MyUplink /v2/systems/me returns {"systems":[{"devices":[{"id":...}]}]}.
+    -- The top-level key is "systems" (not "objects").
+    for _, system in ipairs(systems.systems or {}) do
         local devices = system.devices or {}
         if #devices > 0 then
             local did = devices[1].id
@@ -238,7 +240,9 @@ function driver_poll()
 
     if pts[PARAM_POWER] then
         local raw = tonumber(pts[PARAM_POWER].value) or 0
-        local power_w = (pts[PARAM_POWER].unit == "kW") and raw * 1000 or raw
+        -- MyUplink points report the unit in "parameterUnit" (not "unit").
+        local unit = pts[PARAM_POWER].parameterUnit or pts[PARAM_POWER].unit
+        local power_w = (unit == "kW") and raw * 1000 or raw
         host.emit_metric("hp_power_w", power_w)
     end
     if pts[PARAM_HW_TEMP]      then host.emit_metric("hp_hw_top_temp_c",  decode_temp(pts[PARAM_HW_TEMP])      or 0) end
