@@ -44,11 +44,13 @@ token by hand. (Background: issue #496.)
 
 ## Step 2 — enter credentials in 42-watts
 
-In **Settings → Devices**, on the MyUplink driver:
+In **Settings → Devices**, on the MyUplink driver's **MyUplink connection**
+fieldset (the field labels match the portal exactly so nothing gets swapped):
 
-- **Client ID** → paste the *Client Identifier*.
-- **Secrets → Client Secret** → paste the *Client Secret*.
-- **Save** the settings (the Connect button reads the *saved* Client ID).
+- **Client Identifier** → paste the portal's *Client Identifier* (the UUID,
+  e.g. `xxxxxxxx-xxxx-…`). This is **not** the secret.
+- **Client Secret** → paste the portal's *Client Secret* (masked once saved).
+- **Save** the settings (the Connect button reads the *saved* values).
 
 ## Step 3 — connect
 
