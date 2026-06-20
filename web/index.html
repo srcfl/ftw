@@ -363,6 +363,17 @@
       <ftw-savings-card default-range="week"></ftw-savings-card>
     </section>
 
+    <!-- Heat-pump telemetry (MyUplink). Hidden until a driver reports hp_*
+         metrics; heating.js unhides it and renders one card per heat pump
+         (compressor power + hot-water/indoor/outdoor temps + 24h power
+         sparkline). Read-only — see docs/myuplink-oauth.md. -->
+    <section class="heating-row" id="heating-section" hidden>
+      <div class="card">
+        <div class="card-label">Heat pump</div>
+        <div id="heating-grid"></div>
+      </div>
+    </section>
+
     <!-- Strategy now lives inside the Plan card header (below) — it's
          the operator-facing control that drives plan behaviour, so
          visually attaching it to the Plan removes the standalone
@@ -787,6 +798,7 @@
   <script src="/models.js?v=diag2"></script>
   <script src="/plan.js?v=diag2"></script>
   <script src="/twins.js?v=diag2"></script>
+  <script src="/heating.js?v=heat1"></script>
   <script src="/loadpoints.js?v=lp3"></script>
   <script src="/diagnose.js?v=diag2"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
