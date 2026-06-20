@@ -154,13 +154,13 @@
             '</fieldset>';
         }
         if (isApiCredsDriver) {
-          // OAuth2 authorization-code drivers (e.g. MyUplink). The operator
-          // registers an app at the provider's developer portal (Callback
-          // URL + Client Identifier + Client Secret), pastes the Client ID
-          // here and the secret in the Secrets section below (masked, never
-          // echoed into the DOM), then clicks Connect to complete the
-          // one-time browser consent. The resulting refresh_token is stored
-          // server-side as a config_secret and the badge flips to Connected.
+          // OAuth2 authorization-code drivers (e.g. MyUplink). Numbered
+          // setup steps + the exact Callback URL, then Client Identifier +
+          // Client Secret rendered together with the SAME labels as the
+          // MyUplink portal (so the two values don't get swapped). The
+          // secret is masked (never echoed into the DOM); Connect completes
+          // the one-time browser consent and the refresh_token is stored
+          // server-side, flipping the badge to Connected.
           var acfg = d.config || {};
           // refresh_token is a config_secret: when saved it round-trips as a
           // masked placeholder (non-empty string), so a non-empty value here
@@ -169,14 +169,28 @@
           var connBadge = connected
             ? '<span class="creds-badge creds-saved">✓ Connected</span>'
             : '<span class="creds-badge creds-missing">⚠ Not connected</span>';
+          var secretSaved = typeof acfg.client_secret === 'string' && acfg.client_secret !== '';
+          var secretBadge = secretSaved
+            ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+            : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
           var callbackURL = location.origin + '/api/oauth/myuplink/callback';
-          html += '<fieldset><legend>API credentials</legend>' +
-            '<p style="color:var(--text-dim);font-size:0.75rem;margin:0 0 8px">Register an application at the provider\'s developer portal to get a Client ID and Client Secret. Paste the secret in the Secrets section below, then click Connect.</p>' +
-            '<label>Client ID ' + help('Application identifier from the developer portal.') + '</label>' +
-            '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
-            '<label style="margin-top:8px">Callback URL ' + help('Register this exact URL as the Callback Url in the MyUplink developer portal. It must match the address you use to reach 42-watts.') + '</label>' +
+          // Field labels mirror the MyUplink portal exactly ("Client
+          // Identifier" / "Client Secret") and sit together — same as the
+          // portal's Credentials box — so the two values don't get swapped.
+          html += '<fieldset><legend>MyUplink connection</legend>' +
+            '<ol style="color:var(--fg-muted);font-size:0.78rem;line-height:1.6;margin:0 0 12px;padding-left:1.2em">' +
+            '<li>Open the <a href="https://dev.myuplink.com/apps" target="_blank" rel="noopener" style="color:var(--accent-e)">MyUplink developer portal</a> → <b>Apps</b> → <b>Create new app</b>.</li>' +
+            '<li>Set <b>Callback Url</b> to the address shown below (copy it exactly).</li>' +
+            '<li>Copy the app\'s <b>Client Identifier</b> and <b>Client Secret</b> into the matching fields below.</li>' +
+            '<li><b>Save</b> these settings, then click <b>Connect to MyUplink</b> and sign in.</li>' +
+            '</ol>' +
+            '<label>Callback URL ' + help('Paste this exact string into the "Callback Url" field of your MyUplink app. It must match the address you use to reach 42-watts.') + '</label>' +
             '<input type="text" class="myuplink-callback-url" value="' + escHtml(callbackURL) + '" readonly onclick="this.select()" style="font-family:var(--mono);font-size:0.8rem">' +
-            '<div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+            '<label style="margin-top:8px">Client Identifier ' + help('The "Client Identifier" from your MyUplink app (a UUID like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). NOT the secret.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+            '<label style="margin-top:8px">Client Secret ' + secretBadge + ' ' + help('The "Client Secret" from your MyUplink app. Stored masked; leave empty to keep the saved value.') + '</label>' +
+            '<input type="password" autocomplete="off" data-path="drivers.' + idx + '.config.client_secret" value="" placeholder="' + (secretSaved ? '•••••••• (leave empty to keep)' : 'paste Client Secret') + '">' +
+            '<div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
             '<button class="btn-add myuplink-connect-btn" type="button" data-driver-idx="' + idx + '" data-driver-name="' + escHtml(d.name || '') + '">Connect to MyUplink</button>' +
             connBadge +
             '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
@@ -330,8 +344,21 @@
           if (!d || !d.lua) return;
           var entry = byLua[d.lua];
           var secrets = (entry && entry.config_secrets) || [];
-          if (secrets.length === 0) return;
           var dcfg = d.config || {};
+          // OAuth apicreds drivers (client_id/client_secret) render the
+          // Client Secret in their own "MyUplink connection" fieldset, and
+          // the refresh_token is managed by the Connect flow — never hand-
+          // entered. Drop both from the generic Secrets section so the
+          // secret isn't duplicated and a confusing "Refresh Token" input
+          // doesn't appear.
+          var isApiCreds = Object.prototype.hasOwnProperty.call(dcfg, 'client_id') ||
+                           Object.prototype.hasOwnProperty.call(dcfg, 'client_secret');
+          if (isApiCreds) {
+            secrets = secrets.filter(function (k) {
+              return k !== 'client_secret' && k !== 'refresh_token';
+            });
+          }
+          if (secrets.length === 0) return;
           var fs = '<fieldset><legend>Secrets</legend>';
           secrets.forEach(function (key) {
             // Title-case, keep the raw key for the data-path attribute.
