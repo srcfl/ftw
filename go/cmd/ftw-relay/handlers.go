@@ -80,15 +80,17 @@ func validPairToken(s string) bool {
 
 // Relay is the in-memory state for one running relay process.
 type Relay struct {
-	Queue       *tunnel.Queue
-	Tokens      *TokenRegistry
-	Owners      *OwnerRegistry
-	Polls       *PollSecrets
-	Signals     *SignalMailbox    // blind WebRTC signaling rendezvous (P2P-only home route)
-	Challenges  *SignalChallenges // single-use device-key proof nonces for the signaling offer (C2)
-	OfferLimit  *IPRateLimiter    // per-source-IP throttle on browser signaling offers (FIX-C)
-	TrustCFIP   bool              // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
-	PollTimeout time.Duration     // 0 → 25s default
+	Queue      *tunnel.Queue
+	Tokens     *TokenRegistry
+	Owners     *OwnerRegistry
+	Polls      *PollSecrets
+	Signals    *SignalMailbox    // blind WebRTC signaling rendezvous (P2P-only home route)
+	Challenges *SignalChallenges // single-use device-key proof nonces for the signaling offer (C2)
+	OfferLimit *IPRateLimiter    // per-source-IP throttle on browser signaling offers (FIX-C)
+	ICELimit   *IPRateLimiter    // SEPARATE per-source-IP throttle on GET /signal/ice so an ICE
+	// fetch never spends an offer token (avoids halving the offer burst)
+	TrustCFIP   bool          // honour CF-Connecting-IP from validated Cloudflare peers (-trust-cf-ip)
+	PollTimeout time.Duration // 0 → 25s default
 	// HomeHost, when set, maps a bare host (e.g. home.fortytwowatts.com) to
 	// the single owner Pi registered under HomeSite — forwarding every path
 	// verbatim (no /me/<site_id> prefix) so the dashboard's absolute asset
@@ -114,6 +116,11 @@ type Relay struct {
 	// still works. On → an offer must carry a verified device-key proof or the Pi
 	// is never contacted. Flip on only once device-keys are enrolled.
 	RequireDeviceKey bool
+	// ICEStunURLs/TURNURLs are public connectivity hints for the signed
+	// browser<->Pi WebRTC channel. TURN only relays DTLS ciphertext.
+	ICEStunURLs []string
+	TURNURLs    []string
+	TURNSecret  string
 	// MultiTenant switches the home host from the single-tenant pin
 	// (-home-site/-home-pubkey) to the public multi-tenant front door:
 	// anonymous home.* serves only the relay-disk bootstrap loader; after the
@@ -170,6 +177,13 @@ func (r *Relay) Handler() http.Handler {
 		// on a different IP (which the old per-site limit did).
 		r.OfferLimit = newIPRateLimiter(offerBucketCapacity, offerBucketRefillPerSec)
 	}
+	if r.ICELimit == nil {
+		// SEPARATE bucket for GET /signal/ice (the TURN-credential mint) so an ICE
+		// fetch never draws down the offer burst — both the browser (once per connect)
+		// and the Pi (hourly) hit it, and a connect spends an ICE token AND an offer
+		// token. A more generous bucket keeps a legit reconnect loop from 429ing.
+		r.ICELimit = newIPRateLimiter(iceBucketCapacity, iceBucketRefillPerSec)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
@@ -221,6 +235,7 @@ func (r *Relay) Handler() http.Handler {
 	// /me/<site> forwarders were removed in the P2P-only cutover, slice 6). Owner
 	// data exists ONLY as DTLS DataChannel frames now.
 	mux.HandleFunc("POST /me/register", r.meRegister)
+	mux.HandleFunc("GET /signal/ice", r.signalICE)
 
 	// Home-host cutover: a bare host (home.fortytwowatts.com) serves the stable
 	// public bootstrap at the root. In multi-tenant mode the dashboard's STATIC
@@ -237,6 +252,7 @@ func (r *Relay) Handler() http.Handler {
 	// (The Pi's /signal/{host}/* routes need no host pin: the Pi dials the relay by
 	// its own host, not the home host.)
 	if r.HomeHost != "" && (r.HomeSite != "" || r.MultiTenant) {
+		mux.HandleFunc("GET "+r.HomeHost+"/signal/ice", r.signalICE)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/challenge", r.signalChallenge)
 		mux.HandleFunc("POST "+r.HomeHost+"/signal/{site_id}/offer", r.signalBrowserOffer)
 		mux.HandleFunc("GET "+r.HomeHost+"/signal/{site_id}/answer", r.signalBrowserAnswer)

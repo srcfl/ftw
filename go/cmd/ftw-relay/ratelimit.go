@@ -38,6 +38,14 @@ const (
 	// offerBucketIdleTTL is how long an idle per-IP bucket is kept before GC, so
 	// the limiter map doesn't grow without bound under a churn of source IPs.
 	offerBucketIdleTTL = 10 * time.Minute
+
+	// iceBucketCapacity / iceBucketRefillPerSec size the SEPARATE per-IP limiter on
+	// GET /signal/ice. More generous than the offer bucket: it is hit by the
+	// browser once per connect AND by the Pi on its hourly ICE refresh, and the
+	// response is a cheap HMAC, so the only thing to bound is a tight credential-
+	// minting loop. A 16-token burst with 4/s refill covers any real reconnect.
+	iceBucketCapacity     = 16.0
+	iceBucketRefillPerSec = 4.0
 )
 
 // tokenBucket is a classic token bucket: tokens refill at a fixed rate up to a

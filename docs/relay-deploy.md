@@ -159,6 +159,166 @@ sudo systemctl status ftw-relay
 root. The `ReadOnlyPaths` line means a relay compromise still cannot
 overwrite cert or key.
 
+### ICE / TURN for owner remote access
+
+`home.fortytwowatts.com` owner traffic uses a signed WebRTC DataChannel. Direct
+STUN works on many networks, but hard NAT / CGNAT / cellular paths need TURN for
+the feature to be usable. The relay serves `GET /signal/ice` (STUN URL + a
+short-lived coturn REST credential derived from `FTW_TURN_SECRET`); the browser
+and Pi both fetch it before WebRTC setup. TURN relays DTLS ciphertext only — the
+Pi-signed DTLS fingerprint remains the trust check, so a hostile TURN can read or
+drop ciphertext but never MITM.
+
+This needs a TURN server. We self-host coturn. The runbook below stands one up.
+
+> **Pending site decisions** (marked `<…>`): the relay VM's public IP, and the
+> TLS path for `turns:` (reuse the CF Origin cert if its SAN is a wildcard, else
+> issue a Let's Encrypt cert for `turn.*`). Fill them before running.
+
+#### 1. DNS — a dedicated, grey-cloud TURN host
+
+TURN media (UDP/TCP 3478, TLS 5349, and a high UDP relay range) **cannot
+traverse Cloudflare's HTTP proxy**. coturn must be reachable on a real public IP.
+Add `turn.fortytwowatts.com` as an **A record with proxy status _DNS only_ (grey
+cloud)** → the relay VM's public IP. Leave `relay.fortytwowatts.com` orange-cloud
+(its HTTPS is unchanged). An orange cloud on `turn.*` silently breaks TURN.
+
+#### 2. coturn `/etc/turnserver.conf` (REST-API mode)
+
+```bash
+sudo apt-get install -y coturn
+sudo sed -i 's/^#TURNSERVER_ENABLED=1/TURNSERVER_ENABLED=1/' /etc/default/coturn
+openssl rand -hex 32   # -> TURN_SECRET; store it, it must equal FTW_TURN_SECRET
+```
+
+```ini
+# /etc/turnserver.conf
+listening-port=3478
+tls-listening-port=5349
+listening-ip=<PUBLIC_IP>
+external-ip=<PUBLIC_IP>            # or <PUBLIC_IP>/<PRIVATE_IP> behind 1:1 NAT
+min-port=49152
+max-port=65535
+
+# REST API shared secret — MUST byte-for-byte equal the relay's FTW_TURN_SECRET.
+use-auth-secret
+static-auth-secret=<TURN_SECRET>
+realm=turn.fortytwowatts.com
+
+# TLS for turns:5349 (see step 4 for which cert)
+cert=/etc/coturn/cert.pem
+pkey=/etc/coturn/key.pem
+no-tlsv1
+no-tlsv1_1
+fingerprint
+
+# SSRF guard: a public TURN must NEVER relay into private space / cloud metadata.
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# Anti-abuse quotas (a public TURN is an open-relay magnet). Tune to the VM.
+total-quota=200
+user-quota=12
+bps-capacity=6250000   # ~50 Mbit/s server-wide
+max-bps=500000         # ~4 Mbit/s per allocation
+no-tcp-relay
+no-cli
+```
+
+`use-auth-secret` + `static-auth-secret` is the exact dual of the relay's
+`HMAC-SHA1(secret, expiry)` / base64 scheme — do **not** also set `lt-cred-mech`
+or a `userdb`. The `denied-peer-ip` list is the critical hardening: `/signal/ice`
+is unauthenticated, so anyone can mint a 12 h credential; without the deny-list
+they could relay into `169.254.169.254` or the VPC.
+
+#### 3. Firewall — direct, not via Cloudflare
+
+| Port / range | Proto | Cloudflare? |
+|---|---|---|
+| 3478 | UDP + TCP | **NO — direct to coturn** |
+| 5349 | TCP (TLS) | **NO — direct** |
+| 49152–65535 | UDP (relay range) | **NO — direct** |
+| 443 | TCP (relay HTTPS) | YES (orange cloud, unchanged) |
+
+Open these on both the host firewall and the cloud security group. Keep the TURN
+ports open to `0.0.0.0/0` — clients are arbitrary browsers/Pis, not CF edges, so
+do **not** extend any "CF-ranges-only" rule (that lock is for `:443` only). The
+`denied-peer-ip` list + quotas are the protection on the TURN ports.
+
+#### 4. TLS for `turns:5349`
+
+coturn drops to the `turnserver` user and can't read `/etc/ssl/relay`. Either
+reuse the relay's CF Origin cert **if** its SAN is a wildcard
+(`openssl x509 -in /etc/ssl/relay/cert.pem -noout -text | grep -A1 'Alternative Name'`),
+or issue a browser-trusted Let's Encrypt cert (the grey-cloud `turn.*` makes
+HTTP-01/DNS-01 work directly). Install as `/etc/coturn/{cert,key}.pem` owned by
+`turnserver`. coturn does **not** auto-reload certs — on LE renewal, add a
+`renewal-hooks/deploy` script that re-installs them and `systemctl restart coturn`.
+
+#### 5. Relay systemd — secret via EnvironmentFile (not argv)
+
+```bash
+sudo install -m 0600 /dev/null /etc/ftw-relay.env
+printf 'FTW_TURN_SECRET=%s\n' '<TURN_SECRET>' | sudo tee /etc/ftw-relay.env >/dev/null
+```
+
+Add to the `ftw-relay` unit that serves `home.*` (the multi-tenant unit if that's
+the one fronting the home route). `FTW_TURN_SECRET` is the default source for
+`-turn-secret`, so do **not** pass the secret on the command line (it would leak
+into `ps`):
+
+```ini
+EnvironmentFile=/etc/ftw-relay.env
+ExecStart=/usr/local/bin/ftw-relay \
+  -addr :443 \
+  -cert /etc/ssl/relay/cert.pem \
+  -key  /etc/ssl/relay/key.pem \
+  -ice-stun stun:stun.l.google.com:19302 \
+  -turn-url turn:turn.fortytwowatts.com:3478?transport=udp,turns:turn.fortytwowatts.com:5349
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart ftw-relay
+```
+
+#### 6. Verify
+
+Order: DNS grey-cloud → coturn up → relay secret + restart → check `/signal/ice`
+→ browser test from off-net.
+
+```bash
+# 1. The relay now advertises a TURN entry:
+curl -s https://home.fortytwowatts.com/signal/ice | jq .
+#    -> expect a stun entry AND a turn entry with username/credential/ttl.
+
+# 2. Prove coturn accepts the relay-minted credential (lift it from the JSON):
+ICE=$(curl -s https://home.fortytwowatts.com/signal/ice)
+U=$(echo "$ICE" | jq -r '.ice_servers[]|select(.username)|.username')
+C=$(echo "$ICE" | jq -r '.ice_servers[]|select(.credential)|.credential')
+turnutils_uclient -v -u "$U" -w "$C" turn.fortytwowatts.com        # UDP
+turnutils_uclient -v -S -u "$U" -w "$C" -p 5349 turn.fortytwowatts.com  # TLS
+#    401 = secret mismatch; 403 to a private target = SSRF deny working.
+
+# 3. Browser: https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/
+#    add turn:turn.fortytwowatts.com:3478?transport=udp with $U/$C, Gather
+#    candidates, and confirm a candidate of type "relay" appears.
+```
+
+Then log in to `home.fortytwowatts.com` from a **cellular / hard-NAT** network
+(STUN alone covers same-LAN) and confirm the owner channel connects.
+
+To roll back, drop `-turn-url` from `ExecStart` and restart — the relay falls
+back to STUN-only (the TURN entry is gated on `len(TURNURLs)>0 && TURNSecret!=""`).
+
 ## Verify end-to-end
 
 From your laptop:
