@@ -1287,7 +1287,7 @@
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
           '</div>';
-      } else {
+      } else if (d.meter_w != null || d.pv_w != null || d.bat_w != null || d.bat_soc != null) {
         var meterW = d.meter_w != null ? d.meter_w : 0;
         var pvWVal = d.pv_w != null ? d.pv_w : 0;
         var batWVal = d.bat_w != null ? d.bat_w : 0;
@@ -1318,6 +1318,15 @@
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
           "</div>" +
           '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + Math.round(batSocVal * 100) + '%"></div></div>';
+      } else {
+        // Metrics-only driver (e.g. MyUplink heat-pump telemetry): no
+        // meter/pv/battery DER reading — don't render phantom 0 PV/SoC rows.
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">Type</span><span class="stat-value stat-dim">telemetry only</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
+          "</div>";
       }
 
       // For disabled drivers the body is minimal — just show the label.
