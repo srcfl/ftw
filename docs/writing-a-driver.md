@@ -139,6 +139,11 @@ entry. The function signatures here match that file exactly.
 | `host.set_sn(serial)` | Serial number. Promotes device_id to canonical `make:serial`. |
 | `host.set_poll_interval(ms)` | Request a different poll cadence. Same effect as returning `ms` from `driver_poll`. |
 | `host.millis()` | Monotonic milliseconds since host startup (`host.go:83`). |
+| `host.persist_secret(key, value) → ok, err` | Durably store a rotated secret (e.g. an OAuth `refresh_token`) for THIS driver. Written to the unwatched state KV — **not** `config.yaml` — so persisting can't trigger a config-reload restart loop. The value is layered back over `config.<key>` at the next `driver_init` (`SecretOverride`), so it survives a restart while `config.yaml` keeps the bootstrap seed the UI shows as "saved". Returns `false, err` if the host didn't grant it. |
+
+Use `host.persist_secret` only for values the *provider* rotates out from
+under you (rotating refresh tokens). Operator-entered credentials belong in
+`config.<key>` (declared in `config_secrets`); don't write those back.
 
 Call `set_make` and `set_sn` as early as you reliably can — before them,
 the device shows up under its config name only.
