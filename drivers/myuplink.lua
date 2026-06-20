@@ -62,6 +62,13 @@ local access_token     = nil
 local token_expires_at = 0
 local refresh_token    = nil   -- rotated on each refresh; persisted via host.persist_secret
 
+-- Self-heal: NIBE/MyUplink is touchy right after consent (token propagation /
+-- rate-limit), so the first auth or device-detect can fail. Rather than idle
+-- forever on a nil device_id (which needed a manual driver restart), poll
+-- retries setup with this backoff between attempts.
+local SETUP_RETRY_MS   = 30000
+local last_setup_ms    = nil   -- nil = never attempted (first try is immediate)
+
 local client_id     = nil
 local client_secret = nil
 local device_id     = nil
@@ -202,6 +209,30 @@ local function sanitize_metric_name(name, pid)
     return "hp_" .. s
 end
 
+-- Bring the driver to "ready" (valid token + device_id). Safe to call
+-- repeatedly; rate-limited by SETUP_RETRY_MS so a touchy NIBE API isn't
+-- hammered. Returns true once device_id is established. This is what makes
+-- the driver self-heal after a transient post-consent auth/detect failure —
+-- no manual restart needed.
+local function try_setup()
+    if not client_id or not client_secret or not refresh_token then return false end
+    if device_id then return true end
+    local now = host.millis()
+    if last_setup_ms ~= nil and (now - last_setup_ms) < SETUP_RETRY_MS then
+        return false
+    end
+    last_setup_ms = now
+    if not ensure_auth() then
+        host.log("warn", "MyUplink: auth not ready yet — will retry")
+        return false
+    end
+    device_id = detect_device_id()
+    if not device_id then return false end
+    host.set_sn(device_id)
+    host.log("info", "MyUplink: ready (read-only) device=" .. device_id)
+    return true
+end
+
 -- ---- Lifecycle -----------------------------------------------------------
 
 function driver_init(config)
@@ -224,6 +255,8 @@ function driver_init(config)
         PARAM_OUTDOOR_TEMP = ov("param_outdoor_temp_id", PARAM_OUTDOOR_TEMP)
         -- base_url override exists for tests; production uses api.myuplink.com.
         if config.base_url and config.base_url ~= "" then BASE_URL = config.base_url end
+        -- setup_retry_ms override exists for tests (0 = retry immediately).
+        if config.setup_retry_ms ~= nil then SETUP_RETRY_MS = tonumber(config.setup_retry_ms) or SETUP_RETRY_MS end
     end
 
     if not client_id or not client_secret then
@@ -237,21 +270,21 @@ function driver_init(config)
         host.log("info", "MyUplink: awaiting OAuth connect — click \"Connect to MyUplink\" in Settings → Devices")
         return
     end
-    if not ensure_auth() then
-        host.log("error", "MyUplink: initial auth failed (refresh_token rejected — reconnect in Settings → Devices)")
-        return
+    -- Best-effort initial setup. If NIBE is touchy right after consent and
+    -- this fails, we DON'T give up — driver_poll retries with backoff, so no
+    -- manual restart is needed.
+    if not try_setup() then
+        host.log("warn", "MyUplink: initial setup did not complete — will retry automatically")
     end
-    if not device_id then
-        device_id = detect_device_id()
-        if not device_id then return end
-    end
-
-    host.set_sn(device_id)
-    host.log("info", "MyUplink: ready (read-only) device=" .. device_id)
 end
 
 function driver_poll()
-    if not device_id or not client_id then return 30000 end
+    if not client_id or not client_secret or not refresh_token then return 30000 end
+    -- Not yet set up (first auth/detect failed, or just connected) → retry
+    -- with backoff. Self-heals the "only works after a manual restart" case.
+    if not device_id then
+        if not try_setup() then return 30000 end
+    end
     if not ensure_auth() then return 30000 end
 
     local data, by_id, err = fetch_all_points()
@@ -313,4 +346,5 @@ function driver_cleanup()
     -- refresh_token is re-read from config (with any KV override) on the
     -- next driver_init; clear it so a hot-reload starts from a clean slate.
     refresh_token    = nil
+    last_setup_ms    = nil
 end

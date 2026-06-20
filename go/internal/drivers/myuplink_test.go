@@ -173,9 +173,9 @@ func TestMyUplinkEmitsAllPointsWithUnits(t *testing.T) {
 			t.Errorf("expected unfiltered points fetch, got query %q", q)
 		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{
-			{"parameterId": "10012", "parameterName": "Compressor power", "value": "1500", "parameterUnit": "W"}, // canonical
-			{"parameterId": "40004", "parameterName": "Outdoor temp (BT1)", "value": "226", "parameterUnit": "°C"}, // canonical
-			{"parameterId": "40008", "parameterName": "Supply line (BT2)", "value": "455", "parameterUnit": "°C"},  // generic temp, ×10
+			{"parameterId": "10012", "parameterName": "Compressor power", "value": "1500", "parameterUnit": "W"},    // canonical
+			{"parameterId": "40004", "parameterName": "Outdoor temp (BT1)", "value": "226", "parameterUnit": "°C"},  // canonical
+			{"parameterId": "40008", "parameterName": "Supply line (BT2)", "value": "455", "parameterUnit": "°C"},   // generic temp, ×10
 			{"parameterId": "43136", "parameterName": "Compressor frequency", "value": "42", "parameterUnit": "Hz"}, // generic
 			{"parameterId": "43005", "parameterName": "Degree minutes", "value": "-600", "parameterUnit": "GM"},     // generic, negative
 		})
@@ -242,6 +242,70 @@ func keysOf(m map[string]telemetry.MetricSnapshot) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestMyUplinkSelfHealsAfterTransientAuthFailure reproduces the "only works
+// after a manual restart" bug: NIBE/MyUplink is touchy right after consent,
+// so the first token request can fail. The driver must retry setup in
+// driver_poll (with backoff) instead of idling forever on a nil device_id.
+func TestMyUplinkSelfHealsAfterTransientAuthFailure(t *testing.T) {
+	var tokenCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			tokenCalls++
+			if tokenCalls == 1 {
+				// First attempt fails (transient, as NIBE does post-consent).
+				w.WriteHeader(400)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "AT", "expires_in": 3600, "refresh_token": "RT",
+			})
+		case "/v2/systems/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"systems": []map[string]any{{"devices": []map[string]any{{"id": "DEV1"}}}},
+			})
+		default: // points
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"parameterId": "10012", "value": "900", "parameterUnit": "W"},
+			})
+		}
+	}))
+	defer srv.Close()
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("myuplink", tel).WithHTTP()
+	env.PersistSecret = func(k, v string) error { return nil }
+
+	d, err := NewLuaDriver(myuplinkDriverPath(t), env)
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+	cfg := map[string]any{
+		"client_id": "cid", "client_secret": "csec", "refresh_token": "RT",
+		"base_url":       srv.URL,
+		"setup_retry_ms": 0, // no backoff delay in the test
+	}
+	// Init's first auth fails — driver must NOT permanently give up.
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, _, ok := tel.LatestMetric("myuplink", "hp_power_w"); ok {
+		t.Fatal("should not have telemetry yet (first auth failed)")
+	}
+	// A subsequent poll must retry setup (auth now succeeds) and recover —
+	// no manual restart needed. May take two polls (retry, then emit).
+	for i := 0; i < 3; i++ {
+		if _, err := d.Poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", i, err)
+		}
+	}
+	if v, _, ok := tel.LatestMetric("myuplink", "hp_power_w"); !ok || v != 900 {
+		t.Errorf("hp_power_w = %v (ok=%v), want 900 — driver should self-heal after the transient auth failure", v, ok)
+	}
 }
 
 // TestMyUplinkNoRefreshTokenIdles verifies the driver degrades gracefully
