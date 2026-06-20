@@ -161,15 +161,17 @@ local function detect_device_id()
     return nil
 end
 
-local function fetch_points(param_ids)
-    local qs = table.concat(param_ids, ",")
-    local data, err = api_get("/v2/devices/" .. device_id .. "/points?parameters=" .. qs)
-    if err then return nil, err end
-    local pts = {}
+-- Fetch ALL points for the device (no ?parameters filter). Returns the raw
+-- array (for emitting everything) plus an id→point index (for the canonical
+-- headline lookups). MyUplink keys each point by parameterId.
+local function fetch_all_points()
+    local data, err = api_get("/v2/devices/" .. device_id .. "/points")
+    if err then return nil, nil, err end
+    local by_id = {}
     for _, pt in ipairs(data) do
-        if pt.parameterId then pts[tostring(pt.parameterId)] = pt end
+        if pt.parameterId then by_id[tostring(pt.parameterId)] = pt end
     end
-    return pts, nil
+    return data, by_id, nil
 end
 
 local function decode_temp(pt)
@@ -178,6 +180,26 @@ local function decode_temp(pt)
     if not raw then return nil end
     if math.abs(raw) > 100 then return raw / 10 end  -- NIBE °C×10 encoding
     return raw
+end
+
+-- Apply the NIBE °C×10 convention ONLY to temperature-unit points, so
+-- non-temperature points (Hz, GM, %, counts) are emitted raw. (The sub-10 °C
+-- ambiguity is a known, separately-tracked decode issue.)
+local function scale_value(raw, unit)
+    if unit == "°C" and math.abs(raw) > 100 then return raw / 10 end
+    return raw
+end
+
+-- Turn a MyUplink parameterName into a stable snake_case metric name,
+-- prefixed hp_. Non-ASCII and punctuation collapse to single underscores;
+-- empty names fall back to the parameterId.
+local function sanitize_metric_name(name, pid)
+    local s = string.lower(name or "")
+    s = string.gsub(s, "[^a-z0-9]+", "_")
+    s = string.gsub(s, "^_+", "")
+    s = string.gsub(s, "_+$", "")
+    if s == "" then s = "p" .. tostring(pid) end
+    return "hp_" .. s
 end
 
 -- ---- Lifecycle -----------------------------------------------------------
@@ -232,22 +254,46 @@ function driver_poll()
     if not device_id or not client_id then return 30000 end
     if not ensure_auth() then return 30000 end
 
-    local pts, err = fetch_points({ PARAM_POWER, PARAM_HW_TEMP, PARAM_INDOOR_TEMP, PARAM_OUTDOOR_TEMP })
+    local data, by_id, err = fetch_all_points()
     if err then
         host.log("warn", "MyUplink: poll failed: " .. err)
         return 30000
     end
 
-    if pts[PARAM_POWER] then
-        local raw = tonumber(pts[PARAM_POWER].value) or 0
+    -- Canonical headline metrics: stable names the dashboard card + history
+    -- depend on, mapped from fixed parameter IDs.
+    if by_id[PARAM_POWER] then
+        local raw = tonumber(by_id[PARAM_POWER].value) or 0
         -- MyUplink points report the unit in "parameterUnit" (not "unit").
-        local unit = pts[PARAM_POWER].parameterUnit or pts[PARAM_POWER].unit
+        local unit = by_id[PARAM_POWER].parameterUnit or by_id[PARAM_POWER].unit
         local power_w = (unit == "kW") and raw * 1000 or raw
-        host.emit_metric("hp_power_w", power_w)
+        host.emit_metric("hp_power_w", power_w, "W")
     end
-    if pts[PARAM_HW_TEMP]      then host.emit_metric("hp_hw_top_temp_c",  decode_temp(pts[PARAM_HW_TEMP])      or 0) end
-    if pts[PARAM_INDOOR_TEMP]  then host.emit_metric("hp_indoor_temp_c",  decode_temp(pts[PARAM_INDOOR_TEMP])  or 0) end
-    if pts[PARAM_OUTDOOR_TEMP] then host.emit_metric("hp_outdoor_temp_c", decode_temp(pts[PARAM_OUTDOOR_TEMP]) or 0) end
+    if by_id[PARAM_HW_TEMP]      then host.emit_metric("hp_hw_top_temp_c",  decode_temp(by_id[PARAM_HW_TEMP])      or 0, "°C") end
+    if by_id[PARAM_INDOOR_TEMP]  then host.emit_metric("hp_indoor_temp_c",  decode_temp(by_id[PARAM_INDOOR_TEMP])  or 0, "°C") end
+    if by_id[PARAM_OUTDOOR_TEMP] then host.emit_metric("hp_outdoor_temp_c", decode_temp(by_id[PARAM_OUTDOOR_TEMP]) or 0, "°C") end
+
+    -- Everything else → hp_<sanitized name> with its unit, so the UI can
+    -- auto-group (temperatures / power / frequency / state / …). Skip the
+    -- four canonical parameter IDs so they aren't emitted twice.
+    local canonical = {
+        [tostring(PARAM_POWER)] = true, [tostring(PARAM_HW_TEMP)] = true,
+        [tostring(PARAM_INDOOR_TEMP)] = true, [tostring(PARAM_OUTDOOR_TEMP)] = true,
+    }
+    local seen = {}
+    for _, pt in ipairs(data) do
+        local pid = tostring(pt.parameterId or "")
+        if pt.parameterId and not canonical[pid] then
+            local raw = tonumber(pt.value)
+            if raw ~= nil then
+                local unit = pt.parameterUnit or pt.unit or ""
+                local name = sanitize_metric_name(pt.parameterName, pid)
+                if seen[name] then name = name .. "_" .. pid end
+                seen[name] = true
+                host.emit_metric(name, scale_value(raw, unit), unit)
+            end
+        end
+    end
 
     return 60000
 end
