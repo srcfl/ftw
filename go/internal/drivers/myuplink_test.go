@@ -27,6 +27,54 @@ func myuplinkDriverPath(t *testing.T) string {
 
 // TestMyUplinkEmitsTelemetry loads the real driver against a fake MyUplink
 // server and asserts the compressor-power metric lands in the telemetry store.
+func TestMyUplinkAutoDetectsDeviceIDFromSystemsResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": "test-token", "expires_in": 3600,
+			})
+		case "/v2/systems/me":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"page": 1, "itemsPerPage": 25, "numItems": 1,
+				"systems": []map[string]any{{
+					"name": "Värmepanna",
+					"devices": []map[string]any{{
+						"id": "DEV1",
+						"product": map[string]any{"name": "CTC EcoZenith i255"},
+					}},
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("myuplink", tel).WithHTTP()
+
+	d, err := NewLuaDriver(myuplinkDriverPath(t), env)
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+
+	cfg := map[string]any{
+		"client_id":     "cid",
+		"client_secret": "csecret",
+		"base_url":      srv.URL,
+	}
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	_, sn := env.Identity()
+	if sn != "DEV1" {
+		t.Fatalf("serial = %q, want DEV1", sn)
+	}
+}
+
 func TestMyUplinkEmitsTelemetry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

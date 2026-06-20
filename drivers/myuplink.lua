@@ -115,15 +115,23 @@ local function detect_device_id()
         host.log("error", "MyUplink: /v2/systems/me failed: " .. err)
         return nil
     end
-    for _, system in ipairs(systems.objects or {}) do
+    local system_list = systems.systems or systems.objects or {}
+    local system_count = 0
+    local device_count = 0
+    for _, system in ipairs(system_list) do
+        system_count = system_count + 1
         local devices = system.devices or {}
-        if #devices > 0 then
-            local did = devices[1].id
-            host.log("info", "MyUplink: auto-detected device " .. tostring(did))
-            return did
+        for _, dev in ipairs(devices) do
+            device_count = device_count + 1
+            local did = dev.id or dev.deviceId or dev.idDevice
+            if did then
+                host.log("info", "MyUplink: auto-detected device " .. tostring(did))
+                return tostring(did)
+            end
         end
     end
-    host.log("error", "MyUplink: no devices found")
+    host.log("error", "MyUplink: no usable device id found in " .. tostring(system_count)
+        .. " system(s), " .. tostring(device_count) .. " device entrie(s)")
     return nil
 end
 
