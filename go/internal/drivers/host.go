@@ -285,6 +285,12 @@ func (h *HostEnv) emitMetric(name string, value float64) error {
 		return nil
 	}
 	h.Telemetry.EmitMetric(h.DriverName, name, value)
+	// A metric emission is fresh telemetry just like a structured emit, so
+	// it counts as a health success. Without this, a read-only driver that
+	// only uses emit_metric (e.g. the MyUplink heat-pump telemetry driver)
+	// never bumps LastSuccess and the watchdog flips it offline despite
+	// live data flowing.
+	h.Telemetry.RecordDriverSuccess(h.DriverName)
 	return nil
 }
 
