@@ -65,6 +65,11 @@ type server struct {
 	// pullRetryDelay is the wait between pull attempts. Defaults to 60s
 	// in production; tests set it to a small value to keep runs fast.
 	pullRetryDelay time.Duration
+	// maxPullAttempts caps retries before giving up with "failed". 0 means
+	// unlimited — the production default so a slow connection never gives up
+	// after an arbitrary N. Tests that exercise the "always-fail" path set
+	// this to a small value to avoid looping forever.
+	maxPullAttempts int
 
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
@@ -272,9 +277,6 @@ func (s *server) runJob(action, target string) {
 	now := time.Now()
 	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-
 	var env []string
 	if target != "" {
 		env = []string{"FTW_IMAGE_TAG=" + target}
@@ -291,19 +293,21 @@ func (s *server) runJob(action, target string) {
 	if !s.skipPull {
 		pullArgs := s.composeArgs("pull", mainServiceName)
 		var pullErr error
-	pullLoop:
-		for attempt := 1; attempt <= 3; attempt++ {
-			pullErr = s.runner(ctx, env, pullArgs...)
-			if pullErr == nil || attempt == 3 {
+		for attempt := 1; ; attempt++ {
+			// Per-attempt timeout: each pull gets a full 2 h window so a
+			// single slow download on a 0.5 Mbps link (~400 MB image ≈ 90 min)
+			// is never cut short by a shared outer deadline.
+			attemptCtx, cancelAttempt := context.WithTimeout(context.Background(), 2*time.Hour)
+			pullErr = s.runner(attemptCtx, env, pullArgs...)
+			cancelAttempt()
+			if pullErr == nil {
 				break
 			}
 			slog.Warn("pull failed, retrying", "attempt", attempt, "err", pullErr)
-			select {
-			case <-time.After(s.pullRetryDelay):
-			case <-ctx.Done():
-				pullErr = ctx.Err()
-				break pullLoop
+			if s.maxPullAttempts > 0 && attempt >= s.maxPullAttempts {
+				break
 			}
+			time.Sleep(s.pullRetryDelay)
 		}
 		if pullErr != nil {
 			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
@@ -316,6 +320,11 @@ func (s *server) runJob(action, target string) {
 
 	s.writeState(State{State: "restarting", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now()})
 
+	// compose up -d just recreates the container from an already-pulled
+	// image — should complete in seconds, 10 min is a generous upper bound.
+	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer upCancel()
+
 	upArgs := s.composeArgs("up", "-d", mainServiceName)
 	if action == "restart" {
 		// --force-recreate is what makes restart actually restart when the
@@ -323,7 +332,7 @@ func (s *server) runJob(action, target string) {
 		// UI exposes as the "Restart" button.
 		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
 	}
-	if err := s.runner(ctx, env, upArgs...); err != nil {
+	if err := s.runner(upCtx, env, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return

@@ -158,6 +158,7 @@ func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
 func TestHandleUpdate_PullFailure(t *testing.T) {
 	s, runner := newTestServer(t)
 	runner.fail = true
+	s.maxPullAttempts = 3 // cap retries so the always-fail runner doesn't loop forever
 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
