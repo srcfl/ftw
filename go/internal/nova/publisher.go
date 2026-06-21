@@ -170,7 +170,7 @@ func (p *Publisher) publishOnce() {
 	}
 	nowMs := time.Now().UnixMilli()
 	for _, d := range devices {
-		for _, kind := range []telemetry.DerType{telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery, telemetry.DerEV} {
+		for _, kind := range []telemetry.DerType{telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery, telemetry.DerEV, telemetry.DerV2X} {
 			r := p.tel.Get(d.DriverName, kind)
 			if r == nil {
 				continue
@@ -235,7 +235,11 @@ func assemble(r *telemetry.DerReading, d state.Device, nowMs int64) *DerTelemetr
 	// Prefer the raw value — ground truth in site convention. Consumers
 	// can smooth as they see fit (mirrors what we store in the TS DB).
 	out.W = r.RawW
-	if r.SoC != nil && out.SoC == nil {
+	if r.SoC != nil && (r.DerType == telemetry.DerEV || r.DerType == telemetry.DerV2X) && out.VehicleSoC == nil {
+		soc := *r.SoC
+		out.VehicleSoC = &soc
+	}
+	if r.SoC != nil && r.DerType != telemetry.DerEV && r.DerType != telemetry.DerV2X && out.SoC == nil {
 		soc := *r.SoC
 		out.SoC = &soc
 	}

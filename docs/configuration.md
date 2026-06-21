@@ -44,6 +44,7 @@ site:
   slew_rate_w: 3000
   slew_enabled: true
   min_dispatch_interval_s: 2
+  troubleshooting_mode: false     # extra incident diagnostics; no control changes
 ```
 
 `grid_target_w` is the PI setpoint in site convention. `0` means
@@ -51,15 +52,19 @@ self-consumption around the site meter. `slew_rate_w` is a soft per-cycle
 ramp ceiling; per-driver power caps and the fuse guard remain the hard
 dispatch constraints.
 
-### Global Troubleshooting Mode
+### Global Troubleshooting Mode (`site.troubleshooting_mode`)
 
-Use **Settings → Control → Troubleshooting mode** when diagnosing a live
-system issue. It does not change planner, dispatch, clamp, or driver command
-behavior. It adds dispatch-decision log lines, exposes the active flag in
+Operators should enable this from **Settings → Control → Troubleshooting
+mode** while diagnosing a live system issue. The setting is saved through the
+same config API as the rest of Settings; do not ask users to edit YAML for an
+incident.
+
+It does not change planner, dispatch, clamp, or driver command behavior. It
+adds one dispatch-decision log line per control cycle, exposes the flag in
 `/api/status`, and passes a reserved `_troubleshooting_mode` flag to Lua
 drivers so driver-specific diagnostics can emit richer status/readback data.
 
-Turn it off in Settings after the incident; logs and long-format metrics are
+Turn it off in Settings after the incident; logs and long-format metrics become
 noisier while it is enabled.
 
 ## `fuse`
@@ -142,13 +147,58 @@ Driver-specific fields are parsed by the Lua driver, not by the generic
 config schema. See the driver source and
 [`docs/driver-catalog.md`](driver-catalog.md) for expected keys.
 
-### Pixii Diagnostics
+The same `pplim_release_w` value (when set > 0) also arms a self-
+healing watchdog in the Ferroamp driver. If the SSO reports the
+sticky-pplim signature — DC bus voltage above 200 V, zero PV current,
+no fault, relay closed — continuously for ten minutes, the driver
+auto-publishes `pplim arg=<pplim_release_w>` to release the lock.
+A five-minute cooldown prevents command-spam if the recovery doesn't
+take. Operators who leave `pplim_release_w` unset see a per-incident
+warning log instead — no MQTT publish, because we don't have a safe
+release value to send.
 
-When Troubleshooting mode is enabled from Settings, the Pixii driver emits
-extra SunSpec battery diagnostics: charge status, control mode, battery state,
-vendor state, event bits, and setpoint readback. `charge_status=testing` is
-the useful signal for suspected Pixii calibration/testing sessions that may
-ignore external setpoints.
+The `stuck_pv_recovery_count` metric tracks how many auto-recoveries
+the driver has issued since startup; alert on any non-zero rate to
+catch a chronic sticky-pplim condition that needs operator attention.
+
+### Pixii diagnostics in troubleshooting mode
+
+Pixii PowerShaper exposes standard SunSpec battery status points near
+the SoC registers. Enable **Settings → Control → Troubleshooting mode** when
+a site reports symptoms like "manual charge/discharge does nothing", "Pixii
+charges to 100 %", or the Pixii UI says batteries are calibrating/testing.
+
+```yaml
+- name: pixii
+  lua: drivers/pixii.lua
+  is_site_meter: true
+  battery_capacity_wh: 20000
+  capabilities:
+    modbus:
+      host: 192.168.1.50
+      port: 502
+      unit_id: 1
+```
+
+When global troubleshooting is enabled, the driver emits extra long-format
+metrics:
+
+- `battery_charge_status_code` — SunSpec 802 `ChaSt`; `7` means
+  `TESTING`, which is the best standard signal for Pixii
+  calibration/testing.
+- `battery_control_mode_code` — `0` remote, `1` local.
+- `battery_state_code`, `battery_vendor_state_code`,
+  `battery_event1_bits` — raw battery state/event diagnostics.
+- `pixii_setpoint_ems_w` / `pixii_setpoint_native_w` — readback of
+  Pixii's active setpoint registers after commands.
+- `pixii_last_command_*` — last command sent by 42W and whether the
+  Modbus write succeeded.
+
+The driver also logs status transitions as `Pixii: status ...`. If
+`charge_status=testing`, assume Pixii may be calibrating/testing and may
+ignore external setpoints until the battery exits that state. The legacy
+per-driver `config.troubleshooting_mode: true` flag still works, but the
+preferred operator path is the global site flag.
 
 ## `api`
 
@@ -210,6 +260,29 @@ weather:
 These feed the planner and ML twins. Provider changes are picked up by the
 next fetch cycle.
 
+## `v2x` — bidirectional EV policy (optional)
+
+```yaml
+v2x:
+  enabled: false                  # default-off; planner does not command V2X yet
+  driver_name: ferroamp_dc2       # optional; empty applies to every V2X driver
+  vehicle_capacity_wh: 77000      # optional if the charger reports capacity
+  min_reserve_soc_pct: 35         # required >0 when enabled
+  departure_target_soc_pct: 80    # optional; pair with departure_time
+  departure_time: "07:30"         # HH:MM local next occurrence, or RFC3339
+  max_charge_w: 7000
+  max_discharge_w: 5000
+  export_allowed: false
+  grid_charging_allowed: false
+  cycle_cost_ore_kwh: 12
+```
+
+This policy is read-only input for `GET /api/v2x/policy` and the
+`v2x_policy` block in `/api/status`. It answers what V2X power range is safe
+right now from live connection state, vehicle SoC, reserve/departure rules,
+charger limits, and grid import/export state. It does not enable automatic
+planner dispatch; manual V2X commands still go through `POST /api/v2x/command`.
+
 ## `planner`
 
 ```yaml
@@ -265,10 +338,12 @@ these specialized blocks.
 | `site.slew_rate_w`, `site.slew_enabled`, `site.min_dispatch_interval_s` | yes | Applied to dispatch immediately after reload. |
 | `site.control_interval_s` | partly | The next sleep interval picks it up; current tick keeps running. |
 | `site.watchdog_timeout_s` | yes | Used by watchdog scan. |
+| `site.troubleshooting_mode` | yes | Restarts active drivers to pass `_troubleshooting_mode`; no control behavior change. |
 | `fuse.*` | yes | Read by the control loop. |
 | `drivers[]` add/remove/reconfigure | yes | Registry diffs and respawns affected drivers. |
 | `drivers[].lua` path change | yes | Driver restarts with the new file. |
 | Editing a Lua file in place | no | Restart or touch `config.yaml` to reload the driver. |
+| `v2x.*` | yes | API readback uses the current config; dispatch does not consume it yet. |
 | `api.port` | no | Socket bind happens at startup. |
 | `state.path`, `state.cold_dir` | no | Store opens at startup. |
 | `homeassistant.*` | no | Broker connection is built at startup. |

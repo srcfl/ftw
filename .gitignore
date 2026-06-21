@@ -10,6 +10,16 @@ data/
 *.test
 *.out
 
+# go/cmd/* binaries built straight into go/ (e.g. `go build ./cmd/ftw-relay`).
+# These are dev build outputs, never shipped — releases build into bin/ via
+# the Makefile / release-assets workflow. Keep this list in sync with go/cmd/.
+/go/forty-two-watts
+/go/ftw-pair
+/go/ftw-relay
+/go/ftw-updater
+/go/sim-ferroamp
+/go/sim-sungrow
+
 # Local config for simulators
 config.local.yaml
 
@@ -26,6 +36,9 @@ dev-data/
 # Per-user Claude Code worktrees — machine-local, never tracked.
 .claude/worktrees/
 
+# Per-user Codex CLI tooling — machine-local, not part of the project.
+.codex/
+
 # pi-gen image builder — cloned by deploy/pi-gen/build.sh into the
 # deploy/pi-gen/ subtree, plus the per-build copies of files that
 # the stage pulls from the repo root at build time.
@@ -38,9 +51,6 @@ dev-data/
 *.db-journal
 *.db-wal
 *.db-shm
-/go/sim-ferroamp
-/go/sim-sungrow
-/go/forty-two-watts
 bin/
 artifacts/
 .cache/

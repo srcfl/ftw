@@ -12,7 +12,7 @@
 // the Lua VM:
 //
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
-//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
+//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"|"v2x_charger"
 //	host.millis()                   -- ms since driver start
 //	host.sleep(ms)                  -- block driver goroutine for ms (inter-write pacing)
 //	host.set_poll_interval(ms)
@@ -217,7 +217,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery"|"ev"|"vehicle", { w=…, soc=…, … })
+	// host.emit("meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", { w=…, soc=…, … })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
@@ -235,6 +235,10 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              session_wh (optional, kWh for current session * 1000),
 	//              max_a (optional, charger current limit),
 	//              phases (optional, 1 or 3)
+	//   v2x_charger -> w (positive = vehicle charging, negative = V2X discharge),
+	//              vehicle_soc (0..1 fraction), connected,
+	//              dc_w, dc_v, dc_a, session_charge_wh, session_discharge_wh,
+	//              rated_power_w, status, control_mode
 	//   vehicle -> soc (required, vehicle battery level % 0-100),
 	//              charge_limit_pct (optional, vehicle-configured limit),
 	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),
@@ -263,16 +267,18 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit_metric("battery_temp_c", 23.5) — record an arbitrary
+	// host.emit_metric("battery_temp_c", 23.5 [, "°C"]) — record an arbitrary
 	// scalar diagnostic into the long-format TS DB. Use for anything that
 	// doesn't fit the structured pv/battery/meter shape: temperatures, DC
 	// voltages, MPPT currents, grid frequency, inverter heat-sink, etc.
 	// The metric name is the column name in the time-series — pick a stable
-	// snake_case identifier with the unit as a suffix.
+	// snake_case identifier with the unit as a suffix. The optional 3rd arg
+	// is a display unit (e.g. "°C", "Hz", "kW") the UI uses to group + label.
 	host.RawSetString("emit_metric", L.NewFunction(func(L *lua.LState) int {
 		name := L.CheckString(1)
 		val := float64(L.CheckNumber(2))
-		if err := env.emitMetric(name, val); err != nil {
+		unit := L.OptString(3, "")
+		if err := env.emitMetric(name, val, unit); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
@@ -323,6 +329,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("set_make", L.NewFunction(func(L *lua.LState) int {
 		env.setMake(L.CheckString(1))
 		return 0
+	}))
+
+	// host.persist_secret(key, value) -> ok, err
+	// Durably writes a config secret back into the driver's own config
+	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
+	// Returns ok=false + an error string when the capability isn't wired.
+	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
+		key := L.CheckString(1)
+		val := L.CheckString(2)
+		if env.PersistSecret == nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString("persist_secret: capability not granted"))
+			return 2
+		}
+		if err := env.PersistSecret(key, val); err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		L.Push(lua.LNil)
+		return 2
 	}))
 
 	mqttSubscribe := L.NewFunction(func(L *lua.LState) int {

@@ -973,6 +973,108 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	}
 }
 
+func TestEVChargingSignalIncludesPositiveV2XReading(t *testing.T) {
+	store := seedStore(5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, 3000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 0
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 3000 {
+		t.Errorf("expected EVChargingW to include live V2X charging = 3000, got %f", st.EVChargingW)
+	}
+}
+
+func TestV2XDischargeClearsPreviousLiveEVChargingSignal(t *testing.T) {
+	store := seedStore(-5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.liveEVChargingW = 5000
+	st.EVChargingW = 5000
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 0 {
+		t.Errorf("expected live V2X discharge to clear previous live EVChargingW, got %f", st.EVChargingW)
+	}
+}
+
+func TestV2XDischargePreservesManualEVChargingSignal(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SetManualEVCharging(5000, true)
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 5000 {
+		t.Errorf("expected live V2X discharge to preserve manual EVChargingW, got %f", st.EVChargingW)
+	}
+}
+
+func TestEVChargingSignalSumsPositiveV2XBeforeNetting(t *testing.T) {
+	store := seedStore(-1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2-charge", telemetry.DerV2X, 3000, nil, nil)
+	store.DriverHealthMut("dc2-charge").RecordSuccess()
+	store.Update("dc2-discharge", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2-discharge").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 0
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 3000 {
+		t.Errorf("expected EVChargingW to keep positive V2X load before netting, got %f", st.EVChargingW)
+	}
+}
+
+func TestSelfConsumptionDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
+	// House load is +1 kW, V2X is discharging -5 kW, so the raw meter
+	// sees -4 kW export. Default BatteryCoversEV=false must strip V2X
+	// from the control signal instead of charging the stationary battery
+	// from the vehicle.
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && targets[0].TargetW > 0 {
+		t.Errorf("battery must not charge from V2X discharge by default, got target=%f", targets[0].TargetW)
+	}
+}
+
 // TestBatteryCoversEV_OffExcludesEVFromGrid mirrors the existing
 // exclusion behaviour. Grid meter reads +3000 W, 2500 W is EV, so
 // the effective grid the controller sees should be 500 W — well
@@ -5026,6 +5128,36 @@ func TestEnergyDispatchAbsorbsSurplusBeyondEVReserveActualDraw(t *testing.T) {
 	}
 	if got > 3900 {
 		t.Errorf("TargetW = %.0f W — battery overshoot, must leave EVRampHeadroomW (2 kW) of headroom for EV ramp-up (want ≈ 3500 W)", got)
+	}
+}
+
+func TestEnergyDispatchDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1250, // plan: charge ~5 kW over the slot
+		Strategy:        "arbitrage",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// House load is +1 kW, V2X is discharging -5 kW, so the raw meter
+	// sees -4 kW export. The energy path must cap the charge using the
+	// house-side grid signal when BatteryCoversEV=false.
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.BatteryCoversEV = false
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && targets[0].TargetW > 200 {
+		t.Errorf("energy path must not charge home battery from V2X discharge by default, got %.0f W", targets[0].TargetW)
 	}
 }
 

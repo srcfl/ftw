@@ -44,24 +44,28 @@ type legacyPayload struct {
 	ReadTimeMs int64  `json:"read_time_ms"`
 
 	// Common / meter
-	W      *float64 `json:"W,omitempty"`
-	Hz     *float64 `json:"Hz,omitempty"`
-	L1V    *float64 `json:"L1_V,omitempty"`
-	L2V    *float64 `json:"L2_V,omitempty"`
-	L3V    *float64 `json:"L3_V,omitempty"`
-	L1A    *float64 `json:"L1_A,omitempty"`
-	L2A    *float64 `json:"L2_A,omitempty"`
-	L3A    *float64 `json:"L3_A,omitempty"`
-	TIWh   *float64 `json:"total_import_Wh,omitempty"`
-	TEWh   *float64 `json:"total_export_Wh,omitempty"`
+	W    *float64 `json:"W,omitempty"`
+	Hz   *float64 `json:"Hz,omitempty"`
+	L1V  *float64 `json:"L1_V,omitempty"`
+	L2V  *float64 `json:"L2_V,omitempty"`
+	L3V  *float64 `json:"L3_V,omitempty"`
+	L1A  *float64 `json:"L1_A,omitempty"`
+	L2A  *float64 `json:"L2_A,omitempty"`
+	L3A  *float64 `json:"L3_A,omitempty"`
+	TIWh *float64 `json:"total_import_Wh,omitempty"`
+	TEWh *float64 `json:"total_export_Wh,omitempty"`
 
 	// Battery
-	A               *float64 `json:"A,omitempty"`
-	V               *float64 `json:"V,omitempty"`
-	SoCFract        *float64 `json:"SoC_nom_fract,omitempty"`
-	TotalChargeWh   *float64 `json:"total_charge_Wh,omitempty"`
-	TotalDischarWh  *float64 `json:"total_discharge_Wh,omitempty"`
-	HeatsinkC       *float64 `json:"heatsink_C,omitempty"`
+	A              *float64 `json:"A,omitempty"`
+	V              *float64 `json:"V,omitempty"`
+	DCW            *float64 `json:"dc_W,omitempty"`
+	DCV            *float64 `json:"dc_V,omitempty"`
+	DCA            *float64 `json:"dc_A,omitempty"`
+	SoCFract       *float64 `json:"SoC_nom_fract,omitempty"`
+	TotalChargeWh  *float64 `json:"total_charge_Wh,omitempty"`
+	TotalDischarWh *float64 `json:"total_discharge_Wh,omitempty"`
+	HeatsinkC      *float64 `json:"heatsink_C,omitempty"`
+	CapacityWh     *float64 `json:"capacity_Wh,omitempty"`
 
 	// PV (shares HeatsinkC above)
 	RatedPowerW       *float64 `json:"rated_power_W,omitempty"`
@@ -72,10 +76,17 @@ type legacyPayload struct {
 	TotalGenerationWh *float64 `json:"total_generation_Wh,omitempty"`
 
 	// EV (ev_port in legacy vocabulary)
-	PlugConnected    *bool    `json:"plug_connected,omitempty"`
-	Status           *string  `json:"status,omitempty"`
-	VehicleSoCFract  *float64 `json:"vehicle_soc_fract,omitempty"`
-	SessionChargeWh  *float64 `json:"session_charge_Wh,omitempty"`
+	PlugConnected    *bool     `json:"plug_connected,omitempty"`
+	Status           *string   `json:"status,omitempty"`
+	Protocol         *string   `json:"protocol,omitempty"`
+	ControlMode      *string   `json:"control_mode,omitempty"`
+	VehicleSoCFract  *float64  `json:"vehicle_soc_fract,omitempty"`
+	EVMaxEnergyReqWh *float64  `json:"ev_max_energy_req_Wh,omitempty"`
+	EVMinEnergyReqWh *float64  `json:"ev_min_energy_req_Wh,omitempty"`
+	SessionChargeWh  *float64  `json:"session_charge_Wh,omitempty"`
+	SessionDischarWh *float64  `json:"session_discharge_Wh,omitempty"`
+	LowerLimitW      []float64 `json:"lower_limit_W,omitempty"`
+	UpperLimitW      []float64 `json:"upper_limit_W,omitempty"`
 }
 
 // toLegacy performs the translation. It is a pure function of the
@@ -120,6 +131,7 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 		out.A = t.DCA
 		out.V = t.DCV
 		out.SoCFract = t.SoC
+		out.CapacityWh = t.CapacityWh
 		out.TotalChargeWh = t.TotalChargeWh
 		out.TotalDischarWh = t.TotalDischargeWh
 	}
@@ -140,7 +152,38 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 			out.Status = &s
 		}
 	}
+	if t.Type == KindV2X {
+		out.PlugConnected = t.Connected
+		out.VehicleSoCFract = t.VehicleSoC
+		out.DCW = t.DCW
+		out.DCV = t.DCV
+		out.DCA = t.DCA
+		out.CapacityWh = t.CapacityWh
+		out.TotalChargeWh = t.TotalChargeWh
+		out.TotalDischarWh = t.TotalDischargeWh
+		out.SessionChargeWh = t.SessionChargeWh
+		out.SessionDischarWh = t.SessionDischargeWh
+		out.EVMaxEnergyReqWh = t.EVMaxEnergyReqWh
+		out.EVMinEnergyReqWh = t.EVMinEnergyReqWh
+		if t.ChargePowerMinW != nil || t.ChargePowerMaxW != nil {
+			out.UpperLimitW = []float64{valueOrZero(t.ChargePowerMinW), 0, valueOrZero(t.ChargePowerMaxW)}
+		}
+		if t.DischargePowerMinW != nil || t.DischargePowerMaxW != nil {
+			out.LowerLimitW = []float64{-valueOrZero(t.DischargePowerMaxW), 0, -valueOrZero(t.DischargePowerMinW)}
+		}
+		out.RatedPowerW = t.RatedPowerW
+		out.Status = t.Status
+		out.Protocol = t.Protocol
+		out.ControlMode = t.ControlMode
+	}
 	return out
+}
+
+func valueOrZero(v *float64) float64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 // legacyType maps the clean DER vocabulary to Nova's current wire vocabulary.
@@ -150,6 +193,8 @@ func legacyType(kind string) string {
 		return "solar"
 	case KindEV:
 		return "ev_port"
+	case KindV2X:
+		return "v2x_charger"
 	default:
 		return kind
 	}

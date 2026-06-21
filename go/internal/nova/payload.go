@@ -8,6 +8,7 @@ package nova
 //   - PV:      ≤0 always (generation reduces import)
 //   - Battery: +W = charging (a load),   −W = discharging (a source)
 //   - EV:      +W when charging
+//   - V2X:     +W = vehicle charging, -W = vehicle discharging
 //
 // Field naming is snake_case; units are in the name (freq_hz, temp_c,
 // total_import_wh). Optional scalars are pointers so "zero" and "not
@@ -18,7 +19,7 @@ package nova
 // describe the same physical reality.
 type DerTelemetry struct {
 	// Envelope — always present.
-	Type        string `json:"type"` // "meter" | "pv" | "battery" | "ev"
+	Type        string `json:"type"` // "meter" | "pv" | "battery" | "ev" | "v2x_charger"
 	Make        string `json:"make,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Serial      string `json:"serial,omitempty"`
@@ -48,8 +49,10 @@ type DerTelemetry struct {
 
 	// Battery
 	SoC              *float64 `json:"soc,omitempty"` // 0..1 fraction of nominal
+	CapacityWh       *float64 `json:"capacity_wh,omitempty"`
 	DCV              *float64 `json:"dc_v,omitempty"`
 	DCA              *float64 `json:"dc_a,omitempty"`
+	DCW              *float64 `json:"dc_w,omitempty"`
 	TotalChargeWh    *float64 `json:"total_charge_wh,omitempty"`
 	TotalDischargeWh *float64 `json:"total_discharge_wh,omitempty"`
 
@@ -67,6 +70,20 @@ type DerTelemetry struct {
 	MaxA       *float64 `json:"max_a,omitempty"`
 	SessionWh  *float64 `json:"session_wh,omitempty"`
 	VehicleSoC *float64 `json:"vehicle_soc,omitempty"` // 0..1 fraction
+
+	// V2X charger
+	SessionChargeWh    *float64 `json:"session_charge_wh,omitempty"`
+	SessionDischargeWh *float64 `json:"session_discharge_wh,omitempty"`
+	ChargePowerMinW    *float64 `json:"charge_power_min_w,omitempty"`
+	ChargePowerMaxW    *float64 `json:"charge_power_max_w,omitempty"`
+	DischargePowerMinW *float64 `json:"discharge_power_min_w,omitempty"`
+	DischargePowerMaxW *float64 `json:"discharge_power_max_w,omitempty"`
+	EVMaxEnergyReqWh   *float64 `json:"ev_max_energy_req_wh,omitempty"`
+	EVMinEnergyReqWh   *float64 `json:"ev_min_energy_req_wh,omitempty"`
+	RatedPowerW        *float64 `json:"rated_power_w,omitempty"`
+	Status             *string  `json:"status,omitempty"`
+	Protocol           *string  `json:"protocol,omitempty"`
+	ControlMode        *string  `json:"control_mode,omitempty"`
 }
 
 // DerKind is the clean vocabulary. Matches telemetry.DerType.String().
@@ -75,4 +92,5 @@ const (
 	KindPV      = "pv"
 	KindBattery = "battery"
 	KindEV      = "ev"
+	KindV2X     = "v2x_charger"
 )

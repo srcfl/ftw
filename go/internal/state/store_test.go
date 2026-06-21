@@ -140,6 +140,67 @@ func TestDailyEnergyMissReturnsFalse(t *testing.T) {
 	}
 }
 
+// DailyEnergy.Intervals reports the number of integration intervals
+// (rows with a predecessor). Right after midnight with 0–1 rows there
+// is nothing to integrate, so callers must be able to tell that apart
+// from a genuine zero — Intervals carries that signal.
+func TestDailyEnergyIntervalsDistinguishesNoDataFromZero(t *testing.T) {
+	base := time.Date(2026, 5, 23, 0, 0, 0, 0, time.Local)
+
+	t.Run("empty range", func(t *testing.T) {
+		s := freshStore(t)
+		d, err := s.DailyEnergy(base.UnixMilli(), base.Add(time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatalf("DailyEnergy: %v", err)
+		}
+		if d.Intervals != 0 {
+			t.Errorf("Intervals = %d, want 0 (no rows)", d.Intervals)
+		}
+	})
+
+	t.Run("single row", func(t *testing.T) {
+		s := freshStore(t)
+		if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+			t.Fatalf("RecordHistory: %v", err)
+		}
+		d, err := s.DailyEnergy(base.UnixMilli(), base.Add(time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatalf("DailyEnergy: %v", err)
+		}
+		// One row has no predecessor → no interval, even though a row exists.
+		if d.Intervals != 0 {
+			t.Errorf("Intervals = %d, want 0 (single row, nothing to integrate)", d.Intervals)
+		}
+		if d.ImportWh != 0 {
+			t.Errorf("ImportWh = %v, want 0 (no interval)", d.ImportWh)
+		}
+	})
+
+	t.Run("multiple rows", func(t *testing.T) {
+		s := freshStore(t)
+		if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(1 * time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+			t.Fatalf("RecordHistory 1: %v", err)
+		}
+		if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(4 * time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+			t.Fatalf("RecordHistory 2: %v", err)
+		}
+		if err := s.RecordHistory(HistoryPoint{TsMs: base.Add(6 * time.Minute).UnixMilli(), GridW: 1200}); err != nil {
+			t.Fatalf("RecordHistory 3: %v", err)
+		}
+		d, err := s.DailyEnergy(base.UnixMilli(), base.Add(time.Hour).UnixMilli())
+		if err != nil {
+			t.Fatalf("DailyEnergy: %v", err)
+		}
+		// 3 rows → 2 intervals (rows 2 and 3 each have a predecessor).
+		if d.Intervals != 2 {
+			t.Errorf("Intervals = %d, want 2 (3 rows → 2 intervals)", d.Intervals)
+		}
+		if d.ImportWh <= 0 {
+			t.Errorf("ImportWh = %v, want > 0 (intervals integrated)", d.ImportWh)
+		}
+	})
+}
+
 func TestConfigPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s1, err := Open(path)

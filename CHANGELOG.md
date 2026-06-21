@@ -1,5 +1,244 @@
 # Changelog
 
+## 0.124.4
+
+### Patch Changes
+
+- aeac725: MyUplink driver self-heals instead of needing a manual restart. NIBE/MyUplink
+  is touchy right after consent (token propagation / rate-limit), so the first
+  auth or device-detect can fail — previously the driver then idled forever on a
+  nil device_id and only came online after the operator hit Restart. driver_poll
+  now retries setup (auth + device detection) with a 30 s backoff, so it recovers
+  on its own within a poll or two.
+
+## 0.124.3
+
+### Patch Changes
+
+- 0db6692: Set the car's SoC from the EV Charger modal. Clicking the EV planet now
+  shows a "State of charge" section: while the car is plugged in it offers
+  an inline % field + Set (re-anchors the inferred SoC via
+  POST /api/loadpoints/{id}/soc and replans); unplugged it shows the current
+  value with a hint. Previously this lived only in the advanced loadpoints
+  panel — now it's where the SoC is naturally looked for.
+
+## 0.124.2
+
+### Patch Changes
+
+- 6e321b3: Driver cards no longer show phantom battery-SoC / PV / meter "0" rows for
+  telemetry-only drivers. A driver that emits only scalar metrics (e.g. the
+  MyUplink heat pump) has no meter/pv/battery DER reading, but the driver
+  card fell through to the meter/pv/battery layout and rendered 0 W / 0 %
+  with an empty SoC bar. Such drivers now render a compact "telemetry only"
+  body (status + ticks + errors); open Diagnose / the Heat pump card for
+  their signals.
+
+## 0.124.1
+
+### Patch Changes
+
+- 33ceac5: Manually correct a vehicle's State of Charge from the UI. The loadpoint
+  card (advanced mode) now shows an inline ✎ next to the SoC while the car
+  is plugged in — click it, type the real %, and it re-anchors the inferred
+  SoC via the existing POST /api/loadpoints/{id}/soc (then triggers an MPC
+  replan). Useful when there's no vehicle BMS reading and the inferred SoC
+  has drifted.
+
+## 0.124.0
+
+### Minor Changes
+
+- 20375bf: Rich heat-pump telemetry. The MyUplink driver now captures **every** device
+  point (not just four), emitting each as a metric with its unit. A new
+  click-through **detail view** on the Heat pump dashboard card groups all
+  signals by unit class (temperatures / power / frequency / percent / electrical
+  / counters & degree-minutes / state), each with its current value and a 24h
+  sparkline. `host.emit_metric` gains an optional `unit` argument (carried into
+  the live snapshot for UI grouping); metric emission now also registers a driver
+  health success, so a read-only telemetry driver no longer shows as offline.
+
+## 0.123.3
+
+### Patch Changes
+
+- d851d8a: Clearer MyUplink onboarding. The device card now shows numbered setup
+  steps with a link to the MyUplink developer portal, and renders **Client
+  Identifier** and **Client Secret** together using the exact same labels as
+  the portal (instead of a separate "Client ID" field and a distant
+  "Secrets" section), so the two values can't be swapped. The OAuth-managed
+  refresh_token no longer appears as a hand-editable secret field.
+
+## 0.123.2
+
+### Patch Changes
+
+- b58891a: Fix read-only telemetry drivers showing "offline" with "last success:
+  never" despite live data. A driver that only calls `host.emit_metric`
+  (e.g. the MyUplink heat-pump driver) never recorded a health success, so
+  the watchdog flipped it offline even while it polled and emitted metrics
+  fine. `emit_metric` now records a health success like the structured
+  `host.emit` does. The dispatch stale-meter guard is unaffected — it keys
+  on per-reading (DerMeter) freshness, not driver-level last-success.
+
+## 0.123.1
+
+### Patch Changes
+
+- 9483205: Fix MyUplink "connects but finds nothing": the driver read the wrong JSON
+  keys from the MyUplink API. Device auto-detection used `systems.objects`
+  but the real `/v2/systems/me` response keys the array as `systems`, so no
+  device was ever found. Also read the points unit from `parameterUnit`
+  (the real field name) instead of `unit`, so kW→W conversion works.
+
+## 0.123.0
+
+### Minor Changes
+
+- 48f972b: MyUplink heat-pump driver now uses the authorization-code OAuth flow the
+  MyUplink developer portal actually supports, fixing the `invalid_client`
+  startup failure (the old `client_credentials` grant is not offered for portal
+  apps). A new in-app consent flow (Settings → Devices → "Connect to MyUplink")
+  handles the one-time browser sign-in, stores the refresh token as a masked
+  secret, and keeps it fresh — the driver runs `grant_type=refresh_token` at
+  runtime and persists Azure-B2C-rotated tokens via the new `host.persist_secret`
+  capability so they survive restarts. A manual fallback (paste the redirected
+  URL) completes the consent on origins where the auto-callback can't reach the
+  Pi (relay/home route, or an http LAN callback the portal rejects) — the Pi
+  exchanges the code over its own outbound HTTPS, so no inbound callback is
+  needed.
+
+  A new **Heat pump** dashboard card surfaces the driver's telemetry (compressor
+  power + hot-water / indoor / outdoor temperatures, with a 24h power sparkline).
+
+  Note: the driver has no `mode` field — it is read-only telemetry for one
+  physical pump.
+
+## 0.122.0
+
+### Minor Changes
+
+- c85ad70: Make owner remote access reachable AND fast. The relay now publishes shared
+  ICE/TURN configuration (new `GET /signal/ice`, new `-ice-stun`/`-turn-url`/
+  `-turn-secret` flags) so hard-NAT/CGNAT owners can reach their Pi over a
+  TURN-relayed DTLS channel, while owner API writes stay on the fail-closed P2P
+  transport.
+
+  Connection setup is also much snappier. The browser no longer arms its retry
+  cooldown on a transient cold-load (directory-not-yet-decrypted) race — the
+  single biggest contributor to the old multi-second "Reaching your home" stall —
+  and both ends now POST their offer/answer as soon as a usable candidate set is
+  gathered (host + server-reflexive, plus a relay candidate when TURN is
+  configured so symmetric-NAT owners still traverse) instead of waiting for full
+  ICE gathering. The Pi caches the relay ICE config and refreshes it hourly
+  instead of refetching it on every offer, retries use exponential backoff, and a
+  transient `/signal/ice` failure reuses the last good config instead of silently
+  dropping TURN.
+
+## 0.121.0
+
+### Minor Changes
+
+- 941a81f: Add a Tesla-style manual charge control to the EV charging modal: an amp
+  slider (range = the loadpoint's min/max charge current) plus Start / Stop.
+  Start pins a **persistent** manual hold at the chosen amperage that now
+  **overrides `surplus_only`** — when the operator explicitly asks to charge,
+  we honour it and import from the grid if PV is short. Stop releases the hold
+  and drops straight back to automatic charging (PV-surplus-only when that
+  toggle is on).
+
+  Behaviour change: previously `surplus_only` clamped any manual hold down to
+  the available PV surplus (a manual "Start" with no sun did nothing). A manual
+  hold now takes priority over surplus; the per-phase fuse clamp remains the one
+  guard a manual hold can never override. Persistent holds carry no time expiry
+  and are auto-released when the vehicle unplugs. `POST .../manual_hold` now
+  accepts `hold_s: 0` (or omitted) to mean a persistent hold; `hold_s > 0` is
+  still the bounded diagnostic hold. `GET /api/loadpoints` gains `phases`,
+  `voltage_v`, `manual_active`, and `manual_charge_w` so the UI can render the
+  amp slider and reflect the current override.
+
+  The now-redundant Start / Pause / Resume footer buttons in the EV modal are
+  removed — the amp slider's Start/Stop supersedes them (Start is strictly more
+  capable: it pins a chosen amperage instead of always MaxChargeW). The
+  `POST /api/ev/command` endpoint is retained for Home Assistant / scripts.
+
+- caf07c3: Add a read-only MyUplink heat-pump telemetry driver (`drivers/myuplink.lua`).
+  Authenticates to the MyUplink Cloud REST API v2 (OAuth2 client_credentials,
+  READSYSTEM scope) and emits compressor power and hot-water / indoor / outdoor
+  temperatures into the time-series DB. Observe-only — no control. Configure the
+  Client ID in Settings → Devices; the Client Secret is stored as a masked
+  config secret.
+- 6ec93f8: Add manual V2X pilot support with experimental Ferroamp DC2 and Ambibox MQTT drivers, signed `v2x_charger` telemetry, `/api/v2x/command`, V2X policy readback, dashboard controls, and V2X-aware load/status accounting.
+
+### Patch Changes
+
+- c76ac32: Fix surplus-only EV charging never starting on a "dumb" charger (CTEK and
+  other AC wallboxes that don't report the vehicle's BMS SoC). In
+  self-consumption mode the home-battery PI absorbs all PV surplus, so the EV
+  loadpoint sees nothing to claim. `EVSurplusOnlyReserveW` is supposed to hold
+  back export headroom for the EV, but `SurplusReserveW` only reserved a
+  bootstrap floor for a plugged-but-not-drawing EV when the vehicle's SoC was
+  known and below its limit — a dumb charger reports no SoC, so the reserve was
+  0, the battery took everything, and the EV could never bootstrap (chicken-and-
+  egg, observed live on Stefan's CTEK).
+
+  `SurplusReserveW` now reserves the loadpoint's `MinChargeW` (or the ramp
+  headroom) for a plugged, surplus-only, not-drawing EV **unless the car is known
+  to be full** (SoC known and at/above its charge limit). This prioritises PV
+  into the EV ahead of the home battery, as intended. Trade-off: a finished-but-
+  still-plugged car on a dumb charger holds the reserve (exports rather than
+  charging the home battery) until unplugged — surfacing the charger's own "done"
+  state into the loadpoint would let us skip that case too (follow-up). Smart
+  chargers/paired vehicles are unaffected: a car known to be full still reserves
+  nothing.
+
+- 6ec93f8: Fix dashboard stalls on late-day loads by aggregating the `/api/status`
+  energy-today totals in SQLite instead of loading every history sample
+  since midnight into Go on every 2-second status poll.
+- 28080b5: Fix Modbus drivers getting stuck after a device goes mute on a long-lived
+  session. The reconnect classifier (`isTransportError`) recognised closed-socket
+  errors but not `simonvetter/modbus`'s own deadline sentinel `ErrRequestTimedOut`
+  ("request timed out") — a plain string-typed value that is neither a `net.Error`
+  nor wraps `syscall.ETIMEDOUT`. When a device kept the TCP socket `ESTABLISHED`
+  but stopped answering requests on it, every read/write timed out and the wrapper
+  reused the dead socket forever instead of redialing.
+
+  Seen in the field on a CTEK Chargestorm CSOS charger: 2907 consecutive
+  charge-limit writes timed out over ~43 h, so the controller could never set the
+  EV charge current and the loadpoint never followed PV surplus — while a fresh
+  connection to the same charger read and wrote the register instantly. The
+  classifier now treats the timeout sentinel as a transport error, so the next
+  call tears down the wedged socket and dials a fresh one.
+
+- 6ec93f8: Add a global `site.troubleshooting_mode` for incident diagnostics. The mode exposes its state in `/api/status`, logs dispatch-decision snapshots without changing control behavior, and passes a reserved troubleshooting flag into Lua drivers. Pixii now uses that flag to emit calibration/control status and setpoint readback metrics, while still supporting its legacy per-driver troubleshooting flag. Invalid Pixii SoC values now omit `soc` from the battery emit instead of dropping the whole battery reading.
+- bc9e473: fix(loadpoint): resume PV surplus after a self-induced charger stop (NCRQ)
+
+  When a surplus_only loadpoint was paused below its 3-phase floor on a sub-floor
+  PV dip, the charger reported the vehicle "not requesting current" (NCRQ). That
+  stop is self-induced — we withheld power, the car didn't decline — but it was
+  counted toward session completion. After the 90 s timeout the loadpoint latched
+  the session "complete" and the planner stopped offering PV surplus for the rest
+  of the day, so the charger never restarted when the sun returned (the home
+  battery soaked the surplus instead).
+
+  Two complementary fixes, both generic across EV-charger drivers:
+
+  - The controller now tells the loadpoint manager when it is withholding power
+    (`SetSurplusWithheld`). A "not requesting current" report during a
+    self-induced pause no longer advances the session-completion timer; a genuine
+    vehicle-side refusal once power is offered again still completes as before.
+  - Chargers with no vehicle-API binding (e.g. a bare CTEK) couldn't be woken
+    from NCRQ because the wake path required a bound vehicle driver. The
+    controller now drives the wake off the charger's own connector state: when
+    surplus recovers and we offer power but the charger is still in a
+    self-induced NCRQ, it cycles the contactor (ev_pause → ev_resume) to make the
+    vehicle renegotiate, throttled to once per cooldown.
+
+- 6ec93f8: Internal: add the `thermal` package — site-level asset contract types
+  (`TemperatureBand`, `MarginalPrice`, `DecideIntent`) for the upcoming heat-pump
+  workstream. Not yet wired into control or MPC, so there is no user-visible
+  behavior change; it lands as scaffolding the thermal-store model will consume.
+
 ## 0.120.9
 
 ### Patch Changes

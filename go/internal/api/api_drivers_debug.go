@@ -30,11 +30,11 @@ import (
 // driver in a single response so the UI doesn't fan-out four parallel
 // fetches.
 type driverDetailResp struct {
-	Name      string                       `json:"name"`
-	Health    *telemetry.DriverHealth      `json:"health,omitempty"`
-	Readings  []readingDTO                 `json:"readings"`
-	Metrics   []telemetry.MetricSnapshot   `json:"metrics"`
-	Identity  driverIdentityDTO            `json:"identity"`
+	Name     string                     `json:"name"`
+	Health   *telemetry.DriverHealth    `json:"health,omitempty"`
+	Readings []readingDTO               `json:"readings"`
+	Metrics  []telemetry.MetricSnapshot `json:"metrics"`
+	Identity driverIdentityDTO          `json:"identity"`
 }
 
 type readingDTO struct {
@@ -80,7 +80,7 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Cfg != nil && s.deps.Cfg.Site.WatchdogTimeoutS > 0 {
 		staleAfter = time.Duration(s.deps.Cfg.Site.WatchdogTimeoutS) * time.Second
 	}
-	for _, der := range []telemetry.DerType{telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery, telemetry.DerEV, telemetry.DerVehicle} {
+	for _, der := range telemetry.AllDerTypes() {
 		rd := s.deps.Tel.Get(name, der)
 		if rd == nil {
 			continue
@@ -229,7 +229,7 @@ func collectDriverProbe(displayName, runtimeName string, tel *telemetry.Store, r
 			resp.Error = h.LastError
 		}
 	}
-	for _, der := range []telemetry.DerType{telemetry.DerMeter, telemetry.DerPV, telemetry.DerBattery, telemetry.DerEV, telemetry.DerVehicle} {
+	for _, der := range telemetry.AllDerTypes() {
 		rd := tel.Get(runtimeName, der)
 		if rd == nil {
 			continue

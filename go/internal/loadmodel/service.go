@@ -261,12 +261,12 @@ func (s *Service) driverOnline(name string) bool {
 	return h != nil && h.IsOnline()
 }
 
-// sample computes measured house load = grid_w − pv_w − bat_w − ev_w
+// sample computes measured house load = grid_w - pv_w - bat_w - ev_w - v2x_w
 // and feeds it to the model. Skips when drivers haven't settled yet
 // (no site meter reading). EV is subtracted so the weekly-pattern
 // learner tracks house consumption, not "house + occasional 10 kWh
-// car session" — otherwise every Monday-evening bucket inflates when
-// the driver happens to plug in after work.
+// car session"; V2X is also subtracted because it is vehicle storage,
+// not household demand, whether charging or discharging.
 func (s *Service) sample() {
 	s.sampleAt(time.Now())
 }
@@ -295,13 +295,14 @@ func (s *Service) sampleAt(now time.Time) {
 		}
 		batW += r.SmoothedW // site-sign: positive = charging
 	}
-	evW := s.Tele.SumOnlineEVW() // online-only so stale readings don't poison load
-	loadW := gridW - pvW - batW - evW
+	evW := s.Tele.SumOnlineEVW()   // online-only so stale readings don't poison load
+	v2xW := s.Tele.SumOnlineV2XW() // signed: +charging, -discharging
+	loadW := gridW - pvW - batW - evW - v2xW
 	if loadW < 0 {
 		// Almost always a transient — during a PI step the measured
 		// flow can briefly appear negative. Skip rather than train
 		// on a physically impossible value.
-		slog.Debug("loadmodel: skip (neg load)", "grid_w", gridW, "pv_w", pvW, "bat_w", batW, "ev_w", evW)
+		slog.Debug("loadmodel: skip (neg load)", "grid_w", gridW, "pv_w", pvW, "bat_w", batW, "ev_w", evW, "v2x_w", v2xW)
 		return
 	}
 

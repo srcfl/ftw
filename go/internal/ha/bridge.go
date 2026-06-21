@@ -318,6 +318,8 @@ func (b *Bridge) publishDiscovery() {
 		{"grid_power", "Grid Power", "W", "power", b.stateTopic("grid_w")},
 		{"pv_power", "PV Power", "W", "power", b.stateTopic("pv_w")},
 		{"battery_power", "Battery Power", "W", "power", b.stateTopic("bat_w")},
+		{"ev_power", "EV Power", "W", "power", b.stateTopic("ev_w")},
+		{"v2x_power", "V2X Power", "W", "power", b.stateTopic("v2x_w")},
 		{"load_power", "Load Power", "W", "power", b.stateTopic("load_w")},
 		{"battery_soc", "Battery SoC", "%", "battery", b.stateTopic("bat_soc_pct")},
 		{"grid_target", "Grid Target", "W", "power", b.stateTopic("grid_target_w")},
@@ -388,6 +390,8 @@ func (b *Bridge) publishDiscovery() {
 			{"_pv_w", " PV Power", "W", "power"},
 			{"_bat_w", " Battery Power", "W", "power"},
 			{"_bat_soc_pct", " Battery SoC", "%", "battery"},
+			{"_v2x_w", " V2X Power", "W", "power"},
+			{"_v2x_vehicle_soc_pct", " V2X Vehicle SoC", "%", "battery"},
 		} {
 			msg := map[string]any{
 				"name":                name + s.label,
@@ -404,7 +408,7 @@ func (b *Bridge) publishDiscovery() {
 	}
 	// Count total sensors announced (site + per-driver).
 	b.mu.Lock()
-	b.sensorsAnnounced = len(sensors) + len(b.driverNames)*5 // 5 per driver
+	b.sensorsAnnounced = len(sensors) + len(b.driverNames)*6 // 6 per driver
 	b.mu.Unlock()
 }
 
@@ -508,7 +512,9 @@ func (b *Bridge) publishState() {
 	if socCount > 0 {
 		avgSoC = sumSoC / float64(socCount)
 	}
-	loadW := gridW - batW - pvW
+	evW := b.tel.SumOnlineEVW()
+	v2xW := b.tel.SumOnlineV2XW()
+	loadW := gridW - batW - pvW - evW - v2xW
 	if loadW < 0 {
 		loadW = 0
 	}
@@ -516,6 +522,8 @@ func (b *Bridge) publishState() {
 	b.publishValue("grid_w", gridW)
 	b.publishValue("pv_w", pvW)
 	b.publishValue("bat_w", batW)
+	b.publishValue("ev_w", evW)
+	b.publishValue("v2x_w", v2xW)
 	b.publishValue("load_w", loadW)
 	b.publishValue("bat_soc_pct", avgSoC*100)
 	b.publishValue("grid_target_w", gridTarget)
@@ -538,6 +546,12 @@ func (b *Bridge) publishState() {
 			b.publishDriver(name, "bat_w", r.SmoothedW)
 			if r.SoC != nil {
 				b.publishDriver(name, "bat_soc_pct", *r.SoC*100)
+			}
+		}
+		if r := b.tel.Get(name, telemetry.DerV2X); r != nil {
+			b.publishDriver(name, "v2x_w", r.SmoothedW)
+			if r.SoC != nil {
+				b.publishDriver(name, "v2x_vehicle_soc_pct", *r.SoC*100)
 			}
 		}
 	}

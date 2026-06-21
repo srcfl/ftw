@@ -167,7 +167,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 	h.mu.Unlock()
 
 	if req.Status == core.ChargePointStatusFaulted {
-		h.tel.EmitMetric(id, "ev_fault", 1)
+		h.tel.EmitMetric(id, "ev_fault", 1, "")
 		slog.Warn("OCPP charger faulted", "charger", id, "errorCode", req.ErrorCode, "info", req.Info)
 	}
 	slog.Info("OCPP status",
@@ -251,7 +251,7 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 		"charger", id, "txid", req.TransactionId,
 		"session_wh", sessionWh, "reason", req.Reason)
 	h.pushReading(id, s)
-	h.tel.EmitMetric(id, "ev_session_wh", sessionWh)
+	h.tel.EmitMetric(id, "ev_session_wh", sessionWh, "Wh")
 	h.tel.RecordDriverSuccess(id)
 	return core.NewStopTransactionConfirmation(), nil
 }
