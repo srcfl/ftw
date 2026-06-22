@@ -1,23 +1,37 @@
 # Raspberry Pi SD-card image
 
-A pre-built `.img.xz` ships with every release. Flash it to an SD
-card, drop the card into a Raspberry Pi 4, plug in power + Ethernet
-(or follow the WiFi-onboarding flow below), and the dashboard is at
-`http://42w.local/` within ~90 s of first boot. No terminal, no
-manual install.
+The recommended way to install on a Raspberry Pi 4/5 is to point
+**Raspberry Pi Imager** at the 42W image repository (a small
+`os_list.json` file), pick **Forty-Two Watts**, and set your
+**hostname, SSH user/password, and WiFi** right in Imager's
+customisation panel before you write the card. Imager downloads the
+image for you — you never fetch the `.img.xz` by hand. Drop the card
+into a Pi, plug in power, and the dashboard is at `http://42w.local/`
+within ~90 s of first boot. No terminal, no manual install.
 
-This is the recommended path for new users.
+You *can* also download the `.img.xz` and flash it directly, but that
+skips the customisation panel — the Pi then boots with default
+credentials and WiFi has to be set up through the captive portal. It's
+the fallback, not the recommended path.
 
 ---
 
-## TL;DR
+## TL;DR (recommended)
 
-1. Download `42w-rpi4-arm64-vX.Y.Z.img.xz` from [Releases](https://github.com/frahlg/forty-two-watts/releases/latest).
-2. Flash to an SD card with [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (recommended) or [balenaEtcher](https://etcher.balena.io/). Both handle `.img.xz` natively — no need to decompress first.
-3. Insert SD card → power on the Pi → wait ~90 s.
-4. Open `http://42w.local/` in any browser on the same network. (`:8080` also works — the image runs an nftables redirect from 80 to 8080 so the bare hostname is enough.)
+1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 2.0 or newer.
+2. **App Options → Content Repository → EDIT → Use custom file** → paste the 42W repository URL, then **APPLY & RESTART**:
+   ```
+   https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json
+   ```
+3. **CHOOSE OS → Forty-Two Watts**, **CHOOSE STORAGE → your SD card**, then set **hostname / SSH user+password / WiFi** in the customisation panel and **WRITE**.
+4. Insert SD card → power on the Pi → wait ~90 s.
+5. Open `http://42w.local/` in any browser on the same network. (`:8080` also works — the image runs an nftables redirect from 80 to 8080 so the bare hostname is enough.)
 
-If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
+That's it — Imager pulls the image itself, so you never download a file
+by hand, and because WiFi is configured up front you need neither
+Ethernet nor the captive portal. Prefer to flash a raw image instead?
+See [the direct-download fallback](#download-the-image-directly-fallback)
+(no customisation panel).
 
 ---
 
@@ -34,8 +48,9 @@ If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 | Port redirect | nftables maps 80 -> 8080 so `http://42w.local/` works without `:8080` |
 | Stack | `forty-two-watts`, `mosquitto`, `ftw-updater` (pulled from GHCR on first boot) |
 
-Image size: ~410 MB compressed, ~2.4 GB written to SD card. Any 8 GB
-or larger card works; 16 GB+ recommended for headroom.
+Image size: ~640 MB compressed, ~2.4 GB written to SD card (it then
+grows to fill the card on first boot). Any 8 GB or larger card works;
+16 GB+ recommended for headroom.
 
 The base is **stock Raspberry Pi OS Lite** (Debian Trixie) with a
 single custom stage layered on top. First-boot customisation
@@ -46,9 +61,16 @@ path if the dashboard ever gets stuck.
 
 ---
 
-## Download
+## Download the image directly (fallback)
 
-### Stable releases (recommended)
+> **Not the recommended path.** Downloading and flashing the raw
+> `.img.xz` skips Imager's customisation panel, so the Pi boots with
+> the default SSH credentials and you configure WiFi through the
+> captive portal. To set hostname / SSH / WiFi before first boot, use
+> the [repository flow](#tldr-recommended) instead — it downloads the
+> image for you.
+
+### Stable releases
 
 Each tagged release publishes the image as a release asset:
 
