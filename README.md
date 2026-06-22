@@ -51,8 +51,15 @@ Adding a new device starts with
 
 ### Option A: Raspberry Pi SD-card image
 
-A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with releases. Flash it
-with Raspberry Pi Imager or balenaEtcher, boot the Pi, and open
+A pre-built `42w-rpi4-arm64-vX.Y.Z.img.xz` ships with releases. To set the
+hostname, SSH user, and Wi-Fi from Raspberry Pi Imager, point it at the 42W
+repository (**App Options → Content Repository → Use custom file**):
+
+```
+https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json
+```
+
+Then pick **Forty-Two Watts**, customise, and write. Boot the Pi and open
 `http://42w.local/`. If Wi-Fi is not pre-configured, the image exposes a
 `42w-setup` captive portal for onboarding.
 

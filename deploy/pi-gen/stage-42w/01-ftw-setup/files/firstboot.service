@@ -2,7 +2,12 @@
 Description=forty-two-watts first-boot provisioner
 Documentation=https://github.com/frahlg/forty-two-watts/blob/master/docs/rpi-image.md
 Wants=network-online.target docker.service
-After=network-online.target docker.service
+# Order after cloud-init's final stage so the user account, hostname,
+# and network (the WiFi/Ethernet config cloud-init applies from the
+# Imager-written user-data/network-config) are fully in place before we
+# pull images. Ordering only — cloud-final.service is already part of
+# the normal trixie boot; we don't pull it in ourselves.
+After=network-online.target docker.service cloud-final.service
 ConditionPathExists=!/var/lib/ftw/firstboot.done
 
 [Service]

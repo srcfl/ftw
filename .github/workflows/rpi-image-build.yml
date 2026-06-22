@@ -53,10 +53,10 @@ jobs:
           df -h /
 
       - name: Register binfmt_misc handlers for arm / arm64
-        # pi-gen's bookworm-arm64 branch checks for
+        # pi-gen's arm64 branch checks for
         # /usr/bin/qemu-aarch64-static (STATIC, with -static suffix,
         # from the qemu-user-static package) — NOT /usr/bin/qemu-arm
-        # like master does. Observed on run 24878263028: "qemu-
+        # like the armhf master does. Observed on run 24878263028: "qemu-
         # aarch64-static not found (please install qemu-user-static)".
         #
         # --no-install-recommends prevents qemu-user-binfmt from
@@ -81,10 +81,10 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.sha }}
 
       - name: Build image
-        env:
-          # Pin to pi-gen's bookworm-arm64 branch. master is on trixie
-          # now; keep us on bookworm until we deliberately jump.
-          PI_GEN_REF: bookworm-arm64
+        # The pinned pi-gen ref (arm64 / trixie branch commit) lives in
+        # deploy/pi-gen/build.sh as the single source of truth — no
+        # per-workflow override, so PR builds and release builds use the
+        # same base.
         run: deploy/pi-gen/build.sh
 
       - name: Locate artifact

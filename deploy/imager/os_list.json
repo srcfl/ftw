@@ -1,0 +1,17 @@
+{
+  "os_list": [
+    {
+      "name": "Forty-Two Watts",
+      "description": "Home Energy Management System — Raspberry Pi 4/5 (64-bit)",
+      "icon": "https://raw.githubusercontent.com/frahlg/forty-two-watts/master/web/favicon.svg",
+      "url": "__IMAGE_URL__",
+      "extract_size": 0,
+      "extract_sha256": "__EXTRACT_SHA256__",
+      "image_download_size": 0,
+      "release_date": "1970-01-01",
+      "init_format": "cloudinit-rpi",
+      "website": "https://github.com/frahlg/forty-two-watts",
+      "devices": ["pi4-64bit", "pi5-64bit"]
+    }
+  ]
+}

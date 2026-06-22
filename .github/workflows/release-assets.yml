@@ -331,7 +331,7 @@ jobs:
       - name: Register binfmt_misc handlers for arm / arm64
         # See rpi-image-build.yml for the full rationale. Short version:
         # install qemu-user-static with --no-install-recommends (pi-gen's
-        # bookworm-arm64 branch wants /usr/bin/qemu-aarch64-static, and
+        # arm64 branch wants /usr/bin/qemu-aarch64-static, and
         # the flag keeps the wrapper-registering qemu-user-binfmt out),
         # then let tonistiigi/binfmt install F-flagged handlers that
         # survive pi-gen's chroot mount-namespace switch.
@@ -346,12 +346,12 @@ jobs:
           ref: ${{ needs.meta.outputs.tag }}
 
       - name: Build image
-        # Pin to pi-gen's bookworm-arm64 branch. Upstream master has
-        # advanced to Debian trixie; we keep the image on bookworm
-        # so the curl|bash installer and the SD image deploy to the
-        # same base OS. Bump this when we choose to jump to trixie.
-        env:
-          PI_GEN_REF: bookworm-arm64
+        # The pinned pi-gen ref (the arm64 / trixie branch commit) lives
+        # in deploy/pi-gen/build.sh as the single source of truth, so
+        # local builds and CI stay in lock-step. The image is Raspberry
+        # Pi OS Lite (64-bit, trixie) with cloud-init — the curl|bash
+        # installer is independent and runs on the user's own OS, so the
+        # two are intentionally no longer tied to the same Debian base.
         run: deploy/pi-gen/build.sh
 
       - name: Locate + rename artifact
@@ -380,6 +380,56 @@ jobs:
         # --clobber mirrors the binaries job — lets a manual re-run
         # replace a prior upload without aborting the job.
         run: gh release upload "${TAG}" "${ASSET}" --clobber
+
+      - name: Build + upload Imager repository JSON
+        # Raspberry Pi Imager 2.0 only offers the OS-customisation panel
+        # (hostname / SSH user / WiFi) for images described by a
+        # repository JSON declaring an `init_format`. Render the template
+        # at deploy/imager/os_list.json with THIS release's image URL,
+        # sizes, and (schema-required, Imager-verified) extract_sha256,
+        # then publish it as a release asset. Users point Imager at the
+        # stable, version-independent URL:
+        #   https://github.com/<owner>/<repo>/releases/latest/download/os_list.json
+        # which always redirects to the newest release's copy.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG:   ${{ needs.meta.outputs.tag }}
+          ASSET: ${{ steps.artifact.outputs.asset }}
+        run: |
+          set -euo pipefail
+          IMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/42w-rpi4-arm64-${TAG}.img.xz"
+          DL_SIZE="$(stat -c%s "${ASSET}")"
+          # xz --robot --list emits a `totals` row whose 5th field is the
+          # uncompressed (extracted) size in bytes.
+          EXTRACT_SIZE="$(xz --robot --list "${ASSET}" | awk '/^totals/{print $5}')"
+          # extract_sha256 is REQUIRED by the V4 schema and verified by
+          # Imager after writing. Stream-decompress so the ~2.4 GB image
+          # never has to land on disk.
+          EXTRACT_SHA="$(xz -dc "${ASSET}" | sha256sum | cut -d' ' -f1)"
+          RELEASE_DATE="$(date -u +%Y-%m-%d)"
+
+          jq \
+            --arg url   "${IMG_URL}" \
+            --argjson ds "${DL_SIZE}" \
+            --argjson es "${EXTRACT_SIZE}" \
+            --arg sha   "${EXTRACT_SHA}" \
+            --arg date  "${RELEASE_DATE}" \
+            '.os_list[0].url                  = $url
+            | .os_list[0].image_download_size = $ds
+            | .os_list[0].extract_size        = $es
+            | .os_list[0].extract_sha256      = $sha
+            | .os_list[0].release_date        = $date' \
+            deploy/imager/os_list.json > os_list.json
+
+          # Fail loudly if templating left any placeholder behind, and
+          # assert the checksum is a real 64-hex-char digest.
+          if grep -q '__IMAGE_URL__\|__EXTRACT_SHA256__' os_list.json; then
+            echo "os_list.json still contains placeholders after templating" >&2
+            exit 1
+          fi
+          jq -e '.os_list[0].extract_sha256 | test("^[0-9a-f]{64}$")' os_list.json >/dev/null
+
+          gh release upload "${TAG}" os_list.json --clobber
 
   discord:
     name: announce release on Discord

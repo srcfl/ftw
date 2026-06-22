@@ -25,7 +25,7 @@ If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 
 | Component | Version |
 |---|---|
-| Base OS | **Raspberry Pi OS Lite** (64-bit, Debian Bookworm) |
+| Base OS | **Raspberry Pi OS Lite** (64-bit, Debian Trixie) |
 | Kernel | Stock Pi kernel (whatever the matching Pi OS Lite ships) |
 | Init | systemd |
 | Container engine | Docker CE + compose plugin (from Docker's official apt repo) |
@@ -37,9 +37,12 @@ If you don't have Ethernet, see [WiFi onboarding](#connect-to-your-network).
 Image size: ~410 MB compressed, ~2.4 GB written to SD card. Any 8 GB
 or larger card works; 16 GB+ recommended for headroom.
 
-The base is **stock Raspberry Pi OS Lite** with stage2 trimmed off
-and a single custom stage layered on top. SSH is enabled by default
-so you have a recovery path if the dashboard ever gets stuck.
+The base is **stock Raspberry Pi OS Lite** (Debian Trixie) with a
+single custom stage layered on top. First-boot customisation
+(hostname, SSH user, WiFi) is handled by **cloud-init** — the same
+mechanism stock Raspberry Pi OS Trixie uses — when you set it in
+Raspberry Pi Imager. SSH is enabled by default so you have a recovery
+path if the dashboard ever gets stuck.
 
 ---
 
@@ -77,15 +80,31 @@ Both supported flashers handle `.img.xz` natively — they decompress
 on the fly while writing to the card. **You do not need to extract
 the file before flashing.**
 
-### Path A — Raspberry Pi Imager (recommended)
+### Path A — Raspberry Pi Imager with the 42W repository (recommended)
 
-1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/).
-2. **CHOOSE OS** → scroll to bottom → **Use custom** → select your
-   downloaded `42w-rpi4-arm64-*.img.xz`.
-3. **CHOOSE STORAGE** → pick the SD card.
-4. **WRITE**. Imager handles xz decompression + verification.
+Raspberry Pi Imager 2.0 only shows the customisation panel (hostname,
+SSH user/password, WiFi) for images it has metadata for. Point it at
+the 42W repository so it does:
+
+1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (2.0 or newer).
+2. **App Options → Content Repository → EDIT → Use custom file** → paste:
+   ```
+   https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json
+   ```
+   → **APPLY & RESTART**. (CLI equivalent: `rpi-imager --repo <url>`.)
+3. **CHOOSE OS** → **Forty-Two Watts** now appears in the list.
+4. **CHOOSE STORAGE** → pick the SD card.
+5. **NEXT** → when asked to apply OS customisation, set your **hostname**
+   (keep `42w` so the dashboard stays at `http://42w.local/`), **SSH
+   user/password**, and **WiFi** (SSID + password — the Pi joins your
+   network at first boot, no captive portal needed). Then **WRITE**.
 
 When it finishes, eject the card cleanly.
+
+> **No repository?** You can still **CHOOSE OS → Use custom** and pick a
+> downloaded `42w-rpi4-arm64-*.img.xz` directly — but Imager then offers
+> **no** customisation panel, so the Pi boots with default credentials
+> and WiFi is configured via the captive portal (below).
 
 ### Path B — balenaEtcher
 
@@ -110,15 +129,19 @@ WiFi is configured at first boot via the **captive portal** flow
 ## First boot
 
 Insert the SD card, plug in Ethernet (or rely on the captive
-portal), connect power. Two things happen automatically:
+portal), connect power. Three things happen automatically:
 
-1. **Partition resize.** The image is ~2.4 GB; the resize step grows
-   the rootfs to fill your SD card on the very first boot. The Pi
-   reboots once to pick up the resized partition. Adds ~30 s.
-2. **First-boot service** (`ftw-firstboot.service`). Pulls the
-   container images from GHCR (`forty-two-watts`, `mosquitto`,
-   `ftw-updater`), brings up the stack with `docker compose up -d`.
-   Takes ~60–90 s on a decent connection.
+1. **Partition resize.** The image is ~2.4 GB; Trixie grows the rootfs
+   to fill your SD card on first boot (initramfs + `rpi-resize.service`).
+   Adds ~30 s.
+2. **cloud-init customisation.** If you set a hostname / SSH user / WiFi
+   in Raspberry Pi Imager, cloud-init applies them now (from the
+   `user-data` / `network-config` it wrote to the boot partition).
+3. **First-boot service** (`ftw-firstboot.service`). Runs after
+   cloud-init finishes, pulls the container images from GHCR
+   (`forty-two-watts`, `mosquitto`, `ftw-updater`) and brings up the
+   stack with `docker compose up -d` from `/opt/forty-two-watts`. Takes
+   ~60–90 s on a decent connection.
 
 After that, the dashboard is up and stays up across reboots.
 
@@ -175,14 +198,15 @@ IP directly — `http://192.168.x.y/` (or `:8080`).
 
 | What | Default | How to change |
 |---|---|---|
-| SSH user | `ftw` | Imager advanced options |
-| SSH password | `fortytwowatts` | Imager advanced options, or `passwd` after first SSH |
-| Hostname | `42w` (mDNS: `42w.local`) | Imager advanced options |
+| SSH user | `ftw` | Imager customisation (via the 42W repository, Path A) |
+| SSH password | `fortytwowatts` | Imager customisation, or `passwd` after first SSH |
+| Hostname | `42w` (mDNS: `42w.local`) | Imager customisation |
 | Dashboard | no auth on the LAN | (planned for a future release) |
 
 The defaults exist so you have a recovery path if something goes
-wrong — they're not meant for production. Override them in Imager
-when you flash for real use.
+wrong — they're not meant for production. Override them in Imager's
+customisation panel (which appears when you load the image via the 42W
+repository — see Path A) when you flash for real use.
 
 ---
 
@@ -202,7 +226,7 @@ Diagnose:
 systemctl status ftw-firstboot           # first-boot provisioner
 journalctl -u ftw-firstboot -b           # its log (this boot)
 tail -f /var/log/ftw-firstboot.log       # durable log
-docker compose -f /home/ftw/forty-two-watts/docker-compose.yml ps
+docker compose -f /opt/forty-two-watts/docker-compose.yml ps
 ```
 
 If `ftw-firstboot` failed (bad network, GHCR outage), it's
@@ -234,7 +258,7 @@ Next boot, the captive portal comes up again.
 
 ```bash
 ssh ftw@42w.local
-cd /home/ftw/forty-two-watts
+cd /opt/forty-two-watts
 sudo docker compose down -v       # drops PV model, battery model,
                                   # price + load history, EV state
 sudo rm -rf data mosquitto/data
@@ -254,7 +278,7 @@ Two ways:
 
   ```bash
   ssh ftw@42w.local
-  cd /home/ftw/forty-two-watts
+  cd /opt/forty-two-watts
   sudo docker compose pull && sudo docker compose up -d
   ```
 
