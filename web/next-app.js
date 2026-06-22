@@ -2903,8 +2903,15 @@
 
       socRow.appendChild(socInput);
       socRow.appendChild(socVal);
-      socRow.appendChild(socSetBtn);
       socBox.appendChild(socRow);
+
+      // Button on its own row so the slider spans the full modal width.
+      var socBtnRow = document.createElement("div");
+      socBtnRow.style.display = "flex";
+      socBtnRow.style.justifyContent = "flex-end";
+      socBtnRow.style.marginTop = "0.4rem";
+      socBtnRow.appendChild(socSetBtn);
+      socBox.appendChild(socBtnRow);
 
       var socStatus = document.createElement("small");
       socStatus.style.display = "block";
@@ -3158,8 +3165,7 @@
       wrap.style.display = "flex";
       wrap.style.alignItems = "center";
       wrap.style.gap = "0.6rem";
-      wrap.style.flex = "1";
-      wrap.style.marginLeft = "0.5rem";
+      wrap.style.marginBottom = "0.4rem";
       var inp = document.createElement("input");
       inp.type = "range";
       inp.min = String(min);
@@ -3220,7 +3226,15 @@
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    box.appendChild(row("Target SoC", socWrap));
+    // Target SoC: label on its own row, slider spanning the full modal
+    // width below — mirrors the State of charge slider in the same tab.
+    var socLabelRow = document.createElement("div");
+    socLabelRow.textContent = "Target SoC";
+    socLabelRow.style.fontSize = "0.85rem";
+    socLabelRow.style.color = "var(--fg)";
+    socLabelRow.style.marginBottom = "0.3rem";
+    box.appendChild(socLabelRow);
+    box.appendChild(socWrap);
     box.appendChild(row("By", timeInp));
 
     var checkRow = document.createElement("div");
