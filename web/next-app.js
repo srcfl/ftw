@@ -2886,18 +2886,27 @@
       var socRow = document.createElement("div");
       socRow.style.display = "flex";
       socRow.style.alignItems = "center";
-      socRow.style.gap = "0.5rem";
+      socRow.style.gap = "0.6rem";
+
+      // Whole-percent slider (0–100). Seed at the current SoC rounded to
+      // the nearest %, defaulting to 50 when unknown.
+      var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
 
       var socInput = document.createElement("input");
-      socInput.type = "number";
-      socInput.min = "0"; socInput.max = "100"; socInput.step = "0.1";
-      socInput.value = (curSoc != null) ? curSoc.toFixed(1) : "";
-      socInput.style.width = "5.5em";
-      socInput.style.fontFamily = "var(--mono)";
+      socInput.type = "range";
+      socInput.min = "0"; socInput.max = "100"; socInput.step = "1";
+      socInput.value = String(initSoc);
+      socInput.style.flex = "1";
+      socInput.style.accentColor = "var(--accent-e)";
+      socInput.style.cursor = "pointer";
 
-      var pctLabel = document.createElement("span");
-      pctLabel.textContent = "%";
-      pctLabel.style.color = "var(--text-dim)";
+      var socVal = document.createElement("span");
+      socVal.textContent = initSoc + "%";
+      socVal.style.fontFamily = "var(--mono)";
+      socVal.style.minWidth = "3.2em";
+      socVal.style.textAlign = "right";
+      socVal.style.color = "var(--accent-e)";
+      socInput.addEventListener("input", function () { socVal.textContent = socInput.value + "%"; });
 
       var socSetBtn = document.createElement("button");
       socSetBtn.type = "button";
@@ -2910,7 +2919,7 @@
       socSetBtn.style.color = "var(--fg)";
 
       socRow.appendChild(socInput);
-      socRow.appendChild(pctLabel);
+      socRow.appendChild(socVal);
       socRow.appendChild(socSetBtn);
       socBox.appendChild(socRow);
 
@@ -2920,11 +2929,11 @@
       socStatus.style.marginTop = "0.35rem";
       socStatus.style.minHeight = "1em";
       socStatus.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
-        (socSource ? " (" + socSource + ")" : "") + ". Correct it if the car's real SoC differs.";
+        (socSource ? " (" + socSource + ")" : "") + ". Drag to correct if the car's real SoC differs.";
       socBox.appendChild(socStatus);
 
       socSetBtn.addEventListener("click", function () {
-        var v = parseFloat(socInput.value);
+        var v = parseInt(socInput.value, 10);
         if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
         socSetBtn.disabled = true;
         socStatus.textContent = "Saving…";
@@ -2936,7 +2945,7 @@
           .then(function (res) {
             socSetBtn.disabled = false;
             if (res.ok && res.body && res.body.ok) {
-              socStatus.textContent = "Saved — SoC set to " + v.toFixed(1) + "%. Replanning.";
+              socStatus.textContent = "Saved — SoC set to " + v + "%. Replanning.";
               manualNeedsRebuild = true;
             } else {
               socStatus.textContent = (res.body && res.body.error) || "Set failed.";
