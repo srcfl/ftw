@@ -2842,85 +2842,98 @@
     return box;
   }
 
-  // buildSoCSection — manual current-SoC correction slider. Lives in the
-  // Scheduled tab because the current SoC is a planning input: the planner
-  // sizes the grid/PV gap to the target from it. The estimate drifts when
-  // there's no vehicle BMS reading, so the operator can correct it via
-  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Only meaningful
-  // during an active session, so the editor is gated on plugged_in.
+  // sliderHeader builds a "LABEL ............ value" row (mono uppercase
+  // label on the left, mono accent value on the right) that sits above a
+  // full-width slider, so the Current-charge and Target sliders read as a
+  // consistent pair. Returns the row plus the value span — the caller
+  // wires the slider's input event to update value.textContent.
+  function sliderHeader(labelText, valueText) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.alignItems = "baseline";
+    row.style.marginBottom = "0.3rem";
+    var lbl = document.createElement("span");
+    lbl.textContent = labelText;
+    lbl.style.fontFamily = "var(--mono)";
+    lbl.style.fontSize = "0.68rem";
+    lbl.style.letterSpacing = "0.14em";
+    lbl.style.textTransform = "uppercase";
+    lbl.style.color = "var(--text-dim)";
+    var val = document.createElement("span");
+    val.textContent = valueText;
+    val.style.fontFamily = "var(--mono)";
+    val.style.fontSize = "0.95rem";
+    val.style.color = "var(--accent-e)";
+    row.appendChild(lbl);
+    row.appendChild(val);
+    return { row: row, value: val };
+  }
+
+  // fullWidthSlider returns a 0–100 whole-percent range input spanning the
+  // modal width, wired to update a value span on drag.
+  function fullWidthSlider(initVal, valueSpan) {
+    var s = document.createElement("input");
+    s.type = "range";
+    s.min = "0"; s.max = "100"; s.step = "1";
+    s.value = String(initVal);
+    s.style.width = "100%";
+    s.style.margin = "0";
+    s.style.accentColor = "var(--accent-e)";
+    s.style.cursor = "pointer";
+    s.addEventListener("input", function () { valueSpan.textContent = s.value + "%"; });
+    return s;
+  }
+
+  // buildSoCSection — the car's CURRENT charge (a planning input: the
+  // planner sizes the grid/PV gap to the target from it). Lives in the
+  // Scheduled tab, above the target. The estimate drifts when there's no
+  // vehicle BMS reading, so the operator can correct it via
+  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Editing is gated
+  // on plugged_in.
   function buildSoCSection(lp) {
     var socBox = document.createElement("div");
     socBox.style.marginTop = "0.25rem";
 
-    var socEyebrow = document.createElement("div");
-    socEyebrow.textContent = "State of charge";
-    socEyebrow.style.fontFamily = "var(--mono)";
-    socEyebrow.style.fontSize = "0.7rem";
-    socEyebrow.style.letterSpacing = "0.18em";
-    socEyebrow.style.textTransform = "uppercase";
-    socEyebrow.style.color = "var(--text-dim)";
-    socEyebrow.style.marginBottom = "0.45rem";
-    socBox.appendChild(socEyebrow);
-
     var curSoc = (lp && lp.current_soc_pct != null) ? lp.current_soc_pct : null;
     var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
+    var sourceNote = socSource === "vehicle"
+      ? "Live from the car — drag only to correct drift."
+      : socSource === "inferred"
+        ? "Estimated from energy delivered — drag to set the real value."
+        : "Drag to set the car's current charge.";
+
+    var hdr = sliderHeader("Current charge", curSoc != null ? Math.round(curSoc) + "%" : "—");
+    socBox.appendChild(hdr.row);
 
     if (lp && lp.plugged_in) {
-      var socRow = document.createElement("div");
-      socRow.style.display = "flex";
-      socRow.style.alignItems = "center";
-      socRow.style.gap = "0.6rem";
-
-      // Whole-percent slider (0–100). Seed at the current SoC rounded to
-      // the nearest %, defaulting to 50 when unknown.
       var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
+      var socInput = fullWidthSlider(initSoc, hdr.value);
+      socBox.appendChild(socInput);
 
-      var socInput = document.createElement("input");
-      socInput.type = "range";
-      socInput.min = "0"; socInput.max = "100"; socInput.step = "1";
-      socInput.value = String(initSoc);
-      socInput.style.flex = "1";
-      socInput.style.accentColor = "var(--accent-e)";
-      socInput.style.cursor = "pointer";
-
-      var socVal = document.createElement("span");
-      socVal.textContent = initSoc + "%";
-      socVal.style.fontFamily = "var(--mono)";
-      socVal.style.minWidth = "3.2em";
-      socVal.style.textAlign = "right";
-      socVal.style.color = "var(--accent-e)";
-      socInput.addEventListener("input", function () { socVal.textContent = socInput.value + "%"; });
+      var socStatus = document.createElement("small");
+      socStatus.style.display = "block";
+      socStatus.style.color = "var(--text-dim)";
+      socStatus.style.marginTop = "0.4rem";
+      socStatus.style.minHeight = "1em";
+      socStatus.textContent = sourceNote;
+      socBox.appendChild(socStatus);
 
       var socSetBtn = document.createElement("button");
       socSetBtn.type = "button";
-      socSetBtn.textContent = "Set SoC";
-      socSetBtn.style.padding = "0.35rem 0.7rem";
+      socSetBtn.textContent = "Set current charge";
+      socSetBtn.style.padding = "0.35rem 0.8rem";
+      socSetBtn.style.marginTop = "0.4rem";
       socSetBtn.style.border = "1px solid var(--line)";
       socSetBtn.style.borderRadius = "4px";
       socSetBtn.style.cursor = "pointer";
       socSetBtn.style.background = "transparent";
       socSetBtn.style.color = "var(--fg)";
-
-      socRow.appendChild(socInput);
-      socRow.appendChild(socVal);
-      socBox.appendChild(socRow);
-
-      // Button on its own row so the slider spans the full modal width.
       var socBtnRow = document.createElement("div");
       socBtnRow.style.display = "flex";
       socBtnRow.style.justifyContent = "flex-end";
-      socBtnRow.style.marginTop = "0.4rem";
       socBtnRow.appendChild(socSetBtn);
       socBox.appendChild(socBtnRow);
-
-      var socStatus = document.createElement("small");
-      socStatus.style.display = "block";
-      socStatus.style.color = "var(--text-dim)";
-      socStatus.style.marginTop = "0.35rem";
-      socStatus.style.minHeight = "1em";
-      socStatus.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
-        (socSource ? " (" + socSource + ")" : "") + ". Drag to correct if the car's real SoC differs.";
-      socBox.appendChild(socStatus);
 
       socSetBtn.addEventListener("click", function () {
         var v = parseInt(socInput.value, 10);
@@ -2935,7 +2948,7 @@
           .then(function (res) {
             socSetBtn.disabled = false;
             if (res.ok && res.body && res.body.ok) {
-              socStatus.textContent = "Saved — SoC set to " + v + "%. Replanning.";
+              socStatus.textContent = "Saved — replanning.";
               manualNeedsRebuild = true;
             } else {
               socStatus.textContent = (res.body && res.body.error) || "Set failed.";
@@ -2943,11 +2956,11 @@
           }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
       });
     } else {
+      hdr.value.style.color = "var(--text-dim)";
       var socMuted = document.createElement("small");
       socMuted.style.display = "block";
       socMuted.style.color = "var(--text-dim)";
-      socMuted.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
-        (socSource ? " (" + socSource + ")" : "") + " · plug in to set manually.";
+      socMuted.textContent = "Plug in to set the car's current charge.";
       socBox.appendChild(socMuted);
     }
 
@@ -3049,25 +3062,14 @@
     var initSurplus = savedUnlock > 0;
     var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
 
+    // Hairline divider separating the current-charge slider above from the
+    // target + deadline controls below. The tab is already named
+    // "Scheduled", so no section eyebrow/explainer here — the field labels
+    // carry the meaning.
     var box = document.createElement("div");
-    box.style.marginTop = "0.25rem";
-
-    var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Schedule (grid charging)";
-    eyebrow.style.fontFamily = "var(--mono)";
-    eyebrow.style.fontSize = "0.7rem";
-    eyebrow.style.letterSpacing = "0.18em";
-    eyebrow.style.textTransform = "uppercase";
-    eyebrow.style.color = "var(--text-dim)";
-    eyebrow.style.marginBottom = "0.55rem";
-    box.appendChild(eyebrow);
-
-    var schedExplainer = document.createElement("div");
-    schedExplainer.textContent = "Target SoC by a deadline. The planner uses cheap grid hours to fill the gap PV can't cover.";
-    schedExplainer.style.fontSize = "0.72rem";
-    schedExplainer.style.color = "var(--text-dim)";
-    schedExplainer.style.marginBottom = "0.5rem";
-    box.appendChild(schedExplainer);
+    box.style.marginTop = "0.9rem";
+    box.style.paddingTop = "0.9rem";
+    box.style.borderTop = "1px solid var(--line)";
 
     // Schedule is persistent loadpoint state — operators can configure
     // tomorrow morning's target tonight before plugging in. Show a
@@ -3157,38 +3159,6 @@
       return wrap;
     }
 
-    // Whole-percent range slider with a live mono % readout — same style
-    // as the manual SoC-correction slider. Exposes .input so callers read
-    // .input.value just like numInput().
-    function sliderInput(value, min, max) {
-      var wrap = document.createElement("div");
-      wrap.style.display = "flex";
-      wrap.style.alignItems = "center";
-      wrap.style.gap = "0.6rem";
-      wrap.style.marginBottom = "0.4rem";
-      var inp = document.createElement("input");
-      inp.type = "range";
-      inp.min = String(min);
-      inp.max = String(max);
-      inp.step = "1";
-      inp.value = String(Math.max(min, Math.min(max, Math.round(value))));
-      inp.style.flex = "1";
-      inp.style.accentColor = "var(--accent-e)";
-      inp.style.cursor = "pointer";
-      var val = document.createElement("span");
-      val.textContent = inp.value + "%";
-      val.style.fontFamily = "var(--mono)";
-      val.style.minWidth = "3.2em";
-      val.style.textAlign = "right";
-      val.style.color = "var(--accent-e)";
-      inp.addEventListener("input", function () { val.textContent = inp.value + "%"; });
-      wrap.appendChild(inp);
-      wrap.appendChild(val);
-      wrap.input = inp;
-      return wrap;
-    }
-
-    var socWrap = sliderInput(initSoC, 0, 100);
     var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
 
     var timeInp = document.createElement("input");
@@ -3221,21 +3191,17 @@
       return wrap;
     }
 
-    var recWrap = checkbox(initRec, "Recurring (every day)");
-    var surWrap = checkbox(initSurplus && !!hasPV, "Surplus charge from PV");
+    var recWrap = checkbox(initRec, "Repeat daily");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Also charge from PV surplus");
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    // Target SoC: label on its own row, slider spanning the full modal
-    // width below — mirrors the State of charge slider in the same tab.
-    var socLabelRow = document.createElement("div");
-    socLabelRow.textContent = "Target SoC";
-    socLabelRow.style.fontSize = "0.85rem";
-    socLabelRow.style.color = "var(--fg)";
-    socLabelRow.style.marginBottom = "0.3rem";
-    box.appendChild(socLabelRow);
-    box.appendChild(socWrap);
-    box.appendChild(row("By", timeInp));
+    // Target: same header + full-width slider treatment as Current charge.
+    var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
+    box.appendChild(targetHdr.row);
+    var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    box.appendChild(targetSlider);
+    box.appendChild(row("Charge by", timeInp));
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -3256,9 +3222,9 @@
     unlockHint.style.color = "var(--text-dim)";
     unlockHint.style.marginTop = "0.2rem";
     unlockHint.style.marginBottom = "0.3rem";
-    unlockHint.textContent = "Always grab PV surplus when home battery ≥ threshold.";
+    unlockHint.textContent = "Only once the home battery is at or above this level.";
 
-    var thresholdRow = row("Threshold", unlockWrap);
+    var thresholdRow = row("Home battery ≥", unlockWrap);
 
     if (hasPV) {
       box.appendChild(unlockHint);
@@ -3337,7 +3303,7 @@
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
       var body = {
         schedule: {
-          soc_pct: Number(socWrap.input.value),
+          soc_pct: Number(targetSlider.value),
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
           surplus_unlock_bat_soc_pct: unlockVal,
