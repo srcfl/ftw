@@ -328,17 +328,17 @@ jobs:
           sudo docker system prune -af
           df -h /
 
-      - name: Register binfmt_misc handlers for arm / arm64
+      - name: Install qemu for arm64 cross-build
         # See rpi-image-build.yml for the full rationale. Short version:
-        # install qemu-user-static with --no-install-recommends (pi-gen's
-        # arm64 branch wants /usr/bin/qemu-aarch64-static, and
-        # the flag keeps the wrapper-registering qemu-user-binfmt out),
-        # then let tonistiigi/binfmt install F-flagged handlers that
-        # survive pi-gen's chroot mount-namespace switch.
+        # pi-gen's arm64 (trixie) branch needs the dynamic /usr/bin/qemu-aarch64
+        # (`which qemu-aarch64`) and registers its own F-flagged handler +
+        # dpkg-reconfigure qemu-user-binfmt in the privileged container, so
+        # we just install qemu-user-binfmt (not the old qemu-user-static +
+        # tonistiigi/binfmt combo that the bookworm-arm64 branch wanted).
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
+          sudo apt-get install -y -qq qemu-user-binfmt
+          which qemu-aarch64   # the exact preflight build-docker.sh runs
 
       - name: Checkout tag
         uses: actions/checkout@v5

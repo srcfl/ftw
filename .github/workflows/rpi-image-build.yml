@@ -52,26 +52,23 @@ jobs:
           sudo docker system prune -af
           df -h /
 
-      - name: Register binfmt_misc handlers for arm / arm64
-        # pi-gen's arm64 branch checks for
-        # /usr/bin/qemu-aarch64-static (STATIC, with -static suffix,
-        # from the qemu-user-static package) — NOT /usr/bin/qemu-arm
-        # like the armhf master does. Observed on run 24878263028: "qemu-
-        # aarch64-static not found (please install qemu-user-static)".
-        #
-        # --no-install-recommends prevents qemu-user-binfmt from
-        # being pulled as a recommend. Its postinst registers wrapper
-        # handlers at /usr/libexec/qemu-binfmt/*-binfmt-P that don't
-        # exist inside pi-gen's chroot (arch-test then fails with
-        # "armhf: not supported"). Diagnosed on run 24875338536.
-        #
-        # tonistiigi/binfmt registers F-flagged handlers that resolve
-        # the interpreter at registration time and keep the fd valid
-        # across pi-gen's mount-namespace switch.
+      - name: Install qemu for arm64 cross-build
+        # pi-gen's arm64 (trixie) branch build-docker.sh requires the
+        # DYNAMIC `qemu-aarch64` binary on PATH (`which qemu-aarch64`)
+        # and then registers its OWN F-flagged binfmt handler
+        # (`qemu-aarch64-rpi`) plus `dpkg-reconfigure qemu-user-binfmt`
+        # inside the privileged container — see build-docker.sh on the
+        # arm64 branch. That's a different contract than the old
+        # bookworm-arm64 branch (which wanted qemu-aarch64-STATIC +
+        # tonistiigi/binfmt, and where qemu-user-binfmt's wrapper
+        # handlers broke arch-test in the chroot). For the arm64 branch
+        # we give it exactly what it asks for: qemu-user-binfmt, which
+        # provides /usr/bin/qemu-aarch64; pi-gen finishes the F-flag
+        # registration so it survives the chroot mount-namespace switch.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
+          sudo apt-get install -y -qq qemu-user-binfmt
+          which qemu-aarch64   # the exact preflight build-docker.sh runs
 
       - name: Checkout
         uses: actions/checkout@v5
