@@ -10,8 +10,7 @@
       "image_download_size": 0,
       "release_date": "1970-01-01",
       "init_format": "cloudinit-rpi",
-      "website": "https://github.com/frahlg/forty-two-watts",
-      "devices": ["pi4-64bit", "pi5-64bit"]
+      "website": "https://github.com/frahlg/forty-two-watts"
     }
   ]
 }

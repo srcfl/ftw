@@ -31,3 +31,15 @@ writing) and uploads the rendered `os_list.json` as a release asset.
 cloud-init (Imager writes `user-data` / `network-config` / `meta-data` to the boot
 partition). If the image base ever changes, update `init_format` accordingly
 (`systemd` for the legacy `firstrun.sh` path on bookworm).
+
+## Why there is no `devices` filter
+
+The OS entry deliberately omits the `devices` array (e.g. `["pi4-64bit",
+"pi5-64bit"]`). When Imager loads a **custom** repository via `--repo`, it uses
+that repository for the OS list but does **not** get the hardware/device list
+that the stock repository ships — so the "CHOOSE DEVICE" picker is empty. A
+device-filtered entry then never appears, because no matching device can be
+selected. Omitting `devices` makes "Forty-Two Watts" show regardless of the
+selected device. The image only supports Pi 4/5 (64-bit), which the `name` and
+`description` already state. **Do not re-add `devices`** — it silently hides the
+entry in the custom-repo flow.
