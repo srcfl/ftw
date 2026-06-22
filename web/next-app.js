@@ -3182,7 +3182,39 @@
       return wrap;
     }
 
-    var socWrap = numInput(initSoC, 0, 100, 5, "%");
+    // Whole-percent range slider with a live mono % readout — same style
+    // as the manual SoC-correction slider. Exposes .input so callers read
+    // .input.value just like numInput().
+    function sliderInput(value, min, max) {
+      var wrap = document.createElement("div");
+      wrap.style.display = "flex";
+      wrap.style.alignItems = "center";
+      wrap.style.gap = "0.6rem";
+      wrap.style.flex = "1";
+      wrap.style.marginLeft = "0.5rem";
+      var inp = document.createElement("input");
+      inp.type = "range";
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.step = "1";
+      inp.value = String(Math.max(min, Math.min(max, Math.round(value))));
+      inp.style.flex = "1";
+      inp.style.accentColor = "var(--accent-e)";
+      inp.style.cursor = "pointer";
+      var val = document.createElement("span");
+      val.textContent = inp.value + "%";
+      val.style.fontFamily = "var(--mono)";
+      val.style.minWidth = "3.2em";
+      val.style.textAlign = "right";
+      val.style.color = "var(--accent-e)";
+      inp.addEventListener("input", function () { val.textContent = inp.value + "%"; });
+      wrap.appendChild(inp);
+      wrap.appendChild(val);
+      wrap.input = inp;
+      return wrap;
+    }
+
+    var socWrap = sliderInput(initSoC, 0, 100);
     var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
 
     var timeInp = document.createElement("input");

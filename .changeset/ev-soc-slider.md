@@ -2,8 +2,8 @@
 "forty-two-watts": patch
 ---
 
-The manual SoC correction in the EV Charger modal is now a 0–100% slider
-in whole-percent steps instead of a free-text number field, with a live
-mono readout of the selected value. Easier to nudge on touch and removes
-the fiddly decimal entry — the backend already rounds to the corrected
-anchor.
+EV Charger modal SoC inputs are now 0–100% sliders in whole-percent steps
+instead of free-text number fields, each with a live mono % readout: the
+manual **current-SoC correction** and the schedule **Target SoC**. Easier
+to nudge on touch and removes fiddly decimal entry — the backend handling
+is unchanged.
