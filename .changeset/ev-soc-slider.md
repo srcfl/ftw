@@ -2,8 +2,12 @@
 "forty-two-watts": patch
 ---
 
-EV Charger modal SoC inputs are now 0–100% sliders in whole-percent steps
-instead of free-text number fields, each with a live mono % readout: the
-manual **current-SoC correction** and the schedule **Target SoC**. Easier
-to nudge on touch and removes fiddly decimal entry — the backend handling
-is unchanged.
+EV Charger modal reworked. The controls are now split into three tabs —
+**PV charging** (surplus-only toggle), **Manual** (amp slider +
+Start/Stop), and **Scheduled** (current-SoC correction + target-SoC-by-
+deadline schedule) — so each charging mode has its own space. The
+current-SoC correction lives under Scheduled because it's a planning
+input. Both SoC inputs (current correction and Target SoC) are now
+0–100% sliders in whole-percent steps with a live mono % readout instead
+of free-text number fields. The "Let battery cover EV" toggle stays as a
+persistent footer. No backend changes.

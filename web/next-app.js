@@ -2538,21 +2538,19 @@
   }
 
   // EV modal sub-elements held across refreshes. The status table is
-  // updated in place on every poll. The schedule section is mounted
-  // exactly once per (modal-open × LP) and is NEVER detached on a poll
-  // — detaching+reattaching a focused <input> blurs it mid-keystroke
-  // and resets caret position. After Save/Clear we set
-  // schedNeedsRebuild=true so the next poll picks up the new
-  // authoritative server state.
+  // updated in place on every poll. The tabbed control (PV charging /
+  // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
+  // and is NEVER detached on a poll — detaching+reattaching a focused
+  // <input> blurs it mid-keystroke and resets caret position. After a
+  // Save/Clear/Start/Stop we set the matching *NeedsRebuild flag so the
+  // next poll rebuilds from the new authoritative server state. The
+  // active tab persists across rebuilds via evActiveTab.
   var statusTableEl = null;
-  var schedSectionEl = null;
-  var schedLpId = null;
+  var evTabsEl = null;
+  var evTabsLpId = null;
   var schedNeedsRebuild = false;
-  // Manual amp-slider override section — same once-per-LP lifecycle as
-  // the schedule section so the slider keeps focus/value between polls.
-  var manualSectionEl = null;
-  var manualLpId = null;
   var manualNeedsRebuild = false;
+  var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2596,8 +2594,8 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
-        schedSectionEl = null;
-        schedLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
         return;
       }
       // Status table: replace in place so the rest of the modal body
@@ -2656,65 +2654,47 @@
         }
       }
       if (matched) {
-        // Build schedule exactly once per LP. Polling never rebuilds
-        // it — inputs keep their focus, value and caret position. Only
-        // a Save / Clear (which sets schedNeedsRebuild) or switching
-        // to a different LP (planet) triggers a fresh build.
-        var lpChanged = schedSectionEl == null || schedLpId !== matched.id;
-        if (lpChanged || schedNeedsRebuild) {
-          if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-            evModalBody.removeChild(schedSectionEl);
+        // Build the tabbed control (PV charging / Manual / Scheduled)
+        // exactly once per LP. Polling never rebuilds it — inputs keep
+        // focus/value/caret and the active tab persists. Only a
+        // Save/Clear (schedNeedsRebuild) or Start/Stop/Set-SoC
+        // (manualNeedsRebuild), or switching LP (planet), forces a build.
+        var lpChanged = evTabsEl == null || evTabsLpId !== matched.id;
+        if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
+          if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+            evModalBody.removeChild(evTabsEl);
           }
-          schedSectionEl = buildScheduleControl(matched, siteHasPV(status));
-          schedLpId = matched.id;
+          evTabsEl = buildEvTabbedControl(matched, siteHasPV(status));
+          evTabsLpId = matched.id;
           schedNeedsRebuild = false;
-          evModalBody.appendChild(schedSectionEl);
-        } else if (schedSectionEl.parentNode !== evModalBody) {
-          // Modal was previously closed: body got wiped but our
-          // cached section is still valid — re-attach.
-          evModalBody.appendChild(schedSectionEl);
-        }
-        // Manual amp-slider override — built once per LP (or after a
-        // Start/Stop). Mounted above the schedule so "charge now"
-        // controls sit closest to the live status.
-        var manualChanged = manualSectionEl == null || manualLpId !== matched.id;
-        if (manualChanged || manualNeedsRebuild) {
-          if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
-            evModalBody.removeChild(manualSectionEl);
-          }
-          manualSectionEl = buildManualControl(matched);
-          manualLpId = matched.id;
           manualNeedsRebuild = false;
-          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
-        } else if (manualSectionEl.parentNode !== evModalBody) {
-          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+          evModalBody.appendChild(evTabsEl);
+        } else if (evTabsEl.parentNode !== evModalBody) {
+          // Modal was previously closed: body got wiped but our cached
+          // section is still valid — re-attach.
+          evModalBody.appendChild(evTabsEl);
         }
       } else {
-        if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-          evModalBody.removeChild(schedSectionEl);
+        if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+          evModalBody.removeChild(evTabsEl);
         }
-        if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
-          evModalBody.removeChild(manualSectionEl);
-        }
-        schedSectionEl = null;
-        schedLpId = null;
-        manualSectionEl = null;
-        manualLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
   }
 
-  // buildManualControl renders the Tesla-style manual override: an amp
-  // slider (range = the charger's min/max charge current) plus Start /
+  // buildManualChargeSection renders the Tesla-style manual override: an
+  // amp slider (range = the charger's min/max charge current) plus Start /
   // Stop. Start pins a persistent manual hold at the slider's amps,
   // which overrides surplus_only and the plan (the fuse clamp still
   // applies); Stop clears the hold and drops back to whatever mode the
   // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
   // is sent as watts (power_w = A × phases × voltage); the driver
   // converts back to amps given the wallbox it's talking to.
-  function buildManualControl(lp) {
+  function buildManualChargeSection(lp) {
     var phases = (lp && lp.phases) || 3;
     var voltage = (lp && lp.voltage_v) || 230;
     var perA = phases * voltage; // watts per amp
@@ -2859,15 +2839,18 @@
       });
     });
 
-    // ---- State of charge (manual correction) ----
-    // The SoC is inferred from delivered energy when there's no vehicle BMS
-    // reading, so it can drift. Let the operator correct it via the existing
-    // POST /api/loadpoints/{id}/soc (re-anchors + replans). Only meaningful
-    // during an active session, so gate the editor on plugged_in.
+    return box;
+  }
+
+  // buildSoCSection — manual current-SoC correction slider. Lives in the
+  // Scheduled tab because the current SoC is a planning input: the planner
+  // sizes the grid/PV gap to the target from it. The estimate drifts when
+  // there's no vehicle BMS reading, so the operator can correct it via
+  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Only meaningful
+  // during an active session, so the editor is gated on plugged_in.
+  function buildSoCSection(lp) {
     var socBox = document.createElement("div");
-    socBox.style.marginTop = "0.75rem";
-    socBox.style.paddingTop = "0.6rem";
-    socBox.style.borderTop = "1px solid var(--line)";
+    socBox.style.marginTop = "0.25rem";
 
     var socEyebrow = document.createElement("div");
     socEyebrow.textContent = "State of charge";
@@ -2961,55 +2944,17 @@
       socBox.appendChild(socMuted);
     }
 
-    box.appendChild(socBox);
-
-    return box;
+    return socBox;
   }
 
-  // buildScheduleControl renders the persistent charging schedule
-  // section: target SoC + time (local; converted to UTC for the wire),
-  // recurring checkbox, and the bat-SoC surplus-unlock threshold.
-  // The backend persists this across restarts (state.config), rolls the
-  // deadline forward each day when Recurring is set, and arms the
-  // surplus-grab whenever the home battery sits at or above the
-  // threshold (with 5 pp release hysteresis).
-  function buildScheduleControl(lp, hasPV) {
-    var sched = (lp && lp.schedule) || {};
-    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the
-    // browser's local zone. The UI shows local time everywhere;
-    // we marshal back to UTC minutes on save.
-    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
-    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
-    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
-    var initRec = !!sched.recurring;
-    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
-    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
-    // The threshold input retains the last-used value (or defaults to 50)
-    // so unchecking + re-checking doesn't wipe the user's pick.
-    var initSurplus = savedUnlock > 0;
-    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
-
-    // Outer wrapper holds two distinct sections:
-    //  1. PV mode (surplus-only toggle) — saves immediately on click
-    //  2. Schedule (target SoC + deadline + bat-SoC unlock) — Save button
-    // They're separated so it's obvious which controls the Save button
-    // owns. Earlier we kept the surplus toggle inside the Schedule
-    // section and operators couldn't tell whether Save covered it.
-    var wrap = document.createElement("div");
-    wrap.style.marginTop = "0.75rem";
-    wrap.style.paddingTop = "0.6rem";
-    wrap.style.borderTop = "1px solid var(--line)";
-
-    // ---- Section 1: PV mode (surplus-only) ----
-    // Per-loadpoint hard flag, *independent* of any schedule. When on,
-    // dispatch refuses to import grid for this loadpoint regardless of
-    // what the MPC plans. Operators can run with this alone (no target,
-    // no deadline — just "harvest PV when there's enough") or layer a
-    // schedule on top below.
+  // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
+  // charging tab). A hard flag, *independent* of any schedule: when on,
+  // dispatch refuses to import grid for this loadpoint regardless of what
+  // the MPC plans. Operators can run with this alone ("harvest PV when
+  // there's enough") or layer a schedule on top. Saves on click.
+  function buildPVModeSection(lp) {
     var soBox = document.createElement("div");
-    soBox.style.marginBottom = "0.8rem";
-    soBox.style.paddingBottom = "0.7rem";
-    soBox.style.borderBottom = "1px solid var(--line)";
+    soBox.style.marginTop = "0.25rem";
 
     var soEyebrow = document.createElement("div");
     soEyebrow.textContent = "PV Mode";
@@ -3046,7 +2991,6 @@
 
     soBox.appendChild(soWrap);
     soBox.appendChild(soStatus);
-    wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
       // Surface the surplus-only ↔ schedule interaction immediately on
@@ -3074,8 +3018,32 @@
       });
     });
 
-    // ---- Section 2: Schedule ----
+    return soBox;
+  }
+
+  // buildScheduleSection — target SoC by a deadline + recurring + the
+  // bat-SoC surplus-unlock threshold (Scheduled tab). Persisted across
+  // restarts; the backend rolls the deadline forward daily when Recurring
+  // is set and arms the surplus-grab when the home battery is at/above the
+  // threshold (5 pp release hysteresis).
+  function buildScheduleSection(lp, hasPV) {
+    var sched = (lp && lp.schedule) || {};
+    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
+    // local zone. The UI shows local time everywhere; we marshal back to
+    // UTC minutes on save.
+    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
+    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var initRec = !!sched.recurring;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
+    // The threshold input retains the last-used value (or defaults to 50)
+    // so unchecking + re-checking doesn't wipe the user's pick.
+    var initSurplus = savedUnlock > 0;
+    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+
     var box = document.createElement("div");
+    box.style.marginTop = "0.25rem";
 
     var eyebrow = document.createElement("div");
     eyebrow.textContent = "Schedule (grid charging)";
@@ -3398,8 +3366,85 @@
       });
     });
 
-    wrap.appendChild(box);
-    return wrap;
+    return box;
+  }
+
+  // buildEvTabbedControl assembles the modal's three tabs and routes each
+  // section into the right one:
+  //   PV charging → surplus-only toggle
+  //   Manual      → amp slider + Start/Stop
+  //   Scheduled   → current-SoC correction (a planning input) + the
+  //                 target-SoC-by-deadline schedule
+  // The active tab persists across rebuilds via evActiveTab.
+  function buildEvTabbedControl(lp, hasPV) {
+    var container = document.createElement("div");
+    container.style.marginTop = "0.75rem";
+    container.style.paddingTop = "0.6rem";
+    container.style.borderTop = "1px solid var(--line)";
+
+    var tabBar = document.createElement("div");
+    tabBar.style.display = "flex";
+    tabBar.style.gap = "0.15rem";
+    tabBar.style.borderBottom = "1px solid var(--line)";
+    tabBar.style.marginBottom = "0.7rem";
+
+    var pvPanel = document.createElement("div");
+    pvPanel.appendChild(buildPVModeSection(lp));
+
+    var manualPanel = document.createElement("div");
+    manualPanel.appendChild(buildManualChargeSection(lp));
+
+    var schedPanel = document.createElement("div");
+    schedPanel.appendChild(buildSoCSection(lp));
+    schedPanel.appendChild(buildScheduleSection(lp, hasPV));
+
+    var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
+    var tabs = [
+      { id: "pv", label: "PV charging" },
+      { id: "manual", label: "Manual" },
+      { id: "scheduled", label: "Scheduled" },
+    ];
+    var tabBtns = {};
+
+    function selectTab(id) {
+      if (!panels[id]) { id = "pv"; }
+      evActiveTab = id;
+      for (var k in panels) { panels[k].style.display = (k === id) ? "" : "none"; }
+      tabs.forEach(function (t) {
+        var on = t.id === id;
+        var b = tabBtns[t.id];
+        b.style.color = on ? "var(--fg)" : "var(--text-dim)";
+        b.style.borderBottom = on ? "2px solid var(--accent-e)" : "2px solid transparent";
+        b.style.fontWeight = on ? "600" : "400";
+      });
+    }
+
+    tabs.forEach(function (t) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = t.label;
+      b.style.background = "transparent";
+      b.style.border = "none";
+      b.style.borderBottom = "2px solid transparent";
+      b.style.padding = "0.4rem 0.7rem";
+      b.style.marginBottom = "-1px";
+      b.style.cursor = "pointer";
+      b.style.fontFamily = "var(--mono)";
+      b.style.fontSize = "0.72rem";
+      b.style.letterSpacing = "0.08em";
+      b.style.textTransform = "uppercase";
+      b.addEventListener("click", function () { selectTab(t.id); });
+      tabBtns[t.id] = b;
+      tabBar.appendChild(b);
+    });
+
+    container.appendChild(tabBar);
+    container.appendChild(pvPanel);
+    container.appendChild(manualPanel);
+    container.appendChild(schedPanel);
+
+    selectTab(evActiveTab);
+    return container;
   }
 
   function utcMinsToLocalHHMM(min) {
