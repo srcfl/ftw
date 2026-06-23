@@ -93,6 +93,17 @@ install -m 0440 files/010_ftw-nopasswd      "${ROOTFS_DIR}/etc/sudoers.d/010_ftw
 # /opt/forty-two-watts stays root-owned (operators edit via passwordless
 # sudo); data/ keeps its 100:101 ownership for the in-container user,
 # already set numerically by `install -d -o 100 -g 101` above.
+# Mask the Raspberry Pi OS first-run user wizard. On a headless,
+# cloud-init-provisioned image it is both redundant and fatal: the `ftw`
+# account (or the Imager-customised account) already exists, yet
+# userconfig.service still runs `userconf-service`, which blocks on a
+# `whiptail "Please enter new username:"` dialog on tty8. It is
+# Type=oneshot WantedBy=multi-user.target, so that never-completing dialog
+# wedges multi-user.target — and with it ftw-firstboot.service (ordered
+# After=cloud-final.service, itself queued behind the wizard) — so the
+# stack is never pulled and the dashboard never comes up. Masking it lets
+# a no-customisation flash boot through to multi-user.target.
 on_chroot << 'EOF'
 systemctl enable ftw-firstboot.service
+systemctl mask userconfig.service
 EOF
