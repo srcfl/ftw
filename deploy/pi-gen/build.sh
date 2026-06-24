@@ -47,14 +47,26 @@ install -m 0644 "${FTW_COMPOSE}"                                "${FILES_DIR}/do
 install -m 0644 "${REPO_ROOT}/mosquitto/config/mosquitto.conf"  "${FILES_DIR}/mosquitto.conf"
 
 if [ ! -d "${PI_GEN_DIR}" ]; then
-    # Clone then checkout the pinned ref. `git clone --branch` only
-    # accepts branch/tag names, not arbitrary commit SHAs, and we pin
-    # PI_GEN_REF to a SHA for reproducibility — so clone the default
-    # branch and check the ref out explicitly (works for SHA, branch,
-    # or tag). pi-gen is a small scripts repo, so a full clone is cheap.
+    # `git clone --branch` only accepts branch/tag names, not arbitrary
+    # commit SHAs, and we pin PI_GEN_REF to a SHA for reproducibility — so
+    # clone the default branch; the explicit checkout below pins the ref
+    # (works for SHA, branch, or tag). pi-gen is a small scripts repo, so a
+    # full clone is cheap.
     git clone https://github.com/RPi-Distro/pi-gen.git "${PI_GEN_DIR}"
-    git -C "${PI_GEN_DIR}" checkout --quiet "${PI_GEN_REF}"
 fi
+
+# Pin to PI_GEN_REF on EVERY run, not just a fresh clone. An existing
+# deploy/pi-gen/pi-gen would otherwise stay on whatever ref it was first
+# cloned at and silently ignore a bumped PI_GEN_REF — a reproducibility hole
+# that bites local rebuilds across a re-pin (CI is unaffected: it always
+# starts from a clean checkout). Try a local checkout first; fetch only if
+# the pinned ref isn't in the local clone yet. `-f` resets pi-gen's own
+# tracked files but leaves our untracked stage-42w/config/SKIP additions
+# (re-copied below) intact.
+git -C "${PI_GEN_DIR}" checkout -f --quiet "${PI_GEN_REF}" 2>/dev/null || {
+    git -C "${PI_GEN_DIR}" fetch --quiet origin
+    git -C "${PI_GEN_DIR}" checkout -f --quiet "${PI_GEN_REF}"
+}
 
 # Copy (not symlink) our stage + config into the pi-gen checkout.
 # build-docker.sh builds an image with `COPY . /pi-gen/` where . is
