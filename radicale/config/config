@@ -1,0 +1,24 @@
+# Radicale configuration for the forty-two-watts calendar sidecar (#498).
+# Shipped read-only into the container at /config/config. LAN-only — never
+# exposed to the internet by 42W.
+
+[server]
+hosts = 0.0.0.0:5232
+
+[auth]
+type = htpasswd
+htpasswd_filename = /config/users
+# bcrypt is recommended. Generate entries with: htpasswd -B radicale/config/users <user>
+htpasswd_encryption = bcrypt
+
+[rights]
+# Each authenticated user may only access their own collections
+# (/<user>/...). The default 42W collections are /<user>/energy/ (intents you
+# create) and /<user>/history/ (EVSE history 42W writes).
+type = owner_only
+
+[storage]
+filesystem_folder = /data/collections
+
+[logging]
+level = info

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/battery"
+	"github.com/frahlg/forty-two-watts/go/internal/calendar"
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
@@ -122,6 +123,10 @@ type Deps struct {
 	// install a temporary override that bypasses the MPC budget
 	// path until expiry. Nil disables the endpoint.
 	LoadpointCtrl *loadpoint.Controller
+
+	// Optional: CalDAV calendar-constraints client (#498). Nil when the
+	// feature is disabled; GET /api/caldav/status then reports disabled.
+	CalDAV *calendar.Service
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
@@ -320,6 +325,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", s.handleNotificationsHistory)

@@ -1,0 +1,15 @@
+# Radicale htpasswd credentials for the forty-two-watts calendar sidecar.
+#
+# This is an EXAMPLE. Before enabling the calendar feature:
+#
+#   cp radicale/config/users.example radicale/config/users
+#   htpasswd -B radicale/config/users fortytwowatts     # set a real password
+#
+# (Each line is "<username>:<bcrypt-hash>". Don't leave the placeholder below
+# in the live "users" file — it is not a valid login.)
+#
+# Then enter the SAME username + password in the 42W dashboard under
+# Settings → Calendar, and subscribe your calendar app to
+#   http://<host-ip>:5232/fortytwowatts/energy/
+#
+fortytwowatts:REPLACE_ME_WITH_htpasswd_-B_OUTPUT

@@ -98,6 +98,26 @@ homeassistant:
   password: homeems
   publish_interval_s: 5
 
+# Calendar-based planner constraints (#498). 42W reads a CalDAV calendar
+# (served by the bundled, LAN-only Radicale sidecar) and turns events into
+# planner intents: "Away"/"Vacation" → away load profile; "Charge car 80%"
+# → EV target SoC by the event time. It also writes an EVSE usage-history
+# calendar. Opt-in + fail-soft. Start the sidecar with
+# `docker compose --profile calendar up -d`. password is stored in state.db.
+caldav:
+  enabled: false
+  url: http://localhost:5232
+  username: fortytwowatts
+  password: ""
+  calendar_path: /fortytwowatts/energy/
+  poll_interval_s: 300
+  ev_default_target_soc_pct: 80
+  # ev_loadpoint_id: ""            # defaults to the first configured loadpoint
+  # away_keywords: [away, vacation, holiday]
+  # ev_keywords:   [ev, car, charge]
+  evse_history: true               # write a calendar event per EV charge session
+  history_path: /fortytwowatts/history/
+
 # Persistent state (SQLite)
 state:
   path: state.db

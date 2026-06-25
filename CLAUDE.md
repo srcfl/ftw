@@ -54,6 +54,7 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/loadmodel` | Household load twin (bucketed + heating coefficient) |
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
 | `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
+| `go/internal/calendar` | CalDAV-client planner constraints (#498) — title-keyword intents (away → load profile, EV deadline → loadpoint target) + EVSE usage history writer; talks to the bundled Radicale sidecar |
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
 | `go/internal/nova` | Opt-in federation client to Sourceful Nova Core — ES256 identity, JWT signer, HTTP client (claim + provision), clean telemetry payload + boundary adapter, MQTT publisher |
 | `go/cmd/ftw-updater` | Sidecar binary — runs docker compose pull + up -d on behalf of the main service |

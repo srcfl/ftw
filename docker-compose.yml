@@ -133,6 +133,44 @@ services:
       - ./mosquitto/config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
 
+  # ---------------------------------------------------------------------
+  # CalDAV server (Radicale) — calendar-based planner constraints (#498)
+  #
+  # 42W is a CalDAV *client* of this sidecar. Add a CalDAV account in your
+  # phone/desktop calendar app pointing at http://<host-ip>:5232/<user>/energy/
+  # and create events to drive the planner:
+  #   - "Away" / "Vacation"  → conserve battery while you're out.
+  #   - "Charge car 80%"     → have the EV ready by the event's start time.
+  # 42W also writes a read-only "EVSE history" calendar (…/<user>/history/).
+  #
+  # LAN-ONLY by design: this is never routed through the owner-access relay
+  # and nothing forwards port 5232 to the internet unless you do so yourself.
+  #
+  # Credentials live in ./radicale/config/users (htpasswd). Before first use:
+  #   cp radicale/config/users.example radicale/config/users
+  #   htpasswd -B radicale/config/users fortytwowatts   # set a password
+  # then enter the same username + password in Settings → Calendar.
+  # Remove this service block if you run CalDAV elsewhere (or not at all);
+  # 42W boots fine without it (the feature is opt-in + fail-soft).
+  # ---------------------------------------------------------------------
+  radicale:
+    image: tomsquest/docker-radicale:3.2.3.0
+    container_name: forty-two-watts-radicale
+    restart: unless-stopped
+
+    # Opt-in: this sidecar only starts with `docker compose --profile calendar
+    # up -d`, so a default deploy that doesn't use the calendar feature is
+    # unaffected (and never needs the ./radicale/config/users file below).
+    profiles: ["calendar"]
+
+    ports:
+      - "5232:5232"
+
+    volumes:
+      - ./radicale/config:/config:ro
+      - radicale-data:/data
+
 volumes:
   update-ipc:
   mosquitto-data:
+  radicale-data:
