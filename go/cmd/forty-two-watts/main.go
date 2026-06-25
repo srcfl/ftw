@@ -779,6 +779,10 @@ func main() {
 		// Outbound EVSE history: feed live EV charge-point readings so the
 		// service can author a calendar event per completed session.
 		calSvc.SetEVSource(func() []calendar.EVSample { return evSamplesFromTelemetry(tel) })
+		// Outbound plan publishing: feed the current MPC plan so the service
+		// can render forward-looking charge/discharge windows. mpcSvc is built
+		// just below; the closure reads it at call time (nil-safe until then).
+		calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
 		calSvc.Start(ctx)
 		defer calSvc.Stop()
 		slog.Info("caldav calendar client started", "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
@@ -2674,6 +2678,36 @@ func evSamplesFromTelemetry(tel *telemetry.Store) []calendar.EVSample {
 			Charging:  d.Charging != nil && *d.Charging,
 			SessionWh: sessionWh,
 			PowerW:    r.SmoothedW,
+		})
+	}
+	return out
+}
+
+// planSlotsFromMPC projects the latest MPC plan into the shape the calendar
+// service's plan publisher consumes (#498, Phase 2). nil-safe: returns nil
+// when the planner is disabled or has no plan yet.
+func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
+	if mpcSvc == nil {
+		return nil
+	}
+	plan := mpcSvc.Latest()
+	if plan == nil {
+		return nil
+	}
+	out := make([]calendar.PlanSlot, 0, len(plan.Actions))
+	for _, a := range plan.Actions {
+		start := time.UnixMilli(a.SlotStartMs)
+		ln := a.SlotLenMin
+		if ln <= 0 {
+			ln = 15
+		}
+		out = append(out, calendar.PlanSlot{
+			Start:      start,
+			End:        start.Add(time.Duration(ln) * time.Minute),
+			BatteryW:   a.BatteryW,
+			GridW:      a.GridW,
+			SoCPct:     a.SoCPct,
+			Confidence: a.Confidence,
 		})
 	}
 	return out

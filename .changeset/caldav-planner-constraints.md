@@ -11,8 +11,11 @@ bundled, LAN-only Radicale sidecar) and turn events into planner intents:
 - A **"Charge car 80%"** event (with your departure as the event time) sets the
   matching loadpoint's target SoC + deadline, which the MPC already honours.
 
-42W also **writes** a read-only history calendar you can subscribe to: it
-records one event per completed EV charging session ("EV charged 12.3 kWh").
+42W also **writes** read-only calendars you can subscribe to:
+
+- an EVSE usage history ("EV charged 12.3 kWh", one event per charge session);
+- the planner's forward-looking plan — upcoming battery charge/discharge
+  windows — reconciled each cycle so it stays current without piling up.
 
 The feature is opt-in (`caldav.enabled`) and fail-soft — an unreachable
 calendar server never blocks control — and stays entirely on your local

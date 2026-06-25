@@ -54,6 +54,7 @@
           "Used when an EV event's title has no explicit percentage.") +
         '</div></div>' +
         '<label><input type="checkbox" data-checkbox-path="caldav.evse_history"' + (config.caldav.evse_history === false ? '' : ' checked') + '> Write EVSE usage as calendar history</label>' +
+        '<label><input type="checkbox" data-checkbox-path="caldav.publish_plan"' + (config.caldav.publish_plan === false ? '' : ' checked') + '> Publish the planner\'s upcoming charge/discharge windows</label>' +
         '<p class="hint" style="margin-top:6px">Title an event <b>Away</b> or <b>Vacation</b> to conserve battery while you\'re out. Title one <b>Charge car 80%</b> (with your departure as the event time) so the car is ready in time.</p>' +
         '<div id="caldav-urls"></div>' +
         '</fieldset>';
@@ -75,6 +76,7 @@
             var bits = (d.event_count || 0) + " intent" + (d.event_count === 1 ? "" : "s");
             if (d.away_active) bits += "  ·  away active";
             if (d.history_written) bits += "  ·  " + d.history_written + " history event" + (d.history_written === 1 ? "" : "s") + " written";
+            if (d.plan_enabled) bits += "  ·  " + (d.plan_events || 0) + " plan window" + (d.plan_events === 1 ? "" : "s");
             el.className = "ha-status-indicator ha-ok";
             el.textContent = "● reachable  ·  " + bits + "  ·  last sync " + age;
           } else {
@@ -90,6 +92,10 @@
             if (d.history_enabled && d.history_url) {
               rows += '<div class="field-row"><label>EVSE history (read-only)</label>' +
                 '<code class="subscribe-url">' + lanURL(d.history_url) + '</code></div>';
+            }
+            if (d.plan_enabled && d.plan_url) {
+              rows += '<div class="field-row"><label>Planned actions (read-only)</label>' +
+                '<code class="subscribe-url">' + lanURL(d.plan_url) + '</code></div>';
             }
             urls.innerHTML = rows;
           }

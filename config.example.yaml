@@ -117,6 +117,9 @@ caldav:
   # ev_keywords:   [ev, car, charge]
   evse_history: true               # write a calendar event per EV charge session
   history_path: /fortytwowatts/history/
+  publish_plan: true               # publish upcoming charge/discharge windows (read-only)
+  plan_path: /fortytwowatts/plan/
+  # plan_publish_interval_s: 900   # how often the plan calendar is reconciled
 
 # Persistent state (SQLite)
 state:

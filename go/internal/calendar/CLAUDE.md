@@ -14,6 +14,10 @@ Two intents, both routed onto **existing** machinery:
 | "Away" / "Vacation" / "Holiday" | `loadmodel.SetProfile(ProfileAway)` for the interval (live + training); `IsAwayAt(t)` drives the per-slot MPC load override |
 | "Charge car 80%" / "EV …" | `loadpoint.Manager.SetTarget(id, soc, departure)` → the MPC loadpoint probe already enforces it |
 
+It also **writes** two read-only calendars (separate collections): an EVSE
+usage history (`history.go`) and the planner's forward-looking charge/discharge
+windows (`plan.go`, reconciled each cycle — PUT changed, DELETE stale).
+
 ## Files
 
 - `parse.go` — pure title→intent classifier (`parser`, no config/network dep).

@@ -131,3 +131,67 @@ func TestCalDAVIntegration(t *testing.T) {
 		t.Fatalf("history event not found in %s", historyPath)
 	}
 }
+
+func countEvents(t *testing.T, c *caldav.Client, path, substr string) int {
+	objs, err := c.QueryCalendar(context.Background(), path, &caldav.CalendarQuery{
+		CompRequest: caldav.CalendarCompRequest{Name: "VCALENDAR", Comps: []caldav.CalendarCompRequest{{Name: "VEVENT", AllProps: true}}},
+		CompFilter:  caldav.CompFilter{Name: "VCALENDAR", Comps: []caldav.CompFilter{{Name: "VEVENT"}}},
+	})
+	if err != nil {
+		t.Fatalf("query %s: %v", path, err)
+	}
+	n := 0
+	for _, o := range objs {
+		if o.Data == nil {
+			continue
+		}
+		for _, ev := range o.Data.Events() {
+			if sum, _ := ev.Props.Text(ical.PropSummary); strings.Contains(sum, substr) {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+func TestCalDAVPlanPublish(t *testing.T) {
+	url, user, pass := itEnv(t)
+	planPath := "/" + user + "/plan/"
+	mkcalendar(t, url, user, pass, planPath)
+	c := itClient(url, user, pass)
+	now := time.Now()
+
+	s := New(config.CalDAV{
+		Enabled: true, URL: url, Username: user, Password: pass,
+		CalendarPath: "/" + user + "/energy/", PlanPath: planPath,
+	}, &fakeLP{}, &fakeLM{}, "garage")
+
+	// Plan v1: a charge window in the near future (two consecutive slots).
+	s.SetPlanSource(func() []PlanSlot {
+		return []PlanSlot{
+			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: 4000, SoCPct: 60},
+			{Start: now.Add(2 * time.Hour), End: now.Add(3 * time.Hour), BatteryW: 4000, SoCPct: 80},
+		}
+	})
+	s.publishPlan(context.Background())
+	if n := countEvents(t, c, planPath, "Charge battery"); n != 1 {
+		t.Fatalf("after v1: want 1 charge event, got %d", n)
+	}
+	t.Logf("plan publish OK: 1 charge window written")
+
+	// Plan v2: the charge window is gone, replaced by a discharge window. The
+	// reconcile must DELETE the stale charge event and PUT the discharge one.
+	s.SetPlanSource(func() []PlanSlot {
+		return []PlanSlot{
+			{Start: now.Add(1 * time.Hour), End: now.Add(2 * time.Hour), BatteryW: -3000, SoCPct: 40},
+		}
+	})
+	s.publishPlan(context.Background())
+	if n := countEvents(t, c, planPath, "Charge battery"); n != 0 {
+		t.Fatalf("after v2: stale charge event not deleted, %d remain", n)
+	}
+	if n := countEvents(t, c, planPath, "Discharge battery"); n != 1 {
+		t.Fatalf("after v2: want 1 discharge event, got %d", n)
+	}
+	t.Logf("plan reconcile OK: stale charge deleted, discharge written")
+}

@@ -73,6 +73,23 @@ deliberately distinct from the intent calendar so 42W never re-reads its own
 events as intents. Subscribe to it read-only. Disable with `evse_history:
 false`.
 
+## Plan publishing (outbound, forward-looking)
+
+42W also publishes the planner's **upcoming** decisions as a read-only calendar
+you can subscribe to (`plan_path`, default `/fortytwowatts/plan/`). On each
+publish it coalesces the MPC plan into charge/discharge windows — e.g.
+`Charge battery ~3.2 kW` from 02:00–05:00 — marked `TENTATIVE` (it's a plan,
+not a commitment).
+
+Because the plan re-plans every ~15 min, the publisher **reconciles** rather
+than appends: each cycle it PUTs new/changed windows and DELETEs windows that
+are no longer planned (or have fallen into the past), keyed by a stable UID,
+so your calendar reflects the current plan without piling up stale events.
+Only forward-looking windows are published; idle/"hold" slots are omitted.
+Disable with `publish_plan: false`; tune cadence with
+`plan_publish_interval_s` (default 900). The plan, history and intent
+collections are kept distinct so 42W never re-reads its own output as input.
+
 ## Config
 
 See the `caldav:` block in `config.example.yaml`. The password is stored in

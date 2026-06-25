@@ -56,6 +56,10 @@ type Service struct {
 	evSampleInterval time.Duration
 	ev               map[string]*evTrack
 
+	// planSource yields the current MPC plan slots (set by main.go before
+	// Start). Drives the forward-looking plan publisher.
+	planSource PlanSource
+
 	// mu guards the resolved config + live diagnostic state below.
 	mu             sync.RWMutex
 	enabled        bool
@@ -77,6 +81,13 @@ type Service struct {
 	lastEV         *EVDeadline
 	historyWritten int
 	lastHistoryMs  int64
+
+	planEnabled         bool
+	planPath            string
+	planPublishInterval time.Duration
+	planWritten         map[string]string // uid -> content hash
+	planEventCount      int
+	lastPlanMs          int64
 }
 
 // Status is the read-only snapshot rendered by GET /api/caldav/status.
@@ -96,6 +107,12 @@ type Status struct {
 	HistoryURL     string `json:"history_url,omitempty"`
 	HistoryWritten int    `json:"history_written"`
 	LastHistoryMs  int64  `json:"last_history_ms,omitempty"`
+
+	// Outbound forward-looking plan publisher.
+	PlanEnabled bool   `json:"plan_enabled"`
+	PlanURL     string `json:"plan_url,omitempty"`
+	PlanEvents  int    `json:"plan_events"`
+	LastPlanMs  int64  `json:"last_plan_ms,omitempty"`
 }
 
 // New builds a calendar service from config. firstLoadpointID is the fallback
@@ -107,10 +124,13 @@ func New(cfg config.CalDAV, lp LoadpointTargeter, lm LoadProfiler, firstLoadpoin
 		lm:               lm,
 		ev:               make(map[string]*evTrack),
 		evSampleInterval: 30 * time.Second,
+		planWritten:      make(map[string]string),
 	}
 	s.applyConfig(cfg, firstLoadpointID)
 	return s
 }
+
+// SetPlanSource is defined in plan.go.
 
 // SetEVSource installs the EV telemetry source for the outbound history
 // writer. Call before Start. nil disables the writer.
@@ -169,6 +189,21 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 		slog.Warn("caldav: history_path equals calendar_path; disabling EVSE history to avoid a feedback loop",
 			"path", histPath)
 	}
+	planPath := strings.TrimSpace(cfg.PlanPath)
+	if planPath == "" {
+		planPath = config.DefaultCalDAVPlanPath
+	}
+	planPub := cfg.PlanPublishIntervalS
+	if planPub <= 0 {
+		planPub = config.DefaultCalDAVPlanPublishS
+	}
+	// Plan collection must be distinct from the inbound calendar (else the
+	// publisher's events would be re-read as intents) and from history.
+	planEnabled := cfg.PublishPlanEnabled() && planPath != "" && planPath != calPath && planPath != histPath
+	if cfg.PublishPlanEnabled() && (planPath == calPath || planPath == histPath) {
+		slog.Warn("caldav: plan_path collides with calendar_path/history_path; disabling plan publishing",
+			"path", planPath)
+	}
 
 	s.mu.Lock()
 	s.enabled = cfg.Enabled
@@ -181,6 +216,9 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	s.prs = newParser(away, evk, defaultLP, targetSoC)
 	s.historyPath = histPath
 	s.historyEnabled = histEnabled
+	s.planPath = planPath
+	s.planEnabled = planEnabled
+	s.planPublishInterval = time.Duration(planPub) * time.Second
 	s.mu.Unlock()
 }
 
@@ -210,6 +248,7 @@ func (s *Service) Start(ctx context.Context) {
 	s.mu.RLock()
 	enabled := s.enabled
 	historyEnabled := s.historyEnabled && s.evSource != nil
+	planEnabled := s.planEnabled && s.planSource != nil
 	s.mu.RUnlock()
 	if !enabled {
 		return
@@ -221,6 +260,10 @@ func (s *Service) Start(ctx context.Context) {
 	if historyEnabled {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.evHistoryLoop(ctx) }()
+	}
+	if planEnabled {
+		s.wg.Add(1)
+		go func() { defer s.wg.Done(); s.planPublishLoop(ctx) }()
 	}
 }
 
@@ -470,9 +513,15 @@ func (s *Service) Status() Status {
 		HistoryEnabled: s.historyEnabled,
 		HistoryWritten: s.historyWritten,
 		LastHistoryMs:  s.lastHistoryMs,
+		PlanEnabled:    s.planEnabled,
+		PlanEvents:     s.planEventCount,
+		LastPlanMs:     s.lastPlanMs,
 	}
 	if s.historyEnabled {
 		st.HistoryURL = joinURL(s.url, s.historyPath)
+	}
+	if s.planEnabled {
+		st.PlanURL = joinURL(s.url, s.planPath)
 	}
 	if n := nextEV(s.intents.EV, time.Now()); n != nil {
 		cp := *n

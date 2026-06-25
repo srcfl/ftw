@@ -1,0 +1,247 @@
+package calendar
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-ical"
+	webdav "github.com/emersion/go-webdav"
+)
+
+// PlanSlot is one MPC plan slot, supplied by the host (main.go reads it off
+// mpc.Service.Latest()). The plan publisher coalesces consecutive slots with
+// the same battery action into human-readable "decision blocks".
+type PlanSlot struct {
+	Start, End time.Time
+	BatteryW   float64 // site sign: + charging, - discharging
+	GridW      float64 // resulting grid power (+ import, - export)
+	SoCPct     float64 // SoC at END of slot
+	Confidence float64
+}
+
+// PlanSource returns the current plan slots (ordered by time).
+type PlanSource func() []PlanSlot
+
+// planChargeThreshW is the |battery power| above which a slot counts as an
+// active charge/discharge window worth publishing. Below it the slot is
+// "hold" and is omitted to keep the calendar to actual charging windows.
+const planChargeThreshW = 150.0
+
+// planBlock is a coalesced, ready-to-write plan event.
+type planBlock struct {
+	uid         string
+	start, end  time.Time
+	summary     string
+	description string
+}
+
+// hash is a cheap content fingerprint for reconcile (re-PUT only on change).
+func (b planBlock) hash() string {
+	return b.summary + "|" + b.start.UTC().Format(time.RFC3339) + "|" + b.end.UTC().Format(time.RFC3339)
+}
+
+// buildPlanBlocks coalesces plan slots into forward-looking charge/discharge
+// blocks. Pure + deterministic for unit testing. Only blocks that extend past
+// `now` are returned (the plan is forward-looking; past windows belong to the
+// history calendar). "Hold" slots break a run but are not published.
+func buildPlanBlocks(slots []PlanSlot, now time.Time) []planBlock {
+	var blocks []planBlock
+
+	flush := func(run []PlanSlot, cat int) {
+		if len(run) == 0 || cat == 0 {
+			return
+		}
+		start := run[0].Start
+		end := run[len(run)-1].End
+		if !end.After(now) {
+			return // entirely in the past
+		}
+		var sum float64
+		for _, s := range run {
+			sum += s.BatteryW
+		}
+		avgKW := math.Abs(sum/float64(len(run))) / 1000
+		endSoC := run[len(run)-1].SoCPct
+		var verb, short string
+		if cat > 0 {
+			verb, short = "Charge battery", "chg"
+		} else {
+			verb, short = "Discharge battery", "dis"
+		}
+		blocks = append(blocks, planBlock{
+			uid:     fmt.Sprintf("ftw-plan-%s-%d@fortytwowatts", short, start.Unix()),
+			start:   start,
+			end:     end,
+			summary: fmt.Sprintf("%s ~%.1f kW", verb, avgKW),
+			description: fmt.Sprintf(
+				"forty-two-watts plan: %s at about %.1f kW, SoC ≈ %.0f%% by end of window.",
+				strings.ToLower(verb), avgKW, endSoC),
+		})
+	}
+
+	var run []PlanSlot
+	runCat := 0
+	for _, s := range slots {
+		cat := 0
+		if s.BatteryW > planChargeThreshW {
+			cat = 1
+		} else if s.BatteryW < -planChargeThreshW {
+			cat = -1
+		}
+		if cat != runCat {
+			flush(run, runCat)
+			run = run[:0]
+			runCat = cat
+		}
+		if cat != 0 {
+			run = append(run, s)
+		}
+	}
+	flush(run, runCat)
+	return blocks
+}
+
+// SetPlanSource installs the MPC plan source for the forward-looking plan
+// publisher. Call before Start. nil disables publishing.
+func (s *Service) SetPlanSource(src PlanSource) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.planSource = src
+	s.mu.Unlock()
+}
+
+// planPublishLoop renders the plan into the plan collection on a ticker,
+// reconciling against what it wrote last cycle. Fail-soft.
+func (s *Service) planPublishLoop(ctx context.Context) {
+	s.publishPlan(ctx) // prime
+	s.mu.RLock()
+	interval := s.planPublishInterval
+	s.mu.RUnlock()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stop:
+			return
+		case <-t.C:
+			s.publishPlan(ctx)
+		}
+	}
+}
+
+// publishPlan builds the current plan blocks and reconciles the plan
+// collection: PUT new/changed blocks, DELETE blocks that are no longer in the
+// plan (or have fallen into the past). Churn is bounded to real plan changes.
+func (s *Service) publishPlan(ctx context.Context) {
+	s.mu.RLock()
+	src := s.planSource
+	url, planPath, user, pass := s.url, s.planPath, s.username, s.password
+	s.mu.RUnlock()
+	if src == nil {
+		return
+	}
+
+	blocks := buildPlanBlocks(src(), time.Now())
+	want := make(map[string]planBlock, len(blocks))
+	for _, b := range blocks {
+		want[b.uid] = b
+	}
+
+	s.mu.Lock()
+	prev := s.planWritten
+	if prev == nil {
+		prev = map[string]string{}
+	}
+	s.mu.Unlock()
+
+	next := make(map[string]string, len(want))
+	var puts, dels int
+
+	// PUT new or changed blocks.
+	for uid, b := range want {
+		h := b.hash()
+		next[uid] = h
+		if prev[uid] == h {
+			continue // unchanged
+		}
+		if err := s.putPlanBlock(ctx, url, planPath, user, pass, b); err != nil {
+			slog.Warn("caldav: failed to publish plan event", "uid", uid, "err", err)
+			// keep last-known state for this uid so we retry next cycle
+			if old, ok := prev[uid]; ok {
+				next[uid] = old
+			} else {
+				delete(next, uid)
+			}
+			continue
+		}
+		puts++
+	}
+	// DELETE blocks we wrote before but no longer want.
+	for uid := range prev {
+		if _, keep := want[uid]; keep {
+			continue
+		}
+		if err := s.deleteObject(ctx, url, planPath, user, pass, uid); err != nil {
+			slog.Warn("caldav: failed to delete stale plan event", "uid", uid, "err", err)
+			next[uid] = prev[uid] // retain so we retry the delete next cycle
+			continue
+		}
+		dels++
+	}
+
+	s.mu.Lock()
+	s.planWritten = next
+	s.planEventCount = len(want)
+	s.lastPlanMs = time.Now().UnixMilli()
+	s.mu.Unlock()
+
+	if puts > 0 || dels > 0 {
+		slog.Info("caldav: plan calendar reconciled", "events", len(want), "put", puts, "deleted", dels)
+	}
+}
+
+func (s *Service) putPlanBlock(ctx context.Context, url, planPath, user, pass string, b planBlock) error {
+	client, err := s.newClient(url, user, pass)
+	if err != nil {
+		return err
+	}
+	cal := ical.NewCalendar()
+	cal.Props.SetText(ical.PropProductID, "-//forty-two-watts//plan//EN")
+	cal.Props.SetText(ical.PropVersion, "2.0")
+	ev := ical.NewEvent()
+	ev.Props.SetText(ical.PropUID, b.uid)
+	ev.Props.SetDateTime(ical.PropDateTimeStamp, time.Now().UTC())
+	ev.Props.SetDateTime(ical.PropDateTimeStart, b.start)
+	ev.Props.SetDateTime(ical.PropDateTimeEnd, b.end)
+	ev.Props.SetText(ical.PropSummary, b.summary)
+	ev.Props.SetText(ical.PropDescription, b.description)
+	// Mark as tentative — a plan, not a commitment.
+	ev.Props.SetText(ical.PropStatus, "TENTATIVE")
+	cal.Children = append(cal.Children, ev.Component)
+	_, err = client.PutCalendarObject(ctx, planObjectPath(planPath, b.uid), cal)
+	return err
+}
+
+// deleteObject removes a plan event by uid via a WebDAV DELETE. The caldav
+// client has no delete, so we use a plain webdav client.
+func (s *Service) deleteObject(ctx context.Context, url, planPath, user, pass, uid string) error {
+	hc := webdav.HTTPClientWithBasicAuth(&http.Client{Timeout: 15 * time.Second}, user, pass)
+	wc, err := webdav.NewClient(hc, url)
+	if err != nil {
+		return err
+	}
+	return wc.RemoveAll(ctx, planObjectPath(planPath, uid))
+}
+
+func planObjectPath(planPath, uid string) string {
+	return strings.TrimRight(planPath, "/") + "/" + uid + ".ics"
+}

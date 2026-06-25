@@ -318,6 +318,15 @@ type CalDAV struct {
 	// never re-reads its own history events as inbound intents.
 	EVSEHistory *bool  `yaml:"evse_history,omitempty" json:"evse_history,omitempty"`
 	HistoryPath string `yaml:"history_path,omitempty" json:"history_path,omitempty"`
+
+	// PublishPlan (default ON when enabled) makes 42W write its forward-looking
+	// plan — upcoming battery charge/discharge windows from the MPC — as
+	// read-only events into PlanPath (a SEPARATE collection), so you can see
+	// what 42W intends to do. Reconciled each publish so stale events are
+	// removed rather than piling up.
+	PublishPlan          *bool  `yaml:"publish_plan,omitempty" json:"publish_plan,omitempty"`
+	PlanPath             string `yaml:"plan_path,omitempty" json:"plan_path,omitempty"`
+	PlanPublishIntervalS int    `yaml:"plan_publish_interval_s,omitempty" json:"plan_publish_interval_s,omitempty"`
 }
 
 // EVSEHistoryEnabled reports whether 42W should write EV-session history
@@ -326,12 +335,20 @@ func (cv *CalDAV) EVSEHistoryEnabled() bool {
 	return cv != nil && cv.Enabled && (cv.EVSEHistory == nil || *cv.EVSEHistory)
 }
 
+// PublishPlanEnabled reports whether 42W should publish its forward-looking
+// plan calendar. Nil-safe; defaults ON when the feature is enabled.
+func (cv *CalDAV) PublishPlanEnabled() bool {
+	return cv != nil && cv.Enabled && (cv.PublishPlan == nil || *cv.PublishPlan)
+}
+
 // CalDAV defaults. Keyword identifiers are English; operators may override
 // with localised terms via config (the values are user-facing).
 var (
 	DefaultCalDAVURL          = "http://localhost:5232"
 	DefaultCalDAVCalendarPath = "/fortytwowatts/energy/"
 	DefaultCalDAVHistoryPath  = "/fortytwowatts/history/"
+	DefaultCalDAVPlanPath     = "/fortytwowatts/plan/"
+	DefaultCalDAVPlanPublishS = 900
 	DefaultCalDAVPollS        = 300
 	DefaultCalDAVHorizonDays  = 7
 	DefaultCalDAVEVTargetSoC  = 80.0
