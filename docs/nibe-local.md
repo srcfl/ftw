@@ -74,9 +74,14 @@ internet.
 ## Telemetry
 
 Canonical headline metrics (stable names the heating dashboard + thermal twin
-read), mapped from NIBE S735 variable ids — override per model via
-`param_power_id`, `param_hw_temp_id`, `param_indoor_temp_id`,
-`param_outdoor_temp_id`, etc. in `config`:
+read). Their variable ids are **auto-selected per pump** from a built-in
+profile map keyed by the device's `firmwareId`/model reported by
+`GET /api/v1/devices` — the generic S-series default below is verified on the
+S735 and, because the S-series shares the core register ids, covers the whole
+family. To support a model that genuinely renumbers a headline, add an entry to
+`PROFILES` in `drivers/nibe_local.lua`. You can always override any id per
+instance via `param_power_id`, `param_hw_temp_id`, `param_indoor_temp_id`,
+`param_outdoor_temp_id`, etc. in `config` (override > profile > default):
 
 | Metric | Unit | Source (S735 id) |
 |---|---|---|

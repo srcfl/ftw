@@ -199,3 +199,70 @@ func TestNibeLocalLive(t *testing.T) {
 		t.Error("expected hp_outdoor_temp_c from a live pump")
 	}
 }
+
+// TestNibeLocalHeadlineOverride proves per-model headline resolution: a
+// config override (param_power_id) wins over the built-in profile default,
+// the model name is captured, and the override survives the post-detection
+// profile rebuild in try_setup. The overridden default id then falls through
+// to its auto-generated name instead of vanishing.
+func TestNibeLocalHeadlineOverride(t *testing.T) {
+	point := func(title, size, unit string, divisor, integerValue int) map[string]any {
+		return map[string]any{
+			"title": title,
+			"metadata": map[string]any{
+				"variableSize": size, "unit": unit, "divisor": divisor, "isWritable": false,
+			},
+			"value": map[string]any{"type": "datavalue", "isOk": true, "integerValue": integerValue},
+		}
+	}
+	points := map[string]any{
+		"1801": point("Compressor power input", "u16", "W", 1, 1500),   // built-in default id
+		"9999": point("Custom whole-house power", "u32", "W", 1, 2222), // override target
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/devices":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"devices": []map[string]any{
+					{"product": map[string]any{
+						"serialNumber": "06613225140002", "manufacturer": "NIBE",
+						"name": "NIBE S735", "firmwareId": "nibe-n",
+					}},
+				},
+			})
+		case "/api/v1/devices/06613225140002/points":
+			_ = json.NewEncoder(w).Encode(points)
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	tel := telemetry.NewStore()
+	d, err := NewLuaDriver(nibeLocalDriverPath(t), NewHostEnv("nibe", tel).WithHTTP())
+	if err != nil {
+		t.Fatalf("load driver: %v", err)
+	}
+	defer d.Cleanup()
+	cfg := map[string]any{
+		"username":       "u",
+		"password":       "p",
+		"base_url":       srv.URL,
+		"param_power_id": "9999", // override the default compressor-power id
+	}
+	if err := d.Init(context.Background(), cfg); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	// hp_power_w must follow the override (id 9999 = 2222 W), not the default 1801.
+	if v, _, ok := tel.LatestMetric("nibe", "hp_power_w"); !ok || !approxEq(v, 2222) {
+		t.Errorf("hp_power_w = %v (ok=%v), want 2222 from override id 9999", v, ok)
+	}
+	// The now-unmapped default id 1801 should surface under its auto name.
+	if v, _, ok := tel.LatestMetric("nibe", "hp_compressor_power_input"); !ok || !approxEq(v, 1500) {
+		t.Errorf("overridden default id should fall through to hp_compressor_power_input=1500, got %v (ok=%v)", v, ok)
+	}
+}

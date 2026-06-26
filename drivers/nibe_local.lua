@@ -81,18 +81,46 @@ local SETUP_RETRY_MS = 30000
 local last_setup_ms  = nil
 local POLL_INTERVAL_MS = 60000
 
--- Canonical headline ids (NIBE S735 local-API variableIds). Built into a
--- lookup in driver_init so config overrides can move them per model. The
--- first four names are the ones web/heating.js + the thermal twin read.
-local DEFAULT_POWER_ID   = "1801"   -- Compressor power input (W)
-local DEFAULT_USED_ID    = "22130"  -- Instantaneous used power (W)
-local DEFAULT_HW_ID      = "11"     -- Hot water top (BT7) (°C)
-local DEFAULT_INDOOR_ID  = "158"    -- Room average temp clim. system 1 (BT50)
-local DEFAULT_OUTDOOR_ID = "4"      -- Current outdoor temperature (BT1)
-local DEFAULT_ECONS_ID   = "28393"  -- Tot. consumption (kWh)
-local DEFAULT_EPROD_ID   = "28392"  -- Tot. production (kWh)
-local DEFAULT_DM_ID      = "781"    -- Degree minutes
-local CANON = {}   -- id(string) -> { name = "...", watts = bool }
+-- ---- Headline metrics + per-model profiles -------------------------------
+-- The BULK of telemetry is metadata-driven (every point self-describes its
+-- unit + divisor), so reading any S-series pump needs NO per-model code. The
+-- only model-specific knobs are the handful of STABLE headline aliases
+-- (hp_power_w, hp_outdoor_temp_c, …) that web/heating.js + the thermal twin
+-- read by fixed name. Each maps to a local-API variableId, resolved per pump
+-- in priority order: explicit config override > model profile > generic
+-- S-series default.
+
+-- Logical headline -> { config override key, emitted metric name, watts? }.
+local HEADLINES = {
+    { key = "power",   cfg = "param_power_id",           name = "hp_power_w",            watts = true },
+    { key = "used",    cfg = "param_used_id",            name = "hp_used_power_w",       watts = true },
+    { key = "hw",      cfg = "param_hw_temp_id",         name = "hp_hw_top_temp_c" },
+    { key = "indoor",  cfg = "param_indoor_temp_id",     name = "hp_indoor_temp_c" },
+    { key = "outdoor", cfg = "param_outdoor_temp_id",    name = "hp_outdoor_temp_c" },
+    { key = "econs",   cfg = "param_energy_consumed_id", name = "hp_energy_consumed_kwh" },
+    { key = "eprod",   cfg = "param_energy_produced_id", name = "hp_energy_produced_kwh" },
+    { key = "dm",      cfg = "param_degree_minutes_id",  name = "hp_degree_minutes" },
+}
+
+-- Per-model headline variable-id profiles, auto-selected from the pump's
+-- product.name / firmwareId (GET /api/v1/devices), matched case-insensitively
+-- as a substring. The S-series shares the core register ids, so `default`
+-- covers the whole family (verified on an S735); add a model entry ONLY when
+-- a specific model is confirmed to renumber a headline. A profile may set
+-- just the keys that differ — the rest fall back to default.
+local PROFILES = {
+    default = {  -- generic NIBE S-series (verified: S735)
+        power = "1801", used = "22130", hw = "11", indoor = "158",
+        outdoor = "4",  econs = "28393", eprod = "28392", dm = "781",
+    },
+    -- Example — uncomment + verify the ids against GET …/points before use:
+    -- ["s320"] = { power = "1801", hw = "11" },
+}
+
+local CANON           = {}   -- id(string) -> { name = "...", watts = bool }
+local driver_config   = nil  -- kept so CANON can be rebuilt once the model is known
+local device_model    = nil  -- product.name reported by the pump (may be "" / nil)
+local device_firmware = nil  -- product.firmwareId (e.g. "nibe-n")
 
 -- ---- Helpers -------------------------------------------------------------
 
@@ -149,6 +177,36 @@ local function to_watts(value, unit)
     return value, (unit ~= "" and unit or "W")
 end
 
+-- Build the id -> canonical-metric lookup. Each headline's id is resolved
+-- explicit config override > model profile > generic default.
+local function build_canon(profile, config)
+    config = config or {}
+    profile = profile or PROFILES.default
+    local function s(v) return (v ~= nil and v ~= "") and tostring(v) or nil end
+    CANON = {}
+    for _, h in ipairs(HEADLINES) do
+        local id = s(config[h.cfg]) or s(profile[h.key]) or s(PROFILES.default[h.key])
+        if id then CANON[id] = { name = h.name, watts = h.watts } end
+    end
+end
+
+-- Pick the model profile whose key appears (case-insensitively, as a
+-- substring) in the pump's product.name or firmwareId. Falls back to the
+-- generic default, which covers the whole S-series.
+local function select_profile(model_name, firmware_id)
+    local n = string.lower(model_name or "")
+    local f = string.lower(firmware_id or "")
+    for k, prof in pairs(PROFILES) do
+        if k ~= "default" then
+            if (n ~= "" and string.find(n, k, 1, true)) or
+               (f ~= "" and string.find(f, k, 1, true)) then
+                return k, prof
+            end
+        end
+    end
+    return "default", PROFILES.default
+end
+
 local function auth_headers()
     return { Authorization = auth_value, Accept = "application/json" }
 end
@@ -172,9 +230,12 @@ local function detect_serial()
     local devs = data.devices
     if type(devs) == "table" and devs[1] and devs[1].product then
         local p = devs[1].product
+        device_model    = p.name
+        device_firmware = p.firmwareId
         if p.serialNumber and p.serialNumber ~= "" then
             host.log("info", "NIBE: detected " .. tostring(p.manufacturer) ..
-                " " .. tostring(p.serialNumber) .. " (fw " .. tostring(p.firmwareId) .. ")")
+                " '" .. tostring(p.name) .. "' " .. tostring(p.serialNumber) ..
+                " (fw " .. tostring(p.firmwareId) .. ")")
             return p.serialNumber
         end
     end
@@ -194,7 +255,11 @@ local function try_setup()
     serial = detect_serial()
     if not serial then return false end
     host.set_sn(serial)
-    host.log("info", "NIBE: ready (read-only) serial=" .. serial)
+    -- Now that the model is known, refine the headline ids (config overrides
+    -- still win inside build_canon).
+    local pkey, prof = select_profile(device_model, device_firmware)
+    build_canon(prof, driver_config)
+    host.log("info", "NIBE: ready (read-only) serial=" .. serial .. " profile=" .. pkey)
     return true
 end
 
@@ -225,17 +290,11 @@ function driver_init(config)
         SETUP_RETRY_MS = tonumber(config.setup_retry_ms) or SETUP_RETRY_MS
     end
 
-    -- Build the canonical headline lookup (ids overridable per model).
-    local function ov(k, d) return s(config[k]) or d end
-    CANON = {}
-    CANON[ov("param_power_id",   DEFAULT_POWER_ID)]   = { name = "hp_power_w",            watts = true }
-    CANON[ov("param_used_id",    DEFAULT_USED_ID)]    = { name = "hp_used_power_w",       watts = true }
-    CANON[ov("param_hw_temp_id", DEFAULT_HW_ID)]      = { name = "hp_hw_top_temp_c" }
-    CANON[ov("param_indoor_temp_id", DEFAULT_INDOOR_ID)] = { name = "hp_indoor_temp_c" }
-    CANON[ov("param_outdoor_temp_id", DEFAULT_OUTDOOR_ID)] = { name = "hp_outdoor_temp_c" }
-    CANON[ov("param_energy_consumed_id", DEFAULT_ECONS_ID)] = { name = "hp_energy_consumed_kwh" }
-    CANON[ov("param_energy_produced_id", DEFAULT_EPROD_ID)] = { name = "hp_energy_produced_kwh" }
-    CANON[ov("param_degree_minutes_id", DEFAULT_DM_ID)]   = { name = "hp_degree_minutes" }
+    -- Build the headline lookup with the generic profile now; try_setup
+    -- refines it to the detected model's profile once the pump answers.
+    -- Config overrides (param_*_id) win in build_canon either way.
+    driver_config = config
+    build_canon(PROFILES.default, config)
 
     if not base_url then
         host.log("error", "NIBE: 'host' (pump IP) is required")
