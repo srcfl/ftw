@@ -88,10 +88,13 @@ Events are classified by case-insensitive keyword in the **title**:
 Keyword lists (`away_keywords`, `ev_keywords`) are configurable for other
 languages. What 42W parsed is visible at `GET /api/caldav/status`.
 
-**Recurring events work.** A weekly *Away* or a daily *Charge car* expands into
-its individual occurrences server-side (RFC 4791 `CALDAV:expand`, via
+**Recurring events work fully.** A weekly *Away* or a daily *Charge car* expands
+into its individual occurrences server-side (RFC 4791 `CALDAV:expand`, via
 `caldavserver/expand.go`), so the planner sees every occurrence inside its
-horizon — not just the first.
+horizon — not just the first. RRULE, RDATE and EXDATE are all honoured, and if
+you edit or delete a single occurrence in your calendar app (a per-instance
+`RECURRENCE-ID` override or cancellation) that one occurrence is updated/removed
+while the rest of the series is unchanged.
 
 ## EVSE history (outbound)
 
@@ -173,6 +176,5 @@ licensed static binary:
 
 ### Future work
 
-- Honour per-instance `RECURRENCE-ID` override events during expansion.
 - Verify interop against the full matrix of iOS / Google / Thunderbird (today
   it's proven against 42W's own go-webdav client).

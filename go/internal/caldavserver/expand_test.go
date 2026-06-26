@@ -125,3 +125,112 @@ func TestExpandCalendarUnit(t *testing.T) {
 		t.Fatalf("daily recurrence should expand to 3 instances, got %d", n)
 	}
 }
+
+// mkEvent builds a timed VEVENT for the expansion edge-case tests.
+func mkEvent(uid, summary string, start time.Time, dur time.Duration) *ical.Event {
+	ev := ical.NewEvent()
+	ev.Props.SetText(ical.PropUID, uid)
+	ev.Props.SetDateTime(ical.PropDateTimeStamp, start)
+	ev.Props.SetDateTime(ical.PropDateTimeStart, start)
+	ev.Props.SetDateTime(ical.PropDateTimeEnd, start.Add(dur))
+	ev.Props.SetText(ical.PropSummary, summary)
+	return ev
+}
+
+// June 1 2026, 09:00 UTC and a window covering Jun 1, 2, 3 (Jun 4 excluded).
+var (
+	expAnchor = time.Date(2026, time.June, 1, 9, 0, 0, 0, time.UTC)
+	expStart  = expAnchor.Add(-time.Hour)
+	expEnd    = expAnchor.Add(3*24*time.Hour - time.Minute)
+)
+
+func summaries(cal *ical.Calendar) []string {
+	if cal == nil {
+		return nil
+	}
+	out := []string{}
+	for _, e := range cal.Events() {
+		s, _ := e.Props.Text(ical.PropSummary)
+		out = append(out, s)
+	}
+	return out
+}
+
+// TestExpandRecurrenceIDOverride: a per-instance override replaces exactly that
+// occurrence (no duplicate), and the other occurrences are still generated.
+func TestExpandRecurrenceIDOverride(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("e", "Away", expAnchor, time.Hour)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=DAILY;COUNT=10"})
+	cal.Children = append(cal.Children, master.Component)
+
+	ov := mkEvent("e", "Away (changed)", expAnchor.AddDate(0, 0, 1), time.Hour) // Jun 2
+	ov.Props.SetDateTime(ical.PropRecurrenceID, expAnchor.AddDate(0, 0, 1))
+	cal.Children = append(cal.Children, ov.Component)
+
+	got := summaries(expandCalendar(cal, expStart, expEnd))
+	if len(got) != 3 {
+		t.Fatalf("want 3 instances, got %d (%v)", len(got), got)
+	}
+	changed := 0
+	for _, s := range got {
+		if s == "Away (changed)" {
+			changed++
+		}
+	}
+	if changed != 1 {
+		t.Fatalf("want exactly one overridden instance, got %d (%v)", changed, got)
+	}
+}
+
+// TestExpandRecurrenceIDCancellation: a STATUS:CANCELLED override deletes that
+// occurrence from the set.
+func TestExpandRecurrenceIDCancellation(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("e", "Away", expAnchor, time.Hour)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=DAILY;COUNT=10"})
+	cal.Children = append(cal.Children, master.Component)
+
+	cancel := mkEvent("e", "Away", expAnchor.AddDate(0, 0, 1), time.Hour) // Jun 2
+	cancel.Props.SetDateTime(ical.PropRecurrenceID, expAnchor.AddDate(0, 0, 1))
+	cancel.SetStatus(ical.EventCancelled)
+	cal.Children = append(cal.Children, cancel.Component)
+
+	got := expandCalendar(cal, expStart, expEnd)
+	if n := len(got.Events()); n != 2 {
+		t.Fatalf("cancelled occurrence should leave 2 instances, got %d", n)
+	}
+	for _, e := range got.Events() {
+		if st, _ := e.DateTimeStart(time.UTC); st.Equal(expAnchor.AddDate(0, 0, 1)) {
+			t.Fatalf("the cancelled Jun 2 occurrence must not appear")
+		}
+	}
+}
+
+// TestExpandEXDATE: an EXDATE removes a generated occurrence.
+func TestExpandEXDATE(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("e", "Away", expAnchor, time.Hour)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=DAILY;COUNT=10"})
+	master.Props.SetDateTime(ical.PropExceptionDates, expAnchor.AddDate(0, 0, 1)) // drop Jun 2
+	cal.Children = append(cal.Children, master.Component)
+
+	got := expandCalendar(cal, expStart, expEnd)
+	if n := len(got.Events()); n != 2 {
+		t.Fatalf("EXDATE should leave 2 instances (Jun 1, 3), got %d", n)
+	}
+}
+
+// TestExpandRDATE: an RDATE adds an occurrence beyond the RRULE.
+func TestExpandRDATE(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("e", "Away", expAnchor, time.Hour)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=DAILY;COUNT=2"}) // Jun 1, 2
+	master.Props.SetDateTime(ical.PropRecurrenceDates, expAnchor.AddDate(0, 0, 2))           // add Jun 3
+	cal.Children = append(cal.Children, master.Component)
+
+	got := expandCalendar(cal, expStart, expEnd)
+	if n := len(got.Events()); n != 3 {
+		t.Fatalf("RDATE should add a third instance (Jun 1, 2, 3), got %d", n)
+	}
+}

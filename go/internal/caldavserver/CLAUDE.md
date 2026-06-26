@@ -23,7 +23,9 @@ authenticate with the managed credential.
   element before the backend sees it, so the expansion window comes from the
   comp-filter time-range the client sends alongside it (`filterTimeRange`).
   Recurring masters fan out into per-occurrence instances (each with a
-  `RECURRENCE-ID`, no `RRULE`) via go-ical's `RecurrenceSet` (rrule-go).
+  `RECURRENCE-ID`, no `RRULE`) via go-ical's `RecurrenceSet` (RRULE/RDATE/EXDATE,
+  rrule-go). VEVENTs are grouped by UID so per-instance `RECURRENCE-ID` override
+  components replace the matching occurrence (and `STATUS:CANCELLED` deletes it).
 - `store.go` — the `Store` interface (`*state.Store` satisfies it; objects live
   in the `caldav_objects` / `caldav_calendars` tables) + `NewMemStore` for
   tests / no-DB fallback.
@@ -44,8 +46,6 @@ intents (including recurring ones) from it lives in
 - Single principal; minimal MKCALENDAR/sync semantics.
 - Interop verified against 42W's own go-webdav client, not yet the full matrix
   of iOS / Google / Thunderbird.
-- Recurrence expansion covers RRULE/RDATE/EXDATE; it does not yet honour
-  per-instance `RECURRENCE-ID` override events.
 
 ## What NOT to do
 
