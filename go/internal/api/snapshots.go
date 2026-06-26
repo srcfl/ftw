@@ -44,13 +44,13 @@ const snapshotSchemaVersion = 1
 
 // SnapshotInfo is the UI-facing shape returned by GET /api/version/snapshots.
 type SnapshotInfo struct {
-	ID        string    `json:"id"`
-	Path      string    `json:"path"`
-	CreatedAt time.Time `json:"created_at"`
-	FromVersion string  `json:"from_version,omitempty"`
-	ToVersion   string  `json:"to_version,omitempty"`
-	Action      string  `json:"action,omitempty"`
-	SizeBytes   int64   `json:"size_bytes"`
+	ID          string    `json:"id"`
+	Path        string    `json:"path"`
+	CreatedAt   time.Time `json:"created_at"`
+	FromVersion string    `json:"from_version,omitempty"`
+	ToVersion   string    `json:"to_version,omitempty"`
+	Action      string    `json:"action,omitempty"`
+	SizeBytes   int64     `json:"size_bytes"`
 }
 
 // createPreUpdateSnapshot captures state.db + config.yaml into

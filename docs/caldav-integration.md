@@ -117,6 +117,26 @@ See the `caldav:` block in `config.example.yaml`. The password is stored in
 credentials, keywords and intervals hot-reload; toggling `enabled` needs a
 restart.
 
+## Deploy modes & Home Assistant
+
+The calendar feature needs the **Radicale sidecar**, which is **GPLv3**. 42W
+keeps it strictly **arm's length** — a separate container reached only over the
+CalDAV network protocol — so 42W itself stays cleanly separable and permissively
+licensable (MIT/Apache-2.0). The compose file only *references* the public image
+(pulled at runtime); Radicale's code is never bundled or redistributed.
+
+The flip side: a sidecar can't live inside a **single-container Home Assistant
+add-on**. So when 42W detects it's running as an HA add-on
+(`runningAsHAAddon()` — `FTW_HA_ADDON=1`, or a Supervisor token /
+`/data/options.json` fallback) it **disables the calendar feature** and the
+Settings tab explains why. Override with `FTW_CALDAV_FORCE=1` if you run a
+*separate* Radicale add-on and point `caldav.url` at it.
+
+**TODO (#498):** first-class HA OS / HA Supervised support — either a separate
+Radicale add-on dialled over the Supervisor network, or a native, MIT-licensed
+in-process CalDAV server (`emersion/go-webdav`) that removes the sidecar
+entirely. Tracking with the add-on maintainer (`erikarenhill`).
+
 ## Implementation
 
 - `go/internal/calendar` — CalDAV client poll loop (`service.go`), title→intent

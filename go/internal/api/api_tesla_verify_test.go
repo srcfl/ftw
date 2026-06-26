@@ -121,16 +121,16 @@ func TestValidVINRegex(t *testing.T) {
 		"ABCDEFGHJKLMNPRST", // exactly 17, no I/O/Q
 	}
 	bad := []string{
-		"",                      // empty
-		"5YJ3E1EA1KF00000",      // 16 chars
-		"5YJ3E1EA1KF0000000",    // 18 chars
-		"5YJ3E1EA1KF00000I",     // contains I
-		"5YJ3E1EA1KF00000O",     // contains O
-		"5YJ3E1EA1KF00000Q",     // contains Q
-		"5YJ3E1EA1KF00000/",     // contains slash (path-smuggle attempt)
-		"5YJ3E1EA1KF00000?",     // contains ? (query smuggle)
-		"5yj3e1ea1kf000000",     // lowercase (handler upper-cases first)
-		"5YJ3E1EA1KF00 0000",    // contains space
+		"",                   // empty
+		"5YJ3E1EA1KF00000",   // 16 chars
+		"5YJ3E1EA1KF0000000", // 18 chars
+		"5YJ3E1EA1KF00000I",  // contains I
+		"5YJ3E1EA1KF00000O",  // contains O
+		"5YJ3E1EA1KF00000Q",  // contains Q
+		"5YJ3E1EA1KF00000/",  // contains slash (path-smuggle attempt)
+		"5YJ3E1EA1KF00000?",  // contains ? (query smuggle)
+		"5yj3e1ea1kf000000",  // lowercase (handler upper-cases first)
+		"5YJ3E1EA1KF00 0000", // contains space
 	}
 	for _, v := range good {
 		if !validVINRe.MatchString(v) {

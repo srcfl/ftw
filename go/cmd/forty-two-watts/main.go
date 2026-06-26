@@ -788,18 +788,30 @@ func main() {
 	// events onto loadpoint targets. Opt-in + fail-soft; enable/disable is
 	// restart-gated (config.RestartRequiredFor), so the runtime block only ever
 	// exists while enabled.
+	var caldavUnavailable string
 	if cfg.CalDAV != nil && cfg.CalDAV.Enabled {
-		calSvc = calendar.New(*cfg.CalDAV, lpMgr, loadSvc, firstLoadpointID(cfg.Loadpoints))
-		// Outbound EVSE history: feed live EV charge-point readings so the
-		// service can author a calendar event per completed session.
-		calSvc.SetEVSource(func() []calendar.EVSample { return evSamplesFromTelemetry(tel) })
-		// Outbound plan publishing: feed the current MPC plan so the service
-		// can render forward-looking charge/discharge windows. mpcSvc is built
-		// just below; the closure reads it at call time (nil-safe until then).
-		calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
-		calSvc.Start(ctx)
-		defer calSvc.Stop()
-		slog.Info("caldav calendar client started", "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
+		if runningAsHAAddon() && !envBool("FTW_CALDAV_FORCE") {
+			// The calendar feature relies on the bundled Radicale sidecar, which
+			// is GPLv3 and therefore must run at arm's length in its OWN
+			// container (a clean license boundary that keeps 42W permissively
+			// licensable). The single-container Home Assistant add-on can't
+			// provide that, so the feature is unavailable here. FTW_CALDAV_FORCE
+			// overrides for operators running a SEPARATE Radicale add-on.
+			caldavUnavailable = "ha-addon"
+			slog.Warn("caldav: disabled in this deploy mode — Radicale (GPLv3) must run at arm's length in its own container, which the single-container Home Assistant add-on can't provide; set FTW_CALDAV_FORCE=1 if you run a separate Radicale add-on (see issue #498)")
+		} else {
+			calSvc = calendar.New(*cfg.CalDAV, lpMgr, loadSvc, firstLoadpointID(cfg.Loadpoints))
+			// Outbound EVSE history: feed live EV charge-point readings so the
+			// service can author a calendar event per completed session.
+			calSvc.SetEVSource(func() []calendar.EVSample { return evSamplesFromTelemetry(tel) })
+			// Outbound plan publishing: feed the current MPC plan so the service
+			// can render forward-looking charge/discharge windows. mpcSvc is built
+			// just below; the closure reads it at call time (nil-safe until then).
+			calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
+			calSvc.Start(ctx)
+			defer calSvc.Stop()
+			slog.Info("caldav calendar client started", "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
+		}
 	}
 
 	// ---- Start MPC planner (optional) ----
@@ -1627,20 +1639,21 @@ func main() {
 		// from the state.db path rather than the config path because
 		// `state.db` is always in the main data volume; the config
 		// can legitimately live elsewhere (e.g. mounted RO from /etc).
-		SnapshotDir:   filepath.Join(filepath.Dir(statePath), "snapshots"),
-		Prices:        priceSvc,
-		Forecast:      forecastSvc,
-		MPC:           mpcSvc,
-		PVModel:       pvSvc,
-		LoadModel:     loadSvc,
-		Loadpoints:    lpMgr,
-		LoadpointCtrl: lpController,
-		CalDAV:        calSvc,
-		HA:            haBridge,
-		Registry:      reg,
-		Events:        bus,
-		Notifications: notifSvc,
-		SelfUpdate:    selfUpdater,
+		SnapshotDir:       filepath.Join(filepath.Dir(statePath), "snapshots"),
+		Prices:            priceSvc,
+		Forecast:          forecastSvc,
+		MPC:               mpcSvc,
+		PVModel:           pvSvc,
+		LoadModel:         loadSvc,
+		Loadpoints:        lpMgr,
+		LoadpointCtrl:     lpController,
+		CalDAV:            calSvc,
+		CalDAVUnavailable: caldavUnavailable,
+		HA:                haBridge,
+		Registry:          reg,
+		Events:            bus,
+		Notifications:     notifSvc,
+		SelfUpdate:        selfUpdater,
 		// ---- Owner remote access ----
 		// rp.id defaults to the production home host (home.fortytwowatts.com),
 		// the origin the owner actually visits. Override with
@@ -3163,6 +3176,36 @@ func troubleshootingSumOnlineW(tel *telemetry.Store, typ telemetry.DerType) floa
 		sum += r.SmoothedW
 	}
 	return sum
+}
+
+// runningAsHAAddon reports whether 42W is running as a Home Assistant add-on
+// (a single Supervisor-managed container). It gates the calendar feature off
+// there: the calendar relies on the bundled Radicale sidecar, which is GPLv3
+// and so must run at arm's length in its own container — a clean license
+// boundary that keeps 42W permissively licensable (MIT/Apache-2.0). The
+// single-container add-on model can't provide a separate sidecar.
+//
+// Detection prefers an explicit FTW_HA_ADDON=1 that the add-on sets; the
+// Supervisor token + add-on options file are best-effort fallbacks. 42W's own
+// data dir is /app/data (not /data), so the options.json probe won't
+// false-positive on a normal compose/binary deploy.
+//
+// TODO(#498): wire up the calendar feature on HA OS / HA Supervised — likely a
+// SEPARATE Radicale add-on that 42W dials over the Supervisor network
+// (FTW_CALDAV_FORCE=1 already allows that), or a native MIT-licensed in-process
+// CalDAV server (emersion/go-webdav) that sidesteps the sidecar entirely.
+// Coordinating with @erikarenhill (erikarenhill/ha-addon-forty-two-watts).
+func runningAsHAAddon() bool {
+	if envBool("FTW_HA_ADDON") {
+		return true
+	}
+	if os.Getenv("SUPERVISOR_TOKEN") != "" || os.Getenv("HASSIO_TOKEN") != "" {
+		return true
+	}
+	if _, err := os.Stat("/data/options.json"); err == nil {
+		return true
+	}
+	return false
 }
 
 // envBool returns true iff the env var is set to a positive value

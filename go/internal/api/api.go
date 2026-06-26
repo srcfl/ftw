@@ -131,6 +131,13 @@ type Deps struct {
 	// feature is disabled; GET /api/caldav/status then reports disabled.
 	CalDAV *calendar.Service
 
+	// CalDAVUnavailable, when non-empty (e.g. "ha-addon"), means the calendar
+	// feature was force-disabled for this deploy mode even though it's enabled
+	// in config — the Radicale sidecar (GPLv3) can't run in a single-container
+	// Home Assistant add-on. /api/caldav/status surfaces it so the UI explains
+	// why instead of looking merely "disabled".
+	CalDAVUnavailable string
+
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 

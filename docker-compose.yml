@@ -150,12 +150,20 @@ services:
   # LAN-ONLY by design: this is never routed through the owner-access relay
   # and nothing forwards port 5232 to the internet unless you do so yourself.
   #
-  # Credentials live in ./radicale/config/users (htpasswd). Before first use:
-  #   cp radicale/config/users.example radicale/config/users
-  #   htpasswd -B radicale/config/users fortytwowatts   # set a password
-  # then enter the same username + password in Settings → Calendar.
-  # Remove this service block if you run CalDAV elsewhere (or not at all);
-  # 42W boots fine without it (the feature is opt-in + fail-soft).
+  # Credentials: by default 42W manages them — it generates the password and
+  # writes ./radicale/config/users itself (it mounts that dir read-write),
+  # then shows it (with a QR) in Settings → Calendar. To manage by hand set
+  # caldav.manage_credentials=false and run `htpasswd -B radicale/config/users
+  # fortytwowatts`. Remove this service block if you run CalDAV elsewhere (or
+  # not at all); 42W boots fine without it (the feature is opt-in + fail-soft).
+  #
+  # LICENSE: Radicale is GPLv3. We do NOT redistribute or bundle it — this file
+  # merely *references* a public image the operator pulls at runtime, and 42W
+  # talks to it only over the CalDAV network protocol (arm's length). That keeps
+  # 42W cleanly separable and permissively licensable (MIT/Apache-2.0). The flip
+  # side: the sidecar can't be embedded in a single-container Home Assistant
+  # add-on, so 42W disables the calendar feature when it detects that deploy
+  # mode (see runningAsHAAddon in cmd/forty-two-watts/main.go, issue #498).
   # ---------------------------------------------------------------------
   radicale:
     image: tomsquest/docker-radicale:3.2.3.0

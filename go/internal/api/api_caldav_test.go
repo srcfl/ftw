@@ -33,6 +33,16 @@ func TestCalDAVStatusDisabledWhenNil(t *testing.T) {
 	}
 }
 
+func TestCalDAVStatusUnavailableInHAAddon(t *testing.T) {
+	body := caldavStatus(t, &Deps{Version: "test", CalDAVUnavailable: "ha-addon"})
+	if body["enabled"] != true || body["available"] != false {
+		t.Fatalf("expected enabled+unavailable, got %v", body)
+	}
+	if body["unavailable_reason"] != "ha-addon" {
+		t.Fatalf("expected reason ha-addon, got %v", body["unavailable_reason"])
+	}
+}
+
 func TestCalDAVStatusReportsSubscribeURL(t *testing.T) {
 	svc := calendar.New(config.CalDAV{Enabled: true}, nil, nil, "garage")
 	body := caldavStatus(t, &Deps{Version: "test", CalDAV: svc})

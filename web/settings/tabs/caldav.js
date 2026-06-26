@@ -132,6 +132,16 @@
             ind.textContent = "○  disabled in config";
             return;
           }
+          if (d.available === false) {
+            ind.className = "ha-status-indicator ha-warn";
+            ind.textContent = (d.unavailable_reason === "ha-addon")
+              ? "⚠  Not available as a Home Assistant add-on. The calendar needs the Radicale sidecar (GPLv3) running in its own container, which the single-container add-on can't provide. See docs/caldav-integration.md."
+              : "⚠  Calendar unavailable in this install.";
+            if (credsEl) credsEl.textContent = "";
+            if (urlsEl) urlsEl.textContent = "";
+            if (qrEl) qrEl.textContent = "";
+            return;
+          }
           if (d.reachable) {
             var age = d.last_sync_ms > 0 ? Math.round((Date.now() - d.last_sync_ms) / 1000) + "s ago" : "no sync yet";
             var bits = (d.event_count || 0) + " intent" + (d.event_count === 1 ? "" : "s");
