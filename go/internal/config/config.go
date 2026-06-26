@@ -336,6 +336,32 @@ type CalDAV struct {
 	// reads (the shared ./radicale/config mount in docker-compose).
 	ManageCredentials *bool  `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
 	HtpasswdPath      string `yaml:"htpasswd_path,omitempty" json:"htpasswd_path,omitempty"`
+
+	// Server selects the CalDAV server 42W talks to:
+	//   "radicale" (default) — the bundled Radicale sidecar (GPLv3, separate
+	//     container; not available in a single-container HA add-on).
+	//   "native" — an in-process pure-Go server (emersion/go-webdav, MIT) that
+	//     needs no sidecar, so it works in a single binary / container incl. the
+	//     HA add-on. PROTOTYPE (in-memory storage).
+	Server string `yaml:"server,omitempty" json:"server,omitempty"`
+	// Listen is the bind address for the native server (default ":5232").
+	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
+}
+
+// ServerMode returns "native" or "radicale" (the default). Nil-safe.
+func (cv *CalDAV) ServerMode() string {
+	if cv != nil && strings.EqualFold(strings.TrimSpace(cv.Server), "native") {
+		return "native"
+	}
+	return "radicale"
+}
+
+// ListenAddr returns the native CalDAV server bind address (default ":5232").
+func (cv *CalDAV) ListenAddr() string {
+	if cv != nil && strings.TrimSpace(cv.Listen) != "" {
+		return strings.TrimSpace(cv.Listen)
+	}
+	return ":5232"
 }
 
 // ManageCredentialsEnabled reports whether 42W should auto-generate + write the

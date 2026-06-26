@@ -24,6 +24,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/api"
 	"github.com/frahlg/forty-two-watts/go/internal/arp"
 	"github.com/frahlg/forty-two-watts/go/internal/battery"
+	"github.com/frahlg/forty-two-watts/go/internal/caldavserver"
 	"github.com/frahlg/forty-two-watts/go/internal/calendar"
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/configreload"
@@ -789,17 +790,25 @@ func main() {
 	// restart-gated (config.RestartRequiredFor), so the runtime block only ever
 	// exists while enabled.
 	var caldavUnavailable string
+	var caldavSrv *caldavserver.Server
 	if cfg.CalDAV != nil && cfg.CalDAV.Enabled {
-		if runningAsHAAddon() && !envBool("FTW_CALDAV_FORCE") {
-			// The calendar feature relies on the bundled Radicale sidecar, which
-			// is GPLv3 and therefore must run at arm's length in its OWN
-			// container (a clean license boundary that keeps 42W permissively
-			// licensable). The single-container Home Assistant add-on can't
-			// provide that, so the feature is unavailable here. FTW_CALDAV_FORCE
-			// overrides for operators running a SEPARATE Radicale add-on.
+		native := cfg.CalDAV.ServerMode() == "native"
+		// Only the Radicale-SIDECAR mode is unavailable in a single-container HA
+		// add-on (GPLv3 must run at arm's length in its own container). The
+		// native in-process server (MIT, pure-Go) works there, so it's exempt.
+		if !native && runningAsHAAddon() && !envBool("FTW_CALDAV_FORCE") {
 			caldavUnavailable = "ha-addon"
-			slog.Warn("caldav: disabled in this deploy mode — Radicale (GPLv3) must run at arm's length in its own container, which the single-container Home Assistant add-on can't provide; set FTW_CALDAV_FORCE=1 if you run a separate Radicale add-on (see issue #498)")
+			slog.Warn("caldav: Radicale-sidecar mode disabled in this deploy mode — set `caldav.server: native` (in-process, MIT) to run the calendar here, or FTW_CALDAV_FORCE=1 for a separate Radicale add-on (issue #498)")
 		} else {
+			if native {
+				// Host CalDAV in-process (no Radicale sidecar). The calendar
+				// client below still talks to it over localhost, so the
+				// inbound/outbound intent logic is unchanged.
+				principal, calPaths := nativeCalDAVLayout(cfg.CalDAV)
+				caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths)
+				caldavSrv.Start()
+				defer caldavSrv.Stop()
+			}
 			calSvc = calendar.New(*cfg.CalDAV, lpMgr, loadSvc, firstLoadpointID(cfg.Loadpoints))
 			// Outbound EVSE history: feed live EV charge-point readings so the
 			// service can author a calendar event per completed session.
@@ -810,7 +819,7 @@ func main() {
 			calSvc.SetPlanSource(func() []calendar.PlanSlot { return planSlotsFromMPC(mpcSvc) })
 			calSvc.Start(ctx)
 			defer calSvc.Stop()
-			slog.Info("caldav calendar client started", "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
+			slog.Info("caldav calendar client started", "mode", cfg.CalDAV.ServerMode(), "url", cfg.CalDAV.URL, "calendar", cfg.CalDAV.CalendarPath)
 		}
 	}
 
@@ -2678,6 +2687,35 @@ func firstLoadpointID(src []config.Loadpoint) string {
 		return src[0].ID
 	}
 	return ""
+}
+
+// caldavUsername resolves the CalDAV username (default fortytwowatts).
+func caldavUsername(cv *config.CalDAV) string {
+	if cv != nil && strings.TrimSpace(cv.Username) != "" {
+		return strings.TrimSpace(cv.Username)
+	}
+	return config.DefaultCalDAVUsername
+}
+
+// nativeCalDAVLayout derives the principal path + the collections the native
+// CalDAV server (#498, native mode) should expose, from config (with defaults).
+func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []string) {
+	principal = "/" + caldavUsername(cv) + "/"
+	calPath := config.DefaultCalDAVCalendarPath
+	histPath := config.DefaultCalDAVHistoryPath
+	planPath := config.DefaultCalDAVPlanPath
+	if cv != nil {
+		if strings.TrimSpace(cv.CalendarPath) != "" {
+			calPath = cv.CalendarPath
+		}
+		if strings.TrimSpace(cv.HistoryPath) != "" {
+			histPath = cv.HistoryPath
+		}
+		if strings.TrimSpace(cv.PlanPath) != "" {
+			planPath = cv.PlanPath
+		}
+	}
+	return principal, []string{calPath, histPath, planPath}
 }
 
 // evSamplesFromTelemetry projects current DerEV readings into the shape the

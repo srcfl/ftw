@@ -106,6 +106,12 @@ homeassistant:
 # `docker compose --profile calendar up -d`. password is stored in state.db.
 caldav:
   enabled: false
+  # server: radicale → talk to the bundled Radicale sidecar (GPLv3, separate
+  # container). server: native → run an in-process pure-Go CalDAV server
+  # (emersion/go-webdav, MIT) — no sidecar, works in a single container incl.
+  # a Home Assistant add-on. native is a PROTOTYPE (in-memory storage).
+  server: radicale
+  # listen: ":5232"          # bind address for the native server
   url: http://localhost:5232
   username: fortytwowatts
   # manage_credentials (default true): 42W generates the password and writes the

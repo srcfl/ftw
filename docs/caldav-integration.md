@@ -132,10 +132,25 @@ add-on**. So when 42W detects it's running as an HA add-on
 Settings tab explains why. Override with `FTW_CALDAV_FORCE=1` if you run a
 *separate* Radicale add-on and point `caldav.url` at it.
 
-**TODO (#498):** first-class HA OS / HA Supervised support — either a separate
-Radicale add-on dialled over the Supervisor network, or a native, MIT-licensed
-in-process CalDAV server (`emersion/go-webdav`) that removes the sidecar
-entirely. Tracking with the add-on maintainer (`erikarenhill`).
+### Native in-process server (`server: native`) — prototype
+
+There's now a second option that sidesteps all of the above: set
+`caldav.server: native` and 42W hosts CalDAV **itself**, in-process, using
+[`emersion/go-webdav`](https://github.com/emersion/go-webdav) (**MIT**) — see
+`go/internal/caldavserver`. No Radicale, no second container, no GPL boundary,
+so it works in a single binary / single container **including the HA add-on**.
+42W's calendar client still talks CalDAV over `localhost`, so the
+inbound/outbound intent logic is identical; only "what it connects to" changes.
+It listens on `caldav.listen` (default `:5232`) with the managed credential.
+
+> **Prototype status:** storage is **in-memory** (events are lost on restart)
+> and recurrences aren't expanded server-side. Fine for evaluation; not yet a
+> production drop-in for Radicale. **TODO(#498):** back it with `state.db` for
+> durability. Default stays `radicale` until then.
+
+**TODO (#498):** wire `server: native` into the HA add-on (it's exempt from the
+HA-addon disable) and add SQLite persistence. Tracking with the add-on
+maintainer (`erikarenhill`).
 
 ## Implementation
 
