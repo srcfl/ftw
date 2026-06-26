@@ -232,8 +232,9 @@
       '.ftw-hpd-title{font-family:var(--mono);font-size:0.74rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--fg-muted)}',
       '.ftw-hpd-close{background:none;border:1px solid var(--line);color:var(--fg);border-radius:6px;cursor:pointer;font-size:1rem;line-height:1;padding:4px 9px}',
       '.ftw-hpd-group{margin:16px 0 4px;font-family:var(--mono);font-size:0.68rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent-e)}',
-      '.ftw-hpd-row{display:grid;grid-template-columns:1fr auto 120px;gap:10px 14px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line-soft,var(--line))}',
+      '.ftw-hpd-row{display:grid;grid-template-columns:1fr auto auto 120px;gap:10px 14px;align-items:center;padding:5px 0;border-bottom:1px solid var(--line-soft,var(--line))}',
       '.ftw-hpd-label{color:var(--fg-muted);font-size:0.85rem}',
+      '.ftw-hpd-reg{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.76rem;color:var(--fg-muted);text-align:right;opacity:0.8}',
       '.ftw-hpd-val{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--fg);text-align:right}',
       '.ftw-hpd-spark svg{width:120px;height:24px;display:block}',
       '.ftw-hpd-empty{color:var(--fg-muted);font-family:var(--mono);font-size:0.82rem}',
@@ -287,6 +288,7 @@
         rows.forEach(function (m) {
           html += '<div class="ftw-hpd-row">' +
             '<span class="ftw-hpd-label">' + escapeHtml(prettyLabel(m.name)) + '</span>' +
+            '<span class="ftw-hpd-reg" title="Modbus register">' + (m.register ? escapeHtml(String(m.register)) : '—') + '</span>' +
             '<span class="ftw-hpd-val">' + escapeHtml(fmtValue(m.value, m.unit)) + '</span>' +
             '<span class="ftw-hpd-spark" data-spark-metric="' + escapeHtml(m.name) + '"></span>' +
             '</div>';
