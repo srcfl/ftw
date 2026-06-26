@@ -15,6 +15,8 @@
   var REFRESH_MS = 30000;
   var timer = null;
   var heatPumpDrivers = null; // cached after discovery: array of driver names
+  var lastDiscoverMs = 0;             // Date.now() of the last discovery scan
+  var DISCOVER_EVERY_MS = 300000;     // re-scan for newly-added heat pumps (5 min)
 
   // Route reads over the owner/P2P transport when present (remote home
   // route), else plain fetch (LAN / tests). Mirrors twins.js.
@@ -151,9 +153,17 @@
     var grid = document.getElementById('heating-grid');
     if (!section || !grid) return;
 
-    var ready = heatPumpDrivers
-      ? Promise.resolve(heatPumpDrivers)
-      : discover().then(function (names) { heatPumpDrivers = names; return names; });
+    // Re-run discovery on first call, then periodically — so a heat-pump
+    // driver added while the dashboard is open shows up without a manual
+    // reload. (The old code cached forever; an empty result is also truthy,
+    // so a site that discovered before its pump reported hp_power_w stayed
+    // blank.) Steady-state stays cheap: between scans we only touch the
+    // already-known heat-pump drivers.
+    var nowMs = Date.now();
+    var rediscover = heatPumpDrivers === null || (nowMs - lastDiscoverMs) >= DISCOVER_EVERY_MS;
+    var ready = rediscover
+      ? discover().then(function (names) { heatPumpDrivers = names; lastDiscoverMs = nowMs; return names; })
+      : Promise.resolve(heatPumpDrivers);
 
     ready.then(function (names) {
       if (!names || names.length === 0) {
