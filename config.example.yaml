@@ -109,7 +109,8 @@ caldav:
   # server: radicale → talk to the bundled Radicale sidecar (GPLv3, separate
   # container). server: native → run an in-process pure-Go CalDAV server
   # (emersion/go-webdav, MIT) — no sidecar, works in a single container incl.
-  # a Home Assistant add-on. native is a PROTOTYPE (in-memory storage).
+  # a Home Assistant add-on; objects persist in state.db. (native still lacks
+  # server-side recurrence expansion.)
   server: radicale
   # listen: ":5232"          # bind address for the native server
   url: http://localhost:5232

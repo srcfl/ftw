@@ -805,7 +805,8 @@ func main() {
 				// client below still talks to it over localhost, so the
 				// inbound/outbound intent logic is unchanged.
 				principal, calPaths := nativeCalDAVLayout(cfg.CalDAV)
-				caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths)
+				// Persist calendar objects in state.db so they survive restarts.
+				caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths, st)
 				caldavSrv.Start()
 				defer caldavSrv.Stop()
 			}

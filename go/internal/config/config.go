@@ -342,7 +342,8 @@ type CalDAV struct {
 	//     container; not available in a single-container HA add-on).
 	//   "native" — an in-process pure-Go server (emersion/go-webdav, MIT) that
 	//     needs no sidecar, so it works in a single binary / container incl. the
-	//     HA add-on. PROTOTYPE (in-memory storage).
+	//     HA add-on. Objects persist in state.db. (Still maturing: no
+	//     server-side recurrence expansion yet.)
 	Server string `yaml:"server,omitempty" json:"server,omitempty"`
 	// Listen is the bind address for the native server (default ":5232").
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`

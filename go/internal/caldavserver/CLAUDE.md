@@ -19,9 +19,14 @@ credential.
 - `server.go` — `Server` (go-webdav `caldav.Handler` behind Basic auth on its
   own listener, default `:5232`) + `New` / `NewHandler` / `Start` / `Stop`.
   `basicAuth` is constant-time and fail-closed on an empty password.
-- `backend.go` — `memBackend`: an in-memory `caldav.Backend`. `QueryCalendarObjects`
+- `backend.go` — `backend`: a `caldav.Backend` that (de)serializes iCal +
+  computes ETags and delegates persistence to a `Store`. `QueryCalendarObjects`
   reuses `caldav.Filter` for query matching.
-- `server_test.go` — client↔server round-trip (PUT/REPORT/DELETE) + auth.
+- `store.go` — the `Store` interface (`*state.Store` satisfies it; objects live
+  in the `caldav_objects` / `caldav_calendars` tables) + `NewMemStore` for
+  tests / no-DB fallback.
+- `server_test.go` — client↔server round-trip (PUT/REPORT/DELETE), auth, and a
+  restart-survival test against a real `state.db`.
 
 ## Wired in
 
@@ -30,18 +35,18 @@ credential.
 (`runningAsHAAddon`). The end-to-end test that the real `calendar.Service`
 parses intents from it lives in `internal/calendar/native_e2e_test.go`.
 
-## PROTOTYPE limitations (do not ship as default yet)
+## Remaining gaps (default stays `radicale` until closed)
 
-- **In-memory storage** — objects are lost on restart. TODO(#498): persist to
-  `state.db` (a `caldav_objects` table); the `caldav.Backend` boundary keeps
-  that change local to `backend.go`.
 - **No server-side recurrence expansion** — recurring events return as their
   master VEVENT.
-- Single principal; minimal MKCALENDAR/sync semantics. Tested against 42W's own
-  go-webdav client, not yet against iOS/Google/Thunderbird.
+- Single principal; minimal MKCALENDAR/sync semantics. Interop verified against
+  42W's own go-webdav client, not yet against iOS/Google/Thunderbird.
+
+Storage IS durable now (persists in `state.db`).
 
 ## What NOT to do
 
 - Don't run it alongside Radicale on the same `:5232` — you pick one
   (`caldav.server`). Native mode needs no `radicale` compose service.
-- Don't treat it as production-ready until storage is persistent.
+- Don't put iCal parsing in `state` — it stays storage-only (`data TEXT`); the
+  backend owns (de)serialization.

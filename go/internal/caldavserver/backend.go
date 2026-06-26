@@ -7,159 +7,184 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/emersion/go-ical"
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
+
+	"github.com/frahlg/forty-two-watts/go/internal/state"
 )
 
-// memBackend is an in-memory caldav.Backend for the native CalDAV server.
-//
-// PROTOTYPE: storage is in-memory, so calendar objects are lost on restart.
-// TODO(#498): back this with state.db (a caldav_objects table) for durability
-// before this is more than a proof-of-concept. The interface boundary
-// (caldav.Backend) is the same, so swapping the store is local to this file.
-type memBackend struct {
+// backend is a caldav.Backend persisting calendar objects through a Store
+// (state.db when wired, in-memory otherwise). iCalendar (de)serialization +
+// ETag computation live here; the Store only moves bytes.
+type backend struct {
 	principal string
+	store     Store
 	now       func() time.Time
-
-	mu        sync.RWMutex
-	calendars map[string]*caldav.Calendar       // collection path -> calendar
-	objects   map[string]*caldav.CalendarObject // full object path -> object
 }
 
-func newMemBackend(principal string, calendarPaths []string) *memBackend {
-	b := &memBackend{
-		principal: principal,
-		now:       time.Now,
-		calendars: map[string]*caldav.Calendar{},
-		objects:   map[string]*caldav.CalendarObject{},
+func newBackend(principal string, calendarPaths []string, store Store) *backend {
+	if store == nil {
+		store = NewMemStore()
 	}
+	b := &backend{principal: principal, store: store, now: time.Now}
 	for _, p := range calendarPaths {
-		b.calendars[p] = &caldav.Calendar{
-			Path:                  p,
-			Name:                  strings.Trim(strings.TrimPrefix(p, principal), "/"),
-			SupportedComponentSet: []string{ical.CompEvent},
-		}
+		name := strings.Trim(strings.TrimPrefix(p, principal), "/")
+		_ = b.store.SaveCalDAVCalendar(state.CalDAVCalendar{Path: p, Name: name})
 	}
 	return b
 }
 
-func (b *memBackend) CurrentUserPrincipal(ctx context.Context) (string, error) {
+func (b *backend) CurrentUserPrincipal(ctx context.Context) (string, error) {
 	return b.principal, nil
 }
 
-func (b *memBackend) CalendarHomeSetPath(ctx context.Context) (string, error) {
+func (b *backend) CalendarHomeSetPath(ctx context.Context) (string, error) {
 	return b.principal, nil
 }
 
-func (b *memBackend) ListCalendars(ctx context.Context) ([]caldav.Calendar, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]caldav.Calendar, 0, len(b.calendars))
-	for _, c := range b.calendars {
-		out = append(out, *c)
+func toCalendar(c state.CalDAVCalendar) caldav.Calendar {
+	return caldav.Calendar{
+		Path:                  c.Path,
+		Name:                  c.Name,
+		Description:           c.Description,
+		SupportedComponentSet: []string{ical.CompEvent},
+	}
+}
+
+func (b *backend) ListCalendars(ctx context.Context) ([]caldav.Calendar, error) {
+	cals, err := b.store.ListCalDAVCalendars()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]caldav.Calendar, 0, len(cals))
+	for _, c := range cals {
+		out = append(out, toCalendar(c))
 	}
 	return out, nil
 }
 
-func (b *memBackend) GetCalendar(ctx context.Context, path string) (*caldav.Calendar, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if c, ok := b.calendars[path]; ok {
-		cp := *c
-		return &cp, nil
+func (b *backend) GetCalendar(ctx context.Context, path string) (*caldav.Calendar, error) {
+	cals, err := b.store.ListCalDAVCalendars()
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cals {
+		if c.Path == path {
+			cal := toCalendar(c)
+			return &cal, nil
+		}
 	}
 	return nil, webdav.NewHTTPError(http.StatusNotFound, fmt.Errorf("calendar not found: %s", path))
 }
 
-func (b *memBackend) CreateCalendar(ctx context.Context, cal *caldav.Calendar) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	c := *cal
-	if c.SupportedComponentSet == nil {
-		c.SupportedComponentSet = []string{ical.CompEvent}
+func (b *backend) CreateCalendar(ctx context.Context, cal *caldav.Calendar) error {
+	return b.store.SaveCalDAVCalendar(state.CalDAVCalendar{
+		Path: cal.Path, Name: cal.Name, Description: cal.Description,
+	})
+}
+
+// parseObject decodes a stored row into a caldav.CalendarObject (Data parsed).
+func parseObject(o state.CalDAVObject) (caldav.CalendarObject, error) {
+	cal, err := ical.NewDecoder(strings.NewReader(o.Data)).Decode()
+	if err != nil {
+		return caldav.CalendarObject{}, err
 	}
-	b.calendars[cal.Path] = &c
-	return nil
+	return caldav.CalendarObject{
+		Path:          o.Path,
+		ETag:          o.ETag,
+		ModTime:       time.UnixMilli(o.ModifiedMs),
+		ContentLength: int64(len(o.Data)),
+		Data:          cal,
+	}, nil
 }
 
-func (b *memBackend) GetCalendarObject(ctx context.Context, path string, req *caldav.CalendarCompRequest) (*caldav.CalendarObject, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	if o, ok := b.objects[path]; ok {
-		cp := *o
-		return &cp, nil
+func (b *backend) GetCalendarObject(ctx context.Context, path string, req *caldav.CalendarCompRequest) (*caldav.CalendarObject, error) {
+	o, ok, err := b.store.GetCalDAVObject(path)
+	if err != nil {
+		return nil, err
 	}
-	return nil, webdav.NewHTTPError(http.StatusNotFound, fmt.Errorf("object not found: %s", path))
+	if !ok {
+		return nil, webdav.NewHTTPError(http.StatusNotFound, fmt.Errorf("object not found: %s", path))
+	}
+	co, err := parseObject(o)
+	if err != nil {
+		return nil, err
+	}
+	return &co, nil
 }
 
-func (b *memBackend) ListCalendarObjects(ctx context.Context, path string, req *caldav.CalendarCompRequest) ([]caldav.CalendarObject, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.objectsIn(path), nil
+func (b *backend) ListCalendarObjects(ctx context.Context, path string, req *caldav.CalendarCompRequest) ([]caldav.CalendarObject, error) {
+	rows, err := b.store.ListCalDAVObjects(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]caldav.CalendarObject, 0, len(rows))
+	for _, o := range rows {
+		co, err := parseObject(o)
+		if err != nil {
+			continue // skip an unparseable row rather than failing the listing
+		}
+		out = append(out, co)
+	}
+	return out, nil
 }
 
-func (b *memBackend) QueryCalendarObjects(ctx context.Context, path string, query *caldav.CalendarQuery) ([]caldav.CalendarObject, error) {
-	b.mu.RLock()
-	objs := b.objectsIn(path)
-	b.mu.RUnlock()
-	// caldav.Filter applies the query's component/property/time-range filters.
-	// NB: recurrence Expand is not performed here (prototype) — recurring
-	// events return as their master VEVENT.
+func (b *backend) QueryCalendarObjects(ctx context.Context, path string, query *caldav.CalendarQuery) ([]caldav.CalendarObject, error) {
+	objs, err := b.ListCalendarObjects(ctx, path, &query.CompRequest)
+	if err != nil {
+		return nil, err
+	}
+	// caldav.Filter applies the component/property/time-range filters.
+	// NB: recurrence Expand is not performed (prototype) — recurring events
+	// return as their master VEVENT.
 	return caldav.Filter(query, objs)
 }
 
-// objectsIn returns a copy of every object whose path is under calPath. Caller
-// holds at least RLock.
-func (b *memBackend) objectsIn(calPath string) []caldav.CalendarObject {
-	var out []caldav.CalendarObject
-	for p, o := range b.objects {
-		if p != calPath && strings.HasPrefix(p, calPath) {
-			out = append(out, *o)
-		}
-	}
-	return out
-}
-
-func (b *memBackend) PutCalendarObject(ctx context.Context, path string, cal *ical.Calendar, opts *caldav.PutCalendarObjectOptions) (*caldav.CalendarObject, error) {
+func (b *backend) PutCalendarObject(ctx context.Context, path string, cal *ical.Calendar, opts *caldav.PutCalendarObjectOptions) (*caldav.CalendarObject, error) {
 	var sb strings.Builder
 	if err := ical.NewEncoder(&sb).Encode(cal); err != nil {
 		return nil, err
 	}
 	data := sb.String()
 	sum := sha1.Sum([]byte(data))
-	obj := &caldav.CalendarObject{
-		Path:          path,
-		ModTime:       b.now(),
-		ContentLength: int64(len(data)),
-		ETag:          hex.EncodeToString(sum[:]),
-		Data:          cal,
-	}
-	b.mu.Lock()
-	// Auto-create the parent collection if a client PUTs without MKCALENDAR
-	// (mirrors Radicale). The collection path is the object path up to the
-	// last '/'.
+	collection := path
 	if i := strings.LastIndex(path, "/"); i >= 0 {
-		calPath := path[:i+1]
-		if _, ok := b.calendars[calPath]; !ok {
-			b.calendars[calPath] = &caldav.Calendar{Path: calPath, SupportedComponentSet: []string{ical.CompEvent}}
-		}
+		collection = path[:i+1]
 	}
-	b.objects[path] = obj
-	b.mu.Unlock()
-	cp := *obj
-	return &cp, nil
+	// Auto-create the parent collection if a client PUTs without MKCALENDAR.
+	_ = b.store.SaveCalDAVCalendar(state.CalDAVCalendar{
+		Path: collection,
+		Name: strings.Trim(strings.TrimPrefix(collection, b.principal), "/"),
+	})
+	row := state.CalDAVObject{
+		Path:       path,
+		Collection: collection,
+		ETag:       hex.EncodeToString(sum[:]),
+		Data:       data,
+		ModifiedMs: b.now().UnixMilli(),
+	}
+	if err := b.store.SaveCalDAVObject(row); err != nil {
+		return nil, err
+	}
+	return &caldav.CalendarObject{
+		Path:          path,
+		ETag:          row.ETag,
+		ModTime:       time.UnixMilli(row.ModifiedMs),
+		ContentLength: int64(len(data)),
+		Data:          cal,
+	}, nil
 }
 
-func (b *memBackend) DeleteCalendarObject(ctx context.Context, path string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.objects[path]; !ok {
+func (b *backend) DeleteCalendarObject(ctx context.Context, path string) error {
+	_, ok, err := b.store.GetCalDAVObject(path)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return webdav.NewHTTPError(http.StatusNotFound, fmt.Errorf("object not found: %s", path))
 	}
-	delete(b.objects, path)
-	return nil
+	return b.store.DeleteCalDAVObject(path)
 }

@@ -16,12 +16,12 @@ import (
 // zone get dictionary-encoded (only a handful of distinct values across
 // thousands of rows). The JSON blob is compressed with zstd alongside.
 type parquetDiagRow struct {
-	TsMs          int64   `parquet:"ts_ms"`
-	Reason        string  `parquet:"reason,dict,zstd"`
-	Zone          string  `parquet:"zone,dict,zstd"`
-	TotalCostOre  float64 `parquet:"total_cost_ore,zstd"`
-	HorizonSlots  int64   `parquet:"horizon_slots,zstd"`
-	JSON          string  `parquet:"json,zstd"`
+	TsMs         int64   `parquet:"ts_ms"`
+	Reason       string  `parquet:"reason,dict,zstd"`
+	Zone         string  `parquet:"zone,dict,zstd"`
+	TotalCostOre float64 `parquet:"total_cost_ore,zstd"`
+	HorizonSlots int64   `parquet:"horizon_slots,zstd"`
+	JSON         string  `parquet:"json,zstd"`
 }
 
 // RolloffDiagnosticsToParquet exports snapshots older than
@@ -46,12 +46,12 @@ func (s *Store) RolloffDiagnosticsToParquet(ctx context.Context, coldDir string)
 			t := time.UnixMilli(r.TsMs).UTC()
 			k := dayKey{t.Year(), int(t.Month()), t.Day()}
 			byDay[k] = append(byDay[k], parquetDiagRow{
-				TsMs:          r.TsMs,
-				Reason:        r.Reason,
-				Zone:          r.Zone,
-				TotalCostOre:  r.TotalCostOre,
-				HorizonSlots:  int64(r.HorizonSlots),
-				JSON:          r.JSON,
+				TsMs:         r.TsMs,
+				Reason:       r.Reason,
+				Zone:         r.Zone,
+				TotalCostOre: r.TotalCostOre,
+				HorizonSlots: int64(r.HorizonSlots),
+				JSON:         r.JSON,
 			})
 		}
 		return nil

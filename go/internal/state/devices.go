@@ -24,9 +24,10 @@ type Device struct {
 
 // ResolveDeviceID computes the canonical device_id from the bits of
 // identity we know. Priority:
-//   1. make + ":" + serial   (hardware-issued, never collides)
-//   2. "mac:" + mac          (L2-stable for TCP devices)
-//   3. "ep:" + endpoint      (only stable as long as the host/IP doesn't change)
+//  1. make + ":" + serial   (hardware-issued, never collides)
+//  2. "mac:" + mac          (L2-stable for TCP devices)
+//  3. "ep:" + endpoint      (only stable as long as the host/IP doesn't change)
+//
 // All inputs are lowercased + colons-stripped from the MAC for stability.
 func ResolveDeviceID(make, serial, mac, endpoint string) string {
 	make = strings.ToLower(strings.TrimSpace(make))
@@ -56,7 +57,9 @@ func (s *Store) RegisterDevice(d Device) (string, error) {
 		return "", errors.New("RegisterDevice: cannot resolve device_id (no make+sn, no mac, no endpoint)")
 	}
 	now := time.Now().UnixMilli()
-	if d.FirstSeenMs == 0 { d.FirstSeenMs = now }
+	if d.FirstSeenMs == 0 {
+		d.FirstSeenMs = now
+	}
 	d.LastSeenMs = now
 	_, err := s.db.Exec(`
 		INSERT INTO devices (device_id, driver_name, make, serial, mac, endpoint, first_seen_ms, last_seen_ms)
@@ -69,7 +72,9 @@ func (s *Store) RegisterDevice(d Device) (string, error) {
 			endpoint     = COALESCE(NULLIF(excluded.endpoint, ''), devices.endpoint),
 			last_seen_ms = excluded.last_seen_ms`,
 		d.DeviceID, d.DriverName, d.Make, d.Serial, d.MAC, d.Endpoint, d.FirstSeenMs, d.LastSeenMs)
-	if err != nil { return "", fmt.Errorf("upsert device: %w", err) }
+	if err != nil {
+		return "", fmt.Errorf("upsert device: %w", err)
+	}
 	return d.DeviceID, nil
 }
 
@@ -84,7 +89,9 @@ func (s *Store) LookupDeviceByDriverName(name string) *Device {
 	var d Device
 	if err := row.Scan(&d.DeviceID, &d.DriverName, &d.Make, &d.Serial, &d.MAC, &d.Endpoint,
 		&d.FirstSeenMs, &d.LastSeenMs); err != nil {
-		if errors.Is(err, sql.ErrNoRows) { return nil }
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		return nil
 	}
 	return &d
@@ -96,13 +103,17 @@ func (s *Store) AllDevices() ([]Device, error) {
 		COALESCE(make,''), COALESCE(serial,''), COALESCE(mac,''), COALESCE(endpoint,''),
 		first_seen_ms, last_seen_ms
 		FROM devices ORDER BY last_seen_ms DESC`)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := make([]Device, 0)
 	for rows.Next() {
 		var d Device
 		if err := rows.Scan(&d.DeviceID, &d.DriverName, &d.Make, &d.Serial, &d.MAC, &d.Endpoint,
-			&d.FirstSeenMs, &d.LastSeenMs); err != nil { return out, err }
+			&d.FirstSeenMs, &d.LastSeenMs); err != nil {
+			return out, err
+		}
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -115,23 +126,33 @@ func (s *Store) AllDevices() ([]Device, error) {
 // Returns the count of migrated rows.
 func (s *Store) MigrateBatteryModelKeys() (int, error) {
 	rows, err := s.db.Query(`SELECT name, json FROM battery_models`)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	defer rows.Close()
 	type entry struct{ name, js string }
 	var all []entry
 	for rows.Next() {
 		var e entry
-		if err := rows.Scan(&e.name, &e.js); err != nil { return 0, err }
+		if err := rows.Scan(&e.name, &e.js); err != nil {
+			return 0, err
+		}
 		all = append(all, e)
 	}
-	if err := rows.Err(); err != nil { return 0, err }
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 
 	migrated := 0
 	for _, e := range all {
 		// Skip if the key already looks like a device_id (contains ":")
-		if strings.Contains(e.name, ":") { continue }
+		if strings.Contains(e.name, ":") {
+			continue
+		}
 		dev := s.LookupDeviceByDriverName(e.name)
-		if dev == nil { continue }
+		if dev == nil {
+			continue
+		}
 		// Insert under new key, delete old. INSERT OR IGNORE so we don't
 		// clobber existing well-trained data on the device_id side.
 		if _, err := s.db.Exec(

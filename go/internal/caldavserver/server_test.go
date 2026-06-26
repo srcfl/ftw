@@ -4,16 +4,19 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/emersion/go-ical"
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
+
+	"github.com/frahlg/forty-two-watts/go/internal/state"
 )
 
 func testHandler(user, pass, principal string, cals []string) http.Handler {
-	return NewHandler(user, pass, principal, cals)
+	return NewHandler(user, pass, principal, cals, NewMemStore())
 }
 
 func query() *caldav.CalendarQuery {
@@ -78,6 +81,45 @@ func TestNativeServerRoundTrip(t *testing.T) {
 	}
 	if len(objs2) != 0 {
 		t.Fatalf("expected 0 events after delete, got %d", len(objs2))
+	}
+}
+
+// TestNativeServerPersistsAcrossRestart proves durability with the state.db
+// backend: write an event, close the DB, reopen it (a "restart"), and confirm
+// the event is still served.
+func TestNativeServerPersistsAcrossRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	st, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(NewHandler("u", "p", "/u/", []string{"/u/energy/"}, st))
+	hc := webdav.HTTPClientWithBasicAuth(http.DefaultClient, "u", "p")
+	c, _ := caldav.NewClient(hc, srv.URL)
+	now := time.Now()
+	putEvent(t, c, "/u/energy/away.ics", "away", "Away — persisted", now.Add(time.Hour), now.Add(2*time.Hour))
+	srv.Close()
+	st.Close()
+
+	// "Restart": reopen the same DB and stand the server back up.
+	st2, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	srv2 := httptest.NewServer(NewHandler("u", "p", "/u/", []string{"/u/energy/"}, st2))
+	defer srv2.Close()
+	c2, _ := caldav.NewClient(hc, srv2.URL)
+
+	objs, err := c2.QueryCalendar(context.Background(), "/u/energy/", query())
+	if err != nil {
+		t.Fatalf("REPORT after restart: %v", err)
+	}
+	if len(objs) != 1 {
+		t.Fatalf("event did not survive restart: got %d objects", len(objs))
+	}
+	if sum, _ := objs[0].Data.Events()[0].Props.Text(ical.PropSummary); sum != "Away — persisted" {
+		t.Fatalf("persisted summary wrong: %q", sum)
 	}
 }
 

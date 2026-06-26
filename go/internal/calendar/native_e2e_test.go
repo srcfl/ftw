@@ -20,7 +20,7 @@ import (
 // a real calendar.Service fetches and parses intents straight from it, with no
 // Radicale anywhere. CI-safe (everything in-process).
 func TestCalendarServiceAgainstNativeServer(t *testing.T) {
-	srv := httptest.NewServer(caldavserver.NewHandler("u", "p", "/u/", []string{"/u/energy/"}))
+	srv := httptest.NewServer(caldavserver.NewHandler("u", "p", "/u/", []string{"/u/energy/"}, caldavserver.NewMemStore()))
 	defer srv.Close()
 
 	// A calendar app would PUT this; we do it with the same client 42W uses.

@@ -143,14 +143,15 @@ so it works in a single binary / single container **including the HA add-on**.
 inbound/outbound intent logic is identical; only "what it connects to" changes.
 It listens on `caldav.listen` (default `:5232`) with the managed credential.
 
-> **Prototype status:** storage is **in-memory** (events are lost on restart)
-> and recurrences aren't expanded server-side. Fine for evaluation; not yet a
-> production drop-in for Radicale. **TODO(#498):** back it with `state.db` for
-> durability. Default stays `radicale` until then.
+> **Status:** objects **persist in `state.db`** (a `caldav_objects` table), so
+> they survive restarts. Remaining gaps before it's a full drop-in for
+> Radicale: no server-side recurrence expansion, and interop is verified
+> against 42W's own go-webdav client rather than the full iOS / Google /
+> Thunderbird matrix. Default stays `radicale` until that's proven.
 
 **TODO (#498):** wire `server: native` into the HA add-on (it's exempt from the
-HA-addon disable) and add SQLite persistence. Tracking with the add-on
-maintainer (`erikarenhill`).
+HA-addon disable), add server-side recurrence expansion, and test against real
+calendar clients. Tracking with the add-on maintainer (`erikarenhill`).
 
 ## Implementation
 

@@ -9,8 +9,10 @@
 // (internal/calendar) still talks CalDAV over localhost, so the inbound/outbound
 // intent logic is unchanged — this just replaces "what the client connects to".
 //
-// PROTOTYPE limitations: in-memory storage (see backend.go) and no server-side
-// recurrence expansion. Not yet a drop-in replacement for Radicale.
+// Objects persist via a Store (state.db in production; in-memory for tests).
+// Remaining gaps before it's a full Radicale replacement: no server-side
+// recurrence expansion, and interop is verified against 42W's own go-webdav
+// client rather than the full matrix of iOS / Google / Thunderbird.
 package caldavserver
 
 import (
@@ -32,10 +34,11 @@ type Server struct {
 }
 
 // New builds the server. principal is the CalDAV principal path (e.g.
-// "/fortytwowatts/"); calendarPaths are collections to pre-create.
-func New(addr, username, password, principal string, calendarPaths []string) *Server {
+// "/fortytwowatts/"); calendarPaths are collections to pre-create; store is the
+// persistence (pass *state.Store for durability, or nil for in-memory).
+func New(addr, username, password, principal string, calendarPaths []string, store Store) *Server {
 	mux := http.NewServeMux()
-	mux.Handle("/", NewHandler(username, password, principal, calendarPaths))
+	mux.Handle("/", NewHandler(username, password, principal, calendarPaths, store))
 	return &Server{
 		addr:    addr,
 		httpSrv: &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second},
@@ -44,8 +47,8 @@ func New(addr, username, password, principal string, calendarPaths []string) *Se
 
 // NewHandler builds the auth-wrapped CalDAV http.Handler. Exposed so callers
 // (and tests) can mount the native server on an existing mux / httptest server.
-func NewHandler(username, password, principal string, calendarPaths []string) http.Handler {
-	return basicAuth(username, password, &caldav.Handler{Backend: newMemBackend(principal, calendarPaths)})
+func NewHandler(username, password, principal string, calendarPaths []string, store Store) http.Handler {
+	return basicAuth(username, password, &caldav.Handler{Backend: newBackend(principal, calendarPaths, store)})
 }
 
 // basicAuth gates the handler with a constant-time Basic-auth check. An empty

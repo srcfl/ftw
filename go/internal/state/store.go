@@ -569,6 +569,24 @@ func (s *Store) migrate() error {
 			json           TEXT    NOT NULL
 		) STRICT`,
 
+		// CalDAV objects + collections for the native in-process CalDAV server
+		// (#498, caldav.server: native). One row per calendar object (.ics),
+		// keyed by its full path; `collection` is the parent collection path so
+		// listing a calendar is an indexed scan. `data` is the raw iCalendar.
+		`CREATE TABLE IF NOT EXISTS caldav_calendars (
+			path        TEXT PRIMARY KEY NOT NULL,
+			name        TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT ''
+		) STRICT`,
+		`CREATE TABLE IF NOT EXISTS caldav_objects (
+			path        TEXT PRIMARY KEY NOT NULL,
+			collection  TEXT NOT NULL,
+			etag        TEXT NOT NULL,
+			data        TEXT NOT NULL,
+			modified_ms INTEGER NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_caldav_objects_collection ON caldav_objects(collection)`,
+
 		// Nova federation: one row per local DER we've provisioned in Nova.
 		// Keyed on (device_id, der_type) so a hybrid inverter with multiple
 		// DERs (battery + pv + meter on the same device_id) has one row per

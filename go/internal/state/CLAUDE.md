@@ -28,6 +28,7 @@ Opens one SQLite file (WAL journal, small connection pool with `busy_timeout=500
 - `RecordSamples / LoadSeries / LatestSample / MetricNames / DriverNames / PruneRecent / SamplesBefore` — long-format TS with interned driver/metric IDs.
 - `RolloffToParquet / LoadSeriesFromParquet` — 14-day-old samples roll off to daily Parquet files, sorted, zstd-compressed.
 - `SavePrices / LoadPrices / SaveForecasts / LoadForecasts` — market and weather data slots.
+- `SaveCalDAVObject / GetCalDAVObject / ListCalDAVObjects / DeleteCalDAVObject` + `SaveCalDAVCalendar / ListCalDAVCalendars` — storage for the native CalDAV server (#498, `caldav.server: native`); `data` is raw iCalendar (parsing stays in `caldavserver`).
 
 ## How it talks to neighbors
 
