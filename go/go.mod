@@ -19,6 +19,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.3
 	github.com/simonvetter/modbus v1.6.4
 	github.com/yuin/gopher-lua v1.1.2
+	golang.org/x/crypto v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.48.2
 )
@@ -76,7 +77,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect

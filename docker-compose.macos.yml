@@ -64,6 +64,10 @@ services:
       # Shared tmpfs with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
+      # Calendar (#498): same host dir Radicale mounts read-only, read-write
+      # here so 42W can write the managed htpasswd credential. On macOS also
+      # set caldav.url to http://radicale:5232 (service-name networking).
+      - ./radicale/config:/app/radicale-config
 
   ftw-updater:
     image: ghcr.io/frahlg/forty-two-watts-updater:latest

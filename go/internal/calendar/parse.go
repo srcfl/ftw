@@ -65,7 +65,14 @@ func newParser(awayKeywords, evKeywords []string, defaultLoadpointID string, def
 // classify maps a single event to at most one intent. EV is checked before
 // away because EV titles are the more specific case (they carry a target %).
 // A non-matching title yields (nil, nil) and is ignored.
+// maxTitleLen bounds how much of an event title we inspect — a hostile server
+// could otherwise ship a multi-megabyte SUMMARY to burn CPU on a Pi.
+const maxTitleLen = 4096
+
 func (p *parser) classify(title string, start, end time.Time, uid string) (*Interval, *EVDeadline) {
+	if len(title) > maxTitleLen {
+		title = title[:maxTitleLen]
+	}
 	lt := strings.ToLower(strings.TrimSpace(title))
 	if lt == "" || start.IsZero() {
 		return nil, nil

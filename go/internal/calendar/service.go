@@ -2,6 +2,7 @@ package calendar
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -59,6 +60,10 @@ type Service struct {
 	// planSource yields the current MPC plan slots (set by main.go before
 	// Start). Drives the forward-looking plan publisher.
 	planSource PlanSource
+
+	// Managed-credential provisioning (42W writes the Radicale htpasswd).
+	manageCreds  bool
+	htpasswdPath string
 
 	// mu guards the resolved config + live diagnostic state below.
 	mu             sync.RWMutex
@@ -178,6 +183,14 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	if defaultLP == "" {
 		defaultLP = firstLoadpointID
 	}
+	username := strings.TrimSpace(cfg.Username)
+	if username == "" && cfg.ManageCredentialsEnabled() {
+		username = config.DefaultCalDAVUsername
+	}
+	htpasswdPath := strings.TrimSpace(cfg.HtpasswdPath)
+	if htpasswdPath == "" {
+		htpasswdPath = config.DefaultCalDAVHtpasswdPath
+	}
 	histPath := strings.TrimSpace(cfg.HistoryPath)
 	if histPath == "" {
 		histPath = config.DefaultCalDAVHistoryPath
@@ -209,8 +222,10 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	s.enabled = cfg.Enabled
 	s.url = url
 	s.calendarPath = calPath
-	s.username = cfg.Username
+	s.username = username
 	s.password = cfg.Password
+	s.manageCreds = cfg.ManageCredentialsEnabled()
+	s.htpasswdPath = htpasswdPath
 	s.pollInterval = time.Duration(poll) * time.Second
 	s.horizon = time.Duration(horizonDays) * 24 * time.Hour
 	s.prs = newParser(away, evk, defaultLP, targetSoC)
@@ -230,6 +245,7 @@ func (s *Service) Reload(cfg config.CalDAV, firstLoadpointID string) {
 		return
 	}
 	s.applyConfig(cfg, firstLoadpointID)
+	s.provisionHtpasswd()
 	slog.Info("caldav config reloaded")
 }
 
@@ -253,6 +269,9 @@ func (s *Service) Start(ctx context.Context) {
 	if !enabled {
 		return
 	}
+	// Write the managed Radicale credential before polling so the first fetch
+	// authenticates against it.
+	s.provisionHtpasswd()
 	s.stop = make(chan struct{})
 	s.running = true
 	s.wg.Add(1)
@@ -316,6 +335,10 @@ func (s *Service) loop(ctx context.Context) {
 // pollOnce fetches + applies once. Errors are recorded but never propagated —
 // control must not stall on a flaky calendar server.
 func (s *Service) pollOnce(ctx context.Context) {
+	// Bound the whole poll (network + XML unmarshal of a possibly-hostile
+	// response), since the HTTP client timeout only covers the round-trip.
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	intents, err := s.fetch(ctx)
 	now := time.Now()
 	if err != nil {
@@ -338,10 +361,47 @@ func (s *Service) pollOnce(ctx context.Context) {
 	s.apply(intents, now)
 }
 
+// DoS guards on the inbound CalDAV response (a hostile or MITM'd server could
+// otherwise exhaust the Pi's memory/CPU): cap the raw response body and the
+// number of events we parse from one fetch.
+const (
+	maxResponseBytes  = 25 << 20 // 25 MiB
+	maxCalendarEvents = 10000
+)
+
+// limitedTransport caps the response body so an oversized CalDAV reply is
+// truncated (and the XML decode then fails) instead of being read fully into
+// memory. Wraps the default transport.
+type limitedTransport struct {
+	base http.RoundTripper
+	max  int64
+}
+
+func (t *limitedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &limitedReadCloser{r: io.LimitReader(resp.Body, t.max), c: resp.Body}
+	return resp, nil
+}
+
+type limitedReadCloser struct {
+	r io.Reader
+	c io.Closer
+}
+
+func (l *limitedReadCloser) Read(p []byte) (int, error) { return l.r.Read(p) }
+func (l *limitedReadCloser) Close() error               { return l.c.Close() }
+
 // newClient builds a CalDAV client with Basic auth against the configured
-// server. Shared by the inbound poll (fetch) and the outbound history writer.
+// server. Shared by the inbound poll (fetch) and the outbound writers.
 func (s *Service) newClient(url, user, pass string) (*caldav.Client, error) {
-	httpClient := webdav.HTTPClientWithBasicAuth(&http.Client{Timeout: 15 * time.Second}, user, pass)
+	hc := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: &limitedTransport{base: http.DefaultTransport, max: maxResponseBytes},
+	}
+	httpClient := webdav.HTTPClientWithBasicAuth(hc, user, pass)
 	return caldav.NewClient(httpClient, url)
 }
 
@@ -386,12 +446,18 @@ func (s *Service) fetch(ctx context.Context) (Intents, error) {
 	}
 
 	var out Intents
+	parsed := 0
 	for _, obj := range objs {
 		if obj.Data == nil {
 			continue
 		}
 		events := obj.Data.Events()
 		for i := range events {
+			if parsed >= maxCalendarEvents {
+				slog.Warn("caldav: event cap reached; ignoring the rest (hostile or misconfigured server?)", "cap", maxCalendarEvents)
+				return out, nil
+			}
+			parsed++
 			ev := events[i]
 			title, _ := ev.Props.Text(ical.PropSummary)
 			uid, _ := ev.Props.Text(ical.PropUID)
@@ -535,4 +601,39 @@ func joinURL(base, path string) string {
 		return ""
 	}
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(path, "/")
+}
+
+// CredentialView is the managed-credential reveal rendered by
+// GET /api/caldav/credentials for the Settings → Calendar tab. It intentionally
+// returns the password (the owner needs it to add the account to their phone);
+// the endpoint is behind the owner-auth gate, like the rest of /api/*.
+type CredentialView struct {
+	Managed      bool   `json:"managed"`
+	Username     string `json:"username,omitempty"`
+	Password     string `json:"password,omitempty"`
+	SubscribeURL string `json:"subscribe_url,omitempty"`
+	HistoryURL   string `json:"history_url,omitempty"`
+	PlanURL      string `json:"plan_url,omitempty"`
+}
+
+// Credentials returns the managed CalDAV credential + subscribe URLs.
+func (s *Service) Credentials() CredentialView {
+	if s == nil {
+		return CredentialView{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cv := CredentialView{
+		Managed:      s.manageCreds,
+		Username:     s.username,
+		Password:     s.password,
+		SubscribeURL: joinURL(s.url, s.calendarPath),
+	}
+	if s.historyEnabled {
+		cv.HistoryURL = joinURL(s.url, s.historyPath)
+	}
+	if s.planEnabled {
+		cv.PlanURL = joinURL(s.url, s.planPath)
+	}
+	return cv
 }

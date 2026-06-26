@@ -108,6 +108,11 @@ caldav:
   enabled: false
   url: http://localhost:5232
   username: fortytwowatts
+  # manage_credentials (default true): 42W generates the password and writes the
+  # Radicale htpasswd itself, then shows it (with a QR) in Settings → Calendar.
+  # Set false to manage radicale/config/users by hand and set `password` here.
+  manage_credentials: true
+  # htpasswd_path: /app/radicale-config/users   # where 42W writes the credential
   password: ""
   calendar_path: /fortytwowatts/energy/
   poll_interval_s: 300

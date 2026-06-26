@@ -327,6 +327,21 @@ type CalDAV struct {
 	PublishPlan          *bool  `yaml:"publish_plan,omitempty" json:"publish_plan,omitempty"`
 	PlanPath             string `yaml:"plan_path,omitempty" json:"plan_path,omitempty"`
 	PlanPublishIntervalS int    `yaml:"plan_publish_interval_s,omitempty" json:"plan_publish_interval_s,omitempty"`
+
+	// ManageCredentials (default ON when enabled) makes 42W generate a random
+	// password on first enable and write the Radicale htpasswd file itself, so
+	// the operator never runs `htpasswd` by hand. The credential is shown in
+	// the Settings → Calendar tab (with a QR) to paste into a calendar app.
+	// Requires HtpasswdPath to point at a file 42W can write that Radicale
+	// reads (the shared ./radicale/config mount in docker-compose).
+	ManageCredentials *bool  `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
+	HtpasswdPath      string `yaml:"htpasswd_path,omitempty" json:"htpasswd_path,omitempty"`
+}
+
+// ManageCredentialsEnabled reports whether 42W should auto-generate + write the
+// Radicale htpasswd credential. Nil-safe; defaults ON when the feature is on.
+func (cv *CalDAV) ManageCredentialsEnabled() bool {
+	return cv != nil && cv.Enabled && (cv.ManageCredentials == nil || *cv.ManageCredentials)
 }
 
 // EVSEHistoryEnabled reports whether 42W should write EV-session history
@@ -349,6 +364,10 @@ var (
 	DefaultCalDAVHistoryPath  = "/fortytwowatts/history/"
 	DefaultCalDAVPlanPath     = "/fortytwowatts/plan/"
 	DefaultCalDAVPlanPublishS = 900
+	// DefaultCalDAVHtpasswdPath is where 42W writes the managed Radicale
+	// credential inside its container — the shared ./radicale/config mount.
+	DefaultCalDAVHtpasswdPath = "/app/radicale-config/users"
+	DefaultCalDAVUsername     = "fortytwowatts"
 	DefaultCalDAVPollS        = 300
 	DefaultCalDAVHorizonDays  = 7
 	DefaultCalDAVEVTargetSoC  = 80.0

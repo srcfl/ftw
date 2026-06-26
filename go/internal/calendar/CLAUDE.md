@@ -24,8 +24,11 @@ windows (`plan.go`, reconciled each cycle — PUT changed, DELETE stale).
   Keyword substring match (case-insensitive); `(\d{1,3})%` → target SoC;
   `lp:<id>` → explicit loadpoint. EV checked before away (more specific).
 - `service.go` — `Service`: poll loop, CalDAV fetch (calendar-query REPORT
-  with server-side `Expand` for recurrences), `apply` (profile switch + EV
-  target), `IsAwayAt`, `Status`.
+  with server-side `Expand`; response-size + event-count + timeout DoS caps),
+  `apply` (profile switch + EV target), `IsAwayAt`, `Status`, `Credentials`.
+- `provision.go` — managed credential: `GenerateToken` + `provisionHtpasswd`
+  (writes `user:bcrypt` to the Radicale htpasswd; fail-soft if the shared mount
+  is absent). main.go generates the password; the Settings tab reveals it (+QR).
 - `doc.go`, `*_test.go`.
 
 ## Public API

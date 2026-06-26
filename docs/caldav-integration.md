@@ -27,30 +27,50 @@ Two directions:
 
 ## Security / network posture
 
-- Radicale binds to the LAN (`:5232`) behind HTTP Basic auth (htpasswd).
-- It is **never** routed through the owner-access relay and no port-forward to
-  `5232` is created. Off your network it simply doesn't sync, then catches up
-  when you're home. Nothing here reaches the internet unless you forward the
-  port yourself.
-- Over plain HTTP on the LAN, Basic-auth credentials are base64-encoded (not
-  encrypted) — standard for self-hosted CalDAV on a trusted home network.
+- Radicale listens on **`0.0.0.0:5232`** — i.e. it is reachable from **any
+  device on your home network**, not just loopback. It is **not** forwarded to
+  the internet by the 42W deployment (no port-forward is created) and is
+  **never** routed through the owner-access relay, so it stays on your LAN
+  unless you deliberately forward port `5232` on your router. Off your network
+  it simply doesn't sync, then catches up when you're home.
+- Authentication is HTTP Basic over **plain HTTP** — credentials are
+  base64-encoded (not encrypted). This is standard for self-hosted CalDAV on a
+  **trusted** home network. If your LAN has guest WiFi or untrusted IoT
+  devices, treat this as a weaker boundary: use a strong password, leave the
+  feature off (it is opt-in), or put Radicale behind a TLS reverse proxy.
+- The 42W API surface for this feature (`/api/caldav/*`) is behind the normal
+  owner-auth gate; only the Radicale port itself is on the open LAN.
+- DoS hardening: 42W caps the CalDAV response it will read (25 MiB) and the
+  number of events it parses per poll (10k), and bounds each poll with a
+  timeout, so a hostile/MITM'd server can't exhaust the Pi or stall the calendar
+  loop. The control loop runs in separate goroutines and is never blocked by a
+  slow calendar server.
 
 ## Setup
 
-1. Set a Radicale password (one-time):
-   ```bash
-   cp radicale/config/users.example radicale/config/users
-   htpasswd -B radicale/config/users fortytwowatts
-   ```
-2. Start the sidecar (opt-in compose profile):
+By default 42W **manages the credential for you** (`caldav.manage_credentials:
+true`): on first enable it generates a random password, writes the Radicale
+htpasswd file itself, and shows the username + password (with a QR) in
+**Settings → Calendar**. So the usual flow is just:
+
+1. Start the sidecar (opt-in compose profile):
    ```bash
    docker compose --profile calendar up -d
    ```
-3. In the 42W dashboard, **Settings → Calendar**: enable, set the same
-   username/password, save.
-4. Subscribe your calendar app to the URL shown in that tab, e.g.
+2. In the 42W dashboard, **Settings → Calendar**: tick *Enabled*, save.
+3. Open the **Calendar account** panel that appears — copy the username +
+   password, or scan the QR to get the subscribe URL onto your phone — and add
+   a CalDAV account in your calendar app pointing at the shown URL, e.g.
    `http://<host-ip>:5232/fortytwowatts/energy/` (the tab rewrites `localhost`
    to the dashboard's host for you).
+
+> **Manual credentials.** If you'd rather manage the htpasswd yourself, set
+> `caldav.manage_credentials: false`, run
+> `cp radicale/config/users.example radicale/config/users && htpasswd -B
+> radicale/config/users fortytwowatts`, and enter the same username/password in
+> the Calendar tab. (For 42W to write the managed file it needs the shared
+> `./radicale/config` mount — present in the bundled docker-compose; raw-binary
+> deploys fall back to manual.)
 
 ## Writing intents (title keywords)
 

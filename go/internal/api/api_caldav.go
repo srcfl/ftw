@@ -18,3 +18,17 @@ func (s *Server) handleCalDAVStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, s.deps.CalDAV.Status())
 }
+
+// handleCalDAVCredentials reveals the managed Radicale credential (username +
+// password) plus subscribe URLs so the Settings → Calendar tab can show them
+// (and render a QR) for the operator to add the account to a phone/desktop
+// calendar app. It intentionally returns the password — the owner needs it —
+// and is gated by owner-access auth like the rest of /api/* (kept separate from
+// the frequently-polled /status so the secret isn't read on every poll).
+func (s *Server) handleCalDAVCredentials(w http.ResponseWriter, r *http.Request) {
+	if s.deps.CalDAV == nil {
+		writeJSON(w, 200, map[string]any{"managed": false})
+		return
+	}
+	writeJSON(w, 200, s.deps.CalDAV.Credentials())
+}

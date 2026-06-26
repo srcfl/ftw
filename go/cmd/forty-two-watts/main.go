@@ -192,6 +192,20 @@ func main() {
 			cfg.CalDAV.Password = pw
 		}
 	}
+	// Managed credential (#498): mint a random password on first enable so the
+	// operator never runs `htpasswd` by hand. Persisted to state.db; the
+	// calendar service writes it into the Radicale htpasswd file on Start and
+	// the Settings tab shows it (with a QR) to paste into a calendar app.
+	if cfg.CalDAV.ManageCredentialsEnabled() && cfg.CalDAV.Password == "" {
+		if tok, err := calendar.GenerateToken(18); err != nil {
+			slog.Warn("caldav: failed to generate managed credential", "err", err)
+		} else if err := st.SaveConfig("caldav_password", tok); err != nil {
+			slog.Warn("caldav: failed to persist managed credential", "err", err)
+		} else {
+			cfg.CalDAV.Password = tok
+			slog.Info("caldav: generated managed Radicale credential")
+		}
+	}
 
 	// ---- Telemetry store ----
 	tel := telemetry.NewStore()
