@@ -1176,6 +1176,8 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
+    var C = chartColors(); // theme-aware chrome colors, re-read each draw
+
     var pad = { top: 20, right: 10, bottom: 25, left: 55 };
     var plotW = w - pad.left - pad.right;
     var plotH = h - pad.top - pad.bottom;
@@ -1204,7 +1206,7 @@
         { data: toKwh(chartHistory.e_pv),         color: "#10b981", width: 2, dash: [], name: "PV",         fill: true },
         { data: toKwh(chartHistory.e_charged),    color: "#3b82f6", width: 2, dash: [], name: "Charged",    fill: false },
         { data: toKwh(chartHistory.e_discharged), color: "#f59e0b", width: 2, dash: [], name: "Discharged", fill: false },
-        { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
+        { data: toKwh(chartHistory.e_load),       color: C.load, width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
       var smoothedGridSeries = smoothSeriesForChart(chartHistory.grid, chartHistory.timestamps, chartSmoothMs);
@@ -1213,7 +1215,7 @@
       series = [
         { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
         { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: smoothedLoadSeries, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: smoothedLoadSeries, color: C.load, width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -1257,7 +1259,7 @@
     if (visibleVals.length === 0) {
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#666";
+      ctx.fillStyle = C.muted;
       ctx.font = chartFontWaiting;
       ctx.textAlign = "center";
       ctx.fillText("waiting for data...", w / 2, h / 2);
@@ -1305,7 +1307,7 @@
     // Grid lines (drawn inside clip so they only appear in the plot area).
     // Walk yMin..yMax in yStep increments so every line lands on a round
     // number — that's what lets the y-axis labels stay readable.
-    ctx.strokeStyle = "#2a2a2a";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 0.5;
     ctx.font = chartFontAxis;
     var steps = Math.round(yRange / yStep);
@@ -1320,7 +1322,7 @@
     // Zero line
     if (yMin < 0 && yMax > 0) {
       var zeroY = pad.top + plotH * (1 - (0 - yMin) / yRange);
-      ctx.strokeStyle = "#444";
+      ctx.strokeStyle = C.muted;
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -1487,7 +1489,7 @@
     // where present is. Stroke width bumps on small screens so the
     // marker stays visible alongside the larger axis labels.
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = smallScreen ? "rgba(255,255,255,0.30)" : "rgba(255,255,255,0.12)";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = chartNowStrokeW;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
@@ -1495,7 +1497,7 @@
     ctx.stroke();
 
     // Y-axis labels (outside clip so they're fully visible)
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.font = chartFontAxis;
     for (var i2 = 0; i2 <= steps; i2++) {
       var yVal = yMin + (yRange * i2 / steps);
@@ -1504,7 +1506,7 @@
     }
 
     // Time labels
-    ctx.fillStyle = "#666";
+    ctx.fillStyle = C.muted;
     ctx.fillText(chartRange + " ago", pad.left, h - 5);
     ctx.textAlign = "right";
     ctx.fillText("now", w - pad.right, h - 5);
@@ -1530,7 +1532,7 @@
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.font = chartFontTooltip;
-      ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
+      ctx.fillStyle = fresh ? C.dim : "#f59e0b";
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
 
@@ -1564,8 +1566,46 @@
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
   }
 
+  // Resolve a CSS custom property to a concrete color string for <canvas>,
+  // which can't read var(). Re-read per draw so the charts follow the active
+  // theme (html[data-theme]) without needing an explicit redraw on toggle —
+  // a hidden probe element inherits :root, and getComputedStyle resolves the
+  // var() + oklch token to a value canvas can paint.
+  var _colorProbe = null;
+  function cssColor(name, fallback) {
+    if (!_colorProbe) {
+      _colorProbe = document.createElement("span");
+      _colorProbe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+      document.body.appendChild(_colorProbe);
+    }
+    _colorProbe.style.color = "var(" + name + ", " + (fallback || "#888") + ")";
+    return getComputedStyle(_colorProbe).color || fallback || "#888";
+  }
+  // Theme-aware chart chrome colors. Series hues stay fixed (they read on
+  // both themes); only text / gridlines / tooltip surface / the neutral
+  // "load" line flip — those are what go invisible on a light background.
+  // Cached so the animation loop doesn't getComputedStyle every frame —
+  // only recomputed when the active theme actually changes.
+  var _chartColors = null, _chartColorsTheme = null;
+  function chartColors() {
+    var theme = document.documentElement.getAttribute("data-theme") || "";
+    if (_chartColors && _chartColorsTheme === theme) return _chartColors;
+    _chartColorsTheme = theme;
+    _chartColors = {
+      text:    cssColor("--fg", "#e6e6e6"),
+      dim:     cssColor("--fg-dim", "#aaaaaa"),
+      muted:   cssColor("--fg-muted", "#888888"),
+      grid:    cssColor("--line", "#2a2a2a"),
+      surface: cssColor("--ink-raised", "#14141f"),
+      accent:  cssColor("--accent-e", "#fbbf24"),
+      load:    cssColor("--fg", "#e2e8f0"),
+    };
+    return _chartColors;
+  }
+
   function drawHoverOverlay(ctx) {
     if (!chartLayout) return;
+    var C = chartColors();
     var l = chartLayout;
     var i = hoverIndex;
     var fontTooltip = l.fontTooltip || "10px monospace";
@@ -1576,7 +1616,7 @@
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
-    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.strokeStyle = C.muted;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
@@ -1602,12 +1642,12 @@
       { name: "PV",         data: chartHistory.e_pv,         color: "#10b981" },
       { name: "Charged",    data: chartHistory.e_charged,    color: "#3b82f6" },
       { name: "Discharged", data: chartHistory.e_discharged, color: "#f59e0b" },
-      { name: "Load",       data: chartHistory.e_load,       color: "#e2e8f0" },
+      { name: "Load",       data: chartHistory.e_load,       color: C.load },
     ] : (function () {
       var rows = [
         { name: "Grid", data: chartHistory.grid, color: "#ef4444" },
         { name: "PV",   data: chartHistory.pv,   color: "#22c55e" },
-        { name: "Load", data: chartHistory.load, color: "#e2e8f0" },
+        { name: "Load", data: chartHistory.load, color: C.load },
       ];
       // Battery rows render their target inline as "actual W (→ target W)"
       // so it's visually obvious the two numbers are the same metric — one
@@ -1634,14 +1674,14 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.95)";
-    ctx.strokeStyle = "#444";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
     ctx.font = fontTooltip;
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
@@ -1649,21 +1689,21 @@
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = lab.dim ? "#888" : "#ddd";
+      ctx.fillStyle = lab.dim ? C.muted : C.text;
       ctx.fillText(lab.name, boxX + 18, y);
       ctx.textAlign = "right";
       if (chartView === "energy") {
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(lab.data[i].toFixed(2) + " kWh", boxX + boxW - 6, y);
       } else {
         var actual = formatW(lab.data[i]);
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(actual, boxX + boxW - 6, y);
         // Inline target as dim "(→ -674 W)" so user sees commanded vs actual
         // in one glance. Skip when target is 0 to reduce visual noise.
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
-          ctx.fillStyle = "#888";
+          ctx.fillStyle = C.dim;
           ctx.font = fontTooltipS;
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
           ctx.font = fontTooltip;
@@ -1675,6 +1715,7 @@
 
   function drawForecastHoverOverlay(ctx) {
     if (!chartLayout || !hoverForecast) return;
+    var C = chartColors();
     var l = chartLayout;
     var a = hoverForecast.action;
     var ts = hoverForecast.ts;
@@ -1708,8 +1749,8 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.96)";
-    ctx.strokeStyle = "rgba(251,191,36,0.6)";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.accent;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -1717,16 +1758,16 @@
     ctx.font = fontTooltip;
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
-    ctx.fillStyle = "#fbbf24";
+    ctx.fillStyle = C.accent;
     ctx.fillText(hh + "  predicted", boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = "#ddd";
+      ctx.fillStyle = C.text;
       ctx.fillText(lab.name, boxX + 18, y);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = C.text;
       ctx.textAlign = "right";
       var val = lab.literal ? lab.val : formatW(lab.val);
       ctx.fillText(val, boxX + boxW - 6, y);
@@ -1735,7 +1776,7 @@
 
     if (a.reason) {
       var ry = boxY + (labels.length + 2) * lineHeight + 2;
-      ctx.fillStyle = "#86efac";
+      ctx.fillStyle = C.dim;
       ctx.font = "italic 10px monospace";
       // Truncate if too long for box
       var reason = a.reason.length > 28 ? a.reason.substring(0, 27) + "…" : a.reason;
@@ -3811,6 +3852,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
 
+    var C = chartColors();
     var pad = { left: 36, right: 36, top: 8, bottom: 18 };
     var plotW = cssW - pad.left - pad.right;
     var plotH = cssH - pad.top - pad.bottom;
@@ -3837,7 +3879,7 @@
     };
 
     // Zero baseline for battery
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.left, batMid);
@@ -3882,7 +3924,7 @@
     ctx.stroke();
 
     // Axis labels — small, mono, dim.
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.fillStyle = C.dim;
     ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
@@ -3894,7 +3936,7 @@
     ctx.fillText("100%", pad.left + plotW + 4, socTop + 6);
     ctx.fillText("0%", pad.left + plotW + 4, socTop + socH - 6);
     // time axis: 24h ago / now
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.fillStyle = C.muted;
     ctx.textAlign = "left";
     ctx.fillText("24h ago", pad.left, cssH - 4);
     ctx.textAlign = "right";
