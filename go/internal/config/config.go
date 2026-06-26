@@ -338,23 +338,25 @@ type CalDAV struct {
 	HtpasswdPath      string `yaml:"htpasswd_path,omitempty" json:"htpasswd_path,omitempty"`
 
 	// Server selects the CalDAV server 42W talks to:
-	//   "radicale" (default) — the bundled Radicale sidecar (GPLv3, separate
-	//     container; not available in a single-container HA add-on).
-	//   "native" — an in-process pure-Go server (emersion/go-webdav, MIT) that
-	//     needs no sidecar, so it works in a single binary / container incl. the
-	//     HA add-on. Objects persist in state.db. (Still maturing: no
-	//     server-side recurrence expansion yet.)
+	//   "native" (default) — an in-process pure-Go server (emersion/go-webdav,
+	//     MIT) that needs no sidecar, so it works in a single binary / container
+	//     incl. the HA add-on. Objects persist in state.db. (Still maturing: no
+	//     server-side recurrence expansion yet — recurring events show only
+	//     their first occurrence.)
+	//   "radicale" — the bundled Radicale sidecar (GPLv3, separate container;
+	//     not available in a single-container HA add-on). Use it if you need
+	//     recurring events or broad calendar-app interop today.
 	Server string `yaml:"server,omitempty" json:"server,omitempty"`
 	// Listen is the bind address for the native server (default ":5232").
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
 }
 
-// ServerMode returns "native" or "radicale" (the default). Nil-safe.
+// ServerMode returns "native" (the default) or "radicale". Nil-safe.
 func (cv *CalDAV) ServerMode() string {
-	if cv != nil && strings.EqualFold(strings.TrimSpace(cv.Server), "native") {
-		return "native"
+	if cv != nil && strings.EqualFold(strings.TrimSpace(cv.Server), "radicale") {
+		return "radicale"
 	}
-	return "radicale"
+	return "native"
 }
 
 // ListenAddr returns the native CalDAV server bind address (default ":5232").

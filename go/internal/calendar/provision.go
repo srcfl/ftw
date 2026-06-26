@@ -28,9 +28,9 @@ func GenerateToken(nBytes int) (string, error) {
 // operator-managed users file untouched.
 func (s *Service) provisionHtpasswd() {
 	s.mu.RLock()
-	manage, path, user, pass := s.manageCreds, s.htpasswdPath, s.username, s.password
+	write, path, user, pass := s.writeHtpasswd, s.htpasswdPath, s.username, s.password
 	s.mu.RUnlock()
-	if !manage || path == "" || user == "" || pass == "" {
+	if !write || path == "" || user == "" || pass == "" {
 		return
 	}
 	dir := filepath.Dir(path)

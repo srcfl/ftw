@@ -140,6 +140,12 @@ services:
   # ---------------------------------------------------------------------
   # CalDAV server (Radicale) — calendar-based planner constraints (#498)
   #
+  # OPTIONAL / ALTERNATIVE: by default 42W runs its OWN in-process CalDAV server
+  # (caldav.server: native) and you do NOT need this container at all. Only
+  # start it if you set caldav.server: radicale (e.g. for recurring events /
+  # broader calendar-app interop). It stays behind the `calendar` compose
+  # profile, so a default `docker compose up -d` never launches it.
+  #
   # 42W is a CalDAV *client* of this sidecar. Add a CalDAV account in your
   # phone/desktop calendar app pointing at http://<host-ip>:5232/<user>/energy/
   # and create events to drive the planner:

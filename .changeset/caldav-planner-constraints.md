@@ -3,8 +3,11 @@
 ---
 
 Calendar-based planner constraints via a built-in CalDAV calendar (#498). 42W
-can now read a calendar you keep in your normal calendar app (served by a
-bundled, LAN-only Radicale sidecar) and turn events into planner intents:
+hosts its own in-process, LAN-only CalDAV server by default (pure-Go,
+`emersion/go-webdav`; objects persist in `state.db`), so no extra container is
+needed — it even works as a Home Assistant add-on. A bundled Radicale sidecar
+remains available via `caldav.server: radicale`. 42W reads a calendar you keep
+in your normal calendar app and turns events into planner intents:
 
 - An **Away** / **Vacation** event switches the load model to its away profile
   for that interval, so the planner conserves battery while the house is empty.

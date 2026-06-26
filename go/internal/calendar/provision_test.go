@@ -15,7 +15,7 @@ func TestProvisionHtpasswdWritesBcrypt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "users")
 	mc := true
 	s := New(config.CalDAV{
-		Enabled: true, Username: "fortytwowatts", Password: "s3cr3t-pw",
+		Enabled: true, Server: "radicale", Username: "fortytwowatts", Password: "s3cr3t-pw",
 		ManageCredentials: &mc, HtpasswdPath: path,
 	}, &fakeLP{}, &fakeLM{}, "garage")
 
@@ -43,7 +43,7 @@ func TestProvisionHtpasswdWritesBcrypt(t *testing.T) {
 func TestProvisionHtpasswdSkipsWhenDirMissing(t *testing.T) {
 	mc := true
 	path := filepath.Join(t.TempDir(), "missing", "users") // parent dir absent
-	s := New(config.CalDAV{Enabled: true, Username: "u", Password: "p", ManageCredentials: &mc, HtpasswdPath: path}, &fakeLP{}, &fakeLM{}, "")
+	s := New(config.CalDAV{Enabled: true, Server: "radicale", Username: "u", Password: "p", ManageCredentials: &mc, HtpasswdPath: path}, &fakeLP{}, &fakeLM{}, "")
 	s.provisionHtpasswd() // must be a fail-soft no-op, not a panic
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("must not create the htpasswd when its directory is missing")

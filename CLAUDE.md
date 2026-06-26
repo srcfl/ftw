@@ -298,5 +298,6 @@ light theme can flip it cleanly.
 - `docs/mpc-planner.md` — MPC strategies, confidence blending
 - `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
 - `docs/ha-integration.md` — Home Assistant MQTT bridge
+- `docs/caldav-integration.md` — calendar planner constraints (#498): native in-process CalDAV server (emersion/go-webdav, default) or Radicale sidecar; away/EV intents, EVSE history + plan publishing
 - `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
 - `docs/archive/rust-go-wasm-migration-plan.md` — historical Rust→Go migration context

@@ -106,12 +106,13 @@ homeassistant:
 # `docker compose --profile calendar up -d`. password is stored in state.db.
 caldav:
   enabled: false
-  # server: radicale → talk to the bundled Radicale sidecar (GPLv3, separate
-  # container). server: native → run an in-process pure-Go CalDAV server
-  # (emersion/go-webdav, MIT) — no sidecar, works in a single container incl.
-  # a Home Assistant add-on; objects persist in state.db. (native still lacks
-  # server-side recurrence expansion.)
-  server: radicale
+  # server: native (DEFAULT) → 42W runs an in-process pure-Go CalDAV server
+  # (emersion/go-webdav, MIT) — no sidecar, works in a single container incl. a
+  # Home Assistant add-on; objects persist in state.db. native does NOT yet
+  # expand recurring events (a recurring event shows only its first occurrence).
+  # server: radicale → use the bundled Radicale sidecar instead (GPLv3, separate
+  # container) if you need recurring events or broad calendar-app interop today.
+  server: native
   # listen: ":5232"          # bind address for the native server
   url: http://localhost:5232
   username: fortytwowatts

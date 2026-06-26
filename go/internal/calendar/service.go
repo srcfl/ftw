@@ -32,8 +32,9 @@ type LoadpointTargeter interface {
 }
 
 // Service is a CalDAV *client*. It periodically polls a calendar collection
-// (served by the bundled Radicale sidecar, or any CalDAV server), classifies
-// events by title keyword, and applies the resulting intents:
+// (served by 42W's own native in-process server by default, or the bundled
+// Radicale sidecar), classifies events by title keyword, and applies the
+// resulting intents:
 //
 //   - "away" intervals → loadmodel away/home profile switch (live + training),
 //     plus an IsAwayAt hook the MPC load predictor consults per slot;
@@ -61,9 +62,12 @@ type Service struct {
 	// Start). Drives the forward-looking plan publisher.
 	planSource PlanSource
 
-	// Managed-credential provisioning (42W writes the Radicale htpasswd).
-	manageCreds  bool
-	htpasswdPath string
+	// Managed-credential provisioning. manageCreds = 42W owns the credential
+	// (shown in the UI). writeHtpasswd = also write the Radicale htpasswd file
+	// — only in radicale mode; the native server authenticates in-process.
+	manageCreds   bool
+	writeHtpasswd bool
+	htpasswdPath  string
 
 	// mu guards the resolved config + live diagnostic state below.
 	mu             sync.RWMutex
@@ -225,6 +229,7 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	s.username = username
 	s.password = cfg.Password
 	s.manageCreds = cfg.ManageCredentialsEnabled()
+	s.writeHtpasswd = cfg.ManageCredentialsEnabled() && cfg.ServerMode() != "native"
 	s.htpasswdPath = htpasswdPath
 	s.pollInterval = time.Duration(poll) * time.Second
 	s.horizon = time.Duration(horizonDays) * 24 * time.Hour

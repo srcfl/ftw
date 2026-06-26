@@ -6,17 +6,28 @@ network.
 
 ## Mental model
 
-forty-two-watts does **not** host CalDAV. It runs a CalDAV **client** that
-talks to a bundled [Radicale](https://radicale.org/) sidecar (or any CalDAV
-server). Radicale owns the protocol correctness (PROPFIND/REPORT/sync with
-iOS, Google Calendar, Thunderbird, …); 42W just polls a collection and maps
-events onto machinery it already has.
+There's a CalDAV **server** (where your calendar lives) and 42W's CalDAV
+**client** (which reads/writes it and maps events onto planner machinery). The
+client is always the same; you choose the server with `caldav.server`:
+
+- **`native` (default)** — 42W hosts CalDAV **itself**, in-process, via
+  [`emersion/go-webdav`](https://github.com/emersion/go-webdav) (MIT). No
+  sidecar, no extra container, objects persisted in `state.db`. Works in a
+  single binary / single container — including a Home Assistant add-on. See
+  `go/internal/caldavserver`.
+- **`radicale`** — the bundled [Radicale](https://radicale.org/) sidecar
+  (GPLv3, separate container). Radicale has more complete protocol support
+  (recurrence expansion, wider client interop), so pick it if you need those
+  today; it can't run in a single-container HA add-on (see *Deploy modes*).
+
+Either way the client talks CalDAV over `localhost`, so everything below is
+identical between the two — only "what it connects to" changes.
 
 ```
- Calendar app ──CalDAV(LAN)──▶ Radicale :5232 ◀──poll/write── 42W (internal/calendar)
-                                                              │ away → loadmodel.ProfileAway
-                                                              │ "charge car 80%" → loadpoint target
-                                                              └ EV session ended → write history event
+ Calendar app ──CalDAV(LAN)──▶  CalDAV server  ◀──poll/write── 42W (internal/calendar)
+   (phone /                     native (default) │ away → loadmodel.ProfileAway
+    Thunderbird)                or Radicale :5232 │ "charge car 80%" → loadpoint target
+                                                  └ EV session ended → write history event
 ```
 
 Two directions:
@@ -46,31 +57,36 @@ Two directions:
   loop. The control loop runs in separate goroutines and is never blocked by a
   slow calendar server.
 
-## Setup
+## Setup (native server — the default)
 
-By default 42W **manages the credential for you** (`caldav.manage_credentials:
-true`): on first enable it generates a random password, writes the Radicale
-htpasswd file itself, and shows the username + password (with a QR) in
-**Settings → Calendar**. So the usual flow is just:
+No sidecar needed. 42W **manages the credential for you**
+(`caldav.manage_credentials: true`): on first enable it generates a random
+password and shows the username + password (with a QR) in **Settings →
+Calendar**.
 
-1. Start the sidecar (opt-in compose profile):
-   ```bash
-   docker compose --profile calendar up -d
-   ```
-2. In the 42W dashboard, **Settings → Calendar**: tick *Enabled*, save.
-3. Open the **Calendar account** panel that appears — copy the username +
-   password, or scan the QR to get the subscribe URL onto your phone — and add
-   a CalDAV account in your calendar app pointing at the shown URL, e.g.
+1. In the dashboard, **Settings → Calendar**: tick *Enabled*, save.
+2. 42W starts its in-process CalDAV server on `:5232`. Open the **Calendar
+   account** panel that appears — copy the username + password, or scan the QR
+   to get the subscribe URL onto your phone — and add a CalDAV account in your
+   calendar app pointing at the shown URL, e.g.
    `http://<host-ip>:5232/fortytwowatts/energy/` (the tab rewrites `localhost`
    to the dashboard's host for you).
 
-> **Manual credentials.** If you'd rather manage the htpasswd yourself, set
-> `caldav.manage_credentials: false`, run
+That's the whole flow — no extra container.
+
+## Setup (Radicale sidecar — `server: radicale`)
+
+Set `caldav.server: radicale`, then:
+
+1. Start the sidecar: `docker compose --profile calendar up -d`.
+2. Credentials work the same (42W writes the Radicale htpasswd into the shared
+   `./radicale/config` mount). Tick *Enabled* and read the **Calendar account**
+   panel as above.
+
+> **Manual Radicale credentials.** Set `caldav.manage_credentials: false`, run
 > `cp radicale/config/users.example radicale/config/users && htpasswd -B
 > radicale/config/users fortytwowatts`, and enter the same username/password in
-> the Calendar tab. (For 42W to write the managed file it needs the shared
-> `./radicale/config` mount — present in the bundled docker-compose; raw-binary
-> deploys fall back to manual.)
+> the Calendar tab.
 
 ## Writing intents (title keywords)
 
@@ -119,39 +135,32 @@ restart.
 
 ## Deploy modes & Home Assistant
 
-The calendar feature needs the **Radicale sidecar**, which is **GPLv3**. 42W
-keeps it strictly **arm's length** — a separate container reached only over the
-CalDAV network protocol — so 42W itself stays cleanly separable and permissively
-licensable (MIT/Apache-2.0). The compose file only *references* the public image
-(pulled at runtime); Radicale's code is never bundled or redistributed.
+**The default `server: native` works in every deploy mode** — docker-compose,
+raw binary, and a single-container Home Assistant add-on — because it's
+in-process and pure-Go (MIT). Nothing extra to install; objects persist in
+`state.db`. Its only current limitation is **no server-side recurrence
+expansion** (a recurring event shows only its first occurrence) and that broad
+calendar-app interop isn't fully proven yet.
 
-The flip side: a sidecar can't live inside a **single-container Home Assistant
-add-on**. So when 42W detects it's running as an HA add-on
-(`runningAsHAAddon()` — `FTW_HA_ADDON=1`, or a Supervisor token /
-`/data/options.json` fallback) it **disables the calendar feature** and the
-Settings tab explains why. Override with `FTW_CALDAV_FORCE=1` if you run a
-*separate* Radicale add-on and point `caldav.url` at it.
+`server: radicale` is the opt-in alternative when you need recurrence /
+wider client interop today. Radicale is **GPLv3**, so 42W keeps it strictly
+**arm's length** — a separate container reached only over the CalDAV network
+protocol — which keeps 42W cleanly separable and permissively licensable
+(MIT/Apache-2.0); the compose file only *references* the public image, never
+bundling or redistributing it.
 
-### Native in-process server (`server: native`) — prototype
+The catch with Radicale: a sidecar can't live inside a **single-container HA
+add-on**. So 42W detects the add-on (`runningAsHAAddon()` — `FTW_HA_ADDON=1`,
+or a Supervisor token / `/data/options.json` fallback) and, **in `radicale`
+mode only**, disables the calendar with an explanation in the Settings tab. The
+fix there is simply to use `server: native` (the default), which is exempt.
+`FTW_CALDAV_FORCE=1` re-enables `radicale` mode for a *separate* Radicale add-on
+you point `caldav.url` at.
 
-There's now a second option that sidesteps all of the above: set
-`caldav.server: native` and 42W hosts CalDAV **itself**, in-process, using
-[`emersion/go-webdav`](https://github.com/emersion/go-webdav) (**MIT**) — see
-`go/internal/caldavserver`. No Radicale, no second container, no GPL boundary,
-so it works in a single binary / single container **including the HA add-on**.
-42W's calendar client still talks CalDAV over `localhost`, so the
-inbound/outbound intent logic is identical; only "what it connects to" changes.
-It listens on `caldav.listen` (default `:5232`) with the managed credential.
-
-> **Status:** objects **persist in `state.db`** (a `caldav_objects` table), so
-> they survive restarts. Remaining gaps before it's a full drop-in for
-> Radicale: no server-side recurrence expansion, and interop is verified
-> against 42W's own go-webdav client rather than the full iOS / Google /
-> Thunderbird matrix. Default stays `radicale` until that's proven.
-
-**TODO (#498):** wire `server: native` into the HA add-on (it's exempt from the
-HA-addon disable), add server-side recurrence expansion, and test against real
-calendar clients. Tracking with the add-on maintainer (`erikarenhill`).
+**TODO (#498):** add server-side recurrence expansion to the native server
+(using the vendored `teambition/rrule-go`) and verify interop against iOS /
+Google / Thunderbird, then drop the Radicale option if it's no longer needed.
+Tracking with the add-on maintainer (`erikarenhill`).
 
 ## Implementation
 
@@ -162,5 +171,24 @@ calendar clients. Tracking with the add-on maintainer (`erikarenhill`).
   (horizon); EV deadlines call `loadpoint.Manager.SetTarget`.
 - `GET /api/caldav/status` (`go/internal/api/api_caldav.go`) backs the
   Settings tab.
-- Deploy: `radicale` service in `docker-compose.yml` (profile `calendar`) +
-  `radicale/config/`.
+- Native server (`server: native`, default): `go/internal/caldavserver` — a
+  go-webdav `caldav.Handler` + a `state.db`-backed `caldav.Backend`.
+- Deploy: optional `radicale` service in `docker-compose.yml` (profile
+  `calendar`) + `radicale/config/`, used only when `server: radicale`.
+
+### Third-party libraries
+
+The CalDAV stack is built entirely on **Emerson Tan's `emersion/*` libraries**
+(all **MIT**-licensed, pure Go — no CGo):
+
+- [`github.com/emersion/go-webdav`](https://github.com/emersion/go-webdav) — the
+  CalDAV **client** (used in every mode to poll/read/write) **and** the CalDAV
+  **server** (`caldav` subpackage) that powers `server: native`.
+- [`github.com/emersion/go-ical`](https://github.com/emersion/go-ical) —
+  iCalendar (RFC 5545) parsing + encoding.
+- [`github.com/teambition/rrule-go`](https://github.com/teambition/rrule-go) —
+  pulled in transitively via go-ical; the future home of native recurrence
+  expansion.
+
+These keep 42W a single static binary and are why the native server is
+permissively licensable (unlike the GPLv3 Radicale sidecar).
