@@ -117,6 +117,15 @@
       '.ftw-hp-spark{display:flex;flex-direction:column;gap:4px}',
       '.ftw-hp-spark-label{font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-muted)}',
       '.ftw-hp-spark svg{width:100%;height:48px;display:block}',
+      '.ftw-hp-tchart{width:100%;height:150px;display:block}',
+      '.ftw-hp-legend{display:flex;gap:14px;flex-wrap:wrap}',
+      '.ftw-hp-leg{font-family:var(--mono);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted);display:inline-flex;align-items:center;gap:4px}',
+      '.ftw-hp-leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}',
+      '.ftw-hp-erow{display:grid;grid-template-columns:1fr auto auto;gap:7px 18px;align-items:baseline}',
+      '.ftw-hp-ehead{font-size:0.58rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-muted);font-family:var(--mono)}',
+      '.ftw-hp-elabel{font-family:var(--mono);font-size:0.66rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted)}',
+      '.ftw-hp-eval{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.92rem;color:var(--fg);text-align:right;min-width:72px}',
+      '.ftw-hp-acc{color:var(--fg-muted);opacity:0.7;font-size:0.74rem}',
       '.ftw-hp-empty{font-family:var(--mono);font-size:0.8rem;color:var(--fg-muted)}',
     ].join('');
     var el = document.createElement('style');
@@ -177,6 +186,89 @@
     });
   }
 
+  // ── Month temperature chart (outdoor / supply / return) ──────────
+  // Multi-line SVG; line hues are fixed (read on both themes), axis chrome
+  // uses theme tokens. Spans whatever history exists (fills toward a month).
+  var TCHART = [
+    { key: 'outdoor', label: 'Outdoor', color: '#38bdf8' },
+    { key: 'supply',  label: 'Supply',  color: '#ef4444' },
+    { key: 'ret',     label: 'Return',  color: '#22c55e' },
+  ];
+  function tempChartBlock(temps) {
+    if (!temps) return '';
+    var lines = TCHART.map(function (s) { return { color: s.color, points: temps[s.key] || [] }; });
+    var all = [];
+    lines.forEach(function (l) { l.points.forEach(function (p) { if (p && p.v != null) all.push(p); }); });
+    if (all.length < 2) return '';
+    var w = 600, h = 150, padL = 26, padR = 6, padT = 8, padB = 14;
+    var ts = all.map(function (p) { return p.ts; });
+    var vs = all.map(function (p) { return p.v; });
+    var t0 = Math.min.apply(null, ts), t1 = Math.max.apply(null, ts), tspan = (t1 - t0) || 1;
+    var vMin = Math.min.apply(null, vs), vMax = Math.max.apply(null, vs);
+    var vp = (vMax - vMin) * 0.1 || 1; vMin -= vp; vMax += vp;
+    var vspan = (vMax - vMin) || 1;
+    function X(t) { return (padL + (t - t0) / tspan * (w - padL - padR)).toFixed(1); }
+    function Y(v) { return (padT + (1 - (v - vMin) / vspan) * (h - padT - padB)).toFixed(1); }
+    var grid = '';
+    [vMin, (vMin + vMax) / 2, vMax].forEach(function (v) {
+      grid += '<line x1="' + padL + '" y1="' + Y(v) + '" x2="' + (w - padR) + '" y2="' + Y(v) + '" stroke="var(--line)" stroke-width="0.5"/>' +
+        '<text x="2" y="' + (parseFloat(Y(v)) + 3).toFixed(1) + '" fill="var(--fg-muted)" font-size="8" font-family="monospace">' + v.toFixed(0) + '</text>';
+    });
+    var paths = lines.map(function (l) {
+      var pp = l.points.filter(function (p) { return p && p.v != null; });
+      if (pp.length < 2) return '';
+      var d = pp.map(function (p, i) { return (i ? 'L' : 'M') + X(p.ts) + ',' + Y(p.v); }).join(' ');
+      return '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="1.4" stroke-linejoin="round"/>';
+    }).join('');
+    var legend = TCHART.map(function (s) {
+      return '<span class="ftw-hp-leg"><span class="ftw-hp-leg-dot" style="background:' + s.color + '"></span>' + s.label + '</span>';
+    }).join('');
+    return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">Temperatures · 30 days</div>' +
+      '<div class="ftw-hp-legend">' + legend + '</div>' +
+      '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" class="ftw-hp-tchart" aria-hidden="true">' + grid + paths + '</svg>' +
+      '</div>';
+  }
+
+  // ── Energy per calendar period, from the lifetime kWh counters ───
+  // delta = current − value at the period boundary; null when the logged
+  // history doesn't reach back that far (shown as "accumulating").
+  function energyDeltas(points) {
+    if (!points || points.length < 2) return {};
+    var last = points[points.length - 1].v;
+    var earliest = points[0].ts;
+    var now = new Date();
+    var startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    var dow = (now.getDay() + 6) % 7; // Monday = 0
+    var startWeek = startToday - dow * 86400000;
+    var startMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    var startYear = new Date(now.getFullYear(), 0, 1).getTime();
+    function delta(b) {
+      if (earliest > b) return null;
+      var base = points[0].v;
+      for (var i = 0; i < points.length; i++) { if (points[i].ts <= b) base = points[i].v; else break; }
+      return Math.max(0, last - base);
+    }
+    return { today: delta(startToday), week: delta(startWeek), month: delta(startMonth), year: delta(startYear) };
+  }
+  function energyPeriodsBlock(energy) {
+    if (!energy || (energy.consumed || []).length < 2) return '';
+    var c = energyDeltas(energy.consumed), p = energyDeltas(energy.produced);
+    function cell(v) { return v == null ? '<span class="ftw-hp-acc">accumulating</span>' : (Math.round(v * 10) / 10).toLocaleString('en-US') + ' kWh'; }
+    var rows = [
+      { k: 'today', label: 'Today' },
+      { k: 'week', label: 'This week' },
+      { k: 'month', label: 'This month' },
+      { k: 'year', label: 'This year' },
+    ].map(function (r) {
+      return '<div class="ftw-hp-erow"><span class="ftw-hp-elabel">' + r.label + '</span>' +
+        '<span class="ftw-hp-eval">' + cell(c[r.k]) + '</span>' +
+        '<span class="ftw-hp-eval">' + cell(p[r.k]) + '</span></div>';
+    }).join('');
+    return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">Energy per period</div>' +
+      '<div class="ftw-hp-erow ftw-hp-ehead"><span class="ftw-hp-elabel"></span><span class="ftw-hp-eval">Consumed</span><span class="ftw-hp-eval">Produced</span></div>' +
+      rows + '</div>';
+  }
+
   function tileHtml(def, m) {
     var has = Object.prototype.hasOwnProperty.call(m, def.key);
     var sensor = def.sensor ? ' <span class="ftw-hp-sensor">(' + escapeHtml(def.sensor) + ')</span>' : '';
@@ -187,7 +279,7 @@
       '</div>';
   }
 
-  function renderPump(name, detail, sparkPoints) {
+  function renderPump(name, detail, sparkPoints, temps, energy) {
     var m = metricMap(detail && detail.metrics);
     var groups = GROUPS.map(function (g) {
       var tiles = g.items.map(function (def) { return tileHtml(def, m); }).join('');
@@ -203,6 +295,8 @@
       '<div class="ftw-hp-head"><span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
       '<span class="ftw-hp-more">All signals →</span></div>' +
       groups +
+      energyPeriodsBlock(energy) +
+      tempChartBlock(temps) +
       sparkBlock +
       '</div>';
   }
@@ -237,11 +331,22 @@
       }
       // Fetch detail + 24h power series for each heat pump in parallel.
       return Promise.all(names.map(function (n) {
+        var ser = function (metric, range, pts) {
+          return fetchJSON('/api/series?driver=' + encodeURIComponent(n) + '&metric=' + metric + '&range=' + range + '&points=' + pts);
+        };
         return Promise.all([
           fetchJSON('/api/drivers/' + encodeURIComponent(n)),
-          fetchJSON('/api/series?driver=' + encodeURIComponent(n) + '&metric=hp_power_w&range=24h&points=200'),
+          ser('hp_power_w', '24h', 200),
+          ser('hp_outdoor_temp_c', '30d', 400),
+          ser('hp_supply_line_bt2', '30d', 400),
+          ser('hp_return_line_bt3', '30d', 400),
+          ser('hp_energy_consumed_kwh', '366d', 800),
+          ser('hp_energy_produced_kwh', '366d', 800),
         ]).then(function (parts) {
-          return { name: n, detail: parts[0], series: (parts[1] && parts[1].points) || [] };
+          var pp = function (r) { return (r && r.points) || []; };
+          return { name: n, detail: parts[0], series: pp(parts[1]),
+            temps: { outdoor: pp(parts[2]), supply: pp(parts[3]), ret: pp(parts[4]) },
+            energy: { consumed: pp(parts[5]), produced: pp(parts[6]) } };
         });
       })).then(function (pumps) {
         var live = pumps.filter(function (p) { return p.detail && isHeatPump(p.detail); });
@@ -249,7 +354,7 @@
         injectStyles();
         section.hidden = false;
         grid.innerHTML = live.map(function (p) {
-          return renderPump(p.name, p.detail, p.series);
+          return renderPump(p.name, p.detail, p.series, p.temps, p.energy);
         }).join('');
       });
     });
