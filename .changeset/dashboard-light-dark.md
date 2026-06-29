@@ -9,3 +9,5 @@ The live power/energy **charts now render correctly in light mode**. The canvas 
 The **heat-pump card now re-discovers newly-added drivers** without a manual reload. `heating.js` cached discovery once and never re-checked — and an empty result is truthy, so a site that discovered before its pump reported `hp_power_w` stayed blank. It now re-scans on first load and every 5 minutes, while steady-state polling still only touches already-known heat-pump drivers.
 
 The heat-pump **"all signals" detail view now shows a Register column** — each signal's source Modbus register id (read from the metric snapshot the driver reports). Signals with no Modbus mapping show "—".
+
+The **heat-pump card itself now themes in light mode**. It renders into a bare `.card`, whose base style uses the `--surface` token — which the light theme doesn't flip — so the card stayed dark on a light page while every other dashboard card themed correctly. It now uses the same `--ink-raised` palette as the rest.
