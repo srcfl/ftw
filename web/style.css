@@ -1573,6 +1573,25 @@ footer {
   height: auto;
 }
 
+/* Per-calendar card: name + what-it-does + link + QR, one per collection. */
+.caldav-cal {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.caldav-cal-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.caldav-cal-desc {
+  margin: 2px 0 8px;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
 /* Collapse the generic two-column settings rows to a single column on phones,
    so inputs aren't squeezed to unusable widths. */
 @media (max-width: 560px) {

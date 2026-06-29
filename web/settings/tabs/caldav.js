@@ -68,35 +68,22 @@
     return b;
   }
 
-  function urlRow(label, url) {
-    var u = lanURL(url);
-    // Render the URL as a real clickable link (http/https only — guard against a
-    // javascript: scheme even though these URLs are 42W's own config, not the
-    // remote CalDAV server's). Falls back to plain <code> if it's not a web URL.
-    var safe = /^https?:\/\//i.test(u);
-    var value = safe
-      ? el("a", { class: "caldav-url", href: u, target: "_blank", rel: "noopener noreferrer", text: u })
-      : el("code", { class: "caldav-val", text: u });
-    return el("div", { class: "caldav-row" }, [
-      el("label", { text: label }),
-      value,
-      copyBtn(function () { return u; }),
+  // calendarCard renders one calendar as a self-contained block: its name, a
+  // one-line description of what it does, the link/URL, a Copy button, and a QR.
+  // c.clickable → render the link as a tappable <a> (the read-only webcal://
+  // feeds); otherwise a plain <code> URL to add as an account (read + write).
+  // The QR is filled in later (after the qrcode.js dynamic import) into c.qrSlot.
+  function calendarCard(c) {
+    var value = c.clickable
+      ? el("a", { class: "caldav-url", href: c.link, target: "_blank", rel: "noopener noreferrer", text: c.displayText || c.link })
+      : el("code", { class: "caldav-val", text: c.link });
+    c.qrSlot = el("div", { class: "caldav-qr" });
+    return el("div", { class: "caldav-cal" }, [
+      el("div", { class: "caldav-cal-title", text: c.label }),
+      el("p", { class: "caldav-cal-desc", text: c.desc }),
+      el("div", { class: "caldav-row" }, [value, copyBtn(function () { return c.link; })]),
+      c.qrSlot,
     ]);
-  }
-
-  // feedSubscribeRow renders a read-only calendar as a one-tap webcal:// link
-  // (opens the phone's calendar-subscribe flow) plus a Copy of the plain URL for
-  // clients that don't take webcal.
-  function feedSubscribeRow(label, httpUrl, name, user, pass) {
-    var wc = webcalFeed(httpUrl, name, user, pass);
-    var kids = [el("label", { text: label + " (read-only)" })];
-    kids.push(
-      wc
-        ? el("a", { class: "caldav-url", href: wc, text: "Subscribe in calendar app ↗" })
-        : el("code", { class: "caldav-val", text: lanURL(httpUrl) })
-    );
-    kids.push(copyBtn(function () { return lanURL(httpUrl); }));
-    return el("div", { class: "caldav-row" }, kids);
   }
 
   // drawQR paints qrMatrix(text) into a <canvas> (mirrors owner-access QR).
@@ -199,18 +186,44 @@
               credsEl.appendChild(box);
             }
           }
+          // One card per calendar: name + what it does + link + QR.
+          var calendars = [];
+          if (d.subscribe_url) calendars.push({
+            label: "Subscribe (read + write)",
+            desc: "Add this as a calendar account, then create “Away” or “Charge car 80%” events for 42W to act on. Scan the QR to get the URL onto your phone.",
+            link: lanURL(d.subscribe_url),
+            clickable: false,
+          });
+          if (d.plan_url) calendars.push({
+            label: "Planned actions (read-only)",
+            desc: "Subscribe to see 42W’s upcoming battery charge / discharge windows. Tap the link or scan the QR to subscribe in one step.",
+            link: webcalFeed(d.plan_url, "plan", d.username, d.password),
+            displayText: webcalFeed(d.plan_url, "plan"),
+            clickable: true,
+          });
+          if (d.history_url) calendars.push({
+            label: "EVSE history (read-only)",
+            desc: "Subscribe to get one event per completed EV charge session. Tap the link or scan the QR to subscribe in one step.",
+            link: webcalFeed(d.history_url, "history", d.username, d.password),
+            displayText: webcalFeed(d.history_url, "history"),
+            clickable: true,
+          });
+
+          if (qrEl) qrEl.textContent = "";
           if (urlsEl) {
             urlsEl.textContent = "";
-            if (d.subscribe_url) urlsEl.appendChild(urlRow("Subscribe (read + write)", d.subscribe_url));
-            if (d.history_url) urlsEl.appendChild(feedSubscribeRow("EVSE history", d.history_url, "history", d.username, d.password));
-            if (d.plan_url) urlsEl.appendChild(feedSubscribeRow("Planned actions", d.plan_url, "plan", d.username, d.password));
-          }
-          if (qrEl && d.subscribe_url) {
-            qrEl.textContent = "";
+            calendars.forEach(function (c) {
+              if (c.link) urlsEl.appendChild(calendarCard(c));
+            });
+            // One dynamic import paints every card's QR (read + write URL, and
+            // the read-only webcal:// feeds).
             import("/vendor/qrcode.js").then(function (m) {
-              qrEl.appendChild(el("div", { class: "hint", text: "Scan to get the calendar URL on your phone:" }));
-              qrEl.appendChild(drawQR(m.qrMatrix, lanURL(d.subscribe_url), 220));
-            }).catch(function () { /* QR is optional */ });
+              calendars.forEach(function (c) {
+                if (!c.link || !c.qrSlot) return;
+                c.qrSlot.appendChild(el("div", { class: "hint", text: "Scan with your phone:" }));
+                c.qrSlot.appendChild(drawQR(m.qrMatrix, c.link, 160));
+              });
+            }).catch(function () { /* QR optional */ });
           }
         }).catch(function () { /* credentials endpoint optional */ });
       }
