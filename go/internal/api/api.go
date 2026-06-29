@@ -1748,6 +1748,33 @@ func parseRange(s string) int64 {
 	case "3d":
 		return 3 * 24 * 60 * 60 * 1000
 	}
+	// Generic "<N><unit>" (m/h/d/w/y) so charts + energy-period windows can ask
+	// for longer spans (e.g. 30d for the month temp graph, 366d for "this year"
+	// energy). Capped at 2 years to bound the TS-DB scan.
+	if len(s) >= 2 {
+		if n, err := strconv.Atoi(s[:len(s)-1]); err == nil && n > 0 {
+			var mult int64
+			switch s[len(s)-1] {
+			case 'm':
+				mult = 60 * 1000
+			case 'h':
+				mult = 60 * 60 * 1000
+			case 'd':
+				mult = 24 * 60 * 60 * 1000
+			case 'w':
+				mult = 7 * 24 * 60 * 60 * 1000
+			case 'y':
+				mult = 365 * 24 * 60 * 60 * 1000
+			}
+			if mult > 0 {
+				ms := int64(n) * mult
+				if maxMs := int64(2) * 365 * 24 * 60 * 60 * 1000; ms > maxMs {
+					ms = maxMs
+				}
+				return ms
+			}
+		}
+	}
 	return 5 * 60 * 1000
 }
 
