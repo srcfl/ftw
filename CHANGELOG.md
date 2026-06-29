@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.125.0
+
+### Minor Changes
+
+- e2fa6d4: Migrate the Raspberry Pi SD-card image to Raspberry Pi OS Trixie with cloud-init, and publish a Raspberry Pi Imager repository JSON so Imager 2.0's customisation panel (hostname, SSH user/password, WiFi) works again.
+
+  Point Raspberry Pi Imager at `https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json` (App Options → Content Repository → Use custom file) to flash "Forty-Two Watts" with full per-flash customisation. The repository JSON is rebuilt and uploaded on every release with the new image's URL, sizes, and verified checksum.
+
+  The on-image deploy directory moved from `/home/ftw/forty-two-watts` to `/opt/forty-two-watts` so a user-chosen account name can't orphan it. The `curl | install.sh` and manual docker-compose install paths are unaffected.
+
+### Patch Changes
+
+- af05294: Adopt the Apache License, Version 2.0. The project now ships a `LICENSE` file
+  plus a `NOTICE` and `CONTRIBUTING.md` (DCO). Previously the license was only
+  declared as "MIT" in the README; prior MIT-licensed contributions are
+  acknowledged and preserved in `NOTICE`.
+- 7e6e04d: EV Charger modal reworked. The controls are now split into three tabs —
+  **PV charging** (surplus-only toggle), **Manual** (amp slider +
+  Start/Stop), and **Scheduled** (current-SoC correction + target-SoC-by-
+  deadline schedule) — so each charging mode has its own space. The
+  current-SoC correction lives under Scheduled because it's a planning
+  input. Both SoC inputs (current correction and Target SoC) are now
+  0–100% sliders in whole-percent steps with a live mono % readout instead
+  of free-text number fields. The "Let battery cover EV" toggle stays as a
+  persistent footer. No backend changes.
+- ddbba7a: Loadpoint SoC now anchors to the live vehicle BMS reading when a vehicle
+  driver (e.g. Tesla via TeslaBLEProxy) is online and matched to the
+  loadpoint. Previously the EV card showed the delivered-Wh _inferred_
+  estimate labelled "(vehicle)", which drifts from the car's real SoC
+  (chargers like Easee can't read the pack) — so an actively charging
+  Tesla reading 31% could show e.g. 36% on the card. The control loop now
+  re-anchors `current_soc_pct` to the paired vehicle's BMS SoC each tick
+  (only when the reading is online, fresh, and not driver-flagged stale),
+  so the dashboard, the planner's `InitialSoCPct`, and the MPC all agree on
+  BMS ground truth. When the vehicle goes BLE-silent the estimate continues
+  from the last known BMS value instead of snapping back to the plug-in
+  guess.
+- 24b1a5c: A manual EV charge hold ("Start" / amp slider) now auto-releases when the
+  vehicle stops requesting current — e.g. it reaches its own charge limit
+  and is full. Previously the hold pinned the wallbox at a fixed amperage
+  and the loadpoint kept showing "charging" at 0 W until the operator
+  pressed Stop. The controller now drops the hold after the vehicle has
+  been not-requesting for SessionCompletionTimeout (90 s, debounced against
+  brief ramp/handshake dips), falling back to automatic dispatch. Only
+  applies to chargers that report "vehicle no longer requesting current"
+  (e.g. Easee); chargers that can't distinguish that are unaffected.
+- 0d548e6: Fix the RPi image's port 80 → 8080 redirect, which never worked.
+
+  The nftables rules file named its table `42w_redirect`. nftables identifiers
+  must match `[a-zA-Z_][a-zA-Z0-9_]*`, so the leading digit was tokenized as a
+  number and the entire file failed to parse. `42w-port-redirect.service` exited
+  1 on every boot and no redirect was ever installed, leaving the dashboard
+  reachable only at `http://42w.local:8080/` rather than the bare
+  `http://42w.local/` the README advertises.
+
+  Renamed the table to `ftw_redirect`. The rule logic was otherwise correct.
+
 ## 0.124.4
 
 ### Patch Changes
