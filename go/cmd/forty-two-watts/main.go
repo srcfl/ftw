@@ -796,8 +796,8 @@ func main() {
 		// Host CalDAV in-process; the client below talks to it over localhost, so
 		// the inbound/outbound intent logic is the same regardless. Objects
 		// persist in state.db so they survive restarts.
-		principal, calPaths := nativeCalDAVLayout(cfg.CalDAV)
-		caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths, st)
+		principal, calPaths, feeds := nativeCalDAVLayout(cfg.CalDAV)
+		caldavSrv = caldavserver.New(cfg.CalDAV.ListenAddr(), caldavUsername(cfg.CalDAV), cfg.CalDAV.Password, principal, calPaths, st, caldavserver.WithFeeds(feeds))
 		caldavSrv.Start()
 		defer caldavSrv.Stop()
 
@@ -2689,7 +2689,7 @@ func caldavUsername(cv *config.CalDAV) string {
 
 // nativeCalDAVLayout derives the principal path + the collections the
 // in-process CalDAV server (#498) should expose, from config (with defaults).
-func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []string) {
+func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []string, feeds map[string]string) {
 	principal = "/" + caldavUsername(cv) + "/"
 	calPath := config.DefaultCalDAVCalendarPath
 	histPath := config.DefaultCalDAVHistoryPath
@@ -2705,7 +2705,11 @@ func nativeCalDAVLayout(cv *config.CalDAV) (principal string, calendarPaths []st
 			planPath = cv.PlanPath
 		}
 	}
-	return principal, []string{calPath, histPath, planPath}
+	// Only the read-only collections get a one-tap webcal:// feed; the
+	// read-write "energy" collection is where the user *writes* intents, so a
+	// read-only subscription would be the wrong tool for it.
+	feeds = map[string]string{"plan": planPath, "history": histPath}
+	return principal, []string{calPath, histPath, planPath}, feeds
 }
 
 // evSamplesFromTelemetry projects current DerEV readings into the shape the

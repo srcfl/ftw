@@ -20,7 +20,10 @@ events into planner intents:
 - the planner's forward-looking plan — upcoming battery charge/discharge
   windows — reconciled each cycle so it stays current without piling up.
 
+Both read-only calendars can be subscribed to in one tap via a `webcal://`
+link (a read-only `.ics` feed served on the CalDAV port).
+
 The feature is opt-in (`caldav.enabled`) and fail-soft — a calendar problem
 never blocks control — and stays entirely on your local network. Configure it
-under Settings → Calendar, which auto-manages the credential and shows it (with
-a QR) to add to a phone or desktop calendar app.
+under Settings → Calendar (mobile-friendly), which auto-manages the credential
+and shows it (with a QR) to add to a phone or desktop calendar app.

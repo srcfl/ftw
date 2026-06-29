@@ -27,6 +27,20 @@
     }
   }
 
+  // webcalFeed turns a collection's http(s) URL into a one-tap webcal:// link to
+  // its read-only .ics feed, with the managed credential embedded so the phone
+  // subscribes without a manual login. Built by string (the URL API refuses to
+  // switch a special http scheme to the non-special webcal scheme).
+  function webcalFeed(httpUrl, name, user, pass) {
+    try {
+      var u = new URL(lanURL(httpUrl));
+      var auth = user ? encodeURIComponent(user) + ":" + encodeURIComponent(pass || "") + "@" : "";
+      return "webcal://" + auth + u.host + "/feed/" + name + ".ics";
+    } catch (e) {
+      return null;
+    }
+  }
+
   // el is a tiny safe DOM builder — text is set via textContent, never parsed.
   function el(tag, props, kids) {
     var n = document.createElement(tag);
@@ -56,11 +70,33 @@
 
   function urlRow(label, url) {
     var u = lanURL(url);
-    return el("div", { class: "field-row" }, [
+    // Render the URL as a real clickable link (http/https only — guard against a
+    // javascript: scheme even though these URLs are 42W's own config, not the
+    // remote CalDAV server's). Falls back to plain <code> if it's not a web URL.
+    var safe = /^https?:\/\//i.test(u);
+    var value = safe
+      ? el("a", { class: "caldav-url", href: u, target: "_blank", rel: "noopener noreferrer", text: u })
+      : el("code", { class: "caldav-val", text: u });
+    return el("div", { class: "caldav-row" }, [
       el("label", { text: label }),
-      el("code", { class: "subscribe-url", text: u }),
+      value,
       copyBtn(function () { return u; }),
     ]);
+  }
+
+  // feedSubscribeRow renders a read-only calendar as a one-tap webcal:// link
+  // (opens the phone's calendar-subscribe flow) plus a Copy of the plain URL for
+  // clients that don't take webcal.
+  function feedSubscribeRow(label, httpUrl, name, user, pass) {
+    var wc = webcalFeed(httpUrl, name, user, pass);
+    var kids = [el("label", { text: label + " (read-only)" })];
+    kids.push(
+      wc
+        ? el("a", { class: "caldav-url", href: wc, text: "Subscribe in calendar app ↗" })
+        : el("code", { class: "caldav-val", text: lanURL(httpUrl) })
+    );
+    kids.push(copyBtn(function () { return lanURL(httpUrl); }));
+    return el("div", { class: "caldav-row" }, kids);
   }
 
   // drawQR paints qrMatrix(text) into a <canvas> (mirrors owner-access QR).
@@ -71,7 +107,8 @@
     var size = total * px;
     var canvas = el("canvas");
     canvas.width = size; canvas.height = size;
-    canvas.style.width = size + "px"; canvas.style.height = size + "px";
+    // No fixed inline width/height — .caldav-qr canvas { max-width:100%; height:auto }
+    // lets the code scale down inside a narrow phone modal without distortion.
     var ctx = canvas.getContext("2d");
     ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, size, size);
     ctx.fillStyle = "#0a0a0a";
@@ -156,8 +193,8 @@
             if (d.managed && d.username && d.password) {
               var box = el("fieldset", { class: "caldav-account" }, [
                 el("legend", { text: "Calendar account (managed by 42W)" }),
-                el("div", { class: "field-row" }, [el("label", { text: "Username" }), el("code", { text: d.username }), copyBtn(function () { return d.username; })]),
-                el("div", { class: "field-row" }, [el("label", { text: "Password" }), el("code", { text: d.password }), copyBtn(function () { return d.password; })]),
+                el("div", { class: "caldav-row" }, [el("label", { text: "Username" }), el("code", { class: "caldav-val", text: d.username }), copyBtn(function () { return d.username; })]),
+                el("div", { class: "caldav-row" }, [el("label", { text: "Password" }), el("code", { class: "caldav-val", text: d.password }), copyBtn(function () { return d.password; })]),
               ]);
               credsEl.appendChild(box);
             }
@@ -165,8 +202,8 @@
           if (urlsEl) {
             urlsEl.textContent = "";
             if (d.subscribe_url) urlsEl.appendChild(urlRow("Subscribe (read + write)", d.subscribe_url));
-            if (d.history_url) urlsEl.appendChild(urlRow("EVSE history (read-only)", d.history_url));
-            if (d.plan_url) urlsEl.appendChild(urlRow("Planned actions (read-only)", d.plan_url));
+            if (d.history_url) urlsEl.appendChild(feedSubscribeRow("EVSE history", d.history_url, "history", d.username, d.password));
+            if (d.plan_url) urlsEl.appendChild(feedSubscribeRow("Planned actions", d.plan_url, "plan", d.username, d.password));
           }
           if (qrEl && d.subscribe_url) {
             qrEl.textContent = "";

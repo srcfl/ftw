@@ -31,22 +31,50 @@ type Server struct {
 	httpSrv *http.Server
 }
 
+// Option configures optional server behaviour without breaking the core
+// New / NewHandler signatures.
+type Option func(*options)
+
+type options struct {
+	feeds map[string]string // feed name -> collection path (read-only .ics feeds)
+}
+
+// WithFeeds exposes read-only aggregated .ics feeds at /feed/<name>.ics for the
+// given collections (e.g. {"plan": "/u/plan/", "history": "/u/history/"}), so a
+// phone can subscribe via a one-tap webcal:// link. Served behind the same
+// Basic auth as the rest of the server.
+func WithFeeds(feeds map[string]string) Option {
+	return func(o *options) { o.feeds = feeds }
+}
+
+func buildOptions(opts []Option) options {
+	var o options
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
 // New builds the server. principal is the CalDAV principal path (e.g.
 // "/fortytwowatts/"); calendarPaths are collections to pre-create; store is the
 // persistence (pass *state.Store for durability, or nil for in-memory).
-func New(addr, username, password, principal string, calendarPaths []string, store Store) *Server {
-	mux := http.NewServeMux()
-	mux.Handle("/", NewHandler(username, password, principal, calendarPaths, store))
+func New(addr, username, password, principal string, calendarPaths []string, store Store, opts ...Option) *Server {
 	return &Server{
 		addr:    addr,
-		httpSrv: &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second},
+		httpSrv: &http.Server{Addr: addr, Handler: NewHandler(username, password, principal, calendarPaths, store, opts...), ReadHeaderTimeout: 10 * time.Second},
 	}
 }
 
 // NewHandler builds the auth-wrapped CalDAV http.Handler. Exposed so callers
 // (and tests) can mount the native server on an existing mux / httptest server.
-func NewHandler(username, password, principal string, calendarPaths []string, store Store) http.Handler {
-	return basicAuth(username, password, &caldav.Handler{Backend: newBackend(principal, calendarPaths, store)})
+func NewHandler(username, password, principal string, calendarPaths []string, store Store, opts ...Option) http.Handler {
+	o := buildOptions(opts)
+	mux := http.NewServeMux()
+	if len(o.feeds) > 0 {
+		mux.Handle("/feed/", basicAuth(username, password, newFeedHandler(o.feeds, store)))
+	}
+	mux.Handle("/", basicAuth(username, password, &caldav.Handler{Backend: newBackend(principal, calendarPaths, store)}))
+	return mux
 }
 
 // basicAuth gates the handler with a constant-time Basic-auth check. An empty

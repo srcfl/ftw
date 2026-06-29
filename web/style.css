@@ -1514,6 +1514,71 @@ footer {
   color: #94a3b8;
 }
 
+/* ---- Calendar (CalDAV) settings tab ---- */
+/* Credential + subscribe-URL rows. The label sits on its own line; the value
+   (a long collection URL) is allowed to wrap instead of forcing the whole
+   settings modal wider than a phone screen; the Copy button stays put. */
+.caldav-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+.caldav-row > label {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+.caldav-row > .caldav-url,
+.caldav-row > .caldav-val {
+  flex: 1 1 12ch;
+  min-width: 0;            /* key: lets the value shrink + wrap, never overflow-x */
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  padding: 6px 8px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.caldav-row > a.caldav-url { text-decoration: none; }
+.caldav-row > a.caldav-url:hover { border-color: var(--accent); }
+.caldav-row > .copy-btn { flex: 0 0 auto; }
+
+.copy-btn {
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  cursor: pointer;
+}
+.copy-btn:hover { border-color: var(--accent); }
+
+.caldav-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.caldav-qr canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Collapse the generic two-column settings rows to a single column on phones,
+   so inputs aren't squeezed to unusable widths. */
+@media (max-width: 560px) {
+  .field-row { grid-template-columns: 1fr; }
+}
+
 /* EV credentials-saved badge — shown next to the password field in
    Settings so the operator can tell "stored in state.db" apart from
    "empty because never entered". */
