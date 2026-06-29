@@ -38,55 +38,60 @@
   function fmtPct(v)    { return v == null ? '—' : Math.round(v) + ' %'; }
   function fmtFlow(v)   { return v == null ? '—' : Math.round(v) + ' m³/h'; }
   function fmtDM(v)     { return v == null ? '—' : Math.round(v) + ' DM'; }
-  function fmtKwh(v)    { return v == null ? '—' : Math.round(v).toLocaleString('sv-SE') + ' kWh'; }
+  function fmtKwh(v)    { return v == null ? '—' : Math.round(v).toLocaleString('en-US') + ' kWh'; }
   function fmtRaw(v)    { return v == null ? '—' : String(Math.round(v * 100) / 100); }
   function fmtOffset(v) { return v == null ? '—' : (v > 0 ? '+' : '') + Math.round(v); }
-  var PRIO = { 0: 'av', 10: 'av', 20: 'varmvatten', 30: 'värme', 40: 'pool', 60: 'kyla' };
-  function fmtPrio(v) { if (v == null) return '—'; var n = Math.round(v); return n + (PRIO[n] ? ' · ' + PRIO[n] : ''); }
-  function fmtVent(v) { if (v == null) return '—'; var n = Math.round(v); return n === 0 ? 'Normal' : String(n); }
+  function fmtOnOff(v)  { return v == null ? '—' : (Math.round(v) ? 'On' : 'Off'); }
+  // Compressor priority code → word (0/10 idle, 20 hot water, 30 heating, …).
+  var PRIO = { 0: 'Off', 10: 'Off', 20: 'Hot water', 30: 'Heating', 40: 'Pool', 60: 'Cooling' };
+  function fmtPrio(v) { if (v == null) return '—'; var n = Math.round(v); return PRIO[n] || ('Mode ' + n); }
+  function fmtVent(v) { if (v == null) return '—'; var n = Math.round(v); return n === 0 ? 'Normal' : ('Mode ' + n); }
 
   // ── Card layout: grouped tiles. Each item = { key (hp_* metric), label,
   // optional sensor designation (BT21 …), formatter, info (hover tooltip on
-  // the ⓘ icon) }. Render order = array order. The detail pop-up still lists
-  // ALL ~960 signals; this is the curated at-a-glance set.
+  // the "?" help icon) }. Render order = array order. The detail pop-up still
+  // lists ALL ~960 signals; this is the curated at-a-glance set.
   var GROUPS = [
-    { title: 'Effekt & el', items: [
-      { key: 'hp_energy_log_current_power_consumption', label: 'Total effekt nu', fmt: fmtKW, info: 'Hela värmepumpens momentana elförbrukning just nu — kompressor + fläkt + cirkulationspumpar + elektronik.' },
-      { key: 'hp_power_w', label: 'Kompressor', fmt: fmtPower, info: 'Effekt till enbart kompressorn. 0 W när kompressorn står still — pumpen drar ändå el (se Total effekt nu).' },
-      { key: 'hp_power_internal_additional_heat', label: 'Intern tillsats', fmt: fmtKW, info: 'Effekt till den interna elpatronen (tillskottsvärme). 0 när bara kompressorn jobbar.' },
-      { key: 'hp_compressor_frequency_current', label: 'Kompr.frekvens', fmt: fmtHz, info: 'Kompressorns frekvens/varvtal just nu. 0 Hz = kompressorn står still.' },
-      { key: 'hp_current_be1', label: 'Ström', sensor: 'BE1', fmt: fmtAmp, info: 'Uppmätt ström på fas 1 (strömtransformator BE1). Används för effektvakt/säkringsskydd.' },
-      { key: 'hp_current_be2', label: 'Ström', sensor: 'BE2', fmt: fmtAmp, info: 'Uppmätt ström på fas 2 (BE2).' },
-      { key: 'hp_current_be3', label: 'Ström', sensor: 'BE3', fmt: fmtAmp, info: 'Uppmätt ström på fas 3 (BE3).' },
+    { title: 'Power & electrical', items: [
+      { key: 'hp_energy_log_current_power_consumption', label: 'Total power now', fmt: fmtKW, info: "The whole heat pump's instantaneous electrical draw right now — compressor + fan + circulation pumps + electronics." },
+      { key: 'hp_power_w', label: 'Compressor', fmt: fmtPower, info: 'Power to the compressor only. 0 W when the compressor is idle — the pump still draws power (see Total power now).' },
+      { key: 'hp_power_internal_additional_heat', label: 'Internal add. heat', fmt: fmtKW, info: 'Power to the internal immersion heater (supplementary heat). 0 when only the compressor runs.' },
+      { key: 'hp_compressor_frequency_current', label: 'Compr. freq.', fmt: fmtHz, info: 'Compressor speed/frequency right now. 0 Hz = compressor idle.' },
+      { key: 'hp_current_be1', label: 'Current', sensor: 'BE1', fmt: fmtAmp, info: 'Measured current on phase 1 (current transformer BE1). Used by the load monitor / fuse protection.' },
+      { key: 'hp_current_be2', label: 'Current', sensor: 'BE2', fmt: fmtAmp, info: 'Measured current on phase 2 (BE2).' },
+      { key: 'hp_current_be3', label: 'Current', sensor: 'BE3', fmt: fmtAmp, info: 'Measured current on phase 3 (BE3).' },
+      { key: 'hp_power_limitation_activation', label: 'Power limit', fmt: fmtOnOff, info: 'Whether the built-in power limitation (load monitor) is actively throttling to stay under the main fuse. Off = not limiting. Throttling only reduces output — it never damages the pump.' },
+      { key: 'hp_fuse', label: 'Fuse', sensor: null, fmt: fmtAmp, info: 'Main fuse size the pump is configured for. It limits compressor + immersion heater to stay under this.' },
+      { key: 'hp_max_internal_additional_heat', label: 'Max add. heat', fmt: fmtKW, info: 'Maximum permitted internal immersion-heater power. Lower this to cap the supplementary heat draw.' },
     ] },
-    { title: 'Temperaturer', items: [
-      { key: 'hp_hw_top_temp_c', label: 'Varmvatten topp', sensor: 'BT7', fmt: fmtTemp, info: 'Temperatur högst upp i varmvattenberedaren — det du får först ur kranen.' },
-      { key: 'hp_hot_water_charging_bt6', label: 'VV laddning', sensor: 'BT6', fmt: fmtTemp, info: 'Styrande givare för varmvattenladdning — avgör när tanken är fulladdad.' },
-      { key: 'hp_hot_water_start_bt5', label: 'VV start', sensor: 'BT5', fmt: fmtTemp, info: 'Startgivare för varmvatten — startar ny laddning när den faller under startvärdet.' },
-      { key: 'hp_supply_line_bt2', label: 'Framledning', sensor: 'BT2', fmt: fmtTemp, info: 'Temperatur på vattnet UT till värmesystemet (framledning).' },
-      { key: 'hp_return_line_bt3', label: 'Returledning', sensor: 'BT3', fmt: fmtTemp, info: 'Temperatur på vattnet TILLBAKA från värmesystemet (retur).' },
-      { key: 'hp_calculated_supply_climate_system_1', label: 'Ber. framledning', fmt: fmtTemp, info: 'Beräknad (önskad) framledning som styrsystemet räknat fram ur värmekurvan.' },
-      { key: 'hp_fr_nluft_bt20', label: 'Frånluft', sensor: 'BT20', fmt: fmtTemp, info: 'Ventilationsluften som sugs ut från rummen — värmepumpens värmekälla (in i förångaren).' },
-      { key: 'hp_avluft_bt21', label: 'Avluft', sensor: 'BT21', fmt: fmtTemp, info: 'Luften efter värmeåtervinning, på väg ut ur huset. Frånluft − avluft = återvunnen värme.' },
-      { key: 'hp_outdoor_temp_c', label: 'Utomhus', sensor: 'BT1', fmt: fmtTemp, info: 'Utomhustemperatur (BT1) — styr värmekurvan.' },
+    { title: 'Temperatures', items: [
+      { key: 'hp_hw_top_temp_c', label: 'Hot water top', sensor: 'BT7', fmt: fmtTemp, info: 'Temperature at the top of the hot-water tank — what you get first from the tap.' },
+      { key: 'hp_hot_water_charging_bt6', label: 'HW charging', sensor: 'BT6', fmt: fmtTemp, info: 'Controlling sensor for hot-water charging — decides when the tank is fully charged.' },
+      { key: 'hp_hot_water_start_bt5', label: 'HW start', sensor: 'BT5', fmt: fmtTemp, info: 'Hot-water start sensor — triggers a new charge when it drops below the start value.' },
+      { key: 'hp_supply_line_bt2', label: 'Supply', sensor: 'BT2', fmt: fmtTemp, info: 'Temperature of the water going OUT to the heating system (supply line).' },
+      { key: 'hp_return_line_bt3', label: 'Return', sensor: 'BT3', fmt: fmtTemp, info: 'Temperature of the water coming BACK from the heating system (return line).' },
+      { key: 'hp_calculated_supply_climate_system_1', label: 'Calc. supply', fmt: fmtTemp, info: 'Calculated (target) supply temperature the control derives from the heating curve.' },
+      { key: 'hp_fr_nluft_bt20', label: 'Extract air', sensor: 'BT20', fmt: fmtTemp, info: "Ventilation air drawn from the rooms — the heat pump's heat source (into the evaporator)." },
+      { key: 'hp_avluft_bt21', label: 'Exhaust air', sensor: 'BT21', fmt: fmtTemp, info: 'Air after heat recovery, on its way out of the house. Extract − exhaust = recovered heat.' },
+      { key: 'hp_outdoor_temp_c', label: 'Outdoor', sensor: 'BT1', fmt: fmtTemp, info: 'Outdoor temperature (BT1) — drives the heating curve.' },
     ] },
     { title: 'Ventilation', items: [
-      { key: 'hp_ventilation_mode', label: 'Ventilationsläge', fmt: fmtVent, info: 'Aktivt ventilationsläge. 0 = normal.' },
-      { key: 'hp_exhaust_air_fan_speed_gq2', label: 'Fläkthastighet', sensor: 'GQ2', fmt: fmtPct, info: 'Frånluftsfläktens varvtal just nu. Normal = 54 %; lägre (t.ex. 30 %) = reducerad ventilation (hastighet 2).' },
-      { key: 'hp_real_air_flow', label: 'Luftflöde', fmt: fmtFlow, info: 'Uppmätt luftflöde genom aggregatet.' },
+      { key: 'hp_ventilation_mode', label: 'Vent. mode', fmt: fmtVent, info: 'Active ventilation mode. 0 = normal.' },
+      { key: 'hp_exhaust_air_fan_speed_gq2', label: 'Fan speed', sensor: 'GQ2', fmt: fmtPct, info: 'Exhaust-air fan speed right now. Normal = 54 %; lower (e.g. 30 %) = reduced ventilation (speed 2).' },
+      { key: 'hp_real_air_flow', label: 'Air flow', fmt: fmtFlow, info: 'Measured air flow through the unit.' },
     ] },
-    { title: 'Drift', items: [
-      { key: 'hp_priority', label: 'Prio', fmt: fmtPrio, info: 'Vad kompressorn prioriterar just nu: 10 = av, 20 = varmvatten, 30 = värme, 40 = pool, 60 = kyla.' },
-      { key: 'hp_degree_minutes', label: 'Gradminuter', fmt: fmtDM, info: 'Värmeunderskott integrerat över tid. Når det startgränsen startar kompressorn. 0 = inget underskott (värme avstängd på sommaren).' },
-      { key: 'hp_heating_medium_pump_speed_gp1', label: 'Värmebärarpump', sensor: 'GP1', fmt: fmtPct, info: 'Cirkulationspumpens (GP1) varvtal i värmesystemet.' },
-      { key: 'hp_heating_curve_climate_system_1', label: 'Värmekurva', fmt: fmtRaw, info: 'Inställd värmekurva (lutning) för klimatsystem 1. Högre = varmare framledning när det är kallt ute.' },
-      { key: 'hp_heating_offset_climate_system_1', label: 'Kurvförskjutning', fmt: fmtOffset, info: 'Parallellförskjutning av värmekurvan — varmare (+) eller kallare (−) överlag.' },
+    { title: 'Operation', items: [
+      { key: 'hp_priority', label: 'Priority', fmt: fmtPrio, info: 'What the compressor is prioritising right now: Off / Hot water / Heating / Pool / Cooling.' },
+      { key: 'hp_degree_minutes', label: 'Degree minutes', fmt: fmtDM, info: 'Heating deficit integrated over time. When it reaches the start threshold the compressor starts. 0 = no deficit (heating off in summer).' },
+      { key: 'hp_heating_medium_pump_speed_gp1', label: 'Circ. pump', sensor: 'GP1', fmt: fmtPct, info: 'Heating circulation pump (GP1) speed.' },
+      { key: 'hp_heating_curve_climate_system_1', label: 'Heating curve', fmt: fmtRaw, info: 'Configured heating curve (slope) for climate system 1. Higher = warmer supply when it is cold outside.' },
+      { key: 'hp_heating_offset_climate_system_1', label: 'Curve offset', fmt: fmtOffset, info: 'Parallel offset of the heating curve — warmer (+) or cooler (−) overall.' },
     ] },
-    { title: 'Energi (totalt)', items: [
-      { key: 'hp_energy_consumed_kwh', label: 'Total förbrukning', fmt: fmtKwh, info: 'Total tillförd el till värmepumpen sedan start (livstidsräknare).' },
-      { key: 'hp_energy_produced_kwh', label: 'Total produktion', fmt: fmtKwh, info: 'Total avgiven värmeenergi sedan start. Produktion ÷ förbrukning ≈ värmefaktor (SCOP).' },
-      { key: 'hp_heating_compressor_only', label: 'Värme (kompr.)', fmt: fmtKwh, info: 'Avgiven värme till uppvärmning, endast från kompressorn (exkl. elpatron).' },
-      { key: 'hp_hot_water_compressor_only', label: 'Varmvatten (kompr.)', fmt: fmtKwh, info: 'Avgiven värme till varmvatten, endast från kompressorn (exkl. elpatron).' },
+    { title: 'Energy (lifetime)', items: [
+      { key: 'hp_energy_consumed_kwh', label: 'Total consumed', fmt: fmtKwh, info: 'Total electricity supplied to the heat pump since installation (lifetime counter).' },
+      { key: 'hp_energy_produced_kwh', label: 'Total produced', fmt: fmtKwh, info: 'Total heat energy delivered since installation. Produced ÷ consumed ≈ heat factor (SCOP).' },
+      { key: 'hp_heating_compressor_only', label: 'Heating (compr.)', fmt: fmtKwh, info: 'Heat delivered to heating, from the compressor only (excl. immersion heater).' },
+      { key: 'hp_hot_water_compressor_only', label: 'Hot water (compr.)', fmt: fmtKwh, info: 'Heat delivered to hot water, from the compressor only (excl. immersion heater).' },
     ] },
   ];
 
@@ -106,7 +111,8 @@
       '.ftw-hp-tile{display:flex;flex-direction:column;gap:3px}',
       '.ftw-hp-tile-label{font-family:var(--mono);font-size:0.64rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--fg-muted);display:flex;align-items:baseline;gap:3px;flex-wrap:wrap}',
       '.ftw-hp-sensor{color:var(--fg-muted);opacity:0.6}',
-      '.ftw-hp-i{cursor:help;color:var(--fg-muted);opacity:0.5;align-self:center}',
+      '.ftw-hp-i{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border:1px solid var(--line);border-radius:50%;color:var(--fg-dim);font-family:var(--sans);font-size:9px;font-weight:600;line-height:1;cursor:help;transition:color 0.18s,border-color 0.18s}',
+      '.ftw-hp-i:hover{color:var(--accent-e);border-color:var(--accent-e)}',
       '.ftw-hp-tile-val{font-family:var(--mono);font-size:1.02rem;font-variant-numeric:tabular-nums;color:var(--fg)}',
       '.ftw-hp-spark{display:flex;flex-direction:column;gap:4px}',
       '.ftw-hp-spark-label{font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-muted)}',
@@ -174,7 +180,7 @@
   function tileHtml(def, m) {
     var has = Object.prototype.hasOwnProperty.call(m, def.key);
     var sensor = def.sensor ? ' <span class="ftw-hp-sensor">(' + escapeHtml(def.sensor) + ')</span>' : '';
-    var info = def.info ? ' <span class="ftw-hp-i" role="img" aria-label="info" title="' + escapeHtml(def.info) + '">ⓘ</span>' : '';
+    var info = def.info ? ' <span class="ftw-hp-i" role="img" aria-label="info" title="' + escapeHtml(def.info) + '">?</span>' : '';
     return '<div class="ftw-hp-tile">' +
       '<span class="ftw-hp-tile-label">' + escapeHtml(def.label) + sensor + info + '</span>' +
       '<span class="ftw-hp-tile-val">' + (has ? def.fmt(m[def.key]) : '—') + '</span>' +
@@ -190,12 +196,12 @@
     }).join('');
     var spark = sparkline(sparkPoints);
     var sparkBlock = spark
-      ? '<div class="ftw-hp-spark"><span class="ftw-hp-spark-label">Kompressoreffekt · 24h</span>' + spark + '</div>'
+      ? '<div class="ftw-hp-spark"><span class="ftw-hp-spark-label">Compressor power · 24h</span>' + spark + '</div>'
       : '';
     // The whole card is a button into the detail view (all signals + register).
-    return '<div class="ftw-hp ftw-hp-clickable" data-hp-driver="' + escapeHtml(name) + '" role="button" tabindex="0" title="Visa alla signaler">' +
+    return '<div class="ftw-hp ftw-hp-clickable" data-hp-driver="' + escapeHtml(name) + '" role="button" tabindex="0" title="View all signals">' +
       '<div class="ftw-hp-head"><span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
-      '<span class="ftw-hp-more">Alla signaler →</span></div>' +
+      '<span class="ftw-hp-more">All signals →</span></div>' +
       groups +
       sparkBlock +
       '</div>';
