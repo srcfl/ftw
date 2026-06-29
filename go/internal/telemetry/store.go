@@ -220,6 +220,7 @@ type metricSnap struct {
 	Value     float64
 	Unit      string
 	Register  string
+	Title     string
 	UpdatedAt time.Time
 }
 
@@ -333,8 +334,10 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // (e.g. "°C", "Hz", "kW") carried into the live snapshot so the UI can group
 // and label metrics; pass "" when unknown. register is an optional source
 // address (e.g. a Modbus register id) carried into the live snapshot for the
-// per-driver detail view; pass "" when not applicable.
-func (s *Store) EmitMetric(driver, name string, value float64, unit, register string) {
+// per-driver detail view; pass "" when not applicable. title is an optional
+// human-readable label (e.g. the device's own point title) surfaced as the
+// per-signal explanation in the detail view; pass "" when not available.
+func (s *Store) EmitMetric(driver, name string, value float64, unit, register, title string) {
 	if !finite(value) {
 		return
 	}
@@ -345,7 +348,7 @@ func (s *Store) EmitMetric(driver, name string, value float64, unit, register st
 	})
 	s.pendingMu.Unlock()
 	s.latestMu.Lock()
-	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit, Register: register}
+	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit, Register: register, Title: title}
 	s.latestMu.Unlock()
 }
 
@@ -355,6 +358,7 @@ type MetricSnapshot struct {
 	Value     float64   `json:"value"`
 	Unit      string    `json:"unit,omitempty"`
 	Register  string    `json:"register,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -376,6 +380,7 @@ func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
 			Value:     v.Value,
 			Unit:      v.Unit,
 			Register:  v.Register,
+			Title:     v.Title,
 			UpdatedAt: v.UpdatedAt,
 		})
 	}

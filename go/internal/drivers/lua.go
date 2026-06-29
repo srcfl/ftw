@@ -279,13 +279,16 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// snake_case identifier with the unit as a suffix. The optional 3rd arg is a
 	// display unit (e.g. "°C", "Hz", "kW") the UI uses to group + label; the
 	// optional 4th arg is a source register/address (e.g. a Modbus register id)
-	// surfaced in the per-driver detail view.
+	// surfaced in the per-driver detail view; the optional 5th arg is a
+	// human-readable title (the device's own point label) shown as the
+	// per-signal explanation in the detail view.
 	host.RawSetString("emit_metric", L.NewFunction(func(L *lua.LState) int {
 		name := L.CheckString(1)
 		val := float64(L.CheckNumber(2))
 		unit := L.OptString(3, "")
 		register := L.OptString(4, "")
-		if err := env.emitMetric(name, val, unit, register); err != nil {
+		title := L.OptString(5, "")
+		if err := env.emitMetric(name, val, unit, register, title); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}

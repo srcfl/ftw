@@ -186,12 +186,12 @@ func TestStoreRejectsInvalidReadings(t *testing.T) {
 
 func TestEmitMetricRejectsNonFinite(t *testing.T) {
 	s := NewStore()
-	s.EmitMetric("driver", "bad", math.Inf(1), "", "")
+	s.EmitMetric("driver", "bad", math.Inf(1), "", "", "")
 	if samples := s.FlushSamples(); len(samples) != 0 {
 		t.Fatalf("non-finite metric should be dropped, got %+v", samples)
 	}
 
-	s.EmitMetric("driver", "ok", 42, "", "")
+	s.EmitMetric("driver", "ok", 42, "", "", "")
 	samples := s.FlushSamples()
 	if len(samples) != 1 || samples[0].Metric != "ok" || samples[0].Value != 42 {
 		t.Fatalf("valid metric not buffered as expected: %+v", samples)
@@ -202,9 +202,9 @@ func TestEmitMetricRejectsNonFinite(t *testing.T) {
 // snapshot so the UI can group + label metrics (heat-pump drill-in).
 func TestEmitMetricCarriesUnit(t *testing.T) {
 	s := NewStore()
-	s.EmitMetric("hp", "hp_outdoor_temp_c", 7.3, "°C", "")
-	s.EmitMetric("hp", "hp_compressor_hz", 42, "Hz", "")
-	s.EmitMetric("hp", "hp_no_unit", 1, "", "")
+	s.EmitMetric("hp", "hp_outdoor_temp_c", 7.3, "°C", "", "")
+	s.EmitMetric("hp", "hp_compressor_hz", 42, "Hz", "", "")
+	s.EmitMetric("hp", "hp_no_unit", 1, "", "", "")
 
 	got := map[string]string{}
 	for _, m := range s.LatestMetricsByDriver("hp") {
@@ -226,8 +226,8 @@ func TestEmitMetricCarriesUnit(t *testing.T) {
 // source Modbus register) and is omitted when not provided.
 func TestEmitMetricCarriesRegister(t *testing.T) {
 	s := NewStore()
-	s.EmitMetric("hp", "hp_power_w", 84, "W", "1048")
-	s.EmitMetric("hp", "hp_no_register", 1, "", "")
+	s.EmitMetric("hp", "hp_power_w", 84, "W", "1048", "")
+	s.EmitMetric("hp", "hp_no_register", 1, "", "", "")
 
 	reg := map[string]string{}
 	for _, m := range s.LatestMetricsByDriver("hp") {
@@ -238,6 +238,26 @@ func TestEmitMetricCarriesRegister(t *testing.T) {
 	}
 	if reg["hp_no_register"] != "" {
 		t.Errorf("missing register should be empty, got %q", reg["hp_no_register"])
+	}
+}
+
+// TestEmitMetricCarriesTitle verifies the optional 6th title arg threads into
+// the live snapshot (used by the heat-pump drill-in to show a human-readable
+// explanation per signal) and is omitted when not provided.
+func TestEmitMetricCarriesTitle(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("hp", "hp_fr_nluft_bt20", 12.3, "°C", "1234", "Frånluft (BT20)")
+	s.EmitMetric("hp", "hp_no_title", 1, "", "", "")
+
+	title := map[string]string{}
+	for _, m := range s.LatestMetricsByDriver("hp") {
+		title[m.Name] = m.Title
+	}
+	if title["hp_fr_nluft_bt20"] != "Frånluft (BT20)" {
+		t.Errorf("title = %q, want Frånluft (BT20)", title["hp_fr_nluft_bt20"])
+	}
+	if title["hp_no_title"] != "" {
+		t.Errorf("missing title should be empty, got %q", title["hp_no_title"])
 	}
 }
 

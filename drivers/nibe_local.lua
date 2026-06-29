@@ -352,15 +352,15 @@ function driver_poll()
                 if canon then
                     if canon.watts then
                         local w, u = to_watts(scaled, unit)
-                        host.emit_metric(canon.name, w, u, reg)
+                        host.emit_metric(canon.name, w, u, reg, pt.title)
                     else
-                        host.emit_metric(canon.name, scaled, unit, reg)
+                        host.emit_metric(canon.name, scaled, unit, reg, pt.title)
                     end
                 else
                     local name = sanitize_metric_name(pt.title, id)
                     if seen[name] then name = name .. "_" .. tostring(id) end
                     seen[name] = true
-                    host.emit_metric(name, scaled, unit, reg)
+                    host.emit_metric(name, scaled, unit, reg, pt.title)
                 end
             end
         end
