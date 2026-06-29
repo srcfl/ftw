@@ -217,4 +217,9 @@ release notes live in `.changeset/*.md`.
 
 ## License
 
-MIT
+Licensed under the Apache License, Version 2.0 — see [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE). Contributions are accepted under the same license via the
+[Developer Certificate of Origin](CONTRIBUTING.md) (commit with `git commit -s`).
+
+> Prior to the adoption of Apache-2.0, the project was offered under the MIT
+> License. See [`NOTICE`](NOTICE) for details.
