@@ -19,7 +19,7 @@ mkdir -p "$(dirname "${SENTINEL}")"
 exec > >(tee -a "${LOG}") 2>&1
 echo "[$(date -Is)] ftw-firstboot starting"
 
-cd /home/ftw/forty-two-watts
+cd /opt/forty-two-watts
 
 # Retry loop: GHCR and general LAN DHCP can be flaky for the first
 # couple of minutes after boot. Back off linearly rather than

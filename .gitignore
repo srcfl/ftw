@@ -19,6 +19,8 @@ data/
 /go/ftw-updater
 /go/sim-ferroamp
 /go/sim-sungrow
+# Windows build outputs of the same commands (`go build` adds .exe on Windows).
+/go/*.exe
 
 # Local config for simulators
 config.local.yaml
