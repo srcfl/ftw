@@ -155,8 +155,11 @@ func (s *Service) publishPlan(ctx context.Context) {
 	// Append the LAN-only / refresh-cadence footer to every block. Done here
 	// (not in the pure buildPlanBlocks) because it needs the live interval, and
 	// after hashing-relevant fields are set — hash() ignores the description, so
-	// the note never causes reconcile churn.
-	note := lanNote("refreshes this plan about every " + friendlyInterval(interval))
+	// the note never causes reconcile churn. The wording is deliberately precise:
+	// 42W re-checks on a timer but only rewrites an event when the plan changes,
+	// so the description must not imply the calendar churns every interval.
+	note := lanNote("re-checks the plan about every " + friendlyInterval(interval) +
+		", and updates an event only when the plan actually changes (so windows you have already seen stay put)")
 	for i := range blocks {
 		blocks[i].description += note
 	}
@@ -259,8 +262,9 @@ func planObjectPath(planPath, uid string) string {
 // subscriber understands the refresh behaviour: forty-two-watts' CalDAV server
 // is LAN-only (never exposed off your network), so a calendar app can only pull
 // updates while it is on the same network — it will not refresh while you are
-// away — plus how often forty-two-watts rewrites the feed. `refresh` is the
-// trailing clause, e.g. "refreshes this plan about every 5 min".
+// away — plus when forty-two-watts actually changes the feed. `refresh` is the
+// trailing clause, e.g. "re-checks the plan about every 15 min, and updates an
+// event only when the plan actually changes".
 func lanNote(refresh string) string {
 	return "\n\nThis calendar lives only on your home network (LAN). Your " +
 		"calendar app can refresh it only while connected to the same network " +
