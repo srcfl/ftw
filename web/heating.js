@@ -119,6 +119,7 @@
       '.ftw-hp-spark svg{width:100%;height:48px;display:block}',
       '.ftw-hp-chartrow{display:flex;gap:6px;align-items:stretch}',
       '.ftw-hp-tchart{flex:1;min-width:0;height:150px;display:block}',
+      '.ftw-hp-pchart{flex:1;min-width:0;height:90px;display:block}',
       '.ftw-hp-yax{display:flex;flex-direction:column;justify-content:space-between;text-align:right;min-width:26px;padding:6px 0;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.6rem;color:var(--fg-muted)}',
       '.ftw-hp-xax{display:flex;justify-content:space-between;margin:3px 0 0 32px;font-family:var(--mono);font-size:0.6rem;color:var(--fg-muted)}',
       '.ftw-hp-legend{display:flex;gap:14px;flex-wrap:wrap}',
@@ -240,6 +241,39 @@
       '</div>';
   }
 
+  // Compressor power over 24h as its own mini-chart (0-based kW y-axis + time
+  // x-axis). Separate from sparkline() so the ~937 tiny detail sparklines stay
+  // axis-free.
+  function powerChartBlock(points) {
+    var pts = (points || []).filter(function (p) { return p && p.v != null; });
+    if (pts.length < 2) return '';
+    var w = 600, h = 90, padR = 4, padL = 2, padT = 6, padB = 6;
+    var ts = pts.map(function (p) { return p.ts; });
+    var t0 = Math.min.apply(null, ts), t1 = Math.max.apply(null, ts), tspan = (t1 - t0) || 1;
+    var vMax = Math.max.apply(null, pts.map(function (p) { return p.v; })) || 1;
+    var vspan = vMax || 1;
+    function X(t) { return (padL + (t - t0) / tspan * (w - padL - padR)).toFixed(1); }
+    function Y(v) { return (padT + (1 - v / vspan) * (h - padT - padB)).toFixed(1); }
+    var grid = [0, vMax / 2, vMax].map(function (v) {
+      return '<line x1="' + padL + '" y1="' + Y(v) + '" x2="' + (w - padR) + '" y2="' + Y(v) + '" stroke="var(--line)" stroke-width="0.5"/>';
+    }).join('');
+    var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + X(p.ts) + ',' + Y(p.v); }).join(' ');
+    var area = 'M' + X(pts[0].ts) + ',' + Y(0) + ' ' +
+      pts.map(function (p) { return 'L' + X(p.ts) + ',' + Y(p.v); }).join(' ') +
+      ' L' + X(pts[pts.length - 1].ts) + ',' + Y(0) + ' Z';
+    var line = '<path d="' + area + '" fill="var(--accent-e)" fill-opacity="0.12"/>' +
+      '<path d="' + d + '" fill="none" stroke="var(--accent-e)" stroke-width="1.4" stroke-linejoin="round"/>';
+    var yax = [vMax, vMax / 2, 0].map(function (v) { return '<span>' + (v / 1000).toFixed(1) + '</span>'; }).join('');
+    var fmtTime = function (t) { return new Date(t).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }); };
+    var xticks = 4, xax = '';
+    for (var xi = 0; xi < xticks; xi++) { xax += '<span>' + escapeHtml(fmtTime(t0 + tspan * xi / (xticks - 1))) + '</span>'; }
+    return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">Compressor power (kW) · 24h</div>' +
+      '<div class="ftw-hp-chartrow"><div class="ftw-hp-yax">' + yax + '</div>' +
+      '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" class="ftw-hp-pchart" aria-hidden="true">' + grid + line + '</svg></div>' +
+      '<div class="ftw-hp-xax">' + xax + '</div>' +
+      '</div>';
+  }
+
   // ── Energy per calendar period, from the lifetime kWh counters ───
   // delta = current − value at the period boundary; null when the logged
   // history doesn't reach back that far (shown as "accumulating").
@@ -297,10 +331,7 @@
       return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">' + escapeHtml(g.title) + '</div>' +
         '<div class="ftw-hp-tiles">' + tiles + '</div></div>';
     }).join('');
-    var spark = sparkline(sparkPoints);
-    var sparkBlock = spark
-      ? '<div class="ftw-hp-spark"><span class="ftw-hp-spark-label">Compressor power · 24h</span>' + spark + '</div>'
-      : '';
+    var sparkBlock = powerChartBlock(sparkPoints);
     // The whole card is a button into the detail view (all signals + register).
     return '<div class="ftw-hp ftw-hp-clickable" data-hp-driver="' + escapeHtml(name) + '" role="button" tabindex="0" title="View all signals">' +
       '<div class="ftw-hp-head"><span class="ftw-hp-name">' + escapeHtml(name) + '</span>' +
