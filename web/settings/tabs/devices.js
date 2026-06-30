@@ -62,7 +62,7 @@
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
-          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden') + '>' +
+          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
           '</div></div>' +
@@ -422,6 +422,7 @@
           var caps = (entry && entry.capabilities) || [];
           var show = caps.indexOf("battery") >= 0;
           wrap.hidden = !show;
+          wrap.style.display = show ? "" : "none";
           if (row) row.classList.toggle("field-row-single", !show);
         });
         // Local-API credential fields (username + cert pin) reveal only for
