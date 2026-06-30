@@ -145,12 +145,21 @@ func (s *Service) publishPlan(ctx context.Context) {
 	s.mu.RLock()
 	src := s.planSource
 	url, planPath, user, pass := s.url, s.planPath, s.username, s.password
+	interval := s.planPublishInterval
 	s.mu.RUnlock()
 	if src == nil {
 		return
 	}
 
 	blocks := buildPlanBlocks(src(), time.Now())
+	// Append the LAN-only / refresh-cadence footer to every block. Done here
+	// (not in the pure buildPlanBlocks) because it needs the live interval, and
+	// after hashing-relevant fields are set — hash() ignores the description, so
+	// the note never causes reconcile churn.
+	note := lanNote("refreshes this plan about every " + friendlyInterval(interval))
+	for i := range blocks {
+		blocks[i].description += note
+	}
 	want := make(map[string]planBlock, len(blocks))
 	for _, b := range blocks {
 		want[b.uid] = b
@@ -244,4 +253,32 @@ func (s *Service) deleteObject(ctx context.Context, url, planPath, user, pass, u
 
 func planObjectPath(planPath, uid string) string {
 	return strings.TrimRight(planPath, "/") + "/" + uid + ".ics"
+}
+
+// lanNote is the footer appended to every published event's description so a
+// subscriber understands the refresh behaviour: forty-two-watts' CalDAV server
+// is LAN-only (never exposed off your network), so a calendar app can only pull
+// updates while it is on the same network — it will not refresh while you are
+// away — plus how often forty-two-watts rewrites the feed. `refresh` is the
+// trailing clause, e.g. "refreshes this plan about every 5 min".
+func lanNote(refresh string) string {
+	return "\n\nThis calendar lives only on your home network (LAN). Your " +
+		"calendar app can refresh it only while connected to the same network " +
+		"as forty-two-watts — it will not update while you are away from home. " +
+		"forty-two-watts " + refresh + "."
+}
+
+// friendlyInterval renders a poll/publish interval in a human-readable unit.
+func friendlyInterval(d time.Duration) string {
+	switch {
+	case d >= time.Hour:
+		if h := d.Hours(); h == math.Trunc(h) {
+			return fmt.Sprintf("%.0f h", h)
+		}
+		return fmt.Sprintf("%.1f h", d.Hours())
+	case d >= time.Minute:
+		return fmt.Sprintf("%.0f min", d.Minutes())
+	default:
+		return fmt.Sprintf("%.0f s", d.Seconds())
+	}
 }

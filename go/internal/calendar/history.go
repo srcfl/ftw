@@ -187,7 +187,8 @@ func (s *Service) writeSession(ctx context.Context, cs CompletedSession) error {
 	ev.Props.SetText(ical.PropSummary, fmt.Sprintf("EV charged %.1f kWh", cs.EnergyWh/1000))
 	ev.Props.SetText(ical.PropDescription, fmt.Sprintf(
 		"forty-two-watts: %s delivered %.0f Wh over %s.",
-		cs.ID, cs.EnergyWh, cs.End.Sub(cs.Start).Round(time.Minute)))
+		cs.ID, cs.EnergyWh, cs.End.Sub(cs.Start).Round(time.Minute))+
+		lanNote("adds a new event here after each completed charge session"))
 	cal.Children = append(cal.Children, ev.Component)
 
 	objPath := strings.TrimRight(histPath, "/") + "/" + uid + ".ics"
