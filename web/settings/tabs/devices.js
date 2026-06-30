@@ -151,20 +151,20 @@
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
-            (localCreds ?
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the local-API account you set up in the myUplink app.') + '</label>' +
-              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">'
-              : '') +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">' +
+            '</div>' +
             '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
               '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_pv"' +
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
             '</label>' +
-            (localCreds ?
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
-              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.capabilities.http.tls_pin_sha256" value="' + escHtml(pin) + '" placeholder="73d1ac81…bd9bf4eb (64 hex)" style="font-family:var(--mono);font-size:0.78rem">'
-              : '') +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.capabilities.http.tls_pin_sha256" value="' + escHtml(pin) + '" placeholder="73d1ac81…bd9bf4eb (64 hex)" style="font-family:var(--mono);font-size:0.78rem">' +
+            '</div>' +
             '</fieldset>';
         }
         if (isApiCredsDriver) {
@@ -423,6 +423,15 @@
           var show = caps.indexOf("battery") >= 0;
           wrap.hidden = !show;
           if (row) row.classList.toggle("field-row-single", !show);
+        });
+        // Local-API credential fields (username + cert pin) reveal only for
+        // drivers whose catalog declares apicreds — done post-fetch so a first
+        // render before the catalog resolves doesn't drop them.
+        bodyEl.querySelectorAll(".drv-local-creds").forEach(function (wrap) {
+          var lua = wrap.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          var caps = (entry && entry.capabilities) || [];
+          wrap.hidden = caps.indexOf("apicreds") < 0;
         });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;

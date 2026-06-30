@@ -498,6 +498,9 @@
   }
 
   function onGridClick(e) {
+    // The ? help icons explain a metric in place (native tooltip) — a click on
+    // one must NOT navigate into the all-signals detail.
+    if (e.target.closest && e.target.closest('.ftw-hp-i')) return;
     var card = e.target.closest && e.target.closest('.ftw-hp-clickable');
     if (card && card.dataset.hpDriver) openDetail(card.dataset.hpDriver);
   }
