@@ -117,7 +117,10 @@
       '.ftw-hp-spark{display:flex;flex-direction:column;gap:4px}',
       '.ftw-hp-spark-label{font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-muted)}',
       '.ftw-hp-spark svg{width:100%;height:48px;display:block}',
-      '.ftw-hp-tchart{width:100%;height:150px;display:block}',
+      '.ftw-hp-chartrow{display:flex;gap:6px;align-items:stretch}',
+      '.ftw-hp-tchart{flex:1;min-width:0;height:150px;display:block}',
+      '.ftw-hp-yax{display:flex;flex-direction:column;justify-content:space-between;text-align:right;min-width:26px;padding:6px 0;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.6rem;color:var(--fg-muted)}',
+      '.ftw-hp-xax{display:flex;justify-content:space-between;margin:3px 0 0 32px;font-family:var(--mono);font-size:0.6rem;color:var(--fg-muted)}',
       '.ftw-hp-legend{display:flex;gap:14px;flex-wrap:wrap}',
       '.ftw-hp-leg{font-family:var(--mono);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted);display:inline-flex;align-items:center;gap:4px}',
       '.ftw-hp-leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}',
@@ -200,7 +203,7 @@
     var all = [];
     lines.forEach(function (l) { l.points.forEach(function (p) { if (p && p.v != null) all.push(p); }); });
     if (all.length < 2) return '';
-    var w = 600, h = 150, padL = 26, padR = 6, padT = 8, padB = 14;
+    var w = 600, h = 150, padR = 4, padL = 2, padT = 6, padB = 6;
     var ts = all.map(function (p) { return p.ts; });
     var vs = all.map(function (p) { return p.v; });
     var t0 = Math.min.apply(null, ts), t1 = Math.max.apply(null, ts), tspan = (t1 - t0) || 1;
@@ -209,11 +212,11 @@
     var vspan = (vMax - vMin) || 1;
     function X(t) { return (padL + (t - t0) / tspan * (w - padL - padR)).toFixed(1); }
     function Y(v) { return (padT + (1 - (v - vMin) / vspan) * (h - padT - padB)).toFixed(1); }
-    var grid = '';
-    [vMin, (vMin + vMax) / 2, vMax].forEach(function (v) {
-      grid += '<line x1="' + padL + '" y1="' + Y(v) + '" x2="' + (w - padR) + '" y2="' + Y(v) + '" stroke="var(--line)" stroke-width="0.5"/>' +
-        '<text x="2" y="' + (parseFloat(Y(v)) + 3).toFixed(1) + '" fill="var(--fg-muted)" font-size="8" font-family="monospace">' + v.toFixed(0) + '</text>';
-    });
+    // Gridlines only — axis labels are HTML (below/left) so they don't distort
+    // under preserveAspectRatio="none".
+    var grid = [vMin, (vMin + vMax) / 2, vMax].map(function (v) {
+      return '<line x1="' + padL + '" y1="' + Y(v) + '" x2="' + (w - padR) + '" y2="' + Y(v) + '" stroke="var(--line)" stroke-width="0.5"/>';
+    }).join('');
     var paths = lines.map(function (l) {
       var pp = l.points.filter(function (p) { return p && p.v != null; });
       if (pp.length < 2) return '';
@@ -223,9 +226,17 @@
     var legend = TCHART.map(function (s) {
       return '<span class="ftw-hp-leg"><span class="ftw-hp-leg-dot" style="background:' + s.color + '"></span>' + s.label + '</span>';
     }).join('');
-    return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">Temperatures · 30 days</div>' +
+    var yax = [vMax, (vMin + vMax) / 2, vMin].map(function (v) {
+      return '<span>' + Math.round(v) + '°</span>';
+    }).join('');
+    var fmtDate = function (t) { return new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); };
+    var xticks = 4, xax = '';
+    for (var xi = 0; xi < xticks; xi++) { xax += '<span>' + escapeHtml(fmtDate(t0 + tspan * xi / (xticks - 1))) + '</span>'; }
+    return '<div class="ftw-hp-group"><div class="ftw-hp-group-title">Temperatures (°C)</div>' +
       '<div class="ftw-hp-legend">' + legend + '</div>' +
-      '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" class="ftw-hp-tchart" aria-hidden="true">' + grid + paths + '</svg>' +
+      '<div class="ftw-hp-chartrow"><div class="ftw-hp-yax">' + yax + '</div>' +
+      '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" class="ftw-hp-tchart" aria-hidden="true">' + grid + paths + '</svg></div>' +
+      '<div class="ftw-hp-xax">' + xax + '</div>' +
       '</div>';
   }
 
