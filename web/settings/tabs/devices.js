@@ -392,8 +392,8 @@
             // pattern instead: empty input + saved/missing badge.
             var saved = typeof dcfg[key] === "string" && dcfg[key] !== "";
             var badge = saved
-              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
-              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+              ? '<span class="creds-badge creds-saved">✓ Set — not shown here</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not set</span>';
             var placeholder = saved
               ? "•••••••• (leave empty to keep)"
               : "Paste from device web UI";
