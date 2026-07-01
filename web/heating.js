@@ -445,13 +445,16 @@
       '.ftw-hpd-close{background:none;border:1px solid var(--line);color:var(--fg);border-radius:6px;cursor:pointer;font-size:1rem;line-height:1;padding:4px 9px}',
       '.ftw-hpd-group{margin:16px 0 4px;font-family:var(--mono);font-size:0.68rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--accent-e)}',
       '.ftw-hpd-item{padding:6px 0;border-bottom:1px solid var(--line-soft,var(--line))}',
-      '.ftw-hpd-row{display:grid;grid-template-columns:1fr auto auto 120px;gap:10px 14px;align-items:center}',
+      '.ftw-hpd-row{display:grid;grid-template-columns:1fr auto auto 150px;gap:10px 14px;align-items:center}',
+      '.ftw-hpd-sub{font-family:var(--mono);font-size:0.62rem;color:var(--fg-muted);margin:-6px 0 12px;letter-spacing:0.02em}',
       '.ftw-hpd-explain{font-size:0.74rem;color:var(--fg-muted);line-height:1.35;margin-top:3px;max-width:66ch}',
       '.ftw-hpd-explain::before{content:"↳ ";opacity:0.55}',
       '.ftw-hpd-label{color:var(--fg-muted);font-size:0.85rem}',
       '.ftw-hpd-reg{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.76rem;color:var(--fg-muted);text-align:right;opacity:0.8}',
       '.ftw-hpd-val{font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--fg);text-align:right}',
-      '.ftw-hpd-spark svg{width:120px;height:24px;display:block}',
+      '.ftw-hpd-spark{display:flex;align-items:center;gap:5px}',
+      '.ftw-hpd-spark svg{flex:1;min-width:0;height:24px;display:block}',
+      '.ftw-hpd-yr{display:flex;flex-direction:column;justify-content:space-between;height:22px;min-width:30px;text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:0.52rem;line-height:1;color:var(--fg-muted)}',
       '.ftw-hpd-empty{color:var(--fg-muted);font-family:var(--mono);font-size:0.82rem}',
     ].join('');
     var el = document.createElement('style');
@@ -480,6 +483,15 @@
     return _infoByKey[key] || '';
   }
 
+  // Compact number for the sparkline min/max scale (keeps the 150px column tight).
+  function sparkNum(v) {
+    var a = Math.abs(v);
+    if (a >= 10000) return Math.round(v / 1000) + 'k';
+    if (a >= 1000) return (v / 1000).toFixed(1) + 'k';
+    if (a >= 10) return Math.round(v).toString();
+    return v.toFixed(1);
+  }
+
   function openDetail(name) {
     injectDetailStyles();
     closeDetail();
@@ -489,6 +501,7 @@
     backdrop.innerHTML = '<div class="ftw-hpd">' +
       '<div class="ftw-hpd-top"><span class="ftw-hpd-title">Heat pump · ' + escapeHtml(name) + '</span>' +
       '<button class="ftw-hpd-close" type="button" aria-label="Close">✕</button></div>' +
+      '<div class="ftw-hpd-sub">Trend column = last 24 h · the two small figures are its min / max over that window.</div>' +
       '<div id="ftw-hpd-body"><div class="ftw-hpd-empty">Loading signals…</div></div></div>';
     backdrop.addEventListener('click', function (e) { if (e.target === backdrop) closeDetail(); });
     backdrop.querySelector('.ftw-hpd-close').addEventListener('click', closeDetail);
@@ -533,7 +546,14 @@
         fetchJSON('/api/series?driver=' + encodeURIComponent(name) + '&metric=' + encodeURIComponent(m.name) + '&range=24h&points=120')
           .then(function (s) {
             var slot = body.querySelector('.ftw-hpd-spark[data-spark-metric="' + (window.CSS && CSS.escape ? CSS.escape(m.name) : m.name) + '"]');
-            if (slot) slot.innerHTML = sparkline((s && s.points) || []);
+            if (!slot) return;
+            var pp = (s && s.points) || [];
+            var vals = pp.map(function (p) { return p.v; }).filter(function (v) { return v != null; });
+            var yr = vals.length
+              ? '<span class="ftw-hpd-yr"><span>' + escapeHtml(sparkNum(Math.max.apply(null, vals))) + '</span>' +
+                '<span>' + escapeHtml(sparkNum(Math.min.apply(null, vals))) + '</span></span>'
+              : '';
+            slot.innerHTML = sparkline(pp) + yr;
           });
       });
     });
