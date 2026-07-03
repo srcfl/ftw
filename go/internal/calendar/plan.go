@@ -353,7 +353,7 @@ func lanNote(refresh string) string {
 	return "\n\nThis calendar lives on your home network and is never " +
 		"published to the internet. Your calendar app can refresh it only " +
 		"while it can reach forty-two-watts — on your home network or over a " +
-		"VPN into it (e.g. Tailscale) — otherwise events stay as last synced. " +
+		"VPN into it — otherwise events stay as last synced. " +
 		"forty-two-watts " + refresh + "."
 }
 
