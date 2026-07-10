@@ -423,3 +423,51 @@ DRIVER = {
 
 No function calls, no concatenation, no variables — the catalog loader
 reads the source as text.
+
+## 9. Installing a custom driver on a Docker deploy
+
+The Docker image ships the bundled drivers in `/app/drivers/`, which is
+part of the **immutable image layer** — replaced wholesale on every
+`docker compose pull`. A driver you wrote yourself, or a patched copy of
+a bundled one, lives nowhere in the image, so it needs a home that
+survives image upgrades. That home is the persistent `./data/drivers/`
+directory.
+
+`docker-compose.yml` bind-mounts `./data:/app/data`, and the container
+launches with `-user-drivers /app/data/drivers` (see the `CMD` in
+`Dockerfile`). At config-resolution time the EMS probes this directory
+**first** and only falls back to the bundled `/app/drivers/` when a file
+isn't found there (`go/internal/config/config.go`, `ResolveDriverPaths`).
+So a file in `./data/drivers/` is loaded, shadows any bundled driver of
+the same name, and persists across both image upgrades and power loss.
+Available since v0.100.0.
+
+To install one (the deploy directory is `~/forty-two-watts` after
+`scripts/install.sh`):
+
+```bash
+mkdir -p ~/forty-two-watts/data/drivers
+cp my-device.lua ~/forty-two-watts/data/drivers/
+
+# Linux only: the container runs as uid 100 / gid 101, so the file must
+# be readable by that user. (Docker Desktop on macOS maps ownership
+# transparently — skip this there.)
+sudo chown 100:101 ~/forty-two-watts/data/drivers/my-device.lua
+
+cd ~/forty-two-watts && sudo docker compose restart forty-two-watts
+```
+
+Reference it in `config.yaml` the normal way — `lua: drivers/my-device.lua`.
+The `drivers/` prefix resolves to the user directory first, so no
+absolute paths leak into the config and it stays portable.
+
+> **Don't `docker cp` into the running container.** Copying a driver to
+> `forty-two-watts:/app/drivers/` writes into the container's ephemeral
+> writable layer — not the image, not the volume. It works until the next
+> `docker compose pull && up -d` recreates the container and discards that
+> layer, and it can be lost on an unclean power-off. Use `./data/drivers/`
+> instead; that overlay exists precisely so you never have to.
+
+During a [pair session](ftw-pair.md) the friend's `deploy_driver` tool
+writes here automatically, so a driver added remotely is already
+persistent without any of the above.

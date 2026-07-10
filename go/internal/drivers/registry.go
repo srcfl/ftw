@@ -180,6 +180,9 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 		if len(hosts) > 0 {
 			env.WithHTTPAllowedHosts(hosts)
 		}
+		if pin := strings.TrimSpace(cfg.Capabilities.HTTP.TLSPinSHA256); pin != "" {
+			env.WithHTTPTLSPin(pin)
+		}
 	}
 	if cfg.Capabilities.WebSocket != nil {
 		env.WithWS(NewGorillaWS(cfg.Name))

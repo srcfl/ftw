@@ -62,7 +62,7 @@
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
-          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden') + '>' +
+          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
           '</div></div>' +
@@ -136,6 +136,12 @@
         }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
+          // NIBE-style local-API drivers (catalog apicreds + a connection port)
+          // also need a username + an optional self-signed cert pin; plain
+          // local-HTTP gateways (e.g. a P1 meter) keep just the Host field.
+          // Backend auto-derives capabilities.http.allowed_hosts from config.host.
+          var localCreds = caps.indexOf('apicreds') >= 0;
+          var pin = (cap.http && cap.http.tls_pin_sha256) || '';
           // Render the Disable-PV checkbox for every HTTP driver; the
           // post-fetch pass in `after` hides it for drivers whose
           // catalog doesn't advertise BOTH meter + pv capabilities
@@ -145,12 +151,20 @@
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
+              '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the local-API account you set up in the myUplink app.') + '</label>' +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">' +
+            '</div>' +
             '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
               '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_pv"' +
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
             '</label>' +
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
+              '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.capabilities.http.tls_pin_sha256" value="' + escHtml(pin) + '" placeholder="73d1ac81…bd9bf4eb (64 hex)" style="font-family:var(--mono);font-size:0.78rem">' +
+            '</div>' +
             '</fieldset>';
         }
         if (isApiCredsDriver) {
@@ -376,10 +390,15 @@
             // GET), but inserting any value into a `value=""` attribute
             // exposes it in the DOM/HTML. Mirror the cloud-password
             // pattern instead: empty input + saved/missing badge.
-            var saved = typeof dcfg[key] === "string" && dcfg[key] !== "";
+            // config_secrets come back masked: a non-empty value means the api
+            // sent the placeholder (e.g. api_token). For the "password" key the
+            // api blanks config.password but sets the driver-level has_password
+            // flag, so honour that too — otherwise a saved password reads as unset.
+            var saved = (typeof dcfg[key] === "string" && dcfg[key] !== "") ||
+                        (key === "password" && d.has_password === true);
             var badge = saved
-              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
-              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+              ? '<span class="creds-badge creds-saved">✓ Set — not shown here</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not set</span>';
             var placeholder = saved
               ? "•••••••• (leave empty to keep)"
               : "Paste from device web UI";
@@ -408,7 +427,17 @@
           var caps = (entry && entry.capabilities) || [];
           var show = caps.indexOf("battery") >= 0;
           wrap.hidden = !show;
+          wrap.style.display = show ? "" : "none";
           if (row) row.classList.toggle("field-row-single", !show);
+        });
+        // Local-API credential fields (username + cert pin) reveal only for
+        // drivers whose catalog declares apicreds — done post-fetch so a first
+        // render before the catalog resolves doesn't drop them.
+        bodyEl.querySelectorAll(".drv-local-creds").forEach(function (wrap) {
+          var lua = wrap.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          var caps = (entry && entry.capabilities) || [];
+          wrap.hidden = caps.indexOf("apicreds") < 0;
         });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
@@ -429,6 +458,7 @@
           opt.dataset.id = e.id || "";
           opt.dataset.httpHosts = (e.http_hosts || []).join(",");
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
           opt.dataset.verificationStatus = e.verification_status || "experimental";
           if (e.verification_notes) opt.title = e.verification_notes;
           sel.appendChild(opt);
@@ -462,6 +492,11 @@
             driver.config = { ip: "", vin: "" };
           } else if (connHost) {
             driver.config = { host: connHost };
+          } else if (entryCaps.indexOf("apicreds") >= 0 && (chosen.dataset.connPort || "")) {
+            // Local HTTP device with HTTP Basic auth (e.g. NIBE local REST API):
+            // host + username + password + an optional self-signed cert pin. The
+            // backend auto-derives capabilities.http.allowed_hosts from config.host.
+            driver.config = { host: "", username: "", password: "" };
           } else if (entryCaps.indexOf("apicreds") >= 0) {
             // OAuth2 client_credentials drivers (e.g. MyUplink).
             driver.config = { client_id: "", client_secret: "" };

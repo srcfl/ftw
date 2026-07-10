@@ -96,6 +96,14 @@ Open `http://<server-ip>:8080/` from another device on the LAN, or
   inverters falls back to `make:serial` (preferred, set by the driver)
   or `ep:<endpoint>`. See [device-identity.md](device-identity.md).
 
+- **Custom (unmerged) drivers go in `./data/drivers/`.** A driver you
+  wrote yourself — or a patched copy of a bundled one — belongs in the
+  persistent `./data/drivers/` directory, not `/app/drivers/` inside the
+  image. Files there survive image upgrades and reboots and shadow a
+  bundled driver of the same name; a `docker cp` into the running
+  container does **not** (it lands in the ephemeral container layer). See
+  [writing-a-driver.md §9](writing-a-driver.md#9-installing-a-custom-driver-on-a-docker-deploy).
+
 - **In-app updates work out of the box.** The `ftw-updater` sidecar in
   `docker-compose.yml` drives the web UI's Update / Restart buttons. See
   [self-update.md](self-update.md).

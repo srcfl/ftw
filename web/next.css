@@ -455,6 +455,17 @@ body.ftw-next .summary-card {
 body.ftw-next .summary-card:hover {
   border-color: oklch(0.35 0.02 250);
 }
+
+/* Heat-pump card. heating.js renders into a bare `.card`, whose base rule in
+   style.css uses `--surface` — a token that is NOT flipped by
+   html[data-theme="light"], so the card stayed dark on a light page while
+   every other dashboard card (.summary-card/.fuse-card/.control-card/…) themed
+   via --ink-raised. Bring it onto the next palette so it themes to light too. */
+body.ftw-next .heating-row .card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
 body.ftw-next .summary-card .card-label {
   margin-bottom: 8px;
 }
