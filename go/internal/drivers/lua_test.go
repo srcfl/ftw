@@ -159,6 +159,56 @@ end
 	}
 }
 
+func TestLuaHostMissingMQTTAndModbusCapabilitiesReturnErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_caps.lua")
+	src := `
+function driver_init(config) end
+function driver_poll()
+    local sub_err = host.mqtt_sub("devices/+/state")
+    assert(sub_err == "no mqtt capability", "mqtt_sub should return a capability error")
+
+    local pub_err = host.mqtt_pub("devices/cmd", "on")
+    assert(pub_err == "no mqtt capability", "mqtt_pub should return a capability error")
+
+    local msgs = host.mqtt_messages()
+    assert(#msgs == 0, "mqtt_messages without capability should return an empty table")
+
+    local regs, read_err = host.modbus_read(1, 1, "input")
+    assert(regs == nil, "modbus_read without capability should not return registers")
+    assert(read_err == "no modbus capability", "modbus_read should return a capability error")
+
+    local write_err = host.modbus_write(1, 2)
+    assert(write_err == "no modbus capability", "modbus_write should return a capability error")
+
+    local multi_err = host.modbus_write_multi(1, {2, 3})
+    assert(multi_err == "no modbus capability", "modbus_write_multi should return a capability error")
+
+    host.emit("pv", { w = -1 })
+    return 1000
+end
+`
+	if err := os.WriteFile(path, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	tel := telemetry.NewStore()
+	d, err := NewLuaDriver(path, NewHostEnv("no-caps", tel))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if got := tel.Get("no-caps", telemetry.DerPV); got == nil || got.RawW != -1 {
+		t.Fatalf("valid pv emit should still pass after capability errors, got %+v", got)
+	}
+}
+
 // A hybrid inverter without a physical battery (operator-declared via
 // battery_capacity_wh = 0) still polls battery registers and emits via
 // host.emit("battery", …). The host must drop those emits so phantom
