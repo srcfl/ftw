@@ -17,6 +17,9 @@
   var heatPumpDrivers = null; // cached after discovery: array of driver names
   var lastDiscoverMs = 0;             // Date.now() of the last discovery scan
   var DISCOVER_EVERY_MS = 300000;     // re-scan for newly-added heat pumps (5 min)
+  var HISTORY_REFRESH_MS = 300000;    // long TS queries refresh at most every 5 min
+  var historyCache = Object.create(null);
+  var refreshInFlight = false;
 
   // Route reads over the owner/P2P transport when present (remote home
   // route), else plain fetch (LAN / tests). Mirrors twins.js.
@@ -343,7 +346,7 @@
       '</div>';
   }
 
-  function renderPump(name, detail, sparkPoints, temps, energy, power) {
+  function renderPump(name, detail, temps, energy, power) {
     var m = metricMap(detail && detail.metrics);
     var groups = GROUPS.map(function (g) {
       var tiles = g.items.map(function (def) { return tileHtml(def, m); }).join('');
@@ -376,10 +379,44 @@
     });
   }
 
+  // The live values are cheap and refresh every 30 s. Month/year history is
+  // comparatively expensive (SQLite/Parquet range scans, possibly over the
+  // owner relay), so cache those series for five minutes per heat pump.
+  function fetchPumpHistory(name) {
+    var cached = historyCache[name];
+    var now = Date.now();
+    if (cached && now - cached.at < HISTORY_REFRESH_MS) return Promise.resolve(cached.data);
+    var ser = function (metric, range, pts) {
+      return fetchJSON('/api/series?driver=' + encodeURIComponent(name) + '&metric=' + metric + '&range=' + range + '&points=' + pts);
+    };
+    return Promise.all([
+      ser('hp_power_w', '24h', 200),
+      ser('hp_outdoor_temp_c', '30d', 400),
+      ser('hp_supply_line_bt2', '30d', 400),
+      ser('hp_return_line_bt3', '30d', 400),
+      ser('hp_energy_consumed_kwh', '366d', 800),
+      ser('hp_energy_produced_kwh', '366d', 800),
+      ser('hp_fr_nluft_bt20', '30d', 400),
+      ser('hp_energy_log_current_power_consumption', '24h', 200),
+      ser('hp_power_internal_additional_heat', '24h', 200),
+    ]).then(function (parts) {
+      var pp = function (r) { return (r && r.points) || []; };
+      var data = {
+        temps: { outdoor: pp(parts[1]), supply: pp(parts[2]), ret: pp(parts[3]), extract: pp(parts[6]) },
+        energy: { consumed: pp(parts[4]), produced: pp(parts[5]) },
+        power: { compressor: pp(parts[0]), total: pp(parts[7]), internal: pp(parts[8]) },
+      };
+      historyCache[name] = { at: Date.now(), data: data };
+      return data;
+    });
+  }
+
   function refresh() {
     var section = document.getElementById('heating-section');
     var grid = document.getElementById('heating-grid');
     if (!section || !grid) return;
+    if (refreshInFlight) return;
+    refreshInFlight = true;
 
     // Re-run discovery on first call, then periodically — so a heat-pump
     // driver added while the dashboard is open shows up without a manual
@@ -398,28 +435,14 @@
         section.hidden = true;
         return;
       }
-      // Fetch detail + 24h power series for each heat pump in parallel.
+      // Refresh live detail every cycle; reuse bounded-age history.
       return Promise.all(names.map(function (n) {
-        var ser = function (metric, range, pts) {
-          return fetchJSON('/api/series?driver=' + encodeURIComponent(n) + '&metric=' + metric + '&range=' + range + '&points=' + pts);
-        };
         return Promise.all([
           fetchJSON('/api/drivers/' + encodeURIComponent(n)),
-          ser('hp_power_w', '24h', 200),
-          ser('hp_outdoor_temp_c', '30d', 400),
-          ser('hp_supply_line_bt2', '30d', 400),
-          ser('hp_return_line_bt3', '30d', 400),
-          ser('hp_energy_consumed_kwh', '366d', 800),
-          ser('hp_energy_produced_kwh', '366d', 800),
-          ser('hp_fr_nluft_bt20', '30d', 400),
-          ser('hp_energy_log_current_power_consumption', '24h', 200),
-          ser('hp_power_internal_additional_heat', '24h', 200),
+          fetchPumpHistory(n),
         ]).then(function (parts) {
-          var pp = function (r) { return (r && r.points) || []; };
-          return { name: n, detail: parts[0], series: pp(parts[1]),
-            temps: { outdoor: pp(parts[2]), supply: pp(parts[3]), ret: pp(parts[4]), extract: pp(parts[7]) },
-            energy: { consumed: pp(parts[5]), produced: pp(parts[6]) },
-            power: { compressor: pp(parts[1]), total: pp(parts[8]), internal: pp(parts[9]) } };
+          var h = parts[1] || {};
+          return { name: n, detail: parts[0], temps: h.temps, energy: h.energy, power: h.power };
         });
       })).then(function (pumps) {
         var live = pumps.filter(function (p) { return p.detail && isHeatPump(p.detail); });
@@ -427,9 +450,13 @@
         injectStyles();
         section.hidden = false;
         grid.innerHTML = live.map(function (p) {
-          return renderPump(p.name, p.detail, p.series, p.temps, p.energy, p.power);
+          return renderPump(p.name, p.detail, p.temps, p.energy, p.power);
         }).join('');
       });
+    }).then(function () {
+      refreshInFlight = false;
+    }, function () {
+      refreshInFlight = false;
     });
   }
 
@@ -571,9 +598,10 @@
         });
       });
       body.innerHTML = html;
-      // Lazily fill sparklines (one /api/series per metric) — values already
-      // shown, so a slow series fetch never blocks the table.
-      metrics.forEach(function (m) {
+      // Fetch trends only for the curated dashboard signals. A NIBE driver can
+      // expose ~980 points; issuing one series query per point here could flood
+      // a Pi (and the remote relay) with nearly a thousand concurrent requests.
+      metrics.filter(function (m) { return !!infoForKey(m.name); }).forEach(function (m) {
         fetchJSON('/api/series?driver=' + encodeURIComponent(name) + '&metric=' + encodeURIComponent(m.name) + '&range=24h&points=120')
           .then(function (s) {
             var slot = body.querySelector('.ftw-hpd-spark[data-spark-metric="' + (window.CSS && CSS.escape ? CSS.escape(m.name) : m.name) + '"]');
