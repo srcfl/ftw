@@ -1767,11 +1767,13 @@ func parseRange(s string) int64 {
 				mult = 365 * 24 * 60 * 60 * 1000
 			}
 			if mult > 0 {
-				ms := int64(n) * mult
-				if maxMs := int64(2) * 365 * 24 * 60 * 60 * 1000; ms > maxMs {
-					ms = maxMs
+				maxMs := int64(2) * 365 * 24 * 60 * 60 * 1000
+				// Cap before multiplication so an attacker-controlled, very large
+				// N cannot overflow int64 and turn the requested window negative.
+				if int64(n) > maxMs/mult {
+					return maxMs
 				}
-				return ms
+				return int64(n) * mult
 			}
 		}
 	}

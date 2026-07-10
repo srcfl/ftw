@@ -535,6 +535,9 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
+	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
+	tlsPin := normalizeHexFingerprint(rawTLSPin)
+
 	// hostAllowed checks the URL's host component against the
 	// per-driver allowlist. Empty allowlist = any host (legacy
 	// behaviour). Matched case-insensitively.
@@ -562,6 +565,18 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		case "http", "https":
 		default:
 			return false, fmt.Sprintf("scheme %q not supported (http/https only)", u.Scheme)
+		}
+		// A configured pin is a security requirement, not a hint. Reject a
+		// malformed value before making any request, and never let a pinned
+		// driver downgrade to clear-text HTTP (which would expose Basic-auth
+		// credentials on the LAN).
+		if rawTLSPin != "" {
+			if tlsPin == "" {
+				return false, "tls_pin_sha256 must contain exactly 64 hexadecimal characters"
+			}
+			if !strings.EqualFold(u.Scheme, "https") {
+				return false, "tls_pin_sha256 requires an https URL"
+			}
 		}
 		if len(env.HTTPAllowedHosts) == 0 {
 			return true, ""
@@ -616,7 +631,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// cert (MITM) is rejected at the handshake even if it chains to a real
 	// CA. Drivers WITHOUT a pin keep Go's default transport untouched, so
 	// nothing about existing HTTP drivers changes.
-	if pin := normalizeHexFingerprint(env.HTTPTLSPinSHA256); pin != "" {
+	if pin := tlsPin; pin != "" {
 		tr := net_http.DefaultTransport.(*net_http.Transport).Clone()
 		tr.TLSClientConfig = &tls.Config{
 			// We replace chain/hostname verification with our own exact

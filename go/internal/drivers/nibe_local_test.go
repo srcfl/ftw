@@ -61,6 +61,8 @@ func TestNibeLocalEmitsTelemetry(t *testing.T) {
 		"8":     point("Supply line (BT2)", "s16", "°C", 10, 449),                  // auto → hp_supply_line_bt2 44.9
 		"5":     point("Supply line (EP23-BT2)", "s16", "°C", 10, -32768),          // sentinel → skipped
 		"28393": point("Tot. consump­tion", "u32", "kWh", 10, 53999),               // hp_energy_consumed_kwh 5399.9
+		"9001":  point("Duplicate title", "u16", "", 1, 10),
+		"9002":  point("Duplicate title", "u16", "", 1, 20),
 	}
 
 	// Attach a Modbus register id to each point's metadata (the pump reports
@@ -162,6 +164,38 @@ func TestNibeLocalEmitsTelemetry(t *testing.T) {
 	// Canonical ids must not ALSO leak under their auto-sanitized names.
 	if _, _, ok := tel.LatestMetric("nibe", "hp_compressor_power_input"); ok {
 		t.Error("compressor power leaked under auto name; canonical id should be emitted once as hp_power_w")
+	}
+	// Sanitized-title collisions must be deterministic: both colliding points
+	// carry their id, independent of Lua table iteration order.
+	for name, want := range map[string]float64{
+		"hp_duplicate_title_9001": 10,
+		"hp_duplicate_title_9002": 20,
+	} {
+		if v, _, ok := tel.LatestMetric("nibe", name); !ok || !approxEq(v, want) {
+			t.Errorf("metric %s = %v (ok=%v), want %v", name, v, ok, want)
+		}
+	}
+	if _, _, ok := tel.LatestMetric("nibe", "hp_duplicate_title"); ok {
+		t.Error("colliding metric leaked under an unstable unsuffixed name")
+	}
+
+	// A second unchanged poll keeps headline resolution but does not enqueue
+	// every non-headline point again. This bounds TS growth for the ~980-point
+	// map while hp_poll_ok still keeps the watchdog fresh.
+	_ = tel.FlushSamples()
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("second poll: %v", err)
+	}
+	second := tel.FlushSamples()
+	seenSecond := map[string]bool{}
+	for _, s := range second {
+		seenSecond[s.Metric] = true
+	}
+	if seenSecond["hp_supply_line_bt2"] || seenSecond["hp_duplicate_title_9001"] {
+		t.Fatalf("unchanged non-headline metrics were re-emitted: %#v", seenSecond)
+	}
+	if !seenSecond["hp_power_w"] || !seenSecond["hp_poll_ok"] {
+		t.Fatalf("second poll must retain headline + health heartbeat: %#v", seenSecond)
 	}
 }
 

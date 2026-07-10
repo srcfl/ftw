@@ -236,13 +236,29 @@ func TestLuaHTTPTLSPinning(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed pin is treated as no pin", func(t *testing.T) {
-		// Too-short / junk pins normalise to "" → standard verification,
-		// which then rejects the self-signed test cert. The point: a typo
-		// must never silently disable verification.
+	t.Run("malformed pin fails closed", func(t *testing.T) {
+		// A configured-but-invalid pin is rejected as configuration error;
+		// it must never silently fall back to the system trust store.
 		env := NewHostEnv("junkpin", telemetry.NewStore()).WithHTTP().WithHTTPTLSPin("not-a-fingerprint")
 		if got, _ := runHTTPDriverWithEnv(t, env, srv.URL); got {
-			t.Fatal("malformed pin must fall back to standard verification (reject), not skip it")
+			t.Fatal("malformed pin must reject the request")
+		}
+	})
+
+	t.Run("configured pin forbids clear-text downgrade", func(t *testing.T) {
+		var hits atomic.Int32
+		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			_, _ = w.Write([]byte(`ok`))
+		}))
+		defer plain.Close()
+		env := NewHostEnv("cleartext", telemetry.NewStore()).WithHTTP().
+			WithHTTPTLSPin(goodPin)
+		if got, _ := runHTTPDriverWithEnv(t, env, plain.URL); got {
+			t.Fatal("a pinned driver must not use clear-text HTTP")
+		}
+		if hits.Load() != 0 {
+			t.Fatalf("clear-text server received %d requests, want 0", hits.Load())
 		}
 	})
 }

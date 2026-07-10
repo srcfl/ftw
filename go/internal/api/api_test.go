@@ -31,6 +31,13 @@ func TestParseRangeSupports48h(t *testing.T) {
 	}
 }
 
+func TestParseRangeCapsBeforeMultiplication(t *testing.T) {
+	const max = int64(2) * 365 * 24 * 60 * 60 * 1000
+	if got := parseRange("999999999999999999d"); got != max {
+		t.Fatalf("parseRange(huge) = %d, want capped %d", got, max)
+	}
+}
+
 // handleEVCommand rejects anything not in the allowlist with 400. The Lua
 // driver's command hook silently returns nil for unknown actions, so
 // without this gate the API would 200-OK typos.

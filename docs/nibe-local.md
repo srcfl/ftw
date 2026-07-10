@@ -18,7 +18,9 @@ flag. That means:
   power with `divisor: 100` becomes kW precisely. No °C×10 guessing like the
   cloud driver has to do.
 - **The whole register map, for life.** Every point lands in the long-format
-  TS DB via `host.emit_metric`, queryable forever (see `docs/tsdb.md`).
+  TS DB via `host.emit_metric`, queryable forever (see `docs/tsdb.md`). To keep
+  a Pi-sized database bounded, headline metrics are sampled every minute while
+  the bulk map records changes plus an hourly full snapshot.
 - **No cloud dependency.** Works on an isolated LAN with no WAN.
 
 ## One-time setup on the pump

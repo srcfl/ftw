@@ -8,7 +8,8 @@
 -- over the LAN. The local API is RICHER than the cloud one: every point
 -- ships its own metadata (modbus register, unit, exact divisor, writable
 -- flag), so scaling is exact — no °C×10 heuristic. ~980 points come back in
--- one bulk GET, so the whole register map lands in the TS DB for life.
+-- one bulk GET. Headline metrics land every minute; the bulk map records
+-- changes plus an hourly full snapshot so the TS DB stays bounded on a Pi.
 --
 -- Observe-only by design: the pump is left in read-only mode (aidMode=off),
 -- so this driver cannot actuate anything and cannot cause harm.
@@ -80,6 +81,12 @@ local serial        = nil    -- device id (NIBE serial number) used in the path
 local SETUP_RETRY_MS = 30000
 local last_setup_ms  = nil
 local POLL_INTERVAL_MS = 60000
+-- Headline metrics are emitted every poll. The remaining ~980-point map is
+-- change-only, with an hourly full refresh so latest-value timestamps stay
+-- useful without writing ~1.4 million mostly-duplicate TS rows per day.
+local FULL_REFRESH_MS = 3600000
+local last_full_emit_ms = nil
+local last_emitted = {}
 
 -- ---- Headline metrics + per-model profiles -------------------------------
 -- The BULK of telemetry is metadata-driven (every point self-describes its
@@ -186,6 +193,22 @@ local function register_str(m)
     local r = tonumber(m.modbusRegisterID)
     if r and r ~= 0 then return string.format("%d", r) end
     return ""
+end
+
+-- Validate and scale one API point. Returns nil for malformed values and the
+-- per-size "not connected" sentinel.
+local function scaled_point(pt)
+    local m = pt and pt.metadata
+    local v = pt and pt.value
+    if type(m) ~= "table" or type(v) ~= "table" or type(v.integerValue) ~= "number" then
+        return nil
+    end
+    local raw = v.integerValue
+    local sentinel = size_sentinel(m.variableSize)
+    if sentinel and raw == sentinel then return nil end
+    local div = tonumber(m.divisor) or 1
+    if div == 0 then div = 1 end
+    return raw / div, m.unit or "", register_str(m)
 end
 
 -- Build the id -> canonical-metric lookup. Each headline's id is resolved
@@ -300,6 +323,9 @@ function driver_init(config)
     if config.setup_retry_ms ~= nil then
         SETUP_RETRY_MS = tonumber(config.setup_retry_ms) or SETUP_RETRY_MS
     end
+    if config.full_refresh_ms ~= nil then
+        FULL_REFRESH_MS = tonumber(config.full_refresh_ms) or FULL_REFRESH_MS
+    end
 
     -- Build the headline lookup with the generic profile now; try_setup
     -- refines it to the detected model's profile once the pump answers.
@@ -335,36 +361,47 @@ function driver_poll()
         return POLL_INTERVAL_MS
     end
 
-    local seen = {}
+    local now = host.millis()
+    local full_refresh = last_full_emit_ms == nil or (now - last_full_emit_ms) >= FULL_REFRESH_MS
+
+    -- Titles are not guaranteed unique. Count sanitized names first so every
+    -- collision gets an id suffix deterministically; the old one-pass `seen`
+    -- approach made whichever point happened to appear first change names
+    -- across polls because Lua table iteration order is unspecified.
+    local name_counts = {}
     for id, pt in pairs(data) do
-        local m = pt.metadata
-        local v = pt.value
-        if type(m) == "table" and type(v) == "table" and type(v.integerValue) == "number" then
-            local raw = v.integerValue
-            local sentinel = size_sentinel(m.variableSize)
-            if not (sentinel and raw == sentinel) then
-                local div = tonumber(m.divisor) or 1
-                if div == 0 then div = 1 end
-                local scaled = raw / div
-                local unit = m.unit or ""
-                local reg = register_str(m)
-                local canon = CANON[tostring(id)]
-                if canon then
-                    if canon.watts then
-                        local w, u = to_watts(scaled, unit)
-                        host.emit_metric(canon.name, w, u, reg, pt.title)
-                    else
-                        host.emit_metric(canon.name, scaled, unit, reg, pt.title)
-                    end
-                else
-                    local name = sanitize_metric_name(pt.title, id)
-                    if seen[name] then name = name .. "_" .. tostring(id) end
-                    seen[name] = true
-                    host.emit_metric(name, scaled, unit, reg, pt.title)
-                end
+        if not CANON[tostring(id)] then
+            local scaled = scaled_point(pt)
+            if scaled ~= nil then
+                local base = sanitize_metric_name(pt.title, id)
+                name_counts[base] = (name_counts[base] or 0) + 1
             end
         end
     end
+
+    for id, pt in pairs(data) do
+        local scaled, unit, reg = scaled_point(pt)
+        if scaled ~= nil then
+            local canon = CANON[tostring(id)]
+            local name = canon and canon.name or sanitize_metric_name(pt.title, id)
+            if not canon and (name_counts[name] or 0) > 1 then
+                name = name .. "_" .. tostring(id)
+            end
+            local value = scaled
+            if canon and canon.watts then value, unit = to_watts(scaled, unit) end
+
+            -- Stable headline series retain one-minute resolution. The bulk
+            -- map records transitions plus an hourly complete snapshot.
+            if canon or full_refresh or last_emitted[name] ~= value then
+                host.emit_metric(name, value, unit, reg, pt.title)
+                last_emitted[name] = value
+            end
+        end
+    end
+    if full_refresh then last_full_emit_ms = now end
+    -- Guarantees watchdog freshness even on a model whose configured headline
+    -- ids are absent and whose non-headline values remain unchanged.
+    host.emit_metric("hp_poll_ok", 1, "")
 
     return POLL_INTERVAL_MS
 end
@@ -381,4 +418,6 @@ end
 function driver_cleanup()
     serial       = nil
     last_setup_ms = nil
+    last_full_emit_ms = nil
+    last_emitted = {}
 end
