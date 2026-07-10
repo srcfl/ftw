@@ -2076,6 +2076,30 @@ func main() {
 			lpMgr.RollSchedules(time.Now().UTC())
 			lpController.Tick(ctx, time.Now())
 
+			// Anchor each plugged-in loadpoint's inferred SoC to the live
+			// vehicle BMS reading when one is paired. Chargers like Easee
+			// can't read the car, so the manager otherwise drifts on a
+			// plug-in-anchor + delivered-Wh estimate; when a vehicle driver
+			// (TeslaBLEProxy etc.) is online and matched, its SoC is ground
+			// truth. Runs after Tick's Observe so the per-tick re-anchor
+			// wins over that tick's inference. Same picker the MPC spec and
+			// api.go's loadpoint decoration use, so all three agree on which
+			// vehicle is "the one"; we additionally require !Stale so a
+			// driver serving last-known cache (car asleep) can't pin the
+			// dashboard to a stale value — inference takes over until fresh
+			// BMS data returns.
+			for _, st := range lpMgr.States() {
+				if !st.PluggedIn {
+					continue
+				}
+				delivering := st.CurrentPowerW > loadpoint.DeliveringW
+				pick := telemetry.PickBestVehicleForLoadpoint(tel, delivering, time.Now())
+				if pick.Driver == "" || pick.Stale {
+					continue
+				}
+				lpMgr.AnchorVehicleSoC(st.ID, pick.SoCPct)
+			}
+
 			// ---- Safety: site meter stale → idle everything this cycle ----
 			// Otherwise stale grid readings cause one battery to charge another.
 			// Only meaningful when a site meter is actually configured;

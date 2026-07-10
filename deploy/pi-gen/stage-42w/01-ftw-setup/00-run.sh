@@ -18,7 +18,12 @@ set -e
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
-echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
+# Derive the Debian codename from the target rootfs (trixie on the
+# current image) rather than hardcoding it — keeps this correct across
+# a pi-gen base bump. This runs INSIDE the chroot (the heredoc is
+# single-quoted, so $(…) is evaluated here, not on the build host),
+# so /etc/os-release is the image's.
+echo "deb [arch=arm64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
     > /etc/apt/sources.list.d/docker.list
 apt-get -qq update
 DEBIAN_FRONTEND=noninteractive apt-get -y -qq install --no-install-recommends \
@@ -38,64 +43,69 @@ rm -f /etc/apt/sources.list.d/docker.list
 sed -i 's/^127\.0\.1\.1.*/127.0.1.1\t42w/' /etc/hosts
 EOF
 
-# init=firstboot on first boot — without stage2, nobody else injects
-# this into cmdline.txt. The firstboot script ships with
-# raspberrypi-sys-mods and handles partition resize, ssh enable, and
-# userconf-pi processing on the very first boot, then removes itself
-# from cmdline.txt and reboots. Mirrors what pi-gen's
-# stage2/01-sys-tweaks/01-run.sh does on a stock Lite build.
-# Idempotent — re-running the build won't double-inject.
-CMDLINE="${ROOTFS_DIR}/boot/firmware/cmdline.txt"
-if [ -f "${CMDLINE}" ] && ! grep -q "raspberrypi-sys-mods/firstboot" "${CMDLINE}"; then
-    sed -i 's| rootwait| init=/usr/lib/raspberrypi-sys-mods/firstboot rootwait|' "${CMDLINE}"
-fi
+# NO manual cmdline.txt first-boot injection on trixie.
+#
+# On bookworm we hand-injected `init=/usr/lib/raspberrypi-sys-mods/firstboot`
+# (because we skipped stage2). Trixie REPLACED that mechanism: the
+# `init=` first-boot path is gone, resize now runs via initramfs +
+# rpi-resize.service, and the customisation hook is `systemd.run=`.
+# Removing/forcing `init=` on trixie causes a boot loop. We now include
+# stage2 (see STAGE_LIST in config), so pi-gen sets the correct trixie
+# first-boot/resize cmdline + cloud-init datasource itself — we must not
+# fight it.
 
 # Deploy directory: docker-compose.yml lives here and
 # `docker compose up -d` runs from it on first boot.
 #
-# Path: /home/ftw/ — the user `ftw` is created at BUILD TIME by
-# stage1 (FIRST_USER_NAME=ftw in deploy/pi-gen/config), so its
-# home directory exists and is owned by ftw:ftw before stage-42w
-# runs. There's no `pi → ftw` rename in our flow — the rename
-# wizard pi-gen sets up is for END USERS who customize the
-# username via Imager's userconf.txt (handled by userconf-pi at
-# first boot, see below).
+# Path: /opt/forty-two-watts — a FIXED system path, deliberately NOT
+# under a user home. On trixie + cloud-init, Raspberry Pi Imager lets
+# the user set their own account name; cloud-init may create/rename the
+# uid-1000 user, which would orphan a deploy dir under /home/ftw/. A
+# fixed /opt path is immune to whatever the user names their account.
 #
-# Earlier builds (commit 6aa5a9d, "trim image") wrote to
-# /home/pi/ on a now-disproved theory that a rename would move
-# files. On real hardware, /home/pi/ ended up as a stale
-# root-owned directory and ftw-firstboot died with
-# "cd: /home/ftw/forty-two-watts: No such file or directory".
+# Self-update stays correct across this move: the ftw-updater sidecar
+# derives its compose path from ${PWD} at `docker compose up -d` time
+# (see docker-compose.yml) and firstboot.sh cd's here, so the updater
+# records /opt/forty-two-watts automatically. COMPOSE_PROJECT_NAME
+# stays the literal `forty-two-watts`.
 #
-# data/ is chowned 100:101 because the in-container ftw user
-# (alpine `adduser -S`) needs to own it before SQLite can create
-# state.db. Same UID/GID mapping as scripts/install.sh.
-install -d -m 0755                    "${ROOTFS_DIR}/home/ftw/forty-two-watts"
-install -d -m 0755 -o 100 -g 101      "${ROOTFS_DIR}/home/ftw/forty-two-watts/data"
-install -d -m 0755                    "${ROOTFS_DIR}/home/ftw/forty-two-watts/mosquitto"
-install -d -m 0755                    "${ROOTFS_DIR}/home/ftw/forty-two-watts/mosquitto/config"
+# data/ is owned 100:101 because the in-container ftw user (alpine
+# `adduser -S`) needs to own it before SQLite can create state.db.
+# Same UID/GID mapping as scripts/install.sh.
+install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts"
+install -d -m 0755 -o 100 -g 101      "${ROOTFS_DIR}/opt/forty-two-watts/data"
+install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto"
+install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto/config"
 # Calendar (#498) needs no extra dirs/files: 42W's CalDAV server is in-process
 # (no sidecar) and persists in state.db under ./data.
 
-install -m 0644 files/docker-compose.yml    "${ROOTFS_DIR}/home/ftw/forty-two-watts/docker-compose.yml"
-install -m 0644 files/mosquitto.conf        "${ROOTFS_DIR}/home/ftw/forty-two-watts/mosquitto/config/mosquitto.conf"
+install -m 0644 files/docker-compose.yml    "${ROOTFS_DIR}/opt/forty-two-watts/docker-compose.yml"
+install -m 0644 files/mosquitto.conf        "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto/config/mosquitto.conf"
 
 install -m 0755 files/firstboot.sh          "${ROOTFS_DIR}/usr/local/sbin/ftw-firstboot"
 install -m 0644 files/firstboot.service     "${ROOTFS_DIR}/etc/systemd/system/ftw-firstboot.service"
 
-# Sudoers fragment for ftw — without stage2, no `010_pi-nopasswd`
-# file gets installed, so the ftw user has no admin rights at all.
-# Mirror the pi-OS-Lite default of passwordless sudo for the
-# admin user; operators expect to be able to SSH in and diagnose
-# without remembering a password they probably overrode in Imager.
+# Sudoers fragment for ftw. Stage2 installs an `010_<user>-nopasswd` for
+# the build-time FIRST_USER (ftw); we drop this belt-and-suspenders copy
+# so the default ftw recovery account keeps passwordless sudo even if a
+# pi-gen internal changes. A user who renames the account via Imager gets
+# their NOPASSWD sudo from cloud-init's `users:` directive instead.
 install -m 0440 files/010_ftw-nopasswd      "${ROOTFS_DIR}/etc/sudoers.d/010_ftw-nopasswd"
 
-# Chown everything to ftw so `ls -la` and edit-without-sudo work
-# when an operator SSHes in. data/ keeps its 100:101 ownership for
-# the in-container user. Run inside chroot so /etc/passwd resolves
-# `ftw` correctly.
+# /opt/forty-two-watts stays root-owned (operators edit via passwordless
+# sudo); data/ keeps its 100:101 ownership for the in-container user,
+# already set numerically by `install -d -o 100 -g 101` above.
+# Mask the Raspberry Pi OS first-run user wizard. On a headless,
+# cloud-init-provisioned image it is both redundant and fatal: the `ftw`
+# account (or the Imager-customised account) already exists, yet
+# userconfig.service still runs `userconf-service`, which blocks on a
+# `whiptail "Please enter new username:"` dialog on tty8. It is
+# Type=oneshot WantedBy=multi-user.target, so that never-completing dialog
+# wedges multi-user.target — and with it ftw-firstboot.service (ordered
+# After=cloud-final.service, itself queued behind the wizard) — so the
+# stack is never pulled and the dashboard never comes up. Masking it lets
+# a no-customisation flash boot through to multi-user.target.
 on_chroot << 'EOF'
-chown -R ftw:ftw /home/ftw/forty-two-watts
-chown 100:101 /home/ftw/forty-two-watts/data
 systemctl enable ftw-firstboot.service
+systemctl mask userconfig.service
 EOF

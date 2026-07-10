@@ -1,10 +1,16 @@
 package caldavserver
 
 import (
+	"log/slog"
 	"time"
 
 	"github.com/emersion/go-ical"
 	"github.com/emersion/go-webdav/caldav"
+)
+
+const (
+	maxExpansionWindow     = 366 * 24 * time.Hour
+	maxExpandedOccurrences = 10000
 )
 
 // findExpand walks a CalendarCompRequest tree for a CALDAV:expand directive.
@@ -86,6 +92,13 @@ type eventGroup struct {
 // generated instance. Non-event components (e.g. VTIMEZONE) and non-recurring
 // events are preserved verbatim. Returns nil when no component remains.
 func expandCalendar(cal *ical.Calendar, start, end time.Time) *ical.Calendar {
+	// CalDAV clients control the REPORT window. Bound it before recurrence
+	// math so an authenticated but buggy/hostile client cannot request decades
+	// of expansion and exhaust a Pi. The planner's configured horizon is at
+	// most one year, so this does not truncate an in-scope query.
+	if end.After(start.Add(maxExpansionWindow)) {
+		end = start.Add(maxExpansionWindow)
+	}
 	loc := start.Location()
 	if loc == nil {
 		loc = time.UTC
@@ -146,6 +159,18 @@ func expandGroup(out *ical.Calendar, g *eventGroup, start, end time.Time, loc *t
 
 	if g.master != nil {
 		if rset, err := g.master.RecurrenceSet(loc); err == nil && rset != nil {
+			if rule := rset.GetRRule(); rule != nil {
+				freq := rule.OrigOptions.Freq.String()
+				if freq == "SECONDLY" || freq == "MINUTELY" {
+					// Sub-hourly recurrence has no useful planner meaning and can
+					// generate hundreds of thousands of instances in the normal
+					// horizon. Preserve the master unexpanded for calendar clients,
+					// while keeping the planner from materialising the flood.
+					slog.Warn("caldav: refusing sub-hourly recurrence expansion", "frequency", freq)
+					out.Children = append(out.Children, g.master)
+					return
+				}
+			}
 			ev := ical.Event{Component: g.master}
 			st0, errS := ev.DateTimeStart(loc)
 			en0, errE := ev.DateTimeEnd(loc)
@@ -154,7 +179,12 @@ func expandGroup(out *ical.Calendar, g *eventGroup, start, end time.Time, loc *t
 				dur = en0.Sub(st0)
 			}
 			allDay := isAllDay(g.master)
-			for _, occ := range rset.Between(start, end, true) {
+			occurrences := rset.Between(start, end, true)
+			if len(occurrences) > maxExpandedOccurrences {
+				slog.Warn("caldav: recurrence expansion capped", "count", len(occurrences), "cap", maxExpandedOccurrences)
+				occurrences = occurrences[:maxExpandedOccurrences]
+			}
+			for _, occ := range occurrences {
 				occ = occ.In(loc)
 				k := occ.UTC().Unix()
 				if ov, ok := overrides[k]; ok {

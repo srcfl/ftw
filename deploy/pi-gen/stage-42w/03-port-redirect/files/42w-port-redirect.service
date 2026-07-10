@@ -11,7 +11,7 @@ Before=network.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/42w-port-redirect.nft
-# Idempotent — the rules file flushes the 42w_redirect table at the
+# Idempotent — the rules file flushes the ftw_redirect table at the
 # top before re-installing, so a manual `systemctl restart` doesn't
 # stack duplicates.
 ExecReload=/usr/sbin/nft -f /etc/42w-port-redirect.nft

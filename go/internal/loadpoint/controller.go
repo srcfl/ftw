@@ -83,6 +83,14 @@ type Controller struct {
 	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
+	// manualIdleSince[id] is when a loadpoint with an active manual hold
+	// first observed the vehicle "not requesting current" this idle spell.
+	// Once it has stayed not-requesting for SessionCompletionTimeout the
+	// controller auto-releases the hold (the car is full / declined), so
+	// the operator doesn't have to press Stop. Reset whenever the car
+	// requests again or the hold goes away. Guarded by manualIdleMu.
+	manualIdleMu    sync.Mutex
+	manualIdleSince map[string]time.Time
 	// manualHoldSaver, if non-nil, persists operator (Persistent) manual
 	// holds so they survive a reboot / firmware update and the EV keeps
 	// charging across the restart. Called on Set (persistent) and Clear.
@@ -1067,6 +1075,35 @@ func (c *Controller) ClearManualHold(id string) {
 	if saver != nil && existed {
 		saver(id, ManualHold{}, true)
 	}
+	// The auto-release idle timer is meaningless without a hold.
+	c.resetManualIdle(id)
+}
+
+// manualHoldIdleFor returns how long the loadpoint has continuously seen
+// the vehicle "not requesting current" while a manual hold is active,
+// starting the timer on the first such tick. Used to debounce the
+// auto-release of a hold once the car is full / declines.
+func (c *Controller) manualHoldIdleFor(id string, now time.Time) time.Duration {
+	c.manualIdleMu.Lock()
+	defer c.manualIdleMu.Unlock()
+	if c.manualIdleSince == nil {
+		c.manualIdleSince = map[string]time.Time{}
+	}
+	since, ok := c.manualIdleSince[id]
+	if !ok {
+		c.manualIdleSince[id] = now
+		return 0
+	}
+	return now.Sub(since)
+}
+
+// resetManualIdle clears the auto-release idle timer for a loadpoint —
+// called when the vehicle resumes requesting current or the hold is
+// removed, so the next idle spell is timed from a clean start.
+func (c *Controller) resetManualIdle(id string) {
+	c.manualIdleMu.Lock()
+	delete(c.manualIdleSince, id)
+	c.manualIdleMu.Unlock()
 }
 
 // SetManualHoldSaver wires the persistence callback for operator manual
@@ -1193,6 +1230,28 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	// by the wake HTTP roundtrip.
 	if sample.PowerW >= DeliveringW && !wasDelivering {
 		go c.wakeVehicleAuto(context.Background(), lpCfg.ID, "delivering_edge")
+	}
+
+	// Auto-release an operator manual hold once the vehicle has stopped
+	// requesting current (it hit its own charge limit / is full). Without
+	// this a "Start" hold pins the wallbox at a fixed amperage and the
+	// loadpoint shows "charging" at 0 W until the operator presses Stop.
+	// Debounced by SessionCompletionTimeout so a brief ramp/handshake dip
+	// — or a car that hasn't woken yet — doesn't drop the hold early. Only
+	// trips for drivers that distinguish "explicitly not requesting" from
+	// "throttled to 0" (RequestActive); others leave it true and never
+	// auto-release. Done before the dispatch branch below so the freed
+	// tick falls straight through to automatic (surplus/plan) dispatch.
+	if _, held := c.GetManualHold(lpCfg.ID, now); held {
+		if !sample.RequestActive {
+			if c.manualHoldIdleFor(lpCfg.ID, now) >= SessionCompletionTimeout {
+				slog.Info("loadpoint manual hold auto-released — vehicle stopped requesting current (full/declined)",
+					"lp", lpCfg.ID, "idle", SessionCompletionTimeout)
+				c.ClearManualHold(lpCfg.ID)
+			}
+		} else {
+			c.resetManualIdle(lpCfg.ID)
+		}
 	}
 
 	cmd := map[string]any{"action": "ev_set_current"}

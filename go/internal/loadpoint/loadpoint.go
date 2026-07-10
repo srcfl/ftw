@@ -612,6 +612,49 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	if !lp.pluggedIn {
 		return false
 	}
+	reanchorSoCLocked(lp, socPct)
+	return true
+}
+
+// AnchorVehicleSoC re-anchors the inferred SoC to a trusted vehicle BMS
+// reading. It is the automatic counterpart to the operator's manual
+// SetCurrentSoC: the control loop calls it every tick with the SoC from
+// the vehicle driver paired to this loadpoint (e.g. Tesla via
+// TeslaBLEProxy), so the dashboard's current_soc and the planner's
+// InitialSoCPct both reflect BMS ground truth instead of the
+// delivered-Wh estimate, which is blind to the real pack (Easee and
+// other chargers can't read the car).
+//
+// Caller is responsible for the trust gate — only call with a reading
+// that is online, fresh, and matched to this loadpoint
+// (telemetry.PickBestVehicleForLoadpoint enforces this). Re-anchoring
+// every tick keeps current_soc locked to the latest BMS value; between
+// refreshes the inference advances from the last anchor on delivered Wh,
+// and if the vehicle goes BLE-silent (caller stops anchoring) the
+// estimate continues from the last known BMS truth rather than snapping
+// back to the plug-in guess.
+//
+// Returns false for unknown IDs or when the loadpoint is unplugged.
+func (m *Manager) AnchorVehicleSoC(id string, socPct float64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if !lp.pluggedIn {
+		return false
+	}
+	reanchorSoCLocked(lp, socPct)
+	return true
+}
+
+// reanchorSoCLocked re-bases the session anchor so the CURRENT estimate
+// equals socPct, then recomputes current_soc from it. Caller must hold
+// m.mu and have verified the loadpoint is plugged in. Shared by the
+// manual (SetCurrentSoC) and automatic (AnchorVehicleSoC) correction
+// paths so they stay arithmetically identical.
+func reanchorSoCLocked(lp *loadpointRuntime, socPct float64) {
 	if socPct < 0 {
 		socPct = 0
 	}
@@ -634,7 +677,6 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	lp.sessionPluginSoCPct = anchor
 	lp.currentSoCPct = estimateSoCPct(anchor, lp.deliveredWhSession, lp.VehicleCapacityWh)
 	lp.updatedAtMs = time.Now().UnixMilli()
-	return true
 }
 
 func (lp *loadpointRuntime) snapshot() State {

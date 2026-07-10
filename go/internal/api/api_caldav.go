@@ -1,6 +1,9 @@
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // handleCalDAVStatus renders the calendar-constraints client's diagnostic
 // snapshot (issue #498): whether it's enabled, whether the CalDAV server is
@@ -26,9 +29,16 @@ func (s *Server) handleCalDAVStatus(w http.ResponseWriter, r *http.Request) {
 // and is gated by owner-access auth like the rest of /api/* (kept separate from
 // the frequently-polled /status so the secret isn't read on every poll).
 func (s *Server) handleCalDAVCredentials(w http.ResponseWriter, r *http.Request) {
+	// Unlike the ordinary read APIs, this response contains a reusable secret.
+	// Do not use writeJSON: its wildcard CORS header would let any website open
+	// in a LAN browser read the managed CalDAV password through the LAN auth
+	// bypass. Also prevent browser/proxy caching.
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if s.deps.CalDAV == nil {
-		writeJSON(w, 200, map[string]any{"managed": false})
+		_ = json.NewEncoder(w).Encode(map[string]any{"managed": false})
 		return
 	}
-	writeJSON(w, 200, s.deps.CalDAV.Credentials())
+	_ = json.NewEncoder(w).Encode(s.deps.CalDAV.Credentials())
 }

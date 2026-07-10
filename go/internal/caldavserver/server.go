@@ -31,6 +31,8 @@ type Server struct {
 	httpSrv *http.Server
 }
 
+const maxRequestBytes = 4 << 20 // calendar objects / REPORT bodies; bound Pi memory use
+
 // Option configures optional server behaviour without breaking the core
 // New / NewHandler signatures.
 type Option func(*options)
@@ -60,8 +62,15 @@ func buildOptions(opts []Option) options {
 // persistence (pass *state.Store for durability, or nil for in-memory).
 func New(addr, username, password, principal string, calendarPaths []string, store Store, opts ...Option) *Server {
 	return &Server{
-		addr:    addr,
-		httpSrv: &http.Server{Addr: addr, Handler: NewHandler(username, password, principal, calendarPaths, store, opts...), ReadHeaderTimeout: 10 * time.Second},
+		addr: addr,
+		httpSrv: &http.Server{
+			Addr:              addr,
+			Handler:           NewHandler(username, password, principal, calendarPaths, store, opts...),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		},
 	}
 }
 
@@ -74,7 +83,7 @@ func NewHandler(username, password, principal string, calendarPaths []string, st
 		mux.Handle("/feed/", basicAuth(username, password, newFeedHandler(o.feeds, store)))
 	}
 	mux.Handle("/", basicAuth(username, password, &caldav.Handler{Backend: newBackend(principal, calendarPaths, store)}))
-	return mux
+	return http.MaxBytesHandler(mux, maxRequestBytes)
 }
 
 // basicAuth gates the handler with a constant-time Basic-auth check. An empty

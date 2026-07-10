@@ -2538,21 +2538,19 @@
   }
 
   // EV modal sub-elements held across refreshes. The status table is
-  // updated in place on every poll. The schedule section is mounted
-  // exactly once per (modal-open × LP) and is NEVER detached on a poll
-  // — detaching+reattaching a focused <input> blurs it mid-keystroke
-  // and resets caret position. After Save/Clear we set
-  // schedNeedsRebuild=true so the next poll picks up the new
-  // authoritative server state.
+  // updated in place on every poll. The tabbed control (PV charging /
+  // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
+  // and is NEVER detached on a poll — detaching+reattaching a focused
+  // <input> blurs it mid-keystroke and resets caret position. After a
+  // Save/Clear/Start/Stop we set the matching *NeedsRebuild flag so the
+  // next poll rebuilds from the new authoritative server state. The
+  // active tab persists across rebuilds via evActiveTab.
   var statusTableEl = null;
-  var schedSectionEl = null;
-  var schedLpId = null;
+  var evTabsEl = null;
+  var evTabsLpId = null;
   var schedNeedsRebuild = false;
-  // Manual amp-slider override section — same once-per-LP lifecycle as
-  // the schedule section so the slider keeps focus/value between polls.
-  var manualSectionEl = null;
-  var manualLpId = null;
   var manualNeedsRebuild = false;
+  var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2596,8 +2594,8 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
-        schedSectionEl = null;
-        schedLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
         return;
       }
       // Status table: replace in place so the rest of the modal body
@@ -2656,65 +2654,47 @@
         }
       }
       if (matched) {
-        // Build schedule exactly once per LP. Polling never rebuilds
-        // it — inputs keep their focus, value and caret position. Only
-        // a Save / Clear (which sets schedNeedsRebuild) or switching
-        // to a different LP (planet) triggers a fresh build.
-        var lpChanged = schedSectionEl == null || schedLpId !== matched.id;
-        if (lpChanged || schedNeedsRebuild) {
-          if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-            evModalBody.removeChild(schedSectionEl);
+        // Build the tabbed control (PV charging / Manual / Scheduled)
+        // exactly once per LP. Polling never rebuilds it — inputs keep
+        // focus/value/caret and the active tab persists. Only a
+        // Save/Clear (schedNeedsRebuild) or Start/Stop/Set-SoC
+        // (manualNeedsRebuild), or switching LP (planet), forces a build.
+        var lpChanged = evTabsEl == null || evTabsLpId !== matched.id;
+        if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
+          if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+            evModalBody.removeChild(evTabsEl);
           }
-          schedSectionEl = buildScheduleControl(matched, siteHasPV(status));
-          schedLpId = matched.id;
+          evTabsEl = buildEvTabbedControl(matched, siteHasPV(status));
+          evTabsLpId = matched.id;
           schedNeedsRebuild = false;
-          evModalBody.appendChild(schedSectionEl);
-        } else if (schedSectionEl.parentNode !== evModalBody) {
-          // Modal was previously closed: body got wiped but our
-          // cached section is still valid — re-attach.
-          evModalBody.appendChild(schedSectionEl);
-        }
-        // Manual amp-slider override — built once per LP (or after a
-        // Start/Stop). Mounted above the schedule so "charge now"
-        // controls sit closest to the live status.
-        var manualChanged = manualSectionEl == null || manualLpId !== matched.id;
-        if (manualChanged || manualNeedsRebuild) {
-          if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
-            evModalBody.removeChild(manualSectionEl);
-          }
-          manualSectionEl = buildManualControl(matched);
-          manualLpId = matched.id;
           manualNeedsRebuild = false;
-          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
-        } else if (manualSectionEl.parentNode !== evModalBody) {
-          evModalBody.insertBefore(manualSectionEl, schedSectionEl);
+          evModalBody.appendChild(evTabsEl);
+        } else if (evTabsEl.parentNode !== evModalBody) {
+          // Modal was previously closed: body got wiped but our cached
+          // section is still valid — re-attach.
+          evModalBody.appendChild(evTabsEl);
         }
       } else {
-        if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-          evModalBody.removeChild(schedSectionEl);
+        if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+          evModalBody.removeChild(evTabsEl);
         }
-        if (manualSectionEl && manualSectionEl.parentNode === evModalBody) {
-          evModalBody.removeChild(manualSectionEl);
-        }
-        schedSectionEl = null;
-        schedLpId = null;
-        manualSectionEl = null;
-        manualLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
   }
 
-  // buildManualControl renders the Tesla-style manual override: an amp
-  // slider (range = the charger's min/max charge current) plus Start /
+  // buildManualChargeSection renders the Tesla-style manual override: an
+  // amp slider (range = the charger's min/max charge current) plus Start /
   // Stop. Start pins a persistent manual hold at the slider's amps,
   // which overrides surplus_only and the plan (the fuse clamp still
   // applies); Stop clears the hold and drops back to whatever mode the
   // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
   // is sent as watts (power_w = A × phases × voltage); the driver
   // converts back to amps given the wallbox it's talking to.
-  function buildManualControl(lp) {
+  function buildManualChargeSection(lp) {
     var phases = (lp && lp.phases) || 3;
     var voltage = (lp && lp.voltage_v) || 230;
     var perA = phases * voltage; // watts per amp
@@ -2859,72 +2839,104 @@
       });
     });
 
-    // ---- State of charge (manual correction) ----
-    // The SoC is inferred from delivered energy when there's no vehicle BMS
-    // reading, so it can drift. Let the operator correct it via the existing
-    // POST /api/loadpoints/{id}/soc (re-anchors + replans). Only meaningful
-    // during an active session, so gate the editor on plugged_in.
-    var socBox = document.createElement("div");
-    socBox.style.marginTop = "0.75rem";
-    socBox.style.paddingTop = "0.6rem";
-    socBox.style.borderTop = "1px solid var(--line)";
+    return box;
+  }
 
-    var socEyebrow = document.createElement("div");
-    socEyebrow.textContent = "State of charge";
-    socEyebrow.style.fontFamily = "var(--mono)";
-    socEyebrow.style.fontSize = "0.7rem";
-    socEyebrow.style.letterSpacing = "0.18em";
-    socEyebrow.style.textTransform = "uppercase";
-    socEyebrow.style.color = "var(--text-dim)";
-    socEyebrow.style.marginBottom = "0.45rem";
-    socBox.appendChild(socEyebrow);
+  // sliderHeader builds a "LABEL ............ value" row (mono uppercase
+  // label on the left, mono accent value on the right) that sits above a
+  // full-width slider, so the Current-charge and Target sliders read as a
+  // consistent pair. Returns the row plus the value span — the caller
+  // wires the slider's input event to update value.textContent.
+  function sliderHeader(labelText, valueText) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.alignItems = "baseline";
+    row.style.marginBottom = "0.3rem";
+    var lbl = document.createElement("span");
+    lbl.textContent = labelText;
+    lbl.style.fontFamily = "var(--mono)";
+    lbl.style.fontSize = "0.68rem";
+    lbl.style.letterSpacing = "0.14em";
+    lbl.style.textTransform = "uppercase";
+    lbl.style.color = "var(--text-dim)";
+    var val = document.createElement("span");
+    val.textContent = valueText;
+    val.style.fontFamily = "var(--mono)";
+    val.style.fontSize = "0.95rem";
+    val.style.color = "var(--accent-e)";
+    row.appendChild(lbl);
+    row.appendChild(val);
+    return { row: row, value: val };
+  }
+
+  // fullWidthSlider returns a 0–100 whole-percent range input spanning the
+  // modal width, wired to update a value span on drag.
+  function fullWidthSlider(initVal, valueSpan) {
+    var s = document.createElement("input");
+    s.type = "range";
+    s.min = "0"; s.max = "100"; s.step = "1";
+    s.value = String(initVal);
+    s.style.width = "100%";
+    s.style.margin = "0";
+    s.style.accentColor = "var(--accent-e)";
+    s.style.cursor = "pointer";
+    s.addEventListener("input", function () { valueSpan.textContent = s.value + "%"; });
+    return s;
+  }
+
+  // buildSoCSection — the car's CURRENT charge (a planning input: the
+  // planner sizes the grid/PV gap to the target from it). Lives in the
+  // Scheduled tab, above the target. The estimate drifts when there's no
+  // vehicle BMS reading, so the operator can correct it via
+  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Editing is gated
+  // on plugged_in.
+  function buildSoCSection(lp) {
+    var socBox = document.createElement("div");
+    socBox.style.marginTop = "0.25rem";
 
     var curSoc = (lp && lp.current_soc_pct != null) ? lp.current_soc_pct : null;
     var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
+    var sourceNote = socSource === "vehicle"
+      ? "Live from the car — drag only to correct drift."
+      : socSource === "inferred"
+        ? "Estimated from energy delivered — drag to set the real value."
+        : "Drag to set the car's current charge.";
+
+    var hdr = sliderHeader("Current charge", curSoc != null ? Math.round(curSoc) + "%" : "—");
+    socBox.appendChild(hdr.row);
 
     if (lp && lp.plugged_in) {
-      var socRow = document.createElement("div");
-      socRow.style.display = "flex";
-      socRow.style.alignItems = "center";
-      socRow.style.gap = "0.5rem";
+      var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
+      var socInput = fullWidthSlider(initSoc, hdr.value);
+      socBox.appendChild(socInput);
 
-      var socInput = document.createElement("input");
-      socInput.type = "number";
-      socInput.min = "0"; socInput.max = "100"; socInput.step = "0.1";
-      socInput.value = (curSoc != null) ? curSoc.toFixed(1) : "";
-      socInput.style.width = "5.5em";
-      socInput.style.fontFamily = "var(--mono)";
-
-      var pctLabel = document.createElement("span");
-      pctLabel.textContent = "%";
-      pctLabel.style.color = "var(--text-dim)";
+      var socStatus = document.createElement("small");
+      socStatus.style.display = "block";
+      socStatus.style.color = "var(--text-dim)";
+      socStatus.style.marginTop = "0.4rem";
+      socStatus.style.minHeight = "1em";
+      socStatus.textContent = sourceNote;
+      socBox.appendChild(socStatus);
 
       var socSetBtn = document.createElement("button");
       socSetBtn.type = "button";
-      socSetBtn.textContent = "Set SoC";
-      socSetBtn.style.padding = "0.35rem 0.7rem";
+      socSetBtn.textContent = "Set current charge";
+      socSetBtn.style.padding = "0.35rem 0.8rem";
+      socSetBtn.style.marginTop = "0.4rem";
       socSetBtn.style.border = "1px solid var(--line)";
       socSetBtn.style.borderRadius = "4px";
       socSetBtn.style.cursor = "pointer";
       socSetBtn.style.background = "transparent";
       socSetBtn.style.color = "var(--fg)";
-
-      socRow.appendChild(socInput);
-      socRow.appendChild(pctLabel);
-      socRow.appendChild(socSetBtn);
-      socBox.appendChild(socRow);
-
-      var socStatus = document.createElement("small");
-      socStatus.style.display = "block";
-      socStatus.style.color = "var(--text-dim)";
-      socStatus.style.marginTop = "0.35rem";
-      socStatus.style.minHeight = "1em";
-      socStatus.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
-        (socSource ? " (" + socSource + ")" : "") + ". Correct it if the car's real SoC differs.";
-      socBox.appendChild(socStatus);
+      var socBtnRow = document.createElement("div");
+      socBtnRow.style.display = "flex";
+      socBtnRow.style.justifyContent = "flex-end";
+      socBtnRow.appendChild(socSetBtn);
+      socBox.appendChild(socBtnRow);
 
       socSetBtn.addEventListener("click", function () {
-        var v = parseFloat(socInput.value);
+        var v = parseInt(socInput.value, 10);
         if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
         socSetBtn.disabled = true;
         socStatus.textContent = "Saving…";
@@ -2936,7 +2948,7 @@
           .then(function (res) {
             socSetBtn.disabled = false;
             if (res.ok && res.body && res.body.ok) {
-              socStatus.textContent = "Saved — SoC set to " + v.toFixed(1) + "%. Replanning.";
+              socStatus.textContent = "Saved — replanning.";
               manualNeedsRebuild = true;
             } else {
               socStatus.textContent = (res.body && res.body.error) || "Set failed.";
@@ -2944,63 +2956,25 @@
           }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
       });
     } else {
+      hdr.value.style.color = "var(--text-dim)";
       var socMuted = document.createElement("small");
       socMuted.style.display = "block";
       socMuted.style.color = "var(--text-dim)";
-      socMuted.textContent = "Current: " + (curSoc != null ? curSoc.toFixed(1) + "%" : "—") +
-        (socSource ? " (" + socSource + ")" : "") + " · plug in to set manually.";
+      socMuted.textContent = "Plug in to set the car's current charge.";
       socBox.appendChild(socMuted);
     }
 
-    box.appendChild(socBox);
-
-    return box;
+    return socBox;
   }
 
-  // buildScheduleControl renders the persistent charging schedule
-  // section: target SoC + time (local; converted to UTC for the wire),
-  // recurring checkbox, and the bat-SoC surplus-unlock threshold.
-  // The backend persists this across restarts (state.config), rolls the
-  // deadline forward each day when Recurring is set, and arms the
-  // surplus-grab whenever the home battery sits at or above the
-  // threshold (with 5 pp release hysteresis).
-  function buildScheduleControl(lp, hasPV) {
-    var sched = (lp && lp.schedule) || {};
-    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the
-    // browser's local zone. The UI shows local time everywhere;
-    // we marshal back to UTC minutes on save.
-    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
-    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
-    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
-    var initRec = !!sched.recurring;
-    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
-    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
-    // The threshold input retains the last-used value (or defaults to 50)
-    // so unchecking + re-checking doesn't wipe the user's pick.
-    var initSurplus = savedUnlock > 0;
-    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
-
-    // Outer wrapper holds two distinct sections:
-    //  1. PV mode (surplus-only toggle) — saves immediately on click
-    //  2. Schedule (target SoC + deadline + bat-SoC unlock) — Save button
-    // They're separated so it's obvious which controls the Save button
-    // owns. Earlier we kept the surplus toggle inside the Schedule
-    // section and operators couldn't tell whether Save covered it.
-    var wrap = document.createElement("div");
-    wrap.style.marginTop = "0.75rem";
-    wrap.style.paddingTop = "0.6rem";
-    wrap.style.borderTop = "1px solid var(--line)";
-
-    // ---- Section 1: PV mode (surplus-only) ----
-    // Per-loadpoint hard flag, *independent* of any schedule. When on,
-    // dispatch refuses to import grid for this loadpoint regardless of
-    // what the MPC plans. Operators can run with this alone (no target,
-    // no deadline — just "harvest PV when there's enough") or layer a
-    // schedule on top below.
+  // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
+  // charging tab). A hard flag, *independent* of any schedule: when on,
+  // dispatch refuses to import grid for this loadpoint regardless of what
+  // the MPC plans. Operators can run with this alone ("harvest PV when
+  // there's enough") or layer a schedule on top. Saves on click.
+  function buildPVModeSection(lp) {
     var soBox = document.createElement("div");
-    soBox.style.marginBottom = "0.8rem";
-    soBox.style.paddingBottom = "0.7rem";
-    soBox.style.borderBottom = "1px solid var(--line)";
+    soBox.style.marginTop = "0.25rem";
 
     var soEyebrow = document.createElement("div");
     soEyebrow.textContent = "PV Mode";
@@ -3037,7 +3011,6 @@
 
     soBox.appendChild(soWrap);
     soBox.appendChild(soStatus);
-    wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
       // Surface the surplus-only ↔ schedule interaction immediately on
@@ -3065,25 +3038,38 @@
       });
     });
 
-    // ---- Section 2: Schedule ----
+    return soBox;
+  }
+
+  // buildScheduleSection — target SoC by a deadline + recurring + the
+  // bat-SoC surplus-unlock threshold (Scheduled tab). Persisted across
+  // restarts; the backend rolls the deadline forward daily when Recurring
+  // is set and arms the surplus-grab when the home battery is at/above the
+  // threshold (5 pp release hysteresis).
+  function buildScheduleSection(lp, hasPV) {
+    var sched = (lp && lp.schedule) || {};
+    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
+    // local zone. The UI shows local time everywhere; we marshal back to
+    // UTC minutes on save.
+    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
+    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var initRec = !!sched.recurring;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
+    // The threshold input retains the last-used value (or defaults to 50)
+    // so unchecking + re-checking doesn't wipe the user's pick.
+    var initSurplus = savedUnlock > 0;
+    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+
+    // Hairline divider separating the current-charge slider above from the
+    // target + deadline controls below. The tab is already named
+    // "Scheduled", so no section eyebrow/explainer here — the field labels
+    // carry the meaning.
     var box = document.createElement("div");
-
-    var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Schedule (grid charging)";
-    eyebrow.style.fontFamily = "var(--mono)";
-    eyebrow.style.fontSize = "0.7rem";
-    eyebrow.style.letterSpacing = "0.18em";
-    eyebrow.style.textTransform = "uppercase";
-    eyebrow.style.color = "var(--text-dim)";
-    eyebrow.style.marginBottom = "0.55rem";
-    box.appendChild(eyebrow);
-
-    var schedExplainer = document.createElement("div");
-    schedExplainer.textContent = "Target SoC by a deadline. The planner uses cheap grid hours to fill the gap PV can't cover.";
-    schedExplainer.style.fontSize = "0.72rem";
-    schedExplainer.style.color = "var(--text-dim)";
-    schedExplainer.style.marginBottom = "0.5rem";
-    box.appendChild(schedExplainer);
+    box.style.marginTop = "0.9rem";
+    box.style.paddingTop = "0.9rem";
+    box.style.borderTop = "1px solid var(--line)";
 
     // Schedule is persistent loadpoint state — operators can configure
     // tomorrow morning's target tonight before plugging in. Show a
@@ -3173,7 +3159,6 @@
       return wrap;
     }
 
-    var socWrap = numInput(initSoC, 0, 100, 5, "%");
     var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
 
     var timeInp = document.createElement("input");
@@ -3206,13 +3191,17 @@
       return wrap;
     }
 
-    var recWrap = checkbox(initRec, "Recurring (every day)");
-    var surWrap = checkbox(initSurplus && !!hasPV, "Surplus charge from PV");
+    var recWrap = checkbox(initRec, "Repeat daily");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Also charge from PV surplus");
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    box.appendChild(row("Target SoC", socWrap));
-    box.appendChild(row("By", timeInp));
+    // Target: same header + full-width slider treatment as Current charge.
+    var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
+    box.appendChild(targetHdr.row);
+    var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    box.appendChild(targetSlider);
+    box.appendChild(row("Charge by", timeInp));
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -3233,9 +3222,9 @@
     unlockHint.style.color = "var(--text-dim)";
     unlockHint.style.marginTop = "0.2rem";
     unlockHint.style.marginBottom = "0.3rem";
-    unlockHint.textContent = "Always grab PV surplus when home battery ≥ threshold.";
+    unlockHint.textContent = "Only once the home battery is at or above this level.";
 
-    var thresholdRow = row("Threshold", unlockWrap);
+    var thresholdRow = row("Home battery ≥", unlockWrap);
 
     if (hasPV) {
       box.appendChild(unlockHint);
@@ -3314,7 +3303,7 @@
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
       var body = {
         schedule: {
-          soc_pct: Number(socWrap.input.value),
+          soc_pct: Number(targetSlider.value),
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
           surplus_unlock_bat_soc_pct: unlockVal,
@@ -3357,8 +3346,85 @@
       });
     });
 
-    wrap.appendChild(box);
-    return wrap;
+    return box;
+  }
+
+  // buildEvTabbedControl assembles the modal's three tabs and routes each
+  // section into the right one:
+  //   PV charging → surplus-only toggle
+  //   Manual      → amp slider + Start/Stop
+  //   Scheduled   → current-SoC correction (a planning input) + the
+  //                 target-SoC-by-deadline schedule
+  // The active tab persists across rebuilds via evActiveTab.
+  function buildEvTabbedControl(lp, hasPV) {
+    var container = document.createElement("div");
+    container.style.marginTop = "0.75rem";
+    container.style.paddingTop = "0.6rem";
+    container.style.borderTop = "1px solid var(--line)";
+
+    var tabBar = document.createElement("div");
+    tabBar.style.display = "flex";
+    tabBar.style.gap = "0.15rem";
+    tabBar.style.borderBottom = "1px solid var(--line)";
+    tabBar.style.marginBottom = "0.7rem";
+
+    var pvPanel = document.createElement("div");
+    pvPanel.appendChild(buildPVModeSection(lp));
+
+    var manualPanel = document.createElement("div");
+    manualPanel.appendChild(buildManualChargeSection(lp));
+
+    var schedPanel = document.createElement("div");
+    schedPanel.appendChild(buildSoCSection(lp));
+    schedPanel.appendChild(buildScheduleSection(lp, hasPV));
+
+    var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
+    var tabs = [
+      { id: "pv", label: "PV charging" },
+      { id: "manual", label: "Manual" },
+      { id: "scheduled", label: "Scheduled" },
+    ];
+    var tabBtns = {};
+
+    function selectTab(id) {
+      if (!panels[id]) { id = "pv"; }
+      evActiveTab = id;
+      for (var k in panels) { panels[k].style.display = (k === id) ? "" : "none"; }
+      tabs.forEach(function (t) {
+        var on = t.id === id;
+        var b = tabBtns[t.id];
+        b.style.color = on ? "var(--fg)" : "var(--text-dim)";
+        b.style.borderBottom = on ? "2px solid var(--accent-e)" : "2px solid transparent";
+        b.style.fontWeight = on ? "600" : "400";
+      });
+    }
+
+    tabs.forEach(function (t) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = t.label;
+      b.style.background = "transparent";
+      b.style.border = "none";
+      b.style.borderBottom = "2px solid transparent";
+      b.style.padding = "0.4rem 0.7rem";
+      b.style.marginBottom = "-1px";
+      b.style.cursor = "pointer";
+      b.style.fontFamily = "var(--mono)";
+      b.style.fontSize = "0.72rem";
+      b.style.letterSpacing = "0.08em";
+      b.style.textTransform = "uppercase";
+      b.addEventListener("click", function () { selectTab(t.id); });
+      tabBtns[t.id] = b;
+      tabBar.appendChild(b);
+    });
+
+    container.appendChild(tabBar);
+    container.appendChild(pvPanel);
+    container.appendChild(manualPanel);
+    container.appendChild(schedPanel);
+
+    selectTab(evActiveTab);
+    return container;
   }
 
   function utcMinsToLocalHHMM(min) {

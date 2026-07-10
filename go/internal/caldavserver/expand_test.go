@@ -234,3 +234,33 @@ func TestExpandRDATE(t *testing.T) {
 		t.Fatalf("RDATE should add a third instance (Jun 1, 2, 3), got %d", n)
 	}
 }
+
+func TestExpandRejectsSubHourlyRecurrence(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("fast", "Away", expAnchor, time.Minute)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=SECONDLY;COUNT=1000000"})
+	cal.Children = append(cal.Children, master.Component)
+
+	got := expandCalendar(cal, expStart, expEnd)
+	if got == nil || len(got.Events()) != 1 {
+		t.Fatalf("sub-hourly recurrence must remain one unexpanded master")
+	}
+	if got.Events()[0].Props.Get(ical.PropRecurrenceRule) == nil {
+		t.Fatal("unexpanded master lost its RRULE")
+	}
+}
+
+func TestExpansionWindowIsBounded(t *testing.T) {
+	cal := ical.NewCalendar()
+	master := mkEvent("long", "Away", expAnchor, time.Hour)
+	master.Props.Set(&ical.Prop{Name: ical.PropRecurrenceRule, Value: "FREQ=DAILY;COUNT=100000"})
+	cal.Children = append(cal.Children, master.Component)
+
+	got := expandCalendar(cal, expAnchor, expAnchor.AddDate(10, 0, 0))
+	if got == nil {
+		t.Fatal("bounded expansion unexpectedly returned nil")
+	}
+	if n := len(got.Events()); n > 367 {
+		t.Fatalf("ten-year query expanded to %d events, want at most one bounded year", n)
+	}
+}
