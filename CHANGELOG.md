@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.126.0
+
+### Minor Changes
+
+- 33d0608: Add a read-only NIBE S-series heat-pump driver (`drivers/nibe_local.lua`) that reads the pump's on-prem **Local REST API** directly over the LAN — no cloud, no OAuth, no internet round-trip. It auto-detects the device serial, pulls the full ~980-point register map in one bulk request, and emits every point into the long-format TS DB with **exact per-point divisor scaling** (the local API ships each point's unit + divisor, so no °C×10 heuristic). It reuses the same `hp_*` headline metrics as the MyUplink cloud driver (`hp_power_w`, `hp_hw_top_temp_c`, `hp_outdoor_temp_c`, `hp_used_power_w`, `hp_energy_consumed_kwh`, …), so the heating dashboard works with either source. The headline variable ids are auto-selected per pump from a built-in model/`firmwareId` profile map (generic S-series default, config-overridable), so one driver covers the whole S-series. Observe-only — it never writes to the pump.
+
+  Each emitted signal also carries its source **Modbus register id**, surfaced as a **Register** column in the per-driver "all signals" detail view. This is plumbed through a new optional 4th argument to `host.emit_metric(name, value, unit, register)` (generic for any driver with addressable points; drivers that omit it are unaffected).
+
+  Also adds **opt-in TLS certificate pinning** to the Lua HTTP host capability: `capabilities.http.tls_pin_sha256` pins an HTTPS endpoint's leaf certificate by SHA-256 fingerprint. This lets a driver reach a self-signed endpoint (the heat pump's local API) by trusting exactly one certificate — rejecting a swapped cert (LAN MITM) at the handshake — instead of disabling verification. Drivers without a pin are unaffected (standard system-root verification).
+
+- 33d0608: Network scan now probes port 8443 (HTTPS) in addition to Modbus 502 / MQTT 1883 /
+  HTTP 80. On-prem device APIs that only listen on HTTPS — notably the NIBE S-series
+  heat pump's Local REST API — now show up in Settings → Scan and the setup wizard.
+  Previously a NIBE pump was pingable but invisible to discovery because its API
+  port wasn't probed.
+- 33d0608: The heat-pump "all signals" detail view can now explain every signal.
+  `host.emit_metric` gained an optional 5th `title` argument — the device's own
+  human-readable point label — which threads through the telemetry snapshot and
+  `/api/drivers/{name}` (as `title`) so the UI can show a plain-language line under
+  each of the ~960 raw signals. The NIBE local driver passes each point's NIBE
+  title (e.g. "Frånluft (BT20)"); other drivers are unaffected (the arg defaults
+  to empty).
+
+### Patch Changes
+
+- e8b4bf4: Dashboard light-mode + heat-pump card fixes.
+
+  The live power/energy **charts now render correctly in light mode**. The canvas chrome (axis labels, gridlines, zero/now/hover lines, both tooltips' background+border+text, and the neutral "Load" line + legend swatch) was hard-coded for the dark theme, so it went invisible or wrong on a light background. The charts now resolve the CSS theme tokens (`--fg`, `--fg-dim`, `--fg-muted`, `--line`, `--ink-raised`, `--accent-e`) into concrete canvas colors per draw — cached and re-read when `data-theme` changes. Saturated data-series hues are unchanged.
+
+  The **heat-pump card now re-discovers newly-added drivers** without a manual reload. `heating.js` cached discovery once and never re-checked — and an empty result is truthy, so a site that discovered before its pump reported `hp_power_w` stayed blank. It now re-scans on first load and every 5 minutes, while steady-state polling still only touches already-known heat-pump drivers.
+
+  The heat-pump **"all signals" detail view now shows a Register column** — each signal's source Modbus register id (read from the metric snapshot the driver reports). Signals with no Modbus mapping show "—".
+
+  The **heat-pump card itself now themes in light mode**. It renders into a bare `.card`, whose base style uses the `--surface` token — which the light theme doesn't flip — so the card stayed dark on a light page while every other dashboard card themed correctly. It now uses the same `--ink-raised` palette as the rest.
+
 ## 0.125.0
 
 ### Minor Changes
