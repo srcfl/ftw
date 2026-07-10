@@ -1,6 +1,6 @@
 // Package scanner discovers devices on the local network by TCP-dialing
-// common energy-device ports (Modbus 502, MQTT 1883, HTTP 80) across all
-// /24 subnets attached to non-loopback, non-virtual interfaces.
+// common energy-device ports (Modbus 502, MQTT 1883, HTTP 80, HTTPS 8443)
+// across all /24 subnets attached to non-loopback, non-virtual interfaces.
 //
 // Used by the bootstrap wizard to help users find their inverters/meters
 // and by the settings UI for re-scanning.
@@ -21,7 +21,7 @@ import (
 type FoundDevice struct {
 	IP        string `json:"ip"`
 	Port      int    `json:"port"`
-	Protocol  string `json:"protocol"` // "modbus", "mqtt", "http"
+	Protocol  string `json:"protocol"` // "modbus", "mqtt", "http", "https"
 	LatencyMs int    `json:"latency_ms"`
 }
 
@@ -30,6 +30,7 @@ var wellKnownPorts = map[int]string{
 	502:  "modbus",
 	1883: "mqtt",
 	80:   "http",
+	8443: "https", // NIBE S-series Local REST API + other on-prem HTTPS device APIs
 }
 
 // Scan probes all /24 subnets on local interfaces for open ports.

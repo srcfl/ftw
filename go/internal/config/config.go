@@ -598,6 +598,16 @@ type ModbusConfig struct {
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+	// TLSPinSHA256, when set, pins the HTTPS server's leaf certificate to
+	// this SHA-256 fingerprint (hex; colons/whitespace ignored, case-
+	// insensitive). It is the SHA-256 over the DER certificate — identical
+	// to `openssl x509 -fingerprint -sha256`. Use it for HTTPS endpoints
+	// that present a self-signed certificate the system trust store cannot
+	// validate (e.g. a NIBE heat pump's local REST API). When set, normal
+	// chain/hostname verification is REPLACED by an exact fingerprint match
+	// for this driver only; when empty, standard verification against the
+	// system roots applies (unchanged for every existing HTTP driver).
+	TLSPinSHA256 string `yaml:"tls_pin_sha256,omitempty" json:"tls_pin_sha256,omitempty"`
 }
 
 // WSCapability grants WebSocket (ws://, wss://) access. Same allowlist

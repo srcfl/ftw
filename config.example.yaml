@@ -76,6 +76,25 @@ drivers:
   #       host: sid-os.local
   #       port: 1883
 
+  # NIBE S-series heat pump — read-only telemetry over the on-prem Local
+  # REST API (HTTPS + Basic auth). The pump presents a SELF-SIGNED cert, so
+  # pin it: tls_pin_sha256 is the cert SHA-256 fingerprint (the
+  # "fingeravtryck" shown in the myUplink app, or from `openssl s_client
+  # -connect <ip>:8443 | openssl x509 -fingerprint -sha256`). The host then
+  # trusts exactly that one cert — never a blanket insecure-skip-verify.
+  # Leave the pump in read-only mode (aidMode off); this driver never writes.
+  # - name: nibe
+  #   lua: drivers/nibe_local.lua
+  #   config:
+  #     host: 192.168.1.180
+  #     port: 8443
+  #     username: <local-api-username>
+  #     password: <local-api-password>
+  #   capabilities:
+  #     http:
+  #       allowed_hosts: ["192.168.1.180:8443"]
+  #       tls_pin_sha256: "<64-hex-char certificate fingerprint>"
+
 api:
   port: 8080
 

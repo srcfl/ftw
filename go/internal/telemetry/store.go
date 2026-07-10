@@ -219,6 +219,8 @@ type Store struct {
 type metricSnap struct {
 	Value     float64
 	Unit      string
+	Register  string
+	Title     string
 	UpdatedAt time.Time
 }
 
@@ -330,9 +332,12 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // Drained by the control loop via FlushSamples.
 // EmitMetric records a scalar metric. unit is an optional display unit
 // (e.g. "°C", "Hz", "kW") carried into the live snapshot so the UI can group
-// and label metrics; pass "" when unknown. Existing callers updated to the
-// 4-arg form.
-func (s *Store) EmitMetric(driver, name string, value float64, unit string) {
+// and label metrics; pass "" when unknown. register is an optional source
+// address (e.g. a Modbus register id) carried into the live snapshot for the
+// per-driver detail view; pass "" when not applicable. title is an optional
+// human-readable label (e.g. the device's own point title) surfaced as the
+// per-signal explanation in the detail view; pass "" when not available.
+func (s *Store) EmitMetric(driver, name string, value float64, unit, register, title string) {
 	if !finite(value) {
 		return
 	}
@@ -343,7 +348,7 @@ func (s *Store) EmitMetric(driver, name string, value float64, unit string) {
 	})
 	s.pendingMu.Unlock()
 	s.latestMu.Lock()
-	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit}
+	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit, Register: register, Title: title}
 	s.latestMu.Unlock()
 }
 
@@ -352,6 +357,8 @@ type MetricSnapshot struct {
 	Name      string    `json:"name"`
 	Value     float64   `json:"value"`
 	Unit      string    `json:"unit,omitempty"`
+	Register  string    `json:"register,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -372,6 +379,8 @@ func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
 			Name:      k[len(prefix):],
 			Value:     v.Value,
 			Unit:      v.Unit,
+			Register:  v.Register,
+			Title:     v.Title,
 			UpdatedAt: v.UpdatedAt,
 		})
 	}
