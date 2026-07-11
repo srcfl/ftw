@@ -133,6 +133,23 @@ services:
       - ./mosquitto/config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
 
+  # ---------------------------------------------------------------------
+  # Calendar (CalDAV) planner constraints (#498)
+  #
+  # No service here: 42W hosts its OWN in-process, pure-Go CalDAV server
+  # (emersion/go-webdav, MIT) inside the main container — there is no sidecar to
+  # run. With `caldav.enabled: true`, point a CalDAV account in your phone or
+  # desktop calendar app at http://<host-ip>:5232/<user>/energy/ and create
+  # events to drive the planner:
+  #   - "Away" / "Vacation"  → conserve battery while you're out.
+  #   - "Charge car 80%"     → have the EV ready by the event's start time.
+  # 42W also writes read-only "EVSE history" and "plan" calendars you subscribe
+  # to. Credentials are auto-managed and shown (with a QR) in Settings →
+  # Calendar. LAN-ONLY by design: never routed through the owner-access relay,
+  # and nothing forwards port 5232 to the internet unless you do so yourself.
+  # See docs/caldav-integration.md.
+  # ---------------------------------------------------------------------
+
 volumes:
   update-ipc:
   mosquitto-data:

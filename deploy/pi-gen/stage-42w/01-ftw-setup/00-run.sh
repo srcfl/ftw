@@ -76,6 +76,8 @@ install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts"
 install -d -m 0755 -o 100 -g 101      "${ROOTFS_DIR}/opt/forty-two-watts/data"
 install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto"
 install -d -m 0755                    "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto/config"
+# Calendar (#498) needs no extra dirs/files: 42W's CalDAV server is in-process
+# (no sidecar) and persists in state.db under ./data.
 
 install -m 0644 files/docker-compose.yml    "${ROOTFS_DIR}/opt/forty-two-watts/docker-compose.yml"
 install -m 0644 files/mosquitto.conf        "${ROOTFS_DIR}/opt/forty-two-watts/mosquitto/config/mosquitto.conf"

@@ -225,6 +225,35 @@ func (s *Service) Predict(t time.Time) float64 {
 	return s.activeModelLocked().Predict(t, temp)
 }
 
+// PredictWith is like Predict but forces a specific profile's model,
+// regardless of which profile is currently active. The calendar service
+// (issue #498) uses it to predict reduced "away"-profile load for the slots
+// inside a future away interval while the live active profile still tracks
+// "now" — so an MPC horizon that crosses in and out of an away window gets
+// the right per-slot load. An unknown or not-yet-trained profile falls back
+// to the active model.
+func (s *Service) PredictWith(t time.Time, profile Profile) float64 {
+	if s == nil {
+		return 0
+	}
+	if !profile.valid() {
+		return s.Predict(t)
+	}
+	temp := HeatingReferenceC
+	if s.Temp != nil {
+		if v, ok := s.Temp(t); ok {
+			temp = v
+		}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	m := s.models[profile]
+	if m == nil {
+		m = s.activeModelLocked()
+	}
+	return m.Predict(t, temp)
+}
+
 // Start kicks off the online-learning goroutine.
 func (s *Service) Start(ctx context.Context) {
 	if s == nil {

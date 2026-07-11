@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/frahlg/forty-two-watts/go/internal/battery"
+	"github.com/frahlg/forty-two-watts/go/internal/calendar"
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
 	"github.com/frahlg/forty-two-watts/go/internal/drivers"
@@ -50,6 +51,9 @@ const (
 	// evPasswordKey is the state.db key for the EV charger password
 	// (stored outside config.yaml for security).
 	evPasswordKey = "ev_charger_password"
+	// caldavPasswordKey is the state.db key for the CalDAV password (#498),
+	// stored outside config.yaml for security — same pattern as the EV charger.
+	caldavPasswordKey = "caldav_password"
 	// maskedPlaceholder is sent to the UI to indicate a password is set
 	// without revealing the actual value.
 	maskedPlaceholder = "••••••••"
@@ -122,6 +126,10 @@ type Deps struct {
 	// install a temporary override that bypasses the MPC budget
 	// path until expiry. Nil disables the endpoint.
 	LoadpointCtrl *loadpoint.Controller
+
+	// Optional: CalDAV calendar-constraints client (#498). Nil when the
+	// feature is disabled; GET /api/caldav/status then reports disabled.
+	CalDAV *calendar.Service
 
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
@@ -322,6 +330,8 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
+	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", s.handleNotificationsHistory)
@@ -1108,6 +1118,14 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			masked.EVCharger = &cp
 		}
 	}
+	// CalDAV password also lives in state.db — signal "set" with the placeholder.
+	if masked.CalDAV != nil {
+		if pw, ok := s.deps.State.LoadConfig(caldavPasswordKey); ok && pw != "" {
+			cp := *masked.CalDAV
+			cp.Password = maskedPlaceholder
+			masked.CalDAV = &cp
+		}
+	}
 	// Mask driver-declared config_secrets (e.g. sonnen api_token) so
 	// the UI never sees the plaintext token in /api/config. The
 	// settings tab renders an empty input + "Saved" badge; on POST the
@@ -1263,6 +1281,21 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// CalDAV password follows the exact same state.db pattern (#498). Without
+	// this, a UI-set password would only live in memory and be blanked on the
+	// next config-reload (Password is yaml:"-", so it is never in config.yaml).
+	var caldavPasswordToPersist string
+	var persistCalDAVPassword bool
+	if newCfg.CalDAV != nil {
+		pw := newCfg.CalDAV.Password
+		if pw != "" && pw != maskedPlaceholder {
+			caldavPasswordToPersist = pw
+			persistCalDAVPassword = true
+		} else if stored, ok := s.deps.State.LoadConfig(caldavPasswordKey); ok {
+			newCfg.CalDAV.Password = stored
+		}
+	}
+
 	if err := newCfg.Validate(); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "validation: " + err.Error()})
 		return
@@ -1278,6 +1311,11 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.SaveConfig(s.deps.ConfigPath, &newCfg); err != nil {
 		writeJSON(w, 500, map[string]string{"error": "save failed: " + err.Error()})
 		return
+	}
+	if persistCalDAVPassword {
+		if err := s.deps.State.SaveConfig(caldavPasswordKey, caldavPasswordToPersist); err != nil {
+			slog.Warn("failed to persist caldav_password", "err", err)
+		}
 	}
 	if persistEVPassword {
 		if err := s.deps.State.SaveConfig(evPasswordKey, evPasswordToPersist); err != nil {

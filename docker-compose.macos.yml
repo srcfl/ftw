@@ -58,6 +58,11 @@ services:
     # NOT used — see the header.)
     ports:
       - "8080:8080"
+      # Calendar (#498): publish 42W's in-process CalDAV server so phones and
+      # desktops on the LAN can subscribe at http://<mac-ip>:5232/. (On the
+      # host-networking Linux compose this is implicit; macOS bridge networking
+      # needs it published.) Drop this line if caldav.enabled is false.
+      - "5232:5232"
 
     volumes:
       - ./data:/app/data
@@ -115,6 +120,19 @@ services:
     volumes:
       - ./mosquitto/config:/mosquitto/config:ro
       - mosquitto-data:/mosquitto/data
+
+  # ---------------------------------------------------------------------
+  # Calendar (CalDAV) planner constraints (#498)
+  #
+  # No service here: 42W hosts its OWN in-process, pure-Go CalDAV server
+  # (emersion/go-webdav, MIT) inside the main container above — there is no
+  # sidecar. With `caldav.enabled: true`, the in-container server binds :5232,
+  # which the main service publishes (see its ports above), so phones/desktops
+  # on the LAN subscribe at http://<mac-ip>:5232/<user>/energy/. Keep
+  # `caldav.url: http://localhost:5232` (the in-container loopback). Credentials
+  # are auto-managed and shown (with a QR) in Settings → Calendar. LAN-only by
+  # design. See docs/caldav-integration.md.
+  # ---------------------------------------------------------------------
 
 volumes:
   update-ipc:

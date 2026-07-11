@@ -288,9 +288,9 @@ func TestValidDevicePubKeyHex(t *testing.T) {
 		t.Fatalf("freshly-minted key should be valid: %s", pub)
 	}
 	cases := []string{
-		"",                  // empty
-		pub[:126],           // too short
-		pub + "00",          // too long
+		"",                         // empty
+		pub[:126],                  // too short
+		pub + "00",                 // too long
 		pub[:64] + "GG" + pub[66:], // non-hex
 		// All-zero X||Y is not on the curve.
 		"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",

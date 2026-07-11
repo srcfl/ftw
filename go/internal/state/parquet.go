@@ -52,8 +52,12 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 		}
 		return nil
 	})
-	if err != nil { return 0, nil, fmt.Errorf("read samples: %w", err) }
-	if len(byDay) == 0 { return 0, nil, nil }
+	if err != nil {
+		return 0, nil, fmt.Errorf("read samples: %w", err)
+	}
+	if len(byDay) == 0 {
+		return 0, nil, nil
+	}
 
 	for k, rows := range byDay {
 		newRows := len(rows)
@@ -87,7 +91,9 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 func writeParquetDay(path string, rows []parquetSampleRow) error {
 	tmp := path + ".tmp"
 	f, err := os.Create(tmp)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	w := parquet.NewGenericWriter[parquetSampleRow](f, parquet.Compression(&zstd.Codec{Level: zstd.DefaultLevel}))
 	if _, err := w.Write(rows); err != nil {
 		f.Close()
@@ -171,7 +177,9 @@ func mergeParquetRows(existing, current []parquetSampleRow) []parquetSampleRow {
 // process — daily files are small enough that pushdown isn't worth the
 // complexity for this dataset size.
 func (s *Store) LoadSeriesFromParquet(coldDir, driver, metric string, sinceMs, untilMs int64) ([]Sample, error) {
-	if coldDir == "" { return nil, nil }
+	if coldDir == "" {
+		return nil, nil
+	}
 	since := time.UnixMilli(sinceMs).UTC()
 	until := time.UnixMilli(untilMs).UTC()
 	out := make([]Sample, 0, 256)
@@ -181,7 +189,9 @@ func (s *Store) LoadSeriesFromParquet(coldDir, driver, metric string, sinceMs, u
 			fmt.Sprintf("%04d/%02d/%02d.parquet", d.Year(), int(d.Month()), d.Day()))
 		rows, err := readParquetDay(path)
 		if err != nil {
-			if os.IsNotExist(err) { continue }
+			if os.IsNotExist(err) {
+				continue
+			}
 			return out, err
 		}
 		for _, r := range rows {

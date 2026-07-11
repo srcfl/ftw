@@ -84,9 +84,9 @@ const verifyWakeupCooldown = 5 * time.Minute
 // Persists for the process lifetime; resets on restart, which is fine
 // because operators can always wait 30 s if they really need to retry.
 var verifyTracker = struct {
-	mu          sync.Mutex
-	lastCall    map[string]time.Time
-	lastWakeup  map[string]time.Time
+	mu         sync.Mutex
+	lastCall   map[string]time.Time
+	lastWakeup map[string]time.Time
 }{
 	lastCall:   map[string]time.Time{},
 	lastWakeup: map[string]time.Time{},

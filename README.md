@@ -23,6 +23,13 @@ published build.
   and battery state to choose charge, discharge, hold, or export targets.
 - **EV and V2X awareness**: EV charging is treated as load, and V2X chargers
   can emit bidirectional vehicle power without confusing stationary batteries.
+- **Calendar planning (CalDAV)**: add events in your normal calendar app and
+  42W turns them into planner intents — *Away* / *Vacation* conserves battery,
+  *Charge car 80%* sets an EV departure deadline — and publishes charging
+  windows + EVSE usage history back to a calendar you can subscribe to. 42W
+  hosts CalDAV itself, in-process, via [`emersion/go-webdav`](https://github.com/emersion/go-webdav)
+  — no extra container, recurring events supported, and it works as a Home
+  Assistant add-on. See [`docs/caldav-integration.md`](docs/caldav-integration.md).
 - **Multi-device control**: multiple meters, inverters, batteries, PV-only
   devices, and chargers can run side by side.
 - **Local operation**: the control loop does not depend on a cloud service.
@@ -172,6 +179,7 @@ not copy the Pi dashboard `web/` directory to the relay. Deployment details:
 - [`docs/operations.md`](docs/operations.md) - deploy, backup, logs, recovery
 - [`docs/self-update.md`](docs/self-update.md) - Docker updater sidecar
 - [`docs/ha-integration.md`](docs/ha-integration.md) - MQTT autodiscovery
+- [`docs/caldav-integration.md`](docs/caldav-integration.md) - calendar planner constraints (CalDAV)
 - [`docs/safety.md`](docs/safety.md) - watchdog, clamps, fuse guard
 
 **Understand it**

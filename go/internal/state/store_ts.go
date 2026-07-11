@@ -29,10 +29,10 @@ type Sample struct {
 
 // internCache holds the in-memory id↔name maps for one Store.
 type internCache struct {
-	mu       sync.RWMutex
-	drivers  map[string]int64
-	metrics  map[string]int64
-	loaded   bool
+	mu      sync.RWMutex
+	drivers map[string]int64
+	metrics map[string]int64
+	loaded  bool
 }
 
 func newInternCache() *internCache {
@@ -47,20 +47,34 @@ func (s *Store) hydrateIntern() error {
 	ts := s.ts
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if ts.loaded { return nil }
+	if ts.loaded {
+		return nil
+	}
 	rows, err := s.db.Query(`SELECT id, name FROM ts_drivers`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	for rows.Next() {
-		var id int64; var name string
-		if err := rows.Scan(&id, &name); err != nil { rows.Close(); return err }
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return err
+		}
 		ts.drivers[name] = id
 	}
 	rows.Close()
 	rows, err = s.db.Query(`SELECT id, name FROM ts_metrics`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	for rows.Next() {
-		var id int64; var name string
-		if err := rows.Scan(&id, &name); err != nil { rows.Close(); return err }
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return err
+		}
 		ts.metrics[name] = id
 	}
 	rows.Close()
@@ -80,11 +94,17 @@ func (s *Store) driverID(name string) (int64, error) {
 	ts.mu.RUnlock()
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if id, ok := ts.drivers[name]; ok { return id, nil }
+	if id, ok := ts.drivers[name]; ok {
+		return id, nil
+	}
 	res, err := s.db.Exec(`INSERT INTO ts_drivers (name) VALUES (?)`, name)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	id, err := res.LastInsertId()
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	ts.drivers[name] = id
 	return id, nil
 }
@@ -100,11 +120,17 @@ func (s *Store) metricID(name string) (int64, error) {
 	ts.mu.RUnlock()
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if id, ok := ts.metrics[name]; ok { return id, nil }
+	if id, ok := ts.metrics[name]; ok {
+		return id, nil
+	}
 	res, err := s.db.Exec(`INSERT INTO ts_metrics (name) VALUES (?)`, name)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	id, err := res.LastInsertId()
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	ts.metrics[name] = id
 	return id, nil
 }
@@ -117,8 +143,12 @@ func (s *Store) metricID(name string) (int64, error) {
 // called inside the transaction (single-connection pool). Pre-resolve all
 // driver/metric IDs first, then run the tx using only stmt.Exec.
 func (s *Store) RecordSamples(samples []Sample) error {
-	if len(samples) == 0 { return nil }
-	if err := s.hydrateIntern(); err != nil { return err }
+	if len(samples) == 0 {
+		return nil
+	}
+	if err := s.hydrateIntern(); err != nil {
+		return err
+	}
 
 	type resolved struct {
 		dID, mID int64
@@ -128,17 +158,25 @@ func (s *Store) RecordSamples(samples []Sample) error {
 	rs := make([]resolved, 0, len(samples))
 	for _, sm := range samples {
 		dID, err := s.driverID(sm.Driver)
-		if err != nil { return fmt.Errorf("driver intern %s: %w", sm.Driver, err) }
+		if err != nil {
+			return fmt.Errorf("driver intern %s: %w", sm.Driver, err)
+		}
 		mID, err := s.metricID(sm.Metric)
-		if err != nil { return fmt.Errorf("metric intern %s: %w", sm.Metric, err) }
+		if err != nil {
+			return fmt.Errorf("metric intern %s: %w", sm.Metric, err)
+		}
 		rs = append(rs, resolved{dID: dID, mID: mID, ts: sm.TsMs, v: sm.Value})
 	}
 
 	tx, err := s.db.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
 	for _, r := range rs {
 		if _, err := stmt.Exec(r.dID, r.mID, r.ts, r.v); err != nil {
@@ -152,27 +190,37 @@ func (s *Store) RecordSamples(samples []Sample) error {
 // Result is sorted ascending by ts_ms. maxPoints=0 means no limit; otherwise
 // returned rows are evenly downsampled to at most maxPoints.
 func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]Sample, error) {
-	if err := s.hydrateIntern(); err != nil { return nil, err }
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
+	}
 	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
 	mID, mOK := ts.metrics[metric]
 	ts.mu.RUnlock()
-	if !dOK || !mOK { return nil, nil }
+	if !dOK || !mOK {
+		return nil, nil
+	}
 
 	rows, err := s.db.Query(`SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
 		ORDER BY ts_ms ASC`, dID, mID, sinceMs, untilMs)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := make([]Sample, 0, 256)
 	for rows.Next() {
 		var sm Sample
 		sm.Driver, sm.Metric = driver, metric
-		if err := rows.Scan(&sm.TsMs, &sm.Value); err != nil { return out, err }
+		if err := rows.Scan(&sm.TsMs, &sm.Value); err != nil {
+			return out, err
+		}
 		out = append(out, sm)
 	}
-	if err := rows.Err(); err != nil { return out, err }
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
 	if maxPoints > 0 && len(out) > maxPoints {
 		if maxPoints == 1 {
 			return []Sample{out[len(out)-1]}, nil
@@ -190,41 +238,55 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 // LatestSample returns the most recent value for one (driver, metric).
 // Returns sql.ErrNoRows if nothing has been recorded.
 func (s *Store) LatestSample(driver, metric string) (Sample, error) {
-	if err := s.hydrateIntern(); err != nil { return Sample{}, err }
+	if err := s.hydrateIntern(); err != nil {
+		return Sample{}, err
+	}
 	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
 	mID, mOK := ts.metrics[metric]
 	ts.mu.RUnlock()
-	if !dOK || !mOK { return Sample{}, sql.ErrNoRows }
+	if !dOK || !mOK {
+		return Sample{}, sql.ErrNoRows
+	}
 	var sm Sample
 	sm.Driver, sm.Metric = driver, metric
 	err := s.db.QueryRow(`SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? ORDER BY ts_ms DESC LIMIT 1`,
 		dID, mID).Scan(&sm.TsMs, &sm.Value)
-	if errors.Is(err, sql.ErrNoRows) { return sm, err }
+	if errors.Is(err, sql.ErrNoRows) {
+		return sm, err
+	}
 	return sm, err
 }
 
 // MetricNames returns all known metric names, sorted alphabetically.
 func (s *Store) MetricNames() ([]string, error) {
-	if err := s.hydrateIntern(); err != nil { return nil, err }
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
+	}
 	ts := s.ts
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	out := make([]string, 0, len(ts.metrics))
-	for n := range ts.metrics { out = append(out, n) }
+	for n := range ts.metrics {
+		out = append(out, n)
+	}
 	return out, nil
 }
 
 // DriverNames returns all known driver names, sorted alphabetically.
 func (s *Store) DriverNames() ([]string, error) {
-	if err := s.hydrateIntern(); err != nil { return nil, err }
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
+	}
 	ts := s.ts
 	ts.mu.RLock()
 	defer ts.mu.RUnlock()
 	out := make([]string, 0, len(ts.drivers))
-	for n := range ts.drivers { out = append(out, n) }
+	for n := range ts.drivers {
+		out = append(out, n)
+	}
 	return out, nil
 }
 
@@ -233,7 +295,9 @@ func (s *Store) DriverNames() ([]string, error) {
 func (s *Store) PruneRecent(ctx context.Context) (int64, error) {
 	cutoff := time.Now().Add(-RecentRetention).UnixMilli()
 	res, err := s.db.ExecContext(ctx, `DELETE FROM ts_samples WHERE ts_ms < ?`, cutoff)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return res.RowsAffected()
 }
 
@@ -241,15 +305,23 @@ func (s *Store) PruneRecent(ctx context.Context) (int64, error) {
 // ascending by ts_ms, calling the visitor for each batch. The visitor MUST
 // not retain the slice past the call (it is reused).
 func (s *Store) SamplesBefore(ctx context.Context, cutoffMs int64, batchSize int, visit func([]Sample) error) error {
-	if err := s.hydrateIntern(); err != nil { return err }
-	if batchSize <= 0 { batchSize = 10000 }
+	if err := s.hydrateIntern(); err != nil {
+		return err
+	}
+	if batchSize <= 0 {
+		batchSize = 10000
+	}
 	// Rebuild reverse maps so we can return strings.
 	ts := s.ts
 	ts.mu.RLock()
 	dRev := make(map[int64]string, len(ts.drivers))
-	for n, id := range ts.drivers { dRev[id] = n }
+	for n, id := range ts.drivers {
+		dRev[id] = n
+	}
 	mRev := make(map[int64]string, len(ts.metrics))
-	for n, id := range ts.metrics { mRev[id] = n }
+	for n, id := range ts.metrics {
+		mRev[id] = n
+	}
 	ts.mu.RUnlock()
 
 	var lastTs, lastDriverID, lastMetricID int64
@@ -262,18 +334,30 @@ func (s *Store) SamplesBefore(ctx context.Context, cutoffMs int64, batchSize int
 			  AND (? = 0 OR ts_ms > ? OR (ts_ms = ? AND (driver_id > ? OR (driver_id = ? AND metric_id > ?))))
 			ORDER BY ts_ms ASC, driver_id ASC, metric_id ASC
 			LIMIT ?`, cutoffMs, cursorSet, lastTs, lastTs, lastDriverID, lastDriverID, lastMetricID, batchSize)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		batch = batch[:0]
 		for rows.Next() {
-			var dID, mID, t int64; var v float64
-			if err := rows.Scan(&dID, &mID, &t, &v); err != nil { rows.Close(); return err }
+			var dID, mID, t int64
+			var v float64
+			if err := rows.Scan(&dID, &mID, &t, &v); err != nil {
+				rows.Close()
+				return err
+			}
 			batch = append(batch, Sample{Driver: dRev[dID], Metric: mRev[mID], TsMs: t, Value: v})
 			lastTs, lastDriverID, lastMetricID = t, dID, mID
 			cursorSet = 1
 		}
 		rows.Close()
-		if len(batch) == 0 { return nil }
-		if err := visit(batch); err != nil { return err }
-		if len(batch) < batchSize { return nil }
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := visit(batch); err != nil {
+			return err
+		}
+		if len(batch) < batchSize {
+			return nil
+		}
 	}
 }

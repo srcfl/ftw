@@ -1,0 +1,31 @@
+# Dependabot opens PRs when newer dependency versions are published.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+#
+# Added for the CalDAV feature (#498), which depends on the emersion/* Go
+# libraries — most importantly github.com/emersion/go-webdav.
+version: 2
+updates:
+  # ---- Go modules -------------------------------------------------------
+  # The Go module lives in the go/ subdirectory, so `directory` must point
+  # there (not the repo root) or Dependabot finds no go.mod.
+  - package-ecosystem: "gomod"
+    directory: "/go"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    # Scope to the CalDAV stack. go-webdav ships tagged releases (v0.7.0), so
+    # its bump PRs are clean semver; go-ical is on an untagged pseudo-version,
+    # which Dependabot bumps only best-effort (tags are more reliable).
+    # Delete this `allow` block to watch EVERY Go dependency instead.
+    allow:
+      - dependency-name: "github.com/emersion/go-webdav"
+      - dependency-name: "github.com/emersion/go-ical"
+    # Move the emersion libs together — they're developed in lockstep, and
+    # go-webdav depends on go-ical, so a single grouped PR avoids churn.
+    groups:
+      emersion:
+        patterns:
+          - "github.com/emersion/*"

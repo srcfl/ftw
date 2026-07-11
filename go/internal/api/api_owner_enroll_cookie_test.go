@@ -140,8 +140,8 @@ func softwareEnrollFinishTamper(t *testing.T, srv *Server, rpID, origin string, 
 	authData = append(authData, rpHash[:]...)
 	// flags: UP (0x01) | AT (0x40). UV not required (UserVerification=preferred).
 	authData = append(authData, 0x01|0x40)
-	authData = append(authData, 0, 0, 0, 0) // signCount = 0
-	authData = append(authData, make([]byte, 16)...) // AAGUID = all-zero
+	authData = append(authData, 0, 0, 0, 0)                              // signCount = 0
+	authData = append(authData, make([]byte, 16)...)                     // AAGUID = all-zero
 	authData = append(authData, byte(len(credID)>>8), byte(len(credID))) // credIDLen BE
 	authData = append(authData, credID...)
 	authData = append(authData, coseKey...)

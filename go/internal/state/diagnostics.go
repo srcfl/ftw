@@ -16,11 +16,11 @@ const DiagnosticsRecentRetention = 30 * 24 * time.Hour
 // DiagnosticSummary is the light-weight row the timeline UI consumes. No
 // full JSON blob — the UI fetches that on demand via LoadDiagnosticAt.
 type DiagnosticSummary struct {
-	TsMs          int64   `json:"ts_ms"`
-	Reason        string  `json:"reason"`
-	Zone          string  `json:"zone"`
-	TotalCostOre  float64 `json:"total_cost_ore"`
-	HorizonSlots  int     `json:"horizon_slots"`
+	TsMs         int64   `json:"ts_ms"`
+	Reason       string  `json:"reason"`
+	Zone         string  `json:"zone"`
+	TotalCostOre float64 `json:"total_cost_ore"`
+	HorizonSlots int     `json:"horizon_slots"`
 }
 
 // DiagnosticRow is the full persisted record — used by the detail view
