@@ -8,8 +8,10 @@ ARTIFACT_DIR=${FTW_CI_ARTIFACT_DIR:-"$ROOT/artifacts/local-ci/$(date -u +%Y%m%dT
 MQTT_PORT=${FTW_CI_MQTT_PORT:-11883}
 MODBUS_PORT=${FTW_CI_MODBUS_PORT:-15502}
 API_PORT=${FTW_CI_API_PORT:-18080}
-
-mkdir -p "$ARTIFACT_DIR"
+BROWSER_SMOKE=1
+if [ "${FTW_CI_SKIP_BROWSER:-0}" = "1" ]; then
+  BROWSER_SMOKE=0
+fi
 
 log() {
   printf '[ci-local] %s\n' "$*"
@@ -18,6 +20,70 @@ log() {
 fail() {
   printf '[ci-local] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+validate_port() {
+  local name=$1
+  local port=$2
+
+  if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    fail "$name must be a numeric TCP port, got '$port'"
+  fi
+  if (( port < 1 || port > 65535 )); then
+    fail "$name must be between 1 and 65535, got '$port'"
+  fi
+}
+
+port_owner() {
+  local port=$1
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true
+    return
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -ltnp 2>/dev/null | awk -v port=":$port" '$4 ~ port "$"'
+  fi
+}
+
+port_is_listening() {
+  local port=$1
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+    return $?
+  fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -H -ltn 2>/dev/null | awk -v port=":$port" '$4 ~ port "$" { found = 1 } END { exit !found }'
+    return $?
+  fi
+
+  (: >"/dev/tcp/127.0.0.1/$port") >/dev/null 2>&1
+}
+
+require_free_port() {
+  local name=$1
+  local port=$2
+
+  validate_port "$name" "$port"
+  if port_is_listening "$port"; then
+    local owner
+    owner=$(port_owner "$port")
+    if [ -n "$owner" ]; then
+      printf '%s\n' "$owner" >&2
+    fi
+    fail "$name=$port is already in use; stop that process or override FTW_CI_API_PORT/FTW_CI_MQTT_PORT/FTW_CI_MODBUS_PORT"
+  fi
+}
+
+preflight_stack_ports() {
+  if [ "$MQTT_PORT" = "$MODBUS_PORT" ] || [ "$MQTT_PORT" = "$API_PORT" ] || [ "$MODBUS_PORT" = "$API_PORT" ]; then
+    fail "FTW_CI_MQTT_PORT, FTW_CI_MODBUS_PORT, and FTW_CI_API_PORT must be distinct"
+  fi
+
+  require_free_port FTW_CI_MQTT_PORT "$MQTT_PORT"
+  require_free_port FTW_CI_MODBUS_PORT "$MODBUS_PORT"
+  require_free_port FTW_CI_API_PORT "$API_PORT"
 }
 
 PIDS=()
@@ -35,6 +101,12 @@ cleanup() {
   done
 }
 trap cleanup EXIT
+
+if [ "$BROWSER_SMOKE" = "1" ]; then
+  preflight_stack_ports
+fi
+
+mkdir -p "$ARTIFACT_DIR"
 
 wait_for_url() {
   local url=$1
@@ -114,7 +186,7 @@ log "building native binaries"
 log "cross-building linux/arm64"
 (cd "$ROOT" && make build-arm64)
 
-if [ "${FTW_CI_SKIP_BROWSER:-0}" = "1" ]; then
+if [ "$BROWSER_SMOKE" = "0" ]; then
   log "browser smoke skipped by FTW_CI_SKIP_BROWSER=1"
   exit 0
 fi

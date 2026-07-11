@@ -43,9 +43,13 @@ func New(
 	applier Applier,
 ) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
-	if dir == "" { dir = "." }
+	if dir == "" {
+		dir = "."
+	}
 	if err := fsw.Add(dir); err != nil {
 		fsw.Close()
 		return nil, err
@@ -83,17 +87,28 @@ func (w *Watcher) loop() {
 		case <-w.stop:
 			return
 		case ev, ok := <-w.fsw.Events:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			// Only care about events on our file
-			if filepath.Base(ev.Name) != target { continue }
-			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 { continue }
+			if filepath.Base(ev.Name) != target {
+				continue
+			}
+			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+				continue
+			}
 			// Debounce: reset timer to 500 ms from now
 			if !debounce.Stop() {
-				select { case <-debounce.C: default: }
+				select {
+				case <-debounce.C:
+				default:
+				}
 			}
 			debounce.Reset(500 * time.Millisecond)
 		case err, ok := <-w.fsw.Errors:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			slog.Warn("watcher error", "err", err)
 		case <-debounce.C:
 			w.reload()
@@ -159,6 +174,21 @@ func (w *Watcher) reload() {
 	}
 	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
 		w.ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
+	}
+	// Site-meter swap (operator moved `is_site_meter: true` from one
+	// driver to another, or set it for the first time). Without this
+	// the dispatcher keeps reading the old driver's meter telemetry —
+	// after the old driver stops emitting, grid_w pegs at 0 and the
+	// control loop has no idea where the actual grid boundary is. The
+	// fix is to update ctrl.SiteMeterDriver under the same lock that
+	// gates every dispatch read of it. main.go's applier callback
+	// follows up by syncing the field on mpc.Service + loadmodel.Service
+	// (those services capture site-meter at construction and need the
+	// same hot-update treatment).
+	if newCfg.SiteMeterDriver() != oldCfg.SiteMeterDriver() {
+		slog.Info("config reload: site_meter",
+			"old", oldCfg.SiteMeterDriver(), "new", newCfg.SiteMeterDriver())
+		w.ctrl.SiteMeterDriver = newCfg.SiteMeterDriver()
 	}
 	w.ctrlMu.Unlock()
 

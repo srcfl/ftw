@@ -636,6 +636,94 @@ Handler: `go/internal/api/api.go:445`
 
 ---
 
+### POST /api/drivers/fingerprint
+
+Probe an open endpoint discovered by a network scan and ask every catalog
+driver that speaks the endpoint's protocol whether the device is one of
+its own (via each driver's `driver_fingerprint` hook — see
+`docs/writing-a-driver.md` §2.3). The probe is passive: it never runs
+`driver_init`/`driver_cleanup`, so it cannot reconfigure the device.
+Modbus (port 502) and HTTP (port 80) are fingerprintable.
+
+**Body:**
+
+```json
+{ "host": "10.0.0.7", "port": 502, "protocol": "modbus", "unit_id": 1 }
+```
+
+`protocol` is inferred from the port when omitted (502 → `modbus`,
+80 → `http`). `unit_id` is Modbus-only and defaults to `1`.
+
+**Response (200):**
+
+```json
+{
+  "host": "10.0.0.7",
+  "port": 502,
+  "protocol": "modbus",
+  "unit_id": 1,
+  "matches": [
+    { "driver": "solaredge.lua", "name": "SolarEdge inverter + meter",
+      "match": "match", "make": "SolarEdge", "serial": "7E0A1B2C",
+      "confidence": 0.97 }
+  ],
+  "tried": [
+    { "driver": "solaredge.lua", "name": "SolarEdge inverter + meter", "match": "match", "make": "SolarEdge", "serial": "7E0A1B2C", "confidence": 0.97 },
+    { "driver": "sungrow.lua", "name": "Sungrow SH Hybrid Inverter", "match": "no_match" },
+    { "driver": "ferroamp_modbus.lua", "name": "Ferroamp EnergyHub (Modbus)", "match": "unknown" }
+  ],
+  "elapsed_ms": 412
+}
+```
+
+`matches` are the confirmed hits (`match`), best confidence first. `tried`
+lists every candidate's verdict — `match` / `no_match` / `unknown` — for
+transparency; a driver with no `driver_fingerprint` hook reports `unknown`.
+
+**Side notes:**
+
+- `400` for a missing host/port, an uninferable port, or an unsupported
+  protocol (only `modbus`/`http`); `503` for a `modbus` request when no
+  Modbus factory is wired. HTTP needs no factory.
+- A candidate whose connection fails (host unreachable, wrong unit id,
+  refused HTTP) degrades to an `unknown` verdict carrying the error — the
+  request still returns `200`.
+
+Handler: `go/internal/api/api_drivers_fingerprint.go`
+
+---
+
+### GET /api/scan
+
+Probe the local `/24` subnets for open ports on common energy-protocol
+ports (Modbus 502, MQTT 1883, HTTP 80). Used by Settings → Scan and the
+bootstrap wizard.
+
+**Query params:**
+
+- `fingerprint` — when set (e.g. `?fingerprint=1`), each discovered Modbus
+  and HTTP host is additionally run through `POST /api/drivers/fingerprint`'s
+  sweep and annotated with a `matches` array (same shape as above). Opt-in
+  because it opens a connection per candidate driver and is materially
+  slower than a bare port scan. Without the flag the response is unchanged.
+
+**Response (200):**
+
+```json
+[
+  { "ip": "10.0.0.7", "port": 502, "protocol": "modbus", "latency_ms": 3,
+    "matches": [ { "driver": "solaredge.lua", "match": "match", "make": "SolarEdge", "confidence": 0.97 } ] },
+  { "ip": "10.0.0.9", "port": 1883, "protocol": "mqtt", "latency_ms": 1 }
+]
+```
+
+`matches` appears only with `?fingerprint=1` and only on Modbus hosts that
+a driver recognised; non-Modbus hosts pass through unannotated.
+
+Handler: `go/internal/api/api.go` (`handleScan`)
+
+---
+
 ## MPC planner
 
 ### GET /api/mpc/plan
