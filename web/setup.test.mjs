@@ -90,3 +90,17 @@ describe("setup wizard — ?step=N deep-link (Job 4)", () => {
       "init must drive goStep with the clamped value, not a hard-coded 1");
   });
 });
+
+describe("setup wizard — fingerprinted network scan", () => {
+  it("requests fingerprint enrichment and renders the best match", () => {
+    assert.match(JS, /\/api\/scan\?fingerprint=1/);
+    assert.match(JS, /d\.matches\[0\]/,
+      "the highest-confidence API match should be shown first");
+    assert.match(HTML, /Detected device/);
+  });
+
+  it("preselects the matched catalog driver for normal configuration", () => {
+    assert.match(JS, /selectedDevice\.matchedFilename/);
+    assert.match(JS, /entry\.filename === selectedDevice\.matchedFilename/);
+  });
+});
