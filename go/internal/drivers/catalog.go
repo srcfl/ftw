@@ -14,14 +14,14 @@ import (
 // directory. Populated from the DRIVER={…} table each .lua file declares
 // at the top. Missing fields are left empty.
 type CatalogEntry struct {
-	Path               string         `json:"path"`          // portable config lua path
-	Filename           string         `json:"filename"`      // e.g. "ferroamp.lua"
+	Path               string         `json:"path"`     // portable config lua path
+	Filename           string         `json:"filename"` // e.g. "ferroamp.lua"
 	ID                 string         `json:"id"`
 	Name               string         `json:"name"`
 	Manufacturer       string         `json:"manufacturer,omitempty"`
 	Version            string         `json:"version,omitempty"`
-	Protocols          []string       `json:"protocols,omitempty"`            // mqtt / modbus / http
-	Capabilities       []string       `json:"capabilities,omitempty"`         // meter / pv / battery
+	Protocols          []string       `json:"protocols,omitempty"`    // mqtt / modbus / http
+	Capabilities       []string       `json:"capabilities,omitempty"` // meter / pv / battery
 	HTTPHosts          []string       `json:"http_hosts,omitempty"`
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
@@ -173,9 +173,9 @@ func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
 	wantPath := filepath.ToSlash(luaPath)
 	wantFilename := filepath.Base(wantPath)
 	for _, e := range catalog {
-		if e.Path == wantPath || e.Filename == wantFilename {
+		if strings.EqualFold(e.Path, wantPath) || strings.EqualFold(e.Filename, wantFilename) {
 			for _, c := range e.Capabilities {
-				if c == "ev" || c == "vehicle" {
+				if strings.EqualFold(c, "ev") || strings.EqualFold(c, "vehicle") {
 					return true
 				}
 			}

@@ -219,9 +219,9 @@ func main() {
 	// rather than sniffing filenames. The Lua DRIVER table's
 	// capabilities list is the driver's self-declaration.
 	driverCatalog, catErr := drivers.LoadCatalogMulti(*userDriversDirFlag, resolveDriverDir())
-	if catErr != nil {
+	if catErr != nil || len(driverCatalog) == 0 {
 		slog.Warn("driver catalog load failed; EV-driver classification will be conservative",
-			"err", catErr)
+			"err", catErr, "entries", len(driverCatalog))
 		driverCatalog = nil
 	}
 
@@ -478,11 +478,19 @@ func main() {
 			// Re-scan the catalog so a hot-edited Lua driver's
 			// capability change is picked up by the EV-classification
 			// filter on the very next reload tick.
-			reloadCatalog, _ := drivers.LoadCatalogMulti(*userDriversDirFlag, resolveDriverDir())
+			reloadCatalog, err := drivers.LoadCatalogMulti(*userDriversDirFlag, resolveDriverDir())
+			if err != nil || len(reloadCatalog) == 0 {
+				slog.Warn("driver catalog reload failed; retaining last known catalog",
+					"err", err, "entries", len(reloadCatalog))
+				reloadCatalog = driverCatalog
+			} else {
+				driverCatalog = reloadCatalog
+			}
 			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog) {
 				capacities[k] = v
 			}
 			capMu.Unlock()
+			warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
 
 			// Swap inverter-group tags (#143) and per-driver power
 			// limits (#145) together. Taken under ctrlMu because

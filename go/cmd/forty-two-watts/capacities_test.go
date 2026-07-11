@@ -165,6 +165,7 @@ func TestIsEVOrVehicleDriverByCapabilities(t *testing.T) {
 	}{
 		// EV chargers — match via capability, not filename.
 		{"drivers/easee_cloud.lua", true},
+		{"DRIVERS/EASEE_CLOUD.LUA", true},
 		{"drivers/ctek_hybrid.lua", true},
 		// Vehicle telemetry — match via capability.
 		{"drivers/tesla_vehicle.lua", true},
