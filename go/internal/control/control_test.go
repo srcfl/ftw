@@ -213,6 +213,55 @@ func TestChargeModeForcesAllBatteriesPositive5kW(t *testing.T) {
 	}
 }
 
+// A device-faulted battery (e.g. a Ferroamp EnergyHub in Fault Mode, which keeps
+// reporting telemetry but has opened its battery relay) must be excluded from
+// dispatch so the load is covered by the healthy battery — not silently imported
+// because the dead battery couldn't deliver its commanded share. The faulted
+// driver is still the site meter; its grid reading stays usable.
+func TestDeviceFaultExcludesBatteryAndReallocates(t *testing.T) {
+	mk := func() *telemetry.Store {
+		return seedStore(3000, []struct { // site importing 3 kW (load to cover)
+			name          string
+			currentW, soc float64
+		}{
+			{"ferroamp", 0, 0.5},
+			{"sungrow", 0, 0.5},
+		})
+	}
+	capsMap := caps(map[string]float64{"ferroamp": 15200, "sungrow": 9600})
+
+	// Baseline: both healthy → both participate in covering the load.
+	stOK := NewState(0, 50, "ferroamp")
+	stOK.Mode = ModeSelfConsumption
+	in := map[string]bool{}
+	for _, tg := range ComputeDispatch(mk(), stOK, capsMap, 11040) {
+		in[tg.Driver] = true
+	}
+	if !in["ferroamp"] || !in["sungrow"] {
+		t.Fatalf("baseline: both batteries should participate, got %v", in)
+	}
+
+	// Ferroamp device-faulted → excluded; sungrow alone covers the load.
+	store := mk()
+	store.SetDriverDeviceFault("ferroamp", true, "EnergyHub Fault Mode")
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	var sungrow float64
+	sawSungrow := false
+	for _, tg := range ComputeDispatch(store, st, capsMap, 11040) {
+		if tg.Driver == "ferroamp" {
+			t.Errorf("device-faulted ferroamp must NOT get a dispatch target, got %.0f W", tg.TargetW)
+		}
+		if tg.Driver == "sungrow" {
+			sungrow = tg.TargetW
+			sawSungrow = true
+		}
+	}
+	if !sawSungrow || sungrow >= 0 {
+		t.Errorf("the healthy sungrow should discharge to cover the load alone (negative target), got saw=%v %.0f W", sawSungrow, sungrow)
+	}
+}
+
 func TestChargeModeRespectsFuseGuard(t *testing.T) {
 	store := seedStore(10000, []struct {
 		name          string
