@@ -65,9 +65,10 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 	dir := t.TempDir()
 	runner := &fakeRunner{}
 	s := &server{
-		composeFile: filepath.Join(dir, "docker-compose.yml"),
-		statusPath:  filepath.Join(dir, "state.json"),
-		runner:      runner.run,
+		composeFile:    filepath.Join(dir, "docker-compose.yml"),
+		statusPath:     filepath.Join(dir, "state.json"),
+		pullRetryDelay: time.Millisecond,
+		runner:         runner.run,
 	}
 	writeCompose(t, s.composeFile, `services:
   forty-two-watts:
@@ -157,6 +158,7 @@ func TestHandleUpdate_RestartForceRecreates(t *testing.T) {
 func TestHandleUpdate_PullFailure(t *testing.T) {
 	s, runner := newTestServer(t)
 	runner.fail = true
+	s.maxPullAttempts = 3 // cap retries so the always-fail runner doesn't loop forever
 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()

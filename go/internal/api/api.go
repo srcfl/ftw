@@ -304,6 +304,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
+	s.handle("GET  /api/modes", s.handleModes)
 	s.handle("POST /api/target", s.handleSetTarget)
 	s.handle("POST /api/peak_limit", s.handleSetPeakLimit)
 	s.handle("POST /api/peak_import_ceiling", s.handleSetPeakImportCeiling)
@@ -454,8 +455,12 @@ func readJSON(r *http.Request, v any) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := s.deps.Tel.AllHealth()
-	var ok, deg, off int
+	var ok, deg, off, fault int
 	for _, h := range health {
+		if h.DeviceFault {
+			fault++
+			continue
+		}
 		switch h.Status {
 		case telemetry.StatusOk:
 			ok++
@@ -466,7 +471,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	status := "ok"
-	if off > 0 {
+	if off > 0 || fault > 0 {
 		status = "degraded"
 	}
 	resp := map[string]any{
@@ -474,6 +479,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"drivers_ok":       ok,
 		"drivers_degraded": deg,
 		"drivers_offline":  off,
+		"drivers_faulted":  fault,
 	}
 	// storage: surface DB corruption-recovery events from this boot so a
 	// corrupt database is never a silent, blank-dashboard failure again.
@@ -499,6 +505,19 @@ func statusDriverOnline(tel *telemetry.Store, name string) bool {
 	return h != nil && h.IsOnline()
 }
 
+// statusDriverTelemetryUsable reports whether a driver is still delivering
+// trustworthy telemetry. DeviceFault deliberately does not fail this check:
+// that flag means a reachable device cannot actuate, not that its meter data is
+// stale. This distinction keeps a faulted hybrid inverter's site-meter reading
+// visible while statusDriverOnline still excludes its battery/PV actuators.
+func statusDriverTelemetryUsable(tel *telemetry.Store, name string) bool {
+	if tel == nil || name == "" {
+		return false
+	}
+	h := tel.DriverHealth(name)
+	return h != nil && h.Status != telemetry.StatusOffline
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Lock()
 	ctrl := *s.deps.Ctrl // copy for consistency
@@ -517,7 +536,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// the live site balance.
 	gridW := 0.0
 	haveGrid := false
-	if statusDriverOnline(s.deps.Tel, ctrl.SiteMeterDriver) {
+	if statusDriverTelemetryUsable(s.deps.Tel, ctrl.SiteMeterDriver) {
 		if r := s.deps.Tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
 			gridW = r.SmoothedW
 			haveGrid = true
@@ -583,10 +602,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Per-driver details
 	drivers := make(map[string]any)
 	for name, h := range s.deps.Tel.AllHealth() {
+		// A device fault overrides the emit-based status: the driver keeps
+		// emitting (Status stays ok) but the device can't actuate, so surface
+		// "fault" prominently so the dashboard doesn't show a faulted hub as ok.
+		status := h.Status.String()
+		if h.DeviceFault {
+			status = "fault"
+		}
 		d := map[string]any{
-			"status":             h.Status.String(),
+			"status":             status,
 			"consecutive_errors": h.ConsecutiveErrors,
 			"tick_count":         h.TickCount,
+		}
+		if h.DeviceFault {
+			d["device_fault"] = true
+			if h.DeviceFaultReason != "" {
+				d["device_fault_reason"] = h.DeviceFaultReason
+			}
 		}
 		if h.LastError != "" {
 			d["last_error"] = h.LastError
@@ -2617,7 +2649,7 @@ func (s *Server) currentV2XGridW() *float64 {
 	s.deps.CtrlMu.Lock()
 	siteMeter := s.deps.Ctrl.SiteMeterDriver
 	s.deps.CtrlMu.Unlock()
-	if siteMeter == "" || !statusDriverOnline(s.deps.Tel, siteMeter) {
+	if siteMeter == "" || !statusDriverTelemetryUsable(s.deps.Tel, siteMeter) {
 		return nil
 	}
 	if r := s.deps.Tel.Get(siteMeter, telemetry.DerMeter); r != nil {

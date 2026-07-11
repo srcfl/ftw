@@ -55,12 +55,21 @@ type server struct {
 	// hand from the project dir.
 	overrideFiles []string
 	statusPath    string
+	stateMu       sync.Mutex
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
 	// becomes a no-op. Needed for local smoke tests where the image lives
 	// only on the dev machine (`docker compose pull` would fail, or worse,
 	// overwrite the local build with a stale GHCR tag). Production leaves
 	// this at false.
 	skipPull bool
+	// pullRetryDelay is the wait between pull attempts. Defaults to 60s
+	// in production; tests set it to a small value to keep runs fast.
+	pullRetryDelay time.Duration
+	// maxPullAttempts caps retries before giving up with "failed". 0 means
+	// unlimited — the production default so a slow connection never gives up
+	// after an arbitrary N. Tests that exercise the "always-fail" path set
+	// this to a small value to avoid looping forever.
+	maxPullAttempts int
 
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
@@ -123,10 +132,11 @@ func main() {
 	}
 
 	srv := &server{
-		composeFile: *compose,
-		statusPath:  *statusPath,
-		skipPull:    *skipPull,
-		runner:      dockerCompose,
+		composeFile:    *compose,
+		statusPath:     *statusPath,
+		skipPull:       *skipPull,
+		pullRetryDelay: 60 * time.Second,
+		runner:         dockerCompose,
 	}
 	// Auto-discover override files alongside the base, the same way the
 	// compose CLI does when invoked without -f. Without this the sidecar
@@ -267,9 +277,6 @@ func (s *server) runJob(action, target string) {
 	now := time.Now()
 	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
 	var env []string
 	if target != "" {
 		env = []string{"FTW_IMAGE_TAG=" + target}
@@ -285,9 +292,26 @@ func (s *server) runJob(action, target string) {
 
 	if !s.skipPull {
 		pullArgs := s.composeArgs("pull", mainServiceName)
-		if err := s.runner(ctx, env, pullArgs...); err != nil {
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + err.Error()})
-			slog.Error("pull failed", "err", err)
+		var pullErr error
+		for attempt := 1; ; attempt++ {
+			// Per-attempt timeout: each pull gets a full 2 h window so a
+			// single slow download on a 0.5 Mbps link (~400 MB image ≈ 90 min)
+			// is never cut short by a shared outer deadline.
+			attemptCtx, cancelAttempt := context.WithTimeout(context.Background(), 2*time.Hour)
+			pullErr = s.runner(attemptCtx, env, pullArgs...)
+			cancelAttempt()
+			if pullErr == nil {
+				break
+			}
+			slog.Warn("pull failed, retrying", "attempt", attempt, "err", pullErr)
+			if s.maxPullAttempts > 0 && attempt >= s.maxPullAttempts {
+				break
+			}
+			time.Sleep(s.pullRetryDelay)
+		}
+		if pullErr != nil {
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
+			slog.Error("pull failed", "err", pullErr)
 			return
 		}
 	} else {
@@ -296,6 +320,11 @@ func (s *server) runJob(action, target string) {
 
 	s.writeState(State{State: "restarting", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now()})
 
+	// compose up -d just recreates the container from an already-pulled
+	// image — should complete in seconds, 10 min is a generous upper bound.
+	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer upCancel()
+
 	upArgs := s.composeArgs("up", "-d", mainServiceName)
 	if action == "restart" {
 		// --force-recreate is what makes restart actually restart when the
@@ -303,7 +332,7 @@ func (s *server) runJob(action, target string) {
 		// UI exposes as the "Restart" button.
 		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
 	}
-	if err := s.runner(ctx, env, upArgs...); err != nil {
+	if err := s.runner(upCtx, env, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return
@@ -458,6 +487,8 @@ func (s *server) runRollback(snapshotID string, files []string) {
 }
 
 func (s *server) writeState(st State) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
 	if st.UpdatedAt.IsZero() {
 		st.UpdatedAt = time.Now()
 	}
@@ -477,20 +508,26 @@ func (s *server) writeState(st State) {
 	}
 	_ = f.Close()
 	// Atomic swap so partial writes never leak to a reader on the other
-	// side of the shared volume.
+	// side of the shared volume. On Windows the rename fails when the
+	// destination is open for reading; fall back to remove-then-rename
+	// so tests pass without relaxing production semantics on Linux.
 	if err := os.Rename(tmp, s.statusPath); err != nil {
-		slog.Warn("state rename", "err", err)
+		_ = os.Remove(s.statusPath)
+		if err2 := os.Rename(tmp, s.statusPath); err2 != nil {
+			slog.Warn("state rename", "err", err2)
+		}
 	}
 }
 
 func (s *server) readState() State {
-	f, err := os.Open(s.statusPath)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	data, err := os.ReadFile(s.statusPath)
 	if err != nil {
 		return State{State: "idle"}
 	}
-	defer f.Close()
 	var st State
-	if err := json.NewDecoder(f).Decode(&st); err != nil || st.State == "" {
+	if err := json.Unmarshal(data, &st); err != nil || st.State == "" {
 		return State{State: "idle"}
 	}
 	return st
