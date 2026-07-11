@@ -94,7 +94,7 @@ function driver_poll()
     for _, msg in ipairs(messages) do
         local val = tonumber(msg.payload)
         if val ~= nil then
-if msg.topic == base_topic .. "/main/Outside_Temp" then
+            if msg.topic == base_topic .. "/main/Outside_Temp" then
                 outside_temp = val
                 last_msg_ts  = now
             elseif msg.topic == base_topic .. "/main/Main_Inlet_Temp" then
@@ -130,9 +130,6 @@ if msg.topic == base_topic .. "/main/Outside_Temp" then
     if inlet_temp   ~= nil then host.emit_metric("hp_inlet_temp_c",   inlet_temp,   "°C") end
     if target_temp  ~= nil then host.emit_metric("hp_target_temp_c",  target_temp,  "°C") end
     if z1_offset    ~= nil then host.emit_metric("hp_z1_heat_offset", z1_offset,    "°C") end
-
--- Heartbeat emit so last_success updates in 42W
-    host.emit("battery", { w = 0, soc = 1.0 })
 
     return 5000
 end
