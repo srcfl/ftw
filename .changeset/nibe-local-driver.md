@@ -1,9 +1,0 @@
----
-"forty-two-watts": minor
----
-
-Add a read-only NIBE S-series heat-pump driver (`drivers/nibe_local.lua`) that reads the pump's on-prem **Local REST API** directly over the LAN — no cloud, no OAuth, no internet round-trip. It auto-detects the device serial, pulls the full ~980-point register map in one bulk request, and emits every point into the long-format TS DB with **exact per-point divisor scaling** (the local API ships each point's unit + divisor, so no °C×10 heuristic). It reuses the same `hp_*` headline metrics as the MyUplink cloud driver (`hp_power_w`, `hp_hw_top_temp_c`, `hp_outdoor_temp_c`, `hp_used_power_w`, `hp_energy_consumed_kwh`, …), so the heating dashboard works with either source. The headline variable ids are auto-selected per pump from a built-in model/`firmwareId` profile map (generic S-series default, config-overridable), so one driver covers the whole S-series. Observe-only — it never writes to the pump.
-
-Each emitted signal also carries its source **Modbus register id**, surfaced as a **Register** column in the per-driver "all signals" detail view. This is plumbed through a new optional 4th argument to `host.emit_metric(name, value, unit, register)` (generic for any driver with addressable points; drivers that omit it are unaffected).
-
-Also adds **opt-in TLS certificate pinning** to the Lua HTTP host capability: `capabilities.http.tls_pin_sha256` pins an HTTPS endpoint's leaf certificate by SHA-256 fingerprint. This lets a driver reach a self-signed endpoint (the heat pump's local API) by trusting exactly one certificate — rejecting a swapped cert (LAN MITM) at the handshake — instead of disabling verification. Drivers without a pin are unaffected (standard system-root verification).
