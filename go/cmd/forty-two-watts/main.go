@@ -2032,12 +2032,12 @@ func main() {
 			}
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
-					"driver", ctrl.SiteMeterDriver)
+					"driver", siteMeterDriver)
 				if troubleshootingMode {
 					slog.Info("troubleshooting: site meter stale, dispatch skipped",
 						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
 				}
-				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), siteMeterDriver) {
 					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
