@@ -252,7 +252,7 @@ func (b *Bridge) connectAndStart(cfg *config.HomeAssistant, driverNames []string
 		SetClientID("forty-two-watts-ha").
 		SetAutoReconnect(true).
 		SetConnectRetry(true).
-		SetConnectRetryInterval(10 * time.Second).
+		SetConnectRetryInterval(10*time.Second).
 		// LWT: broker publishes "offline" if the EMS vanishes without a clean disconnect.
 		// QoS 1 + retained so HA sees it immediately after reconnecting to the broker.
 		SetWill(b.availTopic(), "offline", 1, true).
@@ -348,7 +348,7 @@ func (b *Bridge) Stop() {
 
 // ---- Topic helpers ----
 
-func (b *Bridge) availTopic() string  { return b.topicPrefix + "/status" }
+func (b *Bridge) availTopic() string            { return b.topicPrefix + "/status" }
 func (b *Bridge) stateTopic(name string) string { return b.topicPrefix + "/state/" + name }
 func (b *Bridge) cmdTopic(name string) string   { return b.topicPrefix + "/cmd/" + name }
 func (b *Bridge) driverTopic(driver, field string) string {
@@ -428,12 +428,12 @@ func (b *Bridge) publishDiscovery() {
 		{"phase_2_current", "Phase L2 Current", "A", "current", "measurement", b.stateTopic("phase_2_a")},
 		{"phase_3_current", "Phase L3 Current", "A", "current", "measurement", b.stateTopic("phase_3_a")},
 		// Today's energy totals (accumulated since midnight, reset daily)
-		{"today_import", "Today Grid Import", "Wh", "energy", "measurement", b.stateTopic("today_import_wh")},
-		{"today_export", "Today Grid Export", "Wh", "energy", "measurement", b.stateTopic("today_export_wh")},
-		{"today_pv", "Today PV Generation", "Wh", "energy", "measurement", b.stateTopic("today_pv_wh")},
-		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "measurement", b.stateTopic("today_bat_charged_wh")},
-		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "measurement", b.stateTopic("today_bat_discharged_wh")},
-		{"today_load", "Today Load", "Wh", "energy", "measurement", b.stateTopic("today_load_wh")},
+		{"today_import", "Today Grid Import", "Wh", "energy", "total_increasing", b.stateTopic("today_import_wh")},
+		{"today_export", "Today Grid Export", "Wh", "energy", "total_increasing", b.stateTopic("today_export_wh")},
+		{"today_pv", "Today PV Generation", "Wh", "energy", "total_increasing", b.stateTopic("today_pv_wh")},
+		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_charged_wh")},
+		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_discharged_wh")},
+		{"today_load", "Today Load", "Wh", "energy", "total_increasing", b.stateTopic("today_load_wh")},
 	}
 	for _, s := range sensors {
 		msg := b.withAvail(map[string]any{
@@ -582,10 +582,6 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Per-driver sensors + health ----
 	b.mu.Lock()
-	knownMetrics := make(map[string]struct{}, len(b.announcedMetrics))
-	for k, v := range b.announcedMetrics {
-		knownMetrics[k] = v
-	}
 	knownEVs := make(map[string]struct{}, len(b.announcedEVDrivers))
 	for k, v := range b.announcedEVDrivers {
 		knownEVs[k] = v
@@ -636,14 +632,14 @@ func (b *Bridge) publishDiscovery() {
 		b.publish(fmt.Sprintf("%s/binary_sensor/%s/%s_online/config", b.discoPrefix, b.deviceID, name), d, true)
 		total++
 
-		// Re-announce any emit_metric sensors already known from a previous cycle.
-		for key := range knownMetrics {
-			prefix := name + ":"
-			if !strings.HasPrefix(key, prefix) {
-				continue
-			}
-			metricName := key[len(prefix):]
-			b.announceMetric(dev, name, metricName)
+		// Re-announce every live emit_metric sensor. Reading the snapshots here
+		// preserves explicit units supplied by the driver across reconnects.
+		for _, snap := range b.tel.LatestMetricsByDriver(name) {
+			key := name + ":" + snap.Name
+			b.mu.Lock()
+			b.announcedMetrics[key] = struct{}{}
+			b.mu.Unlock()
+			b.announceMetric(dev, name, snap.Name, snap.Unit)
 			total++
 		}
 	}
@@ -665,14 +661,14 @@ func (b *Bridge) publishDiscovery() {
 
 // announceMetric publishes a single HA discovery message for a driver emit_metric.
 // Called when a metric is seen for the first time and on every reconnect.
-func (b *Bridge) announceMetric(dev map[string]any, driver, metricName string) {
-	unit, devClass := metricUnitAndClass(metricName)
+func (b *Bridge) announceMetric(dev map[string]any, driver, metricName, explicitUnit string) {
+	unit, devClass := metricUnitAndClass(metricName, explicitUnit)
 	uid := b.deviceID + "_" + driver + "_" + metricName
 	msg := b.withAvail(map[string]any{
-		"name":      driver + " " + strings.ReplaceAll(metricName, "_", " "),
-		"unique_id": uid,
+		"name":        driver + " " + strings.ReplaceAll(metricName, "_", " "),
+		"unique_id":   uid,
 		"state_topic": b.driverTopic(driver, metricName),
-		"device":    dev,
+		"device":      dev,
 	})
 	if unit != "" {
 		msg["unit_of_measurement"] = unit
@@ -685,8 +681,33 @@ func (b *Bridge) announceMetric(dev map[string]any, driver, metricName string) {
 	b.publish(topic, d, true)
 }
 
-// metricUnitAndClass infers HA unit and device_class from an emit_metric name suffix.
-func metricUnitAndClass(name string) (unit, devClass string) {
+// metricUnitAndClass preserves a unit explicitly emitted by the driver and
+// infers Home Assistant's device class from it. Legacy metrics without a unit
+// retain the suffix-based fallback.
+func metricUnitAndClass(name, explicitUnit string) (unit, devClass string) {
+	if explicitUnit != "" {
+		switch explicitUnit {
+		case "W":
+			return explicitUnit, "power"
+		case "Wh", "kWh":
+			return explicitUnit, "energy"
+		case "°C":
+			return explicitUnit, "temperature"
+		case "V":
+			return explicitUnit, "voltage"
+		case "A":
+			return explicitUnit, "current"
+		case "Hz":
+			return explicitUnit, "frequency"
+		case "%":
+			if strings.Contains(name, "soc") {
+				return explicitUnit, "battery"
+			}
+			return explicitUnit, ""
+		default:
+			return explicitUnit, ""
+		}
+	}
 	switch {
 	case strings.HasSuffix(name, "_w"):
 		return "W", "power"
@@ -939,7 +960,7 @@ func (b *Bridge) publishState() {
 			}
 			b.mu.Unlock()
 			if !known {
-				b.announceMetric(dev, name, snap.Name)
+				b.announceMetric(dev, name, snap.Name, snap.Unit)
 			}
 			b.publishDriver(name, snap.Name, snap.Value)
 		}

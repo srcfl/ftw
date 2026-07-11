@@ -3052,7 +3052,7 @@ func (b stateEnergyBridge) TodayEnergy() (ha.TodayEnergySnapshot, bool) {
 		BatChargedWh:    d.BatChargedWh,
 		BatDischargedWh: d.BatDischargedWh,
 		LoadWh:          d.LoadWh,
-	}, true
+	}, d.Intervals > 0
 }
 
 func haEnergySource(st *state.Store) ha.EnergySource {
