@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -42,6 +43,7 @@ import (
 	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	v2xpolicy "github.com/frahlg/forty-two-watts/go/internal/v2x"
 )
 
 const (
@@ -53,6 +55,18 @@ const (
 	maskedPlaceholder = "••••••••"
 )
 
+// InstanceSigner signs the owner-access instance descriptor with the Pi's
+// self-sovereign ES256 identity. *nova.Identity satisfies it. PublicKeyHex
+// returns the uncompressed P-256 public key (X||Y, 128 lowercase hex chars);
+// SignRawHex returns the raw r||s 64-byte signature as a 128-char hex string
+// (the handler re-encodes it to base64url for the wire). Declared as an
+// interface here so internal/api does not import internal/nova (matches the
+// relaySigner pattern in cmd/forty-two-watts/owner_relay_register.go).
+type InstanceSigner interface {
+	PublicKeyHex() string
+	SignRawHex(msg string) (string, error)
+}
+
 // Deps is the full set of runtime dependencies the API handlers need.
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
@@ -60,24 +74,24 @@ type Deps struct {
 	Tel *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing    *telemetry.LogRing
-	Ctrl       *control.State
-	CtrlMu     *sync.Mutex
-	State      *state.Store
-	CapMu      *sync.RWMutex
-	Capacities map[string]float64 // driver → battery_capacity_wh
-	CfgMu      *sync.RWMutex
-	Cfg        *config.Config
-	ConfigPath string
-	DriverDir      string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir  string // persistent user-drivers overlay; searched before DriverDir
-	Models     map[string]*battery.Model
-	ModelsMu   *sync.Mutex
-	SelfTune   *selftune.Coordinator
-	DtS        float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig func(path string, c *config.Config) error // injection for testability
-	WebDir     string                                    // static assets root (default "web")
-	ColdDir    string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	LogRing       *telemetry.LogRing
+	Ctrl          *control.State
+	CtrlMu        *sync.Mutex
+	State         *state.Store
+	CapMu         *sync.RWMutex
+	Capacities    map[string]float64 // driver → battery_capacity_wh
+	CfgMu         *sync.RWMutex
+	Cfg           *config.Config
+	ConfigPath    string
+	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
+	Models        map[string]*battery.Model
+	ModelsMu      *sync.Mutex
+	SelfTune      *selftune.Coordinator
+	DtS           float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig    func(path string, c *config.Config) error // injection for testability
+	WebDir        string                                    // static assets root (default "web")
+	ColdDir       string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -155,7 +169,7 @@ type Deps struct {
 
 	// OwnerAccessRPID is the WebAuthn Relying Party ID for owner-access
 	// passkeys. Must match the hostname the browser sees. Defaults to
-	// "relay.fortytwowatts.com"; override to "localhost" for local dev.
+	// "home.fortytwowatts.com"; override to "localhost" for local dev.
 	OwnerAccessRPID string
 
 	// OwnerAccessOrigins is the list of permitted browser origins for
@@ -183,6 +197,28 @@ type Deps struct {
 	// boot regardless of Nova (see cmd/forty-two-watts/main.go). Empty if
 	// identity load failed; the /api/identity endpoint then returns 503.
 	SiteIdentityPubHex string
+
+	// SiteID is this Pi's stable owner-routing identifier. New installs use an
+	// opaque high-entropy "site:<token>"; legacy installs may keep "site:<name>"
+	// until their encrypted directory is migrated. Published via /api/identity so
+	// the browser can pin it and rebuild the canonical DTLS fingerprint signing
+	// string (which binds the signature to this site).
+	SiteID string
+
+	// RelayBaseURL is the base URL of the owner-access relay this Pi registers
+	// with. main.go defaults it to the official relay after remote_access opt-in
+	// and lets FTW_RELAY_URL override it for self-hosted/dev relays. Used to
+	// self-publish the signed instance descriptor to PUT
+	// {RelayBaseURL}/bootstrap/{site_id} during the brief first-enrollment window
+	// (see bootstrap_publish.go). Empty means setup links cannot be published.
+	RelayBaseURL string
+
+	// InstanceSigner is the Pi's self-sovereign ES256 identity used to sign the
+	// owner-access instance descriptor (GET /api/owner-access/instance-descriptor)
+	// over the P2P channel. Satisfied by *nova.Identity — the same key behind
+	// SiteIdentityPubHex. Nil when identity load failed on boot; the descriptor
+	// endpoint then returns 503.
+	InstanceSigner InstanceSigner
 
 	// P2P is the Pi-side WebRTC manager (Phase 5). It answers browser SDP
 	// offers (POST /api/p2p/offer) and serves the resulting direct DataChannel
@@ -263,6 +299,9 @@ func (s *Server) routes() {
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
+	s.handle("GET /api/oauth/myuplink/start", s.handleMyUplinkOAuthStart)
+	s.handle("GET /api/oauth/myuplink/callback", s.handleMyUplinkOAuthCallback)
+	s.handle("POST /api/oauth/myuplink/exchange", s.handleMyUplinkOAuthExchange)
 	s.handle("GET  /api/mode", s.handleGetMode)
 	s.handle("POST /api/mode", s.handleSetMode)
 	s.handle("POST /api/target", s.handleSetTarget)
@@ -312,6 +351,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/scan", s.handleScan)
 	s.handle("GET  /api/ev/status", s.handleEVStatus)
 	s.handle("POST /api/ev/command", s.handleEVCommand)
+	s.handle("GET  /api/v2x/policy", s.handleV2XPolicy)
+	s.handle("POST /api/v2x/command", s.handleV2XCommand)
 	s.handle("POST /api/ev/chargers", s.handleEVChargers)
 	s.handle("GET  /api/ev/providers", s.handleEVProviders)
 	s.handle("GET  /api/loadpoints", s.handleLoadpoints)
@@ -355,8 +396,18 @@ func (s *Server) routes() {
 	s.handle("POST /api/owner-access/login/finish", s.handleOwnerLoginFinish)
 	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
 	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
+	s.handle("GET  /api/owner-access/browser-keys", s.handleOwnerBrowserKeysList)
+	s.handle("DELETE /api/owner-access/browser-keys/{browser_key_id}", s.handleOwnerBrowserKeyDelete)
+	s.handle("GET  /api/owner-access/sessions", s.handleOwnerSessionsList)
+	s.handle("DELETE /api/owner-access/sessions/{session_id}", s.handleOwnerSessionDelete)
 	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
 	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
+	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).
+	s.handle("GET  /api/owner-access/device-challenge", s.handleOwnerDeviceChallenge)
+	s.handle("POST /api/owner-access/device-pop", s.handleOwnerDevicePoP)
+	// Multi-tenant home route: Pi-signed instance descriptor, owner-authed,
+	// served over the P2P channel (see api_owner_instance_descriptor.go).
+	s.handle("GET  /api/owner-access/instance-descriptor", s.handleOwnerInstanceDescriptor)
 
 	// ---- Self-sovereign site identity (Phase 2) ----
 	s.handle("GET  /api/identity", s.handleIdentity)
@@ -492,16 +543,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load = house-only consumption in site convention (+ into site):
-	//   meter    = load + ev + (bat charge - bat discharge) - pv_gen
-	//   so load  = grid - bat - pv - ev
-	// Subtracting EV keeps the load signal (and the loadmodel trained on
-	// it) reflecting the house, not "house + car" — otherwise a 10 kWh
-	// overnight EV session would inflate every Monday-evening bucket of
-	// the weekly-pattern learner.
+	//   meter = load + ev + v2x + battery + pv
+	//   so load = grid - bat - pv - ev - v2x
+	// Subtracting vehicle charging/storage keeps the load signal (and
+	// the loadmodel trained on it) reflecting the house, not "house + car".
 	evW := s.deps.Tel.SumOnlineEVW()
+	v2xW := s.deps.Tel.SumOnlineV2XW()
 	loadW := 0.0
 	if haveGrid {
-		rawLoad := gridW - batW - pvW - evW
+		rawLoad := gridW - batW - pvW - evW - v2xW
 		loadW = s.deps.Tel.UpdateLoad(rawLoad)
 		if loadW < 0 {
 			loadW = 0
@@ -651,6 +701,102 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		if r := s.deps.Tel.Get(name, telemetry.DerV2X); r != nil {
+			d["v2x_w"] = r.SmoothedW
+			if r.SoC != nil {
+				d["v2x_vehicle_soc"] = *r.SoC
+			}
+			var v2x struct {
+				Connected          *bool    `json:"connected"`
+				PlugConnected      *bool    `json:"plug_connected"`
+				VehicleSoC         *float64 `json:"vehicle_soc"`
+				VehicleSoCFract    *float64 `json:"vehicle_soc_fract"`
+				DCW                *float64 `json:"dc_w"`
+				DCV                *float64 `json:"dc_v"`
+				DCA                *float64 `json:"dc_a"`
+				SessionChargeWh    *float64 `json:"session_charge_wh"`
+				SessionDischargeWh *float64 `json:"session_discharge_wh"`
+				TotalChargeWh      *float64 `json:"total_charge_wh"`
+				TotalDischargeWh   *float64 `json:"total_discharge_wh"`
+				ChargePowerMinW    *float64 `json:"charge_power_min_w"`
+				ChargePowerMaxW    *float64 `json:"charge_power_max_w"`
+				DischargePowerMinW *float64 `json:"discharge_power_min_w"`
+				DischargePowerMaxW *float64 `json:"discharge_power_max_w"`
+				EVMaxEnergyReqWh   *float64 `json:"ev_max_energy_req_wh"`
+				EVMinEnergyReqWh   *float64 `json:"ev_min_energy_req_wh"`
+				CapacityWh         *float64 `json:"capacity_wh"`
+				RatedPowerW        *float64 `json:"rated_power_w"`
+				Status             *string  `json:"status"`
+				ControlMode        *string  `json:"control_mode"`
+				Protocol           *string  `json:"protocol"`
+			}
+			if r.Data != nil && json.Unmarshal(r.Data, &v2x) == nil {
+				if v2x.Connected != nil {
+					d["v2x_connected"] = *v2x.Connected
+				} else if v2x.PlugConnected != nil {
+					d["v2x_connected"] = *v2x.PlugConnected
+				}
+				if v2x.VehicleSoC != nil {
+					d["v2x_vehicle_soc"] = *v2x.VehicleSoC
+				} else if v2x.VehicleSoCFract != nil {
+					d["v2x_vehicle_soc"] = *v2x.VehicleSoCFract
+				}
+				if v2x.DCW != nil {
+					d["v2x_dc_w"] = *v2x.DCW
+				}
+				if v2x.DCV != nil {
+					d["v2x_dc_v"] = *v2x.DCV
+				}
+				if v2x.DCA != nil {
+					d["v2x_dc_a"] = *v2x.DCA
+				}
+				if v2x.SessionChargeWh != nil {
+					d["v2x_session_charge_wh"] = *v2x.SessionChargeWh
+				}
+				if v2x.SessionDischargeWh != nil {
+					d["v2x_session_discharge_wh"] = *v2x.SessionDischargeWh
+				}
+				if v2x.TotalChargeWh != nil {
+					d["v2x_total_charge_wh"] = *v2x.TotalChargeWh
+				}
+				if v2x.TotalDischargeWh != nil {
+					d["v2x_total_discharge_wh"] = *v2x.TotalDischargeWh
+				}
+				if v2x.ChargePowerMinW != nil {
+					d["v2x_charge_power_min_w"] = *v2x.ChargePowerMinW
+				}
+				if v2x.ChargePowerMaxW != nil {
+					d["v2x_charge_power_max_w"] = *v2x.ChargePowerMaxW
+				}
+				if v2x.DischargePowerMinW != nil {
+					d["v2x_discharge_power_min_w"] = *v2x.DischargePowerMinW
+				}
+				if v2x.DischargePowerMaxW != nil {
+					d["v2x_discharge_power_max_w"] = *v2x.DischargePowerMaxW
+				}
+				if v2x.EVMaxEnergyReqWh != nil {
+					d["v2x_ev_max_energy_req_wh"] = *v2x.EVMaxEnergyReqWh
+				}
+				if v2x.EVMinEnergyReqWh != nil {
+					d["v2x_ev_min_energy_req_wh"] = *v2x.EVMinEnergyReqWh
+				}
+				if v2x.CapacityWh != nil {
+					d["v2x_capacity_wh"] = *v2x.CapacityWh
+				}
+				if v2x.RatedPowerW != nil {
+					d["v2x_rated_power_w"] = *v2x.RatedPowerW
+				}
+				if v2x.Status != nil {
+					d["v2x_status"] = *v2x.Status
+				}
+				if v2x.ControlMode != nil {
+					d["v2x_control_mode"] = *v2x.ControlMode
+				}
+				if v2x.Protocol != nil {
+					d["v2x_protocol"] = *v2x.Protocol
+				}
+			}
+		}
 		drivers[name] = d
 	}
 	// Merge config drivers that aren't in the registry so the UI can
@@ -713,13 +859,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		d, err := s.deps.State.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
 		if err == nil {
-			energyToday = map[string]any{
-				"import_wh":         d.ImportWh,
-				"export_wh":         d.ExportWh,
-				"pv_wh":             d.PVWh,
-				"bat_charged_wh":    d.BatChargedWh,
-				"bat_discharged_wh": d.BatDischargedWh,
-				"load_wh":           d.LoadWh,
+			// Only surface today's totals once at least one integration
+			// interval exists. Right after local midnight the range has
+			// 0–1 history rows, so the SQL COALESCEs every sum to a vacuous
+			// 0; rendering that as a hard "0 Wh" looks like a real reading
+			// instead of "no data yet". Mirror the old `len(pts) > 1` guard.
+			if d.Intervals > 0 {
+				energyToday = map[string]any{
+					"import_wh":         d.ImportWh,
+					"export_wh":         d.ExportWh,
+					"pv_wh":             d.PVWh,
+					"bat_charged_wh":    d.BatChargedWh,
+					"bat_discharged_wh": d.BatDischargedWh,
+					"load_wh":           d.LoadWh,
+				}
 			}
 		} else {
 			slog.Warn("failed to integrate today's energy", "err", err)
@@ -737,6 +890,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// doesn't need a second /api/config fetch, and pull per-phase readings
 	// from the site meter driver's raw emit payload.
 	s.deps.CfgMu.RLock()
+	troubleshootingMode := s.deps.Cfg.Site.TroubleshootingMode
 	fuseCfg := map[string]any{
 		"max_amps": s.deps.Cfg.Fuse.MaxAmps,
 		"phases":   s.deps.Cfg.Fuse.Phases,
@@ -745,16 +899,24 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RUnlock()
 
 	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
+	var v2xGridW *float64
+	if haveGrid {
+		gridCopy := gridW
+		v2xGridW = &gridCopy
+	}
+	v2xPolicy := s.v2xPolicyStatus(v2xGridW)
 
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
+		"troubleshooting_mode":  troubleshootingMode,
 		"plan_stale":            ctrl.PlanStale,
 		"grid_w":                gridW,
 		"pv_w":                  pvW,
 		"pv_w_predicted":        pvPredictW,
 		"bat_w":                 batW,
 		"ev_w":                  evW,
+		"v2x_w":                 v2xW,
 		"load_w":                loadW,
 		"load_w_predicted":      loadPredictW,
 		"bat_soc":               avgSoC,
@@ -776,6 +938,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"fuse":         fuseCfg,
 		"phase_amps":   phaseAmps,
 		"phase_powers": siteMeterPhasePowers(s.deps.Tel, ctrl.SiteMeterDriver),
+		"v2x_policy":   v2xPolicy,
 		"drivers":      drivers,
 		"dispatch":     dispatch,
 		// Observability counters for the per-slot Wh tracker. Pure
@@ -1098,6 +1261,9 @@ func (s *Server) handlePostConfig(w http.ResponseWriter, r *http.Request) {
 	s.deps.Ctrl.PVSurplusAbsorbSoCCapPct = newCfg.Site.PVSurplusAbsorbSoCCapPct
 	s.deps.Ctrl.PVSurplusAbsorbThresholdW = newCfg.Site.PVSurplusAbsorbThresholdW
 	s.deps.CtrlMu.Unlock()
+	if s.deps.Registry != nil {
+		s.deps.Registry.Reload(r.Context(), newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+	}
 	// Update shared cfg pointer
 	s.deps.CfgMu.Lock()
 	*s.deps.Cfg = newCfg
@@ -1130,52 +1296,43 @@ func (s *Server) handleSetMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m := control.Mode(req.Mode)
-	// Validate mode string
-	switch m {
-	case control.ModeIdle, control.ModeSelfConsumption, control.ModePeakShaving,
-		control.ModeCharge, control.ModePriority, control.ModeWeighted,
-		control.ModePlannerSelf, control.ModePlannerCheap,
-		control.ModePlannerPassiveArbitrage, control.ModePlannerArbitrage:
-		s.deps.CtrlMu.Lock()
-		s.deps.Ctrl.Mode = m
-		// An explicit mode change is a reset signal: drop any active
-		// battery manual hold so the new mode takes effect on the very
-		// next dispatch tick. Mirrors the loadpoint manual_hold UX.
-		s.deps.Ctrl.ClearBatteryManualHold()
-		// Reset the PI integrator. The integral accumulated under the
-		// previous mode's error signal is meaningless to the new mode
-		// — keeping it caused integrator windup → wrong-direction stuck
-		// output across the 2026-05-24 evening mode switch (live
-		// regression: discharged the fleet to 7 % overnight while the
-		// PI integral was pinned in the wrong direction). Mode change
-		// is a discrete event; start the new regime from a clean PI.
-		if s.deps.Ctrl.PI != nil {
-			s.deps.Ctrl.PI.Reset()
-		}
-		s.deps.CtrlMu.Unlock()
-		if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
-			slog.Warn("failed to persist mode", "err", err)
-		}
-		// Propagate to MPC if switching to a planner mode. Map
-		// control.ModePlanner* → mpc.Mode and force an immediate replan.
-		if m.IsPlannerMode() && s.deps.MPC != nil {
-			var mm mpc.Mode
-			switch m {
-			case control.ModePlannerSelf:
-				mm = mpc.ModeSelfConsumption
-			case control.ModePlannerCheap:
-				mm = mpc.ModeCheapCharge
-			case control.ModePlannerPassiveArbitrage:
-				mm = mpc.ModePassiveArbitrage
-			case control.ModePlannerArbitrage:
-				mm = mpc.ModeArbitrage
-			}
-			s.deps.MPC.SetMode(r.Context(), mm)
-		}
-		writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
-	default:
+	// Validate against the canonical mode list. control.AllModes is the
+	// single source of truth — the same list the HA discovery `select`
+	// options derive from — so the validator and the HA bridge can't drift.
+	if !control.IsValidMode(m) {
 		writeJSON(w, 400, map[string]string{"error": "unknown mode: " + req.Mode})
+		return
 	}
+	s.deps.CtrlMu.Lock()
+	s.deps.Ctrl.Mode = m
+	// An explicit mode change is a reset signal: drop any active
+	// battery manual hold so the new mode takes effect on the very
+	// next dispatch tick. Mirrors the loadpoint manual_hold UX.
+	s.deps.Ctrl.ClearBatteryManualHold()
+	// Reset the PI integrator. The integral accumulated under the
+	// previous mode's error signal is meaningless to the new mode
+	// — keeping it caused integrator windup → wrong-direction stuck
+	// output across the 2026-05-24 evening mode switch (live
+	// regression: discharged the fleet to 7 % overnight while the
+	// PI integral was pinned in the wrong direction). Mode change
+	// is a discrete event; start the new regime from a clean PI.
+	if s.deps.Ctrl.PI != nil {
+		s.deps.Ctrl.PI.Reset()
+	}
+	s.deps.CtrlMu.Unlock()
+	if err := s.deps.State.SaveConfig("mode", req.Mode); err != nil {
+		slog.Warn("failed to persist mode", "err", err)
+	}
+	// Propagate to MPC if switching to a planner mode and force an
+	// immediate replan. control.PlannerMPCMode is the single source of the
+	// ModePlanner* → mpc.Mode mapping; ok is false for non-planner modes (and
+	// for any planner mode that hasn't been wired into the mapping), so an
+	// unmapped mode skips the MPC push instead of silently coercing it to the
+	// zero-value mpc.Mode("").
+	if mm, ok := control.PlannerMPCMode(m); ok && s.deps.MPC != nil {
+		s.deps.MPC.SetMode(r.Context(), mm)
+	}
+	writeJSON(w, 200, map[string]string{"status": "ok", "mode": req.Mode})
 }
 
 // ---- /api/target ----
@@ -1255,11 +1412,7 @@ func (s *Server) handleSetEVCharging(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.CtrlMu.Lock()
-	if req.Active {
-		s.deps.Ctrl.EVChargingW = req.PowerW
-	} else {
-		s.deps.Ctrl.EVChargingW = 0
-	}
+	s.deps.Ctrl.SetManualEVCharging(req.PowerW, req.Active)
 	s.deps.CtrlMu.Unlock()
 	writeJSON(w, 200, map[string]any{"status": "ok", "ev_charging_w": req.PowerW})
 }
@@ -1405,7 +1558,7 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 	}
 	// Apply immediately via Reload — it filters disabled drivers and
 	// stops running ones, or re-adds the newly-enabled one.
-	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers)
+	s.deps.Registry.Reload(r.Context(), cfgCopy.Drivers, cfgCopy.Site.TroubleshootingMode)
 
 	action := "disabled"
 	if !disabled {
@@ -1594,6 +1747,35 @@ func parseRange(s string) int64 {
 		return 48 * 60 * 60 * 1000
 	case "3d":
 		return 3 * 24 * 60 * 60 * 1000
+	}
+	// Generic "<N><unit>" (m/h/d/w/y) so charts + energy-period windows can ask
+	// for longer spans (e.g. 30d for the month temp graph, 366d for "this year"
+	// energy). Capped at 2 years to bound the TS-DB scan.
+	if len(s) >= 2 {
+		if n, err := strconv.Atoi(s[:len(s)-1]); err == nil && n > 0 {
+			var mult int64
+			switch s[len(s)-1] {
+			case 'm':
+				mult = 60 * 1000
+			case 'h':
+				mult = 60 * 60 * 1000
+			case 'd':
+				mult = 24 * 60 * 60 * 1000
+			case 'w':
+				mult = 7 * 24 * 60 * 60 * 1000
+			case 'y':
+				mult = 365 * 24 * 60 * 60 * 1000
+			}
+			if mult > 0 {
+				maxMs := int64(2) * 365 * 24 * 60 * 60 * 1000
+				// Cap before multiplication so an attacker-controlled, very large
+				// N cannot overflow int64 and turn the requested window negative.
+				if int64(n) > maxMs/mult {
+					return maxMs
+				}
+				return int64(n) * mult
+			}
+		}
 	}
 	return 5 * 60 * 1000
 }
@@ -2233,6 +2415,290 @@ func (s *Server) handleEVCommand(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "ok"})
 }
 
+var validV2XActions = map[string]bool{
+	"v2x_set_power": true,
+	"v2x_stop":      true,
+	"init":          true,
+	"deinit":        true,
+}
+
+const maxManualV2XPowerW = 50000
+
+func catalogHasCapability(entries []drivers.CatalogEntry, luaPath, capability string) bool {
+	base := filepath.Base(luaPath)
+	for _, entry := range entries {
+		if entry.Path != luaPath && entry.Filename != base && filepath.Base(entry.Path) != base {
+			continue
+		}
+		for _, cap := range entry.Capabilities {
+			if cap == capability {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Server) configuredV2XDrivers() map[string]bool {
+	out := make(map[string]bool)
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return out
+	}
+	var cfgDrivers []config.Driver
+	s.deps.CfgMu.RLock()
+	cfgDrivers = append(cfgDrivers, s.deps.Cfg.Drivers...)
+	s.deps.CfgMu.RUnlock()
+	catalog, _ := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.deps.DriverDir)
+	for _, d := range cfgDrivers {
+		if d.Disabled || d.Name == "" {
+			continue
+		}
+		if catalogHasCapability(catalog, d.Lua, telemetry.DerV2X.String()) ||
+			strings.Contains(strings.ToLower(filepath.Base(d.Lua)), "v2x") {
+			out[d.Name] = true
+		}
+	}
+	return out
+}
+
+func (s *Server) liveV2XDrivers() map[string]bool {
+	out := make(map[string]bool)
+	if s.deps.Tel == nil {
+		return out
+	}
+	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerV2X) {
+		h := s.deps.Tel.DriverHealth(r.Driver)
+		if h != nil && h.IsOnline() {
+			out[r.Driver] = true
+		}
+	}
+	return out
+}
+
+func pickV2XDriver(requested string, configured, live map[string]bool) (string, error) {
+	if requested != "" {
+		if configured[requested] || live[requested] {
+			return requested, nil
+		}
+		return "", fmt.Errorf("unknown v2x driver")
+	}
+	candidates := make(map[string]bool)
+	for name := range configured {
+		candidates[name] = true
+	}
+	for name := range live {
+		candidates[name] = true
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no V2X driver configured")
+	}
+	if len(candidates) > 1 {
+		return "", fmt.Errorf("driver is required when multiple V2X drivers exist")
+	}
+	for name := range candidates {
+		return name, nil
+	}
+	return "", fmt.Errorf("no V2X driver configured")
+}
+
+type v2xPolicyTelemetry struct {
+	Connected          *bool    `json:"connected"`
+	PlugConnected      *bool    `json:"plug_connected"`
+	VehicleSoC         *float64 `json:"vehicle_soc"`
+	VehicleSoCFract    *float64 `json:"vehicle_soc_fract"`
+	CapacityWh         *float64 `json:"capacity_wh"`
+	RatedPowerW        *float64 `json:"rated_power_w"`
+	ChargePowerMaxW    *float64 `json:"charge_power_max_w"`
+	DischargePowerMaxW *float64 `json:"discharge_power_max_w"`
+}
+
+func (s *Server) v2xPolicyConfig() *config.V2XPolicy {
+	if s.deps == nil || s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return nil
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if s.deps.Cfg.V2X == nil {
+		return nil
+	}
+	cp := *s.deps.Cfg.V2X
+	return &cp
+}
+
+func (s *Server) v2xPolicyStatus(gridW *float64) map[string]any {
+	policy := s.v2xPolicyConfig()
+	policyOut := config.V2XPolicy{}
+	if policy != nil {
+		policyOut = *policy
+	}
+
+	driversOut := map[string]v2xpolicy.Envelope{}
+	if s.deps == nil || s.deps.Tel == nil {
+		return map[string]any{
+			"policy":  policyOut,
+			"drivers": driversOut,
+		}
+	}
+
+	candidates := s.configuredV2XDrivers()
+	for _, r := range s.deps.Tel.ReadingsByType(telemetry.DerV2X) {
+		candidates[r.Driver] = true
+	}
+	if policy != nil && policy.DriverName != "" {
+		candidates[policy.DriverName] = true
+	}
+	for name := range candidates {
+		r := s.deps.Tel.Get(name, telemetry.DerV2X)
+		driversOut[name] = v2xpolicy.Evaluate(policy, s.v2xSnapshot(name, r, gridW))
+	}
+
+	return map[string]any{
+		"policy":  policyOut,
+		"drivers": driversOut,
+	}
+}
+
+func (s *Server) v2xSnapshot(name string, r *telemetry.DerReading, gridW *float64) v2xpolicy.Snapshot {
+	snap := v2xpolicy.Snapshot{
+		Driver: name,
+		GridW:  gridW,
+		Now:    time.Now(),
+	}
+	if s.deps != nil && s.deps.Tel != nil {
+		if h := s.deps.Tel.DriverHealth(name); h != nil {
+			snap.Online = h.IsOnline()
+		}
+	}
+	if r == nil {
+		return snap
+	}
+	if r.SoC != nil {
+		soc := *r.SoC
+		snap.SoC = &soc
+	}
+	var data v2xPolicyTelemetry
+	if r.Data != nil && json.Unmarshal(r.Data, &data) == nil {
+		if data.Connected != nil {
+			connected := *data.Connected
+			snap.Connected = &connected
+		} else if data.PlugConnected != nil {
+			connected := *data.PlugConnected
+			snap.Connected = &connected
+		}
+		if snap.SoC == nil {
+			if data.VehicleSoC != nil {
+				soc := *data.VehicleSoC
+				snap.SoC = &soc
+			} else if data.VehicleSoCFract != nil {
+				soc := *data.VehicleSoCFract
+				snap.SoC = &soc
+			}
+		}
+		if data.CapacityWh != nil {
+			snap.CapacityWh = *data.CapacityWh
+		}
+		if data.RatedPowerW != nil {
+			snap.RatedPowerW = *data.RatedPowerW
+		}
+		if data.ChargePowerMaxW != nil {
+			snap.ChargePowerMaxW = *data.ChargePowerMaxW
+		}
+		if data.DischargePowerMaxW != nil {
+			snap.DischargePowerMaxW = *data.DischargePowerMaxW
+		}
+	}
+	return snap
+}
+
+func (s *Server) currentV2XGridW() *float64 {
+	if s.deps == nil || s.deps.Tel == nil || s.deps.Ctrl == nil || s.deps.CtrlMu == nil {
+		return nil
+	}
+	s.deps.CtrlMu.Lock()
+	siteMeter := s.deps.Ctrl.SiteMeterDriver
+	s.deps.CtrlMu.Unlock()
+	if siteMeter == "" || !statusDriverOnline(s.deps.Tel, siteMeter) {
+		return nil
+	}
+	if r := s.deps.Tel.Get(siteMeter, telemetry.DerMeter); r != nil {
+		gridW := r.SmoothedW
+		return &gridW
+	}
+	return nil
+}
+
+// GET /api/v2x/policy — read back the configured V2X policy plus the live
+// allowed power envelope per V2X driver. This is observability only; automatic
+// dispatch remains disabled until a later planner integration consumes it.
+func (s *Server) handleV2XPolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, 200, s.v2xPolicyStatus(s.currentV2XGridW()))
+}
+
+// POST /api/v2x/command — send a signed W setpoint to a V2X charger driver.
+// This is intentionally a thin manual/test surface; automatic optimizer
+// dispatch is kept out until the V2X policy layer has reserve/departure
+// constraints wired in.
+func (s *Server) handleV2XCommand(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string  `json:"action"`
+		Driver string  `json:"driver"`
+		PowerW float64 `json:"power_w"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid request"})
+		return
+	}
+	if req.Action == "" {
+		req.Action = "v2x_set_power"
+	}
+	if !validV2XActions[req.Action] {
+		writeJSON(w, 400, map[string]string{"error": "unsupported action"})
+		return
+	}
+	if math.IsNaN(req.PowerW) || math.IsInf(req.PowerW, 0) {
+		writeJSON(w, 400, map[string]string{"error": "power_w must be finite"})
+		return
+	}
+	if math.Abs(req.PowerW) > maxManualV2XPowerW {
+		writeJSON(w, 400, map[string]string{"error": "power_w outside allowed manual V2X range"})
+		return
+	}
+	live := s.liveV2XDrivers()
+	driverName, err := pickV2XDriver(req.Driver, s.configuredV2XDrivers(), live)
+	if err != nil {
+		writeJSON(w, 404, map[string]string{"error": err.Error()})
+		return
+	}
+	if s.deps.Registry == nil {
+		writeJSON(w, 503, map[string]string{"error": "driver registry not available"})
+		return
+	}
+	action := req.Action
+	powerW := req.PowerW
+	if action == "v2x_stop" {
+		action = "v2x_set_power"
+		powerW = 0
+	}
+	// Only the v2x_set_power action carries a setpoint. init / deinit (and
+	// the v2x_stop→set_power+0 remap above) are non-setpoint actions, so a
+	// caller-supplied power_w must never leak through to the driver on
+	// them — force it to 0. This also keeps the live-telemetry guard below
+	// from being bypassed by a non-setpoint action smuggling a setpoint.
+	if action != "v2x_set_power" {
+		powerW = 0
+	}
+	if action == "v2x_set_power" && powerW != 0 && !live[driverName] {
+		writeJSON(w, 409, map[string]string{"error": "v2x driver is not reporting live telemetry"})
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{"action": action, "power_w": powerW})
+	if err := s.deps.Registry.Send(r.Context(), driverName, payload); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"status": "ok", "driver": driverName, "power_w": powerW})
+}
+
 // applyManualEVHold pins / releases the loadpoint matching the given
 // EV driver according to the operator action. Start / Resume install
 // a no-expiry hold at the loadpoint's MaxChargeW so the next dispatch
@@ -2346,6 +2812,7 @@ func (s *Server) handleLoadpoints(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Tel != nil {
 		decorateLoadpointsWithVehicle(states, s.deps.Tel)
 	}
+	s.decorateLoadpointsWithManual(states)
 	writeJSON(w, 200, map[string]any{
 		"enabled":    true,
 		"loadpoints": states,

@@ -78,6 +78,16 @@ type HostEnv struct {
 	// backward compat with existing drivers that didn't declare a list.
 	// Populated from driver config `capabilities.http.allowed_hosts`.
 	HTTPAllowedHosts []string
+	// HTTPTLSPinSHA256, when non-empty, pins the HTTPS leaf certificate to
+	// this SHA-256 fingerprint (hex; colons/whitespace ignored, case-
+	// insensitive — same value as `openssl x509 -fingerprint -sha256`).
+	// When set, the http_* client for THIS driver replaces system-root
+	// chain verification with an exact leaf-fingerprint match, so a driver
+	// can talk to a self-signed HTTPS endpoint (e.g. a heat pump's local
+	// REST API) without trusting any other certificate. Empty = standard
+	// verification (unchanged default for all existing HTTP drivers).
+	// Populated from driver config `capabilities.http.tls_pin_sha256`.
+	HTTPTLSPinSHA256 string
 	WS               WSCap // nil → ws_* calls return ErrNoCapability
 	// WSAllowedHosts mirrors HTTPAllowedHosts but for ws://+wss:// URLs
 	// passed to host.ws_open. Same matching semantics; empty = any host.
@@ -112,6 +122,14 @@ type HostEnv struct {
 	SN       string
 	MAC      string // resolved by ARP after first connection (best-effort)
 	Endpoint string // e.g. "modbus://192.168.1.1:502" or "mqtt://broker:1883"
+
+	// PersistSecret, when non-nil, lets a driver durably write a config
+	// secret (e.g. a rotated OAuth refresh_token) back into its own
+	// config block so it survives a restart. nil → host.persist_secret
+	// returns ok=false + an error. Wired by the Registry to a per-driver
+	// closure (see registry.go SecretPersister). Keep the value small:
+	// it is round-tripped through config.yaml as a plain string.
+	PersistSecret func(key, value string) error
 }
 
 // NewHostEnv creates a fresh host environment for a driver.
@@ -138,6 +156,14 @@ func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
 // means "any host" (backward compatible). Matched against URL host.
 func (h *HostEnv) WithHTTPAllowedHosts(hosts []string) *HostEnv {
 	h.HTTPAllowedHosts = hosts
+	return h
+}
+
+// WithHTTPTLSPin pins the HTTPS leaf certificate this driver's http_*
+// calls will accept, by SHA-256 fingerprint. Empty string = no pin
+// (standard system-root verification). See HostEnv.HTTPTLSPinSHA256.
+func (h *HostEnv) WithHTTPTLSPin(fp string) *HostEnv {
+	h.HTTPTLSPinSHA256 = fp
 	return h
 }
 
@@ -205,15 +231,17 @@ func (h *HostEnv) setPollInterval(ms int32) {
 // emitTelemetry accepts a JSON telemetry blob from the driver and routes it
 // into the telemetry store. Expected shape:
 //
-//	{"type": "meter"|"pv"|"battery", "w": 123.4, "soc": 0.5 (optional), ...}
+//	{"type": "meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", "w": 123.4, "soc": 0.5 (optional), ...}
 //
 // Extra fields are preserved in the reading's Data payload so the UI/API can
 // surface them verbatim.
 func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	var env struct {
-		Type string   `json:"type"`
-		W    *float64 `json:"w"`
-		SoC  *float64 `json:"soc,omitempty"`
+		Type            string   `json:"type"`
+		W               *float64 `json:"w"`
+		SoC             *float64 `json:"soc,omitempty"`
+		VehicleSoC      *float64 `json:"vehicle_soc,omitempty"`
+		VehicleSoCFract *float64 `json:"vehicle_soc_fract,omitempty"`
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
@@ -227,6 +255,15 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		rawW = *env.W
 	} else if t != telemetry.DerVehicle {
 		return fmt.Errorf("emit_telemetry: %s missing required w", t)
+	}
+	soc := env.SoC
+	if t == telemetry.DerV2X && soc == nil {
+		switch {
+		case env.VehicleSoC != nil:
+			soc = env.VehicleSoC
+		case env.VehicleSoCFract != nil:
+			soc = env.VehicleSoCFract
+		}
 	}
 	// Drop battery emits from drivers the operator declared as no-battery
 	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
@@ -242,11 +279,11 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		}
 		return nil
 	}
-	if err := telemetry.ValidateReading(t, rawW, env.SoC); err != nil {
+	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
 		return fmt.Errorf("emit_telemetry: %w", err)
 	}
 	if h.Telemetry != nil {
-		h.Telemetry.Update(h.DriverName, t, rawW, env.SoC, rawJSON)
+		h.Telemetry.Update(h.DriverName, t, rawW, soc, rawJSON)
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
@@ -257,15 +294,22 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 
 // emitMetric buffers a scalar diagnostic metric for the long-format TS DB.
 // Driver authors call this for anything beyond the standard pv/battery/meter
-// shape — temperatures, voltages, frequencies, MPPT currents, etc.
-func (h *HostEnv) emitMetric(name string, value float64) error {
+// shape — temperatures, voltages, frequencies, MPPT currents, etc. unit is an
+// optional display unit (e.g. "°C", "Hz") used by the UI to group + label.
+func (h *HostEnv) emitMetric(name string, value float64, unit, register, title string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
 	}
 	if h.Telemetry == nil {
 		return nil
 	}
-	h.Telemetry.EmitMetric(h.DriverName, name, value)
+	h.Telemetry.EmitMetric(h.DriverName, name, value, unit, register, title)
+	// A metric emission is fresh telemetry just like a structured emit, so
+	// it counts as a health success. Without this, a read-only driver that
+	// only uses emit_metric (e.g. the MyUplink heat-pump telemetry driver)
+	// never bumps LastSuccess and the watchdog flips it offline despite
+	// live data flowing.
+	h.Telemetry.RecordDriverSuccess(h.DriverName)
 	return nil
 }
 

@@ -17,25 +17,21 @@ function), `go/internal/drivers/host.go` (the env that backs them), and
 
 ## 1. Why Lua
 
-v2.1 switched the recommended driver path from Rust-compiled WASM to Lua
-via [gopher-lua](https://github.com/yuin/gopher-lua). The reasons, in
-order of how much they matter:
+Lua via [gopher-lua](https://github.com/yuin/gopher-lua) is the current
+driver runtime. The reasons, in order of how much they matter:
 
 - **Contributor-friendly**: no toolchain to install. Edit a `.lua` file
   and restart — no `cargo`, no `wasm-opt`, no cross-compile.
 - **Hot-editable on the device**: the operator can `ssh` into a Zap, tweak
   a register offset, restart, done. This is load-bearing for field work.
-- **Smaller host surface**: the Lua host is ~350 LOC in one file
-  (`go/internal/drivers/lua.go`) vs ~850 for the WASM runtime plus the
-  Rust scaffolding a WASM driver needs. Less code to trust.
+- **Small host surface**: the Lua host is one Go file plus the capability
+  environment, with no separate cross-compiled driver artifact.
 - **Good enough performance**: a poll at 1 Hz that reads a dozen Modbus
   registers and emits three telemetry tables is nowhere near the Lua VM
   budget. The EMS's hot loop is the controller, not the driver.
 
-WASM is still supported through the same `Registry` interface
-(`registry.go:137-153`) for performance-critical drivers or for anyone
-who already shipped a `.wasm` on v2.0. You pick per-driver in
-`config.yaml` with `lua:` or `wasm:`.
+The legacy WASM runtime has been removed. New and bundled drivers are
+plain `.lua` files.
 
 ## 2. The contract
 
@@ -131,8 +127,8 @@ see two callbacks racing for the same VM.
 ## 3. The host API
 
 Everything below is exposed as a `host.*` global. The authoritative list
-is `go/internal/drivers/lua.go` lines 163-403 — grep for `RawSetString`
-to see every entry. The function signatures here match that file exactly.
+is `go/internal/drivers/lua.go` — grep for `RawSetString` to see every
+entry. The function signatures here match that file exactly.
 
 ### 3.1 Logging and identity
 
@@ -143,6 +139,11 @@ to see every entry. The function signatures here match that file exactly.
 | `host.set_sn(serial)` | Serial number. Promotes device_id to canonical `make:serial`. |
 | `host.set_poll_interval(ms)` | Request a different poll cadence. Same effect as returning `ms` from `driver_poll`. |
 | `host.millis()` | Monotonic milliseconds since host startup (`host.go:83`). |
+| `host.persist_secret(key, value) → ok, err` | Durably store a rotated secret (e.g. an OAuth `refresh_token`) for THIS driver. Written to the unwatched state KV — **not** `config.yaml` — so persisting can't trigger a config-reload restart loop. The value is layered back over `config.<key>` at the next `driver_init` (`SecretOverride`), so it survives a restart while `config.yaml` keeps the bootstrap seed the UI shows as "saved". Returns `false, err` if the host didn't grant it. |
+
+Use `host.persist_secret` only for values the *provider* rotates out from
+under you (rotating refresh tokens). Operator-entered credentials belong in
+`config.<key>` (declared in `config_secrets`); don't write those back.
 
 Call `set_make` and `set_sn` as early as you reliably can — before them,
 the device shows up under its config name only.
@@ -189,6 +190,16 @@ host.emit("ev", {
     max_a      = 16,    -- optional. Charger current cap.
     phases     = 3,     -- optional. 1 or 3.
 })
+
+host.emit("v2x_charger", {
+    w                  = -5000, -- required. Positive = charging vehicle,
+                                --           negative = V2X discharge.
+    vehicle_soc        = 0.64,  -- 0.0 to 1.0 fraction (NOT percent)
+    connected          = true,
+    dc_w               = -5200,
+    session_discharge_wh = 1250,
+    rated_power_w      = 20000,
+})
 ```
 
 EV readings feed directly into the dispatch clamp that keeps home
@@ -199,14 +210,18 @@ For anything that doesn't fit the pv/battery/meter shape — temperatures,
 DC voltages, MPPT currents, grid frequency — use:
 
 ```lua
-host.emit_metric("inverter_temp_c", 42.3)
-host.emit_metric("battery_dc_v",    48.7)
-host.emit_metric("grid_hz",         50.01)
+host.emit_metric("inverter_temp_c", 42.3, "°C")
+host.emit_metric("battery_dc_v",    48.7, "V")
+host.emit_metric("grid_hz",         50.01)         -- unit optional
 ```
 
-Naming convention: snake_case with a unit suffix. These land in the
-long-format TSDB where the UI charts them on demand. There's no
-allow-list — pick a stable name and keep using it.
+Naming convention: snake_case with a unit suffix. The optional 3rd
+argument is a display unit (`"°C"`, `"Hz"`, `"kW"`, …) carried into the
+live snapshot so the UI can group + label the metric (e.g. the heat-pump
+detail drill-in groups by unit class). These land in the long-format
+TSDB where the UI charts them on demand. There's no allow-list — pick a
+stable name and keep using it. Emitting a metric also counts as a driver
+health success (a metric-only driver stays online).
 
 ### 3.3 MQTT (granted only if the driver has `mqtt:` in its config)
 
@@ -281,6 +296,8 @@ API all assume it.
 | `meter.w` | importing from grid | exporting to grid |
 | `pv.w`   | (never — always ≤ 0) | generating |
 | `battery.w` | charging (energy INTO battery) | discharging (energy OUT of battery) |
+| `ev.w` | vehicle charging | (never) |
+| `v2x_charger.w` | vehicle charging | vehicle discharging into site/grid |
 
 Drivers convert at the boundary. If your device reports PV as a positive
 number (almost all do), negate it before `host.emit`. If your device
@@ -315,14 +332,15 @@ in `docs/site-convention.md`.
        lua: drivers/my-device.lua
        is_site_meter: false
        battery_capacity_wh: 10000
-       modbus:
-         host: 192.168.1.50
-         port: 502
-         unit_id: 1
+       capabilities:
+         modbus:
+           host: 192.168.1.50
+           port: 502
+           unit_id: 1
    ```
 
-   For an MQTT driver, swap `modbus:` for `mqtt:` with `host`, `port`,
-   `username`, `password`.
+   For an MQTT driver, swap `capabilities.modbus` for
+   `capabilities.mqtt` with `host`, `port`, `username`, and `password`.
 
 6. Restart the service (or wait for `fsnotify` to hot-reload
    `config.yaml`).
@@ -346,7 +364,7 @@ in `docs/site-convention.md`.
   forced mode if the EMS crashes. Always revert.
 - **Emitting telemetry too often.** Poll cadence ≈ 1 Hz is plenty.
   Faster doesn't help control quality and saturates Modbus. The EMS
-  control loop runs at `control_interval_s` (default 5 s) — your
+  control loop runs at `control_interval_s` (default 2 s) — your
   driver doesn't need to outrun it.
 - **Using `soc` as a percent.** The EMS expects `soc` as a 0.0–1.0
   fraction. If the device reports 0–100, divide.
@@ -405,3 +423,51 @@ DRIVER = {
 
 No function calls, no concatenation, no variables — the catalog loader
 reads the source as text.
+
+## 9. Installing a custom driver on a Docker deploy
+
+The Docker image ships the bundled drivers in `/app/drivers/`, which is
+part of the **immutable image layer** — replaced wholesale on every
+`docker compose pull`. A driver you wrote yourself, or a patched copy of
+a bundled one, lives nowhere in the image, so it needs a home that
+survives image upgrades. That home is the persistent `./data/drivers/`
+directory.
+
+`docker-compose.yml` bind-mounts `./data:/app/data`, and the container
+launches with `-user-drivers /app/data/drivers` (see the `CMD` in
+`Dockerfile`). At config-resolution time the EMS probes this directory
+**first** and only falls back to the bundled `/app/drivers/` when a file
+isn't found there (`go/internal/config/config.go`, `ResolveDriverPaths`).
+So a file in `./data/drivers/` is loaded, shadows any bundled driver of
+the same name, and persists across both image upgrades and power loss.
+Available since v0.100.0.
+
+To install one (the deploy directory is `~/forty-two-watts` after
+`scripts/install.sh`):
+
+```bash
+mkdir -p ~/forty-two-watts/data/drivers
+cp my-device.lua ~/forty-two-watts/data/drivers/
+
+# Linux only: the container runs as uid 100 / gid 101, so the file must
+# be readable by that user. (Docker Desktop on macOS maps ownership
+# transparently — skip this there.)
+sudo chown 100:101 ~/forty-two-watts/data/drivers/my-device.lua
+
+cd ~/forty-two-watts && sudo docker compose restart forty-two-watts
+```
+
+Reference it in `config.yaml` the normal way — `lua: drivers/my-device.lua`.
+The `drivers/` prefix resolves to the user directory first, so no
+absolute paths leak into the config and it stays portable.
+
+> **Don't `docker cp` into the running container.** Copying a driver to
+> `forty-two-watts:/app/drivers/` writes into the container's ephemeral
+> writable layer — not the image, not the volume. It works until the next
+> `docker compose pull && up -d` recreates the container and discards that
+> layer, and it can be lost on an unclean power-off. Use `./data/drivers/`
+> instead; that overlay exists precisely so you never have to.
+
+During a [pair session](ftw-pair.md) the friend's `deploy_driver` tool
+writes here automatically, so a driver added remotely is already
+persistent without any of the above.

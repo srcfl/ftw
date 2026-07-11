@@ -26,11 +26,11 @@ import (
 // CommandCallbacks is how the bridge hands received commands back to the
 // control loop. Caller provides these at construction time.
 type CommandCallbacks struct {
-	SetMode             func(string) error
-	SetGridTarget       func(float64) error
-	SetPeakLimit        func(float64) error
-	SetEVCharging       func(float64, bool) error
-	SetBatteryCoversEV  func(bool) error
+	SetMode            func(string) error
+	SetGridTarget      func(float64) error
+	SetPeakLimit       func(float64) error
+	SetEVCharging      func(float64, bool) error
+	SetBatteryCoversEV func(bool) error
 }
 
 // Bridge is an instance of the HA MQTT bridge.
@@ -289,6 +289,22 @@ func (b *Bridge) discoveryDevice() map[string]any {
 	}
 }
 
+// modeSelectOptions is the option list for the HA mode `select`. It MUST
+// cover every value publishState can emit on the mode state topic (which is
+// string(ctrl.Mode)), otherwise HA logs "Invalid option for select" the
+// moment the active mode falls outside the list (e.g. any planner_* mode,
+// which is the default UI choice). Derived from control.AllModes so the enum
+// is the single source of truth and the two lists can't drift again — see
+// TestModeSelectOptionsMatchAllModes for the guard.
+func modeSelectOptions() []string {
+	modes := control.AllModes()
+	opts := make([]string, len(modes))
+	for i, m := range modes {
+		opts[i] = string(m)
+	}
+	return opts
+}
+
 // publishDiscovery registers all sensors and controls with HA. Called on
 // every reconnect — HA de-dupes by unique_id so it's safe to re-publish.
 func (b *Bridge) publishDiscovery() {
@@ -302,6 +318,8 @@ func (b *Bridge) publishDiscovery() {
 		{"grid_power", "Grid Power", "W", "power", b.stateTopic("grid_w")},
 		{"pv_power", "PV Power", "W", "power", b.stateTopic("pv_w")},
 		{"battery_power", "Battery Power", "W", "power", b.stateTopic("bat_w")},
+		{"ev_power", "EV Power", "W", "power", b.stateTopic("ev_w")},
+		{"v2x_power", "V2X Power", "W", "power", b.stateTopic("v2x_w")},
 		{"load_power", "Load Power", "W", "power", b.stateTopic("load_w")},
 		{"battery_soc", "Battery SoC", "%", "battery", b.stateTopic("bat_soc_pct")},
 		{"grid_target", "Grid Target", "W", "power", b.stateTopic("grid_target_w")},
@@ -322,12 +340,12 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Mode as HA select ----
 	modeMsg := map[string]any{
-		"name":             "Mode",
-		"unique_id":        b.deviceID + "_mode",
-		"state_topic":      b.stateTopic("mode"),
-		"command_topic":    b.cmdTopic("mode"),
-		"options":          []string{"idle", "self_consumption", "peak_shaving", "charge", "priority", "weighted"},
-		"device":           dev,
+		"name":          "Mode",
+		"unique_id":     b.deviceID + "_mode",
+		"state_topic":   b.stateTopic("mode"),
+		"command_topic": b.cmdTopic("mode"),
+		"options":       modeSelectOptions(),
+		"device":        dev,
 	}
 	data, _ := json.Marshal(modeMsg)
 	b.publish(fmt.Sprintf("%s/select/%s/mode/config", b.discoPrefix, b.deviceID), data, true)
@@ -372,6 +390,8 @@ func (b *Bridge) publishDiscovery() {
 			{"_pv_w", " PV Power", "W", "power"},
 			{"_bat_w", " Battery Power", "W", "power"},
 			{"_bat_soc_pct", " Battery SoC", "%", "battery"},
+			{"_v2x_w", " V2X Power", "W", "power"},
+			{"_v2x_vehicle_soc_pct", " V2X Vehicle SoC", "%", "battery"},
 		} {
 			msg := map[string]any{
 				"name":                name + s.label,
@@ -388,7 +408,7 @@ func (b *Bridge) publishDiscovery() {
 	}
 	// Count total sensors announced (site + per-driver).
 	b.mu.Lock()
-	b.sensorsAnnounced = len(sensors) + len(b.driverNames)*5 // 5 per driver
+	b.sensorsAnnounced = len(sensors) + len(b.driverNames)*6 // 6 per driver
 	b.mu.Unlock()
 }
 
@@ -405,21 +425,27 @@ func (b *Bridge) subscribeCommands() {
 	})
 	b.client.Subscribe(b.cmdTopic("grid_target_w"), 0, func(_ paho.Client, m paho.Message) {
 		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		if b.cb.SetGridTarget != nil {
 			_ = b.cb.SetGridTarget(f)
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("peak_limit_w"), 0, func(_ paho.Client, m paho.Message) {
 		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		if b.cb.SetPeakLimit != nil {
 			_ = b.cb.SetPeakLimit(f)
 		}
 	})
 	b.client.Subscribe(b.cmdTopic("ev_charging_w"), 0, func(_ paho.Client, m paho.Message) {
 		f, err := strconv.ParseFloat(string(m.Payload()), 64)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 		if b.cb.SetEVCharging != nil {
 			_ = b.cb.SetEVCharging(f, f > 0)
 		}
@@ -437,7 +463,9 @@ func (b *Bridge) subscribeCommands() {
 func (b *Bridge) publishLoop() {
 	defer close(b.done)
 	interval := time.Duration(b.cfg.PublishIntervalS) * time.Second
-	if interval <= 0 { interval = 5 * time.Second }
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
@@ -470,7 +498,9 @@ func (b *Bridge) publishState() {
 	}
 	var pvW, batW, sumSoC float64
 	var socCount int
-	for _, r := range b.tel.ReadingsByType(telemetry.DerPV) { pvW += r.SmoothedW }
+	for _, r := range b.tel.ReadingsByType(telemetry.DerPV) {
+		pvW += r.SmoothedW
+	}
 	for _, r := range b.tel.ReadingsByType(telemetry.DerBattery) {
 		batW += r.SmoothedW
 		if r.SoC != nil {
@@ -479,13 +509,21 @@ func (b *Bridge) publishState() {
 		}
 	}
 	avgSoC := 0.0
-	if socCount > 0 { avgSoC = sumSoC / float64(socCount) }
-	loadW := gridW - batW - pvW
-	if loadW < 0 { loadW = 0 }
+	if socCount > 0 {
+		avgSoC = sumSoC / float64(socCount)
+	}
+	evW := b.tel.SumOnlineEVW()
+	v2xW := b.tel.SumOnlineV2XW()
+	loadW := gridW - batW - pvW - evW - v2xW
+	if loadW < 0 {
+		loadW = 0
+	}
 
 	b.publishValue("grid_w", gridW)
 	b.publishValue("pv_w", pvW)
 	b.publishValue("bat_w", batW)
+	b.publishValue("ev_w", evW)
+	b.publishValue("v2x_w", v2xW)
 	b.publishValue("load_w", loadW)
 	b.publishValue("bat_soc_pct", avgSoC*100)
 	b.publishValue("grid_target_w", gridTarget)
@@ -508,6 +546,12 @@ func (b *Bridge) publishState() {
 			b.publishDriver(name, "bat_w", r.SmoothedW)
 			if r.SoC != nil {
 				b.publishDriver(name, "bat_soc_pct", *r.SoC*100)
+			}
+		}
+		if r := b.tel.Get(name, telemetry.DerV2X); r != nil {
+			b.publishDriver(name, "v2x_w", r.SmoothedW)
+			if r.SoC != nil {
+				b.publishDriver(name, "v2x_vehicle_soc_pct", *r.SoC*100)
 			}
 		}
 	}

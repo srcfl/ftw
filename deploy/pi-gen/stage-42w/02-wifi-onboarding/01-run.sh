@@ -26,12 +26,14 @@ install -m 0644 files/42w-wifi-onboarding.service    "${ROOTFS_DIR}/etc/systemd/
 on_chroot << 'EOF'
 systemctl enable 42w-wifi-onboarding.service
 
-# Bookworm's default dhcpcd setup fights NetworkManager over the wlan
-# interface. Raspberry Pi OS Lite has shipped with NM as the default
-# network stack since 2023, but dhcpcd is still installed and running
-# on a stock stage2 image. Disable it so NM owns wlan0 uncontested —
-# otherwise wifi-connect's AP-mode toggling races the dhcpcd wlan0
-# supplicant and both sides lose.
+# Make sure NetworkManager owns wlan0 uncontested so wifi-connect's
+# AP-mode toggling doesn't race another supplicant. On trixie, netplan
+# (NetworkManager renderer) is the source of truth and dhcpcd is
+# normally absent — these commands are then a guarded no-op (|| true).
+# We keep them as belt-and-suspenders in case a base bump reintroduces
+# a stray dhcpcd on wlan0. cloud-init-applied WiFi (from the Imager
+# network-config) lands as an NM connection via netplan, which the
+# onboarding script already detects so the captive portal is skipped.
 systemctl disable dhcpcd.service 2>/dev/null || true
 systemctl mask    dhcpcd.service 2>/dev/null || true
 EOF

@@ -211,3 +211,69 @@ func TestNoBatteryToEVForbidsBatteryFeedingEV(t *testing.T) {
 		}
 	}
 }
+
+func TestSurplusOnlyForbidsBatteryFeedingEVEvenWhenCoverEVEnabled(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	start := now.Truncate(15 * time.Minute)
+
+	slots := []Slot{
+		{
+			StartMs:    start.UnixMilli(),
+			LenMin:     60,
+			PriceOre:   500,
+			SpotOre:    500,
+			LoadW:      1000,
+			PVW:        -1000,
+			Confidence: 1.0,
+		},
+		{
+			StartMs:    start.Add(time.Hour).UnixMilli(),
+			LenMin:     60,
+			PriceOre:   500,
+			SpotOre:    500,
+			LoadW:      1000,
+			PVW:        -1000,
+			Confidence: 1.0,
+		},
+	}
+
+	plan := Optimize(slots, Params{
+		Mode:                ModeArbitrage,
+		SoCLevels:           11,
+		CapacityWh:          20000,
+		SoCMinPct:           10,
+		SoCMaxPct:           95,
+		InitialSoCPct:       90,
+		ActionLevels:        11,
+		MaxChargeW:          5000,
+		MaxDischargeW:       5000,
+		ChargeEfficiency:    0.95,
+		DischargeEfficiency: 0.95,
+		TerminalSoCPrice:    400,
+		Loadpoint: &LoadpointSpec{
+			ID:               "garage",
+			CapacityWh:       10000,
+			Levels:           11,
+			InitialSoCPct:    20,
+			PluggedIn:        true,
+			TargetSoCPct:     70,
+			TargetSlotIdx:    1,
+			MaxChargeW:       5000,
+			AllowedStepsW:    []float64{0, 5000},
+			ChargeEfficiency: 1.0,
+			SurplusOnly:      true,
+			NoBatteryToEV:    false, // mirrors BatteryCoversEV=true.
+		},
+	})
+
+	for i, a := range plan.Actions {
+		houseResidualW := slots[i].LoadW + slots[i].PVW
+		if houseResidualW < 0 {
+			houseResidualW = 0
+		}
+		if a.LoadpointW > 100 && a.BatteryW < -(houseResidualW+50) {
+			t.Errorf("slot %d: surplus_only used battery as EV surplus — battW=%.0f loadpointW=%.0f gridW=%.0f",
+				i, a.BatteryW, a.LoadpointW, a.GridW)
+		}
+	}
+}

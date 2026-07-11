@@ -14,10 +14,15 @@
     input { font: inherit; padding: .5rem; width: 100%; box-sizing: border-box; border: 1px solid var(--line, #ddd); border-radius: .3rem; background: var(--bg, #fff); color: inherit; }
     button { font: inherit; padding: .6rem 1.2rem; border-radius: .3rem; border: 1px solid var(--line, #ddd); cursor: pointer; background: var(--ink-raised, #fafafa); color: inherit; margin-top: 1rem; }
     button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
-    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
-    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
-    .muted { color: var(--fg-muted, #888); font-size: .9em; }
-    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
+	    .err { color: #c00; background: #fee; border: 1px solid #fcc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+	    .ok { color: #060; background: #efe; border: 1px solid #cfc; padding: .5rem; border-radius: .3rem; margin: 1rem 0; }
+	    .muted { color: var(--fg-muted, #888); font-size: .9em; }
+	    .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .2rem .4rem; border-radius: .2rem; }
+	    .diag { margin-top: .75rem; color: #700; }
+	    .diag summary { cursor: pointer; font-weight: 600; }
+	    .diag dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem .65rem; margin: .5rem 0 0; }
+	    .diag dt { font-weight: 600; }
+	    .diag dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono), monospace; }
 
     /* Enrollment-PIN affordance (enroll-pin.js). Mono + tabular for the
        digits, hairline border, single amber accent — per DESIGN.md. */
@@ -68,28 +73,200 @@
     <input id="name" placeholder="e.g. Fredrik's MacBook" autocomplete="off">
     <p class="muted">Shows up in the trusted-devices list so you can identify and revoke this passkey later.</p>
 
-    <label for="pin">First-time enrollment PIN <span class="muted">(only for your first passkey)</span></label>
-    <input id="pin" inputmode="numeric" autocomplete="off" placeholder="6 digits — shown on the Pi's LAN dashboard">
-    <p class="muted">Leave blank if you already have a passkey, or if you're enrolling on the local network. For the very first passkey via the relay, get the PIN below from a device on your home network, then type it here.</p>
+    <label for="pin">First-time enrollment PIN <span class="muted">(optional second factor)</span></label>
+    <input id="pin" inputmode="numeric" autocomplete="off" placeholder="6 digits — shown next to the setup QR on your Pi">
+    <p class="muted">The setup link you scanned already carries the secure handle. The 6-digit PIN is an optional extra check: if you typed it next to the QR on your home network, enter it here. Leave blank otherwise, or if you already have a passkey.</p>
 
     <div id="pin-panel" class="pin-panel"></div>
 
     <button id="enroll" class="primary">Enroll passkey</button>
-    <button onclick="location.href='./'">Cancel</button>
+    <button id="cancel" type="button">Cancel</button>
 
     <div id="msg"></div>
   </div>
 
+  <!-- Load the P2P transport: for an EXISTING-session add-device the owner API
+       (enroll/start + enroll/finish) is P2P-only over the relay, so the ceremony
+       rides the DTLS DataChannel. ownerFetch() routes through window.p2pFetch when
+       a channel is up. The FIRST-time bootstrap path below does NOT use P2P — a
+       keyless device can't open the channel — it uses the relay's narrow
+       claim_key-gated enroll-forward instead. -->
+  <script src="/p2p.js?v=p2p14"></script>
   <script type="module">
-    import { apiBase, decodeCreationOptions, encodeRegistrationResult } from "./webauthn.js";
+    import { decodeCreationOptions, encodeRegistrationResult, bufToB64url } from "./webauthn.js";
     import { mountEnrollPin } from "./enroll-pin.js";
-    const base = apiBase();
+    import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
+    import { exportPubHex } from "./device-key.js";
+    import { extensionInput, outputFrom, deriveEncKey } from "./prf.js";
+    import { saveDirectory, verifyEntry } from "./instance-sync.js";
+    import { bootstrapIdFromHash, claimKeyFromBootstrapId, bootstrapProof, claimAndVerify } from "./bootstrap-enroll.js";
     const msg = document.getElementById("msg");
     const nameInput = document.getElementById("name");
     nameInput.focus();
 
-    // "Show enrollment PIN" — LAN-only; gracefully degrades over the relay.
-    mountEnrollPin(document.getElementById("pin-panel"));
+    // BOOTSTRAP COURIER (multi-tenant onboarding, R-series rework). The setup QR /
+    // link carries a HIGH-ENTROPY bootstrap_id in the URL FRAGMENT (#b=<id>). The
+    // fragment never reaches any server, so the secret stays on the device. We read
+    // it ONCE, immediately CLEAR the hash (history.replaceState) so it doesn't
+    // linger in history/back-forward, and derive the relay's claim handle
+    // claimKey = hex(sha256(bootstrap_id)). The relay only ever sees that digest;
+    // it never holds the raw bootstrap secret and never sees the 6-digit PIN.
+    const bootstrapId = bootstrapIdFromHash(location.hash);
+    if (bootstrapId) {
+      try { history.replaceState(null, "", location.pathname + location.search); } catch (_) {}
+    }
+
+    // ownerFetch (shared, owner-fetch.js) routes the EXISTING-session enroll over
+    // the P2P DataChannel in STRICT mode (FIX-2): the WebAuthn attestation +
+    // ceremony token must never leak to the untrusted relay. It fails closed on a
+    // public origin when the channel is down. The bootstrap path below deliberately
+    // bypasses it — a first-time device has no key to open P2P with — and instead
+    // hits the relay's claim_key-gated enroll-forward, which the relay forwards to
+    // the Pi over the tunnel ONLY while a live bootstrap window is open.
+
+    // "Show enrollment PIN" is LAN-only. On the public home route the bootstrap
+    // PIN already came next to the QR on the Pi; trying to mint/reveal it here is
+    // both impossible and confusing.
+    const pinPanel = document.getElementById("pin-panel");
+    if (!bootstrapId && isLanOrigin()) {
+      mountEnrollPin(pinPanel);
+    } else if (pinPanel) {
+      pinPanel.remove();
+    }
+
+    function publicHomeTarget() {
+      return (!isLanOrigin() || bootstrapId) ? "/" : "./";
+    }
+
+    function setHomeRouteCookie(siteID) {
+      if (!siteID || isLanOrigin()) return;
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = "ftw_home_site=" + encodeURIComponent(siteID) +
+        "; Path=/; Max-Age=2592000; SameSite=Lax" + secure;
+    }
+
+    function canCreatePasskey() {
+      return !!(window.isSecureContext &&
+        window.PublicKeyCredential &&
+        navigator.credentials &&
+        typeof navigator.credentials.create === "function");
+    }
+
+	    function passkeyUnavailableMessage() {
+	      if (!window.isSecureContext) {
+	        return "Passkeys require HTTPS. Scan the QR or open the setup link on https://home.fortytwowatts.com, not the local http:// address.";
+	      }
+	      return "Passkeys are not available in this browser. Use Safari, Chrome, Edge, or another device with passkeys enabled.";
+	    }
+
+	    function esc(s) {
+	      return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+	        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+	      }[c]));
+	    }
+
+	    function errorCodeFromText(text) {
+	      const m = /^([A-Z0-9_]+):/.exec(String(text || ""));
+	      return m ? m[1] : "";
+	    }
+
+	    function responseErrorCode(response, body) {
+	      return (response.headers && response.headers.get && response.headers.get("X-FTW-Error-Code")) ||
+	        errorCodeFromText(body) ||
+	        ("FTW_HTTP_" + response.status);
+	    }
+
+	    function p2pState() {
+	      try {
+	        if (window.ftwP2P && typeof window.ftwP2P.state === "function") return window.ftwP2P.state();
+	      } catch (_) { /* ignore diagnostics only */ }
+	      return "unavailable";
+	    }
+
+	    function hintFor(code, status, body) {
+	      const text = String(body || "");
+	      if (code === "FTW_REMOTE_P2P_ONLY" || status === 405) {
+	        return "This request reached the public relay as a raw owner API call. For first setup, mint a fresh QR from local Access and scan/open the full https://home.fortytwowatts.com setup link. For adding another passkey later, sign in first and wait for the secure channel.";
+	      }
+	      if (code === "FTW_BOOTSTRAP_CLAIM_REQUIRED") {
+	        return "The setup link lost its secure #b handle. Scan the QR again or copy the full link, including the part after #.";
+	      }
+	      if (code === "FTW_BOOTSTRAP_NOT_LIVE" || status === 404) {
+	        return "The setup window is no longer live. Create a fresh setup QR from Settings -> Access on the local network.";
+	      }
+	      if (code === "FTW_REMOTE_HOME_OFFLINE" || code === "FTW_REMOTE_HOME_NO_RESPONSE") {
+	        return "The relay cannot reach your Pi. Check that Remote Access is enabled locally and that the service is running.";
+	      }
+	      if (code === "FTW_ENROLL_PIN_REQUIRED" || /pin/i.test(text)) {
+	        return "Enter the 6-digit PIN shown next to the QR on your local 42W Access screen, then try again.";
+	      }
+	      if (code === "FTW_ENROLL_SESSION_REQUIRED") {
+	        return "This is the add-passkey path. Sign in with an existing passkey first, then open Access to add another one.";
+	      }
+	      if (code === "FTW_FIRST_SETUP_CLOSED") {
+	        return "A passkey already exists. First setup is single-use; sign in and manage passkeys from Access.";
+	      }
+	      if (code === "FTW_BOOTSTRAP_PUBLISH_FAILED") {
+	        return "The Pi could not publish the setup link to the relay. Toggle Remote Access off/on, save, restart if prompted, then mint a fresh QR.";
+	      }
+	      return "Retry once. If it repeats, send the support code and diagnostics below.";
+	    }
+
+	    function diagnostics(stage, code, status) {
+	      return '<details class="diag" open>' +
+	        '<summary>Support details</summary>' +
+	        '<dl>' +
+	          '<dt>Code</dt><dd>' + esc(code) + '</dd>' +
+	          '<dt>Step</dt><dd>' + esc(stage) + '</dd>' +
+	          '<dt>Status</dt><dd>' + esc(status) + '</dd>' +
+	          '<dt>Host</dt><dd>' + esc(location.host) + '</dd>' +
+	          '<dt>Path</dt><dd>' + esc(location.pathname) + '</dd>' +
+	          '<dt>Setup handle</dt><dd>' + (bootstrapId ? "present" : "missing") + '</dd>' +
+	          '<dt>LAN</dt><dd>' + esc(isLanOrigin() ? "yes" : "no") + '</dd>' +
+	          '<dt>P2P</dt><dd>' + esc(p2pState()) + '</dd>' +
+	        '</dl>' +
+	      '</details>';
+	    }
+
+	    function renderFailure(stage, response, body) {
+	      const code = responseErrorCode(response, body);
+	      const hint = hintFor(code, response.status, body);
+	      msg.innerHTML = '<div class="err">' +
+	        '<strong>' + esc(stage) + ' failed (' + esc(response.status) + ')</strong><br>' +
+	        '<span>' + esc(body || code) + '</span>' +
+	        '<p>' + esc(hint) + '</p>' +
+	        diagnostics(stage, code, response.status) +
+	      '</div>';
+	    }
+
+	    function renderException(e) {
+	      const code = e && e.code ? e.code : (e && e.name ? e.name : "FTW_ENROLL_EXCEPTION");
+	      const status = e && e.status ? e.status : "n/a";
+	      const body = e && e.message ? e.message : String(e);
+	      msg.innerHTML = '<div class="err">' +
+	        '<strong>' + esc(code) + '</strong><br>' +
+	        '<span>' + esc(body) + '</span>' +
+	        '<p>' + esc(hintFor(code, status, body)) + '</p>' +
+	        diagnostics("exception", code, status) +
+	      '</div>';
+	    }
+
+	    document.getElementById("cancel").onclick = () => {
+	      location.href = publicHomeTarget();
+	    };
+
+    // enrollFetch picks the transport for the two enroll RPCs:
+    //   - bootstrap (first device, has bootstrap_id): RAW fetch to the relay's
+    //     enroll-forward with ?claim_key=<digest> (relay gate) AND ?pin=<6digits>
+    //     (Pi-validated factor). location.origin IS the relay/home origin here.
+    //   - otherwise (existing session add-device): ownerFetch over strict P2P/LAN.
+    function enrollFetch(which, query, init) {
+      const qs = query ? ("?" + query) : "";
+      if (bootstrapId) {
+        return fetch("/api/owner-access/enroll/" + which + qs, init);
+      }
+      return ownerFetch("/api/owner-access/enroll/" + which + qs, init);
+    }
 
     document.getElementById("enroll").onclick = async () => {
       msg.innerHTML = "";
@@ -98,48 +275,158 @@
         msg.innerHTML = '<div class="err">Friendly name is required.</div>';
         return;
       }
+      if (!canCreatePasskey()) {
+        msg.innerHTML = '<div class="err">' + passkeyUnavailableMessage() + '</div>';
+        return;
+      }
       try {
-        // 1. Start ceremony. The first passkey enrolled through the relay
-        //    needs the LAN PIN (?pin=); later enrollments (logged in) don't.
         const pin = document.getElementById("pin").value.trim();
-        const startUrl = base + "/api/owner-access/enroll/start" + (pin ? ("?pin=" + encodeURIComponent(pin)) : "");
-        const start = await fetch(startUrl, { method: "POST" });
-        if (!start.ok) {
-          const body = await start.text();
-          const hint = (start.status === 403 && /pin/i.test(body))
-            ? ' — your first passkey through the relay needs the LAN PIN. Use "Show enrollment PIN" above from a device on your home network, then enter it here.'
-            : '';
-          msg.innerHTML = `<div class="err">Start failed (${start.status}): ${body}${hint}</div>`;
-          return;
+
+        // BOOTSTRAP PRE-FLIGHT — verify before trust. Before touching the enroll
+        // ceremony, claim the Pi-signed descriptor from the relay and verify the
+        // Pi's ES256 signature over it. If verification fails we ABORT: a tampering
+        // relay must not be able to walk us through enrolling against a fake home.
+        // The verified entry is also the directory seed below — no separate
+        // (P2P-only) /instance-descriptor fetch is needed for a keyless device.
+        let claimKey = null, verifiedEntry = null;
+        if (bootstrapId) {
+          claimKey = await claimKeyFromBootstrapId(bootstrapId);
+          verifiedEntry = await claimAndVerify(location.origin, claimKey);
         }
+
+        // 1. Start ceremony. Bootstrap passes claim_key (relay gate) + pin (Pi
+        //    factor); the existing-session path passes the optional pin only.
+        const startQuery = bootstrapId
+          ? ("claim_key=" + encodeURIComponent(claimKey) + (pin ? ("&pin=" + encodeURIComponent(pin)) : ""))
+          : (pin ? ("pin=" + encodeURIComponent(pin)) : "");
+	        const start = await enrollFetch("start", startQuery, { method: "POST" });
+	        if (!start.ok) {
+	          const body = await start.text();
+	          renderFailure("Start", start, body);
+	          return;
+	        }
         const { ceremony_token, options } = await start.json();
 
-        // 2. Browser ceremony.
+        // 2. Browser ceremony. Request the PRF extension so THIS credential can
+        //    later derive the per-wallet directory ENCRYPTION key (prf.js): the
+        //    same passkey the owner taps to sign in yields the key that decrypts
+        //    their list of 42W homes from the relay, with no LAN visit. Harmless
+        //    on authenticators without PRF — they just return no prf result.
         const credOpts = decodeCreationOptions(options);
+        credOpts.extensions = Object.assign({}, credOpts.extensions, extensionInput());
         const cred = await navigator.credentials.create({ publicKey: credOpts });
 
-        // 3. Finish.
-        const finish = await fetch(
-          base + "/api/owner-access/enroll/finish?ceremony_token=" + encodeURIComponent(ceremony_token) + "&name=" + encodeURIComponent(name),
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(encodeRegistrationResult(cred)),
-            credentials: "same-origin",
-          }
-        );
-        if (!finish.ok) {
-          const body = await finish.text();
-          msg.innerHTML = `<div class="err">Finish failed (${finish.status}): ${body}</div>`;
-          return;
+        // 2b. Mint this device's silent-login key (C4). Enrollment is the ONLY
+        //     place it's created — the public key we send here gets PINNED on the
+        //     Pi's new credential, so afterwards the device can sign in over the
+        //     relay with NO passkey (C2/C3). A failure to mint must not silently
+        //     drop the field — it would leave the device un-rememberable without
+        //     any signal — so we surface it.
+        let devicePubHex;
+        let routeEntry = verifiedEntry;
+        try {
+          devicePubHex = await exportPubHex();
+        } catch (e) {
+          msg.innerHTML = `<div class="err">Couldn't set up this device's silent-login key (${e.name}: ${e.message}). Your passkey still works; this device just won't be remembered.</div>`;
+          // Continue without the field rather than abort the passkey enrollment.
+          devicePubHex = null;
         }
+
+        // 3. Finish. The device_pubkey rides INSIDE the WebAuthn registration JSON
+        //    body (C4): the Pi pins it on the NEW credential's trusted_devices row.
+        //    Bootstrap re-sends claim_key (the relay re-gates + single-use-burns the
+        //    window on a 200) AND pin (the Pi re-validates) AND a CEREMONY-BOUND,
+        //    BODY-BOUND possession proof. The proof = HMAC-SHA256(key=bootstrap_id,
+        //    msg=ceremony_token + "|" + sha256(body)): it proves WE hold the raw
+        //    bootstrap_id that opened THIS ceremony AND that we authored THIS exact
+        //    finish body. The relay only ever sees sha256(bootstrap_id), so it can
+        //    neither forge a proof for its own ceremony_token nor reuse ours — and
+        //    binding the body hash stops a MITM relay swapping device_pubkey (or the
+        //    attestation, or the name) for its own after we computed the proof. This
+        //    closes both the "relay sees the PIN and runs its own enrollment" hole and
+        //    the device_pubkey-substitution hole. The raw bootstrap_id NEVER leaves
+        //    the browser; only its HMAC does.
+        //
+        //    We serialize the body string ONCE, hash THAT exact string for the proof,
+        //    and POST it VERBATIM — never re-stringify a different object, or the Pi's
+        //    body hash (over the bytes it receives) would diverge from ours.
+        const finishBody = encodeRegistrationResult(cred);
+        if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+        const bodyString = JSON.stringify(finishBody);
+        let proof = "";
+        if (bootstrapId) proof = await bootstrapProof(bootstrapId, ceremony_token, bodyString);
+        const finishQuery = "ceremony_token=" + encodeURIComponent(ceremony_token)
+          + "&name=" + encodeURIComponent(name)
+          + (bootstrapId
+              ? ("&claim_key=" + encodeURIComponent(claimKey)
+                 + "&bootstrap_proof=" + encodeURIComponent(proof)
+                 + (pin ? ("&pin=" + encodeURIComponent(pin)) : ""))
+              : "");
+        const finish = await enrollFetch("finish", finishQuery, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: bodyString,
+          credentials: "same-origin",
+	        });
+	        if (!finish.ok) {
+	          const body = await finish.text();
+	          renderFailure("Finish", finish, body);
+	          return;
+	        }
         const out = await finish.json();
-        msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Redirecting…</div>';
-        setTimeout(() => location.href = "./", 1500);
-      } catch (e) {
-        msg.innerHTML = `<div class="err">${e.name}: ${e.message}</div>`;
-      }
-    };
+        msg.innerHTML = '<div class="ok">Enrolled <span class="code">' + (out.friendly_name || name) + '</span>. Opening your home…</div>';
+
+        // 4. Seed the per-wallet directory so a FRESH device with the synced passkey
+        //    can discover this home remotely. The entry is the VERIFIED descriptor:
+        //      - bootstrap: the entry we already claimed + verified above (the
+        //        keyless device cannot reach the P2P-only /instance-descriptor).
+        //      - existing session: fetched fresh over the owner channel + verified.
+        //    Best-effort: a failure here never blocks the enrollment that already
+        //    succeeded — the directory also self-heals on first sign-in.
+        try {
+          // W = base64url(user.id) — the opaque wallet handle the relay keys the
+          // encrypted blob on. On a create ceremony the handle is the user.id we
+          // were given in the options (the assertion's userHandle echoes it later).
+          const W = credOpts.user && credOpts.user.id ? bufToB64url(credOpts.user.id) : null;
+          const prfOut = outputFrom(cred); // null on authenticators without PRF
+          let entry = verifiedEntry;
+          if (!entry) {
+            const desc = await ownerFetch("/api/owner-access/instance-descriptor", { credentials: "same-origin" });
+            if (desc.ok) {
+              const e = await desc.json(); // { site_id, pi_pubkey, label, sig }
+              if (await verifyEntry(e)) entry = e;
+            }
+          }
+          routeEntry = entry || routeEntry;
+          if (W && entry) {
+            entry.added_ms = Date.now();
+            // encKey = PRF-derived when available; null falls back to the
+            // browser-carried copy only (no relay blob written, but the home is
+            // still cached locally so this device routes correctly).
+            const encKey = prfOut ? await deriveEncKey(prfOut) : null;
+            // The encrypted blob must live on the RELAY (so a fresh device can fetch
+            // it remotely). On the public home route location.origin IS the relay;
+            // otherwise prefer the WebAuthn RP-ID (e.g. home.fortytwowatts.com) and
+            // fall back to the page origin for LAN dev.
+            const relayBase = bootstrapId
+              ? location.origin
+              : ((credOpts.rp && credOpts.rp.id) ? ("https://" + credOpts.rp.id) : location.origin);
+            await saveDirectory(W, encKey, relayBase, {
+              instances: [entry], version: 0, writeKey: null,
+            });
+          }
+        } catch (e) {
+          // Non-fatal: log only. The passkey is enrolled; directory seeding can
+          // retry on the next sign-in.
+          try { console.warn("instance directory seed failed: " + (e && e.message)); } catch (_) {}
+        }
+        if (routeEntry) setHomeRouteCookie(routeEntry.site_id);
+
+        setTimeout(() => location.href = publicHomeTarget(), 800);
+	      } catch (e) {
+	        renderException(e);
+	      }
+	    };
   </script>
 </body>
 </html>

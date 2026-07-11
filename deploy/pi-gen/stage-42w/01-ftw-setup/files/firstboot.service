@@ -2,6 +2,16 @@
 Description=forty-two-watts first-boot provisioner
 Documentation=https://github.com/frahlg/forty-two-watts/blob/master/docs/rpi-image.md
 Wants=network-online.target docker.service
+# Order after the network and Docker only. We deliberately do NOT order
+# After=cloud-final.service: ftw-firstboot is WantedBy=multi-user.target,
+# and cloud-final.service is ordered around multi-user.target too (cloud-init
+# runs late), so that extra edge formed an ordering cycle
+# (multi-user.target -> ftw-firstboot -> cloud-final -> multi-user.target).
+# systemd broke it by DELETING ftw-firstboot's start job, so on a clean boot
+# the stack was never pulled and the dashboard never came up. The pull/up
+# only needs the network and Docker; firstboot runs as root (no cloud-init
+# account dependency) and firstboot.sh's retry loop covers a network that is
+# still settling after cloud-init's final stage.
 After=network-online.target docker.service
 ConditionPathExists=!/var/lib/ftw/firstboot.done
 

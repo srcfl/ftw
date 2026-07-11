@@ -4,4 +4,3 @@ curl
 jq
 network-manager
 raspberrypi-sys-mods
-userconf-pi

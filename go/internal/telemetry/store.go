@@ -16,6 +16,10 @@ const (
 	DerPV
 	DerBattery
 	DerEV
+	// DerV2X is a bidirectional EV charger. Its power uses the same
+	// site convention as batteries: positive means charging the vehicle,
+	// negative means discharging the vehicle into the site/grid.
+	DerV2X
 	// DerVehicle is a read-only reading from the connected vehicle
 	// itself (e.g. via TeslaBLEProxy), distinct from DerEV which is
 	// the charger. Carries SoC + `charge_limit_pct`/`charging_state`/
@@ -25,8 +29,17 @@ const (
 	DerVehicle
 )
 
+var allDerTypes = []DerType{DerMeter, DerPV, DerBattery, DerEV, DerV2X, DerVehicle}
+
+// AllDerTypes returns the DER types the telemetry store knows about.
+func AllDerTypes() []DerType {
+	out := make([]DerType, len(allDerTypes))
+	copy(out, allDerTypes)
+	return out
+}
+
 // String returns the canonical string form ("meter", "pv", "battery",
-// "ev", "vehicle").
+// "ev", "v2x_charger", "vehicle").
 func (d DerType) String() string {
 	switch d {
 	case DerMeter:
@@ -37,6 +50,8 @@ func (d DerType) String() string {
 		return "battery"
 	case DerEV:
 		return "ev"
+	case DerV2X:
+		return "v2x_charger"
 	case DerVehicle:
 		return "vehicle"
 	}
@@ -54,6 +69,8 @@ func ParseDerType(s string) (DerType, error) {
 		return DerBattery, nil
 	case "ev":
 		return DerEV, nil
+	case "v2x_charger":
+		return DerV2X, nil
 	case "vehicle":
 		return DerVehicle, nil
 	}
@@ -66,7 +83,7 @@ type DerReading struct {
 	DerType   DerType
 	RawW      float64
 	SmoothedW float64
-	SoC       *float64 // optional (only for batteries)
+	SoC       *float64 // optional; 0..1 for batteries/V2X, 0..100 for DerVehicle
 	Data      json.RawMessage
 	UpdatedAt time.Time
 }
@@ -201,6 +218,9 @@ type Store struct {
 
 type metricSnap struct {
 	Value     float64
+	Unit      string
+	Register  string
+	Title     string
 	UpdatedAt time.Time
 }
 
@@ -243,6 +263,10 @@ func ValidateReading(t DerType, rawW float64, soc *float64) error {
 	case DerBattery:
 		if soc != nil && (*soc < 0 || *soc > 1) {
 			return fmt.Errorf("battery soc must be a 0..1 fraction, got %.3f", *soc)
+		}
+	case DerV2X:
+		if soc != nil && (*soc < 0 || *soc > 1) {
+			return fmt.Errorf("v2x_charger vehicle soc must be a 0..1 fraction, got %.3f", *soc)
 		}
 	}
 	return nil
@@ -306,7 +330,14 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 // Use for diagnostic data drivers want to record beyond the standard
 // pv/battery/meter shape (temperatures, voltages, frequencies, etc.).
 // Drained by the control loop via FlushSamples.
-func (s *Store) EmitMetric(driver, name string, value float64) {
+// EmitMetric records a scalar metric. unit is an optional display unit
+// (e.g. "°C", "Hz", "kW") carried into the live snapshot so the UI can group
+// and label metrics; pass "" when unknown. register is an optional source
+// address (e.g. a Modbus register id) carried into the live snapshot for the
+// per-driver detail view; pass "" when not applicable. title is an optional
+// human-readable label (e.g. the device's own point title) surfaced as the
+// per-signal explanation in the detail view; pass "" when not available.
+func (s *Store) EmitMetric(driver, name string, value float64, unit, register, title string) {
 	if !finite(value) {
 		return
 	}
@@ -317,7 +348,7 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 	})
 	s.pendingMu.Unlock()
 	s.latestMu.Lock()
-	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now}
+	s.latestMetric[driver+":"+name] = metricSnap{Value: value, UpdatedAt: now, Unit: unit, Register: register, Title: title}
 	s.latestMu.Unlock()
 }
 
@@ -325,6 +356,9 @@ func (s *Store) EmitMetric(driver, name string, value float64) {
 type MetricSnapshot struct {
 	Name      string    `json:"name"`
 	Value     float64   `json:"value"`
+	Unit      string    `json:"unit,omitempty"`
+	Register  string    `json:"register,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -344,6 +378,9 @@ func (s *Store) LatestMetricsByDriver(driver string) []MetricSnapshot {
 		out = append(out, MetricSnapshot{
 			Name:      k[len(prefix):],
 			Value:     v.Value,
+			Unit:      v.Unit,
+			Register:  v.Register,
+			Title:     v.Title,
 			UpdatedAt: v.UpdatedAt,
 		})
 	}
@@ -424,6 +461,29 @@ func (s *Store) SumOnlineEVW() float64 {
 	var sum float64
 	for _, r := range s.readings {
 		if r.DerType != DerEV {
+			continue
+		}
+		h, ok := s.health[r.Driver]
+		if !ok || !h.IsOnline() {
+			continue
+		}
+		sum += r.SmoothedW
+	}
+	if math.Abs(sum) < 1.0 {
+		return 0
+	}
+	return sum
+}
+
+// SumOnlineV2XW returns the summed SmoothedW across online bidirectional
+// V2X chargers. Positive values mean vehicle charging; negative values
+// mean the vehicle is discharging into the site/grid.
+func (s *Store) SumOnlineV2XW() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var sum float64
+	for _, r := range s.readings {
+		if r.DerType != DerV2X {
 			continue
 		}
 		h, ok := s.health[r.Driver]
@@ -524,7 +584,7 @@ func (s *Store) RecordDriverError(name, err string) {
 func (s *Store) Remove(driver string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, t := range []DerType{DerMeter, DerPV, DerBattery, DerEV, DerVehicle} {
+	for _, t := range allDerTypes {
 		k := key(driver, t)
 		delete(s.readings, k)
 		delete(s.filters, k)

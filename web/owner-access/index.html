@@ -14,6 +14,7 @@
     button.primary { background: var(--accent-e, #f0c040); border-color: var(--accent-e, #f0c040); color: #0a0a0a; font-weight: 600; }
     a.block { text-decoration: none; display: block; }
     .muted { color: var(--fg-muted, #888); font-size: .9em; margin: .6rem 0 1.1rem; }
+    .eyebrow-hero { font-family: var(--mono), monospace; font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .18em; color: var(--accent-e, #f0c040); margin: 0 0 .5rem; }
     .sep { border: 0; border-top: 1px solid var(--line, #eee); margin: 1.3rem 0; }
     .code { font-family: var(--mono), monospace; background: var(--ink-raised, #f4f4f4); padding: .15rem .4rem; border-radius: .2rem; }
     .ok { color: #060; }
@@ -57,11 +58,61 @@
     .pin-note { margin: 0; color: var(--fg-dim); font-size: .9em; }
     .pin-err { margin: 0; color: var(--red-e); font-size: .9em; }
     .pin-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
+
+    /* "Set up remote access" affordance (setup-remote.js) — QR + link + the
+       optional PIN. Reuses the .pin-* digit/copy styles above; adds the QR + link
+       chrome. Hairline border, one amber accent, mono eyebrows — per DESIGN.md. */
+    .setup-remote { margin: .8rem 0 0; }
+    .setup-remote-btn {
+      font: inherit; width: 100%; padding: .55rem 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: transparent; color: var(--fg); cursor: pointer;
+    }
+    .setup-remote-btn:hover { border-color: var(--accent-e); }
+    .setup-remote-result {
+      margin-top: .8rem; padding: 1rem;
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+      background: var(--ink-raised); text-align: center;
+    }
+    .setup-remote-result .eyebrow {
+      font-family: var(--mono), monospace; font-size: .68rem; font-weight: 500;
+      text-transform: uppercase; letter-spacing: .18em;
+      color: var(--accent-e); margin: 0 0 .6rem;
+    }
+    .setup-qr {
+      display: flex; justify-content: center; margin: 0 0 .6rem;
+    }
+    .setup-qr canvas {
+      /* QR carries its own light quiet zone; a hairline frames it on dark bg. */
+      border: 1px solid var(--line); border-radius: var(--radius-sm, 10px);
+    }
+    .setup-link-row {
+      margin: 0; font-size: .82rem; color: var(--fg-dim); word-break: break-all;
+    }
+    .setup-link {
+      font-family: var(--mono), monospace; color: var(--accent-e);
+      text-decoration: none; word-break: break-all;
+    }
+    .setup-link:hover { text-decoration: underline; }
+    .setup-sep { border: 0; border-top: 1px solid var(--line); margin: 1rem 0; }
+    .setup-note { margin: .6rem 0 0; color: var(--fg-dim); font-size: .82rem; }
+    .setup-err { margin: 0; color: var(--red-e); font-size: .9em; }
+    .setup-expired { margin-top: 0; color: var(--red-e); border-color: var(--red-e); }
   </style>
 </head>
 <body>
   <h1>forty-two&nbsp;watts</h1>
-  <p class="muted">Your home, one URL. Sign in with your passkey — or set up this device.</p>
+  <p class="muted" id="tagline">Your home, one URL.</p>
+
+  <!-- LAN hero — shown ONLY on a genuine-LAN origin (your Pi itself). The QR to
+       reach this home from your phone is THE primary action: auto-rendered, always
+       visible, above the sign-in/manage panels. Hidden on the relay/home.* origin
+       (the bootstrap_id is minted LAN-side, so there's nothing to show there). -->
+  <div id="lan-setup" class="panel" style="display:none">
+    <p class="eyebrow-hero">Reach this home from anywhere</p>
+    <p class="muted" style="margin:.2rem 0 0">Scan with your phone to create your passkey. After that, open <span class="code">home.fortytwowatts.com</span> on any device — your passkey takes you straight here.</p>
+    <div id="setup-remote-panel" class="setup-remote"></div>
+  </div>
 
   <div id="loading" class="panel">Loading…</div>
 
@@ -77,25 +128,52 @@
   </div>
 
   <div id="choose" class="panel" style="display:none">
-    <div class="row"><a class="block" href="./login.html"><button class="primary">Sign in with passkey</button></a></div>
+    <div class="row"><a class="block" id="signin-link" href="./login.html"><button class="primary">Sign in with passkey</button></a></div>
     <p class="muted">Already set up on this device? Face&nbsp;ID / Touch&nbsp;ID.</p>
     <hr class="sep">
     <div class="row"><a class="block" href="./enroll.html"><button>Set up this device</button></a></div>
-    <p class="muted">First time here? Enroll a passkey. The very first device needs the LAN&nbsp;PIN — read it below while you're on your home network.</p>
-    <div id="pin-panel" class="pin-panel"></div>
+    <p class="muted">First time here? Enroll a passkey on this device.</p>
   </div>
 
+  <!-- Load the P2P transport so the landing page's owner API calls (whoami,
+       devices, logout) ride the DTLS DataChannel — the owner API is P2P-only
+       over the relay. ownerFetch() routes through window.p2pFetch when up. -->
+  <script src="/p2p.js?v=p2p14"></script>
   <script type="module">
     import { apiBase } from "./webauthn.js";
-    import { mountEnrollPin } from "./enroll-pin.js";
+    import { mountSetupRemote } from "./setup-remote.js";
+    import { ownerFetch, isLanOrigin } from "./owner-fetch.js";
     const base = apiBase();
 
-    // "Show enrollment PIN" lives in the first-time "choose" panel; it's
-    // inert until clicked and gracefully degrades over the relay (LAN-only).
-    mountEnrollPin(document.getElementById("pin-panel"));
+    // ownerFetch (shared, owner-fetch.js) routes owner API calls — whoami, the
+    // devices list + DELETE revoke, logout — over the STRICT P2P transport (FIX-2):
+    // they carry or rely on the owner session, which must never ride the cleartext
+    // relay on the public home route. It fails closed on a public origin both when
+    // the channel is down AND when p2p.js never loaded (FIX-B); only a genuine-LAN
+    // origin raw-fetches.
+
+    // LAN hero: on your Pi's OWN origin, the QR to reach this home
+    // from your phone is THE primary action — auto-shown, always visible, above the
+    // sign-in/manage panels, regardless of the whoami state below. On the relay/home.*
+    // origin there is nothing to mint (the bootstrap_id is LAN-side), so it stays hidden.
+    const onLan = isLanOrigin();
+    const signinLink = document.getElementById("signin-link");
+    if (!onLan && signinLink) signinLink.href = "/";
+    if (onLan) {
+      document.getElementById("tagline").textContent = "Reach this home from anywhere — scan with your phone.";
+      document.getElementById("lan-setup").style.display = "block";
+      mountSetupRemote(document.getElementById("setup-remote-panel"), { auto: true, qrSize: 260 });
+    } else {
+      document.getElementById("tagline").textContent = "Your home, one URL. Sign in with your passkey.";
+    }
+
+    const MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
+    function markManualSignout() {
+      try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (_) {}
+    }
 
     async function whoami() {
-      const r = await fetch(base + "/api/owner-access/whoami", { credentials: "same-origin" });
+      const r = await ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" });
       return r.status === 200 ? await r.json() : null;
     }
     function show(id) {
@@ -106,7 +184,8 @@
     document.getElementById("signout").onclick = async () => {
       // The ftw_owner cookie is HttpOnly, so JS can't clear it — POST the
       // server logout to revoke the session AND expire the cookie properly.
-      try { await fetch(base + "/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
+      markManualSignout();
+      try { await ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" }); }
       catch (e) { /* best-effort — fall through to the choose panel regardless */ }
       show("choose");
     };
@@ -131,7 +210,7 @@
       ul.innerHTML = "";
       let devices = [];
       try {
-        const r = await fetch(base + "/api/owner-access/devices", { credentials: "same-origin" });
+        const r = await ownerFetch("/api/owner-access/devices", { credentials: "same-origin" });
         if (r.ok) ({ devices } = await r.json());
       } catch { return; }
       for (const d of (devices || [])) {
@@ -145,7 +224,7 @@
         btn.style = "width:auto;padding:.35rem .7rem;font-size:.85em";
         btn.onclick = async () => {
           if (!confirm("Remove the passkey \"" + (d.friendly_name || "unnamed") + "\"?")) return;
-          await fetch(base + "/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
+          await ownerFetch("/api/owner-access/devices/" + encodeURIComponent(d.credential_id_b64),
             { method: "DELETE", credentials: "same-origin" });
           refresh();
         };

@@ -83,7 +83,7 @@ func (s *Store) DeleteNovaDER(deviceID, derType string) error {
 	return err
 }
 
-// InferDerKinds returns the clean DER kinds (meter/pv/battery/ev) that a
+// InferDerKinds returns the clean DER kinds (meter/pv/battery/ev/v2x_charger) that a
 // driver has emitted at least one telemetry sample for, inferred from
 // the long-format TS DB (ts_samples keyed on {kind}_w metrics). Used by
 // the nova-claim CLI to decide which DERs to register under one device
@@ -93,8 +93,8 @@ func (s *Store) DeleteNovaDER(deviceID, derType string) error {
 // means forty-two-watts hasn't been run long enough for the driver to
 // connect. The CLI surfaces a hint to that effect.
 func (s *Store) InferDerKinds(driver string) []string {
-	out := make([]string, 0, 4)
-	for _, k := range []string{"meter", "pv", "battery", "ev"} {
+	out := make([]string, 0, 5)
+	for _, k := range []string{"meter", "pv", "battery", "ev", "v2x_charger"} {
 		sample, err := s.LatestSample(driver, k+"_w")
 		if err == nil && sample.TsMs > 0 {
 			out = append(out, k)

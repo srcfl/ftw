@@ -15,6 +15,11 @@
 // content silently and preserve modal/log scroll positions so the
 // operator's reading place isn't yanked away.
 (function () {
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function fmtAge(ms) {
     if (!Number.isFinite(ms) || ms <= 0) return "—";
     var s = Math.floor(ms / 1000);
@@ -215,7 +220,7 @@
 
   function downloadWithFeedback(url, title, message, fallbackName) {
     startJobOverlay(title, message);
-    fetch(url)
+    ownerFetch(url)
       .then(function (resp) {
         if (!resp.ok) {
           return resp.text().then(function (txt) {
@@ -335,8 +340,8 @@
     var n = state.name;
     if (!n) return;
     Promise.all([
-      fetch("/api/drivers/" + encodeURIComponent(n)).then(function (r) { return r.json(); }),
-      fetch("/api/drivers/" + encodeURIComponent(n) + "/logs?limit=200").then(function (r) { return r.json(); }).catch(function () { return { entries: [] }; }),
+      ownerFetch("/api/drivers/" + encodeURIComponent(n)).then(function (r) { return r.json(); }),
+      ownerFetch("/api/drivers/" + encodeURIComponent(n) + "/logs?limit=200").then(function (r) { return r.json(); }).catch(function () { return { entries: [] }; }),
     ]).then(function (results) {
       if (state.name !== n) return; // user closed or switched
       renderBody(results[0] || {}, results[1] || {}, isFirstPaint);

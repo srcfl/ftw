@@ -71,6 +71,9 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
 	}
+	if !pointerEqual(oldCfg.RemoteAccess, newCfg.RemoteAccess) {
+		reasons = append(reasons, "remote_access — relay registration is opt-in and starts/stops at startup")
+	}
 	if !pointerEqual(oldCfg.OCPP, newCfg.OCPP) {
 		reasons = append(reasons, "ocpp — OCPP server is bound once at startup")
 	}

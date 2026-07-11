@@ -2,6 +2,8 @@ package drivers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,11 +22,18 @@ import (
 
 func runHTTPTestDriver(t *testing.T, allowed []string, targetURL string) (gotBody bool, errMsg string) {
 	t.Helper()
-	tel := telemetry.NewStore()
-	env := NewHostEnv("httptest", tel).WithHTTP()
+	env := NewHostEnv("httptest", telemetry.NewStore()).WithHTTP()
 	if allowed != nil {
 		env.WithHTTPAllowedHosts(allowed)
 	}
+	return runHTTPDriverWithEnv(t, env, targetURL)
+}
+
+// runHTTPDriverWithEnv runs a minimal http_get driver against targetURL
+// with a caller-supplied HostEnv, so tests can exercise TLS pinning and
+// other per-driver HTTP settings, not just the allowlist.
+func runHTTPDriverWithEnv(t *testing.T, env *HostEnv, targetURL string) (gotBody bool, errMsg string) {
+	t.Helper()
 	src := `
 		function driver_init() end
 		function driver_poll()
@@ -57,10 +66,10 @@ func runHTTPTestDriver(t *testing.T, allowed []string, targetURL string) (gotBod
 	if _, err := d.Poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
-	if v, _, ok := tel.LatestMetric("httptest", "result_ok"); ok && v == 1 {
+	if v, _, ok := env.Telemetry.LatestMetric(env.DriverName, "result_ok"); ok && v == 1 {
 		return true, ""
 	}
-	if v, _, ok := tel.LatestMetric("httptest", "result_err"); ok && v == 1 {
+	if v, _, ok := env.Telemetry.LatestMetric(env.DriverName, "result_err"); ok && v == 1 {
 		return false, "errored"
 	}
 	return false, "neither metric set — driver did not run"
@@ -185,5 +194,104 @@ func TestHTTPTestRigSelfCheck(t *testing.T) {
 	}
 	if atomic.LoadInt32(&hits) != 1 {
 		t.Errorf("rig sanity: server saw %d hits, want 1", atomic.LoadInt32(&hits))
+	}
+}
+
+// TLS pinning lets a driver reach a self-signed HTTPS endpoint (e.g. a
+// NIBE heat pump's local REST API) by accepting exactly one leaf cert.
+// httptest.NewTLSServer mints a self-signed cert NOT in the system root
+// store, so it stands in perfectly for the pump: rejected without a pin,
+// accepted with the right pin, rejected with a wrong one.
+func TestLuaHTTPTLSPinning(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`ok`))
+	}))
+	defer srv.Close()
+
+	sum := sha256.Sum256(srv.Certificate().Raw)
+	goodPin := hex.EncodeToString(sum[:])
+
+	t.Run("no pin rejects self-signed cert", func(t *testing.T) {
+		env := NewHostEnv("nopin", telemetry.NewStore()).WithHTTP()
+		if got, _ := runHTTPDriverWithEnv(t, env, srv.URL); got {
+			t.Fatal("self-signed cert must be rejected when no pin is configured")
+		}
+	})
+
+	t.Run("correct pin accepts (openssl colon/upper form)", func(t *testing.T) {
+		// Feed the openssl-style "AB:CD:..." upper-case form to prove the
+		// host normalises it before comparing.
+		env := NewHostEnv("goodpin", telemetry.NewStore()).WithHTTP().
+			WithHTTPTLSPin(colonizeHex(strings.ToUpper(goodPin)))
+		if got, errMsg := runHTTPDriverWithEnv(t, env, srv.URL); !got {
+			t.Fatalf("pinned fetch must succeed, err=%s", errMsg)
+		}
+	})
+
+	t.Run("wrong pin rejects", func(t *testing.T) {
+		env := NewHostEnv("badpin", telemetry.NewStore()).WithHTTP().
+			WithHTTPTLSPin(strings.Repeat("ab", 32)) // 64 valid hex chars, wrong cert
+		if got, _ := runHTTPDriverWithEnv(t, env, srv.URL); got {
+			t.Fatal("a wrong pin must reject the connection")
+		}
+	})
+
+	t.Run("malformed pin fails closed", func(t *testing.T) {
+		// A configured-but-invalid pin is rejected as configuration error;
+		// it must never silently fall back to the system trust store.
+		env := NewHostEnv("junkpin", telemetry.NewStore()).WithHTTP().WithHTTPTLSPin("not-a-fingerprint")
+		if got, _ := runHTTPDriverWithEnv(t, env, srv.URL); got {
+			t.Fatal("malformed pin must reject the request")
+		}
+	})
+
+	t.Run("configured pin forbids clear-text downgrade", func(t *testing.T) {
+		var hits atomic.Int32
+		plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			_, _ = w.Write([]byte(`ok`))
+		}))
+		defer plain.Close()
+		env := NewHostEnv("cleartext", telemetry.NewStore()).WithHTTP().
+			WithHTTPTLSPin(goodPin)
+		if got, _ := runHTTPDriverWithEnv(t, env, plain.URL); got {
+			t.Fatal("a pinned driver must not use clear-text HTTP")
+		}
+		if hits.Load() != 0 {
+			t.Fatalf("clear-text server received %d requests, want 0", hits.Load())
+		}
+	})
+}
+
+// colonizeHex turns "abcd..." into "ab:cd:..." to mimic the openssl
+// `-fingerprint` output format the operator copy-pastes.
+func colonizeHex(h string) string {
+	var parts []string
+	for i := 0; i+2 <= len(h); i += 2 {
+		parts = append(parts, h[i:i+2])
+	}
+	return strings.Join(parts, ":")
+}
+
+func TestNormalizeHexFingerprint(t *testing.T) {
+	const canonical = "0011223344556677889900aabbccddeeff0123456789abcdef0011223344abcd"
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"already canonical", canonical, canonical},
+		{"openssl colon+upper", colonizeHex(strings.ToUpper(canonical)), canonical},
+		{"spaces tolerated", canonical[:8] + " " + canonical[8:24] + " " + canonical[24:], canonical},
+		{"too short → empty", "deadbeef", ""},
+		{"non-hex char → empty", "zz" + canonical[2:], ""},
+		{"empty → empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeHexFingerprint(tc.in); got != tc.want {
+				t.Errorf("normalizeHexFingerprint(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

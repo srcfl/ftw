@@ -83,6 +83,19 @@ type Controller struct {
 	// compute-from-plan path.
 	holdMu sync.Mutex
 	holds  map[string]ManualHold
+	// manualIdleSince[id] is when a loadpoint with an active manual hold
+	// first observed the vehicle "not requesting current" this idle spell.
+	// Once it has stayed not-requesting for SessionCompletionTimeout the
+	// controller auto-releases the hold (the car is full / declined), so
+	// the operator doesn't have to press Stop. Reset whenever the car
+	// requests again or the hold goes away. Guarded by manualIdleMu.
+	manualIdleMu    sync.Mutex
+	manualIdleSince map[string]time.Time
+	// manualHoldSaver, if non-nil, persists operator (Persistent) manual
+	// holds so they survive a reboot / firmware update and the EV keeps
+	// charging across the restart. Called on Set (persistent) and Clear.
+	// Timed/diagnostic holds are intentionally NOT persisted (ephemeral).
+	manualHoldSaver func(id string, h ManualHold, cleared bool)
 
 	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
 	// state that smooths the surplus_only pause/resume decision over
@@ -338,6 +351,12 @@ type ManualHold struct {
 	MaxAmpsPerPhase float64
 	SitePhases      int
 	ExpiresAt       time.Time
+	// Persistent marks an operator "Start" / amp-slider override that
+	// never expires on time — it is released only by ClearManualHold
+	// ("Stop") or on unplug. A persistent hold carries a zero ExpiresAt;
+	// the flag is what distinguishes it from the zero-ExpiresAt "clear"
+	// sentinel that SetManualHold honours.
+	Persistent bool
 }
 
 // Directive is the loadpoint-relevant slice of mpc.SlotDirective.
@@ -1007,23 +1026,37 @@ func (c *Controller) siteFuse() SiteFuse {
 // behaviour without fighting the 5-second control tick.
 //
 // A zero ExpiresAt clears any hold for this loadpoint (same as
-// ClearManualHold). Setting a hold for an unknown loadpoint ID is
-// silently allowed — the hold has no effect because tickOne only
-// runs for configured loadpoints.
+// ClearManualHold) UNLESS h.Persistent is set, in which case it
+// installs a never-expiring override. Setting a hold for an unknown
+// loadpoint ID is silently allowed — the hold has no effect because
+// tickOne only runs for configured loadpoints.
 func (c *Controller) SetManualHold(id string, h ManualHold) {
 	if c == nil {
 		return
 	}
 	c.holdMu.Lock()
-	defer c.holdMu.Unlock()
 	if c.holds == nil {
 		c.holds = map[string]ManualHold{}
 	}
-	if h.ExpiresAt.IsZero() {
+	cleared := false
+	if h.ExpiresAt.IsZero() && !h.Persistent {
 		delete(c.holds, id)
-		return
+		cleared = true
+	} else {
+		c.holds[id] = h
 	}
-	c.holds[id] = h
+	saver := c.manualHoldSaver
+	c.holdMu.Unlock()
+	// Persist outside the lock (saver may do disk I/O). Only persistent
+	// operator holds survive a restart; clearing or a timed hold writes the
+	// "cleared" sentinel so a stale persistent hold isn't resurrected.
+	if saver != nil {
+		if cleared || !h.Persistent {
+			saver(id, ManualHold{}, true)
+		} else {
+			saver(id, h, false)
+		}
+	}
 }
 
 // ClearManualHold removes any active hold for the given loadpoint,
@@ -1033,13 +1066,63 @@ func (c *Controller) ClearManualHold(id string) {
 		return
 	}
 	c.holdMu.Lock()
-	defer c.holdMu.Unlock()
+	_, existed := c.holds[id]
 	delete(c.holds, id)
+	saver := c.manualHoldSaver
+	c.holdMu.Unlock()
+	// Only persist the clear if a hold actually existed — ClearManualHold is
+	// called on every unplugged tick, and we must not hammer the store.
+	if saver != nil && existed {
+		saver(id, ManualHold{}, true)
+	}
+	// The auto-release idle timer is meaningless without a hold.
+	c.resetManualIdle(id)
+}
+
+// manualHoldIdleFor returns how long the loadpoint has continuously seen
+// the vehicle "not requesting current" while a manual hold is active,
+// starting the timer on the first such tick. Used to debounce the
+// auto-release of a hold once the car is full / declines.
+func (c *Controller) manualHoldIdleFor(id string, now time.Time) time.Duration {
+	c.manualIdleMu.Lock()
+	defer c.manualIdleMu.Unlock()
+	if c.manualIdleSince == nil {
+		c.manualIdleSince = map[string]time.Time{}
+	}
+	since, ok := c.manualIdleSince[id]
+	if !ok {
+		c.manualIdleSince[id] = now
+		return 0
+	}
+	return now.Sub(since)
+}
+
+// resetManualIdle clears the auto-release idle timer for a loadpoint —
+// called when the vehicle resumes requesting current or the hold is
+// removed, so the next idle spell is timed from a clean start.
+func (c *Controller) resetManualIdle(id string) {
+	c.manualIdleMu.Lock()
+	delete(c.manualIdleSince, id)
+	c.manualIdleMu.Unlock()
+}
+
+// SetManualHoldSaver wires the persistence callback for operator manual
+// holds. Pass nil to disable. Wire it AFTER restoring persisted holds at
+// startup so the restore doesn't immediately re-write what it just read.
+func (c *Controller) SetManualHoldSaver(fn func(id string, h ManualHold, cleared bool)) {
+	if c == nil {
+		return
+	}
+	c.holdMu.Lock()
+	c.manualHoldSaver = fn
+	c.holdMu.Unlock()
 }
 
 // GetManualHold returns the current hold for a loadpoint. The bool
-// is false when no hold is active. Expired holds are not returned —
-// they're lazily evicted on the next read.
+// is false when no hold is active. Time-bounded holds past their
+// ExpiresAt are lazily evicted on the next read. A Persistent hold
+// (operator "Start" / amp-slider override) never expires on time and
+// is only released by ClearManualHold ("Stop") or on unplug (tickOne).
 func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) {
 	if c == nil {
 		return ManualHold{}, false
@@ -1050,7 +1133,7 @@ func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) 
 	if !ok {
 		return ManualHold{}, false
 	}
-	if !now.Before(h.ExpiresAt) {
+	if !h.Persistent && !now.Before(h.ExpiresAt) {
 		delete(c.holds, id)
 		return ManualHold{}, false
 	}
@@ -1116,9 +1199,23 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		wasPlugged = st.PluggedIn
 		wasDelivering = st.CurrentPowerW >= DeliveringW
 	}
+	// As of last tick, were we pausing this surplus loadpoint below its
+	// floor? (computeSurplusCmd for THIS tick runs later.) A charger that
+	// reports "not requesting current" while we're withholding power is
+	// responding to our own pause, not declining — so it must not count
+	// toward session completion, and the same signal drives the resume
+	// wallbox-cycle in maybeWakeVehicle below.
+	enteringSurplusPaused, _ := c.getSurplusPause(lpCfg.ID)
+	selfWithheld := surplusOn && enteringSurplusPaused
+	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
+		// Release any manual override when the vehicle unplugs. A
+		// persistent "Start" hold (zero ExpiresAt) would otherwise
+		// survive the session and silently re-apply to the next car;
+		// "until Stop or unplug" is the operator's mental model.
+		c.ClearManualHold(lpCfg.ID)
 		return
 	}
 	if !wasPlugged {
@@ -1135,6 +1232,28 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		go c.wakeVehicleAuto(context.Background(), lpCfg.ID, "delivering_edge")
 	}
 
+	// Auto-release an operator manual hold once the vehicle has stopped
+	// requesting current (it hit its own charge limit / is full). Without
+	// this a "Start" hold pins the wallbox at a fixed amperage and the
+	// loadpoint shows "charging" at 0 W until the operator presses Stop.
+	// Debounced by SessionCompletionTimeout so a brief ramp/handshake dip
+	// — or a car that hasn't woken yet — doesn't drop the hold early. Only
+	// trips for drivers that distinguish "explicitly not requesting" from
+	// "throttled to 0" (RequestActive); others leave it true and never
+	// auto-release. Done before the dispatch branch below so the freed
+	// tick falls straight through to automatic (surplus/plan) dispatch.
+	if _, held := c.GetManualHold(lpCfg.ID, now); held {
+		if !sample.RequestActive {
+			if c.manualHoldIdleFor(lpCfg.ID, now) >= SessionCompletionTimeout {
+				slog.Info("loadpoint manual hold auto-released — vehicle stopped requesting current (full/declined)",
+					"lp", lpCfg.ID, "idle", SessionCompletionTimeout)
+				c.ClearManualHold(lpCfg.ID)
+			}
+		} else {
+			c.resetManualIdle(lpCfg.ID)
+		}
+	}
+
 	cmd := map[string]any{"action": "ev_set_current"}
 	if hold, ok := c.GetManualHold(lpCfg.ID, now); ok {
 		// Manual override active — skip MPC translation. The hold's
@@ -1143,20 +1262,14 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 		// minimal hold (just `power_w`) still carries the per-phase
 		// fuse clamp inputs the driver needs to stay safe.
 		holdW := hold.PowerW
-		// Surplus-only is a hard promise even against a diagnostic
-		// hold: if the operator left surplus_only on while pinning a
-		// manual amperage, we still refuse to import grid for the EV.
-		// The hold's other fields (phase mode, hold time) are still
-		// honoured — only the W setpoint is clamped, and we log it so
-		// the operator notices the conflict.
-		if surplusOn && holdW > 0 {
-			clamped := c.computeSurplusCmd(now, lpCfg, holdW, sample.PowerW)
-			if clamped < holdW {
-				slog.Warn("loadpoint manual hold clamped by surplus_only",
-					"lp", lpCfg.ID, "hold_w", holdW, "clamped_w", clamped)
-				holdW = clamped
-			}
-		}
+		// An explicit manual hold ("Start" / amp slider) takes priority
+		// over surplus_only: when the operator deliberately pins a charge
+		// rate we honour it even if that means importing from the grid.
+		// surplus_only still governs *automatic* dispatch (the non-hold
+		// branch below) — releasing the hold ("Stop") drops straight back
+		// into PV-surplus-only charging. The fuse clamp below is the one
+		// guard a manual hold can never override. (surplusOn still drives
+		// the phase-mode fallback further down.)
 		// Fuse protection: even an operator-pinned hold must not bust
 		// the fuse. Apply the joint allocator's FuseEVMax cap and the
 		// pause-cooldown guard before sending. A sticky 11 kW Start
@@ -1375,12 +1488,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	// unlock is opportunistic and tick-level; it must not poke a sleeping
 	// car at night just because the bat is full. Pass the configured flag,
 	// not the runtime-armed one.
-	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, cmd)
+	c.maybeWakeVehicle(ctx, now, lpCfg, lpCfg.SurplusOnly, sample.RequestActive, selfWithheld, cmd)
 }
 
-func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn bool, cmd map[string]any) {
+func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg Config, surplusOn, chargerRequesting, selfPaused bool, cmd map[string]any) {
 	lpID := lpCfg.ID
-	if c == nil || c.vehicleStatus == nil || c.send == nil {
+	if c == nil || c.send == nil {
 		return
 	}
 	pw, _ := cmd["power_w"].(float64)
@@ -1391,8 +1504,25 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	if !wantWake {
 		return
 	}
-	driver, state, ok := c.vehicleStatus(lpID)
+	var driver, state string
+	var ok bool
+	if c.vehicleStatus != nil {
+		driver, state, ok = c.vehicleStatus(lpID)
+	}
 	if !ok || driver == "" {
+		// No vehicle-API binding (e.g. a bare CTEK with no Tesla/cloud
+		// vehicle driver). We can't read a vehicle charging state, but the
+		// charger itself reports "not requesting current" (NCRQ) via
+		// request_active. When a surplus loadpoint is being offered power
+		// yet the charger sits in NCRQ from our own earlier sub-floor
+		// pause, cycle the contactor so the vehicle renegotiates — there's
+		// no vehicle driver for charge_start to land on, so the wallbox
+		// cycle is the only lever. Throttled to once per cooldown.
+		if c.shouldKickWallboxForResume(now, lpID, surplusOn, chargerRequesting, selfPaused, pw) {
+			slog.Info("loadpoint wallbox-cycle: charger not requesting while surplus offered — renegotiating",
+				"lp", lpID, "driver", lpCfg.DriverName)
+			c.cycleWallbox(lpID, lpCfg.DriverName)
+		}
 		return
 	}
 	// "Complete" is intentionally NOT in the wake set: the car says
@@ -1467,31 +1597,67 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	// driver implementing the standard ev_pause / ev_resume actions
 	// gets this for free.
 	//
-	// Runs in a goroutine so the dispatch tick doesn't block on the
-	// pause→sleep→resume sequence (~3 s).
-	if lpCfg.DriverName != "" && c.send != nil {
-		go func(driverName string) {
-			pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
-			resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
-			if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
-				slog.Warn("loadpoint wallbox-cycle pause failed",
-					"lp", lpID, "driver", driverName, "err", err)
-				return
-			}
-			slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
-			// 3 s is enough for Tesla to register the contactor
-			// open as a plug-cycle. Shorter risks the car missing
-			// the transition; longer eats into the wake-kick
-			// window and prolongs the grid-import.
-			time.Sleep(3 * time.Second)
-			if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
-				slog.Warn("loadpoint wallbox-cycle resume failed",
-					"lp", lpID, "driver", driverName, "err", err)
-				return
-			}
-			slog.Info("loadpoint wallbox-cycle: resumed", "lp", lpID, "driver", driverName)
-		}(lpCfg.DriverName)
+	c.cycleWallbox(lpID, lpCfg.DriverName)
+}
+
+// wallboxCycleGap is the dwell between ev_pause and ev_resume in a contactor
+// cycle. 3 s is enough for a car to register the contactor open as a
+// plug-cycle (shorter risks the car missing the transition; longer eats into
+// the wake-kick window and prolongs grid import). A var, not a const, so tests
+// can shrink it.
+var wallboxCycleGap = 3 * time.Second
+
+// cycleWallbox opens and re-closes the charger's contactor (ev_pause →
+// ev_resume), which a car interprets as a plug-cycle and accepts as a fresh
+// session boundary — the only software lever that drags a vehicle out of a
+// "Stopped"/NCRQ state that rejects charge_start. Driver-agnostic: any EV
+// charger driver implementing ev_pause / ev_resume gets it. Runs in a
+// goroutine so the dispatch tick doesn't block on the pause→sleep→resume.
+func (c *Controller) cycleWallbox(lpID, driverName string) {
+	if driverName == "" || c.send == nil {
+		return
 	}
+	go func() {
+		pauseCmd, _ := json.Marshal(map[string]any{"action": "ev_pause"})
+		resumeCmd, _ := json.Marshal(map[string]any{"action": "ev_resume"})
+		if err := c.send(context.Background(), driverName, pauseCmd); err != nil {
+			slog.Warn("loadpoint wallbox-cycle pause failed",
+				"lp", lpID, "driver", driverName, "err", err)
+			return
+		}
+		slog.Info("loadpoint wallbox-cycle: paused", "lp", lpID, "driver", driverName)
+		time.Sleep(wallboxCycleGap)
+		if err := c.send(context.Background(), driverName, resumeCmd); err != nil {
+			slog.Warn("loadpoint wallbox-cycle resume failed",
+				"lp", lpID, "driver", driverName, "err", err)
+			return
+		}
+		slog.Info("loadpoint wallbox-cycle: resumed", "lp", lpID, "driver", driverName)
+	}()
+}
+
+// shouldKickWallboxForResume decides whether to fire a contactor cycle to drag
+// an offline charger (no vehicle-API binding) out of a self-induced NCRQ once
+// PV surplus has recovered. Returns true only when we're a surplus loadpoint
+// offering power (offeredW > 0) into a charger that isn't requesting current
+// because WE paused it (selfPaused) — and at most once per vehicleWakeCooldown
+// per loadpoint so a flapping resume can't storm the contactor.
+func (c *Controller) shouldKickWallboxForResume(now time.Time, lpID string, surplusOn, chargerRequesting, selfPaused bool, offeredW float64) bool {
+	if !surplusOn || !selfPaused || chargerRequesting || offeredW <= 0 {
+		return false
+	}
+	c.wakeMu.Lock()
+	defer c.wakeMu.Unlock()
+	if c.wakeLast == nil {
+		c.wakeLast = map[string]time.Time{}
+		c.wakeKickUntil = map[string]time.Time{}
+		c.wakeAttempts = map[string]int{}
+	}
+	if last := c.wakeLast[lpID]; !last.IsZero() && now.Sub(last) < vehicleWakeCooldown {
+		return false
+	}
+	c.wakeLast[lpID] = now
+	return true
 }
 
 // computeSurplusCmd applies the surplus_only live clamp to the
@@ -1661,6 +1827,23 @@ func (c *Controller) pickSurplusSteps(now time.Time, lpCfg Config) []float64 {
 	}
 	steps3 := surplus3PhaseSteps(lpCfg)
 	minStep3 := smallestNonZero(steps3)
+
+	// 3Φ-only charger: an operator who pinned "3p" is telling us the
+	// wallbox can't fall back to single-phase (e.g. CTEK Chargestorm —
+	// 3Φ, 6 A minimum, no phase-switch register). Never offer a 1Φ-
+	// eligible step and never commit the day-long 1Φ lock; the charger
+	// simply pauses below the 3Φ minimum and charges in 3Φ steps above
+	// it. Without this the surplus 1Φ fallback hands such a charger a
+	// ~1380 W offer it can only answer by writing 0 A → it never charges
+	// on any day the PV forecast can't sustain 3Φ. Clear any stale lock
+	// so flipping the config to "3p" takes effect immediately.
+	if lpCfg.PhaseMode == "3p" {
+		c.phaseLockMu.Lock()
+		delete(c.phaseLocked1P, lpCfg.ID)
+		delete(c.phaseLockedAt, lpCfg.ID)
+		c.phaseLockMu.Unlock()
+		return steps3
+	}
 
 	c.phaseLockMu.Lock()
 	locked := c.phaseLocked1P[lpCfg.ID]
@@ -1871,6 +2054,14 @@ func resolvePhaseMode(operatorMode string, scheduleActive, surplusLocked1P, surp
 		}
 		return operatorMode
 	case surplusLocked1P:
+		// A 3Φ-only charger (operator pinned "3p") physically cannot
+		// trickle at 1Φ, so the surplus 1Φ lock must never override it —
+		// defends against a stale lock left from a previous "auto"/"1p"
+		// config. pickSurplusSteps also refuses to set the lock for a
+		// "3p" loadpoint, so this is belt-and-braces.
+		if operatorMode == "3p" {
+			return "3p"
+		}
 		return "1p"
 	case surplusOn && (operatorMode == "" || operatorMode == "auto"):
 		if dwell != "" {

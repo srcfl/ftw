@@ -1,6 +1,7 @@
 # Device repository
 
-Status: planned.
+Status: planned. This is not the current driver install path; bundled and
+local Lua drivers under `drivers/` remain the active mechanism.
 
 This document defines the first non-breaking device repository milestone
 for forty-two-watts. The implementation target is a PR series, not a

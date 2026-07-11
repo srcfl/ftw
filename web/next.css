@@ -249,6 +249,123 @@ body.ftw-next .icon-btn[aria-pressed="true"]:hover {
   background: color-mix(in oklab, var(--accent-e) 24%, transparent);
 }
 
+/* Sign-in GATE — a full-screen lock over the dashboard for logged-out remote
+   visitors (the dashboard IS the door; locked, it shows only the door, never
+   the empty dashboard chrome). setupAuth() reveals it; data-mode flips between
+   "connecting" (reaching home), "signin" (passkey / silent device key) and
+   "setup" (this device has no key — send the user to LAN enrollment). A trust
+   line conveys the direct, end-to-end, relay-blind transport. Single amber
+   accent; on-accent text near-black per DESIGN.md; tokens flip cleanly in the
+   light theme. */
+body.ftw-next .signin-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: none;            /* shown via html.ftw-gated — set pre-paint (no flash) + by JS */
+  place-items: center;
+  background: var(--bg);
+  font-family: var(--sans);
+}
+html.ftw-gated body.ftw-next .signin-gate { display: grid; }
+body.ftw-next .signin-gate-card {
+  width: min(92vw, 380px);
+  padding: 30px 28px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--ink-raised);
+}
+body.ftw-next .signin-gate-brand {
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 12px;
+  color: var(--fg-dim);
+  margin-bottom: 20px;
+}
+body.ftw-next .signin-gate-lead { color: var(--fg); font-size: 15px; margin: 0 0 18px; }
+body.ftw-next .signin-gate-btn {
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-e);
+  background: var(--accent-e);
+  color: #0a0a0a;
+  cursor: pointer;
+}
+body.ftw-next .signin-gate-btn:hover { filter: brightness(1.05); }
+body.ftw-next .signin-gate-msg { color: var(--fg-dim); font-size: 12px; margin: 12px 0 0; min-height: 1em; }
+body.ftw-next .signin-gate-msg.err { color: var(--accent-e); }
+body.ftw-next .signin-gate-msg.ok { color: var(--green-e); }
+body.ftw-next .signin-gate-setup { color: var(--fg-dim); font-size: 12px; margin: 18px 0 0; }
+body.ftw-next .signin-gate-setup a { color: var(--accent-e); text-decoration: none; }
+/* setup mode — "set up this device first" (no device key on this origin). */
+body.ftw-next .signin-gate-sub { color: var(--fg-dim); font-size: 12.5px; line-height: 1.5; margin: 0 0 18px; }
+body.ftw-next a.signin-gate-btn { display: inline-block; text-decoration: none; }
+
+/* Trust line — direct & E2E-encrypted, relay-blind. Mono eyebrow + 6 px status
+   dot per DESIGN.md; the accent glow on the dot is the only sanctioned shadow.
+   It carries p2p-direct / p2p-relay / p2p-connecting classes from next-app.js
+   so the dot colour tracks the live transport (green = direct, amber = relay). */
+body.ftw-next .signin-gate-trust {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 22px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+}
+body.ftw-next .signin-gate-trust-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--green-e);
+  box-shadow: 0 0 10px var(--green-e);
+}
+body.ftw-next .signin-gate-trust.is-relay .signin-gate-trust-dot { background: var(--accent-e); box-shadow: none; }
+body.ftw-next .signin-gate-trust.is-connecting .signin-gate-trust-dot { background: var(--fg-muted); box-shadow: none; }
+body.ftw-next .signin-gate-trust-text {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+
+/* Mode switch: "connecting" shows only the reaching-home line; "signin" the
+   passkey card; "setup" the set-up-this-device card. */
+body.ftw-next .signin-gate-auth { display: none; }
+body.ftw-next .signin-gate-needs-setup { display: none; }
+body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-auth { display: block; }
+body.ftw-next .signin-gate[data-mode="setup"] .signin-gate-needs-setup { display: block; }
+body.ftw-next .signin-gate[data-mode="signin"] .signin-gate-connecting,
+body.ftw-next .signin-gate[data-mode="setup"] .signin-gate-connecting { display: none; }
+/* The trust line is meaningless while still "connecting" — hide it there. */
+body.ftw-next .signin-gate[data-mode="connecting"] .signin-gate-trust { display: none; }
+
+/* Public landing (multi-tenant): the anonymous front door. Brand + passkey +
+   a discreet "Learn more" — no instance data pre-auth. Shown ONLY in
+   data-mode="public-landing"; it suppresses the "reaching your home" line, the
+   single-tenant auth/setup panels, and the trust line (no home reached yet).
+   Reuses the existing gate tokens — single amber accent, near-black on-accent
+   text, mono eyebrow — so light theme flips cleanly. No hard-coded hex. */
+body.ftw-next .signin-gate-landing { display: none; }
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-landing { display: block; }
+/* No "reaching your home" line on the public front door — the visitor hasn't
+   chosen a home yet. */
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-connecting { display: none; }
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-auth,
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-needs-setup,
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-trust { display: none; }
+/* The landing carries its OWN brand inside .signin-gate-landing; hide the
+   card-level brand (a direct child of the card, not the landing's nested one)
+   so the public front door shows a single masthead, not a doubled one. */
+body.ftw-next .signin-gate[data-mode="public-landing"] .signin-gate-card > .signin-gate-brand { display: none; }
+body.ftw-next .signin-gate-learn-row { color: var(--fg-dim); font-size: 12px; margin: 18px 0 0; }
+body.ftw-next .signin-gate-learn { color: var(--accent-e); text-decoration: none; }
+
 /* Hamburger — hidden on desktop, visible under 720 px. Lives next to
    the header-right cluster so it's always reachable even when that
    cluster is collapsed into the drawer below. */
@@ -337,6 +454,17 @@ body.ftw-next .summary-card {
 }
 body.ftw-next .summary-card:hover {
   border-color: oklch(0.35 0.02 250);
+}
+
+/* Heat-pump card. heating.js renders into a bare `.card`, whose base rule in
+   style.css uses `--surface` — a token that is NOT flipped by
+   html[data-theme="light"], so the card stayed dark on a light page while
+   every other dashboard card (.summary-card/.fuse-card/.control-card/…) themed
+   via --ink-raised. Bring it onto the next palette so it themes to light too. */
+body.ftw-next .heating-row .card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
 }
 body.ftw-next .summary-card .card-label {
   margin-bottom: 8px;
@@ -1224,6 +1352,16 @@ body.ftw-next .modal-close {
 body.ftw-next .modal-close:hover {
   color: var(--fg);
 }
+body.ftw-next .ev-cover-info {
+  background: rgba(251,191,36,0.10);
+  border: 1px solid rgba(251,191,36,0.22);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  margin-top: 10px;
+  padding: 8px 10px;
+}
 body.ftw-next .modal-tabs {
   gap: 0;
   padding: 8px 16px 0;
@@ -1399,6 +1537,66 @@ body.ftw-next .driver-test-output {
   border-radius: 8px;
   flex-basis: 100%;
   padding: 10px 12px;
+}
+body.ftw-next .v2x-control-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(92px, 1fr) repeat(3, auto);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+body.ftw-next .v2x-power-label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-next .v2x-power-input {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  min-height: 32px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+body.ftw-next .v2x-power-input:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-next .v2x-power-input:disabled,
+body.ftw-next .v2x-command-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+body.ftw-next .v2x-command-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 1 / -1;
+  min-height: 1em;
+}
+body.ftw-next .v2x-command-status.ok {
+  color: var(--green-e);
+}
+body.ftw-next .v2x-command-status.error {
+  color: var(--red-e);
+}
+@media (max-width: 720px) {
+  body.ftw-next .v2x-control-panel {
+    grid-template-columns: 1fr 1fr;
+  }
+  body.ftw-next .v2x-power-label,
+  body.ftw-next .v2x-power-input,
+  body.ftw-next .v2x-command-status {
+    grid-column: 1 / -1;
+  }
 }
 body.ftw-next .driver-test-kv,
 body.ftw-next .driver-test-metrics {

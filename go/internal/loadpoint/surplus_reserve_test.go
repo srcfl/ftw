@@ -29,19 +29,17 @@ func TestSurplusReserveW(t *testing.T) {
 			want: 2500 + EVRampHeadroomW,
 		},
 		{
-			// Updated 2026-05: when EV is plugged but not actually
-			// drawing, no reserve. The 2 kW idle headroom otherwise
-			// hangs around for a Tesla that's Complete / a vehicle
-			// driver that went offline / a car refusing the offer,
-			// blocking the home battery from absorbing PV. Wake-kick
-			// path (controller.tickOne) materialises EV draw to
-			// >50 W within a tick if the EV is actually going to
-			// start, at which point the reserve re-engages.
-			name: "EV at 0W → no reserve (not drawing)",
+			// EV plugged + surplus_only + not drawing, SoC UNKNOWN (dumb
+			// charger like CTEK): reserve a bootstrap floor so the home
+			// battery yields enough headroom for the EV to start. MinChargeW
+			// is 0 here, so the floor falls back to EVRampHeadroomW. Without
+			// this the EV could never bootstrap surplus charging (the battery
+			// eats all PV → no surplus to claim → EV stays at 0 W).
+			name: "EV at 0W, SoC unknown → bootstrap reserve (dumb charger)",
 			states: []State{
 				{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 0, MaxChargeW: 11000},
 			},
-			want: 0,
+			want: EVRampHeadroomW,
 		},
 		{
 			name: "EV close to max → clamped to MaxChargeW (no overshoot)",
@@ -58,12 +56,12 @@ func TestSurplusReserveW(t *testing.T) {
 			want: 11000,
 		},
 		{
-			name: "multiple LPs sum — only active ones contribute",
+			name: "multiple LPs sum — drawing LP + bootstrap for not-drawing",
 			states: []State{
 				{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 1500, MaxChargeW: 3700}, // 1500 + 2000 = 3500, under cap
-				{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 0, MaxChargeW: 11000},   // not drawing → 0
+				{SurplusOnly: true, PluggedIn: true, CurrentPowerW: 0, MaxChargeW: 11000},   // not drawing, SoC unknown → bootstrap EVRampHeadroomW
 			},
-			want: 1500 + EVRampHeadroomW,
+			want: 1500 + EVRampHeadroomW + EVRampHeadroomW,
 		},
 	}
 	for _, tt := range tests {
@@ -119,8 +117,11 @@ func TestSurplusReserveWThresholdBoundary(t *testing.T) {
 		power float64
 		want  float64
 	}{
-		{0, 0},
-		{49.9, 0},
+		// Below 50 W = "not drawing"; SoC unknown (no vehicle fields) →
+		// bootstrap floor (MinChargeW 0 → EVRampHeadroomW). At/above 50 W =
+		// "drawing" → CurrentPowerW + EVRampHeadroomW.
+		{0, EVRampHeadroomW},
+		{49.9, EVRampHeadroomW},
 		{50.0, 50.0 + EVRampHeadroomW}, // strict-less-than gate: exactly 50 W is on the "drawing" side
 		{50.001, 50.001 + EVRampHeadroomW},
 		{1380, 1380 + EVRampHeadroomW},
@@ -191,19 +192,45 @@ func TestSurplusReserveWPluggedStoppedAtLimitNoReserve(t *testing.T) {
 	}
 }
 
-// Plugged + Stopped + SoC unknown (vehicle driver missing/offline)
-// → no reserve. Preserves the strict pre-existing "don't hold back
-// battery for an unknown EV" rule so a single missing/offline
-// vehicle driver can't permanently block the home battery.
-func TestSurplusReserveWPluggedStoppedSoCUnknownNoReserve(t *testing.T) {
+// Plugged + Stopped + SoC unknown (dumb charger like CTEK with no BMS
+// readout) → reserve MinChargeW as a bootstrap. Without it, an EV on a
+// charger that never reports SoC could never start surplus charging: the
+// home battery absorbs all PV, no surplus is left to claim, the EV stays
+// at 0 W and the reserve stays 0 W (chicken-and-egg). EV PV-charging is
+// prioritised over the home battery. We skip ONLY a car KNOWN to be full
+// (see TestSurplusReserveWPluggedStoppedAtLimitNoReserve).
+func TestSurplusReserveWPluggedStoppedSoCUnknownBootstraps(t *testing.T) {
 	states := []State{{
 		ID: "garage", SurplusOnly: true, PluggedIn: true,
 		CurrentPowerW: 0,
 		MinChargeW:    1380,
 		MaxChargeW:    11000,
-		// VehicleSoCPct + VehicleChargeLimitPct both 0 (unknown)
+		// VehicleSoCPct + VehicleChargeLimitPct both 0 (unknown — dumb charger)
+	}}
+	if got := SurplusReserveW(states, nil); got != 1380 {
+		t.Errorf("SurplusReserveW = %.0f, want 1380 (MinChargeW bootstrap for dumb charger)", got)
+	}
+}
+
+// Manual/schedule override: a force-charging (manual hold) surplus_only EV
+// must contribute NO reserve — the battery is meant to cover it, and a
+// non-zero reserve arms the dispatch no-discharge floor which flaps the
+// battery support 0↔full (Stefan 2026-06-11 manual charge). surplus_only
+// stays on so automatic surplus charging resumes when the hold ends.
+func TestSurplusReserveWManualActiveSkipped(t *testing.T) {
+	// Drawing 6.2 kW under a manual hold → would normally reserve
+	// current+headroom; with ManualActive it must reserve 0.
+	states := []State{{
+		ID: "garage", SurplusOnly: true, PluggedIn: true,
+		CurrentPowerW: 6210, MaxChargeW: 11000, ManualActive: true,
 	}}
 	if got := SurplusReserveW(states, nil); got != 0 {
-		t.Errorf("SurplusReserveW = %.0f, want 0 (SoC unknown, conservative)", got)
+		t.Errorf("SurplusReserveW = %.0f, want 0 (manual-active LP must not reserve)", got)
+	}
+	// Sanity: same LP WITHOUT the manual hold still reserves (proves the
+	// skip is what zeroed it, not some other gate).
+	states[0].ManualActive = false
+	if got := SurplusReserveW(states, nil); got <= 0 {
+		t.Errorf("SurplusReserveW = %.0f, want >0 without manual hold (control)", got)
 	}
 }

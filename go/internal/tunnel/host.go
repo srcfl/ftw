@@ -51,6 +51,13 @@ func (h *Host) getPollSecret() string {
 	return h.pollSecret
 }
 
+// PollSecret returns the current relay-minted poll token. Exported so a sibling
+// loop on the same host (e.g. the P2P signaling poller) can present the same
+// token the registration loop refreshes, without re-plumbing the secret.
+func (h *Host) PollSecret() string {
+	return h.getPollSecret()
+}
+
 // NewHost constructs a Host. relayURL is the base URL (no trailing
 // slash). handler receives each tunneled request as a normal
 // ServeHTTP call.

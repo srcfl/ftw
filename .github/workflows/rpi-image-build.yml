@@ -52,26 +52,28 @@ jobs:
           sudo docker system prune -af
           df -h /
 
-      - name: Register binfmt_misc handlers for arm / arm64
-        # pi-gen's bookworm-arm64 branch checks for
-        # /usr/bin/qemu-aarch64-static (STATIC, with -static suffix,
-        # from the qemu-user-static package) — NOT /usr/bin/qemu-arm
-        # like master does. Observed on run 24878263028: "qemu-
-        # aarch64-static not found (please install qemu-user-static)".
-        #
-        # --no-install-recommends prevents qemu-user-binfmt from
-        # being pulled as a recommend. Its postinst registers wrapper
-        # handlers at /usr/libexec/qemu-binfmt/*-binfmt-P that don't
-        # exist inside pi-gen's chroot (arch-test then fails with
-        # "armhf: not supported"). Diagnosed on run 24875338536.
-        #
-        # tonistiigi/binfmt registers F-flagged handlers that resolve
-        # the interpreter at registration time and keep the fd valid
-        # across pi-gen's mount-namespace switch.
+      - name: Install qemu for arm64 cross-build
+        # pi-gen's arm64 (trixie) branch build-docker.sh has a preflight
+        # `which qemu-aarch64` and registers an F-flagged binfmt handler
+        # pointing at that binary. The interpreter MUST be STATICALLY
+        # linked: a dynamic qemu (qemu-user / qemu-user-binfmt) can't
+        # resolve its shared libs inside pi-gen's chroot, so arch-test
+        # fails with "arm64: not supported" (run 27952017470). So install
+        # qemu-user-static (--no-install-recommends keeps the wrapper-
+        # registering qemu-user-binfmt out) and expose the static binary
+        # under the unsuffixed name the preflight expects, plus
+        # tonistiigi/binfmt for F-flagged handlers that survive the chroot
+        # mount-namespace switch — the combo that built the bookworm image.
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm,arm64
+          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
+          sudo docker run --privileged --rm tonistiigi/binfmt --install arm64
+          which qemu-aarch64
+          echo "--- binfmt_misc qemu-aarch64 handlers ---"
+          for f in /proc/sys/fs/binfmt_misc/qemu-aarch64*; do
+            echo "== ${f} =="; cat "${f}" 2>/dev/null || true
+          done
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -81,10 +83,10 @@ jobs:
           ref: ${{ github.event.inputs.ref || github.sha }}
 
       - name: Build image
-        env:
-          # Pin to pi-gen's bookworm-arm64 branch. master is on trixie
-          # now; keep us on bookworm until we deliberately jump.
-          PI_GEN_REF: bookworm-arm64
+        # The pinned pi-gen ref (arm64 / trixie branch commit) lives in
+        # deploy/pi-gen/build.sh as the single source of truth — no
+        # per-workflow override, so PR builds and release builds use the
+        # same base.
         run: deploy/pi-gen/build.sh
 
       - name: Locate artifact

@@ -4,11 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/frahlg/forty-two-watts/go/internal/config"
 	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/frahlg/forty-two-watts/go/internal/drivers"
 	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
 )
@@ -25,6 +28,13 @@ func TestParseRangeSupports48h(t *testing.T) {
 	const want = 48 * 60 * 60 * 1000
 	if got := parseRange("48h"); got != want {
 		t.Fatalf("parseRange(48h) = %d, want %d", got, want)
+	}
+}
+
+func TestParseRangeCapsBeforeMultiplication(t *testing.T) {
+	const max = int64(2) * 365 * 24 * 60 * 60 * 1000
+	if got := parseRange("999999999999999999d"); got != max {
+		t.Fatalf("parseRange(huge) = %d, want capped %d", got, max)
 	}
 }
 
@@ -237,6 +247,153 @@ func TestHandleStatusIgnoresOfflineDERInLiveBalance(t *testing.T) {
 	}
 }
 
+func TestHandleV2XPolicyReturnsLiveEnvelope(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("meter", telemetry.DerMeter, 1500, nil, nil)
+	tel.DriverHealthMut("meter").RecordSuccess()
+
+	soc := 0.72
+	v2xData := json.RawMessage(`{
+		"connected": true,
+		"capacity_wh": 77000,
+		"charge_power_max_w": 7000,
+		"discharge_power_max_w": 5000
+	}`)
+	tel.Update("dc2", telemetry.DerV2X, -500, &soc, v2xData)
+	tel.DriverHealthMut("dc2").RecordSuccess()
+
+	srv := New(&Deps{
+		Tel:    tel,
+		Ctrl:   &control.State{SiteMeterDriver: "meter"},
+		CtrlMu: &sync.Mutex{},
+		CfgMu:  &sync.RWMutex{},
+		Cfg: &config.Config{V2X: &config.V2XPolicy{
+			Enabled:             true,
+			DriverName:          "dc2",
+			MinReserveSoCPct:    20,
+			MaxChargeW:          6000,
+			MaxDischargeW:       4000,
+			ExportAllowed:       false,
+			GridChargingAllowed: true,
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2x/policy", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Drivers map[string]struct {
+			MinPowerW     float64  `json:"min_power_w"`
+			MaxPowerW     float64  `json:"max_power_w"`
+			MaxDischargeW float64  `json:"max_discharge_w"`
+			Reasons       []string `json:"reasons"`
+		} `json:"drivers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	env, ok := resp.Drivers["dc2"]
+	if !ok {
+		t.Fatalf("missing dc2 envelope: %+v", resp.Drivers)
+	}
+	if env.MaxPowerW != 6000 {
+		t.Fatalf("max_power_w = %v, want 6000", env.MaxPowerW)
+	}
+	if env.MaxDischargeW != 1500 || env.MinPowerW != -1500 {
+		t.Fatalf("discharge cap = max %v / min %v, want 1500 / -1500", env.MaxDischargeW, env.MinPowerW)
+	}
+	found := false
+	for _, reason := range env.Reasons {
+		if reason == "export_limited_to_import" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing export_limited_to_import reason: %+v", env.Reasons)
+	}
+}
+
+// A non-setpoint V2X action (init / deinit / stop) must never forward a
+// caller-supplied power_w to the driver. Regression for the leak where
+// action="init" with power_w=9000 sailed past the v2x_set_power-only
+// live-telemetry guard and handed the driver an arbitrary setpoint. The
+// driver below echoes the power_w it actually received back as a metric;
+// we assert it saw 0, not 9000.
+func TestHandleV2XCommandForcesZeroPowerForNonSetpointActions(t *testing.T) {
+	tel := telemetry.NewStore()
+	reg := drivers.NewRegistry(tel)
+
+	// Lua driver whose command hook records the power_w it was handed.
+	const src = `
+function driver_init(config) end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd)
+  host.emit_metric("last_command_power_w", w)
+end
+`
+	dir := t.TempDir()
+	luaPath := filepath.Join(dir, "fake_v2x.lua") // filename contains "v2x"
+	if err := os.WriteFile(luaPath, []byte(src), 0o644); err != nil {
+		t.Fatalf("write driver: %v", err)
+	}
+	cfg := config.Driver{Name: "dc2", Lua: luaPath}
+	if err := reg.Add(context.Background(), cfg); err != nil {
+		t.Fatalf("registry add: %v", err)
+	}
+	defer reg.ShutdownAll()
+
+	srv := New(&Deps{
+		Tel:      tel,
+		Registry: reg,
+		Cfg:      &config.Config{Drivers: []config.Driver{cfg}},
+		CfgMu:    &sync.RWMutex{},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2x/command",
+		strings.NewReader(`{"action":"init","driver":"dc2","power_w":9000}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
+	}
+
+	// The response must echo the neutralized setpoint, not the 9000 input.
+	var resp struct {
+		PowerW float64 `json:"power_w"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.PowerW != 0 {
+		t.Errorf("response power_w = %v, want 0 (init carries no setpoint)", resp.PowerW)
+	}
+
+	// The driver itself must have seen power_w=0. Send is synchronous, so by
+	// the time the handler returned the command has been processed and the
+	// metric is buffered in the telemetry store.
+	var sawZero, sawNine bool
+	for _, s := range tel.FlushSamples() {
+		if s.Driver == "dc2" && s.Metric == "last_command_power_w" {
+			switch s.Value {
+			case 0:
+				sawZero = true
+			case 9000:
+				sawNine = true
+			}
+		}
+	}
+	if sawNine {
+		t.Errorf("driver received power_w=9000 from a non-setpoint action — setpoint leaked")
+	}
+	if !sawZero {
+		t.Errorf("driver did not receive the forced power_w=0 (samples: %+v)", tel.FlushSamples())
+	}
+}
+
 func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -275,8 +432,8 @@ func TestLoadResearchDumpExportsHouseLoadWithEVSplit(t *testing.T) {
 
 	files := readTarGz(t, rr.Body.Bytes())
 	csv := string(files["timeseries_15m.csv"])
-	if !strings.Contains(csv, ",300,1500,1800,") {
-		t.Fatalf("timeseries does not carry ev_w=300, house_load_w=1500, recorded_load_w=1800:\n%s", csv)
+	if !strings.Contains(csv, ",300,0,1500,1800,") {
+		t.Fatalf("timeseries does not carry ev_w=300, v2x_w=0, house_load_w=1500, recorded_load_w=1800:\n%s", csv)
 	}
 	siteJSON := string(files["site.json"])
 	if !strings.Contains(siteJSON, `"has_ev": true`) {

@@ -1,217 +1,151 @@
 # Configuration
 
-forty-two-watts is configured by **one yaml file** (`config.yaml`). The Settings UI in the web dashboard reads and writes the same file via the REST API. Everything is hot-reloadable except a small set of one-time bindings (HA broker connection, API socket port, redb file path).
+forty-two-watts is configured by one YAML file, normally `config.yaml`.
+The Settings UI reads and writes the same file through the REST API, so
+editing the file and saving through the UI are equivalent paths.
 
-## Two equivalent paths
+The concrete schema lives in [`config.example.yaml`](../config.example.yaml)
+and [`go/internal/config/config.go`](../go/internal/config/config.go). This
+document explains the operator-facing fields and hot-reload behavior.
+
+## Source of Truth
 
 ```
-                  ┌────────────────────────────┐
-                  │       config.yaml          │
-                  └────────────┬───────────────┘
-                               │
-              ┌────────────────┴────────────────┐
-              ▼                                 ▼
-    ┌──────────────────┐              ┌─────────────────┐
-    │ Edit yaml in     │              │ Open Settings   │
-    │ your editor      │              │ UI in browser   │
-    └────────┬─────────┘              └────────┬────────┘
-             │ save                            │ click Save
-             ▼                                 ▼
-    ┌──────────────────┐              ┌─────────────────┐
-    │ notify watcher   │              │ POST            │
-    │ debounces 500ms  │              │ /api/config     │
-    └────────┬─────────┘              └────────┬────────┘
-             │                                 │
-             └────────┬────────────────────────┘
-                      ▼
-            ┌────────────────────┐
-            │ Diff vs current,   │
-            │ apply per-system,  │
-            │ swap RwLock<Config>│
-            └────────────────────┘
+config.yaml
+   |
+   +-- edited by operator and watched by fsnotify
+   |
+   +-- written by POST /api/config from the Settings UI
+   |
+   v
+go/internal/config.Load + Validate
+   |
+   v
+runtime reload: drivers, control settings, planner inputs
 ```
 
-Whichever path you use, the runtime ends up at the same place.
+The API writes changes atomically via `config.SaveAtomic`: write a temporary
+file, then rename it over `config.yaml`. If a file edit is invalid, the
+running process keeps the old config.
 
-## Schema
+## `site`
 
-### `site` — control loop
+Control-loop and safety defaults:
 
 ```yaml
 site:
-  name: "Heart of Gold"           # cosmetic, shown in UI
-  control_interval_s: 5           # how often the control loop runs
-  grid_target_w: 0                # PI setpoint. 0 = self-consumption
-  grid_tolerance_w: 42            # deadband — no dispatch within ±42W
-  watchdog_timeout_s: 60          # revert driver to autonomous if it stalls
-  smoothing_alpha: 0.3            # legacy EMA alpha (Kalman is now used internally)
-  gain: 0.5                       # legacy proportional gain
-  slew_rate_w: 500                # max change in dispatch target per cycle
-  min_dispatch_interval_s: 5      # holdoff between successive dispatches
-  max_export_w: 0                 # cap total site export (W); 0 = fuse only
+  name: "Home"
+  control_interval_s: 2
+  grid_target_w: 0
+  grid_tolerance_w: 42
+  watchdog_timeout_s: 60
+  smoothing_alpha: 0.3
+  gain: 0.5
+  slew_rate_w: 3000
+  slew_enabled: true
+  min_dispatch_interval_s: 2
+  troubleshooting_mode: false     # extra incident diagnostics; no control changes
 ```
 
-`max_export_w` is an **opt-in export ceiling below the physical fuse**.
-Some inverters trip into a protective fault on *sustained* grid export
-well under the breaker rating — a Ferroamp EnergyHub, for example, faults
-(state `0x8030`) after ~8 kW of continuous midday export and only recovers
-as PV wanes, losing hours of solar. Set `max_export_w` just below the
-observed trip point and the EMS enforces it two ways: the dispatch fuse
-guard scales battery discharge back so predicted export stays under it,
-and the MPC caps each plan slot's export so the planner never *schedules*
-a discharge that would over-export. `0` (default) leaves export bounded
-only by the fuse. Hot-reloads on the dispatch side; the MPC picks it up on
-restart (parity with `fuse.max_amps`). See [safety.md §3c](safety.md).
+`grid_target_w` is the PI setpoint in site convention. `0` means
+self-consumption around the site meter. `slew_rate_w` is a soft per-cycle
+ramp ceiling; per-driver power caps and the fuse guard remain the hard
+dispatch constraints.
 
-### `fuse` — shared breaker limit
+### Global Troubleshooting Mode (`site.troubleshooting_mode`)
+
+Operators should enable this from **Settings → Control → Troubleshooting
+mode** while diagnosing a live system issue. The setting is saved through the
+same config API as the rest of Settings; do not ask users to edit YAML for an
+incident.
+
+It does not change planner, dispatch, clamp, or driver command behavior. It
+adds one dispatch-decision log line per control cycle, exposes the flag in
+`/api/status`, and passes a reserved `_troubleshooting_mode` flag to Lua
+drivers so driver-specific diagnostics can emit richer status/readback data.
+
+Turn it off in Settings after the incident; logs and long-format metrics become
+noisier while it is enabled.
+
+## `fuse`
 
 ```yaml
 fuse:
-  max_amps: 16                    # main fuse rating
-  phases: 3                       # 1 or 3
-  voltage: 230                    # nominal phase voltage
+  max_amps: 16
+  phases: 3
+  voltage: 230
 ```
 
-`max_power_w = max_amps × voltage × phases`. The fuse guard scales discharge targets when `total_pv + total_discharge > max_power_w`.
+The fuse guard derives site power from `max_amps * phases * voltage` and
+scales charge/discharge targets that would otherwise breach the shared
+breaker.
 
-### `drivers` — devices
+## `drivers`
+
+Every driver is a Lua file with a capability block that grants only the
+resources the sandbox may use:
 
 ```yaml
 drivers:
-  - name: ferroamp                # unique key, used in API + HA topics
-    lua: drivers/ferroamp.lua     # path to driver script
-    is_site_meter: true           # exactly one driver must have this
-    battery_capacity_wh: 15200    # 0 (or unset) → driver's battery emits are dropped
-    max_charge_w: 10000           # per-driver cap; 0/unset → 5 kW default
+  - name: ferroamp
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    battery_capacity_wh: 15200
+    max_charge_w: 10000
     max_discharge_w: 10000
-    inverter_group: ferroamp      # optional — see "Inverter affinity" below
-    mqtt:
-      host: 192.168.1.153
-      port: 1883
-      username: extapi
-      password: ferroampExtApi
+    inverter_group: ferroamp
+    capabilities:
+      mqtt:
+        host: 192.168.1.153
+        port: 1883
+        username: extapi
+        password: ferroampExtApi
 
   - name: sungrow
     lua: drivers/sungrow.lua
     battery_capacity_wh: 9600
-    inverter_group: sungrow
-    modbus:
-      host: 192.168.1.10
-      port: 502
-      unit_id: 1
+    capabilities:
+      modbus:
+        host: 192.168.1.10
+        port: 502
+        unit_id: 1
 ```
 
-Each driver must have **either** `mqtt` or `modbus` (not both, not neither). Adding/removing/changing a driver hot-reloads — the matching thread spawns or stops within a few seconds.
+Rules:
 
-#### Per-driver power limits (`max_charge_w`, `max_discharge_w`)
+- `name` is the stable API/UI key for this configured instance.
+- `lua` is required; Lua is the only current driver runtime.
+- Exactly one configured driver must have `is_site_meter: true`.
+- A driver must have at least one of `mqtt`, `modbus`, `http`,
+  `websocket`, or `tcp` under `capabilities`.
+- `battery_capacity_wh` enables the driver as a controllable battery.
+  Battery emits from drivers without capacity are ignored for dispatch.
+- `max_charge_w` and `max_discharge_w` are optional per-driver caps.
+  When unset or zero, the dispatcher uses its conservative default.
+- `inverter_group` keeps PV and battery flows local to a physical inverter
+  group when several inverters share the same site.
 
-Both are optional. When unset (or set to `0`), the dispatcher uses the
-**5 kW default** (`MaxCommandW`) — the conservative floor the EMS
-shipped with during early v0.x. Lift these per driver once you know
-the real hardware capability:
+Older configs with top-level `mqtt:` or `modbus:` under a driver are still
+accepted for compatibility. New configs should use `capabilities:`.
 
-- Ferroamp EnergyHub commonly delivers 10–15 kW continuous charge.
-- Sungrow SH10RT-V13 is rated ~10 kW hybrid.
-- Pixii EssLi is ~5–7 kW.
+## Driver-Specific `config`
 
-The two directions are independent — hybrid inverters frequently have
-asymmetric charge/discharge rating, so set both explicitly for any
-driver you tune.
-
-Regardless of how high you set the per-driver caps, the site
-fuse-guard (derived from `fuse.max_amps × voltage × phases`) stays the
-non-negotiable ceiling: it protects both the import (charge-heavy) and
-export (discharge+PV-heavy) sides of the grid boundary, scaling
-targets down in the direction that would otherwise blow the fuse.
-
-Planned follow-up (#145 Phase B/C): observed rolling maxima + self-tune
-probing so the UI can suggest the right value from measurement rather
-than operator guesswork.
-
-#### Inverter affinity (`inverter_group`)
-
-Tag drivers that share a single physical inverter unit with the same
-`inverter_group` string. The dispatcher uses this to keep charging flows
-DC-coupled: PV surplus on inverter A is routed to battery A via A's own
-DC path, avoiding the DC→AC→AC→DC round-trip that cross-charging
-(PV on A → AC bus → B → battery B) would incur. Typical site layout:
-
-- A hybrid inverter like Ferroamp with its own PV strings *and* a battery
-  gets `inverter_group: ferroamp` on its driver entry.
-- A Sungrow hybrid gets `inverter_group: sungrow`.
-- A separate PV-only driver reading a string on the Ferroamp side should
-  share its tag: `inverter_group: ferroamp`.
-- A standalone AC-coupled battery (no local PV) can either leave the tag
-  unset or use a unique group — both keep that battery in the "overflow"
-  pool that accepts cross-routed energy when PV-local capacity is
-  exhausted.
-
-When no drivers carry the tag, or only one group exists, the dispatcher
-falls back to its capacity-proportional split (the default through
-v0.27). See issue #143 for the design rationale. Estimated benefit on a
-two-inverter site with balanced PV strings: ~3-4 % round-trip efficiency
-improvement during the hours when the plan chooses to charge from PV.
-
-#### Ferroamp per-driver SoC bounds (`config.charge_ceil_soc`, `config.discharge_floor_soc`)
-
-The Ferroamp Lua driver gates per-ESO charge/discharge dispatch on two
-SoC bounds. Both are read from the driver's `config:` block and default
-to the existing hardcoded values when unset.
+Each driver may read its own nested config block:
 
 ```yaml
-  - name: ferroamp
-    lua: drivers/ferroamp.lua
-    is_site_meter: true
-    config:
-      # Optional. Defaults shown — both fields are read by the Lua
-      # driver to gate per-ESO charge/discharge dispatch. Ferroamp's
-      # own BMS still protects against overcharge / deep discharge,
-      # so these are tuning knobs for cell-balancing / longevity
-      # preferences, not safety limits.
-      charge_ceil_soc: 0.95      # exclude ESOs at or above this SoC from charge dispatch
-      discharge_floor_soc: 0.15  # exclude ESOs at or below this SoC from discharge dispatch
-```
-
-Validation: `charge_ceil_soc` must be in `(0, 1.0]`; `discharge_floor_soc`
-must be in `[0, 1.0)`. Out-of-range or non-numeric values log a warning
-and keep the default. Note that the planner's `soc_max_pct` is an
-independent layer — to actually charge to 100 % both caps must be lifted.
-
-#### Ferroamp PV-curtail release watts (`config.pplim_release_w`)
-
-Required if you set `supports_pv_curtail: true` on the Ferroamp driver
-and want the dispatcher's automatic curtail-release to take effect.
-
-**Background.** Ferroamp's extapi treats `{"cmd":{"name":"pplim","arg":0}}`
-as "limit PV output to 0 W" — the same wire bytes a naive release
-would have, opposite semantics. The inverter then sticks at 0 W PV
-until the operator clears pplim from the Ferroamp portal or
-power-cycles the EnergyHub. The driver therefore refuses to publish
-`pplim arg=0` from any path, and the default `curtail_disable`
-handler is a no-op.
-
-To recover automatic release, set `pplim_release_w` to the inverter's
-nominal max (e.g. 15000 for a 15 kW SSO). On `curtail_disable` the
-driver publishes `pplim arg=<pplim_release_w>` which Ferroamp accepts
-as "raise the limit so PV can run free".
-
-```yaml
+drivers:
   - name: ferroamp
     lua: drivers/ferroamp.lua
     supports_pv_curtail: true
     config:
-      pplim_release_w: 15000  # SSO nominal max — adapt to your inverter
+      charge_ceil_soc: 0.95
+      discharge_floor_soc: 0.15
+      pplim_release_w: 15000
 ```
 
-If left unset (default `0`), curtail still works (pplim arg=N for
-N > 0), but the release path is a no-op and the operator must clear
-pplim manually from the Ferroamp portal once curtailment ends.
-
-The 2026-05-27 incident: dispatching `pplim arg=0` during a stale
-curtail-allocation cycle locked the SSO at 0 W PV for 30+ minutes
-and triggered a fault state on the EnergyHub.
-
-#### Ferroamp stuck-pplim self-healing watchdog
+Driver-specific fields are parsed by the Lua driver, not by the generic
+config schema. See the driver source and
+[`docs/driver-catalog.md`](driver-catalog.md) for expected keys.
 
 The same `pplim_release_w` value (when set > 0) also arms a self-
 healing watchdog in the Ferroamp driver. If the SSO reports the
@@ -227,18 +161,59 @@ The `stuck_pv_recovery_count` metric tracks how many auto-recoveries
 the driver has issued since startup; alert on any non-zero rate to
 catch a chronic sticky-pplim condition that needs operator attention.
 
-### `api` — REST + web UI
+### Pixii diagnostics in troubleshooting mode
+
+Pixii PowerShaper exposes standard SunSpec battery status points near
+the SoC registers. Enable **Settings → Control → Troubleshooting mode** when
+a site reports symptoms like "manual charge/discharge does nothing", "Pixii
+charges to 100 %", or the Pixii UI says batteries are calibrating/testing.
+
+```yaml
+- name: pixii
+  lua: drivers/pixii.lua
+  is_site_meter: true
+  battery_capacity_wh: 20000
+  capabilities:
+    modbus:
+      host: 192.168.1.50
+      port: 502
+      unit_id: 1
+```
+
+When global troubleshooting is enabled, the driver emits extra long-format
+metrics:
+
+- `battery_charge_status_code` — SunSpec 802 `ChaSt`; `7` means
+  `TESTING`, which is the best standard signal for Pixii
+  calibration/testing.
+- `battery_control_mode_code` — `0` remote, `1` local.
+- `battery_state_code`, `battery_vendor_state_code`,
+  `battery_event1_bits` — raw battery state/event diagnostics.
+- `pixii_setpoint_ems_w` / `pixii_setpoint_native_w` — readback of
+  Pixii's active setpoint registers after commands.
+- `pixii_last_command_*` — last command sent by 42W and whether the
+  Modbus write succeeded.
+
+The driver also logs status transitions as `Pixii: status ...`. If
+`charge_status=testing`, assume Pixii may be calibrating/testing and may
+ignore external setpoints until the battery exits that state. The legacy
+per-driver `config.troubleshooting_mode: true` flag still works, but the
+preferred operator path is the global site flag.
+
+## `api`
 
 ```yaml
 api:
-  port: 8080                      # not hot-reloadable (socket bind happens at startup)
+  port: 8080
 ```
 
-### `homeassistant` — MQTT bridge (optional)
+The API port is bound at process startup and requires restart to change.
+
+## `homeassistant`
 
 ```yaml
 homeassistant:
-  enabled: true
+  enabled: false
   broker: 192.168.1.1
   port: 1883
   username: homeems
@@ -246,95 +221,150 @@ homeassistant:
   publish_interval_s: 5
 ```
 
-Not hot-reloadable: changing requires a restart for the broker connection to be re-established.
+The HA bridge uses MQTT autodiscovery. Broker changes require restart
+because the bridge connection is built at startup.
 
-### `state` — redb persistence (optional)
+## `state`
+
+Persistent state uses SQLite:
 
 ```yaml
 state:
-  path: state.redb                # default; not hot-reloadable
+  path: state.db
+  cold_dir: cold
 ```
 
-### `price` — spot price source (optional)
+The SQLite DB stores config overrides, events, device identities, battery
+models, price/weather state, recent history, and long-format time-series
+samples. Samples older than the recent retention window are rolled off to
+Parquet under `cold_dir`.
+
+Changing `state.path` or `state.cold_dir` requires restart.
+
+## `price` and `weather`
 
 ```yaml
 price:
-  provider: elprisetjustnu        # or "entsoe" or "none"
-  zone: SE3                       # SE1, SE2, SE3, SE4
-  grid_tariff_ore_kwh: 50         # added on top of spot
-  vat_percent: 25                 # default 25% (Sweden)
-  api_key: null                   # required for entsoe
-```
+  provider: elprisetjustnu
+  zone: SE3
+  grid_tariff_ore_kwh: 50
+  vat_percent: 25
 
-`elprisetjustnu` is free and key-less but Sweden-only. ENTSO-E covers all of EU but needs a free API key.
-
-### `weather` — forecast source (optional)
-
-```yaml
 weather:
-  provider: met_no                # or "openweather" or "none"
+  provider: met_no
   latitude: 59.3293
   longitude: 18.0686
-  api_key: null                   # required for openweather
+  pv_rated_w: 10000
 ```
 
-`met.no` is free and key-less. Default coordinates point at Stockholm.
+These feed the planner and ML twins. Provider changes are picked up by the
+next fetch cycle.
 
-### `batteries` — per-battery overrides (optional)
+## `v2x` — bidirectional EV policy (optional)
+
+```yaml
+v2x:
+  enabled: false                  # default-off; planner does not command V2X yet
+  driver_name: ferroamp_dc2       # optional; empty applies to every V2X driver
+  vehicle_capacity_wh: 77000      # optional if the charger reports capacity
+  min_reserve_soc_pct: 35         # required >0 when enabled
+  departure_target_soc_pct: 80    # optional; pair with departure_time
+  departure_time: "07:30"         # HH:MM local next occurrence, or RFC3339
+  max_charge_w: 7000
+  max_discharge_w: 5000
+  export_allowed: false
+  grid_charging_allowed: false
+  cycle_cost_ore_kwh: 12
+```
+
+This policy is read-only input for `GET /api/v2x/policy` and the
+`v2x_policy` block in `/api/status`. It answers what V2X power range is safe
+right now from live connection state, vehicle SoC, reserve/departure rules,
+charger limits, and grid import/export state. It does not enable automatic
+planner dispatch; manual V2X commands still go through `POST /api/v2x/command`.
+
+## `planner`
+
+```yaml
+planner:
+  enabled: true
+  mode: self_consumption
+  horizon_hours: 48
+  interval_min: 15
+  soc_min_pct: 10
+  soc_max_pct: 90
+```
+
+The planner emits grid-target slots that the control loop consumes in
+`planner_*` modes. Planner service wiring happens at startup, so some
+structural changes still need restart.
+
+## `batteries`
+
+Optional per-battery overrides keyed by configured driver name:
 
 ```yaml
 batteries:
   ferroamp:
-    soc_min: 0.10                 # don't discharge below 10% (overrides BMS hint)
-    soc_max: 0.95                 # don't charge above 95%
-    max_charge_w: 5000
-    max_discharge_w: 5000
-    weight: 2.0                   # used by Mode::Weighted
-  sungrow:
-    weight: 1.0
+    soc_min: 0.10
+    soc_max: 0.95
+    max_charge_w: 8000
+    max_discharge_w: 8000
+    weight: 2.0
 ```
 
-Keys must match `drivers[].name`. Leave blank to use BMS defaults.
+Prefer per-driver `max_charge_w` / `max_discharge_w` for hardware command
+caps. The `batteries` map remains useful for strategy weights and explicit
+SoC policy.
 
-## Hot-reload matrix
+## EV, V2X, OCPP, Notifications, Nova
 
-| Field | Hot? | Notes |
-|-------|------|-------|
-| `site.grid_target_w` | ✅ | Updates PID setpoint live |
-| `site.grid_tolerance_w` | ✅ | Deadband applied next cycle |
-| `site.slew_rate_w` | ✅ | Applied next dispatch |
-| `site.min_dispatch_interval_s` | ✅ | |
-| `site.max_export_w` | ⚠️ | Dispatch guard hot-reloads; MPC picks it up on restart |
-| `site.control_interval_s` | ⚠️ | Picked up next cycle (current cycle uses old value) |
-| `site.watchdog_timeout_s` | ✅ | |
-| `fuse.*` | ✅ | Read fresh each cycle |
-| `drivers[]` add/remove | ✅ | `DriverRegistry::reload()` diffs and applies |
-| `drivers[].lua` change | ✅ | Driver thread restarts |
-| `drivers[].mqtt/modbus` change | ✅ | Driver thread restarts |
-| `drivers[].battery_capacity_wh` | ✅ | Driver thread restarts (capacity affects dispatch math) |
-| `api.port` | ❌ | Restart required |
-| `homeassistant.*` | ❌ | Restart required (broker reconnect not implemented) |
-| `state.path` | ❌ | redb file opened at startup |
-| `price.*` | ✅ | Picked up next price-fetch cycle |
-| `weather.*` | ✅ | Picked up next weather-fetch cycle |
-| `batteries.*` | ✅ | Read fresh each control cycle |
+Additional optional blocks exist for:
 
-## Atomic writes
+- `ocpp`: embedded OCPP 1.6J Central System.
+- `ev_charger`: Settings-UI managed cloud/local EV charger config.
+- `loadpoints`: planner-visible EV loadpoint contracts.
+- `notifications`: ntfy push notifications.
+- `nova`: Sourceful Nova federation publishing.
 
-`save_atomic()` writes to `config.yaml.tmp` then renames over `config.yaml`. The rename is atomic on POSIX, so partial writes never appear to the file watcher. If your editor uses backup-and-replace (vim, helix, vscode), the watcher may fire twice; the 500ms debounce coalesces them.
+Use `config.example.yaml`, the Settings UI, and the corresponding docs for
+these specialized blocks.
 
-## API
+## Hot Reload
+
+| Field area | Hot? | Notes |
+|---|---|---|
+| `site.grid_target_w`, `site.grid_tolerance_w` | yes | Applied on the next control cycle. |
+| `site.slew_rate_w`, `site.slew_enabled`, `site.min_dispatch_interval_s` | yes | Applied to dispatch immediately after reload. |
+| `site.control_interval_s` | partly | The next sleep interval picks it up; current tick keeps running. |
+| `site.watchdog_timeout_s` | yes | Used by watchdog scan. |
+| `site.troubleshooting_mode` | yes | Restarts active drivers to pass `_troubleshooting_mode`; no control behavior change. |
+| `fuse.*` | yes | Read by the control loop. |
+| `drivers[]` add/remove/reconfigure | yes | Registry diffs and respawns affected drivers. |
+| `drivers[].lua` path change | yes | Driver restarts with the new file. |
+| Editing a Lua file in place | no | Restart or touch `config.yaml` to reload the driver. |
+| `v2x.*` | yes | API readback uses the current config; dispatch does not consume it yet. |
+| `api.port` | no | Socket bind happens at startup. |
+| `state.path`, `state.cold_dir` | no | Store opens at startup. |
+| `homeassistant.*` | no | Broker connection is built at startup. |
+| `price.*`, `weather.*` | yes | Picked up by the next fetch. |
+
+When in doubt, restart the service after structural changes.
+
+## API Examples
 
 ```bash
-# Get current full config
 curl http://localhost:8080/api/config
 
-# Replace + hot-apply + save yaml
 curl -X POST http://localhost:8080/api/config \
   -H 'Content-Type: application/json' \
   -d @new-config.json
 
-# Quick mode/target setters (don't touch yaml)
-curl -X POST http://localhost:8080/api/mode -d '{"mode":"self_consumption"}'
-curl -X POST http://localhost:8080/api/target -d '{"grid_target_w": 0}'
+curl -X POST http://localhost:8080/api/mode \
+  -H 'Content-Type: application/json' \
+  -d '{"mode":"self_consumption"}'
+
+curl -X POST http://localhost:8080/api/target \
+  -H 'Content-Type: application/json' \
+  -d '{"grid_target_w":0}'
 ```

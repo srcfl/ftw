@@ -5,6 +5,17 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
+  // ownerFetch routes state-changing owner/CONTROL probes (EV-charger probe with
+  // email+password, Tesla verify with IP+VIN, driver test with the full driver
+  // config) over the STRICT P2P transport so those SENSITIVE bodies never traverse
+  // the untrusted relay on the public home route. Wired in p2p.js to the shared
+  // fail-closed strict function; falls back to plain fetch only where p2p.js never
+  // loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   function catalogEntryForLua(lua) {
     return lua ? (S.catalogByLua || {})[lua] : null;
   }
@@ -51,7 +62,7 @@
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
           '<label>Driver file ' + help('Path to the .lua driver. Absolute or relative to the config file directory.') + '</label>' +
           '<input type="text" data-path="drivers.' + idx + '.lua" value="' + escHtml(driverFile) + '">' +
-          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden') + '>' +
+          '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
           '</div></div>' +
@@ -90,6 +101,8 @@
         var hasHostField = Object.prototype.hasOwnProperty.call(dcfg, 'host');
         var hasAuthField = Object.prototype.hasOwnProperty.call(dcfg, 'email') ||
                            Object.prototype.hasOwnProperty.call(dcfg, 'password');
+        var hasApiCredsField = Object.prototype.hasOwnProperty.call(dcfg, 'client_id') ||
+                               Object.prototype.hasOwnProperty.call(dcfg, 'client_secret');
         var catalogEntry = (S.catalogByLua || {})[d.lua];
         var caps = (catalogEntry && catalogEntry.capabilities) || [];
         var isVehicleDriver = cap.http != null &&
@@ -97,7 +110,9 @@
            Object.prototype.hasOwnProperty.call(dcfg, 'vin') ||
            Object.prototype.hasOwnProperty.call(dcfg, 'ip'));
         var isLocalHTTP = !isVehicleDriver && cap.http != null && hasHostField;
-        var isCloudDriver = !isVehicleDriver && cap.http != null && !hasHostField &&
+        // OAuth2 client_credentials drivers (e.g. MyUplink): identify via client_id/client_secret keys.
+        var isApiCredsDriver = !isVehicleDriver && cap.http != null && !hasHostField && hasApiCredsField;
+        var isCloudDriver = !isVehicleDriver && !isApiCredsDriver && cap.http != null && !hasHostField &&
           (hasAuthField || Object.keys(dcfg).length === 0);
         if (isVehicleDriver) {
           // TeslaBLEProxy-style drivers only need the LAN IP of the
@@ -121,6 +136,12 @@
         }
         if (isLocalHTTP) {
           var lcfg = d.config || {};
+          // NIBE-style local-API drivers (catalog apicreds + a connection port)
+          // also need a username + an optional self-signed cert pin; plain
+          // local-HTTP gateways (e.g. a P1 meter) keep just the Host field.
+          // Backend auto-derives capabilities.http.allowed_hosts from config.host.
+          var localCreds = caps.indexOf('apicreds') >= 0;
+          var pin = (cap.http && cap.http.tls_pin_sha256) || '';
           // Render the Disable-PV checkbox for every HTTP driver; the
           // post-fetch pass in `after` hides it for drivers whose
           // catalog doesn't advertise BOTH meter + pv capabilities
@@ -130,12 +151,75 @@
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
+              '<label style="margin-top:8px">Username ' + help('Username for the device\'s local API (HTTP Basic auth). For NIBE this is the local-API account you set up in the myUplink app.') + '</label>' +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.config.username" value="' + escHtml(lcfg.username || '') + '" placeholder="local-api-user">' +
+            '</div>' +
             '<label class="drv-disable-pv" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
               '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_pv"' +
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
             '</label>' +
+            '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
+              '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
+              '<input type="text" autocomplete="off" data-path="drivers.' + idx + '.capabilities.http.tls_pin_sha256" value="' + escHtml(pin) + '" placeholder="73d1ac81…bd9bf4eb (64 hex)" style="font-family:var(--mono);font-size:0.78rem">' +
+            '</div>' +
+            '</fieldset>';
+        }
+        if (isApiCredsDriver) {
+          // OAuth2 authorization-code drivers (e.g. MyUplink). Numbered
+          // setup steps + the exact Callback URL, then Client Identifier +
+          // Client Secret rendered together with the SAME labels as the
+          // MyUplink portal (so the two values don't get swapped). The
+          // secret is masked (never echoed into the DOM); Connect completes
+          // the one-time browser consent and the refresh_token is stored
+          // server-side, flipping the badge to Connected.
+          var acfg = d.config || {};
+          // refresh_token is a config_secret: when saved it round-trips as a
+          // masked placeholder (non-empty string), so a non-empty value here
+          // means "consent completed".
+          var connected = typeof acfg.refresh_token === 'string' && acfg.refresh_token !== '';
+          var connBadge = connected
+            ? '<span class="creds-badge creds-saved">✓ Connected</span>'
+            : '<span class="creds-badge creds-missing">⚠ Not connected</span>';
+          var secretSaved = typeof acfg.client_secret === 'string' && acfg.client_secret !== '';
+          var secretBadge = secretSaved
+            ? '<span class="creds-badge creds-saved">✓ Saved</span>'
+            : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+          var callbackURL = location.origin + '/api/oauth/myuplink/callback';
+          // Field labels mirror the MyUplink portal exactly ("Client
+          // Identifier" / "Client Secret") and sit together — same as the
+          // portal's Credentials box — so the two values don't get swapped.
+          html += '<fieldset><legend>MyUplink connection</legend>' +
+            '<ol style="color:var(--fg-muted);font-size:0.78rem;line-height:1.6;margin:0 0 12px;padding-left:1.2em">' +
+            '<li>Open the <a href="https://dev.myuplink.com/apps" target="_blank" rel="noopener" style="color:var(--accent-e)">MyUplink developer portal</a> → <b>Apps</b> → <b>Create new app</b>.</li>' +
+            '<li>Set <b>Callback Url</b> to the address shown below (copy it exactly).</li>' +
+            '<li>Copy the app\'s <b>Client Identifier</b> and <b>Client Secret</b> into the matching fields below.</li>' +
+            '<li><b>Save</b> these settings, then click <b>Connect to MyUplink</b> and sign in.</li>' +
+            '</ol>' +
+            '<label>Callback URL ' + help('Paste this exact string into the "Callback Url" field of your MyUplink app. It must match the address you use to reach 42-watts.') + '</label>' +
+            '<input type="text" class="myuplink-callback-url" value="' + escHtml(callbackURL) + '" readonly onclick="this.select()" style="font-family:var(--mono);font-size:0.8rem">' +
+            '<label style="margin-top:8px">Client Identifier ' + help('The "Client Identifier" from your MyUplink app (a UUID like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). NOT the secret.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+            '<label style="margin-top:8px">Client Secret ' + secretBadge + ' ' + help('The "Client Secret" from your MyUplink app. Stored masked; leave empty to keep the saved value.') + '</label>' +
+            '<input type="password" autocomplete="off" data-path="drivers.' + idx + '.config.client_secret" value="" placeholder="' + (secretSaved ? '•••••••• (leave empty to keep)' : 'paste Client Secret') + '">' +
+            '<div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
+            '<button class="btn-add myuplink-connect-btn" type="button" data-driver-idx="' + idx + '" data-driver-name="' + escHtml(d.name || '') + '">Connect to MyUplink</button>' +
+            connBadge +
+            '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
+            '</div>' +
+            // Manual fallback: when the automatic redirect can't reach this
+            // device (remote/relay access, or the portal rejected an http LAN
+            // callback), the operator copies the redirected URL from the
+            // address bar and pastes it here. The Pi exchanges the code over
+            // its own outbound HTTPS, so no inbound callback is needed.
+            '<details style="margin-top:10px">' +
+            '<summary style="cursor:pointer;font-size:0.8rem;color:var(--text-dim)">Not redirected back? Paste the URL instead</summary>' +
+            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here. Use this for remote/relay access or if the page didn\'t return to 42-watts.</p>' +
+            '<input type="text" class="myuplink-manual-url" data-driver-idx="' + idx + '" placeholder=".../api/oauth/myuplink/callback?code=...&amp;state=..." style="font-family:var(--mono);font-size:0.78rem">' +
+            '<button class="btn-add myuplink-manual-btn" type="button" data-driver-idx="' + idx + '" style="margin-top:6px">Complete connection</button>' +
+            '</details>' +
             '</fieldset>';
         }
         // Slot for catalog-declared config_secrets (e.g. sonnen Auth-Token).
@@ -247,7 +331,7 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
-      fetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      ownerFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
         // on drivers whose catalog entry advertises BOTH meter and pv.
@@ -274,8 +358,21 @@
           if (!d || !d.lua) return;
           var entry = byLua[d.lua];
           var secrets = (entry && entry.config_secrets) || [];
-          if (secrets.length === 0) return;
           var dcfg = d.config || {};
+          // OAuth apicreds drivers (client_id/client_secret) render the
+          // Client Secret in their own "MyUplink connection" fieldset, and
+          // the refresh_token is managed by the Connect flow — never hand-
+          // entered. Drop both from the generic Secrets section so the
+          // secret isn't duplicated and a confusing "Refresh Token" input
+          // doesn't appear.
+          var isApiCreds = Object.prototype.hasOwnProperty.call(dcfg, 'client_id') ||
+                           Object.prototype.hasOwnProperty.call(dcfg, 'client_secret');
+          if (isApiCreds) {
+            secrets = secrets.filter(function (k) {
+              return k !== 'client_secret' && k !== 'refresh_token';
+            });
+          }
+          if (secrets.length === 0) return;
           var fs = '<fieldset><legend>Secrets</legend>';
           secrets.forEach(function (key) {
             // Title-case, keep the raw key for the data-path attribute.
@@ -293,10 +390,15 @@
             // GET), but inserting any value into a `value=""` attribute
             // exposes it in the DOM/HTML. Mirror the cloud-password
             // pattern instead: empty input + saved/missing badge.
-            var saved = typeof dcfg[key] === "string" && dcfg[key] !== "";
+            // config_secrets come back masked: a non-empty value means the api
+            // sent the placeholder (e.g. api_token). For the "password" key the
+            // api blanks config.password but sets the driver-level has_password
+            // flag, so honour that too — otherwise a saved password reads as unset.
+            var saved = (typeof dcfg[key] === "string" && dcfg[key] !== "") ||
+                        (key === "password" && d.has_password === true);
             var badge = saved
-              ? '<span class="creds-badge creds-saved">✓ Saved</span>'
-              : '<span class="creds-badge creds-missing">⚠ Not saved</span>';
+              ? '<span class="creds-badge creds-saved">✓ Set — not shown here</span>'
+              : '<span class="creds-badge creds-missing">⚠ Not set</span>';
             var placeholder = saved
               ? "•••••••• (leave empty to keep)"
               : "Paste from device web UI";
@@ -325,7 +427,17 @@
           var caps = (entry && entry.capabilities) || [];
           var show = caps.indexOf("battery") >= 0;
           wrap.hidden = !show;
+          wrap.style.display = show ? "" : "none";
           if (row) row.classList.toggle("field-row-single", !show);
+        });
+        // Local-API credential fields (username + cert pin) reveal only for
+        // drivers whose catalog declares apicreds — done post-fetch so a first
+        // render before the catalog resolves doesn't drop them.
+        bodyEl.querySelectorAll(".drv-local-creds").forEach(function (wrap) {
+          var lua = wrap.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          var caps = (entry && entry.capabilities) || [];
+          wrap.hidden = caps.indexOf("apicreds") < 0;
         });
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
@@ -346,6 +458,7 @@
           opt.dataset.id = e.id || "";
           opt.dataset.httpHosts = (e.http_hosts || []).join(",");
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
           opt.dataset.verificationStatus = e.verification_status || "experimental";
           if (e.verification_notes) opt.title = e.verification_notes;
           sel.appendChild(opt);
@@ -379,6 +492,14 @@
             driver.config = { ip: "", vin: "" };
           } else if (connHost) {
             driver.config = { host: connHost };
+          } else if (entryCaps.indexOf("apicreds") >= 0 && (chosen.dataset.connPort || "")) {
+            // Local HTTP device with HTTP Basic auth (e.g. NIBE local REST API):
+            // host + username + password + an optional self-signed cert pin. The
+            // backend auto-derives capabilities.http.allowed_hosts from config.host.
+            driver.config = { host: "", username: "", password: "" };
+          } else if (entryCaps.indexOf("apicreds") >= 0) {
+            // OAuth2 client_credentials drivers (e.g. MyUplink).
+            driver.config = { client_id: "", client_secret: "" };
           } else {
             driver.config = { email: "", password: "", serial: "" };
           }
@@ -409,7 +530,7 @@
               .replace(/_cloud$/i, "");
             if (!provider) provider = "easee";
           }
-          fetch("/api/ev/chargers", {
+          ownerFetch("/api/ev/chargers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ provider: provider, email: email, password: pw }),
@@ -465,7 +586,7 @@
           }
           if (statusEl) { statusEl.textContent = "Verifying…"; statusEl.style.color = "var(--text-dim)"; }
           vbtn.disabled = true;
-          fetch("/api/drivers/verify_tesla", {
+          ownerFetch("/api/drivers/verify_tesla", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ip: ip, vin: vin }),
@@ -494,6 +615,74 @@
         });
       });
 
+      // MyUplink (and any OAuth authorization-code apicreds driver): open the
+      // provider consent in a new tab. /start reads the SAVED client_id, so
+      // the operator must save the row first; we pass the browser's own
+      // callback URL (location.origin) because on a relay origin the server
+      // can't derive it. The refresh_token lands server-side; the operator
+      // reloads to see the badge flip to Connected.
+      bodyEl.querySelectorAll(".myuplink-connect-btn").forEach(function (cbtn) {
+        cbtn.addEventListener("click", function () {
+          var dIdx = cbtn.dataset.driverIdx;
+          var name = cbtn.dataset.driverName || "";
+          var statusEl = bodyEl.querySelector('.myuplink-connect-status[data-driver-idx="' + dIdx + '"]');
+          function setStatus(msg, color) {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color || "var(--text-dim)"; }
+          }
+          if (!name) { setStatus("Save the driver name first", "var(--red-e)"); return; }
+          setStatus("Opening MyUplink…");
+          cbtn.disabled = true;
+          var redirectURI = location.origin + "/api/oauth/myuplink/callback";
+          var qs = "?driver=" + encodeURIComponent(name) +
+            "&redirect_uri=" + encodeURIComponent(redirectURI);
+          ownerFetch("/api/oauth/myuplink/start" + qs)
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+              if (!res.ok || !res.body || !res.body.authorize_url) {
+                setStatus("✗ " + ((res.body && res.body.error) || "could not start consent — save Client ID + Secret first"), "var(--red-e)");
+                return;
+              }
+              window.open(res.body.authorize_url, "_blank");
+              setStatus("Complete the consent in the new tab. If it returns here, reload; if not, paste the URL below.", "var(--green-e)");
+            })
+            .catch(function (e) { setStatus("✗ " + e.message, "var(--red-e)"); })
+            .finally(function () { cbtn.disabled = false; });
+        });
+      });
+
+      // Manual fallback: exchange a pasted redirect URL (carries code + state)
+      // server-side. Works on any origin since the Pi exchanges the code over
+      // outbound HTTPS — no inbound callback required.
+      bodyEl.querySelectorAll(".myuplink-manual-btn").forEach(function (mbtn) {
+        mbtn.addEventListener("click", function () {
+          var dIdx = mbtn.dataset.driverIdx;
+          var input = bodyEl.querySelector('.myuplink-manual-url[data-driver-idx="' + dIdx + '"]');
+          var statusEl = bodyEl.querySelector('.myuplink-connect-status[data-driver-idx="' + dIdx + '"]');
+          function setStatus(msg, color) {
+            if (statusEl) { statusEl.textContent = msg; statusEl.style.color = color || "var(--text-dim)"; }
+          }
+          var url = input ? input.value.trim() : "";
+          if (!url) { setStatus("Paste the redirect URL first", "var(--red-e)"); return; }
+          setStatus("Completing…");
+          mbtn.disabled = true;
+          ownerFetch("/api/oauth/myuplink/exchange", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ redirect_url: url }),
+          })
+            .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+            .then(function (res) {
+              if (res.ok && res.body && res.body.status === "connected") {
+                setStatus("✓ Connected — reload to refresh the badge.", "var(--green-e)");
+              } else {
+                setStatus("✗ " + ((res.body && res.body.error) || "exchange failed"), "var(--red-e)");
+              }
+            })
+            .catch(function (e) { setStatus("✗ " + e.message, "var(--red-e)"); })
+            .finally(function () { mbtn.disabled = false; });
+        });
+      });
+
       // Generic driver probe. Runs the current row's unsaved config through a
       // short-lived backend driver instance and dumps live readings/metrics
       // inline so the operator can verify host, credentials, and protocol.
@@ -514,7 +703,7 @@
             outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
           }
           testBtn.disabled = true;
-          fetch("/api/drivers/test", {
+          ownerFetch("/api/drivers/test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(driver),

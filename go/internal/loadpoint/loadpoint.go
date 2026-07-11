@@ -155,6 +155,19 @@ type State struct {
 	MaxChargeW    float64   `json:"max_charge_w"`
 	AllowedStepsW []float64 `json:"allowed_steps_w,omitempty"`
 
+	// Phases / VoltageV let the UI convert between watts and amps for the
+	// manual amp slider (A = W / (Phases × VoltageV)). Populated by the
+	// API layer from the loadpoint's phase_mode and the site fuse voltage.
+	Phases   int     `json:"phases,omitempty"`
+	VoltageV float64 `json:"voltage_v,omitempty"`
+
+	// ManualActive is true when an operator manual hold ("Start" / amp
+	// slider) is pinned on this loadpoint, overriding surplus/plan.
+	// ManualChargeW is the held setpoint in watts. Populated by the API
+	// layer from the loadpoint controller.
+	ManualActive  bool    `json:"manual_active"`
+	ManualChargeW float64 `json:"manual_charge_w,omitempty"`
+
 	// SurplusOnly mirrors Config.SurplusOnly with any runtime override
 	// (set via POST /api/loadpoints/{id}/target). Always emitted (no
 	// omitempty) so a polling client can distinguish "explicitly off"
@@ -253,6 +266,16 @@ type loadpointRuntime struct {
 	// "completed" when sessionComplete is latched so operators can
 	// see why the inferred SoC pinned at target.
 	socSource string
+
+	// surplusWithheld is set by the controller each tick: true when WE
+	// are intentionally withholding power from this loadpoint (a
+	// surplus_only pause below the 3-phase floor). While set, a vehicle
+	// reporting "not requesting current" is responding to our own pause,
+	// not declining charge — so Observe must not count it toward session
+	// completion. Without this a cloudy spell below the floor latches the
+	// session done and the planner stops offering PV surplus for the rest
+	// of the day. Transient per-tick; the controller refreshes it.
+	surplusWithheld bool
 }
 
 // NewManager returns an empty manager. Configure with Load().
@@ -372,6 +395,19 @@ func (m *Manager) Configs() []Config {
 //
 // No-op for unknown IDs — a misconfigured driver shouldn't crash the
 // manager.
+// SetSurplusWithheld records whether the controller is intentionally
+// withholding power from this loadpoint this tick (a surplus_only pause below
+// the 3-phase floor). When true, the next Observe treats a "not requesting
+// current" report as self-induced and does not advance the session-completion
+// timer. No-op for an unknown id.
+func (m *Manager) SetSurplusWithheld(id string, withheld bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lp, ok := m.byID[id]; ok {
+		lp.surplusWithheld = withheld
+	}
+}
+
 func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64, requestActive bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -402,9 +438,19 @@ func (m *Manager) Observe(id string, pluggedIn bool, powerW, deliveredWh float64
 	lp.currentPowerW = powerW
 	lp.deliveredWhSession = deliveredWh
 
-	if pluggedIn && !requestActive {
-		// Vehicle has explicitly stopped requesting current. Start
-		// (or continue) the completion timer; latch once it elapses.
+	if pluggedIn && !requestActive && lp.surplusWithheld {
+		// Self-induced "not requesting": we paused this surplus_only
+		// loadpoint below its floor, so the vehicle dropping current is
+		// our doing, not a vehicle-side decline. Do not start/advance the
+		// completion timer — otherwise a sub-floor spell would latch the
+		// session done and the planner would stop offering surplus all
+		// day. Reset the clock so a genuine refusal (once we resume
+		// offering power) is timed from a clean start.
+		lp.notRequestingSince = time.Time{}
+	} else if pluggedIn && !requestActive {
+		// Vehicle has explicitly stopped requesting current while we ARE
+		// offering power. Start (or continue) the completion timer; latch
+		// once it elapses.
 		if lp.notRequestingSince.IsZero() {
 			lp.notRequestingSince = now
 		}
@@ -566,6 +612,49 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	if !lp.pluggedIn {
 		return false
 	}
+	reanchorSoCLocked(lp, socPct)
+	return true
+}
+
+// AnchorVehicleSoC re-anchors the inferred SoC to a trusted vehicle BMS
+// reading. It is the automatic counterpart to the operator's manual
+// SetCurrentSoC: the control loop calls it every tick with the SoC from
+// the vehicle driver paired to this loadpoint (e.g. Tesla via
+// TeslaBLEProxy), so the dashboard's current_soc and the planner's
+// InitialSoCPct both reflect BMS ground truth instead of the
+// delivered-Wh estimate, which is blind to the real pack (Easee and
+// other chargers can't read the car).
+//
+// Caller is responsible for the trust gate — only call with a reading
+// that is online, fresh, and matched to this loadpoint
+// (telemetry.PickBestVehicleForLoadpoint enforces this). Re-anchoring
+// every tick keeps current_soc locked to the latest BMS value; between
+// refreshes the inference advances from the last anchor on delivered Wh,
+// and if the vehicle goes BLE-silent (caller stops anchoring) the
+// estimate continues from the last known BMS truth rather than snapping
+// back to the plug-in guess.
+//
+// Returns false for unknown IDs or when the loadpoint is unplugged.
+func (m *Manager) AnchorVehicleSoC(id string, socPct float64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp, ok := m.byID[id]
+	if !ok {
+		return false
+	}
+	if !lp.pluggedIn {
+		return false
+	}
+	reanchorSoCLocked(lp, socPct)
+	return true
+}
+
+// reanchorSoCLocked re-bases the session anchor so the CURRENT estimate
+// equals socPct, then recomputes current_soc from it. Caller must hold
+// m.mu and have verified the loadpoint is plugged in. Shared by the
+// manual (SetCurrentSoC) and automatic (AnchorVehicleSoC) correction
+// paths so they stay arithmetically identical.
+func reanchorSoCLocked(lp *loadpointRuntime, socPct float64) {
 	if socPct < 0 {
 		socPct = 0
 	}
@@ -588,7 +677,6 @@ func (m *Manager) SetCurrentSoC(id string, socPct float64) bool {
 	lp.sessionPluginSoCPct = anchor
 	lp.currentSoCPct = estimateSoCPct(anchor, lp.deliveredWhSession, lp.VehicleCapacityWh)
 	lp.updatedAtMs = time.Now().UnixMilli()
-	return true
 }
 
 func (lp *loadpointRuntime) snapshot() State {

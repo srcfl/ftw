@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,6 +44,24 @@ type Store struct {
 	ts    *internCache
 
 	healEvents []HealEvent
+
+	// mainDBPath is retained so Close can drop a clean-shutdown marker beside the
+	// precious state.db (see heal.go) — the marker is what lets the next boot skip
+	// the multi-minute integrity check on a large DB. (statePath() the method
+	// queries the live DB and can't be used after Close, hence a cached field.)
+	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
+	mainDBPath string
+
+	// healMu guards corrupt + verifyCancel. corrupt is set by the background
+	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
+	// marked clean). verifyCancel interrupts the in-flight background scan so
+	// Close can stop it before closing the DB — otherwise db.Close() blocks on
+	// the (multi-minute) scan, the clean marker never gets written, and the next
+	// boot is slow. verifyWG lets Close wait for the scan goroutine to unwind.
+	healMu       sync.Mutex
+	corrupt      bool
+	verifyCancel context.CancelFunc
+	verifyWG     sync.WaitGroup
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -53,6 +72,11 @@ func Open(path string) (*Store, error) {
 	nowMs := time.Now().UnixMilli()
 	cachePath := filepath.Join(filepath.Dir(path), "cache.db")
 
+	// Phase-timed so a slow startup is never a silent hang: each line below
+	// reports how long its phase took, so an operator watching the logs can see
+	// exactly where a large-DB boot is spending time (integrity gate vs
+	// migrations) instead of staring at a frozen "config loaded" line.
+	tGate := time.Now()
 	db, stEv, err := openChecked(path, tierState, nowMs)
 	if err != nil {
 		return nil, err
@@ -62,13 +86,15 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
-	s := &Store{db: db, cache: cache, ts: newInternCache()}
+	s := &Store{db: db, cache: cache, ts: newInternCache(), mainDBPath: path}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
 			s.healEvents = append(s.healEvents, *ev)
 		}
 	}
+	tMig := time.Now()
 	if err := s.migrate(); err != nil {
 		db.Close()
 		cache.Close()
@@ -79,14 +105,38 @@ func Open(path string) (*Store, error) {
 		cache.Close()
 		return nil, err
 	}
+	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
+
+	// Arm the verified-good marker: state.db opened + migrated successfully (it
+	// either passed quick_check, was restored from snapshot, or rebuilt fresh), so
+	// the next boot can SKIP the (slow on a large DB) integrity check. The marker
+	// persists across restarts and crashes — it does NOT depend on a clean Close.
+	// Only VerifyInBackground finding corruption removes it, which forces the next
+	// boot to run the full check + heal. This is what makes restarts reliably fast.
+	writeCleanMarker(path)
 	return s, nil
 }
 
-// Close releases both DB files. Safe to call multiple times.
+// Close releases both DB files. Safe to call multiple times. The verified-good
+// marker is NOT managed here — it is armed by Open and removed only by a
+// background verify that finds corruption, so fast restarts never depend on this
+// running cleanly (a SIGKILLed shutdown still leaves a fast next boot).
 func (s *Store) Close() error {
 	if s == nil {
 		return nil
 	}
+	// Stop the background integrity scan first: db.Close() blocks until every
+	// in-flight query finishes, and the scan's quick_check can run for minutes on
+	// a large DB. Cancelling it (sqlite3_interrupt) lets the close happen promptly
+	// instead of being SIGKILLed mid-close.
+	s.healMu.Lock()
+	cancel := s.verifyCancel
+	s.healMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.verifyWG.Wait()
+
 	var err error
 	if s.cache != nil {
 		err = s.cache.Close()
@@ -97,6 +147,61 @@ func (s *Store) Close() error {
 		}
 	}
 	return err
+}
+
+// VerifyInBackground runs the integrity check OFF the startup hot path. Call it
+// once, after the app is already serving. A clean-shutdown boot skips the
+// blocking check (see openChecked) so startup stays fast on a multi-GB DB; this
+// is the belt-and-suspenders pass that still catches at-rest corruption (e.g.
+// SD-card rot) without making control wait. On failure it logs loudly and arms a
+// full check + heal for the next boot: it marks the Store corrupt (so Close
+// leaves no clean marker) and removes any existing marker.
+func (s *Store) VerifyInBackground() {
+	if s == nil || s.db == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.healMu.Lock()
+	s.verifyCancel = cancel
+	s.healMu.Unlock()
+	s.verifyWG.Add(1)
+	go func() {
+		defer s.verifyWG.Done()
+		s.verifyOnce(ctx)
+	}()
+}
+
+// verifyOnce is the synchronous body of VerifyInBackground (split out so it is
+// directly testable). It runs quick_check on state.db and, on failure, arms a
+// heal for the next boot. A ctx cancellation (Close interrupting the scan on
+// shutdown) is NOT a failure — the check simply didn't finish, so we leave the
+// DB's clean status untouched.
+func (s *Store) verifyOnce(ctx context.Context) {
+	t0 := time.Now()
+	ok, err := quickCheckContext(ctx, s.db)
+	if err == nil && ok {
+		slog.Info("state: background integrity check passed",
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+		return
+	}
+	if ctx.Err() != nil {
+		slog.Info("state: background integrity check aborted (shutdown)",
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+		return
+	}
+	// A malformed image surfaces as an error rather than an "ok != 'ok'" row, so
+	// treat ANY non-clean result as corruption: arm a heal for the next boot
+	// (don't leave a clean marker). The next boot's openChecked runs the full
+	// check and restores from snapshot if the damage is real; a transient error
+	// just costs one slower boot.
+	slog.Error("state: BACKGROUND INTEGRITY CHECK FAILED — state.db is not clean; "+
+		"it will be checked and healed from snapshot on the next restart", "err", err)
+	s.healMu.Lock()
+	s.corrupt = true
+	s.healMu.Unlock()
+	if s.mainDBPath != "" {
+		_ = os.Remove(cleanMarkerPath(s.mainDBPath))
+	}
 }
 
 // HealEvents returns the corruption-recovery events from this boot (nil = a
@@ -177,12 +282,6 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	// ROWID survive unchanged because the substring is purely
 	// "TABLE name" → "TABLE snap.name", before any column / option
 	// clauses.
-	type schemaRow struct {
-		objType string
-		name    string
-		tblName string
-		sqlText string
-	}
 	rows, err := conn.QueryContext(ctx,
 		`SELECT type, name, tbl_name, sql FROM main.sqlite_master
 		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
@@ -190,9 +289,9 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("snapshot: list schema: %w", err)
 	}
-	var items []schemaRow
+	var items []snapshotSchemaRow
 	for rows.Next() {
-		var r schemaRow
+		var r snapshotSchemaRow
 		if err := rows.Scan(&r.objType, &r.name, &r.tblName, &r.sqlText); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("snapshot: scan schema: %w", err)
@@ -219,15 +318,15 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 
-	// Copy each essential table's rows over. Order doesn't matter for
-	// the INSERTs because all FK constraints are deferred (and we don't
-	// declare any in our schema). Tables created without rows above
-	// stay empty if the source had no data.
-	for _, r := range items {
+	// Copy each essential table's rows over in parent-before-child order. Some
+	// state tables carry real FK constraints (trusted_device_pubkeys ->
+	// trusted_devices), so alphabetic sqlite_master order is not safe.
+	copyItems, err := snapshotTableCopyOrder(ctx, conn, items, snapshotExcludedTables)
+	if err != nil {
+		return fmt.Errorf("snapshot: order tables: %w", err)
+	}
+	for _, r := range copyItems {
 		if r.objType != "table" {
-			continue
-		}
-		if snapshotExcludedTables[r.name] {
 			continue
 		}
 		if _, err := conn.ExecContext(ctx,
@@ -236,6 +335,84 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 	return nil
+}
+
+type snapshotSchemaRow struct {
+	objType string
+	name    string
+	tblName string
+	sqlText string
+}
+
+func snapshotTableCopyOrder(ctx context.Context, conn *sql.Conn, items []snapshotSchemaRow, excluded map[string]bool) ([]snapshotSchemaRow, error) {
+	tables := make([]snapshotSchemaRow, 0)
+	byName := make(map[string]snapshotSchemaRow)
+	for _, r := range items {
+		if r.objType != "table" || excluded[r.name] {
+			continue
+		}
+		tables = append(tables, r)
+		byName[r.name] = r
+	}
+
+	deps := make(map[string][]string, len(tables))
+	for _, r := range tables {
+		rows, err := conn.QueryContext(ctx, "PRAGMA main.foreign_key_list("+sqliteIdent(r.name)+")")
+		if err != nil {
+			return nil, fmt.Errorf("foreign_key_list %s: %w", r.name, err)
+		}
+		for rows.Next() {
+			var id, seq int
+			var parent, from, to, onUpdate, onDelete, match string
+			if err := rows.Scan(&id, &seq, &parent, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan foreign_key_list %s: %w", r.name, err)
+			}
+			if parent != r.name && !excluded[parent] {
+				deps[r.name] = append(deps[r.name], parent)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close foreign_key_list %s: %w", r.name, err)
+		}
+	}
+
+	visiting := make(map[string]bool, len(tables))
+	visited := make(map[string]bool, len(tables))
+	ordered := make([]snapshotSchemaRow, 0, len(tables))
+	var visit func(string) error
+	visit = func(name string) error {
+		if visited[name] {
+			return nil
+		}
+		if visiting[name] {
+			return fmt.Errorf("foreign-key cycle involving %s", name)
+		}
+		row, ok := byName[name]
+		if !ok {
+			return nil
+		}
+		visiting[name] = true
+		for _, dep := range deps[name] {
+			if err := visit(dep); err != nil {
+				return err
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		ordered = append(ordered, row)
+		return nil
+	}
+	for _, r := range tables {
+		if err := visit(r.name); err != nil {
+			return nil, err
+		}
+	}
+	return ordered, nil
+}
+
+func sqliteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
 // rewriteCreateForAttachedDB rewrites the leading object identifier
@@ -473,13 +650,27 @@ func (s *Store) migrate() error {
 			last_used_ms  INTEGER NOT NULL DEFAULT 0,
 			wallet_handle TEXT    NOT NULL DEFAULT '',
 			backup_eligible INTEGER NOT NULL DEFAULT 0,
-			backup_state    INTEGER NOT NULL DEFAULT 0
+			backup_state    INTEGER NOT NULL DEFAULT 0,
+			device_pubkey TEXT    NOT NULL DEFAULT ''
 		) STRICT`,
 		`CREATE TABLE IF NOT EXISTS owner_sessions (
 			token         TEXT    PRIMARY KEY NOT NULL,
 			credential_id BLOB    NOT NULL DEFAULT x'',
 			expires_at_ms INTEGER NOT NULL
 		) STRICT`,
+		// One WebAuthn credential can be synced across several browsers/devices
+		// (for example iCloud passkeys on iPhone + Safari on Mac). Each browser has
+		// its own local device key, so keep a one-to-many table instead of the
+		// legacy single trusted_devices.device_pubkey slot.
+		`CREATE TABLE IF NOT EXISTS trusted_device_pubkeys (
+			device_pubkey TEXT    PRIMARY KEY NOT NULL,
+			credential_id BLOB    NOT NULL,
+			created_at_ms INTEGER NOT NULL DEFAULT 0,
+			last_used_ms  INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (credential_id) REFERENCES trusted_devices(credential_id) ON DELETE CASCADE
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_trusted_device_pubkeys_credential
+			ON trusted_device_pubkeys(credential_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -493,10 +684,27 @@ func (s *Store) migrate() error {
 	for _, col := range []struct{ name, ddl string }{
 		{"backup_eligible", "backup_eligible INTEGER NOT NULL DEFAULT 0"},
 		{"backup_state", "backup_state INTEGER NOT NULL DEFAULT 0"},
+		// device_pubkey is the per-credential P-256 device key (X||Y, 128 hex
+		// chars) minted at LAN enrollment (C4). It backs the silent device-PoP
+		// login (C3) and is published to the relay so the browser can prove it
+		// before a signaling offer is forwarded (C1/C2). Empty for credentials
+		// enrolled before this column existed; such a device can be upgraded by
+		// re-presenting the key on a later enroll/login finish.
+		{"device_pubkey", "device_pubkey TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.addColumnIfMissing("trusted_devices", col.name, col.ddl); err != nil {
 			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)
 		}
+	}
+	// Seed the multi-device-key table from the legacy single-key column. This is
+	// idempotent and keeps existing remembered browsers working after upgrade.
+	if _, err := s.db.Exec(`
+		INSERT OR IGNORE INTO trusted_device_pubkeys
+			(device_pubkey, credential_id, created_at_ms, last_used_ms)
+		SELECT device_pubkey, credential_id, created_at_ms, last_used_ms
+		FROM trusted_devices
+		WHERE device_pubkey <> ''`); err != nil {
+		return fmt.Errorf("migrate trusted_device_pubkeys seed: %w", err)
 	}
 
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
@@ -739,18 +947,24 @@ func (s *Store) LoadAllBatteryModels() (map[string]string, error) {
 	if drows, err := s.db.Query(`SELECT device_id, driver_name FROM devices`); err == nil {
 		for drows.Next() {
 			var id, n string
-			if err := drows.Scan(&id, &n); err == nil { rev[id] = n }
+			if err := drows.Scan(&id, &n); err == nil {
+				rev[id] = n
+			}
 		}
 		drows.Close()
 	}
 	// Phase 2: read battery_models, translating keys via rev.
 	rows, err := s.db.Query(`SELECT name, json FROM battery_models`)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := make(map[string]string)
 	for rows.Next() {
 		var name, js string
-		if err := rows.Scan(&name, &js); err != nil { return out, err }
+		if err := rows.Scan(&name, &js); err != nil {
+			return out, err
+		}
 		if n, ok := rev[name]; ok {
 			out[n] = js
 		} else if !strings.Contains(name, ":") {
@@ -899,13 +1113,23 @@ type DayEnergy struct {
 	BatChargedWh    float64
 	BatDischargedWh float64
 	LoadWh          float64
+	// Intervals is the number of integration intervals that contributed to
+	// the totals — i.e. the count of rows that had a predecessor (prev_ts IS
+	// NOT NULL). Zero means there was at most one history row in the range, so
+	// nothing could be integrated and the totals are a vacuous 0 rather than a
+	// real measurement. Callers use this to tell "no data yet" apart from a
+	// genuine zero (mirrors the old `len(pts) > 1` guard).
+	Intervals int64
 }
 
 // DailyEnergy integrates history W columns over [sinceMs, untilMs] and returns
-// Wh totals in a single round-trip. The integration is a left-Riemann sum
-// (W[j] * (ts[j]-ts[j-1])), matching the previous Go loop in handleEnergyDaily.
-// Pushing the sums into SQL avoids shipping ~17k hot-tier rows per day back to
-// the application — month-view dashboards got slow once hot retention grew.
+// Wh totals in a single round-trip. The integration uses the value at the
+// LATER sample of each interval over that interval's width
+// (W[j] * (ts[j]-ts[j-1])) — i.e. a right-endpoint / right-Riemann sum. This
+// matches the previous Go loop in handleEnergyDaily exactly; do not "fix" it
+// to a left-endpoint sum. Pushing the sums into SQL avoids shipping ~17k
+// hot-tier rows per day back to the application — month-view dashboards got
+// slow once hot retention grew.
 func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	const q = `
 		WITH all_rows AS (
@@ -930,7 +1154,8 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 			COALESCE(SUM((-pv_w) * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COALESCE(SUM((CASE WHEN bat_w > 0 THEN  bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
 			COALESCE(SUM((CASE WHEN bat_w < 0 THEN -bat_w ELSE 0 END) * (ts_ms - prev_ts)) / 3600000.0, 0),
-			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0)
+			COALESCE(SUM(load_w * (ts_ms - prev_ts)) / 3600000.0, 0),
+			COUNT(*)
 		FROM lagged
 		WHERE prev_ts IS NOT NULL
 	`
@@ -942,6 +1167,7 @@ func (s *Store) DailyEnergy(sinceMs, untilMs int64) (DayEnergy, error) {
 	).Scan(
 		&d.ImportWh, &d.ExportWh, &d.PVWh,
 		&d.BatChargedWh, &d.BatDischargedWh, &d.LoadWh,
+		&d.Intervals,
 	)
 	if err != nil {
 		return DayEnergy{}, err
@@ -1097,9 +1323,13 @@ type PricePoint struct {
 
 // SavePrices upserts a batch of price rows (slot duration per-row).
 func (s *Store) SavePrices(pts []PricePoint) error {
-	if len(pts) == 0 { return nil }
+	if len(pts) == 0 {
+		return nil
+	}
 	tx, err := s.cache.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO prices
 		(zone, slot_ts_ms, slot_len_min, spot_ore_kwh, total_ore_kwh, source, fetched_at_ms)
@@ -1110,11 +1340,15 @@ func (s *Store) SavePrices(pts []PricePoint) error {
 			total_ore_kwh = excluded.total_ore_kwh,
 			source = excluded.source,
 			fetched_at_ms = excluded.fetched_at_ms`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
 	for _, p := range pts {
 		slot := p.SlotLenMin
-		if slot <= 0 { slot = 60 }
+		if slot <= 0 {
+			slot = 60
+		}
 		if _, err := stmt.Exec(p.Zone, p.SlotTsMs, slot, p.SpotOreKwh, p.TotalOreKwh, p.Source, p.FetchedAtMs); err != nil {
 			return err
 		}
@@ -1128,7 +1362,9 @@ func (s *Store) LoadPrices(zone string, sinceMs, untilMs int64) ([]PricePoint, e
 		FROM prices
 		WHERE zone = ? AND slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, zone, sinceMs, untilMs)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := []PricePoint{}
 	for rows.Next() {
@@ -1157,9 +1393,13 @@ type ForecastPoint struct {
 
 // SaveForecasts upserts a batch of forecast rows.
 func (s *Store) SaveForecasts(pts []ForecastPoint) error {
-	if len(pts) == 0 { return nil }
+	if len(pts) == 0 {
+		return nil
+	}
 	tx, err := s.cache.Begin()
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer tx.Rollback()
 	stmt, err := tx.Prepare(`INSERT INTO forecasts
 		(slot_ts_ms, slot_len_min, cloud_cover_pct, temp_c, solar_wm2, pv_w_estimated, source, fetched_at_ms)
@@ -1172,11 +1412,15 @@ func (s *Store) SaveForecasts(pts []ForecastPoint) error {
 			pv_w_estimated = excluded.pv_w_estimated,
 			source = excluded.source,
 			fetched_at_ms = excluded.fetched_at_ms`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer stmt.Close()
 	for _, p := range pts {
 		slot := p.SlotLenMin
-		if slot <= 0 { slot = 60 }
+		if slot <= 0 {
+			slot = 60
+		}
 		if _, err := stmt.Exec(p.SlotTsMs, slot, p.CloudCoverPct, p.TempC, p.SolarWm2, p.PVWEstimated, p.Source, p.FetchedAtMs); err != nil {
 			return err
 		}
@@ -1190,7 +1434,9 @@ func (s *Store) LoadForecasts(sinceMs, untilMs int64) ([]ForecastPoint, error) {
 		FROM forecasts
 		WHERE slot_ts_ms BETWEEN ? AND ?
 		ORDER BY slot_ts_ms ASC`, sinceMs, untilMs)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := []ForecastPoint{}
 	for rows.Next() {

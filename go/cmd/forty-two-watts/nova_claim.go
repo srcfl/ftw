@@ -285,7 +285,7 @@ func cleanKindFromLegacyName(derName, driverName string) string {
 }
 
 // cleanKindFromLegacyType reverses Nova's vocabulary (solar/ev_port)
-// back to forty-two-watts' clean kind (pv/ev). Called as fallback when
+// back to forty-two-watts' clean kind (pv/ev/v2x_charger). Called as fallback when
 // the DER name doesn't follow the "{driver}-{kind}" shape.
 func cleanKindFromLegacyType(legacy string) string {
 	switch legacy {
@@ -293,7 +293,7 @@ func cleanKindFromLegacyType(legacy string) string {
 		return "pv"
 	case "ev_port":
 		return "ev"
-	case "battery", "meter":
+	case "battery", "meter", "v2x_charger":
 		return legacy
 	}
 	return ""

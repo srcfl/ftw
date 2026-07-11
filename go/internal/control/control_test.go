@@ -973,6 +973,108 @@ func TestEVChargingSignalOverriddenByDerEVReading(t *testing.T) {
 	}
 }
 
+func TestEVChargingSignalIncludesPositiveV2XReading(t *testing.T) {
+	store := seedStore(5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, 3000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 0
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 3000 {
+		t.Errorf("expected EVChargingW to include live V2X charging = 3000, got %f", st.EVChargingW)
+	}
+}
+
+func TestV2XDischargeClearsPreviousLiveEVChargingSignal(t *testing.T) {
+	store := seedStore(-5000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.liveEVChargingW = 5000
+	st.EVChargingW = 5000
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 0 {
+		t.Errorf("expected live V2X discharge to clear previous live EVChargingW, got %f", st.EVChargingW)
+	}
+}
+
+func TestV2XDischargePreservesManualEVChargingSignal(t *testing.T) {
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SetManualEVCharging(5000, true)
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 5000 {
+		t.Errorf("expected live V2X discharge to preserve manual EVChargingW, got %f", st.EVChargingW)
+	}
+}
+
+func TestEVChargingSignalSumsPositiveV2XBeforeNetting(t *testing.T) {
+	store := seedStore(-1000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2-charge", telemetry.DerV2X, 3000, nil, nil)
+	store.DriverHealthMut("dc2-charge").RecordSuccess()
+	store.Update("dc2-discharge", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2-discharge").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVChargingW = 0
+	st.SlewRateW = 100000
+	_ = ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if st.EVChargingW != 3000 {
+		t.Errorf("expected EVChargingW to keep positive V2X load before netting, got %f", st.EVChargingW)
+	}
+}
+
+func TestSelfConsumptionDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
+	// House load is +1 kW, V2X is discharging -5 kW, so the raw meter
+	// sees -4 kW export. Default BatteryCoversEV=false must strip V2X
+	// from the control signal instead of charging the stationary battery
+	// from the vehicle.
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.BatteryCoversEV = false
+	st.SlewRateW = 100000
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && targets[0].TargetW > 0 {
+		t.Errorf("battery must not charge from V2X discharge by default, got target=%f", targets[0].TargetW)
+	}
+}
+
 // TestBatteryCoversEV_OffExcludesEVFromGrid mirrors the existing
 // exclusion behaviour. Grid meter reads +3000 W, 2500 W is EV, so
 // the effective grid the controller sees should be 500 W — well
@@ -1031,6 +1133,40 @@ func TestSurplusOnlyEVDoesNotAutoEnableBatteryCoversEV(t *testing.T) {
 	}
 	if targets[0].TargetW < 0 {
 		t.Errorf("surplus_only EV must not auto-enable battery-to-EV discharge, got %f", targets[0].TargetW)
+	}
+}
+
+func TestSurplusOnlyEVPlanBlocksBatteryToEVEvenWhenCoverEVEnabled(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:         now,
+		SlotEnd:           now.Add(15 * time.Minute),
+		BatteryEnergyWh:   -1250, // stale/pre-fix plan: discharge ~5 kW this slot.
+		Strategy:          "arbitrage",
+		LoadpointEnergyWh: map[string]float64{"garage": 1250},
+	}
+	store := seedStore(0, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.7},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.BatteryCoversEV = true
+	st.EVSurplusOnlyReserveW = 5000
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("expected 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -50 {
+		t.Errorf("surplus_only planned EV must block battery-to-EV discharge even with BatteryCoversEV=true, got %.0f W",
+			targets[0].TargetW)
 	}
 }
 
@@ -3684,6 +3820,38 @@ func TestPlannerSelfIdleGateLeavesSurplusOnlyEVReserve(t *testing.T) {
 	}
 }
 
+// Regression: the surplus-only EV reserve must never DISCHARGE the home
+// battery to manufacture the reserved export. When PV surplus is below the
+// reserve, the within-reserve grid bias (biasedGridW=0 in the −reserve..0
+// band) drove the PI to discharge the pack to grid — observed live on
+// Stefan's site: ~4 kW drain while a plugged EV reserved 4.14 kW but PV was
+// only ~1.7 kW, and the EV still couldn't start. The reserve must only
+// REDUCE charging, never force discharge: self_consumption battery floored
+// at idle (≥ 0) while the grid is exporting/balanced.
+func TestSelfConsumptionEVReserveNeverDischargesToExport(t *testing.T) {
+	// Meter exporting only 700 W — well below the 4.14 kW reserve.
+	store := seedStore(-700, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3Φ min; PV below it
+	st.EVChargingW = 0
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < -1 {
+		t.Errorf("TargetW = %.0f W — EV reserve must not discharge the battery to manufacture export; want >= 0 (idle)", targets[0].TargetW)
+	}
+}
+
 func TestPlannerSelfIdleGateSplitsLiveSurplusAcrossBatteries(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -4963,6 +5131,36 @@ func TestEnergyDispatchAbsorbsSurplusBeyondEVReserveActualDraw(t *testing.T) {
 	}
 }
 
+func TestEnergyDispatchDoesNotChargeBatteryFromV2XDischargeByDefault(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1250, // plan: charge ~5 kW over the slot
+		Strategy:        "arbitrage",
+		PlannedGridW:    0,
+		HasPlannedGridW: true,
+	}
+	// House load is +1 kW, V2X is discharging -5 kW, so the raw meter
+	// sees -4 kW export. The energy path must cap the charge using the
+	// house-side grid signal when BatteryCoversEV=false.
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("dc2", telemetry.DerV2X, -5000, nil, nil)
+	store.DriverHealthMut("dc2").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.BatteryCoversEV = false
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) > 0 && targets[0].TargetW > 200 {
+		t.Errorf("energy path must not charge home battery from V2X discharge by default, got %.0f W", targets[0].TargetW)
+	}
+}
+
 // Companion: same setup, but with the PRE-FIX reserve (= full
 // MaxChargeW). The battery should be capped at or near 0. Documents
 // the bug this PR fixed and prevents accidental re-regression if
@@ -5555,5 +5753,56 @@ func TestPlannerCheapIdleSlotStillBlocksReactiveDischarge(t *testing.T) {
 		if tg.TargetW < 0 {
 			t.Errorf("TargetW = %.0f W — planner_cheap idle slot must NOT discharge reactively (carve-out is arbitrage-only)", tg.TargetW)
 		}
+	}
+}
+
+// When the EV is plugged but NOT drawing and the available PV surplus is below
+// the reserved amount, the EV can't start on it — so the reserve is released to
+// the home battery instead of exported. Above the reserve (EV can start) and
+// while the EV is actively drawing, the reserve is protected. (Stefan 2026-06-10:
+// 1.5kW surplus was exporting while a 3φ EV that needs 4.14kW sat idle.)
+func TestChargeCeilingReleasesReserveWhenEVCannotStart(t *testing.T) {
+	// not drawing, surplus 1500 < reserve 4140 → release full surplus to battery
+	a := surplusAccounting{rawGridW: -1500, effectiveGridW: -1500, currentBatteryW: 0, evReserveRemainingW: 4140, evActive: false}
+	if got := a.chargeCeilingAfterEVReserveW(); got != 1500 {
+		t.Errorf("ceiling=%.0f, want 1500 (release reserve — EV can't start on sub-min surplus)", got)
+	}
+	// not drawing, surplus 5000 >= reserve 4140 → EV can start, reserve protected
+	a2 := surplusAccounting{rawGridW: -5000, effectiveGridW: -5000, currentBatteryW: 0, evReserveRemainingW: 4140, evActive: false}
+	if got := a2.chargeCeilingAfterEVReserveW(); got != 860 {
+		t.Errorf("ceiling=%.0f, want 860 (5000-4140, reserve protects EV start)", got)
+	}
+	// EV actively drawing, surplus 1000 < remaining 2000 → keep reserve (don't steal)
+	a3 := surplusAccounting{rawGridW: -1000, effectiveGridW: -1000, currentBatteryW: 0, evReserveRemainingW: 2000, evActive: true}
+	if got := a3.chargeCeilingAfterEVReserveW(); got != 0 {
+		t.Errorf("ceiling=%.0f, want 0 (EV drawing — protect its ramp reserve)", got)
+	}
+}
+
+// Full-dispatch check for the EV-surplus fix: EV plugged + surplus_only but
+// NOT drawing, reserving 4140 W, and the meter exports 2000 W — below the
+// reserve, so the EV can't start. Both reserve hold-backs (grid bias + charge
+// ceiling) must release so the home battery ABSORBS the surplus instead of
+// leaving it reserved and exporting. Pre-fix the bias pinned the PI at idle
+// (~0). (Stefan 2026-06-10: surplus exporting while battery sat at 0.)
+func TestSelfConsumptionEVReserveReleasesToBatteryWhenEVCannotStart(t *testing.T) {
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(-160, 20, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.EVSurplusOnlyReserveW = 4140 // plugged EV reserves 3φ min; export (2000) below it
+	st.EVChargingW = 0              // not drawing → can't start on 2000 W
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if targets[0].TargetW < 500 {
+		t.Errorf("TargetW=%.0f — battery must absorb the sub-reserve surplus the EV can't use; want a positive charge (~1100), got idle", targets[0].TargetW)
 	}
 }

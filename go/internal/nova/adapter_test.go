@@ -175,3 +175,63 @@ func TestEncode_TimestampRFC3339(t *testing.T) {
 		t.Fatalf("read_time_ms: got %v", rtm)
 	}
 }
+
+func TestEncode_LegacyV2X(t *testing.T) {
+	connected := true
+	status := "discharging"
+	mode := "manual"
+	protocol := "mqtt"
+	in := &DerTelemetry{
+		Type:               KindV2X,
+		TimestampMs:        1_713_610_245_123,
+		W:                  -5000,
+		Connected:          &connected,
+		VehicleSoC:         p(0.64),
+		DCW:                p(-5200),
+		DCV:                p(400),
+		DCA:                p(-13),
+		SessionDischargeWh: p(1250),
+		ChargePowerMinW:    p(1400),
+		ChargePowerMaxW:    p(20000),
+		DischargePowerMinW: p(1400),
+		DischargePowerMaxW: p(15000),
+		EVMaxEnergyReqWh:   p(50000),
+		EVMinEnergyReqWh:   p(10000),
+		RatedPowerW:        p(20000),
+		Status:             &status,
+		ControlMode:        &mode,
+		Protocol:           &protocol,
+	}
+	raw, _ := Encode(in, SchemaLegacy)
+	var m map[string]any
+	_ = json.Unmarshal(raw, &m)
+	if m["type"] != "v2x_charger" {
+		t.Fatalf("v2x type: got %v", m["type"])
+	}
+	if m["W"].(float64) != -5000 {
+		t.Fatalf("v2x W sign changed: %v", m["W"])
+	}
+	if m["vehicle_soc_fract"].(float64) != 0.64 {
+		t.Fatalf("vehicle_soc mapping failed: %v", m["vehicle_soc_fract"])
+	}
+	if m["dc_W"].(float64) != -5200 || m["dc_V"].(float64) != 400 || m["dc_A"].(float64) != -13 {
+		t.Fatalf("dc fields failed: %+v", m)
+	}
+	if m["session_discharge_Wh"].(float64) != 1250 {
+		t.Fatalf("session discharge failed: %v", m["session_discharge_Wh"])
+	}
+	upper := m["upper_limit_W"].([]any)
+	lower := m["lower_limit_W"].([]any)
+	if upper[0].(float64) != 1400 || upper[2].(float64) != 20000 {
+		t.Fatalf("upper limits failed: %+v", upper)
+	}
+	if lower[0].(float64) != -15000 || lower[2].(float64) != -1400 {
+		t.Fatalf("lower limits failed: %+v", lower)
+	}
+	if m["ev_max_energy_req_Wh"].(float64) != 50000 || m["ev_min_energy_req_Wh"].(float64) != 10000 {
+		t.Fatalf("energy request fields failed: %+v", m)
+	}
+	if m["status"] != "discharging" || m["control_mode"] != "manual" || m["protocol"] != "mqtt" {
+		t.Fatalf("status/control fields failed: %+v", m)
+	}
+}

@@ -1,24 +1,23 @@
 # REST API reference
 
-Complete HTTP surface of forty-two-watts. Every endpoint listed here has a
-matching `s.handle(…)` line in `go/internal/api/api.go` — that file is the
-source of truth; this doc is a readable projection of it.
+Human-readable guide to the main HTTP surface of forty-two-watts.
+[`go/internal/api/api.go`](../go/internal/api/api.go) is the route source of
+truth; this document should be treated as a readable reference, not a
+generated route inventory.
 
 ## Conventions
 
-- **Base URL:** `http://<host>:8080` (default port from `api.port` in config;
-  see `go/internal/config/config.go:270`)
-- **Authentication:** none. The server assumes a trusted local network.
-  Do not expose it to the public internet without a reverse proxy that adds
-  auth and TLS
+- **Base URL:** `http://<host>:8080` by default; configured via `api.port`.
+- **Access model:** local deployments assume a trusted LAN. Remote/owner
+  access paths have their own pairing and tunnel flow. Do not expose the
+  local API directly to the public internet without auth and TLS.
 - **Content type:** `application/json` for both requests and responses
-- **CORS:** every response sets `Access-Control-Allow-Origin: *`
-  (`writeJSON` in `go/internal/api/api.go:144`)
+- **CORS:** JSON responses set permissive CORS headers for the local UI/API
+  workflow.
 - **WebSocket / SSE:** none. Clients poll `/api/status` and `/api/history`.
   The top comment in `go/internal/api/api.go:6` notes this explicitly
-- **Static UI:** any path not matched by a registered route is served from
-  `WebDir` (default `web/`) with `Cache-Control: no-cache, must-revalidate`
-  (`go/internal/api/api.go:867`)
+- **Static UI:** paths not matched by registered routes are served from
+  `WebDir` (default `web/`).
 
 ## Site sign convention
 
@@ -27,6 +26,8 @@ Every power field in this document uses the site sign convention:
 - `grid_w` positive = importing from grid, negative = exporting
 - `pv_w` always negative = generation (leaving PV into the site)
 - `bat_w` positive = charging (energy into battery), negative = discharging
+- `ev_w` positive = EV charging load
+- `v2x_w` positive = vehicle charging, negative = vehicle discharging
 - `load_w` always positive (clamped)
 
 See `docs/site-convention.md` for the full reasoning.
@@ -78,12 +79,34 @@ is the main polling endpoint for the UI
   "pv_w": -890.0,
   "pv_w_predicted": 0,
   "bat_w": -2462,
+  "ev_w": 0,
+  "v2x_w": -1000,
   "load_w": 2418,
   "load_w_predicted": 4247,
   "bat_soc": 0.749,
   "grid_target_w": 0,
   "peak_limit_w": 5000,
   "ev_charging_w": 0,
+  "v2x_policy": {
+    "policy": {
+      "enabled": true,
+      "driver_name": "ferroamp_dc2",
+      "min_reserve_soc_pct": 35,
+      "max_charge_w": 7000,
+      "max_discharge_w": 5000,
+      "export_allowed": false,
+      "grid_charging_allowed": false
+    },
+    "drivers": {
+      "ferroamp_dc2": {
+        "enabled": true,
+        "min_power_w": -1200,
+        "max_power_w": 0,
+        "max_discharge_w": 1200,
+        "reasons": ["export_limited_to_import", "grid_charging_blocked"]
+      }
+    }
+  },
   "drivers": {
     "ferroamp": {
       "status": "ok",
@@ -93,6 +116,18 @@ is the main polling endpoint for the UI
       "pv_w": -8.9,
       "bat_w": -222,
       "bat_soc": 0.78
+    },
+    "ferroamp_dc2": {
+      "status": "ok",
+      "consecutive_errors": 0,
+      "tick_count": 120,
+      "v2x_w": -1000,
+      "v2x_vehicle_soc": 0.62,
+      "v2x_dc_w": -1030,
+      "v2x_dc_v": 400,
+      "v2x_dc_a": -2.6,
+      "v2x_connected": true,
+      "v2x_status": "discharging"
     },
     "sungrow": {
       "status": "ok",
@@ -125,13 +160,16 @@ is the main polling endpoint for the UI
   `DerPV` / `DerBattery`
 - `bat_soc` is a capacity-weighted average across batteries, so batteries
   with more kWh pull harder
-- `load_w = grid_w - bat_w - pv_w`, smoothed by `telemetry.UpdateLoad` and
-  clamped to ≥ 0 (see `go/internal/api/api.go:216`)
+- `load_w = grid_w - bat_w - pv_w - ev_w - v2x_w`, smoothed by
+  `telemetry.UpdateLoad` and clamped to ≥ 0. EV and V2X are subtracted so the
+  load model tracks house demand rather than vehicle sessions
 - `pv_w_predicted` is negated at emit time so it matches site-sign (negative
   for generation)
 - `plan_stale` is set by the watchdog when the MPC plan is older than the
   freshness window; the dispatch loop falls back to autonomous mode when
   stale (see `docs/safety.md`)
+- `v2x_policy` is a read-only policy envelope. It is present for observability
+  and future planner input; the dispatch loop does not consume it yet
 - Driver `status` values: `ok`, `degraded`, `offline`
   (`telemetry.DriverStatus`)
 - `energy.today` is present when the state DB has at least two history
@@ -189,6 +227,7 @@ Valid values (from `go/internal/control/dispatch.go:14`):
 - `weighted`
 - `planner_self`
 - `planner_cheap`
+- `planner_passive_arbitrage`
 - `planner_arbitrage`
 
 **Response (200):**
@@ -267,6 +306,91 @@ When `active` is `false`, `ev_charging_w` is reset to 0 regardless of
 ```
 
 Handler: `go/internal/api/api.go:417`
+
+### GET /api/v2x/policy
+
+Return the configured V2X policy and the live allowed power envelope for each
+configured or reporting V2X driver. This endpoint does not send commands.
+
+**Query params:** none
+
+**Response (200):**
+
+```json
+{
+  "policy": {
+    "enabled": true,
+    "driver_name": "ferroamp_dc2",
+    "vehicle_capacity_wh": 77000,
+    "min_reserve_soc_pct": 35,
+    "departure_target_soc_pct": 80,
+    "departure_time": "07:30",
+    "max_charge_w": 7000,
+    "max_discharge_w": 5000,
+    "export_allowed": false,
+    "grid_charging_allowed": false,
+    "cycle_cost_ore_kwh": 12
+  },
+  "drivers": {
+    "ferroamp_dc2": {
+      "driver": "ferroamp_dc2",
+      "enabled": true,
+      "min_power_w": -1200,
+      "max_power_w": 0,
+      "max_charge_w": 0,
+      "max_discharge_w": 1200,
+      "export_allowed": false,
+      "grid_charging_allowed": false,
+      "min_reserve_soc_pct": 35,
+      "vehicle_soc": 0.72,
+      "vehicle_capacity_wh": 77000,
+      "reasons": ["export_limited_to_import", "grid_charging_blocked"]
+    }
+  }
+}
+```
+
+`min_power_w` is negative discharge; `max_power_w` is positive charge. Missing
+SoC, unknown connection state, offline drivers, reserve floor, or missing grid
+context collapse the relevant side of the envelope to `0 W`.
+
+Handler: `go/internal/api/api.go:2511`
+
+### POST /api/v2x/command
+
+Send a manual signed setpoint to a configured V2X charger driver. This is a
+manual pilot endpoint; the MPC planner does not dispatch V2X automatically.
+
+**Request body:**
+
+```json
+{ "driver": "ferroamp_dc2", "power_w": -3000 }
+```
+
+Fields:
+
+- `driver` — optional when exactly one V2X driver is configured or reporting
+  live telemetry; required when multiple V2X drivers exist
+- `power_w` — signed setpoint in W. Positive charges the vehicle, negative
+  discharges the vehicle
+- `action` — optional. Defaults to `v2x_set_power`; `v2x_stop` sends zero
+
+**Response (200):**
+
+```json
+{ "status": "ok", "driver": "ferroamp_dc2", "power_w": -3000 }
+```
+
+**Errors:**
+
+- `400` `{ "error": "unsupported action" }`
+- `400` `{ "error": "power_w outside allowed manual V2X range" }`
+- `404` `{ "error": "no V2X driver configured" }`
+- `404` `{ "error": "driver is required when multiple V2X drivers exist" }`
+- `409` `{ "error": "v2x driver is not reporting live telemetry" }`
+- `503` `{ "error": "driver registry not available" }`
+
+Handler: `go/internal/api/api.go:2519`
 
 ---
 

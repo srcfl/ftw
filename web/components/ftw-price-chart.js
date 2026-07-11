@@ -17,6 +17,7 @@
 // config endpoint is missing.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -201,6 +202,9 @@ class FtwPriceChart extends FtwElement {
     this._vatPct = 25;        // fallback; overwritten from /api/config
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
+    this._p2pStateListener = null;
+    this._waitingForDirect = false;
+    this._authListener = null;
   }
 
   connectedCallback() {
@@ -217,6 +221,31 @@ class FtwPriceChart extends FtwElement {
       if (this._mql.addEventListener) this._mql.addEventListener("change", this._mqlListener);
       else if (this._mql.addListener) this._mql.addListener(this._mqlListener);
     }
+    if (typeof window !== "undefined" &&
+        window.ftwP2P &&
+        typeof window.ftwP2P.onState === "function") {
+      const listener = (s) => {
+        if (this._p2pStateListener !== listener) return;
+        if (s !== "direct") {
+          this._waitingForDirect = true;
+          return;
+        }
+        if (!this._waitingForDirect || !this.isConnected) return;
+        this._waitingForDirect = false;
+        this._loadConfig();
+        this._loadPrices();
+      };
+      this._p2pStateListener = listener;
+      window.ftwP2P.onState(listener);
+    }
+    if (typeof window !== "undefined") {
+      this._authListener = () => {
+        if (!this.isConnected) return;
+        this._loadConfig();
+        this._loadPrices();
+      };
+      window.addEventListener("ftw-owner-authenticated", this._authListener);
+    }
   }
 
   disconnectedCallback() {
@@ -230,11 +259,16 @@ class FtwPriceChart extends FtwElement {
       this._mql = null;
       this._mqlListener = null;
     }
+    this._p2pStateListener = null;
+    if (this._authListener && typeof window !== "undefined") {
+      window.removeEventListener("ftw-owner-authenticated", this._authListener);
+      this._authListener = null;
+    }
   }
 
   async _loadConfig() {
     try {
-      const r = await fetch("/api/config");
+      const r = await ownerFetch("/api/config");
       const j = await r.json();
       const v = j && j.price && j.price.vat_percent;
       if (typeof v === "number" && v > 0) {
@@ -254,7 +288,7 @@ class FtwPriceChart extends FtwElement {
       midnight.setHours(0, 0, 0, 0);
       const since = midnight.getTime();
       const until = Date.now() + 48 * 3600_000;
-      const r = await fetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
+      const r = await ownerFetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
       const j = await r.json();
       if (!j || !Array.isArray(j.items)) {
         this._data = null;

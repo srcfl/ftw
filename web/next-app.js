@@ -41,6 +41,92 @@
   let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
   let lastFlashAt = 0;               // browser-clock timestamp of last "new data" flash
 
+  // ---- Owner / CONTROL fetch (FIX-B) ----------------------------------------
+  // Every owner + state-changing API call (mode, target, peak limit, EV command,
+  // loadpoint schedule, driver lifecycle, sign-out, …) must ride the STRICT P2P
+  // transport so its body + the owner session cookie never traverse the untrusted
+  // relay on the public home route. p2pFetchStrict fails closed (synthetic 503)
+  // when the channel is down on a public origin; we additionally fail closed when
+  // p2p.js never LOADED at all on a non-LAN origin, instead of raw-fetching the
+  // owner/control body to the relay. Read-only GETs of non-secret data may still
+  // use plain fetch (no body, cookie stripped) — this is for OWNER + CONTROL calls
+  // only.
+  function isLanFallbackOrigin() {
+    // Genuine-LAN origin = the Pi serves this page directly (relay not in path),
+    // so a raw fetch is safe. Prefer p2p.js's own isLanOrigin (single source of
+    // truth); only when p2p.js never loaded do we conservatively treat a dotted
+    // public host as NOT-LAN and fail closed.
+    if (window.ftwP2P && typeof window.ftwP2P.isLanOrigin === "function") {
+      try { return window.ftwP2P.isLanOrigin(); } catch (e) { /* fall through */ }
+    }
+    if (/^\/me\/[^/]+\//.test(location.pathname)) return false; // relay tunnel prefix
+    var h = (location.hostname || "").toLowerCase();
+    if (h === "localhost" || h === "::1" || h === "[::1]") return true;
+    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true; // *.local / single-label
+    if (/^10\./.test(h) || /^127\./.test(h) || /^192\.168\./.test(h) ||
+        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+        /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // 100.64/10 CGNAT (Tailscale)
+    var hv6 = h.replace(/^\[|\]$/g, "");
+    if (/^f[cd][0-9a-f]{2}:/.test(hv6) || /^fe[89ab][0-9a-f]:/.test(hv6)) return true;
+    return false; // dotted public host → NOT LAN → fail closed
+  }
+  // ownerWriteFailClosed mimics enough of a fetch Response that callers handle it
+  // uniformly; the owner/control body NEVER leaves the browser.
+  function ownerWriteFailClosed(path) {
+    var msg = "Secure channel unavailable — reconnecting. This control request was NOT sent to the relay.";
+    return Promise.resolve({
+      ok: false, status: 503, url: path, headers: new Headers(),
+      json: function () { return Promise.resolve({ error: msg, retry: true }); },
+      text: function () { return Promise.resolve(msg); }
+    });
+  }
+  // ownerFetch is the single owner/CONTROL fetch entry point. Strict when the P2P
+  // transport is present; fail-closed on a public origin when it isn't; raw fetch
+  // only on a genuine LAN.
+  function ownerFetch(path, opts) {
+    opts = opts || {};
+    if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts);
+    if (window.p2pFetch) return window.p2pFetch(path, Object.assign({ strict: true }, opts));
+    if (!isLanFallbackOrigin()) return ownerWriteFailClosed(path);
+    return fetch(path, opts);
+  }
+
+  function waitForOwnerTransport(timeoutMs) {
+    if (!window.ftwP2P || isLanFallbackOrigin()) return Promise.resolve(true);
+    if (typeof window.ftwP2P.state === "function" && window.ftwP2P.state() === "direct") {
+      return Promise.resolve(true);
+    }
+    var connectP = typeof window.ftwP2P.connect === "function"
+      ? window.ftwP2P.connect().catch(function () { return false; })
+      : Promise.resolve(false);
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        resolve(false);
+      }, timeoutMs || 9000);
+      function finish(ok) {
+        if (done) return;
+        if (!ok) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(true);
+      }
+      if (typeof window.ftwP2P.onState === "function") {
+        window.ftwP2P.onState(function (s) { finish(s === "direct"); });
+      }
+      connectP.then(finish);
+    });
+  }
+
+  function ownerTransportReady() {
+    if (isLanFallbackOrigin()) return true;
+    return !!(window.ftwP2P &&
+      typeof window.ftwP2P.state === "function" &&
+      window.ftwP2P.state() === "direct");
+  }
+
   // ---- Chart data ----
   var chartHistory = {
     grid: [],
@@ -197,7 +283,8 @@
   // extending past "now").
   var chartPlan = null;
   function refreshChartPlan() {
-    fetch("/api/mpc/plan")
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/mpc/plan")
       .then(function (r) { return r.json(); })
       .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
       .catch(function () {});
@@ -258,6 +345,7 @@
   const evSend = $("ev-send");
   const bceToggle = $("battery-covers-ev-toggle");
   const bceLabel = $("battery-covers-ev-label");
+  const bceInfo = $("battery-covers-ev-info");
   const fuseUse = $("fuse-use");
   const fuseFill = $("fuse-fill");
   const fusePhases = $("fuse-phases");
@@ -844,6 +932,7 @@
     if (bceToggle && document.activeElement !== bceToggle && data.battery_covers_ev != null) {
       bceToggle.checked = !!data.battery_covers_ev;
       if (bceLabel) bceLabel.textContent = data.battery_covers_ev ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !data.battery_covers_ev;
     }
 
     // Energy today
@@ -1087,6 +1176,8 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
+    var C = chartColors(); // theme-aware chrome colors, re-read each draw
+
     var pad = { top: 20, right: 10, bottom: 25, left: 55 };
     var plotW = w - pad.left - pad.right;
     var plotH = h - pad.top - pad.bottom;
@@ -1115,7 +1206,7 @@
         { data: toKwh(chartHistory.e_pv),         color: "#10b981", width: 2, dash: [], name: "PV",         fill: true },
         { data: toKwh(chartHistory.e_charged),    color: "#3b82f6", width: 2, dash: [], name: "Charged",    fill: false },
         { data: toKwh(chartHistory.e_discharged), color: "#f59e0b", width: 2, dash: [], name: "Discharged", fill: false },
-        { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
+        { data: toKwh(chartHistory.e_load),       color: C.load, width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
       var smoothedGridSeries = smoothSeriesForChart(chartHistory.grid, chartHistory.timestamps, chartSmoothMs);
@@ -1124,7 +1215,7 @@
       series = [
         { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
         { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: smoothedLoadSeries, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: smoothedLoadSeries, color: C.load, width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -1168,7 +1259,7 @@
     if (visibleVals.length === 0) {
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#666";
+      ctx.fillStyle = C.muted;
       ctx.font = chartFontWaiting;
       ctx.textAlign = "center";
       ctx.fillText("waiting for data...", w / 2, h / 2);
@@ -1216,7 +1307,7 @@
     // Grid lines (drawn inside clip so they only appear in the plot area).
     // Walk yMin..yMax in yStep increments so every line lands on a round
     // number — that's what lets the y-axis labels stay readable.
-    ctx.strokeStyle = "#2a2a2a";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 0.5;
     ctx.font = chartFontAxis;
     var steps = Math.round(yRange / yStep);
@@ -1231,7 +1322,7 @@
     // Zero line
     if (yMin < 0 && yMax > 0) {
       var zeroY = pad.top + plotH * (1 - (0 - yMin) / yRange);
-      ctx.strokeStyle = "#444";
+      ctx.strokeStyle = C.muted;
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -1398,7 +1489,7 @@
     // where present is. Stroke width bumps on small screens so the
     // marker stays visible alongside the larger axis labels.
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = smallScreen ? "rgba(255,255,255,0.30)" : "rgba(255,255,255,0.12)";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = chartNowStrokeW;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
@@ -1406,7 +1497,7 @@
     ctx.stroke();
 
     // Y-axis labels (outside clip so they're fully visible)
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.font = chartFontAxis;
     for (var i2 = 0; i2 <= steps; i2++) {
       var yVal = yMin + (yRange * i2 / steps);
@@ -1415,7 +1506,7 @@
     }
 
     // Time labels
-    ctx.fillStyle = "#666";
+    ctx.fillStyle = C.muted;
     ctx.fillText(chartRange + " ago", pad.left, h - 5);
     ctx.textAlign = "right";
     ctx.fillText("now", w - pad.right, h - 5);
@@ -1441,7 +1532,7 @@
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.font = chartFontTooltip;
-      ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
+      ctx.fillStyle = fresh ? C.dim : "#f59e0b";
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
 
@@ -1475,8 +1566,46 @@
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
   }
 
+  // Resolve a CSS custom property to a concrete color string for <canvas>,
+  // which can't read var(). Re-read per draw so the charts follow the active
+  // theme (html[data-theme]) without needing an explicit redraw on toggle —
+  // a hidden probe element inherits :root, and getComputedStyle resolves the
+  // var() + oklch token to a value canvas can paint.
+  var _colorProbe = null;
+  function cssColor(name, fallback) {
+    if (!_colorProbe) {
+      _colorProbe = document.createElement("span");
+      _colorProbe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+      document.body.appendChild(_colorProbe);
+    }
+    _colorProbe.style.color = "var(" + name + ", " + (fallback || "#888") + ")";
+    return getComputedStyle(_colorProbe).color || fallback || "#888";
+  }
+  // Theme-aware chart chrome colors. Series hues stay fixed (they read on
+  // both themes); only text / gridlines / tooltip surface / the neutral
+  // "load" line flip — those are what go invisible on a light background.
+  // Cached so the animation loop doesn't getComputedStyle every frame —
+  // only recomputed when the active theme actually changes.
+  var _chartColors = null, _chartColorsTheme = null;
+  function chartColors() {
+    var theme = document.documentElement.getAttribute("data-theme") || "";
+    if (_chartColors && _chartColorsTheme === theme) return _chartColors;
+    _chartColorsTheme = theme;
+    _chartColors = {
+      text:    cssColor("--fg", "#e6e6e6"),
+      dim:     cssColor("--fg-dim", "#aaaaaa"),
+      muted:   cssColor("--fg-muted", "#888888"),
+      grid:    cssColor("--line", "#2a2a2a"),
+      surface: cssColor("--ink-raised", "#14141f"),
+      accent:  cssColor("--accent-e", "#fbbf24"),
+      load:    cssColor("--fg", "#e2e8f0"),
+    };
+    return _chartColors;
+  }
+
   function drawHoverOverlay(ctx) {
     if (!chartLayout) return;
+    var C = chartColors();
     var l = chartLayout;
     var i = hoverIndex;
     var fontTooltip = l.fontTooltip || "10px monospace";
@@ -1487,7 +1616,7 @@
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
-    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.strokeStyle = C.muted;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
@@ -1513,12 +1642,12 @@
       { name: "PV",         data: chartHistory.e_pv,         color: "#10b981" },
       { name: "Charged",    data: chartHistory.e_charged,    color: "#3b82f6" },
       { name: "Discharged", data: chartHistory.e_discharged, color: "#f59e0b" },
-      { name: "Load",       data: chartHistory.e_load,       color: "#e2e8f0" },
+      { name: "Load",       data: chartHistory.e_load,       color: C.load },
     ] : (function () {
       var rows = [
         { name: "Grid", data: chartHistory.grid, color: "#ef4444" },
         { name: "PV",   data: chartHistory.pv,   color: "#22c55e" },
-        { name: "Load", data: chartHistory.load, color: "#e2e8f0" },
+        { name: "Load", data: chartHistory.load, color: C.load },
       ];
       // Battery rows render their target inline as "actual W (→ target W)"
       // so it's visually obvious the two numbers are the same metric — one
@@ -1545,14 +1674,14 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.95)";
-    ctx.strokeStyle = "#444";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
     ctx.font = fontTooltip;
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
@@ -1560,21 +1689,21 @@
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = lab.dim ? "#888" : "#ddd";
+      ctx.fillStyle = lab.dim ? C.muted : C.text;
       ctx.fillText(lab.name, boxX + 18, y);
       ctx.textAlign = "right";
       if (chartView === "energy") {
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(lab.data[i].toFixed(2) + " kWh", boxX + boxW - 6, y);
       } else {
         var actual = formatW(lab.data[i]);
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(actual, boxX + boxW - 6, y);
         // Inline target as dim "(→ -674 W)" so user sees commanded vs actual
         // in one glance. Skip when target is 0 to reduce visual noise.
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
-          ctx.fillStyle = "#888";
+          ctx.fillStyle = C.dim;
           ctx.font = fontTooltipS;
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
           ctx.font = fontTooltip;
@@ -1586,6 +1715,7 @@
 
   function drawForecastHoverOverlay(ctx) {
     if (!chartLayout || !hoverForecast) return;
+    var C = chartColors();
     var l = chartLayout;
     var a = hoverForecast.action;
     var ts = hoverForecast.ts;
@@ -1619,8 +1749,8 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.96)";
-    ctx.strokeStyle = "rgba(251,191,36,0.6)";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.accent;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -1628,16 +1758,16 @@
     ctx.font = fontTooltip;
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
-    ctx.fillStyle = "#fbbf24";
+    ctx.fillStyle = C.accent;
     ctx.fillText(hh + "  predicted", boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = "#ddd";
+      ctx.fillStyle = C.text;
       ctx.fillText(lab.name, boxX + 18, y);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = C.text;
       ctx.textAlign = "right";
       var val = lab.literal ? lab.val : formatW(lab.val);
       ctx.fillText(val, boxX + boxW - 6, y);
@@ -1646,7 +1776,7 @@
 
     if (a.reason) {
       var ry = boxY + (labels.length + 2) * lineHeight + 2;
-      ctx.fillStyle = "#86efac";
+      ctx.fillStyle = C.dim;
       ctx.font = "italic 10px monospace";
       // Truncate if too long for box
       var reason = a.reason.length > 28 ? a.reason.substring(0, 27) + "…" : a.reason;
@@ -1655,11 +1785,41 @@
   }
 
   function driverLifecycleCall(name, action) {
-    return fetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
+    // CONTROL write — strict (FIX-B): driver enable/disable/restart/diagnose.
+    return ownerFetch("/api/drivers/" + encodeURIComponent(name) + "/" + action, { method: "POST" })
       .then(function (res) {
         if (!res.ok) return res.text().then(function (t) { throw new Error(t || ("HTTP " + res.status)); });
         return res.json();
       });
+  }
+
+  function parseResponseError(res) {
+    return res.text().then(function (t) {
+      if (!t) return "HTTP " + res.status;
+      try {
+        var j = JSON.parse(t);
+        return j && j.error ? j.error : t;
+      } catch (e) {
+        return t;
+      }
+    });
+  }
+
+  function v2xCommand(driver, powerW) {
+    return ownerFetch("/api/v2x/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: powerW === 0 ? "v2x_stop" : "v2x_set_power",
+        driver: driver,
+        power_w: powerW,
+      }),
+    }).then(function (res) {
+      if (!res.ok) {
+        return parseResponseError(res).then(function (msg) { throw new Error(msg); });
+      }
+      return res.json();
+    });
   }
 
   function renderDriverActions(name, d) {
@@ -1679,10 +1839,92 @@
     return actions;
   }
 
+  function formatOptionalW(w) {
+    return w == null ? "—" : formatW(w);
+  }
+
+  // ---------------------------------------------------------------------
+  // SHARED V2X manual-command surface (parseResponseError, v2xCommand,
+  // formatOptionalW, renderV2XControls + the click handler and card body
+  // below) is intentionally kept byte-identical with the same block in
+  // web/app.js. There is no shared module system — each file is a
+  // standalone IIFE loaded on a different page (app.js → legacy.html,
+  // next-app.js → index.html) — so changes here MUST be mirrored there.
+  // ---------------------------------------------------------------------
+  function renderV2XControls(name, d) {
+    var isLive = d.status === "ok";
+    var chargeMax = d.v2x_charge_power_max_w || d.v2x_rated_power_w || 50000;
+    var dischargeMax = d.v2x_discharge_power_max_w || d.v2x_rated_power_w || 50000;
+    var maxW = Math.max(1, Math.min(50000, Math.max(chargeMax, dischargeMax)));
+    var suggested = Math.min(3000, maxW);
+    var disabled = isLive ? "" : " disabled";
+    // Mono eyebrow + caption styled inline from theme.css tokens so it reads
+    // identically on both dashboards (legacy style.css has no .v2x-* rules).
+    // Flags that this manual surface bypasses the dispatch policy envelope.
+    var note = '' +
+      '<div class="v2x-experimental-note" style="margin-top:8px">' +
+      '  <span style="font-family:var(--mono);font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e)">Experimentell</span>' +
+      '  <span style="display:block;font-family:var(--mono);font-size:10px;color:var(--fg-dim);margin-top:2px">manuell styrning utan säkerhetsenvelope</span>' +
+      '</div>';
+    return '' +
+      '<div class="v2x-control-panel" data-v2x-driver="' + escHtml(name) + '">' +
+      '  <label class="v2x-power-label" for="v2x-power-' + escHtml(name) + '">Manual W</label>' +
+      '  <input class="v2x-power-input" id="v2x-power-' + escHtml(name) + '" type="number" min="0" max="' + maxW + '" step="100" value="' + suggested + '"' + disabled + '>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="charge" data-drv="' + escHtml(name) + '"' + disabled + '>Charge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="discharge" data-drv="' + escHtml(name) + '"' + disabled + '>Discharge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="stop" data-drv="' + escHtml(name) + '"' + disabled + '>Stop</button>' +
+      '  <div class="v2x-command-status" role="status" aria-live="polite"></div>' +
+      note +
+      '</div>';
+  }
+
   // Event delegation — one listener for all driver-action buttons. Saves
   // re-binding on every re-render.
   if (driversGrid) {
     driversGrid.addEventListener("click", function (ev) {
+      var v2xBtn = ev.target.closest("[data-v2x-action]");
+      if (v2xBtn) {
+        var v2xName = v2xBtn.getAttribute("data-drv");
+        var v2xAction = v2xBtn.getAttribute("data-v2x-action");
+        var panel = v2xBtn.closest(".v2x-control-panel");
+        var input = panel ? panel.querySelector(".v2x-power-input") : null;
+        var status = panel ? panel.querySelector(".v2x-command-status") : null;
+        if (!v2xName || !v2xAction) return;
+
+        var requested = input ? Math.abs(Number(input.value || 0)) : 0;
+        var max = input ? Number(input.max || 50000) : 50000;
+        if (!Number.isFinite(requested)) requested = 0;
+        requested = Math.min(Math.max(requested, 0), max);
+        var powerW = v2xAction === "stop" ? 0 : requested;
+        if (v2xAction === "discharge") powerW = -powerW;
+        if (v2xAction === "discharge" && powerW < 0) {
+          if (!window.confirm("Discharge " + v2xName + " at " + formatW(powerW) + "?")) return;
+        }
+
+        v2xBtn.disabled = true;
+        if (status) {
+          status.className = "v2x-command-status";
+          status.textContent = "Sending " + formatW(powerW) + "…";
+        }
+        v2xCommand(v2xName, powerW)
+          .then(function () {
+            if (status) {
+              status.className = "v2x-command-status ok";
+              status.textContent = powerW === 0 ? "Stopped" : "Sent " + formatW(powerW);
+            }
+            setTimeout(fetchStatus, 600);
+          })
+          .catch(function (err) {
+            if (status) {
+              status.className = "v2x-command-status error";
+              status.textContent = err.message;
+            }
+            alert("V2X command failed: " + err.message);
+          })
+          .finally(function () { v2xBtn.disabled = false; });
+        return;
+      }
+
       var btn = ev.target.closest("[data-drv-action]");
       if (!btn) return;
       var name = btn.getAttribute("data-drv");
@@ -1725,6 +1967,7 @@
       // else falls through to the legacy meter/pv/battery layout.
       var isVehicle = (d.vehicle_soc != null || d.vehicle_charge_limit_pct != null);
       var isEV = !isVehicle && (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+      var isV2X = !isVehicle && (d.v2x_w != null || d.v2x_connected != null || d.v2x_vehicle_soc != null);
 
       var body;
       if (isVehicle) {
@@ -1773,6 +2016,42 @@
           (vSoc != null
             ? '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + vSoc + '%"></div></div>'
             : '');
+      } else if (isV2X) {
+        var v2xWVal = d.v2x_w != null ? d.v2x_w : 0;
+        var connected = d.v2x_connected === true;
+        var statusLabel = d.v2x_status
+          || (v2xWVal > 100 ? "charging" : (v2xWVal < -100 ? "discharging" : (connected ? "connected" : "idle")));
+        var v2xClass = v2xWVal < -100 ? "stat-ok" : (v2xWVal > 100 ? "stat-warn" : (connected ? "stat-warn" : "stat-dim"));
+        var vehicleSoc = d.v2x_vehicle_soc != null ? formatSoc(d.v2x_vehicle_soc) : "—";
+        var dcSummary = (d.v2x_dc_w != null || d.v2x_dc_v != null || d.v2x_dc_a != null)
+          ? formatOptionalW(d.v2x_dc_w) + " · " +
+            (d.v2x_dc_v != null ? d.v2x_dc_v.toFixed(0) + " V" : "—") + " · " +
+            (d.v2x_dc_a != null ? d.v2x_dc_a.toFixed(1) + " A" : "—")
+          : "—";
+        var sessionParts = [];
+        if (d.v2x_session_charge_wh != null) sessionParts.push("in " + formatKwh(d.v2x_session_charge_wh));
+        if (d.v2x_session_discharge_wh != null) sessionParts.push("out " + formatKwh(d.v2x_session_discharge_wh));
+        var session = sessionParts.length ? sessionParts.join(" / ") : "—";
+        var limitParts = [];
+        if (d.v2x_charge_power_max_w != null) limitParts.push("charge " + formatW(d.v2x_charge_power_max_w));
+        if (d.v2x_discharge_power_max_w != null) limitParts.push("discharge " + formatW(d.v2x_discharge_power_max_w));
+        if (!limitParts.length && d.v2x_rated_power_w != null) limitParts.push("rated " + formatW(d.v2x_rated_power_w));
+        var limits = limitParts.length ? limitParts.join(" / ") : "—";
+        var mode = d.v2x_control_mode || d.v2x_protocol || "—";
+
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value ' + v2xClass + '">' + escHtml(statusLabel) + '</span>' +
+          '  <span class="stat-label">Power</span><span class="stat-value">' + formatW(v2xWVal) + '</span>' +
+          '  <span class="stat-label">Vehicle SoC</span><span class="stat-value">' + vehicleSoc + '</span>' +
+          '  <span class="stat-label">DC</span><span class="stat-value">' + escHtml(dcSummary) + '</span>' +
+          '  <span class="stat-label">Session</span><span class="stat-value">' + escHtml(session) + '</span>' +
+          '  <span class="stat-label">Limits</span><span class="stat-value">' + escHtml(limits) + '</span>' +
+          '  <span class="stat-label">Mode</span><span class="stat-value">' + escHtml(mode) + '</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
+          '</div>' +
+          renderV2XControls(name, d);
       } else if (isEV) {
         var evWVal = d.ev_w != null ? d.ev_w : 0;
         // state_label + reason_no_current_label come from the driver —
@@ -1804,7 +2083,7 @@
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
           '</div>';
-      } else {
+      } else if (d.meter_w != null || d.pv_w != null || d.bat_w != null || d.bat_soc != null) {
         var meterW = d.meter_w != null ? d.meter_w : 0;
         var pvWVal = d.pv_w != null ? d.pv_w : 0;
         var batWVal = d.bat_w != null ? d.bat_w : 0;
@@ -1835,6 +2114,17 @@
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
           "</div>" +
           '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + Math.round(batSocVal * 100) + '%"></div></div>';
+      } else {
+        // Metrics-only driver (e.g. MyUplink heat-pump telemetry): emits
+        // scalar metrics via emit_metric, no meter/pv/battery DER reading.
+        // Don't render phantom 0 W / 0 % PV+battery+SoC rows — show liveness
+        // and point at the per-driver metrics view (Diagnose) instead.
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">Type</span><span class="stat-value stat-dim">telemetry only</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
+          "</div>";
       }
 
       // For disabled drivers the body is minimal — just show the label.
@@ -1894,6 +2184,7 @@
   // ---- API ----
   var firstLoad = true;
   var setupBannerShown = false;
+  var ownerDataPrimed = false;
   // Loadpoint cache — keyed by driver_name so the EV-planet builder
   // in render() can look up vehicle SoC + charge-limit without a
   // second round of fetches per status tick. Refreshed in parallel
@@ -1906,11 +2197,23 @@
   // facts like siteHasPV() without re-fetching. `null` until the
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
+  function ownerDataAllowed() {
+    return isLanFallbackOrigin() || (!authGateActive && !ownerNotAuthed);
+  }
   function fetchStatus() {
-    // Route the hot poll over the direct P2P DataChannel when it's up; p2pFetch
-    // falls back to the relay fetch transparently (home-route Phase 5).
-    var xfetch = window.p2pFetch || fetch;
-    Promise.all([
+    if (!ownerDataAllowed()) return Promise.resolve(false);
+    // Route the hot poll over the direct P2P DataChannel when it's up. STRICT
+    // mode (FIX-2): the owner API (/api/status etc.) must never ride the cleartext
+    // relay on the public home route — strict fails closed (synthetic 503) if the
+    // channel is down, while still allowing the relay fallback on a genuine-LAN
+    // origin where the Pi serves the page directly. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    // Owner reads carry the owner session cookie, so route them STRICT too (FIX-B):
+    // ownerFetch fails closed on a public origin when no channel/transport is
+    // available rather than sending the cookie to the relay. A 503 here just shows
+    // "reconnecting" until the channel recovers (p2p.js auto-retries).
+    var xfetch = ownerFetch;
+    return Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
       xfetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
       xfetch("/api/health").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
@@ -2013,6 +2316,7 @@
   // ---- Setup banner (bootstrap mode — no config yet) ----
   function showSetupBanner() {
     if (setupBannerShown) return;
+    if (authGateActive || ownerNotAuthed) return; // auth-pending/logged-out empty status is not config state
     var banner = document.createElement("div");
     banner.id = "setup-banner";
     banner.className = "setup-banner";
@@ -2030,6 +2334,7 @@
   // ---- "Add a device" prompt when drivers object is empty ----
   function updateNoDevicesPrompt(drivers) {
     var existing = document.getElementById("no-devices-prompt");
+    if (authGateActive || ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge before auth
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
     if (hasDrivers) {
       if (existing) existing.remove();
@@ -2048,7 +2353,8 @@
   }
 
   function setMode(mode) {
-    fetch("/api/mode", {
+    // CONTROL write — strict (FIX-B): never send the mode change to the relay.
+    ownerFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mode: mode }),
@@ -2064,7 +2370,7 @@
   }
 
   // Fire-and-forget wrappers around postJson. postJson itself rethrows
-  // so callers that chain .then/.finally (evCommand) behave correctly;
+  // so callers that chain .then/.finally behave correctly;
   // here we explicitly mark the rejection handled so the browser
   // doesn't log "Uncaught (in promise)" on every network hiccup.
   // postJson has already console.warn'd the failure.
@@ -2093,7 +2399,10 @@
   }
 
   function postJson(url, body) {
-    return fetch(url, {
+    // CONTROL write — strict (FIX-B). Covers /api/target, /api/peak_limit,
+    // /api/peak_import_ceiling, /api/ev_charging, /api/battery_covers_ev,
+    // /api/ev/command, … (every state-changing dashboard knob routes here).
+    return ownerFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -2214,6 +2523,7 @@
   if (bceToggle) {
     bceToggle.addEventListener("change", function () {
       if (bceLabel) bceLabel.textContent = bceToggle.checked ? "On" : "Off";
+      if (bceInfo) bceInfo.hidden = !bceToggle.checked;
       setBatteryCoversEV(bceToggle.checked);
     });
   }
@@ -2269,16 +2579,19 @@
   }
 
   // EV modal sub-elements held across refreshes. The status table is
-  // updated in place on every poll. The schedule section is mounted
-  // exactly once per (modal-open × LP) and is NEVER detached on a poll
-  // — detaching+reattaching a focused <input> blurs it mid-keystroke
-  // and resets caret position. After Save/Clear we set
-  // schedNeedsRebuild=true so the next poll picks up the new
-  // authoritative server state.
+  // updated in place on every poll. The tabbed control (PV charging /
+  // Manual / Scheduled) is mounted exactly once per (modal-open × LP)
+  // and is NEVER detached on a poll — detaching+reattaching a focused
+  // <input> blurs it mid-keystroke and resets caret position. After a
+  // Save/Clear/Start/Stop we set the matching *NeedsRebuild flag so the
+  // next poll rebuilds from the new authoritative server state. The
+  // active tab persists across rebuilds via evActiveTab.
   var statusTableEl = null;
-  var schedSectionEl = null;
-  var schedLpId = null;
+  var evTabsEl = null;
+  var evTabsLpId = null;
   var schedNeedsRebuild = false;
+  var manualNeedsRebuild = false;
+  var evActiveTab = "pv"; // "pv" | "manual" | "scheduled"
 
   // Detect whether the site has any PV driver configured. Used to hide
   // the "surplus charge from PV" option on PV-less sites where the
@@ -2304,8 +2617,9 @@
     // duplicate /api/status fetch on every 5 s modal tick. Falls back
     // to "no PV" until the dashboard's own fetchStatus lands once.
     Promise.all([
-      fetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      fetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      // Owner reads (carry the session cookie) — strict (FIX-B).
+      ownerFetch(url).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      ownerFetch("/api/loadpoints").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
     ]).then(function (results) {
       var d = results[0];
       var lps = results[1];
@@ -2321,8 +2635,8 @@
       if (!carConnected && !hasLoadpoints) {
         setEvModalMessage("No EV charger connected");
         statusTableEl = null;
-        schedSectionEl = null;
-        schedLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
         return;
       }
       // Status table: replace in place so the rest of the modal body
@@ -2381,80 +2695,327 @@
         }
       }
       if (matched) {
-        // Build schedule exactly once per LP. Polling never rebuilds
-        // it — inputs keep their focus, value and caret position. Only
-        // a Save / Clear (which sets schedNeedsRebuild) or switching
-        // to a different LP (planet) triggers a fresh build.
-        var lpChanged = schedSectionEl == null || schedLpId !== matched.id;
-        if (lpChanged || schedNeedsRebuild) {
-          if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-            evModalBody.removeChild(schedSectionEl);
+        // Build the tabbed control (PV charging / Manual / Scheduled)
+        // exactly once per LP. Polling never rebuilds it — inputs keep
+        // focus/value/caret and the active tab persists. Only a
+        // Save/Clear (schedNeedsRebuild) or Start/Stop/Set-SoC
+        // (manualNeedsRebuild), or switching LP (planet), forces a build.
+        var lpChanged = evTabsEl == null || evTabsLpId !== matched.id;
+        if (lpChanged || schedNeedsRebuild || manualNeedsRebuild) {
+          if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+            evModalBody.removeChild(evTabsEl);
           }
-          schedSectionEl = buildScheduleControl(matched, siteHasPV(status));
-          schedLpId = matched.id;
+          evTabsEl = buildEvTabbedControl(matched, siteHasPV(status));
+          evTabsLpId = matched.id;
           schedNeedsRebuild = false;
-          evModalBody.appendChild(schedSectionEl);
-        } else if (schedSectionEl.parentNode !== evModalBody) {
-          // Modal was previously closed: body got wiped but our
-          // cached section is still valid — re-attach.
-          evModalBody.appendChild(schedSectionEl);
+          manualNeedsRebuild = false;
+          evModalBody.appendChild(evTabsEl);
+        } else if (evTabsEl.parentNode !== evModalBody) {
+          // Modal was previously closed: body got wiped but our cached
+          // section is still valid — re-attach.
+          evModalBody.appendChild(evTabsEl);
         }
       } else {
-        if (schedSectionEl && schedSectionEl.parentNode === evModalBody) {
-          evModalBody.removeChild(schedSectionEl);
+        if (evTabsEl && evTabsEl.parentNode === evModalBody) {
+          evModalBody.removeChild(evTabsEl);
         }
-        schedSectionEl = null;
-        schedLpId = null;
+        evTabsEl = null;
+        evTabsLpId = null;
       }
     }).catch(function () {
       setEvModalMessage("Failed to load EV status");
     });
   }
 
-  // buildScheduleControl renders the persistent charging schedule
-  // section: target SoC + time (local; converted to UTC for the wire),
-  // recurring checkbox, and the bat-SoC surplus-unlock threshold.
-  // The backend persists this across restarts (state.config), rolls the
-  // deadline forward each day when Recurring is set, and arms the
-  // surplus-grab whenever the home battery sits at or above the
-  // threshold (with 5 pp release hysteresis).
-  function buildScheduleControl(lp, hasPV) {
-    var sched = (lp && lp.schedule) || {};
-    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the
-    // browser's local zone. The UI shows local time everywhere;
-    // we marshal back to UTC minutes on save.
-    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
-    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
-    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
-    var initRec = !!sched.recurring;
-    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
-    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
-    // The threshold input retains the last-used value (or defaults to 50)
-    // so unchecking + re-checking doesn't wipe the user's pick.
-    var initSurplus = savedUnlock > 0;
-    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+  // buildManualChargeSection renders the Tesla-style manual override: an
+  // amp slider (range = the charger's min/max charge current) plus Start /
+  // Stop. Start pins a persistent manual hold at the slider's amps,
+  // which overrides surplus_only and the plan (the fuse clamp still
+  // applies); Stop clears the hold and drops back to whatever mode the
+  // loadpoint is in (PV-surplus-only if that toggle is on). The amperage
+  // is sent as watts (power_w = A × phases × voltage); the driver
+  // converts back to amps given the wallbox it's talking to.
+  function buildManualChargeSection(lp) {
+    var phases = (lp && lp.phases) || 3;
+    var voltage = (lp && lp.voltage_v) || 230;
+    var perA = phases * voltage; // watts per amp
+    function wToA(w) { return perA > 0 ? w / perA : 0; }
+    function aToW(a) { return Math.round(a * perA); }
 
-    // Outer wrapper holds two distinct sections:
-    //  1. PV mode (surplus-only toggle) — saves immediately on click
-    //  2. Schedule (target SoC + deadline + bat-SoC unlock) — Save button
-    // They're separated so it's obvious which controls the Save button
-    // owns. Earlier we kept the surplus toggle inside the Schedule
-    // section and operators couldn't tell whether Save covered it.
-    var wrap = document.createElement("div");
-    wrap.style.marginTop = "0.75rem";
-    wrap.style.paddingTop = "0.6rem";
-    wrap.style.borderTop = "1px solid var(--line)";
+    var minA = Math.max(1, Math.round(wToA((lp && lp.min_charge_w) || 0)) || 6);
+    var maxA = Math.round(wToA((lp && lp.max_charge_w) || 0)) || 16;
+    if (maxA <= minA) { maxA = minA + 1; }
 
-    // ---- Section 1: PV mode (surplus-only) ----
-    // Per-loadpoint hard flag, *independent* of any schedule. When on,
-    // dispatch refuses to import grid for this loadpoint regardless of
-    // what the MPC plans. Operators can run with this alone (no target,
-    // no deadline — just "harvest PV when there's enough") or layer a
-    // schedule on top below.
+    var active = !!(lp && lp.manual_active);
+    var curA = active ? Math.round(wToA((lp && lp.manual_charge_w) || 0)) : maxA;
+    if (curA < minA) { curA = minA; }
+    if (curA > maxA) { curA = maxA; }
+
+    var box = document.createElement("div");
+    box.style.marginTop = "0.75rem";
+    box.style.paddingTop = "0.6rem";
+    box.style.borderTop = "1px solid var(--line)";
+
+    var eyebrow = document.createElement("div");
+    eyebrow.textContent = "Manual Charge";
+    eyebrow.style.fontFamily = "var(--mono)";
+    eyebrow.style.fontSize = "0.7rem";
+    eyebrow.style.letterSpacing = "0.18em";
+    eyebrow.style.textTransform = "uppercase";
+    eyebrow.style.color = "var(--text-dim)";
+    eyebrow.style.marginBottom = "0.45rem";
+    box.appendChild(eyebrow);
+
+    // Slider + live readout.
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.alignItems = "center";
+    row.style.gap = "0.6rem";
+
+    var slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = String(minA);
+    slider.max = String(maxA);
+    slider.step = "1";
+    slider.value = String(curA);
+    slider.style.flex = "1";
+    slider.style.accentColor = "var(--accent-e)";
+
+    var readout = document.createElement("div");
+    readout.style.fontFamily = "var(--mono)";
+    readout.style.fontSize = "0.9rem";
+    readout.style.minWidth = "6.5em";
+    readout.style.textAlign = "right";
+    readout.style.color = "var(--fg)";
+    function renderReadout() {
+      var a = parseInt(slider.value, 10) || minA;
+      readout.textContent = a + " A · " + (aToW(a) / 1000).toFixed(1) + " kW";
+    }
+    renderReadout();
+    slider.addEventListener("input", renderReadout);
+
+    row.appendChild(slider);
+    row.appendChild(readout);
+    box.appendChild(row);
+
+    // Status line.
+    var status = document.createElement("small");
+    status.style.display = "block";
+    status.style.color = "var(--text-dim)";
+    status.style.marginTop = "0.35rem";
+    status.style.minHeight = "1em";
+    status.textContent = active
+      ? "Manual override active — overriding PV surplus (fuse still limits)."
+      : "Stopped = automatic (PV-surplus-only if enabled below). Start overrides it.";
+    box.appendChild(status);
+
+    // Start / Stop buttons.
+    var btnRow = document.createElement("div");
+    btnRow.style.display = "flex";
+    btnRow.style.gap = "0.5rem";
+    btnRow.style.marginTop = "0.5rem";
+
+    var startBtn = document.createElement("button");
+    startBtn.type = "button";
+    startBtn.textContent = active ? "Update" : "Start";
+    startBtn.style.flex = "1";
+    startBtn.style.padding = "0.4rem 0.6rem";
+    startBtn.style.border = "none";
+    startBtn.style.borderRadius = "4px";
+    startBtn.style.cursor = "pointer";
+    startBtn.style.fontWeight = "600";
+    startBtn.style.background = "var(--accent-e)";
+    startBtn.style.color = "#0a0a0a";
+
+    var stopBtn = document.createElement("button");
+    stopBtn.type = "button";
+    stopBtn.textContent = "Stop";
+    stopBtn.style.flex = "1";
+    stopBtn.style.padding = "0.4rem 0.6rem";
+    stopBtn.style.border = "1px solid var(--line)";
+    stopBtn.style.borderRadius = "4px";
+    stopBtn.style.cursor = "pointer";
+    stopBtn.style.background = "transparent";
+    stopBtn.style.color = "var(--fg)";
+    stopBtn.disabled = !active;
+    stopBtn.style.opacity = active ? "1" : "0.5";
+
+    btnRow.appendChild(startBtn);
+    btnRow.appendChild(stopBtn);
+    box.appendChild(btnRow);
+
+    startBtn.addEventListener("click", function () {
+      startBtn.disabled = true;
+      status.textContent = "Starting…";
+      var a = parseInt(slider.value, 10) || minA;
+      // CONTROL write — strict (FIX-B): persistent manual hold (hold_s:0).
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          power_w: aToW(a),
+          hold_s: 0,
+          phase_mode: phases === 1 ? "1p" : "3p",
+        }),
+      }).then(function () {
+        status.textContent = "Charging at " + a + " A — overriding PV surplus.";
+        manualNeedsRebuild = true; // reflect active state on next poll
+      }).catch(function () {
+        startBtn.disabled = false;
+        status.textContent = "Start failed — try again.";
+      });
+    });
+
+    stopBtn.addEventListener("click", function () {
+      stopBtn.disabled = true;
+      status.textContent = "Stopping…";
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/manual_hold", {
+        method: "DELETE",
+      }).then(function () {
+        status.textContent = "Released — back to automatic charging.";
+        manualNeedsRebuild = true;
+      }).catch(function () {
+        stopBtn.disabled = false;
+        status.textContent = "Stop failed — try again.";
+      });
+    });
+
+    return box;
+  }
+
+  // sliderHeader builds a "LABEL ............ value" row (mono uppercase
+  // label on the left, mono accent value on the right) that sits above a
+  // full-width slider, so the Current-charge and Target sliders read as a
+  // consistent pair. Returns the row plus the value span — the caller
+  // wires the slider's input event to update value.textContent.
+  function sliderHeader(labelText, valueText) {
+    var row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.alignItems = "baseline";
+    row.style.marginBottom = "0.3rem";
+    var lbl = document.createElement("span");
+    lbl.textContent = labelText;
+    lbl.style.fontFamily = "var(--mono)";
+    lbl.style.fontSize = "0.68rem";
+    lbl.style.letterSpacing = "0.14em";
+    lbl.style.textTransform = "uppercase";
+    lbl.style.color = "var(--text-dim)";
+    var val = document.createElement("span");
+    val.textContent = valueText;
+    val.style.fontFamily = "var(--mono)";
+    val.style.fontSize = "0.95rem";
+    val.style.color = "var(--accent-e)";
+    row.appendChild(lbl);
+    row.appendChild(val);
+    return { row: row, value: val };
+  }
+
+  // fullWidthSlider returns a 0–100 whole-percent range input spanning the
+  // modal width, wired to update a value span on drag.
+  function fullWidthSlider(initVal, valueSpan) {
+    var s = document.createElement("input");
+    s.type = "range";
+    s.min = "0"; s.max = "100"; s.step = "1";
+    s.value = String(initVal);
+    s.style.width = "100%";
+    s.style.margin = "0";
+    s.style.accentColor = "var(--accent-e)";
+    s.style.cursor = "pointer";
+    s.addEventListener("input", function () { valueSpan.textContent = s.value + "%"; });
+    return s;
+  }
+
+  // buildSoCSection — the car's CURRENT charge (a planning input: the
+  // planner sizes the grid/PV gap to the target from it). Lives in the
+  // Scheduled tab, above the target. The estimate drifts when there's no
+  // vehicle BMS reading, so the operator can correct it via
+  // POST /api/loadpoints/{id}/soc (re-anchors + replans). Editing is gated
+  // on plugged_in.
+  function buildSoCSection(lp) {
+    var socBox = document.createElement("div");
+    socBox.style.marginTop = "0.25rem";
+
+    var curSoc = (lp && lp.current_soc_pct != null) ? lp.current_soc_pct : null;
+    var socSource = (lp && lp.soc_source) ? lp.soc_source : "";
+    var sourceNote = socSource === "vehicle"
+      ? "Live from the car — drag only to correct drift."
+      : socSource === "inferred"
+        ? "Estimated from energy delivered — drag to set the real value."
+        : "Drag to set the car's current charge.";
+
+    var hdr = sliderHeader("Current charge", curSoc != null ? Math.round(curSoc) + "%" : "—");
+    socBox.appendChild(hdr.row);
+
+    if (lp && lp.plugged_in) {
+      var initSoc = (curSoc != null) ? Math.max(0, Math.min(100, Math.round(curSoc))) : 50;
+      var socInput = fullWidthSlider(initSoc, hdr.value);
+      socBox.appendChild(socInput);
+
+      var socStatus = document.createElement("small");
+      socStatus.style.display = "block";
+      socStatus.style.color = "var(--text-dim)";
+      socStatus.style.marginTop = "0.4rem";
+      socStatus.style.minHeight = "1em";
+      socStatus.textContent = sourceNote;
+      socBox.appendChild(socStatus);
+
+      var socSetBtn = document.createElement("button");
+      socSetBtn.type = "button";
+      socSetBtn.textContent = "Set current charge";
+      socSetBtn.style.padding = "0.35rem 0.8rem";
+      socSetBtn.style.marginTop = "0.4rem";
+      socSetBtn.style.border = "1px solid var(--line)";
+      socSetBtn.style.borderRadius = "4px";
+      socSetBtn.style.cursor = "pointer";
+      socSetBtn.style.background = "transparent";
+      socSetBtn.style.color = "var(--fg)";
+      var socBtnRow = document.createElement("div");
+      socBtnRow.style.display = "flex";
+      socBtnRow.style.justifyContent = "flex-end";
+      socBtnRow.appendChild(socSetBtn);
+      socBox.appendChild(socBtnRow);
+
+      socSetBtn.addEventListener("click", function () {
+        var v = parseInt(socInput.value, 10);
+        if (!isFinite(v) || v < 0 || v > 100) { socStatus.textContent = "Enter 0–100%."; return; }
+        socSetBtn.disabled = true;
+        socStatus.textContent = "Saving…";
+        ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/soc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ soc_pct: v }),
+        }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
+          .then(function (res) {
+            socSetBtn.disabled = false;
+            if (res.ok && res.body && res.body.ok) {
+              socStatus.textContent = "Saved — replanning.";
+              manualNeedsRebuild = true;
+            } else {
+              socStatus.textContent = (res.body && res.body.error) || "Set failed.";
+            }
+          }).catch(function (e) { socSetBtn.disabled = false; socStatus.textContent = "Set failed: " + e.message; });
+      });
+    } else {
+      hdr.value.style.color = "var(--text-dim)";
+      var socMuted = document.createElement("small");
+      socMuted.style.display = "block";
+      socMuted.style.color = "var(--text-dim)";
+      socMuted.textContent = "Plug in to set the car's current charge.";
+      socBox.appendChild(socMuted);
+    }
+
+    return socBox;
+  }
+
+  // buildPVModeSection — the per-loadpoint surplus-only toggle (PV
+  // charging tab). A hard flag, *independent* of any schedule: when on,
+  // dispatch refuses to import grid for this loadpoint regardless of what
+  // the MPC plans. Operators can run with this alone ("harvest PV when
+  // there's enough") or layer a schedule on top. Saves on click.
+  function buildPVModeSection(lp) {
     var soBox = document.createElement("div");
-    soBox.style.marginBottom = "0.8rem";
-    soBox.style.paddingBottom = "0.7rem";
-    soBox.style.borderBottom = "1px solid var(--line)";
+    soBox.style.marginTop = "0.25rem";
 
     var soEyebrow = document.createElement("div");
     soEyebrow.textContent = "PV Mode";
@@ -2477,7 +3038,7 @@
     soCb.checked = !!(lp && lp.surplus_only);
     soCb.style.accentColor = "var(--accent-e)";
     var soText = document.createElement("span");
-    soText.textContent = "Surplus only (PV exports only — never imports grid)";
+    soText.textContent = "Surplus only (PV only — no grid or battery)";
     soWrap.appendChild(soCb);
     soWrap.appendChild(soText);
 
@@ -2491,7 +3052,6 @@
 
     soBox.appendChild(soWrap);
     soBox.appendChild(soStatus);
-    wrap.appendChild(soBox);
 
     soCb.addEventListener("change", function () {
       // Surface the surplus-only ↔ schedule interaction immediately on
@@ -2502,7 +3062,8 @@
       }
       soCb.disabled = true;
       soStatus.textContent = "Saving…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint surplus-only toggle.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ surplus_only: soCb.checked }),
@@ -2518,25 +3079,38 @@
       });
     });
 
-    // ---- Section 2: Schedule ----
+    return soBox;
+  }
+
+  // buildScheduleSection — target SoC by a deadline + recurring + the
+  // bat-SoC surplus-unlock threshold (Scheduled tab). Persisted across
+  // restarts; the backend rolls the deadline forward daily when Recurring
+  // is set and arms the surplus-grab when the home battery is at/above the
+  // threshold (5 pp release hysteresis).
+  function buildScheduleSection(lp, hasPV) {
+    var sched = (lp && lp.schedule) || {};
+    // Convert "minutes-of-day-UTC" to a "HH:MM" string in the browser's
+    // local zone. The UI shows local time everywhere; we marshal back to
+    // UTC minutes on save.
+    var hasSched = !!(sched.soc_pct || sched.recurring || sched.surplus_unlock_bat_soc_pct);
+    var initLocalHHMM = utcMinsToLocalHHMM(typeof sched.time_of_day_min_utc === "number" ? sched.time_of_day_min_utc : 360);
+    var initSoC = typeof sched.soc_pct === "number" && sched.soc_pct > 0 ? sched.soc_pct : 50;
+    var initRec = !!sched.recurring;
+    var savedUnlock = typeof sched.surplus_unlock_bat_soc_pct === "number" ? sched.surplus_unlock_bat_soc_pct : 0;
+    // Surplus on/off is derived from the saved threshold: > 0 ⇒ enabled.
+    // The threshold input retains the last-used value (or defaults to 50)
+    // so unchecking + re-checking doesn't wipe the user's pick.
+    var initSurplus = savedUnlock > 0;
+    var initUnlock = savedUnlock > 0 ? savedUnlock : 50;
+
+    // Hairline divider separating the current-charge slider above from the
+    // target + deadline controls below. The tab is already named
+    // "Scheduled", so no section eyebrow/explainer here — the field labels
+    // carry the meaning.
     var box = document.createElement("div");
-
-    var eyebrow = document.createElement("div");
-    eyebrow.textContent = "Schedule (grid charging)";
-    eyebrow.style.fontFamily = "var(--mono)";
-    eyebrow.style.fontSize = "0.7rem";
-    eyebrow.style.letterSpacing = "0.18em";
-    eyebrow.style.textTransform = "uppercase";
-    eyebrow.style.color = "var(--text-dim)";
-    eyebrow.style.marginBottom = "0.55rem";
-    box.appendChild(eyebrow);
-
-    var schedExplainer = document.createElement("div");
-    schedExplainer.textContent = "Target SoC by a deadline. The planner uses cheap grid hours to fill the gap PV can't cover.";
-    schedExplainer.style.fontSize = "0.72rem";
-    schedExplainer.style.color = "var(--text-dim)";
-    schedExplainer.style.marginBottom = "0.5rem";
-    box.appendChild(schedExplainer);
+    box.style.marginTop = "0.9rem";
+    box.style.paddingTop = "0.9rem";
+    box.style.borderTop = "1px solid var(--line)";
 
     // Schedule is persistent loadpoint state — operators can configure
     // tomorrow morning's target tonight before plugging in. Show a
@@ -2567,7 +3141,7 @@
     // above, so toggling it gives instant feedback without waiting on
     // the network save round-trip.
     var surplusBestEffortHint = document.createElement("div");
-    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from PV only. Turn it off to let the planner grid-charge if PV can't cover.";
+    surplusBestEffortHint.textContent = "Surplus only is on — the deadline becomes best-effort from real PV surplus only. Turn it off to let the planner grid-charge if PV can't cover.";
     surplusBestEffortHint.style.fontSize = "0.72rem";
     surplusBestEffortHint.style.color = "var(--fg)";
     surplusBestEffortHint.style.fontStyle = "italic";
@@ -2626,7 +3200,6 @@
       return wrap;
     }
 
-    var socWrap = numInput(initSoC, 0, 100, 5, "%");
     var unlockWrap = numInput(initUnlock, 0, 100, 5, "%");
 
     var timeInp = document.createElement("input");
@@ -2659,13 +3232,17 @@
       return wrap;
     }
 
-    var recWrap = checkbox(initRec, "Recurring (every day)");
-    var surWrap = checkbox(initSurplus && !!hasPV, "Surplus charge from PV");
+    var recWrap = checkbox(initRec, "Repeat daily");
+    var surWrap = checkbox(initSurplus && !!hasPV, "Also charge from PV surplus");
     var recCb = recWrap.input;
     var surCb = surWrap.input;
 
-    box.appendChild(row("Target SoC", socWrap));
-    box.appendChild(row("By", timeInp));
+    // Target: same header + full-width slider treatment as Current charge.
+    var targetHdr = sliderHeader("Target", Math.max(0, Math.min(100, Math.round(initSoC))) + "%");
+    box.appendChild(targetHdr.row);
+    var targetSlider = fullWidthSlider(Math.max(0, Math.min(100, Math.round(initSoC))), targetHdr.value);
+    box.appendChild(targetSlider);
+    box.appendChild(row("Charge by", timeInp));
 
     var checkRow = document.createElement("div");
     checkRow.style.display = "flex";
@@ -2686,9 +3263,9 @@
     unlockHint.style.color = "var(--text-dim)";
     unlockHint.style.marginTop = "0.2rem";
     unlockHint.style.marginBottom = "0.3rem";
-    unlockHint.textContent = "Always grab PV surplus when home battery ≥ threshold.";
+    unlockHint.textContent = "Only once the home battery is at or above this level.";
 
-    var thresholdRow = row("Threshold", unlockWrap);
+    var thresholdRow = row("Home battery ≥", unlockWrap);
 
     if (hasPV) {
       box.appendChild(unlockHint);
@@ -2767,13 +3344,14 @@
       var unlockVal = (hasPV && surCb.checked) ? Number(unlockWrap.input.value) : 0;
       var body = {
         schedule: {
-          soc_pct: Number(socWrap.input.value),
+          soc_pct: Number(targetSlider.value),
           time_of_day_min_utc: minUTC,
           recurring: !!recCb.checked,
           surplus_unlock_bat_soc_pct: unlockVal,
         },
       };
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule save.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -2793,7 +3371,8 @@
       saveBtn.disabled = true;
       clearBtn.disabled = true;
       status.textContent = "Clearing…";
-      fetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+      // CONTROL write — strict (FIX-B): loadpoint schedule clear.
+      ownerFetch("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ schedule: null }),
@@ -2808,8 +3387,85 @@
       });
     });
 
-    wrap.appendChild(box);
-    return wrap;
+    return box;
+  }
+
+  // buildEvTabbedControl assembles the modal's three tabs and routes each
+  // section into the right one:
+  //   PV charging → surplus-only toggle
+  //   Manual      → amp slider + Start/Stop
+  //   Scheduled   → current-SoC correction (a planning input) + the
+  //                 target-SoC-by-deadline schedule
+  // The active tab persists across rebuilds via evActiveTab.
+  function buildEvTabbedControl(lp, hasPV) {
+    var container = document.createElement("div");
+    container.style.marginTop = "0.75rem";
+    container.style.paddingTop = "0.6rem";
+    container.style.borderTop = "1px solid var(--line)";
+
+    var tabBar = document.createElement("div");
+    tabBar.style.display = "flex";
+    tabBar.style.gap = "0.15rem";
+    tabBar.style.borderBottom = "1px solid var(--line)";
+    tabBar.style.marginBottom = "0.7rem";
+
+    var pvPanel = document.createElement("div");
+    pvPanel.appendChild(buildPVModeSection(lp));
+
+    var manualPanel = document.createElement("div");
+    manualPanel.appendChild(buildManualChargeSection(lp));
+
+    var schedPanel = document.createElement("div");
+    schedPanel.appendChild(buildSoCSection(lp));
+    schedPanel.appendChild(buildScheduleSection(lp, hasPV));
+
+    var panels = { pv: pvPanel, manual: manualPanel, scheduled: schedPanel };
+    var tabs = [
+      { id: "pv", label: "PV charging" },
+      { id: "manual", label: "Manual" },
+      { id: "scheduled", label: "Scheduled" },
+    ];
+    var tabBtns = {};
+
+    function selectTab(id) {
+      if (!panels[id]) { id = "pv"; }
+      evActiveTab = id;
+      for (var k in panels) { panels[k].style.display = (k === id) ? "" : "none"; }
+      tabs.forEach(function (t) {
+        var on = t.id === id;
+        var b = tabBtns[t.id];
+        b.style.color = on ? "var(--fg)" : "var(--text-dim)";
+        b.style.borderBottom = on ? "2px solid var(--accent-e)" : "2px solid transparent";
+        b.style.fontWeight = on ? "600" : "400";
+      });
+    }
+
+    tabs.forEach(function (t) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.textContent = t.label;
+      b.style.background = "transparent";
+      b.style.border = "none";
+      b.style.borderBottom = "2px solid transparent";
+      b.style.padding = "0.4rem 0.7rem";
+      b.style.marginBottom = "-1px";
+      b.style.cursor = "pointer";
+      b.style.fontFamily = "var(--mono)";
+      b.style.fontSize = "0.72rem";
+      b.style.letterSpacing = "0.08em";
+      b.style.textTransform = "uppercase";
+      b.addEventListener("click", function () { selectTab(t.id); });
+      tabBtns[t.id] = b;
+      tabBar.appendChild(b);
+    });
+
+    container.appendChild(tabBar);
+    container.appendChild(pvPanel);
+    container.appendChild(manualPanel);
+    container.appendChild(schedPanel);
+
+    selectTab(evActiveTab);
+    return container;
   }
 
   function utcMinsToLocalHHMM(min) {
@@ -2829,11 +3485,6 @@
 
   var evRefreshTimer = null;
   if (evModal) {
-    var evBtnStart = document.getElementById("ev-btn-start");
-    var evBtnPause = document.getElementById("ev-btn-pause");
-    var evBtnResume = document.getElementById("ev-btn-resume");
-    var evActionBtns = [evBtnStart, evBtnPause, evBtnResume];
-
     function openEvModal(driver) {
       evModalDriver = driver || null;
       evModal.open();
@@ -2923,20 +3574,11 @@
       });
     }
 
-    function evCommand(action) {
-      evActionBtns.forEach(function (b) { b.disabled = true; });
-      var body = { action: action };
-      if (evModalDriver) body.driver = evModalDriver;
-      postJson("/api/ev/command", body)
-        .catch(function () { /* postJson already logs */ })
-        .finally(function () {
-          refreshEvModal();
-          evActionBtns.forEach(function (b) { b.disabled = false; });
-        });
-    }
-    evBtnStart.addEventListener("click", function () { evCommand("ev_start"); });
-    evBtnPause.addEventListener("click", function () { evCommand("ev_pause"); });
-    evBtnResume.addEventListener("click", function () { evCommand("ev_resume"); });
+    // Legacy Start/Pause/Resume footer buttons were removed in favour of
+    // the in-body Manual Charge control (buildManualControl): an amp slider
+    // + Start/Stop that pins a persistent manual hold at a chosen current
+    // (Start, overrides surplus) or clears it (Stop, back to automatic).
+    // The POST /api/ev/command endpoint stays for HA / scripts.
   }
 
 
@@ -3057,8 +3699,10 @@
 
   // ---- History loader ----
   function loadHistory(range) {
+    if (!ownerDataAllowed()) return Promise.resolve(null);
     var points = CHART_POINTS;
-    return fetch("/api/history?range=" + (range || "5m") + "&points=" + points)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    return ownerFetch("/api/history?range=" + (range || "5m") + "&points=" + points)
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (!data || !data.items) return;
@@ -3177,7 +3821,8 @@
       if (seq !== historyCakeReqSeq) return;
       if (historyCakeWrap) historyCakeWrap.classList.remove("loading");
     };
-    fetch("/api/energy/daily?days=" + days)
+    // Owner read (carries the session cookie) — strict (FIX-B).
+    ownerFetch("/api/energy/daily?days=" + days)
       .then(function (r) { return r.json(); })
       .then(function (j) {
         if (seq !== historyCakeReqSeq) return;
@@ -3273,6 +3918,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
 
+    var C = chartColors();
     var pad = { left: 36, right: 36, top: 8, bottom: 18 };
     var plotW = cssW - pad.left - pad.right;
     var plotH = cssH - pad.top - pad.bottom;
@@ -3299,7 +3945,7 @@
     };
 
     // Zero baseline for battery
-    ctx.strokeStyle = "rgba(255,255,255,0.08)";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.left, batMid);
@@ -3344,7 +3990,7 @@
     ctx.stroke();
 
     // Axis labels — small, mono, dim.
-    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.fillStyle = C.dim;
     ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
@@ -3356,7 +4002,7 @@
     ctx.fillText("100%", pad.left + plotW + 4, socTop + 6);
     ctx.fillText("0%", pad.left + plotW + 4, socTop + socH - 6);
     // time axis: 24h ago / now
-    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.fillStyle = C.muted;
     ctx.textAlign = "left";
     ctx.fillText("24h ago", pad.left, cssH - 4);
     ctx.textAlign = "right";
@@ -3369,7 +4015,10 @@
   // otherwise fan out into many identical requests. Coalesce in-flight calls
   // and reuse a fresh result for a short TTL; pass force=true to bypass the
   // cache when a genuinely fresh sample is wanted (the periodic poll).
-  // Mirrors ftw-history-card.js's dailyFetchCache.
+  // Mirrors ftw-history-card.js's dailyFetchCache. Routed through ownerFetch
+  // (strict / FIX-B): /api/history is an owner read carrying the session cookie,
+  // so it must never traverse the relay in cleartext on the public home route
+  // (master used a plain fetch here; the P2P-only route keeps it strict).
   var HISTORY_CACHE_TTL_MS = 15000;
   var historyFetchCache = Object.create(null); // "range|points" -> { at, data?, promise? }
   function fetchHistory(range, points, force) {
@@ -3380,7 +4029,7 @@
       if (c.data) return Promise.resolve(c.data);
       if (c.promise) return c.promise;
     }
-    var promise = fetch("/api/history?range=" + range + "&points=" + points)
+    var promise = ownerFetch("/api/history?range=" + range + "&points=" + points)
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) { historyFetchCache[key] = { at: Date.now(), data: data }; return data; })
       .catch(function (err) {
@@ -3394,6 +4043,7 @@
 
   var lastLiveHistFetch = 0;
   function fetchLiveHistory(force) {
+    if (!ownerDataAllowed()) return Promise.resolve();
     lastLiveHistFetch = Date.now();
     return fetchHistory("24h", 288, force) // 5-min cadence
       .then(function (d) {
@@ -3404,59 +4054,564 @@
   }
 
   // ---- P2P transport indicator ----
-  // Reflects window.ftwP2P state (direct / relay / connecting); click toggles
-  // direct P2P on/off (persisted). Hidden only when WebRTC is unsupported.
+  // Reflects window.ftwP2P state (direct / relay / connecting). PURELY
+  // INFORMATIONAL — it explains how your browser is talking to your Pi; it is
+  // NOT a toggle. (The old click-to-toggle "disable direct P2P" made no sense on
+  // the P2P-only home route — there's no cleartext relay fallback for owner data,
+  // so disabling it just broke the channel. Tap/hover now only reveals the
+  // explanation.)
   function setupP2PIndicator() {
     var el = document.getElementById("p2p-status");
-    if (!el || !window.ftwP2P) return;
-    var label = el.querySelector(".p2p-label");
+    if (!window.ftwP2P) return;
+    var label = el && el.querySelector(".p2p-label");
     var titles = {
-      direct: "Direct P2P — end-to-end encrypted, bypassing the relay",
-      relay: "Via relay — click to toggle direct P2P",
-      connecting: "Connecting direct P2P…",
-      off: "Direct P2P unavailable",
+      direct: "Direct & end-to-end encrypted between your browser and your Pi — the relay sees nothing.",
+      relay: "Relayed via a blind TURN server — still end-to-end encrypted; the relay only forwards ciphertext.",
+      connecting: "Opening a direct, encrypted channel to your Pi…",
+      off: "Direct channel unavailable.",
     };
-    var text = { direct: "Direct", relay: "Relay", connecting: "P2P…", off: "" };
+    var text = { direct: "Direct", relay: "Relayed", connecting: "Connecting…", off: "" };
+    if (el) el.style.cursor = "default";
+
+    // The sign-in gate's trust line mirrors the same transport, so a visitor sees
+    // the security story BEFORE they're signed in. Direct = end-to-end to the Pi;
+    // Relayed = still E2E, relay forwards ciphertext only.
+    var trust = document.getElementById("signin-gate-trust");
+    var trustText = document.getElementById("signin-gate-trust-text");
+    var trustCopy = {
+      direct: "Direct & end-to-end encrypted to your Pi. The relay never sees your home.",
+      relay: "End-to-end encrypted. The relay only forwards ciphertext — it never sees your home.",
+      connecting: "Opening an encrypted channel to your Pi…",
+      off: "End-to-end encrypted to your Pi. The relay never sees your home.",
+    };
+
     window.ftwP2P.onState(function (s) {
-      if (s === "off") { el.hidden = true; return; }
-      el.hidden = false;
-      el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
-      el.classList.add("p2p-" + s);
-      if (label) label.textContent = text[s] || "";
-      el.title = titles[s] || "Transport";
-    });
-    el.addEventListener("click", function () {
-      var disabled = localStorage.getItem("ftw.p2p") === "off";
-      window.ftwP2P.setEnabled(disabled); // toggle
+      if (el) {
+        if (s === "off") { el.hidden = true; }
+        else {
+          el.hidden = false;
+          el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
+          el.classList.add("p2p-" + s);
+          if (label) label.textContent = text[s] || "";
+          el.title = titles[s] || "Transport";
+        }
+      }
+      if (trust) {
+        trust.classList.remove("is-relay", "is-connecting");
+        if (s === "relay") trust.classList.add("is-relay");
+        else if (s === "connecting") trust.classList.add("is-connecting");
+        if (trustText && trustCopy[s]) trustText.textContent = trustCopy[s];
+      }
     });
   }
 
-  // ---- Sign out (remote sessions only) ----
-  // whoami reports whether there's a real session to revoke; on the LAN
-  // (bypass) there's nothing to sign out of, so the button stays hidden.
-  function setupSignOut() {
-    var btn = document.getElementById("signout-btn");
-    if (!btn) return;
-    fetch("/api/owner-access/whoami", { credentials: "same-origin" })
+  // ---- Owner auth: inline sign-in + sign-out (the dashboard IS the door) ----
+  // whoami reports whether the viewer is signed in (and whether there's a
+  // session to revoke). On the LAN (bypass) there's nothing to sign in/out of.
+  // Remotely, when NOT signed in, we reveal an inline passkey sign-in (a discreet
+  // banner + a header key) and run the ceremony over the SAME strict P2P channel —
+  // no redirect to /owner-access/login.html, which would spawn a fresh channel
+  // with no session. All three calls (whoami, login/*, logout) ride ownerFetch
+  // (strict / FIX-B) so they never traverse the relay in cleartext.
+
+  // Minimal WebAuthn codec — mirrors owner-access/webauthn.js. next-app.js is a
+  // classic script, so it can't `import` the module; these few helpers are tiny.
+  function b64urlToBuf(s) {
+    if (typeof s !== "string") return s;
+    var pad = "=".repeat((4 - (s.length % 4)) % 4);
+    var b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/");
+    var bin = atob(b64), buf = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return buf.buffer;
+  }
+  function bufToB64url(buf) {
+    var bytes = new Uint8Array(buf), bin = "";
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function decodeAssertionOptions(opts) {
+    opts = JSON.parse(JSON.stringify(opts));
+    if (opts.publicKey) opts = opts.publicKey;
+    opts.challenge = b64urlToBuf(opts.challenge);
+    if (Array.isArray(opts.allowCredentials)) {
+      opts.allowCredentials = opts.allowCredentials.map(function (c) {
+        return Object.assign({}, c, { id: b64urlToBuf(c.id) });
+      });
+    }
+    return opts;
+  }
+  function encodeAssertionResult(cred) {
+    return {
+      id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type,
+      response: {
+        clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+        authenticatorData: bufToB64url(cred.response.authenticatorData),
+        signature: bufToB64url(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+      },
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    };
+  }
+
+  // hasDecryptableDirectory reports whether instance-sync has a usable directory
+  // cached (the user already authenticated + PRF-decrypted this session, or a
+  // migrated single-home record seeded the browser-carried copy). When false the
+  // visitor is anonymous and gets the PUBLIC landing — never any instance data.
+  function hasDecryptableDirectory() {
+    try {
+      var sync = window.ftwInstanceSync;
+      if (!sync || typeof sync.getCachedInstances !== "function") return false;
+      var list = sync.getCachedInstances() || [];
+      return list.length >= 1;
+    } catch (e) { return false; }
+  }
+
+  // The sign-in GATE replaces the dashboard when the viewer isn't signed in on a
+  // remote origin — so a logged-out visitor sees a clean "sign in to reach your
+  // home", never the empty dashboard chrome (which falsely reads as an
+  // unconfigured instance). On the LAN (bypass) the gate never shows. ownerNotAuthed
+  // also suppresses the "no devices configured" prompt for logged-out viewers.
+  var ownerNotAuthed = false;
+  var authGateActive = false;
+  function showGate(mode) {
+    document.documentElement.classList.add("ftw-gated"); // CSS shows the gate, hides nothing else needed (opaque overlay)
+    var g = document.getElementById("signin-gate");
+    if (g) g.setAttribute("data-mode", mode || "signin");
+    authGateActive = true;
+    ownerNotAuthed = (mode !== "connecting");
+    try { hideSetupBanner(); } catch (e) {}
+    try {
+      var noDevices = document.getElementById("no-devices-prompt");
+      if (noDevices) noDevices.remove();
+    } catch (e) {}
+  }
+  function hideGate() {
+    document.documentElement.classList.remove("ftw-gated");
+    authGateActive = false;
+    ownerNotAuthed = false;
+  }
+
+  // ---- C3: silent device-key sign-in (no passkey) ---------------------------
+  // A device that was set up on the LAN (C4) holds a NON-EXTRACTABLE key the Pi
+  // pinned. Once the channel is open we can prove that key to the Pi to mint the
+  // owner session SILENTLY — no Face ID. Flow:
+  //   GET  /api/owner-access/device-challenge -> {challenge, exp_ms}
+  //   sign "ftw-device-pop:v1:<site>:<challenge>" with the device key
+  //   POST /api/owner-access/device-pop {device_pubkey, challenge, sig}
+  // All over ownerFetch (strict P2P), so the proof never crosses the relay in
+  // cleartext. Resolves true iff the session was minted. Resolves false (never
+  // throws) for "no device key", "no site", or any PoP failure — the caller then
+  // falls back to the passkey ceremony.
+  var devicePoPBusy = false;
+  function waitForDeviceKeyStore(timeoutMs) {
+    if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+      return Promise.resolve(window.ftwDeviceKey);
+    }
+    return new Promise(function (resolve) {
+      var deadline = Date.now() + (timeoutMs || 3000);
+      function tick() {
+        if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
+          resolve(window.ftwDeviceKey);
+          return;
+        }
+        if (Date.now() >= deadline) { resolve(null); return; }
+        setTimeout(tick, 50);
+      }
+      tick();
+    });
+  }
+
+  function runDevicePoP() {
+    if (devicePoPBusy) return Promise.resolve(false);
+    // Need both the device-key store and the pinned site (for the signing string).
+    // device-key.js is an ES module loaded before this classic script, but modules
+    // are deferred and can still finish after setupAuth's first direct-channel
+    // tick. Wait briefly so a reload does not burn the one silent-auth attempt
+    // before window.ftwDeviceKey exists.
+    if (!window.ftwP2P || typeof window.ftwP2P.site !== "function") {
+      return Promise.resolve(false);
+    }
+    devicePoPBusy = true;
+    return waitForOwnerTransport(10000)
+      .then(function (transportOk) {
+        if (!transportOk) return false;
+        return waitForDeviceKeyStore(3000);
+      })
+      .then(function (store) {
+        if (!store) return false;
+        return store.hasDeviceKey()
+          .then(function (has) {
+            if (!has) return false; // never enrolled on this device → passkey path
+            return Promise.all([store.getOrCreate(), window.ftwP2P.site()])
+              .then(function (pair) {
+                var key = pair[0], site = pair[1];
+                if (!site) return false;
+                return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
+                  .then(function (r) { return r.ok ? r.json() : null; })
+                  .then(function (ch) {
+                    if (!ch || !ch.challenge) return false;
+                    var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
+                    return key.sign(msg).then(function (sig) {
+                      return ownerFetch("/api/owner-access/device-pop", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
+                        credentials: "same-origin",
+                      }).then(function (pop) { return !!(pop && pop.ok); });
+                    });
+                  });
+              });
+          });
+      })
+      .catch(function () { return false; })
+      .then(function (ok) { devicePoPBusy = false; return ok; });
+  }
+
+  // applySignedIn refreshes the dashboard in place once a session is minted
+  // (passkey OR silent device-PoP). Shared so both paths converge.
+  function refreshOwnerData(forceHistory) {
+    ownerDataPrimed = true;
+    fetchStatus();
+    fetchLiveHistory(!!forceHistory);
+    loadHistory(chartRange);
+  }
+  function primeOwnerData() {
+    if (ownerDataPrimed) return;
+    refreshOwnerData(true);
+  }
+  function applySignedIn() {
+    hideGate();
+    var signoutBtn = document.getElementById("signout-btn");
+    if (signoutBtn && !isLanFallbackOrigin()) signoutBtn.hidden = false;
+    refreshOwnerData(true);
+    announceOwnerAuthenticated();
+  }
+
+  function announceOwnerAuthenticated() {
+    window.dispatchEvent(new CustomEvent("ftw-owner-authenticated"));
+  }
+
+  // Explicit logout is a local browser intent, not just a server session revoke:
+  // if we let C3 run immediately afterwards, the remembered device-key silently
+  // mints a fresh session and "logout" appears to do nothing. Keep a local guard
+  // until the next successful passkey ceremony; normal reloads still auto-remember
+  // as long as the user did not press Sign out.
+  var MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
+  function manualSignoutActive() {
+    try { return localStorage.getItem(MANUAL_SIGNOUT_KEY) === "1"; }
+    catch (e) { return false; }
+  }
+  function markManualSignout() {
+    try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (e) {}
+    silentAuthTried = true;
+  }
+  function clearManualSignout() {
+    try { localStorage.removeItem(MANUAL_SIGNOUT_KEY); } catch (e) {}
+  }
+
+  // runSignIn: explicit button-driven sign-in over the dashboard's strict P2P
+  // transport. The button says "passkey", so it must run the passkey ceremony
+  // directly; the SILENT device-key path is only for automatic remembered-device
+  // checks in setupAuth(), and is disabled after an explicit logout until passkey
+  // auth succeeds.
+  var signInBusy = false;
+  function runSignIn(opts) {
+    opts = opts || {};
+    var allowSilent = opts.allowSilent === true && !manualSignoutActive();
+    if (signInBusy) return Promise.resolve(false);
+    signInBusy = true;
+    // say updates whichever message line is on screen. The same ceremony runs
+    // from both the returning-visitor gate (#signin-banner-msg) and the public
+    // landing (#signin-landing-msg); writing both keeps feedback visible without
+    // forking the flow.
+    var msgEls = ["signin-banner-msg", "signin-landing-msg"]
+      .map(function (id) { return document.getElementById(id); })
+      .filter(function (el) { return !!el; });
+    function say(t, cls) {
+      for (var i = 0; i < msgEls.length; i++) {
+        msgEls[i].textContent = t || "";
+        msgEls[i].className = "signin-gate-msg" + (cls ? " " + cls : "");
+      }
+    }
+    if (!allowSilent) return runPasskeySignIn(say);
+
+    say("Reaching your home…");
+    return runDevicePoP().then(function (silentOk) {
+      if (silentOk) {
+        signInBusy = false;
+        say("Signed in — this device is remembered.", "ok");
+        applySignedIn();
+        return true;
+      }
+      return runPasskeySignIn(say);
+    });
+  }
+
+  // openDirectoryAfterAssertion derives the directory ENCRYPTION key from THIS
+  // login assertion's PRF output (prf.js: outputFrom → deriveEncKey), loads +
+  // decrypts the relay directory blob (instance-sync.js: loadDirectory), and
+  // routes. v1 contract: the directory is a LIST. Exactly 1 entry → auto-open
+  // (no picker). >1 → auto-open the FIRST and leave a clearly-marked picker TODO.
+  // 0 → "finish setup on your home network" guidance (no error). When the PRF
+  // output is absent (Firefox, or a passkey enrolled without prf), we fall back to
+  // loadDirectory(W, null, origin) — the browser-carried copy — and surface that
+  // encrypted home sync is unavailable here. A PRF/decrypt failure is NEVER fatal:
+  // the dashboard still opens; instance-sync's local cache is the source of truth.
+  function openDirectoryAfterAssertion(cred, say) {
+    var prf = window.ftwPrf, sync = window.ftwInstanceSync;
+    if (!prf || typeof prf.outputFrom !== "function" || typeof prf.deriveEncKey !== "function" ||
+        !sync || typeof sync.loadDirectory !== "function") {
+      return Promise.resolve(); // crypto modules absent → carry-local only
+    }
+    // W = base64url(assertion.response.userHandle) — the opaque wallet handle the
+    // relay keys the encrypted blob on.
+    var W = null;
+    try {
+      var uh = cred && cred.response ? cred.response.userHandle : null;
+      if (uh) W = bufToB64url(uh);
+    } catch (e) {}
+    if (!W) return Promise.resolve(); // no wallet handle → nothing to fetch
+    var origin = location.origin;
+    function route(dir) {
+      var list = (dir && dir.instances) || [];
+      if (list.length === 1) {
+        // Exactly one home — auto-open. The pin re-resolves from the freshly
+        // cached directory entry (p2p.js::pinnedIdentity), so the next owner
+        // fetch connects to the right site with no relay round-trip.
+        return;
+      }
+      if (list.length > 1) {
+        // TODO(multi-instance picker): v1 has no picker, so auto-open the FIRST
+        // entry. instance-sync's getCachedInstances()[0] is what p2p.js pins, so
+        // "the first" is already the chosen one. Replace this with a picker UI
+        // when multi-home support lands.
+        try { console.log("ftw: " + list.length + " homes in directory; auto-opening the first (picker TODO)"); } catch (e) {}
+        return;
+      }
+      // 0 entries — the wallet has no home registered yet. This isn't an error;
+      // the user just hasn't finished setup on their home network.
+      say("Finish setting up 42W on your home network, then return here.", "ok");
+    }
+    var prfOut = null;
+    try { prfOut = prf.outputFrom(cred); } catch (e) { prfOut = null; }
+    if (!prfOut) {
+      // No PRF on this browser/passkey — fall back to the browser-carried copy.
+      say("Signed in. (Encrypted home sync isn’t available on this browser.)", "ok");
+      return sync.loadDirectory(W, null, origin).then(route).catch(function () {});
+    }
+    return prf.deriveEncKey(prfOut)
+      .then(function (encKey) { return sync.loadDirectory(W, encKey, origin); })
+      .then(route)
+      .catch(function () { /* PRF/decrypt failure → carry-local; never blocks login */ });
+  }
+
+  // runPasskeySignIn is the explicit passkey ceremony — the fallback when the
+  // silent device path isn't available. Kept as its own function so runSignIn can
+  // try silent first without duplicating the WebAuthn flow. The assertion requests
+  // the PRF extension (prf.extensionInput): the same passkey tap yields the
+  // directory-decryption key, so after finish we load + route the directory.
+  function runPasskeySignIn(say) {
+    say("Opening secure channel…");
+    return waitForOwnerTransport(25000)
+      .then(function (ok) {
+        if (!ok) {
+          say("Still opening the encrypted channel to your Pi. Try again in a moment.");
+          scheduleAuthRetry(1000);
+          return null;
+        }
+        say("Waiting for your passkey…");
+        return ownerFetch("/api/owner-access/login/start", { method: "POST" });
+      })
+      .then(function (start) {
+        if (!start) return null;
+        if (start.status === 404) { say("No passkey here yet — set up this device on your home network first.", "err"); return null; }
+        if (!start.ok) { say("Sign-in unavailable (" + start.status + ").", "err"); return null; }
+        return start.json();
+      })
+      .then(function (data) {
+        if (!data) return false;
+        var getOpts = { publicKey: decodeAssertionOptions(data.options) };
+        // Request the PRF extension so the authenticator evaluates the per-wallet
+        // secret we HKDF into the directory key (prf.js). Harmless on browsers /
+        // authenticators that don't support it — they simply return no prf result
+        // and we fall back to the browser-carried directory copy.
+        try {
+          if (window.ftwPrf && typeof window.ftwPrf.extensionInput === "function") {
+            getOpts.publicKey.extensions = Object.assign(
+              {}, getOpts.publicKey.extensions, window.ftwPrf.extensionInput());
+          }
+        } catch (e) {}
+        return navigator.credentials.get(getOpts).then(function (cred) {
+          if (!cred) { say(""); return false; }
+          var finishBody = encodeAssertionResult(cred);
+          var devicePubP = Promise.resolve(null);
+          if (window.ftwDeviceKey && typeof window.ftwDeviceKey.exportPubHex === "function") {
+            devicePubP = window.ftwDeviceKey.exportPubHex().catch(function () { return null; });
+          }
+          return devicePubP.then(function (devicePubHex) {
+            if (devicePubHex) finishBody.device_pubkey = devicePubHex;
+            return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(finishBody),
+              credentials: "same-origin",
+            });
+          }).then(function (finish) {
+            if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
+            // Session minted. Now derive the directory key from this SAME
+            // assertion's PRF output, load + decrypt the relay directory, and
+            // route (auto-open on exactly 1). Non-fatal: a PRF/decrypt failure
+            // still signs the user in against the browser-carried copy.
+            return openDirectoryAfterAssertion(cred, say).then(function () {
+              clearManualSignout();
+              say("Signed in.", "ok");
+              return true;
+            });
+          });
+        });
+      })
+      .catch(function (e) {
+        if (e && e.name === "AbortError") { say(""); return false; }
+        say((e && e.message) || "Sign-in error.", "err");
+        return false;
+      })
+      .then(function (ok) {
+        signInBusy = false;
+        if (ok) applySignedIn();
+        return ok;
+      });
+  }
+
+  // setupAuth wires the gate/signout buttons once, then reflects the current
+  // whoami state. Safe to call repeatedly (on load and whenever the P2P channel
+  // (re)connects), since whoami needs the channel up to answer on a remote origin.
+  var authRetryTimer = null;
+  function scheduleAuthRetry(delayMs) {
+    if (authRetryTimer || isLanFallbackOrigin()) return;
+    authRetryTimer = setTimeout(function () {
+      authRetryTimer = null;
+      setupAuth();
+    }, delayMs || 1500);
+  }
+
+  function showWaitingOrLandingGate() {
+    if (!hasDecryptableDirectory()) {
+      showSignInGate();
+      return;
+    }
+    showGate("connecting");
+    scheduleAuthRetry(1500);
+  }
+
+  function setupAuth() {
+    if (authRetryTimer) {
+      clearTimeout(authRetryTimer);
+      authRetryTimer = null;
+    }
+    var signoutBtn = document.getElementById("signout-btn");
+    var gateBtn = document.getElementById("signin-gate-btn");
+    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
+    // The public-landing button runs the SAME ceremony as the gate button — one
+    // runSignIn(), not a fork — so the landing and the returning-visitor card
+    // converge on the identical passkey + PRF + directory flow.
+    var landingBtn = document.getElementById("signin-landing-btn");
+    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
+    if (signoutBtn && !signoutBtn._wired) {
+      signoutBtn._wired = true;
+      signoutBtn.onclick = function () {
+        markManualSignout();
+        ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
+          .catch(function () {})
+          .then(function () { location.reload(); });
+      };
+    }
+    ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (me) {
-        if (!me || !me.can_sign_out) return; // LAN bypass / not signed in
-        btn.hidden = false;
-        btn.onclick = function () {
-          fetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
-            .catch(function () {})
-            .then(function () { location.href = "/owner-access/"; });
-        };
+        if (me && me.can_sign_out) {            // signed-in remote session
+          if (signoutBtn) signoutBtn.hidden = false;
+          hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
+          return;
+        }
+        if (me && me.authenticated) {           // genuine-LAN bypass — full access
+          if (signoutBtn) signoutBtn.hidden = true;
+          hideGate();
+          primeOwnerData();
+          announceOwnerAuthenticated();
+          return;
+        }
+        // Not signed in (remote). Try the SILENT device-key path (C3) ONCE before
+        // showing the gate — a remembered device signs in with no Face ID. Only
+        // when there's no device key / PoP fails do we fall back to the passkey
+        // gate. silentAuthTried guards against re-running it on every channel
+        // reconnect.
+        if (signoutBtn) signoutBtn.hidden = true;
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        if (manualSignoutActive()) {
+          showSignInGate();
+          return;
+        }
+        if (!silentAuthTried) {
+          silentAuthTried = true;
+          runDevicePoP().then(function (ok) {
+            if (ok) { applySignedIn(); return; }
+            showSignInGate();
+          });
+          return;
+        }
+        showSignInGate();
       })
-      .catch(function () { /* whoami failed → leave the button hidden */ });
+      .catch(function () {
+        if (!ownerTransportReady()) {
+          showWaitingOrLandingGate();
+          return;
+        }
+        showSignInGate();
+      });
+  }
+
+  // silentAuthTried: the C3 silent device-PoP is attempted at most once per page
+  // load (it's idempotent but pointless to repeat on every reconnect).
+  var silentAuthTried = false;
+
+  // showSignInGate routes the gate. The multi-tenant PUBLIC home route is purely
+  // ADDITIVE: a visitor with NO decryptable directory (anonymous, fresh browser)
+  // gets the public landing — brand + passkey + Learn more, and NO instance data.
+  // Once a directory is cached (this session's PRF decrypt, or a migrated
+  // single-home record) the existing single-tenant copy applies: the normal
+  // "signin" card, or the "setup" card when p2p.js reports this origin is
+  // UNENROLLED (no device key — never set up on the LAN). On the LAN the gate
+  // never shows at all, so the existing flow there is untouched.
+  function showSignInGate() {
+    if (!hasDecryptableDirectory()) { showGate("public-landing"); return; }
+    var unEnrolled = false;
+    try {
+      unEnrolled = !!(window.ftwP2P && window.ftwP2P.isUnenrolled && window.ftwP2P.isUnenrolled());
+    } catch (e) { /* default to the normal sign-in gate */ }
+    showGate(unEnrolled ? "setup" : "signin");
   }
 
   // ---- Init ----
+  // On a remote/public origin, cover the dashboard with the gate ("connecting…")
+  // BEFORE any data fetch renders, so a logged-out visitor never sees the empty
+  // dashboard chrome. setupAuth() resolves it to the dashboard (signed in) or the
+  // sign-in card (not). On the LAN (bypass) the gate never shows.
+  if (typeof isLanFallbackOrigin === "function" && !isLanFallbackOrigin()) showGate("connecting");
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();
   setupP2PIndicator();
-  setupSignOut();
+  setupAuth();
+  // whoami needs the P2P channel up to answer on a remote origin, so the load-time
+  // call may race the connection — re-check whenever the channel (re)connects.
+  if (window.ftwP2P && typeof window.ftwP2P.onState === "function") {
+    window.ftwP2P.onState(function (s) { if (s === "direct" || s === "relay") setupAuth(); });
+  }
   setInterval(fetchStatus, POLL_INTERVAL);
   setInterval(function () { fetchLiveHistory(true); }, 60_000); // 1-min refresh — always fresh
   window.addEventListener("resize", function () {

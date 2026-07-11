@@ -11,6 +11,7 @@ func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"public_key_hex": s.deps.SiteIdentityPubHex,
+		"site_id":        s.deps.SiteID,
 		"algorithm":      "ES256",
 		"curve":          "P-256",
 	})

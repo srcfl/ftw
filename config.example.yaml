@@ -43,8 +43,70 @@ drivers:
         port: 502
         unit_id: 1
 
+  # Pixii PowerShaper. When troubleshooting mode is enabled in Settings,
+  # Pixii also exposes calibration/control status and setpoint readback metrics.
+  # - name: pixii
+  #   lua: drivers/pixii.lua
+  #   is_site_meter: true
+  #   battery_capacity_wh: 20000
+  #   capabilities:
+  #     modbus:
+  #       host: 192.168.1.50
+  #       port: 502
+  #       unit_id: 1
+
+  # V2X chargers are modeled separately from stationary batteries.
+  # They emit signed v2x_charger.w telemetry:
+  #   +W = vehicle charging, -W = vehicle discharging into the site/grid.
+  # Manual test setpoints can be sent with POST /api/v2x/command.
+  #
+  # - name: ferroamp_dc2
+  #   lua: drivers/ferroamp_dc2_v2x.lua
+  #   capabilities:
+  #     mqtt:
+  #       host: 192.168.1.70
+  #       port: 1883
+  #       username: dc2
+  #       password: dc2mqtt!
+  #
+  # - name: ambibox
+  #   lua: drivers/ambibox_v2x.lua
+  #   capabilities:
+  #     mqtt:
+  #       host: sid-os.local
+  #       port: 1883
+
+  # NIBE S-series heat pump — read-only telemetry over the on-prem Local
+  # REST API (HTTPS + Basic auth). The pump presents a SELF-SIGNED cert, so
+  # pin it: tls_pin_sha256 is the cert SHA-256 fingerprint (the
+  # "fingeravtryck" shown in the myUplink app, or from `openssl s_client
+  # -connect <ip>:8443 | openssl x509 -fingerprint -sha256`). The host then
+  # trusts exactly that one cert — never a blanket insecure-skip-verify.
+  # Leave the pump in read-only mode (aidMode off); this driver never writes.
+  # - name: nibe
+  #   lua: drivers/nibe_local.lua
+  #   config:
+  #     host: 192.168.1.180
+  #     port: 8443
+  #     username: <local-api-username>
+  #     password: <local-api-password>
+  #   capabilities:
+  #     http:
+  #       allowed_hosts: ["192.168.1.180:8443"]
+  #       tls_pin_sha256: "<64-hex-char certificate fingerprint>"
+
 api:
   port: 8080
+
+# Owner remote access — reach your dashboard from anywhere over a direct,
+# end-to-end-encrypted browser↔Pi WebRTC channel (the relay only brokers the
+# connection; it never sees your traffic). OPT-IN, DEFAULT OFF: the Pi makes no
+# outgoing connection unless you enable it. Omit this block to stay fully local.
+# remote_access:
+#   enabled: false
+#   turn:                 # optional blind ICE fallback for hard-NAT/CGNAT peers
+#     enabled: false      # relays ciphertext only — costs zero trustlessness
+#     url: ""
 
 # Home Assistant MQTT bridge (optional)
 homeassistant:

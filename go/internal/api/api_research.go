@@ -31,6 +31,7 @@ type loadResearchBucket struct {
 	pvW           float64
 	batW          float64
 	evW           float64
+	v2xW          float64
 	houseLoadW    float64
 	recordedLoadW float64
 	batSoC        float64
@@ -110,7 +111,7 @@ func (s *Server) handleLoadResearchDump(w http.ResponseWriter, r *http.Request) 
 		"bucket_min":     loadResearchBucketMin,
 		"timezone":       time.Local.String(),
 		"privacy":        "no logs, no raw config, no hostnames, no driver names, no device identifiers",
-		"load_semantics": "house_load_w = max(grid_w - pv_w - bat_w - ev_w, 0); site convention: import/charge positive, PV/discharge negative",
+		"load_semantics": "house_load_w = max(grid_w - pv_w - bat_w - ev_w - v2x_w, 0); site convention: import/charge positive, PV/battery discharge/V2X discharge negative",
 		"contents": []string{
 			"manifest.json",
 			"site.json",
@@ -144,7 +145,8 @@ func buildLoadResearchBuckets(rows []state.HistoryPoint) []loadResearchBucket {
 			byStart[start] = b
 		}
 		evW := historyEVW(row.JSON)
-		houseLoadW := row.GridW - row.PVW - row.BatW - evW
+		v2xW := historyV2XW(row.JSON)
+		houseLoadW := row.GridW - row.PVW - row.BatW - evW - v2xW
 		if houseLoadW < 0 {
 			houseLoadW = 0
 		}
@@ -153,6 +155,7 @@ func buildLoadResearchBuckets(rows []state.HistoryPoint) []loadResearchBucket {
 		b.pvW += row.PVW
 		b.batW += row.BatW
 		b.evW += evW
+		b.v2xW += v2xW
 		b.houseLoadW += houseLoadW
 		b.recordedLoadW += row.LoadW
 		b.batSoC += row.BatSoC
@@ -171,6 +174,7 @@ func buildLoadResearchBuckets(rows []state.HistoryPoint) []loadResearchBucket {
 			pvW:           b.pvW / n,
 			batW:          b.batW / n,
 			evW:           b.evW / n,
+			v2xW:          b.v2xW / n,
 			houseLoadW:    b.houseLoadW / n,
 			recordedLoadW: b.recordedLoadW / n,
 			batSoC:        b.batSoC / n,
@@ -182,14 +186,14 @@ func buildLoadResearchBuckets(rows []state.HistoryPoint) []loadResearchBucket {
 
 func formatLoadResearchCSV(buckets []loadResearchBucket, forecasts []state.ForecastPoint, prices []state.PricePoint) string {
 	var b strings.Builder
-	b.WriteString("bucket_start_ms,bucket_end_ms,local_weekday,local_hour,local_minute,n_samples,grid_w,pv_w,bat_w,ev_w,house_load_w,recorded_load_w,bat_soc,temp_c,cloud_pct,total_ore_kwh,spot_ore_kwh\n")
+	b.WriteString("bucket_start_ms,bucket_end_ms,local_weekday,local_hour,local_minute,n_samples,grid_w,pv_w,bat_w,ev_w,v2x_w,house_load_w,recorded_load_w,bat_soc,temp_c,cloud_pct,total_ore_kwh,spot_ore_kwh\n")
 	for _, row := range buckets {
 		start := time.UnixMilli(row.startMs)
 		local := start.In(time.Local)
 		midMs := row.startMs + int64(loadResearchBucketMin)*60*1000/2
 		tempC, tempOK, cloudPct, cloudOK := forecastAt(forecasts, midMs)
 		totalOre, totalOK, spotOre, spotOK := priceAt(prices, midMs)
-		fmt.Fprintf(&b, "%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+		fmt.Fprintf(&b, "%d,%d,%d,%d,%d,%d,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
 			row.startMs,
 			row.startMs+int64(loadResearchBucketMin)*60*1000,
 			int(local.Weekday()),
@@ -200,6 +204,7 @@ func formatLoadResearchCSV(buckets []loadResearchBucket, forecasts []state.Forec
 			researchFloat(row.pvW, true),
 			researchFloat(row.batW, true),
 			researchFloat(row.evW, true),
+			researchFloat(row.v2xW, true),
 			researchFloat(row.houseLoadW, true),
 			researchFloat(row.recordedLoadW, true),
 			researchFloat(row.batSoC, true),
@@ -234,6 +239,30 @@ func historyEVW(js string) float64 {
 		return 0
 	}
 	return evW
+}
+
+func historyV2XW(js string) float64 {
+	if js == "" {
+		return 0
+	}
+	var payload struct {
+		V2XW    *float64                      `json:"v2x_w"`
+		Drivers map[string]map[string]float64 `json:"drivers"`
+	}
+	if err := json.Unmarshal([]byte(js), &payload); err != nil {
+		return 0
+	}
+	if payload.V2XW != nil {
+		return *payload.V2XW
+	}
+	var v2xW float64
+	for _, vals := range payload.Drivers {
+		v2xW += vals["v2x_w"]
+	}
+	if math.Abs(v2xW) < 1 {
+		return 0
+	}
+	return v2xW
 }
 
 func forecastAt(rows []state.ForecastPoint, tsMs int64) (tempC float64, tempOK bool, cloudPct float64, cloudOK bool) {

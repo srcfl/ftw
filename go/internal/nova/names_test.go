@@ -34,9 +34,10 @@ func TestDeviceTypeFor(t *testing.T) {
 		want  string
 	}{
 		{[]string{KindBattery, KindPV, KindMeter}, "inverter"}, // hybrid
-		{[]string{KindPV}, "inverter"},                          // string inverter
+		{[]string{KindPV}, "inverter"},                         // string inverter
 		{[]string{KindMeter}, "meter"},
 		{[]string{KindEV}, "charger"},
+		{[]string{KindV2X}, "charger"},
 		{[]string{}, "inverter"}, // default when unknown
 	}
 	for _, c := range cases {

@@ -27,6 +27,42 @@ function fmtCountdown(s) {
   return m + ":" + String(sec).padStart(2, "0");
 }
 
+async function copyText(text) {
+  if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) { /* fall through to the selection fallback */ }
+  }
+  if (typeof document === "undefined" || !document.createElement || !document.body) return false;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.left = "-1000px";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  let ok = false;
+  try {
+    ok = !!(document.execCommand && document.execCommand("copy"));
+  } catch (_) {
+    ok = false;
+  }
+  ta.remove();
+  return ok;
+}
+
+function selectText(el) {
+  if (!el || typeof window === "undefined" || typeof document === "undefined" || !window.getSelection || !document.createRange) return;
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 // mountEnrollPin wires a host element. It injects the toggle button + a hidden
 // result region, and manages a single live countdown timer at a time.
 //
@@ -81,12 +117,13 @@ export function mountEnrollPin(host, label) {
 
     const copyBtn = out.querySelector(".pin-copy-btn");
     copyBtn.onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(pin);
+      if (await copyText(pin)) {
         copyBtn.textContent = "Copied";
         setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
-      } catch (e) {
-        copyBtn.textContent = "Copy failed";
+      } else {
+        selectText(out.querySelector(".pin-digits"));
+        copyBtn.textContent = "Select PIN";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
       }
     };
 

@@ -278,6 +278,18 @@ func (r *TokenRegistry) CheckGrant(token, grant string) bool {
 	return subtle.ConstantTimeCompare([]byte(t.grant), []byte(grant)) == 1
 }
 
+// Delete removes a token outright (not merely revokes it). Used to ROLL BACK a
+// registration whose post-register step failed — e.g. when /tunnel/register
+// could not prove poll-secret ownership of the host_id, so the token must leave
+// NO trace. Idempotent. Distinct from Revoke (which keeps the record in a
+// revoked state for the session's lifetime): a rolled-back registration never
+// existed, so the friend can't later approve it and reach the host_id.
+func (r *TokenRegistry) Delete(token string) {
+	r.mu.Lock()
+	delete(r.tokens, token)
+	r.mu.Unlock()
+}
+
 // Revoke unconditionally marks a token as revoked. Idempotent.
 func (r *TokenRegistry) Revoke(token string) {
 	t, err := r.Get(token)

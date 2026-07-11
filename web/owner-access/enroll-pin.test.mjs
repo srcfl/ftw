@@ -46,6 +46,8 @@ describe("enroll-pin module", () => {
   it("renders a copy button and a live countdown that re-mints on expiry", () => {
     assert.match(SRC, /pin-copy-btn/);
     assert.match(SRC, /clipboard\.writeText/);
+    assert.match(SRC, /execCommand\("copy"\)/, "copy has an insecure-LAN/Safari fallback");
+    assert.match(SRC, /Select PIN/, "copy failure selects the visible PIN instead of dead-ending");
     assert.match(SRC, /setInterval\(tick, 1000\)/, "countdown ticks once per second");
     assert.match(SRC, /mint a new PIN/i, "expired state offers a re-mint");
   });
@@ -63,14 +65,24 @@ describe("owner-access pages stop pointing users at the raw PIN endpoint", () =>
   it("enroll.html no longer instructs curling /api/owner-access/enroll-pin or reading logs", () => {
     assert.doesNotMatch(ENROLL, /read the PIN on the Pi at[\s\S]*enroll-pin/i);
     assert.doesNotMatch(ENROLL, /in its logs/i);
-    assert.match(ENROLL, /Show enrollment PIN/,
-      "the button copy replaces the raw-API instruction");
+    assert.match(ENROLL, /PIN already came next to the QR/,
+      "public bootstrap enrollment should point back to the QR-side PIN, not raw APIs");
   });
 
-  it("both owner-access pages mount the PIN panel", () => {
-    for (const html of [ENROLL, INDEX]) {
-      assert.match(html, /mountEnrollPin\(/);
-      assert.match(html, /id="pin-panel"/);
-    }
+  it("the owner-access pages surface the enrollment PIN (not a raw curl)", () => {
+    // enroll.html keeps the click-to-reveal PIN panel only on the LAN origin.
+    assert.match(ENROLL, /mountEnrollPin\(/);
+    assert.match(ENROLL, /isLanOrigin\(\)/,
+      "LAN-only means the Pi serves the page directly, not just apiBase()==='' on home.*");
+    assert.match(ENROLL, /pinPanel\.remove\(\)/);
+    assert.match(ENROLL, /id="pin-panel"/);
+    assert.match(ENROLL, /navigator\.credentials/);
+    assert.match(ENROLL, /Passkeys require HTTPS/);
+    // index.html (the LAN landing) now surfaces the PIN inside the auto-shown
+    // "Set up remote access" QR hero (setup-remote.js renders the 6-digit PIN below
+    // the QR), so a separate bare mountEnrollPin panel is redundant there.
+    assert.match(INDEX, /mountSetupRemote\(/);
+    assert.match(INDEX, /auto:\s*true/,
+      "the LAN landing auto-shows the setup QR, which carries the PIN");
   });
 });

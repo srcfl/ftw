@@ -47,7 +47,7 @@ forty-two-watts publishes MQTT auto-discovery configs under the `homeassistant/`
 
 | Entity          | Type   | Options                                              | Description         |
 |-----------------|--------|------------------------------------------------------|---------------------|
-| Home EMS Mode   | select | `idle`, `self_consumption`, `charge`, `priority`, `weighted` | Operating mode      |
+| Home EMS Mode   | select | `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_self`, `planner_cheap`, `planner_passive_arbitrage`, `planner_arbitrage` | Operating mode      |
 
 ### Per-Driver Sensors
 
@@ -85,7 +85,7 @@ Home Assistant (or any MQTT client) can publish to these topics to control forty
 
 | Topic                          | Payload        | Description                            |
 |--------------------------------|----------------|----------------------------------------|
-| `fortytwo/command/mode`         | string         | Set mode: `idle`, `self_consumption`, `charge`, `priority`, `weighted` |
+| `fortytwo/command/mode`         | string         | Set mode: `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_self`, `planner_cheap`, `planner_passive_arbitrage`, `planner_arbitrage` |
 | `fortytwo/command/grid_target_w`| number (string)| Set grid target in watts (e.g., `"0"` for self-consumption, `"200"` for 200W import target) |
 
 ## Example Home Assistant Automations

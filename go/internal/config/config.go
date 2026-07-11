@@ -8,9 +8,11 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,8 +32,41 @@ type Config struct {
 	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	V2X           *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+	RemoteAccess  *RemoteAccess      `yaml:"remote_access,omitempty" json:"remote_access,omitempty"`
+}
+
+// RemoteAccess opts the Pi into the owner remote-access home route. DEFAULT OFF:
+// the Pi makes NO outgoing connection to the signaling relay unless Enabled is
+// true — even if FTW_RELAY_URL is present in the environment. A fresh install
+// stays fully local (Local Over Cloud), and an operator who reaches their Pi
+// over a VPN never has to carry an unnecessary outbound connection.
+//
+// When enabled, owner traffic rides a direct browser↔Pi DTLS WebRTC DataChannel
+// (the relay is a blind signaling rendezvous, never a plaintext tunnel). See
+// docs/superpowers/specs/2026-06-04-p2p-only-home-route-v1-design.md.
+type RemoteAccess struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// TURN is a BLIND, self-hostable ICE fallback for hard-NAT / CGNAT peers
+	// where direct P2P can't form. It relays DTLS ciphertext only — it cannot
+	// read or MITM the channel (anti-MITM is the signed fingerprint, not TURN),
+	// so it costs zero trustlessness. Default OFF; enabling it is config-only.
+	TURN *TURN `yaml:"turn,omitempty" json:"turn,omitempty"`
+}
+
+// TURN is the optional, blind, ciphertext-only ICE relay fallback.
+type TURN struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	URL     string `yaml:"url,omitempty" json:"url,omitempty"`
+	Secret  string `yaml:"secret,omitempty" json:"secret,omitempty"`
+}
+
+// RemoteAccessEnabled reports whether the owner remote-access home route is
+// opted in. Nil-safe: a config with no remote_access block is OFF.
+func (c *Config) RemoteAccessEnabled() bool {
+	return c.RemoteAccess != nil && c.RemoteAccess.Enabled
 }
 
 // Notifications configures outbound push notifications. Exactly one
@@ -64,9 +99,9 @@ type NtfyConfig struct {
 
 // NotificationRule is one event type the operator can toggle.
 type NotificationRule struct {
-	Type          string `yaml:"type" json:"type"`
-	Enabled       bool   `yaml:"enabled" json:"enabled"`
-	ThresholdS    int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
+	Type       string `yaml:"type" json:"type"`
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	ThresholdS int    `yaml:"threshold_s,omitempty" json:"threshold_s,omitempty"`
 	// ThresholdN is a count-based threshold used by event types that
 	// aggregate across drivers (concurrent_drivers_offline). Ignored
 	// by per-driver events. Default behaviour per event documented
@@ -90,12 +125,12 @@ type NotificationRule struct {
 //
 // SchemaMode controls the wire format sent to Nova:
 //   - "legacy"  (default): translate forty-two-watts' native clean payload
-//                to the current Nova wire shape (battery sign flip,
-//                PascalCase fields, pv→solar, ev→ev_port). The translation
-//                layer is in internal/nova and is designed to be deleted
-//                once Nova adopts the unified schema.
+//     to the current Nova wire shape (battery sign flip,
+//     PascalCase fields, pv→solar, ev→ev_port). The translation
+//     layer is in internal/nova and is designed to be deleted
+//     once Nova adopts the unified schema.
 //   - "unified": publish forty-two-watts' clean payload directly. Enable
-//                once the Nova schema-alignment PR lands.
+//     once the Nova schema-alignment PR lands.
 type Nova struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	URL                string `yaml:"url" json:"url"`
@@ -131,6 +166,36 @@ type Loadpoint struct {
 	PhaseSplitW   float64 `yaml:"phase_split_w,omitempty" json:"phase_split_w,omitempty"`
 	MinPhaseHoldS int     `yaml:"min_phase_hold_s,omitempty" json:"min_phase_hold_s,omitempty"`
 	SurplusOnly   bool    `yaml:"surplus_only,omitempty" json:"surplus_only,omitempty"`
+}
+
+// V2XPolicy is the opt-in policy envelope for automatic V2X use. The
+// current V2X pilot still dispatches only manual operator commands; this
+// config lets the API expose "what would be safe right now?" before the
+// planner is allowed to consume V2X as a dispatchable asset.
+type V2XPolicy struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// DriverName, when set, scopes the policy to one configured V2X driver.
+	// Empty means the same policy applies to every V2X driver.
+	DriverName string `yaml:"driver_name,omitempty" json:"driver_name,omitempty"`
+
+	// VehicleCapacityWh is optional if the charger reports capacity, but is
+	// required for reserve/departure energy math when the driver does not.
+	VehicleCapacityWh float64 `yaml:"vehicle_capacity_wh,omitempty" json:"vehicle_capacity_wh,omitempty"`
+
+	// SoC percentages are YAML-facing 0..100 values. Telemetry stays 0..1.
+	MinReserveSoCPct      float64 `yaml:"min_reserve_soc_pct,omitempty" json:"min_reserve_soc_pct,omitempty"`
+	DepartureTargetSoCPct float64 `yaml:"departure_target_soc_pct,omitempty" json:"departure_target_soc_pct,omitempty"`
+
+	// DepartureTime is either "HH:MM" local time (next occurrence) or RFC3339.
+	DepartureTime string `yaml:"departure_time,omitempty" json:"departure_time,omitempty"`
+
+	MaxChargeW    float64 `yaml:"max_charge_w,omitempty" json:"max_charge_w,omitempty"`
+	MaxDischargeW float64 `yaml:"max_discharge_w,omitempty" json:"max_discharge_w,omitempty"`
+
+	ExportAllowed       bool    `yaml:"export_allowed" json:"export_allowed"`
+	GridChargingAllowed bool    `yaml:"grid_charging_allowed" json:"grid_charging_allowed"`
+	CycleCostOreKWh     float64 `yaml:"cycle_cost_ore_kwh,omitempty" json:"cycle_cost_ore_kwh,omitempty"`
 }
 
 // OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
@@ -250,13 +315,13 @@ func (e *EVCharger) Validate() error {
 // Planner configures the MPC scheduler (optional — disabled if omitted).
 // Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
 type Planner struct {
-	Enabled             bool    `yaml:"enabled" json:"enabled"`
-	Mode                string  `yaml:"mode,omitempty" json:"mode,omitempty"`
-	BaseLoadW           float64 `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
-	HorizonHours        int     `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
-	IntervalMin         int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
-	SoCMinPct           float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
-	SoCMaxPct           float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+	Enabled      bool    `yaml:"enabled" json:"enabled"`
+	Mode         string  `yaml:"mode,omitempty" json:"mode,omitempty"`
+	BaseLoadW    float64 `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
+	HorizonHours int     `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
+	IntervalMin  int     `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMinPct    float64 `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
+	SoCMaxPct    float64 `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
 	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
 	// SoC-percentage safety floor was replaced by downside-PV planning
@@ -292,6 +357,16 @@ type Planner struct {
 	ChargeEfficiency    float64 `yaml:"charge_efficiency,omitempty" json:"charge_efficiency,omitempty"`
 	DischargeEfficiency float64 `yaml:"discharge_efficiency,omitempty" json:"discharge_efficiency,omitempty"`
 	ExportOrePerKWh     float64 `yaml:"export_ore_per_kwh,omitempty" json:"export_ore_per_kwh,omitempty"` // 0 = use mean spot
+
+	// MinArbitrageSpreadOreKwh is the operator's "don't cycle the battery
+	// for marginal gains" knob, in öre per kWh. The planner won't cycle for
+	// grid arbitrage unless the price gain beats this many öre/kWh on top of
+	// round-trip losses. Applies only to the arbitrage modes
+	// (planner_arbitrage / planner_passive_arbitrage); self-consumption is
+	// never affected. It biases the planner's decision only — the savings
+	// statistics stay on real spot economics. 0 (default) = disabled.
+	MinArbitrageSpreadOreKwh float64 `yaml:"min_arbitrage_spread_ore_kwh,omitempty" json:"min_arbitrage_spread_ore_kwh,omitempty"`
+
 	// LegacyDispatch reverts the control loop from the default
 	// energy-allocation path back to the legacy PI-on-grid-target
 	// path. Provided for emergency rollback only — the energy path
@@ -321,6 +396,7 @@ func (p *Planner) PVSafetyK() float64 {
 
 // Site is the top-level control loop config.
 type Site struct {
+	TroubleshootingMode  bool    `yaml:"troubleshooting_mode,omitempty" json:"troubleshooting_mode,omitempty"`
 	Name                 string  `yaml:"name" json:"name"`
 	ControlIntervalS     int     `yaml:"control_interval_s" json:"control_interval_s"`
 	GridTargetW          float64 `yaml:"grid_target_w" json:"grid_target_w"`
@@ -439,10 +515,10 @@ func (f Fuse) EffectiveSafetyMarginA() float64 {
 // Driver is one driver entry. Each driver is a Lua script loaded by
 // the driver host at startup (or on hot-reload via the file watcher).
 type Driver struct {
-	Name               string  `yaml:"name" json:"name"`
-	Lua                string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
-	IsSiteMeter        bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
-	BatteryCapacityWh  float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	Name              string  `yaml:"name" json:"name"`
+	Lua               string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
+	IsSiteMeter       bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
+	BatteryCapacityWh float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
 	// MaxChargeW + MaxDischargeW set this driver's per-command power
 	// ceiling (site-signed +/-). Both optional; zero = fall through to
 	// the global MaxCommandW = 5 kW default the dispatcher has shipped
@@ -497,11 +573,11 @@ type Driver struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT      *MQTTConfig      `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus    *ModbusConfig    `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP      *HTTPCapability  `yaml:"http,omitempty" json:"http,omitempty"`
-	WebSocket *WSCapability    `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	TCP       *TCPCapability   `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	MQTT      *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus    *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	HTTP      *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP       *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -515,13 +591,23 @@ type MQTTConfig struct {
 // ModbusConfig grants access to one Modbus TCP endpoint.
 type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
-	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`   // default 502
+	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
 }
 
 // HTTPCapability grants HTTP access to specific hostnames (future).
 type HTTPCapability struct {
 	AllowedHosts []string `yaml:"allowed_hosts" json:"allowed_hosts"`
+	// TLSPinSHA256, when set, pins the HTTPS server's leaf certificate to
+	// this SHA-256 fingerprint (hex; colons/whitespace ignored, case-
+	// insensitive). It is the SHA-256 over the DER certificate — identical
+	// to `openssl x509 -fingerprint -sha256`. Use it for HTTPS endpoints
+	// that present a self-signed certificate the system trust store cannot
+	// validate (e.g. a NIBE heat pump's local REST API). When set, normal
+	// chain/hostname verification is REPLACED by an exact fingerprint match
+	// for this driver only; when empty, standard verification against the
+	// system roots applies (unchanged for every existing HTTP driver).
+	TLSPinSHA256 string `yaml:"tls_pin_sha256,omitempty" json:"tls_pin_sha256,omitempty"`
 }
 
 // WSCapability grants WebSocket (ws://, wss://) access. Same allowlist
@@ -988,15 +1074,23 @@ func applyDefaults(c *Config) {
 			cap.Port = 1883
 		}
 		if cap := d.Capabilities.Modbus; cap != nil {
-			if cap.Port == 0 { cap.Port = 502 }
-			if cap.UnitID == 0 { cap.UnitID = 1 }
+			if cap.Port == 0 {
+				cap.Port = 502
+			}
+			if cap.UnitID == 0 {
+				cap.UnitID = 1
+			}
 		}
 		if cap := d.MQTT; cap != nil && cap.Port == 0 {
 			cap.Port = 1883
 		}
 		if cap := d.Modbus; cap != nil {
-			if cap.Port == 0 { cap.Port = 502 }
-			if cap.UnitID == 0 { cap.UnitID = 1 }
+			if cap.Port == 0 {
+				cap.Port = 502
+			}
+			if cap.UnitID == 0 {
+				cap.UnitID = 1
+			}
 		}
 	}
 	if c.HomeAssistant != nil {
@@ -1164,6 +1258,9 @@ func (c *Config) Validate() error {
 			return errors.New("fuse.safety_margin_a must be < fuse.max_amps")
 		}
 	}
+	if err := c.validateV2XPolicy(names); err != nil {
+		return err
+	}
 	if n := c.Notifications; n != nil {
 		if n.DefaultPriority < 0 || n.DefaultPriority > 5 {
 			return errors.New("notifications.default_priority must be in [0,5]")
@@ -1221,7 +1318,75 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("nova.schema_mode must be \"legacy\" or \"unified\", got %q", c.Nova.SchemaMode)
 		}
 	}
+	if c.Planner != nil && c.Planner.MinArbitrageSpreadOreKwh < 0 {
+		return fmt.Errorf("planner.min_arbitrage_spread_ore_kwh must be ≥ 0, got %g", c.Planner.MinArbitrageSpreadOreKwh)
+	}
 	return nil
+}
+
+func (c *Config) validateV2XPolicy(driverNames map[string]bool) error {
+	p := c.V2X
+	if p == nil {
+		return nil
+	}
+	if p.DriverName != "" && !driverNames[p.DriverName] {
+		return fmt.Errorf("v2x.driver_name %q: no such driver", p.DriverName)
+	}
+	for name, value := range map[string]float64{
+		"v2x.vehicle_capacity_wh":      p.VehicleCapacityWh,
+		"v2x.max_charge_w":             p.MaxChargeW,
+		"v2x.max_discharge_w":          p.MaxDischargeW,
+		"v2x.cycle_cost_ore_kwh":       p.CycleCostOreKWh,
+		"v2x.min_reserve_soc_pct":      p.MinReserveSoCPct,
+		"v2x.departure_target_soc_pct": p.DepartureTargetSoCPct,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return fmt.Errorf("%s must be finite", name)
+		}
+	}
+	if p.VehicleCapacityWh < 0 {
+		return errors.New("v2x.vehicle_capacity_wh must be >= 0")
+	}
+	if p.MaxChargeW < 0 {
+		return errors.New("v2x.max_charge_w must be >= 0")
+	}
+	if p.MaxDischargeW < 0 {
+		return errors.New("v2x.max_discharge_w must be >= 0")
+	}
+	if p.CycleCostOreKWh < 0 {
+		return errors.New("v2x.cycle_cost_ore_kwh must be >= 0")
+	}
+	if p.MinReserveSoCPct < 0 || p.MinReserveSoCPct > 100 {
+		return errors.New("v2x.min_reserve_soc_pct must be in [0,100]")
+	}
+	if p.DepartureTargetSoCPct < 0 || p.DepartureTargetSoCPct > 100 {
+		return errors.New("v2x.departure_target_soc_pct must be in [0,100]")
+	}
+	if p.Enabled && p.MinReserveSoCPct <= 0 {
+		return errors.New("v2x.min_reserve_soc_pct must be > 0 when v2x.enabled")
+	}
+	if p.DepartureTime != "" {
+		if err := validateV2XDepartureTime(p.DepartureTime); err != nil {
+			return err
+		}
+	}
+	if (p.DepartureTargetSoCPct > 0) != (p.DepartureTime != "") {
+		return errors.New("v2x.departure_target_soc_pct and v2x.departure_time must be set together")
+	}
+	if p.DepartureTargetSoCPct > 0 && p.DepartureTargetSoCPct < p.MinReserveSoCPct {
+		return errors.New("v2x.departure_target_soc_pct must be >= v2x.min_reserve_soc_pct")
+	}
+	return nil
+}
+
+func validateV2XDepartureTime(value string) error {
+	if _, err := time.Parse("15:04", value); err == nil {
+		return nil
+	}
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return nil
+	}
+	return fmt.Errorf("v2x.departure_time must be HH:MM or RFC3339, got %q", value)
 }
 
 // SiteMeterDriver returns the name of the driver marked is_site_meter.

@@ -186,22 +186,85 @@ func TestStoreRejectsInvalidReadings(t *testing.T) {
 
 func TestEmitMetricRejectsNonFinite(t *testing.T) {
 	s := NewStore()
-	s.EmitMetric("driver", "bad", math.Inf(1))
+	s.EmitMetric("driver", "bad", math.Inf(1), "", "", "")
 	if samples := s.FlushSamples(); len(samples) != 0 {
 		t.Fatalf("non-finite metric should be dropped, got %+v", samples)
 	}
 
-	s.EmitMetric("driver", "ok", 42)
+	s.EmitMetric("driver", "ok", 42, "", "", "")
 	samples := s.FlushSamples()
 	if len(samples) != 1 || samples[0].Metric != "ok" || samples[0].Value != 42 {
 		t.Fatalf("valid metric not buffered as expected: %+v", samples)
 	}
 }
 
+// TestEmitMetricCarriesUnit verifies the optional unit threads into the live
+// snapshot so the UI can group + label metrics (heat-pump drill-in).
+func TestEmitMetricCarriesUnit(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("hp", "hp_outdoor_temp_c", 7.3, "°C", "", "")
+	s.EmitMetric("hp", "hp_compressor_hz", 42, "Hz", "", "")
+	s.EmitMetric("hp", "hp_no_unit", 1, "", "", "")
+
+	got := map[string]string{}
+	for _, m := range s.LatestMetricsByDriver("hp") {
+		got[m.Name] = m.Unit
+	}
+	if got["hp_outdoor_temp_c"] != "°C" {
+		t.Errorf("outdoor temp unit = %q, want °C", got["hp_outdoor_temp_c"])
+	}
+	if got["hp_compressor_hz"] != "Hz" {
+		t.Errorf("compressor unit = %q, want Hz", got["hp_compressor_hz"])
+	}
+	if got["hp_no_unit"] != "" {
+		t.Errorf("no-unit metric unit = %q, want empty", got["hp_no_unit"])
+	}
+}
+
+// TestEmitMetricCarriesRegister verifies the optional 5th register arg threads
+// into the live snapshot (used by the heat-pump drill-in to show each signal's
+// source Modbus register) and is omitted when not provided.
+func TestEmitMetricCarriesRegister(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("hp", "hp_power_w", 84, "W", "1048", "")
+	s.EmitMetric("hp", "hp_no_register", 1, "", "", "")
+
+	reg := map[string]string{}
+	for _, m := range s.LatestMetricsByDriver("hp") {
+		reg[m.Name] = m.Register
+	}
+	if reg["hp_power_w"] != "1048" {
+		t.Errorf("register = %q, want 1048", reg["hp_power_w"])
+	}
+	if reg["hp_no_register"] != "" {
+		t.Errorf("missing register should be empty, got %q", reg["hp_no_register"])
+	}
+}
+
+// TestEmitMetricCarriesTitle verifies the optional 6th title arg threads into
+// the live snapshot (used by the heat-pump drill-in to show a human-readable
+// explanation per signal) and is omitted when not provided.
+func TestEmitMetricCarriesTitle(t *testing.T) {
+	s := NewStore()
+	s.EmitMetric("hp", "hp_fr_nluft_bt20", 12.3, "°C", "1234", "Frånluft (BT20)")
+	s.EmitMetric("hp", "hp_no_title", 1, "", "", "")
+
+	title := map[string]string{}
+	for _, m := range s.LatestMetricsByDriver("hp") {
+		title[m.Name] = m.Title
+	}
+	if title["hp_fr_nluft_bt20"] != "Frånluft (BT20)" {
+		t.Errorf("title = %q, want Frånluft (BT20)", title["hp_fr_nluft_bt20"])
+	}
+	if title["hp_no_title"] != "" {
+		t.Errorf("missing title should be empty, got %q", title["hp_no_title"])
+	}
+}
+
 // ---- DerType ----
 
 func TestDerTypeRoundtrip(t *testing.T) {
-	for _, name := range []string{"meter", "pv", "battery", "ev"} {
+	for _, name := range []string{"meter", "pv", "battery", "ev", "v2x_charger", "vehicle"} {
 		d, err := ParseDerType(name)
 		if err != nil {
 			t.Fatal(err)
@@ -364,6 +427,34 @@ func TestSumOnlineEVWFloorsSubWattReadings(t *testing.T) {
 	s2.DriverHealthMut("easee").RecordSuccess()
 	if got := s2.SumOnlineEVW(); got != 3600 {
 		t.Errorf("real EV reading must pass through, got %g", got)
+	}
+}
+
+func TestV2XAcceptsSignedPowerAndVehicleSoC(t *testing.T) {
+	s := NewStore()
+	soc := 0.58
+	s.Update("dc2", DerV2X, -4200, &soc, nil)
+	r := s.Get("dc2", DerV2X)
+	if r == nil || r.RawW != -4200 || r.SoC == nil || *r.SoC != 0.58 {
+		t.Fatalf("v2x signed reading not stored as expected: %+v", r)
+	}
+	badSoC := 58.0
+	s.Update("bad-dc2", DerV2X, 1000, &badSoC, nil)
+	if r := s.Get("bad-dc2", DerV2X); r != nil {
+		t.Fatalf("v2x percent SoC should be rejected, got %+v", r)
+	}
+}
+
+func TestSumOnlineV2XWIsSignedAndSkipsOffline(t *testing.T) {
+	s := NewStore()
+	s.Update("charging", DerV2X, 3000, nil, nil)
+	s.Update("discharging", DerV2X, -1200, nil, nil)
+	s.Update("offline", DerV2X, 9000, nil, nil)
+	s.DriverHealthMut("charging").RecordSuccess()
+	s.DriverHealthMut("discharging").RecordSuccess()
+	s.DriverHealthMut("offline").SetOffline()
+	if got := s.SumOnlineV2XW(); got != 1800 {
+		t.Fatalf("signed online V2X sum: got %f, want 1800", got)
 	}
 }
 

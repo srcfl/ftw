@@ -119,6 +119,53 @@ func TestLoadMinimalYAML(t *testing.T) {
 	}
 }
 
+func TestSiteTroubleshootingModeParses(t *testing.T) {
+	raw := strings.Replace(minimalYAML, "name: Test", "name: Test\n  troubleshooting_mode: true", 1)
+	c, err := Parse([]byte(raw), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Site.TroubleshootingMode {
+		t.Fatal("expected troubleshooting_mode=true")
+	}
+}
+
+// TestRemoteAccessOptInDefaultsOff: the owner remote-access home route is
+// opt-in / default-off. A config with no remote_access block must NOT dial out
+// (a Pi that merely inherits FTW_RELAY_URL stays local); only an explicit
+// enabled:true opts in. The blind TURN knob must parse while staying off.
+func TestRemoteAccessOptInDefaultsOff(t *testing.T) {
+	off, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.RemoteAccess != nil {
+		t.Errorf("remote_access should be nil when unset, got %+v", off.RemoteAccess)
+	}
+	if off.RemoteAccessEnabled() {
+		t.Error("remote access must default OFF when no block is set")
+	}
+
+	on, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !on.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: true must opt in")
+	}
+
+	turn, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: false\n  turn:\n    enabled: false\n    url: turn:relay.example:3478\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.RemoteAccessEnabled() {
+		t.Error("remote_access.enabled: false must stay off")
+	}
+	if turn.RemoteAccess == nil || turn.RemoteAccess.TURN == nil || turn.RemoteAccess.TURN.URL != "turn:relay.example:3478" {
+		t.Errorf("turn block did not parse: %+v", turn.RemoteAccess)
+	}
+}
+
 // TestDeprecatedUseEnergyDispatchParsesAsPointer covers the
 // Codex P1 on PR #124: an operator who explicitly set
 // `use_energy_dispatch: false` to pick legacy dispatch pre-v0.27
@@ -157,6 +204,111 @@ planner:
 	}
 	if c.Planner.UseEnergyDispatch != nil {
 		t.Errorf("UseEnergyDispatch should be nil when YAML omits the key, got %v", *c.Planner.UseEnergyDispatch)
+	}
+}
+
+func TestV2XPolicyParses(t *testing.T) {
+	yaml := minimalYAML + `
+v2x:
+  enabled: true
+  driver_name: ferroamp
+  vehicle_capacity_wh: 77000
+  min_reserve_soc_pct: 35
+  departure_target_soc_pct: 80
+  departure_time: "07:30"
+  max_charge_w: 7000
+  max_discharge_w: 5000
+  export_allowed: false
+  grid_charging_allowed: false
+  cycle_cost_ore_kwh: 12
+`
+	c, err := Parse([]byte(yaml), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.V2X == nil {
+		t.Fatal("v2x policy not parsed")
+	}
+	if !c.V2X.Enabled || c.V2X.DriverName != "ferroamp" || c.V2X.MinReserveSoCPct != 35 {
+		t.Fatalf("unexpected v2x policy: %+v", c.V2X)
+	}
+}
+
+func TestV2XPolicyValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "enabled without reserve",
+			body: `
+v2x:
+  enabled: true
+`,
+		},
+		{
+			name: "unknown driver",
+			body: `
+v2x:
+  enabled: false
+  driver_name: missing
+`,
+		},
+		{
+			name: "bad departure time",
+			body: `
+v2x:
+  enabled: false
+  departure_target_soc_pct: 80
+  departure_time: soon
+`,
+		},
+		{
+			name: "target without departure",
+			body: `
+v2x:
+  enabled: false
+  departure_target_soc_pct: 80
+`,
+		},
+		{
+			name: "negative discharge limit",
+			body: `
+v2x:
+  enabled: false
+  max_discharge_w: -1
+`,
+		},
+		{
+			name: "departure target below reserve",
+			body: `
+v2x:
+  enabled: true
+  min_reserve_soc_pct: 50
+  departure_target_soc_pct: 40
+  departure_time: "08:00"
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Parse([]byte(minimalYAML+tc.body), "/tmp"); err == nil {
+				t.Fatal("expected v2x validation error")
+			}
+		})
+	}
+}
+
+func TestV2XPolicyDepartureTargetAtOrAboveReserveOK(t *testing.T) {
+	body := `
+v2x:
+  enabled: true
+  min_reserve_soc_pct: 40
+  departure_target_soc_pct: 40
+  departure_time: "08:00"
+`
+	if _, err := Parse([]byte(minimalYAML+body), "/tmp"); err != nil {
+		t.Fatalf("target == reserve should pass, got: %v", err)
 	}
 }
 
@@ -447,6 +599,24 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 	if c2.Site.Name != c.Site.Name {
 		t.Errorf("roundtrip site.name: got %q", c2.Site.Name)
+	}
+}
+
+func TestSaveAtomicDoesNotLeaveTmpFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.yaml")
+	c, err := Parse([]byte(minimalYAML), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAtomic(path, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("SaveAtomic left tmp file behind: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("saved config missing: %v", err)
 	}
 }
 

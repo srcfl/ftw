@@ -15,6 +15,7 @@
 // the helpers.
 
 import { FtwElement } from "./ftw-element.js";
+import { ownerFetch } from "./owner-fetch.js";
 import {
   POLL_MS,
   FAST_POLL_MS,
@@ -334,7 +335,7 @@ class FtwPairCard extends FtwElement {
 
   async _refresh() {
     try {
-      const r = await fetch("/api/pair/status");
+      const r = await ownerFetch("/api/pair/status");
       if (r.status === 404) {
         this._state = null;
       } else if (r.ok) {
@@ -369,7 +370,7 @@ class FtwPairCard extends FtwElement {
 
     btn.disabled = true;
     try {
-      const resp = await fetch("/api/pair/start", {
+      const resp = await ownerFetch("/api/pair/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ intent: intentEl.value.trim(), ttl: ttlEl.value }),
@@ -390,7 +391,7 @@ class FtwPairCard extends FtwElement {
 
   async _abort() {
     if (!confirm("End the pair session now?")) return;
-    await fetch("/api/pair/abort", { method: "POST" });
+    await ownerFetch("/api/pair/abort", { method: "POST" });
     this._state = null;
     this.update();
   }

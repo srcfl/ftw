@@ -125,6 +125,7 @@ func TestTranslateDerType(t *testing.T) {
 	cases := [][2]string{
 		{"pv", "solar"},
 		{"ev", "ev_port"},
+		{"v2x_charger", "v2x_charger"},
 		{"battery", "battery"},
 		{"meter", "meter"},
 	}

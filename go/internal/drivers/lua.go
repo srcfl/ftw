@@ -12,7 +12,7 @@
 // the Lua VM:
 //
 //	host.log(level, msg)            -- level: "debug"|"info"|"warn"|"error"
-//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"
+//	host.emit(type, table)          -- type: "meter"|"pv"|"battery"|"ev"|"v2x_charger"
 //	host.millis()                   -- ms since driver start
 //	host.sleep(ms)                  -- block driver goroutine for ms (inter-write pacing)
 //	host.set_poll_interval(ms)
@@ -44,6 +44,10 @@ package drivers
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -217,19 +221,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit("meter"|"pv"|"battery"|"ev"|"vehicle", { w=…, soc=…, … })
+	// host.emit("meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", { w=…, soc=…, … })
 	// The type string is prepended to the table as a `type` field and
 	// the whole thing is serialized as JSON before hitting the telemetry store.
 	// Allowed fields per type:
 	//   meter   -> w, l1_w, l2_w, l3_w, l1_v, l2_v, l3_v, l1_a, l2_a, l3_a, freq_hz
 	//   pv      -> w, mppt1_v, mppt1_a, mppt2_v, mppt2_a, dc_v
-	//   battery -> w, soc, dc_v, dc_a, temp_c
+	//   battery -> w, soc, dc_v, dc_a, temp_c,
+	//              discharge_capable (optional bool), charge_capable (optional
+	//              bool) — set false when the pack physically can't move that
+	//              way right now (e.g. floored/full); the dispatcher then
+	//              hands its share to a capable sibling instead of leaking to
+	//              the grid. Absent → assumed capable (back-compat).
 	//   ev      -> w (charge power, positive when charging),
 	//              connected (bool, plug inserted),
 	//              charging (bool, current flowing),
 	//              session_wh (optional, kWh for current session * 1000),
 	//              max_a (optional, charger current limit),
 	//              phases (optional, 1 or 3)
+	//   v2x_charger -> w (positive = vehicle charging, negative = V2X discharge),
+	//              vehicle_soc (0..1 fraction), connected,
+	//              dc_w, dc_v, dc_a, session_charge_wh, session_discharge_wh,
+	//              rated_power_w, status, control_mode
 	//   vehicle -> soc (required, vehicle battery level % 0-100),
 	//              charge_limit_pct (optional, vehicle-configured limit),
 	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),
@@ -258,16 +271,24 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
-	// host.emit_metric("battery_temp_c", 23.5) — record an arbitrary
-	// scalar diagnostic into the long-format TS DB. Use for anything that
-	// doesn't fit the structured pv/battery/meter shape: temperatures, DC
+	// host.emit_metric("battery_temp_c", 23.5 [, "°C" [, "40004"]]) — record an
+	// arbitrary scalar diagnostic into the long-format TS DB. Use for anything
+	// that doesn't fit the structured pv/battery/meter shape: temperatures, DC
 	// voltages, MPPT currents, grid frequency, inverter heat-sink, etc.
 	// The metric name is the column name in the time-series — pick a stable
-	// snake_case identifier with the unit as a suffix.
+	// snake_case identifier with the unit as a suffix. The optional 3rd arg is a
+	// display unit (e.g. "°C", "Hz", "kW") the UI uses to group + label; the
+	// optional 4th arg is a source register/address (e.g. a Modbus register id)
+	// surfaced in the per-driver detail view; the optional 5th arg is a
+	// human-readable title (the device's own point label) shown as the
+	// per-signal explanation in the detail view.
 	host.RawSetString("emit_metric", L.NewFunction(func(L *lua.LState) int {
 		name := L.CheckString(1)
 		val := float64(L.CheckNumber(2))
-		if err := env.emitMetric(name, val); err != nil {
+		unit := L.OptString(3, "")
+		register := L.OptString(4, "")
+		title := L.OptString(5, "")
+		if err := env.emitMetric(name, val, unit, register, title); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}
@@ -318,6 +339,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	host.RawSetString("set_make", L.NewFunction(func(L *lua.LState) int {
 		env.setMake(L.CheckString(1))
 		return 0
+	}))
+
+	// host.persist_secret(key, value) -> ok, err
+	// Durably writes a config secret back into the driver's own config
+	// block (e.g. a rotated OAuth refresh_token) so it survives restarts.
+	// Returns ok=false + an error string when the capability isn't wired.
+	host.RawSetString("persist_secret", L.NewFunction(func(L *lua.LState) int {
+		key := L.CheckString(1)
+		val := L.CheckString(2)
+		if env.PersistSecret == nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString("persist_secret: capability not granted"))
+			return 2
+		}
+		if err := env.PersistSecret(key, val); err != nil {
+			L.Push(lua.LBool(false))
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LBool(true))
+		L.Push(lua.LNil)
+		return 2
 	}))
 
 	mqttSubscribe := L.NewFunction(func(L *lua.LState) int {
@@ -492,6 +535,9 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// host.http_get(url, headers?) → (body, nil) or (nil, error_string)
 	// host.http_post(url, body, headers?) → (body, nil) or (nil, error_string)
 	// headers is an optional Lua table {["Content-Type"]="application/json", ...}
+	rawTLSPin := strings.TrimSpace(env.HTTPTLSPinSHA256)
+	tlsPin := normalizeHexFingerprint(rawTLSPin)
+
 	// hostAllowed checks the URL's host component against the
 	// per-driver allowlist. Empty allowlist = any host (legacy
 	// behaviour). Matched case-insensitively.
@@ -519,6 +565,18 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		case "http", "https":
 		default:
 			return false, fmt.Sprintf("scheme %q not supported (http/https only)", u.Scheme)
+		}
+		// A configured pin is a security requirement, not a hint. Reject a
+		// malformed value before making any request, and never let a pinned
+		// driver downgrade to clear-text HTTP (which would expose Basic-auth
+		// credentials on the LAN).
+		if rawTLSPin != "" {
+			if tlsPin == "" {
+				return false, "tls_pin_sha256 must contain exactly 64 hexadecimal characters"
+			}
+			if !strings.EqualFold(u.Scheme, "https") {
+				return false, "tls_pin_sha256 requires an https URL"
+			}
 		}
 		if len(env.HTTPAllowedHosts) == 0 {
 			return true, ""
@@ -562,6 +620,36 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			}
 			return nil
 		},
+	}
+
+	// TLS certificate pinning (opt-in, per driver). When the driver was
+	// granted capabilities.http.tls_pin_sha256, we DON'T trust the system
+	// roots — instead we accept exactly the one leaf certificate whose
+	// SHA-256 matches the pin. This is how a driver reaches an HTTPS
+	// endpoint with a self-signed cert (a NIBE heat pump's local REST API)
+	// without the SSRF-grade hole of blanket InsecureSkipVerify: a swapped
+	// cert (MITM) is rejected at the handshake even if it chains to a real
+	// CA. Drivers WITHOUT a pin keep Go's default transport untouched, so
+	// nothing about existing HTTP drivers changes.
+	if pin := tlsPin; pin != "" {
+		tr := net_http.DefaultTransport.(*net_http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{
+			// We replace chain/hostname verification with our own exact
+			// fingerprint check below, so the stdlib check must be off.
+			InsecureSkipVerify: true, //nolint:gosec // verified by pin in VerifyConnection
+			VerifyConnection: func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return fmt.Errorf("tls pin: server presented no certificate")
+				}
+				sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+				got := hex.EncodeToString(sum[:])
+				if subtle.ConstantTimeCompare([]byte(got), []byte(pin)) != 1 {
+					return fmt.Errorf("tls pin mismatch: leaf %s does not match pinned %s", got, pin)
+				}
+				return nil
+			},
+		}
+		httpClient.Transport = tr
 	}
 
 	applyHeaders := func(req *net_http.Request, L *lua.LState, argIdx int) {
@@ -846,6 +934,35 @@ func splitHostPortLower(s string) (host, port string, hasPort bool) {
 		}
 	}
 	return s[:i], maybePort, true
+}
+
+// normalizeHexFingerprint canonicalises a SHA-256 certificate fingerprint
+// for comparison: strips the colons / spaces that `openssl -fingerprint`
+// emits and lower-cases the hex, so "73:D1:AC:..." and
+// "73d1ac..." compare equal. A value that doesn't reduce to exactly 64
+// hex chars returns "" (treated as "no usable pin").
+func normalizeHexFingerprint(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r >= 'a' && r <= 'f':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'F':
+			b.WriteRune(r + ('a' - 'A'))
+		case r == ':' || r == ' ' || r == '\t' || r == '\n' || r == '\r':
+			// separators in openssl-style fingerprints — skip
+		default:
+			// any other character makes the pin unusable
+			return ""
+		}
+	}
+	out := b.String()
+	if len(out) != 64 {
+		return ""
+	}
+	return out
 }
 
 func modbusKindFromString(s string) (int32, bool) {

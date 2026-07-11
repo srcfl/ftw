@@ -31,6 +31,17 @@
 
   if (!modal || !openBtn) return;
 
+  // ownerFetch routes state-changing owner/CONTROL calls (config save, restart)
+  // over the STRICT P2P transport so their body never traverses the untrusted
+  // relay on the public home route. window.ownerFetch is wired in p2p.js to the
+  // same fail-closed strict function the owner-access pages use; it fails closed
+  // (synthetic 503) on a public origin with no DataChannel. The plain-fetch
+  // fallback covers only contexts where p2p.js never loaded (genuine LAN / tests).
+  function ownerFetch(path, opts) {
+    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
+    return fetch(path, opts);
+  }
+
   // Expose the registry namespace immediately so tab files that load
   // before or after this shell can register idempotently.
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
@@ -40,7 +51,7 @@
   var currentTab = "control";
 
   openBtn.addEventListener("click", function () {
-    fetch("/api/config")
+    ownerFetch("/api/config")
       .then(function (r) { return r.json(); })
       .then(function (cfg) {
         currentConfig = cfg;
@@ -74,7 +85,7 @@
   saveBtn.addEventListener("click", function () {
     captureCurrentTab();
     setStatus("Saving...");
-    fetch("/api/config", {
+    ownerFetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(currentConfig),
@@ -142,7 +153,7 @@
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
 
-    fetch("/api/restart", { method: "POST" })
+    ownerFetch("/api/restart", { method: "POST" })
       .then(function (r) {
         if (!r.ok) {
           return r.json()
@@ -167,7 +178,7 @@
     var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
     function tick() {
       // Cache-bust so an intermediate proxy can't lie about reachability.
-      fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
+      ownerFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
         .then(function (r) {
           if (r.ok) {
             progressTextEl.textContent = "Reloading…";
@@ -206,6 +217,9 @@
       // Preserve a stored password when the user hasn't typed over it.
       if (input.type === "password" && val === "" && getByPath(currentConfig, path, "")) return;
       setByPath(currentConfig, path, val);
+    });
+    bodyEl.querySelectorAll("[data-checkbox-path]").forEach(function (input) {
+      setByPath(currentConfig, input.dataset.checkboxPath, input.checked);
     });
   }
 
@@ -271,6 +285,7 @@
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
       renderTab: renderTab,
+      ownerFetch: ownerFetch,
     };
     var html = "";
     try {

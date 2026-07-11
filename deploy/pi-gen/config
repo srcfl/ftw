@@ -2,7 +2,15 @@
 # Sourced by pi-gen's build scripts — plain shell variables, no logic.
 
 IMG_NAME="42w-rpi4-arm64"
-RELEASE="bookworm"
+RELEASE="trixie"
+
+# Install + configure cloud-init and netplan (pi-gen stage2/04-cloud-init).
+# This is what lets Raspberry Pi Imager 2.0 apply hostname / SSH user /
+# WiFi customisation on first boot (init_format "cloudinit-rpi" in the
+# Imager repository JSON — see deploy/imager/os_list.json). Default on the
+# pi-gen arm64 (trixie) branch is already 1; set it explicitly so a
+# pi-gen branch bump can't silently turn it off.
+ENABLE_CLOUD_INIT=1
 
 # mDNS: the avahi-daemon shipped with Raspberry Pi OS picks up
 # /etc/hostname as its primary .local name. Setting this to `42w`
@@ -15,14 +23,16 @@ KEYBOARD_KEYMAP="us"
 KEYBOARD_LAYOUT="English (US)"
 TIMEZONE_DEFAULT="UTC"
 
-# Skip stage2 (Pi OS Lite "comfort" packages: vim, less, raspi-config,
-# build-essential, python3-pip, network-manager-gnome, etc.) — none of
-# its additions are needed for "boot → docker compose up". Stage-42w
-# explicitly pulls the bits we DO need (avahi-daemon for mDNS,
-# network-manager for wifi-connect) so we don't lose mDNS or WiFi
-# onboarding by dropping stage2. Stage3-5 (desktop + NOOBS) are
-# skipped separately via SKIP files in build.sh.
-STAGE_LIST="stage0 stage1 stage-42w"
+# Trixie note: stage2 is now INCLUDED. On bookworm we skipped stage2 and
+# hand-installed the few packages we needed, but trixie moved the
+# first-boot machinery (cloud-init + netplan + the systemd.run= resize
+# path that replaced the old init=…firstboot mechanism) into stage2
+# (stage2/04-cloud-init and friends). Replicating that actively-changing
+# wiring by hand is fragile and boot-loop-prone, so we ride pi-gen's
+# maintained stage2. Stage3-5 (desktop + NOOBS) stay skipped via SKIP
+# files in build.sh; stage2's own image export is suppressed there too
+# (SKIP_IMAGES) so stage-42w produces the only image.
+STAGE_LIST="stage0 stage1 stage2 stage-42w"
 
 # First-login creds. Users who flash with Raspberry Pi Imager will
 # override these via Imager's advanced-options panel (which writes to

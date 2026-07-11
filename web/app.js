@@ -504,6 +504,8 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
+    var C = chartColors(); // theme-aware chrome colors, re-read each draw
+
     var pad = { top: 20, right: 10, bottom: 25, left: 55 };
     var plotW = w - pad.left - pad.right;
     var plotH = h - pad.top - pad.bottom;
@@ -529,13 +531,13 @@
         { data: toKwh(chartHistory.e_pv),         color: "#10b981", width: 2, dash: [], name: "PV",         fill: true },
         { data: toKwh(chartHistory.e_charged),    color: "#3b82f6", width: 2, dash: [], name: "Charged",    fill: false },
         { data: toKwh(chartHistory.e_discharged), color: "#f59e0b", width: 2, dash: [], name: "Discharged", fill: false },
-        { data: toKwh(chartHistory.e_load),       color: "#e2e8f0", width: 2, dash: [], name: "Load",       fill: false },
+        { data: toKwh(chartHistory.e_load),       color: C.load, width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
       series = [
         { data: chartHistory.grid, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
         { data: chartHistory.pv,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
-        { data: chartHistory.load, color: "#e2e8f0", width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
+        { data: chartHistory.load, color: C.load, width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
       // Stable order so chart colors don't jump as the driver set grows.
@@ -567,7 +569,7 @@
     if (visibleVals.length === 0) {
       // Empty state — draw axes + "waiting for data" hint
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#666";
+      ctx.fillStyle = C.muted;
       ctx.font = "12px monospace";
       ctx.textAlign = "center";
       ctx.fillText("waiting for data...", w / 2, h / 2);
@@ -615,7 +617,7 @@
     // Grid lines (drawn inside clip so they only appear in the plot area).
     // Walk yMin..yMax in yStep increments so every line lands on a round
     // number — that's what lets the y-axis labels stay readable.
-    ctx.strokeStyle = "#2a2a2a";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 0.5;
     ctx.font = "11px monospace";
     var steps = Math.round(yRange / yStep);
@@ -630,7 +632,7 @@
     // Zero line
     if (yMin < 0 && yMax > 0) {
       var zeroY = pad.top + plotH * (1 - (0 - yMin) / yRange);
-      ctx.strokeStyle = "#444";
+      ctx.strokeStyle = C.muted;
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 4]);
       ctx.beginPath();
@@ -795,7 +797,7 @@
 
     // Subtle vertical "now" line — anchor point so the eye knows where present is
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
@@ -803,7 +805,7 @@
     ctx.stroke();
 
     // Y-axis labels (outside clip so they're fully visible)
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.font = "11px monospace";
     for (var i2 = 0; i2 <= steps; i2++) {
       var yVal = yMin + (yRange * i2 / steps);
@@ -812,7 +814,7 @@
     }
 
     // Time labels
-    ctx.fillStyle = "#666";
+    ctx.fillStyle = C.muted;
     ctx.fillText(chartRange + " ago", pad.left, h - 5);
     ctx.textAlign = "right";
     ctx.fillText("now", w - pad.right, h - 5);
@@ -838,7 +840,7 @@
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.font = "10px monospace";
-      ctx.fillStyle = fresh ? "#aaa" : "#f59e0b";
+      ctx.fillStyle = fresh ? C.dim : "#f59e0b";
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
 
@@ -870,8 +872,46 @@
     return "rgba(" + r + "," + g + "," + b + "," + alpha + ")";
   }
 
+  // Resolve a CSS custom property to a concrete color string for <canvas>,
+  // which can't read var(). Re-read per draw so the charts follow the active
+  // theme (html[data-theme]) without needing an explicit redraw on toggle —
+  // a hidden probe element inherits :root, and getComputedStyle resolves the
+  // var() + oklch token to a value canvas can paint.
+  var _colorProbe = null;
+  function cssColor(name, fallback) {
+    if (!_colorProbe) {
+      _colorProbe = document.createElement("span");
+      _colorProbe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+      document.body.appendChild(_colorProbe);
+    }
+    _colorProbe.style.color = "var(" + name + ", " + (fallback || "#888") + ")";
+    return getComputedStyle(_colorProbe).color || fallback || "#888";
+  }
+  // Theme-aware chart chrome colors. Series hues stay fixed (they read on
+  // both themes); only text / gridlines / tooltip surface / the neutral
+  // "load" line flip — those are what go invisible on a light background.
+  // Cached so the animation loop doesn't getComputedStyle every frame —
+  // only recomputed when the active theme actually changes.
+  var _chartColors = null, _chartColorsTheme = null;
+  function chartColors() {
+    var theme = document.documentElement.getAttribute("data-theme") || "";
+    if (_chartColors && _chartColorsTheme === theme) return _chartColors;
+    _chartColorsTheme = theme;
+    _chartColors = {
+      text:    cssColor("--fg", "#e6e6e6"),
+      dim:     cssColor("--fg-dim", "#aaaaaa"),
+      muted:   cssColor("--fg-muted", "#888888"),
+      grid:    cssColor("--line", "#2a2a2a"),
+      surface: cssColor("--ink-raised", "#14141f"),
+      accent:  cssColor("--accent-e", "#fbbf24"),
+      load:    cssColor("--fg", "#e2e8f0"),
+    };
+    return _chartColors;
+  }
+
   function drawHoverOverlay(ctx) {
     if (!chartLayout) return;
+    var C = chartColors();
     var l = chartLayout;
     var i = hoverIndex;
     // Map by timestamp (matches the time-anchored line drawing)
@@ -880,7 +920,7 @@
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
-    ctx.strokeStyle = "rgba(255,255,255,0.3)";
+    ctx.strokeStyle = C.muted;
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
@@ -906,12 +946,12 @@
       { name: "PV",         data: chartHistory.e_pv,         color: "#10b981" },
       { name: "Charged",    data: chartHistory.e_charged,    color: "#3b82f6" },
       { name: "Discharged", data: chartHistory.e_discharged, color: "#f59e0b" },
-      { name: "Load",       data: chartHistory.e_load,       color: "#e2e8f0" },
+      { name: "Load",       data: chartHistory.e_load,       color: C.load },
     ] : (function () {
       var rows = [
         { name: "Grid", data: chartHistory.grid, color: "#ef4444" },
         { name: "PV",   data: chartHistory.pv,   color: "#22c55e" },
-        { name: "Load", data: chartHistory.load, color: "#e2e8f0" },
+        { name: "Load", data: chartHistory.load, color: C.load },
       ];
       // Battery rows render their target inline as "actual W (→ target W)"
       // so it's visually obvious the two numbers are the same metric — one
@@ -934,14 +974,14 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.95)";
-    ctx.strokeStyle = "#444";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
 
     ctx.font = "10px monospace";
-    ctx.fillStyle = "#888";
+    ctx.fillStyle = C.dim;
     ctx.fillText(timeStr, boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
@@ -949,21 +989,21 @@
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = lab.dim ? "#888" : "#ddd";
+      ctx.fillStyle = lab.dim ? C.muted : C.text;
       ctx.fillText(lab.name, boxX + 18, y);
       ctx.textAlign = "right";
       if (chartView === "energy") {
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(lab.data[i].toFixed(2) + " kWh", boxX + boxW - 6, y);
       } else {
         var actual = formatW(lab.data[i]);
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = C.text;
         ctx.fillText(actual, boxX + boxW - 6, y);
         // Inline target as dim "(→ -674 W)" so user sees commanded vs actual
         // in one glance. Skip when target is 0 to reduce visual noise.
         if (lab.target && i < lab.target.length && Math.abs(lab.target[i]) > 1) {
           var actualW = ctx.measureText(actual).width;
-          ctx.fillStyle = "#888";
+          ctx.fillStyle = C.dim;
           ctx.font = "9px monospace";
           ctx.fillText("→ " + formatW(lab.target[i]), boxX + boxW - 10 - actualW, y);
           ctx.font = "10px monospace";
@@ -975,6 +1015,7 @@
 
   function drawForecastHoverOverlay(ctx) {
     if (!chartLayout || !hoverForecast) return;
+    var C = chartColors();
     var l = chartLayout;
     var a = hoverForecast.action;
     var ts = hoverForecast.ts;
@@ -1007,8 +1048,8 @@
     if (boxX + boxW > l.w - 5) boxX = x - boxW - 10;
     var boxY = l.pad.top + 5;
 
-    ctx.fillStyle = "rgba(20,20,35,0.96)";
-    ctx.strokeStyle = "rgba(251,191,36,0.6)";
+    ctx.fillStyle = C.surface;
+    ctx.strokeStyle = C.accent;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -1016,16 +1057,16 @@
     ctx.font = "10px monospace";
     var d = new Date(ts);
     var hh = d.getHours().toString().padStart(2, "0") + ":" + d.getMinutes().toString().padStart(2, "0");
-    ctx.fillStyle = "#fbbf24";
+    ctx.fillStyle = C.accent;
     ctx.fillText(hh + "  predicted", boxX + 6, boxY + lineHeight - 2);
 
     labels.forEach(function (lab, idx) {
       var y = boxY + (idx + 2) * lineHeight - 4;
       ctx.fillStyle = lab.color;
       ctx.fillRect(boxX + 6, y - 8, 8, 8);
-      ctx.fillStyle = "#ddd";
+      ctx.fillStyle = C.text;
       ctx.fillText(lab.name, boxX + 18, y);
-      ctx.fillStyle = "#fff";
+      ctx.fillStyle = C.text;
       ctx.textAlign = "right";
       var val = lab.literal ? lab.val : formatW(lab.val);
       ctx.fillText(val, boxX + boxW - 6, y);
@@ -1034,7 +1075,7 @@
 
     if (a.reason) {
       var ry = boxY + (labels.length + 2) * lineHeight + 2;
-      ctx.fillStyle = "#86efac";
+      ctx.fillStyle = C.dim;
       ctx.font = "italic 10px monospace";
       // Truncate if too long for box
       var reason = a.reason.length > 28 ? a.reason.substring(0, 27) + "…" : a.reason;
@@ -1048,6 +1089,35 @@
         if (!res.ok) return res.text().then(function (t) { throw new Error(t || ("HTTP " + res.status)); });
         return res.json();
       });
+  }
+
+  function parseResponseError(res) {
+    return res.text().then(function (t) {
+      if (!t) return "HTTP " + res.status;
+      try {
+        var j = JSON.parse(t);
+        return j && j.error ? j.error : t;
+      } catch (e) {
+        return t;
+      }
+    });
+  }
+
+  function v2xCommand(driver, powerW) {
+    return fetch("/api/v2x/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: powerW === 0 ? "v2x_stop" : "v2x_set_power",
+        driver: driver,
+        power_w: powerW,
+      }),
+    }).then(function (res) {
+      if (!res.ok) {
+        return parseResponseError(res).then(function (msg) { throw new Error(msg); });
+      }
+      return res.json();
+    });
   }
 
   function renderDriverActions(name, d) {
@@ -1066,10 +1136,92 @@
     return actions;
   }
 
+  function formatOptionalW(w) {
+    return w == null ? "—" : formatW(w);
+  }
+
+  // ---------------------------------------------------------------------
+  // SHARED V2X manual-command surface (parseResponseError, v2xCommand,
+  // formatOptionalW, renderV2XControls + the click handler and card body
+  // below) is intentionally kept byte-identical with the same block in
+  // web/next-app.js. There is no shared module system — each file is a
+  // standalone IIFE loaded on a different page (app.js → legacy.html,
+  // next-app.js → index.html) — so changes here MUST be mirrored there.
+  // ---------------------------------------------------------------------
+  function renderV2XControls(name, d) {
+    var isLive = d.status === "ok";
+    var chargeMax = d.v2x_charge_power_max_w || d.v2x_rated_power_w || 50000;
+    var dischargeMax = d.v2x_discharge_power_max_w || d.v2x_rated_power_w || 50000;
+    var maxW = Math.max(1, Math.min(50000, Math.max(chargeMax, dischargeMax)));
+    var suggested = Math.min(3000, maxW);
+    var disabled = isLive ? "" : " disabled";
+    // Mono eyebrow + caption styled inline from theme.css tokens so it reads
+    // identically on both dashboards (legacy style.css has no .v2x-* rules).
+    // Flags that this manual surface bypasses the dispatch policy envelope.
+    var note = '' +
+      '<div class="v2x-experimental-note" style="margin-top:8px">' +
+      '  <span style="font-family:var(--mono);font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e)">Experimentell</span>' +
+      '  <span style="display:block;font-family:var(--mono);font-size:10px;color:var(--fg-dim);margin-top:2px">manuell styrning utan säkerhetsenvelope</span>' +
+      '</div>';
+    return '' +
+      '<div class="v2x-control-panel" data-v2x-driver="' + escHtml(name) + '">' +
+      '  <label class="v2x-power-label" for="v2x-power-' + escHtml(name) + '">Manual W</label>' +
+      '  <input class="v2x-power-input" id="v2x-power-' + escHtml(name) + '" type="number" min="0" max="' + maxW + '" step="100" value="' + suggested + '"' + disabled + '>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="charge" data-drv="' + escHtml(name) + '"' + disabled + '>Charge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="discharge" data-drv="' + escHtml(name) + '"' + disabled + '>Discharge</button>' +
+      '  <button class="btn-send v2x-command-btn" data-v2x-action="stop" data-drv="' + escHtml(name) + '"' + disabled + '>Stop</button>' +
+      '  <div class="v2x-command-status" role="status" aria-live="polite"></div>' +
+      note +
+      '</div>';
+  }
+
   // Event delegation — one listener for all driver-action buttons. Saves
   // re-binding on every re-render.
   if (driversGrid) {
     driversGrid.addEventListener("click", function (ev) {
+      var v2xBtn = ev.target.closest("[data-v2x-action]");
+      if (v2xBtn) {
+        var v2xName = v2xBtn.getAttribute("data-drv");
+        var v2xAction = v2xBtn.getAttribute("data-v2x-action");
+        var panel = v2xBtn.closest(".v2x-control-panel");
+        var input = panel ? panel.querySelector(".v2x-power-input") : null;
+        var status = panel ? panel.querySelector(".v2x-command-status") : null;
+        if (!v2xName || !v2xAction) return;
+
+        var requested = input ? Math.abs(Number(input.value || 0)) : 0;
+        var max = input ? Number(input.max || 50000) : 50000;
+        if (!Number.isFinite(requested)) requested = 0;
+        requested = Math.min(Math.max(requested, 0), max);
+        var powerW = v2xAction === "stop" ? 0 : requested;
+        if (v2xAction === "discharge") powerW = -powerW;
+        if (v2xAction === "discharge" && powerW < 0) {
+          if (!window.confirm("Discharge " + v2xName + " at " + formatW(powerW) + "?")) return;
+        }
+
+        v2xBtn.disabled = true;
+        if (status) {
+          status.className = "v2x-command-status";
+          status.textContent = "Sending " + formatW(powerW) + "…";
+        }
+        v2xCommand(v2xName, powerW)
+          .then(function () {
+            if (status) {
+              status.className = "v2x-command-status ok";
+              status.textContent = powerW === 0 ? "Stopped" : "Sent " + formatW(powerW);
+            }
+            setTimeout(fetchStatus, 600);
+          })
+          .catch(function (err) {
+            if (status) {
+              status.className = "v2x-command-status error";
+              status.textContent = err.message;
+            }
+            alert("V2X command failed: " + err.message);
+          })
+          .finally(function () { v2xBtn.disabled = false; });
+        return;
+      }
+
       var btn = ev.target.closest("[data-drv-action]");
       if (!btn) return;
       var name = btn.getAttribute("data-drv");
@@ -1098,12 +1250,54 @@
       var ticks = d.tick_count != null ? d.tick_count : 0;
       var errors = d.consecutive_errors != null ? d.consecutive_errors : 0;
 
-      // Detect EV driver by presence of any ev_* field. Render a distinct
-      // card body — PV/battery/meter rows are always 0 for EV chargers.
-      var isEV = (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+      // Detect driver kind from telemetry shape. A pure vehicle driver
+      // (DerVehicle: SoC + charge-limit, no power) must NOT be mistaken
+      // for an EV charger or a V2X charger, so both checks are guarded by
+      // !isVehicle. Kept consistent with next-app.js renderDrivers().
+      // The legacy dashboard has no dedicated vehicle body, so a vehicle
+      // driver falls through to the meter/pv/battery layout below.
+      var isVehicle = (d.vehicle_soc != null || d.vehicle_charge_limit_pct != null);
+      var isEV = !isVehicle && (d.ev_w != null || d.ev_connected != null || d.ev_charging != null);
+      var isV2X = !isVehicle && (d.v2x_w != null || d.v2x_connected != null || d.v2x_vehicle_soc != null);
 
       var body;
-      if (isEV) {
+      if (isV2X) {
+        var v2xWVal = d.v2x_w != null ? d.v2x_w : 0;
+        var connected = d.v2x_connected === true;
+        var statusLabel = d.v2x_status
+          || (v2xWVal > 100 ? "charging" : (v2xWVal < -100 ? "discharging" : (connected ? "connected" : "idle")));
+        var v2xClass = v2xWVal < -100 ? "stat-ok" : (v2xWVal > 100 ? "stat-warn" : (connected ? "stat-warn" : "stat-dim"));
+        var vehicleSoc = d.v2x_vehicle_soc != null ? formatSoc(d.v2x_vehicle_soc) : "—";
+        var dcSummary = (d.v2x_dc_w != null || d.v2x_dc_v != null || d.v2x_dc_a != null)
+          ? formatOptionalW(d.v2x_dc_w) + " · " +
+            (d.v2x_dc_v != null ? d.v2x_dc_v.toFixed(0) + " V" : "—") + " · " +
+            (d.v2x_dc_a != null ? d.v2x_dc_a.toFixed(1) + " A" : "—")
+          : "—";
+        var sessionParts = [];
+        if (d.v2x_session_charge_wh != null) sessionParts.push("in " + formatKwh(d.v2x_session_charge_wh));
+        if (d.v2x_session_discharge_wh != null) sessionParts.push("out " + formatKwh(d.v2x_session_discharge_wh));
+        var session = sessionParts.length ? sessionParts.join(" / ") : "—";
+        var limitParts = [];
+        if (d.v2x_charge_power_max_w != null) limitParts.push("charge " + formatW(d.v2x_charge_power_max_w));
+        if (d.v2x_discharge_power_max_w != null) limitParts.push("discharge " + formatW(d.v2x_discharge_power_max_w));
+        if (!limitParts.length && d.v2x_rated_power_w != null) limitParts.push("rated " + formatW(d.v2x_rated_power_w));
+        var limits = limitParts.length ? limitParts.join(" / ") : "—";
+        var mode = d.v2x_control_mode || d.v2x_protocol || "—";
+
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">State</span><span class="stat-value ' + v2xClass + '">' + escHtml(statusLabel) + '</span>' +
+          '  <span class="stat-label">Power</span><span class="stat-value">' + formatW(v2xWVal) + '</span>' +
+          '  <span class="stat-label">Vehicle SoC</span><span class="stat-value">' + vehicleSoc + '</span>' +
+          '  <span class="stat-label">DC</span><span class="stat-value">' + escHtml(dcSummary) + '</span>' +
+          '  <span class="stat-label">Session</span><span class="stat-value">' + escHtml(session) + '</span>' +
+          '  <span class="stat-label">Limits</span><span class="stat-value">' + escHtml(limits) + '</span>' +
+          '  <span class="stat-label">Mode</span><span class="stat-value">' + escHtml(mode) + '</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
+          '</div>' +
+          renderV2XControls(name, d);
+      } else if (isEV) {
         var evWVal = d.ev_w != null ? d.ev_w : 0;
         // state_label + reason_no_current_label come from the driver —
         // UI renders them verbatim. Protocol knowledge stays in Lua.
@@ -1134,7 +1328,7 @@
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + '</span>' +
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + '</span>' +
           '</div>';
-      } else {
+      } else if (d.meter_w != null || d.pv_w != null || d.bat_w != null || d.bat_soc != null) {
         var meterW = d.meter_w != null ? d.meter_w : 0;
         var pvWVal = d.pv_w != null ? d.pv_w : 0;
         var batWVal = d.bat_w != null ? d.bat_w : 0;
@@ -1165,6 +1359,15 @@
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
           "</div>" +
           '<div class="driver-soc-bar"><div class="driver-soc-fill" style="width:' + Math.round(batSocVal * 100) + '%"></div></div>';
+      } else {
+        // Metrics-only driver (e.g. MyUplink heat-pump telemetry): no
+        // meter/pv/battery DER reading — don't render phantom 0 PV/SoC rows.
+        body =
+          '<div class="driver-stats">' +
+          '  <span class="stat-label">Type</span><span class="stat-value stat-dim">telemetry only</span>' +
+          '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
+          '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
+          "</div>";
       }
 
       // For disabled drivers the body is minimal — just show the label.
@@ -1535,14 +1738,14 @@
     var cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!lp.surplus_only;
-    cb.title = "Charge only when PV exports exceed local load. No deadline planning, no grid import. Add a schedule below to also catch up via grid when prices are cheap.";
+    cb.title = "Charge only from real PV surplus. No grid import and no home-battery discharge. Add a schedule below to also catch up via grid when prices are cheap.";
     var text = document.createElement("span");
-    text.textContent = "Surplus only (PV exports only — never imports grid)";
+    text.textContent = "Surplus only (PV only — no grid or battery)";
     var hint = document.createElement("div");
     hint.style.fontSize = "0.72rem";
     hint.style.color = "var(--text-dim)";
     hint.style.marginLeft = "1.4rem";
-    hint.textContent = "Charges only when PV exports exceed your load. No deadline planning — no grid import. Optional: add a schedule below to also catch up via grid when cheap.";
+    hint.textContent = "Charges only from real PV surplus. No deadline planning, no grid import, and no home-battery discharge. Optional: add a schedule below to also catch up via grid when cheap.";
     cb.addEventListener("change", function () {
       cb.disabled = true;
       var body = { surplus_only: cb.checked };
@@ -1916,9 +2119,9 @@
     if (!legend) return;
     var items = chartView === "energy" ? [
       ["#ef4444", "Import"], ["#22c55e", "Export"], ["#10b981", "PV"],
-      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["#e2e8f0", "Load"],
+      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["var(--fg)", "Load"],
     ] : [
-      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["#e2e8f0", "Load"],
+      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["var(--fg)", "Load"],
       ["#f59e0b", "Ferroamp"], ["#8b5cf6", "Sungrow"],
     ];
     legend.innerHTML = items.map(function(it) {
