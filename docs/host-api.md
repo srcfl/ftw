@@ -42,9 +42,28 @@ Returning `false` or a non-empty string is treated as an error.
 | `host.set_watchdog_timeout_s(seconds)` | Per-driver watchdog override. `0` clears it. |
 | `host.set_make(name)` | Manufacturer used for device identity. |
 | `host.set_sn(serial)` | Serial number used for stable `device_id`. |
+| `host.set_device_fault(faulted, reason)` | Excludes a reachable-but-non-actuating device from dispatch and planning until cleared. |
 
 There is no `host.timestamp()`, `host.pool_free()`, or one-argument
 `host.log()` in the current runtime.
+
+### `host.set_device_fault(faulted, reason)`
+
+Flag or clear a device-level fault: the driver is reachable and still emits
+fresh telemetry, but the hardware cannot actuate—for example, a Ferroamp
+EnergyHub in Fault Mode with its battery/PV relays open.
+
+This differs from watchdog staleness. While faulted, the driver remains visible
+with its fresh diagnostic and site-meter data, but battery/PV control and MPC
+capacity calculations exclude it. `/api/status` reports `status: "fault"` and
+includes `device_fault_reason`. Reasserting the same state each poll is safe;
+only transitions are logged.
+
+```lua
+local fault_mode = (math.floor(ehub_state / 32768) % 2) == 1
+host.set_device_fault(fault_mode,
+    fault_mode and ("EnergyHub Fault Mode (state " .. ehub_state .. ")") or "")
+```
 
 ## Telemetry
 

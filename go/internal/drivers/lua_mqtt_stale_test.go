@@ -721,21 +721,22 @@ func TestFerroampZeroBatteryCommandForcesIdleNotAuto(t *testing.T) {
 		t.Fatalf("zero command payload = %s, must NOT publish auto (regression: auto lets EnergyHub self-consume)", last)
 	}
 
-	// Idempotent: once we're in forced idle, another power_w=0 must not
-	// republish — that would churn MQTT on every dispatch tick.
+	// Forced idle must be refreshed every dispatch tick. The EnergyHub expires
+	// the forced-mode command; a one-shot zero lets it fall back to autonomous
+	// operation and can charge from grid while the planner believes it is idle.
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":0}`)); err != nil {
 		t.Fatalf("second zero command: %v", err)
 	}
-	if got := len(mqtt.Published()); got != initial+1 {
-		t.Fatalf("second zero command published %d new messages, want 0 (idempotent)", got-(initial+1))
+	if got := len(mqtt.Published()); got != initial+2 {
+		t.Fatalf("second zero command publish count = %d, want %d (forced idle refresh)", got, initial+2)
 	}
 
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1200}`)); err != nil {
 		t.Fatalf("discharge command: %v", err)
 	}
 	pubs = mqtt.Published()
-	if got := len(pubs); got != initial+2 {
-		t.Fatalf("discharge publish count = %d, want %d", got, initial+2)
+	if got := len(pubs); got != initial+3 {
+		t.Fatalf("discharge publish count = %d, want %d", got, initial+3)
 	}
 	if !strings.Contains(pubs[len(pubs)-1].Payload, `"name":"discharge"`) {
 		t.Fatalf("last payload = %s, want discharge command", pubs[len(pubs)-1].Payload)
@@ -747,8 +748,8 @@ func TestFerroampZeroBatteryCommandForcesIdleNotAuto(t *testing.T) {
 		t.Fatalf("release-to-idle command: %v", err)
 	}
 	pubs = mqtt.Published()
-	if got := len(pubs); got != initial+3 {
-		t.Fatalf("release-to-idle publish count = %d, want %d", got, initial+3)
+	if got := len(pubs); got != initial+4 {
+		t.Fatalf("release-to-idle publish count = %d, want %d", got, initial+4)
 	}
 	last = pubs[len(pubs)-1].Payload
 	if !strings.Contains(last, `"name":"discharge"`) || !strings.Contains(last, `"arg":0`) {
@@ -779,9 +780,14 @@ func lastBatteryDispatch(t *testing.T, mqtt *fakeMQTT) string {
 // ubat / ibat are kept consistent with the existing multi-ESO tests so
 // the battery emit path stays happy (otherwise n_eso never advances).
 func esoPayload(id string, soc float64) string {
+	return esoPayloadCurrent(id, soc, 0.5)
+}
+
+func esoPayloadCurrent(id string, soc, currentA float64) string {
 	return `{"id":{"val":"` + id + `"},"soc":{"val":` +
 		strconv.FormatFloat(soc, 'f', -1, 64) +
-		`},"ubat":{"val":400},"ibat":{"val":0.5},` +
+		`},"ubat":{"val":400},"ibat":{"val":` +
+		strconv.FormatFloat(currentA, 'f', -1, 64) + `},` +
 		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
 }
 
@@ -790,22 +796,19 @@ func esoPayloadNoSoC(id string) string {
 		`"relaystatus":{"val":0},"faultcode":{"val":0},"udc":{"val":760}}`
 }
 
-// Live-system regression (Stefan's 4-ESO site, 2026-05-26): the
-// EnergyHub divides a dispatch setpoint evenly across all ESOs it knows
-// about, including units pinned at their SoC floor that physically
-// refuse to respond. Asking for 1.3 kW with 2 of 4 ESOs floored at min
-// SoC delivered ~0.66 kW. The driver now pre-scales by N_total/N_capable.
+// Live-system regression (Stefan's 4-ESO site): the EnergyHub divides a
+// dispatch setpoint evenly across all ESOs, including units that deliver no
+// power. Scaling is based on measured delivery from the previous tick rather
+// than SoC, because an ESO can be inactive at a mid-range SoC too.
 func TestFerroampMultiESOScalingDoublesWhenHalfFloored(t *testing.T) {
 	tel := telemetry.NewStore()
 	mqtt := &fakeMQTT{}
 	d, _ := newTestFerroampDriver(t, tel, mqtt)
 
-	// 4 ESOs: two floored at 10% (below the 15% discharge floor), two
-	// active at 50%. ehub.pbat is irrelevant — n_eso comes from the per-
-	// ESO map.
+	// Establish the fleet and issue the first, deliberately unscaled command.
 	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
-	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
-	mqtt.Push("extapi/data/eso", esoPayload("B", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("A", 50))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 50))
 	mqtt.Push("extapi/data/eso", esoPayload("C", 50))
 	mqtt.Push("extapi/data/eso", esoPayload("D", 50))
 	if _, err := d.Poll(context.Background()); err != nil {
@@ -815,6 +818,19 @@ func TestFerroampMultiESOScalingDoublesWhenHalfFloored(t *testing.T) {
 	if err := d.Command(context.Background(),
 		[]byte(`{"action":"battery","power_w":-1300}`)); err != nil {
 		t.Fatalf("discharge command: %v", err)
+	}
+
+	// Next telemetry tick: A/B delivered zero, C/D carried the command.
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("A", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("B", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("C", 50, 0.5))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("D", 50, 0.5))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("feedback poll: %v", err)
+	}
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1300}`)); err != nil {
+		t.Fatalf("scaled discharge command: %v", err)
 	}
 
 	got := lastBatteryDispatch(t, mqtt)
@@ -842,9 +858,9 @@ func TestFerroampMultiESOScalingCappedAtMax(t *testing.T) {
 	d, _ := newTestFerroampDriver(t, tel, mqtt)
 
 	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
-	mqtt.Push("extapi/data/eso", esoPayload("A", 10))
-	mqtt.Push("extapi/data/eso", esoPayload("B", 10))
-	mqtt.Push("extapi/data/eso", esoPayload("C", 10))
+	mqtt.Push("extapi/data/eso", esoPayload("A", 50))
+	mqtt.Push("extapi/data/eso", esoPayload("B", 50))
+	mqtt.Push("extapi/data/eso", esoPayload("C", 50))
 	mqtt.Push("extapi/data/eso", esoPayload("D", 50))
 	if _, err := d.Poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
@@ -853,6 +869,17 @@ func TestFerroampMultiESOScalingCappedAtMax(t *testing.T) {
 	if err := d.Command(context.Background(),
 		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
 		t.Fatalf("discharge command: %v", err)
+	}
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("A", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("B", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("C", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("D", 50, 0.5))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("feedback poll: %v", err)
+	}
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
+		t.Fatalf("scaled discharge command: %v", err)
 	}
 
 	got := lastBatteryDispatch(t, mqtt)
@@ -880,6 +907,15 @@ func TestFerroampMultiESOScalingRefusesStaleSnapshot(t *testing.T) {
 	if _, err := d.Poll(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
+	if err := d.Command(context.Background(),
+		[]byte(`{"action":"battery","power_w":-1000}`)); err != nil {
+		t.Fatalf("initial discharge command: %v", err)
+	}
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("A", 50, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("B", 50, 0.5))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("feedback poll: %v", err)
+	}
 
 	// Rewind the host clock by > STALE_AFTER_MS so the snapshot from
 	// the poll above looks stale to driver_command.
@@ -896,6 +932,43 @@ func TestFerroampMultiESOScalingRefusesStaleSnapshot(t *testing.T) {
 	}
 	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 1000 {
 		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 1000 (no scaling on stale data)", v)
+	}
+}
+
+func TestFerroampMultiESOChargeScalingUsesMeasuredAcceptance(t *testing.T) {
+	tel := telemetry.NewStore()
+	mqtt := &fakeMQTT{}
+	d, _ := newTestFerroampDriver(t, tel, mqtt)
+
+	mqtt.Push("extapi/data/ehub", `{"pext":{"L1":0,"L2":0,"L3":0},"ppv":{"val":0},"pbat":{"val":0}}`)
+	for _, id := range []string{"A", "B", "C", "D"} {
+		mqtt.Push("extapi/data/eso", esoPayloadCurrent(id, 60, -0.5))
+	}
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":1300}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A/B are saturated at the same mid-range SoC and accept no charge; C/D do.
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("A", 60, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("B", 60, 0))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("C", 60, -0.5))
+	mqtt.Push("extapi/data/eso", esoPayloadCurrent("D", 60, -0.5))
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":1300}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := lastBatteryDispatch(t, mqtt)
+	if !strings.Contains(got, `"name":"charge"`) || !strings.Contains(got, `"arg":2600`) {
+		t.Fatalf("dispatch payload = %s, want charge arg=2600", got)
+	}
+	if v, _, ok := tel.LatestMetric("ferroamp", "eso_dispatch_scale_x1000"); !ok || v != 2000 {
+		t.Fatalf("eso_dispatch_scale_x1000 = %v, want 2000", v)
 	}
 }
 

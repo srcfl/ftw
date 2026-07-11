@@ -3,6 +3,7 @@ package telemetry
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -127,6 +128,17 @@ type DriverHealth struct {
 	// dispatcher still uses LastSuccess + this override for stale
 	// detection — there is no separate "degraded" state.
 	WatchdogTimeoutOverride time.Duration
+
+	// DeviceFault is set by a driver (via host.set_device_fault) when it can
+	// reach the device but the device is in a fault state where it cannot
+	// actuate — e.g. a Ferroamp EnergyHub in Fault Mode with its relays open.
+	// It is orthogonal to Status: the driver keeps emitting fresh telemetry
+	// (so the watchdog sees it as alive and RecordSuccess keeps Status=ok),
+	// but IsOnline() returns false so the dispatcher and the MPC plan exclude
+	// it — otherwise we keep commanding a dead battery and the un-delivered
+	// power silently becomes grid import. DeviceFaultReason is operator-facing.
+	DeviceFault       bool
+	DeviceFaultReason string
 }
 
 // RecordSuccess resets error state and marks the driver healthy. Call
@@ -175,9 +187,22 @@ func (h *DriverHealth) SetOffline() {
 	h.Status = StatusOffline
 }
 
-// IsOnline reports whether the driver is usable for control.
+// SetDeviceFault flags (or clears) a device-level fault — the driver reaches
+// the device but it can't actuate. Independent of Status so a driver that
+// keeps emitting from cache doesn't flap it back on every RecordSuccess.
+func (h *DriverHealth) SetDeviceFault(faulted bool, reason string) {
+	h.DeviceFault = faulted
+	if faulted {
+		h.DeviceFaultReason = reason
+	} else {
+		h.DeviceFaultReason = ""
+	}
+}
+
+// IsOnline reports whether the driver is usable for control. A stale-flagged
+// driver (Status offline) OR one its driver flagged as device-faulted is not.
 func (h *DriverHealth) IsOnline() bool {
-	return h.Status != StatusOffline
+	return h.Status != StatusOffline && !h.DeviceFault
 }
 
 // MetricSample is one (driver, metric, ts, value) tuple buffered for the
@@ -645,6 +670,29 @@ func (s *Store) SetDriverWatchdogTimeout(name string, d time.Duration) {
 		s.health[name] = h
 	}
 	h.WatchdogTimeoutOverride = d
+}
+
+// SetDriverDeviceFault flags (or clears) a device-level fault for the driver,
+// creating the health record if needed. Wired to host.set_device_fault.
+func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
+	s.mu.Lock()
+	h, ok := s.health[name]
+	if !ok {
+		h = &DriverHealth{Name: name}
+		s.health[name] = h
+	}
+	changed := h.DeviceFault != faulted
+	h.SetDeviceFault(faulted, reason)
+	s.mu.Unlock()
+	// Log only the transition (the driver re-asserts the fault every poll) so
+	// the entry/exit surfaces in /api/logs as an operator alert without spam.
+	if changed {
+		if faulted {
+			slog.Warn("driver device fault — excluding from dispatch + plan until it recovers", "driver", name, "reason", reason)
+		} else {
+			slog.Info("driver device fault cleared — back in control", "driver", name)
+		}
+	}
 }
 
 // WatchdogTransition describes a driver whose online state just flipped.

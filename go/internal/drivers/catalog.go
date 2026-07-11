@@ -14,14 +14,14 @@ import (
 // directory. Populated from the DRIVER={…} table each .lua file declares
 // at the top. Missing fields are left empty.
 type CatalogEntry struct {
-	Path               string         `json:"path"`          // portable config lua path
-	Filename           string         `json:"filename"`      // e.g. "ferroamp.lua"
+	Path               string         `json:"path"`     // portable config lua path
+	Filename           string         `json:"filename"` // e.g. "ferroamp.lua"
 	ID                 string         `json:"id"`
 	Name               string         `json:"name"`
 	Manufacturer       string         `json:"manufacturer,omitempty"`
 	Version            string         `json:"version,omitempty"`
-	Protocols          []string       `json:"protocols,omitempty"`            // mqtt / modbus / http
-	Capabilities       []string       `json:"capabilities,omitempty"`         // meter / pv / battery
+	Protocols          []string       `json:"protocols,omitempty"`    // mqtt / modbus / http
+	Capabilities       []string       `json:"capabilities,omitempty"` // meter / pv / battery
 	HTTPHosts          []string       `json:"http_hosts,omitempty"`
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
@@ -150,6 +150,39 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.TestedModels = pickList(block, "tested_models")
 	e.ConfigSecrets = pickList(block, "config_secrets")
 	return e, nil
+}
+
+// IsEVOrVehicleDriver reports whether the driver at luaPath is an EV
+// charger (capabilities contains "ev") or a vehicle telemetry source
+// (capabilities contains "vehicle"). Returns false when the driver
+// isn't in the catalog or declares neither.
+//
+// The match is by the catalog entry's portable Path (relative to
+// drivers/) first, then by Filename — operators reference drivers
+// either way in YAML and both forms must work.
+//
+// This is the source of truth for "is this a non-stationary-battery
+// driver" decisions in main.go (battery-pool capacity exclusion +
+// operator-warning routing). The Lua DRIVER table's capabilities list
+// is the driver's self-declaration; nothing in Go should match on
+// filenames or vendor names directly.
+func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	wantPath := filepath.ToSlash(luaPath)
+	wantFilename := filepath.Base(wantPath)
+	for _, e := range catalog {
+		if strings.EqualFold(e.Path, wantPath) || strings.EqualFold(e.Filename, wantFilename) {
+			for _, c := range e.Capabilities {
+				if strings.EqualFold(c, "ev") || strings.EqualFold(c, "vehicle") {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
 }
 
 // normalizeVerificationStatus coerces the Lua string into one of the

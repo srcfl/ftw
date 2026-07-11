@@ -94,6 +94,25 @@ func TestModeOptionsIncludePublishedPlannerModes(t *testing.T) {
 	}
 }
 
+func TestMetricUnitAndClassPreservesExplicitDriverUnit(t *testing.T) {
+	unit, class := metricUnitAndClass("hp_z1_heat_offset", "°C")
+	if unit != "°C" || class != "temperature" {
+		t.Fatalf("metricUnitAndClass explicit unit = (%q, %q), want (°C, temperature)", unit, class)
+	}
+
+	unit, class = metricUnitAndClass("battery_level", "%")
+	if unit != "%" || class != "" {
+		t.Fatalf("non-SoC percentage = (%q, %q), want (%%, empty class)", unit, class)
+	}
+}
+
+func TestMetricUnitAndClassFallsBackToMetricSuffix(t *testing.T) {
+	unit, class := metricUnitAndClass("grid_frequency_hz", "")
+	if unit != "Hz" || class != "frequency" {
+		t.Fatalf("suffix fallback = (%q, %q), want (Hz, frequency)", unit, class)
+	}
+}
+
 // TestSensorsAnnouncedZeroWithoutStart verifies that SensorsAnnounced is
 // zero when the bridge has been constructed but discovery has not run (no
 // broker connection). This is the normal state when the API queries a

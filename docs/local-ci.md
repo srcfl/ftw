@@ -52,6 +52,14 @@ This runs:
 Artifacts land under `artifacts/local-ci/<timestamp>/`, including logs,
 API JSON, DOM dumps, and screenshots.
 
+The local stack uses loopback ports `18080` for the API, `11883` for the
+Ferroamp MQTT simulator, and `15502` for the Sungrow Modbus simulator. Before
+running the full pass, `scripts/ci-local.sh` fails fast if any of those ports
+are already listening, so it cannot accidentally run the smoke test against an
+unrelated local process. Override with `FTW_CI_API_PORT`,
+`FTW_CI_MQTT_PORT`, and `FTW_CI_MODBUS_PORT` when another session is using the
+defaults.
+
 Set `FTW_CI_SKIP_BROWSER=1` to skip the browser smoke when you only want
 Go/build verification.
 
