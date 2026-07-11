@@ -41,12 +41,13 @@ type LoadpointTargeter interface {
 //   - EV deadlines → loadpoint SetTarget(socPct, departure).
 //
 // Everything is opt-in and fail-soft: an unreachable server logs a warning and
-// leaves the last-good intents (and control) untouched.
+// keeps evaluating the last-good intents so known time-based transitions still
+// happen while the server is unavailable.
 type Service struct {
 	lp LoadpointTargeter
 	lm LoadProfiler
 
-	// lifecycleMu serialises Start / Stop / Reload.
+	// lifecycleMu serialises Start / Stop.
 	lifecycleMu sync.Mutex
 	stop        chan struct{}
 	wg          sync.WaitGroup
@@ -79,6 +80,7 @@ type Service struct {
 	historyEnabled bool
 	historyPath    string
 	intents        Intents
+	hasIntents     bool
 	lastSyncMs     int64
 	lastErr        string
 	reachable      bool
@@ -234,17 +236,6 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 	s.mu.Unlock()
 }
 
-// Reload swaps in a changed caldav config without a restart (URL, credentials,
-// keywords, interval). Enabling/disabling the feature is restart-gated in
-// config.RestartRequiredFor, so this only ever runs while enabled.
-func (s *Service) Reload(cfg config.CalDAV, firstLoadpointID string) {
-	if s == nil {
-		return
-	}
-	s.applyConfig(cfg, firstLoadpointID)
-	slog.Info("caldav config reloaded")
-}
-
 // Start launches the inbound poll loop, plus the outbound EVSE-history loop
 // when a source + history collection are configured. No-op if disabled or
 // already running.
@@ -339,8 +330,15 @@ func (s *Service) pollOnce(ctx context.Context) {
 		s.reachable = false
 		s.lastErr = err.Error()
 		s.lastSyncMs = now.UnixMilli()
+		cached, hasCached := s.intents, s.hasIntents
 		s.mu.Unlock()
 		slog.Warn("caldav poll failed", "err", err)
+		// A failed refresh must not freeze a previously active Away profile
+		// beyond the known event end. Do not apply an empty cache before the
+		// first successful poll: that would overwrite a manual profile choice.
+		if hasCached {
+			s.apply(cached, now)
+		}
 		return
 	}
 
@@ -349,6 +347,7 @@ func (s *Service) pollOnce(ctx context.Context) {
 	s.lastErr = ""
 	s.lastSyncMs = now.UnixMilli()
 	s.intents = intents
+	s.hasIntents = true
 	s.mu.Unlock()
 
 	s.apply(intents, now)
@@ -454,7 +453,10 @@ func (s *Service) fetch(ctx context.Context) (Intents, error) {
 			ev := events[i]
 			title, _ := ev.Props.Text(ical.PropSummary)
 			uid, _ := ev.Props.Text(ical.PropUID)
-			st, _ := ev.DateTimeStart(time.Local)
+			st, err := ev.DateTimeStart(time.Local)
+			if err != nil {
+				continue
+			}
 			en, _ := ev.DateTimeEnd(time.Local)
 			away, evd := prs.classify(title, st, en, uid)
 			if away != nil {

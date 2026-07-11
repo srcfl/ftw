@@ -479,16 +479,12 @@ func main() {
 					newCfg.EVCharger.Password = pw
 				}
 			}
-			// Restore CalDAV password from state.db (not in YAML), then
-			// hot-reload the calendar client (URL/credentials/keywords/
-			// interval). Enable/disable is restart-gated, so calSvc is
-			// non-nil here exactly when the feature is running.
+			// Restore CalDAV password from state.db (not in YAML). Any CalDAV
+			// change is restart-gated because the native server and client must
+			// switch credentials, paths, and listeners atomically.
 			if newCfg.CalDAV != nil {
 				if pw, ok := st.LoadConfig("caldav_password"); ok {
 					newCfg.CalDAV.Password = pw
-				}
-				if calSvc != nil {
-					calSvc.Reload(*newCfg.CalDAV, firstLoadpointID(newCfg.Loadpoints))
 				}
 			}
 			// Driver paths are already resolved by config.Load; no extra

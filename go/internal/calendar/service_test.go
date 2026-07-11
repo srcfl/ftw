@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -58,6 +59,41 @@ func TestApplyAwayProfileTransitions(t *testing.T) {
 	s.apply(Intents{}, now)
 	if lm.profile != loadmodel.ProfileHome || lm.calls != 2 {
 		t.Fatalf("expected home profile after leaving window: profile=%v calls=%d", lm.profile, lm.calls)
+	}
+}
+
+func TestPollFailureExpiresCachedAwayIntent(t *testing.T) {
+	lm := &fakeLM{}
+	s := newTestService(&fakeLP{}, lm)
+	now := time.Now()
+	cached := Intents{Away: []Interval{{Start: now.Add(-2 * time.Hour), End: now.Add(-time.Hour)}}}
+
+	// Simulate the earlier successful application while the event was active.
+	s.apply(cached, now.Add(-90*time.Minute))
+	s.mu.Lock()
+	s.intents = cached
+	s.hasIntents = true
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // force the refresh to fail immediately
+	s.pollOnce(ctx)
+
+	if lm.profile != loadmodel.ProfileHome || lm.calls != 2 {
+		t.Fatalf("failed refresh must expire known away window: profile=%v calls=%d", lm.profile, lm.calls)
+	}
+}
+
+func TestFirstPollFailureDoesNotOverrideManualProfile(t *testing.T) {
+	lm := &fakeLM{profile: loadmodel.ProfileAway}
+	s := newTestService(&fakeLP{}, lm)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	s.pollOnce(ctx)
+
+	if lm.calls != 0 || lm.profile != loadmodel.ProfileAway {
+		t.Fatalf("first failed poll must leave manual profile untouched: profile=%v calls=%d", lm.profile, lm.calls)
 	}
 }
 
