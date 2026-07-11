@@ -2489,6 +2489,14 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string) {
 }
 
 func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
+	// Age the fixed-column dashboard history on the same cadence as the
+	// long-format TS + diagnostics rolloff below. Prune is idempotent and pure
+	// SQL; without this call history_hot/history_warm grow forever even though
+	// ts_samples is correctly moved to Parquet.
+	if err := st.Prune(ctx); err != nil {
+		slog.Warn("history tier prune failed", "err", err)
+	}
+
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
 	if err != nil {
 		slog.Warn("parquet rolloff failed", "err", err)
