@@ -48,6 +48,39 @@ local sn_read = false
 local init_verified = false
 
 ----------------------------------------------------------------------------
+-- Fingerprint
+----------------------------------------------------------------------------
+
+-- driver_fingerprint() — passive probe used by /api/drivers/fingerprint to
+-- auto-detect what's listening on a Modbus endpoint. Reads ONLY the
+-- read-only device-type input register (5000 / addr 4999); never writes.
+-- Tri-state:
+--   true  → device-type code is in the SH hybrid family (0x0Dxx / 0x0Exx,
+--           e.g. 0x0E0E = SH10RT)
+--   false → answered Modbus with a clean code that isn't a Sungrow hybrid
+--   nil    → couldn't read (wrong unit id, not Modbus, timeout) or the code
+--           reads back as the 0 / 0xFFFF "not present" sentinel
+function driver_fingerprint()
+    local ok, regs = pcall(host.modbus_read, 4999, 1, "input")
+    if not ok or regs == nil or regs[1] == nil then
+        return nil
+    end
+    local code = regs[1]
+    if code == 0 or code == 0xFFFF then
+        return nil -- empty / sentinel read — inconclusive
+    end
+    local hi = math.floor(code / 256)
+    if hi == 0x0E or hi == 0x0D then
+        return true, {
+            make = "Sungrow",
+            model = string.format("0x%04X", code),
+            confidence = 0.9,
+        }
+    end
+    return false -- responded, but not a Sungrow SH hybrid signature
+end
+
+----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 

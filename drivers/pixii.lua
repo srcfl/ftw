@@ -222,6 +222,42 @@ local function emit_troubleshooting_metrics()
 end
 
 ----------------------------------------------------------------------------
+-- Fingerprint
+----------------------------------------------------------------------------
+
+-- driver_fingerprint() — passive probe for /api/drivers/fingerprint. Reads
+-- ONLY the SunSpec common block; never writes (no heartbeat / setpoint).
+-- Pixii exposes the common block on HOLDING registers (FC 0x03), unlike
+-- SolarEdge which mirrors SunSpec onto input registers. Tri-state:
+--   true  → SunSpec common block reports manufacturer "Pixii"
+--   false → answered Modbus but it's a non-Pixii device
+--   nil    → couldn't read (wrong unit id, not Modbus, timeout)
+function driver_fingerprint()
+    local ok, sig = pcall(host.modbus_read, 40000, 2, "holding")
+    if not ok or sig == nil or sig[1] == nil or sig[2] == nil then
+        return nil
+    end
+    -- SunSpec identifier "SunS" = 0x5375, 0x6E53.
+    if sig[1] ~= 0x5375 or sig[2] ~= 0x6E53 then
+        return false
+    end
+    local mok, mfg_regs = pcall(host.modbus_read, 40004, 16, "holding")
+    if not mok or mfg_regs == nil then
+        return nil
+    end
+    local mfg = decode_ascii(mfg_regs, 16)
+    if mfg:sub(1, 5) ~= "Pixii" then
+        return false -- SunSpec, but a different vendor
+    end
+    local serial = ""
+    local sok, sn_regs = pcall(host.modbus_read, 40052, 16, "holding")
+    if sok and sn_regs ~= nil then
+        serial = decode_ascii(sn_regs, 16)
+    end
+    return true, { make = "Pixii", serial = serial, confidence = 0.95 }
+end
+
+----------------------------------------------------------------------------
 -- Initialization
 ----------------------------------------------------------------------------
 

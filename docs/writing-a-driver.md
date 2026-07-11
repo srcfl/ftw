@@ -124,6 +124,46 @@ the EMS crashes.
 Dispatch is serialized per driver (`registry.go:188`), so you will never
 see two callbacks racing for the same VM.
 
+### 2.3 driver_fingerprint — optional device auto-detect
+
+When a network scan finds an open port (say Modbus on `:502`), the host
+asks every driver that speaks that protocol "is this you?" by calling an
+optional sixth hook:
+
+```lua
+-- Passive probe. Reads ONLY — never writes (driver_init / driver_cleanup
+-- are NOT run during fingerprinting, precisely so a probe can't reconfigure
+-- the device). Returns a tri-state:
+--   true  → I read a discriminating signature; this is one of mine
+--   false → I got a clean response, and it's positively NOT one of mine
+--   nil    → inconclusive: read error, ambiguous value, wrong unit id
+function driver_fingerprint()
+    local ok, regs = pcall(host.modbus_read, 4999, 1, "input")
+    if not ok or regs == nil or regs[1] == nil then
+        return nil                       -- couldn't talk → inconclusive
+    end
+    if is_my_signature(regs[1]) then
+        -- optional 2nd return: identity hint the UI pre-fills
+        return true, { make = "Acme", model = "X1", confidence = 0.9 }
+    end
+    return false                          -- answered, but not my device
+end
+```
+
+Only return `true` when you've read something *discriminating* — a SunSpec
+marker, a vendor device-type code, a magic register value — never on a bare
+"the connection opened". A missing hook (or any `nil`) is reported as
+`unknown` and never counts as a match, so silence is always safe.
+
+This powers `POST /api/drivers/fingerprint` and `GET /api/scan?fingerprint=1`
+(see `docs/api.md`), for both Modbus (port 502) and HTTP (port 80) drivers.
+The `target` table carries `host`, `port`, `protocol` and a ready-built
+`base_url` (HTTP). For worked examples read `driver_fingerprint` in
+`drivers/solaredge.lua` and `drivers/pixii.lua` (SunSpec `"SunS"` +
+manufacturer string, on input vs holding registers respectively),
+`drivers/sungrow.lua` (SH-hybrid device-type code), and `drivers/zap.lua`
+(HTTP `GET <base_url>/api/devices` device-list signature).
+
 ## 3. The host API
 
 Everything below is exposed as a `host.*` global. The authoritative list
