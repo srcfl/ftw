@@ -1,5 +1,195 @@
 # Changelog
 
+## 0.127.0
+
+### Minor Changes
+
+- 3cd15fe: Calendar-based planner constraints via a built-in CalDAV calendar (#498). 42W
+  hosts its own in-process, LAN-only CalDAV server (pure-Go, `emersion/go-webdav`,
+  MIT; objects persist in `state.db`), so no extra container is needed — it even
+  works as a single-container Home Assistant add-on. Recurring events are expanded
+  server-side. 42W reads a calendar you keep in your normal calendar app and turns
+  events into planner intents:
+
+  - An **Away** / **Vacation** event switches the load model to its away profile
+    for that interval, so the planner conserves battery while the house is empty.
+  - A **"Charge car 80%"** event (with your departure as the event time) sets the
+    matching loadpoint's target SoC + deadline, which the MPC already honours.
+
+  42W also **writes** read-only calendars you can subscribe to:
+
+  - an EVSE usage history ("EV charged 12.3 kWh", one event per charge session);
+  - the planner's forward-looking plan — upcoming battery charge/discharge
+    windows — reconciled each cycle so it stays current without piling up.
+
+  Both read-only calendars can be subscribed to in one tap via a `webcal://`
+  link (a read-only `.ics` feed served on the CalDAV port).
+
+  The feature is opt-in (`caldav.enabled`) and fail-soft — a calendar problem
+  never blocks control — and stays entirely on your local network. Configure it
+  under Settings → Calendar (mobile-friendly), which auto-manages the credential
+  and shows it (with a QR) to add to a phone or desktop calendar app.
+
+- 886a426: **The system now understands when a device is reachable but faulted, and stops
+  relying on it.** Previously a driver that kept emitting telemetry was treated as
+  healthy even if the device had gone into a fault state it couldn't act on — so
+  the dispatcher kept commanding it and the MPC kept planning against it. A
+  Ferroamp EnergyHub in _Fault Mode_ (relays open, can't charge/discharge) would
+  silently turn the battery's commanded share into **grid import**, while a healthy
+  second battery sat under-used.
+
+  - **New host capability `host.set_device_fault(faulted, reason)`** lets a driver
+    flag a device-level fault. It's orthogonal to the watchdog (which only catches
+    "stopped emitting") — the driver keeps emitting, but `IsOnline()` returns false.
+  - **Dispatch + MPC exclude a faulted driver** automatically (both already gate on
+    `IsOnline()`), so the load is covered by the healthy battery instead of
+    imported, and the plan stops counting capacity that isn't there.
+  - **`/api/status`** shows the driver as `"fault"` with `device_fault_reason`;
+    `/api/health` reports `drivers_faulted`; the transition is logged to `/api/logs`.
+  - **The Ferroamp driver** now detects EnergyHub Fault Mode (`ehub.state` bit 15)
+    and flags/clears the fault automatically.
+
+- 8733f0f: feat(drivers): driver-level device fingerprinting + scan auto-detect
+
+  Drivers can now identify whether an arbitrary endpoint is one of their own
+  devices via a new optional Lua lifecycle hook, `driver_fingerprint()`. It
+  returns a deliberate tri-state — `true` (positive signature match), `false`
+  (talked to it, it's _not_ mine), or `nil` (inconclusive / not supported) —
+  plus an optional `{make, model, serial, confidence}` identity hint. The
+  probe is passive: `driver_init`/`driver_cleanup` are never run, so a
+  fingerprint can't reconfigure the device (no Sungrow power-limit writes, no
+  SolarEdge curtail-register clears).
+
+  New `POST /api/drivers/fingerprint {host, port, protocol?, unit_id?}` takes
+  an open endpoint discovered by a network scan (e.g. port 502 or 80), runs
+  every catalog driver that speaks that protocol against it, and returns the
+  ranked matches (plus every candidate's verdict for transparency).
+  `GET /api/scan?fingerprint=1` folds this into discovery: each open Modbus
+  or HTTP host comes back annotated with the drivers that recognise it —
+  turning "port 502 is open on 10.0.0.7" into "that's a SolarEdge". The
+  default `/api/scan` response is unchanged.
+
+  Both Modbus (port 502) and HTTP (port 80) are fingerprintable. The hook
+  receives a `target` table (`host`, `port`, `protocol`, `base_url`) so HTTP
+  drivers can build their probe URL.
+
+  Ships signatures for four drivers:
+
+  - **SolarEdge** — SunSpec `"SunS"` marker + common-block manufacturer
+    string on input registers, with serial extraction.
+  - **Pixii** — same SunSpec common block but on holding registers
+    (manufacturer "Pixii"), with serial extraction.
+  - **Sungrow** — SH-hybrid device-type code.
+  - **Zap** (Sourceful) — HTTP `GET /api/devices` device-list signature,
+    latching the P1 serial as identity.
+
+  Drivers without a `driver_fingerprint` hook simply report `unknown` and are
+  never false-positives.
+
+- 07a5ae5: Add a read-only ESPHome DSMR/P1 meter driver and hot-reload site-meter changes into control, MPC, and load-model services without restarting.
+
+  The driver uses site-sign power, retries serial discovery for stable hardware identity, backs off after failures, and omits optional phase or lifetime-counter fields when their reads fail rather than publishing unsafe zeroes.
+
+- d43ad0d: Expand the Home Assistant MQTT bridge with reliable availability, driver health, live diagnostics, plans, prices, forecasts, phase data, EV/vehicle data, and daily energy totals.
+
+  - **Availability topic (LWT)**: HA entities now show as "Unavailable" when the EMS goes offline. The paho Last Will Testament publishes `offline` to `forty-two-watts/status` on unclean disconnect; a clean shutdown publishes it synchronously before disconnect.
+  - **Per-driver binary_sensor**: One `<driver>_online` entity per driver so HA dashboards can alert on a stale driver (e.g. stuck Modbus device).
+  - **`peak_limit_w` and `ev_charging_w`**: Both control setpoints are now published as `number` entities and writable from HA.
+  - **`emit_metric` sensors**: Any scalar diagnostic emitted by a Lua driver is automatically discovered with its explicit unit preserved and a device class inferred when possible.
+  - **MPC plan sensor**: A `plan_action` text sensor shows the current slot's action (charge / discharge / idle), with JSON attributes containing `battery_w`, `grid_w`, `soc_pct`, slot start/end times, and a full 24 h schedule array — so you can see what the EMS plans to do throughout the day directly in HA.
+  - **Richer energy data**: Publish current price and forecasts, per-phase meter values, EV and vehicle telemetry, and daily import/export/PV/battery/load energy totals.
+
+- 1789105: Add an experimental MQTT driver for Panasonic Aquarea heat pumps connected through HeishaMon, including live temperature metrics and safe heat-curve offset control.
+- 2457429: Improve setup discovery with driver identification, reverse DNS and mDNS labels, small private routed-network scans, and common Modbus proxy ports 503 and 1502.
+
+  The setup wizard shows the highest-confidence driver match and preselects it in the normal configuration form. Routed subnets retain their actual mask so a narrow route is never expanded into a broader scan.
+
+- 5a05d6b: Drive the dashboard mode buttons from a server-side catalog. New
+  `GET /api/modes` returns every selectable mode with its label, tooltip, and
+  tier (primary / advanced / hidden), derived from `control.ModeCatalog`. The
+  web dashboard now builds its Strategy buttons from that endpoint instead of a
+  hand-maintained HTML list, so the UI, the `/api/mode` validator, and the Home
+  Assistant discovery `select` all derive from the same canonical mode set and
+  can't drift apart. Adding a new mode to the enum now surfaces everywhere by
+  construction (a completeness test fails if the catalog omits one).
+
+### Patch Changes
+
+- 50a2242: main: classify EV / vehicle drivers via Lua DRIVER catalog instead of filename prefix sniffing
+
+  `driverCapacitiesFrom` and `warnIfEVHasBatteryCapacity` previously fell back
+  to a hard-coded filename-prefix allowlist (`easee`, `ocpp`, `ctek`,
+  `chargestorm`, `tesla_vehicle`, `vehicle`) to decide whether a YAML driver
+  entry pointed at an EV charger or vehicle telemetry source. That coupled
+  the controller surface to vendor names and required code edits whenever a
+  new EV-charger Lua driver was added.
+
+  Each Lua driver already self-declares its kind via the `DRIVER = { …
+capabilities = { … } }` table at the top of the file. EV chargers
+  declare `"ev"`; vehicle telemetry drivers declare `"vehicle"`. This PR
+  adds `drivers.IsEVOrVehicleDriver(catalog, luaPath)` which consults that
+  self-declaration, and routes both pre-flight call sites through it. The
+  filename sniffer is deleted.
+
+  The catalog is parsed once at startup (text scan, no Lua VM) and re-
+  scanned on every config hot-reload so a hot-edited driver's capability
+  change is picked up without a service restart.
+
+  No new schema. No operator action required — every EV/vehicle driver
+  that shipped with the repo already declares the right capability.
+
+- 5358f5e: Fix the Ferroamp battery under-charging (and spilling PV surplus to grid) on
+  multi-ESO sites where one battery is saturated. The EnergyHub splits a charge
+  setpoint evenly across all ESOs; a unit in CV taper near full — or held back by
+  the EHub's own SoC balancing — absorbs almost none of its share, so the pack
+  caps well below the commanded power (observed on Stefan's 4×ESO site: an 8.3 kW
+  command delivered only 4.3 kW, the rest exported).
+
+  Replaces the previous per-unit acceptance threshold (which flapped: a saturated
+  ESO trickling ~170 W against a ~650 W share still read "charging", dropping the
+  up-scale and re-spilling surplus) with a **delivery-ratio loop**: the driver
+  measures how much of its last on-wire setpoint the pack actually absorbed
+  (`eff = |delivered| / |on-wire|`, EMA-smoothed) and scales the next command by
+  `1/eff`, bounded by `MAX_DISPATCH_SCALE` (2.0×). A saturated unit's trickle is
+  simply summed in rather than voted on, so the command rises until the units
+  that _can_ take more cover the deficit — converging on the commanded power
+  regardless of which units under-pull, with no threshold to flap on. The
+  SoC-capable count is retained only for the "every unit floored/ceilinged → idle"
+  guard. New `eso_accept_eff_x1000` metric exposes the measured efficiency.
+  Verified live: battery charge rose 4.3 kW → ~8 kW and the surplus stopped
+  spilling.
+
+- 77aa663: fix(battery): honor configured soc_max at the driver, not just the planner
+
+  A battery's `soc_max` (and `soc_min`) only reached the planner, never the
+  driver. The Ferroamp driver therefore applied its own built-in
+  `CHARGE_CEIL_SOC` default of 0.95: once every ESO crossed ~95% it reported the
+  pack "not charge-capable" and idled the charge command, so a site configured
+  with `soc_max: 1.0` plateaued around 95–97% even while dispatch kept asking for
+  charge.
+
+  `config.WithBatterySoCBounds` now defaults each battery driver's
+  `charge_ceil_soc` / `discharge_floor_soc` from the matching
+  `batteries.<name>.soc_max` / `soc_min`, applied at both startup and config
+  hot-reload. An explicit value in the driver's own `config:` block still wins,
+  and the persisted config is never mutated (so a later `soc_max` change is not
+  shadowed by a stale derived value). `soc_max` is now the single source of truth
+  for a battery's usable SoC window.
+
+- 76069a5: Fix plain local Docker builds so native `docker build .` does not depend on buildx-only platform args.
+- 5c6e8ed: Fix docker pulls failing on slow connections at first boot and in-app update.
+
+  `firstboot.sh` capped retries at 6 attempts (~90 s total) — shorter than a single
+  pull on a 0.5 Mbps link. It now retries indefinitely with a 60 s gap; the sentinel
+  is only written on success so a reboot is always a safe abort path.
+
+  `ftw-updater` shared one 2-hour context across all 3 pull attempts, leaving almost
+  no room for retries after a slow-but-failed download. Each attempt now gets its own
+  independent 2-hour window, retries are unbounded, and `compose up -d` gets a
+  separate 10-minute timeout since it only recreates an already-pulled container.
+
+- cf0acb1: Use the locked site-meter driver snapshot when idling batteries after stale site-meter telemetry.
+
 ## 0.126.0
 
 ### Minor Changes
