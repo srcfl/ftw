@@ -272,7 +272,10 @@ func main() {
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers. config.Load has already joined relative Lua
 	// paths with the config directory — nothing to resolve here.
-	for _, d := range cfg.Drivers {
+	// WithBatterySoCBounds routes each battery's soc_min/soc_max into the
+	// matching driver's config (discharge_floor_soc/charge_ceil_soc) so the
+	// operator's SoC window reaches the driver, not just the planner.
+	for _, d := range config.WithBatterySoCBounds(cfg.Drivers, cfg.Batteries) {
 		if d.Disabled {
 			slog.Info("driver skipped (disabled)", "name", d.Name)
 			continue
@@ -453,8 +456,11 @@ func main() {
 				}
 			}
 			// Driver paths are already resolved by config.Load; no extra
-			// work needed here.
-			reg.Reload(ctx, newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+			// work needed here. Re-apply the battery SoC-window → driver
+			// config mapping so a hot-edited soc_max reaches the driver too.
+			reg.Reload(ctx,
+				config.WithBatterySoCBounds(newCfg.Drivers, newCfg.Batteries),
+				newCfg.Site.TroubleshootingMode)
 			// Refresh capacities — mutate the existing map in place so
 			// Deps.Capacities (a map header captured at init) sees the
 			// update. Rebinding the local variable would orphan the
