@@ -331,6 +331,22 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	// host.set_device_fault(faulted, reason) — the driver reaches the device
+	// but it's in a fault state where it can't actuate (e.g. a Ferroamp
+	// EnergyHub in Fault Mode with its relays open). Flags the driver so the
+	// dispatcher + MPC plan exclude it (IsOnline()→false) instead of
+	// commanding a dead battery whose un-delivered power would silently become
+	// grid import. Call with false to clear when the device recovers. The
+	// driver keeps emitting telemetry either way (watchdog stays satisfied).
+	host.RawSetString("set_device_fault", L.NewFunction(func(L *lua.LState) int {
+		faulted := L.ToBool(1)
+		reason := L.OptString(2, "")
+		if env.Telemetry != nil {
+			env.Telemetry.SetDriverDeviceFault(env.DriverName, faulted, reason)
+		}
+		return 0
+	}))
+
 	host.RawSetString("set_sn", L.NewFunction(func(L *lua.LState) int {
 		env.setSN(L.CheckString(1))
 		return 0
