@@ -64,7 +64,12 @@ func TestHandleDriverFingerprintRejectsBadInput(t *testing.T) {
 	}{
 		{"bad json", `nope`, 400, "invalid request"},
 		{"missing host", `{"port":502}`, 400, "missing host"},
+		{"host with userinfo", `{"host":"user@10.0.0.1","port":502}`, 400, "invalid host"},
+		{"host with embedded port", `{"host":"10.0.0.1:80","port":502}`, 400, "invalid host"},
 		{"missing port", `{"host":"10.0.0.1"}`, 400, "invalid port"},
+		{"port too high", `{"host":"10.0.0.1","port":65536,"protocol":"http"}`, 400, "invalid port"},
+		{"negative unit", `{"host":"10.0.0.1","port":502,"unit_id":-1}`, 400, "unit_id"},
+		{"unit too high", `{"host":"10.0.0.1","port":502,"unit_id":256}`, 400, "unit_id"},
 		{"uninferable protocol", `{"host":"10.0.0.1","port":1234}`, 400, "cannot infer protocol"},
 		{"unsupported protocol", `{"host":"10.0.0.1","port":1234,"protocol":"mqtt"}`, 400, "modbus"},
 	}

@@ -69,6 +69,32 @@ func TestFingerprintIdentityHint(t *testing.T) {
 	}
 }
 
+func TestFingerprintConfidenceIsBounded(t *testing.T) {
+	cases := []struct {
+		name string
+		lua  string
+		want float64
+	}{
+		{"above one", "2.5", 1},
+		{"negative", "-0.2", 0},
+		{"nan", "0/0", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `function driver_fingerprint()
+				return true, { confidence = ` + tc.lua + ` }
+			end`
+			fp, err := RunFingerprint(writeTempDriver(t, body), NewHostEnv("probe", telemetry.NewStore()), FingerprintTarget{})
+			if err != nil {
+				t.Fatalf("RunFingerprint: %v", err)
+			}
+			if fp.Confidence != tc.want {
+				t.Fatalf("Confidence = %v, want %v", fp.Confidence, tc.want)
+			}
+		})
+	}
+}
+
 func TestFingerprintErrorIsUnknown(t *testing.T) {
 	body := `function driver_fingerprint() error("boom") end`
 	env := NewHostEnv("probe", telemetry.NewStore())
@@ -263,7 +289,7 @@ func httpTarget(t *testing.T, handler http.HandlerFunc) (*HostEnv, FingerprintTa
 		t.Fatalf("parse server url: %v", err)
 	}
 	port, _ := strconv.Atoi(u.Port())
-	env := NewHostEnv("zap", telemetry.NewStore()).WithHTTP().WithHTTPAllowedHosts([]string{u.Hostname()})
+	env := NewHostEnv("zap", telemetry.NewStore()).WithHTTP().WithHTTPAllowedHosts([]string{u.Host})
 	return env, FingerprintTarget{Host: u.Hostname(), Port: port, Protocol: "http"}, srv
 }
 
@@ -298,6 +324,16 @@ func TestZapFingerprint(t *testing.T) {
 		fp, _ := RunFingerprint("../../../drivers/zap.lua", env, target)
 		if fp.Match != MatchNo {
 			t.Fatalf("Match = %q, want no_match for a non-Zap HTTP service", fp.Match)
+		}
+	})
+	t.Run("generic_empty_devices_list_is_no_match", func(t *testing.T) {
+		env, target, srv := httpTarget(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"devices":[]}`))
+		})
+		defer srv.Close()
+		fp, _ := RunFingerprint("../../../drivers/zap.lua", env, target)
+		if fp.Match != MatchNo {
+			t.Fatalf("Match = %q, want no_match for a generic empty devices response", fp.Match)
 		}
 	})
 	t.Run("unreachable_is_unknown", func(t *testing.T) {

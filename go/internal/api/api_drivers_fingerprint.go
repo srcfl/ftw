@@ -10,10 +10,12 @@ package api
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -54,12 +56,13 @@ func (s *Server) handleDriverFingerprint(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 400, map[string]string{"error": "invalid request: " + err.Error()})
 		return
 	}
-	req.Host = strings.TrimSpace(req.Host)
-	if req.Host == "" {
-		writeJSON(w, 400, map[string]string{"error": "missing host"})
+	var err error
+	req.Host, err = normalizeFingerprintHost(req.Host)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
-	if req.Port <= 0 {
+	if req.Port <= 0 || req.Port > 65535 {
 		writeJSON(w, 400, map[string]string{"error": "missing or invalid port"})
 		return
 	}
@@ -81,8 +84,12 @@ func (s *Server) handleDriverFingerprint(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if req.UnitID < 0 || req.UnitID > 255 {
+		writeJSON(w, 400, map[string]string{"error": "unit_id must be between 1 and 255"})
+		return
+	}
 	unit := req.UnitID
-	if unit <= 0 {
+	if unit == 0 {
 		unit = 1
 	}
 
@@ -184,14 +191,45 @@ func (s *Server) fingerprintOne(luaPath, protocol, host string, port, unit int) 
 		// HTTP is a built-in host capability (no factory). Scope the
 		// allowlist to exactly the scanned host so a fingerprint can't be
 		// tricked into probing some other address via a crafted base_url.
+		allowedEndpoint := net.JoinHostPort(host, strconv.Itoa(port))
 		env := drivers.NewHostEnv("__fingerprint", telemetry.NewStore()).
-			WithHTTP().WithHTTPAllowedHosts([]string{host})
+			WithHTTP().WithHTTPAllowedHosts([]string{allowedEndpoint})
 		env.SetEndpoint(fmt.Sprintf("http://%s:%d", host, port))
 		fp, _ := drivers.RunFingerprint(luaPath, env, target)
 		return fp
 	default:
 		return drivers.Fingerprint{Match: drivers.MatchUnknown, Err: "unsupported protocol: " + protocol}
 	}
+}
+
+// normalizeFingerprintHost accepts a bare IP address or DNS/mDNS hostname.
+// URL components, userinfo, and embedded ports are rejected so the target
+// table and HTTP allowlist always describe exactly one endpoint.
+func normalizeFingerprintHost(raw string) (string, error) {
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return host, nil
+	}
+	if len(host) > 253 || strings.ContainsAny(host, "/\\@?#:") {
+		return "", fmt.Errorf("invalid host")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid host")
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+				return "", fmt.Errorf("invalid host")
+			}
+		}
+	}
+	return strings.ToLower(host), nil
 }
 
 // scannedDevice augments a discovered open port with fingerprint matches.

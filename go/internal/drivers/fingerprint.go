@@ -38,6 +38,8 @@ package drivers
 import (
 	"context"
 	"fmt"
+	"math"
+	"net"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -95,11 +97,7 @@ func (t FingerprintTarget) luaTable(L *lua.LState) *lua.LTable {
 	tbl.RawSetString("port", lua.LNumber(t.Port))
 	tbl.RawSetString("protocol", lua.LString(t.Protocol))
 	if t.Protocol == "http" || t.Protocol == "https" {
-		base := fmt.Sprintf("%s://%s", t.Protocol, t.Host)
-		defaultPort := (t.Protocol == "http" && t.Port == 80) || (t.Protocol == "https" && t.Port == 443)
-		if t.Port != 0 && !defaultPort {
-			base = fmt.Sprintf("%s://%s:%d", t.Protocol, t.Host, t.Port)
-		}
+		base := fmt.Sprintf("%s://%s", t.Protocol, net.JoinHostPort(t.Host, fmt.Sprintf("%d", t.Port)))
 		tbl.RawSetString("base_url", lua.LString(base))
 	}
 	return tbl
@@ -144,6 +142,11 @@ func (d *LuaDriver) Fingerprint(ctx context.Context, target FingerprintTarget) (
 		fp.Serial = luaFieldString(tbl, "serial")
 		if n, ok := tbl.RawGetString("confidence").(lua.LNumber); ok {
 			fp.Confidence = float64(n)
+			if math.IsNaN(fp.Confidence) || math.IsInf(fp.Confidence, 0) || fp.Confidence < 0 {
+				fp.Confidence = 0
+			} else if fp.Confidence > 1 {
+				fp.Confidence = 1
+			}
 		}
 	}
 	return fp, nil

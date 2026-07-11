@@ -208,11 +208,18 @@ function driver_fingerprint(target)
     -- A Zap device entry carries `sn` plus a `type` / `device_type`. Latch
     -- the P1 serial as the gateway identity when present.
     local serial = nil
+    local recognised = false
     for _, dev in ipairs(data.devices) do
-        if type(dev) == "table" and dev.type == "p1_uart" and dev.sn then
-            serial = dev.sn
-            break
+        if type(dev) == "table" and dev.sn and (dev.type or dev.device_type) then
+            recognised = true
+            if dev.type == "p1_uart" then
+                serial = dev.sn
+                break
+            end
         end
+    end
+    if not recognised then
+        return false -- generic/empty devices JSON is not a Zap signature
     end
     return true, { make = "Sourceful", model = "Zap", serial = serial or "", confidence = 0.95 }
 end
