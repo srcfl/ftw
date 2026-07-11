@@ -150,6 +150,40 @@ func TestOwnerSessionCookieLastsThirtyDays(t *testing.T) {
 	}
 }
 
+func TestOwnerSessionCookieSecurityAttributes(t *testing.T) {
+	d := minDeps(t)
+	d.OwnerAccessLANBypass = false
+	srv := New(d)
+
+	rec := httptest.NewRecorder()
+	if err := srv.issueOwnerSession(rec, []byte("cred-attrs")); err != nil {
+		t.Fatalf("issue session: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("no owner session cookie issued")
+	}
+	cookie := cookies[0]
+	if cookie.Name != ownerAccessCookieName || cookie.Value == "" {
+		t.Fatalf("unexpected owner session cookie: %+v", cookie)
+	}
+	if !cookie.HttpOnly {
+		t.Error("owner session cookie must be HttpOnly")
+	}
+	if !cookie.Secure {
+		t.Error("owner session cookie must be Secure")
+	}
+	if cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("owner session SameSite = %v, want Lax", cookie.SameSite)
+	}
+	if cookie.Path != "/" {
+		t.Errorf("owner session Path = %q, want /", cookie.Path)
+	}
+	if cookie.MaxAge <= 0 {
+		t.Errorf("owner session MaxAge = %d, want positive", cookie.MaxAge)
+	}
+}
+
 func TestOwnerAccessSessionsListAndDelete(t *testing.T) {
 	d := minDeps(t)
 	d.OwnerAccessLANBypass = false
