@@ -78,6 +78,8 @@ local esp_host  = nil    -- "192.168.1.147" or "srcful-zap-p1.local" (no scheme)
 local make_name = "ESPHome"
 local poll_ms   = 5000
 local sn_set    = false  -- one-shot: only call host.set_sn once we've read it
+local serial_attempts = 0
+local SERIAL_MAX_ATTEMPTS = 12
 
 -- Capability flags filled in once on the first successful poll. The
 -- ESPHome firmware varies in which entities it exposes (the
@@ -171,8 +173,9 @@ function driver_init(config)
     if type(config.make) == "string" and config.make ~= "" then
         make_name = config.make
     end
-    if tonumber(config.poll_ms) and config.poll_ms >= 1000 then
-        poll_ms = config.poll_ms
+    local configured_poll_ms = tonumber(config.poll_ms)
+    if configured_poll_ms and configured_poll_ms >= 1000 then
+        poll_ms = configured_poll_ms
     end
 
     host.set_make(make_name)
@@ -187,15 +190,16 @@ function driver_poll()
 
     -- One-shot serial discovery (cheap text_sensor reads, runs once per
     -- driver lifetime — re-flashing the meter restarts the driver anyway).
-    if not sn_set then
+    if not sn_set and serial_attempts < SERIAL_MAX_ATTEMPTS then
+        serial_attempts = serial_attempts + 1
         local sn = fetch_serial()
         if sn ~= "" then
             host.set_sn(sn)
             host.log("info", "esphome_dsmr: serial = " .. sn)
-        else
+            sn_set = true
+        elseif serial_attempts == SERIAL_MAX_ATTEMPTS then
             host.log("info", "esphome_dsmr: no DSMR equipment id available; falling back to MAC/endpoint identity")
         end
-        sn_set = true
     end
 
     -- Site-meter totals are the only mandatory reads. If either fails the
@@ -228,7 +232,7 @@ function driver_poll()
     -- separately; site convention is the net. Missing phase reads are
     -- non-fatal — fall back to 0 for that phase, log debug, keep going.
     -- (Single-phase meters won't expose L2/L3 entities at all.)
-    local phase_w = { 0, 0, 0 }
+    local phase_w = {}
     for i = 1, 3 do
         local c, ec = fetch_num("power_consumed_l" .. i)
         local p, ep = fetch_num("power_produced_l" .. i)
@@ -238,46 +242,42 @@ function driver_poll()
         if ep then
             host.log("debug", "esphome_dsmr: power_produced_l" .. i .. " unavailable: " .. ep)
         end
-        phase_w[i] = ((c or 0) - (p or 0)) * 1000.0
+        if c ~= nil and p ~= nil then
+            phase_w[i] = (c - p) * 1000.0
+        end
     end
 
     -- Per-phase voltage / current (V, A — already in base units).
-    local v = { 0, 0, 0 }
-    local a = { 0, 0, 0 }
+    local v = {}
+    local a = {}
     for i = 1, 3 do
-        v[i] = fetch_num("voltage_l" .. i) or 0
-        a[i] = fetch_num("current_l" .. i) or 0
+        v[i] = fetch_num("voltage_l" .. i)
+        a[i] = fetch_num("current_l" .. i)
     end
 
     -- Lifetime energy counters: ESPHome serves these in kWh, we emit in Wh.
-    local imp_kwh = fetch_num("energy_consumed") or 0
-    local exp_kwh = fetch_num("energy_produced") or 0
+    local imp_kwh = fetch_num("energy_consumed")
+    local exp_kwh = fetch_num("energy_produced")
 
-    host.emit("meter", {
-        w         = total_w,
-        l1_w      = phase_w[1],
-        l2_w      = phase_w[2],
-        l3_w      = phase_w[3],
-        l1_v      = v[1],
-        l2_v      = v[2],
-        l3_v      = v[3],
-        l1_a      = a[1],
-        l2_a      = a[2],
-        l3_a      = a[3],
-        import_wh = imp_kwh * 1000.0,
-        export_wh = exp_kwh * 1000.0,
-    })
+    -- Optional phase/counter values are omitted when their HTTP read fails.
+    -- Publishing a synthetic 0 A would disable the per-phase fuse guard, and
+    -- publishing a synthetic 0 Wh would look like a lifetime-counter reset.
+    local meter = { w = total_w }
+    for i = 1, 3 do
+        if phase_w[i] ~= nil then meter["l" .. i .. "_w"] = phase_w[i] end
+        if v[i] ~= nil then meter["l" .. i .. "_v"] = v[i] end
+        if a[i] ~= nil then meter["l" .. i .. "_a"] = a[i] end
+    end
+    if imp_kwh ~= nil then meter.import_wh = imp_kwh * 1000.0 end
+    if exp_kwh ~= nil then meter.export_wh = exp_kwh * 1000.0 end
+    host.emit("meter", meter)
 
     -- Long-format diagnostics into the TS DB.
-    host.emit_metric("meter_l1_w", phase_w[1])
-    host.emit_metric("meter_l2_w", phase_w[2])
-    host.emit_metric("meter_l3_w", phase_w[3])
-    host.emit_metric("meter_l1_v", v[1])
-    host.emit_metric("meter_l2_v", v[2])
-    host.emit_metric("meter_l3_v", v[3])
-    host.emit_metric("meter_l1_a", a[1])
-    host.emit_metric("meter_l2_a", a[2])
-    host.emit_metric("meter_l3_a", a[3])
+    for i = 1, 3 do
+        if phase_w[i] ~= nil then host.emit_metric("meter_l" .. i .. "_w", phase_w[i], "W") end
+        if v[i] ~= nil then host.emit_metric("meter_l" .. i .. "_v", v[i], "V") end
+        if a[i] ~= nil then host.emit_metric("meter_l" .. i .. "_a", a[i], "A") end
+    end
 
     -- Reactive power (kvar → var). DSMR meters publish reactive both
     -- as a total and per phase, in each direction. The forty-two-watts
@@ -331,6 +331,7 @@ end
 
 function driver_cleanup()
     sn_set = false
+    serial_attempts = 0
     caps_probed = false
     has_reactive = false
     consecutive_failures = 0

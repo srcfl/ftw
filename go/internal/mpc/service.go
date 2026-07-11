@@ -86,8 +86,8 @@ type Service struct {
 	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
 	// unset config to 1.0.
 	PVForecastSafetyK float64
-	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
-	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
+	Price             PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint         LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
 
 	// SaveDiag is called synchronously after every successful replan
 	// with the same Diagnostic the /api/mpc/diagnose endpoint would

@@ -74,24 +74,24 @@ func TestESPHomeDSMR_ImportingSiteConvention(t *testing.T) {
 	// positive = importing). Per-phase split arbitrary but must sum
 	// to the same value.
 	srv := mkESPHomeStub(map[string]string{
-		"sensor/power_consumed":      "1.234",
-		"sensor/power_produced":      "0.567",
-		"sensor/power_consumed_l1":   "0.500",
-		"sensor/power_consumed_l2":   "0.400",
-		"sensor/power_consumed_l3":   "0.334",
-		"sensor/power_produced_l1":   "0.100",
-		"sensor/power_produced_l2":   "0.200",
-		"sensor/power_produced_l3":   "0.267",
-		"sensor/voltage_l1":          "230.1",
-		"sensor/voltage_l2":          "229.8",
-		"sensor/voltage_l3":          "230.5",
-		"sensor/current_l1":          "2.5",
-		"sensor/current_l2":          "1.8",
-		"sensor/current_l3":          "0.4",
-		"sensor/energy_consumed":     "1234.567", // kWh → 1,234,567 Wh
-		"sensor/energy_produced":     "56.789",   // kWh →    56,789 Wh
-		"text_sensor/electric_meter_equipment_id": "\"\"", // empty → fall through
-		"text_sensor/meter_identification":         "\"LGF5E360\"",
+		"sensor/power_consumed":                   "1.234",
+		"sensor/power_produced":                   "0.567",
+		"sensor/power_consumed_l1":                "0.500",
+		"sensor/power_consumed_l2":                "0.400",
+		"sensor/power_consumed_l3":                "0.334",
+		"sensor/power_produced_l1":                "0.100",
+		"sensor/power_produced_l2":                "0.200",
+		"sensor/power_produced_l3":                "0.267",
+		"sensor/voltage_l1":                       "230.1",
+		"sensor/voltage_l2":                       "229.8",
+		"sensor/voltage_l3":                       "230.5",
+		"sensor/current_l1":                       "2.5",
+		"sensor/current_l2":                       "1.8",
+		"sensor/current_l3":                       "0.4",
+		"sensor/energy_consumed":                  "1234.567", // kWh → 1,234,567 Wh
+		"sensor/energy_produced":                  "56.789",   // kWh →    56,789 Wh
+		"text_sensor/electric_meter_equipment_id": "\"\"",     // empty → fall through
+		"text_sensor/meter_identification":        "\"LGF5E360\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -148,24 +148,24 @@ func TestESPHomeDSMR_ExportingSign(t *testing.T) {
 	// Consumed=0, produced=0.5 kW → meter.w must be negative
 	// (exporting). Phase L1 mirrors the total; L2/L3 zero.
 	srv := mkESPHomeStub(map[string]string{
-		"sensor/power_consumed":      "0",
-		"sensor/power_produced":      "0.5",
-		"sensor/power_consumed_l1":   "0",
-		"sensor/power_consumed_l2":   "0",
-		"sensor/power_consumed_l3":   "0",
-		"sensor/power_produced_l1":   "0.5",
-		"sensor/power_produced_l2":   "0",
-		"sensor/power_produced_l3":   "0",
-		"sensor/voltage_l1":          "230",
-		"sensor/voltage_l2":          "230",
-		"sensor/voltage_l3":          "230",
-		"sensor/current_l1":          "2.2",
-		"sensor/current_l2":          "0",
-		"sensor/current_l3":          "0",
-		"sensor/energy_consumed":     "10",
-		"sensor/energy_produced":     "5",
+		"sensor/power_consumed":                   "0",
+		"sensor/power_produced":                   "0.5",
+		"sensor/power_consumed_l1":                "0",
+		"sensor/power_consumed_l2":                "0",
+		"sensor/power_consumed_l3":                "0",
+		"sensor/power_produced_l1":                "0.5",
+		"sensor/power_produced_l2":                "0",
+		"sensor/power_produced_l3":                "0",
+		"sensor/voltage_l1":                       "230",
+		"sensor/voltage_l2":                       "230",
+		"sensor/voltage_l3":                       "230",
+		"sensor/current_l1":                       "2.2",
+		"sensor/current_l2":                       "0",
+		"sensor/current_l3":                       "0",
+		"sensor/energy_consumed":                  "10",
+		"sensor/energy_produced":                  "5",
 		"text_sensor/electric_meter_equipment_id": "\"EM-12345\"",
-		"text_sensor/meter_identification":         "\"LGF5E360\"",
+		"text_sensor/meter_identification":        "\"LGF5E360\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -199,24 +199,24 @@ func TestESPHomeDSMR_CustomMakeFromConfig(t *testing.T) {
 	// up under the right brand in the UI even though the driver is
 	// generic ESPHome.
 	srv := mkESPHomeStub(map[string]string{
-		"sensor/power_consumed":     "0",
-		"sensor/power_produced":     "0",
-		"sensor/power_consumed_l1":  "0",
-		"sensor/power_consumed_l2":  "0",
-		"sensor/power_consumed_l3":  "0",
-		"sensor/power_produced_l1":  "0",
-		"sensor/power_produced_l2":  "0",
-		"sensor/power_produced_l3":  "0",
-		"sensor/voltage_l1":         "230",
-		"sensor/voltage_l2":         "230",
-		"sensor/voltage_l3":         "230",
-		"sensor/current_l1":         "0",
-		"sensor/current_l2":         "0",
-		"sensor/current_l3":         "0",
-		"sensor/energy_consumed":    "0",
-		"sensor/energy_produced":    "0",
+		"sensor/power_consumed":                   "0",
+		"sensor/power_produced":                   "0",
+		"sensor/power_consumed_l1":                "0",
+		"sensor/power_consumed_l2":                "0",
+		"sensor/power_consumed_l3":                "0",
+		"sensor/power_produced_l1":                "0",
+		"sensor/power_produced_l2":                "0",
+		"sensor/power_produced_l3":                "0",
+		"sensor/voltage_l1":                       "230",
+		"sensor/voltage_l2":                       "230",
+		"sensor/voltage_l3":                       "230",
+		"sensor/current_l1":                       "0",
+		"sensor/current_l2":                       "0",
+		"sensor/current_l3":                       "0",
+		"sensor/energy_consumed":                  "0",
+		"sensor/energy_produced":                  "0",
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -231,6 +231,59 @@ func TestESPHomeDSMR_CustomMakeFromConfig(t *testing.T) {
 	}
 }
 
+func TestESPHomeDSMROmitsFailedOptionalReadsAndRetriesSerial(t *testing.T) {
+	values := map[string]string{
+		"sensor/power_consumed": "1.2",
+		"sensor/power_produced": "0.2",
+		// Phase, current, voltage, energy, and serial endpoints are absent.
+	}
+	srv := mkESPHomeStub(values)
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	tel := telemetry.NewStore()
+	env := NewHostEnv("zap-p1", tel).WithHTTP()
+	d, err := NewLuaDriver("../../../drivers/esphome_dsmr.lua", env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	t.Cleanup(d.Cleanup)
+	if err := d.Init(context.Background(), map[string]any{"host": host, "poll_ms": "1500"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	interval, err := d.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if interval.Milliseconds() != 1500 {
+		t.Fatalf("string poll_ms interval = %d, want 1500", interval.Milliseconds())
+	}
+
+	reading := tel.Get("zap-p1", telemetry.DerMeter)
+	if reading == nil {
+		t.Fatal("missing mandatory meter reading")
+	}
+	var data map[string]any
+	if err := json.Unmarshal(reading.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"l1_a", "l1_w", "l1_v", "import_wh", "export_wh"} {
+		if _, ok := data[field]; ok {
+			t.Errorf("optional failed field %q was published as a synthetic value: %v", field, data[field])
+		}
+	}
+
+	// Identity endpoints can be temporarily unavailable during startup. A
+	// later poll must still anchor device_id when the serial appears.
+	values["text_sensor/electric_meter_equipment_id"] = `"P1-LATE"`
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll: %v", err)
+	}
+	if _, serial := env.Identity(); serial != "P1-LATE" {
+		t.Fatalf("late serial = %q, want P1-LATE", serial)
+	}
+}
+
 func TestESPHomeDSMR_BailsOnTotalReadFailure(t *testing.T) {
 	// power_consumed missing (404) → driver logs warn and skips emit.
 	// The test asserts the driver does NOT publish a meter reading
@@ -238,9 +291,9 @@ func TestESPHomeDSMR_BailsOnTotalReadFailure(t *testing.T) {
 	// offline upstream after `site.watchdog_timeout_s`).
 	srv := mkESPHomeStub(map[string]string{
 		// Note: power_consumed deliberately missing.
-		"sensor/power_produced":                    "0.5",
+		"sensor/power_produced":                   "0.5",
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -256,32 +309,32 @@ func TestESPHomeDSMR_ReactiveDiagnosticsEmitted(t *testing.T) {
 	// flags `has_reactive`, then emits the per-phase + total
 	// reactive metrics into the TS DB.
 	srv := mkESPHomeStub(map[string]string{
-		"sensor/power_consumed":    "1.0",
-		"sensor/power_produced":    "0.5",
-		"sensor/power_consumed_l1": "0",
-		"sensor/power_consumed_l2": "0",
-		"sensor/power_consumed_l3": "0",
-		"sensor/power_produced_l1": "0",
-		"sensor/power_produced_l2": "0",
-		"sensor/power_produced_l3": "0",
-		"sensor/voltage_l1":        "230",
-		"sensor/voltage_l2":        "230",
-		"sensor/voltage_l3":        "230",
-		"sensor/current_l1":        "0",
-		"sensor/current_l2":        "0",
-		"sensor/current_l3":        "0",
-		"sensor/energy_consumed":   "0",
-		"sensor/energy_produced":   "0",
-		"sensor/reactive_power_imported":    "0.123",
-		"sensor/reactive_power_exported":    "0.456",
-		"sensor/reactive_power_imported_l1": "0.04",
-		"sensor/reactive_power_imported_l2": "0.04",
-		"sensor/reactive_power_imported_l3": "0.043",
-		"sensor/reactive_power_exported_l1": "0.15",
-		"sensor/reactive_power_exported_l2": "0.15",
-		"sensor/reactive_power_exported_l3": "0.156",
+		"sensor/power_consumed":                   "1.0",
+		"sensor/power_produced":                   "0.5",
+		"sensor/power_consumed_l1":                "0",
+		"sensor/power_consumed_l2":                "0",
+		"sensor/power_consumed_l3":                "0",
+		"sensor/power_produced_l1":                "0",
+		"sensor/power_produced_l2":                "0",
+		"sensor/power_produced_l3":                "0",
+		"sensor/voltage_l1":                       "230",
+		"sensor/voltage_l2":                       "230",
+		"sensor/voltage_l3":                       "230",
+		"sensor/current_l1":                       "0",
+		"sensor/current_l2":                       "0",
+		"sensor/current_l3":                       "0",
+		"sensor/energy_consumed":                  "0",
+		"sensor/energy_produced":                  "0",
+		"sensor/reactive_power_imported":          "0.123",
+		"sensor/reactive_power_exported":          "0.456",
+		"sensor/reactive_power_imported_l1":       "0.04",
+		"sensor/reactive_power_imported_l2":       "0.04",
+		"sensor/reactive_power_imported_l3":       "0.043",
+		"sensor/reactive_power_exported_l1":       "0.15",
+		"sensor/reactive_power_exported_l2":       "0.15",
+		"sensor/reactive_power_exported_l3":       "0.156",
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -324,7 +377,7 @@ func TestESPHomeDSMR_ReactiveSkippedOnFirmwareWithout(t *testing.T) {
 		"sensor/energy_produced":   "0",
 		// No reactive entries — the stub will 404.
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -342,7 +395,7 @@ func TestESPHomeDSMR_BackoffOnConsecutiveFailures(t *testing.T) {
 	srv := mkESPHomeStub(map[string]string{
 		// power_consumed missing → all polls fail.
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	})
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "http://")
@@ -394,7 +447,7 @@ func TestESPHomeDSMR_BackoffResetsOnRecovery(t *testing.T) {
 	values := map[string]string{
 		// Initially: no power_consumed → fails.
 		"text_sensor/electric_meter_equipment_id": "\"\"",
-		"text_sensor/meter_identification":         "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
 	}
 	srv := mkESPHomeStub(values)
 	defer srv.Close()

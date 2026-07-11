@@ -43,9 +43,13 @@ func New(
 	applier Applier,
 ) (*Watcher, error) {
 	fsw, err := fsnotify.NewWatcher()
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	dir := filepath.Dir(path)
-	if dir == "" { dir = "." }
+	if dir == "" {
+		dir = "."
+	}
 	if err := fsw.Add(dir); err != nil {
 		fsw.Close()
 		return nil, err
@@ -83,17 +87,28 @@ func (w *Watcher) loop() {
 		case <-w.stop:
 			return
 		case ev, ok := <-w.fsw.Events:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			// Only care about events on our file
-			if filepath.Base(ev.Name) != target { continue }
-			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 { continue }
+			if filepath.Base(ev.Name) != target {
+				continue
+			}
+			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
+				continue
+			}
 			// Debounce: reset timer to 500 ms from now
 			if !debounce.Stop() {
-				select { case <-debounce.C: default: }
+				select {
+				case <-debounce.C:
+				default:
+				}
 			}
 			debounce.Reset(500 * time.Millisecond)
 		case err, ok := <-w.fsw.Errors:
-			if !ok { return }
+			if !ok {
+				return
+			}
 			slog.Warn("watcher error", "err", err)
 		case <-debounce.C:
 			w.reload()
