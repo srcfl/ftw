@@ -5,12 +5,12 @@
 # only ca-certificates + tzdata; everything else (Lua drivers, web
 # assets, the binary itself) ships verbatim.
 #
-# Multi-arch: linux/amd64 + linux/arm64 via docker buildx BUILDPLATFORM
-# / TARGETPLATFORM split so the toolchain runs natively on the build
-# host and only `go build` is cross-compiled.
+# Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
+# TARGETARCH when available. Plain `docker build` falls back to the
+# native Go arch inside the builder image.
 
 # --- Builder ---------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # git is needed by `go build` to resolve VCS info baked into the binary
 # via -X main.Version. Everything else is in the base image.
@@ -27,23 +27,25 @@ COPY go/ ./go/
 
 # Cross-compile by mapping TARGETARCH → GOARCH. CGO is off so the
 # binary is fully static and runs on alpine without glibc.
-ARG TARGETOS
+ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=dev
 RUN cd go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/forty-two-watts ./cmd/forty-two-watts
 RUN cd go && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw-pair ./cmd/ftw-pair
 
-# Note: the standalone relay (ftw-subetha) is NOT bundled in this image.
-# It's deployed separately — see docs/subetha-deploy.md for the "run your
-# own relay" guide.
+# Note: the standalone relay (ftw-relay) is NOT bundled in this image.
+# It is built and deployed separately; this image only includes the main
+# service and the local ftw-pair sidecar.
 # The cross-platform binaries are published as GitHub release assets
-# (ftw-subetha-linux-{amd64,arm64}) for operators who self-host.
+# (ftw-relay-linux-{amd64,arm64}) for operators who self-host.
 
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.20
