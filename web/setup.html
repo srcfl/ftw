@@ -310,6 +310,16 @@
 
     .scan-table tr:hover td { background: var(--ink-raised); }
 
+    .dev-host, .dev-caps {
+      display: block;
+      margin-top: 2px;
+      color: var(--fg-muted);
+      font-size: 0.7rem;
+    }
+    .dev-name { display: block; color: var(--fg); }
+    .dev-caps { color: var(--accent-e); }
+    .dev-unknown { color: var(--fg-muted); }
+
     .scan-table .btn-use {
       padding: 5px 12px;
       border: 1px solid var(--line);
@@ -577,7 +587,7 @@
     <div id="scan-results" style="display:none">
       <table class="scan-table">
         <thead>
-          <tr><th>IP</th><th>Port</th><th>Protocol</th><th></th></tr>
+          <tr><th>Address</th><th>Port</th><th>Protocol</th><th>Detected device</th><th></th></tr>
         </thead>
         <tbody id="scan-tbody"></tbody>
       </table>

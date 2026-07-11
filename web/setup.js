@@ -60,7 +60,7 @@
     statusEl.innerHTML = '<span class="spinner"></span> Scanning network...';
     resultsEl.style.display = 'none';
 
-    fetch('/api/scan')
+    fetch('/api/scan?fingerprint=1')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         // API returns a raw array, not {devices: [...]}
@@ -72,16 +72,30 @@
         statusEl.style.display = 'none';
         var tbody = document.getElementById('scan-tbody');
         tbody.innerHTML = '';
+        devices.sort(function (a, b) {
+          return Number(Boolean(b.matches && b.matches.length)) - Number(Boolean(a.matches && a.matches.length));
+        });
         devices.forEach(function (d) {
           var tr = document.createElement('tr');
           var proto = d.protocol || 'modbus';
+          var match = d.matches && d.matches.length ? d.matches[0] : null;
+          var address = esc(d.ip);
+          if (d.hostname) address += '<span class="dev-host">' + esc(d.hostname) + '</span>';
+          var identity = '<span class="dev-unknown">Unrecognised</span>';
+          if (match) {
+            var label = match.name || match.make || match.driver;
+            var detail = [match.model, match.serial ? 'SN ' + match.serial : ''].filter(Boolean).join(' · ');
+            identity = '<span class="dev-name">' + esc(label) + '</span>' +
+              (detail ? '<span class="dev-caps">' + esc(detail) + '</span>' : '');
+          }
           tr.innerHTML =
-            '<td>' + esc(d.ip) + '</td>' +
+            '<td>' + address + '</td>' +
             '<td>' + esc(String(d.port)) + '</td>' +
             '<td>' + esc(proto) + '</td>' +
+            '<td>' + identity + '</td>' +
             '<td><button class="btn-use">Use this device</button></td>';
           tr.querySelector('.btn-use').addEventListener('click', function () {
-            useScanDevice(d.ip, d.port, proto);
+            useScanDevice(d.ip, d.port, proto, match && match.driver);
           });
           tbody.appendChild(tr);
         });
@@ -98,8 +112,8 @@
     document.getElementById('manual-ip-toggle').style.display = 'none';
   };
 
-  function useScanDevice(ip, port, protocol) {
-    selectedDevice = { ip: ip, port: port, protocol: protocol };
+  function useScanDevice(ip, port, protocol, matchedFilename) {
+    selectedDevice = { ip: ip, port: port, protocol: protocol, matchedFilename: matchedFilename || '' };
     goStep(4);
   }
 
@@ -167,6 +181,21 @@
       opt.textContent = label;
       sel.appendChild(opt);
     });
+
+    // A positive fingerprint preselects the matching catalog driver while
+    // still sending the operator through the normal configuration form.
+    if (selectedDevice && selectedDevice.matchedFilename) {
+      for (var i = 0; i < sel.options.length; i++) {
+        var value = sel.options[i].value;
+        if (value === '') continue;
+        var entry = driverCatalog[parseInt(value, 10)];
+        if (entry && entry.filename === selectedDevice.matchedFilename) {
+          sel.value = value;
+          window.onDriverSelected();
+          break;
+        }
+      }
+    }
   }
 
   window.onDriverSelected = function () {

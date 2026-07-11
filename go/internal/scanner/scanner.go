@@ -20,6 +20,7 @@ import (
 // FoundDevice is one open port discovered on the local network.
 type FoundDevice struct {
 	IP        string `json:"ip"`
+	Hostname  string `json:"hostname,omitempty"`
 	Port      int    `json:"port"`
 	Protocol  string `json:"protocol"` // "modbus", "mqtt", "http", "https"
 	LatencyMs int    `json:"latency_ms"`
@@ -28,6 +29,8 @@ type FoundDevice struct {
 // wellKnownPorts maps TCP ports to protocol names.
 var wellKnownPorts = map[int]string{
 	502:  "modbus",
+	503:  "modbus", // common TCP-proxy port for inverters and batteries
+	1502: "modbus", // solaredge-proxy default
 	1883: "mqtt",
 	80:   "http",
 	8443: "https", // NIBE S-series Local REST API + other on-prem HTTPS device APIs
@@ -94,9 +97,52 @@ done:
 		}
 		return found[i].Port < found[j].Port
 	})
+	resolveHostnames(ctx, found)
 
 	slog.Info("network scan complete", "found", len(found))
 	return found, nil
+}
+
+// resolveHostnames adds best-effort reverse DNS/mDNS labels without making a
+// missing name fail the scan. Each IP is resolved once and all lookups run in
+// parallel, so the extra latency is bounded by the slowest lookup.
+func resolveHostnames(ctx context.Context, devices []FoundDevice) {
+	var resolver net.Resolver
+	names := make(map[string]string)
+	seen := make(map[string]bool)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, d := range devices {
+		if seen[d.IP] {
+			continue
+		}
+		seen[d.IP] = true
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			dnsCtx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+			hosts, err := resolver.LookupAddr(dnsCtx, ip)
+			cancel()
+			name := ""
+			if err == nil && len(hosts) > 0 {
+				name = strings.TrimSuffix(hosts[0], ".")
+			}
+			if name == "" && ctx.Err() == nil {
+				mdnsCtx, cancel := context.WithTimeout(ctx, 900*time.Millisecond)
+				name = reverseMDNS(mdnsCtx, ip)
+				cancel()
+			}
+			if name != "" {
+				mu.Lock()
+				names[ip] = name
+				mu.Unlock()
+			}
+		}(d.IP)
+	}
+	wg.Wait()
+	for i := range devices {
+		devices[i].Hostname = names[devices[i].IP]
+	}
 }
 
 // probe tries to TCP-connect to ip:port with a 500 ms timeout.
@@ -172,18 +218,58 @@ func localSubnets() ([]net.IPNet, error) {
 			})
 		}
 	}
+
+	// Include small private routed networks, preserving their real masks. A
+	// routed /28 must never be expanded into a /24 scan outside that route.
+	for _, routed := range routedSubnets() {
+		ip4 := routed.IP.To4()
+		ones, bits := routed.Mask.Size()
+		if ip4 == nil || bits != 32 || !isPrivateV4(ip4) || ones < 24 || ones > 28 {
+			continue
+		}
+		routed.IP = ip4.Mask(routed.Mask)
+		duplicate := false
+		for _, existing := range subnets {
+			existingOnes, _ := existing.Mask.Size()
+			if existingOnes <= ones && existing.Contains(routed.IP) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			subnets = append(subnets, routed)
+		}
+	}
 	return subnets, nil
 }
 
-// subnetHosts returns all 254 usable host IPs in a /24 subnet.
+func isPrivateV4(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	return ip4[0] == 10 ||
+		(ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) ||
+		(ip4[0] == 192 && ip4[1] == 168)
+}
+
+// subnetHosts returns usable IPv4 host addresses for a /24../30 subnet.
 func subnetHosts(subnet net.IPNet) []string {
 	base := subnet.IP.To4()
 	if base == nil {
 		return nil
 	}
-	hosts := make([]string, 0, 254)
-	for i := 1; i <= 254; i++ {
-		hosts = append(hosts, fmt.Sprintf("%d.%d.%d.%d", base[0], base[1], base[2], i))
+	ones, bits := subnet.Mask.Size()
+	if bits != 32 || ones < 24 || ones > 30 {
+		return nil
+	}
+	network := base.Mask(subnet.Mask)
+	count := 1 << (32 - ones)
+	hosts := make([]string, 0, count-2)
+	start := uint32(network[0])<<24 | uint32(network[1])<<16 | uint32(network[2])<<8 | uint32(network[3])
+	for offset := 1; offset < count-1; offset++ {
+		v := start + uint32(offset)
+		hosts = append(hosts, fmt.Sprintf("%d.%d.%d.%d", byte(v>>24), byte(v>>16), byte(v>>8), byte(v)))
 	}
 	return hosts
 }
