@@ -860,6 +860,9 @@
 
     // Mode buttons — primary (strategy) + advanced (manual)
     currentMode = data.mode;
+    // Buttons come from GET /api/modes; if that hasn't landed yet (offline at
+    // first paint), this confirmed-live poll is the retry trigger.
+    if (!modeCatalogRendered) renderModeCatalog();
     var allModeButtons = document.querySelectorAll("#mode-buttons-primary button, #mode-buttons button");
     allModeButtons.forEach(function (btn) {
       if (btn.dataset.mode === data.mode) btn.classList.add("active");
@@ -2366,6 +2369,54 @@
       })
       .catch(function () {
         setConnected(false);
+      });
+  }
+
+  // ---- Mode buttons, built from the server's canonical catalog ----
+  // The dashboard no longer hard-codes which modes exist or how they're
+  // labelled. GET /api/modes returns every selectable mode with a label,
+  // tooltip, and tier; we render `primary` into the strategy row and
+  // `advanced` behind the "Manual…" toggle (hidden modes are valid but not
+  // shown). This is the UI-side counterpart to the HA discovery fix — both
+  // surfaces derive from control.AllModes, so they can't drift.
+  //
+  // /api/modes is static, non-sensitive metadata, so it rides a plain fetch
+  // (not the strict owner channel that hot reads use). If it fails — offline
+  // at first paint — modeCatalogRendered stays false and fetchStatus retries
+  // it on the next successful poll, so the buttons appear as soon as the host
+  // is reachable, with no hard-coded fallback list.
+  var modeCatalogRendered = false;
+  function renderModeCatalog() {
+    if (modeCatalogRendered) return Promise.resolve(true);
+    var primary = document.getElementById("mode-buttons-primary");
+    var advanced = document.getElementById("mode-buttons");
+    if (!primary || !advanced) return Promise.resolve(false);
+    return fetch("/api/modes", { headers: { Accept: "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var modes = (data && data.modes) || [];
+        if (!modes.length) return false;
+        var frags = { primary: document.createDocumentFragment(), advanced: document.createDocumentFragment() };
+        modes.forEach(function (m) {
+          if (m.tier !== "primary" && m.tier !== "advanced") return; // skip hidden
+          var btn = document.createElement("button");
+          btn.dataset.mode = m.key;
+          btn.textContent = m.label;
+          if (m.tooltip) btn.title = m.tooltip;
+          if (currentMode && m.key === currentMode) btn.classList.add("active");
+          frags[m.tier].appendChild(btn);
+        });
+        primary.replaceChildren(frags.primary);
+        advanced.replaceChildren(frags.advanced);
+        modeCatalogRendered = true;
+        return true;
+      })
+      .catch(function () {
+        // Leave modeCatalogRendered false so a later poll retries.
+        return false;
       });
   }
 
@@ -4602,6 +4653,7 @@
   // dashboard chrome. setupAuth() resolves it to the dashboard (signed in) or the
   // sign-in card (not). On the LAN (bypass) the gate never shows.
   if (typeof isLanFallbackOrigin === "function" && !isLanFallbackOrigin()) showGate("connecting");
+  renderModeCatalog(); // build mode buttons from the server's canonical catalog
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();

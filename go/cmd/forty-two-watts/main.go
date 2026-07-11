@@ -284,7 +284,10 @@ func main() {
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers. config.Load has already joined relative Lua
 	// paths with the config directory — nothing to resolve here.
-	for _, d := range cfg.Drivers {
+	// WithBatterySoCBounds routes each battery's soc_min/soc_max into the
+	// matching driver's config (discharge_floor_soc/charge_ceil_soc) so the
+	// operator's SoC window reaches the driver, not just the planner.
+	for _, d := range config.WithBatterySoCBounds(cfg.Drivers, cfg.Batteries) {
 		if d.Disabled {
 			slog.Info("driver skipped (disabled)", "name", d.Name)
 			continue
@@ -465,8 +468,11 @@ func main() {
 				}
 			}
 			// Driver paths are already resolved by config.Load; no extra
-			// work needed here.
-			reg.Reload(ctx, newCfg.Drivers, newCfg.Site.TroubleshootingMode)
+			// work needed here. Re-apply the battery SoC-window → driver
+			// config mapping so a hot-edited soc_max reaches the driver too.
+			reg.Reload(ctx,
+				config.WithBatterySoCBounds(newCfg.Drivers, newCfg.Batteries),
+				newCfg.Site.TroubleshootingMode)
 			// Refresh capacities — mutate the existing map in place so
 			// Deps.Capacities (a map header captured at init) sees the
 			// update. Rebinding the local variable would orphan the
@@ -590,7 +596,7 @@ func main() {
 				deps.HA = nil
 				slog.Info("HA bridge stopped (disabled in config)")
 			case haBridge == nil && haEnabled:
-				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc)); err != nil {
+				if bridge, err := ha.Start(newCfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st)); err != nil {
 					slog.Warn("HA bridge start failed", "err", err)
 				} else {
 					haBridge = bridge
@@ -1812,7 +1818,7 @@ func main() {
 
 	// ---- HA MQTT bridge (optional) ----
 	if cfg.HomeAssistant != nil && cfg.HomeAssistant.Enabled {
-		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc))
+		bridge, err := ha.Start(cfg.HomeAssistant, tel, ctrl, ctrlMu, reg.Names(), haCallbacks(ctx, ctrl, ctrlMu, st, mpcSvc), mpcPlanSource(mpcSvc), haEnergySource(st))
 		if err != nil {
 			slog.Warn("HA MQTT bridge failed to start", "err", err)
 		} else {
@@ -2056,12 +2062,12 @@ func main() {
 			}
 			if siteMeterStale {
 				slog.Warn("site meter telemetry stale — idling batteries this cycle",
-					"driver", ctrl.SiteMeterDriver)
+					"driver", siteMeterDriver)
 				if troubleshootingMode {
 					slog.Info("troubleshooting: site meter stale, dispatch skipped",
 						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
 				}
-				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), ctrl.SiteMeterDriver) {
+				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), siteMeterDriver) {
 					sendDriverDefault(ctx, reg, n, "site_meter_stale")
 				}
 				continue
@@ -2993,6 +2999,73 @@ func haCallbacks(ctx context.Context, ctrl *control.State, ctrlMu *sync.Mutex, s
 			return st.SaveConfig("battery_covers_ev", val)
 		},
 	}
+}
+
+// mpcPlanBridge adapts *mpc.Service to ha.PlanSource without creating an
+// import cycle between ha and mpc.
+type mpcPlanBridge struct{ svc *mpc.Service }
+
+func (b mpcPlanBridge) LatestActions() []ha.PlanAction {
+	if b.svc == nil {
+		return nil
+	}
+	plan := b.svc.Latest()
+	if plan == nil {
+		return nil
+	}
+	out := make([]ha.PlanAction, len(plan.Actions))
+	for i, a := range plan.Actions {
+		out[i] = ha.PlanAction{
+			SlotStartMs: a.SlotStartMs,
+			SlotLenMin:  a.SlotLenMin,
+			BatteryW:    a.BatteryW,
+			GridW:       a.GridW,
+			SoCPct:      a.SoCPct,
+			PriceOre:    a.PriceOre,
+			SpotOre:     a.SpotOre,
+			CostOre:     a.CostOre,
+			Confidence:  a.Confidence,
+			Reason:      a.Reason,
+			EMSMode:     a.EMSMode,
+			PVW:         a.PVW,
+			LoadW:       a.LoadW,
+		}
+	}
+	return out
+}
+
+func mpcPlanSource(svc *mpc.Service) ha.PlanSource {
+	if svc == nil {
+		return nil
+	}
+	return mpcPlanBridge{svc: svc}
+}
+
+// stateEnergyBridge adapts *state.Store to ha.EnergySource.
+type stateEnergyBridge struct{ st *state.Store }
+
+func (b stateEnergyBridge) TodayEnergy() (ha.TodayEnergySnapshot, bool) {
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	d, err := b.st.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return ha.TodayEnergySnapshot{}, false
+	}
+	return ha.TodayEnergySnapshot{
+		ImportWh:        d.ImportWh,
+		ExportWh:        d.ExportWh,
+		PVWh:            d.PVWh,
+		BatChargedWh:    d.BatChargedWh,
+		BatDischargedWh: d.BatDischargedWh,
+		LoadWh:          d.LoadWh,
+	}, d.Intervals > 0
+}
+
+func haEnergySource(st *state.Store) ha.EnergySource {
+	if st == nil {
+		return nil
+	}
+	return stateEnergyBridge{st: st}
 }
 
 func envOr(key, def string) string {
