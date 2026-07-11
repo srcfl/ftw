@@ -437,6 +437,14 @@ func main() {
 	// wired up. nil until that point — the reload closure guards.
 	var mpcSvc *mpc.Service
 
+	// Pre-declared for the same reason as mpcSvc — the hot-reload
+	// Applier needs to mutate loadSvc.SiteMeter when the operator
+	// moves the `is_site_meter: true` flag between drivers, and
+	// loadSvc itself is constructed further down (line ~619) after
+	// the telemetry store + state DB are wired. Closure capture
+	// works because Go closes over the variable, not its value.
+	var loadSvc *loadmodel.Service
+
 	// Pre-declared so the hot-reload Applier can call (*ha.Bridge).Reload
 	// when broker / credentials / publish interval change. Constructed
 	// further down once the registry + control callbacks exist; the
@@ -532,6 +540,28 @@ func main() {
 					Voltage:  newCfg.Fuse.Voltage,
 					PhaseCnt: newCfg.Fuse.Phases,
 				})
+			}
+
+			// Site-meter swap propagation. The configreload watcher
+			// already updated ctrl.SiteMeterDriver under ctrlMu before
+			// this applier ran, so the dispatch loop reads from the
+			// right driver from the next tick. Two more sites cached
+			// the meter at construction and need the same hot-update
+			// treatment:
+			//   - mpc.Service.SiteMeter — used by reactive replan to
+			//     compute actual site load (grid − pv − bat).
+			//   - loadmodel.Service.SiteMeter — drives twin learning;
+			//     leaving it stale teaches the load model from a meter
+			//     that may not even be emitting any more.
+			if newCfg.SiteMeterDriver() != oldCfg.SiteMeterDriver() {
+				if mpcSvc != nil {
+					mpcSvc.SetSiteMeter(newCfg.SiteMeterDriver())
+				}
+				if loadSvc != nil {
+					loadSvc.SetSiteMeter(newCfg.SiteMeterDriver())
+				}
+				slog.Info("site-meter hot-reloaded into mpc + loadmodel",
+					"driver", newCfg.SiteMeterDriver())
 			}
 
 			// Push the new pool totals into the planner so its next
@@ -741,7 +771,7 @@ func main() {
 	if loadPeakW <= 0 {
 		loadPeakW = 5000
 	}
-	loadSvc := loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
+	loadSvc = loadmodel.NewService(st, tel, cfg.SiteMeterDriver(), loadPeakW)
 	// SeedHeatingCoef — operator config is a cold-start prior. Once the
 	// load model has accumulated samples in production, its
 	// telemetry-fit HeatingW_per_degC survives restart and the config

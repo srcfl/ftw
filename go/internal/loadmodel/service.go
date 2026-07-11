@@ -113,6 +113,18 @@ func NewService(st *state.Store, tel *telemetry.Store, siteMeter string, peakW f
 	return s
 }
 
+// SetSiteMeter swaps the grid-boundary driver used for future training
+// samples. It is safe to call from config hot reload while the sample loop is
+// running.
+func (s *Service) SetSiteMeter(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SiteMeter = name
+	s.mu.Unlock()
+}
+
 func restoreModel(js string, peakW float64, profile Profile) (*Model, bool) {
 	var m Model
 	if err := json.Unmarshal([]byte(js), &m); err != nil || m.Alpha <= 0 {
@@ -272,13 +284,16 @@ func (s *Service) sample() {
 }
 
 func (s *Service) sampleAt(now time.Time) {
-	meter := s.Tele.Get(s.SiteMeter, telemetry.DerMeter)
+	s.mu.RLock()
+	siteMeter := s.SiteMeter
+	s.mu.RUnlock()
+	meter := s.Tele.Get(siteMeter, telemetry.DerMeter)
 	if meter == nil {
 		slog.Debug("loadmodel: skip (no site meter yet)")
 		return
 	}
-	if !s.driverOnline(s.SiteMeter) {
-		slog.Debug("loadmodel: skip (site meter offline)", "driver", s.SiteMeter)
+	if !s.driverOnline(siteMeter) {
+		slog.Debug("loadmodel: skip (site meter offline)", "driver", siteMeter)
 		return
 	}
 	gridW := meter.SmoothedW

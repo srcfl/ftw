@@ -86,8 +86,8 @@ type Service struct {
 	// forecast PV minus k·σ. 0 = raw forecast (no hedge). main.go defaults the
 	// unset config to 1.0.
 	PVForecastSafetyK float64
-	Price             PricePredictor      // optional — fills in future slots when day-ahead isn't published yet
-	Loadpoint         LoadpointProbe      // optional — when non-nil, the DP extends its state with EV dimensions
+	Price             PricePredictor // optional — fills in future slots when day-ahead isn't published yet
+	Loadpoint         LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
 
 	// SaveDiag is called synchronously after every successful replan
 	// with the same Diagnostic the /api/mpc/diagnose endpoint would
@@ -241,6 +241,17 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		stop:                  make(chan struct{}),
 		done:                  make(chan struct{}),
 	}
+}
+
+// SetSiteMeter updates the grid-boundary driver used by reactive replanning.
+// Config hot reload calls this while the planner goroutine may be reading it.
+func (s *Service) SetSiteMeter(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.SiteMeter = name
+	s.mu.Unlock()
 }
 
 // UpdateCapacity swaps the aggregate battery capacity + charge/discharge
@@ -534,6 +545,7 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	s.mu.RLock()
 	plan := s.last
 	last := s.lastReplanAt
+	siteMeter := s.SiteMeter
 	s.mu.RUnlock()
 	if plan == nil || len(plan.Actions) == 0 {
 		return
@@ -570,8 +582,8 @@ func (s *Service) checkDivergence(ctx context.Context) {
 	// have a site meter wired.
 	var loadW float64
 	haveLoad := false
-	if s.SiteMeter != "" && s.driverOnline(s.SiteMeter) {
-		if m := s.Tele.Get(s.SiteMeter, telemetry.DerMeter); m != nil {
+	if siteMeter != "" && s.driverOnline(siteMeter) {
+		if m := s.Tele.Get(siteMeter, telemetry.DerMeter); m != nil {
 			var batW float64
 			for _, r := range s.Tele.ReadingsByType(telemetry.DerBattery) {
 				if !s.driverOnline(r.Driver) {
