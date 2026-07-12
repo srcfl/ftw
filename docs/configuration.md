@@ -296,7 +296,7 @@ planner:
   soc_max_pct: 90
   optimizer_solver: HIGHS
   optimizer_formulation: auto
-  optimizer_timeout_s: 5
+  optimizer_timeout_s: 30
   optimizer_mip_rel_gap: 0.005
   optimizer_cvar_weight: 0.15
   optimizer_cvar_alpha: 0.90

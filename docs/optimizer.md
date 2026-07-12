@@ -146,7 +146,7 @@ planner:
   engine: python                 # default; dp is emergency rollback
   optimizer_solver: HIGHS
   optimizer_formulation: auto    # auto | milp | relaxed
-  optimizer_timeout_s: 5
+  optimizer_timeout_s: 30
   optimizer_mip_rel_gap: 0.005
   optimizer_cvar_weight: 0.15
   optimizer_cvar_alpha: 0.90

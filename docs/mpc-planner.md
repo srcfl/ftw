@@ -180,7 +180,7 @@ when the operator has chosen one.
 | `planner.export_ore_per_kwh` | mean spot | Export revenue per kWh |
 | `planner.engine` | `python` | Primary engine; `dp` is rollback |
 | `planner.optimizer_formulation` | `auto` | Automatic convex/MILP selection |
-| `planner.optimizer_timeout_s` | 5 | Whole worker request deadline |
+| `planner.optimizer_timeout_s` | 30 | Whole worker request deadline; includes Python cold start |
 | `planner.optimizer_mip_rel_gap` | 0.005 | Accepted HiGHS relative MIP gap |
 | `planner.optimizer_cvar_weight` | 0.15 | Tail-risk weight; explicit 0 disables |
 

@@ -3033,7 +3033,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		}
 		timeout := time.Duration(pl.OptimizerTimeoutS * float64(time.Second))
 		if timeout <= 0 {
-			timeout = 5 * time.Second
+			timeout = 30 * time.Second
 		}
 		cvarWeight := 0.15
 		if pl.OptimizerCVaRWeight != nil {
