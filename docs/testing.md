@@ -1,7 +1,15 @@
 # Testing Guide
 
-This guide covers the current Go + Lua test workflow for forty-two-watts.
+This guide covers the Go, Lua, and Python/CVXPY test workflow for forty-two-watts.
+
+`make test` creates the local optimizer venv when needed, runs the CVXPY model
+suite, then runs Go tests with the real Go-to-Python worker integration enabled.
 All commands are run from the repo root unless noted.
+
+Historical planner qualification uses `ftw-optimizer-backtest`; see
+[optimizer.md](optimizer.md#historical-backtest). Export and solve are separate
+commands so captured live diagnostics can be retained as an immutable test
+input and every solver run after export is offline.
 
 ## Main Commands
 

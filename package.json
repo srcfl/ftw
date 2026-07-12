@@ -3,7 +3,7 @@
   "version": "0.127.0",
   "private": true,
   "type": "module",
-  "description": "Unified Home Energy Management System — version metadata only; the application itself is Go. Changesets reads `version` from this file to drive the release tag.",
+  "description": "Unified Home Energy Management System — version metadata only; the host is Go and the mathematical planner is Python/CVXPY. Changesets reads `version` from this file to drive the release tag.",
   "scripts": {
     "test": "node --test 'web/**/*.test.mjs'"
   },

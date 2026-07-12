@@ -49,6 +49,9 @@ jobs:
   meta:
     name: derive tag + version
     runs-on: ubuntu-latest
+    # Beta tags have their own lightweight channel workflow and must never
+    # retag :latest or publish stable RPi/Discord assets.
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-') }}
     outputs:
       tag:     ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
@@ -71,7 +74,7 @@ jobs:
             echo "release-assets must be dispatched against a v* tag (got ref=${GITHUB_REF})" >&2
             exit 1
           fi
-          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Tag ${TAG} doesn't look like a vX.Y.Z release tag" >&2
             exit 1
           fi

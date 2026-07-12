@@ -62,6 +62,9 @@ artifacts/
 # CI via `npm ci`); node_modules and runtime artifacts are not.
 node_modules/
 release-notes.md
+optimizer/.venv/
+optimizer/.pytest_cache/
+optimizer/**/__pycache__/
 
 # TLS material — never commit. Public certs go on the deploy host, private keys never leave the browser.
 *.pem

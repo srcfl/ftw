@@ -155,6 +155,57 @@ func TestVersionCheck_ReturnsInfo(t *testing.T) {
 	}
 }
 
+func TestVersionChannel_RoundTrip(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	srv := New(&Deps{SelfUpdate: c})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"beta"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("channel status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var info selfupdate.Info
+	if err := json.Unmarshal(rr.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.Channel != selfupdate.ChannelBeta || info.Latest != "" || info.UpdateAvailable {
+		t.Fatalf("channel response = %+v", info)
+	}
+}
+
+func TestVersionChannel_RejectsUnknownChannel(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	srv := New(&Deps{SelfUpdate: c})
+	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"nightly"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown channel status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestVersionChannel_BlockedWhileSidecarUpdateIsInFlight(t *testing.T) {
+	statusPath := filepath.Join(t.TempDir(), "state.json")
+	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
+	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v1.5.0"}); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(&Deps{SelfUpdate: c})
+	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"edge"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("in-flight channel status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if c.Info().Channel != selfupdate.ChannelStable {
+		t.Fatalf("channel changed during update: %+v", c.Info())
+	}
+}
+
 func TestVersionSkip_RoundTrip(t *testing.T) {
 	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
 	srv := New(&Deps{SelfUpdate: c})

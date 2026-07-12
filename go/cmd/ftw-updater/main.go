@@ -201,11 +201,11 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		// pull resolves to the old digest while the build workflow's
 		// retag is in flight.
 		if body.Target == "" {
-			http.Error(w, "update requires target version (vX.Y.Z)", 400)
+			http.Error(w, "update requires an immutable image tag", 400)
 			return
 		}
-		if !isSemverTag(body.Target) {
-			http.Error(w, "target must look like vX.Y.Z", 400)
+		if !isImmutableImageTag(body.Target) {
+			http.Error(w, "target must be stable vX.Y.Z, beta vX.Y.Z-beta.N, or immutable edge tag", 400)
 			return
 		}
 	case "restart":
@@ -590,15 +590,39 @@ func envOr(key, def string) string {
 	return def
 }
 
-// isSemverTag matches the strict "vX.Y.Z" tag shape that release-please
-// produces. Pre-release suffixes (-rc1, +meta) are intentionally
-// rejected here so the sidecar can't be talked into pinning the deploy
-// to a release candidate via a crafted target string.
-func isSemverTag(s string) bool {
+// isImmutableImageTag accepts only tags produced by the stable, beta, and
+// edge publishers. Moving aliases (:latest, :beta, :edge), arbitrary
+// prereleases, metadata, and shell-shaped input are rejected at the Docker
+// boundary.
+func isImmutableImageTag(s string) bool {
+	if strings.HasPrefix(s, "edge-") {
+		parts := strings.Split(s, "-")
+		if len(parts) != 3 || len(parts[2]) < 7 {
+			return false
+		}
+		if _, err := time.Parse("20060102T150405Z", parts[1]); err != nil {
+			return false
+		}
+		for _, r := range parts[2] {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+				return false
+			}
+		}
+		return true
+	}
 	if !strings.HasPrefix(s, "v") {
 		return false
 	}
-	parts := strings.Split(s[1:], ".")
+	version := s[1:]
+	prerelease := ""
+	if i := strings.IndexByte(version, '-'); i >= 0 {
+		prerelease = version[i+1:]
+		version = version[:i]
+	}
+	if strings.ContainsAny(version, "+-") {
+		return false
+	}
+	parts := strings.Split(version, ".")
 	if len(parts) != 3 {
 		return false
 	}
@@ -610,6 +634,22 @@ func isSemverTag(s string) bool {
 			if r < '0' || r > '9' {
 				return false
 			}
+		}
+	}
+	if prerelease == "" {
+		return true
+	}
+	pre := strings.Split(prerelease, ".")
+	return len(pre) == 2 && pre[0] == "beta" && allDigits(pre[1])
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
 	return true

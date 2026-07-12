@@ -92,15 +92,15 @@ Outputs one `DispatchTarget` per battery driver (site convention:
 + = charge, − = discharge) after slew-rate and fuse-guard clamping.
 
 ### MPC planner
-Source: `go/internal/mpc/`.
+Sources: `go/internal/mpc/`, `optimizer/`.
 
-Dynamic programming over discretized SoC × actions, 48-hour horizon,
-15-min interval by default. Consumes prices, weather-driven PV
-forecast, load forecast, and current SoC; emits a grid-target
-schedule the control loop reads via `Service.GridTargetAt`
-(`service.go:132`). Three flavors bind to the `planner_*` control
-modes with different action constraints (no grid-charge / no export
-discharge / full freedom).
+CVXPY formulates a continuous or mixed-integer 48-hour model and HiGHS solves
+it every 15 minutes by default. It consumes prices, scenario-based PV/load
+forecasts, asset states, deadlines, comfort constraints, and site limits. Go
+validates the complete returned trajectory before exposing it through the
+existing energy-allocation contract. CLARABEL handles continuous convex
+fallbacks; the former Go DP is retained only as an emergency fallback. See
+[optimizer.md](optimizer.md).
 
 ### ML twins
 Sources: `go/internal/pvmodel/`, `go/internal/loadmodel/`,

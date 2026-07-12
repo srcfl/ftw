@@ -11,13 +11,14 @@
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
 
-.PHONY: help test build build-arm64 build-amd64 build-windows-amd64 release \
+.PHONY: help test optimizer-install optimizer-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
         verify verify-all install-hooks \
         e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
+OPTIMIZER_PYTHON := $(CURDIR)/optimizer/.venv/bin/python
 
 help:
 	@echo "forty-two-watts — Go + Lua EMS"
@@ -43,8 +44,18 @@ help:
 
 # ---- Testing ----
 
-test:
-	cd go && go test ./...
+test: optimizer-test
+	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
+
+optimizer-install:
+	python3 -m venv optimizer/.venv
+	optimizer/.venv/bin/pip install -e 'optimizer[test]'
+
+optimizer-test: optimizer/.venv/bin/pytest
+	optimizer/.venv/bin/pytest -q optimizer/tests
+
+optimizer/.venv/bin/pytest: optimizer/pyproject.toml
+	$(MAKE) optimizer-install
 
 e2e:
 	cd go && go test ./test/e2e -v -timeout 180s
@@ -67,9 +78,9 @@ ci-hw-pi:
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify:
+verify: optimizer-test
 	cd go && go vet ./...
-	cd go && go test ./...
+	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
 	cd go && go build ./...
 	@echo "verify: vet + test + build clean"
 
@@ -151,7 +162,7 @@ release: build-arm64 build-amd64 build-windows-amd64
 		cp "bin/ftw-pair-linux-$$arch"        "$$stage/ftw-pair"; \
 		tar czf release/forty-two-watts-linux-$$arch.tar.gz \
 			-C "$$stage" forty-two-watts ftw-pair \
-			-C ../.. drivers web config.example.yaml; \
+			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml; \
 		printf "built release/forty-two-watts-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/forty-two-watts-linux-$$arch.tar.gz)"; \
 	done
@@ -160,7 +171,7 @@ release: build-arm64 build-amd64 build-windows-amd64
 	@# doesn't keep appending to a stale archive.
 	@rm -f release/forty-two-watts-windows-amd64.zip
 	@cd bin && zip -q ../release/forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.exe
-	@zip -qr release/forty-two-watts-windows-amd64.zip drivers web config.example.yaml
+	@zip -qr release/forty-two-watts-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
 	@printf "built release/forty-two-watts-windows-amd64.zip (%s bytes)\n" \
 		"$$(wc -c <release/forty-two-watts-windows-amd64.zip)"
 
@@ -173,13 +184,13 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	wait
 
-dev:
+dev: optimizer/.venv/bin/pytest
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \
 	(cd go && go run ./cmd/sim-sungrow) & \
 	sleep 2 && \
-	(cd go && go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
+	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
 	wait
 
 # ---- Local docker E2E harness (relay + Pi on this machine) ----

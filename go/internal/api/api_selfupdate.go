@@ -33,6 +33,51 @@ func (s *Server) handleVersionCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.deps.SelfUpdate.Info())
 }
 
+// handleVersionChannel persists the selected release stream. Changing the
+// channel only clears the cached target; image pulls still require the normal
+// update endpoint and its pre-update snapshot.
+func (s *Server) handleVersionChannel(w http.ResponseWriter, r *http.Request) {
+	if s.deps.SelfUpdate == nil {
+		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
+		return
+	}
+	var body struct {
+		Channel string `json:"channel"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	channel, err := selfupdate.ParseChannel(body.Channel)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	if !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	defer s.versionUpdateMu.Unlock()
+	if err := s.deps.SelfUpdate.SetChannel(channel); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, 200, s.deps.SelfUpdate.Info())
+}
+
+func versionUpdateInFlight(state string) bool {
+	switch state {
+	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+		return true
+	default:
+		return false
+	}
+}
+
 // handleVersionSkip persists a dismissed version. A subsequent /check with a
 // NEWER release resurfaces the notification automatically — Skip only hides
 // the version passed in the body, not everything above it.

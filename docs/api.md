@@ -745,6 +745,25 @@ generated. See `docs/mpc-planner.md`
     "capacity_wh": 20000,
     "initial_soc_pct": 74.9,
     "total_cost_ore": -120.5,
+    "solver": {
+      "engine": "cvxpy",
+      "backend": "highs",
+      "status": "optimal",
+      "formulation": "milp",
+      "solve_ms": 418.2,
+      "mip_gap": 0.001,
+      "scenario_count": 3
+    },
+    "dp_shadow": {
+      "total_cost_ore": -98.2,
+      "active_minus_shadow_ore": -22.3,
+      "forecast_basis": "downside-pv fallback input",
+      "mean_abs_battery_delta_w": 418.5,
+      "max_abs_battery_delta_w": 2400,
+      "direction_disagreements": 7,
+      "compared_slots": 193,
+      "first_action": {"battery_w": 0, "grid_w": -620, "soc_pct": 74.9}
+    },
     "actions": [
       {
         "slot_start_ms": 1744579200000,
@@ -758,7 +777,9 @@ generated. See `docs/mpc-planner.md`
         "cost_ore": 0,
         "confidence": 0.85,
         "reason": "cover load from battery",
-        "pv_limit_w": 0
+        "pv_limit_w": 0,
+        "storage_power_w": {"battery-east": -600, "battery-west": -1000},
+        "storage_energy_wh": {"battery-east": 7300, "battery-west": 7340}
       }
     ]
   },
@@ -1215,6 +1236,8 @@ Cached GitHub Releases probe.
 ```json
 {
   "current": "v1.2.3",
+  "channel": "stable",
+  "channels": ["stable", "beta", "edge"],
   "latest": "v1.3.0",
   "update_available": true,
   "skipped": false,
@@ -1231,6 +1254,19 @@ release resurfaces automatically without requiring an explicit unskip.
 503 when the self-update service is disabled (`SelfUpdate == nil` in
 Deps). 502 when `force=1` and GitHub is unreachable; the cached view is
 still included in the body.
+
+### POST /api/version/channel
+
+Persist the selected release stream in `state.db` without pulling an
+image. The cached target is cleared and the UI follows with a forced
+version check. An actual update remains a separate, snapshot-protected
+operation.
+
+**Request body:** `{"channel":"beta"}` where channel is `stable`,
+`beta`, or `edge`.
+
+Returns the cleared version-check state with the newly selected channel.
+Returns 409 if an update is already in progress.
 
 ### POST /api/version/skip
 
@@ -1343,7 +1379,7 @@ schedule fast.
 | `soc_pct: 0` | clears the target |
 | `target_time_ms` (omit / null) | preserves existing deadline |
 | `target_time_ms: 0` | clears the deadline (charge opportunistically) |
-| `surplus_only: true` | EV charges only from PV surplus — DP refuses any plan that would import grid for this loadpoint, dispatch live-clamps to PV-minus-load, and the charger is held on 3-phase steps to avoid contactor-wearing phase swaps |
+| `surplus_only: true` | EV charges only from PV surplus — the optimizer refuses any plan that would import grid for this loadpoint, dispatch live-clamps to PV-minus-load, and the charger is held on 3-phase steps to avoid contactor-wearing phase swaps |
 | `surplus_only: false` | clears the flag (default) |
 | all three omitted | 400 — handler refuses no-op requests |
 

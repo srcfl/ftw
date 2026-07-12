@@ -63,7 +63,10 @@ services:
       - update-ipc:/run/ftw-update
 
   ftw-updater:
-    image: ghcr.io/frahlg/forty-two-watts-updater:latest
+    # Normally follows :latest. The separate variable is only needed for
+    # bootstrapping a beta/edge pair before the installed stable updater
+    # understands that channel's immutable tag format.
+    image: ghcr.io/frahlg/forty-two-watts-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
     container_name: ftw-updater
     restart: unless-stopped
 

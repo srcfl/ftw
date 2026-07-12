@@ -1,6 +1,7 @@
 # forty-two-watts — project orientation
 
-Unified Home Energy Management System, written in Go with Lua drivers.
+Unified Home Energy Management System: Go host, Lua drivers, and a local
+Python/CVXPY mathematical planning engine.
 See `docs/archive/rust-go-wasm-migration-plan.md` only if you need the
 historical Rust→Go migration context.
 
@@ -53,7 +54,8 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/priceforecast` | Price twin — fills beyond day-ahead publication |
 | `go/internal/loadmodel` | Household load twin (bucketed + heating coefficient) |
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
-| `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
+| `go/internal/mpc` | MPC orchestration, Go validation, DP emergency fallback |
+| `optimizer` | CVXPY model; HiGHS LP/MILP + CLARABEL convex fallback |
 | `go/internal/calendar` | CalDAV-client planner constraints (#498) — title-keyword intents (away → load profile, EV deadline → loadpoint target) + EVSE usage history + plan publishing; polls 42W's own in-process `caldavserver` |
 | `go/internal/caldavserver` | Native in-process CalDAV server (#498) on emersion/go-webdav (MIT) — the only CalDAV server (no sidecar), so the calendar feature works single-container incl. a HA add-on. Objects persist in state.db (`caldav_objects`); recurring events expanded server-side (`expand.go`) |
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
@@ -81,8 +83,9 @@ make install-hooks  # install git pre-commit + pre-push hooks (opt-in)
 Lua drivers need no build step — `drivers/*.lua` ships verbatim with the
 release tarball and is loaded on startup.
 
-No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua). `go build`
-produces a static single-binary distribution.
+The Go host remains CGo-free and static. The primary MPC is a local Python
+worker shipped in the official container and alongside native release assets;
+the static host falls back to the in-process Go DP if that worker is absent.
 
 ## Releases (Changesets)
 

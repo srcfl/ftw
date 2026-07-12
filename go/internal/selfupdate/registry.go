@@ -8,13 +8,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// registryProbe asks an OCI registry which version tags exist for an
-// image. The Checker uses this as the source of truth for "what is the
-// newest release available right now" — version tags are immutable
-// once pushed, so listing them tells us exactly what's deployable
-// without involving any moving tag like :latest.
+// registryProbe asks an OCI registry which immutable version and edge tags
+// exist for an image. Listing them proves a resolved target is deployable
+// without installing moving aliases such as :latest, :beta, or :edge.
 type registryProbe struct {
 	httpClient *http.Client
 	// base is the registry root, e.g. "https://ghcr.io". Overridable for tests.
@@ -43,6 +42,43 @@ func (rp *registryProbe) hasTag(ctx context.Context, tag string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// latestEdgeTag returns the newest immutable edge tag. Edge publishers use
+// edge-YYYYMMDDTHHMMSSZ-<shortsha>, so lexical order is chronological and a
+// moving :edge alias never becomes an install target.
+func (rp *registryProbe) latestEdgeTag(ctx context.Context) (string, error) {
+	tok, err := rp.token(ctx)
+	if err != nil {
+		return "", err
+	}
+	tags, err := rp.listTags(ctx, tok)
+	if err != nil {
+		return "", err
+	}
+	latest := ""
+	for _, tag := range tags {
+		if validEdgeTag(tag) && tag > latest {
+			latest = tag
+		}
+	}
+	return latest, nil
+}
+
+func validEdgeTag(tag string) bool {
+	parts := strings.Split(tag, "-")
+	if len(parts) != 3 || parts[0] != "edge" || len(parts[2]) < 7 {
+		return false
+	}
+	if _, err := time.Parse("20060102T150405Z", parts[1]); err != nil {
+		return false
+	}
+	for _, r := range parts[2] {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func (rp *registryProbe) token(ctx context.Context) (string, error) {
@@ -130,4 +166,3 @@ func parseNextLink(header, base string) string {
 	}
 	return ""
 }
-

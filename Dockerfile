@@ -1,9 +1,7 @@
-# forty-two-watts container — multi-stage Go build, alpine runtime.
+# forty-two-watts container — static Go host + Python mathematical planner.
 #
-# Builder uses golang:alpine to keep the final binary fully static and
-# the toolchain layer small. The runtime stage is plain alpine with
-# only ca-certificates + tzdata; everything else (Lua drivers, web
-# assets, the binary itself) ships verbatim.
+# Builder uses golang:alpine to keep the Go binary fully static. The runtime is
+# Debian slim because the CVXPY and HiGHS ARM64 wheels target glibc.
 #
 # Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
 # TARGETARCH when available. Plain `docker build` falls back to the
@@ -47,14 +45,20 @@ RUN cd go && \
 # The cross-platform binaries are published as GitHub release assets
 # (ftw-relay-linux-{amd64,arm64}) for operators who self-host.
 
+# --- Optimizer -------------------------------------------------------------
+FROM python:3.12-slim-bookworm AS optimizer
+
+COPY optimizer/ /src/optimizer/
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir /src/optimizer
+
 # --- Runtime ---------------------------------------------------------------
-FROM alpine:3.20
+FROM python:3.12-slim-bookworm
 
 # ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
-# tzdata:        timezone-aware price + plan windows (Europe/Stockholm etc).
-# Python, fowl, libsodium no longer needed — the pair transport is now pure Go.
-RUN apk add --no-cache ca-certificates tzdata && \
-    addgroup -S ftw && adduser -S ftw -G ftw
+# tzdata: timezone-aware price + plan windows (Europe/Stockholm etc).
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && \
+    rm -rf /var/lib/apt/lists/*
 
 # Image layout:
 #   /app/forty-two-watts  binary (immutable, replaced on upgrade)
@@ -71,13 +75,19 @@ RUN apk add --no-cache ca-certificates tzdata && \
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/forty-two-watts /app/forty-two-watts
 COPY --from=builder /out/ftw-pair        /app/ftw-pair
+COPY --from=optimizer /opt/venv          /opt/venv
+COPY optimizer/                          /app/optimizer/
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
 RUN mkdir -p /app/data /app/data/drivers /run/ftw-update && \
-    chown -R ftw:ftw /app /run/ftw-update
+    chown -R 100:101 /app /run/ftw-update /opt/venv
 
-USER ftw
+ENV HOME=/app/data \
+    FTW_OPTIMIZER_PYTHON=/opt/venv/bin/python \
+    FTW_OPTIMIZER_DIR=/app/optimizer
+
+USER 100:101
 WORKDIR /app/data
 
 VOLUME ["/app/data"]
@@ -88,8 +98,8 @@ EXPOSE 8080
 # paths into the immutable image layer so the bundled versions ship
 # with each release.
 #
-# UID note: the ftw user is uid 100 / gid 101 (alpine `adduser -S`
-# convention). Named docker volumes inherit ownership from the image
+# UID note: the process runs as uid 100 / gid 101 for compatibility with
+# existing bind mounts. Named docker volumes inherit ownership from the image
 # automatically and just work. For HOST BIND MOUNTS, the host
 # directory must be owned by uid 100 (or world-writable) before the
 # container starts:
