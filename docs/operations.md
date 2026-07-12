@@ -181,6 +181,11 @@ When in doubt, `sudo systemctl restart forty-two-watts`.
 
 For the `docker-compose.yml` deployment, the web UI's version badge and "Update" / "Restart" buttons drive `docker compose pull` + `up -d` via the `ftw-updater` sidecar. See [self-update.md](self-update.md) for the architecture and how to test the flow locally before a release.
 
+The same dialog selects `stable`, `beta`, or `edge`. Stable is the production
+default. Beta is an explicit prerelease for real-site testing; edge follows
+timestamped development images and should be reserved for test rigs. Every
+channel still takes a local state/config snapshot before applying an update.
+
 ## 7. Backup + restore
 
 Three things hold state:

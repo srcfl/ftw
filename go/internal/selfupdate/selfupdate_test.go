@@ -252,6 +252,84 @@ func TestCheck_PrereleaseFiltered(t *testing.T) {
 	}
 }
 
+func TestCheck_BetaChannelSelectsNewestBetaAndPersistsChannel(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("v1.5.0-beta.1")
+	reg.addTag("v1.5.0-beta.2")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"tag_name": "v1.5.0-rc.1", "prerelease": true, "published_at": "2026-07-12T11:00:00Z"},
+			{"tag_name": "v1.5.0-beta.2", "prerelease": true, "published_at": "2026-07-12T10:00:00Z"},
+			{"tag_name": "v1.5.0-beta.1", "prerelease": true, "published_at": "2026-07-11T10:00:00Z"},
+		})
+	}))
+	defer releases.Close()
+
+	st := newMemStore()
+	c := New(Config{
+		Repo: repo, CurrentVersion: "v1.4.0",
+		RegistryBaseURL: rsrv.URL, ReleasesURL: releases.URL,
+	}, st)
+	if err := c.SetChannel(ChannelBeta); err != nil {
+		t.Fatalf("SetChannel: %v", err)
+	}
+	info, err := c.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.Channel != ChannelBeta || info.Latest != "v1.5.0-beta.2" || !info.UpdateAvailable {
+		t.Fatalf("beta info = %+v", info)
+	}
+	if got, _ := st.LoadConfig(channelKey); got != "beta" {
+		t.Fatalf("persisted channel = %q", got)
+	}
+}
+
+func TestCheck_EdgeChannelUsesNewestImmutableTag(t *testing.T) {
+	const repo = "frahlg/forty-two-watts"
+	reg := newFakeRegistry(t, repo)
+	reg.addTag("edge")
+	reg.addTag("edge-20260711T100000Z-abcdef0")
+	reg.addTag("edge-not-a-time-deadbee")
+	reg.addTag("edge-20260712T120000Z-1234abc")
+	rsrv := reg.server()
+	defer rsrv.Close()
+
+	st := newMemStore()
+	st.m[channelKey] = "edge"
+	c := New(Config{Repo: repo, CurrentVersion: "edge-20260711T100000Z-abcdef0", RegistryBaseURL: rsrv.URL}, st)
+	info, err := c.Check(context.Background(), true)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if info.Channel != ChannelEdge || info.Latest != "edge-20260712T120000Z-1234abc" || !info.UpdateAvailable {
+		t.Fatalf("edge info = %+v", info)
+	}
+	if want := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC); !info.PublishedAt.Equal(want) {
+		t.Fatalf("published = %s, want %s", info.PublishedAt, want)
+	}
+}
+
+func TestNew_InfersChannelFromBuildVersion(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    Channel
+	}{
+		{"v1.2.3", ChannelStable},
+		{"v1.3.0-beta.4", ChannelBeta},
+		{"edge-20260712T120000Z-1234abc", ChannelEdge},
+	} {
+		c := New(Config{CurrentVersion: tc.version}, newMemStore())
+		if got := c.Info().Channel; got != tc.want {
+			t.Errorf("version %q inferred %q, want %q", tc.version, got, tc.want)
+		}
+	}
+}
+
 func TestCheck_SameVersion(t *testing.T) {
 	const repo = "frahlg/forty-two-watts"
 	reg := newFakeRegistry(t, repo)
@@ -472,6 +550,10 @@ func TestIsNewer(t *testing.T) {
 		{"v1.2.3", "dev", true},
 		{"", "v1.2.3", false},
 		{"v1.2.3-rc1", "v1.2.2", true},
+		{"v1.3.0-beta.2", "v1.3.0-beta.1", true},
+		{"v1.3.0-beta.1", "v1.3.0-beta.2", false},
+		{"v1.3.0", "v1.3.0-beta.2", true},
+		{"v1.3.0-beta.2", "v1.3.0", false},
 		{"1.2.3", "1.2.2", true},
 	}
 	for _, tc := range cases {

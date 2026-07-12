@@ -1,13 +1,12 @@
-// Package selfupdate decides what version of forty-two-watts is the
-// "current latest release" and triggers pull+restart via the
-// ftw-updater sidecar over a Unix socket.
+// Package selfupdate resolves the selected stable, beta, or edge release
+// stream and triggers pull+restart via the ftw-updater sidecar over a Unix
+// socket.
 //
 // Two signals are required, both for safety reasons:
 //
-//  1. The GitHub Releases API's "latest release" endpoint identifies
-//     the *semantic* current release — the most recently published
-//     non-prerelease, per release-please's ordering. We can't use
-//     raw semver descending over GHCR tags because the repo's tag
+//  1. GitHub Releases identifies stable and beta targets. Edge uses
+//     timestamped immutable GHCR tags. We can't use raw semver descending
+//     over every registry tag because the repo's tag
 //     history isn't monotonic (e.g. an older `2.x.y` tag scheme
 //     still in the registry would outrank the current `v0.X.Y` line
 //     numerically).
@@ -20,11 +19,9 @@
 //     :latest — still aliased to the previous image, no digest
 //     change, sidecar writes state=done with the version unmoved.
 //
-// Both signals required: GH Releases tells us *what's released*, GHCR
-// tells us *is it deployable yet*. When the registry doesn't have the
-// release yet, Check returns update_available=false this cycle and
-// retries on the next probe — the immutable version tag will appear
-// once the build workflow finishes.
+// Stable and beta require both signals: GitHub tells us *what's released*,
+// GHCR tells us *is it deployable yet*. Edge is registry-native but still
+// installs only its immutable timestamped tag, never the moving alias.
 //
 // Dispatch passes the resolved version tag (not :latest) to the
 // sidecar, which sets FTW_IMAGE_TAG=<target> on the docker exec so
@@ -64,6 +61,7 @@ type Store interface {
 
 const (
 	skippedKey           = "update.skipped_version"
+	channelKey           = "update.channel"
 	defaultCheckInterval = 1 * time.Hour
 	defaultHTTPTimeout   = 10 * time.Second
 	// staleThreshold flags an in-flight update as failed when the sidecar
@@ -71,6 +69,28 @@ const (
 	// sidecar crashing mid-pull so the UI overlay can unblock.
 	staleThreshold = 5 * time.Minute
 )
+
+// Channel controls which immutable release stream the checker follows.
+// Stable remains the default; beta and edge are explicit operator opt-ins.
+type Channel string
+
+const (
+	ChannelStable Channel = "stable"
+	ChannelBeta   Channel = "beta"
+	ChannelEdge   Channel = "edge"
+)
+
+var availableChannels = []Channel{ChannelStable, ChannelBeta, ChannelEdge}
+
+func ParseChannel(v string) (Channel, error) {
+	channel := Channel(strings.ToLower(strings.TrimSpace(v)))
+	switch channel {
+	case ChannelStable, ChannelBeta, ChannelEdge:
+		return channel, nil
+	default:
+		return "", fmt.Errorf("selfupdate: invalid channel %q", v)
+	}
+}
 
 // Config configures the Checker.
 type Config struct {
@@ -103,6 +123,9 @@ type Config struct {
 	// from the response in one call. Default returns the public
 	// api.github.com endpoint for cfg.Repo. Overrideable for tests.
 	LatestReleaseURL string
+	// ReleasesURL lists published releases and is used by the beta channel
+	// to find prereleases without weakening stable's /releases/latest path.
+	ReleasesURL string
 
 	// Overrides for tests.
 	HTTPClient *http.Client
@@ -112,6 +135,8 @@ type Config struct {
 // Info is the cached view returned to the UI.
 type Info struct {
 	Current         string    `json:"current"`
+	Channel         Channel   `json:"channel"`
+	Channels        []Channel `json:"channels"`
 	Latest          string    `json:"latest,omitempty"`
 	PublishedAt     time.Time `json:"published_at,omitempty"`
 	ReleaseNotesURL string    `json:"release_notes_url,omitempty"`
@@ -188,11 +213,24 @@ func New(cfg Config, store Store) *Checker {
 	if cfg.LatestReleaseURL == "" {
 		cfg.LatestReleaseURL = "https://api.github.com/repos/" + cfg.Repo + "/releases/latest"
 	}
+	if cfg.ReleasesURL == "" {
+		cfg.ReleasesURL = "https://api.github.com/repos/" + cfg.Repo + "/releases?per_page=100"
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
+	channel := inferChannel(cfg.CurrentVersion)
+	if store != nil {
+		if persisted, ok := store.LoadConfig(channelKey); ok && persisted != "" {
+			if parsed, err := ParseChannel(persisted); err == nil {
+				channel = parsed
+			}
+		}
+	}
 	c := &Checker{cfg: cfg, store: store}
 	c.info.Current = cfg.CurrentVersion
+	c.info.Channel = channel
+	c.info.Channels = append([]Channel(nil), availableChannels...)
 	c.mu.Lock()
 	c.reloadSkipLocked()
 	c.mu.Unlock()
@@ -245,24 +283,18 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return cached, nil
 	}
 
-	rel, err := c.fetchLatestRelease(ctx)
-	if err != nil {
-		return c.recordErr(err)
-	}
-
-	// Verify the registry actually has this tag pushed before flipping
-	// update_available. Skipping this re-introduces the race where GH
-	// publishes the release seconds before the build workflow finishes,
-	// and the sidecar dispatches a pull that resolves the previous
-	// digest.
+	channel := cached.Channel
 	rp := &registryProbe{
 		httpClient: c.cfg.HTTPClient,
 		base:       c.cfg.RegistryBaseURL,
 		repo:       c.cfg.Image,
 		service:    c.cfg.RegistryService,
 	}
-	deployable := false
-	if rel.TagName != "" {
+	rel, deployable, err := c.resolveChannel(ctx, channel, rp)
+	if err != nil {
+		return c.recordErr(err)
+	}
+	if rel.TagName != "" && channel != ChannelEdge {
 		ok, err := rp.hasTag(ctx, rel.TagName)
 		if err != nil {
 			return c.recordErr(fmt.Errorf("registry probe: %w", err))
@@ -271,12 +303,19 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	}
 
 	c.mu.Lock()
+	// A channel switch may complete while an older network probe is in
+	// flight. Never let that stale result overwrite the newly selected stream.
+	if c.info.Channel != channel {
+		info := c.info
+		c.mu.Unlock()
+		return info, nil
+	}
 	if deployable {
 		c.info.Latest = rel.TagName
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
-		c.info.UpdateAvailable = isNewer(rel.TagName, c.info.Current)
+		c.info.UpdateAvailable = channelUpdateAvailable(channel, rel.TagName, c.info.Current)
 	} else {
 		// Either GH has no published release yet, or the build workflow
 		// hasn't pushed the image for this release yet. Keep the prior
@@ -305,6 +344,25 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		c.cfg.Bus.Publish(*announce)
 	}
 	return info, nil
+}
+
+func (c *Checker) resolveChannel(ctx context.Context, channel Channel, rp *registryProbe) (ghRelease, bool, error) {
+	switch channel {
+	case ChannelStable:
+		rel, err := c.fetchLatestRelease(ctx)
+		return rel, rel.TagName != "", err
+	case ChannelBeta:
+		rel, err := c.fetchBetaRelease(ctx)
+		return rel, rel.TagName != "", err
+	case ChannelEdge:
+		tag, err := rp.latestEdgeTag(ctx)
+		if err != nil {
+			return ghRelease{}, false, fmt.Errorf("registry edge probe: %w", err)
+		}
+		return ghRelease{TagName: tag, PublishedAt: edgeTagTime(tag)}, tag != "", nil
+	default:
+		return ghRelease{}, false, fmt.Errorf("selfupdate: unsupported channel %q", channel)
+	}
 }
 
 func (c *Checker) recordErr(err error) (Info, error) {
@@ -359,6 +417,40 @@ func (c *Checker) fetchLatestRelease(ctx context.Context) (ghRelease, error) {
 	return rel, nil
 }
 
+// fetchBetaRelease selects the newest published beta or stable release.
+// Including stable releases means beta testers naturally converge back to a
+// promoted stable build instead of remaining pinned to the final prerelease.
+func (c *Checker) fetchBetaRelease(ctx context.Context) (ghRelease, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.ReleasesURL, nil)
+	if err != nil {
+		return ghRelease{}, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "forty-two-watts-selfupdate")
+	resp, err := c.cfg.HTTPClient.Do(req)
+	if err != nil {
+		return ghRelease{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return ghRelease{}, fmt.Errorf("github releases list %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var releases []ghRelease
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases); err != nil {
+		return ghRelease{}, err
+	}
+	for _, rel := range releases {
+		if rel.Draft {
+			continue
+		}
+		if !rel.Prerelease || isBetaTag(rel.TagName) {
+			return rel, nil
+		}
+	}
+	return ghRelease{}, nil
+}
+
 // Info returns the cached view. Skip state is re-read from the store on each
 // call so a Skip/Unskip from another request is reflected immediately without
 // broadcasting. SidecarReady is re-probed on every call so a sidecar that
@@ -371,6 +463,35 @@ func (c *Checker) Info() Info {
 	info := c.info
 	info.SidecarReady = c.sidecarReadyLocked()
 	return info
+}
+
+// SetChannel persists an operator-selected release stream and clears the
+// cached target. It does not pull or restart anything; the caller performs a
+// fresh Check and the normal update endpoint remains the only mutation path.
+func (c *Checker) SetChannel(channel Channel) error {
+	parsed, err := ParseChannel(string(channel))
+	if err != nil {
+		return err
+	}
+	if c.store == nil {
+		return errors.New("selfupdate: no store configured")
+	}
+	if err := c.store.SaveConfig(channelKey, string(parsed)); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.info.Channel = parsed
+	c.info.Latest = ""
+	c.info.PublishedAt = time.Time{}
+	c.info.ReleaseNotesURL = ""
+	c.info.ReleaseBody = ""
+	c.info.CheckedAt = time.Time{}
+	c.info.UpdateAvailable = false
+	c.info.Err = ""
+	c.info.Skipped = false
+	c.lastAnnouncedTag = ""
+	c.mu.Unlock()
+	return nil
 }
 
 // sidecarReadyLocked reports whether the updater socket is present as an
@@ -564,15 +685,49 @@ func isInFlightState(state string) bool {
 	}
 }
 
-// isNewer returns true if latest is strictly greater than current in
-// x.y.z order. Non-semver current ("dev", commit SHAs) is treated as older
-// than any proper release so development builds see the upgrade banner.
+func inferChannel(version string) Channel {
+	switch {
+	case strings.HasPrefix(version, "edge-"):
+		return ChannelEdge
+	case isBetaTag(version):
+		return ChannelBeta
+	default:
+		return ChannelStable
+	}
+}
+
+func channelUpdateAvailable(channel Channel, latest, current string) bool {
+	if latest == "" || latest == current {
+		return false
+	}
+	if channel == ChannelEdge {
+		return true
+	}
+	return isNewer(latest, current)
+}
+
+func isBetaTag(tag string) bool {
+	v := parseSemanticVersion(tag)
+	return v != nil && len(v.pre) == 2 && v.pre[0] == "beta" && isDigits(v.pre[1])
+}
+
+func edgeTagTime(tag string) time.Time {
+	parts := strings.Split(tag, "-")
+	if len(parts) < 3 || parts[0] != "edge" {
+		return time.Time{}
+	}
+	t, _ := time.Parse("20060102T150405Z", parts[1])
+	return t
+}
+
+// isNewer implements the SemVer precedence needed by stable and beta,
+// including beta.1 -> beta.2 and prerelease -> stable promotion.
 func isNewer(latest, current string) bool {
 	if latest == "" || latest == current {
 		return false
 	}
-	l := parseSemver(latest)
-	cc := parseSemver(current)
+	l := parseSemanticVersion(latest)
+	cc := parseSemanticVersion(current)
 	if l == nil {
 		return false
 	}
@@ -580,34 +735,92 @@ func isNewer(latest, current string) bool {
 		return true
 	}
 	for i := 0; i < 3; i++ {
-		if l[i] > cc[i] {
+		if l.numbers[i] > cc.numbers[i] {
 			return true
 		}
-		if l[i] < cc[i] {
+		if l.numbers[i] < cc.numbers[i] {
 			return false
 		}
 	}
-	return false
+	if len(l.pre) == 0 {
+		return len(cc.pre) > 0
+	}
+	if len(cc.pre) == 0 {
+		return false
+	}
+	for i := 0; i < len(l.pre) && i < len(cc.pre); i++ {
+		if l.pre[i] == cc.pre[i] {
+			continue
+		}
+		ln, lok := numericIdentifier(l.pre[i])
+		cn, cok := numericIdentifier(cc.pre[i])
+		switch {
+		case lok && cok:
+			return ln > cn
+		case lok:
+			return false
+		case cok:
+			return true
+		default:
+			return l.pre[i] > cc.pre[i]
+		}
+	}
+	return len(l.pre) > len(cc.pre)
 }
 
-func parseSemver(s string) *[3]int {
+type semanticVersion struct {
+	numbers [3]int
+	pre     []string
+}
+
+func parseSemanticVersion(s string) *semanticVersion {
 	s = strings.TrimPrefix(strings.TrimPrefix(s, "v"), "V")
-	if i := strings.IndexAny(s, "-+"); i > 0 {
+	if i := strings.IndexByte(s, '+'); i >= 0 {
+		s = s[:i]
+	}
+	var pre []string
+	if i := strings.IndexByte(s, '-'); i > 0 {
+		pre = strings.Split(s[i+1:], ".")
 		s = s[:i]
 	}
 	parts := strings.Split(s, ".")
 	if len(parts) != 3 {
 		return nil
 	}
-	var out [3]int
+	out := &semanticVersion{pre: pre}
 	for i, p := range parts {
 		n, err := strconv.Atoi(p)
-		if err != nil {
+		if err != nil || n < 0 {
 			return nil
 		}
-		out[i] = n
+		out.numbers[i] = n
 	}
-	return &out
+	for _, id := range pre {
+		if id == "" {
+			return nil
+		}
+	}
+	return out
+}
+
+func numericIdentifier(s string) (int, bool) {
+	if !isDigits(s) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // truncateBody caps release-body markdown to MaxReleaseBodyBytes so a

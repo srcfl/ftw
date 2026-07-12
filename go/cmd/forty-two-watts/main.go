@@ -1621,7 +1621,9 @@ func main() {
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
-		slog.Info("selfupdate enabled", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))
+		slog.Info("selfupdate enabled",
+			"socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			"channel", selfUpdater.Info().Channel)
 	} else {
 		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
 	}

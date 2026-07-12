@@ -191,6 +191,8 @@ func TestHandleUpdate_RequiresTarget(t *testing.T) {
 		`{"action":"update"}`,
 		`{"action":"update","target":""}`,
 		`{"action":"update","target":"latest"}`,
+		`{"action":"update","target":"beta"}`,
+		`{"action":"update","target":"edge"}`,
 		`{"action":"update","target":"v1.2"}`,
 		`{"action":"update","target":"v1.2.3-rc1"}`,
 		`{"action":"update","target":"v1.2.3 ; rm -rf /"}`,
@@ -200,6 +202,30 @@ func TestHandleUpdate_RequiresTarget(t *testing.T) {
 		s.handleUpdate(rr, req)
 		if rr.Code != 400 {
 			t.Errorf("body %s: want 400, got %d (%s)", body, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestImmutableImageTagChannels(t *testing.T) {
+	for _, tc := range []struct {
+		tag  string
+		want bool
+	}{
+		{"v1.2.3", true},
+		{"v1.3.0-beta.1", true},
+		{"edge-20260712T120000Z-a48529b", true},
+		{"latest", false},
+		{"beta", false},
+		{"edge", false},
+		{"v1.3.0-rc.1", false},
+		{"v1.3.0-beta", false},
+		{"v1.3.0-beta.x", false},
+		{"edge-20260712T120000Z-nothexz", false},
+		{"edge-not-a-time-a48529b", false},
+		{"v1.2.3+meta", false},
+	} {
+		if got := isImmutableImageTag(tc.tag); got != tc.want {
+			t.Errorf("isImmutableImageTag(%q) = %v, want %v", tc.tag, got, tc.want)
 		}
 	}
 }

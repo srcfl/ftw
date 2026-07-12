@@ -14,11 +14,11 @@ processes so the main container never touches the Docker socket.
 │  │  forty-two-watts        │     │  ftw-updater (sidecar)       │   │
 │  │  ───────────────        │     │  ─────────────               │   │
 │  │  selfupdate.Checker     │     │  net/http on UDS             │   │
-│  │  - lists GHCR semver    │◀────┤  POST /update {action,target}│   │
-│  │    tags                 │ UDS │  GET /status                 │   │
-│  │  - GH Releases for      │     │                              │   │
-│  │    notes only (best-    │     │  shells out (with            │   │
-│  │    effort)              │     │   FTW_IMAGE_TAG=<target>):   │   │
+│  │  - resolves stable,     │◀────┤  POST /update {action,target}│   │
+│  │    beta, or edge        │ UDS │  GET /status                 │   │
+│  │  - verifies immutable   │     │                              │   │
+│  │    GHCR targets         │     │  shells out (with            │   │
+│  │  - reads release notes  │     │   FTW_IMAGE_TAG=<target>):   │   │
 │  │  - serves /api/version  │     │   docker compose pull        │   │
 │  │    /* endpoints         │     │   docker compose up -d       │   │
 │  │  - reads state.json     │     │     [--force-recreate]       │   │
@@ -31,7 +31,24 @@ processes so the main container never touches the Docker socket.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Why version tags, not :latest
+## Release channels
+
+The selected channel is persisted under `update.channel` in `state.db`.
+Changing it only changes the version probe; pulling an image remains a
+separate operator action protected by the normal pre-update snapshot.
+
+| Channel | Source | Immutable install target | Intended use |
+|---|---|---|---|
+| `stable` | GitHub's latest non-prerelease Release | `vX.Y.Z` | Production installations |
+| `beta` | Newest published `vX.Y.Z-beta.N` or promoted stable Release | `vX.Y.Z-beta.N` / `vX.Y.Z` | Opt-in testing on real sites |
+| `edge` | Newest timestamped GHCR edge build | `edge-YYYYMMDDTHHMMSSZ-<sha>` | Maintainer test rigs and rapid hardware validation |
+
+Stable is always the default. A binary stamped with a beta or edge tag
+infers its matching channel on first boot; a previously persisted operator
+choice takes precedence. The moving `:beta` and `:edge` aliases are useful
+for discovery and manual inspection only. The updater never installs them.
+
+## Why immutable tags, not moving aliases
 
 A GitHub Release is published the moment release-please's PR merges;
 the GitHub Actions workflow that builds and pushes the image to GHCR
@@ -47,23 +64,20 @@ pull` happily fetched the previous digest, `up -d` recreated the same
 container, and the sidecar wrote `state=done` against the new tag while
 the running version didn't actually move.
 
-The fix is to ignore `:latest` entirely — both as a probe signal and as
-a pull target:
+The fix is to ignore `:latest`, `:beta`, and `:edge` as pull targets:
 
-- The Checker lists semver tags from GHCR's `/v2/<repo>/tags/list` and
-  picks the highest. Tags appear in that list only when their manifest
-  has been pushed, so the existence of `vX.Y.Z` is itself proof the
-  image is deployable. No digest comparison or HEAD on `:latest`
-  needed.
+- Stable and beta first resolve a published GitHub Release, then verify
+  that its exact tag exists in GHCR. Edge lists GHCR tags and chooses the
+  newest timestamped immutable edge tag, never the moving alias.
 - The dispatch payload to the sidecar carries the resolved version as
   `target`. The sidecar passes `FTW_IMAGE_TAG=vX.Y.Z` to docker, and
   `docker-compose.yml` uses `image: ghcr.io/.../forty-two-watts:${FTW_IMAGE_TAG:-latest}`
   — so the pull resolves a *specific*, immutable tag and the recreate
   is guaranteed to move the digest. No race possible.
 
-The sidecar refuses `update` requests without a properly-shaped target
-(`vX.Y.Z`) — falling through to `:latest` is exactly what we're
-preventing, so the boundary check fails fast.
+The sidecar accepts only `vX.Y.Z`, `vX.Y.Z-beta.N`, or
+`edge-YYYYMMDDTHHMMSSZ-<sha>`. Falling through to a moving alias is exactly
+what this boundary prevents.
 
 The GH Releases API is still consulted, but only as a best-effort
 lookup for the changelog body shown in the upgrade modal. A 404 there
@@ -103,11 +117,44 @@ The tmpfs volume outlives the recreate of either container, so the new
 main container reads `done` on startup and serves it to the UI that's
 still polling in the browser — which then hard-reloads.
 
-## The six endpoints
+## The channel workflows
+
+`.github/workflows/edge.yml` publishes multi-arch main and updater images
+after every merge to `master`. Maintainers can also dispatch the workflow
+against a selected feature branch to move the public edge channel for an
+explicit hardware test. Each run publishes a new immutable timestamped tag.
+
+`.github/workflows/beta.yml` is manual and requires a tag matching
+`vX.Y.Z-beta.N`. It anchors that tag to the selected commit, builds both
+ARM64 and AMD64 images, and only then creates the GitHub prerelease. This
+ordering prevents the checker from offering a beta whose image is not ready.
+
+Stable continues through Changesets and `release.yml`. The stable asset
+workflow explicitly ignores beta tags so a prerelease can never retag
+`:latest` or emit stable RPi/Discord artifacts.
+
+## Bootstrapping the first beta
+
+An updater released before channel support rejects beta and edge targets by
+design. The first beta installation therefore pins both containers once:
+
+```env
+FTW_IMAGE_TAG=v0.128.0-beta.1
+FTW_UPDATER_IMAGE_TAG=v0.128.0-beta.1
+```
+
+Run `docker compose pull` and `docker compose up -d` with those values in
+the deployment's `.env`. After that pair is running, channel selection and
+future main-image updates work in the dashboard. The updater protocol is
+kept backward compatible; updating the sidecar itself remains an explicit
+compose operation.
+
+## The seven endpoints
 
 | Endpoint | Purpose |
 |---|---|
 | `GET  /api/version/check?force=1` | Cached GH Releases probe. `?force=1` bypasses the 3 h cache. |
+| `POST /api/version/channel` `{channel}` | Persist `stable`, `beta`, or `edge` and clear the cached target. Does not deploy. |
 | `POST /api/version/skip` `{version}` | Persist a dismissed version. Hides the badge until something newer ships. |
 | `POST /api/version/unskip` | Clear the skip so the current latest resurfaces. |
 | `POST /api/version/update` | Trigger `pull` + `up -d` for the currently-latest tag. |

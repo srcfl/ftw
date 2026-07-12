@@ -1236,6 +1236,8 @@ Cached GitHub Releases probe.
 ```json
 {
   "current": "v1.2.3",
+  "channel": "stable",
+  "channels": ["stable", "beta", "edge"],
   "latest": "v1.3.0",
   "update_available": true,
   "skipped": false,
@@ -1252,6 +1254,19 @@ release resurfaces automatically without requiring an explicit unskip.
 503 when the self-update service is disabled (`SelfUpdate == nil` in
 Deps). 502 when `force=1` and GitHub is unreachable; the cached view is
 still included in the body.
+
+### POST /api/version/channel
+
+Persist the selected release stream in `state.db` without pulling an
+image. The cached target is cleared and the UI follows with a forced
+version check. An actual update remains a separate, snapshot-protected
+operation.
+
+**Request body:** `{"channel":"beta"}` where channel is `stable`,
+`beta`, or `edge`.
+
+Returns the cleared version-check state with the newly selected channel.
+Returns 409 if an update is already in progress.
 
 ### POST /api/version/skip
 

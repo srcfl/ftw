@@ -381,6 +381,7 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/pv/manual_hold", s.handlePVManualHoldClear)
 	s.handle("GET  /api/pv/manual_hold", s.handlePVManualHoldGet)
 	s.handle("GET  /api/version/check", s.handleVersionCheck)
+	s.handle("POST /api/version/channel", s.handleVersionChannel)
 	s.handle("POST /api/version/skip", s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", s.handleVersionUnskip)
 	s.handle("POST /api/version/update", s.handleVersionUpdate)

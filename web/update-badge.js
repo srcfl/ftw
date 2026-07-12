@@ -198,6 +198,27 @@
       this._postJSON("/api/version/unskip", null).finally(() => this._refresh(true));
     }
 
+    _setChannel(channel) {
+      if (!channel || (this._info && this._info.channel === channel)) return;
+      this._postJSON("/api/version/channel", { channel })
+        .then((resp) => {
+          if (!resp.ok) {
+            this._info = Object.assign({}, this._info || {}, {
+              err: (resp.body && resp.body.error) || "failed to change update channel",
+            });
+            this._render();
+            return;
+          }
+          this._info = resp.body;
+          this._render();
+          this._refresh(true);
+        })
+        .catch((e) => {
+          this._info = Object.assign({}, this._info || {}, { err: String(e) });
+          this._render();
+        });
+    }
+
     _beginUpdate(action) {
       this._phase = "updating";
       this._updateStartedAt = Date.now();
@@ -410,6 +431,22 @@
            </div>`
         : "";
 
+      const channels = Array.isArray(info.channels) && info.channels.length
+        ? info.channels
+        : ["stable", "beta", "edge"];
+      const selectedChannel = info.channel || "stable";
+      const channelButtons = channels.map((channel) => `
+        <button class="channel-option${selectedChannel === channel ? " active" : ""}"
+                data-action="set-channel" data-channel="${escapeHTML(channel)}"
+                aria-pressed="${selectedChannel === channel ? "true" : "false"}">
+          ${escapeHTML(channel)}
+        </button>`).join("");
+      const channelNote = selectedChannel === "edge"
+        ? "Edge follows the newest verified development build."
+        : selectedChannel === "beta"
+          ? "Beta receives prereleases and promoted stable releases."
+          : "Stable receives production releases only.";
+
       return `
         <div class="backdrop" data-action="close"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
@@ -419,6 +456,13 @@
           </header>
           <div class="body">
             <p class="subtitle">${escapeHTML(subtitle)}</p>
+            <div class="channel-picker">
+              <span class="channel-label">Update channel</span>
+              <div class="channel-options" role="group" aria-label="Update channel">
+                ${channelButtons}
+              </div>
+              <p class="channel-note">${escapeHTML(channelNote)}</p>
+            </div>
             <dl>
               <div><dt>Current</dt><dd>${escapeHTML(info.current || "?")}</dd></div>
               ${info.latest ? `<div><dt>Latest</dt><dd>${escapeHTML(info.latest)}</dd></div>` : ""}
@@ -567,6 +611,9 @@
             case "check":
               this._unskipAndCheck();
               break;
+            case "set-channel":
+              this._setChannel(e.currentTarget.dataset.channel);
+              break;
             case "reload":
               this._attemptReload();
               break;
@@ -679,6 +726,48 @@
         dl > div { display: contents; }
         dt { color: var(--fg-dim, #94a3b8); font-size: 0.8rem; }
         dd { margin: 0; font-variant-numeric: tabular-nums; }
+        .channel-picker {
+          margin-bottom: 0.85rem;
+        }
+        .channel-label {
+          display: block;
+          margin-bottom: 0.35rem;
+          color: var(--fg-dim, #94a3b8);
+          font-size: 0.78rem;
+        }
+        .channel-options {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
+          overflow: hidden;
+        }
+        .channel-option {
+          appearance: none;
+          min-width: 0;
+          padding: 0.4rem 0.3rem;
+          border: 0;
+          border-right: 1px solid var(--line, #334155);
+          background: transparent;
+          color: var(--fg-dim, #94a3b8);
+          cursor: pointer;
+          font: inherit;
+          font-size: 0.8rem;
+          text-transform: capitalize;
+        }
+        .channel-option:last-child { border-right: 0; }
+        .channel-option:hover { background: rgba(255,255,255,0.04); }
+        .channel-option.active {
+          background: var(--accent-e, #f59e0b);
+          color: #0a0a0a;
+          font-weight: 600;
+        }
+        .channel-note {
+          margin: 0.35rem 0 0;
+          color: var(--fg-dim, #94a3b8);
+          font-size: 0.75rem;
+          line-height: 1.35;
+        }
         .changelog {
           margin-top: 0.75rem;
           border: 1px solid var(--line, #334155);

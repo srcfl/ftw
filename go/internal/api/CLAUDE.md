@@ -36,7 +36,7 @@ Endpoint groups (route table is `api.go:95-130`):
 | loadpoints | `GET /api/loadpoints`, `POST /api/loadpoints/{id}/target` |
 | twins | `GET /api/pvmodel`, `POST /api/pvmodel/reset`, `GET /api/loadmodel`, `POST /api/loadmodel/reset` |
 | ha | `GET /api/ha/status` |
-| version (self-update) | `GET /api/version/check`, `POST /api/version/skip\|unskip\|update\|restart`, `GET /api/version/update/status` |
+| version (self-update) | `GET /api/version/check`, `POST /api/version/channel\|skip\|unskip\|update\|restart`, `GET /api/version/update/status` |
 | static | `/` falls through to `Deps.WebDir` |
 
 ## How it talks to neighbors
