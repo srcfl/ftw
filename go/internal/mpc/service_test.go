@@ -435,6 +435,23 @@ func TestOnlineFleetParamsUsesCapacityWeightedOnlineSoC(t *testing.T) {
 	if p.MaxDischargeW != 6000 {
 		t.Fatalf("MaxDischargeW = %.0f, want fuse-clamped 6000", p.MaxDischargeW)
 	}
+	if len(p.Storages) != 2 {
+		t.Fatalf("len(Storages) = %d, want 2", len(p.Storages))
+	}
+	if p.Storages[0].ID != "a" || p.Storages[0].InitialEnergyWh != 2000 {
+		t.Fatalf("Storages[0] = %+v, want battery a at 2000 Wh", p.Storages[0])
+	}
+	if p.Storages[1].ID != "b" || p.Storages[1].InitialEnergyWh != 24000 {
+		t.Fatalf("Storages[1] = %+v, want battery b at 24000 Wh", p.Storages[1])
+	}
+	if p.Storages[0].MaxChargeW != 2250 || p.Storages[1].MaxChargeW != 3750 {
+		t.Fatalf("storage charge limits = %.0f + %.0f, want fuse-scaled 2250 + 3750",
+			p.Storages[0].MaxChargeW, p.Storages[1].MaxChargeW)
+	}
+	if math.Abs(p.Storages[0].MaxDischargeW-8000.0/3.0) > 1e-9 || math.Abs(p.Storages[1].MaxDischargeW-10000.0/3.0) > 1e-9 {
+		t.Fatalf("storage discharge limits = %.3f + %.3f, want proportional 6000 W total",
+			p.Storages[0].MaxDischargeW, p.Storages[1].MaxDischargeW)
+	}
 }
 
 func TestOnlineFleetParamsRequiresOnlineSoCTelemetry(t *testing.T) {

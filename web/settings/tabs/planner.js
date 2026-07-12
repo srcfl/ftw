@@ -51,7 +51,7 @@
 
   S.tabs.planner = {
     render: function (ctx) {
-      var field = ctx.field, help = ctx.help, config = ctx.config;
+      var field = ctx.field, selectField = ctx.selectField, help = ctx.help, config = ctx.config;
       if (!config.planner) config.planner = {};
       return '<fieldset><legend>MPC Planner</legend>' +
         '<label><input type="checkbox" data-checkbox-path="planner.enabled"' + (config.planner.enabled ? ' checked' : '') + '> Enabled ' +
@@ -61,6 +61,31 @@
         '</label>' +
         '<div id="planner-active-strategy" style="font-family:var(--mono);margin:2px 0 0">—</div>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin:4px 0 12px">Set from the Plan card on the dashboard — not editable here.</p>' +
+        '<div class="field-row"><div>' +
+        selectField("Engine", "planner.engine", ["python", "dp"], "python",
+          "Python runs the CVXPY mathematical optimizer. DP is the emergency rollback engine.") +
+        '</div><div>' +
+        selectField("Solver", "planner.optimizer_solver", ["HIGHS", "CLARABEL"], "HIGHS",
+          "HiGHS handles LP and MILP. CLARABEL is available only for continuous convex formulations.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
+        selectField("Formulation", "planner.optimizer_formulation", ["auto", "milp", "relaxed"], "auto",
+          "Auto introduces integer variables only when physics or discrete asset steps require them.") +
+        '</div><div>' +
+        field("Solver timeout (s)", "planner.optimizer_timeout_s", "number", 5,
+          "Whole worker deadline. A timeout activates the validated Go-DP fallback for that replan.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
+        field("MIP relative gap", "planner.optimizer_mip_rel_gap", "number", 0.005,
+          "Accepted HiGHS MILP optimality gap. 0.005 means 0.5 percent.") +
+        '</div><div>' +
+        field("CVaR risk weight", "planner.optimizer_cvar_weight", "number", 0.15,
+          "Weight on expensive forecast-tail scenarios. 0 disables tail-risk cost.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
+        field("CVaR alpha", "planner.optimizer_cvar_alpha", "number", 0.9,
+          "Tail confidence level. 0.9 optimizes the worst ten percent of scenario cost.") +
+        '</div></div>' +
         '<div class="field-row"><div>' +
         field("SoC min (%)", "planner.soc_min_pct", "number", 10,
           "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +

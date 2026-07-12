@@ -53,6 +53,7 @@ type PricePredictor func(zone string, t time.Time) float64
 // closure type to avoid the mpc package importing loadpoint (which
 // would risk a cycle if loadpoint ever needs mpc types).
 type LoadpointProbe func(slotLenMin int) *LoadpointSpec
+type LoadpointsProbe func(slotLenMin int) []*LoadpointSpec
 
 // BatteryFleetMember describes one configured home battery the MPC may plan
 // against. Service filters this list by live driver health and SoC telemetry
@@ -77,6 +78,11 @@ type Service struct {
 	PV                PVPredictor         // optional — overrides stored pv_w_estimated
 	PVResidualCorrect PVResidualCorrector // optional — additive short-horizon bias on top of PV
 	Load              LoadPredictor       // optional — overrides flat BaseLoad
+	// Optimizer is the primary mathematical planning engine. Nil selects the
+	// legacy in-process Go DP explicitly. When non-nil, any engine/process/
+	// validation failure falls back to the DP for this replan and is recorded
+	// in Plan.Solver.
+	Optimizer PlanOptimizer
 
 	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
@@ -88,6 +94,7 @@ type Service struct {
 	PVForecastSafetyK float64
 	Price             PricePredictor // optional — fills in future slots when day-ahead isn't published yet
 	Loadpoint         LoadpointProbe // optional — when non-nil, the DP extends its state with EV dimensions
+	Loadpoints        LoadpointsProbe
 
 	// SaveDiag is called synchronously after every successful replan
 	// with the same Diagnostic the /api/mpc/diagnose endpoint would
@@ -400,10 +407,14 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			PVLimitW:        a.PVLimitW,
 			GridW:           a.GridW,
 		}
-		// EV energy budget for the slot (single-loadpoint for now —
-		// keyed under lpID snapshot so the dispatch layer routes
-		// to the right driver).
-		if a.LoadpointW > 0 && lpID != "" {
+		if len(a.LoadpointPowerW) > 0 {
+			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
+			d.LoadpointSoCTargetPct = make(map[string]float64, len(a.LoadpointPowerW))
+			for id, powerW := range a.LoadpointPowerW {
+				d.LoadpointEnergyWh[id] = powerW * float64(a.SlotLenMin) / 60.0
+				d.LoadpointSoCTargetPct[id] = a.LoadpointSoCPctByID[id]
+			}
+		} else if a.LoadpointW > 0 && lpID != "" {
 			lpEnergyWh := a.LoadpointW * float64(a.SlotLenMin) / 60.0
 			d.LoadpointEnergyWh = map[string]float64{
 				lpID: lpEnergyWh,
@@ -507,6 +518,9 @@ func (s *Service) Stop() {
 	}
 	close(s.stop)
 	<-s.done
+	if s.Optimizer != nil {
+		_ = s.Optimizer.Close()
+	}
 }
 
 func (s *Service) loop(ctx context.Context) {
@@ -818,7 +832,7 @@ func (s *Service) ReplanWithReason(ctx context.Context, reason string) *Plan {
 	return s.replan(ctx)
 }
 
-func (s *Service) replan(_ context.Context) *Plan {
+func (s *Service) replan(ctx context.Context) *Plan {
 	now := time.Now()
 	untilMs := now.Add(s.Horizon).UnixMilli()
 	sinceMs := now.UnixMilli() - 15*60*1000 // small margin — slot starting ≤15min ago still in-flight
@@ -852,10 +866,11 @@ func (s *Service) replan(_ context.Context) *Plan {
 	if len(slots) == 0 {
 		return nil
 	}
-	// Plan against downside PV (forecast − k·σ) so the DP holds a reserve sized
-	// to the live forecast uncertainty instead of a flat SoC floor. See Alt 2,
-	// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
-	s.applyPVDownsideToSlots(slots)
+	// The mathematical optimizer receives raw PV plus explicit scenarios. Keep
+	// a separate downside copy for the emergency Go-DP path, preserving the
+	// previous safety behavior if the worker is unavailable.
+	fallbackSlots := append([]Slot(nil), slots...)
+	s.applyPVDownsideToSlots(fallbackSlots)
 
 	// Plumb the site fuse + export ceiling into per-slot limits so the DP
 	// joint-plans battery + EV under the grid constraints instead of
@@ -868,6 +883,7 @@ func (s *Service) replan(_ context.Context) *Plan {
 	// fault). Pre-fix this only set MaxImportW, producing plans like a
 	// 14:45 slot grid=-14.2 kW past an 11 kW fuse.
 	clampSlotGridLimits(slots, s.FuseMaxW, s.MaxExportW)
+	clampSlotGridLimits(fallbackSlots, s.FuseMaxW, s.MaxExportW)
 
 	s.mu.RLock()
 	p := s.Defaults
@@ -892,6 +908,10 @@ func (s *Service) replan(_ context.Context) *Plan {
 	p.ExportFeeOreKwh = s.ExportFeeOreKwh
 	p.MinArbitrageSpreadOreKwh = s.MinArbitrageSpreadOreKwh
 	p.ExportFloorOreKwh = s.ExportFloorOreKwh
+	p.PVForecastSafetyK = s.PVForecastSafetyK
+	if s.PVUncertaintyW != nil {
+		p.PVUncertaintyW = math.Max(0, s.PVUncertaintyW())
+	}
 
 	// Default terminal valuation. Mode-dependent because self-consumption
 	// is a constrained game: the battery can only offset local load, not
@@ -929,19 +949,27 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 
-	// Loadpoint extension: if a probe is wired AND returns an active
-	// spec, the DP adds an EV SoC dimension and produces per-slot
-	// LoadpointW decisions. One loadpoint at a time — multi-LP
-	// support is on the roadmap.
+	// The mathematical planner consumes every active loadpoint. Loadpoint is
+	// also populated with the first entry for the emergency Go-DP fallback.
 	var loadpointID string
-	if s.Loadpoint != nil {
+	if s.Loadpoints != nil || s.Loadpoint != nil {
 		slotLenMin := 60 // safe fallback — most price sources are hourly
 		if len(slots) > 0 && slots[0].LenMin > 0 {
 			slotLenMin = slots[0].LenMin
 		}
-		if spec := s.Loadpoint(slotLenMin); spec != nil && spec.PluggedIn {
-			p.Loadpoint = spec
-			loadpointID = spec.ID
+		if s.Loadpoints != nil {
+			p.Loadpoints = s.Loadpoints(slotLenMin)
+		}
+		if len(p.Loadpoints) == 0 && s.Loadpoint != nil {
+			if spec := s.Loadpoint(slotLenMin); spec != nil {
+				p.Loadpoints = []*LoadpointSpec{spec}
+			}
+		}
+		active := p.activeLoadpoints()
+		if len(active) > 0 {
+			p.Loadpoints = active
+			p.Loadpoint = active[0]
+			loadpointID = active[0].ID
 		}
 	}
 
@@ -975,7 +1003,52 @@ func (s *Service) replan(_ context.Context) *Plan {
 		"loadpoint_active", p.Loadpoint != nil,
 		"loadpoint_id", loadpointID,
 	)
-	plan := Optimize(slots, p)
+	var plan Plan
+	if s.Optimizer == nil {
+		slots = fallbackSlots
+		plan = Optimize(slots, p)
+		plan.Solver = &SolverInfo{
+			Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
+			Formulation: "discrete-dp",
+		}
+	} else {
+		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
+		if err == nil {
+			dpShadow := Optimize(fallbackSlots, p)
+			dpShadow.Solver = &SolverInfo{
+				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
+				Formulation: "discrete-dp",
+			}
+			candidate.DPShadow = compareDPShadow(candidate, dpShadow)
+			candidate.DPShadow.ForecastBasis = "downside-pv fallback input"
+			candidate.DPShadow.Solver = dpShadow.Solver
+			candidate.DPShadow.TotalCostOre = dpShadow.TotalCostOre
+			candidate.DPShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpShadow.TotalCostOre
+			if candidate.DPShadow.FirstAction != nil {
+				mode, _, _ := actionToSlot(*candidate.DPShadow.FirstAction, p.Mode)
+				candidate.DPShadow.FirstAction.EMSMode = mode
+			}
+			optimizerSolveMs := 0.0
+			if candidate.Solver != nil {
+				optimizerSolveMs = candidate.Solver.SolveMs
+			}
+			slog.Info("mpc: active optimizer vs DP shadow",
+				"optimizer_cost_ore", candidate.TotalCostOre,
+				"dp_shadow_cost_ore", dpShadow.TotalCostOre,
+				"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
+				"optimizer_solve_ms", optimizerSolveMs)
+			plan = candidate
+		} else {
+			slog.Error("mpc: primary optimizer failed; using Go DP fallback", "err", err)
+			slots = fallbackSlots
+			plan = Optimize(slots, p)
+			plan.Solver = &SolverInfo{
+				Engine: "go-dp", Backend: "bellman", Status: "fallback",
+				Formulation: "discrete-dp", Fallback: true,
+				FallbackReason: err.Error(),
+			}
+		}
+	}
 
 	// Tag each action with the effective EMS mode so the UI can render
 	// a mode-band showing which strategy drives each slot.
@@ -1065,6 +1138,36 @@ func (s *Service) replan(_ context.Context) *Plan {
 		}
 	}
 	return &plan
+}
+
+func compareDPShadow(active, shadow Plan) *ShadowPlan {
+	n := min(len(active.Actions), len(shadow.Actions))
+	out := &ShadowPlan{ComparedSlots: n}
+	if n == 0 {
+		return out
+	}
+	first := shadow.Actions[0]
+	out.FirstAction = &first
+	for i := 0; i < n; i++ {
+		delta := math.Abs(active.Actions[i].BatteryW - shadow.Actions[i].BatteryW)
+		out.MeanAbsBatteryDeltaW += delta
+		out.MaxAbsBatteryDeltaW = math.Max(out.MaxAbsBatteryDeltaW, delta)
+		if shadowDirection(active.Actions[i].BatteryW) != shadowDirection(shadow.Actions[i].BatteryW) {
+			out.DirectionDisagreements++
+		}
+	}
+	out.MeanAbsBatteryDeltaW /= float64(n)
+	return out
+}
+
+func shadowDirection(powerW float64) int {
+	if powerW > IdleGateThresholdW {
+		return 1
+	}
+	if powerW < -IdleGateThresholdW {
+		return -1
+	}
+	return 0
 }
 
 // LastReplanInfo returns when the most recent replan ran and why.
@@ -1513,6 +1616,7 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 		return p, false
 	}
 	var totalCap, sumSoCWh, maxCharge, maxDischarge float64
+	storages := make([]StorageAssetSpec, 0, len(fleet))
 	for _, b := range fleet {
 		if b.Driver == "" || b.CapacityWh <= 0 {
 			continue
@@ -1526,9 +1630,21 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 			continue
 		}
 		totalCap += b.CapacityWh
-		sumSoCWh += *r.SoC * b.CapacityWh
+		initialEnergyWh := *r.SoC * b.CapacityWh
+		sumSoCWh += initialEnergyWh
 		maxCharge += b.MaxChargeW
 		maxDischarge += b.MaxDischargeW
+		storages = append(storages, StorageAssetSpec{
+			ID:                  b.Driver,
+			CapacityWh:          b.CapacityWh,
+			InitialEnergyWh:     initialEnergyWh,
+			MinEnergyWh:         b.CapacityWh * p.SoCMinPct / 100,
+			MaxEnergyWh:         b.CapacityWh * p.SoCMaxPct / 100,
+			MaxChargeW:          b.MaxChargeW,
+			MaxDischargeW:       b.MaxDischargeW,
+			ChargeEfficiency:    p.ChargeEfficiency,
+			DischargeEfficiency: p.DischargeEfficiency,
+		})
 	}
 	if totalCap <= 0 {
 		return p, false
@@ -1545,5 +1661,20 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember) (Param
 			p.MaxDischargeW = s.FuseMaxW
 		}
 	}
+	// Preserve the existing aggregate fleet clamp inside the per-asset model.
+	// Scaling retains each device's configured share while guaranteeing that
+	// the optimizer cannot produce a candidate the aggregate validator rejects.
+	chargeScale, dischargeScale := 1.0, 1.0
+	if maxCharge > 0 && p.MaxChargeW < maxCharge {
+		chargeScale = p.MaxChargeW / maxCharge
+	}
+	if maxDischarge > 0 && p.MaxDischargeW < maxDischarge {
+		dischargeScale = p.MaxDischargeW / maxDischarge
+	}
+	for i := range storages {
+		storages[i].MaxChargeW *= chargeScale
+		storages[i].MaxDischargeW *= dischargeScale
+	}
+	p.Storages = storages
 	return p, true
 }

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "forty-two-watts-optimizer"
+version = "0.1.0"
+description = "CVXPY planning engine for forty-two-watts"
+requires-python = ">=3.11"
+dependencies = [
+  "cvxpy==1.9.2",
+  "highspy==1.15.1",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+ftw-optimizer = "ftw_optimizer.worker:main"
+ftw-optimizer-replay = "ftw_optimizer.replay:main"
+ftw-optimizer-backtest = "ftw_optimizer.backtest:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ftw_optimizer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

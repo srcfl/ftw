@@ -34,6 +34,7 @@
 package mpc
 
 import (
+	"encoding/json"
 	"math"
 	"sort"
 	"strings"
@@ -204,6 +205,53 @@ type Params struct {
 	// Nil (default) keeps the battery-only optimization path. See
 	// LoadpointSpec for the state/action shape.
 	Loadpoint *LoadpointSpec
+	// Loadpoints is the unbounded mathematical-planner representation. The Go
+	// DP fallback consumes Loadpoint (the first active entry) only.
+	Loadpoints []*LoadpointSpec
+
+	// Storages preserves the physical battery fleet for the mathematical
+	// optimizer. Dispatch still consumes the aggregate BatteryW target, while
+	// the optimizer and validator enforce each online battery's own energy and
+	// power bounds. The Go DP fallback continues to use the aggregate fields.
+	Storages []StorageAssetSpec
+
+	// PV scenario inputs are consumed by the mathematical optimizer. The Go DP
+	// fallback still receives downside-adjusted slots directly from Service.
+	PVUncertaintyW    float64
+	PVForecastSafetyK float64
+}
+
+// StorageAssetSpec is one independently constrained home battery in the
+// mathematical planner. Power follows the site convention: positive charges
+// the battery and negative discharges it.
+type StorageAssetSpec struct {
+	ID                  string
+	CapacityWh          float64
+	InitialEnergyWh     float64
+	MinEnergyWh         float64
+	MaxEnergyWh         float64
+	MaxChargeW          float64
+	MaxDischargeW       float64
+	ChargeEfficiency    float64
+	DischargeEfficiency float64
+}
+
+func (p Params) activeLoadpoints() []*LoadpointSpec {
+	if len(p.Loadpoints) > 0 {
+		out := make([]*LoadpointSpec, 0, len(p.Loadpoints))
+		for _, lp := range p.Loadpoints {
+			if lp.active() {
+				out = append(out, lp)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if p.Loadpoint.active() {
+		return []*LoadpointSpec{p.Loadpoint}
+	}
+	return nil
 }
 
 // Action is one scheduled battery target.
@@ -243,7 +291,14 @@ type Action struct {
 
 	// LoadpointSoCPct is the EV SoC at END of slot, following the
 	// same convention as SoCPct for the home battery.
-	LoadpointSoCPct float64 `json:"loadpoint_soc_pct,omitempty"`
+	LoadpointSoCPct     float64            `json:"loadpoint_soc_pct,omitempty"`
+	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
+
+	// Per-storage values make a multi-battery solve auditable. BatteryW and
+	// SoCPct remain the stable aggregate dispatch/API contract.
+	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
+	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
 
 // Baselines are counter-factual dispatch costs over the same horizon,
@@ -270,14 +325,53 @@ type Baselines struct {
 
 // Plan is the output.
 type Plan struct {
-	GeneratedAtMs int64      `json:"generated_at_ms"`
-	Mode          Mode       `json:"mode"`
-	HorizonSlots  int        `json:"horizon_slots"`
-	CapacityWh    float64    `json:"capacity_wh"`
-	InitialSoCPct float64    `json:"initial_soc_pct"`
-	TotalCostOre  float64    `json:"total_cost_ore"`
-	Actions       []Action   `json:"actions"`
-	Baselines     *Baselines `json:"baselines,omitempty"`
+	GeneratedAtMs int64       `json:"generated_at_ms"`
+	Mode          Mode        `json:"mode"`
+	HorizonSlots  int         `json:"horizon_slots"`
+	CapacityWh    float64     `json:"capacity_wh"`
+	InitialSoCPct float64     `json:"initial_soc_pct"`
+	TotalCostOre  float64     `json:"total_cost_ore"`
+	Actions       []Action    `json:"actions"`
+	Baselines     *Baselines  `json:"baselines,omitempty"`
+	Solver        *SolverInfo `json:"solver,omitempty"`
+	DPShadow      *ShadowPlan `json:"dp_shadow,omitempty"`
+	// OptimizerInput is the exact versioned request used by an external
+	// optimizer. It is omitted from the live plan API and copied into the
+	// persisted Diagnostic for deterministic replay.
+	OptimizerInput json.RawMessage `json:"-"`
+}
+
+// ShadowPlan is the legacy Go-DP candidate calculated alongside an active
+// mathematical plan. It is diagnostic only and is never read by dispatch.
+// ActiveMinusShadowOre is negative when the Python plan has lower raw cost.
+type ShadowPlan struct {
+	TotalCostOre           float64     `json:"total_cost_ore"`
+	ActiveMinusShadowOre   float64     `json:"active_minus_shadow_ore"`
+	ForecastBasis          string      `json:"forecast_basis"`
+	MeanAbsBatteryDeltaW   float64     `json:"mean_abs_battery_delta_w"`
+	MaxAbsBatteryDeltaW    float64     `json:"max_abs_battery_delta_w"`
+	DirectionDisagreements int         `json:"direction_disagreements"`
+	ComparedSlots          int         `json:"compared_slots"`
+	FirstAction            *Action     `json:"first_action,omitempty"`
+	Solver                 *SolverInfo `json:"solver,omitempty"`
+}
+
+// SolverInfo identifies the engine that produced a plan and records enough
+// detail to audit optimizer fallbacks. The Go DP remains available as an
+// emergency fallback when the external mathematical planner is unavailable or
+// returns a plan that fails the Go-side physics validator.
+type SolverInfo struct {
+	Engine         string   `json:"engine"`
+	Backend        string   `json:"backend,omitempty"`
+	Status         string   `json:"status"`
+	Formulation    string   `json:"formulation,omitempty"`
+	ObjectiveOre   float64  `json:"objective_ore,omitempty"`
+	ServiceSlack   float64  `json:"service_slack,omitempty"`
+	SolveMs        float64  `json:"solve_ms,omitempty"`
+	MIPGap         *float64 `json:"mip_gap,omitempty"`
+	ScenarioCount  int      `json:"scenario_count,omitempty"`
+	Fallback       bool     `json:"fallback,omitempty"`
+	FallbackReason string   `json:"fallback_reason,omitempty"`
 }
 
 // SlotGridCostOre returns the raw öre cost of flowing gridKWh across the

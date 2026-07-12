@@ -90,4 +90,13 @@ describe("render", () => {
     assert.ok(html.includes('id="planner-hedge-line"'));
     assert.ok(html.includes("Set from the Plan card on the dashboard"));
   });
+
+  it("renders mathematical optimizer controls", () => {
+    const html = tab.render(stubCtx());
+    assert.ok(html.includes("[select:planner.engine]"));
+    assert.ok(html.includes("[select:planner.optimizer_solver]"));
+    assert.ok(html.includes("[select:planner.optimizer_formulation]"));
+    assert.ok(html.includes("[field:planner.optimizer_timeout_s]"));
+    assert.ok(html.includes("[field:planner.optimizer_cvar_weight]"));
+  });
 });

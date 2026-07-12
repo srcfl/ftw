@@ -15,6 +15,15 @@
     return fetch(path, opts);
   }
 
+  function escapeHTML(value) {
+    return String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   // Horizon controls the x-axis bounds; mirrors the price chart's
   // 3-position pill so operators have a consistent affordance across
   // both charts. Persisted in localStorage so a user who prefers
@@ -555,6 +564,35 @@
           `<span title="Number of ${slotMin}-minute slots inside the horizon">` +
           `<span class="s-value">${plan.horizon_slots} slots</span></span>`
         );
+        if (plan.solver) {
+          const solver = plan.solver;
+          const solverLabel = solver.fallback
+            ? `${solver.engine} fallback`
+            : [solver.engine, solver.backend].filter(Boolean).join(' / ');
+          const solverTitle = solver.fallback
+            ? `Primary optimizer failed: ${solver.fallback_reason || 'unknown error'}`
+            : `Solver status: ${solver.status || 'unknown'}; formulation: ${solver.formulation || 'unknown'}; solve: ${(solver.solve_ms || 0).toFixed(1)} ms`;
+          parts.push(
+            `<span title="${escapeHTML(solverTitle)}"><span class="s-label">solver </span>` +
+            `<span class="s-value">${escapeHTML(solverLabel)}</span></span>`
+          );
+        }
+        if (plan.dp_shadow) {
+          const shadow = plan.dp_shadow;
+          const deltaSek = (shadow.active_minus_shadow_ore || 0) / 100;
+          const comparison = deltaSek <= 0
+            ? `${Math.abs(deltaSek).toFixed(2)} SEK below DP`
+            : `${deltaSek.toFixed(2)} SEK above DP`;
+          const shadowTitle =
+            `Legacy DP shadow over ${shadow.compared_slots || 0} slots; ` +
+            `mean battery difference ${(shadow.mean_abs_battery_delta_w || 0).toFixed(0)} W; ` +
+            `direction disagreements ${shadow.direction_disagreements || 0}; ` +
+            `basis: ${shadow.forecast_basis || 'unknown'}. DP does not drive dispatch.`;
+          parts.push(
+            `<span title="${escapeHTML(shadowTitle)}"><span class="s-label">DP shadow </span>` +
+            `<span class="s-value">${escapeHTML(comparison)}</span></span>`
+          );
+        }
         parts.push(
           `<span title="Battery state of charge right now — the plan starts from here">` +
           `<span class="s-label">start SoC </span>` +

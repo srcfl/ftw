@@ -150,3 +150,20 @@ caldav:
 # Persistent state (SQLite)
 state:
   path: state.db
+
+# Mathematical MPC optimizer. The official container includes Python/CVXPY;
+# native installs can set optimizer_command to their venv's Python executable.
+# planner:
+#   enabled: true
+#   engine: python
+#   mode: passive_arbitrage
+#   horizon_hours: 48
+#   interval_min: 15
+#   soc_min_pct: 10
+#   soc_max_pct: 95
+#   optimizer_solver: HIGHS
+#   optimizer_formulation: auto
+#   optimizer_timeout_s: 5
+#   optimizer_mip_rel_gap: 0.005
+#   optimizer_cvar_weight: 0.15
+#   optimizer_cvar_alpha: 0.90

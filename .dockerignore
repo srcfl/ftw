@@ -9,6 +9,7 @@
 !go/
 !drivers/
 !web/
+!optimizer/
 
 # Within those trees, drop test files and local state so they don't
 # bloat the build context or accidentally leak secrets.
@@ -17,3 +18,5 @@ go/**/*_test.go
 **/state.db-*
 **/cold/
 **/.DS_Store
+optimizer/.venv/
+optimizer/tests/

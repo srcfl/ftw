@@ -916,10 +916,10 @@ func main() {
 		}
 		mpcSvc.Price = priceFc.Predict
 		mpcSvc.SiteMeter = cfg.SiteMeterDriver()
-		// Wire the loadpoint probe so the DP extends its state space
-		// when an EV is plugged in. Single-loadpoint for now: picks
-		// the first plugged-in one.
-		mpcSvc.Loadpoint = func(slotLenMin int) *mpc.LoadpointSpec {
+		// The mathematical planner co-optimizes every scheduled loadpoint.
+		// The service retains the first entry for its Go-DP emergency fallback.
+		mpcSvc.Loadpoints = func(slotLenMin int) []*mpc.LoadpointSpec {
+			specs := make([]*mpc.LoadpointSpec, 0)
 			for _, st := range lpMgr.States() {
 				if !st.PluggedIn {
 					continue
@@ -1089,7 +1089,7 @@ func main() {
 				ctrlMu.Lock()
 				noBatteryToEV := !ctrl.BatteryCoversEV
 				ctrlMu.Unlock()
-				return &mpc.LoadpointSpec{
+				specs = append(specs, &mpc.LoadpointSpec{
 					ID:               st.ID,
 					CapacityWh:       capWh,
 					Levels:           11,
@@ -1104,9 +1104,9 @@ func main() {
 					ChargeEfficiency: 0.9,
 					SurplusOnly:      st.SurplusOnly || deferGridPlan || batSoCArmed,
 					NoBatteryToEV:    noBatteryToEV,
-				}
+				})
 			}
-			return nil
+			return specs
 		}
 		if cfg.Price != nil {
 			mpcSvc.ExportBonusOreKwh = cfg.Price.ExportBonusOreKwh
@@ -3015,6 +3015,47 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 	}
 	svc := mpc.New(st, tel, zone, params)
 	svc.UpdateBatteryFleet(fleet, totalCap, maxChg, maxDis)
+	engine := pl.Engine
+	if engine == "" {
+		engine = "python"
+	}
+	if engine == "python" {
+		python := pl.OptimizerCommand
+		if python == "" {
+			python = envOr("FTW_OPTIMIZER_PYTHON", "python3")
+		}
+		moduleDir := pl.OptimizerDir
+		if fromEnv := os.Getenv("FTW_OPTIMIZER_DIR"); fromEnv != "" {
+			moduleDir = fromEnv
+		}
+		if moduleDir == "" {
+			moduleDir = resolveOptimizerDir()
+		}
+		timeout := time.Duration(pl.OptimizerTimeoutS * float64(time.Second))
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		cvarWeight := 0.15
+		if pl.OptimizerCVaRWeight != nil {
+			cvarWeight = *pl.OptimizerCVaRWeight
+		}
+		ext, err := mpc.NewExternalOptimizer(mpc.ExternalOptimizerConfig{
+			Command:   []string{python, "-m", "ftw_optimizer.worker"},
+			ModuleDir: moduleDir, Timeout: timeout,
+			Solver: pl.OptimizerSolver, Formulation: pl.OptimizerFormulation,
+			MIPRelGap:  pl.OptimizerMIPRelGap,
+			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
+		})
+		if err != nil {
+			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
+		} else {
+			svc.Optimizer = ext
+			slog.Info("mpc: Python optimizer configured", "python", python,
+				"module_dir", moduleDir, "timeout", timeout)
+		}
+	} else {
+		slog.Warn("mpc: legacy Go DP selected explicitly", "engine", engine)
+	}
 	svc.BaseLoad = pl.BaseLoadW
 	if pl.HorizonHours > 0 {
 		svc.Horizon = time.Duration(pl.HorizonHours) * time.Hour
@@ -3023,6 +3064,19 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		svc.Interval = time.Duration(pl.IntervalMin) * time.Minute
 	}
 	return svc
+}
+
+func resolveOptimizerDir() string {
+	candidates := []string{"optimizer", "../optimizer", "/app/optimizer"}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append([]string{filepath.Join(filepath.Dir(exe), "optimizer")}, candidates...)
+	}
+	for _, candidate := range candidates {
+		if st, err := os.Stat(filepath.Join(candidate, "ftw_optimizer")); err == nil && st.IsDir() {
+			return candidate
+		}
+	}
+	return "optimizer"
 }
 
 // isConfigMissing checks whether the error from config.Load indicates the

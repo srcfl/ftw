@@ -288,16 +288,28 @@ planner dispatch; manual V2X commands still go through `POST /api/v2x/command`.
 ```yaml
 planner:
   enabled: true
+  engine: python
   mode: self_consumption
   horizon_hours: 48
   interval_min: 15
   soc_min_pct: 10
   soc_max_pct: 90
+  optimizer_solver: HIGHS
+  optimizer_formulation: auto
+  optimizer_timeout_s: 5
+  optimizer_mip_rel_gap: 0.005
+  optimizer_cvar_weight: 0.15
+  optimizer_cvar_alpha: 0.90
 ```
 
 The planner emits grid-target slots that the control loop consumes in
 `planner_*` modes. Planner service wiring happens at startup, so some
 structural changes still need restart.
+
+The Python/CVXPY engine is primary. `engine: dp` selects the former in-process
+planner for emergency rollback. Any worker timeout, solver failure, or rejected
+trajectory automatically uses that DP for the affected replan. Full model,
+deployment, validation, and replay details are in [optimizer.md](optimizer.md).
 
 ## `batteries`
 

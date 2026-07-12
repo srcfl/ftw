@@ -1,6 +1,9 @@
 package mpc
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // DiagnosticSlot joins the per-slot inputs the DP saw with the action
 // it chose. One row per horizon slot, indexed from 0 at the slot
@@ -37,8 +40,12 @@ type DiagnosticSlot struct {
 	// against `LOAD 1.6 kW` and reasonably assumed the battery was
 	// exporting — reality was `LOAD 1.6 + EV 4.0 = 5.6 kW covered`,
 	// grid ≈ 0. See issue #174.
-	LoadpointW      float64 `json:"loadpoint_w,omitempty"`
-	LoadpointSoCPct float64 `json:"loadpoint_soc_pct,omitempty"`
+	LoadpointW          float64            `json:"loadpoint_w,omitempty"`
+	LoadpointSoCPct     float64            `json:"loadpoint_soc_pct,omitempty"`
+	LoadpointPowerW     map[string]float64 `json:"loadpoint_power_w,omitempty"`
+	LoadpointSoCPctByID map[string]float64 `json:"loadpoint_soc_pct_by_id,omitempty"`
+	StoragePowerW       map[string]float64 `json:"storage_power_w,omitempty"`
+	StorageEnergyWh     map[string]float64 `json:"storage_energy_wh,omitempty"`
 }
 
 // DiagnosticParams is a JSON-friendly subset of the Params struct —
@@ -74,6 +81,9 @@ type Diagnostic struct {
 	Zone           string           `json:"zone"`
 	Horizon        int              `json:"horizon_slots"`
 	TotalCostOre   float64          `json:"total_cost_ore"`
+	Solver         *SolverInfo      `json:"solver,omitempty"`
+	DPShadow       *ShadowPlan      `json:"dp_shadow,omitempty"`
+	OptimizerInput json.RawMessage  `json:"optimizer_input,omitempty"`
 	Params         DiagnosticParams `json:"params"`
 	Slots          []DiagnosticSlot `json:"slots"`
 	LoadpointID    string           `json:"loadpoint_id,omitempty"`
@@ -123,24 +133,28 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		slot := slots[i]
 		action := plan.Actions[i]
 		out[i] = DiagnosticSlot{
-			Idx:             i,
-			SlotStartMs:     slot.StartMs,
-			SlotEndMs:       slot.StartMs + int64(slot.LenMin)*60*1000,
-			LenMin:          slot.LenMin,
-			PriceOre:        slot.PriceOre,
-			SpotOre:         slot.SpotOre,
-			Confidence:      slot.Confidence,
-			PVW:             slot.PVW,
-			LoadW:           slot.LoadW,
-			BatteryW:        action.BatteryW,
-			GridW:           action.GridW,
-			SoCPct:          action.SoCPct,
-			CostOre:         action.CostOre,
-			Reason:          action.Reason,
-			EMSMode:         action.EMSMode,
-			PVLimitW:        action.PVLimitW,
-			LoadpointW:      action.LoadpointW,
-			LoadpointSoCPct: action.LoadpointSoCPct,
+			Idx:                 i,
+			SlotStartMs:         slot.StartMs,
+			SlotEndMs:           slot.StartMs + int64(slot.LenMin)*60*1000,
+			LenMin:              slot.LenMin,
+			PriceOre:            slot.PriceOre,
+			SpotOre:             slot.SpotOre,
+			Confidence:          slot.Confidence,
+			PVW:                 slot.PVW,
+			LoadW:               slot.LoadW,
+			BatteryW:            action.BatteryW,
+			GridW:               action.GridW,
+			SoCPct:              action.SoCPct,
+			CostOre:             action.CostOre,
+			Reason:              action.Reason,
+			EMSMode:             action.EMSMode,
+			PVLimitW:            action.PVLimitW,
+			LoadpointW:          action.LoadpointW,
+			LoadpointSoCPct:     action.LoadpointSoCPct,
+			LoadpointPowerW:     action.LoadpointPowerW,
+			LoadpointSoCPctByID: action.LoadpointSoCPctByID,
+			StoragePowerW:       action.StoragePowerW,
+			StorageEnergyWh:     action.StorageEnergyWh,
 		}
 	}
 	loadpointID := ""
@@ -148,10 +162,13 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		loadpointID = p.Loadpoint.ID
 	}
 	return &Diagnostic{
-		ComputedAtMs: plan.GeneratedAtMs,
-		Zone:         zone,
-		Horizon:      plan.HorizonSlots,
-		TotalCostOre: plan.TotalCostOre,
+		ComputedAtMs:   plan.GeneratedAtMs,
+		Zone:           zone,
+		Horizon:        plan.HorizonSlots,
+		TotalCostOre:   plan.TotalCostOre,
+		Solver:         plan.Solver,
+		DPShadow:       plan.DPShadow,
+		OptimizerInput: append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
 			InitialSoCPct:              p.InitialSoCPct,
@@ -302,22 +319,26 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 			Confidence: ds.Confidence,
 		})
 		actions = append(actions, Action{
-			SlotStartMs:     ds.SlotStartMs,
-			SlotLenMin:      lenMin,
-			PriceOre:        ds.PriceOre,
-			SpotOre:         ds.SpotOre,
-			PVW:             ds.PVW,
-			LoadW:           ds.LoadW,
-			BatteryW:        ds.BatteryW,
-			GridW:           ds.GridW,
-			SoCPct:          ds.SoCPct,
-			CostOre:         ds.CostOre,
-			Confidence:      ds.Confidence,
-			Reason:          ds.Reason,
-			EMSMode:         ds.EMSMode,
-			PVLimitW:        ds.PVLimitW,
-			LoadpointW:      ds.LoadpointW,
-			LoadpointSoCPct: ds.LoadpointSoCPct,
+			SlotStartMs:         ds.SlotStartMs,
+			SlotLenMin:          lenMin,
+			PriceOre:            ds.PriceOre,
+			SpotOre:             ds.SpotOre,
+			PVW:                 ds.PVW,
+			LoadW:               ds.LoadW,
+			BatteryW:            ds.BatteryW,
+			GridW:               ds.GridW,
+			SoCPct:              ds.SoCPct,
+			CostOre:             ds.CostOre,
+			Confidence:          ds.Confidence,
+			Reason:              ds.Reason,
+			EMSMode:             ds.EMSMode,
+			PVLimitW:            ds.PVLimitW,
+			LoadpointW:          ds.LoadpointW,
+			LoadpointSoCPct:     ds.LoadpointSoCPct,
+			LoadpointPowerW:     ds.LoadpointPowerW,
+			LoadpointSoCPctByID: ds.LoadpointSoCPctByID,
+			StoragePowerW:       ds.StoragePowerW,
+			StorageEnergyWh:     ds.StorageEnergyWh,
 		})
 	}
 	if len(actions) == 0 {
@@ -328,13 +349,16 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		horizon = len(actions)
 	}
 	plan := &Plan{
-		GeneratedAtMs: generatedAtMs,
-		Mode:          params.Mode,
-		HorizonSlots:  horizon,
-		CapacityWh:    params.CapacityWh,
-		InitialSoCPct: params.InitialSoCPct,
-		TotalCostOre:  d.TotalCostOre,
-		Actions:       actions,
+		GeneratedAtMs:  generatedAtMs,
+		Mode:           params.Mode,
+		HorizonSlots:   horizon,
+		CapacityWh:     params.CapacityWh,
+		InitialSoCPct:  params.InitialSoCPct,
+		TotalCostOre:   d.TotalCostOre,
+		Actions:        actions,
+		Solver:         d.Solver,
+		DPShadow:       d.DPShadow,
+		OptimizerInput: append(json.RawMessage(nil), d.OptimizerInput...),
 	}
 	return plan, slots, params, time.UnixMilli(replanAtMs), true
 }

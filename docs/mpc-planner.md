@@ -40,7 +40,7 @@ When the plan is stale (> 30 min old) or absent, every strategy falls
 back to manual self-consumption. Operators see `plan_stale: true`
 in the status endpoint.
 
-Under Self-consumption, a slot where the DP allocated `|battery_energy_wh|
+Under Self-consumption, a slot where the optimizer allocated `|battery_energy_wh|
 / slot_hours < 100 W` (avg) is interpreted as **idle**: the EMS will not
 discharge to cover live import, but it still charges from true live PV
 surplus that would otherwise cross the site meter. Any larger allocation
@@ -52,17 +52,20 @@ without intentionally exporting via the battery.
 
 ## How it thinks
 
-For each slot in the 48-hour horizon, the planner has five inputs:
+For each slot in the 48-hour horizon, the planner receives:
 
 - **price** — consumer öre/kWh (spot + grid tariff + VAT)
 - **PV forecast** — expected generation W (digital twin)
 - **load forecast** — expected household consumption W (digital twin)
 - **SoC at start of slot** — propagated from the previous slot's decision
 - **confidence** — 1.0 if day-ahead real, ~0.6 if ML-forecasted
+- **asset state and limits** — each online battery and scheduled loadpoint
+- **site limits and forecast scenarios** — fuse/export ceilings plus PV risk
 
-Dynamic programming over a discretized SoC grid (51 levels × 21 action
-levels × 193 slots ≈ 200k evaluations) finds the cost-minimizing
-schedule in ~0.6 ms.
+CVXPY builds one sparse LP/MILP across the horizon. Battery power and SoC are
+continuous; EV charger steps and other real operating modes are integer
+decisions. HiGHS solves the primary model, while CLARABEL can solve a
+continuous convex formulation. See [optimizer.md](optimizer.md).
 
 ### Cost function
 
@@ -77,7 +80,7 @@ PV negative, battery positive = charging). Export revenue defaults to
 
 ### Confidence blending (the "don't bet the farm on a guess" lens)
 
-Predicted slots are less trustworthy than real day-ahead prices. The DP
+Predicted slots are less trustworthy than real day-ahead prices. The optimizer
 doesn't ignore them — it pulls them toward the horizon mean:
 
 ```
@@ -100,9 +103,9 @@ Every slot comes with a short human-readable `reason` string, surfaced
 in the UI hover tooltip:
 
 - `absorb PV surplus` — battery charging, PV-surplus baseline
-- `charge — price below horizon mean` — DP picked up on a cheap slot
+- `charge — price below horizon mean` — optimizer picked up on a cheap slot
 - `discharge — cover local load` — battery covering house consumption
-- `discharge — price above horizon mean` — DP discharging into a peak
+- `discharge — price above horizon mean` — optimizer discharging into a peak
 - `idle — import to cover load`
 - `idle — export PV surplus`
 
@@ -158,7 +161,7 @@ when the operator has chosen one.
 
 - `GET  /api/mpc/plan` — latest cached plan (mode, horizon, per-slot actions with reasons)
 - `POST /api/mpc/replan` — force an immediate replan
-- `GET  /api/mpc/diagnose` — per-slot audit view: what the DP saw (price, spot, confidence, PV, load) joined with what it decided (battery, grid, SoC, cost, reason) plus the full `Params` the optimize was parameterized with. Meant for debugging "why did the planner decide X at this slot?" without shelling into the host
+- `GET  /api/mpc/diagnose` — per-slot audit view plus solver metadata and the exact versioned optimizer input used for deterministic replay
 - `POST /api/mode {"mode":"planner_arbitrage"}` — activates a strategy AND forces an MPC replan so targets take effect within one control cycle
 - `GET  /api/loadpoints` — list configured EV loadpoints + observable state (plug, SoC, power, session Wh)
 - `POST /api/loadpoints/{id}/target` — set user intent `{soc_pct: 80, target_time_ms: …}`; triggers an MPC replan
@@ -172,18 +175,22 @@ when the operator has chosen one.
 | `planner.mode` | `self_consumption` | Starting strategy |
 | `planner.horizon_hours` | 48 | How far ahead to plan |
 | `planner.interval_min` | 15 | Replan cadence |
-| `planner.soc_min_pct` / `soc_max_pct` | 10 / 95 | SoC bounds the DP respects |
+| `planner.soc_min_pct` / `soc_max_pct` | 10 / 95 | SoC bounds the optimizer respects |
 | `planner.charge_efficiency` / `discharge_efficiency` | 0.95 / 0.95 | Round-trip = 0.9025 |
 | `planner.export_ore_per_kwh` | mean spot | Export revenue per kWh |
+| `planner.engine` | `python` | Primary engine; `dp` is rollback |
+| `planner.optimizer_formulation` | `auto` | Automatic convex/MILP selection |
+| `planner.optimizer_timeout_s` | 5 | Whole worker request deadline |
+| `planner.optimizer_mip_rel_gap` | 0.005 | Accepted HiGHS relative MIP gap |
+| `planner.optimizer_cvar_weight` | 0.15 | Tail-risk weight; explicit 0 disables |
 
-The DP internally uses 51 SoC levels × 21 action levels; this is fixed
-and gives ≈0.6 ms solve time over a 193-slot horizon.
+The former fixed SoC/action grids no longer constrain the primary plan.
 
 ---
 
 ## When arbitrage won't help
 
-Flat-price days give the DP nothing to work with; all three strategies
+Flat-price days give the optimizer little timing value; all three strategies
 return near-identical schedules. See `go/internal/mpc/stress_test.go`
 for the scenario-comparison benchmark that illustrates this.
 
@@ -278,32 +285,30 @@ planner, coerce `t` with `t.UTC()` first. Tests
 
 ## Unified EV charging (Phase 4)
 
-When one or more loadpoints are configured and the MPC's `LoadpointProbe`
-sees a plugged-in EV, the DP extends its state space with a per-vehicle
-SoC dimension. The optimization then schedules **battery AND EV actions
+When one or more loadpoints are configured and scheduled, the mathematical
+model adds one energy state and one power decision set per vehicle. The
+optimization then schedules **battery AND EV actions
 jointly** rather than treating the EV as uncontrolled load — avoiding
 the "two planners fighting" problem that happens when an external EVCC-
 style scheduler runs alongside our MPC.
 
-Per-slot decision space expands from `(battery_soc, battery_action)` to
-`(battery_soc, ev_soc, battery_action, ev_action)`. The EV action set is
-discrete (the charger's allowed W levels), which lets us handle the
-disjunctive 1-phase↔3-phase gap without MILP.
+The charger's allowed W levels are modeled with one-hot MILP variables. Adding
+vehicles grows variables and constraints linearly instead of multiplying a DP
+state space.
 
 ### Target + deadline
 
 User intent (`POST /api/loadpoints/{id}/target`) sets `target_soc_pct` +
 `target_time_ms`. The planner maps the time to a horizon slot index
-and adds a shortfall penalty at that slot: missing the target costs
-`missed_kwh × horizon_mean_price × 4`. Factor 4 is tuned so meeting the
-target dominates any single-slot charging cost, with lexicographic
-degradation when infeasible — if the vehicle can't reach target by
-deadline, the DP maximizes delivered energy instead of returning no plan.
+and adds a non-negative shortfall variable at that slot. A first solve
+minimizes service shortfall, then locks that result before minimizing energy
+cost. Infeasible targets therefore maximize delivered energy without relying
+on a tuned monetary penalty.
 
 ### No deadline
 
 `target_soc_pct == 0` or `target_time_ms == 0` means "charge
-opportunistically". No penalty, no push — the DP will only charge when
+opportunistically". No penalty, no push — the optimizer will only charge when
 a slot is cheap enough to be worth it relative to battery alternatives
 and terminal credit.
 
