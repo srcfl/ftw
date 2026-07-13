@@ -25,6 +25,22 @@ func externalTestFixture() ([]Slot, Params) {
 	return slots, p
 }
 
+func TestExternalOptimizerPreservesExplicitZeroServiceCVaRWeight(t *testing.T) {
+	zero := 0.0
+	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
+		Command: []string{"python3"},
+		Multistage: MultistageOptimizerConfig{
+			ServiceCVaRWeight: &zero,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *optimizer.cfg.Multistage.ServiceCVaRWeight; got != 0 {
+		t.Fatalf("explicit zero weight replaced by default: %g", got)
+	}
+}
+
 func TestValidatePlanAcceptsContinuousPowerTrajectory(t *testing.T) {
 	slots, p := externalTestFixture()
 	plan := Plan{
@@ -229,6 +245,16 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 	}
 	if recourse.Solver == nil || recourse.Solver.ScenarioPolicy != "recourse" || recourse.Solver.NonAnticipativeSlots != 1 {
 		t.Fatalf("unexpected recourse metadata: %+v", recourse.Solver)
+	}
+	multistage, err := optimizer.OptimizeMultistage(context.Background(), slots, p, 1)
+	if err != nil {
+		t.Fatalf("OptimizeMultistage: %v", err)
+	}
+	if multistage.Solver == nil || multistage.Solver.ScenarioPolicy != "multistage" || multistage.Solver.PolicyVersion != "storage-multistage-v1" {
+		t.Fatalf("unexpected multistage metadata: %+v", multistage.Solver)
+	}
+	if multistage.Solver.PolicyConfig == "" || multistage.Solver.ModelVariables == 0 || multistage.Solver.ModelConstraints == 0 {
+		t.Fatalf("missing direct multistage topology metadata: %+v", multistage.Solver)
 	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {

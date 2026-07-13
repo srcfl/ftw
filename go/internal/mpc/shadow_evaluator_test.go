@@ -98,6 +98,20 @@ func TestShadowEvaluatorNeverScoresAnticipativeRecourseTail(t *testing.T) {
 	}
 }
 
+func TestShadowEvaluatorNeverScoresConditionalMultistageTail(t *testing.T) {
+	start := time.Unix(1_800_000_000, 0)
+	plan := &Plan{
+		Solver: &SolverInfo{ScenarioPolicy: "multistage", NonAnticipativeSlots: 1},
+		Actions: []Action{
+			{SlotStartMs: start.UnixMilli(), SlotLenMin: 15},
+			{SlotStartMs: start.Add(15 * time.Minute).UnixMilli(), SlotLenMin: 15},
+		},
+	}
+	if _, ok := shadowActionAt(plan, start.Add(16*time.Minute)); ok {
+		t.Fatal("conditional multistage tail must not be scored without a fresh replan")
+	}
+}
+
 func TestShadowEvaluatorDoesNotInventRecoveryFromInitialBandViolation(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoCPct: 5, SoCMinPct: 10, SoCMaxPct: 90, MaxChargeW: 5000, MaxDischargeW: 5000, ChargeEfficiency: 1, DischargeEfficiency: 1}

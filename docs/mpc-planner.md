@@ -185,6 +185,12 @@ when the operator has chosen one.
 | `planner.optimizer_cvar_weight` | 0.15 | Tail-risk weight; explicit 0 disables |
 | `planner.optimizer_recourse_shadow` | false | Stateful storage-recourse challenger; diagnostic only |
 | `planner.optimizer_recourse_non_anticipative_slots` | 1 | Shared scenario prefix before recourse |
+| `planner.optimizer_challenger_policy` | `recourse` | `recourse` reference or `multistage` scenario-tree policy |
+| `planner.optimizer_multistage.scenario_limit` | 12 | Representative paths retained after scenario reduction |
+| `planner.optimizer_multistage.branch_interval_slots` | 4 | Information-branch cadence in the near horizon |
+| `planner.optimizer_multistage.near_horizon_slots` | 16 | Full-resolution 15-minute decisions |
+| `planner.optimizer_multistage.far_block_slots` | 4 | Hourly far-horizon move blocks |
+| `planner.optimizer_multistage.decomposition_threshold` | 20 | PH/reduction boundary for large ensembles |
 
 The former fixed SoC/action grids no longer constrain the primary plan.
 

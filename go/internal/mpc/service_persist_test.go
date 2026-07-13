@@ -33,6 +33,19 @@ func (testPrimaryOptimizer) OptimizeRecourse(_ context.Context, slots []Slot, p 
 	return plan, nil
 }
 
+func (testPrimaryOptimizer) OptimizeMultistage(_ context.Context, slots []Slot, p Params, prefix int) (Plan, error) {
+	plan := Optimize(slots, p)
+	plan.Solver = &SolverInfo{
+		Engine: "cvxpy", Backend: "highs", Status: "optimal",
+		Formulation: "multistage-milp", ScenarioPolicy: "multistage",
+		PolicyVersion:        "storage-multistage-v1",
+		NonAnticipativeSlots: prefix,
+		ServiceCVaRWeight:    1,
+		ServiceCVaRAlpha:     0.95,
+	}
+	return plan, nil
+}
+
 // TestReplanCallsSaveDiag — after a successful replan, the SaveDiag
 // hook fires once with (non-nil Diagnostic, reason). Verifies the hook
 // wiring end-to-end without having to spin up the full stack.
@@ -166,5 +179,39 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	}
 	if d := svc.Diagnose(); d == nil || d.DPShadow == nil || d.DPEvaluationShadow == nil || d.RecourseShadow == nil || d.ShadowEvaluation == nil {
 		t.Fatal("persisted diagnostic omitted a DP shadow")
+	}
+}
+
+func TestPrimaryOptimizerCanSelectMultistageShadow(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now().UTC().Truncate(time.Hour)
+	for i := 0; i < 4; i++ {
+		_ = st.SavePrices([]state.PricePoint{{
+			Zone: "SE3", SlotTsMs: now.Add(time.Duration(i) * time.Hour).UnixMilli(),
+			SlotLenMin: 60, SpotOreKwh: 50, TotalOreKwh: 100,
+			Source: "test", FetchedAtMs: now.UnixMilli(),
+		}})
+	}
+	svc := New(st, nil, "SE3", Params{
+		Mode: ModePassiveArbitrage, SoCLevels: 11, CapacityWh: 10000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		ActionLevels: 5, MaxChargeW: 2000, MaxDischargeW: 2000,
+		ChargeEfficiency: 0.95, DischargeEfficiency: 0.95,
+	})
+	svc.BaseLoad = 500
+	svc.Optimizer = testPrimaryOptimizer{}
+	svc.EnableRecourseShadow = true
+	svc.ChallengerPolicy = "multistage"
+	svc.RecourseNonAnticipativeSlots = 1
+	plan := svc.Replan(context.Background())
+	if plan == nil || plan.Solver == nil || plan.Solver.ScenarioPolicy == "multistage" {
+		t.Fatalf("challenger replaced active champion: %+v", plan)
+	}
+	if plan.RecourseShadow == nil || plan.RecourseShadow.Solver == nil || plan.RecourseShadow.Solver.ScenarioPolicy != "multistage" {
+		t.Fatalf("multistage shadow missing: %+v", plan.RecourseShadow)
 	}
 }

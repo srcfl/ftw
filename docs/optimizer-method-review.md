@@ -29,12 +29,12 @@ new measurements and forecasts by then. Residential stochastic MPC literature
 uses scenario-dependent futures with non-anticipativity where information is
 still shared ([van der Meer et al., 2021](https://doi.org/10.1016/j.apenergy.2020.116289)).
 
-This branch adds a two-stage storage-recourse challenger with a shared first
-15-minute action and stateful closed-loop scoring. It closes the largest method
-gap without changing dispatch. It does **not** make the project fully SOTA yet:
-two-stage recourse assumes the rest of each scenario path becomes known after
-the first stage and is therefore an optimistic bound. A small multi-stage tree
-is the eventual production target.
+This branch keeps the two-stage storage-recourse reference and adds the
+`storage-multistage-v1` production candidate. The candidate builds a
+hierarchical information tree, preserves a shared first 15-minute action,
+reduces large ensembles, move-blocks the far horizon, and separates service
+risk from expected economics. Both are stateful shadows; dispatch remains on
+the shared champion.
 
 ## Method scorecard
 
@@ -42,11 +42,11 @@ is the eventual production target.
 |---|---|---|
 | Safety and fallback | Strong | Keep Go as final authority |
 | Asset/constraint coverage | Strong champion; recourse is storage-only | Scenario-dependent EV and thermal state |
-| Uncertainty policy | Shared open-loop champion + two-stage shadow | Small calibrated multi-stage tree |
+| Uncertainty policy | Shared champion + two-stage and multistage shadows | Calibrate the tree from residuals |
 | Closed-loop evidence | Stateful champion/challenger added | 7-14 day gates plus seasonal corpus |
-| Edge compute | Acceptable with idle worker; high cold/RSS peak | Cached model and sparse direct fast path |
-| Long horizon | Uniform 15-minute grid | Multi-resolution horizon/move blocking |
-| Risk | Expected cost + CVaR knob | Risk on violations; economics mostly expected cost |
+| Edge compute | Direct sparse HiGHS LP + DPP CVXPY fallback + idle worker | Keep Pi p95/RSS promotion gates |
+| Long horizon | 15-minute near horizon + 30-60-minute move blocks | Tune boundaries from replay |
+| Risk | Service CVaR first; expected economics second | Calibrate violation coverage |
 
 ## Recommended production formulation
 
@@ -88,19 +88,23 @@ HiGHS is designed for sparse LP/MIP/QP and has native Python and C interfaces
 ([HiGHS project](https://highs.dev/)). CLARABEL remains a useful continuous
 convex fallback, not a MILP fallback.
 
-The next compute improvements should be made in this order:
+The compute implementation follows this order:
 
-1. Vectorize CVXPY expressions and build a DPP-compliant parameterized problem.
-   CVXPY then caches canonicalization for repeated solves
+1. The compact multistage extensive problem stores each physical action once
+   per information node and move block. The normal continuous battery case is
+   built directly as a sparse HiGHS LP. The CVXPY reference/fallback is
+   DPP-compliant and caches one compiled topology per warm worker
    ([CVXPY DPP guide](https://www.cvxpy.org/tutorial/dpp/index.html)).
-2. Use a multi-resolution horizon so model size follows decision value, not
+2. Move blocking gives a multi-resolution action horizon so model size follows decision value, not
    simply `48 h / 15 min`.
-3. Reduce a larger raw scenario ensemble to roughly 5-20 representative paths
+3. Weighted forward scenario reduction retains roughly 5-20 representative paths
    and measure out-of-sample coverage and value.
-4. Add a direct sparse HiGHS battery-only fast path, continuously checked
-   against the CVXPY champion. Retain CVXPY for complex assets and fallback.
-5. Consider Progressive Hedging only when the scenario tree is too large for a
-   monolithic deterministic equivalent. It adds convergence/tuning complexity
+4. ARM64 profiling justified and now selects the direct sparse battery-only
+   path: eight live snapshots measured 125,072 KiB peak RSS versus 223,096 KiB
+   for cached CVXPY, with a 0.97 s warm median. Retain CVXPY as executable
+   reference and exact MILP/CLARABEL fallback.
+5. Quadratic Progressive Hedging is implemented only for eligible continuous
+   arbitrage ensembles above the decomposition threshold. It adds convergence/tuning complexity
    and is primarily a scaling tool, not an accuracy feature
    ([Bastin et al., 2013](https://optimization-online.org/2013/10/4065/)).
 
@@ -122,10 +126,15 @@ score and safety metrics.
 ## Current branch contract
 
 - `optimizer_recourse_shadow: false` by default.
+- `optimizer_challenger_policy` selects `recourse` or `multistage`.
 - When enabled, champion and challenger run sequentially in the same warm
   worker, avoiding a second resident CVXPY process.
-- The challenger has scenario-specific storage, grid, and PV-curtailment state
-  after `optimizer_recourse_non_anticipative_slots` (default 1).
+- Storage actions and PV curtailment exist once per information node; battery
+  state and meter flows remain scenario-specific. Normal tariff cases solve as
+  LPs, while negative import or inverted import/export prices activate only the
+  required HiGHS binary guards.
+- Solver metadata exposes reduction error, tree size, move blocks, DPP cache,
+  decomposition, solve phases, PH iterations, and PH residual.
 - Flexible EV/thermal contracts pause the challenger until their counterfactual
   state can be evaluated correctly.
 - `/api/mpc/plan` and persisted diagnostics expose raw and terminal-valued

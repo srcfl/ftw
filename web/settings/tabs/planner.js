@@ -86,11 +86,39 @@
         field("CVaR alpha", "planner.optimizer_cvar_alpha", "number", 0.9,
           "Tail confidence level. 0.9 optimizes the worst ten percent of scenario cost.") +
         '</div><div>' +
-        field("Recourse prefix (slots)", "planner.optimizer_recourse_non_anticipative_slots", "number", 1,
-          "Number of initial slots that must use the same action in every forecast scenario. Keep at 1 for the 15-minute shadow experiment.") +
+        selectField("Shadow policy", "planner.optimizer_challenger_policy", ["recourse", "multistage"], "recourse",
+          "Recourse is the two-stage reference. Multistage uses a hierarchical scenario tree, move-blocking, service risk, and scenario reduction.") +
         '</div></div>' +
-        '<label class="checkbox-row"><input type="checkbox" data-checkbox-path="planner.optimizer_recourse_shadow"' + (config.planner.optimizer_recourse_shadow ? ' checked' : '') + '> Recourse shadow ' +
+        '<div class="field-row"><div>' +
+        field("Shared prefix (slots)", "planner.optimizer_recourse_non_anticipative_slots", "number", 1,
+          "Initial slots that use the same action in every scenario. One slot means the next 15-minute action is executable before replanning.") +
+        '</div><div>' +
+        field("Scenario limit", "planner.optimizer_multistage.scenario_limit", "number", 12,
+          "Maximum representative trajectories retained by energy-weighted scenario reduction.") +
+        '</div></div>' +
+        '<label class="checkbox-row"><input type="checkbox" data-checkbox-path="planner.optimizer_recourse_shadow"' + (config.planner.optimizer_recourse_shadow ? ' checked' : '') + '> Stochastic shadow ' +
         help('Run the stochastic storage challenger and stateful score it against the active champion. It never controls dispatch and pauses while flexible assets are active.') + '</label>' +
+        '<div class="field-row"><div>' +
+        field("Branch interval (slots)", "planner.optimizer_multistage.branch_interval_slots", "number", 4,
+          "How often the near-horizon scenario tree may reveal new information.") +
+        '</div><div>' +
+        field("Branch horizon (slots)", "planner.optimizer_multistage.branch_horizon_slots", "number", 48,
+          "Stop adding new scenario branches after this many slots to bound edge complexity.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
+        field("Near horizon (slots)", "planner.optimizer_multistage.near_horizon_slots", "number", 16,
+          "Slots kept at full 15-minute control resolution.") +
+        '</div><div>' +
+        field("Far move block (slots)", "planner.optimizer_multistage.far_block_slots", "number", 4,
+          "Far-horizon actions tied into blocks. Four slots give hourly decisions.") +
+        '</div></div>' +
+        '<div class="field-row"><div>' +
+        field("Service CVaR weight", "planner.optimizer_multistage.service_cvar_weight", "number", 1,
+          "Risk weight on target and operating-bound violations, optimized before economic cost.") +
+        '</div><div>' +
+        field("Decomposition threshold", "planner.optimizer_multistage.decomposition_threshold", "number", 20,
+          "Scenario count above which auto mode uses eligible Progressive Hedging or reduces to the exact extensive budget.") +
+        '</div></div>' +
         '<div class="field-row"><div>' +
         field("SoC min (%)", "planner.soc_min_pct", "number", 10,
           "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +

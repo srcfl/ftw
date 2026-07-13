@@ -364,22 +364,43 @@ type ShadowPlan struct {
 // emergency fallback when the external mathematical planner is unavailable or
 // returns a plan that fails the Go-side physics validator.
 type SolverInfo struct {
-	Engine               string   `json:"engine"`
-	Backend              string   `json:"backend,omitempty"`
-	Status               string   `json:"status"`
-	Formulation          string   `json:"formulation,omitempty"`
-	ObjectiveOre         float64  `json:"objective_ore,omitempty"`
-	ServiceSlack         float64  `json:"service_slack,omitempty"`
-	SolveMs              float64  `json:"solve_ms,omitempty"`
-	MIPGap               *float64 `json:"mip_gap,omitempty"`
-	ScenarioCount        int      `json:"scenario_count,omitempty"`
-	ScenarioPolicy       string   `json:"scenario_policy,omitempty"`
-	PolicyVersion        string   `json:"policy_version,omitempty"`
-	NonAnticipativeSlots int      `json:"non_anticipative_slots,omitempty"`
-	CVaRWeight           float64  `json:"cvar_weight,omitempty"`
-	CVaRAlpha            float64  `json:"cvar_alpha,omitempty"`
-	Fallback             bool     `json:"fallback,omitempty"`
-	FallbackReason       string   `json:"fallback_reason,omitempty"`
+	Engine                 string   `json:"engine"`
+	Backend                string   `json:"backend,omitempty"`
+	Status                 string   `json:"status"`
+	Formulation            string   `json:"formulation,omitempty"`
+	ObjectiveOre           float64  `json:"objective_ore,omitempty"`
+	ServiceSlack           float64  `json:"service_slack,omitempty"`
+	SolveMs                float64  `json:"solve_ms,omitempty"`
+	PrepareMs              float64  `json:"prepare_ms,omitempty"`
+	BuildMs                float64  `json:"build_ms,omitempty"`
+	SolverMs               float64  `json:"solver_ms,omitempty"`
+	CacheHit               bool     `json:"cache_hit,omitempty"`
+	DPP                    bool     `json:"dpp,omitempty"`
+	MIPGap                 *float64 `json:"mip_gap,omitempty"`
+	ScenarioCount          int      `json:"scenario_count,omitempty"`
+	ScenarioOriginalCount  int      `json:"scenario_original_count,omitempty"`
+	ScenarioReductionError float64  `json:"scenario_reduction_error,omitempty"`
+	ScenarioPolicy         string   `json:"scenario_policy,omitempty"`
+	PolicyVersion          string   `json:"policy_version,omitempty"`
+	PolicyConfig           string   `json:"policy_config,omitempty"`
+	NonAnticipativeSlots   int      `json:"non_anticipative_slots,omitempty"`
+	TreeNodes              int      `json:"tree_nodes,omitempty"`
+	MoveBlocks             int      `json:"move_blocks,omitempty"`
+	Decomposition          string   `json:"decomposition,omitempty"`
+	RiskModel              string   `json:"risk_model,omitempty"`
+	CVaRWeight             float64  `json:"cvar_weight,omitempty"`
+	CVaRAlpha              float64  `json:"cvar_alpha,omitempty"`
+	ServiceCVaRWeight      float64  `json:"service_cvar_weight,omitempty"`
+	ServiceCVaRAlpha       float64  `json:"service_cvar_alpha,omitempty"`
+	EconomicCVaRWeight     float64  `json:"economic_cvar_weight,omitempty"`
+	EconomicCVaRAlpha      float64  `json:"economic_cvar_alpha,omitempty"`
+	PHIterations           int      `json:"ph_iterations,omitempty"`
+	PHResidualW            float64  `json:"ph_residual_w,omitempty"`
+	PHRho                  float64  `json:"ph_rho,omitempty"`
+	ModelVariables         int      `json:"model_variables,omitempty"`
+	ModelConstraints       int      `json:"model_constraints,omitempty"`
+	Fallback               bool     `json:"fallback,omitempty"`
+	FallbackReason         string   `json:"fallback_reason,omitempty"`
 }
 
 // SlotGridCostOre returns the raw öre cost of flowing gridKWh across the

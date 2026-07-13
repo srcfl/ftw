@@ -144,10 +144,15 @@ Every accepted Python plan records two non-dispatching Go-DP references. The
 `dp_evaluation_shadow` uses the exact same base forecast as Python; use this
 field for planned-cost and first-action comparisons between engines.
 
-With `optimizer_recourse_shadow: true`, the worker also solves a two-stage
-storage challenger. Storage, grid, and PV-curtailment trajectories become
-scenario-specific after `optimizer_recourse_non_anticipative_slots`; the first
-slot is shared by default. The same worker process solves champion and
+With `optimizer_recourse_shadow: true`, the worker also solves a storage
+challenger. `optimizer_challenger_policy: recourse` keeps the two-stage
+reference. `multistage` constructs a hierarchical scenario tree from observed
+net-power and PV/load history, reduces large ensembles with weighted
+net-energy/PV trajectory medoids,
+and ties far-horizon actions into move blocks. Decisions become scenario-
+specific only after their tree node branches; the first slot is shared by
+default. Service-risk CVaR is minimized before expected economic cost. The same
+worker process solves champion and
 challenger sequentially. A stateful evaluator then advances both policies over
 identical realized house load and PV with independent virtual storage energy.
 The accumulated raw and terminal-energy-valued cost, SoC, and clamp counts are stored under
@@ -156,30 +161,49 @@ their counterfactual state is modeled equivalently.
 Both policies carry an explicit `policy_version`; changing it or the planner
 mode starts a new score run instead of mixing incompatible references.
 
-## Improvement path
+## Challenger hierarchy
 
 The active champion uses one shared 48-hour asset schedule across all PV
 scenarios and adds CVaR risk cost. That is deliberately conservative, but it can
 reserve energy twice: once through all-scenario feasibility and again through
-CVaR. The storage-recourse experiment now exists as a shadow. Since MPC replans
-every 15 minutes, only its common first action is executable; future paths are
-an optimistic wait-and-see bound until a small multi-stage tree is implemented.
+CVaR. The storage-recourse experiment remains the optimistic two-stage
+reference. The `storage-multistage-v1` shadow is the production candidate: it
+uses a hierarchical information tree, 15-minute near-horizon decisions,
+30-60-minute move blocks farther out, scenario reduction, and lexicographic
+service CVaR. Since MPC replans every 15 minutes, only the common first action
+is executable.
 
-Promote a recourse formulation only after rolling-origin replay shows lower realized
+Promote a multistage formulation only after rolling-origin replay shows lower realized
 cost without more mode, grid-limit, or SoC violations. Tune scenario
 probabilities, PV spreads, CVaR weight, and terminal energy price against
 forecast residuals from each installation rather than one fixed global value.
-The same-input DP evaluation shadow is the champion/challenger baseline for
-those experiments.
+The same-input DP evaluation shadow and two-stage recourse lower bound remain
+references for those experiments.
+
+The normal continuous battery model is assembled directly as a sparse HiGHS LP.
+The CVXPY reference and fallback is DPP-compliant and retained once per
+warm-worker topology, so repeated fallback solves reuse canonicalization. For
+eligible continuous arbitrage ensembles above the decomposition threshold,
+`auto` may use quadratic Progressive Hedging with a reported
+non-anticipativity residual. Discrete or otherwise ineligible models are
+reduced to the threshold and solved exactly by HiGHS through CVXPY.
+
+The compact extensive form creates charge, discharge, and curtailment actions
+once per information node and move block instead of copying them per scenario
+and joining the copies with equalities. With ordinary tariffs `auto` is an LP;
+negative import prices or export compensation above import cost activate the
+corresponding charge/discharge or meter-flow binary guard.
 
 The wider method assessment and promotion gate live in
 [optimizer-method-review.md](optimizer-method-review.md).
 
-CVXPY itself accounts for most of the worker's warm memory. If idle unloading
-is insufficient on smaller hosts, the primary MILP can be translated to the
-native `highspy` API while retaining CVXPY/CLARABEL as the convex fallback and
-reference implementation. That is a separate backend change and should be
-validated against identical protocol fixtures before replacing CVXPY.
+The direct `highspy` path is parity-tested against the CVXPY model. On an ARM64
+Pi, eight stored live snapshots measured 125,072 KiB peak RSS and 0.97 s warm
+median, down from 223,096 KiB and 1.14 s for the cached CVXPY extensive form;
+its cold model solve fell from 24.8 s to 0.81 s. CVXPY remains loaded because it
+also runs the champion and handles exact binary guards, but the large cached
+multistage graph is avoided. The worker idle timeout still releases all Python
+and solver memory between planning bursts.
 
 ## Configuration
 
@@ -196,6 +220,21 @@ planner:
   optimizer_cvar_alpha: 0.90
   optimizer_recourse_shadow: false
   optimizer_recourse_non_anticipative_slots: 1
+  optimizer_challenger_policy: multistage
+  optimizer_multistage:
+    scenario_limit: 12
+    branch_interval_slots: 4
+    branch_horizon_slots: 48
+    max_branching: 2
+    near_horizon_slots: 16
+    mid_horizon_slots: 96
+    mid_block_slots: 2
+    far_block_slots: 4
+    service_cvar_weight: 1.0
+    service_cvar_alpha: 0.95
+    economic_cvar_weight: 0
+    decomposition_threshold: 20
+    decomposition_method: auto
 ```
 
 `optimizer_command` may point at a different Python executable. It is an

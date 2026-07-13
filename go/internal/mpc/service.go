@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math"
 	"sort"
@@ -88,6 +89,9 @@ type Service struct {
 	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
 	EnableRecourseShadow         bool
 	RecourseNonAnticipativeSlots int
+	// ChallengerPolicy selects "recourse" (two-stage reference) or
+	// "multistage" (scenario tree + move blocking). Both remain shadow-only.
+	ChallengerPolicy string
 
 	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
@@ -1056,15 +1060,36 @@ func (s *Service) replan(ctx context.Context) *Plan {
 			if s.EnableRecourseShadow {
 				if len(p.activeLoadpoints()) > 0 {
 					s.ensureShadowEvaluator().SetError("recourse shadow skipped while flexible loads are active", now)
-				} else if challenger, ok := s.Optimizer.(RecourseOptimizer); ok {
-					recourse, recourseErr := challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
+				} else {
+					policy := s.ChallengerPolicy
+					if policy == "" {
+						policy = "recourse"
+					}
+					var recourse Plan
+					var recourseErr error
+					switch policy {
+					case "multistage":
+						challenger, ok := s.Optimizer.(MultistageOptimizer)
+						if !ok {
+							recourseErr = errors.New("primary optimizer does not implement multistage")
+						} else {
+							recourse, recourseErr = challenger.OptimizeMultistage(ctx, slots, p, s.RecourseNonAnticipativeSlots)
+						}
+					default:
+						challenger, ok := s.Optimizer.(RecourseOptimizer)
+						if !ok {
+							recourseErr = errors.New("primary optimizer does not implement recourse")
+						} else {
+							recourse, recourseErr = challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
+						}
+					}
 					if recourseErr != nil {
-						slog.Warn("mpc: recourse shadow failed", "err", recourseErr)
+						slog.Warn("mpc: stochastic challenger failed", "policy", policy, "err", recourseErr)
 						s.ensureShadowEvaluator().SetError(recourseErr.Error(), now)
 					} else {
 						recoursePlan = &recourse
 						candidate.RecourseShadow = compareDPShadow(candidate, recourse)
-						candidate.RecourseShadow.ForecastBasis = "same stochastic scenario input; recourse after non-anticipative prefix"
+						candidate.RecourseShadow.ForecastBasis = "same stochastic scenario input; conditional decisions after non-anticipative prefix"
 						candidate.RecourseShadow.Solver = recourse.Solver
 						candidate.RecourseShadow.TotalCostOre = recourse.TotalCostOre
 						candidate.RecourseShadow.ActiveMinusShadowOre = candidate.TotalCostOre - recourse.TotalCostOre
@@ -1073,8 +1098,6 @@ func (s *Service) replan(ctx context.Context) *Plan {
 							candidate.RecourseShadow.FirstAction.EMSMode = mode
 						}
 					}
-				} else {
-					s.ensureShadowEvaluator().SetError("primary optimizer does not implement recourse", now)
 				}
 				evaluator := s.ensureShadowEvaluator()
 				evaluator.SetPlans(&candidate, recoursePlan, slots, p, time.Now())
@@ -1092,7 +1115,7 @@ func (s *Service) replan(ctx context.Context) *Plan {
 				"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
 				"optimizer_solve_ms", optimizerSolveMs)
 			if candidate.RecourseShadow != nil {
-				slog.Info("mpc: champion vs recourse shadow",
+				slog.Info("mpc: champion vs stochastic shadow",
 					"champion_cost_ore", candidate.TotalCostOre,
 					"recourse_cost_ore", candidate.RecourseShadow.TotalCostOre,
 					"champion_minus_recourse_ore", candidate.RecourseShadow.ActiveMinusShadowOre,

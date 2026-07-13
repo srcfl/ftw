@@ -35,6 +35,32 @@ type RecourseOptimizer interface {
 	OptimizeRecourse(context.Context, []Slot, Params, int) (Plan, error)
 }
 
+// MultistageOptimizer exposes the calibrated scenario-tree challenger. Like
+// recourse, its result is diagnostic-only and cannot reach dispatch.
+type MultistageOptimizer interface {
+	OptimizeMultistage(context.Context, []Slot, Params, int) (Plan, error)
+}
+
+type MultistageOptimizerConfig struct {
+	ScenarioLimit          int
+	BranchIntervalSlots    int
+	BranchHorizonSlots     int
+	MaxBranching           int
+	NearHorizonSlots       int
+	MidHorizonSlots        int
+	MidBlockSlots          int
+	FarBlockSlots          int
+	ServiceCVaRWeight      *float64
+	ServiceCVaRAlpha       float64
+	EconomicCVaRWeight     float64
+	EconomicCVaRAlpha      float64
+	DecompositionThreshold int
+	DecompositionMethod    string
+	PHMaxIterations        int
+	PHRho                  float64
+	PHToleranceW           float64
+}
+
 // ExternalOptimizerConfig controls the local Python worker. The command is an
 // argv array rather than a shell string, so configuration cannot accidentally
 // acquire shell expansion semantics.
@@ -48,6 +74,7 @@ type ExternalOptimizerConfig struct {
 	CVaRWeight  float64
 	CVaRAlpha   float64
 	IdleTimeout time.Duration
+	Multistage  MultistageOptimizerConfig
 }
 
 // ExternalOptimizer owns one warm JSON-lines worker process. Calls are
@@ -84,6 +111,56 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 	if cfg.CVaRAlpha <= 0 || cfg.CVaRAlpha >= 1 {
 		cfg.CVaRAlpha = 0.9
 	}
+	ms := &cfg.Multistage
+	if ms.ScenarioLimit <= 0 {
+		ms.ScenarioLimit = 12
+	}
+	if ms.BranchIntervalSlots <= 0 {
+		ms.BranchIntervalSlots = 4
+	}
+	if ms.BranchHorizonSlots <= 0 {
+		ms.BranchHorizonSlots = 48
+	}
+	if ms.MaxBranching <= 0 {
+		ms.MaxBranching = 2
+	}
+	if ms.NearHorizonSlots <= 0 {
+		ms.NearHorizonSlots = 16
+	}
+	if ms.MidHorizonSlots <= 0 {
+		ms.MidHorizonSlots = 96
+	}
+	if ms.MidBlockSlots <= 0 {
+		ms.MidBlockSlots = 2
+	}
+	if ms.FarBlockSlots <= 0 {
+		ms.FarBlockSlots = 4
+	}
+	if ms.ServiceCVaRWeight == nil {
+		defaultWeight := 1.0
+		ms.ServiceCVaRWeight = &defaultWeight
+	}
+	if ms.ServiceCVaRAlpha <= 0 || ms.ServiceCVaRAlpha >= 1 {
+		ms.ServiceCVaRAlpha = 0.95
+	}
+	if ms.EconomicCVaRAlpha <= 0 || ms.EconomicCVaRAlpha >= 1 {
+		ms.EconomicCVaRAlpha = 0.9
+	}
+	if ms.DecompositionThreshold <= 0 {
+		ms.DecompositionThreshold = 20
+	}
+	if ms.DecompositionMethod == "" {
+		ms.DecompositionMethod = "auto"
+	}
+	if ms.PHMaxIterations <= 0 {
+		ms.PHMaxIterations = 8
+	}
+	if ms.PHRho <= 0 {
+		ms.PHRho = 50
+	}
+	if ms.PHToleranceW <= 0 {
+		ms.PHToleranceW = 5
+	}
 	return &ExternalOptimizer{cfg: cfg}, nil
 }
 
@@ -114,6 +191,23 @@ type externalSettings struct {
 	CVaRAlpha                float64  `json:"cvar_alpha"`
 	ScenarioPolicy           string   `json:"scenario_policy,omitempty"`
 	NonAnticipativeSlots     int      `json:"non_anticipative_slots,omitempty"`
+	ScenarioLimit            int      `json:"scenario_limit,omitempty"`
+	BranchIntervalSlots      int      `json:"branch_interval_slots,omitempty"`
+	BranchHorizonSlots       int      `json:"branch_horizon_slots,omitempty"`
+	MaxBranching             int      `json:"max_branching,omitempty"`
+	NearHorizonSlots         int      `json:"near_horizon_slots,omitempty"`
+	MidHorizonSlots          int      `json:"mid_horizon_slots,omitempty"`
+	MidBlockSlots            int      `json:"mid_block_slots,omitempty"`
+	FarBlockSlots            int      `json:"far_block_slots,omitempty"`
+	ServiceCVaRWeight        float64  `json:"service_cvar_weight,omitempty"`
+	ServiceCVaRAlpha         float64  `json:"service_cvar_alpha,omitempty"`
+	EconomicCVaRWeight       float64  `json:"economic_cvar_weight,omitempty"`
+	EconomicCVaRAlpha        float64  `json:"economic_cvar_alpha,omitempty"`
+	DecompositionThreshold   int      `json:"decomposition_threshold,omitempty"`
+	DecompositionMethod      string   `json:"decomposition_method,omitempty"`
+	PHMaxIterations          int      `json:"ph_max_iterations,omitempty"`
+	PHRho                    float64  `json:"ph_rho,omitempty"`
+	PHToleranceW             float64  `json:"ph_tolerance_w,omitempty"`
 }
 
 type externalSlot struct {
@@ -209,6 +303,13 @@ func (o *ExternalOptimizer) OptimizeRecourse(ctx context.Context, slots []Slot, 
 	return o.optimize(ctx, slots, p, "recourse", nonAnticipativeSlots)
 }
 
+func (o *ExternalOptimizer) OptimizeMultistage(ctx context.Context, slots []Slot, p Params, nonAnticipativeSlots int) (Plan, error) {
+	if nonAnticipativeSlots < 1 {
+		nonAnticipativeSlots = 1
+	}
+	return o.optimize(ctx, slots, p, "multistage", nonAnticipativeSlots)
+}
+
 func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params, scenarioPolicy string, nonAnticipativeSlots int) (Plan, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -217,6 +318,26 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 	request := o.buildRequest(slots, p)
 	request.Settings.ScenarioPolicy = scenarioPolicy
 	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
+	if scenarioPolicy == "multistage" {
+		ms := o.cfg.Multistage
+		request.Settings.ScenarioLimit = ms.ScenarioLimit
+		request.Settings.BranchIntervalSlots = ms.BranchIntervalSlots
+		request.Settings.BranchHorizonSlots = ms.BranchHorizonSlots
+		request.Settings.MaxBranching = ms.MaxBranching
+		request.Settings.NearHorizonSlots = ms.NearHorizonSlots
+		request.Settings.MidHorizonSlots = ms.MidHorizonSlots
+		request.Settings.MidBlockSlots = ms.MidBlockSlots
+		request.Settings.FarBlockSlots = ms.FarBlockSlots
+		request.Settings.ServiceCVaRWeight = *ms.ServiceCVaRWeight
+		request.Settings.ServiceCVaRAlpha = ms.ServiceCVaRAlpha
+		request.Settings.EconomicCVaRWeight = ms.EconomicCVaRWeight
+		request.Settings.EconomicCVaRAlpha = ms.EconomicCVaRAlpha
+		request.Settings.DecompositionThreshold = ms.DecompositionThreshold
+		request.Settings.DecompositionMethod = ms.DecompositionMethod
+		request.Settings.PHMaxIterations = ms.PHMaxIterations
+		request.Settings.PHRho = ms.PHRho
+		request.Settings.PHToleranceW = ms.PHToleranceW
+	}
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return Plan{}, fmt.Errorf("encode optimizer request: %w", err)
