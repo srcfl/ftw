@@ -40,20 +40,22 @@ type ExternalOptimizerConfig struct {
 	MIPRelGap   float64
 	CVaRWeight  float64
 	CVaRAlpha   float64
+	IdleTimeout time.Duration
 }
 
-// ExternalOptimizer owns one long-lived JSON-lines worker process. Calls are
+// ExternalOptimizer owns one warm JSON-lines worker process. Calls are
 // serialized because CVXPY problem construction and warm-start state live in
-// that process; replans are infrequent and a single outstanding solve is the
-// desired behavior.
+// that process. An optional idle timeout releases the worker's solver memory
+// between planning bursts.
 type ExternalOptimizer struct {
 	cfg ExternalOptimizerConfig
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	scanner *bufio.Scanner
-	waitCh  chan error
+	mu        sync.Mutex
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	scanner   *bufio.Scanner
+	waitCh    chan error
+	idleTimer *time.Timer
 }
 
 func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, error) {
@@ -187,6 +189,7 @@ type externalAction struct {
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.cancelIdleStopLocked()
 
 	request := o.buildRequest(slots, p)
 	payload, err := json.Marshal(request)
@@ -239,11 +242,14 @@ func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params
 		return Plan{}, fmt.Errorf("decode optimizer response: %w", err)
 	}
 	if response.SchemaVersion != externalOptimizerSchemaVersion {
+		o.stopLocked()
 		return Plan{}, fmt.Errorf("optimizer schema version %d, want %d", response.SchemaVersion, externalOptimizerSchemaVersion)
 	}
 	if response.RequestID != request.RequestID && !(response.RequestID == "unknown" && !response.OK) {
+		o.stopLocked()
 		return Plan{}, fmt.Errorf("optimizer response request_id %q, want %q", response.RequestID, request.RequestID)
 	}
+	defer o.scheduleIdleStopLocked()
 	if !response.OK {
 		if response.Error == nil {
 			return Plan{}, errors.New("optimizer returned an unspecified error")
@@ -256,6 +262,32 @@ func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params
 		return Plan{}, fmt.Errorf("optimizer plan rejected: %w", err)
 	}
 	return plan, nil
+}
+
+func (o *ExternalOptimizer) cancelIdleStopLocked() {
+	if o.idleTimer == nil {
+		return
+	}
+	o.idleTimer.Stop()
+	o.idleTimer = nil
+}
+
+func (o *ExternalOptimizer) scheduleIdleStopLocked() {
+	if o.cfg.IdleTimeout <= 0 || o.cmd == nil {
+		return
+	}
+	o.cancelIdleStopLocked()
+	var timer *time.Timer
+	timer = time.AfterFunc(o.cfg.IdleTimeout, func() {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		if o.idleTimer != timer {
+			return
+		}
+		o.idleTimer = nil
+		o.stopLocked()
+	})
+	o.idleTimer = timer
 }
 
 func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest {
@@ -440,6 +472,7 @@ func (o *ExternalOptimizer) ensureStartedLocked() error {
 }
 
 func (o *ExternalOptimizer) stopLocked() {
+	o.cancelIdleStopLocked()
 	if o.cmd == nil {
 		return
 	}
@@ -452,6 +485,7 @@ func (o *ExternalOptimizer) stopLocked() {
 func (o *ExternalOptimizer) Close() error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.cancelIdleStopLocked()
 	if o.cmd == nil {
 		return nil
 	}
@@ -618,7 +652,8 @@ func ValidatePlan(slots []Slot, p Params, plan *Plan) error {
 		}
 		baseGridW := slot.LoadW + effectivePVW + totalLoadpointW
 		if !modeAllows(p.Mode, baseGridW, a.GridW, a.BatteryW) {
-			return fmt.Errorf("slot %d violates mode %s", i, p.Mode)
+			return fmt.Errorf("slot %d violates mode %s: baseline_grid_w=%.9f grid_w=%.9f battery_w=%.9f",
+				i, p.Mode, baseGridW, a.GridW, a.BatteryW)
 		}
 		if !slot.Limits.allowsImport(a.GridW) || !slot.Limits.allowsExport(a.GridW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)

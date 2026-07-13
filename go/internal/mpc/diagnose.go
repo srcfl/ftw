@@ -77,18 +77,19 @@ type DiagnosticParams struct {
 // Diagnostic is the full post-mortem of the most recent Optimize call.
 // Returned by Service.Diagnose for the /api/mpc/diagnose endpoint.
 type Diagnostic struct {
-	ComputedAtMs   int64            `json:"computed_at_ms"`
-	Zone           string           `json:"zone"`
-	Horizon        int              `json:"horizon_slots"`
-	TotalCostOre   float64          `json:"total_cost_ore"`
-	Solver         *SolverInfo      `json:"solver,omitempty"`
-	DPShadow       *ShadowPlan      `json:"dp_shadow,omitempty"`
-	OptimizerInput json.RawMessage  `json:"optimizer_input,omitempty"`
-	Params         DiagnosticParams `json:"params"`
-	Slots          []DiagnosticSlot `json:"slots"`
-	LoadpointID    string           `json:"loadpoint_id,omitempty"`
-	LastReplanAtMs int64            `json:"last_replan_at_ms"`
-	LastReason     string           `json:"last_reason"`
+	ComputedAtMs       int64            `json:"computed_at_ms"`
+	Zone               string           `json:"zone"`
+	Horizon            int              `json:"horizon_slots"`
+	TotalCostOre       float64          `json:"total_cost_ore"`
+	Solver             *SolverInfo      `json:"solver,omitempty"`
+	DPShadow           *ShadowPlan      `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow *ShadowPlan      `json:"dp_evaluation_shadow,omitempty"`
+	OptimizerInput     json.RawMessage  `json:"optimizer_input,omitempty"`
+	Params             DiagnosticParams `json:"params"`
+	Slots              []DiagnosticSlot `json:"slots"`
+	LoadpointID        string           `json:"loadpoint_id,omitempty"`
+	LastReplanAtMs     int64            `json:"last_replan_at_ms"`
+	LastReason         string           `json:"last_reason"`
 }
 
 // Diagnose returns the inputs + outputs of the most recent Optimize
@@ -162,13 +163,14 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 		loadpointID = p.Loadpoint.ID
 	}
 	return &Diagnostic{
-		ComputedAtMs:   plan.GeneratedAtMs,
-		Zone:           zone,
-		Horizon:        plan.HorizonSlots,
-		TotalCostOre:   plan.TotalCostOre,
-		Solver:         plan.Solver,
-		DPShadow:       plan.DPShadow,
-		OptimizerInput: append(json.RawMessage(nil), plan.OptimizerInput...),
+		ComputedAtMs:       plan.GeneratedAtMs,
+		Zone:               zone,
+		Horizon:            plan.HorizonSlots,
+		TotalCostOre:       plan.TotalCostOre,
+		Solver:             plan.Solver,
+		DPShadow:           plan.DPShadow,
+		DPEvaluationShadow: plan.DPEvaluationShadow,
+		OptimizerInput:     append(json.RawMessage(nil), plan.OptimizerInput...),
 		Params: DiagnosticParams{
 			Mode:                       p.Mode,
 			InitialSoCPct:              p.InitialSoCPct,
@@ -349,16 +351,17 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		horizon = len(actions)
 	}
 	plan := &Plan{
-		GeneratedAtMs:  generatedAtMs,
-		Mode:           params.Mode,
-		HorizonSlots:   horizon,
-		CapacityWh:     params.CapacityWh,
-		InitialSoCPct:  params.InitialSoCPct,
-		TotalCostOre:   d.TotalCostOre,
-		Actions:        actions,
-		Solver:         d.Solver,
-		DPShadow:       d.DPShadow,
-		OptimizerInput: append(json.RawMessage(nil), d.OptimizerInput...),
+		GeneratedAtMs:      generatedAtMs,
+		Mode:               params.Mode,
+		HorizonSlots:       horizon,
+		CapacityWh:         params.CapacityWh,
+		InitialSoCPct:      params.InitialSoCPct,
+		TotalCostOre:       d.TotalCostOre,
+		Actions:            actions,
+		Solver:             d.Solver,
+		DPShadow:           d.DPShadow,
+		DPEvaluationShadow: d.DPEvaluationShadow,
+		OptimizerInput:     append(json.RawMessage(nil), d.OptimizerInput...),
 	}
 	return plan, slots, params, time.UnixMilli(replanAtMs), true
 }

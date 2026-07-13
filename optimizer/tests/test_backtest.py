@@ -4,6 +4,7 @@ import pytest
 
 from ftw_optimizer.backtest import (
     SnapshotSkip,
+    dp_evaluation_reference,
     realized_first_slot,
     request_from_diagnostic,
     select_summaries,
@@ -99,3 +100,25 @@ def test_realized_first_slot_reprices_both_actions_against_actual_base() -> None
     assert result["new_grid_w"] == 100
     assert result["delta_ore"] == pytest.approx(-5)
     assert not result["mode_violation"]
+
+
+def test_dp_evaluation_reference_prefers_same_input_shadow() -> None:
+    value = diagnostic()
+    value["solver"] = {"engine": "cvxpy"}
+    value["optimizer_input"] = {"schema_version": 1}
+    value["slots"][0]["battery_w"] = -900
+    value["dp_evaluation_shadow"] = {
+        "total_cost_ore": 8.25,
+        "first_action": {"battery_w": -200},
+    }
+    cost, action = dp_evaluation_reference(value)
+    assert cost == 8.25
+    assert action["battery_w"] == -200
+
+
+def test_dp_evaluation_reference_rejects_active_plan_without_shadow() -> None:
+    value = diagnostic()
+    value["solver"] = {"engine": "cvxpy"}
+    value["optimizer_input"] = {"schema_version": 1}
+    with pytest.raises(SnapshotSkip, match="same-input DP"):
+        dp_evaluation_reference(value)

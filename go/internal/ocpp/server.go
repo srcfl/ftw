@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
@@ -29,10 +30,11 @@ import (
 
 // Server is a running OCPP 1.6J Central System.
 type Server struct {
-	cfg     *Config
-	cs      ocpp16.CentralSystem
-	handler *Handler
-	done    chan struct{}
+	cfg      *Config
+	cs       ocpp16.CentralSystem
+	handler  *Handler
+	done     chan struct{}
+	stopOnce sync.Once
 }
 
 // Start brings up the OCPP CS on the configured bind:port. Returns
@@ -98,7 +100,7 @@ func (s *Server) Stop() {
 	if s == nil || s.cs == nil {
 		return
 	}
-	s.cs.Stop()
+	s.stopOnce.Do(func() { s.cs.Stop() })
 	select {
 	case <-s.done:
 	case <-time.After(5 * time.Second):

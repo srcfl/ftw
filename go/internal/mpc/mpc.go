@@ -325,24 +325,25 @@ type Baselines struct {
 
 // Plan is the output.
 type Plan struct {
-	GeneratedAtMs int64       `json:"generated_at_ms"`
-	Mode          Mode        `json:"mode"`
-	HorizonSlots  int         `json:"horizon_slots"`
-	CapacityWh    float64     `json:"capacity_wh"`
-	InitialSoCPct float64     `json:"initial_soc_pct"`
-	TotalCostOre  float64     `json:"total_cost_ore"`
-	Actions       []Action    `json:"actions"`
-	Baselines     *Baselines  `json:"baselines,omitempty"`
-	Solver        *SolverInfo `json:"solver,omitempty"`
-	DPShadow      *ShadowPlan `json:"dp_shadow,omitempty"`
+	GeneratedAtMs      int64       `json:"generated_at_ms"`
+	Mode               Mode        `json:"mode"`
+	HorizonSlots       int         `json:"horizon_slots"`
+	CapacityWh         float64     `json:"capacity_wh"`
+	InitialSoCPct      float64     `json:"initial_soc_pct"`
+	TotalCostOre       float64     `json:"total_cost_ore"`
+	Actions            []Action    `json:"actions"`
+	Baselines          *Baselines  `json:"baselines,omitempty"`
+	Solver             *SolverInfo `json:"solver,omitempty"`
+	DPShadow           *ShadowPlan `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow *ShadowPlan `json:"dp_evaluation_shadow,omitempty"`
 	// OptimizerInput is the exact versioned request used by an external
 	// optimizer. It is omitted from the live plan API and copied into the
 	// persisted Diagnostic for deterministic replay.
 	OptimizerInput json.RawMessage `json:"-"`
 }
 
-// ShadowPlan is the legacy Go-DP candidate calculated alongside an active
-// mathematical plan. It is diagnostic only and is never read by dispatch.
+// ShadowPlan is a Go-DP candidate calculated alongside an active mathematical
+// plan. It is diagnostic only and is never read by dispatch.
 // ActiveMinusShadowOre is negative when the Python plan has lower raw cost.
 type ShadowPlan struct {
 	TotalCostOre           float64     `json:"total_cost_ore"`
@@ -1118,6 +1119,10 @@ func annotateCurtailment(plan *Plan, p Params) {
 //	actW          = battery command (+ charge, − discharge)
 func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 	const eps = 1e-6
+	// solverTolW covers sub-watt floating-point residue from continuous
+	// optimizers. It is deliberately much smaller than any dispatchable
+	// battery step and caps worst-case policy leakage at 2.4 Wh/day.
+	const solverTolW = 0.1
 	// modeTolW absorbs action-grid discretization at the boundary so a
 	// 50 W overshoot doesn't disqualify an otherwise-correct action.
 	// Without it, ActionLevels=41 (450 W step) frequently can't find a
@@ -1156,7 +1161,7 @@ func modeAllows(m Mode, baselineGridW, gridW, actW float64) bool {
 		if baselineGridW < 0 {
 			minGrid = baselineGridW
 		}
-		return gridW >= minGrid-eps
+		return gridW >= minGrid-solverTolW
 	case ModeArbitrage:
 		return true
 	default:

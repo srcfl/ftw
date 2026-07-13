@@ -143,7 +143,10 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	if plan.DPShadow.ComparedSlots != len(plan.Actions) || plan.DPShadow.FirstAction == nil {
 		t.Fatalf("shadow comparison incomplete: %+v", plan.DPShadow)
 	}
-	if d := svc.Diagnose(); d == nil || d.DPShadow == nil {
-		t.Fatal("persisted diagnostic omitted DP shadow")
+	if plan.DPEvaluationShadow == nil || plan.DPEvaluationShadow.ForecastBasis != "same base forecast input" {
+		t.Fatalf("same-input DP evaluation shadow missing: %+v", plan.DPEvaluationShadow)
+	}
+	if d := svc.Diagnose(); d == nil || d.DPShadow == nil || d.DPEvaluationShadow == nil {
+		t.Fatal("persisted diagnostic omitted a DP shadow")
 	}
 }

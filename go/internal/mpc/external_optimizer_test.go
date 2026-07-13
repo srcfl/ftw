@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,91 @@ func TestValidatePlanRejectsBrokenGridBalance(t *testing.T) {
 	plan.Actions[0].GridW += 100
 	if err := ValidatePlan(slots, p, &plan); err == nil {
 		t.Fatal("ValidatePlan accepted broken grid balance")
+	}
+}
+
+func TestValidatePlanAcceptsSubWattSolverResidueInPassiveMode(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
+	p := Params{
+		Mode: ModePassiveArbitrage, CapacityWh: 10000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	plan := Plan{TotalCostOre: -0.0000025, Actions: []Action{{
+		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.0001, GridW: -0.0001,
+		SoCPct: 49.99999975, CostOre: -0.0000025,
+	}}}
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("ValidatePlan rejected numerical solver residue: %v", err)
+	}
+}
+
+func TestValidatePlanModeErrorIncludesPowerValues(t *testing.T) {
+	slots := []Slot{{StartMs: 1, LenMin: 15, PriceOre: 100, Confidence: 1, LoadW: 0}}
+	p := Params{
+		Mode: ModePassiveArbitrage, CapacityWh: 10000,
+		SoCMinPct: 10, SoCMaxPct: 95, InitialSoCPct: 50,
+		MaxChargeW: 5000, MaxDischargeW: 5000,
+		ChargeEfficiency: 1, DischargeEfficiency: 1,
+	}
+	plan := Plan{TotalCostOre: -0.0025, Actions: []Action{{
+		SlotStartMs: 1, SlotLenMin: 15, BatteryW: -0.2, GridW: -0.2,
+		SoCPct: 49.9995, CostOre: -0.005,
+	}}}
+	plan.TotalCostOre = plan.Actions[0].CostOre
+	err := ValidatePlan(slots, p, &plan)
+	if err == nil || !strings.Contains(err.Error(), "baseline_grid_w=") || !strings.Contains(err.Error(), "battery_w=") {
+		t.Fatalf("expected detailed mode error, got %v", err)
+	}
+}
+
+func TestExternalOptimizerStopsWorkerAfterIdleTimeout(t *testing.T) {
+	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "external-worker-helper" {
+		time.Sleep(10 * time.Second)
+		return
+	}
+	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
+		Command: []string{os.Args[0], "-test.run=TestExternalOptimizerStopsWorkerAfterIdleTimeout", "--", "external-worker-helper"},
+		Timeout: time.Second, IdleTimeout: 30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer optimizer.Close()
+
+	optimizer.mu.Lock()
+	if err := optimizer.ensureStartedLocked(); err != nil {
+		optimizer.mu.Unlock()
+		t.Fatal(err)
+	}
+	firstProcess := optimizer.cmd.Process.Pid
+	optimizer.scheduleIdleStopLocked()
+	optimizer.mu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		optimizer.mu.Lock()
+		stopped := optimizer.cmd == nil
+		optimizer.mu.Unlock()
+		if stopped {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	optimizer.mu.Lock()
+	if optimizer.cmd != nil {
+		optimizer.mu.Unlock()
+		t.Fatal("worker remained running after idle timeout")
+	}
+	if err := optimizer.ensureStartedLocked(); err != nil {
+		optimizer.mu.Unlock()
+		t.Fatal(err)
+	}
+	secondProcess := optimizer.cmd.Process.Pid
+	optimizer.mu.Unlock()
+	if secondProcess == firstProcess {
+		t.Fatalf("worker did not restart: pid=%d", firstProcess)
 	}
 }
 
@@ -120,6 +206,7 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 		Command:   []string{python, "-m", "ftw_optimizer.worker"},
 		ModuleDir: moduleDir, Timeout: 20 * time.Second,
 		Solver: "HIGHS", Formulation: "auto", MIPRelGap: 0.001,
+		IdleTimeout: 30 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -136,6 +223,17 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 	if plan.Actions[0].BatteryW <= 0 || plan.Actions[1].BatteryW >= 0 {
 		t.Fatalf("expected cheap-charge/expensive-discharge plan: %+v", plan.Actions)
 	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		optimizer.mu.Lock()
+		stopped := optimizer.cmd == nil
+		optimizer.mu.Unlock()
+		if stopped {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("real optimizer worker remained running after idle timeout")
 }
 
 func TestExternalOptimizerPlansMultipleLoadpoints(t *testing.T) {

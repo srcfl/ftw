@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,21 @@ func startServer(t *testing.T, tel *telemetry.Store) (int, *Server) {
 	}
 	t.Fatalf("server did not bind on port %d within deadline", port)
 	return 0, nil
+}
+
+func TestStopIsConcurrentAndIdempotent(t *testing.T) {
+	_, srv := startServer(t, telemetry.NewStore())
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			srv.Stop()
+		}()
+	}
+	wg.Wait()
+	srv.Stop()
 }
 
 func TestBootAndMeterValuesPushDerEV(t *testing.T) {
