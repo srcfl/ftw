@@ -3045,6 +3045,19 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		if pl.OptimizerCVaRWeight != nil {
 			cvarWeight = *pl.OptimizerCVaRWeight
 		}
+		var multistage mpc.MultistageOptimizerConfig
+		if ms := pl.OptimizerMultistage; ms != nil {
+			multistage = mpc.MultistageOptimizerConfig{
+				ScenarioLimit: ms.ScenarioLimit, BranchIntervalSlots: ms.BranchIntervalSlots,
+				BranchHorizonSlots: ms.BranchHorizonSlots, MaxBranching: ms.MaxBranching,
+				NearHorizonSlots: ms.NearHorizonSlots, MidHorizonSlots: ms.MidHorizonSlots,
+				MidBlockSlots: ms.MidBlockSlots, FarBlockSlots: ms.FarBlockSlots,
+				ServiceCVaRWeight: ms.ServiceCVaRWeight, ServiceCVaRAlpha: ms.ServiceCVaRAlpha,
+				EconomicCVaRWeight: ms.EconomicCVaRWeight, EconomicCVaRAlpha: ms.EconomicCVaRAlpha,
+				DecompositionThreshold: ms.DecompositionThreshold, DecompositionMethod: ms.DecompositionMethod,
+				PHMaxIterations: ms.PHMaxIterations, PHRho: ms.PHRho, PHToleranceW: ms.PHToleranceW,
+			}
+		}
 		ext, err := mpc.NewExternalOptimizer(mpc.ExternalOptimizerConfig{
 			Command:   []string{python, "-m", "ftw_optimizer.worker"},
 			ModuleDir: moduleDir, Timeout: timeout,
@@ -3052,6 +3065,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			MIPRelGap:  pl.OptimizerMIPRelGap,
 			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
 			IdleTimeout: idleTimeout,
+			Multistage:  multistage,
 		})
 		if err != nil {
 			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
@@ -3059,12 +3073,17 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			svc.Optimizer = ext
 			svc.EnableRecourseShadow = pl.OptimizerRecourseShadow
 			svc.RecourseNonAnticipativeSlots = pl.OptimizerRecourseNonAnticipativeSlots
+			svc.ChallengerPolicy = pl.OptimizerChallengerPolicy
+			if svc.ChallengerPolicy == "" {
+				svc.ChallengerPolicy = "recourse"
+			}
 			if svc.RecourseNonAnticipativeSlots <= 0 {
 				svc.RecourseNonAnticipativeSlots = 1
 			}
 			slog.Info("mpc: Python optimizer configured", "python", python,
 				"module_dir", moduleDir, "timeout", timeout, "idle_timeout", idleTimeout,
 				"recourse_shadow", svc.EnableRecourseShadow,
+				"challenger_policy", svc.ChallengerPolicy,
 				"recourse_non_anticipative_slots", svc.RecourseNonAnticipativeSlots)
 		}
 	} else {

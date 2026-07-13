@@ -170,3 +170,22 @@ state:
 #   optimizer_cvar_alpha: 0.90
 #   optimizer_recourse_shadow: false # diagnostic only; never controls dispatch
 #   optimizer_recourse_non_anticipative_slots: 1
+#   optimizer_challenger_policy: multistage # recourse | multistage
+#   optimizer_multistage:
+#     scenario_limit: 12
+#     branch_interval_slots: 4
+#     branch_horizon_slots: 48
+#     max_branching: 2
+#     near_horizon_slots: 16
+#     mid_horizon_slots: 96
+#     mid_block_slots: 2
+#     far_block_slots: 4
+#     service_cvar_weight: 1.0
+#     service_cvar_alpha: 0.95
+#     economic_cvar_weight: 0
+#     economic_cvar_alpha: 0.90
+#     decomposition_threshold: 20
+#     decomposition_method: auto # auto | extensive | progressive_hedging
+#     ph_max_iterations: 8
+#     ph_rho: 50
+#     ph_tolerance_w: 5

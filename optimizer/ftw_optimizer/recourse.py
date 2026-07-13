@@ -130,9 +130,9 @@ def solve_storage_recourse(payload: dict[str, Any]) -> dict[str, Any]:
     expected_pv_bonus: cp.Expression = cp.Constant(0.0)
     strict_sc_penalty: cp.Expression = cp.Constant(0.0)
     worst_service_slack = cp.Variable(nonneg=True, name="worst_service_slack")
-    unsafe_cycle = bool(np.any(eff_import < 0))
-    unsafe_meter_split = bool(np.any(eff_import < eff_export - 1e-9))
     bonus_ore = max(0.0, finite_number(settings.get("pv_charge_bonus_ore_kwh", 0), "settings.pv_charge_bonus_ore_kwh"))
+    unsafe_cycle = bool(np.any(eff_import < 0)) or bonus_ore > 0
+    unsafe_meter_split = bool(np.any(eff_import < eff_export - 1e-9))
 
     for si, scenario in enumerate(scenarios):
         probability = float(scenario["probability"])

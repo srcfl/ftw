@@ -303,6 +303,25 @@ planner:
   optimizer_cvar_alpha: 0.90
   optimizer_recourse_shadow: false
   optimizer_recourse_non_anticipative_slots: 1
+  optimizer_challenger_policy: multistage
+  optimizer_multistage:
+    scenario_limit: 12
+    branch_interval_slots: 4
+    branch_horizon_slots: 48
+    max_branching: 2
+    near_horizon_slots: 16
+    mid_horizon_slots: 96
+    mid_block_slots: 2
+    far_block_slots: 4
+    service_cvar_weight: 1.0
+    service_cvar_alpha: 0.95
+    economic_cvar_weight: 0
+    economic_cvar_alpha: 0.90
+    decomposition_threshold: 20
+    decomposition_method: auto
+    ph_max_iterations: 8
+    ph_rho: 50
+    ph_tolerance_w: 5
 ```
 
 The planner emits grid-target slots that the control loop consumes in
@@ -315,12 +334,24 @@ trajectory automatically uses that DP for the affected replan. Full model,
 deployment, validation, and replay details are in [optimizer.md](optimizer.md).
 
 `optimizer_recourse_shadow` runs a storage-only stochastic challenger after the
-active champion solve. The first slot is non-anticipative by default; later
-storage decisions may adapt to each PV/load scenario. The challenger is scored
+active champion solve. `optimizer_challenger_policy` selects the two-stage
+`recourse` reference or the hierarchical `multistage` policy. The first slot is
+non-anticipative by default; later storage decisions may adapt only after their
+scenario-tree observation. The challenger is scored
 against the champion with independent virtual battery state and can never feed
 dispatch. Shadow evaluation pauses while a flexible EV or thermal contract is
 active, because those assets do not yet have equivalent stateful telemetry in
 the evaluator.
+
+The multistage defaults retain at most 12 net-energy/PV trajectory medoids, branch every
+four slots through the first 12 hours, keep the first four hours at 15-minute
+resolution, and move-block the far horizon to hourly decisions. Service CVaR is
+solved lexicographically before expected economic cost. `auto` decomposition
+uses Progressive Hedging only for eligible continuous arbitrage ensembles above
+the threshold; discrete cases are reduced and solved as an exact extensive
+HiGHS model. Under ordinary tariffs `auto` is an LP. It adds binary cycling or
+meter guards only when negative import prices or inverted import/export prices
+make simultaneous flows economically unsafe.
 
 ## `batteries`
 

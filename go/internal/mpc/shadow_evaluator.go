@@ -369,7 +369,7 @@ func shadowActionAt(plan *Plan, now time.Time) (Action, bool) {
 	for i, action := range plan.Actions {
 		endMs := action.SlotStartMs + int64(action.SlotLenMin)*60*1000
 		if nowMs >= action.SlotStartMs && nowMs < endMs {
-			if plan.Solver != nil && plan.Solver.ScenarioPolicy == "recourse" &&
+			if plan.Solver != nil && (plan.Solver.ScenarioPolicy == "recourse" || plan.Solver.ScenarioPolicy == "multistage") &&
 				plan.Solver.NonAnticipativeSlots > 0 && i >= plan.Solver.NonAnticipativeSlots {
 				return Action{}, false
 			}
@@ -445,6 +445,12 @@ func shadowPolicyID(plan *Plan, p Params, storages []virtualStorage) string {
 	}
 	id := fmt.Sprintf("%s:%s:%s:%s:cvar=%g@%g", plan.Solver.Engine, plan.Solver.Backend,
 		version, plan.Mode, plan.Solver.CVaRWeight, plan.Solver.CVaRAlpha)
+	if plan.Solver.PolicyConfig != "" {
+		id += ":config=" + plan.Solver.PolicyConfig
+	}
+	id += fmt.Sprintf(":na=%d:service-cvar=%g@%g:economic-cvar=%g@%g", plan.Solver.NonAnticipativeSlots,
+		plan.Solver.ServiceCVaRWeight, plan.Solver.ServiceCVaRAlpha,
+		plan.Solver.EconomicCVaRWeight, plan.Solver.EconomicCVaRAlpha)
 	id += fmt.Sprintf(":terminal=%g:export=%g/%g/%g", p.TerminalSoCPrice,
 		p.ExportOrePerKWh, p.ExportBonusOreKwh, p.ExportFeeOreKwh)
 	id += fmt.Sprintf(":spread=%g:pvbonus=%g:pvsafety=%g", p.MinArbitrageSpreadOreKwh,

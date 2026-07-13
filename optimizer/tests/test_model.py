@@ -1,7 +1,17 @@
 from __future__ import annotations
 
+import copy
 import math
 
+import numpy as np
+
+from ftw_optimizer.multistage import clear_multistage_cache
+from ftw_optimizer.scenario_tree import (
+    Scenario,
+    build_scenario_tree,
+    decision_blocks,
+    reduce_scenarios,
+)
 from ftw_optimizer.worker import handle
 
 
@@ -179,6 +189,362 @@ def test_recourse_rejects_fractional_non_anticipative_prefix() -> None:
     response = handle(request)
     assert not response["ok"]
     assert response["error"]["code"] == "invalid_request"
+
+
+def test_multistage_tree_is_hierarchical_and_never_remerges() -> None:
+    scenarios = (
+        Scenario("base", 0.5, np.asarray([0, 0, 100, 100]), np.zeros(4)),
+        Scenario("high", 0.3, np.asarray([0, 0, 500, 500]), np.zeros(4)),
+        Scenario("low", 0.2, np.asarray([0, 0, 0, 0]), np.zeros(4)),
+    )
+    tree = build_scenario_tree(
+        scenarios,
+        n=4,
+        first_stage_slots=1,
+        branch_interval_slots=1,
+        branch_horizon_slots=4,
+        max_branching=2,
+    )
+    assert len(set(tree.node_at[:, 0])) == 1
+    for left in range(len(scenarios)):
+        for right in range(left + 1, len(scenarios)):
+            separated = False
+            for slot in range(4):
+                same = tree.node_at[left, slot] == tree.node_at[right, slot]
+                assert not (separated and same)
+                separated = separated or not same
+
+
+def test_scenario_reduction_preserves_base_and_probability_mass() -> None:
+    scenarios = [
+        Scenario(
+            "base" if i == 0 else f"path-{i}",
+            0.1,
+            np.full(8, float(i * 100)),
+            np.zeros(8),
+        )
+        for i in range(10)
+    ]
+    reduced = reduce_scenarios(scenarios, 4, np.full(8, 0.25))
+    assert reduced.original_count == 10
+    assert len(reduced.scenarios) == 4
+    assert reduced.scenarios[0].id == "base"
+    assert math.isclose(sum(s.probability for s in reduced.scenarios), 1.0)
+    assert reduced.reduction_error > 0
+
+
+def test_scenario_geometry_preserves_pv_load_composition() -> None:
+    scenarios = (
+        Scenario(
+            "base",
+            0.5,
+            np.asarray([1000.0, 1000.0]),
+            np.asarray([-500.0, -500.0]),
+        ),
+        Scenario(
+            "same-net",
+            0.5,
+            np.asarray([500.0, 500.0]),
+            np.asarray([0.0, 0.0]),
+        ),
+    )
+    tree = build_scenario_tree(
+        scenarios,
+        n=2,
+        first_stage_slots=1,
+        branch_interval_slots=1,
+        branch_horizon_slots=2,
+        max_branching=2,
+    )
+    assert tree.node_at[0, 1] != tree.node_at[1, 1]
+    reduced = reduce_scenarios(list(scenarios), 1, np.asarray([0.25, 0.25]))
+    assert reduced.reduction_error > 0
+
+
+def test_move_blocks_split_at_every_information_branch() -> None:
+    blocks = decision_blocks(
+        n=20,
+        near_horizon_slots=4,
+        mid_horizon_slots=12,
+        mid_block_slots=3,
+        far_block_slots=6,
+        branch_slots=(1, 5, 9, 13),
+    )
+    assert blocks[:4] == ((0, 1), (1, 2), (2, 3), (3, 4))
+    for start, end in blocks:
+        assert not any(start < branch < end for branch in (1, 5, 9, 13))
+
+
+def test_multistage_model_reuses_dpp_cache_and_keeps_first_action_shared() -> None:
+    clear_multistage_cache()
+    request = base_request()
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "non_anticipative_slots": 1,
+            "branch_interval_slots": 1,
+            "branch_horizon_slots": 2,
+            "scenario_limit": 4,
+            "service_cvar_weight": 1,
+            "economic_cvar_weight": 0,
+            "multistage_backend": "cvxpy",
+        }
+    )
+    request["scenarios"] = [
+        {"id": "base", "probability": 0.6, "load_w": [500, 2500], "pv_w": [0, 0]},
+        {"id": "high", "probability": 0.4, "load_w": [500, 5000], "pv_w": [0, 0]},
+    ]
+    first = handle(request)
+    assert first["ok"], first
+    assert first["solver"]["scenario_policy"] == "multistage"
+    assert first["solver"]["policy_version"] == "storage-multistage-v1"
+    assert first["solver"]["dpp"] is True
+    assert first["solver"]["cache_hit"] is False
+    assert first["solver"]["economic_cvar_weight"] == 0
+
+    request["request_id"] = "test-2"
+    second = handle(request)
+    assert second["ok"], second
+    assert second["solver"]["cache_hit"] is True
+    assert second["solver"]["build_ms"] == 0
+    assert math.isclose(
+        first["plan"]["actions"][0]["battery_w"],
+        second["plan"]["actions"][0]["battery_w"],
+        abs_tol=1e-3,
+    )
+
+    request["request_id"] = "test-3"
+    request["slots"][0]["price_ore"] = 400
+    request["slots"][1]["price_ore"] = 20
+    request["slots"][1]["spot_ore"] = 10
+    third = handle(request)
+    assert third["ok"], third
+    assert third["solver"]["cache_hit"] is True
+    assert third["plan"]["actions"][0]["battery_w"] < 0
+
+
+def test_multistage_reduces_large_ensemble_before_extensive_solve() -> None:
+    clear_multistage_cache()
+    request = base_request()
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "scenario_limit": 6,
+            "decomposition_threshold": 3,
+            "branch_interval_slots": 1,
+            "branch_horizon_slots": 2,
+        }
+    )
+    request["scenarios"] = [
+        {
+            "id": "base" if i == 0 else f"path-{i}",
+            "probability": 0.2,
+            "load_w": [500 + i * 100, 2500 + i * 200],
+            "pv_w": [0, 0],
+        }
+        for i in range(5)
+    ]
+    response = handle(request)
+    assert response["ok"], response
+    assert response["solver"]["scenario_original_count"] == 5
+    assert response["solver"]["scenario_count"] == 3
+    assert response["solver"]["decomposition"] == "direct-highs-scenario-reduction-extensive"
+
+
+def test_direct_highs_matches_cvxpy_multistage_reference() -> None:
+    request = base_request()
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "scenario_limit": 4,
+            "branch_interval_slots": 1,
+            "branch_horizon_slots": 2,
+            "multistage_backend": "highs",
+            "economic_cvar_weight": 0.25,
+        }
+    )
+    request["storages"][0]["initial_energy_wh"] = 500
+    request["storages"].append(
+        {
+            "id": "shed",
+            "capacity_wh": 5000,
+            "initial_energy_wh": 2500,
+            "min_energy_wh": 500,
+            "max_energy_wh": 4500,
+            "max_charge_w": 2000,
+            "max_discharge_w": 2500,
+            "charge_efficiency": 0.92,
+            "discharge_efficiency": 0.93,
+            "terminal_price_ore_kwh": 25,
+            "cycle_cost_ore_kwh": 8,
+        }
+    )
+    request["scenarios"] = [
+        {"id": "base", "probability": 0.6, "load_w": [500, 2500], "pv_w": [0, 0]},
+        {"id": "high", "probability": 0.4, "load_w": [500, 5000], "pv_w": [0, 0]},
+    ]
+    reference_request = copy.deepcopy(request)
+    reference_request["request_id"] = "cvxpy-reference"
+    reference_request["settings"]["multistage_backend"] = "cvxpy"
+
+    direct = handle(request)
+    reference = handle(reference_request)
+    assert direct["ok"], direct
+    assert reference["ok"], reference
+    assert direct["solver"]["engine"] == "highspy"
+    assert direct["solver"]["formulation"] == "multistage-lp"
+    assert direct["solver"]["dpp"] is False
+    assert math.isclose(
+        direct["solver"]["objective_ore"],
+        reference["solver"]["objective_ore"],
+        abs_tol=1e-4,
+    )
+    assert math.isclose(
+        direct["plan"]["actions"][0]["battery_w"],
+        reference["plan"]["actions"][0]["battery_w"],
+        abs_tol=1e-3,
+    )
+
+
+def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:
+    negative_price = base_request()
+    negative_price["settings"]["scenario_policy"] = "multistage"
+    negative_price["slots"][0]["price_ore"] = -10
+    response = handle(negative_price)
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "multistage-milp"
+
+    shared_bonus = base_request()
+    shared_bonus["settings"]["pv_charge_bonus_ore_kwh"] = 1
+    response = handle(shared_bonus)
+    assert response["ok"], response
+    assert response["solver"]["formulation"] == "milp"
+
+    recourse_bonus = base_request()
+    recourse_bonus["settings"].update(
+        {"scenario_policy": "recourse", "pv_charge_bonus_ore_kwh": 1}
+    )
+    response = handle(recourse_bonus)
+    assert response["ok"], response
+    assert response["solver"]["formulation"] == "stochastic-recourse-milp"
+
+    pv_bonus = base_request()
+    pv_bonus["settings"].update(
+        {"scenario_policy": "multistage", "pv_charge_bonus_ore_kwh": 1}
+    )
+    response = handle(pv_bonus)
+    assert response["ok"], response
+    assert response["solver"]["engine"] == "cvxpy"
+    assert response["solver"]["formulation"] == "multistage-milp"
+
+
+def test_multistage_curtailment_cannot_create_room_for_passive_export() -> None:
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "passive_arbitrage",
+            "scenario_policy": "multistage",
+            "near_horizon_slots": 1,
+            "mid_horizon_slots": 1,
+            "far_block_slots": 2,
+            "branch_horizon_slots": 1,
+        }
+    )
+    request["slots"] = [
+        {
+            "start_ms": 1, "len_min": 60, "price_ore": 10, "spot_ore": 0,
+            "confidence": 1, "pv_w": 0, "load_w": 500,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+        {
+            "start_ms": 3600001, "len_min": 60, "price_ore": 300,
+            "spot_ore": 200, "confidence": 1, "pv_w": -1000, "load_w": 500,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+        {
+            "start_ms": 7200001, "len_min": 60, "price_ore": 300,
+            "spot_ore": 200, "confidence": 1, "pv_w": 0, "load_w": 2000,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+    ]
+    request["storages"][0]["initial_energy_wh"] = 8000
+    request["storages"][0]["terminal_price_ore_kwh"] = 0
+
+    for backend in ("highs", "cvxpy"):
+        candidate = copy.deepcopy(request)
+        candidate["request_id"] = f"passive-curtail-{backend}"
+        candidate["settings"]["multistage_backend"] = backend
+        response = handle(candidate)
+        assert response["ok"], response
+        for action in response["plan"]["actions"]:
+            post_curtail_baseline = action["grid_w"] - action["battery_w"]
+            assert action["grid_w"] >= min(post_curtail_baseline, 0.0) - 1e-3
+        assert response["plan"]["actions"][1]["battery_w"] >= -1e-3
+
+
+def test_multistage_uses_progressive_hedging_only_for_eligible_large_convex_case() -> None:
+    request = base_request()
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "formulation": "relaxed",
+            "scenario_limit": 6,
+            "decomposition_threshold": 3,
+            "decomposition_method": "progressive_hedging",
+            "branch_interval_slots": 1,
+            "branch_horizon_slots": 2,
+            "ph_max_iterations": 4,
+            "ph_tolerance_w": 10,
+        }
+    )
+    request["scenarios"] = [
+        {
+            "id": "base" if i == 0 else f"path-{i}",
+            "probability": 0.2,
+            "load_w": [500 + i * 50, 2500 + i * 100],
+            "pv_w": [0, 0],
+        }
+        for i in range(5)
+    ]
+    response = handle(request)
+    assert response["ok"], response
+    assert response["solver"]["decomposition"] == "progressive-hedging"
+    assert response["solver"]["formulation"] == "multistage-ph-qp"
+    assert response["solver"]["ph_residual_w"] <= 10
+
+
+def test_progressive_hedging_refuses_discrete_mode() -> None:
+    request = base_request()
+    request["settings"].update(
+        {
+            "scenario_policy": "multistage",
+            "decomposition_method": "progressive_hedging",
+        }
+    )
+    response = handle(request)
+    assert not response["ok"]
+    assert "not eligible" in response["error"]["message"]
+
+
+def test_multistage_rejects_unobserved_flexible_assets() -> None:
+    request = base_request()
+    request["settings"]["scenario_policy"] = "multistage"
+    request["flex_loads"] = [
+        {
+            "id": "car",
+            "capacity_wh": 40000,
+            "initial_energy_wh": 10000,
+            "max_energy_wh": 40000,
+            "target_energy_wh": 12000,
+            "target_slot": 1,
+            "charge_efficiency": 1,
+            "allowed_steps_w": [0, 2000],
+        }
+    ]
+    response = handle(request)
+    assert not response["ok"]
+    assert "flex_loads" in response["error"]["message"]
 
 
 def test_rejects_wrong_site_sign() -> None:

@@ -455,6 +455,26 @@ func (e *EVCharger) Validate() error {
 	return nil
 }
 
+type OptimizerMultistage struct {
+	ScenarioLimit          int      `yaml:"scenario_limit,omitempty" json:"scenario_limit,omitempty"`
+	BranchIntervalSlots    int      `yaml:"branch_interval_slots,omitempty" json:"branch_interval_slots,omitempty"`
+	BranchHorizonSlots     int      `yaml:"branch_horizon_slots,omitempty" json:"branch_horizon_slots,omitempty"`
+	MaxBranching           int      `yaml:"max_branching,omitempty" json:"max_branching,omitempty"`
+	NearHorizonSlots       int      `yaml:"near_horizon_slots,omitempty" json:"near_horizon_slots,omitempty"`
+	MidHorizonSlots        int      `yaml:"mid_horizon_slots,omitempty" json:"mid_horizon_slots,omitempty"`
+	MidBlockSlots          int      `yaml:"mid_block_slots,omitempty" json:"mid_block_slots,omitempty"`
+	FarBlockSlots          int      `yaml:"far_block_slots,omitempty" json:"far_block_slots,omitempty"`
+	ServiceCVaRWeight      *float64 `yaml:"service_cvar_weight,omitempty" json:"service_cvar_weight,omitempty"`
+	ServiceCVaRAlpha       float64  `yaml:"service_cvar_alpha,omitempty" json:"service_cvar_alpha,omitempty"`
+	EconomicCVaRWeight     float64  `yaml:"economic_cvar_weight,omitempty" json:"economic_cvar_weight,omitempty"`
+	EconomicCVaRAlpha      float64  `yaml:"economic_cvar_alpha,omitempty" json:"economic_cvar_alpha,omitempty"`
+	DecompositionThreshold int      `yaml:"decomposition_threshold,omitempty" json:"decomposition_threshold,omitempty"`
+	DecompositionMethod    string   `yaml:"decomposition_method,omitempty" json:"decomposition_method,omitempty"`
+	PHMaxIterations        int      `yaml:"ph_max_iterations,omitempty" json:"ph_max_iterations,omitempty"`
+	PHRho                  float64  `yaml:"ph_rho,omitempty" json:"ph_rho,omitempty"`
+	PHToleranceW           float64  `yaml:"ph_tolerance_w,omitempty" json:"ph_tolerance_w,omitempty"`
+}
+
 // Planner configures the MPC scheduler (optional — disabled if omitted).
 // Mode: "self_consumption" (default) | "cheap_charge" | "arbitrage".
 type Planner struct {
@@ -466,22 +486,24 @@ type Planner struct {
 	// OptimizerCommand is the Python executable used for the local worker.
 	// It is an executable path, not a shell command. The module invocation is
 	// fixed by the host to avoid shell parsing and configuration injection.
-	OptimizerCommand                      string   `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
-	OptimizerDir                          string   `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
-	OptimizerSolver                       string   `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
-	OptimizerFormulation                  string   `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
-	OptimizerTimeoutS                     float64  `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
-	OptimizerIdleTimeoutS                 float64  `yaml:"optimizer_idle_timeout_s,omitempty" json:"optimizer_idle_timeout_s,omitempty"`
-	OptimizerMIPRelGap                    float64  `yaml:"optimizer_mip_rel_gap,omitempty" json:"optimizer_mip_rel_gap,omitempty"`
-	OptimizerCVaRWeight                   *float64 `yaml:"optimizer_cvar_weight,omitempty" json:"optimizer_cvar_weight,omitempty"`
-	OptimizerCVaRAlpha                    float64  `yaml:"optimizer_cvar_alpha,omitempty" json:"optimizer_cvar_alpha,omitempty"`
-	OptimizerRecourseShadow               bool     `yaml:"optimizer_recourse_shadow,omitempty" json:"optimizer_recourse_shadow,omitempty"`
-	OptimizerRecourseNonAnticipativeSlots int      `yaml:"optimizer_recourse_non_anticipative_slots,omitempty" json:"optimizer_recourse_non_anticipative_slots,omitempty"`
-	BaseLoadW                             float64  `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
-	HorizonHours                          int      `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
-	IntervalMin                           int      `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
-	SoCMinPct                             float64  `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
-	SoCMaxPct                             float64  `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+	OptimizerCommand                      string               `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
+	OptimizerDir                          string               `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
+	OptimizerSolver                       string               `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
+	OptimizerFormulation                  string               `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
+	OptimizerTimeoutS                     float64              `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
+	OptimizerIdleTimeoutS                 float64              `yaml:"optimizer_idle_timeout_s,omitempty" json:"optimizer_idle_timeout_s,omitempty"`
+	OptimizerMIPRelGap                    float64              `yaml:"optimizer_mip_rel_gap,omitempty" json:"optimizer_mip_rel_gap,omitempty"`
+	OptimizerCVaRWeight                   *float64             `yaml:"optimizer_cvar_weight,omitempty" json:"optimizer_cvar_weight,omitempty"`
+	OptimizerCVaRAlpha                    float64              `yaml:"optimizer_cvar_alpha,omitempty" json:"optimizer_cvar_alpha,omitempty"`
+	OptimizerRecourseShadow               bool                 `yaml:"optimizer_recourse_shadow,omitempty" json:"optimizer_recourse_shadow,omitempty"`
+	OptimizerRecourseNonAnticipativeSlots int                  `yaml:"optimizer_recourse_non_anticipative_slots,omitempty" json:"optimizer_recourse_non_anticipative_slots,omitempty"`
+	OptimizerChallengerPolicy             string               `yaml:"optimizer_challenger_policy,omitempty" json:"optimizer_challenger_policy,omitempty"`
+	OptimizerMultistage                   *OptimizerMultistage `yaml:"optimizer_multistage,omitempty" json:"optimizer_multistage,omitempty"`
+	BaseLoadW                             float64              `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
+	HorizonHours                          int                  `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
+	IntervalMin                           int                  `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMinPct                             float64              `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
+	SoCMaxPct                             float64              `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
 	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
 	// SoC-percentage safety floor was replaced by downside-PV planning
@@ -1520,6 +1542,36 @@ func (c *Config) Validate() error {
 		}
 		if p.OptimizerRecourseNonAnticipativeSlots < 0 {
 			return errors.New("planner.optimizer_recourse_non_anticipative_slots must be non-negative")
+		}
+		switch p.OptimizerChallengerPolicy {
+		case "", "recourse", "multistage":
+		default:
+			return fmt.Errorf("planner.optimizer_challenger_policy must be recourse or multistage, got %q", p.OptimizerChallengerPolicy)
+		}
+		if ms := p.OptimizerMultistage; ms != nil {
+			ints := []int{ms.ScenarioLimit, ms.BranchIntervalSlots, ms.BranchHorizonSlots,
+				ms.MaxBranching, ms.NearHorizonSlots, ms.MidHorizonSlots, ms.MidBlockSlots,
+				ms.FarBlockSlots, ms.DecompositionThreshold, ms.PHMaxIterations}
+			for _, value := range ints {
+				if value < 0 {
+					return errors.New("planner.optimizer_multistage integer settings must be non-negative")
+				}
+			}
+			if ms.MaxBranching == 1 {
+				return errors.New("planner.optimizer_multistage.max_branching must be 0 (default) or at least 2")
+			}
+			if (ms.ServiceCVaRWeight != nil && *ms.ServiceCVaRWeight < 0) || ms.EconomicCVaRWeight < 0 || ms.PHRho < 0 || ms.PHToleranceW < 0 {
+				return errors.New("planner.optimizer_multistage risk weights, PH rho, and PH tolerance must be non-negative")
+			}
+			if (ms.ServiceCVaRAlpha < 0 || ms.ServiceCVaRAlpha >= 1) ||
+				(ms.EconomicCVaRAlpha < 0 || ms.EconomicCVaRAlpha >= 1) {
+				return errors.New("planner.optimizer_multistage CVaR alpha must be 0 (default) or in (0,1)")
+			}
+			switch ms.DecompositionMethod {
+			case "", "auto", "extensive", "progressive_hedging":
+			default:
+				return fmt.Errorf("planner.optimizer_multistage.decomposition_method is invalid: %q", ms.DecompositionMethod)
+			}
 		}
 	}
 	return nil

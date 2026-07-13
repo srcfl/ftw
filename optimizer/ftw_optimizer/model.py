@@ -93,8 +93,12 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         from .recourse import solve_storage_recourse
 
         return solve_storage_recourse(payload)
+    if scenario_policy == "multistage":
+        from .multistage import solve_storage_multistage
+
+        return solve_storage_multistage(payload)
     if scenario_policy != "shared":
-        raise ProtocolError("settings.scenario_policy must be shared or recourse")
+        raise ProtocolError("settings.scenario_policy must be shared, recourse, or multistage")
 
     started = time.perf_counter()
     slots = [require_dict(v, f"slots[{i}]") for i, v in enumerate(require_list(payload["slots"], "slots"))]
@@ -148,6 +152,13 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     if formulation not in {"auto", "milp", "relaxed"}:
         raise ProtocolError("settings.formulation must be auto, milp, or relaxed")
     force_milp = formulation == "milp"
+    pv_charge_bonus_ore = max(
+        0.0,
+        finite_number(
+            settings.get("pv_charge_bonus_ore_kwh", 0),
+            "settings.pv_charge_bonus_ore_kwh",
+        ),
+    )
     constraints: list[cp.Constraint] = []
     discrete = False
 
@@ -201,7 +212,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         # it may never worsen, and once cleared it can never return. In-bound
         # starts have zero recovery allowance, preserving hard min/max bounds.
         service_slack += cp.sum(lower_recovery[1:] + upper_recovery[1:]) / (capacity * n)
-        unsafe_cycle = bool(np.any(eff_import < 0))
+        unsafe_cycle = bool(np.any(eff_import < 0)) or pv_charge_bonus_ore > 0
         if force_milp or (formulation == "auto" and unsafe_cycle):
             direction = cp.Variable(n, boolean=True, name=f"storage_{i}_charge_mode")
             constraints += [charge <= max_charge * direction, discharge <= max_discharge * (1 - direction)]
@@ -426,7 +437,7 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         terminal_credit += terminal_price * storage.energy[-1] / 1000.0
 
     pv_bonus = cp.Constant(0.0)
-    bonus_ore = max(0.0, finite_number(settings.get("pv_charge_bonus_ore_kwh", 0), "settings.pv_charge_bonus_ore_kwh"))
+    bonus_ore = pv_charge_bonus_ore
     if bonus_ore > 0 and storages:
         charge_from_pv = cp.Variable(n, nonneg=True, name="charge_from_pv")
         constraints += [charge_from_pv <= total_charge, charge_from_pv <= np.maximum(0.0, -base_pv - base_load)]
