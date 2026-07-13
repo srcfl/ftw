@@ -245,9 +245,6 @@ def solve_direct_highs(
             export_upper = float(prepared.export_bound[t])
             if prepared.mode == "self_consumption":
                 import_upper = min(import_upper, float(base_import[t]) + 50.0)
-                export_upper = min(export_upper, float(pv_surplus[t]) + 50.0)
-            elif prepared.mode in {"cheap_charge", "passive_arbitrage"}:
-                export_upper = min(export_upper, float(pv_surplus[t]) + 1e-6)
             import_index = model.variable(0.0, import_upper)
             export_index = model.variable(0.0, export_upper)
             grid_import.append(import_index)
@@ -263,6 +260,16 @@ def solve_direct_highs(
                 _add(balance, index, 1.0)
             net = float(scenario.load[t] - pv_generation[t])
             model.row(balance, net, net)
+            if prepared.mode == "self_consumption":
+                model.row(
+                    {export_index: 1.0, curtail[t]: 1.0},
+                    upper=float(pv_surplus[t]) + 50.0,
+                )
+            elif prepared.mode in {"cheap_charge", "passive_arbitrage"}:
+                model.row(
+                    {export_index: 1.0, curtail[t]: 1.0},
+                    upper=float(pv_surplus[t]) + 1e-6,
+                )
             _add(
                 economic,
                 import_index,

@@ -133,6 +133,8 @@ score and safety metrics.
   state and meter flows remain scenario-specific. Normal tariff cases solve as
   LPs, while negative import or inverted import/export prices activate only the
   required HiGHS binary guards.
+- Passive-mode export is coupled to curtailment in the model, so curtailment
+  cannot create artificial headroom for battery-funded export.
 - Solver metadata exposes reduction error, tree size, move blocks, DPP cache,
   decomposition, solve phases, PH iterations, and PH residual.
 - Flexible EV/thermal contracts pause the challenger until their counterfactual

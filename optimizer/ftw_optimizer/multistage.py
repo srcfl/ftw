@@ -751,10 +751,10 @@ def _compile(prepared: PreparedMultistage, key: tuple[Any, ...]) -> CompiledMult
             if prepared.mode == "self_consumption":
                 constraints += [
                     grid_import <= base_import[si] + 50.0,
-                    grid_export <= pv_surplus[si] + 50.0,
+                    grid_export + curtail <= pv_surplus[si] + 50.0,
                 ]
             else:
-                constraints.append(grid_export <= pv_surplus[si] + 1e-6)
+                constraints.append(grid_export + curtail <= pv_surplus[si] + 1e-6)
 
         strict_penalty: cp.Expression = cp.Constant(0.0)
         if prepared.mode in {"self_consumption", "passive_arbitrage"}:

@@ -131,6 +131,8 @@ Before activation, Go independently replays:
   charge/discharge efficiency;
 - every loadpoint's allowed step and energy/SoC transition;
 - PV curtailment bounds;
+- post-curtailment mode limits (`grid_export + curtailment` cannot exceed the
+  original PV surplus in passive modes);
 - site power balance;
 - planner-mode policy;
 - fuse/import/export limits;

@@ -439,6 +439,50 @@ def test_multistage_auto_keeps_binary_guards_for_unsafe_incentives() -> None:
     assert response["solver"]["formulation"] == "multistage-milp"
 
 
+def test_multistage_curtailment_cannot_create_room_for_passive_export() -> None:
+    request = base_request()
+    request["settings"].update(
+        {
+            "mode": "passive_arbitrage",
+            "scenario_policy": "multistage",
+            "near_horizon_slots": 1,
+            "mid_horizon_slots": 1,
+            "far_block_slots": 2,
+            "branch_horizon_slots": 1,
+        }
+    )
+    request["slots"] = [
+        {
+            "start_ms": 1, "len_min": 60, "price_ore": 10, "spot_ore": 0,
+            "confidence": 1, "pv_w": 0, "load_w": 500,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+        {
+            "start_ms": 3600001, "len_min": 60, "price_ore": 300,
+            "spot_ore": 200, "confidence": 1, "pv_w": -1000, "load_w": 500,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+        {
+            "start_ms": 7200001, "len_min": 60, "price_ore": 300,
+            "spot_ore": 200, "confidence": 1, "pv_w": 0, "load_w": 2000,
+            "max_import_w": 8000, "max_export_w": 8000,
+        },
+    ]
+    request["storages"][0]["initial_energy_wh"] = 8000
+    request["storages"][0]["terminal_price_ore_kwh"] = 0
+
+    for backend in ("highs", "cvxpy"):
+        candidate = copy.deepcopy(request)
+        candidate["request_id"] = f"passive-curtail-{backend}"
+        candidate["settings"]["multistage_backend"] = backend
+        response = handle(candidate)
+        assert response["ok"], response
+        for action in response["plan"]["actions"]:
+            post_curtail_baseline = action["grid_w"] - action["battery_w"]
+            assert action["grid_w"] >= min(post_curtail_baseline, 0.0) - 1e-3
+        assert response["plan"]["actions"][1]["battery_w"] >= -1e-3
+
+
 def test_multistage_uses_progressive_hedging_only_for_eligible_large_convex_case() -> None:
     request = base_request()
     request["settings"].update(
