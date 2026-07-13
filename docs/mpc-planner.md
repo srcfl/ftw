@@ -183,6 +183,8 @@ when the operator has chosen one.
 | `planner.optimizer_timeout_s` | 30 | Whole worker request deadline; includes Python cold start |
 | `planner.optimizer_mip_rel_gap` | 0.005 | Accepted HiGHS relative MIP gap |
 | `planner.optimizer_cvar_weight` | 0.15 | Tail-risk weight; explicit 0 disables |
+| `planner.optimizer_recourse_shadow` | false | Stateful storage-recourse challenger; diagnostic only |
+| `planner.optimizer_recourse_non_anticipative_slots` | 1 | Shared scenario prefix before recourse |
 
 The former fixed SoC/action grids no longer constrain the primary plan.
 

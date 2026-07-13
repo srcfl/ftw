@@ -168,3 +168,5 @@ state:
 #   optimizer_mip_rel_gap: 0.005
 #   optimizer_cvar_weight: 0.15
 #   optimizer_cvar_alpha: 0.90
+#   optimizer_recourse_shadow: false # diagnostic only; never controls dispatch
+#   optimizer_recourse_non_anticipative_slots: 1

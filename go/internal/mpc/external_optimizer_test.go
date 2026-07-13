@@ -223,6 +223,13 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 	if plan.Actions[0].BatteryW <= 0 || plan.Actions[1].BatteryW >= 0 {
 		t.Fatalf("expected cheap-charge/expensive-discharge plan: %+v", plan.Actions)
 	}
+	recourse, err := optimizer.OptimizeRecourse(context.Background(), slots, p, 1)
+	if err != nil {
+		t.Fatalf("OptimizeRecourse: %v", err)
+	}
+	if recourse.Solver == nil || recourse.Solver.ScenarioPolicy != "recourse" || recourse.Solver.NonAnticipativeSlots != 1 {
+		t.Fatalf("unexpected recourse metadata: %+v", recourse.Solver)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		optimizer.mu.Lock()

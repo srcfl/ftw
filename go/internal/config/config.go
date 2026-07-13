@@ -466,20 +466,22 @@ type Planner struct {
 	// OptimizerCommand is the Python executable used for the local worker.
 	// It is an executable path, not a shell command. The module invocation is
 	// fixed by the host to avoid shell parsing and configuration injection.
-	OptimizerCommand      string   `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
-	OptimizerDir          string   `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
-	OptimizerSolver       string   `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
-	OptimizerFormulation  string   `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
-	OptimizerTimeoutS     float64  `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
-	OptimizerIdleTimeoutS float64  `yaml:"optimizer_idle_timeout_s,omitempty" json:"optimizer_idle_timeout_s,omitempty"`
-	OptimizerMIPRelGap    float64  `yaml:"optimizer_mip_rel_gap,omitempty" json:"optimizer_mip_rel_gap,omitempty"`
-	OptimizerCVaRWeight   *float64 `yaml:"optimizer_cvar_weight,omitempty" json:"optimizer_cvar_weight,omitempty"`
-	OptimizerCVaRAlpha    float64  `yaml:"optimizer_cvar_alpha,omitempty" json:"optimizer_cvar_alpha,omitempty"`
-	BaseLoadW             float64  `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
-	HorizonHours          int      `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
-	IntervalMin           int      `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
-	SoCMinPct             float64  `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
-	SoCMaxPct             float64  `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
+	OptimizerCommand                      string   `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
+	OptimizerDir                          string   `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
+	OptimizerSolver                       string   `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
+	OptimizerFormulation                  string   `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
+	OptimizerTimeoutS                     float64  `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
+	OptimizerIdleTimeoutS                 float64  `yaml:"optimizer_idle_timeout_s,omitempty" json:"optimizer_idle_timeout_s,omitempty"`
+	OptimizerMIPRelGap                    float64  `yaml:"optimizer_mip_rel_gap,omitempty" json:"optimizer_mip_rel_gap,omitempty"`
+	OptimizerCVaRWeight                   *float64 `yaml:"optimizer_cvar_weight,omitempty" json:"optimizer_cvar_weight,omitempty"`
+	OptimizerCVaRAlpha                    float64  `yaml:"optimizer_cvar_alpha,omitempty" json:"optimizer_cvar_alpha,omitempty"`
+	OptimizerRecourseShadow               bool     `yaml:"optimizer_recourse_shadow,omitempty" json:"optimizer_recourse_shadow,omitempty"`
+	OptimizerRecourseNonAnticipativeSlots int      `yaml:"optimizer_recourse_non_anticipative_slots,omitempty" json:"optimizer_recourse_non_anticipative_slots,omitempty"`
+	BaseLoadW                             float64  `yaml:"base_load_w,omitempty" json:"base_load_w,omitempty"`
+	HorizonHours                          int      `yaml:"horizon_hours,omitempty" json:"horizon_hours,omitempty"`
+	IntervalMin                           int      `yaml:"interval_min,omitempty" json:"interval_min,omitempty"`
+	SoCMinPct                             float64  `yaml:"soc_min_pct,omitempty" json:"soc_min_pct,omitempty"`
+	SoCMaxPct                             float64  `yaml:"soc_max_pct,omitempty" json:"soc_max_pct,omitempty"`
 
 	// Deprecated: SoCSafetyFloorPct / SafetyFloorPenaltyOreKwhHour. The
 	// SoC-percentage safety floor was replaced by downside-PV planning
@@ -1515,6 +1517,9 @@ func (c *Config) Validate() error {
 		}
 		if p.OptimizerCVaRAlpha < 0 || p.OptimizerCVaRAlpha >= 1 {
 			return fmt.Errorf("planner.optimizer_cvar_alpha must be 0 (default) or in (0,1), got %g", p.OptimizerCVaRAlpha)
+		}
+		if p.OptimizerRecourseNonAnticipativeSlots < 0 {
+			return errors.New("planner.optimizer_recourse_non_anticipative_slots must be non-negative")
 		}
 	}
 	return nil

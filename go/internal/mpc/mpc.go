@@ -325,17 +325,19 @@ type Baselines struct {
 
 // Plan is the output.
 type Plan struct {
-	GeneratedAtMs      int64       `json:"generated_at_ms"`
-	Mode               Mode        `json:"mode"`
-	HorizonSlots       int         `json:"horizon_slots"`
-	CapacityWh         float64     `json:"capacity_wh"`
-	InitialSoCPct      float64     `json:"initial_soc_pct"`
-	TotalCostOre       float64     `json:"total_cost_ore"`
-	Actions            []Action    `json:"actions"`
-	Baselines          *Baselines  `json:"baselines,omitempty"`
-	Solver             *SolverInfo `json:"solver,omitempty"`
-	DPShadow           *ShadowPlan `json:"dp_shadow,omitempty"`
-	DPEvaluationShadow *ShadowPlan `json:"dp_evaluation_shadow,omitempty"`
+	GeneratedAtMs      int64             `json:"generated_at_ms"`
+	Mode               Mode              `json:"mode"`
+	HorizonSlots       int               `json:"horizon_slots"`
+	CapacityWh         float64           `json:"capacity_wh"`
+	InitialSoCPct      float64           `json:"initial_soc_pct"`
+	TotalCostOre       float64           `json:"total_cost_ore"`
+	Actions            []Action          `json:"actions"`
+	Baselines          *Baselines        `json:"baselines,omitempty"`
+	Solver             *SolverInfo       `json:"solver,omitempty"`
+	DPShadow           *ShadowPlan       `json:"dp_shadow,omitempty"`
+	DPEvaluationShadow *ShadowPlan       `json:"dp_evaluation_shadow,omitempty"`
+	RecourseShadow     *ShadowPlan       `json:"recourse_shadow,omitempty"`
+	ShadowEvaluation   *ShadowEvaluation `json:"shadow_evaluation,omitempty"`
 	// OptimizerInput is the exact versioned request used by an external
 	// optimizer. It is omitted from the live plan API and copied into the
 	// persisted Diagnostic for deterministic replay.
@@ -362,17 +364,22 @@ type ShadowPlan struct {
 // emergency fallback when the external mathematical planner is unavailable or
 // returns a plan that fails the Go-side physics validator.
 type SolverInfo struct {
-	Engine         string   `json:"engine"`
-	Backend        string   `json:"backend,omitempty"`
-	Status         string   `json:"status"`
-	Formulation    string   `json:"formulation,omitempty"`
-	ObjectiveOre   float64  `json:"objective_ore,omitempty"`
-	ServiceSlack   float64  `json:"service_slack,omitempty"`
-	SolveMs        float64  `json:"solve_ms,omitempty"`
-	MIPGap         *float64 `json:"mip_gap,omitempty"`
-	ScenarioCount  int      `json:"scenario_count,omitempty"`
-	Fallback       bool     `json:"fallback,omitempty"`
-	FallbackReason string   `json:"fallback_reason,omitempty"`
+	Engine               string   `json:"engine"`
+	Backend              string   `json:"backend,omitempty"`
+	Status               string   `json:"status"`
+	Formulation          string   `json:"formulation,omitempty"`
+	ObjectiveOre         float64  `json:"objective_ore,omitempty"`
+	ServiceSlack         float64  `json:"service_slack,omitempty"`
+	SolveMs              float64  `json:"solve_ms,omitempty"`
+	MIPGap               *float64 `json:"mip_gap,omitempty"`
+	ScenarioCount        int      `json:"scenario_count,omitempty"`
+	ScenarioPolicy       string   `json:"scenario_policy,omitempty"`
+	PolicyVersion        string   `json:"policy_version,omitempty"`
+	NonAnticipativeSlots int      `json:"non_anticipative_slots,omitempty"`
+	CVaRWeight           float64  `json:"cvar_weight,omitempty"`
+	CVaRAlpha            float64  `json:"cvar_alpha,omitempty"`
+	Fallback             bool     `json:"fallback,omitempty"`
+	FallbackReason       string   `json:"fallback_reason,omitempty"`
 }
 
 // SlotGridCostOre returns the raw öre cost of flowing gridKWh across the

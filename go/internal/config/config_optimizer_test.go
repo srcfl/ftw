@@ -25,6 +25,7 @@ func TestPlannerOptimizerConfigValidation(t *testing.T) {
 		{"timeout", func(p *Planner) { p.OptimizerTimeoutS = -1 }},
 		{"idle timeout", func(p *Planner) { p.OptimizerIdleTimeoutS = -1 }},
 		{"cvar alpha", func(p *Planner) { p.OptimizerCVaRAlpha = 1 }},
+		{"recourse prefix", func(p *Planner) { p.OptimizerRecourseNonAnticipativeSlots = -1 }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

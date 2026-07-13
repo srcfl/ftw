@@ -22,6 +22,17 @@ func (testPrimaryOptimizer) Optimize(_ context.Context, slots []Slot, p Params) 
 
 func (testPrimaryOptimizer) Close() error { return nil }
 
+func (testPrimaryOptimizer) OptimizeRecourse(_ context.Context, slots []Slot, p Params, prefix int) (Plan, error) {
+	plan := Optimize(slots, p)
+	plan.Solver = &SolverInfo{
+		Engine: "cvxpy", Backend: "highs", Status: "optimal",
+		Formulation: "stochastic-recourse", ScenarioPolicy: "recourse",
+		PolicyVersion:        "storage-recourse-v1",
+		NonAnticipativeSlots: prefix,
+	}
+	return plan, nil
+}
+
 // TestReplanCallsSaveDiag — after a successful replan, the SaveDiag
 // hook fires once with (non-nil Diagnostic, reason). Verifies the hook
 // wiring end-to-end without having to spin up the full stack.
@@ -133,6 +144,7 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	})
 	svc.BaseLoad = 500
 	svc.Optimizer = testPrimaryOptimizer{}
+	svc.EnableRecourseShadow = true
 	plan := svc.Replan(context.Background())
 	if plan == nil || plan.Solver == nil || plan.Solver.Engine != "cvxpy" {
 		t.Fatalf("primary plan not active: %+v", plan)
@@ -146,7 +158,13 @@ func TestPrimaryOptimizerKeepsDPAsDiagnosticShadow(t *testing.T) {
 	if plan.DPEvaluationShadow == nil || plan.DPEvaluationShadow.ForecastBasis != "same base forecast input" {
 		t.Fatalf("same-input DP evaluation shadow missing: %+v", plan.DPEvaluationShadow)
 	}
-	if d := svc.Diagnose(); d == nil || d.DPShadow == nil || d.DPEvaluationShadow == nil {
+	if plan.RecourseShadow == nil || plan.RecourseShadow.Solver == nil || plan.RecourseShadow.Solver.ScenarioPolicy != "recourse" {
+		t.Fatalf("recourse shadow missing: %+v", plan.RecourseShadow)
+	}
+	if plan.ShadowEvaluation == nil || plan.ShadowEvaluation.Status != "running" {
+		t.Fatalf("stateful shadow evaluation missing: %+v", plan.ShadowEvaluation)
+	}
+	if d := svc.Diagnose(); d == nil || d.DPShadow == nil || d.DPEvaluationShadow == nil || d.RecourseShadow == nil || d.ShadowEvaluation == nil {
 		t.Fatal("persisted diagnostic omitted a DP shadow")
 	}
 }

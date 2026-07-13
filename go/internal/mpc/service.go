@@ -83,6 +83,11 @@ type Service struct {
 	// validation failure falls back to the DP for this replan and is recorded
 	// in Plan.Solver.
 	Optimizer PlanOptimizer
+	// EnableRecourseShadow runs a storage-only stochastic recourse challenger
+	// after each successful champion solve. It shares the primary worker and is
+	// diagnostic-only: no challenger action is ever read by SlotDirectiveAt.
+	EnableRecourseShadow         bool
+	RecourseNonAnticipativeSlots int
 
 	// PVUncertaintyW returns the current PV forecast error std (W) — wired to
 	// the pvmodel residual std. Drives downside-PV safety planning (Alt 2).
@@ -198,6 +203,7 @@ type Service struct {
 	lastSlots       []Slot // inputs that went into the most recent Optimize call
 	lastParams      Params // params that went into the most recent Optimize call
 	lastLoadpointID string // ID of the loadpoint active in the most recent plan (empty = none)
+	shadowEvaluator *StatefulShadowEvaluator
 
 	stop chan struct{}
 	done chan struct{}
@@ -239,14 +245,15 @@ func New(st *state.Store, tl *telemetry.Store, zone string, p Params) *Service {
 		// Pi 4 (51 SoC × 21 action × 193 slots DP, sub-1 % CPU) — being
 		// stingy was leaving stale plans in place every time the cover-
 		// load reactive carve-out fired (PR #378).
-		MinReplanGap:          30 * time.Second,
-		PVDivergenceWh:        250, // 250 Wh sustained gap over ~8 min
-		LoadDivergenceWh:      200,
-		TwinDriftPVW:          250,
-		TwinDriftLoadW:        200,
-		TwinDriftHorizonSlots: 16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
-		stop:                  make(chan struct{}),
-		done:                  make(chan struct{}),
+		MinReplanGap:                 30 * time.Second,
+		PVDivergenceWh:               250, // 250 Wh sustained gap over ~8 min
+		LoadDivergenceWh:             200,
+		TwinDriftPVW:                 250,
+		TwinDriftLoadW:               200,
+		TwinDriftHorizonSlots:        16, // ~4 h at 15-min slots — short enough to keep RMSE meaningful
+		RecourseNonAnticipativeSlots: 1,
+		stop:                         make(chan struct{}),
+		done:                         make(chan struct{}),
 	}
 }
 
@@ -530,7 +537,7 @@ func (s *Service) loop(ctx context.Context) {
 	t := time.NewTicker(s.Interval)
 	defer t.Stop()
 	var reactiveTick <-chan time.Time
-	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0) {
+	if s.ReactiveInterval > 0 && (s.PVDivergenceWh > 0 || s.LoadDivergenceWh > 0 || s.EnableRecourseShadow) {
 		rt := time.NewTicker(s.ReactiveInterval)
 		defer rt.Stop()
 		reactiveTick = rt.C
@@ -545,6 +552,7 @@ func (s *Service) loop(ctx context.Context) {
 			s.lastReason = "scheduled"
 			s.replan(ctx)
 		case <-reactiveTick:
+			s.observeShadow(time.Now())
 			s.checkDivergence(ctx)
 			s.checkTwinDrift(ctx)
 		}
@@ -1043,6 +1051,35 @@ func (s *Service) replan(ctx context.Context) *Plan {
 				mode, _, _ := actionToSlot(*candidate.DPShadow.FirstAction, p.Mode)
 				candidate.DPShadow.FirstAction.EMSMode = mode
 			}
+
+			var recoursePlan *Plan
+			if s.EnableRecourseShadow {
+				if len(p.activeLoadpoints()) > 0 {
+					s.ensureShadowEvaluator().SetError("recourse shadow skipped while flexible loads are active", now)
+				} else if challenger, ok := s.Optimizer.(RecourseOptimizer); ok {
+					recourse, recourseErr := challenger.OptimizeRecourse(ctx, slots, p, s.RecourseNonAnticipativeSlots)
+					if recourseErr != nil {
+						slog.Warn("mpc: recourse shadow failed", "err", recourseErr)
+						s.ensureShadowEvaluator().SetError(recourseErr.Error(), now)
+					} else {
+						recoursePlan = &recourse
+						candidate.RecourseShadow = compareDPShadow(candidate, recourse)
+						candidate.RecourseShadow.ForecastBasis = "same stochastic scenario input; recourse after non-anticipative prefix"
+						candidate.RecourseShadow.Solver = recourse.Solver
+						candidate.RecourseShadow.TotalCostOre = recourse.TotalCostOre
+						candidate.RecourseShadow.ActiveMinusShadowOre = candidate.TotalCostOre - recourse.TotalCostOre
+						if candidate.RecourseShadow.FirstAction != nil {
+							mode, _, _ := actionToSlot(*candidate.RecourseShadow.FirstAction, p.Mode)
+							candidate.RecourseShadow.FirstAction.EMSMode = mode
+						}
+					}
+				} else {
+					s.ensureShadowEvaluator().SetError("primary optimizer does not implement recourse", now)
+				}
+				evaluator := s.ensureShadowEvaluator()
+				evaluator.SetPlans(&candidate, recoursePlan, slots, p, time.Now())
+				candidate.ShadowEvaluation = evaluator.Snapshot()
+			}
 			optimizerSolveMs := 0.0
 			if candidate.Solver != nil {
 				optimizerSolveMs = candidate.Solver.SolveMs
@@ -1054,6 +1091,13 @@ func (s *Service) replan(ctx context.Context) *Plan {
 				"dp_shadow_cost_ore", dpShadow.TotalCostOre,
 				"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
 				"optimizer_solve_ms", optimizerSolveMs)
+			if candidate.RecourseShadow != nil {
+				slog.Info("mpc: champion vs recourse shadow",
+					"champion_cost_ore", candidate.TotalCostOre,
+					"recourse_cost_ore", candidate.RecourseShadow.TotalCostOre,
+					"champion_minus_recourse_ore", candidate.RecourseShadow.ActiveMinusShadowOre,
+					"recourse_solve_ms", candidate.RecourseShadow.Solver.SolveMs)
+			}
 			plan = candidate
 		} else {
 			slog.Error("mpc: primary optimizer failed; using Go DP fallback", "err", err)
@@ -1155,6 +1199,61 @@ func (s *Service) replan(ctx context.Context) *Plan {
 		}
 	}
 	return &plan
+}
+
+func (s *Service) ensureShadowEvaluator() *StatefulShadowEvaluator {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.shadowEvaluator == nil {
+		s.shadowEvaluator = newStatefulShadowEvaluator()
+	}
+	return s.shadowEvaluator
+}
+
+// observeShadow samples realized exogenous power for closed-loop scoring. It
+// deliberately derives house load without battery or vehicle power so both
+// virtual policies receive the same uncontrollable input.
+func (s *Service) observeShadow(now time.Time) {
+	if s == nil || !s.EnableRecourseShadow || s.Tele == nil {
+		return
+	}
+	s.mu.RLock()
+	evaluator := s.shadowEvaluator
+	siteMeter := s.SiteMeter
+	s.mu.RUnlock()
+	if evaluator == nil || siteMeter == "" || !s.driverOnline(siteMeter) {
+		return
+	}
+	meter := s.Tele.Get(siteMeter, telemetry.DerMeter)
+	if meter == nil {
+		return
+	}
+	var pvW, batteryW float64
+	for _, reading := range s.Tele.ReadingsByType(telemetry.DerPV) {
+		if s.driverOnline(reading.Driver) {
+			pvW += reading.SmoothedW
+		}
+	}
+	for _, reading := range s.Tele.ReadingsByType(telemetry.DerBattery) {
+		if s.driverOnline(reading.Driver) {
+			batteryW += reading.SmoothedW
+		}
+	}
+	loadW := meter.SmoothedW - pvW - batteryW - s.Tele.SumOnlineEVW() - s.Tele.SumOnlineV2XW()
+	if loadW < 0 {
+		loadW = 0
+	}
+	summary := evaluator.Observe(now, loadW, pvW)
+	s.mu.Lock()
+	if s.last != nil {
+		// Latest returns a plan pointer after dropping s.mu, so published plans
+		// must remain immutable. Replace the plan snapshot instead of mutating
+		// the object an API handler may currently be marshaling.
+		updated := *s.last
+		updated.ShadowEvaluation = &summary
+		s.last = &updated
+	}
+	s.mu.Unlock()
 }
 
 func compareDPShadow(active, shadow Plan) *ShadowPlan {

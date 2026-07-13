@@ -301,6 +301,8 @@ planner:
   optimizer_mip_rel_gap: 0.005
   optimizer_cvar_weight: 0.15
   optimizer_cvar_alpha: 0.90
+  optimizer_recourse_shadow: false
+  optimizer_recourse_non_anticipative_slots: 1
 ```
 
 The planner emits grid-target slots that the control loop consumes in
@@ -311,6 +313,14 @@ The Python/CVXPY engine is primary. `engine: dp` selects the former in-process
 planner for emergency rollback. Any worker timeout, solver failure, or rejected
 trajectory automatically uses that DP for the affected replan. Full model,
 deployment, validation, and replay details are in [optimizer.md](optimizer.md).
+
+`optimizer_recourse_shadow` runs a storage-only stochastic challenger after the
+active champion solve. The first slot is non-anticipative by default; later
+storage decisions may adapt to each PV/load scenario. The challenger is scored
+against the champion with independent virtual battery state and can never feed
+dispatch. Shadow evaluation pauses while a flexible EV or thermal contract is
+active, because those assets do not yet have equivalent stateful telemetry in
+the evaluator.
 
 ## `batteries`
 

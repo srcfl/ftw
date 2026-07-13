@@ -84,8 +84,19 @@ def _solver_options(settings: dict[str, Any], solver: str) -> dict[str, Any]:
 
 
 def solve(payload: dict[str, Any]) -> dict[str, Any]:
-    started = time.perf_counter()
     settings = require_dict(payload.get("settings", {}), "settings")
+    scenario_policy = settings.get("scenario_policy", "shared")
+    if scenario_policy == "recourse":
+        # Imported lazily to keep the shared champion model independent. The
+        # challenger is deliberately storage-only until scenario-dependent EV
+        # and thermal state can be evaluated against equally stateful telemetry.
+        from .recourse import solve_storage_recourse
+
+        return solve_storage_recourse(payload)
+    if scenario_policy != "shared":
+        raise ProtocolError("settings.scenario_policy must be shared or recourse")
+
+    started = time.perf_counter()
     slots = [require_dict(v, f"slots[{i}]") for i, v in enumerate(require_list(payload["slots"], "slots"))]
     n = len(slots)
     mode = _mode(payload)
@@ -547,6 +558,11 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             "solve_ms": solve_ms,
             "mip_gap": mip_gap,
             "scenario_count": len(scenarios),
+            "scenario_policy": "shared",
+            "policy_version": "shared-v1",
+            "non_anticipative_slots": n,
+            "cvar_weight": risk_weight,
+            "cvar_alpha": finite_number(settings.get("cvar_alpha", 0.9), "settings.cvar_alpha"),
         },
         "plan": {
             "mode": mode,

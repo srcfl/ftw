@@ -51,7 +51,8 @@ The model supports:
   forecasts, continuous power, or discrete compressor stages;
 - PV curtailment as a decision variable;
 - site import/export limits;
-- multiple load/PV scenarios with shared asset schedules;
+- multiple load/PV scenarios with shared champion schedules;
+- an opt-in storage-only recourse shadow with a shared executable prefix;
 - expected cost plus configurable CVaR tail risk.
 
 If live storage energy starts outside a configured operating band, the initial
@@ -143,22 +144,36 @@ Every accepted Python plan records two non-dispatching Go-DP references. The
 `dp_evaluation_shadow` uses the exact same base forecast as Python; use this
 field for planned-cost and first-action comparisons between engines.
 
+With `optimizer_recourse_shadow: true`, the worker also solves a two-stage
+storage challenger. Storage, grid, and PV-curtailment trajectories become
+scenario-specific after `optimizer_recourse_non_anticipative_slots`; the first
+slot is shared by default. The same worker process solves champion and
+challenger sequentially. A stateful evaluator then advances both policies over
+identical realized house load and PV with independent virtual storage energy.
+The accumulated raw and terminal-energy-valued cost, SoC, and clamp counts are stored under
+`shadow_evaluation`. Flexible EV/thermal contracts pause this challenger until
+their counterfactual state is modeled equivalently.
+Both policies carry an explicit `policy_version`; changing it or the planner
+mode starts a new score run instead of mixing incompatible references.
+
 ## Improvement path
 
-The current stochastic model uses one shared 48-hour asset schedule across all
-PV scenarios and adds CVaR risk cost. That is deliberately conservative, but it
-can reserve energy twice: once through the all-scenario feasibility contract
-and again through CVaR. The next model experiment should use scenario-specific
-storage trajectories after the first control interval, with non-anticipativity
-only on the first dispatched action. Since MPC replans every 15 minutes, later
-actions can adapt to the scenario that actually develops.
+The active champion uses one shared 48-hour asset schedule across all PV
+scenarios and adds CVaR risk cost. That is deliberately conservative, but it can
+reserve energy twice: once through all-scenario feasibility and again through
+CVaR. The storage-recourse experiment now exists as a shadow. Since MPC replans
+every 15 minutes, only its common first action is executable; future paths are
+an optimistic wait-and-see bound until a small multi-stage tree is implemented.
 
-Promote that formulation only after rolling-origin replay shows lower realized
+Promote a recourse formulation only after rolling-origin replay shows lower realized
 cost without more mode, grid-limit, or SoC violations. Tune scenario
 probabilities, PV spreads, CVaR weight, and terminal energy price against
 forecast residuals from each installation rather than one fixed global value.
 The same-input DP evaluation shadow is the champion/challenger baseline for
 those experiments.
+
+The wider method assessment and promotion gate live in
+[optimizer-method-review.md](optimizer-method-review.md).
 
 CVXPY itself accounts for most of the worker's warm memory. If idle unloading
 is insufficient on smaller hosts, the primary MILP can be translated to the
@@ -179,6 +194,8 @@ planner:
   optimizer_mip_rel_gap: 0.005
   optimizer_cvar_weight: 0.15
   optimizer_cvar_alpha: 0.90
+  optimizer_recourse_shadow: false
+  optimizer_recourse_non_anticipative_slots: 1
 ```
 
 `optimizer_command` may point at a different Python executable. It is an
