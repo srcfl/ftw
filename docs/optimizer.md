@@ -138,6 +138,34 @@ Before activation, Go independently replays:
 Validation uses tight numerical tolerances only. It does not clamp or repair a
 solver result; an invalid plan falls back in full.
 
+Every accepted Python plan records two non-dispatching Go-DP references. The
+`dp_shadow` uses downside PV and remains the conservative fallback comparison.
+`dp_evaluation_shadow` uses the exact same base forecast as Python; use this
+field for planned-cost and first-action comparisons between engines.
+
+## Improvement path
+
+The current stochastic model uses one shared 48-hour asset schedule across all
+PV scenarios and adds CVaR risk cost. That is deliberately conservative, but it
+can reserve energy twice: once through the all-scenario feasibility contract
+and again through CVaR. The next model experiment should use scenario-specific
+storage trajectories after the first control interval, with non-anticipativity
+only on the first dispatched action. Since MPC replans every 15 minutes, later
+actions can adapt to the scenario that actually develops.
+
+Promote that formulation only after rolling-origin replay shows lower realized
+cost without more mode, grid-limit, or SoC violations. Tune scenario
+probabilities, PV spreads, CVaR weight, and terminal energy price against
+forecast residuals from each installation rather than one fixed global value.
+The same-input DP evaluation shadow is the champion/challenger baseline for
+those experiments.
+
+CVXPY itself accounts for most of the worker's warm memory. If idle unloading
+is insufficient on smaller hosts, the primary MILP can be translated to the
+native `highspy` API while retaining CVXPY/CLARABEL as the convex fallback and
+reference implementation. That is a separate backend change and should be
+validated against identical protocol fixtures before replacing CVXPY.
+
 ## Configuration
 
 ```yaml
@@ -147,6 +175,7 @@ planner:
   optimizer_solver: HIGHS
   optimizer_formulation: auto    # auto | milp | relaxed
   optimizer_timeout_s: 30
+  optimizer_idle_timeout_s: 120  # stop the warm worker after two idle minutes
   optimizer_mip_rel_gap: 0.005
   optimizer_cvar_weight: 0.15
   optimizer_cvar_alpha: 0.90
@@ -156,6 +185,11 @@ planner:
 executable path, not a shell command. `optimizer_dir` overrides the module
 directory. The corresponding environment overrides are
 `FTW_OPTIMIZER_PYTHON` and `FTW_OPTIMIZER_DIR`.
+
+`optimizer_idle_timeout_s` defaults to 120 seconds. The worker stays warm
+during reactive planning bursts and exits after that much idle time, releasing
+CVXPY and solver memory until the next replan. Set a longer value when cold
+Python startup latency matters more than resident memory.
 
 The official container includes the pinned primary solver packages. Native
 release archives include the Python package; install it with:

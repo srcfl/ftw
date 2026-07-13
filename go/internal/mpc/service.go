@@ -1014,6 +1014,21 @@ func (s *Service) replan(ctx context.Context) *Plan {
 	} else {
 		candidate, err := s.Optimizer.Optimize(ctx, slots, p)
 		if err == nil {
+			dpEvaluation := Optimize(slots, p)
+			dpEvaluation.Solver = &SolverInfo{
+				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
+				Formulation: "discrete-dp",
+			}
+			candidate.DPEvaluationShadow = compareDPShadow(candidate, dpEvaluation)
+			candidate.DPEvaluationShadow.ForecastBasis = "same base forecast input"
+			candidate.DPEvaluationShadow.Solver = dpEvaluation.Solver
+			candidate.DPEvaluationShadow.TotalCostOre = dpEvaluation.TotalCostOre
+			candidate.DPEvaluationShadow.ActiveMinusShadowOre = candidate.TotalCostOre - dpEvaluation.TotalCostOre
+			if candidate.DPEvaluationShadow.FirstAction != nil {
+				mode, _, _ := actionToSlot(*candidate.DPEvaluationShadow.FirstAction, p.Mode)
+				candidate.DPEvaluationShadow.FirstAction.EMSMode = mode
+			}
+
 			dpShadow := Optimize(fallbackSlots, p)
 			dpShadow.Solver = &SolverInfo{
 				Engine: "go-dp", Backend: "bellman", Status: "optimal-grid",
@@ -1034,6 +1049,8 @@ func (s *Service) replan(ctx context.Context) *Plan {
 			}
 			slog.Info("mpc: active optimizer vs DP shadow",
 				"optimizer_cost_ore", candidate.TotalCostOre,
+				"dp_evaluation_cost_ore", dpEvaluation.TotalCostOre,
+				"active_minus_evaluation_ore", candidate.DPEvaluationShadow.ActiveMinusShadowOre,
 				"dp_shadow_cost_ore", dpShadow.TotalCostOre,
 				"active_minus_shadow_ore", candidate.DPShadow.ActiveMinusShadowOre,
 				"optimizer_solve_ms", optimizerSolveMs)

@@ -287,20 +287,41 @@ def _realized_cost(
     return import_ore_kwh * max(grid_kwh, 0.0) - export_ore_kwh * max(-grid_kwh, 0.0)
 
 
+def dp_evaluation_reference(
+    diagnostic: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    shadow = diagnostic.get("dp_evaluation_shadow")
+    if isinstance(shadow, dict) and isinstance(shadow.get("first_action"), dict):
+        return float(shadow.get("total_cost_ore", 0)), shadow["first_action"]
+
+    solver = diagnostic.get("solver")
+    engine = str(solver.get("engine", "")) if isinstance(solver, dict) else ""
+    slots = diagnostic.get("slots", [])
+    if engine in {"", "go-dp"} and not diagnostic.get("optimizer_input") and slots:
+        return float(diagnostic.get("total_cost_ore", 0)), slots[0]
+    raise SnapshotSkip("missing same-input DP evaluation shadow")
+
+
 def realized_first_slot(
     diagnostic: dict[str, Any],
     response: dict[str, Any],
     realized: dict[int, dict[str, float]],
     max_import_w: float,
     max_export_w: float,
+    old_action: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     slots = diagnostic.get("slots", [])
     actions = response.get("plan", {}).get("actions", [])
     if not slots or not actions:
         return None
-    old = slots[0]
+    old_slot = slots[0]
     new = actions[0]
-    start_ms = int(old.get("slot_start_ms", 0))
+    if old_action is None:
+        try:
+            _, old_action = dp_evaluation_reference(diagnostic)
+        except SnapshotSkip:
+            return None
+    start_ms = int(old_slot.get("slot_start_ms", 0))
     actual = realized.get(start_ms)
     if actual is None:
         return None
@@ -324,7 +345,7 @@ def realized_first_slot(
     if floor is not None:
         export_ore = max(export_ore, float(floor))
     base_w = actual["house_load_w"] + actual["ev_w"] + actual["v2x_w"] + actual["pv_w"]
-    old_grid_w = base_w + float(old.get("battery_w", 0))
+    old_grid_w = base_w + float(old_action.get("battery_w", 0))
     new_grid_w = base_w + float(new.get("battery_w", 0))
     dt_h = (actual["bucket_end_ms"] - start_ms) / 3_600_000.0
     mode = str(params.get("mode", "self_consumption"))
@@ -346,8 +367,8 @@ def realized_first_slot(
     return {
         "bucket_start_ms": start_ms,
         "actual_base_w": base_w,
-        "forecast_base_w": float(old.get("load_w", 0)) + float(old.get("pv_w", 0)),
-        "old_battery_w": float(old.get("battery_w", 0)),
+        "forecast_base_w": float(old_slot.get("load_w", 0)) + float(old_slot.get("pv_w", 0)),
+        "old_battery_w": float(old_action.get("battery_w", 0)),
         "new_battery_w": float(new.get("battery_w", 0)),
         "old_grid_w": old_grid_w,
         "new_grid_w": new_grid_w,
@@ -405,6 +426,7 @@ def run_backtest(
                 max_export_w=max_export_w,
                 min_arbitrage_spread_ore_kwh=min_arbitrage_spread_ore_kwh,
             )
+            old_cost, old_action = dp_evaluation_reference(diagnostic)
         except SnapshotSkip as exc:
             skips[str(exc)] += 1
             continue
@@ -424,7 +446,6 @@ def run_backtest(
             print(f"replayed {position}/{len(snapshots)} failed: {message}", file=sys.stderr)
             continue
 
-        old_cost = float(diagnostic.get("total_cost_ore", 0))
         new_cost = float(response["plan"]["total_cost_ore"])
         solve_ms = float(response["solver"]["solve_ms"])
         delta = new_cost - old_cost
@@ -445,7 +466,7 @@ def run_backtest(
             }
         )
         actual = realized_first_slot(
-            diagnostic, response, realized, max_import_w, max_export_w
+            diagnostic, response, realized, max_import_w, max_export_w, old_action
         )
         if actual is not None:
             row["realized_first_slot"] = actual

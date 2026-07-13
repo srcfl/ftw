@@ -3037,6 +3037,10 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		if timeout <= 0 {
 			timeout = 30 * time.Second
 		}
+		idleTimeout := time.Duration(pl.OptimizerIdleTimeoutS * float64(time.Second))
+		if idleTimeout <= 0 {
+			idleTimeout = 2 * time.Minute
+		}
 		cvarWeight := 0.15
 		if pl.OptimizerCVaRWeight != nil {
 			cvarWeight = *pl.OptimizerCVaRWeight
@@ -3047,13 +3051,14 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			Solver: pl.OptimizerSolver, Formulation: pl.OptimizerFormulation,
 			MIPRelGap:  pl.OptimizerMIPRelGap,
 			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
+			IdleTimeout: idleTimeout,
 		})
 		if err != nil {
 			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
 		} else {
 			svc.Optimizer = ext
 			slog.Info("mpc: Python optimizer configured", "python", python,
-				"module_dir", moduleDir, "timeout", timeout)
+				"module_dir", moduleDir, "timeout", timeout, "idle_timeout", idleTimeout)
 		}
 	} else {
 		slog.Warn("mpc: legacy Go DP selected explicitly", "engine", engine)
