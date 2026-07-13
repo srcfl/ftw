@@ -28,6 +28,13 @@ type PlanOptimizer interface {
 	Close() error
 }
 
+// RecourseOptimizer is implemented by optimizers that can solve the same
+// immutable planning snapshot with scenario-dependent future decisions. The
+// returned plan is diagnostic only; Service never promotes it to dispatch.
+type RecourseOptimizer interface {
+	OptimizeRecourse(context.Context, []Slot, Params, int) (Plan, error)
+}
+
 // ExternalOptimizerConfig controls the local Python worker. The command is an
 // argv array rather than a shell string, so configuration cannot accidentally
 // acquire shell expansion semantics.
@@ -105,6 +112,8 @@ type externalSettings struct {
 	PVChargeBonusOreKwh      float64  `json:"pv_charge_bonus_ore_kwh"`
 	CVaRWeight               float64  `json:"cvar_weight"`
 	CVaRAlpha                float64  `json:"cvar_alpha"`
+	ScenarioPolicy           string   `json:"scenario_policy,omitempty"`
+	NonAnticipativeSlots     int      `json:"non_anticipative_slots,omitempty"`
 }
 
 type externalSlot struct {
@@ -187,11 +196,27 @@ type externalAction struct {
 }
 
 func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params) (Plan, error) {
+	return o.optimize(ctx, slots, p, "shared", 0)
+}
+
+// OptimizeRecourse runs the storage recourse challenger in the same warm
+// worker as the champion. Calls remain serialized, avoiding a second resident
+// CVXPY/HiGHS process on memory-constrained edge hosts.
+func (o *ExternalOptimizer) OptimizeRecourse(ctx context.Context, slots []Slot, p Params, nonAnticipativeSlots int) (Plan, error) {
+	if nonAnticipativeSlots < 1 {
+		nonAnticipativeSlots = 1
+	}
+	return o.optimize(ctx, slots, p, "recourse", nonAnticipativeSlots)
+}
+
+func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params, scenarioPolicy string, nonAnticipativeSlots int) (Plan, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.cancelIdleStopLocked()
 
 	request := o.buildRequest(slots, p)
+	request.Settings.ScenarioPolicy = scenarioPolicy
+	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return Plan{}, fmt.Errorf("encode optimizer request: %w", err)

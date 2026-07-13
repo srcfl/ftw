@@ -98,5 +98,7 @@ describe("render", () => {
     assert.ok(html.includes("[select:planner.optimizer_formulation]"));
     assert.ok(html.includes("[field:planner.optimizer_timeout_s]"));
     assert.ok(html.includes("[field:planner.optimizer_cvar_weight]"));
+    assert.ok(html.includes("[field:planner.optimizer_recourse_non_anticipative_slots]"));
+    assert.ok(html.includes('data-checkbox-path="planner.optimizer_recourse_shadow"'));
   });
 });

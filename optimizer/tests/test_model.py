@@ -119,6 +119,68 @@ def test_scenario_cvar_uses_shared_asset_schedule() -> None:
     assert response["solver"]["scenario_count"] == 2
 
 
+def test_storage_recourse_keeps_first_action_executable_and_improves_wait_and_see_bound() -> None:
+    shared = base_request()
+    shared["settings"]["mode"] = "self_consumption"
+    shared["settings"]["cvar_weight"] = 0
+    shared["settings"]["min_arbitrage_spread_ore_kwh"] = 0
+    shared["slots"] = [
+        {"start_ms": 1, "len_min": 60, "price_ore": 50, "spot_ore": 20, "confidence": 1, "pv_w": 0, "load_w": 0, "max_import_w": 8000, "max_export_w": 8000},
+        {"start_ms": 3600001, "len_min": 60, "price_ore": 300, "spot_ore": 100, "confidence": 1, "pv_w": 0, "load_w": 3000, "max_import_w": 8000, "max_export_w": 8000},
+        {"start_ms": 7200001, "len_min": 60, "price_ore": 50, "spot_ore": 20, "confidence": 1, "pv_w": 0, "load_w": 0, "max_import_w": 8000, "max_export_w": 8000},
+    ]
+    shared["storages"][0]["initial_energy_wh"] = 5000
+    shared["storages"][0]["terminal_price_ore_kwh"] = 0
+    shared["scenarios"] = [
+        {"id": "base", "probability": 0.5, "load_w": [0, 3000, 0], "pv_w": [0, 0, 0]},
+        {"id": "sunny", "probability": 0.5, "load_w": [0, 0, 0], "pv_w": [0, -3000, 0]},
+    ]
+    shared_response = handle(shared)
+    assert shared_response["ok"], shared_response
+
+    recourse = base_request()
+    recourse.update(shared)
+    recourse["request_id"] = "recourse-test"
+    recourse["settings"] = dict(shared["settings"])
+    recourse["settings"]["scenario_policy"] = "recourse"
+    recourse["settings"]["non_anticipative_slots"] = 1
+    recourse_response = handle(recourse)
+    assert recourse_response["ok"], recourse_response
+    assert recourse_response["solver"]["scenario_policy"] == "recourse"
+    assert recourse_response["solver"]["non_anticipative_slots"] == 1
+    assert recourse_response["solver"]["objective_ore"] < shared_response["solver"]["objective_ore"] - 1
+
+
+def test_recourse_rejects_flexible_assets_instead_of_mis_scoring_them() -> None:
+    request = base_request()
+    request["settings"]["scenario_policy"] = "recourse"
+    request["flex_loads"] = [
+        {
+            "id": "car",
+            "capacity_wh": 40000,
+            "initial_energy_wh": 10000,
+            "max_energy_wh": 40000,
+            "target_energy_wh": 12000,
+            "target_slot": 1,
+            "charge_efficiency": 1,
+            "allowed_steps_w": [0, 2000],
+        }
+    ]
+    response = handle(request)
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "flex_loads" in response["error"]["message"]
+
+
+def test_recourse_rejects_fractional_non_anticipative_prefix() -> None:
+    request = base_request()
+    request["settings"]["scenario_policy"] = "recourse"
+    request["settings"]["non_anticipative_slots"] = 1.5
+    response = handle(request)
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+
+
 def test_rejects_wrong_site_sign() -> None:
     request = base_request()
     request["slots"][0]["pv_w"] = 500

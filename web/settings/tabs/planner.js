@@ -85,7 +85,12 @@
         '<div class="field-row"><div>' +
         field("CVaR alpha", "planner.optimizer_cvar_alpha", "number", 0.9,
           "Tail confidence level. 0.9 optimizes the worst ten percent of scenario cost.") +
+        '</div><div>' +
+        field("Recourse prefix (slots)", "planner.optimizer_recourse_non_anticipative_slots", "number", 1,
+          "Number of initial slots that must use the same action in every forecast scenario. Keep at 1 for the 15-minute shadow experiment.") +
         '</div></div>' +
+        '<label class="checkbox-row"><input type="checkbox" data-checkbox-path="planner.optimizer_recourse_shadow"' + (config.planner.optimizer_recourse_shadow ? ' checked' : '') + '> Recourse shadow ' +
+        help('Run the stochastic storage challenger and stateful score it against the active champion. It never controls dispatch and pauses while flexible assets are active.') + '</label>' +
         '<div class="field-row"><div>' +
         field("SoC min (%)", "planner.soc_min_pct", "number", 10,
           "Lowest SoC the planner will discharge to (percent). 10 = 10%.") +

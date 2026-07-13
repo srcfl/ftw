@@ -3057,8 +3057,15 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 			slog.Error("mpc: configure primary optimizer failed; using Go DP", "err", err)
 		} else {
 			svc.Optimizer = ext
+			svc.EnableRecourseShadow = pl.OptimizerRecourseShadow
+			svc.RecourseNonAnticipativeSlots = pl.OptimizerRecourseNonAnticipativeSlots
+			if svc.RecourseNonAnticipativeSlots <= 0 {
+				svc.RecourseNonAnticipativeSlots = 1
+			}
 			slog.Info("mpc: Python optimizer configured", "python", python,
-				"module_dir", moduleDir, "timeout", timeout, "idle_timeout", idleTimeout)
+				"module_dir", moduleDir, "timeout", timeout, "idle_timeout", idleTimeout,
+				"recourse_shadow", svc.EnableRecourseShadow,
+				"recourse_non_anticipative_slots", svc.RecourseNonAnticipativeSlots)
 		}
 	} else {
 		slog.Warn("mpc: legacy Go DP selected explicitly", "engine", engine)
