@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.128.0
+
+### Minor Changes
+
+- 49fe04f: Replace the discretized Go MPC as the primary planner with a CVXPY mathematical optimizer using HiGHS for LP/MILP, CLARABEL for continuous convex fallback, scenario/CVaR forecast risk, independently constrained battery fleets, recoverable out-of-band SoC states, multiple jointly optimized EV loadpoints, Go-side trajectory validation, deterministic and historical replay tooling, an always-on diagnostic DP shadow, and automatic Go-DP emergency fallback.
+- b10acac: Add an opt-in stochastic storage-recourse shadow planner and stateful champion/challenger evaluation without allowing the challenger to affect dispatch.
+- c032cfa: Add an opt-in multistage stochastic optimizer shadow with hierarchical scenario trees, scenario reduction, move blocking, service-risk CVaR, a direct sparse HiGHS path, DPP CVXPY fallback, and guarded Progressive Hedging for large continuous ensembles.
+- 1f0f7b4: Rename the project to FTW under the `srcfl` GitHub and GHCR namespaces, add
+  canonical `ftw` binaries and fresh-install defaults, retain compatibility
+  aliases for existing installations, and update active product documentation
+  and branding for Sourceful stewardship.
+- 49fe04f: Add persistent stable, beta, and edge update channels with immutable GHCR targets, snapshot-protected channel updates, a dashboard channel selector, automatic edge images from master, and an explicit beta prerelease workflow.
+
+### Patch Changes
+
+- 353c26d: Harden the Python optimizer worker with idle memory release, robust solver tolerances, same-forecast DP evaluation diagnostics, and safe repeated OCPP shutdown.
+
 ## 0.127.0
 
 ### Minor Changes
