@@ -1,0 +1,97 @@
+name: GHCR migration preflight
+
+# Proves that the temporary dual-publish credentials can write the same FTW
+# manifests to both namespaces before the repository transfer. The tags are
+# deliberately isolated from stable, beta and edge channels.
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/ghcr-migration-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-migration-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dual-publish:
+    name: dual-publish probe (${{ matrix.target }})
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: main
+            dockerfile: ./Dockerfile
+            image_suffix: ''
+          - target: updater
+            dockerfile: ./Dockerfile.updater
+            image_suffix: '-updater'
+    env:
+      PREFLIGHT_TAG: migration-preflight-${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to canonical GHCR namespace
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ vars.SOURCEFUL_GHCR_USER }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN }}
+
+      - name: Build and publish canonical preflight image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ env.PREFLIGHT_TAG }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/srcfl/ftw
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.PREFLIGHT_TAG }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            VERSION=${{ env.PREFLIGHT_TAG }}
+          cache-from: type=gha,scope=migration-preflight-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=migration-preflight-${{ matrix.target }}
+
+      - name: Login to compatibility GHCR namespace
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN }}
+
+      - name: Mirror and verify exact manifest
+        env:
+          IMAGE_SUFFIX: ${{ matrix.image_suffix }}
+        run: |
+          set -euo pipefail
+          source="ghcr.io/srcfl/ftw${IMAGE_SUFFIX}:${PREFLIGHT_TAG}"
+          legacy="ghcr.io/frahlg/forty-two-watts${IMAGE_SUFFIX}:${PREFLIGHT_TAG}"
+
+          docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
+
+          source_digest="$(docker buildx imagetools inspect "${source}" | awk '$1 == "Digest:" {print $2; exit}')"
+          legacy_digest="$(docker buildx imagetools inspect "${legacy}" | awk '$1 == "Digest:" {print $2; exit}')"
+          test -n "${source_digest}"
+          test "${source_digest}" = "${legacy_digest}"
+
+          echo "Verified ${source_digest} in canonical and compatibility namespaces"
