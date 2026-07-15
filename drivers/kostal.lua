@@ -13,10 +13,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "Kostal Plenticore Plus and Piko IQ via Modbus TCP (SunSpec plus Kostal custom map).",
   homepage     = "https://www.kostal-solar-electric.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "Plenticore Plus", "Piko IQ" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -26,7 +26,7 @@ DRIVER = {
 PROTOCOL = "modbus"
 
 ----------------------------------------------------------------------------
--- SunSpec helpers (inline — the 42W host has no host.scale / host.decode_f32)
+-- SunSpec helpers (inline — the FTW host has no host.scale / host.decode_f32)
 ----------------------------------------------------------------------------
 
 -- Apply a SunSpec signed scale factor: result = value * 10^sf.

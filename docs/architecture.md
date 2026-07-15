@@ -1,12 +1,12 @@
 # Architecture overview
 
-This is the canonical system map for forty-two-watts. For the sign
+This is the canonical system map for FTW. For the sign
 convention every number in the rest of this document obeys, see
 [site-convention.md](site-convention.md) first.
 
 ## System summary
 
-forty-two-watts is an embedded home energy management system that runs
+FTW is an embedded home energy management system that runs
 on a Raspberry Pi or Linux host and coordinates meters, PV, batteries,
 inverters, EV chargers, and V2X devices behind one site meter. A Go
 control loop unifies dispatch, an MPC planner with online ML digital
@@ -72,7 +72,7 @@ Retention constants live in `go/internal/state/store.go`: 30 days hot,
 365 days warm, and 14 days of long-format samples before parquet roll-off.
 
 ### Control loop
-Source: `go/cmd/forty-two-watts/main.go` calling `go/internal/control/`.
+Source: `go/cmd/ftw/main.go` calling `go/internal/control/`.
 
 Runs every `site.control_interval_s` seconds (default 2). Modes:
 
@@ -258,11 +258,9 @@ In this order, for someone new to the codebase:
 1. [docs/site-convention.md](site-convention.md) — every number in
    the system obeys it. Nothing below makes sense otherwise.
 2. This file.
-3. `docs/ml-models.md` (planned) — today read
-   [docs/ml-twins.md](ml-twins.md) for the digital twins and
+3. [docs/ml-models.md](ml-models.md) for the digital twins and
    [docs/mpc-planner.md](mpc-planner.md) for the planner internals.
-4. `docs/writing-a-driver.md` (planned) — today read
-   [docs/lua-drivers.md](lua-drivers.md) and
-   [docs/host-api.md](host-api.md).
-5. `go/cmd/forty-two-watts/main.go` — the orchestrator. One file,
-   ~770 lines, wires everything above together. Read top to bottom.
+4. [docs/writing-a-driver.md](writing-a-driver.md) and
+   [docs/host-api.md](host-api.md) for Lua drivers.
+5. `go/cmd/ftw/main.go` — the process orchestrator that wires the packages
+   together.

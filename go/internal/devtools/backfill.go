@@ -1,5 +1,5 @@
 // Package devtools hosts developer-only utilities that ship inside the
-// main forty-two-watts binary but stay dormant unless explicitly invoked
+// main FTW binary but stay dormant unless explicitly invoked
 // (e.g. via the -backfill flag). Nothing here runs during normal service
 // operation.
 package devtools
@@ -13,7 +13,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // backfillMarker is the JSON payload stamped on every synthetic row so

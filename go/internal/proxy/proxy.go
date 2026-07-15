@@ -1,6 +1,6 @@
 // Package proxy implements an optional dev-mode reverse proxy for the
 // HTTP handler. When enabled, requests under /api/ are forwarded to an
-// upstream forty-two-watts instance so the local dev server can render
+// upstream FTW instance so the local dev server can render
 // the UI against live data without running real drivers locally.
 //
 // Static assets (/, /index.html, /legacy.html, /components/*.css, *.js, …)
@@ -24,7 +24,7 @@ import (
 )
 
 // Config captures how the proxy behaves. Upstream must be a valid URL
-// (scheme + host) pointing at a running forty-two-watts instance.
+// (scheme + host) pointing at a running FTW instance.
 type Config struct {
 	Upstream *url.URL
 	ReadOnly bool
@@ -42,7 +42,7 @@ func Wrap(next http.Handler, cfg Config) http.Handler {
 		// Rewrite Host so upstream logs the right target and any virtual-
 		// host-style routing works. NewSingleHostReverseProxy leaves Host
 		// alone by default because some backends need the client Host, but
-		// talking to another forty-two-watts we want the upstream to own it.
+		// talking to another FTW we want the upstream to own it.
 		r.Host = cfg.Upstream.Host
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {

@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // POST /api/loadpoints/{id}/force_start — handler coverage.

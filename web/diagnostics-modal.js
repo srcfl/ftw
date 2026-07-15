@@ -390,7 +390,7 @@
         "/api/support/dump",
         "Preparing support bundle",
         "Collecting logs, redacted config, driver health, and recent telemetry.",
-        "forty-two-watts-support.tar.gz"
+        "ftw-support.tar.gz"
       );
     });
     backdrop.querySelector('[data-role="research"]').addEventListener("click", function () {
@@ -398,7 +398,7 @@
         "/api/research/load/dump?days=120",
         "Preparing load research",
         "Building the anonymized 120-day research bundle. This can take a while on large databases.",
-        "forty-two-watts-load-research.tar.gz"
+        "ftw-load-research.tar.gz"
       );
     });
 

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // register_atomicity_test.go — the FIX-A escalation guard.

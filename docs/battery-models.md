@@ -1,6 +1,6 @@
 # Battery Models — online learning, cascade control, hardware health
 
-This is what makes forty-two-watts adaptive: every battery has its own learned
+This is what makes FTW adaptive: every battery has its own learned
 model of how it actually responds to power commands. The system uses these
 models in three ways:
 

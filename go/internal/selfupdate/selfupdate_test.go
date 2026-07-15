@@ -118,7 +118,7 @@ func newCheckerOnFakes(currentVersion string, registry, releases *httptest.Serve
 }
 
 func TestCheck_UpdateAvailable(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v1.3.0")
 	rsrv := reg.server()
@@ -155,7 +155,7 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 // update_available=false in that window, then flip to true once the
 // tag appears in the registry.
 func TestCheck_GHReleaseExistsButImageNotPushedYet(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	// No tags pushed yet.
 	rsrv := reg.server()
@@ -192,7 +192,7 @@ func TestCheck_GHReleaseExistsButImageNotPushedYet(t *testing.T) {
 // the older-but-numerically-higher tag as latest. GH Releases is the
 // authority for which version is current.
 func TestCheck_RespectsGHReleaseOverHigherSemverInRegistry(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v0.43.1")
 	reg.addTag("v0.44.0") // current line, what GH says is latest
@@ -214,7 +214,7 @@ func TestCheck_RespectsGHReleaseOverHigherSemverInRegistry(t *testing.T) {
 }
 
 func TestCheck_NoReleasesYet(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	rsrv := reg.server()
 	defer rsrv.Close()
@@ -233,7 +233,7 @@ func TestCheck_NoReleasesYet(t *testing.T) {
 }
 
 func TestCheck_PrereleaseFiltered(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v1.5.0-rc1")
 	rsrv := reg.server()
@@ -253,7 +253,7 @@ func TestCheck_PrereleaseFiltered(t *testing.T) {
 }
 
 func TestCheck_BetaChannelSelectsNewestBetaAndPersistsChannel(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v1.5.0-beta.1")
 	reg.addTag("v1.5.0-beta.2")
@@ -290,7 +290,7 @@ func TestCheck_BetaChannelSelectsNewestBetaAndPersistsChannel(t *testing.T) {
 }
 
 func TestCheck_EdgeChannelUsesNewestImmutableTag(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("edge")
 	reg.addTag("edge-20260711T100000Z-abcdef0")
@@ -331,7 +331,7 @@ func TestNew_InfersChannelFromBuildVersion(t *testing.T) {
 }
 
 func TestCheck_SameVersion(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v2.0.0")
 	rsrv := reg.server()
@@ -351,7 +351,7 @@ func TestCheck_SameVersion(t *testing.T) {
 }
 
 func TestCheck_DevCurrent(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v0.17.1")
 	rsrv := reg.server()
@@ -368,7 +368,7 @@ func TestCheck_DevCurrent(t *testing.T) {
 }
 
 func TestCheck_CacheRespected(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v1.0.0")
 	rsrv := reg.server()
@@ -404,10 +404,10 @@ func TestCheck_GHReleasesError(t *testing.T) {
 	}))
 	defer rls.Close()
 
-	reg := newFakeRegistry(t, "frahlg/forty-two-watts").server()
+	reg := newFakeRegistry(t, "srcfl/ftw").server()
 	defer reg.Close()
 
-	c := newCheckerOnFakes("v1.0.0", reg, rls, "frahlg/forty-two-watts", newMemStore())
+	c := newCheckerOnFakes("v1.0.0", reg, rls, "srcfl/ftw", newMemStore())
 	if _, err := c.Check(context.Background(), false); err == nil {
 		t.Fatal("expected error for 503")
 	}
@@ -426,7 +426,7 @@ func TestCheck_RegistryError(t *testing.T) {
 	rls := fakeReleasesServer(t, fakeRelease{tag: "v1.1.0"})
 	defer rls.Close()
 
-	c := newCheckerOnFakes("v1.0.0", rsrv, rls, "frahlg/forty-two-watts", newMemStore())
+	c := newCheckerOnFakes("v1.0.0", rsrv, rls, "srcfl/ftw", newMemStore())
 	if _, err := c.Check(context.Background(), false); err == nil {
 		t.Fatal("expected error when registry is unreachable")
 	}
@@ -436,7 +436,7 @@ func TestCheck_RegistryError(t *testing.T) {
 }
 
 func TestSkipAndUnskip(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v1.3.0")
 	rsrv := reg.server()
@@ -564,7 +564,7 @@ func TestIsNewer(t *testing.T) {
 }
 
 func TestCheck_TruncatesHugeReleaseBody(t *testing.T) {
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 	reg := newFakeRegistry(t, repo)
 	reg.addTag("v2.0.0")
 	rsrv := reg.server()

@@ -37,7 +37,7 @@ DRIVER = {
   capabilities = { "meter" },
   description  = "Tibber Pulse grid meter via GraphQL-transport-ws liveMeasurement stream.",
   homepage     = "https://tibber.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "Pulse IR", "Pulse HAN", "Pulse P1" },
   verification_status = "experimental",
   -- Settings UI: the api_key field gets rendered as a password input in the
@@ -141,7 +141,7 @@ local function ws_connect()
   if host.millis() < S.reconnect_at then return false end
   local ok, err = host.ws_open(TIBBER_WS_URL, {
     ["Sec-WebSocket-Protocol"] = "graphql-transport-ws",
-    ["User-Agent"]             = "forty-two-watts/tibber",
+    ["User-Agent"]             = "FTW/tibber",
   })
   if not ok then
     host.log("warn", "Tibber WS dial failed: " .. tostring(err))

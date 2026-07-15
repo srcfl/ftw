@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // TestOwnerGateThroughRelay reproduces the home.fortytwowatts.com path end to
@@ -30,7 +30,7 @@ func TestOwnerGateThroughRelay(t *testing.T) {
 	}
 	repo := repoRoot(t)
 	relayBin := buildBinary(t, repo, "ftw-relay")
-	mainBin := buildBinary(t, repo, "forty-two-watts")
+	mainBin := buildBinary(t, repo, "ftw")
 
 	work := t.TempDir()
 	stateDir := filepath.Join(work, "state")

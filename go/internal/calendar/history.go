@@ -176,7 +176,7 @@ func (s *Service) writeSession(ctx context.Context, cs CompletedSession) error {
 	uid := fmt.Sprintf("ftw-ev-%s-%d@fortytwowatts", sanitizeUID(cs.ID), cs.Start.Unix())
 
 	cal := ical.NewCalendar()
-	cal.Props.SetText(ical.PropProductID, "-//forty-two-watts//EV history//EN")
+	cal.Props.SetText(ical.PropProductID, "-//FTW//EV history//EN")
 	cal.Props.SetText(ical.PropVersion, "2.0")
 
 	ev := ical.NewEvent()
@@ -186,7 +186,7 @@ func (s *Service) writeSession(ctx context.Context, cs CompletedSession) error {
 	ev.Props.SetDateTime(ical.PropDateTimeEnd, cs.End)
 	ev.Props.SetText(ical.PropSummary, fmt.Sprintf("EV charged %.1f kWh", cs.EnergyWh/1000))
 	ev.Props.SetText(ical.PropDescription, fmt.Sprintf(
-		"forty-two-watts: %s delivered %.0f Wh over %s.",
+		"FTW: %s delivered %.0f Wh over %s.",
 		cs.ID, cs.EnergyWh, cs.End.Sub(cs.Start).Round(time.Minute))+
 		lanNote("adds a new event here after each completed charge session"))
 	cal.Children = append(cal.Children, ev.Component)

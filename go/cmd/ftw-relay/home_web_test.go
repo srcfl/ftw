@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // home_web_test.go — single-tenant SLICE 1 (serve the home shell from

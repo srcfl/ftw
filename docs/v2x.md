@@ -126,7 +126,7 @@ limits.
 ### Ferroamp DC2 MQTT details
 
 The Ferroamp DC2 charger API does not take watts on its power control topic.
-The driver accepts site-convention watts from forty-two-watts and translates
+The driver accepts site-convention watts from FTW and translates
 them at the driver boundary to the DC2 API:
 
 - `dc2/ui/control/controller` gets JSON `{"timestamp": ..., "value": "MQTT"}`.

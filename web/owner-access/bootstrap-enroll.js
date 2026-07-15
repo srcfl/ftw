@@ -120,7 +120,7 @@ export async function claimAndVerify(homeBase, claimKey, fetchImpl) {
     body: JSON.stringify({ claim_key: claimKey }),
   });
   if (r.status === 404) {
-    throw codedError("FTW_BOOTSTRAP_NOT_LIVE", "This setup link is no longer live. Create a fresh setup QR from your local 42W Access screen. If a passkey was already enrolled, sign in first; the first setup link is single-use.", r.status);
+    throw codedError("FTW_BOOTSTRAP_NOT_LIVE", "This setup link is no longer live. Create a fresh setup QR from your local FTW Access screen. If a passkey was already enrolled, sign in first; the first setup link is single-use.", r.status);
   }
   if (!r.ok) {
     const body = await r.text();

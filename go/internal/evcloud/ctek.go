@@ -8,7 +8,7 @@ import (
 
 	sv "github.com/simonvetter/modbus"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // ctekDefaultPort is the standard Modbus/TCP port. Overridable via

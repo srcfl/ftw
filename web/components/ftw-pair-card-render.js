@@ -102,7 +102,8 @@ export function formatAge(ms) {
 // (grant) is minted by the relay only when the code is accepted, so it
 // cannot exist before approval. Pre-baking a token-less command would
 // just hand the friend something that gets rejected with 401. See the
-// grant-exchange model in docs/goals/relay-subdomain-sessions.md.
+// grant-exchange model in
+// docs/archive/agent-artifacts/goals/relay-subdomain-sessions.md.
 //
 // When state has no pair_url (e.g. -no-relay mode) it falls back to
 // the local MCP addr stored in `code` so the same template works for

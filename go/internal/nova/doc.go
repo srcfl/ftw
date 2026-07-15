@@ -1,16 +1,16 @@
 // Package nova is the opt-in federation client that publishes
-// forty-two-watts telemetry into Sourceful's Nova Core backend.
+// FTW telemetry into Sourceful's Nova Core backend.
 //
-// Design thesis
+// # Design thesis
 //
-// forty-two-watts uses a clean, physics-consistent, snake_case, site-
+// FTW uses a clean, physics-consistent, snake_case, site-
 // convention data model (see ../../../docs/site-convention.md). Nova's
 // current wire format has divergences from that model — mixed-case field
 // names (SoC_nom_fract, L1_V, heatsink_C), opposite battery sign
 // (negative W for charging), and a mismatched DER type vocabulary
 // (solar/ev_port vs pv/ev).
 //
-// Rather than adopt Nova's debt, this package holds forty-two-watts'
+// Rather than adopt Nova's debt, this package holds FTW's
 // native clean payload (payload.go) and a single adapter (adapter.go)
 // that translates it to the current Nova wire shape at the MQTT
 // publisher boundary. When Nova ships the unified schema (see
@@ -25,14 +25,14 @@
 //
 // Identity mapping
 //
-//   - Nova hardware_id  ← forty-two-watts device_id verbatim
+//   - Nova hardware_id  ← FTW device_id verbatim
 //     (make:serial / mac:aabb... / ep:host:port)
 //   - Nova der_name     ← "{driver_name}-{der_type}" (e.g. solis-battery)
 //   - Nova der_id       ← server-generated der-{uuid7}, stored locally
 //     in state.nova_ders purely for diagnostics
 //   - Gateway identity  ← ES256 keypair generated on first run
 //
-// Runtime layout
+// # Runtime layout
 //
 // Start() mirrors internal/ha.Start: it owns its own paho MQTT client,
 // reads snapshots from telemetry.Store on a ticker, translates via the

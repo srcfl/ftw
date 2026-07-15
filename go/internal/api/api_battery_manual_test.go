@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // Battery manual-hold endpoint tests. Validation, route wiring, and

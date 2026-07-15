@@ -3,7 +3,7 @@
 -- Protocol: Modbus TCP (typical port 502)
 --
 -- Ported from sourceful-hugin/device-support/drivers/lua/solis.lua.
--- Rewritten to forty-two-watts v2.1 host idiom:
+-- Rewritten to FTW v2.1 host idiom:
 --   * DRIVER metadata table for the catalog
 --   * host.log(level, msg)         (was host.log(msg))
 --   * host.decode_u32_be / i32_be  (was host.decode_u32 / i32)
@@ -56,10 +56,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "Solis S5/S6 hybrid inverters via Modbus TCP.",
   homepage     = "https://www.ginlong.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "S6-EH", "S5-GR", "S6-GR" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,

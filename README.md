@@ -1,14 +1,16 @@
-# forty-two-watts
+# FTW
 
-<img src="web/logo.jpg" alt="42W" width="120" align="right">
+<img src="web/logo.jpg" alt="FTW" width="120" align="right">
 
-> Local-first home energy management for solar, batteries, grid import,
-> export, and EV charging.
+> Local-first home energy coordination.
 
-forty-two-watts is a single Go binary that runs on a Raspberry Pi or any
-Linux host. It coordinates inverters, batteries, meters, EV chargers, and
-V2X devices through Lua drivers and keeps all core control local to the
-site.
+FTW is an open-source local energy runtime for solar, batteries, grid and EV
+charging. It runs as a single Go binary on a Raspberry Pi or Linux host,
+coordinates devices through Lua drivers, and keeps the core control loop local.
+
+FTW is maintained by Sourceful Labs AB and project contributors. It is a
+self-hosted open-source project, not a hosted Sourceful service; the local
+control path does not depend on Sourceful cloud services.
 
 The project is active and runs on real hardware, but API and config fields
 can still change before a stable 1.0 release. Version numbers come from
@@ -24,9 +26,9 @@ published build.
 - **EV and V2X awareness**: EV charging is treated as load, and V2X chargers
   can emit bidirectional vehicle power without confusing stationary batteries.
 - **Calendar planning (CalDAV)**: add events in your normal calendar app and
-  42W turns them into planner intents — *Away* / *Vacation* conserves battery,
+  FTW turns them into planner intents — *Away* / *Vacation* conserves battery,
   *Charge car 80%* sets an EV departure deadline — and publishes charging
-  windows + EVSE usage history back to a calendar you can subscribe to. 42W
+  windows + EVSE usage history back to a calendar you can subscribe to. FTW
   hosts CalDAV itself, in-process, via [`emersion/go-webdav`](https://github.com/emersion/go-webdav)
   — no extra container, recurring events supported, and it works as a Home
   Assistant add-on. See [`docs/caldav-integration.md`](docs/caldav-integration.md).
@@ -58,20 +60,20 @@ Adding a new device starts with
 
 ### Option A: Raspberry Pi SD-card image
 
-Recommended: point **Raspberry Pi Imager** at the 42W image repository
+Recommended: point **Raspberry Pi Imager** at the FTW image repository
 (**App Options → Content Repository → Use custom file**):
 
 ```
-https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json
+https://github.com/srcfl/ftw/releases/latest/download/os_list.json
 ```
 
-Then pick **Forty-Two Watts**, set your hostname / SSH user / Wi-Fi in the
+Then pick **FTW**, set your hostname / SSH user / Wi-Fi in the
 customisation panel, and write — Imager downloads the image for you. Boot the
-Pi and open `http://42w.local/`.
+Pi and open `http://ftw.local/`.
 
-You can instead download the `42w-rpi4-arm64-vX.Y.Z.img.xz` release asset and
+You can instead download the `ftw-rpi4-arm64-vX.Y.Z.img.xz` release asset and
 flash it directly, but that skips the customisation panel (default
-credentials, Wi-Fi via the `42w-setup` captive portal) — not recommended.
+credentials, Wi-Fi via the `ftw-setup` captive portal) — not recommended.
 
 Full walkthrough: [`docs/rpi-image.md`](docs/rpi-image.md).
 
@@ -80,7 +82,7 @@ Full walkthrough: [`docs/rpi-image.md`](docs/rpi-image.md).
 On Raspberry Pi OS, Debian, or Ubuntu:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
 ```
 
 Then open `http://<your-pi>:8080/setup`.
@@ -96,8 +98,8 @@ Prerequisites: Go 1.26+, a Linux/Raspberry Pi target, and at least one
 supported device or simulator.
 
 ```bash
-git clone https://github.com/frahlg/forty-two-watts
-cd forty-two-watts
+git clone https://github.com/srcfl/ftw
+cd ftw
 
 make dev          # simulators + app at http://localhost:8080
 make test         # unit + integration tests
@@ -178,6 +180,7 @@ not copy the Pi dashboard `web/` directory to the relay. Deployment details:
 
 - [`docs/operations.md`](docs/operations.md) - deploy, backup, logs, recovery
 - [`docs/self-update.md`](docs/self-update.md) - Docker updater sidecar
+- [`MIGRATION.md`](MIGRATION.md) - former-name compatibility and upgrade notes
 - [`docs/ha-integration.md`](docs/ha-integration.md) - MQTT autodiscovery
 - [`docs/caldav-integration.md`](docs/caldav-integration.md) - calendar planner constraints (CalDAV)
 - [`docs/safety.md`](docs/safety.md) - watchdog, clamps, fuse guard
@@ -231,12 +234,13 @@ release notes live in `.changeset/*.md`.
 ## Community
 
 - Discord: [discord.gg/25xcBzQaux](https://discord.gg/25xcBzQaux)
-- Issues: [github.com/frahlg/forty-two-watts/issues](https://github.com/frahlg/forty-two-watts/issues)
+- Issues: [github.com/srcfl/ftw/issues](https://github.com/srcfl/ftw/issues)
 
 ## License
 
 Licensed under the Apache License, Version 2.0 — see [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE). Contributions are accepted under the same license via the
+[`NOTICE`](NOTICE). Project naming guidance lives in [`TRADEMARKS.md`](TRADEMARKS.md).
+Contributions are accepted under the same license via the
 [Developer Certificate of Origin](CONTRIBUTING.md) (commit with `git commit -s`).
 
 > Prior to the adoption of Apache-2.0, the project was offered under the MIT

@@ -1,4 +1,4 @@
-# forty-two-watts config example
+# FTW config example
 # Copy to config.yaml and edit for your site.
 
 site:
@@ -117,7 +117,7 @@ homeassistant:
   password: homeems
   publish_interval_s: 5
 
-# Calendar-based planner constraints (#498). 42W hosts its OWN in-process,
+# Calendar-based planner constraints (#498). FTW hosts its OWN in-process,
 # pure-Go CalDAV server (emersion/go-webdav, MIT — no sidecar, works in a
 # single container incl. a Home Assistant add-on; objects persist in state.db)
 # and turns the events you add into planner intents: "Away"/"Vacation" → away
@@ -130,7 +130,7 @@ caldav:
   # listen: ":5232"          # bind address for the in-process CalDAV server
   url: http://localhost:5232
   username: fortytwowatts
-  # manage_credentials (default true): 42W generates the password and the
+  # manage_credentials (default true): FTW generates the password and the
   # in-process server authenticates against it, then shows it (with a QR) in
   # Settings → Calendar. Set false to set `password` here by hand.
   manage_credentials: true

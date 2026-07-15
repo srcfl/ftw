@@ -12,7 +12,7 @@
 --   MyUplink's developer portal issues authorization-code apps (you register
 --   a Callback URL, Client Identifier and Client Secret) — it does NOT support
 --   the client_credentials grant, which is why a portal app returns
---   `invalid_client` (issue #496). 42w handles the one-time browser consent in
+--   `invalid_client` (issue #496). FTW handles the one-time browser consent in
 --   Settings → Devices ("Connect to MyUplink"); the resulting refresh_token is
 --   stored in config and this driver runs `grant_type=refresh_token` at
 --   runtime. Azure B2C rotates the refresh_token on each refresh, so we persist
@@ -48,7 +48,7 @@ DRIVER = {
   description  = "Read-only heat-pump telemetry via MyUplink Cloud REST API v2: compressor power + hot-water/indoor/outdoor temperatures. Observe-only — no control. OAuth: authorization-code + refresh-token (connect in Settings → Devices).",
   homepage     = "https://dev.myuplink.com",
   http_hosts   = { "api.myuplink.com" },
-  authors      = { "hannesb90", "forty-two-watts contributors" },
+  authors      = { "hannesb90", "FTW contributors" },
   tested_models = { "NIBE F1145", "NIBE S1255", "NIBE F730" },
   verification_status = "experimental",
   config_secrets = { "client_secret", "refresh_token" },

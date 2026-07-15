@@ -1,6 +1,6 @@
 # docker-compose.e2e.yml — LOCAL end-to-end harness (relay + Pi) on ONE machine.
 #
-# Brings up the standalone ftw-relay and a forty-two-watts "Pi" wired to dial it,
+# Brings up the standalone ftw-relay and a ftw "Pi" wired to dial it,
 # so you can exercise the whole home-route / owner-access / pair / P2P flow
 # locally — no real Pi, no real relay VM, no Cloudflare, no certs.
 #
@@ -48,7 +48,7 @@ services:
       # and matches the `home.fortytwowatts.localhost/` mux pattern.
       - "80:7378"
 
-  forty-two-watts:
+  ftw:
     build:
       context: .
       dockerfile: Dockerfile

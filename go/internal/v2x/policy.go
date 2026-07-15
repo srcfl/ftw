@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // Snapshot is the live state needed to answer whether V2X power is safe now.

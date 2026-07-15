@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/battery"
+	"github.com/srcfl/ftw/go/internal/battery"
 )
 
 // Step is one position in the self-tune state machine.

@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // Manual-hold diagnostics endpoint. Lets an operator pin a loadpoint

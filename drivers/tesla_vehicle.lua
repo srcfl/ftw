@@ -2,7 +2,7 @@
 -- Emits: Vehicle (DerVehicle)
 -- Protocol: HTTP (Tesla Owner API shape — /api/1/vehicles/{VIN}/vehicle_data)
 --
--- Fetches the vehicle's own SoC and charge_limit so forty-two-watts can
+-- Fetches the vehicle's own SoC and charge_limit so FTW can
 -- show the real "24 / 50 %" in the EV bubble and let the loadpoint
 -- manager prefer the truth over its delivered-Wh inference. Designed
 -- to talk to TeslaBLEProxy running on the same LAN
@@ -32,7 +32,7 @@ DRIVER = {
   capabilities = { "vehicle" },
   description  = "Read-only vehicle SoC + charge limit via Tesla API-compatible HTTP endpoint (e.g. TeslaBLEProxy).",
   homepage     = "https://github.com/wimaha/TeslaBleHttpProxy",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "Model Y", "Model 3" },
   verification_status = "beta",
 }

@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
-	"github.com/frahlg/forty-two-watts/go/internal/scanner"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/scanner"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 type fingerprintReq struct {

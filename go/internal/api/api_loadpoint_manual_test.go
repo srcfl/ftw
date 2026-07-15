@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
 // Manual-hold endpoint tests. Validation, route wiring, and the full

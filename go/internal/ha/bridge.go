@@ -20,9 +20,9 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/control"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // CommandCallbacks is how the bridge hands received commands back to the
@@ -94,7 +94,7 @@ type Bridge struct {
 	plan   PlanSource   // nil when MPC is not configured
 	energy EnergySource // nil when state.Store is not available
 
-	topicPrefix string // e.g. "forty-two-watts"
+	topicPrefix string // stable wire ID, e.g. "forty-two-watts"
 	discoPrefix string // e.g. "homeassistant"
 	deviceID    string
 
@@ -362,7 +362,7 @@ func (b *Bridge) driverTopic(driver, field string) string {
 func (b *Bridge) discoveryDevice() map[string]any {
 	return map[string]any{
 		"identifiers":  []string{b.deviceID},
-		"name":         "forty-two-watts",
+		"name":         "FTW",
 		"manufacturer": "Sourceful",
 		"model":        "Home EMS",
 	}

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts — sign in</title>
+  <title>FTW — sign in</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <link rel="stylesheet" href="/components/theme.css">
   <style>
@@ -138,7 +138,7 @@
         const credOpts = decodeAssertionOptions(options);
         // Request the PRF extension so this assertion also yields the per-wallet
         // directory ENCRYPTION key (prf.js) — the same passkey tap that signs in
-        // can decrypt the owner's list of 42W homes from the relay. Harmless where
+        // can decrypt the owner's list of FTW homes from the relay. Harmless where
         // unsupported (no prf result → browser-carried directory only).
         credOpts.extensions = Object.assign({}, credOpts.extensions, extensionInput());
         const getOpts = { publicKey: credOpts, signal: abort.signal };

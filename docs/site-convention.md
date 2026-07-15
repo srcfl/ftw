@@ -1,6 +1,6 @@
 # Site sign convention — boundary-view, imports positive
 
-forty-two-watts uses a **unified sign convention** for all power and energy
+FTW uses a **unified sign convention** for all power and energy
 values above the driver layer. Every telemetry field, API response, log
 line, battery model, chart — all use the same signs.
 

@@ -1,4 +1,4 @@
-# Contributing to forty-two-watts
+# Contributing to FTW
 
 Thanks for helping build the local energy coordination layer. This document
 covers the legal bits — for how the code is organized and how to add a driver,

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // readBodyLimited must reject a body over the cap rather than silently
@@ -225,7 +225,7 @@ func TestHomeForwardServesOfflinePage(t *testing.T) {
 	body := make([]byte, 4096)
 	n, _ := resp.Body.Read(body)
 	html := string(body[:n])
-	if !strings.Contains(html, "forty-two-watts") || !strings.Contains(html, `id="retry"`) {
+	if !strings.Contains(html, "FTW") || !strings.Contains(html, `id="retry"`) {
 		t.Fatalf("offline page missing brand/retry affordance:\n%s", html)
 	}
 }

@@ -91,7 +91,8 @@ type Token struct {
 	// code is accepted. It — not the URL token — is what authorizes
 	// /h/<token>/{mcp,web} requests after activation, so a leaked-but-
 	// already-activated URL is useless without it. Empty until approval.
-	// See docs/goals/relay-subdomain-sessions.md (grant-exchange model).
+	// See docs/archive/agent-artifacts/goals/relay-subdomain-sessions.md
+	// (grant-exchange model).
 	grant string
 }
 

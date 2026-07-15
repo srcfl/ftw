@@ -3,7 +3,7 @@
 -- Protocol: Modbus TCP, ALL HOLDING registers (FC 0x03), Big-Endian word order
 --
 -- Ported from sourceful-hugin/device-support/drivers/lua/sofar.lua
--- for forty-two-watts Lua host v2.1.
+-- for FTW Lua host v2.1.
 --
 -- Register map derived from the wills106/homeassistant-solax-modbus
 -- community project. Hex register addresses converted to decimal here.
@@ -29,10 +29,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "Sofar Solar HYD-ES / HYD-EP hybrid inverters via Modbus TCP.",
   homepage     = "https://www.sofarsolar.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "HYD-ES", "HYD-EP" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,

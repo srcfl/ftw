@@ -2,12 +2,12 @@
 
 ## What it does
 
-42W's own pure-Go CalDAV server, built on `github.com/emersion/go-webdav`
-(**MIT**). It is the **only** CalDAV server 42W uses — there is no sidecar.
-Being in-process it ships in the single 42W binary, so the calendar feature
-runs everywhere 42W does, including a single-container Home Assistant add-on.
+FTW's own pure-Go CalDAV server, built on `github.com/emersion/go-webdav`
+(**MIT**). It is the **only** CalDAV server FTW uses — there is no sidecar.
+Being in-process it ships in the single FTW binary, so the calendar feature
+runs everywhere FTW does, including a single-container Home Assistant add-on.
 
-42W's calendar client (`internal/calendar`) talks CalDAV to it over localhost,
+FTW's calendar client (`internal/calendar`) talks CalDAV to it over localhost,
 so the inbound/outbound intent logic is independent of transport. Both sides
 authenticate with the managed credential.
 
@@ -44,7 +44,7 @@ intents (including recurring ones) from it lives in
 ## Known limits
 
 - Single principal; minimal MKCALENDAR/sync semantics.
-- Interop verified against 42W's own go-webdav client, not yet the full matrix
+- Interop verified against FTW's own go-webdav client, not yet the full matrix
   of iOS / Google / Thunderbird.
 
 ## What NOT to do

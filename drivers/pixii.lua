@@ -29,10 +29,10 @@ DRIVER = {
   capabilities = { "battery", "meter" },
   description  = "Pixii PowerShaper commercial battery storage via Modbus TCP.",
   homepage     = "https://pixii.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "PowerShaper" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -572,7 +572,7 @@ end
 ----------------------------------------------------------------------------
 -- Control: active power setpoint (demand response)
 ----------------------------------------------------------------------------
--- EMS convention on the 42W side: power_w > 0 = charge, < 0 = discharge.
+-- EMS convention on the FTW side: power_w > 0 = charge, < 0 = discharge.
 -- Pixii 39905/06 uses generator reference frame (positive = discharge),
 -- so the sign is flipped at the setpoint boundary. The two registers
 -- MUST be written atomically as a single write-multiple (FC 0x10) so

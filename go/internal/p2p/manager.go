@@ -7,7 +7,7 @@ package p2p
 // API mux, then it tracks the connection so dead peers are reaped. Signaling
 // (the offer/answer exchange) rides the existing authenticated owner tunnel via
 // POST /api/p2p/offer — no relay changes; see
-// docs/superpowers/specs/2026-06-03-home-route-phase5-transport-design.md.
+// docs/archive/agent-artifacts/superpowers/specs/2026-06-03-home-route-phase5-transport-design.md.
 
 import (
 	"context"
@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 	"github.com/pion/webrtc/v4"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // FingerprintSigner signs a canonical string with the Pi's ES256 identity key

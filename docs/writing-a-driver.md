@@ -360,7 +360,7 @@ in `docs/site-convention.md`.
 4. Test in isolation:
 
    ```bash
-   cd /Users/fredde/repositories/forty-two-watts/go
+   cd go
    go test -count=1 -run TestLuaDriverLifecycle ./internal/drivers/
    ```
 
@@ -414,7 +414,7 @@ in `docs/site-convention.md`.
 Lua syntax + ABI check:
 
 ```bash
-cd /Users/fredde/repositories/forty-two-watts/go
+cd go
 go test -count=1 -run TestLuaDriverLifecycle ./internal/drivers/
 ```
 
@@ -482,19 +482,19 @@ So a file in `./data/drivers/` is loaded, shadows any bundled driver of
 the same name, and persists across both image upgrades and power loss.
 Available since v0.100.0.
 
-To install one (the deploy directory is `~/forty-two-watts` after
+To install one (the deploy directory is `~/ftw` after
 `scripts/install.sh`):
 
 ```bash
-mkdir -p ~/forty-two-watts/data/drivers
-cp my-device.lua ~/forty-two-watts/data/drivers/
+mkdir -p ~/ftw/data/drivers
+cp my-device.lua ~/ftw/data/drivers/
 
 # Linux only: the container runs as uid 100 / gid 101, so the file must
 # be readable by that user. (Docker Desktop on macOS maps ownership
 # transparently — skip this there.)
-sudo chown 100:101 ~/forty-two-watts/data/drivers/my-device.lua
+sudo chown 100:101 ~/ftw/data/drivers/my-device.lua
 
-cd ~/forty-two-watts && sudo docker compose restart forty-two-watts
+cd ~/ftw && sudo docker compose restart FTW
 ```
 
 Reference it in `config.yaml` the normal way — `lua: drivers/my-device.lua`.
@@ -502,7 +502,7 @@ The `drivers/` prefix resolves to the user directory first, so no
 absolute paths leak into the config and it stays portable.
 
 > **Don't `docker cp` into the running container.** Copying a driver to
-> `forty-two-watts:/app/drivers/` writes into the container's ephemeral
+> `FTW:/app/drivers/` writes into the container's ephemeral
 > writable layer — not the image, not the volume. It works until the next
 > `docker compose pull && up -d` recreates the container and discards that
 > layer, and it can be lost on an unclean power-off. Use `./data/drivers/`

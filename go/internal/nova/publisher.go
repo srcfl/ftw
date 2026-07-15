@@ -9,9 +9,9 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Publisher owns one MQTT connection to Nova's broker plus a periodic
@@ -202,7 +202,7 @@ func (p *Publisher) publishOnce() {
 
 // warnMissingOnce WARNs exactly once per (device_id, der_type) for a
 // DER that isn't provisioned in Nova yet. Avoids log spam on the 5-s
-// tick while still surfacing "you need to run `forty-two-watts
+// tick while still surfacing "you need to run `FTW
 // nova-claim` after adding this driver".
 func (p *Publisher) warnMissingOnce(deviceID, derType string) {
 	k := deviceID + "|" + derType
@@ -212,7 +212,7 @@ func (p *Publisher) warnMissingOnce(deviceID, derType string) {
 		return
 	}
 	p.missingDERs[k] = true
-	slog.Warn("nova: DER not provisioned — run `forty-two-watts nova-claim --reconcile`",
+	slog.Warn("nova: DER not provisioned — run `FTW nova-claim --reconcile`",
 		"device_id", deviceID, "der_type", derType)
 }
 

@@ -1,5 +1,5 @@
 // Settings → Calendar tab: CalDAV planner-constraints client (#498).
-// 42W can manage the calendar credential itself and show it here (with a QR)
+// FTW can manage the calendar credential itself and show it here (with a QR)
 // to add to a phone/desktop calendar app. All server-supplied values are
 // rendered via textContent / DOM nodes (never innerHTML) so a hostile or
 // MITM'd CalDAV server cannot inject markup into this gated settings page.
@@ -12,7 +12,7 @@
     return fetch(path, opts);
   }
 
-  // Calendar apps on the LAN can't reach "localhost" (that's 42W's own link to
+  // Calendar apps on the LAN can't reach "localhost" (that's FTW's own link to
   // its in-process CalDAV server); rewrite it to the host serving this dashboard.
   function lanURL(u) {
     if (!u) return u;
@@ -115,17 +115,17 @@
       var html =
         '<div id="caldav-status-indicator" class="ha-status-indicator">checking…</div>' +
         '<fieldset><legend>Calendar (CalDAV)</legend>' +
-        '<p class="hint">42W hosts its own built-in CalDAV server and turns the events you add into planner constraints. It stays on your local network — nothing here is exposed to the internet.</p>' +
+        '<p class="hint">FTW hosts its own built-in CalDAV server and turns the events you add into planner constraints. It stays on your local network — nothing here is exposed to the internet.</p>' +
         '<label><input type="checkbox" data-checkbox-path="caldav.enabled"' + (config.caldav.enabled ? " checked" : "") + "> Enabled</label>" +
-        '<label><input type="checkbox" data-checkbox-path="caldav.manage_credentials"' + (managed ? " checked" : "") + "> Let 42W manage the calendar password (recommended)</label>" +
+        '<label><input type="checkbox" data-checkbox-path="caldav.manage_credentials"' + (managed ? " checked" : "") + "> Let FTW manage the calendar password (recommended)</label>" +
         '<div class="field-row"><div>' +
-        field("Server URL", "caldav.url", "text", "http://localhost:5232", "Base URL of the CalDAV server. Defaults to 42W's built-in in-process server.") +
+        field("Server URL", "caldav.url", "text", "http://localhost:5232", "Base URL of the CalDAV server. Defaults to FTW's built-in in-process server.") +
         "</div><div>" +
-        field("Calendar path", "caldav.calendar_path", "text", "/fortytwowatts/energy/", "Collection 42W reads events from.") +
+        field("Calendar path", "caldav.calendar_path", "text", "/fortytwowatts/energy/", "Collection FTW reads events from.") +
         "</div></div>" +
         field("Username", "caldav.username", "text", "fortytwowatts");
       if (!managed) {
-        html += field("Password", "caldav.password", "password", "", "Only used when 42W is not managing the password.");
+        html += field("Password", "caldav.password", "password", "", "Only used when FTW is not managing the password.");
       }
       html +=
         '<div class="field-row"><div>' +
@@ -179,7 +179,7 @@
             credsEl.textContent = "";
             if (d.managed && d.username && d.password) {
               var box = el("fieldset", { class: "caldav-account" }, [
-                el("legend", { text: "Calendar account (managed by 42W)" }),
+                el("legend", { text: "Calendar account (managed by FTW)" }),
                 el("div", { class: "caldav-row" }, [el("label", { text: "Username" }), el("code", { class: "caldav-val", text: d.username }), copyBtn(function () { return d.username; })]),
                 el("div", { class: "caldav-row" }, [el("label", { text: "Password" }), el("code", { class: "caldav-val", text: d.password }), copyBtn(function () { return d.password; })]),
               ]);
@@ -190,13 +190,13 @@
           var calendars = [];
           if (d.subscribe_url) calendars.push({
             label: "Subscribe (read + write)",
-            desc: "Add this as a calendar account, then create “Away” or “Charge car 80%” events for 42W to act on. Scan the QR to get the URL onto your phone.",
+            desc: "Add this as a calendar account, then create “Away” or “Charge car 80%” events for FTW to act on. Scan the QR to get the URL onto your phone.",
             link: lanURL(d.subscribe_url),
             clickable: false,
           });
           if (d.plan_url) calendars.push({
             label: "Planned actions (read-only)",
-            desc: "Subscribe to see 42W’s upcoming battery charge / discharge windows. Tap the link or scan the QR to subscribe in one step.",
+            desc: "Subscribe to see FTW’s upcoming battery charge / discharge windows. Tap the link or scan the QR to subscribe in one step.",
             link: webcalFeed(d.plan_url, "plan", d.username, d.password),
             displayText: webcalFeed(d.plan_url, "plan"),
             clickable: true,

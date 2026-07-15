@@ -19,7 +19,7 @@ grants access through a browser sign-in. It does **not** support the
 MyUplink: token request failed: HTTP 400: {"error":"invalid_client", ...}
 ```
 
-So 42-watts does a one-time browser consent for you and stores the resulting
+So FTW does a one-time browser consent for you and stores the resulting
 refresh token. After that the driver refreshes silently; you never paste a
 token by hand. (Background: issue #496.)
 
@@ -27,22 +27,22 @@ token by hand. (Background: issue #496.)
 
 1. Go to the MyUplink **developer web portal**: <https://dev.myuplink.com> →
    **Applications** → create an application. (This is the *web* portal — not the
-   iOS/Android MyUplink app, which will not show a 42-watts client.)
-2. In 42-watts, open **Settings → Devices**, add the **MyUplink** driver from
+   iOS/Android MyUplink app, which will not show a FTW client.)
+2. In FTW, open **Settings → Devices**, add the **MyUplink** driver from
    the catalogue, and copy the **Callback URL** it shows you (it looks like
-   `http://<your-42w-address>/api/oauth/myuplink/callback`).
+   `http://<your-ftw-address>/api/oauth/myuplink/callback`).
 3. Paste that exact string into the portal's **Callback Url** field. It must
-   match the address you use to reach 42-watts, character for character.
+   match the address you use to reach FTW, character for character.
 4. Save the portal app and copy its **Client Identifier** and **Client
    Secret**.
 
 > **Callback URL must be reachable by your browser after sign-in.** If you reach
-> 42-watts over plain `http://<lan-ip>:8080` and MyUplink rejects a non-HTTPS
+> FTW over plain `http://<lan-ip>:8080` and MyUplink rejects a non-HTTPS
 > callback, use an HTTPS address instead — e.g. your relay URL
 > (`https://…`) — and register *that* as the callback. Whatever address you
 > register is the one you must be on when you click Connect.
 
-## Step 2 — enter credentials in 42-watts
+## Step 2 — enter credentials in FTW
 
 In **Settings → Devices**, on the MyUplink driver's **MyUplink connection**
 fieldset (the field labels match the portal exactly so nothing gets swapped):
@@ -57,11 +57,11 @@ fieldset (the field labels match the portal exactly so nothing gets swapped):
 Click **Connect to MyUplink**. A new tab opens MyUplink's sign-in; log in and
 grant access.
 
-**If you're redirected back to 42-watts** (typical for LAN-direct access): it
+**If you're redirected back to FTW** (typical for LAN-direct access): it
 exchanges the code, stores the refresh token, and restarts the driver. Return to
 Settings and **reload** — the badge flips to **✓ Connected**.
 
-**If you're _not_ redirected back** — you reach 42-watts over the relay / home
+**If you're _not_ redirected back** — you reach FTW over the relay / home
 route, or the portal rejected an `http` LAN callback — the browser still lands
 on a URL containing `?code=…&state=…` in the address bar. This is expected.
 Then:
@@ -70,7 +70,7 @@ Then:
 2. Back in Settings → Devices, expand **"Not redirected back? Paste the URL
    instead"**, paste it, and click **Complete connection**.
 
-42-watts exchanges the code over its own outbound HTTPS — no inbound callback
+FTW exchanges the code over its own outbound HTTPS — no inbound callback
 needed — so this path works on any origin (relay, headless, http LAN). Reload to
 see the **✓ Connected** badge. Do this within ~15 minutes of clicking Connect
 (the consent state expires).
@@ -92,7 +92,7 @@ compressor power and temperatures, plus a 24-hour power sparkline.
 
 | Symptom | Cause / fix |
 |---|---|
-| `invalid_client` at startup | Old `client_credentials` build, or wrong Client ID/Secret. Update 42-watts and re-enter the credentials. |
+| `invalid_client` at startup | Old `client_credentials` build, or wrong Client ID/Secret. Update FTW and re-enter the credentials. |
 | Connect button: "save the Client ID first" | Save the settings before clicking Connect — `/start` reads the *saved* Client ID. |
 | Redirected to a "connection failed — invalid state" page | The consent took longer than 10 minutes, or you started Connect from a different address than you finished on. Start again from the address you registered as the callback. |
 | Badge stays "Not connected" after consent | Reload the Settings page; the badge reflects the last config load. |

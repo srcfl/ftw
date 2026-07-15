@@ -43,7 +43,7 @@ export function isLanOrigin() {
   if (apiBase() !== "") return false;
   const h = (location.hostname || "").toLowerCase();
   if (h === "localhost" || h === "::1" || h === "[::1]") return true;
-  // A bare single-label host (e.g. "fortytwowatts", "raspberrypi") or *.local is a
+  // A bare single-label host (e.g. "ftw", "raspberrypi") or *.local is a
   // direct-LAN name — never the public home host (which has dots).
   if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true;
   if (isPrivateIPv4(h)) return true;

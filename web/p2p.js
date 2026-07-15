@@ -80,7 +80,7 @@
     if (h === "::1" || h === "[::1]") return true;
     // mDNS / local hostnames the Pi answers on directly.
     if (h.slice(-6) === ".local" || h.indexOf(".") === -1) {
-      // A bare single-label host (e.g. "fortytwowatts", "raspberrypi") or *.local
+      // A bare single-label host (e.g. "ftw", "raspberrypi") or *.local
       // is a direct-LAN name — never the public home host (which has dots).
       // Exception: don't treat a future bare public alias as LAN; but a
       // single-label host can't be a public FQDN, so this is safe.
@@ -455,7 +455,7 @@
     if (/^169\.254\./.test(h)) return true;            // link-local
     if (/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // CGNAT 100.64/10
     if (/\.local$/.test(h)) return true;               // mDNS
-    if (h.indexOf(".") === -1) return true;            // single-label host (e.g. "fortytwowatts")
+    if (h.indexOf(".") === -1) return true;            // single-label host (e.g. "ftw")
     return false;                                      // public FQDN → relay context (incl. home.*)
   }
 

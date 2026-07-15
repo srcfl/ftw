@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/nova"
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/nova"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 const testFpToken = "AB:CD:01:EF:23:45:67:89:AB:CD:01:EF:23:45:67:89:AB:CD:01:EF:23:45:67:89:AB:CD:01:EF:23:45:67:89"

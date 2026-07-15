@@ -10,7 +10,7 @@ import (
 
 	sv "github.com/simonvetter/modbus"
 
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/drivers"
 )
 
 func TestIsTransportError(t *testing.T) {

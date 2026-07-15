@@ -3,7 +3,7 @@ package evcloud
 import (
 	"fmt"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // Transport identifies the wire protocol a provider speaks. Drives the

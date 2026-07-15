@@ -1,10 +1,8 @@
 # ftw-updater sidecar — the one process allowed to touch the Docker socket.
 #
 # It listens on a Unix socket in a shared tmpfs volume, accepts signals
-# from the main forty-two-watts container, and runs
-#   docker compose pull forty-two-watts
-#   docker compose up -d [--force-recreate] forty-two-watts
-# against the host's Docker daemon. See docs/self-update.md.
+# from the main FTW container, and updates the in-use Compose service in place
+# through the host's Docker daemon. See docs/self-update.md.
 #
 # Multi-arch: same BUILDPLATFORM/TARGETPLATFORM split as Dockerfile so the
 # toolchain runs natively and only `go build` is cross-compiled.

@@ -2,10 +2,11 @@
 //
 // Replaces the old subetha shim. ftw-pair now exposes its MCP server
 // (and the dashboard at *apiBase) to a friend's browser / Claude Code
-// via the request-response relay at relay.fortytwowatts.com (or a
+// via the request-response relay at relay.ftw.sourceful.energy (or a
 // local relay for development).
 //
-// See docs/goals/relay-as-tunnel.md and docs/relay-deploy.md.
+// See docs/archive/agent-artifacts/goals/relay-as-tunnel.md and
+// docs/relay-deploy.md.
 package main
 
 import (
@@ -22,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // TunnelHandle wraps a tunnel.Host with the metadata the rest of

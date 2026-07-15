@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 func TestMergeAllowedHosts(t *testing.T) {

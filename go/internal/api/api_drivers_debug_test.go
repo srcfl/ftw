@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // /api/drivers/test handler-level coverage. The probe path runs a real

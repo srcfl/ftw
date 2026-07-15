@@ -19,7 +19,7 @@ Watches the *directory* containing `config.yaml` (not the file itself — editor
 
 ## How it talks to neighbors
 
-Calls `config.Load(path)` on each debounced event; on parse failure the old pointer is left intact (`watcher.go:100-102`) — atomic-switch guarantee. Applies control-layer scalars inline under `ctrlMu` (grid target, tolerance, slew rate, min dispatch interval — `watcher.go:111-123`). Everything else is punted to the `applier` callback wired in `cmd/forty-two-watts/main.go`, which is where driver-registry `Reload`, price-service restart, MPC re-config, etc. get triggered per section. No imports of `drivers`, `mpc`, `prices`, `ha` — keeps the watcher generic.
+Calls `config.Load(path)` on each debounced event; on parse failure the old pointer is left intact (`watcher.go:100-102`) — atomic-switch guarantee. Applies control-layer scalars inline under `ctrlMu` (grid target, tolerance, slew rate, min dispatch interval — `watcher.go:111-123`). Everything else is punted to the `applier` callback wired in `cmd/ftw/main.go`, which is where driver-registry `Reload`, price-service restart, MPC re-config, etc. get triggered per section. No imports of `drivers`, `mpc`, `prices`, `ha` — keeps the watcher generic.
 
 ## What to read first
 

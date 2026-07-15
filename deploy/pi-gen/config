@@ -1,7 +1,7 @@
-# pi-gen configuration for the forty-two-watts Raspberry Pi image.
+# pi-gen configuration for the FTW Raspberry Pi image.
 # Sourced by pi-gen's build scripts — plain shell variables, no logic.
 
-IMG_NAME="42w-rpi4-arm64"
+IMG_NAME="ftw-rpi4-arm64"
 RELEASE="trixie"
 
 # Install + configure cloud-init and netplan (pi-gen stage2/04-cloud-init).
@@ -13,10 +13,10 @@ RELEASE="trixie"
 ENABLE_CLOUD_INIT=1
 
 # mDNS: the avahi-daemon shipped with Raspberry Pi OS picks up
-# /etc/hostname as its primary .local name. Setting this to `42w`
-# means the dashboard is reachable at http://42w.local:8080/ on any
+# /etc/hostname as its primary .local name. Setting this to `ftw`
+# means the dashboard is reachable at http://ftw.local:8080/ on any
 # LAN with working mDNS (which is almost everything modern).
-TARGET_HOSTNAME="42w"
+TARGET_HOSTNAME="ftw"
 
 LOCALE_DEFAULT="en_US.UTF-8"
 KEYBOARD_KEYMAP="us"
@@ -31,8 +31,8 @@ TIMEZONE_DEFAULT="UTC"
 # wiring by hand is fragile and boot-loop-prone, so we ride pi-gen's
 # maintained stage2. Stage3-5 (desktop + NOOBS) stay skipped via SKIP
 # files in build.sh; stage2's own image export is suppressed there too
-# (SKIP_IMAGES) so stage-42w produces the only image.
-STAGE_LIST="stage0 stage1 stage2 stage-42w"
+# (SKIP_IMAGES) so stage-ftw produces the only image.
+STAGE_LIST="stage0 stage1 stage2 stage-ftw"
 
 # First-login creds. Users who flash with Raspberry Pi Imager will
 # override these via Imager's advanced-options panel (which writes to
@@ -40,7 +40,7 @@ STAGE_LIST="stage0 stage1 stage2 stage-42w"
 # defaults exist so a user who flashes raw can still SSH in when
 # something goes wrong.
 FIRST_USER_NAME="ftw"
-FIRST_USER_PASS="fortytwowatts"
+FIRST_USER_PASS="ftw"
 
 # SSH enabled by default — the image has no console, so without SSH
 # (or wifi-connect captive portal, landing in Phase 3) there's no

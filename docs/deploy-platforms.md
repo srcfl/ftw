@@ -1,6 +1,6 @@
 # Deploying on a Mac mini or a generic Linux server
 
-The fastest supported path to a running forty-two-watts is the Raspberry
+The fastest supported path to a running FTW is the Raspberry
 Pi SD-card image ([rpi-image.md](rpi-image.md)). But the same multi-arch
 Docker images run anywhere Docker does — this guide covers the two most
 common "I already have a box" cases:
@@ -9,7 +9,7 @@ common "I already have a box" cases:
 - a **generic Linux server** — Ubuntu, Debian, an Intel NUC, a VM, etc.
 
 Both pull the exact same pre-built images from GHCR
-(`ghcr.io/frahlg/forty-two-watts` + `…-updater`), published for
+(`ghcr.io/srcfl/ftw` + `…-updater`), published for
 `linux/amd64` and `linux/arm64`. No local build step.
 
 > **Which file do I use?**
@@ -33,13 +33,13 @@ This is the same flow as the Pi, minus the SD-card image. If you're on a
 Debian-family distro the one-shot installer does everything:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
 ```
 
 It installs Docker Engine + the compose plugin, adds you to the `docker`
-group, creates `~/forty-two-watts/data` with the right ownership, fetches
+group, creates `~/ftw/data` with the right ownership, fetches
 `docker-compose.yml`, and brings the stack up. Override the install
-location with `FTW_DIR=/srv/ftw`, the image with `FTW_IMAGE=…`. See
+location with `FTW_DIR=/srv/ftw`. See
 [`scripts/install.sh`](../scripts/install.sh) for every env knob.
 
 ### Manual install (any Linux)
@@ -52,8 +52,8 @@ distro (Fedora, Arch, openSUSE), do it by hand:
 #    https://docs.docker.com/engine/install/
 
 # 2. Lay out the deploy directory.
-mkdir -p ~/forty-two-watts/data
-cd ~/forty-two-watts
+mkdir -p ~/ftw/data
+cd ~/ftw
 
 # 3. The container runs as uid 100 / gid 101 (the alpine `ftw` user).
 #    A host bind-mount must be owned by those ids or SQLite can't create
@@ -61,9 +61,9 @@ cd ~/forty-two-watts
 sudo chown -R 100:101 ./data
 
 # 4. Grab the compose file + broker config.
-curl -fsSLO https://raw.githubusercontent.com/frahlg/forty-two-watts/master/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/srcfl/ftw/master/docker-compose.yml
 mkdir -p mosquitto/config
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/mosquitto/config/mosquitto.conf \
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/mosquitto/config/mosquitto.conf \
   -o mosquitto/config/mosquitto.conf
 
 # 5. Pull + start.
@@ -113,7 +113,7 @@ Open `http://<server-ip>:8080/` from another device on the LAN, or
   (`sudo systemctl enable docker`). If you'd rather run the **native
   binary** under systemd instead of Docker, that's the
   [operations.md](operations.md) path (`make build-amd64` + the
-  [`deploy/forty-two-watts.service`](../deploy/forty-two-watts.service)
+  [`deploy/ftw.service`](../deploy/ftw.service)
   unit).
 
 ---
@@ -134,7 +134,7 @@ the rest (lay out the directory, fetch the macOS compose file, start the
 stack):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-macos.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install-macos.sh | bash
 ```
 
 Prefer to do it by hand? The manual steps are below.
@@ -148,18 +148,18 @@ Prefer to do it by hand? The manual steps are below.
 #    Make sure Docker Desktop is running before continuing.
 
 # 2. Lay out the deploy directory.
-mkdir -p ~/forty-two-watts/data
-cd ~/forty-two-watts
+mkdir -p ~/ftw/data
+cd ~/ftw
 
 # NOTE: no `chown 100:101` here. Docker Desktop's file sharing maps host
 # ownership transparently, so the container's ftw user can always write
 # to ./data. (Running that chown on macOS would do nothing useful.)
 
 # 3. Grab the macOS compose file + broker config.
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/docker-compose.macos.yml \
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/docker-compose.macos.yml \
   -o docker-compose.macos.yml
 mkdir -p mosquitto/config
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/mosquitto/config/mosquitto.conf \
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/mosquitto/config/mosquitto.conf \
   -o mosquitto/config/mosquitto.conf
 
 # 4. Pull + start (note the -f on every command).
@@ -226,7 +226,7 @@ file so the Update / Restart buttons recreate the right containers. If
 you'd rather upgrade by hand, the manual path is:
 
 ```bash
-cd ~/forty-two-watts
+cd ~/ftw
 docker compose -f docker-compose.macos.yml pull
 docker compose -f docker-compose.macos.yml up -d
 ```

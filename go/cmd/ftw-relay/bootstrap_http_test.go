@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // claimKeyHex is hex(sha256(bootstrap_id)) — the 256-bit unguessable handle the

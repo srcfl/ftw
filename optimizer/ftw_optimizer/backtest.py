@@ -26,7 +26,7 @@ class SnapshotSkip(ValueError):
 def _get_json(url: str, timeout_s: float) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
-        headers={"Accept": "application/json", "User-Agent": "forty-two-watts-optimizer-backtest/1"},
+        headers={"Accept": "application/json", "User-Agent": "ftw-optimizer-backtest/1"},
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=timeout_s) as response:

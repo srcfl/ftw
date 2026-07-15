@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
 )
 
 type loadModelStats struct {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Browser smoke test for a running forty-two-watts instance.
+# Browser smoke test for a running ftw instance.
 #
 # Usage:
 #   scripts/ci-ui-browser.sh [base-url]

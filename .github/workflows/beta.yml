@@ -80,14 +80,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
+      - name: Login to canonical GHCR namespace
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and publish beta image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,16 +96,40 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:${{ needs.tag.outputs.version }}
-            ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}:beta
+            ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ needs.tag.outputs.version }}
+            ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:beta
           labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/srcfl/ftw
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.tag.outputs.version }}
+            org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             VERSION=${{ needs.tag.outputs.version }}
           cache-from: type=gha,scope=beta-${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=beta-${{ matrix.target }}
+
+      - name: Login to compatibility GHCR namespace
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Mirror exact beta manifests to compatibility namespace
+        env:
+          IMAGE_SUFFIX: ${{ matrix.image_suffix }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -n "${SOURCE_DIGEST}"
+          for tag in "${VERSION}" beta; do
+            source="ghcr.io/srcfl/ftw${IMAGE_SUFFIX}:${tag}"
+            legacy="ghcr.io/frahlg/forty-two-watts${IMAGE_SUFFIX}:${tag}"
+            docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
+            legacy_digest="$(scripts/inspect-image-digest.sh "${legacy}")"
+            test "${SOURCE_DIGEST}" = "${legacy_digest}"
+          done
 
   release:
     name: publish GitHub prerelease

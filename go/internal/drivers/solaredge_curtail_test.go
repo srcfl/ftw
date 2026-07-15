@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // capturingModbus is a tiny in-memory Modbus capability for driver tests. It

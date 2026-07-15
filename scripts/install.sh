@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# forty-two-watts one-shot installer.
+# FTW one-shot installer.
 #
 # Designed for a freshly-installed Raspberry Pi OS (arm64) but works on
 # any Debian/Ubuntu-flavoured Linux with curl + sudo.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
 #
 # What this does:
 #   1. Installs Docker Engine + the `docker compose` plugin via
 #      get.docker.com (skipped if Docker is already present).
 #   2. Adds your user to the `docker` group.
-#   3. Creates ~/forty-two-watts/ with data/ subdir owned by the
+#   3. Reuses an existing FTW/legacy install, or creates ~/ftw, with data/
 #      in-container ftw user (uid 100 / gid 101).
 #   4. Fetches docker-compose.yml from the repo.
 #   5. Pulls the multi-arch image from GHCR and starts the container.
@@ -20,25 +20,31 @@
 # picks up config changes without destroying the state volume.
 #
 # Override via env vars (optional):
-#   FTW_DIR=/srv/ftw       # install location (default: ~/forty-two-watts)
-#   FTW_IMAGE=...          # custom image (default: ghcr.io/frahlg/forty-two-watts:latest)
+#   FTW_DIR=/srv/ftw       # explicit install location
 #   FTW_BRANCH=some-branch # pull docker-compose.yml from a non-master branch
 
 set -euo pipefail
 
 # ---- Config (override via env) ----
-REPO="frahlg/forty-two-watts"
+REPO="srcfl/ftw"
 BRANCH="${FTW_BRANCH:-master}"
-IMAGE="${FTW_IMAGE:-ghcr.io/${REPO}:latest}"
-INSTALL_DIR="${FTW_DIR:-$HOME/forty-two-watts}"
+if [ -n "${FTW_DIR:-}" ]; then
+  INSTALL_DIR="$FTW_DIR"
+elif [ -d "$HOME/ftw" ]; then
+  INSTALL_DIR="$HOME/ftw"
+elif [ -d "$HOME/forty-two-watts" ]; then
+  INSTALL_DIR="$HOME/forty-two-watts"
+else
+  INSTALL_DIR="$HOME/ftw"
+fi
 COMPOSE_URL="${FTW_COMPOSE_URL:-https://raw.githubusercontent.com/${REPO}/${BRANCH}/docker-compose.yml}"
 
 # Banner
 cat <<'BANNER'
 
   ┌─────────────────────────────────────────────────┐
-  │     forty-two-watts installer                   │
-  │     Home Energy Management System               │
+  │     FTW installer                               │
+  │     Local-first home energy coordination.       │
   └─────────────────────────────────────────────────┘
 
 BANNER
@@ -54,8 +60,8 @@ This installer is for Linux only.
 
 On macOS, install Docker Desktop and use docker-compose.macos.yml:
 
-  mkdir -p ~/forty-two-watts/data && cd ~/forty-two-watts
-  curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/docker-compose.macos.yml -o docker-compose.macos.yml
+  mkdir -p ~/ftw/data && cd ~/ftw
+  curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/docker-compose.macos.yml -o docker-compose.macos.yml
   docker compose -f docker-compose.macos.yml up -d
 
 Full walkthrough: docs/deploy-platforms.md
@@ -135,20 +141,39 @@ $SUDO chown -R 100:101 "$INSTALL_DIR/data"
 
 # ---- 4. docker-compose.yml ----
 echo ""
-echo "==[4/5]== Fetching docker-compose.yml from $BRANCH"
-curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/docker-compose.yml"
+echo "==[4/5]== Preparing docker-compose.yml from $BRANCH"
+COMPOSE_PATH="$INSTALL_DIR/docker-compose.yml"
+if [ -f "$COMPOSE_PATH" ]; then
+  # Existing deployments keep their service, project, bind path, and image
+  # namespace. The updater supports both layouts and legacy images remain
+  # published during the compatibility window.
+  SERVICES="$($SUDO docker compose -f "$COMPOSE_PATH" config --services)"
+  MAIN_COUNT="$(printf '%s\n' "$SERVICES" | grep -Ec '^(ftw|forty-two-watts)$' || true)"
+  if [ "$MAIN_COUNT" -ne 1 ]; then
+    echo "ERROR: existing compose must contain exactly one ftw/forty-two-watts service; leaving it untouched." >&2
+    exit 1
+  fi
+  MAIN_SERVICE="$(printf '%s\n' "$SERVICES" | grep -E '^(ftw|forty-two-watts)$')"
+  if ! $SUDO docker compose -f "$COMPOSE_PATH" config "$MAIN_SERVICE" | grep -q '/app/data'; then
+    echo "ERROR: existing main service has no visible /app/data mount; leaving it untouched." >&2
+    exit 1
+  fi
+  cp "$COMPOSE_PATH" "$COMPOSE_PATH.pre-ftw.bak"
+  echo "    Existing safe deployment layout retained (backup: docker-compose.yml.pre-ftw.bak)."
+else
+  curl -fsSL "$COMPOSE_URL" -o "$COMPOSE_PATH"
+fi
 
 # ---- 5. Pull + start ----
-# Run docker as the invoking user, not via sudo. If they were just added
-# to the docker group in step 2, their current shell hasn't picked it up
-# yet — `sg docker -c ...` executes under the new primary group without
-# requiring a re-login. NEED_RELOGIN from step 2 is authoritative here:
+# Run Docker as the invoking user when its current shell already has access.
+# If the user was just added to the docker group, use sudo for this first run;
+# the next login picks up group membership. NEED_RELOGIN from step 2 is authoritative:
 # `id -nG "$USER"` reads /etc/group (already updated by usermod), not the
 # current process's credentials, so it can't answer this question.
 if [ "$(id -u)" -eq 0 ] || [ "$NEED_RELOGIN" = "0" ]; then
   run_docker() { docker "$@"; }
 else
-  run_docker() { sg docker -c "docker $*"; }
+  run_docker() { sudo docker "$@"; }
 fi
 
 echo ""
@@ -164,7 +189,7 @@ HOST_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────────
-  ✓ forty-two-watts is running.
+  ✓ FTW is running.
 
   Open the dashboard:
      http://${HOST_IP}:8080/         (from another device on the LAN)

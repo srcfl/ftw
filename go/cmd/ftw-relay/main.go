@@ -1,7 +1,7 @@
-// ftw-relay — HTTPS request-response tunnel for relay.fortytwowatts.com.
+// ftw-relay — HTTPS request-response tunnel for relay.ftw.sourceful.energy.
 //
-// See docs/goals/relay-as-tunnel.md for the design and docs/relay-deploy.md
-// for operator setup (Cloudflare Origin Cert + systemd).
+// See docs/archive/agent-artifacts/goals/relay-as-tunnel.md for the design and
+// docs/relay-deploy.md for operator setup (Cloudflare Origin Cert + systemd).
 package main
 
 import (
@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 var Version = "dev"

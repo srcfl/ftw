@@ -15,14 +15,14 @@
 # directly routable, so the DataChannel reaches `direct` deterministically — no
 # STUN/TURN, no CGNAT variables. That is exactly the path tier 2 proves.
 #
-# This file ALSO patches the Pi (tier-1 service `forty-two-watts`) with the
+# This file ALSO patches the Pi (tier-1 service `ftw`) with the
 # WebAuthn RP-ID + origin for the harness host, so the passkey ceremony's
 # clientDataJSON.origin check passes. Without this the Pi defaults RP-ID to the
 # production host (home.fortytwowatts.com) and every enroll/login is rejected.
 
 services:
   # --- Patch the Pi: WebAuthn RP-ID/origin = the harness home host -----------
-  forty-two-watts:
+  ftw:
     environment:
       # RP-ID must match the registrable suffix of the origin the browser
       # actually visits. The browser loads the home route as
@@ -55,7 +55,7 @@ services:
     profiles: ["tier2"]
     depends_on:
       - relay
-      - forty-two-watts
+      - ftw
     environment:
       # The home route, reached as the home host (resolved to the relay by the
       # bridge DNS alias + Chromium host-resolver-rules). Port 7378 is the relay's
@@ -64,7 +64,7 @@ services:
       HOME_ORIGIN: "http://home.fortytwowatts.localhost:7378"
       # The Pi's LAN port on the bridge net — used only to mint the
       # first-enrollment PIN (LAN-presence proof; 403 over the relay by design).
-      PI_LAN_URL: "http://forty-two-watts:8080"
+      PI_LAN_URL: "http://ftw:8080"
       # The docker service name the home host resolves to, for the browser's
       # host-resolver-rules (see playwright.config.ts).
       RELAY_HOST: "relay"

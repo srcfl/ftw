@@ -11,7 +11,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // TestManager_Answer_RoundTrip drives the production Manager.Answer with a pion

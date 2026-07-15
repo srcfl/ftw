@@ -79,8 +79,8 @@ func (f *fakeClient) Publish(topic string, _ byte, _ bool, _ interface{}) paho.T
 // (e.g. pixii_pv) call host.mqtt_subscribe once from driver_init and
 // never again, so a network blip silently ends the message flow until
 // the driver is restarted. Real-world: Pixii MQTT going dark every
-// evening, "Connected" in Pixii UI but red in 42W, restored only by
-// restarting the driver in 42W.
+// evening, "Connected" in Pixii UI but red in FTW, restored only by
+// restarting the driver in FTW.
 //
 // Capability records every Subscribe() topic and replays them all from
 // its OnConnectHandler. This test verifies the replay actually iterates

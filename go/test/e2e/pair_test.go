@@ -30,7 +30,7 @@ func TestPairFlow(t *testing.T) {
 
 	repo := repoRoot(t)
 	pairBin := buildBinary(t, repo, "ftw-pair")
-	mainBin := buildBinary(t, repo, "forty-two-watts")
+	mainBin := buildBinary(t, repo, "ftw")
 
 	// Temp config / state.
 	work := t.TempDir()
@@ -123,7 +123,7 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	repo := repoRoot(t)
 	pairBin := buildBinary(t, repo, "ftw-pair")
 	relayBin := buildBinary(t, repo, "ftw-relay")
-	mainBin := buildBinary(t, repo, "forty-two-watts")
+	mainBin := buildBinary(t, repo, "ftw")
 
 	work := t.TempDir()
 	stateDir := filepath.Join(work, "state")
@@ -146,7 +146,7 @@ func TestPairFlowThroughRelay(t *testing.T) {
 	relayURL := "http://" + relayAddr
 	waitForAPI(t, relayURL+"/healthz")
 
-	// 2. 42W main service so ftw-pair has something to report to.
+	// 2. FTW main service so ftw-pair has something to report to.
 	mainCmd := exec.Command(mainBin, "-config", cfgPath, "-web", filepath.Join(repo, "web"))
 	mainCmd.Stdout = os.Stdout
 	mainCmd.Stderr = os.Stderr

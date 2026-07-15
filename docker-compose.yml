@@ -1,4 +1,4 @@
-# forty-two-watts — Home Energy Management System (Linux)
+# FTW — Home Energy Management System (Linux)
 #
 # Pulls the pre-built multi-arch image (linux/amd64 + linux/arm64) from
 # GitHub Container Registry. No local build needed.
@@ -30,13 +30,15 @@
 # the UI buttons will surface a non-2xx error (typically 502) and the
 # version-check banner keeps working as a notify-only indicator.
 
+name: ${COMPOSE_PROJECT_NAME:-ftw}
+
 services:
-  forty-two-watts:
+  ftw:
     # Tag is variable so the ftw-updater sidecar can pin to a specific
     # release on `update`. Manual `docker compose up -d` (no env set)
     # falls through to :latest. See docs/self-update.md.
-    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
-    container_name: forty-two-watts
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    container_name: ftw
     restart: unless-stopped
 
     environment:
@@ -66,7 +68,7 @@ services:
     # Normally follows :latest. The separate variable is only needed for
     # bootstrapping a beta/edge pair before the installed stable updater
     # understands that channel's immutable tag format.
-    image: ghcr.io/frahlg/forty-two-watts-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
     container_name: ftw-updater
     restart: unless-stopped
 
@@ -81,14 +83,15 @@ services:
       # matters because the host daemon — not the sidecar — interprets
       # the bind paths in the file, so they must be real host paths.
       FTW_UPDATER_COMPOSE: ${PWD:-.}/docker-compose.yml
+      FTW_UPDATER_MAIN_SERVICE: ftw
       # Without this the sidecar's internal compose would derive its
       # project name from the -f file's parent dir and create a parallel
       # set of containers/volumes instead of recreating the real ones.
-      # Defaults to `forty-two-watts` (matches the layout in
+      # Defaults to `ftw` (matches the layout in
       # operations.md); override at launch time if your deploy dir is
       # named differently:
       #   COMPOSE_PROJECT_NAME=myhome docker compose up -d
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-forty-two-watts}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-ftw}
 
     volumes:
       # The Docker socket is the ONE privileged resource the sidecar
@@ -114,19 +117,19 @@ services:
   # MQTT broker (Eclipse Mosquitto)
   #
   # Lets on-LAN devices — notably the Pixii PowerShaper's MQTT uplink —
-  # publish telemetry into forty-two-watts without us having to poll them
+  # publish telemetry into FTW without us having to poll them
   # over Modbus. The main app reaches the broker at localhost:1883 because
   # it runs with host networking; the Pixii (and any other LAN device)
   # reaches it at <host-ip>:1883.
   #
   # Config lives in ./mosquitto/config/mosquitto.conf (anonymous access,
   # persistent queues). Remove this service block if you don't need an
-  # embedded broker — forty-two-watts' drivers can just as well dial out
+  # embedded broker — FTW drivers can just as well dial out
   # to a broker somewhere else on the LAN.
   # ---------------------------------------------------------------------
   mosquitto:
     image: eclipse-mosquitto:2
-    container_name: forty-two-watts-mosquitto
+    container_name: ftw-mosquitto
     restart: unless-stopped
 
     ports:
@@ -139,14 +142,14 @@ services:
   # ---------------------------------------------------------------------
   # Calendar (CalDAV) planner constraints (#498)
   #
-  # No service here: 42W hosts its OWN in-process, pure-Go CalDAV server
+  # No service here: FTW hosts its OWN in-process, pure-Go CalDAV server
   # (emersion/go-webdav, MIT) inside the main container — there is no sidecar to
   # run. With `caldav.enabled: true`, point a CalDAV account in your phone or
   # desktop calendar app at http://<host-ip>:5232/<user>/energy/ and create
   # events to drive the planner:
   #   - "Away" / "Vacation"  → conserve battery while you're out.
   #   - "Charge car 80%"     → have the EV ready by the event's start time.
-  # 42W also writes read-only "EVSE history" and "plan" calendars you subscribe
+  # FTW also writes read-only "EVSE history" and "plan" calendars you subscribe
   # to. Credentials are auto-managed and shown (with a QR) in Settings →
   # Calendar. LAN-ONLY by design: never routed through the owner-access relay,
   # and nothing forwards port 5232 to the internet unless you do so yourself.

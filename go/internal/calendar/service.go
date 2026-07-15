@@ -13,8 +13,8 @@ import (
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
 )
 
 // LoadProfiler is the slice of *loadmodel.Service the calendar service needs:
@@ -32,7 +32,7 @@ type LoadpointTargeter interface {
 }
 
 // Service is a CalDAV *client*. It periodically polls a calendar collection
-// (served by 42W's own in-process native CalDAV server — see
+// (served by FTW's own in-process native CalDAV server — see
 // internal/caldavserver), classifies events by title keyword, and applies the
 // resulting intents:
 //
@@ -63,7 +63,7 @@ type Service struct {
 	// Start). Drives the forward-looking plan publisher.
 	planSource PlanSource
 
-	// manageCreds = 42W owns the credential (generated on first enable and shown
+	// manageCreds = FTW owns the credential (generated on first enable and shown
 	// in the UI); the in-process native server authenticates against it.
 	manageCreds bool
 
@@ -196,7 +196,7 @@ func (s *Service) applyConfig(cfg config.CalDAV, firstLoadpointID string) {
 		histPath = config.DefaultCalDAVHistoryPath
 	}
 	// Refuse to write history into the same collection we read intents from —
-	// 42W would re-ingest its own "EV charged …" events as EV deadlines.
+	// FTW would re-ingest its own "EV charged …" events as EV deadlines.
 	histEnabled := cfg.EVSEHistoryEnabled() && histPath != "" && histPath != calPath
 	if cfg.EVSEHistoryEnabled() && histPath == calPath {
 		slog.Warn("caldav: history_path equals calendar_path; disabling EVSE history to avoid a feedback loop",

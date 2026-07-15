@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 func TestFreshModelHasSensibleCurve(t *testing.T) {

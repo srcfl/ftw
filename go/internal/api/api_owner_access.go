@@ -1,7 +1,7 @@
 // api_owner_access.go
 //
 // WebAuthn passkey enrollment + login for owner remote access through
-// the relay (see docs/goals/relay-as-tunnel.md Phase 3).
+// the relay (see docs/archive/agent-artifacts/goals/relay-as-tunnel.md Phase 3).
 //
 // Flow:
 //  1. /api/owner-access/enroll/start   — operator's browser (relay or LAN)
@@ -41,9 +41,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // ownerAccessCookieName is the session cookie set by the host after a
@@ -264,7 +264,7 @@ func (oa *ownerAccessState) webauthnLib(deps *Deps) (*webauthn.WebAuthn, error) 
 	}
 	wa, err := webauthn.New(&webauthn.Config{
 		RPID:                  rpID,
-		RPDisplayName:         "forty-two-watts",
+		RPDisplayName:         "FTW",
 		RPOrigins:             origins,
 		AttestationPreference: protocol.PreferNoAttestation,
 		AuthenticatorSelection: protocol.AuthenticatorSelection{

@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/calendar"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/calendar"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 func caldavStatus(t *testing.T, deps *Deps) map[string]any {

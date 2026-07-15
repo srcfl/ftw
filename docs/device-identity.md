@@ -3,7 +3,7 @@
 Hardware-stable identity for every driver. Lets persistent state (battery
 models, calibration history, RLS twin parameters) outlive cosmetic config
 changes — rename a driver, remove + re-add it, swap the host running
-forty-two-watts: the same physical inverter keeps its trained state.
+FTW: the same physical inverter keeps its trained state.
 
 ## Why driver-name is not enough
 
@@ -136,7 +136,7 @@ battery models. See
 
 ## Identity bootstrap flow
 
-Wired in [`go/cmd/forty-two-watts/main.go:151-165`](../go/cmd/forty-two-watts/main.go)
+Wired in [`go/cmd/ftw/main.go:151-165`](../go/cmd/ftw/main.go)
 and [`go/internal/drivers/registry.go:99-135`](../go/internal/drivers/registry.go):
 
 1. **At registry-Add.** Endpoint is set immediately from the effective
@@ -156,8 +156,8 @@ and [`go/internal/drivers/registry.go:99-135`](../go/internal/drivers/registry.g
    `reg.Add` completes, then calls `registerAllDevices(st, reg)` which
    snapshots `env.FullIdentity()` for every running driver and upserts a
    row via `RegisterDevice`
-   ([`main.go:157-165`](../go/cmd/forty-two-watts/main.go),
-   [`main.go:607-623`](../go/cmd/forty-two-watts/main.go)).
+   ([`main.go:157-165`](../go/cmd/ftw/main.go),
+   [`main.go:607-623`](../go/cmd/ftw/main.go)).
 5. **One-shot migration.** Immediately after, `MigrateBatteryModelKeys`
    runs once to re-key legacy `battery_models` rows.
 

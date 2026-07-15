@@ -1,0 +1,20 @@
+[Unit]
+Description=FTW local energy runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ftw
+Group=ftw
+WorkingDirectory=/var/lib/ftw
+ExecStart=/opt/ftw/ftw -config /etc/ftw/config.yaml -web /opt/ftw/web -drivers /opt/ftw/drivers -user-drivers /var/lib/ftw/drivers
+Restart=on-failure
+RestartSec=5
+StateDirectory=ftw
+ConfigurationDirectory=ftw
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
+Alias=forty-two-watts.service

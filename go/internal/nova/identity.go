@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 )
 
-// Identity is the ES256 keypair this forty-two-watts instance uses to
+// Identity is the ES256 keypair this FTW instance uses to
 // authenticate with Nova. The private key signs MQTT auth JWTs (see
 // SignJWT) and claim-flow proof messages (see SignClaimMessage).
 type Identity struct {

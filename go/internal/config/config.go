@@ -47,7 +47,7 @@ type Config struct {
 //
 // When enabled, owner traffic rides a direct browser↔Pi DTLS WebRTC DataChannel
 // (the relay is a blind signaling rendezvous, never a plaintext tunnel). See
-// docs/superpowers/specs/2026-06-04-p2p-only-home-route-v1-design.md.
+// docs/archive/agent-artifacts/superpowers/specs/2026-06-04-p2p-only-home-route-v1-design.md.
 type RemoteAccess struct {
 	Enabled bool `yaml:"enabled" json:"enabled"`
 	// TURN is a BLIND, self-hostable ICE fallback for hard-NAT / CGNAT peers
@@ -116,7 +116,7 @@ type NotificationRule struct {
 }
 
 // Nova is the opt-in Sourceful Nova Core federation config. When enabled,
-// forty-two-watts publishes telemetry to Nova's MQTT broker (NATS MQTT
+// FTW publishes telemetry to Nova's MQTT broker (NATS MQTT
 // adapter) and reconciles device/DER registrations via Nova's core-api.
 //
 // Identity is an ES256 keypair generated on first run and stored at
@@ -125,12 +125,12 @@ type NotificationRule struct {
 // lived JWT used as the MQTT password.
 //
 // SchemaMode controls the wire format sent to Nova:
-//   - "legacy"  (default): translate forty-two-watts' native clean payload
+//   - "legacy"  (default): translate FTW's native clean payload
 //     to the current Nova wire shape (battery sign flip,
 //     PascalCase fields, pv→solar, ev→ev_port). The translation
 //     layer is in internal/nova and is designed to be deleted
 //     once Nova adopts the unified schema.
-//   - "unified": publish forty-two-watts' clean payload directly. Enable
+//   - "unified": publish FTW's clean payload directly. Enable
 //     once the Nova schema-alignment PR lands.
 type Nova struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
@@ -258,7 +258,7 @@ type EVChargerModbus struct {
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"`
 }
 
-// CalDAV configures the calendar-constraints feature (issue #498). 42W hosts
+// CalDAV configures the calendar-constraints feature (issue #498). FTW hosts
 // its own in-process, pure-Go CalDAV server (emersion/go-webdav, MIT — see
 // internal/caldavserver) and runs a CalDAV *client* against it that polls the
 // calendar collection and maps events into planner intents:
@@ -311,24 +311,24 @@ type CalDAV struct {
 	AwayKeywords []string `yaml:"away_keywords,omitempty" json:"away_keywords,omitempty"`
 	EVKeywords   []string `yaml:"ev_keywords,omitempty" json:"ev_keywords,omitempty"`
 
-	// EVSEHistory (default ON when enabled) makes 42W *write* a calendar
+	// EVSEHistory (default ON when enabled) makes FTW *write* a calendar
 	// event for each completed EV charging session into HistoryPath. This is
 	// an outbound capability — the user subscribes to HistoryPath to see when
-	// the charger was used. HistoryPath MUST differ from CalendarPath so 42W
+	// the charger was used. HistoryPath MUST differ from CalendarPath so FTW
 	// never re-reads its own history events as inbound intents.
 	EVSEHistory *bool  `yaml:"evse_history,omitempty" json:"evse_history,omitempty"`
 	HistoryPath string `yaml:"history_path,omitempty" json:"history_path,omitempty"`
 
-	// PublishPlan (default ON when enabled) makes 42W write its forward-looking
+	// PublishPlan (default ON when enabled) makes FTW write its forward-looking
 	// plan — upcoming battery charge/discharge windows from the MPC — as
 	// read-only events into PlanPath (a SEPARATE collection), so you can see
-	// what 42W intends to do. Reconciled each publish so stale events are
+	// what FTW intends to do. Reconciled each publish so stale events are
 	// removed rather than piling up.
 	PublishPlan          *bool  `yaml:"publish_plan,omitempty" json:"publish_plan,omitempty"`
 	PlanPath             string `yaml:"plan_path,omitempty" json:"plan_path,omitempty"`
 	PlanPublishIntervalS int    `yaml:"plan_publish_interval_s,omitempty" json:"plan_publish_interval_s,omitempty"`
 
-	// ManageCredentials (default ON when enabled) makes 42W generate a random
+	// ManageCredentials (default ON when enabled) makes FTW generate a random
 	// password on first enable, which the in-process CalDAV server then
 	// authenticates against. The credential is shown in the Settings → Calendar
 	// tab (with a QR) to paste into a calendar app, so the operator never has to
@@ -336,7 +336,7 @@ type CalDAV struct {
 	ManageCredentials *bool `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
 
 	// Listen is the bind address for the in-process CalDAV server. Default
-	// ":5232". 42W binds it on the LAN (never routed through the owner relay).
+	// ":5232". FTW binds it on the LAN (never routed through the owner relay).
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
 }
 
@@ -348,19 +348,19 @@ func (cv *CalDAV) ListenAddr() string {
 	return ":5232"
 }
 
-// ManageCredentialsEnabled reports whether 42W should auto-generate the managed
+// ManageCredentialsEnabled reports whether FTW should auto-generate the managed
 // CalDAV credential. Nil-safe; defaults ON when the feature is on.
 func (cv *CalDAV) ManageCredentialsEnabled() bool {
 	return cv != nil && cv.Enabled && (cv.ManageCredentials == nil || *cv.ManageCredentials)
 }
 
-// EVSEHistoryEnabled reports whether 42W should write EV-session history
+// EVSEHistoryEnabled reports whether FTW should write EV-session history
 // events. Nil-safe; defaults ON when the feature is enabled.
 func (cv *CalDAV) EVSEHistoryEnabled() bool {
 	return cv != nil && cv.Enabled && (cv.EVSEHistory == nil || *cv.EVSEHistory)
 }
 
-// PublishPlanEnabled reports whether 42W should publish its forward-looking
+// PublishPlanEnabled reports whether FTW should publish its forward-looking
 // plan calendar. Nil-safe; defaults ON when the feature is enabled.
 func (cv *CalDAV) PublishPlanEnabled() bool {
 	return cv != nil && cv.Enabled && (cv.PublishPlan == nil || *cv.PublishPlan)
@@ -1497,7 +1497,7 @@ func (c *Config) Validate() error {
 			return errors.New("nova.mqtt_host is required when nova.enabled")
 		}
 		if c.Nova.GatewaySerial == "" {
-			return errors.New("nova.gateway_serial is required when nova.enabled — run `forty-two-watts nova-claim`")
+			return errors.New("nova.gateway_serial is required when nova.enabled — run `ftw nova-claim`")
 		}
 		if c.Nova.OrgID == "" {
 			return errors.New("nova.org_id is required when nova.enabled")

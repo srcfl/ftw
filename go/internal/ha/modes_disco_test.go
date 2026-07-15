@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // TestModeSelectOptionsMatchAllModes is the wiring guard for the original

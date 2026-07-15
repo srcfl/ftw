@@ -1,4 +1,4 @@
-// Package ocpp is the OCPP 1.6J Central System for forty-two-watts.
+// Package ocpp is the OCPP 1.6J Central System for FTW.
 //
 // EV chargers connect to us via WebSocket. We translate every BootNotification,
 // MeterValues, and StatusNotification into a DerEV reading in telemetry.Store,
@@ -25,7 +25,7 @@ import (
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Server is a running OCPP 1.6J Central System.

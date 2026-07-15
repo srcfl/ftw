@@ -1,4 +1,4 @@
-# Top-level build for forty-two-watts (pure Go + Lua drivers).
+# Top-level build for FTW (pure Go + Lua drivers).
 #
 # Common targets:
 #   make test                 — full test suite
@@ -19,9 +19,10 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 OPTIMIZER_PYTHON := $(CURDIR)/optimizer/.venv/bin/python
+PYTHON ?= python3
 
 help:
-	@echo "forty-two-watts — Go + Lua EMS"
+	@echo "FTW — Go + Lua EMS"
 	@echo ""
 	@echo "Targets:"
 	@echo "  test                 run full test suite"
@@ -48,7 +49,7 @@ test: optimizer-test
 	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
 
 optimizer-install:
-	python3 -m venv optimizer/.venv
+	$(PYTHON) -m venv optimizer/.venv
 	optimizer/.venv/bin/pip install -e 'optimizer[test]'
 
 optimizer-test: optimizer/.venv/bin/pytest
@@ -100,7 +101,8 @@ install-hooks:
 
 build:
 	@mkdir -p bin
-	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts ./cmd/forty-two-watts
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw ./cmd/ftw
+	@ln -sf ftw bin/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair ./cmd/ftw-pair
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay ./cmd/ftw-relay
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
@@ -110,28 +112,31 @@ build:
 build-arm64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-arm64 ./cmd/forty-two-watts
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-arm64 ./cmd/ftw
+	@cp bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-arm64 ./cmd/ftw-pair
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-arm64 ./cmd/ftw-relay
-	@ls -la bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64 bin/ftw-relay-linux-arm64
+	@ls -la bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64 bin/ftw-relay-linux-arm64
 
 build-amd64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-linux-amd64 ./cmd/forty-two-watts
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-amd64 ./cmd/ftw
+	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-amd64 ./cmd/ftw-pair
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-amd64 ./cmd/ftw-relay
-	@ls -la bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64 bin/ftw-relay-linux-amd64
+	@ls -la bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64 bin/ftw-relay-linux-amd64
 
 build-windows-amd64:
 	@mkdir -p bin
 	cd go && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/forty-two-watts-windows-amd64.exe ./cmd/forty-two-watts
-	@ls -la bin/forty-two-watts-windows-amd64.exe
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-windows-amd64.exe ./cmd/ftw
+	@cp bin/ftw-windows-amd64.exe bin/forty-two-watts-windows-amd64.exe
+	@ls -la bin/ftw-windows-amd64.exe bin/forty-two-watts-windows-amd64.exe
 
 # ---- Release archives ----
 
@@ -147,33 +152,47 @@ relay-web:
 		cp "web/$$f" "bin/ftw-relay-web/$$f"; \
 	done < "$(RELAY_WEB_MANIFEST)"
 	@COPYFILE_DISABLE=1 tar --no-xattrs -czf release/ftw-relay-web.tar.gz -C bin/ftw-relay-web .
+	@cd release && shasum -a 256 ftw-relay-web.tar.gz > ftw-relay-web.tar.gz.sha256
 	@printf "built release/ftw-relay-web.tar.gz (%s bytes)\n" \
 		"$$(wc -c <release/ftw-relay-web.tar.gz)"
 
 release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
-	@# Per-arch staging dirs so the tarballs ship forty-two-watts +
-	@# ftw-pair as siblings (the `forty-two-watts pair` subcommand
+	@# Per-arch staging dirs ship ftw, its compatibility alias, and
+	@# ftw-pair as siblings (the `ftw pair` subcommand
 	@# locates ftw-pair next to itself by default).
 	@for arch in arm64 amd64; do \
 		stage="bin/stage-linux-$$arch"; \
 		mkdir -p "$$stage"; \
-		cp "bin/forty-two-watts-linux-$$arch" "$$stage/forty-two-watts"; \
+		cp "bin/ftw-linux-$$arch"             "$$stage/ftw"; \
+		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		cp "bin/ftw-pair-linux-$$arch"        "$$stage/ftw-pair"; \
-		tar czf release/forty-two-watts-linux-$$arch.tar.gz \
-			-C "$$stage" forty-two-watts ftw-pair \
+		tar czf release/ftw-linux-$$arch.tar.gz \
+			-C "$$stage" ftw forty-two-watts ftw-pair \
 			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml; \
-		printf "built release/forty-two-watts-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
-			"$$(wc -c <release/forty-two-watts-linux-$$arch.tar.gz)"; \
+		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
+		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
+			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
 	done
 	@# Windows: .zip — pair sidecar is Linux-only (uses fowld + systemctl)
 	@# so we don't ship it on Windows. Delete first so rerunning release
 	@# doesn't keep appending to a stale archive.
-	@rm -f release/forty-two-watts-windows-amd64.zip
-	@cd bin && zip -q ../release/forty-two-watts-windows-amd64.zip forty-two-watts-windows-amd64.exe
-	@zip -qr release/forty-two-watts-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
-	@printf "built release/forty-two-watts-windows-amd64.zip (%s bytes)\n" \
-		"$$(wc -c <release/forty-two-watts-windows-amd64.zip)"
+	@rm -rf bin/stage-windows-amd64
+	@mkdir -p bin/stage-windows-amd64
+	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/ftw.exe
+	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
+	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
+	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe forty-two-watts.exe
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
+	@cd release && for f in \
+		ftw-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz \
+		ftw-linux-amd64.tar.gz forty-two-watts-linux-amd64.tar.gz \
+		ftw-windows-amd64.zip forty-two-watts-windows-amd64.zip; do \
+		shasum -a 256 "$$f" > "$$f.sha256"; \
+	done
+	@printf "built release/ftw-windows-amd64.zip (%s bytes)\n" \
+		"$$(wc -c <release/ftw-windows-amd64.zip)"
 
 # ---- Dev workflow ----
 
@@ -190,12 +209,12 @@ dev: optimizer/.venv/bin/pytest
 	(cd go && go run ./cmd/sim-ferroamp) & \
 	(cd go && go run ./cmd/sim-sungrow) & \
 	sleep 2 && \
-	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web) & \
+	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/ftw -config ../config.local.yaml -web ../web) & \
 	wait
 
 # ---- Local docker E2E harness (relay + Pi on this machine) ----
 #
-# Brings up ftw-relay + a forty-two-watts "Pi" wired to dial it, so the whole
+# Brings up ftw-relay + an FTW "Pi" wired to dial it, so the whole
 # home-route / owner-access / pair / P2P flow runs locally with no real Pi,
 # relay VM, or Cloudflare. See docs/local-e2e-docker.md.
 #   Pi:         http://localhost:8080/

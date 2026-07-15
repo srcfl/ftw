@@ -34,7 +34,7 @@ DRIVER = {
   capabilities = { "heatpump" },
   description  = "Panasonic Aquarea H/J/K/L/M-series heat pump via Heishamon MQTT bridge. Controls Zone 1 heat curve offset (Z1_Heat_Request_Temp) in range -3..+3 °C.",
   homepage     = "https://github.com/Egyjs/HeishaMon",
-  authors      = { "Rolf (Runneval)", "Claude (Anthropic)", "forty-two-watts contributors" },
+  authors      = { "Rolf (Runneval)", "Claude (Anthropic)", "FTW contributors" },
   tested_models = { "WH-SXC09H3E8" },
   verification_status = "experimental",
   verified_by = { "Rolf (Runneval)" },
@@ -169,7 +169,7 @@ function driver_command(action, _power_w, cmd)
     return false
 end
 
--- Called by 42W watchdog when control is released or EMS stops.
+-- Called by FTW watchdog when control is released or EMS stops.
 -- Return to safe/neutral offset so the pump runs on its own heat curve.
 function driver_default_mode()
     host.log("info", "Heishamon: default_mode — resetting offset to " .. tostring(safe_offset))

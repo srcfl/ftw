@@ -18,7 +18,7 @@ import (
 //
 // Both endpoints require a Bearer JWT from a human operator (root/admin/
 // user identity type). That JWT is handed to the client via OperatorJWT;
-// it is not stored by forty-two-watts — the CLI subcommand passes it in
+// it is not stored by FTW — the CLI subcommand passes it in
 // at claim/provision time and we forget it.
 type Client struct {
 	BaseURL     string
@@ -62,7 +62,7 @@ func (c *Client) Claim(ctx context.Context, req ClaimRequest) error {
 
 // DERDefinition mirrors Nova's body schema for DERs inside /devices/provision.
 // The Type field uses NOVA's vocabulary (solar, battery, meter, ev_port)
-// — the caller is responsible for translating from forty-two-watts'
+// — the caller is responsible for translating from FTW's
 // native DER type (pv, battery, meter, ev, v2x_charger) via TranslateDerTypeToLegacy.
 type DERDefinition struct {
 	Name string `json:"name"`
@@ -90,7 +90,7 @@ type CreatedDER struct {
 }
 
 // ProvisionResponse is the shape Nova returns from /devices/provision.
-// Only the fields forty-two-watts needs are surfaced — the response has
+// Only the fields FTW needs are surfaced — the response has
 // more metadata we don't use.
 type ProvisionResponse struct {
 	DeviceID   string       `json:"device_id"`
@@ -114,7 +114,7 @@ func (c *Client) Provision(ctx context.Context, req ProvisionRequest) (*Provisio
 	return &resp, nil
 }
 
-// TranslateDerTypeToLegacy maps forty-two-watts' native clean DER type
+// TranslateDerTypeToLegacy maps FTW's native clean DER type
 // (pv/ev/v2x_charger) to Nova's current vocabulary (solar/ev_port/v2x_charger).
 // Meter and battery are identical in both. This is the same translation the
 // wire adapter does — centralised here so the provisioning payload

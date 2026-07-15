@@ -13,8 +13,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // buildMyUplinkOAuthServer wires a test Server with one MyUplink driver in

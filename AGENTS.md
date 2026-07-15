@@ -1,4 +1,4 @@
-# forty-two-watts — project orientation
+# FTW — project orientation
 
 Unified Home Energy Management System, written in Go with Lua drivers.
 See `docs/archive/rust-go-wasm-migration-plan.md` only if you need the
@@ -190,13 +190,13 @@ Every `host.emit_metric` call lands in three SQLite tables defined in
 Samples older than `RecentRetention` (14 days) roll off to daily Parquet
 files under `<state.cold_dir>/YYYY/MM/DD.parquet` — see
 `go/internal/state/parquet.go`. Rolloff runs hourly from
-`go/cmd/forty-two-watts/main.go` (`rolloffLoop`). Parquet files are
+`go/cmd/ftw/main.go` (`rolloffLoop`). Parquet files are
 zstd-compressed and dictionary-encoded on `driver` + `metric`, so a
 year of 50 metrics is typically a few GB.
 
 ## Watchdog + safety
 
-The control loop (`go/cmd/forty-two-watts/main.go`, the `ticker.C`
+The control loop (`go/cmd/ftw/main.go`, the `ticker.C`
 branch) runs `tel.WatchdogScan(timeout)` every cycle. Any driver whose
 last successful telemetry is older than `site.watchdog_timeout_s`
 (default 60 s) flips to offline and receives `DefaultMode` — which in
@@ -252,7 +252,5 @@ charge another.
 - `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune
 - `docs/clamping.md` — the safety clamps
 - `docs/mpc-planner.md` — MPC strategies, confidence blending
-- `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
 - `docs/ha-integration.md` — Home Assistant MQTT bridge
-- `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
 - `docs/archive/rust-go-wasm-migration-plan.md` — historical Rust→Go migration context

@@ -11,13 +11,13 @@
 #
 # Defaults:
 #   FTW_PI_HOST=fredde@192.168.192.40
-#   FTW_PI_DIR=forty-two-watts-ci
+#   FTW_PI_DIR=ftw-ci
 #   FTW_PI_PORT=18080
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 HOST=${1:-${FTW_PI_HOST:-fredde@192.168.192.40}}
-REMOTE_DIR=${FTW_PI_DIR:-forty-two-watts-ci}
+REMOTE_DIR=${FTW_PI_DIR:-ftw-ci}
 PI_PORT=${FTW_PI_PORT:-18080}
 UPSTREAM=${FTW_PI_UPSTREAM:-http://127.0.0.1:8080}
 ARTIFACT_DIR=${FTW_CI_ARTIFACT_DIR:-"$ROOT/artifacts/hw-ci/$(date -u +%Y%m%dT%H%M%SZ)"}
@@ -108,7 +108,7 @@ log "deploying to $HOST:~/$REMOTE_DIR"
 ssh "$HOST" "mkdir -p '$REMOTE_DIR'"
 rsync -az --delete "$ROOT/web/" "$HOST:$REMOTE_DIR/web/"
 rsync -az --delete "$ROOT/drivers/" "$HOST:$REMOTE_DIR/drivers/"
-rsync -az "$ROOT/bin/forty-two-watts-linux-arm64" "$HOST:$REMOTE_DIR/forty-two-watts.new"
+rsync -az "$ROOT/bin/ftw-linux-arm64" "$HOST:$REMOTE_DIR/ftw.new"
 rsync -az "$CONFIG" "$HOST:$REMOTE_DIR/config.hw-ci.yaml"
 
 log "starting candidate on port $PI_PORT with read-only upstream $UPSTREAM"
@@ -124,11 +124,11 @@ ssh "$HOST" "
       esac
     fi
   fi
-  mv forty-two-watts.new forty-two-watts
-  chmod +x forty-two-watts
+  mv ftw.new ftw
+  chmod +x ftw
   : > ci.log
   FTW_PROXY_UPSTREAM='$UPSTREAM' FTW_PROXY_READONLY=1 \\
-    nohup ./forty-two-watts -config config.hw-ci.yaml -web web -drivers drivers >> ci.log 2>&1 &
+    nohup ./ftw -config config.hw-ci.yaml -web web -drivers drivers >> ci.log 2>&1 &
   echo \$! > ci.pid
 "
 

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
-	"github.com/frahlg/forty-two-watts/go/internal/scanner"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/scanner"
 )
 
 // fakeModbus is a no-op Modbus capability — the fingerprint orchestration

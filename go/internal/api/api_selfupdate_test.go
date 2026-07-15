@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/selfupdate"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // memStore satisfies selfupdate.Store for the wiring tests.
@@ -53,7 +53,7 @@ func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) 
 
 func newCheckerAgainstWithStatusAndSocket(t *testing.T, tag, current, statusPath, socketPath string) *selfupdate.Checker {
 	t.Helper()
-	const repo = "frahlg/forty-two-watts"
+	const repo = "srcfl/ftw"
 
 	regMux := http.NewServeMux()
 	regMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {

@@ -13,7 +13,7 @@ import (
 )
 
 // expandQuery is a calendar-query REPORT carrying a VEVENT time-range — the
-// shape 42W's calendar client sends — which the backend uses as the recurrence
+// shape FTW's calendar client sends — which the backend uses as the recurrence
 // expansion window.
 func expandQuery(start, end time.Time) *caldav.CalendarQuery {
 	return &caldav.CalendarQuery{

@@ -17,7 +17,7 @@ import (
 // SignRawHex/PublicKeyHex wire contract (raw r||s as 128-char hex; pubkey as
 // uncompressed X||Y, 128 lowercase hex chars). It lets the api package test the
 // descriptor handler without importing internal/nova (no cycle, matches the
-// relaySigner interface pattern in cmd/forty-two-watts/owner_relay_register.go).
+// relaySigner interface pattern in cmd/ftw/owner_relay_register.go).
 type fakeInstanceSigner struct{ priv *ecdsa.PrivateKey }
 
 func newFakeInstanceSigner(t *testing.T) *fakeInstanceSigner {

@@ -7,7 +7,7 @@ import "reflect"
 // An empty slice means the running process can safely apply `new` without a
 // restart.
 //
-// The list mirrors what the applier in cmd/forty-two-watts/main.go already
+// The list mirrors what the applier in cmd/ftw/main.go already
 // hot-reloads:
 //
 //   - Site control scalars (grid_target, tolerance, slew, min_dispatch),
@@ -58,7 +58,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}
 	// homeassistant.* is hot-reloadable via (*ha.Bridge).Reload; see the
-	// applier in cmd/forty-two-watts/main.go.
+	// applier in cmd/ftw/main.go.
 	if !pointerEqual(oldCfg.State, newCfg.State) {
 		reasons = append(reasons, "state — SQLite database paths are opened at startup")
 	}

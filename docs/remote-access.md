@@ -1,7 +1,7 @@
 # Reaching your home from anywhere
 
 > A plain-language guide for owners. If you've just set up your
-> forty-two-watts box (see [`setup-guide/`](setup-guide/)) and now want to
+> FTW box (see [`setup-guide/`](setup-guide/)) and now want to
 > open it from your phone on the train, this is for you.
 
 ## The short version
@@ -56,7 +56,7 @@ deliberate — it means the very first trust is established locally, where no
 stranger can be involved.
 
 1. At home, open your box's dashboard the way you normally do (e.g.
-   `http://forty-two-watts.local` or its IP address).
+   `http://ftw.local` or its IP address).
 2. Open **Settings -> Access**, enable **Remote Access**, save, and restart if
    the dashboard asks for it.
 3. Return to the local Access screen and find **Set up remote access**. Your box

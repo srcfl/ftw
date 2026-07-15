@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // mkESPHomeStub spins up an httptest.Server that mimics the

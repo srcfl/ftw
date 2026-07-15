@@ -22,8 +22,8 @@ package savings
 import (
 	"sort"
 
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // DaySavings is the per-day result. All energies in kWh, all costs in öre.

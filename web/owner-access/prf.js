@@ -4,7 +4,7 @@
 // The same passkey the owner taps to sign in also yields, through the WebAuthn
 // `prf` extension, a high-entropy secret that is STABLE for that credential. We
 // HKDF it into a non-extractable AES-GCM-256 key and use that to encrypt/decrypt
-// the wallet's directory blob (the list of the owner's 42W instances) that the
+// the wallet's directory blob (the list of the owner's FTW instances) that the
 // relay stores opaquely. Because the key derives from the passkey — not from any
 // device-local secret — a FRESH device with the SYNCED passkey derives the SAME
 // key and can decrypt the blob it fetches from the relay, with no LAN visit.

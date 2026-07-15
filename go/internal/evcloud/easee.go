@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // easeeDefaultBaseURL is the Easee cloud API base URL. Split out so

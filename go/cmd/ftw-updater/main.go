@@ -1,5 +1,5 @@
 // ftw-updater is the sidecar that executes `docker compose pull` +
-// `docker compose up -d` on behalf of the main forty-two-watts container.
+// `docker compose up -d` on behalf of the main FTW container.
 //
 // It runs in its own container with the Docker socket mounted in and a
 // read-only bind to docker-compose.yml, and listens on a Unix socket shared
@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -32,7 +33,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const mainServiceName = "forty-two-watts"
+const (
+	canonicalMainServiceName = "ftw"
+	legacyMainServiceName    = "forty-two-watts"
+)
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
@@ -47,7 +51,8 @@ type State struct {
 }
 
 type server struct {
-	composeFile string
+	composeFile     string
+	mainServiceName string
 	// overrideFiles are auto-discovered compose overrides next to
 	// composeFile (e.g. docker-compose.override.yml). Each one is added
 	// as an extra -f arg to every compose invocation so the sidecar
@@ -79,6 +84,11 @@ type server struct {
 	// pass FTW_IMAGE_TAG=<target> so compose's image tag substitution
 	// pins to the requested version. nil/empty means "inherit only".
 	runner func(ctx context.Context, env []string, args ...string) error
+	// imageID captures the image backing the running service before an update.
+	// healthCheck waits for the recreated service to become healthy. Both are
+	// injectable so the rollback path is testable without Docker.
+	imageID     func(ctx context.Context, service string) (string, error)
+	healthCheck func(ctx context.Context, service string) error
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -108,10 +118,72 @@ func discoverOverrides(base string) []string {
 	return out
 }
 
+// selectMainService accepts the canonical and legacy service names, but only
+// when exactly one of them owns the persistent /app/data mount. This prevents
+// an ambiguous compose file from ever starting two host-networked controllers.
+func selectMainService(files []string, configured string) (string, error) {
+	mapsData, err := servicesMappingAppData(files)
+	if err != nil {
+		return "", err
+	}
+	if configured != "" {
+		if !mapsData[configured] {
+			return "", fmt.Errorf("configured service %q does not map persistent /app/data", configured)
+		}
+		return configured, nil
+	}
+	var candidates []string
+	for _, name := range []string{canonicalMainServiceName, legacyMainServiceName} {
+		if mapsData[name] {
+			candidates = append(candidates, name)
+		}
+	}
+	if len(candidates) != 1 {
+		return "", fmt.Errorf("expected exactly one FTW service mapping /app/data, found %v", candidates)
+	}
+	return candidates[0], nil
+}
+
+func servicesMappingAppData(files []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		var doc struct {
+			Services map[string]struct {
+				Volumes []any `yaml:"volumes"`
+			} `yaml:"services"`
+		}
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		for name, svc := range doc.Services {
+			for _, volume := range svc.Volumes {
+				switch v := volume.(type) {
+				case string:
+					parts := strings.Split(v, ":")
+					if (len(parts) >= 2 && parts[len(parts)-1] == "/app/data") ||
+						(len(parts) >= 3 && parts[len(parts)-2] == "/app/data") {
+						out[name] = true
+					}
+				case map[string]any:
+					if target, _ := v["target"].(string); target == "/app/data" {
+						out[name] = true
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 func main() {
 	socket := flag.String("socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"), "Unix socket to listen on")
 	statusPath := flag.String("status", envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"), "State file to write")
 	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
+	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
 	flag.Parse()
 
@@ -146,6 +218,16 @@ func main() {
 	if len(srv.overrideFiles) > 0 {
 		slog.Info("ftw-updater: override files discovered", "files", srv.overrideFiles)
 	}
+	serviceFiles := append([]string{srv.composeFile}, srv.overrideFiles...)
+	selectedService, err := selectMainService(serviceFiles, *mainService)
+	if err != nil {
+		slog.Error("ftw-updater: unsafe compose layout", "err", err)
+		os.Exit(1)
+	}
+	srv.mainServiceName = selectedService
+	srv.imageID = srv.currentServiceImageID
+	srv.healthCheck = srv.waitForServiceHealth
+	slog.Info("ftw-updater: main service selected", "service", selectedService)
 	if *skipPull {
 		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
 	}
@@ -290,8 +372,23 @@ func (s *server) runJob(action, target string) {
 		}
 	}
 
+	// Capture the current immutable image ID before pulling. Docker retains the
+	// old image object after the tag moves, which lets us retag and recreate it
+	// if the new container never becomes healthy.
+	var previousImageID string
+	if action == "update" && s.imageID != nil {
+		inspectCtx, cancelInspect := context.WithTimeout(context.Background(), 30*time.Second)
+		var err error
+		previousImageID, err = s.imageID(inspectCtx, s.mainServiceName)
+		cancelInspect()
+		if err != nil {
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot capture current image for rollback: " + err.Error()})
+			return
+		}
+	}
+
 	if !s.skipPull {
-		pullArgs := s.composeArgs("pull", mainServiceName)
+		pullArgs := s.composeArgs("pull", s.mainServiceName)
 		var pullErr error
 		for attempt := 1; ; attempt++ {
 			// Per-attempt timeout: each pull gets a full 2 h window so a
@@ -325,17 +422,35 @@ func (s *server) runJob(action, target string) {
 	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer upCancel()
 
-	upArgs := s.composeArgs("up", "-d", mainServiceName)
+	upArgs := s.composeArgs("up", "-d", s.mainServiceName)
 	if action == "restart" {
 		// --force-recreate is what makes restart actually restart when the
 		// image digest didn't change — exactly the dev/test path the main
 		// UI exposes as the "Restart" button.
-		upArgs = s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
+		upArgs = s.composeArgs("up", "-d", "--force-recreate", s.mainServiceName)
 	}
 	if err := s.runner(upCtx, env, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return
+	}
+
+	if s.healthCheck != nil {
+		healthCtx, cancelHealth := context.WithTimeout(context.Background(), 3*time.Minute)
+		healthErr := s.healthCheck(healthCtx, s.mainServiceName)
+		cancelHealth()
+		if healthErr != nil {
+			if action == "update" && previousImageID != "" {
+				if rollbackErr := s.restorePreviousImage(previousImageID); rollbackErr == nil {
+					s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "new image failed health check; previous image restored: " + healthErr.Error()})
+					return
+				} else {
+					healthErr = fmt.Errorf("%v; automatic image rollback failed: %w", healthErr, rollbackErr)
+				}
+			}
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
+			return
+		}
 	}
 
 	// The main container is now being recreated. The brand-new replica
@@ -344,20 +459,58 @@ func (s *server) runJob(action, target string) {
 	s.writeState(State{State: "done", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed"})
 }
 
+func (s *server) restorePreviousImage(imageID string) error {
+	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), s.mainServiceName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("service %q has no image", s.mainServiceName)
+	}
+	repository, err := composeImageRepository(image)
+	if err != nil {
+		return err
+	}
+	rollbackTag := fmt.Sprintf("ftw-rollback-%d", time.Now().Unix())
+	rollbackRef := repository + ":" + rollbackTag
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
+		return fmt.Errorf("tag previous image: %w", err)
+	}
+	env := []string{"FTW_IMAGE_TAG=" + rollbackTag}
+	if err := s.runner(ctx, env, s.composeArgs("up", "-d", s.mainServiceName)...); err != nil {
+		return fmt.Errorf("recreate previous image: %w", err)
+	}
+	if s.healthCheck != nil {
+		if err := s.healthCheck(ctx, s.mainServiceName); err != nil {
+			return fmt.Errorf("previous image health check: %w", err)
+		}
+	}
+	return nil
+}
+
+func composeImageRepository(image string) (string, error) {
+	if i := strings.Index(image, ":${FTW_IMAGE_TAG"); i > 0 {
+		return image[:i], nil
+	}
+	return "", fmt.Errorf("image %q does not use the supported repository:${FTW_IMAGE_TAG} form", image)
+}
+
 // validateComposeImagePin catches old host-side compose files that hard-code
 // :latest. In that layout FTW_IMAGE_TAG is passed to docker compose but never
 // read, so the sidecar can report "done" while the main service stays on the
 // previous image.
 func (s *server) validateComposeImagePin() error {
-	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), mainServiceName)
+	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), s.mainServiceName)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("service %q is missing an image entry in compose files", mainServiceName)
+		return fmt.Errorf("service %q is missing an image entry in compose files", s.mainServiceName)
 	}
 	if !strings.Contains(image, "FTW_IMAGE_TAG") {
-		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG; update docker-compose.yml from the latest install script", mainServiceName, image)
+		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG; update docker-compose.yml from the latest install script", s.mainServiceName, image)
 	}
 	return nil
 }
@@ -406,12 +559,12 @@ func serviceImageFromComposeFile(path, service string) (string, bool, error) {
 // volume, keeping the image unchanged ("soft" rollback). The sequence is
 // intentionally simple:
 //
-//  1. compose stop forty-two-watts — main releases its SQLite handle so
+//  1. compose stop <main-service> — main releases its SQLite handle so
 //     the swap doesn't write into a live DB.
 //  2. docker cp each file from the snapshot dir on the host into the
 //     stopped container. Bind-mount semantics make this a direct write
 //     to the host-side data dir; no read-only/writable bind trick needed.
-//  3. compose up -d forty-two-watts — main comes up on the restored state.
+//  3. compose up -d <main-service> — main comes up on the restored state.
 //
 // Paths: the snapshots live at <host_project_dir>/data/snapshots/<id>.
 // We compute host_project_dir from FTW_UPDATER_COMPOSE (an absolute host
@@ -419,10 +572,9 @@ func serviceImageFromComposeFile(path, service string) (string, bool, error) {
 // the data bind off the default `./data:/app/data` layout would need a
 // separate override; tracked as a follow-up if we hit that in practice.
 //
-// A failed rollback leaves state: "failed" with a descriptive message
-// and — critically — still runs compose up -d in defer so the main
-// container comes back, even if wrong. Leaving the service down would
-// strand the operator.
+// A failed file restore leaves state: "failed" with a descriptive message
+// and attempts compose up -d before returning so the main container is not
+// stranded offline. A failed start remains visible as a failed state.
 func (s *server) runRollback(snapshotID string, files []string) {
 	now := time.Now()
 	base := State{Action: "rollback", Snapshot: snapshotID, StartedAt: now}
@@ -440,7 +592,7 @@ func (s *server) runRollback(snapshotID string, files []string) {
 
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
-	stopArgs := s.composeArgs("stop", mainServiceName)
+	stopArgs := s.composeArgs("stop", s.mainServiceName)
 	if err := s.runner(ctx, nil, stopArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose stop failed: " + err.Error()})
 		return
@@ -463,13 +615,13 @@ func (s *server) runRollback(snapshotID string, files []string) {
 			continue
 		}
 		dst := "/app/data/" + f
-		cpArgs := []string{"cp", src, mainServiceName + ":" + dst}
+		cpArgs := []string{"cp", src, s.mainServiceName + ":" + dst}
 		if err := s.runner(ctx, nil, cpArgs...); err != nil {
 			// File-swap failure is serious. Try to bring the
 			// service back anyway so the operator isn't stranded.
 			slog.Error("rollback docker cp failed", "file", f, "err", err)
 			s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "docker cp " + f + " failed: " + err.Error()})
-			_ = s.runner(ctx, nil, s.composeArgs("up", "-d", mainServiceName)...)
+			_ = s.runner(ctx, nil, s.composeArgs("up", "-d", s.mainServiceName)...)
 			return
 		}
 	}
@@ -478,7 +630,7 @@ func (s *server) runRollback(snapshotID string, files []string) {
 	// process certainly sees the swapped files (same semantics as the
 	// restart flow).
 	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
-	upArgs := s.composeArgs("up", "-d", "--force-recreate", mainServiceName)
+	upArgs := s.composeArgs("up", "-d", "--force-recreate", s.mainServiceName)
 	if err := s.runner(ctx, nil, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d failed: " + err.Error()})
 		return
@@ -550,6 +702,57 @@ func (s *server) recoverCrashedState() {
 	}
 }
 
+func (s *server) serviceContainerID(ctx context.Context, service string) (string, error) {
+	out, err := dockerOutput(ctx, s.composeArgs("ps", "-q", service)...)
+	if err != nil {
+		return "", err
+	}
+	ids := strings.Fields(out)
+	if len(ids) != 1 {
+		return "", fmt.Errorf("service %q resolved to %d containers", service, len(ids))
+	}
+	return ids[0], nil
+}
+
+func (s *server) currentServiceImageID(ctx context.Context, service string) (string, error) {
+	containerID, err := s.serviceContainerID(ctx, service)
+	if err != nil {
+		return "", err
+	}
+	out, err := dockerOutput(ctx, "inspect", "--format", "{{.Image}}", containerID)
+	if err != nil {
+		return "", err
+	}
+	imageID := strings.TrimSpace(out)
+	if imageID == "" {
+		return "", errors.New("running container has no image ID")
+	}
+	return imageID, nil
+}
+
+func (s *server) waitForServiceHealth(ctx context.Context, service string) error {
+	containerID, err := s.serviceContainerID(ctx, service)
+	if err != nil {
+		return err
+	}
+	for {
+		out, inspectErr := dockerOutput(ctx, "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", containerID)
+		if inspectErr == nil {
+			switch status := strings.TrimSpace(out); status {
+			case "healthy", "running":
+				return nil
+			case "unhealthy", "exited", "dead":
+				return fmt.Errorf("container status is %s", status)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for service health: %w", ctx.Err())
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // dockerCompose shells out to the `docker` CLI (the compose plugin ships
 // in the docker:27-cli image). stdout+stderr are captured so a failure
 // includes the compose error text in state.json. extraEnv is appended
@@ -567,6 +770,15 @@ func dockerCompose(ctx context.Context, extraEnv []string, args ...string) error
 	}
 	slog.Info("docker compose ok", "args", args, "env", extraEnv, "out", truncate(string(out), 200))
 	return nil
+}
+
+func dockerOutput(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker %s: %w: %s", strings.Join(args, " "), err, truncate(string(out), 400))
+	}
+	return string(out), nil
 }
 
 func truncate(s string, n int) string {

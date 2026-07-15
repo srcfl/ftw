@@ -93,14 +93,14 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          # Pick the stage-42w image specifically — exclude any
+          # Pick the stage-ftw image specifically — exclude any
           # `…-lite.img.xz` that might come along if SKIP_IMAGES on
           # stage2 isn't honoured for some reason. Naive ls|head
           # would alphabetically prefer the lite variant and ship
           # a stock Raspberry Pi OS Lite — which is exactly what
           # happened in run 24881931326 before this guard.
           shopt -s nullglob
-          candidates=( deploy/pi-gen/pi-gen/deploy/*42w-rpi4-arm64.img.xz )
+          candidates=( deploy/pi-gen/pi-gen/deploy/*ftw-rpi4-arm64.img.xz )
           IMG=""
           for f in "${candidates[@]}"; do
             case "${f}" in
@@ -110,7 +110,7 @@ jobs:
             break
           done
           if [ -z "${IMG}" ]; then
-            echo "pi-gen produced no 42w-rpi4-arm64.img.xz — check build log above" >&2
+            echo "pi-gen produced no ftw-rpi4-arm64.img.xz — check build log above" >&2
             ls -lah deploy/pi-gen/pi-gen/deploy/ || true
             exit 1
           fi

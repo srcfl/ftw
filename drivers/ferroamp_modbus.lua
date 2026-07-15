@@ -2,7 +2,7 @@
 -- Ferroamp EnergyHub Modbus TCP driver (alternative transport to drivers/ferroamp.lua)
 -- Emits: PV, Battery, Meter telemetry
 -- Ported from sourceful-hugin/device-support/drivers/lua/ferroamp_modbus.lua
--- Port notes (42W v2.1 API drift vs hugin):
+-- Port notes (FTW v2.1 API drift vs hugin):
 --   host.log(msg)                 → host.log("info", msg)
 --   host.decode_f32               → inline IEEE-754 (decode_f32_be, word-swap helper)
 --   host.modbus_write_multiple(…) → host.modbus_write_multi(…)
@@ -27,7 +27,7 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "Ferroamp EnergyHub XL via Modbus TCP (alternative transport to drivers/ferroamp.lua).",
   homepage     = "https://ferroamp.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "EnergyHub XL" },
   verification_status = "experimental",
   verification_notes = "Ported from sourceful-hugin. Read-only telemetry; control still goes through drivers/ferroamp.lua (MQTT). Not yet verified against live hardware.",

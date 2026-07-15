@@ -1,5 +1,5 @@
 // Package calendar consumes calendar events as planner constraints (issue
-// #498). forty-two-watts runs a CalDAV *client* against its own in-process
+// #498). FTW runs a CalDAV *client* against its own in-process
 // native CalDAV server (internal/caldavserver) — it polls a calendar
 // collection and maps events into intents the planner already knows how to
 // honour:

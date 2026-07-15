@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# forty-two-watts one-shot installer for macOS (Docker Desktop).
+# FTW one-shot installer for macOS (Docker Desktop).
 #
 # The Linux installer (scripts/install.sh) can't run here — macOS has no
 # apt-get, no host networking, and Docker Desktop is a GUI app that can't
@@ -8,12 +8,12 @@
 # the macOS compose file + broker config, and brings the stack up.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install-macos.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install-macos.sh | bash
 #
 # What this does:
 #   1. Verifies Docker Desktop is installed and the daemon is running.
-#   2. Creates ~/forty-two-watts/data (no chown needed — Docker Desktop
-#      maps host ownership transparently).
+#   2. Reuses an existing FTW/legacy install, or creates ~/ftw/data (Docker
+#      Desktop maps host ownership transparently, so no chown is needed).
 #   3. Fetches docker-compose.macos.yml + mosquitto.conf from the repo.
 #   4. Pulls the multi-arch images from GHCR and starts the stack.
 #
@@ -21,15 +21,23 @@
 # picks up changes without destroying the ./data state.
 #
 # Override via env vars (optional):
-#   FTW_DIR=/path/to/dir   # install location (default: ~/forty-two-watts)
+#   FTW_DIR=/path/to/dir   # explicit install location
 #   FTW_BRANCH=some-branch # pull files from a non-master branch
 
 set -euo pipefail
 
 # ---- Config (override via env) ----
-REPO="frahlg/forty-two-watts"
+REPO="srcfl/ftw"
 BRANCH="${FTW_BRANCH:-master}"
-INSTALL_DIR="${FTW_DIR:-$HOME/forty-two-watts}"
+if [ -n "${FTW_DIR:-}" ]; then
+  INSTALL_DIR="$FTW_DIR"
+elif [ -d "$HOME/ftw" ]; then
+  INSTALL_DIR="$HOME/ftw"
+elif [ -d "$HOME/forty-two-watts" ]; then
+  INSTALL_DIR="$HOME/forty-two-watts"
+else
+  INSTALL_DIR="$HOME/ftw"
+fi
 RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 COMPOSE_FILE="docker-compose.macos.yml"
 
@@ -37,8 +45,8 @@ COMPOSE_FILE="docker-compose.macos.yml"
 cat <<'BANNER'
 
   ┌─────────────────────────────────────────────────┐
-  │     forty-two-watts installer (macOS)           │
-  │     Home Energy Management System               │
+  │     FTW installer (macOS)                       │
+  │     Local-first home energy coordination.       │
   └─────────────────────────────────────────────────┘
 
 BANNER
@@ -97,8 +105,25 @@ mkdir -p "$INSTALL_DIR/data" "$INSTALL_DIR/mosquitto/config"
 
 # ---- 3. Compose file + broker config ----
 echo ""
-echo "==[3/4]== Fetching $COMPOSE_FILE + mosquitto.conf from $BRANCH"
-curl -fsSL "${RAW}/${COMPOSE_FILE}" -o "$INSTALL_DIR/${COMPOSE_FILE}"
+echo "==[3/4]== Preparing $COMPOSE_FILE + mosquitto.conf from $BRANCH"
+COMPOSE_PATH="$INSTALL_DIR/${COMPOSE_FILE}"
+if [ -f "$COMPOSE_PATH" ]; then
+  SERVICES="$(docker compose -f "$COMPOSE_PATH" config --services)"
+  MAIN_COUNT="$(printf '%s\n' "$SERVICES" | grep -Ec '^(ftw|forty-two-watts)$' || true)"
+  if [ "$MAIN_COUNT" -ne 1 ]; then
+    echo "ERROR: existing compose layout is ambiguous or lacks /app/data; leaving it untouched." >&2
+    exit 1
+  fi
+  MAIN_SERVICE="$(printf '%s\n' "$SERVICES" | grep -E '^(ftw|forty-two-watts)$')"
+  if ! docker compose -f "$COMPOSE_PATH" config "$MAIN_SERVICE" | grep -q '/app/data'; then
+    echo "ERROR: existing main service lacks /app/data; leaving it untouched." >&2
+    exit 1
+  fi
+  cp "$COMPOSE_PATH" "$COMPOSE_PATH.pre-ftw.bak"
+  echo "    Existing safe deployment layout retained."
+else
+  curl -fsSL "${RAW}/${COMPOSE_FILE}" -o "$COMPOSE_PATH"
+fi
 curl -fsSL "${RAW}/mosquitto/config/mosquitto.conf" \
   -o "$INSTALL_DIR/mosquitto/config/mosquitto.conf"
 
@@ -122,7 +147,7 @@ done
 cat <<EOF
 
 ──────────────────────────────────────────────────────────────────
-  ✓ forty-two-watts is running.
+  ✓ FTW is running.
 
   Open the dashboard:
      http://${HOST_IP}:8080/         (from another device on the LAN)

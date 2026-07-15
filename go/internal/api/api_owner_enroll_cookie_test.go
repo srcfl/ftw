@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // This file drives a REAL WebAuthn enroll/start + enroll/finish ceremony with a

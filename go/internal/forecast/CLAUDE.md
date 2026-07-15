@@ -26,7 +26,7 @@ Fetches hourly weather (cloud cover + air temp, optionally shortwave irradiance)
 
 ## How it talks to neighbors
 
-Writes via `state.Store.SaveForecasts([]state.ForecastPoint)` and reads via `LoadForecasts` — that's the only persistence dependency. `cmd/forty-two-watts/main.go` constructs the Service from the `config.Weather` section and passes the `*Service` into `mpc.Service` (fallback PV curve) and `api.Deps.Forecast` (the `GET /api/forecast` handler). No import of `drivers`, `telemetry`, or `control` — forecasts are a pure input to the planner.
+Writes via `state.Store.SaveForecasts([]state.ForecastPoint)` and reads via `LoadForecasts` — that's the only persistence dependency. `cmd/ftw/main.go` constructs the Service from the `config.Weather` section and passes the `*Service` into `mpc.Service` (fallback PV curve) and `api.Deps.Forecast` (the `GET /api/forecast` handler). No import of `drivers`, `telemetry`, or `control` — forecasts are a pure input to the planner.
 
 ## What to read first
 

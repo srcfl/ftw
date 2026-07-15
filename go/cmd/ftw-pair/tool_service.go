@@ -17,7 +17,7 @@ import (
 var _ Tool = (*RestartMainServiceTool)(nil)
 var _ Tool = (*TailServiceLogsTool)(nil)
 
-// RestartMainServiceTool triggers a graceful restart of the 42W service via
+// RestartMainServiceTool triggers a graceful restart of the FTW service via
 // POST /api/version/restart. Works whether the deploy is native systemd or
 // docker-compose (the container has no systemctl).
 type RestartMainServiceTool struct {
@@ -37,7 +37,7 @@ func (t *RestartMainServiceTool) Name() string { return "restart_main_service" }
 func (t *RestartMainServiceTool) Schema() *mcpsdk.Tool {
 	return &mcpsdk.Tool{
 		Name:        "restart_main_service",
-		Description: "Trigger a graceful restart of the forty-two-watts main service. The service exits and is brought back up by docker's restart policy (or systemd, depending on deploy). Drivers re-init from config.",
+		Description: "Trigger a graceful restart of the FTW main service. The service exits and is brought back up by docker's restart policy (or systemd, depending on deploy). Drivers re-init from config.",
 		InputSchema: map[string]any{"type": "object"},
 	}
 }
@@ -80,7 +80,7 @@ func (t *TailServiceLogsTool) Name() string { return "tail_service_logs" }
 func (t *TailServiceLogsTool) Schema() *mcpsdk.Tool {
 	return &mcpsdk.Tool{
 		Name:        "tail_service_logs",
-		Description: "Fetch recent log entries from the forty-two-watts in-process log ring via GET /api/logs.",
+		Description: "Fetch recent log entries from the FTW in-process log ring via GET /api/logs.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

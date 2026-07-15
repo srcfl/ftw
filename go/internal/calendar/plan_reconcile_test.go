@@ -13,8 +13,8 @@ import (
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 
-	"github.com/frahlg/forty-two-watts/go/internal/caldavserver"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/caldavserver"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 func planServer(t *testing.T) (*httptest.Server, *caldav.Client) {
@@ -29,7 +29,7 @@ func planServer(t *testing.T) (*httptest.Server, *caldav.Client) {
 	return srv, c
 }
 
-// putRawPlan writes a plan object the way a previous 42W process would have, so
+// putRawPlan writes a plan object the way a previous FTW process would have, so
 // tests can stage pre-existing / orphaned objects in the plan collection.
 func putRawPlan(t *testing.T, c *caldav.Client, uid, summary string, start, end time.Time) {
 	t.Helper()

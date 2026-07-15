@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts — next</title>
+  <title>FTW — next</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <!-- Leaflet is lazy-loaded by settings.js when the Weather tab opens
        the OSM picker — it's not needed on the main dashboard and
@@ -73,7 +73,7 @@
 </head>
 <body class="ftw-next">
   <header>
-    <img src="/logo.jpg" alt="42W" class="header-logo"><h1>42W</h1>
+    <img src="/logo.jpg" alt="FTW" class="header-logo"><h1>FTW</h1>
     <nav class="app-tabs" id="app-tabs" role="tablist">
       <button data-view="live" class="tab-btn active" role="tab">Live</button>
       <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
@@ -125,16 +125,16 @@
            (no count, label, site_id, or Pi key) before the user authenticates —
            home.fortytwowatts.com is a public front door for everyone. -->
       <div class="signin-gate-landing">
-        <div class="signin-gate-brand">&#9889; forty-two watts</div>
-        <p class="signin-gate-lead">This is your forty-two-watts home. Sign in with your passkey to reach it.</p>
+        <div class="signin-gate-brand">&#9889; FTW</div>
+        <p class="signin-gate-lead">This is your FTW home. Sign in with your passkey to reach it.</p>
         <button id="signin-landing-btn" class="signin-gate-btn">Sign in with your passkey</button>
         <p class="signin-gate-msg" id="signin-landing-msg" role="status" aria-live="polite"></p>
-        <p class="signin-gate-learn-row">Don&rsquo;t have a 42W yet?
-          <a class="signin-gate-learn" href="https://fortytwowatts.com" rel="noopener">Learn more &rarr;</a></p>
+        <p class="signin-gate-learn-row">Don&rsquo;t have a FTW yet?
+          <a class="signin-gate-learn" href="https://ftw.sourceful.energy" rel="noopener">Learn more &rarr;</a></p>
       </div>
       <!-- /signin-gate-landing -->
 
-      <div class="signin-gate-brand">&#9889; forty-two watts</div>
+      <div class="signin-gate-brand">&#9889; FTW</div>
       <p class="signin-gate-lead signin-gate-connecting">Reaching your home&hellip;</p>
 
       <!-- signin mode: passkey (or silent device) sign-in -->
@@ -768,7 +768,7 @@
   <!-- Multi-tenant home route (ADDITIVE — only active on the public home host).
        prf.js derives the per-wallet directory ENCRYPTION key from the passkey's
        PRF output; instance-sync.js manages the encrypted per-wallet directory of
-       42W homes against the relay. Both are ES modules that ALSO attach
+       FTW homes against the relay. Both are ES modules that ALSO attach
        window.ftwPrf / window.ftwInstanceSync for the classic scripts (p2p.js,
        next-app.js) to consume. Deferred like device-key.js: every consumer reads
        the globals from inside async handlers (whoami / sign-in / connect), never

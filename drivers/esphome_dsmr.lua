@@ -56,7 +56,7 @@ DRIVER = {
   capabilities = { "meter" },
   description  = "Smart meter via ESPHome web_server v3 + dsmr component (Sourceful Zap on open firmware, DIY ESP32+P1, etc.).",
   homepage     = "https://github.com/erikarenhill/sourceful-zap-esphome",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "Sourceful Zap P1 (sourceful-zap-esphome firmware)" },
   verification_status = "experimental",
   verification_notes = "Built and validated against the live HTTP responses of an LGF5E360 meter behind a Sourceful Zap running the open-source ESPHome firmware. Awaiting a second site to promote to beta.",
@@ -280,7 +280,7 @@ function driver_poll()
     end
 
     -- Reactive power (kvar → var). DSMR meters publish reactive both
-    -- as a total and per phase, in each direction. The forty-two-watts
+    -- as a total and per phase, in each direction. The FTW
     -- Meter struct doesn't carry kvar (load-flow control is active-only
     -- for now), but the values are useful for grid-quality dashboards
     -- and PF inference, so we drop them into the long-format TS DB

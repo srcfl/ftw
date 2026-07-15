@@ -1,9 +1,9 @@
 {
-  "name": "forty-two-watts",
+  "name": "ftw",
   "version": "0.127.0",
   "private": true,
   "type": "module",
-  "description": "Unified Home Energy Management System — version metadata only; the host is Go and the mathematical planner is Python/CVXPY. Changesets reads `version` from this file to drive the release tag.",
+  "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is Python/CVXPY.",
   "scripts": {
     "test": "node --test 'web/**/*.test.mjs'"
   },

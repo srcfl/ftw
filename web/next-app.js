@@ -1,4 +1,4 @@
-// forty-two-watts dashboard — plain JS, no framework
+// FTW dashboard — plain JS, no framework
 
 (function () {
   "use strict";
@@ -4441,7 +4441,7 @@
       }
       // 0 entries — the wallet has no home registered yet. This isn't an error;
       // the user just hasn't finished setup on their home network.
-      say("Finish setting up 42W on your home network, then return here.", "ok");
+      say("Finish setting up FTW on your home network, then return here.", "ok");
     }
     var prfOut = null;
     try { prfOut = prf.outputFrom(cred); } catch (e) { prfOut = null; }

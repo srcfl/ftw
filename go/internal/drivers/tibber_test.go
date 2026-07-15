@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // fakeWS is a WSCap stub for unit tests. Tests Push() inbound frames

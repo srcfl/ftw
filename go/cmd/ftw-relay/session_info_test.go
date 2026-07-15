@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 func TestSessionInfoTracksLandingHitsAndActivity(t *testing.T) {

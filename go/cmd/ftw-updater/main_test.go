@@ -65,14 +65,18 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 	dir := t.TempDir()
 	runner := &fakeRunner{}
 	s := &server{
-		composeFile:    filepath.Join(dir, "docker-compose.yml"),
-		statusPath:     filepath.Join(dir, "state.json"),
-		pullRetryDelay: time.Millisecond,
-		runner:         runner.run,
+		composeFile:     filepath.Join(dir, "docker-compose.yml"),
+		mainServiceName: canonicalMainServiceName,
+		statusPath:      filepath.Join(dir, "state.json"),
+		pullRetryDelay:  time.Millisecond,
+		runner:          runner.run,
+		healthCheck:     func(context.Context, string) error { return nil },
 	}
 	writeCompose(t, s.composeFile, `services:
-  forty-two-watts:
-    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
 `)
 	return s, runner
 }
@@ -263,8 +267,8 @@ func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
 func TestHandleUpdate_FailsWhenComposeDoesNotReadImageTag(t *testing.T) {
 	s, runner := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
-  forty-two-watts:
-    image: ghcr.io/frahlg/forty-two-watts:latest
+  ftw:
+    image: ghcr.io/srcfl/ftw:latest
 `)
 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
@@ -462,6 +466,60 @@ func TestDiscoverOverridesAndComposeArgs(t *testing.T) {
 	want := []string{"compose", "-f", base, "-f", override, "up", "-d", "svc"}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Errorf("composeArgs =\n  %v\nwant\n  %v", args, want)
+	}
+}
+
+func TestSelectMainServiceSupportsCanonicalAndLegacyLayouts(t *testing.T) {
+	for _, service := range []string{canonicalMainServiceName, legacyMainServiceName} {
+		t.Run(service, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "docker-compose.yml")
+			writeCompose(t, path, "services:\n  "+service+":\n    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}\n    volumes:\n      - ./data:/app/data\n")
+			got, err := selectMainService([]string{path}, "")
+			if err != nil || got != service {
+				t.Fatalf("selectMainService() = %q, %v; want %q", got, err, service)
+			}
+		})
+	}
+}
+
+func TestSelectMainServiceRejectsAmbiguousDataOwners(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "docker-compose.yml")
+	writeCompose(t, path, `services:
+  ftw:
+    volumes: ["./data:/app/data"]
+  forty-two-watts:
+    volumes: ["./data:/app/data"]
+`)
+	if _, err := selectMainService([]string{path}, ""); err == nil {
+		t.Fatal("ambiguous main services should be rejected")
+	}
+}
+
+func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
+	checks := 0
+	s.healthCheck = func(context.Context, string) error {
+		checks++
+		if checks == 1 {
+			return errors.New("unhealthy")
+		}
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	st := waitForState(t, s, "failed")
+	if !strings.Contains(st.Message, "previous image restored") {
+		t.Fatalf("state should report automatic rollback, got %+v", st)
+	}
+	calls := runner.snapshot()
+	if len(calls) != 4 {
+		t.Fatalf("want pull, new up, image tag, rollback up; got %v", calls)
+	}
+	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
+		t.Fatalf("third call should tag previous image, got %q", got)
 	}
 }
 

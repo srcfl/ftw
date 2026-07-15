@@ -26,9 +26,9 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/events"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Event types.
@@ -665,7 +665,7 @@ func (s *Service) SendTest() error {
 		prio = 3
 	}
 	msg := Message{
-		Title:    "forty-two-watts: test notification",
+		Title:    "FTW: test notification",
 		Body:     fmt.Sprintf("Test notification sent at %s.", time.Now().UTC().Format(time.RFC3339)),
 		Priority: prio,
 	}
@@ -853,17 +853,17 @@ func EventDefaults() map[string]struct {
 func defaultTitleFor(eventType string) string {
 	switch eventType {
 	case EventDriverOffline:
-		return "forty-two-watts: {{.Device}} offline"
+		return "FTW: {{.Device}} offline"
 	case EventDriverRecovered:
-		return "forty-two-watts: {{.Device}} recovered"
+		return "FTW: {{.Device}} recovered"
 	case EventUpdateAvailable:
-		return "forty-two-watts: update {{.Version}} available"
+		return "FTW: update {{.Version}} available"
 	case EventFuseOverLimit:
-		return "forty-two-watts: {{.Phase}} over fuse limit"
+		return "FTW: {{.Phase}} over fuse limit"
 	case EventConcurrentDriversOffline:
-		return "forty-two-watts: {{len .Devices}} drivers offline (likely fuse / outage)"
+		return "FTW: {{len .Devices}} drivers offline (likely fuse / outage)"
 	}
-	return "forty-two-watts: {{.EventType}}"
+	return "FTW: {{.EventType}}"
 }
 
 func defaultBodyFor(eventType string) string {

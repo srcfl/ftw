@@ -8,9 +8,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/control"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // PV manual-hold endpoint tests. Validation, scoping, pct→W

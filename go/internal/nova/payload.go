@@ -1,6 +1,6 @@
 package nova
 
-// DerTelemetry is forty-two-watts' native clean DER telemetry payload.
+// DerTelemetry is FTW's native clean DER telemetry payload.
 // One instance per (device, DER) per tick. Every W value uses the site
 // sign convention from docs/site-convention.md:
 //
@@ -23,7 +23,7 @@ type DerTelemetry struct {
 	Make        string `json:"make,omitempty"`
 	Model       string `json:"model,omitempty"`
 	Serial      string `json:"serial,omitempty"`
-	HardwareID  string `json:"hardware_id,omitempty"` // the forty-two-watts device_id
+	HardwareID  string `json:"hardware_id,omitempty"` // the FTW device_id
 	TimestampMs int64  `json:"ts_ms"`                 // Unix millis
 
 	// Core instantaneous power, site-signed.

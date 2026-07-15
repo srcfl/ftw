@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // newMultiTenantRelay builds a relay in multi-tenant mode with a real

@@ -20,7 +20,7 @@ import (
 
 	"github.com/simonvetter/modbus"
 
-	"github.com/frahlg/forty-two-watts/go/cmd/sim-sungrow/sungrow"
+	"github.com/srcfl/ftw/go/cmd/sim-sungrow/sungrow"
 )
 
 func main() {

@@ -1,4 +1,4 @@
-# forty-two-watts — project orientation
+# FTW — project orientation
 
 Unified Home Energy Management System: Go host, Lua drivers, and a local
 Python/CVXPY mathematical planning engine.
@@ -56,7 +56,7 @@ in YAML or re-adding it doesn't orphan a trained model. See
 | `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
 | `go/internal/mpc` | MPC orchestration, Go validation, DP emergency fallback |
 | `optimizer` | CVXPY model; HiGHS LP/MILP + CLARABEL convex fallback |
-| `go/internal/calendar` | CalDAV-client planner constraints (#498) — title-keyword intents (away → load profile, EV deadline → loadpoint target) + EVSE usage history + plan publishing; polls 42W's own in-process `caldavserver` |
+| `go/internal/calendar` | CalDAV-client planner constraints (#498) — title-keyword intents (away → load profile, EV deadline → loadpoint target) + EVSE usage history + plan publishing; polls FTW's own in-process `caldavserver` |
 | `go/internal/caldavserver` | Native in-process CalDAV server (#498) on emersion/go-webdav (MIT) — the only CalDAV server (no sidecar), so the calendar feature works single-container incl. a HA add-on. Objects persist in state.db (`caldav_objects`); recurring events expanded server-side (`expand.go`) |
 | `go/internal/selfupdate` | GH Releases probe + trigger dispatch for the in-app updater sidecar |
 | `go/internal/nova` | Opt-in federation client to Sourceful Nova Core — ES256 identity, JWT signer, HTTP client (claim + provision), clean telemetry payload + boundary adapter, MQTT publisher |
@@ -208,13 +208,13 @@ Every `host.emit_metric` call lands in three SQLite tables defined in
 Samples older than `RecentRetention` (14 days) roll off to daily Parquet
 files under `<state.cold_dir>/YYYY/MM/DD.parquet` — see
 `go/internal/state/parquet.go`. Rolloff runs hourly from
-`go/cmd/forty-two-watts/main.go` (`rolloffLoop`). Parquet files are
+`go/cmd/ftw/main.go` (`rolloffLoop`). Parquet files are
 zstd-compressed and dictionary-encoded on `driver` + `metric`, so a
 year of 50 metrics is typically a few GB.
 
 ## Watchdog + safety
 
-The control loop (`go/cmd/forty-two-watts/main.go`, the `ticker.C`
+The control loop (`go/cmd/ftw/main.go`, the `ticker.C`
 branch) runs `tel.WatchdogScan(timeout)` every cycle. Any driver whose
 last successful telemetry is older than `site.watchdog_timeout_s`
 (default 60 s) flips to offline and receives `DefaultMode` — which in
@@ -299,8 +299,6 @@ light theme can flip it cleanly.
 - `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune
 - `docs/clamping.md` — the safety clamps
 - `docs/mpc-planner.md` — MPC strategies, confidence blending
-- `docs/ml-twins.md` — older twin notes (superseded by ml-models.md)
 - `docs/ha-integration.md` — Home Assistant MQTT bridge
-- `docs/caldav-integration.md` — calendar planner constraints (#498): 42W's in-process native CalDAV server (emersion/go-webdav, MIT; no sidecar; recurrence expanded server-side); away/EV intents, EVSE history + plan publishing
-- `docs/lua-drivers.md` — earlier Lua driver notes (superseded by writing-a-driver.md)
+- `docs/caldav-integration.md` — calendar planner constraints (#498): FTW's in-process native CalDAV server (emersion/go-webdav, MIT; no sidecar; recurrence expanded server-side); away/EV intents, EVSE history + plan publishing
 - `docs/archive/rust-go-wasm-migration-plan.md` — historical Rust→Go migration context

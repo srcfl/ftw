@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>forty-two-watts — enroll passkey</title>
+  <title>FTW — enroll passkey</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <link rel="stylesheet" href="/components/theme.css">
   <style>
@@ -66,7 +66,7 @@
 </head>
 <body>
   <h1>Enroll a passkey</h1>
-  <p class="muted">Bind this device's secure enclave (Touch ID, Windows Hello, Android keystore) to your forty-two-watts instance. Once enrolled, this device can sign in from anywhere through the relay.</p>
+  <p class="muted">Bind this device's secure enclave (Touch ID, Windows Hello, Android keystore) to your FTW instance. Once enrolled, this device can sign in from anywhere through the relay.</p>
 
   <div class="panel">
     <label for="name">Friendly name</label>
@@ -198,7 +198,7 @@
 	        return "The relay cannot reach your Pi. Check that Remote Access is enabled locally and that the service is running.";
 	      }
 	      if (code === "FTW_ENROLL_PIN_REQUIRED" || /pin/i.test(text)) {
-	        return "Enter the 6-digit PIN shown next to the QR on your local 42W Access screen, then try again.";
+	        return "Enter the 6-digit PIN shown next to the QR on your local FTW Access screen, then try again.";
 	      }
 	      if (code === "FTW_ENROLL_SESSION_REQUIRED") {
 	        return "This is the add-passkey path. Sign in with an existing passkey first, then open Access to add another one.";
@@ -310,7 +310,7 @@
         // 2. Browser ceremony. Request the PRF extension so THIS credential can
         //    later derive the per-wallet directory ENCRYPTION key (prf.js): the
         //    same passkey the owner taps to sign in yields the key that decrypts
-        //    their list of 42W homes from the relay, with no LAN visit. Harmless
+        //    their list of FTW homes from the relay, with no LAN visit. Harmless
         //    on authenticators without PRF — they just return no prf result.
         const credOpts = decodeCreationOptions(options);
         credOpts.extensions = Object.assign({}, credOpts.extensions, extensionInput());

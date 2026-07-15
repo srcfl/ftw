@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // PVPredictor lets the MPC plug in a learned PV predictor (the digital
@@ -1617,8 +1617,8 @@ func selectPlannerPVW(forecastPVW, predictedPVW float64, radiationBacked bool) f
 	// dominating the plan — the twin's NowAnchor-corrected value already
 	// reflects live irradiance conditions, and a 3–10× divergence between
 	// forecast and twin is a stronger signal of NWP error than calibration
-	// gap. See investigation in docs/pvmodel-overprediction-investigation.md
-	// (T33, 2026-05-25, open_meteo predicted 154 W/m2 / 1% cloud while
+	// gap. Production incident T33 (2026-05-25) observed open_meteo predicting
+	// 154 W/m2 / 1% cloud while
 	// site measured ~22 W/m2 effective irradiance → 7× blend over-shoot).
 	if radiationBacked && forecastPVW > 0 {
 		cappedForecast := forecastPVW
