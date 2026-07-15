@@ -328,6 +328,7 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -357,15 +358,15 @@ jobs:
       - name: Mirror exact manifests to compatibility namespace
         env:
           CANONICAL_TAGS: ${{ steps.meta.outputs.tags }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
+          test -n "${SOURCE_DIGEST}"
           for source in ${CANONICAL_TAGS}; do
             legacy="${source/ghcr.io\/srcfl\/ftw/ghcr.io\/frahlg\/forty-two-watts}"
             docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
-            source_digest="$(docker buildx imagetools inspect "${source}" | awk '$1 == "Digest:" {print $2; exit}')"
             legacy_digest="$(docker buildx imagetools inspect "${legacy}" | awk '$1 == "Digest:" {print $2; exit}')"
-            test -n "${source_digest}"
-            test "${source_digest}" = "${legacy_digest}"
+            test "${SOURCE_DIGEST}" = "${legacy_digest}"
           done
 
   rpi-image:
