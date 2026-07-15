@@ -127,7 +127,7 @@ jobs:
             source="ghcr.io/srcfl/ftw${IMAGE_SUFFIX}:${tag}"
             legacy="ghcr.io/frahlg/forty-two-watts${IMAGE_SUFFIX}:${tag}"
             docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
-            legacy_digest="$(docker buildx imagetools inspect "${legacy}" | awk '$1 == "Digest:" {print $2; exit}')"
+            legacy_digest="$(scripts/inspect-image-digest.sh "${legacy}")"
             test "${SOURCE_DIGEST}" = "${legacy_digest}"
           done
 
