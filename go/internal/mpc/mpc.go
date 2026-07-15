@@ -40,7 +40,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/gridcost"
+	"github.com/srcfl/ftw/go/internal/gridcost"
 )
 
 // Mode selects how aggressively the planner uses the battery.
@@ -839,7 +839,7 @@ func Optimize(slots []Slot, p Params) Plan {
 						// so a reserve emerges from the live forecast uncertainty
 						// itself — sized to the real risk, zero when PV is certain
 						// (clear day) or absent (winter). See Alt 2 design spec
-						// docs/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
+						// docs/archive/agent-artifacts/superpowers/specs/2026-06-02-energy-safety-floor-design.md.
 
 						// PV-first bias: when this slot has PV surplus
 						// AND the action charges the battery, credit a

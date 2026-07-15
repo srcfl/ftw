@@ -4,7 +4,7 @@
 -- Tested: SMA Sunny Tripower, Sunny Boy Storage
 --
 -- Ported from sourceful-hugin/device-support/drivers/lua/sma.lua to the
--- forty-two-watts v2.1 Lua host idiom. READ-ONLY driver — SMA control is
+-- FTW v2.1 Lua host idiom. READ-ONLY driver — SMA control is
 -- not wired up here.
 
 DRIVER = {
@@ -16,10 +16,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "SMA Sunny Tripower / Sunny Boy Storage via Modbus TCP (SunSpec).",
   homepage     = "https://www.sma.de",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "Sunny Tripower", "Sunny Boy Storage" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,

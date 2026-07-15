@@ -4,7 +4,7 @@
 --
 -- Ported from sourceful-hugin/device-support/drivers/lua/solaredge.lua.
 -- Differences vs hugin source:
---   * Uses 42W v2.1 host idiom (host.log(level,msg), decode_u32_be,
+--   * Uses FTW v2.1 host idiom (host.log(level,msg), decode_u32_be,
 --     host.emit_metric).
 --   * SunSpec scale factor + pow10 applied inline in Lua (host.scale is
 --     not available in v2.1).
@@ -22,10 +22,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "pv-curtail" },
   description  = "SolarEdge HD-Wave / StorEdge via Modbus TCP (SunSpec) with PV active-power-limit curtail.",
   homepage     = "https://www.solaredge.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "HD-Wave", "StorEdge" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Curtail path (F000/F001 registers) not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Curtail path (F000/F001 registers) not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,

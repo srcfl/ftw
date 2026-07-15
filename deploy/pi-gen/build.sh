@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the forty-two-watts Raspberry Pi OS image.
+# Build the FTW Raspberry Pi OS image.
 #
 # Usage:
 #   deploy/pi-gen/build.sh
@@ -40,12 +40,12 @@ PI_GEN_REF="${PI_GEN_REF:-ca8aeed0ae300c2a89f55ce9617d5f96a27e99e5}"
 # a plain tree and doesn't resolve symlinks pointing outside it.
 # Both copies are gitignored; the canonical versions live at the
 # repo root.
-FILES_DIR="${SCRIPT_DIR}/stage-42w/01-ftw-setup/files"
+FILES_DIR="${SCRIPT_DIR}/stage-ftw/01-ftw-setup/files"
 FTW_COMPOSE="${FTW_COMPOSE:-${REPO_ROOT}/docker-compose.yml}"
 
 install -m 0644 "${FTW_COMPOSE}"                                "${FILES_DIR}/docker-compose.yml"
 install -m 0644 "${REPO_ROOT}/mosquitto/config/mosquitto.conf"  "${FILES_DIR}/mosquitto.conf"
-# Calendar (#498) needs nothing shipped here: 42W's CalDAV server is in-process
+# Calendar (#498) needs nothing shipped here: FTW's CalDAV server is in-process
 # (no sidecar) and persists its objects in state.db.
 
 if [ ! -d "${PI_GEN_DIR}" ]; then
@@ -63,7 +63,7 @@ fi
 # that bites local rebuilds across a re-pin (CI is unaffected: it always
 # starts from a clean checkout). Try a local checkout first; fetch only if
 # the pinned ref isn't in the local clone yet. `-f` resets pi-gen's own
-# tracked files but leaves our untracked stage-42w/config/SKIP additions
+# tracked files but leaves our untracked stage-ftw/config/SKIP additions
 # (re-copied below) intact.
 git -C "${PI_GEN_DIR}" checkout -f --quiet "${PI_GEN_REF}" 2>/dev/null || {
     git -C "${PI_GEN_DIR}" fetch --quiet origin
@@ -74,10 +74,10 @@ git -C "${PI_GEN_DIR}" checkout -f --quiet "${PI_GEN_REF}" 2>/dev/null || {
 # build-docker.sh builds an image with `COPY . /pi-gen/` where . is
 # the pi-gen directory — a symlink pointing OUTSIDE the build
 # context becomes a dangling symlink inside the container, and
-# pi-gen's `realpath /pi-gen/stage-42w` then fails with "No such
+# pi-gen's `realpath /pi-gen/stage-ftw` then fails with "No such
 # file or directory" before a single stage runs.
-rm -rf "${PI_GEN_DIR}/stage-42w"
-cp -R "${SCRIPT_DIR}/stage-42w" "${PI_GEN_DIR}/stage-42w"
+rm -rf "${PI_GEN_DIR}/stage-ftw"
+cp -R "${SCRIPT_DIR}/stage-ftw" "${PI_GEN_DIR}/stage-ftw"
 cp    "${SCRIPT_DIR}/config"    "${PI_GEN_DIR}/config"
 
 # pi-gen honours SKIP files per stage: SKIP prevents the stage from
@@ -86,7 +86,7 @@ cp    "${SCRIPT_DIR}/config"    "${PI_GEN_DIR}/config"
 # stage2 RUNS now (on trixie it installs cloud-init + netplan and sets
 # the systemd.run= first-boot/resize cmdline that replaced the old
 # init=…firstboot path) — but we suppress its OWN image export so we
-# don't waste a full export on the plain Lite image; stage-42w (last in
+# don't waste a full export on the plain Lite image; stage-ftw (last in
 # STAGE_LIST, carries EXPORT_IMAGE) produces the only image.
 touch "${PI_GEN_DIR}/stage2/SKIP_IMAGES" 2>/dev/null || true
 # stage3-5 (desktop + NOOBS) are skipped entirely.

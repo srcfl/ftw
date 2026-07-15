@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // ---- helpers -----------------------------------------------------------
@@ -604,7 +604,6 @@ func TestScenario_D21_LoadModel_AboveFloor_NotRepaired(t *testing.T) {
 
 // E22. Site never imports above fuse limit. Checked across planner modes and
 // several adversarial grid + battery states from the matrix above.
-//
 func TestScenario_E22_FuseNeverExceeded(t *testing.T) {
 	const fuseMaxW = 11040.0
 

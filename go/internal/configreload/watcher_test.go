@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // minimalYAML is the smallest config that passes config.Load validation.

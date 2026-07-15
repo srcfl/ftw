@@ -42,7 +42,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // Buckets is 7 days × 24 hours = 168.

@@ -16,7 +16,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 
-	"github.com/frahlg/forty-two-watts/go/cmd/sim-ferroamp/ferroamp"
+	"github.com/srcfl/ftw/go/cmd/sim-ferroamp/ferroamp"
 )
 
 // pickFreePort returns an available TCP port on localhost.
@@ -322,13 +322,18 @@ func printSamplePayload(t *testing.T, sim *ferroamp.Simulator, s *mqttserver.Ser
 	// Capture one full ehub payload for visual confirmation in test logs
 	payload := make(chan string, 1)
 	cli.Subscribe("extapi/data/ehub", 0, func(_ mqtt.Client, m mqtt.Message) {
-		select { case payload <- string(m.Payload()): default: }
+		select {
+		case payload <- string(m.Payload()):
+		default:
+		}
 	})
 	snap := sim.Tick(100 * time.Millisecond)
 	publishEhub(s, snap)
 	select {
 	case p := <-payload:
-		if len(p) > 400 { p = p[:400] + "..." }
+		if len(p) > 400 {
+			p = p[:400] + "..."
+		}
 		t.Logf("sample ehub payload: %s", p)
 	case <-time.After(1 * time.Second):
 	}

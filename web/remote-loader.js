@@ -254,7 +254,7 @@ async function unlockDirectoryWithPasskey() {
     const local = await loadDirectory(W, null, location.origin);
     const entry = await firstReachableInstance(instanceList(local));
     if (entry) return entry;
-    throw new Error("This browser could not unlock a saved home directory from that passkey. Some synced passkeys do not share the encrypted home key across browsers/devices yet. Set up this browser from local 42W Settings -> Access, then try again.");
+    throw new Error("This browser could not unlock a saved home directory from that passkey. Some synced passkeys do not share the encrypted home key across browsers/devices yet. Set up this browser from local FTW Settings -> Access, then try again.");
   }
   const encKey = await deriveEncKey(prfOut);
   let dir = await loadDirectory(W, encKey, location.origin);
@@ -273,7 +273,7 @@ async function unlockDirectoryWithPasskey() {
   if (list.length) {
     throw new Error("This passkey has a saved home, but it is not active on the relay right now. Check that Remote Access is on locally, then try again.");
   } else {
-    throw new Error("No 42W home is saved for this browser yet. Start from local 42W Settings -> Access and open the setup link on this browser/device.");
+    throw new Error("No FTW home is saved for this browser yet. Start from local FTW Settings -> Access and open the setup link on this browser/device.");
   }
 }
 

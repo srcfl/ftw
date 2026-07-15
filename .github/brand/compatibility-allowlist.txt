@@ -1,0 +1,16 @@
+# Anchored Bash regular expressions for active former-name lines that are part
+# of a documented compatibility contract. Keep these narrow; historical files
+# are excluded separately and presentation copy belongs in FTW.
+^Makefile:.*-C \"\$\$stage\" ftw forty-two-watts ftw-pair.*$
+^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
+^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
+^docs/operations\.md:.*forty-two-watts.*compatibility symlink$
+^docs/operations\.md:- The install alias lets existing `systemctl \.\.\. forty-two-watts` commands$
+^go/cmd/ftw-updater/main\.go:.*legacyMainServiceName.*= \"forty-two-watts\"$
+^go/cmd/ftw/main\.go:// caldavUsername resolves the CalDAV username \(default fortytwowatts\)\.$
+^go/internal/ha/bridge\.go:.*topicPrefix string // stable wire ID, e\.g\. \"forty-two-watts\"$
+^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
+^scripts/install-macos\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
+^scripts/install-macos\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
+^scripts/install\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
+^scripts/install\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$

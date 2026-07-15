@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // ---- Applier ----

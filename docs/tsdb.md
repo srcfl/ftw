@@ -1,6 +1,6 @@
 # Time-series database
 
-Reference for the long-format time-series storage used for per-driver diagnostics in forty-two-watts. The hot "recent" tier lives in SQLite; >14-day data rolls off into daily Parquet files under `cold/`.
+Reference for the long-format time-series storage used for per-driver diagnostics in FTW. The hot "recent" tier lives in SQLite; >14-day data rolls off into daily Parquet files under `cold/`.
 
 ## 1. Why long-format
 
@@ -65,7 +65,7 @@ The path from driver to disk:
 2. The Lua host (go/internal/drivers/lua.go:211-216) forwards to `HostEnv.emitMetric` (go/internal/drivers/host.go:143-146), which calls `telemetry.Store.EmitMetric`
 3. `telemetry.Store.EmitMetric` (go/internal/telemetry/store.go:215-221) appends a `MetricSample` to the in-memory `pending` slice
 4. Standard `emit("pv"|"battery"|"meter", …)` calls auto-buffer the `<derType>_w` and `_soc` fields -- see `telemetry.Store.Update` (go/internal/telemetry/store.go:196-208). Raw, not smoothed values are stored; consumers smooth client-side
-5. Once per control cycle (~5 s), the main loop drains the buffer via `tel.FlushSamples()` and forwards it to `state.Store.RecordSamples(stSamples)` (go/cmd/forty-two-watts/main.go:550-559)
+5. Once per control cycle (~5 s), the main loop drains the buffer via `tel.FlushSamples()` and forwards it to `state.Store.RecordSamples(stSamples)` (go/cmd/ftw/main.go:550-559)
 6. `RecordSamples` pre-resolves driver/metric IDs **outside** the transaction, then opens a tx and bulk-inserts via a prepared `INSERT OR IGNORE`
 
 ### Deadlock note -- read this before changing RecordSamples
@@ -113,7 +113,7 @@ Defined in `go/internal/state/parquet.go`:
 
 - **Compression**: zstd at default level. A daily file is typically 5-15 MB, which works out to ~100-200 MB/year
 - **Idempotent**: re-running a day rewrites the file through a `.tmp` + atomic rename (go/internal/state/parquet.go:80-100). No partial files, and re-running never loses data
-- **Triggered** by the hourly `rolloffLoop` goroutine (go/cmd/forty-two-watts/main.go:579-590), with one run at startup so a fresh boot catches any backlog. After successful writes, rolled rows are deleted from `ts_samples` in a single `DELETE WHERE ts_ms < cutoff`
+- **Triggered** by the hourly `rolloffLoop` goroutine (go/cmd/ftw/main.go:579-590), with one run at startup so a fresh boot catches any backlog. After successful writes, rolled rows are deleted from `ts_samples` in a single `DELETE WHERE ts_ms < cutoff`
 
 ## 7. Driver-side API
 
@@ -184,7 +184,7 @@ curl 'localhost:8080/api/series?driver=sungrow&metric=inverter_temp_c&range=1h'
 curl 'localhost:8080/api/series?driver=ferroamp&metric=battery_dc_v&range=7d&points=600'
 
 # Roll-off runs hourly automatically; inspect via service log
-journalctl -u forty-two-watts | grep "parquet rolloff"
+journalctl -u ftw | grep "parquet rolloff"
 ```
 
-Related docs: [host-api.md](host-api.md), [lua-drivers.md](lua-drivers.md), [configuration.md](configuration.md)
+Related docs: [host-api.md](host-api.md), [writing-a-driver.md](writing-a-driver.md), [configuration.md](configuration.md)

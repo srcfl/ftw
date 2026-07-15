@@ -10,7 +10,7 @@ import (
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/core"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Handler implements ocpp1.6/core.CentralSystemHandler. One Handler is shared

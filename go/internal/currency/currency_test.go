@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 const sampleXML = `<?xml version="1.0" encoding="UTF-8"?>

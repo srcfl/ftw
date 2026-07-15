@@ -49,7 +49,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/events"
 )
 
 // Store is the subset of state.Store methods this package needs. Declared as
@@ -94,7 +94,7 @@ func ParseChannel(v string) (Channel, error) {
 
 // Config configures the Checker.
 type Config struct {
-	// Repo is the GitHub "owner/name" slug. Defaults to frahlg/forty-two-watts.
+	// Repo is the GitHub "owner/name" slug. Defaults to srcfl/ftw.
 	// Doubles as the registry path under RegistryBaseURL when Image is unset.
 	Repo string
 	// Image overrides the registry path if it differs from Repo (rare —
@@ -199,7 +199,7 @@ func New(cfg Config, store Store) *Checker {
 		cfg.CheckInterval = defaultCheckInterval
 	}
 	if cfg.Repo == "" {
-		cfg.Repo = "frahlg/forty-two-watts"
+		cfg.Repo = "srcfl/ftw"
 	}
 	if cfg.Image == "" {
 		cfg.Image = cfg.Repo
@@ -394,7 +394,7 @@ func (c *Checker) fetchLatestRelease(ctx context.Context) (ghRelease, error) {
 		return ghRelease{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "forty-two-watts-selfupdate")
+	req.Header.Set("User-Agent", "FTW-selfupdate")
 	resp, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
 		return ghRelease{}, err
@@ -426,7 +426,7 @@ func (c *Checker) fetchBetaRelease(ctx context.Context) (ghRelease, error) {
 		return ghRelease{}, err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "forty-two-watts-selfupdate")
+	req.Header.Set("User-Agent", "FTW-selfupdate")
 	resp, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
 		return ghRelease{}, err

@@ -7,7 +7,7 @@ import (
 
 	"github.com/emersion/go-ical"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // feedHandler serves read-only, aggregated iCalendar feeds for selected
@@ -18,7 +18,7 @@ import (
 //
 // feeds maps a short feed name (the URL is /feed/<name>.ics) to the collection
 // path whose objects are merged. Only read-only collections are exposed here —
-// never the read-write "energy" collection 42W reads inbound intents from.
+// never the read-write "energy" collection FTW reads inbound intents from.
 // The handler is mounted behind the same Basic auth as the rest of the server,
 // so the webcal:// link carries the managed credential.
 type feedHandler struct {
@@ -63,7 +63,7 @@ func (h *feedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // emptyCalendar is a valid, empty VCALENDAR. go-ical refuses to encode a
 // calendar with no components, but an empty subscription feed (no plan/history
 // events yet) is a legitimate state a client must still be able to fetch.
-const emptyCalendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//forty-two-watts//CalDAV feed//EN\r\nEND:VCALENDAR\r\n"
+const emptyCalendar = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//FTW//CalDAV feed//EN\r\nEND:VCALENDAR\r\n"
 
 // encodeFeed serializes the collection's events into one text/calendar body.
 func encodeFeed(objs []state.CalDAVObject) (string, error) {
@@ -84,7 +84,7 @@ func encodeFeed(objs []state.CalDAVObject) (string, error) {
 func mergeFeed(objs []state.CalDAVObject) *ical.Calendar {
 	out := ical.NewCalendar()
 	out.Props.SetText(ical.PropVersion, "2.0")
-	out.Props.SetText(ical.PropProductID, "-//forty-two-watts//CalDAV feed//EN")
+	out.Props.SetText(ical.PropProductID, "-//FTW//CalDAV feed//EN")
 	for _, o := range objs {
 		cal, err := ical.NewDecoder(strings.NewReader(o.Data)).Decode()
 		if err != nil {

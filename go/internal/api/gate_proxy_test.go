@@ -10,7 +10,7 @@ import (
 )
 
 // TestGateBehindOwnerProxy reproduces the home.fortytwowatts.com path: an owner
-// reverse-proxy stamps X-FTW-Tunnel (exactly like cmd/forty-two-watts/
+// reverse-proxy stamps X-FTW-Tunnel (exactly like cmd/ftw/
 // owner_relay_register.go) and forwards to the gated API. The gate MUST then
 // treat the request as remote (NOT LAN-bypass) and refuse it without a session.
 func TestGateBehindOwnerProxy(t *testing.T) {

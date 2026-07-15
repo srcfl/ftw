@@ -11,7 +11,7 @@ processes so the main container never touches the Docker socket.
 │                         host (Pi / server)                          │
 │                                                                     │
 │  ┌─────────────────────────┐     ┌──────────────────────────────┐   │
-│  │  forty-two-watts        │     │  ftw-updater (sidecar)       │   │
+│  │  FTW        │     │  ftw-updater (sidecar)       │   │
 │  │  ───────────────        │     │  ─────────────               │   │
 │  │  selfupdate.Checker     │     │  net/http on UDS             │   │
 │  │  - resolves stable,     │◀────┤  POST /update {action,target}│   │
@@ -71,7 +71,7 @@ The fix is to ignore `:latest`, `:beta`, and `:edge` as pull targets:
   newest timestamped immutable edge tag, never the moving alias.
 - The dispatch payload to the sidecar carries the resolved version as
   `target`. The sidecar passes `FTW_IMAGE_TAG=vX.Y.Z` to docker, and
-  `docker-compose.yml` uses `image: ghcr.io/.../forty-two-watts:${FTW_IMAGE_TAG:-latest}`
+  `docker-compose.yml` uses `image: ghcr.io/.../ftw:${FTW_IMAGE_TAG:-latest}`
   — so the pull resolves a *specific*, immutable tag and the recreate
   is guaranteed to move the digest. No race possible.
 

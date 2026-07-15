@@ -1,6 +1,6 @@
 # Safety and protective clamping
 
-forty-two-watts runs unattended. A home battery pushing the wrong way
+FTW runs unattended. A home battery pushing the wrong way
 for thirty seconds can flip a fuse; a model learning from its own
 clamped output can lock itself; a driver that went silent at 02:00
 can leave another battery charging it from stale telemetry. This doc
@@ -18,7 +18,7 @@ No single layer is sufficient; they compose.
 
 | Layer | Guards against | Lives in |
 |---|---|---|
-| Watchdog | Silent drivers, stale telemetry | `go/internal/telemetry/store.go` + `go/cmd/forty-two-watts/main.go` |
+| Watchdog | Silent drivers, stale telemetry | `go/internal/telemetry/store.go` + `go/cmd/ftw/main.go` |
 | Dispatch clamps | Out-of-budget commands, oscillation | `go/internal/control/dispatch.go` + `go/internal/control/pi.go` |
 | Model sanity envelopes | Wild RLS coefficients from bad samples | `go/internal/pvmodel/model.go` + `go/internal/battery/model.go` |
 | Default mode | EMS offline, driver excluded | `drivers/*.lua` `driver_default_mode` |
@@ -57,7 +57,7 @@ The main loop drains the transitions once per tick and calls
 `reg.SendDefault(ctx, name)` on each driver that just went offline.
 That routes into the driver's Lua `driver_default_mode()` function —
 Sungrow reverts to built-in self-consumption, Ferroamp returns to
-auto. See [`main.go:489-500`](../go/cmd/forty-two-watts/main.go).
+auto. See [`main.go:489-500`](../go/cmd/ftw/main.go).
 
 ```go
 // main.go

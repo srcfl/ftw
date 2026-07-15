@@ -12,10 +12,10 @@ DRIVER = {
   capabilities = { "meter" },
   description  = "Eastron SDM630 and SDM72D-M three-phase energy meters via Modbus TCP/RTU.",
   homepage     = "https://www.eastrongroup.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "SDM630 Modbus", "SDM72D-M" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -39,7 +39,7 @@ PROTOCOL = "modbus"
 ----------------------------------------------------------------------------
 
 -- Decode a big-endian IEEE 754 float32 from two u16 Modbus registers
--- (hi word first, then lo word). 42W's host has no decode_f32, so we do
+-- (hi word first, then lo word). FTW's host has no decode_f32, so we do
 -- it inline in Lua. Treats inf/NaN as 0 to keep downstream consumers safe.
 local function decode_f32_be(hi, lo)
     local combined = hi * 65536 + lo

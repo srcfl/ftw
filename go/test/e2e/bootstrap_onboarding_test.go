@@ -24,13 +24,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/api"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/nova"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
 	"github.com/fxamacker/cbor/v2"
+	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/nova"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // TestBootstrapOnboardingThroughRelay is the full-stack e2e for the multi-tenant
@@ -74,7 +74,7 @@ import (
 //     deterministic in CI (no dependency on a real LAN interface, which `make verify`
 //     runs without -short would otherwise make flaky).
 //   - The production enroll-forward HOST that drains the relay queue and stamps
-//     X-FTW-Tunnel is cmd/forty-two-watts/owner_relay_register.go's
+//     X-FTW-Tunnel is cmd/ftw/owner_relay_register.go's
 //     staticAssetHandler (the F4 component). It lives in `package main`, which an
 //     external test package cannot import, and the full binary cannot be booted
 //     in-process (monolithic main with os.Exit + the LAN-source PIN-mint constraint
@@ -472,7 +472,7 @@ func TestBootstrapOnboardingThroughRelay(t *testing.T) {
 }
 
 // newProdEnrollForwardHandler returns a tunnel-host handler that mirrors the
-// production staticAssetHandler (cmd/forty-two-watts/owner_relay_register.go) under
+// production staticAssetHandler (cmd/ftw/owner_relay_register.go) under
 // -multi-tenant, BYTE FOR BYTE for the security-relevant gating: only POST of the
 // two enroll paths is forwarded to the Pi with X-FTW-Tunnel stamped (so the Pi's
 // isTunneled gate fires — PIN + possession-proof + zero-device recheck +

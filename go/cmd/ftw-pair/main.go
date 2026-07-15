@@ -1,7 +1,7 @@
-// ftw-pair is the host-side sidecar that exposes a forty-two-watts
+// ftw-pair is the host-side sidecar that exposes a FTW
 // instance as an MCP server over the subetha relay tunnel.
 //
-// Spawned by `forty-two-watts pair`. Talks to the running main
+// Spawned by `FTW pair`. Talks to the running main
 // service via http://localhost:8080. Exposes MCP on :9999, forwarded
 // through the subetha relay to the friend's laptop.
 //
@@ -26,15 +26,15 @@ import (
 var Version = "dev"
 
 // relayAddrFlag is a package-level flag so tunnel.go can read it.
-// Default: FTW_PAIR_RELAY env var, then relay.fortytwowatts.com.
+// Default: FTW_PAIR_RELAY env var, then relay.ftw.sourceful.energy.
 var relayAddrFlag *string
 
 func main() {
 	version := flag.Bool("version", false, "print version and exit")
-	apiBase := flag.String("api", "http://localhost:8080", "URL of the running forty-two-watts service")
-	repoDir := flag.String("repo", "/opt/forty-two-watts", "Path to the 42W repo / install dir")
-	stateDir := flag.String("state", "/var/lib/forty-two-watts", "Path to the configured state dir")
-	configPath := flag.String("config", "/etc/forty-two-watts/config.yaml", "Path to config.yaml")
+	apiBase := flag.String("api", "http://localhost:8080", "URL of the running FTW service")
+	repoDir := flag.String("repo", "/opt/ftw", "Path to the FTW repo / install dir")
+	stateDir := flag.String("state", "/var/lib/ftw", "Path to the configured state dir")
+	configPath := flag.String("config", "/etc/ftw/config.yaml", "Path to config.yaml")
 	userDriversDir := flag.String("user-drivers", "", "Path to PERSISTENT user-drivers directory. deploy_driver writes Lua files here so they survive docker image updates. Defaults to sibling-of-config drivers/ when empty.")
 	addr := flag.String("addr", "127.0.0.1:9999", "Local MCP server bind address")
 	ttl := flag.Duration("ttl", 4*time.Hour, "Session TTL")
@@ -49,7 +49,7 @@ func main() {
 	noSubetha := flag.Bool("no-subetha", false, "deprecated alias for -no-relay")
 	noWormhole := flag.Bool("no-wormhole", false, "deprecated alias for -no-relay")
 	stateless := flag.Bool("stateless", false, "Enable stateless MCP sessions (no initialize handshake required)")
-	relayDefault := "https://relay.fortytwowatts.com"
+	relayDefault := "https://relay.ftw.sourceful.energy"
 	if env := os.Getenv("FTW_PAIR_RELAY"); env != "" {
 		relayDefault = env
 	}
@@ -124,7 +124,7 @@ func main() {
 		slog.Warn("post pair status", "err", err)
 	}
 
-	// Abort-poller: the owner can run `forty-two-watts pair --abort` which
+	// Abort-poller: the owner can run `FTW pair --abort` which
 	// POSTs /api/pair/abort on the main service, clearing the session store.
 	// We poll GET /api/pair/status here; a 404 means the store was cleared
 	// (abort was requested) and we end the session gracefully.
@@ -233,7 +233,7 @@ func postPairStatusFull(apiBase, code string, sess *Session, audit *Audit, tun *
 	return nil
 }
 
-// postPairStatus tells the running 42W service about the current pair
+// postPairStatus tells the running FTW service about the current pair
 // session so the dashboard's <ftw-pair-card> can render it. Best-effort —
 // a failure here doesn't block the session.
 func postPairStatus(apiBase, code string, sess *Session) error {

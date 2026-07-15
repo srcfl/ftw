@@ -90,7 +90,7 @@ func (s *Store) DeleteNovaDER(deviceID, derType string) error {
 // when the operator doesn't want to name them individually.
 //
 // Empty slice means the driver has never emitted anything — probably
-// means forty-two-watts hasn't been run long enough for the driver to
+// means FTW hasn't been run long enough for the driver to
 // connect. The CLI surfaces a hint to that effect.
 func (s *Store) InferDerKinds(driver string) []string {
 	out := make([]string, 0, 5)

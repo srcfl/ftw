@@ -14,7 +14,7 @@ const (
 	// vocabulary. This is what Nova (and hundreds of deployed ZAP
 	// gateways) speak today.
 	SchemaLegacy SchemaMode = "legacy"
-	// SchemaUnified emits forty-two-watts' native clean payload
+	// SchemaUnified emits FTW's native clean payload
 	// as-is. Flip to this once Nova's unified schema ships.
 	SchemaUnified SchemaMode = "unified"
 )

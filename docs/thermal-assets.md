@@ -2,19 +2,19 @@
 
 Status: design foundation.
 
-forty-two-watts should treat heat pumps, cooling, domestic hot water, and
+FTW should treat heat pumps, cooling, domestic hot water, and
 buffer tanks as thermal flexibility, not as plain on/off loads. The central
 rule is:
 
 ```text
-42W owns the site-level economic intent.
+FTW owns the site-level economic intent.
 The device driver owns the vendor-specific influence method.
 ```
 
 That split is important because many heat pumps already have competent
 internal control. A NIBE-class system should usually keep control of
 compressor cadence, degree minutes, defrost, circulation, and comfort logic.
-42W should bias it with a synthetic price signal. A simpler or more open
+FTW should bias it with a synthetic price signal. A simpler or more open
 system can instead be biased with curve offsets, setpoints, SG-ready modes,
 or relays.
 
@@ -52,7 +52,7 @@ Drivers advertise one or more influence surfaces:
 
 | Strategy | Use when | Driver action |
 |---|---|---|
-| `synthetic_price` | Device has good native smart-price control | Publish 42W marginal price/tariff curve |
+| `synthetic_price` | Device has good native smart-price control | Publish FTW marginal price/tariff curve |
 | `curve_offset` | Device exposes heating curve offset | Map preheat/shed to offset steps |
 | `setpoint` | Device exposes target temperatures | Move target within hard bounds |
 | `discrete_mode` | Device exposes SG-ready, eco/boost, or relay modes | Select normal/boost/block/eco |
@@ -71,7 +71,7 @@ The driver maps that intent to the configured influence strategy.
 
 ## Synthetic price
 
-For smart systems, the preferred signal is a 42W marginal price:
+For smart systems, the preferred signal is a FTW marginal price:
 
 ```text
 synthetic_price =

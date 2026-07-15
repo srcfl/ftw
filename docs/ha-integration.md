@@ -1,11 +1,17 @@
 # Home Assistant Integration
 
-forty-two-watts integrates with Home Assistant via MQTT. It publishes sensor data, supports MQTT auto-discovery, and subscribes to command topics for mode and target changes.
+FTW integrates with Home Assistant via MQTT. It publishes sensor data, supports MQTT auto-discovery, and subscribes to command topics for mode and target changes.
+
+> **Compatibility contract:** the MQTT prefix `forty-two-watts`, discovery
+> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing
+> Home Assistant entity IDs are stable wire identifiers. They deliberately do
+> not follow the FTW product rename, so upgrades do not create duplicate
+> devices or break automations.
 
 ## Prerequisites
 
 1. **Mosquitto MQTT broker** running on your Home Assistant instance (install via Settings > Add-ons > Mosquitto broker)
-2. An MQTT user configured for forty-two-watts (Settings > People > Users, or in the Mosquitto add-on config)
+2. An MQTT user configured for FTW (Settings > People > Users, or in the Mosquitto add-on config)
 3. **MQTT integration** enabled in Home Assistant (Settings > Devices & Services > MQTT)
 
 ## Configuration
@@ -32,7 +38,7 @@ homeassistant:
 
 ## Auto-Discovered Entities
 
-forty-two-watts publishes MQTT auto-discovery configs under the `homeassistant/` prefix. Once connected, these entities appear automatically in Home Assistant.
+FTW publishes MQTT auto-discovery configs under the `homeassistant/` prefix. Once connected, these entities appear automatically in Home Assistant.
 
 ### Site-Level Sensors
 
@@ -64,29 +70,32 @@ For each configured driver (e.g., `ferroamp`, `sungrow`), the following sensors 
 
 ### Published Topics (State)
 
-forty-two-watts publishes to these topics at the configured interval:
+FTW publishes to these topics at the configured interval:
 
 | Topic                              | Payload   | Description                          |
 |------------------------------------|-----------|--------------------------------------|
-| `fortytwo/status/grid_w`            | number    | Total grid power in watts            |
-| `fortytwo/status/pv_w`             | number    | Total PV power in watts              |
-| `fortytwo/status/bat_w`            | number    | Total battery power in watts         |
-| `fortytwo/status/bat_soc`          | number    | Weighted avg battery SoC (0-100%)    |
-| `fortytwo/status/mode`             | string    | Current operating mode               |
-| `fortytwo/drivers/{name}/meter_w`  | number    | Per-driver grid power                |
-| `fortytwo/drivers/{name}/pv_w`     | number    | Per-driver PV power                  |
-| `fortytwo/drivers/{name}/bat_w`    | number    | Per-driver battery power             |
-| `fortytwo/drivers/{name}/bat_soc`  | number    | Per-driver battery SoC (0-100%)      |
-| `fortytwo/drivers/{name}/status`   | string    | Driver status: `Ok`, `Degraded`, `Offline` |
+| `forty-two-watts/status`                          | `online` / `offline` | Retained availability state          |
+| `forty-two-watts/state/grid_w`                    | number    | Total grid power in watts            |
+| `forty-two-watts/state/pv_w`                      | number    | Total PV power in watts              |
+| `forty-two-watts/state/bat_w`                     | number    | Total battery power in watts         |
+| `forty-two-watts/state/bat_soc_pct`               | number    | Weighted avg battery SoC (0-100%)    |
+| `forty-two-watts/state/mode`                      | string    | Current operating mode               |
+| `forty-two-watts/driver/{name}/meter_w`           | number    | Per-driver grid power                |
+| `forty-two-watts/driver/{name}/pv_w`              | number    | Per-driver PV power                  |
+| `forty-two-watts/driver/{name}/bat_w`             | number    | Per-driver battery power             |
+| `forty-two-watts/driver/{name}/bat_soc_pct`       | number    | Per-driver battery SoC (0-100%)      |
+| `forty-two-watts/driver/{name}/health`            | JSON      | Driver state and health attributes   |
 
 ### Command Topics (Control)
 
-Home Assistant (or any MQTT client) can publish to these topics to control forty-two-watts:
+Home Assistant (or any MQTT client) can publish to these topics to control FTW:
 
 | Topic                          | Payload        | Description                            |
 |--------------------------------|----------------|----------------------------------------|
-| `fortytwo/command/mode`         | string         | Set mode: `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_self`, `planner_cheap`, `planner_passive_arbitrage`, `planner_arbitrage` |
-| `fortytwo/command/grid_target_w`| number (string)| Set grid target in watts (e.g., `"0"` for self-consumption, `"200"` for 200W import target) |
+| `forty-two-watts/cmd/mode`            | string         | Set mode: `idle`, `self_consumption`, `peak_shaving`, `charge`, `priority`, `weighted`, `planner_self`, `planner_cheap`, `planner_passive_arbitrage`, `planner_arbitrage` |
+| `forty-two-watts/cmd/grid_target_w`   | number (string)| Set grid target in watts (e.g., `"0"` for self-consumption, `"200"` for 200W import target) |
+| `forty-two-watts/cmd/peak_limit_w`    | number (string)| Set the site peak limit in watts      |
+| `forty-two-watts/cmd/ev_charging_w`   | number (string)| Set EV charging power in watts        |
 
 ## Example Home Assistant Automations
 
@@ -103,7 +112,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "charge"
 
   - alias: "Self-consumption during day"
@@ -113,7 +122,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "self_consumption"
 ```
 
@@ -131,7 +140,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "charge"
 
   - alias: "Self-consumption when electricity is expensive"
@@ -142,7 +151,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "self_consumption"
 ```
 
@@ -161,7 +170,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "self_consumption"
 ```
 
@@ -179,7 +188,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "idle"
 
   - alias: "Resume self-consumption when battery recovers"
@@ -190,7 +199,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/mode"
+          topic: "forty-two-watts/cmd/mode"
           payload: "self_consumption"
 ```
 
@@ -207,7 +216,7 @@ automation:
     action:
       - service: mqtt.publish
         data:
-          topic: "fortytwo/command/grid_target_w"
+          topic: "forty-two-watts/cmd/grid_target_w"
           payload: "-5000"
 ```
 
@@ -301,8 +310,8 @@ entities:
 
 **Entities not appearing in HA:**
 - Verify the Mosquitto add-on is running and MQTT integration is configured
-- Check that forty-two-watts can reach the broker: `mosquitto_pub -h <broker-ip> -u fortytwo -P fortytwo -t test -m hello`
-- Check forty-two-watts logs for MQTT connection errors
+- Check that FTW can reach the broker: `mosquitto_pub -h <broker-ip> -u fortytwo -P fortytwo -t test -m hello`
+- Check FTW logs for MQTT connection errors
 
 **Stale sensor values:**
 - Verify `publish_interval_s` is set appropriately (default 5 seconds)

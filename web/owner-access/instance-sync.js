@@ -1,5 +1,5 @@
 // instance-sync.js — the per-wallet DIRECTORY manager for the multi-tenant home
-// route. The directory is the list of a wallet's 42W instances
+// route. The directory is the list of a wallet's FTW instances
 // [{site_id, pi_pubkey, label}], each entry SIGNED by its Pi. It lives in two
 // places, by design (the "hybrid" binding):
 //

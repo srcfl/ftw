@@ -1,8 +1,8 @@
-# Comment installer forty-two-watts
+# Comment installer FTW
 
 Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de panique — c'est plus simple qu'il n'y paraît. Il suffit de suivre les étapes, une par une.
 
-> **Pas de Raspberry Pi ?** Vous pouvez aussi faire tourner forty-two-watts sur un NUC, un vieux portable ou tout autre matériel qui traîne — du moment qu'il peut exécuter Docker. Ce guide se concentre sur la mise en route avec un Raspberry Pi ; si vous êtes sur une autre machine, survolez les étapes matérielles et passez directement à l'**Étape 11 — Installer forty-two-watts** (le script d'installation suppose Debian ou Ubuntu).
+> **Pas de Raspberry Pi ?** Vous pouvez aussi faire tourner FTW sur un NUC, un vieux portable ou tout autre matériel qui traîne — du moment qu'il peut exécuter Docker. Ce guide se concentre sur la mise en route avec un Raspberry Pi ; si vous êtes sur une autre machine, survolez les étapes matérielles et passez directement à l'**Étape 11 — Installer FTW** (le script d'installation suppose Debian ou Ubuntu).
 
 ## Ce dont vous avez besoin
 
@@ -114,12 +114,12 @@ Notez l'adresse IP. Elle ressemble à : **192.168.1.xxx**.
 
 Bravo — vous êtes maintenant "à l'intérieur" du Raspberry Pi.
 
-## Étape 11 — Installer forty-two-watts
+## Étape 11 — Installer FTW
 
 Copiez cette ligne EXACTEMENT telle qu'elle est :
 
 ```
-curl -fsSL https://raw.githubusercontent.com/frahlg/forty-two-watts/master/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
 ```
 
 Collez-la dans le terminal ou PuTTY (le clic droit colle généralement) et appuyez sur entrée.

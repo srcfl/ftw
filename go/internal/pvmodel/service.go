@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // stateKey is the config k/v key where we persist the model JSON.

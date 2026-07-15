@@ -1,4 +1,4 @@
-# forty-two-watts — macOS (Docker Desktop) deployment
+# FTW — macOS (Docker Desktop) deployment
 #
 # Use this file INSTEAD of docker-compose.yml on a Mac (e.g. a Mac mini
 # running as an always-on home server). It is self-contained — do not
@@ -39,12 +39,14 @@
 # transparently, so the container's ftw user can always write to it.
 # Just `mkdir -p ./data` before the first `up`.
 
+name: ${COMPOSE_PROJECT_NAME:-ftw}
+
 services:
-  forty-two-watts:
+  ftw:
     # Tag is variable so the ftw-updater sidecar can pin to a specific
     # release on `update`. Manual `up -d` (no env set) → :latest.
-    image: ghcr.io/frahlg/forty-two-watts:${FTW_IMAGE_TAG:-latest}
-    container_name: forty-two-watts
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    container_name: ftw
     restart: unless-stopped
 
     environment:
@@ -58,7 +60,7 @@ services:
     # NOT used — see the header.)
     ports:
       - "8080:8080"
-      # Calendar (#498): publish 42W's in-process CalDAV server so phones and
+      # Calendar (#498): publish FTW's in-process CalDAV server so phones and
       # desktops on the LAN can subscribe at http://<mac-ip>:5232/. (On the
       # host-networking Linux compose this is implicit; macOS bridge networking
       # needs it published.) Drop this line if caldav.enabled is false.
@@ -71,7 +73,7 @@ services:
       - update-ipc:/run/ftw-update
 
   ftw-updater:
-    image: ghcr.io/frahlg/forty-two-watts-updater:latest
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
     container_name: ftw-updater
     restart: unless-stopped
 
@@ -85,10 +87,11 @@ services:
       # bind paths, so it must be the real macOS path the user launched
       # compose from.
       FTW_UPDATER_COMPOSE: ${PWD:-.}/docker-compose.macos.yml
+      FTW_UPDATER_MAIN_SERVICE: ftw
       # Keep the project name stable so the sidecar recreates the real
       # containers instead of a parallel set. Defaults to the directory
       # name compose derives; pin it to match your manual invocation.
-      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-forty-two-watts}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-ftw}
 
     volumes:
       # The Docker Desktop socket — the one privileged resource the
@@ -111,7 +114,7 @@ services:
   # ---------------------------------------------------------------------
   mosquitto:
     image: eclipse-mosquitto:2
-    container_name: forty-two-watts-mosquitto
+    container_name: ftw-mosquitto
     restart: unless-stopped
 
     ports:
@@ -124,7 +127,7 @@ services:
   # ---------------------------------------------------------------------
   # Calendar (CalDAV) planner constraints (#498)
   #
-  # No service here: 42W hosts its OWN in-process, pure-Go CalDAV server
+  # No service here: FTW hosts its OWN in-process, pure-Go CalDAV server
   # (emersion/go-webdav, MIT) inside the main container above — there is no
   # sidecar. With `caldav.enabled: true`, the in-container server binds :5232,
   # which the main service publishes (see its ports above), so phones/desktops

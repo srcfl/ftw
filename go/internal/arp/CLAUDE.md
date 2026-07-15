@@ -15,7 +15,7 @@ No public types — one package-level function and one test-stub `readFile`.
 
 ## How it talks to neighbors
 
-`../drivers.Registry.ARPLookup` is set to `arp.Lookup` in `cmd/forty-two-watts/main.go:138`. At `Registry.Add` time, when a driver has an MQTT or Modbus config, the registry extracts the host string, calls `ARPLookup(host)`, and records the MAC on `HostEnv` via `SetMAC` (`drivers/registry.go:121-134`). That MAC then flows into `state.RegisterDevice` via `HostEnv.FullIdentity()`, producing a `mac:<addr>` device_id preferred over the `ep:<hash>` fallback. See `docs/site-convention.md` for how identity roots downstream state (battery models, history).
+`../drivers.Registry.ARPLookup` is set to `arp.Lookup` in `cmd/ftw/main.go:138`. At `Registry.Add` time, when a driver has an MQTT or Modbus config, the registry extracts the host string, calls `ARPLookup(host)`, and records the MAC on `HostEnv` via `SetMAC` (`drivers/registry.go:121-134`). That MAC then flows into `state.RegisterDevice` via `HostEnv.FullIdentity()`, producing a `mac:<addr>` device_id preferred over the `ep:<hash>` fallback. See `docs/site-convention.md` for how identity roots downstream state (battery models, history).
 
 ## What to read first
 

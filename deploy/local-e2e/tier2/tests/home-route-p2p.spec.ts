@@ -33,7 +33,7 @@ import { test, expect, type Page, type CDPSession } from "@playwright/test";
 const HOME_ORIGIN = process.env.HOME_ORIGIN ?? "http://home.fortytwowatts.localhost:7378";
 // Direct LAN address of the Pi on the docker bridge net (NOT through the relay):
 // used only to mint the first-enrollment PIN, which is LAN-only by design.
-const PI_LAN_URL = process.env.PI_LAN_URL ?? "http://forty-two-watts:8080";
+const PI_LAN_URL = process.env.PI_LAN_URL ?? "http://ftw:8080";
 
 // ---- helpers --------------------------------------------------------------
 

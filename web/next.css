@@ -1,4 +1,4 @@
-/* forty-two-watts — /next redesign overrides.
+/* FTW — /next redesign overrides.
  *
  * Loaded AFTER /style.css so it layers on top. Everything here is scoped
  * to `body.ftw-next` to guarantee we never leak into /index.html, which

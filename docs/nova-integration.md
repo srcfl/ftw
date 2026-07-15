@@ -1,9 +1,9 @@
 # Nova Core federation (opt-in)
 
-forty-two-watts can federate its telemetry into [Sourceful Nova
+FTW can federate its telemetry into [Sourceful Nova
 Core](https://github.com/srcful/srcful-novacore) — the central backend
 the ZAP gateway fleet reports into. Federation is strictly opt-in: when
-disabled (default), forty-two-watts ships no data off-site.
+disabled (default), FTW ships no data off-site.
 
 ## What federation gives you
 
@@ -11,7 +11,7 @@ disabled (default), forty-two-watts ships no data off-site.
 - Long-retention time-series in Nova's VictoriaMetrics (alongside the
   local long-format SQLite TS DB — the two are independent).
 - Fleet views in the Sourceful portal.
-- Future (PR 3+): control commands from Nova back to forty-two-watts
+- Future (PR 3+): control commands from Nova back to FTW
   for coordinated flexibility / VPP dispatch.
 
 What federation does **not** do today:
@@ -25,7 +25,7 @@ What federation does **not** do today:
 ## Architecture at a glance
 
 ```
-forty-two-watts                             Nova Core
+FTW                             Nova Core
 ┌──────────────────────┐                  ┌────────────────────────┐
 │ telemetry.Store      │   MQTT (TCP/TLS) │ NATS MQTT adapter      │
 │ (DerReadings)        │ ───────────────► │ :1883                  │
@@ -47,19 +47,19 @@ on `gateways/{gateway_serial}/devices/{hardware_id}/ders/{der_name}/telemetry/js
 
 ## Data model alignment
 
-forty-two-watts uses a physics-first, snake_case, site-convention
+FTW uses a physics-first, snake_case, site-convention
 schema (see [docs/site-convention.md](site-convention.md)). Nova's
 current wire format has several divergences from that schema — opposite
 battery sign, mixed-case field names (`SoC_nom_fract`, `L1_V`,
 `heatsink_C`), and a different DER type vocabulary (`solar`, `ev_port`).
 
-We build forty-two-watts against its clean schema and translate at the
+We build FTW against its clean schema and translate at the
 publisher boundary. The translation layer (`internal/nova/adapter.go`)
 is a single file designed to be deleted once Nova's unified schema PR
 lands; until then, `nova.schema_mode: legacy` (default) keeps
-forty-two-watts compatible with every deployed ZAP gateway.
+FTW compatible with every deployed ZAP gateway.
 
-| Concept         | forty-two-watts (clean) | Nova legacy wire       |
+| Concept         | FTW (clean) | Nova legacy wire       |
 |-----------------|-------------------------|------------------------|
 | Battery W sign  | `+W` = charging (load)  | `−W` = charging        |
 | Power           | `w`                     | `W`                    |
@@ -86,9 +86,9 @@ nova:
 
 ## Identity mapping
 
-| Nova field        | forty-two-watts source                                |
+| Nova field        | FTW source                                |
 |-------------------|--------------------------------------------------------|
-| `gateway_serial`  | Chosen at claim time (auto: `f42w-<12 hex>` if empty).|
+| `gateway_serial`  | Chosen at claim time (auto: `fftw-<12 hex>` if empty).|
 | `hardware_id`     | `state.Device.device_id` verbatim (`make:serial`,      |
 |                   |  `mac:…`, or `ep:…`).                                  |
 | `der_name`        | `{driver_name}-{der_kind}` (e.g. `ferroamp-battery`). |
@@ -103,7 +103,7 @@ translates `/` to `.` at the NATS-subject boundary; dots inside a
 `hardware_id` (e.g. `ep:192.168.1.10:502`) would otherwise create
 accidental extra subject levels.
 
-## One-time setup: `forty-two-watts nova-claim`
+## One-time setup: `FTW nova-claim`
 
 Prerequisites:
 
@@ -111,11 +111,11 @@ Prerequisites:
    `POST /organizations` + `POST /sites`).
 2. A human operator JWT from Nova, and that operator's identity ID
    (`idt-…`). The JWT authorises the claim; it is **not** persisted by
-   forty-two-watts.
-3. forty-two-watts has been running long enough for each driver to
+   FTW.
+3. FTW has been running long enough for each driver to
    register a device and emit at least one telemetry sample — that's
    how the CLI infers which DERs to provision. If you're adding a
-   federation on a fresh install, start forty-two-watts once, let
+   federation on a fresh install, start FTW once, let
    drivers connect, then run `nova-claim`.
 
 Then:
@@ -123,7 +123,7 @@ Then:
 ```bash
 export NOVA_OPERATOR_JWT=eyJhbGciOi...            # human identity JWT
 
-./forty-two-watts nova-claim \
+./ftw nova-claim \
   --url=https://core.sourceful.energy \
   --org=org-019b952b-... \
   --site=sit-019b952b-... \
@@ -144,7 +144,7 @@ What happens:
 4. The resulting `nova:` block (URL, gateway_serial, org_id, site_id,
    key_path, schema_mode) is written atomically into `config.yaml`.
 
-Restart forty-two-watts to pick up the new `nova:` block. The
+Restart FTW to pick up the new `nova:` block. The
 publisher starts and data begins flowing.
 
 ### Adding a driver after the initial claim
@@ -153,7 +153,7 @@ Add the driver to `config.yaml`, restart, let it register and emit
 telemetry, then:
 
 ```bash
-./forty-two-watts nova-claim --reconcile \
+./ftw nova-claim --reconcile \
   --url=https://core.sourceful.energy \
   --site=sit-019b952b-...
 ```
@@ -191,10 +191,10 @@ nova:
   mqtt_host: broker.sourceful.energy        # NATS MQTT adapter host
   mqtt_port: 1883
   mqtt_tls: false
-  gateway_serial: f42w-abc123               # stable across restarts
+  gateway_serial: fftw-abc123               # stable across restarts
   org_id: org-019b952b-...
   site_id: sit-019b952b-...
-  key_path: /var/lib/forty-two-watts/nova.key
+  key_path: /var/lib/ftw/nova.key
   schema_mode: legacy                       # "legacy" | "unified"
   publish_interval_s: 5
   reconcile_interval_h: 24                  # reserved for future use
@@ -210,7 +210,7 @@ publisher.
 matching `nova_ders` row. Run `nova-claim --reconcile`.
 
 **Connection lost / reconnect loop** — check that the clock on the
-forty-two-watts host is within a few minutes of Nova's; ES256 JWTs
+FTW host is within a few minutes of Nova's; ES256 JWTs
 have short TTLs and auth-callout rejects stale tokens. Also verify
 the gateway was claimed (`POST /gateways/<serial>` should return
 your claimed record).
@@ -221,7 +221,7 @@ and caches the miss for an hour. Either re-run provisioning, or wait
 out the cache.
 
 **Sign looks wrong on battery charts** — confirm `schema_mode`. With
-`legacy`, Nova's charts expect `−W` on charging; forty-two-watts flips
+`legacy`, Nova's charts expect `−W` on charging; FTW flips
 at the boundary. If you flipped to `unified` but Nova is still on the
 legacy schema, battery signs will appear inverted.
 
@@ -248,7 +248,7 @@ legacy schema, battery signs will appear inverted.
   migrates, flip `schema_mode: unified` and delete `adapter.go`.
 - **Control-topic subscription** — subscribe to
   `orgs/{org}/sites/{site}/devices/{device}/ders/{der}/control` so Nova
-  can dispatch setpoints to forty-two-watts. Currently out of scope.
+  can dispatch setpoints to FTW. Currently out of scope.
 - **Nightly reconciliation** — auto-call `GET /sites/{site}/devices`
   and warn on drift. Today, drift detection is manual
   (`nova-claim --reconcile`).

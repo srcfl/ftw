@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // fakeCTekClient is a stub ctekClient that returns canned register

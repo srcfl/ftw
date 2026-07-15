@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // myuplinkDriverPath resolves drivers/myuplink.lua from the repo root regardless

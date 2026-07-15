@@ -10,7 +10,7 @@ import (
 
 	"github.com/emersion/go-ical"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 const feedObj = `BEGIN:VCALENDAR

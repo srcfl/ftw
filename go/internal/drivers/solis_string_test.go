@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 type solisStringModbus struct {

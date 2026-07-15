@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // Battery manual-hold endpoint. Pins the aggregate battery setpoint to

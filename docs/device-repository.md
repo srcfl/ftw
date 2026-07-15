@@ -4,12 +4,12 @@ Status: planned. This is not the current driver install path; bundled and
 local Lua drivers under `drivers/` remain the active mechanism.
 
 This document defines the first non-breaking device repository milestone
-for forty-two-watts. The implementation target is a PR series, not a
+for FTW. The implementation target is a PR series, not a
 single big-bang migration.
 
 ## Goal
 
-forty-two-watts should discover Lua drivers from the public Hugin driver
+FTW should discover Lua drivers from the public Hugin driver
 repository by default:
 
 ```text
@@ -51,7 +51,7 @@ As of `origin/master` at `b7906cb`:
   driver's `DRIVER = { ... }` block
 
 The Hugin driver repository currently exists on `main` and was seeded
-from forty-two-watts, but it has no CI or manifest yet and does not
+from FTW, but it has no CI or manifest yet and does not
 contain every driver from the latest bundled catalog.
 
 ## Non-Breaking Contract
@@ -103,7 +103,7 @@ ordering, never for installation.
 
 ## Repository Manifest
 
-forty-two-watts should consume a static HTTPS manifest. It must not
+FTW should consume a static HTTPS manifest. It must not
 depend on `git` in the runtime container.
 
 Default manifest URL:
@@ -326,7 +326,7 @@ serial numbers, MAC addresses, or raw config.
 
 ## hugin-drivers Requirements
 
-The Hugin driver repository needs its own PR before forty-two-watts can
+The Hugin driver repository needs its own PR before FTW can
 use it as a default source with confidence.
 
 Required artifacts:
@@ -373,7 +373,7 @@ Repository: `srcfl/hugin-drivers`.
 
 Deliverables:
 
-- sync missing drivers from latest forty-two-watts bundled catalog
+- sync missing drivers from latest FTW bundled catalog
 - add manifest generator
 - add manifest file
 - add CI verifier
@@ -385,9 +385,9 @@ Validation:
 - verifier fails on duplicate IDs, bad semver, wrong hashes, unsafe paths,
   and missing production verifier metadata
 
-### PR 2: forty-two-watts repository client
+### PR 2: FTW repository client
 
-Repository: `frahlg/forty-two-watts`.
+Repository: `srcfl/ftw`.
 
 Deliverables:
 
@@ -422,7 +422,7 @@ Validation:
 
 ### PR 3: opt-in fleet statistics
 
-Repository: `frahlg/forty-two-watts`.
+Repository: `srcfl/ftw`.
 
 Deliverables:
 
@@ -445,7 +445,7 @@ Validation:
 The device repository feature is complete when all of these are true:
 
 - `hugin-drivers` has green CI for manifest and driver validation.
-- forty-two-watts starts an existing config with no network.
+- FTW starts an existing config with no network.
 - `GET /api/drivers/catalog` exposes `source`, `installed`,
   `upstream`, and `update_available`.
 - The Settings UI shows update availability without installing it.

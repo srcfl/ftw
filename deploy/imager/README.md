@@ -1,7 +1,7 @@
 # Raspberry Pi Imager — custom OS repository
 
 `os_list.json` is a **Raspberry Pi Imager repository JSON** (V4 schema). It
-describes the forty-two-watts SD-card image so that **Raspberry Pi Imager 2.0+**
+describes the FTW SD-card image so that **Raspberry Pi Imager 2.0+**
 shows the OS-customisation panel (hostname, SSH user/password, WiFi) for our
 image — Imager only offers that panel for images it has metadata for, which a
 bare `.img.xz` loaded via "Use custom" does not have.
@@ -12,7 +12,7 @@ In Raspberry Pi Imager: **App Options → Content Repository → EDIT → Use cu
 file**, paste the URL below, then **APPLY & RESTART** (or `rpi-imager --repo <url>`):
 
 ```
-https://github.com/frahlg/forty-two-watts/releases/latest/download/os_list.json
+https://github.com/srcfl/ftw/releases/latest/download/os_list.json
 ```
 
 `releases/latest/download/...` always redirects to the newest release's asset,
@@ -39,7 +39,7 @@ The OS entry deliberately omits the `devices` array (e.g. `["pi4-64bit",
 that repository for the OS list but does **not** get the hardware/device list
 that the stock repository ships — so the "CHOOSE DEVICE" picker is empty. A
 device-filtered entry then never appears, because no matching device can be
-selected. Omitting `devices` makes "Forty-Two Watts" show regardless of the
+selected. Omitting `devices` makes "FTW" show regardless of the
 selected device. The image only supports Pi 4/5 (64-bit), which the `name` and
 `description` already state. **Do not re-add `devices`** — it silently hides the
 entry in the custom-repo flow.

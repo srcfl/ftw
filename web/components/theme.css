@@ -1,4 +1,4 @@
-/* forty-two-watts — shared design tokens.
+/* FTW — shared design tokens.
  *
  * Declared on :root so they inherit into every shadow DOM automatically —
  * no adoptedStyleSheets gymnastics needed for tokens, only for the reset

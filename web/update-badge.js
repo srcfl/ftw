@@ -1,5 +1,5 @@
 // <ftw-update-badge> — self-contained Web Component that checks for a
-// newer forty-two-watts image, renders a notification dot in the header,
+// newer FTW image, renders a notification dot in the header,
 // and drives the update/restart flow end-to-end (pull → recreate →
 // auto-reload). Everything lives in shadow DOM so dashboard styles are
 // untouched.
@@ -451,7 +451,7 @@
         <div class="backdrop" data-action="close"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
           <header>
-            <h3 id="ftw-upd-title">forty-two-watts</h3>
+            <h3 id="ftw-upd-title">FTW</h3>
             <button class="x" data-action="close" aria-label="Close">×</button>
           </header>
           <div class="body">

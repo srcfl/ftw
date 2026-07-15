@@ -1,4 +1,4 @@
-// setup.js — multi-step setup wizard for forty-two-watts
+// setup.js — multi-step setup wizard for FTW
 // Single-page state machine: show/hide step divs, collect config, POST to /api/config.
 
 (function () {
@@ -663,7 +663,7 @@
       })
       .catch(function (err) {
         btn.disabled = false;
-        btn.textContent = 'Start 42W';
+        btn.textContent = 'Start FTW's;
         var errEl = document.getElementById('save-error');
         errEl.className = 'error-msg';
         errEl.textContent = err.message;

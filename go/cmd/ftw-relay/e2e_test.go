@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // TestE2EHostAndFriendRoundtripThroughRelay is the canary: register a

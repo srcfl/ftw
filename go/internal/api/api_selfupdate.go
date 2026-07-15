@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
+	"github.com/srcfl/ftw/go/internal/selfupdate"
 )
 
 // handleVersionCheck returns the cached self-update state. ?force=1 bypasses

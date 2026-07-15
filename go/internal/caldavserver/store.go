@@ -3,7 +3,7 @@ package caldavserver
 import (
 	"sync"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // Store is the persistence the native CalDAV server needs. *state.Store

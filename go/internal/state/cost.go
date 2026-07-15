@@ -3,7 +3,7 @@ package state
 import (
 	"fmt"
 
-	"github.com/frahlg/forty-two-watts/go/internal/gridcost"
+	"github.com/srcfl/ftw/go/internal/gridcost"
 )
 
 // DayCostBreakdown decomposes a historical range into actual net grid cost and

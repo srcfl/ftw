@@ -385,7 +385,7 @@ here we only note the ML integration surface.
 ### Algorithm
 
 Dynamic programming over a discretized SoC × action grid. Production
-defaults (`go/cmd/forty-two-watts/main.go:696`):
+defaults (`go/cmd/ftw/main.go:696`):
 
 - `SoCLevels = 41` (2.5 % steps across the SoC window).
 - `ActionLevels = 21` (odd so battery-W = 0 is represented).

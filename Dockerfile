@@ -1,4 +1,4 @@
-# forty-two-watts container — static Go host + Python mathematical planner.
+# FTW container — static Go host + Python mathematical planner.
 #
 # Builder uses golang:alpine to keep the Go binary fully static. The runtime is
 # Debian slim because the CVXPY and HiGHS ARM64 wheels target glibc.
@@ -32,7 +32,7 @@ RUN cd go && \
     target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/forty-two-watts ./cmd/forty-two-watts
+    -o /out/ftw ./cmd/ftw
 RUN cd go && \
     target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
@@ -61,7 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     rm -rf /var/lib/apt/lists/*
 
 # Image layout:
-#   /app/forty-two-watts  binary (immutable, replaced on upgrade)
+#   /app/ftw              binary (immutable, replaced on upgrade)
 #   /app/drivers/         bundled Lua drivers (immutable, replaced on upgrade)
 #   /app/web/             bundled UI assets (immutable, replaced on upgrade)
 #   /app/data/            PERSISTENT — config.yaml, state.db, cold/, models
@@ -70,17 +70,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # path in the user's config (state.path: state.db, state.cold_dir: cold)
 # resolves under the persistent volume by default. Without this, the
 # binary would default-write state.db to its CWD and lose every byte
-# on container recreate. See go/cmd/forty-two-watts/main.go:66 — there
+# on container recreate. See go/cmd/ftw/main.go:66 — there
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
-COPY --from=builder /out/forty-two-watts /app/forty-two-watts
+COPY --from=builder /out/ftw             /app/ftw
 COPY --from=builder /out/ftw-pair        /app/ftw-pair
 COPY --from=optimizer /opt/venv          /opt/venv
 COPY optimizer/                          /app/optimizer/
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 
-RUN mkdir -p /app/data /app/data/drivers /run/ftw-update && \
+RUN ln -s /app/ftw /app/forty-two-watts && \
+    mkdir -p /app/data /app/data/drivers /run/ftw-update && \
     chown -R 100:101 /app /run/ftw-update /opt/venv
 
 ENV HOME=/app/data \
@@ -105,10 +106,13 @@ EXPOSE 8080
 # container starts:
 #
 #     mkdir -p /srv/ftw-data && chown -R 100:101 /srv/ftw-data
-#     docker run -v /srv/ftw-data:/app/data ghcr.io/<owner>/forty-two-watts:latest
+#     docker run -v /srv/ftw-data:/app/data ghcr.io/srcfl/ftw:latest
 #
 # Without this the binary fails fast with "open state … unable to
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
-ENTRYPOINT ["/app/forty-two-watts"]
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=4)" || exit 1
+
+ENTRYPOINT ["/app/ftw"]
 CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]

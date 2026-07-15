@@ -130,43 +130,65 @@ jobs:
         run: |
           mkdir -p ../bin
           go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
-            -o "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}" \
-            ./cmd/forty-two-watts
-          ls -la "../bin/forty-two-watts-${GOOS}-${GOARCH}${{ matrix.ext }}"
+            -o "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw
+          if [[ "${GOOS}" == "linux" ]]; then
+            go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+              -o "../bin/ftw-pair-${GOOS}-${GOARCH}" \
+              ./cmd/ftw-pair
+          fi
+          ls -la "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}"
 
       - name: Package
         env:
           PLATFORM: ${{ matrix.goos }}-${{ matrix.goarch }}
-          BINARY: forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          BINARY: ftw-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
           ARCHIVE: ${{ matrix.archive }}
         run: |
           set -euo pipefail
           mkdir -p release
+          STAGE="bin/stage-${PLATFORM}"
+          rm -rf "${STAGE}"
+          mkdir -p "${STAGE}"
           if [[ "${ARCHIVE}" == "zip" ]]; then
-            (cd bin && zip -q "../release/forty-two-watts-${PLATFORM}.zip" "${BINARY}")
-            zip -qr "release/forty-two-watts-${PLATFORM}.zip" drivers web config.example.yaml
+            cp "bin/${BINARY}" "${STAGE}/ftw.exe"
+            cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
+            (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe forty-two-watts.exe)
+            zip -qr "release/ftw-${PLATFORM}.zip" \
+              drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+            cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
           else
-            tar czf "release/forty-two-watts-${PLATFORM}.tar.gz" \
-              -C bin "${BINARY}" \
-              -C .. drivers web config.example.yaml
+            cp "bin/${BINARY}" "${STAGE}/ftw"
+            ln -s ftw "${STAGE}/forty-two-watts"
+            cp "bin/ftw-pair-${PLATFORM}" "${STAGE}/ftw-pair"
+            tar czf "release/ftw-${PLATFORM}.tar.gz" \
+              -C "${STAGE}" ftw forty-two-watts ftw-pair \
+              -C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+            cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
+          (
+            cd release
+            sha256sum "ftw-${PLATFORM}.${ARCHIVE}" > "ftw-${PLATFORM}.${ARCHIVE}.sha256"
+            sha256sum "forty-two-watts-${PLATFORM}.${ARCHIVE}" > "forty-two-watts-${PLATFORM}.${ARCHIVE}.sha256"
+          )
           ls -la release/
 
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
-          ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+          ASSET: release/ftw-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
+          LEGACY_ASSET: release/forty-two-watts-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive }}
         # --clobber lets a workflow re-run replace a prior upload without
         # failing — useful when this workflow is re-dispatched manually.
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
+        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" "${LEGACY_ASSET}" "${LEGACY_ASSET}.sha256" --clobber
 
   ftw-relay:
     name: build + upload ftw-relay binaries
     runs-on: ubuntu-latest
     needs: meta
     # The HTTPS request-response relay that replaces ftw-subetha.
-    # Deployed by the operator on relay.fortytwowatts.com — see
+    # Deployed by the operator on relay.ftw.sourceful.energy — see
     # docs/relay-deploy.md.
     permissions:
       contents: write  # upload assets to the release
@@ -206,12 +228,19 @@ jobs:
             ./cmd/ftw-relay
           ls -la "../bin/ftw-relay-${GOOS}-${GOARCH}${{ matrix.ext }}"
 
+      - name: Write checksum
+        env:
+          BASENAME: ftw-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+        run: |
+          cd bin
+          sha256sum "${BASENAME}" > "${BASENAME}.sha256"
+
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
           ASSET: bin/ftw-relay-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
+        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
 
   ftw-relay-web:
     name: build + upload ftw-relay web bootstrap
@@ -228,12 +257,17 @@ jobs:
       - name: Build relay bootstrap web bundle
         run: make relay-web
 
+      - name: Write checksum
+        run: |
+          cd release
+          sha256sum ftw-relay-web.tar.gz > ftw-relay-web.tar.gz.sha256
+
       - name: Upload to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.meta.outputs.tag }}
           ASSET: release/ftw-relay-web.tar.gz
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
+        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
 
   docker:
     name: docker build + push (${{ matrix.target }})
@@ -250,12 +284,12 @@ jobs:
           - target: main
             dockerfile: ./Dockerfile
             image_suffix: ""
-            title: forty-two-watts
+            title: FTW
             description: Unified Home Energy Management System
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
-            title: forty-two-watts-updater
+            title: FTW updater
             description: Sidecar that executes docker compose pull + up for in-app updates
     steps:
       - name: Checkout tag
@@ -269,19 +303,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to GHCR
+      - name: Login to canonical GHCR namespace
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Compute image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # ghcr.io/<owner>/<repo>[-updater]:<tag>
-          images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
+          images: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}
           tags: |
             type=raw,value=${{ needs.meta.outputs.tag }}
             type=raw,value=${{ needs.meta.outputs.version }}
@@ -290,9 +323,9 @@ jobs:
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/srcfl/ftw
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -309,6 +342,31 @@ jobs:
           # Per-target scope keeps main + updater from evicting each other.
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to:   type=gha,mode=max,scope=${{ matrix.target }}
+
+      # Docker stores one credential per registry host, so two consecutive
+      # ghcr.io logins cannot be active at once. Build and publish once to the
+      # canonical namespace, then copy that exact multi-platform manifest to
+      # the temporary compatibility namespace under its own credentials.
+      - name: Login to compatibility GHCR namespace
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: frahlg
+          password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Mirror exact manifests to compatibility namespace
+        env:
+          CANONICAL_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          for source in ${CANONICAL_TAGS}; do
+            legacy="${source/ghcr.io\/srcfl\/ftw/ghcr.io\/frahlg\/forty-two-watts}"
+            docker buildx imagetools create --prefer-index=false --tag "${legacy}" "${source}"
+            source_digest="$(docker buildx imagetools inspect "${source}" | awk '$1 == "Digest:" {print $2; exit}')"
+            legacy_digest="$(docker buildx imagetools inspect "${legacy}" | awk '$1 == "Digest:" {print $2; exit}')"
+            test -n "${source_digest}"
+            test "${source_digest}" = "${legacy_digest}"
+          done
 
   rpi-image:
     name: build + upload RPi SD-card image
@@ -376,8 +434,12 @@ jobs:
             echo "pi-gen produced no .img.xz — check build log above" >&2
             exit 1
           fi
-          DST="deploy/pi-gen/pi-gen/deploy/42w-rpi4-arm64-${{ needs.meta.outputs.tag }}.img.xz"
+          DST="deploy/pi-gen/pi-gen/deploy/ftw-rpi4-arm64-${{ needs.meta.outputs.tag }}.img.xz"
           mv "${SRC}" "${DST}"
+          (
+            cd "$(dirname "${DST}")"
+            sha256sum "$(basename "${DST}")" > "$(basename "${DST}").sha256"
+          )
           ls -lah "${DST}"
           echo "asset=${DST}" >> "${GITHUB_OUTPUT}"
 
@@ -388,7 +450,7 @@ jobs:
           ASSET: ${{ steps.artifact.outputs.asset }}
         # --clobber mirrors the binaries job — lets a manual re-run
         # replace a prior upload without aborting the job.
-        run: gh release upload "${TAG}" "${ASSET}" --clobber
+        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
 
       - name: Build + upload Imager repository JSON
         # Raspberry Pi Imager 2.0 only offers the OS-customisation panel
@@ -406,7 +468,7 @@ jobs:
           ASSET: ${{ steps.artifact.outputs.asset }}
         run: |
           set -euo pipefail
-          IMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/42w-rpi4-arm64-${TAG}.img.xz"
+          IMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/ftw-rpi4-arm64-${TAG}.img.xz"
           DL_SIZE="$(stat -c%s "${ASSET}")"
           # xz --robot --list emits a `totals` row whose 5th field is the
           # uncompressed (extracted) size in bytes.
@@ -459,6 +521,7 @@ jobs:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GITHUB_TOKEN:    ${{ secrets.GITHUB_TOKEN }}
           REPO:            ${{ github.repository }}
+          IMAGE_REPO:      srcfl/ftw
           VERSION:         ${{ needs.meta.outputs.tag }}
         run: |
           set -euo pipefail
@@ -468,8 +531,8 @@ jobs:
           fi
 
           RELEASE_URL="https://github.com/${REPO}/releases/tag/${VERSION}"
-          IMAGE_MAIN="ghcr.io/${REPO}:${VERSION}"
-          IMAGE_UPDATER="ghcr.io/${REPO}-updater:${VERSION}"
+          IMAGE_MAIN="ghcr.io/${IMAGE_REPO}:${VERSION}"
+          IMAGE_UPDATER="ghcr.io/${IMAGE_REPO}-updater:${VERSION}"
 
           # Pull the release body (changelog) the publish step wrote.
           # Truncated to 3500 chars so the embed description stays under
@@ -487,13 +550,13 @@ jobs:
           # Code-fence the image refs with a literal backtick char (`)
           # so the markdown renders as inline code in Discord.
           PAYLOAD="$(jq -n \
-            --arg title "🚀 forty-two-watts ${VERSION}" \
+            --arg title "🚀 FTW ${VERSION}" \
             --arg url   "${RELEASE_URL}" \
             --arg desc  "${BODY}" \
             --arg main  "${IMAGE_MAIN}" \
             --arg upd   "${IMAGE_UPDATER}" \
             '{
-              username: "forty-two-watts",
+              username: "FTW",
               embeds: [{
                 title: $title,
                 url:   $url,

@@ -11,8 +11,8 @@ import (
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 
-	"github.com/frahlg/forty-two-watts/go/internal/caldavserver"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/caldavserver"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // TestCalendarServiceAgainstNativeServer is the end-to-end proof that the
@@ -23,7 +23,7 @@ func TestCalendarServiceAgainstNativeServer(t *testing.T) {
 	srv := httptest.NewServer(caldavserver.NewHandler("u", "p", "/u/", []string{"/u/energy/"}, caldavserver.NewMemStore()))
 	defer srv.Close()
 
-	// A calendar app would PUT this; we do it with the same client 42W uses.
+	// A calendar app would PUT this; we do it with the same client FTW uses.
 	hc := webdav.HTTPClientWithBasicAuth(http.DefaultClient, "u", "p")
 	c, err := caldav.NewClient(hc, srv.URL)
 	if err != nil {

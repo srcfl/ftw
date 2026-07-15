@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Minimal driver that emits meter + battery via host.emit and bumps the

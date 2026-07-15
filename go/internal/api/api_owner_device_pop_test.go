@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // newDeviceKey mints a P-256 device key and returns (private key, 128-hex

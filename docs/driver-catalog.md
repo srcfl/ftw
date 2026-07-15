@@ -1,6 +1,6 @@
 # Driver Catalog
 
-forty-two-watts drivers are Lua files in [`drivers/`](../drivers/). Each
+FTW drivers are Lua files in [`drivers/`](../drivers/). Each
 file declares a `DRIVER = { ... }` metadata block that the catalog loader
 parses without starting a Lua VM. The Settings UI and
 `GET /api/drivers/catalog` use the same metadata.

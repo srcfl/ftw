@@ -18,7 +18,7 @@ type registryProbe struct {
 	httpClient *http.Client
 	// base is the registry root, e.g. "https://ghcr.io". Overridable for tests.
 	base string
-	// repo is the registry path, e.g. "frahlg/forty-two-watts".
+	// repo is the registry path, e.g. "srcfl/ftw".
 	repo string
 	// service is the audience for the token request. ghcr.io expects "ghcr.io".
 	service string

@@ -81,7 +81,7 @@ func buildPlanBlocks(slots []PlanSlot, now time.Time) []planBlock {
 			end:     end,
 			summary: fmt.Sprintf("%s ~%.1f kW", verb, avgKW),
 			description: fmt.Sprintf(
-				"forty-two-watts plan: %s at about %.1f kW, SoC ≈ %.0f%% by end of window.",
+				"FTW plan: %s at about %.1f kW, SoC ≈ %.0f%% by end of window.",
 				strings.ToLower(verb), avgKW, endSoC),
 		})
 	}
@@ -167,7 +167,7 @@ func (s *Service) publishPlan(ctx context.Context) {
 	// (not in the pure buildPlanBlocks) because it needs the live interval, and
 	// after hashing-relevant fields are set — hash() ignores the description, so
 	// the note never causes reconcile churn. The wording is deliberately precise:
-	// 42W re-checks on a timer but only rewrites an event when the plan changes,
+	// FTW re-checks on a timer but only rewrites an event when the plan changes,
 	// so the description must not imply the calendar churns every interval.
 	note := lanNote("re-checks the plan about every " + friendlyInterval(interval) +
 		", and updates an event only when the plan actually changes (so windows you have already seen stay put)")
@@ -267,7 +267,7 @@ func (s *Service) putPlanBlock(ctx context.Context, url, planPath, user, pass st
 		return err
 	}
 	cal := ical.NewCalendar()
-	cal.Props.SetText(ical.PropProductID, "-//forty-two-watts//plan//EN")
+	cal.Props.SetText(ical.PropProductID, "-//FTW//plan//EN")
 	cal.Props.SetText(ical.PropVersion, "2.0")
 	ev := ical.NewEvent()
 	ev.Props.SetText(ical.PropUID, b.uid)
@@ -343,18 +343,18 @@ func (s *Service) listPlanObjectUIDs(ctx context.Context) ([]string, error) {
 }
 
 // lanNote is the footer appended to every published event's description so a
-// subscriber understands the refresh behaviour: forty-two-watts' CalDAV server
+// subscriber understands the refresh behaviour: FTW's CalDAV server
 // is never published to the internet, so a calendar app can only pull updates
-// while it can reach forty-two-watts — on the home network or over a VPN into
-// it — plus when forty-two-watts actually changes the feed. `refresh` is the
+// while it can reach FTW — on the home network or over a VPN into
+// it — plus when FTW actually changes the feed. `refresh` is the
 // trailing clause, e.g. "re-checks the plan about every 15 min, and updates an
 // event only when the plan actually changes".
 func lanNote(refresh string) string {
 	return "\n\nThis calendar lives on your home network and is never " +
 		"published to the internet. Your calendar app can refresh it only " +
-		"while it can reach forty-two-watts — on your home network or over a " +
+		"while it can reach FTW — on your home network or over a " +
 		"VPN into it — otherwise events stay as last synced. " +
-		"forty-two-watts " + refresh + "."
+		"FTW " + refresh + "."
 }
 
 // friendlyInterval renders a poll/publish interval in a human-readable unit.

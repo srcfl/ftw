@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 func TestDriverSecretKeysIncludePortableDriverPathAlias(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 func TestResetPreservesHeatingCoefficient(t *testing.T) {
@@ -25,7 +25,7 @@ func TestResetPreservesHeatingCoefficient(t *testing.T) {
 // where the load model has been adapting must not clobber the learned
 // HeatingW_per_degC with the operator-config seed. Without this guarantee
 // every binary update silently throws away weeks of online fit. The
-// startup wiring in cmd/forty-two-watts/main.go uses SeedHeatingCoef
+// startup wiring in cmd/ftw/main.go uses SeedHeatingCoef
 // precisely because operator config is a *prior*, not an override.
 func TestSeedHeatingCoefDoesNotOverwriteLearnedValue(t *testing.T) {
 	s := NewService(nil, telemetry.NewStore(), "site", 4000)

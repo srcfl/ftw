@@ -8,7 +8,11 @@ directory is ever committed.
 
 | File | What | Lifecycle |
 |---|---|---|
-| `relay.fortytwowatts.com.cert.pem` | Cloudflare Origin Certificate, public half. Covers `*.fortytwowatts.com` + apex. Valid 2026-05-27 → 2041-05-23. | Renew before 2041; CF dashboard regenerates the pair. |
+| `relay.fortytwowatts.com.cert.pem` | **Legacy only:** Cloudflare Origin Certificate covering `*.fortytwowatts.com` + apex. | It does not cover `relay.ftw.sourceful.energy`; retain only while the old zone needs it. |
+
+Generate and deploy a separate certificate whose SAN covers
+`relay.ftw.sourceful.energy`. Certificate provisioning is intentionally not
+performed by the repository migration.
 
 ## What's NOT here (and should never be)
 
@@ -23,7 +27,7 @@ See `docs/relay-deploy.md` for the full runbook. Short version:
 
 ```bash
 # On your laptop:
-scp deploy/secrets/relay.fortytwowatts.com.cert.pem ubuntu@<RELAY_IP>:/tmp/cert.pem
+scp <new-sourceful-relay-cert.pem> ubuntu@<RELAY_IP>:/tmp/cert.pem
 
 # Open the Cloudflare dashboard, regenerate the Origin Cert pair if
 # you don't already have the private key, copy the private-key textbox.

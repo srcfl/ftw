@@ -1,16 +1,16 @@
-// Package caldavserver is 42W's native, in-process CalDAV server built on
+// Package caldavserver is FTW's native, in-process CalDAV server built on
 // github.com/emersion/go-webdav (MIT). Being pure-Go and in-process, it ships
-// in the single 42W binary and needs no second container — so the calendar
-// feature (#498) runs everywhere 42W does, including a single-container Home
+// in the single FTW binary and needs no second container — so the calendar
+// feature (#498) runs everywhere FTW does, including a single-container Home
 // Assistant add-on.
 //
-// 42W's calendar client (internal/calendar) talks CalDAV to it over localhost,
+// FTW's calendar client (internal/calendar) talks CalDAV to it over localhost,
 // so the inbound/outbound intent logic is independent of transport.
 //
 // Objects persist via a Store (state.db in production; in-memory for tests).
 // Recurring events ARE expanded server-side per RFC 4791 CALDAV:expand (see
 // expand.go). Known limits: a single principal and minimal MKCALENDAR/sync
-// semantics; interop is verified against 42W's own go-webdav client rather than
+// semantics; interop is verified against FTW's own go-webdav client rather than
 // the full matrix of iOS / Google / Thunderbird.
 package caldavserver
 
@@ -96,7 +96,7 @@ func basicAuth(username, password string, next http.Handler) http.Handler {
 			subtle.ConstantTimeCompare([]byte(u), []byte(username)) == 1 &&
 			subtle.ConstantTimeCompare([]byte(p), []byte(password)) == 1
 		if !authed {
-			w.Header().Set("WWW-Authenticate", `Basic realm="forty-two-watts"`)
+			w.Header().Set("WWW-Authenticate", `Basic realm="FTW"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

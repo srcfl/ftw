@@ -1,4 +1,4 @@
-// Package e2e runs the full forty-two-watts stack against both simulators
+// Package e2e runs the full ftw stack against both simulators
 // in one process and verifies end-to-end behavior: drivers load, telemetry
 // flows, the control loop responds to transients, commands round-trip,
 // self-tune runs, battery models learn.
@@ -28,19 +28,19 @@ import (
 	"github.com/mochi-mqtt/server/v2/packets"
 	sv "github.com/simonvetter/modbus"
 
-	"github.com/frahlg/forty-two-watts/go/cmd/sim-ferroamp/ferroamp"
-	"github.com/frahlg/forty-two-watts/go/cmd/sim-sungrow/sungrow"
+	"github.com/srcfl/ftw/go/cmd/sim-ferroamp/ferroamp"
+	"github.com/srcfl/ftw/go/cmd/sim-sungrow/sungrow"
 
-	"github.com/frahlg/forty-two-watts/go/internal/api"
-	"github.com/frahlg/forty-two-watts/go/internal/battery"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/control"
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
-	modbuscli "github.com/frahlg/forty-two-watts/go/internal/modbus"
-	mqttcli "github.com/frahlg/forty-two-watts/go/internal/mqtt"
-	"github.com/frahlg/forty-two-watts/go/internal/selftune"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/battery"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/drivers"
+	modbuscli "github.com/srcfl/ftw/go/internal/modbus"
+	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
+	"github.com/srcfl/ftw/go/internal/selftune"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // ---- Test fixture ----

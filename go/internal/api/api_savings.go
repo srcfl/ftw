@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // daySavings is the cached per-local-day cost breakdown that powers

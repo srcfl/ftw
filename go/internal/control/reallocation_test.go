@@ -5,7 +5,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // targetsByDriver indexes a dispatch result by driver name for assertions.

@@ -13,7 +13,7 @@ import (
 	webdav "github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // backend is a caldav.Backend persisting calendar objects through a Store

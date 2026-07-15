@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Setup — forty-two-watts</title>
+  <title>Setup — FTW</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <!-- No external font CDN — the wizard has to boot on a fresh Pi
        that may not have internet yet. theme.css's --sans / --mono
@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="/style.css">
   <style>
     /* Setup wizard styling — matches the /next UI tokens
-       (components/theme.css) and the look of fortytwowatts.com:
+       (components/theme.css) and the look of ftw.sourceful.energy:
        dark ink canvas, hairline 1px borders, flat cards, warm amber
        single-accent, Inter body + JetBrains Mono eyebrows. Kept inline
        so the wizard's chrome is self-contained and doesn't cross into
@@ -497,8 +497,8 @@
   <!-- Header -->
   <div class="wizard-header">
     <div class="wizard-title">
-      <img src="/logo.jpg" alt="42W" class="wizard-logo">
-      <h1>42W</h1>
+      <img src="/logo.jpg" alt="FTW" class="wizard-logo">
+      <h1>FTW</h1>
     </div>
   </div>
 
@@ -514,7 +514,7 @@
            invisible when the backend has self-update gated off. -->
       <ftw-update-check></ftw-update-check>
 
-      <h2>Welcome to forty-two-watts</h2>
+      <h2>Welcome to FTW</h2>
       <p>Let's set up your home energy system in a few steps.</p>
       <button class="btn-primary" onclick="goStep(2)">Get started</button>
     </div>
@@ -805,7 +805,7 @@
 
     <div id="save-actions" class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(7)">Back</button>
-      <button class="btn-primary" id="save-btn" onclick="saveConfig()">Start 42W</button>
+      <button class="btn-primary" id="save-btn" onclick="saveConfig()">Start FTW</button>
     </div>
 
     <div id="save-success" class="success-screen" style="display:none">

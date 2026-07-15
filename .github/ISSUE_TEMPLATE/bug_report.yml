@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a bug in forty-two-watts
+description: Report a bug in FTW
 title: "[bug] "
 labels: ["bug"]
 body:
@@ -37,7 +37,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `forty-two-watts --version` or release tag / commit.
+      description: Output of `ftw --version` or release tag / commit.
       placeholder: e.g. v0.42.0 or commit 65aaf18
     validations:
       required: true

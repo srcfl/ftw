@@ -26,7 +26,7 @@ import (
 	"github.com/mochi-mqtt/server/v2/listeners"
 	"github.com/mochi-mqtt/server/v2/packets"
 
-	"github.com/frahlg/forty-two-watts/go/cmd/sim-ferroamp/ferroamp"
+	"github.com/srcfl/ftw/go/cmd/sim-ferroamp/ferroamp"
 )
 
 func main() {

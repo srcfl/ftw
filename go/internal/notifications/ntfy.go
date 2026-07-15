@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // ntfyProvider publishes to ntfy.sh (or a self-hosted ntfy server).

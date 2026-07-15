@@ -9,7 +9,7 @@ import (
 
 	paho "github.com/eclipse/paho.mqtt.golang"
 
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/drivers"
 )
 
 // Capability wraps a paho client to match drivers.MQTTCap.
@@ -35,7 +35,7 @@ type Capability struct {
 // queue forever, and the watchdog flips the driver offline. Restarting
 // the driver re-runs driver_init → host.mqtt_subscribe and traffic
 // resumes (real incident: Pixii MQTT going silent at dusk after a broker
-// blip, recovered only by 42W-side driver restart).
+// blip, recovered only by FTW-side driver restart).
 //
 // Fix: every Subscribe() records the topic in cap.subs and issues
 // SUBSCRIBE directly (so the initial flow from driver_init is

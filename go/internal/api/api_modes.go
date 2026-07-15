@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // handleModes serves the operator-facing mode catalog: every selectable mode

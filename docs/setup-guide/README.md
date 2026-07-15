@@ -1,7 +1,7 @@
-# Setup Guide — forty-two-watts
+# Setup Guide — FTW
 
-Installationsguide för forty-two-watts, i flera språk.
-Setup guide for forty-two-watts, in several languages.
+Installationsguide för FTW, i flera språk.
+Setup guide for FTW, in several languages.
 
 - Svenska — [sv.md](sv.md)
 - English — [en.md](en.md)

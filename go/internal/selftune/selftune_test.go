@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/battery"
+	"github.com/srcfl/ftw/go/internal/battery"
 )
 
 // ---- Step progression ----

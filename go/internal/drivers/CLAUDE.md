@@ -27,7 +27,7 @@ Spawns one goroutine per device driver, running a Lua 5.1 script via `yuin/gophe
 
 ## How it talks to neighbors
 
-`Registry.Add` resolves capabilities via the injected `MQTTFactory` / `ModbusFactory` / `ARPLookup` (wired in `cmd/forty-two-watts/main.go`). MAC resolution comes from `../arp`; endpoint is set from the MQTT/Modbus config. The HostEnv owns a pointer to `../telemetry.Store` — `emitTelemetry` routes structured pv/battery/meter readings through `Store.Update`, `emitMetric` routes scalar diagnostics through `Store.EmitMetric`, and each successful poll records a health tick via `DriverHealthMut`. The Lua backend adapts a `map[string]any` config at the boundary (`registry.go`). See `docs/writing-a-driver.md` and `docs/host-api.md`.
+`Registry.Add` resolves capabilities via the injected `MQTTFactory` / `ModbusFactory` / `ARPLookup` (wired in `cmd/ftw/main.go`). MAC resolution comes from `../arp`; endpoint is set from the MQTT/Modbus config. The HostEnv owns a pointer to `../telemetry.Store` — `emitTelemetry` routes structured pv/battery/meter readings through `Store.Update`, `emitMetric` routes scalar diagnostics through `Store.EmitMetric`, and each successful poll records a health tick via `DriverHealthMut`. The Lua backend adapts a `map[string]any` config at the boundary (`registry.go`). See `docs/writing-a-driver.md` and `docs/host-api.md`.
 
 ## What to read first
 

@@ -1,6 +1,6 @@
 // Package tunnel defines the wire protocol for the relay-as-tunnel
-// design (see docs/goals/relay-as-tunnel.md). The relay is a stateless
-// request queue; this package serializes one tunneled HTTP request +
+// design (see docs/archive/agent-artifacts/goals/relay-as-tunnel.md). The relay
+// is a stateless request queue; this package serializes one tunneled HTTP request +
 // response as JSON bodies with base64'd payloads.
 package tunnel
 

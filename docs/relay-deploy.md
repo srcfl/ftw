@@ -1,10 +1,15 @@
 # Deploying the `ftw-relay` HTTPS relay
 
-The new relay terminates HTTPS for `relay.fortytwowatts.com` and
+The new relay terminates HTTPS for `relay.ftw.sourceful.energy` and
 serves the request-response tunnel. This doc walks through the one-time
 deploy on the AWS VM that previously ran the raw-TCP `ftw-subetha`
 binary. Historical design context lives in
 [`archive/agent-artifacts/goals/relay-as-tunnel.md`](archive/agent-artifacts/goals/relay-as-tunnel.md).
+
+> **Provisioning status:** repository defaults now use the Sourceful relay and
+> TURN names, but those endpoints are not declared operational by this change.
+> Complete and verify this runbook before relying on remote access. Local
+> control continues to work if relay/TURN is unavailable.
 
 ## Topology
 
@@ -30,30 +35,25 @@ the original trade-off analysis.
 
 ## Prerequisites
 
-- AWS VM (whatever the current `subetha.fortytwowatts.com` runs on).
+- AWS VM (the previous relay VM may be reused).
 - Public IP, port `:443` reachable from the internet.
-- Cloudflare account with `fortytwowatts.com` zone.
-- TLS material: cert in `deploy/secrets/relay.fortytwowatts.com.cert.pem`
-  (in this repo, gitignored); private key in your password manager
-  (Cloudflare showed it once at generation — if you don't have it,
-  regenerate the pair in the CF dashboard).
+- DNS/TLS access for the `sourceful.energy` zone.
+- New TLS material covering `relay.ftw.sourceful.energy`. The legacy
+  `*.fortytwowatts.com` origin certificate does not cover this host.
 
 ## One-time DNS + CF setup
 
-In the Cloudflare dashboard for `fortytwowatts.com`:
+In the DNS/CDN dashboard for `sourceful.energy`:
 
-1. **DNS** → add `A relay → <AWS VM IP>`, **Proxied** (orange cloud).
+1. **DNS** → add `A relay.ftw → <AWS VM IP>`, **Proxied** (orange cloud).
 2. **SSL/TLS → Overview** → mode: **Full (strict)**.
 3. **SSL/TLS → Edge Certificates**:
    - Always Use HTTPS: **On**
-   - HSTS: **Enable** with `max-age = 31536000`, include subdomains,
-     preload. Confirm you understand the consequences before
-     enabling preload on the apex.
+   - HSTS: enable for the relay response only after HTTPS is verified. Do not
+     change apex-wide Sourceful HSTS/preload policy from this runbook.
    - Minimum TLS version: **TLS 1.2** (or 1.3 if you want to drop
      older clients — fine for our use).
-4. **Submit `fortytwowatts.com` to `hstspreload.org`** once HSTS is
-   verified live. The submission is permanent; the apex needs to
-   serve HTTPS for every subdomain that ever exists, forever.
+4. Verify edge and origin TLS before enabling production traffic.
 
 ## One-time VM setup
 
@@ -69,8 +69,8 @@ sudo chown root:root /etc/ssl/relay
 From your laptop:
 
 ```bash
-scp deploy/secrets/relay.fortytwowatts.com.cert.pem \
-    ubuntu@relay.fortytwowatts.com:/tmp/cert.pem
+scp deploy/secrets/relay.ftw.sourceful.energy.cert.pem \
+    ubuntu@relay.ftw.sourceful.energy:/tmp/cert.pem
 ```
 
 On the VM:
@@ -90,7 +90,7 @@ Verify:
 
 ```bash
 sudo openssl x509 -in /etc/ssl/relay/cert.pem -noout -dates -subject
-# notAfter=May 23 08:26:00 2041 GMT  ← good
+# Check that the dates and SANs cover relay.ftw.sourceful.energy.
 sudo openssl rsa -in /etc/ssl/relay/key.pem -check -noout
 # RSA key ok
 ```
@@ -108,7 +108,7 @@ sudo openssl rsa  -in /etc/ssl/relay/key.pem  -noout -modulus | openssl md5
 ```bash
 # Build matrix from CI uploads to GitHub releases.
 sudo curl -fsSL -o /usr/local/bin/ftw-relay \
-  https://github.com/frahlg/forty-two-watts/releases/latest/download/ftw-relay-linux-amd64
+  https://github.com/srcfl/ftw/releases/latest/download/ftw-relay-linux-amd64
 sudo chmod 0755 /usr/local/bin/ftw-relay
 sudo chown root:root /usr/local/bin/ftw-relay
 ```
@@ -118,7 +118,7 @@ sudo chown root:root /usr/local/bin/ftw-relay
 ```bash
 sudo tee /etc/systemd/system/ftw-relay.service >/dev/null <<'EOF'
 [Unit]
-Description=ftw-relay HTTPS tunnel for relay.fortytwowatts.com
+Description=ftw-relay HTTPS tunnel for relay.ftw.sourceful.energy
 After=network-online.target
 Wants=network-online.target
 
@@ -179,8 +179,8 @@ This needs a TURN server. We self-host coturn. The runbook below stands one up.
 
 TURN media (UDP/TCP 3478, TLS 5349, and a high UDP relay range) **cannot
 traverse Cloudflare's HTTP proxy**. coturn must be reachable on a real public IP.
-Add `turn.fortytwowatts.com` as an **A record with proxy status _DNS only_ (grey
-cloud)** → the relay VM's public IP. Leave `relay.fortytwowatts.com` orange-cloud
+Add `turn.ftw.sourceful.energy` as an **A record with proxy status _DNS only_ (grey
+cloud)** → the relay VM's public IP. Leave `relay.ftw.sourceful.energy` orange-cloud
 (its HTTPS is unchanged). An orange cloud on `turn.*` silently breaks TURN.
 
 #### 2. coturn `/etc/turnserver.conf` (REST-API mode)
@@ -203,7 +203,7 @@ max-port=65535
 # REST API shared secret — MUST byte-for-byte equal the relay's FTW_TURN_SECRET.
 use-auth-secret
 static-auth-secret=<TURN_SECRET>
-realm=turn.fortytwowatts.com
+realm=turn.ftw.sourceful.energy
 
 # TLS for turns:5349 (see step 4 for which cert)
 cert=/etc/coturn/cert.pem
@@ -283,7 +283,7 @@ ExecStart=/usr/local/bin/ftw-relay \
   -cert /etc/ssl/relay/cert.pem \
   -key  /etc/ssl/relay/key.pem \
   -ice-stun stun:stun.l.google.com:19302 \
-  -turn-url turn:turn.fortytwowatts.com:3478?transport=udp,turns:turn.fortytwowatts.com:5349
+  -turn-url turn:turn.ftw.sourceful.energy:3478?transport=udp,turns:turn.ftw.sourceful.energy:5349
 ```
 
 ```bash
@@ -304,12 +304,12 @@ curl -s https://home.fortytwowatts.com/signal/ice | jq .
 ICE=$(curl -s https://home.fortytwowatts.com/signal/ice)
 U=$(echo "$ICE" | jq -r '.ice_servers[]|select(.username)|.username')
 C=$(echo "$ICE" | jq -r '.ice_servers[]|select(.credential)|.credential')
-turnutils_uclient -v -u "$U" -w "$C" turn.fortytwowatts.com        # UDP
-turnutils_uclient -v -S -u "$U" -w "$C" -p 5349 turn.fortytwowatts.com  # TLS
+turnutils_uclient -v -u "$U" -w "$C" turn.ftw.sourceful.energy        # UDP
+turnutils_uclient -v -S -u "$U" -w "$C" -p 5349 turn.ftw.sourceful.energy  # TLS
 #    401 = secret mismatch; 403 to a private target = SSRF deny working.
 
 # 3. Browser: https://webrtc.github.io/samples/src/content/peerconnection/trickle-ice/
-#    add turn:turn.fortytwowatts.com:3478?transport=udp with $U/$C, Gather
+#    add turn:turn.ftw.sourceful.energy:3478?transport=udp with $U/$C, Gather
 #    candidates, and confirm a candidate of type "relay" appears.
 ```
 
@@ -325,21 +325,20 @@ From your laptop:
 
 ```bash
 # Cert + chain
-echo | openssl s_client -connect relay.fortytwowatts.com:443 \
-  -servername relay.fortytwowatts.com 2>/dev/null \
+echo | openssl s_client -connect relay.ftw.sourceful.energy:443 \
+  -servername relay.ftw.sourceful.energy 2>/dev/null \
   | openssl x509 -noout -subject -issuer -dates
 
 # Should see "Connection: close" 200 OK or a 404 if no token is hit
-curl -v https://relay.fortytwowatts.com/healthz
+curl -v https://relay.ftw.sourceful.energy/healthz
 ```
 
 ## Renewal
 
-The Origin Cert is valid for 15 years (until 2041). No automatic
-renewal. Calendar reminder: 2040-11-01 → regenerate in Cloudflare
-dashboard, redo "Cert + key" section above. The CF edge cert in
-front of the relay is auto-renewed by Cloudflare with no action
-required.
+Record the new origin certificate's actual expiry in the operations calendar;
+do not reuse the legacy certificate's 2041 date. Cloudflare-managed edge
+certificates renew automatically, while origin certificate renewal depends on
+the certificate type selected above.
 
 ## Multi-tenant home route + onboarding bootstrap
 
@@ -358,7 +357,7 @@ Install the relay bootstrap bundle:
 ```
 sudo mkdir -p /usr/local/share/ftw-relay-web
 curl -fsSL -o /tmp/ftw-relay-web.tar.gz \
-  https://github.com/frahlg/forty-two-watts/releases/latest/download/ftw-relay-web.tar.gz
+  https://github.com/srcfl/ftw/releases/latest/download/ftw-relay-web.tar.gz
 sudo tar -C /usr/local/share/ftw-relay-web -xzf /tmp/ftw-relay-web.tar.gz
 ```
 
@@ -471,7 +470,7 @@ enroll a second device.
 
 **The production enroll-forward host.** The two `enroll/{start,finish}` POSTs are
 enqueued onto the box's tunnel queue. The box drains them with a narrow tunnel
-host (`cmd/forty-two-watts/owner_relay_register.go`, `staticAssetHandler`) that
+host (`cmd/ftw/owner_relay_register.go`, `staticAssetHandler`) that
 serves **only** those two POSTs, stamps the per-process `X-FTW-Tunnel` marker so
 the box's `isTunneled` gate fires (PIN + possession-proof + zero-device recheck +
 owner-cookie suppression), and strips `Set-Cookie` on the way back. Every other
@@ -494,7 +493,7 @@ genuine browser can compute — and even then it cannot alter a single forwarded
 today. Nobody depends on it (no field installs of `ftw-connect`),
 so the migration is:
 
-1. Bring up `relay.fortytwowatts.com` per this doc.
+1. Bring up `relay.ftw.sourceful.energy` per this doc.
 2. Update host code (`ftw-pair`) to long-poll the new relay instead
    of dialing the subetha TCP endpoint.
 3. Cut the next release; Pi instances pick up the new client.

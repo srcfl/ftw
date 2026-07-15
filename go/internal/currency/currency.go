@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 const (
@@ -170,7 +170,7 @@ func (s *Service) fetch(ctx context.Context) {
 		slog.Warn("ecb fx fetch", "err", err)
 		return
 	}
-	req.Header.Set("User-Agent", "forty-two-watts/1.0")
+	req.Header.Set("User-Agent", "FTW/1.0")
 	resp, err := s.Client.Do(req)
 	if err != nil {
 		slog.Warn("ecb fx fetch", "err", err)
@@ -212,7 +212,9 @@ func (s *Service) fetch(ctx context.Context) {
 }
 
 // persist writes the current rates to state as a simple flat string:
+//
 //   "YYYY-MM-DD;CODE:RATE;CODE:RATE;..."
+//
 // Keeps parsing trivial + human-debuggable.
 func (s *Service) persist() {
 	if s.Store == nil {

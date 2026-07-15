@@ -20,7 +20,7 @@ Wraps one `simonvetter/modbus.ModbusClient` per driver and implements `drivers.M
 
 ## How it talks to neighbors
 
-`../drivers` Registry holds a `ModbusFactory` wired in `cmd/forty-two-watts/main.go` that calls `Dial(c.Host, c.Port, c.UnitID)` per driver. The returned `*Capability` is bound to the driver's `HostEnv.Modbus`. Lua drivers call `host.modbus_read / host.modbus_write / host.modbus_write_multi`, which route through `drivers.ModbusCap`. The endpoint string `modbus://<host>:<port>` is recorded on the HostEnv for device-identity and the host IP gets ARP-resolved for MAC-stable `device_id`.
+`../drivers` Registry holds a `ModbusFactory` wired in `cmd/ftw/main.go` that calls `Dial(c.Host, c.Port, c.UnitID)` per driver. The returned `*Capability` is bound to the driver's `HostEnv.Modbus`. Lua drivers call `host.modbus_read / host.modbus_write / host.modbus_write_multi`, which route through `drivers.ModbusCap`. The endpoint string `modbus://<host>:<port>` is recorded on the HostEnv for device-identity and the host IP gets ARP-resolved for MAC-stable `device_id`.
 
 ## What to read first
 

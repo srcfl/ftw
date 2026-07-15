@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // bridge_session_test.go — slice-5: the Bridge captures the ftw_owner session

@@ -1,7 +1,7 @@
 # ADR 0001 — WebAuthn RP-ID for owner remote access
 
 - Status: Accepted (2026-06-03)
-- Context: `docs/superpowers/specs/2026-06-03-home-route-passkey-design.md`
+- Context: [archived home-route passkey design](../archive/agent-artifacts/superpowers/specs/2026-06-03-home-route-passkey-design.md)
 
 ## Decision
 
@@ -30,7 +30,7 @@ re-enrollment. Therefore:
 - **Phases 1–3 (done):** RP-ID ran on `relay.fortytwowatts.com` (the host then
   serving the page) for security-floor hardening only — no real passkeys.
 - **Phase 4 (SHIPPED):** the cutover has landed. The RP-ID default is now
-  **`home.fortytwowatts.com`** (`go/cmd/forty-two-watts/main.go`, mirrored in
+  **`home.fortytwowatts.com`** (`go/cmd/ftw/main.go`, mirrored in
   `api_owner_access.go`'s `webauthnLib` fallback), enrollment is served from that
   origin, and the relay's single-home route requires an operator
   `-home-pubkey` pin. `FTW_OWNER_ACCESS_RPID` remains an override knob for dev

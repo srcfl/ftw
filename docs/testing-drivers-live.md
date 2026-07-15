@@ -36,7 +36,7 @@ make dev
 ```
 
 From `Makefile:102-109` this is `make run-sim` plus
-`go run ./cmd/forty-two-watts -config ../config.local.yaml -web ../web`.
+`go run ./cmd/ftw -config ../config.local.yaml -web ../web`.
 The main binary parses `config.local.yaml`, spawns every declared
 driver, and serves the HTTP API on `:8080`.
 
@@ -84,11 +84,11 @@ What this means for live driver development:
   current design.
 
 Tail logs under `make dev` (everything goes to stdout; slog text
-handler at `slog.LevelInfo` — `go/cmd/forty-two-watts/main.go:53`):
+handler at `slog.LevelInfo` — `go/cmd/ftw/main.go:53`):
 
 ```bash
-make dev 2>&1 | tee /tmp/42w.log
-tail -f /tmp/42w.log
+make dev 2>&1 | tee /tmp/ftw.log
+tail -f /tmp/ftw.log
 ```
 
 There is no `LOG_LEVEL` env var — the level is hardcoded to
@@ -121,8 +121,8 @@ Lua drivers have no build step.
 ### 3.1 Build + tarball
 
 ```bash
-make build-arm64   # → bin/forty-two-watts-linux-arm64
-make release       # → release/forty-two-watts-linux-{arm64,amd64}.tar.gz
+make build-arm64   # → bin/ftw-linux-arm64
+make release       # → release/ftw-linux-{arm64,amd64}.tar.gz
 ```
 
 The tarball bundles the binary, `drivers/`, `web/`, and
@@ -136,36 +136,31 @@ Assuming the service unit is already installed (see
 ```bash
 PI=pi@pi.local   # edit to taste
 
-# Ship the binary + bundled assets
-rsync -avz release/forty-two-watts-linux-arm64.tar.gz $PI:/tmp/
-ssh $PI 'cd ~/forty-two-watts-go && \
-  tar xzf /tmp/forty-two-watts-linux-arm64.tar.gz && \
-  mv forty-two-watts-linux-arm64 forty-two-watts.new && \
-  sudo systemctl stop forty-two-watts && \
-  mv forty-two-watts.new forty-two-watts && \
-  chmod +x forty-two-watts && \
-  sudo systemctl start forty-two-watts'
+# Ship the binary
+scp bin/ftw-linux-arm64 $PI:/tmp/ftw.new
+ssh $PI 'sudo systemctl stop ftw && \
+  sudo install -m 0755 /tmp/ftw.new /opt/ftw/ftw && \
+  sudo systemctl start ftw'
 
-# Ship Lua drivers separately (not in the tarball)
-rsync -avz drivers/ $PI:~/forty-two-watts-go/drivers/
+# Ship a custom Lua driver into the persistent override directory
+scp drivers/mydriver.lua $PI:/tmp/mydriver.lua
+ssh $PI 'sudo install -m 0644 /tmp/mydriver.lua /var/lib/ftw/drivers/mydriver.lua'
 ```
 
 ### 3.3 Tail logs on the Pi
 
-The shipped unit redirects stdout to a file and stderr to journald
-(`docs/operations.md` §5):
+The shipped unit sends logs to journald (`docs/operations.md` §5):
 
 ```bash
-ssh $PI 'tail -f ~/forty-two-watts-go/forty-two-watts.log'
-ssh $PI 'journalctl -u forty-two-watts -f'   # stderr + lifecycle
+ssh $PI 'journalctl -u ftw -f'
 ```
 
 ### 3.4 Iterate on a driver on-Pi
 
 ```bash
 # Edit locally, push, and touch the config to force a reload
-scp drivers/mydriver.lua $PI:~/forty-two-watts-go/drivers/
-ssh $PI 'touch ~/forty-two-watts-go/config.yaml'
+scp drivers/mydriver.lua $PI:/tmp/mydriver.lua
+ssh $PI 'sudo install -m 0644 /tmp/mydriver.lua /var/lib/ftw/drivers/mydriver.lua && sudo touch /etc/ftw/config.yaml'
 ```
 
 `touch` bumps the mtime; fsnotify fires; the watcher re-parses and
@@ -257,9 +252,9 @@ bank inside that sim package — no new binary needed.
 `site.watchdog_timeout_s` (default 60 s) is the oldest-telemetry
 threshold; beyond it the driver flips to `StatusOffline` and the
 control loop sends `DefaultMode` to make it autonomous
-(`go/cmd/forty-two-watts/main.go` control-loop branch +
+(`go/cmd/ftw/main.go` control-loop branch +
 `tel.WatchdogScan`). A driver stuck at the same `tick_count` across
-several seconds has a hung VM — `sudo systemctl restart forty-two-watts`
+several seconds has a hung VM — `sudo systemctl restart ftw`
 on the Pi, then fix the root cause.
 
 ### 6.2 Self-tune + battery model reset

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 const (
@@ -894,7 +894,7 @@ const offlineHTML = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>forty-two-watts — home offline</title>
+<title>FTW — home offline</title>
 <style>
   :root { --accent: #f0c040; --ink: #1a1a1a; --muted: #6b6b6b; --line: #e6e3dd; --bg: #faf9f7; }
   * { box-sizing: border-box; }
@@ -915,7 +915,7 @@ const offlineHTML = `<!doctype html>
 </style>
 </head><body>
   <main class="card">
-    <div class="eyebrow"><span class="dot"></span> forty-two-watts</div>
+    <div class="eyebrow"><span class="dot"></span> FTW</div>
     <h1>{{HEADLINE}}</h1>
     <p>{{DETAIL}}</p>
     <button id="retry" type="button">Try again</button>
@@ -1123,7 +1123,7 @@ func esc(s string) string {
 // Format args (in order): token, claimed identity (host-supplied "as"),
 // intent, current token state.
 const landingHTML = `<!doctype html>
-<html><head><title>forty-two-watts pair session</title>
+<html><head><title>FTW pair session</title>
 <style>
   body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #222; }
   code { background: #f4f4f4; padding: .2rem .4rem; border-radius: .2rem; }
@@ -1157,7 +1157,7 @@ const landingHTML = `<!doctype html>
   .muted { color: #888; font-size: 0.9em; }
 </style>
 </head><body>
-<h1>forty-two-watts pair session</h1>
+<h1>FTW pair session</h1>
 <p>From: <code>%s</code></p>
 <p>Intent: %s</p>
 

@@ -12,8 +12,8 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/frahlg/forty-two-watts/go/internal/p2p"
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/p2p"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // TestHandleP2POffer_RoundTrip drives the real POST /api/p2p/offer handler with

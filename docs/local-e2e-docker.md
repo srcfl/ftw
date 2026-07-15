@@ -1,7 +1,7 @@
 # Local end-to-end harness (relay + Pi in Docker)
 
 Run the **whole home-route stack on one machine** — the standalone `ftw-relay`
-plus a `forty-two-watts` "Pi" wired to dial it — with no real Pi, no relay VM, no
+plus a `FTW` "Pi" wired to dial it — with no real Pi, no relay VM, no
 Cloudflare, and no certificates. This is the fast feedback loop for anything that
 touches owner-access, the relay tunnel, the pair flow, or P2P.
 
@@ -70,7 +70,7 @@ non-zero if it fails. The test:
    the passkey enroll + login run with no human prompt;
 2. **enrolls** a passkey over the relay tunnel (first enrollment needs the LAN
    PIN — the test mints it straight from the Pi's bridge port
-   `forty-two-watts:8080`, a genuine private-range source, exactly the
+   `FTW:8080`, a genuine private-range source, exactly the
    local-presence proof the PIN exists for), then **logs in** with it;
 3. asserts the real P2P `RTCDataChannel` reaches **`direct`** (polls
    `window.ftwP2P.state()`), proving container-to-container WebRTC forms with no

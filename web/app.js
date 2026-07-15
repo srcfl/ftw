@@ -1,4 +1,4 @@
-// forty-two-watts dashboard — plain JS, no framework
+// FTW dashboard — plain JS, no framework
 
 (function () {
   "use strict";

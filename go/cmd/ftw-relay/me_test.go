@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/nova"
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/nova"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // newTestIdentity mints a throwaway ES256 site identity (the same type the Pi

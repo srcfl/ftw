@@ -1,6 +1,6 @@
 package savings
 
-import "github.com/frahlg/forty-two-watts/go/internal/state"
+import "github.com/srcfl/ftw/go/internal/state"
 
 // MaxGapMs caps the per-row integration interval. The history schema
 // produces samples ~5 s apart in hot, ~15 min in warm, ~1 day in cold.

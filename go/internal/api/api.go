@@ -1,4 +1,4 @@
-// Package api is the HTTP surface for forty-two-watts: control endpoints,
+// Package api is the HTTP surface for FTW: control endpoints,
 // telemetry queries, config get/set, battery-model introspection, self-tune
 // orchestration, static file serving for the web UI.
 //
@@ -23,28 +23,28 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/battery"
-	"github.com/frahlg/forty-two-watts/go/internal/calendar"
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/control"
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
-	"github.com/frahlg/forty-two-watts/go/internal/evcloud"
-	"github.com/frahlg/forty-two-watts/go/internal/events"
-	"github.com/frahlg/forty-two-watts/go/internal/forecast"
-	"github.com/frahlg/forty-two-watts/go/internal/ha"
-	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/loadpoint"
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
-	"github.com/frahlg/forty-two-watts/go/internal/notifications"
-	"github.com/frahlg/forty-two-watts/go/internal/p2p"
-	"github.com/frahlg/forty-two-watts/go/internal/prices"
-	"github.com/frahlg/forty-two-watts/go/internal/pvmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/scanner"
-	"github.com/frahlg/forty-two-watts/go/internal/selftune"
-	"github.com/frahlg/forty-two-watts/go/internal/selfupdate"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
-	v2xpolicy "github.com/frahlg/forty-two-watts/go/internal/v2x"
+	"github.com/srcfl/ftw/go/internal/battery"
+	"github.com/srcfl/ftw/go/internal/calendar"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/evcloud"
+	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/forecast"
+	"github.com/srcfl/ftw/go/internal/ha"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
+	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/notifications"
+	"github.com/srcfl/ftw/go/internal/p2p"
+	"github.com/srcfl/ftw/go/internal/prices"
+	"github.com/srcfl/ftw/go/internal/pvmodel"
+	"github.com/srcfl/ftw/go/internal/scanner"
+	"github.com/srcfl/ftw/go/internal/selftune"
+	"github.com/srcfl/ftw/go/internal/selfupdate"
+	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/telemetry"
+	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
 )
 
 const (
@@ -65,7 +65,7 @@ const (
 // SignRawHex returns the raw r||s 64-byte signature as a 128-char hex string
 // (the handler re-encodes it to base64url for the wire). Declared as an
 // interface here so internal/api does not import internal/nova (matches the
-// relaySigner pattern in cmd/forty-two-watts/owner_relay_register.go).
+// relaySigner pattern in cmd/ftw/owner_relay_register.go).
 type InstanceSigner interface {
 	PublicKeyHex() string
 	SignRawHex(msg string) (string, error)
@@ -192,7 +192,7 @@ type Deps struct {
 	OwnerAccessLANBypass bool
 
 	// TunnelMarker is a per-process random secret. The relay long-poll
-	// reverse-proxy (cmd/forty-two-watts/owner_relay_register.go) sets it
+	// reverse-proxy (cmd/ftw/owner_relay_register.go) sets it
 	// as the X-FTW-Tunnel header on every request it forwards from the
 	// relay to the local API server. A request carrying this exact value
 	// is therefore known to have arrived via the relay tunnel (remote) and
@@ -202,7 +202,7 @@ type Deps struct {
 
 	// SiteIdentityPubHex is the uncompressed P-256 public key (X||Y, 128 hex
 	// chars) of this Pi's self-sovereign ES256 identity — generated on first
-	// boot regardless of Nova (see cmd/forty-two-watts/main.go). Empty if
+	// boot regardless of Nova (see cmd/ftw/main.go). Empty if
 	// identity load failed; the /api/identity endpoint then returns 503.
 	SiteIdentityPubHex string
 

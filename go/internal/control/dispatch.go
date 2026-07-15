@@ -6,8 +6,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Mode is the operating mode of the control loop.

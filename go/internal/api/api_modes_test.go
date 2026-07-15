@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/control"
 )
 
 // TestModesEndpoint verifies /api/modes serves the full canonical catalog

@@ -49,7 +49,7 @@ describe("remote loader auto-open guard", () => {
 
   it("explains synced-passkey directory gaps without implying the passkey is broken", () => {
     assert.match(LOADER, /Some synced passkeys do not share the encrypted home key/);
-    assert.match(LOADER, /local 42W Settings -> Access/);
+    assert.match(LOADER, /local FTW Settings -> Access/);
   });
 
   it("bumps the loader script URL when bootstrap behavior changes", () => {

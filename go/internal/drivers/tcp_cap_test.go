@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // ---- TCPCap unit tests -----------------------------------------------------
@@ -206,11 +206,13 @@ func (f *fakeTCPCap) IsOpen() bool { return f.opened && !f.closed }
 func (f *fakeTCPCap) Close() error { f.closed = true; return nil }
 
 // Synthetic DSMR 5.0 telegram body. Values chosen so we can pin every emit:
+//
 //   import 1.234 kW, export 0.500 kW   → meter.w = +734 W
 //   per-phase voltages 230.1 / 230.2 / 230.3 V
 //   per-phase currents 5 / 3 / 7 A
 //   import T1 100.000 kWh + T2 200.000 kWh → import_wh = 300_000
 //   export T1 10.000 kWh + T2 20.000 kWh → export_wh = 30_000
+//
 // CRC is computed at runtime via dsmrCRC16; tests build the full telegram
 // with dsmrWrap() so they exercise the same CRC path the live meter does.
 const dsmrBody = "/XMX5LGBBFFB231215493\r\n" +
@@ -507,4 +509,3 @@ func nearly(a, b, eps float64) bool {
 	}
 	return d <= eps
 }
-

@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // writeTempDriver drops a .lua file into a temp dir and returns its path.

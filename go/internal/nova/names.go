@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// DerName derives the stable human name forty-two-watts uses for a DER
+// DerName derives the stable human name FTW uses for a DER
 // in Nova. Nova stores this on the DER row (unique per device) and the
 // publisher puts it into every telemetry topic path, so stability is
 // load-bearing: a rename orphans every metric in VictoriaMetrics.
@@ -55,7 +55,7 @@ func sanitizeTopicSegment(s string) string {
 }
 
 // DeviceTypeFor chooses a Nova device_type string from the set of
-// DER kinds one forty-two-watts driver reports. Nova expects one of
+// DER kinds one FTW driver reports. Nova expects one of
 // a fixed vocabulary (checked against its device_types table); we
 // pick the most-specific single value consistent with what the driver
 // actually emits:
@@ -66,7 +66,7 @@ func sanitizeTopicSegment(s string) string {
 //   - emits only meter                     → "meter"
 //   - emits only ev/v2x                    → "charger"
 //
-// derKinds is the set of forty-two-watts clean DER kinds (pv, battery,
+// derKinds is the set of FTW clean DER kinds (pv, battery,
 // meter, ev, v2x_charger) observed for this device.
 func DeviceTypeFor(derKinds []string) string {
 	has := map[string]bool{}

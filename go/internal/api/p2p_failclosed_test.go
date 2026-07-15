@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/p2p"
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/p2p"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // p2p_failclosed_test.go — the slice-5 regression guard for the P2P-only home

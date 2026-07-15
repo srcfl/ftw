@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deploy forty-two-watts to a remote host — ships the Go binary + Lua
+# Deploy FTW to a remote host — ships the Go binary + Lua
 # drivers + web assets.
 #
 # Usage:
@@ -11,27 +11,27 @@ set -euo pipefail
 
 HOST=${1:?Usage: $0 <ssh-host> [version]}
 VERSION=${2:-latest}
-REPO="frahlg/forty-two-watts"
-REMOTE_DIR="forty-two-watts-go"
+REPO="srcfl/ftw"
+REMOTE_DIR="${FTW_REMOTE_DIR:-ftw-go}"
 
 # Detect arch
 ARCH=$(ssh "$HOST" "uname -m")
 case "$ARCH" in
-    aarch64) BINARY="forty-two-watts-linux-arm64" ;;
-    x86_64)  BINARY="forty-two-watts-linux-amd64" ;;
+    aarch64) ARCHIVE="ftw-linux-arm64.tar.gz" ;;
+    x86_64)  ARCHIVE="ftw-linux-amd64.tar.gz" ;;
     *) echo "Unsupported arch: $ARCH"; exit 1 ;;
 esac
 
 # Resolve download URL
 if [ "$VERSION" = "latest" ]; then
     URL=$(gh release view --repo "$REPO" --json assets \
-        --jq ".assets[] | select(.name | contains(\"${BINARY}\")) | .url")
+        --jq ".assets[] | select(.name == \"${ARCHIVE}\") | .url")
 else
     URL=$(gh release view "$VERSION" --repo "$REPO" --json assets \
-        --jq ".assets[] | select(.name | contains(\"${BINARY}\")) | .url")
+        --jq ".assets[] | select(.name == \"${ARCHIVE}\") | .url")
 fi
 
-echo "Deploying $BINARY @ $VERSION to $HOST..."
+echo "Deploying $ARCHIVE @ $VERSION to $HOST..."
 ssh "$HOST" "
     set -e
     mkdir -p ~/$REMOTE_DIR
@@ -45,6 +45,7 @@ ssh "$HOST" "
     fi
 
     # Stop running instance
+    pkill -f '$REMOTE_DIR/ftw' 2>/dev/null || true
     pkill -f '$REMOTE_DIR/forty-two-watts' 2>/dev/null || true
     sleep 1
 
@@ -54,11 +55,12 @@ ssh "$HOST" "
     curl -sL '$URL' | tar xz -C .deploy-staging
 
     # Backup current binary
-    [ -f forty-two-watts ] && cp forty-two-watts forty-two-watts.bak
+    [ -f ftw ] && cp ftw ftw.bak
 
     # Swap binary + web + drivers (config.yaml + *.db untouched)
-    cp .deploy-staging/$BINARY forty-two-watts
-    chmod +x forty-two-watts
+    cp .deploy-staging/ftw ftw
+    ln -sf ftw forty-two-watts
+    chmod +x ftw
     rm -rf web drivers
     cp -r .deploy-staging/web web
     cp -r .deploy-staging/drivers drivers
@@ -67,7 +69,7 @@ ssh "$HOST" "
     echo 'Binary updated to $VERSION'
 
     # Start
-    nohup ./forty-two-watts -config config.yaml -web web > forty-two-watts.log 2>&1 &
+    nohup ./ftw -config config.yaml -web web > ftw.log 2>&1 &
     sleep 3
 
     if curl -sf http://localhost:8080/api/health > /dev/null; then
@@ -76,6 +78,6 @@ ssh "$HOST" "
         echo
     else
         echo 'WARNING: health check failed'
-        tail -10 forty-two-watts.log
+        tail -10 ftw.log
     fi
 "

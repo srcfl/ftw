@@ -201,7 +201,7 @@ PIDS+=("$!")
 PIDS+=("$!")
 
 log "starting app on :$API_PORT"
-"$ROOT/bin/forty-two-watts" -config "$CONFIG" -web "$ROOT/web" -drivers "$ROOT/drivers" > "$ARTIFACT_DIR/app.log" 2>&1 &
+"$ROOT/bin/ftw" -config "$CONFIG" -web "$ROOT/web" -drivers "$ROOT/drivers" > "$ARTIFACT_DIR/app.log" 2>&1 &
 PIDS+=("$!")
 
 if ! wait_for_url "http://127.0.0.1:$API_PORT/api/health" "$ARTIFACT_DIR/health.wait.json" 60; then

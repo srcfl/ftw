@@ -19,7 +19,7 @@ import {
 
 const stateActive = {
   code: "alpha-amber-arrow-atom-axis-bay",
-  pair_url: "https://relay.fortytwowatts.com/h/alpha-amber-arrow-atom-axis-bay",
+  pair_url: "https://relay.ftw.sourceful.energy/h/alpha-amber-arrow-atom-axis-bay",
   approval_code: "4827",
   session_state: "active",
   intent: "help me write a sungrow driver",
@@ -149,7 +149,7 @@ describe("derivePresence (state machine across session lifecycle)", () => {
 describe("friendMessage (golden snapshot)", () => {
   it("includes BOTH the URL and the 4-digit code", () => {
     const msg = friendMessage(stateActive);
-    assert.match(msg, /https:\/\/relay\.fortytwowatts\.com\/h\/alpha-amber/);
+    assert.match(msg, /https:\/\/relay\.ftw\.sourceful\.energy\/h\/alpha-amber/);
     assert.match(msg, /Code: 4827/);
   });
 

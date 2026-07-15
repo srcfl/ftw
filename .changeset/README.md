@@ -34,7 +34,7 @@ with this frontmatter:
 
 ```markdown
 ---
-"forty-two-watts": minor
+"ftw": minor
 ---
 
 One-line summary of the user-visible change.

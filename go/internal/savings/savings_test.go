@@ -4,8 +4,8 @@ import (
 	"math"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // constHistory generates one HistoryPoint per minute over [startMs, endMs]

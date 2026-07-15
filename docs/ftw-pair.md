@@ -1,7 +1,7 @@
-# `ftw-pair` — handing over a 42W instance temporarily
+# `ftw-pair` — handing over a FTW instance temporarily
 
 `ftw-pair` lets you grant time-bound MCP access to a running
-forty-two-watts instance over an encrypted relay tunnel. The recipient's
+FTW instance over an encrypted relay tunnel. The recipient's
 Claude Code gets a curated tool surface for driver development, model
 tuning, or live debugging.
 
@@ -29,7 +29,7 @@ To end the session early, click **Abort** on the card.
 Or, if you prefer the terminal:
 
 ```bash
-forty-two-watts pair --intent "help me write a goodwe XS driver" --ttl 4h
+FTW pair --intent "help me write a goodwe XS driver" --ttl 4h
 ```
 
 The CLI prints the token directly:
@@ -42,7 +42,7 @@ TTL: 4h0m0s — sidecar will exit at expiry
 To abort from the terminal:
 
 ```bash
-forty-two-watts pair --abort
+FTW pair --abort
 ```
 
 ## On the friend
@@ -50,7 +50,7 @@ forty-two-watts pair --abort
 **No install.** The host sends the friend a URL of the form:
 
 ```
-https://relay.fortytwowatts.com/h/garage-coffee-river-bicycle-window-cat
+https://relay.ftw.sourceful.energy/h/garage-coffee-river-bicycle-window-cat
 ```
 
 The friend opens it in any modern browser. The landing page displays
@@ -66,18 +66,18 @@ ready-to-paste blocks:
 1. For Claude Code (or any MCP-aware agent):
    ```bash
    claude mcp add ftw-friend --transport http \
-     https://relay.fortytwowatts.com/h/<token>/mcp
+     https://relay.ftw.sourceful.energy/h/<token>/mcp
    ```
 2. For the browser dashboard:
    ```
-   https://relay.fortytwowatts.com/h/<token>/web/
+   https://relay.ftw.sourceful.energy/h/<token>/web/
    ```
 
 Both URLs are live for the rest of the TTL (default 4 h). The host
 can revoke from the dashboard at any time.
 
 When the work is done, **the friend opens the PR from their own
-machine** — they clone the 42W repo locally (the agent does this for
+machine** — they clone the FTW repo locally (the agent does this for
 them via its own shell), apply the changes they wrote on the owner's
 instance, and run `gh pr create` with the `pair-session.md` template.
 
@@ -87,13 +87,13 @@ the connection, let the friend work, and get a PR link back.
 ## Relay
 
 The transport uses the Sourceful-operated HTTPS relay at
-`relay.fortytwowatts.com`. The host (Pi) opens a long-poll
+`relay.ftw.sourceful.energy`. The host (Pi) opens a long-poll
 connection outbound; the relay enqueues friend traffic for the host
 to pick up. Friend connects with normal HTTPS — browser, `curl`, or
 Claude Code's HTTP MCP transport.
 
 ```
-       relay.fortytwowatts.com (HTTPS, terminated by CF + ftw-relay)
+       relay.ftw.sourceful.energy (HTTPS, terminated by CF + ftw-relay)
                       |
           +-----------+-----------+
           |                       |
@@ -133,7 +133,7 @@ curl -X POST <local-url>/tools/<name> -d '<json args>'  # invoke a tool
 
 The 17 tools:
 
-- `ftw_api(method, path, body)` — full 42W HTTP API
+- `ftw_api(method, path, body)` — full FTW HTTP API
 - `read_file` / `write_file` / `list_directory` — repo, state dir, /tmp
 - `run_command` — shell, same scope
 - `restart_main_service` / `tail_service_logs` — systemd, journalctl
@@ -152,7 +152,7 @@ what changed on the owner's instance.
 
 | Step | Owner | Friend |
 |---|---|---|
-| Trigger pair session | Click **Start pair session** in the dashboard (or `forty-two-watts pair --intent "..."`) | — |
+| Trigger pair session | Click **Start pair session** in the dashboard (or `FTW pair --intent "..."`) | — |
 | Share URL | Copy from the dashboard card, send via Signal/SMS/Slack | Receive |
 | Connect | — | Open the URL in a browser |
 | Approve | Hears the 4-digit code on voice, clicks **Allow** on the dashboard | Reads the code aloud |
@@ -167,10 +167,10 @@ PR the friend opens.
 
 ## Architecture in one paragraph
 
-`forty-two-watts pair` spawns the `ftw-pair` sidecar. The sidecar runs
+`FTW pair` spawns the `ftw-pair` sidecar. The sidecar runs
 a 17-tool HTTP surface on `localhost:9999` (REST at `/tools/<name>` +
 MCP at `/mcp`, sharing the same Tool[] and audit log), then registers
-a 6-word token with the HTTPS relay at `relay.fortytwowatts.com` and
+a 6-word token with the HTTPS relay at `relay.ftw.sourceful.energy` and
 starts a long-poll loop. When a friend opens the URL, the relay
 displays a 4-digit code; the host approves on its dashboard with the
 matching code (heard over voice). After approval, the relay forwards
@@ -207,7 +207,7 @@ regardless of whether the PR is merged.
 
 - One session at a time.
 - 4 h default TTL, configurable, hard kill at expiry.
-- Relay: `relay.fortytwowatts.com` (Sourceful-operated). Override
+- Relay: `relay.ftw.sourceful.energy` (Sourceful-operated). Override
   with `-relay` flag or `FTW_PAIR_RELAY` env var for self-hosted relays
   or local development.
 - No per-call approval after the initial connect-approval. Pairing =
@@ -216,7 +216,7 @@ regardless of whether the PR is merged.
 ## Troubleshooting
 
 **`register with relay: ...`** — the relay isn't reachable from the
-host. Check the host can `curl https://relay.fortytwowatts.com/healthz`.
+host. Check the host can `curl https://relay.ftw.sourceful.energy/healthz`.
 Use `-relay http://localhost:7378` to point at a local relay for testing.
 
 **Friend gets `425 Too Early`** — the host hasn't approved the session
@@ -226,7 +226,7 @@ Without approval, MCP and web paths return 425.
 
 **Agent can't reach the dashboard** — confirm the host's `ftw-pair`
 process is still running and the long-poll loop is healthy. `curl
-https://relay.fortytwowatts.com/h/<token>/web/api/status` from any
+https://relay.ftw.sourceful.energy/h/<token>/web/api/status` from any
 shell to test directly; you should get a JSON payload from the
 dashboard.
 
@@ -251,7 +251,7 @@ cd go && go build -o ../bin/ftw-relay ./cmd/ftw-relay
 ./bin/ftw-relay -addr :7378
 
 # Point the host at it
-FTW_PAIR_RELAY=http://localhost:7378 forty-two-watts pair --intent "..."
+FTW_PAIR_RELAY=http://localhost:7378 FTW pair --intent "..."
 
 # Friend just opens the URL the host prints:
 #   http://localhost:7378/h/<token>

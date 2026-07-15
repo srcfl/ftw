@@ -1,6 +1,6 @@
 # Configuration
 
-forty-two-watts is configured by one YAML file, normally `config.yaml`.
+FTW is configured by one YAML file, normally `config.yaml`.
 The Settings UI reads and writes the same file through the REST API, so
 editing the file and saving through the UI are equivalent paths.
 
@@ -191,7 +191,7 @@ metrics:
   `battery_event1_bits` — raw battery state/event diagnostics.
 - `pixii_setpoint_ems_w` / `pixii_setpoint_native_w` — readback of
   Pixii's active setpoint registers after commands.
-- `pixii_last_command_*` — last command sent by 42W and whether the
+- `pixii_last_command_*` — last command sent by FTW and whether the
   Modbus write succeeded.
 
 The driver also logs status transitions as `Pixii: status ...`. If

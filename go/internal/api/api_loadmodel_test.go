@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/loadmodel"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/loadmodel"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 func TestHandleLoadModelProfileSwitch(t *testing.T) {

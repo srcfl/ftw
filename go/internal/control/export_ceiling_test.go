@@ -3,7 +3,7 @@ package control
 import (
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // A site exporting 8 kW via battery discharge, with max_export_w = 5 kW set

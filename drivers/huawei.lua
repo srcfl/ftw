@@ -3,7 +3,7 @@
 -- Protocol: Modbus TCP, ALL HOLDING registers, Big-Endian word order
 --
 -- Ported from sourceful-hugin/device-support/drivers/lua/huawei.lua
--- for forty-two-watts Lua host v2.1.
+-- for FTW Lua host v2.1.
 --
 -- Reference: Huawei SUN2000 Modbus Interface Definition
 -- (inverter + LUNA2000 battery module via SDongle / embedded Modbus TCP).
@@ -26,10 +26,10 @@ DRIVER = {
   capabilities = { "meter", "pv", "battery" },
   description  = "Huawei SUN2000 hybrid inverters with LUNA2000 battery via Modbus TCP.",
   homepage     = "https://solar.huawei.com",
-  authors      = { "forty-two-watts contributors" },
+  authors      = { "FTW contributors" },
   tested_models = { "SUN2000L1", "SUN2000-LUNA2000" },
   verification_status = "experimental",
-  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a 42W site.",
+  verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
   connection_defaults = {
     port    = 502,
     unit_id = 1,

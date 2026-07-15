@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // MyUplink OAuth bootstrap.
@@ -43,7 +43,7 @@ var myUplinkOAuthBase = "https://api.myuplink.com"
 // makes MyUplink return a refresh_token.
 const myUplinkScope = "READSYSTEM offline_access"
 
-// myUplinkCallbackPath is the 42w route MyUplink redirects back to. The
+// myUplinkCallbackPath is the FTW route MyUplink redirects back to. The
 // operator registers <origin>+this as the Callback Url in the portal.
 const myUplinkCallbackPath = "/api/oauth/myuplink/callback"
 
@@ -230,7 +230,7 @@ func (s *Server) handleMyUplinkOAuthCallback(w http.ResponseWriter, r *http.Requ
 		renderOAuthResult(w, false, err.Error())
 		return
 	}
-	renderOAuthResult(w, true, "MyUplink connected for driver \""+driver+"\". You can close this tab and return to 42-watts.")
+	renderOAuthResult(w, true, "MyUplink connected for driver \""+driver+"\". You can close this tab and return to FTW.")
 }
 
 // handleMyUplinkOAuthExchange: POST /api/oauth/myuplink/exchange

@@ -20,7 +20,7 @@ func (s *Server) gate(next http.Handler) http.Handler {
 		// tunnel detection is disabled (no relay wired — TunnelMarker empty),
 		// there are no remote requests to identify, so the gate has nothing
 		// to enforce and defers to the pre-existing LAN-trust model. The main
-		// binary always sets TunnelMarker (cmd/forty-two-watts/main.go), so
+		// binary always sets TunnelMarker (cmd/ftw/main.go), so
 		// the gate is always active in production; only minimal test Deps omit
 		// it. This is the same TunnelMarker-gated condition as isTunneled.
 		if s.deps.TunnelMarker == "" {

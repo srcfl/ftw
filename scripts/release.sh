@@ -11,16 +11,36 @@
 set -euo pipefail
 
 VERSION=${1:?Usage: $0 <version>}
-REPO="frahlg/forty-two-watts"
+REPO="srcfl/ftw"
 
-echo "Building forty-two-watts ${VERSION} (linux arm64/amd64, windows amd64)…"
+echo "Building FTW ${VERSION} (linux arm64/amd64, windows amd64)…"
 make release relay-web
 
+for f in bin/ftw-relay-linux-arm64 bin/ftw-relay-linux-amd64; do
+    dir="${f%/*}"
+    base="${f##*/}"
+    (cd "$dir" && shasum -a 256 "$base" > "$base.sha256")
+done
+
 ASSETS=(
+    release/ftw-linux-arm64.tar.gz
+    release/ftw-linux-arm64.tar.gz.sha256
+    release/ftw-linux-amd64.tar.gz
+    release/ftw-linux-amd64.tar.gz.sha256
+    release/ftw-windows-amd64.zip
+    release/ftw-windows-amd64.zip.sha256
     release/forty-two-watts-linux-arm64.tar.gz
+    release/forty-two-watts-linux-arm64.tar.gz.sha256
     release/forty-two-watts-linux-amd64.tar.gz
+    release/forty-two-watts-linux-amd64.tar.gz.sha256
     release/forty-two-watts-windows-amd64.zip
+    release/forty-two-watts-windows-amd64.zip.sha256
+    bin/ftw-relay-linux-arm64
+    bin/ftw-relay-linux-arm64.sha256
+    bin/ftw-relay-linux-amd64
+    bin/ftw-relay-linux-amd64.sha256
     release/ftw-relay-web.tar.gz
+    release/ftw-relay-web.tar.gz.sha256
 )
 
 for f in "${ASSETS[@]}"; do

@@ -2,7 +2,7 @@
 
 ## What it does
 
-Polls a CalDAV calendar collection — served by 42W's own in-process native
+Polls a CalDAV calendar collection — served by FTW's own in-process native
 CalDAV server (`internal/caldavserver`) — and maps events into planner intents.
 This package is the **client**; the server is a sibling package. Opt-in
 (`config.CalDAV.Enabled`) and fail-soft: an unreachable server never blocks

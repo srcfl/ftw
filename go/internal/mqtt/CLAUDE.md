@@ -4,7 +4,7 @@
 
 Wraps one `paho.Client` per driver so each driver has its own broker connection, its own subscription set, and its own inbound message buffer. Implements `drivers.MQTTCap` (`Subscribe`, `Publish`, `PopMessages`). Auto-reconnect + 5 s connect-retry are on by default; inbound messages are buffered in a slice by the default publish handler and drained when the driver calls `host.mqtt_messages()`.
 
-`Subscribe()` does two things: (a) records the topic in `cap.subs`, and (b) issues SUBSCRIBE directly. Initial bindings flow through (b) — same as before this fix. `OnConnectHandler` calls `replaySubscriptions` on every (re)connect: at the very first connect cap.subs is still empty (driver_init hasn't run yet) so the loop is a no-op; from the second connect onward it re-issues SUBSCRIBE for every recorded topic. This is the fix for a real Pixii MQTT outage (2026-05): default `CleanSession=true` + `AutoReconnect=true` means paho transparently reconnects but the broker has dropped the session, so without re-subscribe the link looks healthy while no messages flow. Drivers only call `host.mqtt_subscribe` from `driver_init`, which never re-runs after a transparent reconnect — restarting the driver in 42W was the only recovery before this fix.
+`Subscribe()` does two things: (a) records the topic in `cap.subs`, and (b) issues SUBSCRIBE directly. Initial bindings flow through (b) — same as before this fix. `OnConnectHandler` calls `replaySubscriptions` on every (re)connect: at the very first connect cap.subs is still empty (driver_init hasn't run yet) so the loop is a no-op; from the second connect onward it re-issues SUBSCRIBE for every recorded topic. This is the fix for a real Pixii MQTT outage (2026-05): default `CleanSession=true` + `AutoReconnect=true` means paho transparently reconnects but the broker has dropped the session, so without re-subscribe the link looks healthy while no messages flow. Drivers only call `host.mqtt_subscribe` from `driver_init`, which never re-runs after a transparent reconnect — restarting the driver in FTW was the only recovery before this fix.
 
 ## Key types
 
@@ -22,7 +22,7 @@ Wraps one `paho.Client` per driver so each driver has its own broker connection,
 
 ## How it talks to neighbors
 
-The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/forty-two-watts/main.go` that calls `Dial(host, port, user, pass, "ftw-"+driverName)` for each driver that has an MQTT config. The returned `*Capability` is bound to the driver's `HostEnv` via `env.WithMQTT(cap)`; from then on the driver's Lua code calls `host.mqtt_subscribe` / `host.mqtt_publish` / `host.mqtt_messages`, which route through `drivers.MQTTCap`. The HA bridge (`../ha`) creates its own paho client — it does NOT go through this package.
+The `../drivers` registry holds an `MQTTFactory` function wired in `cmd/ftw/main.go` that calls `Dial(host, port, user, pass, "ftw-"+driverName)` for each driver that has an MQTT config. The returned `*Capability` is bound to the driver's `HostEnv` via `env.WithMQTT(cap)`; from then on the driver's Lua code calls `host.mqtt_subscribe` / `host.mqtt_publish` / `host.mqtt_messages`, which route through `drivers.MQTTCap`. The HA bridge (`../ha`) creates its own paho client — it does NOT go through this package.
 
 ## What to read first
 

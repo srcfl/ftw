@@ -32,7 +32,7 @@ type DeployDriverTool struct {
 }
 
 // NewDeployDriverTool constructs a DeployDriverTool. apiBase is the base URL of
-// the running forty-two-watts service (e.g. "http://localhost:8080").
+// the running FTW service (e.g. "http://localhost:8080").
 // userDriversDir is the persistent user-drivers directory (e.g. /app/data/drivers
 // in the docker deploy). When non-empty, Lua files are written there so they
 // survive docker image updates. When empty, the old behaviour (sibling of configPath)

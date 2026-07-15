@@ -18,7 +18,7 @@ def _load(path: str) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Replay a persisted forty-two-watts planner diagnostic")
+    parser = argparse.ArgumentParser(description="Replay a persisted ftw planner diagnostic")
     parser.add_argument("diagnostic", help="diagnostic JSON file, or - for stdin")
     parser.add_argument("--solver", choices=["HIGHS", "CLARABEL"])
     parser.add_argument("--formulation", choices=["auto", "milp", "relaxed"])

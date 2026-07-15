@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // fakeMQTT is a minimal MQTTCap stub for unit tests. Tests push messages

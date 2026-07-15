@@ -9,12 +9,12 @@ Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (bu
 Pure-Go build, no CGO, single static binary:
 
 ```bash
-# On a dev machine (macOS / Linux), cross-compile for the Pi:
-cd /Users/fredde/repositories/forty-two-watts/go
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /tmp/forty-two-watts-arm64 ./cmd/forty-two-watts
+git clone https://github.com/srcfl/ftw
+cd ftw
+make build-arm64
 
 # Sanity check — should report arm64, statically linked
-file /tmp/forty-two-watts-arm64
+file bin/ftw-linux-arm64
 # → ELF 64-bit LSB executable, ARM aarch64, statically linked
 ```
 
@@ -23,8 +23,8 @@ For amd64: `GOARCH=amd64`.
 The Makefile has the usual pair of targets. Prefer these when iterating:
 
 ```bash
-make build-arm64   # → bin/forty-two-watts-linux-arm64
-make build-amd64   # → bin/forty-two-watts-linux-amd64
+make build-arm64   # → bin/ftw-linux-arm64
+make build-amd64   # → bin/ftw-linux-amd64
 make release       # → local tarballs with binary + drivers + web + config.example.yaml
 ```
 
@@ -32,7 +32,7 @@ make release       # → local tarballs with binary + drivers + web + config.exa
 Official tags, release notes, binaries, docker images, and Raspberry Pi images
 are produced by the Changesets + GitHub Actions release flow.
 
-## 2. Files to deploy
+## 2. Native file layout
 
 The Pi needs:
 
@@ -41,107 +41,107 @@ The Pi needs:
 - **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …).
 - **`config.yaml`** — operator-edited; see [`config.example.yaml`](../config.example.yaml) for the schema and [configuration.md](configuration.md) for every field.
 
-Suggested layout on the Pi:
+The supported native unit uses portable system paths:
 
 ```
-/home/fredde/forty-two-watts-go/
-├── forty-two-watts          # binary
-├── config.yaml              # local config (don't commit)
-├── web/                     # static UI
-├── drivers/                 # Lua drivers
-├── state.db                 # created on first run
-├── state.db-wal
-├── state.db-shm
-├── cold/                    # parquet rolloff (created on first run)
-└── forty-two-watts.log      # service log (if redirecting stdout/stderr)
+/opt/ftw/
+├── ftw                     # canonical binary
+├── forty-two-watts         # compatibility symlink
+├── web/                    # static UI
+└── drivers/                # bundled Lua drivers
+
+/etc/ftw/config.yaml        # operator configuration
+
+/var/lib/ftw/
+├── state.db                # SQLite state
+├── cold/                   # Parquet rolloff
+└── drivers/                # persistent custom Lua drivers
 ```
 
 The binary only takes two command-line flags:
 
-- `-config config.yaml` — path to the config file.
-- `-web web` — path to the static UI directory.
+- `-config /etc/ftw/config.yaml` — path to the config file.
+- `-web /opt/ftw/web` — path to the static UI directory.
 
 Relative Lua driver paths in `config.yaml` are resolved against the config
 file's directory, so keep `drivers/` side by side with the config.
 
 ## 3. systemd unit
 
-The repo ships [`deploy/forty-two-watts.service`](../deploy/forty-two-watts.service):
+The repo ships [`deploy/ftw.service`](../deploy/ftw.service):
 
 ```ini
 [Unit]
-Description=forty-two-watts EMS
+Description=FTW local energy runtime
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=fredde
-WorkingDirectory=/home/fredde/forty-two-watts-go
-ExecStart=/home/fredde/forty-two-watts-go/forty-two-watts -config config.yaml -web web
+User=ftw
+Group=ftw
+WorkingDirectory=/var/lib/ftw
+ExecStart=/opt/ftw/ftw -config /etc/ftw/config.yaml -web /opt/ftw/web -drivers /opt/ftw/drivers -user-drivers /var/lib/ftw/drivers
 Restart=on-failure
 RestartSec=5
-StandardOutput=append:/home/fredde/forty-two-watts-go/forty-two-watts.log
-StandardError=inherit
-# Limit memory growth (RPi has 4GB).
+StateDirectory=ftw
+ConfigurationDirectory=ftw
 MemoryMax=512M
 
 [Install]
 WantedBy=multi-user.target
+Alias=forty-two-watts.service
 ```
 
 Notes:
 
-- `User=fredde` is a **template** — change for your install.
-- `WorkingDirectory=/home/fredde/forty-two-watts-go` — this is where `state.db`, `cold/`, and the log file are created, so pick a persistent path.
+- Create the `ftw` system user before installing files; it owns `/var/lib/ftw`.
+- `StateDirectory=ftw` and `ConfigurationDirectory=ftw` keep mutable state and
+  operator configuration out of `/opt`.
 - `Restart=on-failure` with `RestartSec=5` — the service comes back automatically after a crash.
 - `MemoryMax=512M` — Pi-friendly cap. The service typically sits at 50–80 MB resident (see §9).
+- The install alias lets existing `systemctl ... forty-two-watts` commands
+  resolve to the same unit; never install both units at once.
 
 Install:
 
 ```bash
-sudo cp deploy/forty-two-watts.service /etc/systemd/system/
+sudo cp deploy/ftw.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now forty-two-watts
-systemctl status forty-two-watts
+sudo systemctl enable --now ftw
+systemctl status ftw
 ```
 
 ## 4. Service lifecycle
 
 ```bash
-sudo systemctl start forty-two-watts
-sudo systemctl stop forty-two-watts
-sudo systemctl restart forty-two-watts
-sudo systemctl reload forty-two-watts   # not supported — the unit has no ExecReload; use the hot-reload path instead (§6)
+sudo systemctl start ftw
+sudo systemctl stop ftw
+sudo systemctl restart ftw
+# reload is not supported; edit config for hot reload or restart
 ```
 
 For a binary swap with minimum downtime:
 
 ```bash
-scp /tmp/forty-two-watts-arm64 user@pi:~/forty-two-watts-go/forty-two-watts.new
-ssh user@pi 'sudo systemctl stop forty-two-watts && \
-  cd ~/forty-two-watts-go && \
-  mv forty-two-watts.new forty-two-watts && \
-  chmod +x forty-two-watts && \
-  sudo systemctl start forty-two-watts'
+scp bin/ftw-linux-arm64 user@pi:/tmp/ftw.new
+ssh user@pi 'sudo systemctl stop ftw && \
+  sudo install -m 0755 /tmp/ftw.new /opt/ftw/ftw && \
+  sudo systemctl start ftw'
 ```
 
 Typical stop → start window: 2–5 seconds. The service records a `shutdown` event on clean stop and a `startup` event on boot, both visible in the `events` table.
 
 ## 5. Logs
 
-Because the unit uses `StandardOutput=append:…/forty-two-watts.log`, journald does **not** capture stdout — the log file is authoritative. `StandardError=inherit` means stderr goes to journald.
+The canonical unit sends structured text logs to journald.
 
 ```bash
-# Tail the file log
-tail -f /home/fredde/forty-two-watts-go/forty-two-watts.log
-
-# Recent stderr / service lifecycle via journald
-journalctl -u forty-two-watts -n 200 --no-pager
-journalctl -u forty-two-watts -f
+journalctl -u ftw -n 200 --no-pager
+journalctl -u ftw -f
 ```
 
-forty-two-watts uses `slog` with the text handler at `LevelInfo`. Levels:
+FTW uses `slog` with the text handler at `LevelInfo`. Levels:
 
 - `INFO` — normal operation (startup, reloads, rolloff completions, driver state changes).
 - `WARN` — recoverable issues (driver send failure, stale site meter, config reload rejected).
@@ -149,7 +149,7 @@ forty-two-watts uses `slog` with the text handler at `LevelInfo`. Levels:
 
 Notable log lines you will look for:
 
-- `forty-two-watts starting version=… config=…` — every boot.
+- `FTW starting version=… config=…` — every boot.
 - `config loaded site=… drivers=N` — config parsed OK.
 - `HTTP API listening addr=:8080` — UI is reachable.
 - `config watcher started path=…` — hot-reload is active.
@@ -175,7 +175,7 @@ Changes that require a full restart (the watcher will not re-wire these):
 - HA MQTT bridge parameters
 - Planner enable/disable (MPC service is built once at startup)
 
-When in doubt, `sudo systemctl restart forty-two-watts`.
+When in doubt, `sudo systemctl restart ftw`.
 
 ### In-app updates (Docker deploy)
 
@@ -198,10 +198,11 @@ Backup (stop for a consistent SQLite snapshot):
 
 ```bash
 # On the Pi
-cd ~/forty-two-watts-go
-sudo systemctl stop forty-two-watts
-tar czf ~/backup-$(date +%F).tgz state.db state.db-wal state.db-shm cold/ config.yaml
-sudo systemctl start forty-two-watts
+sudo systemctl stop ftw
+sudo tar czf "/tmp/ftw-backup-$(date +%F).tgz" \
+  -C /var/lib/ftw state.db state.db-wal state.db-shm cold drivers \
+  -C /etc/ftw config.yaml
+sudo systemctl start ftw
 ```
 
 Online backup is possible (SQLite is WAL-mode and survives `cp`), but cold backup is the safe default.
@@ -228,7 +229,7 @@ The tick should advance every control interval (default 2 s). If it doesn't, the
 **Fix:** The watchdog (`site.watchdog_timeout_s`, default 60 s) auto-reverts stuck drivers to their autonomous defaults — you'll see `driver telemetry stale — marking offline + reverting to autonomous` in the log. For a full reset of MQTT/Modbus client state:
 
 ```bash
-sudo systemctl restart forty-two-watts
+sudo systemctl restart ftw
 ```
 
 ### MQTT broker connection lost
@@ -238,7 +239,7 @@ sudo systemctl restart forty-two-watts
 **Confirm:**
 
 ```bash
-tail -f /home/fredde/forty-two-watts-go/forty-two-watts.log | grep -i mqtt
+journalctl -u ftw -f | grep -i mqtt
 ping -c 3 192.168.1.X   # your broker IP
 ```
 
@@ -329,13 +330,13 @@ This is a **safety feature**, not a bug: stale grid readings would otherwise cau
 sudo lsof -i :8080
 ```
 
-**Fix:** Kill the conflicting process — usually a stale forty-two-watts from a crash that didn't shut down cleanly. `sudo systemctl stop forty-two-watts` first (in case systemd is racing you), then kill the orphan, then `sudo systemctl start forty-two-watts`.
+**Fix:** Kill the conflicting process — usually a stale FTW process from a crash that didn't shut down cleanly. `sudo systemctl stop ftw` first (in case systemd is racing you), then kill the orphan, then `sudo systemctl start ftw`.
 
 ### Config reload rejected
 
 **Symptom:** You edited `config.yaml` and saved, but no `config reload: applied` line appears — just a `config reload failed err=…`.
 
-**Fix:** The old config is still live; the site is safe. Read the error (usually a YAML syntax issue or a validation failure such as "no site meter"), fix, save again. If you want to force a full restart after a big change, `sudo systemctl restart forty-two-watts`.
+**Fix:** The old config is still live; the site is safe. Read the error (usually a YAML syntax issue or a validation failure such as "no site meter"), fix, save again. If you want to force a full restart after a big change, `sudo systemctl restart ftw`.
 
 ## 9. Resource expectations
 
@@ -358,6 +359,6 @@ The rolloff loop runs once per hour and is cheap when nothing is due (a single `
 | `state.db-wal`, `state.db-shm` | sqlite | WAL sidecars — include in backup | High |
 | `cold/YYYY/MM/DD.parquet` | rolloffLoop | Long-format TS history > 14 days | Medium |
 | `config.yaml` | operator | All operator-tunable settings | High |
-| `forty-two-watts.log` | service | Diagnostic log (stdout redirect) | Low |
+| journald (`journalctl -u ftw`) | service | Diagnostic logs | Low |
 
 See [architecture.md](architecture.md) for the full data flow.

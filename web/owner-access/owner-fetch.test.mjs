@@ -63,7 +63,7 @@ describe("ownerFetch — transport selection (FIX-B)", () => {
   });
 
   it("FAILS CLOSED under a /me/<site> relay tunnel prefix with no transport", async () => {
-    setOrigin("/me/site:Home/owner-access/login.html", "relay.fortytwowatts.com");
+    setOrigin("/me/site:Home/owner-access/login.html", "relay.ftw.sourceful.energy");
     const r = await ownerFetch("/api/owner-access/login/finish", { method: "POST" });
     assert.equal(r.status, 503, "relay-prefixed origin is not LAN → fail closed");
     assert.equal(lastRawFetch, null);
@@ -77,7 +77,7 @@ describe("ownerFetch — transport selection (FIX-B)", () => {
   });
 
   it("treats *.local and single-label hosts as LAN", async () => {
-    setOrigin("/owner-access/login.html", "fortytwowatts.local");
+    setOrigin("/owner-access/login.html", "ftw.local");
     assert.equal(isLanOrigin(), true);
     setOrigin("/owner-access/login.html", "raspberrypi");
     assert.equal(isLanOrigin(), true);

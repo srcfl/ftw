@@ -27,8 +27,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // Provider is implemented by each weather source.
@@ -64,7 +64,7 @@ type MetNoProvider struct {
 // NewMetNo returns a configured provider.
 func NewMetNo(userAgent string) *MetNoProvider {
 	if userAgent == "" {
-		userAgent = "forty-two-watts github.com/frahlg/forty-two-watts"
+		userAgent = "FTW github.com/srcfl/ftw"
 	}
 	return &MetNoProvider{
 		Client:    &http.Client{Timeout: 15 * time.Second},

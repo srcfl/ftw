@@ -13,7 +13,7 @@ import (
 
 	sv "github.com/simonvetter/modbus"
 
-	"github.com/frahlg/forty-two-watts/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/drivers"
 )
 
 // Capability wraps a simonvetter/modbus client. Each call serializes through

@@ -1,6 +1,6 @@
 # Local development
 
-Two patterns for running forty-two-watts on your dev machine:
+Two patterns for running FTW on your dev machine:
 
 1. **Host-native `go run`** — fastest feedback loop; full LAN access
    from the binary, which matters when you want to point the UI at a
@@ -8,17 +8,16 @@ Two patterns for running forty-two-watts on your dev machine:
 2. **`docker compose up`** — mirrors production layout (sidecar, volumes,
    health-checks). Good for testing the update / restart flow.
 
-The docker-compose override (`docker-compose.override.yml`) is
-intentionally not tracked — it's your machine's local deploy knob. A
-template is generated on first run by `scripts/install.sh`, or you can
-hand-write one. The committed `docker-compose.yml` is the reference
+The docker-compose override (`docker-compose.override.yml`) is intentionally
+not tracked — it is a per-machine development knob. Create it when you need a
+local image build. The committed `docker-compose.yml` is the reference
 production topology.
 
 ## Host-native `go run`
 
 ```bash
 cd go
-go run ./cmd/forty-two-watts \
+go run ./cmd/ftw \
   -config ../data/config.yaml \
   -web ../web
 ```
@@ -43,7 +42,7 @@ FTW_SELFUPDATE_ENABLED=
 ```bash
 cd go
 set -a; source ../.env.local; set +a
-go run ./cmd/forty-two-watts -config ../data/config.yaml -web ../web
+go run ./cmd/ftw -config ../data/config.yaml -web ../web
 ```
 
 On boot you'll see:
@@ -114,7 +113,7 @@ For full-stack checks (sidecar, update flow, volumes):
 
 ```bash
 docker compose up -d --build
-docker compose logs -f forty-two-watts
+docker compose logs -f ftw
 ```
 
 The override template builds both images from your tree (`pull_policy:
@@ -127,10 +126,21 @@ If you want the proxy with compose, add to your override:
 
 ```yaml
 services:
-  forty-two-watts:
+  ftw:
+    build: .
+    image: ftw:dev
+    pull_policy: never
     env_file:
       - .env.local
     network_mode: host   # needed for LAN reachability on WSL2
+  ftw-updater:
+    build:
+      context: .
+      dockerfile: Dockerfile.updater
+    image: ftw-updater:dev
+    pull_policy: never
+    environment:
+      FTW_UPDATER_SKIP_PULL: "1"
 ```
 
 …and set `FTW_PROXY_UPSTREAM` in `.env.local` as above.

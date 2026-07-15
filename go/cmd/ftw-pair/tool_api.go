@@ -32,7 +32,7 @@ func (t *FtwAPITool) Name() string { return "ftw_api" }
 func (t *FtwAPITool) Schema() *mcpsdk.Tool {
 	return &mcpsdk.Tool{
 		Name:        "ftw_api",
-		Description: "Proxy an HTTP request to the running forty-two-watts service on localhost:8080. Path MUST start with /api/. Read docs/api.md for the available endpoints.",
+		Description: "Proxy an HTTP request to the running FTW service on localhost:8080. Path MUST start with /api/. Read docs/api.md for the available endpoints.",
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{

@@ -92,7 +92,7 @@ make ci-hw-pi
 Defaults:
 
 - SSH target: `fredde@192.168.192.40`
-- remote dir: `~/forty-two-watts-ci`
+- remote dir: `~/ftw-ci`
 - candidate URL: `http://192.168.192.40:18080`
 - upstream live API from the Pi: `http://127.0.0.1:8080`
 
@@ -122,7 +122,7 @@ The script leaves the candidate process running for manual browser testing.
 Tail its log with:
 
 ```bash
-ssh fredde@192.168.192.40 'tail -f ~/forty-two-watts-ci/ci.log'
+ssh fredde@192.168.192.40 'tail -f ~/ftw-ci/ci.log'
 ```
 
 To skip the local test phase when you only want to redeploy the current

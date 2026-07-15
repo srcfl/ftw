@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // nibeLocalDriverPath resolves drivers/nibe_local.lua from the repo root

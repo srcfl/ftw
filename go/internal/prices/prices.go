@@ -27,8 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 // Provider is implemented by each concrete price source. Fetch returns

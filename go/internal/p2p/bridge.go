@@ -9,7 +9,7 @@
 // HTTP replay) plus a thin peer constructor. The relay signaling endpoints and
 // the browser p2pClient are later slices that need a real browser + live
 // network (ICE/STUN/DTLS) to verify end to end — see
-// docs/superpowers/specs/2026-06-03-home-route-phase5-transport-design.md.
+// docs/archive/agent-artifacts/superpowers/specs/2026-06-03-home-route-phase5-transport-design.md.
 //
 // pion/webrtc is pure Go (no CGo), honoring the project's no-CGo rule, and can
 // play both peers in an in-process test (p2p_test.go) — that test is the CI
@@ -28,7 +28,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/frahlg/forty-two-watts/go/internal/tunnel"
+	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
 // DefaultSTUNServers is the public STUN set used to discover server-reflexive

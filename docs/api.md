@@ -1,6 +1,6 @@
 # REST API reference
 
-Human-readable guide to the main HTTP surface of forty-two-watts.
+Human-readable guide to the main HTTP surface of FTW.
 [`go/internal/api/api.go`](../go/internal/api/api.go) is the route source of
 truth; this document should be treated as a readable reference, not a
 generated route inventory.
@@ -825,7 +825,7 @@ Handler: `go/internal/api/api.go:710`
 
 ### GET /api/pvmodel
 
-PV digital-twin self-learner status. See `docs/ml-twins.md`
+PV digital-twin self-learner status. See `docs/ml-models.md`.
 
 **Query params:** none
 
@@ -1243,7 +1243,7 @@ Cached GitHub Releases probe.
   "skipped": false,
   "skipped_version": "",
   "published_at": "2026-04-17T10:00:00Z",
-  "release_notes_url": "https://github.com/frahlg/forty-two-watts/releases/tag/v1.3.0",
+  "release_notes_url": "https://github.com/srcfl/ftw/releases/tag/v1.3.0",
   "checked_at": "2026-04-18T08:20:04Z"
 }
 ```
@@ -1282,8 +1282,8 @@ action so a previously-hidden version resurfaces.
 
 ### POST /api/version/update
 
-Signal the sidecar to `docker compose pull forty-two-watts` +
-`docker compose up -d forty-two-watts`. Returns 202 as soon as the
+Signal the sidecar to `docker compose pull FTW` +
+`docker compose up -d FTW`. Returns 202 as soon as the
 sidecar acknowledges; the UI polls `/api/version/update/status` for
 progress. 502 if the sidecar socket isn't reachable.
 

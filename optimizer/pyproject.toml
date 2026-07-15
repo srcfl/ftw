@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "forty-two-watts-optimizer"
+name = "ftw-optimizer"
 version = "0.1.0"
-description = "CVXPY planning engine for forty-two-watts"
+description = "CVXPY planning engine for ftw"
 requires-python = ">=3.11"
 dependencies = [
   "cvxpy==1.9.2",

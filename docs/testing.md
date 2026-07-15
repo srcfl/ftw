@@ -1,6 +1,6 @@
 # Testing Guide
 
-This guide covers the Go, Lua, and Python/CVXPY test workflow for forty-two-watts.
+This guide covers the Go, Lua, and Python/CVXPY test workflow for FTW.
 
 `make test` creates the local optimizer venv when needed, runs the CVXPY model
 suite, then runs Go tests with the real Go-to-Python worker integration enabled.

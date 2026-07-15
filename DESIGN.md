@@ -1,7 +1,7 @@
-# forty-two-watts — UI design system
+# FTW — UI design system
 
 One source of truth for tokens, typography, and the component vocabulary
-shared across the landing page (fortytwowatts.com), the `/next` dashboard,
+shared across the landing page (ftw.sourceful.energy), the `/next` dashboard,
 and the `/setup` wizard. Tokens live in `web/components/theme.css` and
 inherit into every shadow DOM via `:root`.
 

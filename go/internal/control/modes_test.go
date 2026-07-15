@@ -3,7 +3,7 @@ package control
 import (
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/mpc"
+	"github.com/srcfl/ftw/go/internal/mpc"
 )
 
 // TestPlannerMPCModeMapping locks the single-source-of-truth control.Mode →

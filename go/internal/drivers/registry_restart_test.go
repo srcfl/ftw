@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
-	"github.com/frahlg/forty-two-watts/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // mockMQTT implements MQTTCap with a Close-call counter. Used to prove

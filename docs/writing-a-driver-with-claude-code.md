@@ -2,12 +2,12 @@
 
 This guide is a hands-on recipe for contributors who want to use
 [Claude Code](https://docs.claude.com/claude-code) to bootstrap a new
-42W Lua driver from a vendor-supplied Modbus (or MQTT) register map.
+FTW Lua driver from a vendor-supplied Modbus (or MQTT) register map.
 It assumes you are porting one device into `drivers/<name>.lua` and
 shipping it as a PR.
 
 Claude Code is very good at the mechanical translation work
-(register map -> Lua). It is less good at catching 42W-specific
+(register map -> Lua). It is less good at catching FTW-specific
 conventions (sign flip, capability gates, watchdog safety). The prompts
 and checklist below exist to close that gap.
 
@@ -18,7 +18,7 @@ first. This guide layers on top of it.
 
 Before you start:
 
-- `forty-two-watts` checked out at a recent `master`.
+- `FTW` checked out at a recent `master`.
 - Go 1.26+ installed. Run `cd go && go test ./internal/drivers/...`
   once to confirm the toolchain works end-to-end.
 - `make dev` starts cleanly and the sims at
@@ -34,7 +34,7 @@ Before you start:
 Open a Claude Code session in the repo root:
 
 ```bash
-cd /Users/fredde/repositories/forty-two-watts
+cd /path/to/ftw
 claude
 ```
 
@@ -57,7 +57,7 @@ Use this verbatim, filling in the name and vendor:
 ```
 Read drivers/sungrow.lua and docs/writing-a-driver.md. Using that as
 the template, generate a new Lua driver at drivers/<name>.lua for the
-<vendor> <model> Modbus register map above. Follow 42W's v2.1 host
+<vendor> <model> Modbus register map above. Follow FTW's v2.1 host
 API — host.log(level, msg), host.decode_u32_be/le, host.set_make,
 host.set_sn, host.emit_metric. Add the DRIVER table, all five
 lifecycle functions (driver_init, driver_poll, driver_command,
@@ -135,11 +135,11 @@ bar for a mergeable driver.
 These come up repeatedly; skim the generated file for each one.
 
 - **Wrong `host.log` signature.** Claude Code often defaults to
-  hugin-style `host.log(msg)`. 42W requires two args:
+  hugin-style `host.log(msg)`. FTW requires two args:
   `host.log("info", msg)`. A single-arg call raises a Lua error on
   the first log line.
 - **Decoder without endianness suffix.** `host.decode_u32` is not a
-  valid call on 42W. It must be `host.decode_u32_be(hi, lo)` or
+  valid call on FTW. It must be `host.decode_u32_be(hi, lo)` or
   `host.decode_u32_le(lo, hi)`. Argument order differs between the
   two — do not copy-paste one and change only the suffix.
 - **Missing `host.set_sn`.** Without a serial number the driver falls
@@ -156,7 +156,7 @@ These come up repeatedly; skim the generated file for each one.
   `drivers/sungrow.lua:127-129` for the canonical pattern.
 - **Wrong sign convention.** Most inverters report PV as a positive
   number and battery charge/discharge with the vendor's own
-  convention. 42W needs site convention (`docs/site-convention.md`):
+  convention. FTW needs site convention (`docs/site-convention.md`):
   PV always negative, battery positive when charging, meter positive
   when importing from grid. Do the flip in the driver, once, at
   the boundary.
@@ -177,7 +177,7 @@ make dev
 Terminal 2 — watch the driver-specific log lines (slog key is `driver=<name>`):
 
 ```bash
-tail -f state/forty-two-watts.log | grep driver=<name>
+journalctl -u ftw -f | grep driver=<name>
 ```
 
 Terminal 3 — hit the status endpoint and the catalog:

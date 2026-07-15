@@ -6,11 +6,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/frahlg/forty-two-watts/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/config"
 )
 
 // The LAN PIN is the bridge that lets the owner enroll the FIRST passkey at
-// the relay.fortytwowatts.com origin (required for the relay RP-ID) while
+// the relay.ftw.sourceful.energy origin (required for the relay RP-ID) while
 // proving LAN presence via a code only a local user can read.
 
 func minEnrollPinDeps(t *testing.T) (*Deps, *fakeBootstrapRelay) {
