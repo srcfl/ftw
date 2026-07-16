@@ -288,11 +288,49 @@ func TestLoadSeriesDownsamplingIncludesLatestSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadSeries: %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("LoadSeries returned %d points, want 3: %+v", len(got), got)
+	if len(got) == 0 || len(got) > 3 {
+		t.Fatalf("LoadSeries returned %d points, want 1..3: %+v", len(got), got)
 	}
-	if got[0].TsMs != 0 || got[len(got)-1].TsMs != 9 {
-		t.Fatalf("downsampled series endpoints = %d..%d, want 0..9: %+v", got[0].TsMs, got[len(got)-1].TsMs, got)
+	// Buckets carry the latest raw ts, so the newest sample must survive.
+	if got[len(got)-1].TsMs != 9 {
+		t.Fatalf("latest sample lost in downsampling: %+v", got)
+	}
+	// Values are bucket averages, not picked samples: with bucketMs=4 the
+	// first bucket covers ts 0..3 → avg 1.5.
+	if got[0].Value != 1.5 {
+		t.Fatalf("first bucket avg = %v, want 1.5: %+v", got[0].Value, got)
+	}
+}
+
+func TestLoadSeriesBucketsEnvelope(t *testing.T) {
+	s := freshStore(t)
+	// A single short spike inside an otherwise flat bucket must show up in
+	// Max — every-Nth-sample downsampling used to drop it silently.
+	samples := []Sample{
+		{Driver: "meter", Metric: "power_w", TsMs: 0, Value: 100},
+		{Driver: "meter", Metric: "power_w", TsMs: 1, Value: 9000},
+		{Driver: "meter", Metric: "power_w", TsMs: 2, Value: 100},
+		{Driver: "meter", Metric: "power_w", TsMs: 3, Value: 100},
+	}
+	if err := s.RecordSamples(samples); err != nil {
+		t.Fatalf("record samples: %v", err)
+	}
+	got, err := s.LoadSeriesBuckets("meter", "power_w", 0, 3, 1)
+	if err != nil {
+		t.Fatalf("LoadSeriesBuckets: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("bucket count = %d, want 1: %+v", len(got), got)
+	}
+	b := got[0]
+	if b.Min != 100 || b.Max != 9000 || b.N != 4 {
+		t.Fatalf("bucket envelope = min:%v max:%v n:%d, want min:100 max:9000 n:4", b.Min, b.Max, b.N)
+	}
+	if b.V != 2325 { // (100+9000+100+100)/4
+		t.Fatalf("bucket avg = %v, want 2325", b.V)
+	}
+	if b.TsMs != 3 {
+		t.Fatalf("bucket ts = %d, want latest sample ts 3", b.TsMs)
 	}
 }
 
@@ -407,12 +445,24 @@ func TestHistoryDownsampling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pts) != 10 {
-		t.Errorf("expected 10 downsampled points, got %d", len(pts))
+	// Bucketed downsampling: at most maxPoints buckets over the QUERIED
+	// window (data covers only half of it here, so fewer buckets is fine).
+	if len(pts) == 0 || len(pts) > 10 {
+		t.Fatalf("expected 1..10 downsampled points, got %d", len(pts))
 	}
-	if pts[0].TsMs != now || pts[len(pts)-1].TsMs != now+99 {
-		t.Errorf("downsampled history endpoints = %d..%d, want %d..%d",
-			pts[0].TsMs, pts[len(pts)-1].TsMs, now, now+99)
+	// The newest row must survive (buckets report their latest raw ts).
+	if pts[len(pts)-1].TsMs != now+99 {
+		t.Errorf("latest history row lost: last ts = %d, want %d",
+			pts[len(pts)-1].TsMs, now+99)
+	}
+	// Values are bucket averages of grid_w = 0..99, so every point must lie
+	// strictly inside the data range and be monotonically increasing.
+	prev := -1.0
+	for _, p := range pts {
+		if p.GridW < 0 || p.GridW > 99 || p.GridW <= prev {
+			t.Fatalf("bucket averages not monotone in-range: %+v", pts)
+		}
+		prev = p.GridW
 	}
 }
 

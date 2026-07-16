@@ -187,9 +187,22 @@ func (s *Store) RecordSamples(samples []Sample) error {
 }
 
 // LoadSeries returns one metric's history for one driver in [sinceMs, untilMs].
-// Result is sorted ascending by ts_ms. maxPoints=0 means no limit; otherwise
-// returned rows are evenly downsampled to at most maxPoints.
+// Result is sorted ascending by ts_ms. maxPoints=0 means every raw sample;
+// otherwise samples are bucket-averaged in SQL down to at most maxPoints rows
+// (Value = bucket AVG, TsMs = latest sample in the bucket, so the newest
+// reading always survives downsampling).
 func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]Sample, error) {
+	if maxPoints > 0 {
+		pts, err := s.LoadSeriesBuckets(driver, metric, sinceMs, untilMs, maxPoints)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Sample, len(pts))
+		for i, p := range pts {
+			out[i] = Sample{Driver: driver, Metric: metric, TsMs: p.TsMs, Value: p.V}
+		}
+		return out, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
@@ -218,21 +231,65 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 		}
 		out = append(out, sm)
 	}
-	if err := rows.Err(); err != nil {
-		return out, err
+	return out, rows.Err()
+}
+
+// SeriesPoint is one downsampling bucket of a metric: the average, the
+// envelope (min/max — a short spike must not vanish from a zoomed-out
+// chart the way pick-every-Nth-sample downsampling made it), and the
+// number of raw samples that contributed.
+type SeriesPoint struct {
+	TsMs int64   `json:"ts"`
+	V    float64 `json:"v"`
+	Min  float64 `json:"min"`
+	Max  float64 `json:"max"`
+	N    int64   `json:"n"`
+}
+
+// LoadSeriesBuckets aggregates one (driver, metric) series into at most
+// maxPoints buckets, entirely in SQL — the previous approach shipped every
+// raw row to Go and then threw most of them away, which on a 2 s cadence
+// meant materializing ~40k rows per queried day. TsMs is the latest raw
+// sample in each bucket; buckets with no samples are absent (no gap fill).
+func (s *Store) LoadSeriesBuckets(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
+	if maxPoints <= 0 || untilMs < sinceMs {
+		return nil, nil
 	}
-	if maxPoints > 0 && len(out) > maxPoints {
-		if maxPoints == 1 {
-			return []Sample{out[len(out)-1]}, nil
-		}
-		ds := make([]Sample, 0, maxPoints)
-		for i := 0; i < maxPoints; i++ {
-			idx := i * (len(out) - 1) / (maxPoints - 1)
-			ds = append(ds, out[idx])
-		}
-		return ds, nil
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
 	}
-	return out, nil
+	ts := s.ts
+	ts.mu.RLock()
+	dID, dOK := ts.drivers[driver]
+	mID, mOK := ts.metrics[metric]
+	ts.mu.RUnlock()
+	if !dOK || !mOK {
+		return nil, nil
+	}
+
+	// Ceil so the bucket count never exceeds maxPoints.
+	bucketMs := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
+	if bucketMs < 1 {
+		bucketMs = 1
+	}
+	rows, err := s.db.Query(`SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
+		FROM ts_samples
+		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
+		GROUP BY (ts_ms - ?) / ?
+		ORDER BY 1 ASC`, dID, mID, sinceMs, untilMs, sinceMs, bucketMs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SeriesPoint, 0, maxPoints)
+	for rows.Next() {
+		var p SeriesPoint
+		if err := rows.Scan(&p.TsMs, &p.V, &p.Min, &p.Max, &p.N); err != nil {
+			return out, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // LatestSample returns the most recent value for one (driver, metric).
