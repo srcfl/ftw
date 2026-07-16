@@ -9,7 +9,7 @@
 # you'll need Docker Desktop with a recent enough engine (24+).
 #
 # Output lands in deploy/pi-gen/pi-gen/deploy/<IMG_NAME>-<date>.img.xz.
-# That file is what the CI release job uploads to GitHub Releases.
+# CI publishes that file through the independent `rpi-installer` channel.
 #
 # Env overrides:
 #   PI_GEN_REF      pi-gen ref to check out (default: master). Pin to a

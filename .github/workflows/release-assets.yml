@@ -5,7 +5,6 @@ name: release-assets
 #   - linux ftw-relay relay binaries
 #   - tiny ftw-relay web bootstrap bundle
 #   - docker images for main + ftw-updater pushed to GHCR
-#   - Raspberry Pi SD-card image (.img.xz)
 #   - Discord release announcement
 #
 # Triggered by `release.yml` via `gh workflow run release-assets.yml
@@ -50,7 +49,7 @@ jobs:
     name: derive tag + version
     runs-on: ubuntu-latest
     # Beta tags have their own lightweight channel workflow and must never
-    # retag :latest or publish stable RPi/Discord assets.
+    # retag :latest or publish stable Discord announcements.
     if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-') }}
     outputs:
       tag:     ${{ steps.meta.outputs.tag }}
@@ -369,162 +368,12 @@ jobs:
             test "${SOURCE_DIGEST}" = "${legacy_digest}"
           done
 
-  rpi-image:
-    name: build + upload RPi SD-card image
-    runs-on: ubuntu-latest
-    # The image's firstboot.service runs `docker compose pull` against
-    # GHCR, so the docker images for this version have to be live
-    # before the image hits the release. Depend on the docker job to
-    # enforce that ordering.
-    needs: [meta, docker]
-    permissions:
-      contents: write  # upload the .img.xz as a release asset
-    steps:
-      - name: Free disk space
-        # pi-gen's chroot stages want ~15 GB of working disk during
-        # a build; ubuntu-latest ships with ~14 GB free. Evicting
-        # the preinstalled dotnet / GHC / boost trees we don't use
-        # and the runner's docker image cache buys ~30 GB back.
-        run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "${AGENT_TOOLSDIRECTORY}"
-          sudo docker system prune -af
-          df -h /
-
-      - name: Install qemu for arm64 cross-build
-        # See rpi-image-build.yml for the full rationale. Short version:
-        # pi-gen's arm64 (trixie) branch needs a STATIC qemu-aarch64 as the
-        # binfmt interpreter (a dynamic one can't find its libs in the
-        # chroot → arch-test "arm64: not supported"). Install qemu-user-static,
-        # symlink it to the unsuffixed name the preflight checks, and use
-        # tonistiigi/binfmt for chroot-surviving F-flagged handlers.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends qemu-user-static
-          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
-          sudo docker run --privileged --rm tonistiigi/binfmt --install arm64
-          which qemu-aarch64
-          echo "--- binfmt_misc qemu-aarch64 handlers ---"
-          for f in /proc/sys/fs/binfmt_misc/qemu-aarch64*; do
-            echo "== ${f} =="; cat "${f}" 2>/dev/null || true
-          done
-
-      - name: Checkout tag
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.meta.outputs.tag }}
-
-      - name: Build image
-        # The pinned pi-gen ref (the arm64 / trixie branch commit) lives
-        # in deploy/pi-gen/build.sh as the single source of truth, so
-        # local builds and CI stay in lock-step. The image is Raspberry
-        # Pi OS Lite (64-bit, trixie) with cloud-init — the curl|bash
-        # installer is independent and runs on the user's own OS, so the
-        # two are intentionally no longer tied to the same Debian base.
-        run: deploy/pi-gen/build.sh
-
-      - name: Locate + rename artifact
-        id: artifact
-        # pi-gen names its output <IMG_NAME>-<date>.img.xz. Embed the
-        # release version in the filename so the GitHub Release asset
-        # matches the binaries job's naming convention and is
-        # self-identifying when users download it later.
-        run: |
-          set -euo pipefail
-          # Pick the FTW stage output specifically. A naive ls|head can select
-          # the stock *-lite image when pi-gen leaves both files behind.
-          shopt -s nullglob
-          candidates=( deploy/pi-gen/pi-gen/deploy/*ftw-rpi4-arm64.img.xz )
-          SRC=""
-          for candidate in "${candidates[@]}"; do
-            case "${candidate}" in
-              *-lite.img.xz) continue ;;
-            esac
-            SRC="${candidate}"
-            break
-          done
-          if [ -z "${SRC}" ]; then
-            echo "pi-gen produced no FTW rpi4 image — check build log above" >&2
-            ls -lah deploy/pi-gen/pi-gen/deploy/ || true
-            exit 1
-          fi
-          DST="deploy/pi-gen/pi-gen/deploy/ftw-rpi4-arm64-${{ needs.meta.outputs.tag }}.img.xz"
-          mv "${SRC}" "${DST}"
-          (
-            cd "$(dirname "${DST}")"
-            sha256sum "$(basename "${DST}")" > "$(basename "${DST}").sha256"
-          )
-          ls -lah "${DST}"
-          echo "asset=${DST}" >> "${GITHUB_OUTPUT}"
-
-      - name: Upload to release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:   ${{ needs.meta.outputs.tag }}
-          ASSET: ${{ steps.artifact.outputs.asset }}
-        # --clobber mirrors the binaries job — lets a manual re-run
-        # replace a prior upload without aborting the job.
-        run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" --clobber
-
-      - name: Build + upload Imager repository JSON
-        # Raspberry Pi Imager 2.0 only offers the OS-customisation panel
-        # (hostname / SSH user / WiFi) for images described by a
-        # repository JSON declaring an `init_format`. Render the template
-        # at deploy/imager/os_list.json with THIS release's image URL,
-        # sizes, and (schema-required, Imager-verified) extract_sha256,
-        # then publish it as a release asset. Users point Imager at the
-        # stable, version-independent URL:
-        #   https://github.com/<owner>/<repo>/releases/latest/download/os_list.json
-        # which always redirects to the newest release's copy.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG:   ${{ needs.meta.outputs.tag }}
-          ASSET: ${{ steps.artifact.outputs.asset }}
-        run: |
-          set -euo pipefail
-          IMG_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/ftw-rpi4-arm64-${TAG}.img.xz"
-          DL_SIZE="$(stat -c%s "${ASSET}")"
-          # xz --robot --list emits a `totals` row whose 5th field is the
-          # uncompressed (extracted) size in bytes.
-          EXTRACT_SIZE="$(xz --robot --list "${ASSET}" | awk '/^totals/{print $5}')"
-          # extract_sha256 is REQUIRED by the V4 schema and verified by
-          # Imager after writing. Stream-decompress so the ~2.4 GB image
-          # never has to land on disk.
-          EXTRACT_SHA="$(xz -dc "${ASSET}" | sha256sum | cut -d' ' -f1)"
-          RELEASE_DATE="$(date -u +%Y-%m-%d)"
-
-          jq \
-            --arg url   "${IMG_URL}" \
-            --argjson ds "${DL_SIZE}" \
-            --argjson es "${EXTRACT_SIZE}" \
-            --arg sha   "${EXTRACT_SHA}" \
-            --arg date  "${RELEASE_DATE}" \
-            '.os_list[0].url                  = $url
-            | .os_list[0].image_download_size = $ds
-            | .os_list[0].extract_size        = $es
-            | .os_list[0].extract_sha256      = $sha
-            | .os_list[0].release_date        = $date' \
-            deploy/imager/os_list.json > os_list.json
-
-          # Fail loudly if templating left any placeholder behind, and
-          # assert the checksum is a real 64-hex-char digest.
-          if grep -q '__IMAGE_URL__\|__EXTRACT_SHA256__' os_list.json; then
-            echo "os_list.json still contains placeholders after templating" >&2
-            exit 1
-          fi
-          jq -e '.os_list[0].extract_sha256 | test("^[0-9a-f]{64}$")' os_list.json >/dev/null
-
-          gh release upload "${TAG}" os_list.json --clobber
-
   discord:
     name: announce release on Discord
     runs-on: ubuntu-latest
     # Wait for binaries + docker so the message links to assets that
-    # actually exist. The rpi-image job is intentionally NOT in `needs`
-    # here: it's a ~30 min pi-gen build that can legitimately fail for
-    # reasons orthogonal to the release being useful (disk-space
-    # eviction regressions, pi-gen upstream breakage). The announcement
-    # should still go out with the binary + image links when that
-    # happens.
+    # actually exist. The independent rpi-installer channel is intentionally
+    # outside the application release critical path.
     needs: [meta, binaries, ftw-relay, ftw-relay-web, docker]
     permissions:
       contents: read   # gh release view needs read access

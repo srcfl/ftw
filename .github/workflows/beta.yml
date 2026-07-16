@@ -105,8 +105,9 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             VERSION=${{ needs.tag.outputs.version }}
-          cache-from: type=gha,scope=beta-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=beta-${{ matrix.target }}
+          # Reuse the same content-addressed layers as edge and stable.
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
       - name: Login to compatibility GHCR namespace
         uses: docker/login-action@v3

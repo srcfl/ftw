@@ -116,7 +116,8 @@ tooling still have to move together.
 
 The `v0.128.0` SD-card image uses `ftw.local` and FTW-branded host services.
 Raspberry Pi Imager metadata is published at
-`https://github.com/srcfl/ftw/releases/latest/download/os_list.json`. Existing
+`https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json`.
+The installer image refreshes independently from application releases; existing
 devices keep their configured hostname, including `42w.local`, and continue
 updating the container without requiring an SD-card reflash.
 

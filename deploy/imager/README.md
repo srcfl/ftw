@@ -12,20 +12,22 @@ In Raspberry Pi Imager: **App Options → Content Repository → EDIT → Use cu
 file**, paste the URL below, then **APPLY & RESTART** (or `rpi-imager --repo <url>`):
 
 ```
-https://github.com/srcfl/ftw/releases/latest/download/os_list.json
+https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
 ```
 
-`releases/latest/download/...` always redirects to the newest release's asset,
-so the URL never changes between versions.
+The `rpi-installer` prerelease is a permanent installer channel. The URL stays
+fixed while its small repository document points at the newest dated image.
 
 ## This file is a template
 
 The committed copy is a **template**: `url`, `extract_size`, `extract_sha256`,
 `image_download_size`, and `release_date` carry placeholder/zero values. The
-`rpi-image` job in `.github/workflows/release-assets.yml` renders these with the
-real values for each release (the `.img.xz` URL, its compressed + decompressed
-sizes, and the SHA-256 of the decompressed image — which Imager verifies after
-writing) and uploads the rendered `os_list.json` as a release asset.
+`.github/workflows/rpi-image-build.yml` renders these with the real values (the
+`.img.xz` URL, its compressed + decompressed sizes, and the SHA-256 of the
+decompressed image — which Imager verifies after writing) and uploads the
+rendered `os_list.json` to the permanent `rpi-installer` prerelease. Full builds
+run when installer inputs change on `master`, monthly for OS/package currency,
+or by explicit maintainer dispatch — not for every application release.
 
 `init_format` is `cloudinit-rpi` because the image is Raspberry Pi OS Trixie with
 cloud-init (Imager writes `user-data` / `network-config` / `meta-data` to the boot
