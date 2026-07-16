@@ -11,7 +11,7 @@
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
 
-.PHONY: help test optimizer-install optimizer-test build build-arm64 build-amd64 build-windows-amd64 release \
+.PHONY: help test optimizer-install optimizer-test compose-migration-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
         e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
@@ -57,6 +57,10 @@ optimizer-install:
 optimizer-test: optimizer/.venv/bin/pytest
 	optimizer/.venv/bin/pytest -q optimizer/tests
 
+compose-migration-test:
+	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh
+	bash scripts/test-modular-compose.sh
+
 optimizer/.venv/bin/pytest: optimizer/pyproject.toml
 	$(MAKE) optimizer-install
 
@@ -88,7 +92,7 @@ ci-hw-pi:
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify: optimizer-test
+verify: optimizer-test compose-migration-test
 	cd go && go vet ./...
 	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
 	cd go && go build ./...

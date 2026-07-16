@@ -37,11 +37,13 @@ Skriptet:
    `ftw-updater` och den beständiga `/app/data`-mounten finns;
 2. säkerhetskopierar de aktiva Compose-filerna;
 3. ändrar endast service-image till `ghcr.io/srcfl/ftw` och
-   `ghcr.io/srcfl/ftw-updater`;
-4. hämtar de officiella multi-arch-imagerna;
-5. återskapar tjänsterna med samma katalog, Compose-projekt, servicenamn,
+   `ghcr.io/srcfl/ftw-updater` samt skapar en separat Compose-override för
+   `ghcr.io/srcfl/ftw-optimizer` när den saknas;
+4. validerar den sammanslagna Compose-konfigurationen och hämtar de officiella
+   multi-arch-imagerna;
+5. startar optimizercontainern och återskapar övriga tjänster med samma katalog, Compose-projekt, servicenamn,
    miljöinställningar, volymer och data-bind;
-6. kontrollerar att båda containrarna och FTW:s lokala health-endpoint svarar.
+6. kontrollerar att alla tre containrarna och FTW:s lokala health-endpoint svarar.
 
 Om något steg misslyckas återställs tidigare Compose-filer och container.
 `data/` kopieras, flyttas eller raderas aldrig.
@@ -60,6 +62,7 @@ Du ska se images som börjar med:
 ```text
 ghcr.io/srcfl/ftw:
 ghcr.io/srcfl/ftw-updater:
+ghcr.io/srcfl/ftw-optimizer:
 ```
 
 Det är normalt att en migrerad installation fortfarande ligger i
@@ -102,11 +105,13 @@ The script:
    `ftw-updater`, and the persistent `/app/data` mount exist;
 2. backs up the active Compose files;
 3. changes only the service images to `ghcr.io/srcfl/ftw` and
-   `ghcr.io/srcfl/ftw-updater`;
-4. pulls the official multi-architecture images;
-5. recreates the services with the same directory, Compose project, service
+   `ghcr.io/srcfl/ftw-updater`, and creates a separate Compose override for
+   `ghcr.io/srcfl/ftw-optimizer` when it is missing;
+4. validates the merged Compose configuration and pulls the official
+   multi-architecture images;
+5. starts the optimizer container and recreates the other services with the same directory, Compose project, service
    name, environment, volumes, and data bind;
-6. verifies both containers and the local FTW health endpoint.
+6. verifies all three containers and the local FTW health endpoint.
 
 If a step fails, the previous Compose files and container are restored.
 `data/` is never copied, moved, or deleted.
@@ -125,6 +130,7 @@ The output should include images beginning with:
 ```text
 ghcr.io/srcfl/ftw:
 ghcr.io/srcfl/ftw-updater:
+ghcr.io/srcfl/ftw-optimizer:
 ```
 
 It is normal for a migrated installation to remain in `~/forty-two-watts` and

@@ -40,6 +40,7 @@ else
 fi
 RAW="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 COMPOSE_FILE="docker-compose.macos.yml"
+ENABLE_MODULAR_URL="${RAW}/scripts/enable-modular-stack.sh"
 
 # Banner
 cat <<'BANNER'
@@ -107,22 +108,58 @@ mkdir -p "$INSTALL_DIR/data" "$INSTALL_DIR/mosquitto/config"
 echo ""
 echo "==[3/4]== Preparing $COMPOSE_FILE + mosquitto.conf from $BRANCH"
 COMPOSE_PATH="$INSTALL_DIR/${COMPOSE_FILE}"
+
+refresh_compose_args() {
+  COMPOSE_ARGS=(-f "$COMPOSE_PATH")
+  for name in \
+    docker-compose.override.yml \
+    docker-compose.override.yaml \
+    compose.override.yml \
+    compose.override.yaml; do
+    candidate="$INSTALL_DIR/$name"
+    if [ -e "$candidate" ]; then
+      COMPOSE_ARGS+=(-f "$candidate")
+    fi
+  done
+}
+
+compose() {
+  docker compose "${COMPOSE_ARGS[@]}" "$@"
+}
+
 if [ -f "$COMPOSE_PATH" ]; then
-  SERVICES="$(docker compose -f "$COMPOSE_PATH" config --services)"
+  refresh_compose_args
+  SERVICES="$(compose config --services)"
   MAIN_COUNT="$(printf '%s\n' "$SERVICES" | grep -Ec '^(ftw|forty-two-watts)$' || true)"
   if [ "$MAIN_COUNT" -ne 1 ]; then
     echo "ERROR: existing compose layout is ambiguous or lacks /app/data; leaving it untouched." >&2
     exit 1
   fi
   MAIN_SERVICE="$(printf '%s\n' "$SERVICES" | grep -E '^(ftw|forty-two-watts)$')"
-  if ! docker compose -f "$COMPOSE_PATH" config "$MAIN_SERVICE" | grep -q '/app/data'; then
+  if ! compose config "$MAIN_SERVICE" | grep -q '/app/data'; then
     echo "ERROR: existing main service lacks /app/data; leaving it untouched." >&2
     exit 1
   fi
   cp "$COMPOSE_PATH" "$COMPOSE_PATH.pre-ftw.bak"
   echo "    Existing safe deployment layout retained."
+
+  if ! printf '%s\n' "$SERVICES" | grep -qx 'ftw-optimizer'; then
+    echo "    Adding the independently updatable optimizer sidecar..."
+    ENABLE_SCRIPT="$(mktemp)"
+    trap 'rm -f "$ENABLE_SCRIPT"' EXIT
+    curl -fsSL "$ENABLE_MODULAR_URL" -o "$ENABLE_SCRIPT"
+    if ! bash "$ENABLE_SCRIPT" "$COMPOSE_PATH"; then
+      echo "ERROR: could not add the modular optimizer without changing an existing override." >&2
+      echo "       Merge it manually using docs/operations.md, then rerun this installer." >&2
+      exit 1
+    fi
+    rm -f "$ENABLE_SCRIPT"
+    trap - EXIT
+    refresh_compose_args
+  fi
 else
   curl -fsSL "${RAW}/${COMPOSE_FILE}" -o "$COMPOSE_PATH"
+  refresh_compose_args
 fi
 curl -fsSL "${RAW}/mosquitto/config/mosquitto.conf" \
   -o "$INSTALL_DIR/mosquitto/config/mosquitto.conf"
@@ -131,8 +168,19 @@ curl -fsSL "${RAW}/mosquitto/config/mosquitto.conf" \
 echo ""
 echo "==[4/4]== Pulling images + starting the stack"
 cd "$INSTALL_DIR"
-docker compose -f "$COMPOSE_FILE" pull
-docker compose -f "$COMPOSE_FILE" up -d
+compose pull
+compose up -d
+
+COMPOSE_MANAGE="docker compose -f $COMPOSE_FILE"
+for name in \
+  docker-compose.override.yml \
+  docker-compose.override.yaml \
+  compose.override.yml \
+  compose.override.yaml; do
+  if [ -e "$INSTALL_DIR/$name" ]; then
+    COMPOSE_MANAGE="$COMPOSE_MANAGE -f $name"
+  fi
+done
 
 # ---- Summary ----
 # en0 is Wi-Fi on most Macs; en1 is the wired port on a Mac mini. Try a
@@ -161,9 +209,9 @@ cat <<EOF
     └── config.yaml, state.db, battery models, cold/ rolloff
 
   Manage the stack (from ${INSTALL_DIR}):
-     docker compose -f ${COMPOSE_FILE} logs -f                          # tail logs
-     docker compose -f ${COMPOSE_FILE} pull && docker compose -f ${COMPOSE_FILE} up -d  # upgrade
-     docker compose -f ${COMPOSE_FILE} down                             # stop
+     ${COMPOSE_MANAGE} logs -f                    # tail logs
+     ${COMPOSE_MANAGE} pull && ${COMPOSE_MANAGE} up -d  # upgrade
+     ${COMPOSE_MANAGE} down                       # stop
 
   macOS networking notes (see docs/deploy-platforms.md):
      • In config.yaml, point MQTT drivers at host: mosquitto (NOT localhost).

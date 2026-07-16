@@ -6,7 +6,8 @@ set -euo pipefail
 # later selective updates see the same merged project.
 
 base="${1:-docker-compose.yml}"
-override="$(dirname "${base}")/docker-compose.override.yml"
+base_dir="$(dirname "${base}")"
+override="${base_dir}/docker-compose.override.yml"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is required" >&2
@@ -16,16 +17,32 @@ if [ ! -f "${base}" ]; then
   echo "compose file not found: ${base}" >&2
   exit 1
 fi
-if grep -q '^  ftw-optimizer:' "${base}"; then
-  echo "${base} already contains the modular optimizer service"
+compose_args=(-f "${base}")
+existing_overrides=()
+for name in \
+  docker-compose.override.yml \
+  docker-compose.override.yaml \
+  compose.override.yml \
+  compose.override.yaml; do
+  candidate="${base_dir}/${name}"
+  if [ -e "${candidate}" ]; then
+    existing_overrides+=("${candidate}")
+    compose_args+=(-f "${candidate}")
+  fi
+done
+
+services="$(docker compose "${compose_args[@]}" config --services)"
+if grep -qx 'ftw-optimizer' <<<"${services}"; then
+  echo "${base} already has the modular optimizer service in its merged Compose project"
   exit 0
 fi
-if [ -e "${override}" ]; then
-  echo "refusing to overwrite existing ${override}; merge the modular service manually" >&2
+if [ "${#existing_overrides[@]}" -gt 0 ]; then
+  printf 'refusing to overwrite or bypass existing Compose override(s):\n' >&2
+  printf '  %s\n' "${existing_overrides[@]}" >&2
+  echo "merge the modular optimizer service manually, then rerun this command" >&2
   exit 1
 fi
 
-services="$(docker compose -f "${base}" config --services)"
 main="${FTW_MAIN_SERVICE:-}"
 if [ -z "${main}" ]; then
   if grep -qx 'ftw' <<<"${services}" && ! grep -qx 'forty-two-watts' <<<"${services}"; then
