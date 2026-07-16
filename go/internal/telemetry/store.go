@@ -212,6 +212,10 @@ type MetricSample struct {
 	Metric string
 	TsMs   int64
 	Value  float64
+	// Unit is the optional display unit from host.emit_metric ("°C", "Hz").
+	// Carried to the TS DB so the metric catalog stays labelled across
+	// restarts, not only while the driver is live.
+	Unit string
 }
 
 // Store is the central telemetry sink that drivers emit into and that the
@@ -369,7 +373,7 @@ func (s *Store) EmitMetric(driver, name string, value float64, unit, register, t
 	now := time.Now()
 	s.pendingMu.Lock()
 	s.pending = append(s.pending, MetricSample{
-		Driver: driver, Metric: name, TsMs: now.UnixMilli(), Value: value,
+		Driver: driver, Metric: name, TsMs: now.UnixMilli(), Value: value, Unit: unit,
 	})
 	s.pendingMu.Unlock()
 	s.latestMu.Lock()

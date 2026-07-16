@@ -2415,7 +2415,7 @@ func main() {
 			if samples := tel.FlushSamples(); len(samples) > 0 {
 				stSamples := make([]state.Sample, len(samples))
 				for i, sm := range samples {
-					stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value}
+					stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
 				}
 				if err := st.RecordSamples(stSamples); err != nil {
 					slog.Warn("ts samples flush failed", "n", len(samples), "err", err)
