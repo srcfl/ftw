@@ -112,8 +112,10 @@ Defined in `go/internal/state/parquet.go`:
   | value   | float64 | zstd            |
 
 - **Compression**: zstd at default level. A daily file is typically 5-15 MB, which works out to ~100-200 MB/year
-- **Idempotent**: re-running a day rewrites the file through a `.tmp` + atomic rename (go/internal/state/parquet.go:80-100). No partial files, and re-running never loses data
-- **Triggered** by the hourly `rolloffLoop` goroutine (go/cmd/ftw/main.go:579-590), with one run at startup so a fresh boot catches any backlog. After successful writes, rolled rows are deleted from `ts_samples` in a single `DELETE WHERE ts_ms < cutoff`
+- **Idempotent + durable**: re-running a day merges into the existing file through a `.tmp` + fsync + atomic rename + directory fsync. No partial files even across power loss, and re-running never loses data — the durability matters because the SQLite rows are deleted right after the write returns
+- **Streamed**: the rolloff flushes one UTC day at a time (samples stream out of SQLite in ts order), so peak memory is one day (~30 MB) regardless of backlog size
+- **Triggered** by the hourly `rolloffLoop` goroutine in `go/cmd/ftw/main.go`, with one run at startup so a fresh boot catches any backlog. After durable writes, rolled rows are deleted from `ts_samples` in a single `DELETE WHERE ts_ms < cutoff`. The same loop then runs a truncating WAL checkpoint, applies `state.cold_retention_days` (deletes expired day files; 0 = keep forever), and warns when free disk is below 500 MB
+- **Compaction**: SQLite never shrinks its file on its own; `state.Open` runs a one-time `VACUUM` at boot when the freelist is both >64 MB and >20% of the file (typically the first boot after a previously unpruned DB got pruned)
 
 ## 7. Driver-side API
 

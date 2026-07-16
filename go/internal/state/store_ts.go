@@ -20,25 +20,33 @@ import (
 const RecentRetention = 14 * 24 * time.Hour
 
 // Sample is one (driver, metric, ts, value) tuple — the canonical TS row.
+// Unit is optional display metadata persisted on the metric (not per row).
 type Sample struct {
 	Driver string
 	Metric string
 	TsMs   int64
 	Value  float64
+	Unit   string
+}
+
+// metricEntry is the cached intern row for one metric.
+type metricEntry struct {
+	id   int64
+	unit string
 }
 
 // internCache holds the in-memory id↔name maps for one Store.
 type internCache struct {
 	mu      sync.RWMutex
 	drivers map[string]int64
-	metrics map[string]int64
+	metrics map[string]metricEntry
 	loaded  bool
 }
 
 func newInternCache() *internCache {
 	return &internCache{
 		drivers: make(map[string]int64),
-		metrics: make(map[string]int64),
+		metrics: make(map[string]metricEntry),
 	}
 }
 
@@ -64,18 +72,18 @@ func (s *Store) hydrateIntern() error {
 		ts.drivers[name] = id
 	}
 	rows.Close()
-	rows, err = s.db.Query(`SELECT id, name FROM ts_metrics`)
+	rows, err = s.db.Query(`SELECT id, name, COALESCE(unit, '') FROM ts_metrics`)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var id int64
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var name, unit string
+		if err := rows.Scan(&id, &name, &unit); err != nil {
 			rows.Close()
 			return err
 		}
-		ts.metrics[name] = id
+		ts.metrics[name] = metricEntry{id: id, unit: unit}
 	}
 	rows.Close()
 	ts.loaded = true
@@ -110,20 +118,29 @@ func (s *Store) driverID(name string) (int64, error) {
 }
 
 // metricID returns the id for a metric name, allocating one on first use.
-func (s *Store) metricID(name string) (int64, error) {
+// A non-empty unit is persisted the first time it is seen (the unit column
+// used to stay NULL forever — units only lived in the in-memory telemetry
+// cache, so the catalog lost its labels on every restart).
+func (s *Store) metricID(name, unit string) (int64, error) {
 	ts := s.ts
 	ts.mu.RLock()
-	if id, ok := ts.metrics[name]; ok {
+	if m, ok := ts.metrics[name]; ok && (unit == "" || m.unit == unit) {
 		ts.mu.RUnlock()
-		return id, nil
+		return m.id, nil
 	}
 	ts.mu.RUnlock()
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if id, ok := ts.metrics[name]; ok {
-		return id, nil
+	if m, ok := ts.metrics[name]; ok {
+		if unit != "" && m.unit != unit {
+			if _, err := s.db.Exec(`UPDATE ts_metrics SET unit = ? WHERE id = ?`, unit, m.id); err != nil {
+				return 0, err
+			}
+			ts.metrics[name] = metricEntry{id: m.id, unit: unit}
+		}
+		return m.id, nil
 	}
-	res, err := s.db.Exec(`INSERT INTO ts_metrics (name) VALUES (?)`, name)
+	res, err := s.db.Exec(`INSERT INTO ts_metrics (name, unit) VALUES (?, NULLIF(?, ''))`, name, unit)
 	if err != nil {
 		return 0, err
 	}
@@ -131,7 +148,7 @@ func (s *Store) metricID(name string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	ts.metrics[name] = id
+	ts.metrics[name] = metricEntry{id: id, unit: unit}
 	return id, nil
 }
 
@@ -161,7 +178,7 @@ func (s *Store) RecordSamples(samples []Sample) error {
 		if err != nil {
 			return fmt.Errorf("driver intern %s: %w", sm.Driver, err)
 		}
-		mID, err := s.metricID(sm.Metric)
+		mID, err := s.metricID(sm.Metric, sm.Unit)
 		if err != nil {
 			return fmt.Errorf("metric intern %s: %w", sm.Metric, err)
 		}
@@ -186,17 +203,84 @@ func (s *Store) RecordSamples(samples []Sample) error {
 	return tx.Commit()
 }
 
+// RecordTick persists one control-loop tick — the history snapshot plus the
+// flushed metric samples — in a single transaction. The loop used to commit
+// these separately, doubling the WAL commit rate (~90k commits/day at a 2 s
+// tick) for no isolation benefit. Same deadlock note as RecordSamples:
+// intern IDs are pre-resolved before the tx opens.
+func (s *Store) RecordTick(p HistoryPoint, samples []Sample) error {
+	if err := s.hydrateIntern(); err != nil {
+		return err
+	}
+	type resolved struct {
+		dID, mID int64
+		ts       int64
+		v        float64
+	}
+	rs := make([]resolved, 0, len(samples))
+	for _, sm := range samples {
+		dID, err := s.driverID(sm.Driver)
+		if err != nil {
+			return fmt.Errorf("driver intern %s: %w", sm.Driver, err)
+		}
+		mID, err := s.metricID(sm.Metric, sm.Unit)
+		if err != nil {
+			return fmt.Errorf("metric intern %s: %w", sm.Metric, err)
+		}
+		rs = append(rs, resolved{dID: dID, mID: mID, ts: sm.TsMs, v: sm.Value})
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
+	); err != nil {
+		return err
+	}
+	if len(rs) > 0 {
+		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, r := range rs {
+			if _, err := stmt.Exec(r.dID, r.mID, r.ts, r.v); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // LoadSeries returns one metric's history for one driver in [sinceMs, untilMs].
-// Result is sorted ascending by ts_ms. maxPoints=0 means no limit; otherwise
-// returned rows are evenly downsampled to at most maxPoints.
+// Result is sorted ascending by ts_ms. maxPoints=0 means every raw sample;
+// otherwise samples are bucket-averaged in SQL down to at most maxPoints rows
+// (Value = bucket AVG, TsMs = latest sample in the bucket, so the newest
+// reading always survives downsampling).
 func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]Sample, error) {
+	if maxPoints > 0 {
+		pts, err := s.LoadSeriesBuckets(driver, metric, sinceMs, untilMs, maxPoints)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Sample, len(pts))
+		for i, p := range pts {
+			out[i] = Sample{Driver: driver, Metric: metric, TsMs: p.TsMs, Value: p.V}
+		}
+		return out, nil
+	}
 	if err := s.hydrateIntern(); err != nil {
 		return nil, err
 	}
 	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
-	mID, mOK := ts.metrics[metric]
+	mEnt, mOK := ts.metrics[metric]
 	ts.mu.RUnlock()
 	if !dOK || !mOK {
 		return nil, nil
@@ -204,7 +288,7 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 
 	rows, err := s.db.Query(`SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
-		ORDER BY ts_ms ASC`, dID, mID, sinceMs, untilMs)
+		ORDER BY ts_ms ASC`, dID, mEnt.id, sinceMs, untilMs)
 	if err != nil {
 		return nil, err
 	}
@@ -218,21 +302,94 @@ func (s *Store) LoadSeries(driver, metric string, sinceMs, untilMs int64, maxPoi
 		}
 		out = append(out, sm)
 	}
-	if err := rows.Err(); err != nil {
-		return out, err
+	return out, rows.Err()
+}
+
+// SeriesPoint is one downsampling bucket of a metric: the average, the
+// envelope (min/max — a short spike must not vanish from a zoomed-out
+// chart the way pick-every-Nth-sample downsampling made it), and the
+// number of raw samples that contributed.
+type SeriesPoint struct {
+	TsMs int64   `json:"ts"`
+	V    float64 `json:"v"`
+	Min  float64 `json:"min"`
+	Max  float64 `json:"max"`
+	N    int64   `json:"n"`
+}
+
+// LoadSeriesBucketsOrRaw is LoadSeriesBuckets with maxPoints=0 meaning "every
+// raw sample" (as degenerate single-sample buckets: v=min=max, n=1), so API
+// handlers can serve both shapes from one code path.
+func (s *Store) LoadSeriesBucketsOrRaw(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
+	if maxPoints > 0 {
+		return s.LoadSeriesBuckets(driver, metric, sinceMs, untilMs, maxPoints)
 	}
-	if maxPoints > 0 && len(out) > maxPoints {
-		if maxPoints == 1 {
-			return []Sample{out[len(out)-1]}, nil
-		}
-		ds := make([]Sample, 0, maxPoints)
-		for i := 0; i < maxPoints; i++ {
-			idx := i * (len(out) - 1) / (maxPoints - 1)
-			ds = append(ds, out[idx])
-		}
-		return ds, nil
+	raw, err := s.LoadSeries(driver, metric, sinceMs, untilMs, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SeriesPoint, len(raw))
+	for i, sm := range raw {
+		out[i] = SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
 	}
 	return out, nil
+}
+
+// BucketWidthMs is the downsampling bucket width for a window and point
+// budget, ceiled so the bucket count never exceeds maxPoints. Exported so
+// callers merging cold (Parquet) samples into the same chart can bucket them
+// on identical boundaries (origin = sinceMs).
+func BucketWidthMs(sinceMs, untilMs int64, maxPoints int) int64 {
+	if maxPoints <= 0 {
+		return 1
+	}
+	w := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
+	if w < 1 {
+		w = 1
+	}
+	return w
+}
+
+// LoadSeriesBuckets aggregates one (driver, metric) series into at most
+// maxPoints buckets, entirely in SQL — the previous approach shipped every
+// raw row to Go and then threw most of them away, which on a 2 s cadence
+// meant materializing ~40k rows per queried day. TsMs is the latest raw
+// sample in each bucket; buckets with no samples are absent (no gap fill).
+func (s *Store) LoadSeriesBuckets(driver, metric string, sinceMs, untilMs int64, maxPoints int) ([]SeriesPoint, error) {
+	if maxPoints <= 0 || untilMs < sinceMs {
+		return nil, nil
+	}
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
+	}
+	ts := s.ts
+	ts.mu.RLock()
+	dID, dOK := ts.drivers[driver]
+	mEnt, mOK := ts.metrics[metric]
+	ts.mu.RUnlock()
+	if !dOK || !mOK {
+		return nil, nil
+	}
+
+	bucketMs := BucketWidthMs(sinceMs, untilMs, maxPoints)
+	rows, err := s.db.Query(`SELECT MAX(ts_ms), AVG(value), MIN(value), MAX(value), COUNT(*)
+		FROM ts_samples
+		WHERE driver_id = ? AND metric_id = ? AND ts_ms BETWEEN ? AND ?
+		GROUP BY (ts_ms - ?) / ?
+		ORDER BY 1 ASC`, dID, mEnt.id, sinceMs, untilMs, sinceMs, bucketMs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]SeriesPoint, 0, maxPoints)
+	for rows.Next() {
+		var p SeriesPoint
+		if err := rows.Scan(&p.TsMs, &p.V, &p.Min, &p.Max, &p.N); err != nil {
+			return out, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // LatestSample returns the most recent value for one (driver, metric).
@@ -244,7 +401,7 @@ func (s *Store) LatestSample(driver, metric string) (Sample, error) {
 	ts := s.ts
 	ts.mu.RLock()
 	dID, dOK := ts.drivers[driver]
-	mID, mOK := ts.metrics[metric]
+	mEnt, mOK := ts.metrics[metric]
 	ts.mu.RUnlock()
 	if !dOK || !mOK {
 		return Sample{}, sql.ErrNoRows
@@ -253,11 +410,33 @@ func (s *Store) LatestSample(driver, metric string) (Sample, error) {
 	sm.Driver, sm.Metric = driver, metric
 	err := s.db.QueryRow(`SELECT ts_ms, value FROM ts_samples
 		WHERE driver_id = ? AND metric_id = ? ORDER BY ts_ms DESC LIMIT 1`,
-		dID, mID).Scan(&sm.TsMs, &sm.Value)
+		dID, mEnt.id).Scan(&sm.TsMs, &sm.Value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return sm, err
 	}
 	return sm, err
+}
+
+// MetricInfo is one catalog entry: a metric name plus its display unit
+// ("" when the driver never supplied one).
+type MetricInfo struct {
+	Name string `json:"name"`
+	Unit string `json:"unit,omitempty"`
+}
+
+// MetricsCatalog returns every known metric with its persisted unit.
+func (s *Store) MetricsCatalog() ([]MetricInfo, error) {
+	if err := s.hydrateIntern(); err != nil {
+		return nil, err
+	}
+	ts := s.ts
+	ts.mu.RLock()
+	defer ts.mu.RUnlock()
+	out := make([]MetricInfo, 0, len(ts.metrics))
+	for n, m := range ts.metrics {
+		out = append(out, MetricInfo{Name: n, Unit: m.unit})
+	}
+	return out, nil
 }
 
 // MetricNames returns all known metric names, sorted alphabetically.
@@ -319,8 +498,8 @@ func (s *Store) SamplesBefore(ctx context.Context, cutoffMs int64, batchSize int
 		dRev[id] = n
 	}
 	mRev := make(map[int64]string, len(ts.metrics))
-	for n, id := range ts.metrics {
-		mRev[id] = n
+	for n, m := range ts.metrics {
+		mRev[m.id] = n
 	}
 	ts.mu.RUnlock()
 

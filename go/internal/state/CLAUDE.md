@@ -25,8 +25,9 @@ Opens one SQLite file (WAL journal, small connection pool with `busy_timeout=500
 - `SaveBatteryModel / LoadAllBatteryModels / DeleteBatteryModel / MigrateBatteryModelKeys` — model state keyed by `device_id` (falls back to driver name cold-start).
 - `RegisterDevice / LookupDeviceByDriverName / AllDevices` + `ResolveDeviceID` — identity layer that keeps trained state surviving renames.
 - `RecordHistory / LoadHistory / HistoryCounts / Prune` — tiered history; `Prune` ages hot→warm (15 min buckets) and warm→cold (1 day buckets) in one transaction.
-- `RecordSamples / LoadSeries / LatestSample / MetricNames / DriverNames / PruneRecent / SamplesBefore` — long-format TS with interned driver/metric IDs.
-- `RolloffToParquet / LoadSeriesFromParquet` — 14-day-old samples roll off to daily Parquet files, sorted, zstd-compressed.
+- `RecordSamples / RecordTick / LoadSeries / LoadSeriesBuckets / LatestSample / MetricNames / MetricsCatalog / DriverNames / PruneRecent / SamplesBefore` — long-format TS with interned driver/metric IDs (+ persisted units). `RecordTick` writes the control-loop tick (history point + samples) in ONE transaction — prefer it over separate calls. `LoadSeriesBuckets` downsamples in SQL (avg/min/max/n per bucket).
+- `RolloffToParquet / LoadSeriesFromParquet` — 14-day-old samples roll off to daily Parquet files, streamed one UTC day at a time, fsynced before rename, zstd-compressed.
+- `CheckpointWAL / PruneColdParquet / DiskAvail / CompactIfBloated` — maintenance: truncating WAL checkpoint after rolloff, cold-tier retention (`state.cold_retention_days`), disk-space probe, one-time boot VACUUM when the freelist is large.
 - `SavePrices / LoadPrices / SaveForecasts / LoadForecasts` — market and weather data slots.
 - `SaveCalDAVObject / GetCalDAVObject / ListCalDAVObjects / DeleteCalDAVObject` + `SaveCalDAVCalendar / ListCalDAVCalendars` — storage for the native in-process CalDAV server (#498); `data` is raw iCalendar (parsing stays in `caldavserver`).
 

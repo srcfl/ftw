@@ -107,6 +107,11 @@ func Open(path string) (*Store, error) {
 	}
 	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
 
+	// Reclaim freelist space left behind by large prunes. No-op on a healthy
+	// file; a one-time multi-minute VACUUM on the boot after a bloated DB's
+	// first prune. Boot is the only window where no writer can be starved.
+	s.CompactIfBloated()
+
 	// Arm the verified-good marker: state.db opened + migrated successfully (it
 	// either passed quick_check, was restored from snapshot, or rebuilt fresh), so
 	// the next boot can SKIP the (slow on a large DB) integrity check. The marker
@@ -1062,11 +1067,16 @@ func (s *Store) BulkRecordHistory(pts []HistoryPoint) error {
 }
 
 // LoadHistory returns points from ALL tiers in [sinceMs, untilMs], merged + sorted.
-// maxPoints=0 means no limit. With a limit, we return at most that many evenly-spaced rows.
+// maxPoints=0 returns every raw row. With a limit, rows are bucket-averaged in
+// SQL down to at most maxPoints points: W columns are bucket AVGs, ts_ms and
+// json come from the latest row in the bucket (json cannot be averaged; a
+// representative sample is the same trade-off Prune makes when tiering).
+// Downsampling used to fetch every row into Go and keep every Nth — a month
+// view materialized >1M rows per request once the hot tier grew.
 func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoint, error) {
 	// Union across all three tiers. Dedupe on ts_ms preferring hot over warm over cold.
 	// COALESCE to 0 so NULL columns (from partial aggregations) scan cleanly.
-	query := `
+	const tierUnion = `
 		WITH all_rows AS (
 			SELECT ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json, 0 AS tier FROM history_hot
 			WHERE ts_ms BETWEEN ? AND ?
@@ -1082,13 +1092,36 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 			GROUP BY ts_ms
 			HAVING tier = MIN(tier)
 		)
-		SELECT ts_ms,
-		       COALESCE(grid_w, 0), COALESCE(pv_w, 0), COALESCE(bat_w, 0),
-		       COALESCE(load_w, 0), COALESCE(bat_soc, 0), json
-		FROM deduped
-		ORDER BY ts_ms ASC
 	`
-	rows, err := s.db.Query(query, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs)
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if maxPoints > 0 && untilMs >= sinceMs {
+		// Ceil so the bucket count never exceeds maxPoints. MAX(ts_ms) is an
+		// aggregate, so SQLite's bare-column rule makes the un-aggregated
+		// json column come from that same newest row.
+		bucketMs := (untilMs - sinceMs + int64(maxPoints)) / int64(maxPoints)
+		if bucketMs < 1 {
+			bucketMs = 1
+		}
+		rows, err = s.db.Query(tierUnion+`
+			SELECT MAX(ts_ms),
+			       AVG(COALESCE(grid_w, 0)), AVG(COALESCE(pv_w, 0)), AVG(COALESCE(bat_w, 0)),
+			       AVG(COALESCE(load_w, 0)), AVG(COALESCE(bat_soc, 0)), json
+			FROM deduped
+			GROUP BY (ts_ms - ?) / ?
+			ORDER BY 1 ASC
+		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs, sinceMs, bucketMs)
+	} else {
+		rows, err = s.db.Query(tierUnion+`
+			SELECT ts_ms,
+			       COALESCE(grid_w, 0), COALESCE(pv_w, 0), COALESCE(bat_w, 0),
+			       COALESCE(load_w, 0), COALESCE(bat_soc, 0), json
+			FROM deduped
+			ORDER BY ts_ms ASC
+		`, sinceMs, untilMs, sinceMs, untilMs, sinceMs, untilMs)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1102,23 +1135,7 @@ func (s *Store) LoadHistory(sinceMs, untilMs int64, maxPoints int) ([]HistoryPoi
 		}
 		all = append(all, p)
 	}
-	if err := rows.Err(); err != nil {
-		return all, err
-	}
-
-	// Downsample by evenly picking maxPoints rows
-	if maxPoints > 0 && len(all) > maxPoints {
-		if maxPoints == 1 {
-			return []HistoryPoint{all[len(all)-1]}, nil
-		}
-		out := make([]HistoryPoint, 0, maxPoints)
-		for i := 0; i < maxPoints; i++ {
-			idx := i * (len(all) - 1) / (maxPoints - 1)
-			out = append(out, all[idx])
-		}
-		return out, nil
-	}
-	return all, nil
+	return all, rows.Err()
 }
 
 // DayEnergy is the set of Wh totals over a time range, in site convention:

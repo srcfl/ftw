@@ -476,45 +476,63 @@ Handler: `go/internal/api/api.go:575`
 
 ### GET /api/series
 
-Long-format time-series query — one metric per driver. Used by the metric
-browser UI and for ML training data exports. Backed by the long-format
-SQLite TSDB; see `docs/tsdb.md`
+Long-format time-series query. Used by the metric browser UI and for ML
+training data exports. Backed by the long-format SQLite TSDB for the last
+14 days; windows reaching further back transparently include the cold
+Parquet tier (see `docs/tsdb.md`)
 
 **Query params (required):**
 
 - `driver` — e.g. `ferroamp`, `sungrow`
-- `metric` — e.g. `battery_w`, `meter_w`, `pv_w`, `battery_soc`
+- `metric` — one name, or several comma-separated
+  (`battery_w` or `hp_power_w,hp_temp_c`)
 
 **Query params (optional):**
 
-- `range` — `5m|15m|1h|6h|24h|3d` (default `1h`)
-- `points` — downsample cap; `0` / omitted = no cap
+- `range` — relative window ending now: `5m|15m|1h|6h|24h|3d` plus generic
+  `<N><m|h|d|w|y>` (default `1h`)
+- `since` / `until` — absolute Unix-ms bounds; overrides `range`
+  (`until` defaults to now)
+- `points` — downsample cap; `0` / omitted = raw samples. Downsampled
+  points are bucket aggregates: `v` = average, `min`/`max` = bucket
+  envelope (so short spikes stay visible zoomed out), `n` = raw samples
+  in the bucket
+- `format=csv` — long-format CSV (`ts_ms,driver,metric,v,min,max,n`)
+  instead of JSON, for spreadsheet / ML export
 
-**Response (200):**
+**Response (200), single metric:**
 
 ```json
 {
   "driver": "ferroamp",
   "metric": "battery_w",
+  "unit": "W",
   "range": "1h",
+  "since": 1744575600000,
+  "until": 1744579200000,
   "points": [
-    { "ts": 1744579200000, "v": -222.0 },
-    { "ts": 1744579260000, "v": -231.5 }
+    { "ts": 1744579200000, "v": -222.0, "min": -401.0, "max": -180.5, "n": 30 }
   ]
 }
 ```
 
+**Response (200), multiple metrics:** the top-level `points` is replaced by
+`series`, an array of `{ metric, unit, points }` objects
+
 **Errors:**
 
-- `400` `{ "error": "driver and metric are required" }`
+- `400` `{ "error": "driver and metric are required" }` (also malformed
+  `since`/`until`)
 - `500` `{ "error": "…" }` on DB read failure
 
-Handler: `go/internal/api/api.go:724`
+Handler: `go/internal/api/api.go` (`handleSeries`)
 
 ### GET /api/series/catalog
 
 List every driver name and every metric name that has at least one sample
-in the TSDB. Used by the metric browser dropdowns
+in the TSDB, plus each metric's display unit (as supplied by the driver's
+`host.emit_metric`; persisted, so labels survive restarts). Used by the
+metric browser dropdowns
 
 **Query params:** none
 
@@ -523,13 +541,14 @@ in the TSDB. Used by the metric browser dropdowns
 ```json
 {
   "drivers": ["ferroamp", "sungrow"],
-  "metrics": ["battery_soc", "battery_w", "meter_w", "pv_w"]
+  "metrics": ["battery_soc", "battery_w", "meter_w", "pv_w"],
+  "units": { "battery_w": "W", "hp_temp_c": "°C" }
 }
 ```
 
-Both lists are sorted alphabetically
+Both lists are sorted alphabetically; `units` omits metrics without a unit
 
-Handler: `go/internal/api/api.go:756`
+Handler: `go/internal/api/api.go` (`handleSeriesCatalog`)
 
 ---
 

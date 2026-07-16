@@ -9,6 +9,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2196,44 +2197,217 @@ func (s *Server) handleMPCDiagnoseAt(w http.ResponseWriter, r *http.Request) {
 // ---- Long-format time-series ----
 
 // handleSeries: GET /api/series?driver=ferroamp&metric=battery_w&range=1h&points=600
-// Returns one metric's time series for one driver. Useful for the metric
-// browser UI and for ML training data exports.
+// Returns time series for one driver. Useful for the metric browser UI and
+// for ML training data exports.
+//
+// Parameters:
+//   - metric: one name, or several comma-separated (battery_w,heatsink_c)
+//   - range: relative window ending now (1h, 24h, 30d, ...), OR
+//   - since/until: absolute unix-ms bounds (until defaults to now)
+//   - points: downsampling budget; 0 = raw samples. Downsampled points carry
+//     the bucket envelope: v = avg, min/max = extremes, n = sample count
+//   - format=csv: long-format CSV (ts_ms,driver,metric,v,min,max,n) instead
+//     of JSON — for spreadsheet / ML export
+//
+// Windows reaching past the 14-day SQLite tier transparently include cold
+// Parquet data, bucketed on the same boundaries.
 func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	driver := r.URL.Query().Get("driver")
-	metric := r.URL.Query().Get("metric")
-	if driver == "" || metric == "" {
+	metricsParam := r.URL.Query().Get("metric")
+	if driver == "" || metricsParam == "" {
 		writeJSON(w, 400, map[string]string{"error": "driver and metric are required"})
 		return
 	}
-	rng := r.URL.Query().Get("range")
-	if rng == "" {
-		rng = "1h"
-	}
+	metrics := strings.Split(metricsParam, ",")
+
 	points := 0
 	if p := r.URL.Query().Get("points"); p != "" {
 		if v, err := strconv.Atoi(p); err == nil {
 			points = v
 		}
 	}
-	windowMs := parseRange(rng)
+
+	// Window: absolute since/until when given, else relative range.
 	now := time.Now().UnixMilli()
-	rows, err := s.deps.State.LoadSeries(driver, metric, now-windowMs, now, points)
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
+	var since, until int64
+	rng := r.URL.Query().Get("range")
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		v, err := strconv.ParseInt(sinceStr, 10, 64)
+		if err != nil || v <= 0 {
+			writeJSON(w, 400, map[string]string{"error": "since must be unix ms"})
+			return
+		}
+		since, until = v, now
+		if untilStr := r.URL.Query().Get("until"); untilStr != "" {
+			u, err := strconv.ParseInt(untilStr, 10, 64)
+			if err != nil || u < since {
+				writeJSON(w, 400, map[string]string{"error": "until must be unix ms >= since"})
+				return
+			}
+			until = u
+		}
+	} else {
+		if rng == "" {
+			rng = "1h"
+		}
+		since, until = now-parseRange(rng), now
+	}
+
+	type seriesOut struct {
+		Metric string              `json:"metric"`
+		Unit   string              `json:"unit,omitempty"`
+		Points []state.SeriesPoint `json:"points"`
+	}
+	units := s.metricUnits()
+	all := make([]seriesOut, 0, len(metrics))
+	for _, m := range metrics {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		pts, err := s.loadSeriesWithCold(driver, m, since, until, points)
+		if err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		all = append(all, seriesOut{Metric: m, Unit: units[m], Points: pts})
+	}
+
+	if r.URL.Query().Get("format") == "csv" {
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf("attachment; filename=%q", driver+"-series.csv"))
+		cw := csv.NewWriter(w)
+		_ = cw.Write([]string{"ts_ms", "driver", "metric", "v", "min", "max", "n"})
+		for _, ser := range all {
+			for _, p := range ser.Points {
+				_ = cw.Write([]string{
+					strconv.FormatInt(p.TsMs, 10), driver, ser.Metric,
+					strconv.FormatFloat(p.V, 'g', -1, 64),
+					strconv.FormatFloat(p.Min, 'g', -1, 64),
+					strconv.FormatFloat(p.Max, 'g', -1, 64),
+					strconv.FormatInt(p.N, 10),
+				})
+			}
+		}
+		cw.Flush()
 		return
 	}
-	out := make([]map[string]any, len(rows))
-	for i, sm := range rows {
-		out[i] = map[string]any{"ts": sm.TsMs, "v": sm.Value}
+
+	// Single-metric responses keep the pre-multi-metric shape (existing UI
+	// consumers read .points off the top level); each point additionally
+	// carries min/max/n now.
+	if len(all) == 1 {
+		writeJSON(w, 200, map[string]any{
+			"driver": driver, "metric": all[0].Metric, "unit": all[0].Unit,
+			"range": rng, "since": since, "until": until, "points": all[0].Points,
+		})
+		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"driver": driver, "metric": metric, "range": rng, "points": out,
+		"driver": driver, "range": rng, "since": since, "until": until, "series": all,
 	})
 }
 
+// loadSeriesWithCold returns one series over [since, until], merging the
+// SQLite recent tier with cold Parquet days when the window reaches past
+// RecentRetention. Cold samples are bucketed in Go on the same boundaries
+// LoadSeriesBuckets uses, so the merged chart has one consistent resolution.
+func (s *Server) loadSeriesWithCold(driver, metric string, since, until int64, points int) ([]state.SeriesPoint, error) {
+	recent, err := s.deps.State.LoadSeriesBucketsOrRaw(driver, metric, since, until, points)
+	if err != nil {
+		return nil, err
+	}
+
+	coldCutoff := time.Now().Add(-state.RecentRetention).UnixMilli()
+	if s.deps.ColdDir == "" || since >= coldCutoff {
+		return recent, nil
+	}
+	coldUntil := until
+	if coldUntil > coldCutoff {
+		coldUntil = coldCutoff
+	}
+	coldRaw, err := s.deps.State.LoadSeriesFromParquet(s.deps.ColdDir, driver, metric, since, coldUntil)
+	if err != nil {
+		return nil, err
+	}
+	if len(coldRaw) == 0 {
+		return recent, nil
+	}
+
+	var cold []state.SeriesPoint
+	if points > 0 {
+		bucketMs := state.BucketWidthMs(since, until, points)
+		for _, sm := range coldRaw {
+			idx := (sm.TsMs - since) / bucketMs
+			if n := len(cold); n > 0 && (cold[n-1].TsMs-since)/bucketMs == idx {
+				b := &cold[n-1]
+				if sm.Value < b.Min {
+					b.Min = sm.Value
+				}
+				if sm.Value > b.Max {
+					b.Max = sm.Value
+				}
+				b.V = (b.V*float64(b.N) + sm.Value) / float64(b.N+1)
+				b.N++
+				if sm.TsMs > b.TsMs {
+					b.TsMs = sm.TsMs
+				}
+			} else {
+				cold = append(cold, state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1})
+			}
+		}
+	} else {
+		cold = make([]state.SeriesPoint, len(coldRaw))
+		for i, sm := range coldRaw {
+			cold[i] = state.SeriesPoint{TsMs: sm.TsMs, V: sm.Value, Min: sm.Value, Max: sm.Value, N: 1}
+		}
+	}
+
+	// Cold strictly precedes recent (rolloff deletes what it exports), but a
+	// boundary bucket can exist on both sides — merge rather than duplicate.
+	if len(cold) > 0 && len(recent) > 0 && points > 0 {
+		bucketMs := state.BucketWidthMs(since, until, points)
+		last, first := &cold[len(cold)-1], recent[0]
+		if (last.TsMs-since)/bucketMs == (first.TsMs-since)/bucketMs {
+			total := last.N + first.N
+			last.V = (last.V*float64(last.N) + first.V*float64(first.N)) / float64(total)
+			if first.Min < last.Min {
+				last.Min = first.Min
+			}
+			if first.Max > last.Max {
+				last.Max = first.Max
+			}
+			last.N = total
+			if first.TsMs > last.TsMs {
+				last.TsMs = first.TsMs
+			}
+			recent = recent[1:]
+		}
+	}
+	return append(cold, recent...), nil
+}
+
+// metricUnits returns the persisted unit per metric name (empty map on error
+// — units are display sugar, never worth failing a data request over).
+func (s *Server) metricUnits() map[string]string {
+	catalog, err := s.deps.State.MetricsCatalog()
+	if err != nil {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(catalog))
+	for _, m := range catalog {
+		if m.Unit != "" {
+			out[m.Name] = m.Unit
+		}
+	}
+	return out
+}
+
 // handleSeriesCatalog: GET /api/series/catalog
-// Lists the (driver, metric) tuples that have any samples recorded. UIs
-// use this to enumerate available signals for charting / debugging.
+// Lists the (driver, metric) tuples that have any samples recorded, plus
+// each metric's display unit. UIs use this to enumerate available signals
+// for charting / debugging.
 func (s *Server) handleSeriesCatalog(w http.ResponseWriter, r *http.Request) {
 	drivers, err := s.deps.State.DriverNames()
 	if err != nil {
@@ -2248,6 +2422,7 @@ func (s *Server) handleSeriesCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"drivers": drivers,
 		"metrics": metrics,
+		"units":   s.metricUnits(),
 	})
 }
 

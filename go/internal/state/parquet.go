@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 
@@ -25,7 +26,7 @@ type parquetSampleRow struct {
 
 // RolloffToParquet exports samples older than RecentRetention into one
 // parquet file per UTC-day, then deletes the rolled-off rows from SQLite.
-// Idempotent: re-running for a day that already has a file rewrites it
+// Idempotent: re-running for a day that already has a file merges into it
 // (we accumulate strict-cutoff data, never lose anything).
 //
 // File layout: <coldDir>/YYYY/MM/DD.parquet
@@ -35,57 +36,85 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 	}
 	cutoff := time.Now().Add(-RecentRetention).UnixMilli()
 
-	// Bucket samples by UTC day so each parquet covers one calendar date.
-	// We accumulate in memory — typical roll-off is ~50 metrics × 17,280
-	// samples/day × ~24 days backlog worst case ≈ 20M rows = ~640 MB.
-	// In practice the daily run keeps it to one day = ~30 MB before flush.
+	// SamplesBefore streams in ts order, so UTC-day boundaries arrive in
+	// order: accumulate one day at a time and flush on day change. Peak
+	// memory is one day of samples (~30 MB) — a multi-day backlog must NOT
+	// be buffered whole, because ~20M backlog rows ≈ 640 MB OOMs a Pi, and
+	// a killed rolloff never trims SQLite, making the next attempt bigger.
 	type dayKey struct{ year, month, day int }
-	byDay := make(map[dayKey][]parquetSampleRow, 4)
-
+	var (
+		cur    dayKey
+		curSet bool
+		rows   []parquetSampleRow
+	)
+	flush := func() error {
+		if len(rows) == 0 {
+			return nil
+		}
+		path, err := flushParquetDay(coldDir, cur.year, cur.month, cur.day, rows)
+		if err != nil {
+			return err
+		}
+		files = append(files, path)
+		rolledRows += int64(len(rows))
+		rows = rows[:0]
+		return nil
+	}
 	err = s.SamplesBefore(ctx, cutoff, 50000, func(batch []Sample) error {
 		for _, sm := range batch {
 			t := time.UnixMilli(sm.TsMs).UTC()
 			k := dayKey{t.Year(), int(t.Month()), t.Day()}
-			byDay[k] = append(byDay[k], parquetSampleRow{
+			if curSet && k != cur {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			cur, curSet = k, true
+			rows = append(rows, parquetSampleRow{
 				TsMs: sm.TsMs, Driver: sm.Driver, Metric: sm.Metric, Value: sm.Value,
 			})
 		}
 		return nil
 	})
 	if err != nil {
-		return 0, nil, fmt.Errorf("read samples: %w", err)
+		return rolledRows, files, fmt.Errorf("read samples: %w", err)
 	}
-	if len(byDay) == 0 {
+	if err := flush(); err != nil {
+		return rolledRows, files, err
+	}
+	if rolledRows == 0 {
 		return 0, nil, nil
 	}
 
-	for k, rows := range byDay {
-		newRows := len(rows)
-		// Sort by ts to maximize compression and make consumer scans linear.
-		sort.Slice(rows, func(i, j int) bool { return rows[i].TsMs < rows[j].TsMs })
-
-		dayDir := filepath.Join(coldDir, fmt.Sprintf("%04d/%02d", k.year, k.month))
-		if err := os.MkdirAll(dayDir, 0o755); err != nil {
-			return rolledRows, files, fmt.Errorf("mkdir %s: %w", dayDir, err)
-		}
-		path := filepath.Join(dayDir, fmt.Sprintf("%02d.parquet", k.day))
-		if existing, err := readParquetDay(path); err == nil {
-			rows = mergeParquetRows(existing, rows)
-		} else if !os.IsNotExist(err) {
-			return rolledRows, files, fmt.Errorf("read existing %s: %w", path, err)
-		}
-		if err := writeParquetDay(path, rows); err != nil {
-			return rolledRows, files, fmt.Errorf("write %s: %w", path, err)
-		}
-		files = append(files, path)
-		rolledRows += int64(newRows)
-	}
-
-	// Delete the rolled-off rows from SQLite. Single statement, atomic.
+	// Delete the rolled-off rows from SQLite — only after every day file is
+	// durably on disk (flushParquetDay fsyncs), so a crash between the two
+	// steps re-rolls and merges rather than losing data.
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM ts_samples WHERE ts_ms < ?`, cutoff); err != nil {
 		return rolledRows, files, fmt.Errorf("delete rolled rows: %w", err)
 	}
 	return rolledRows, files, nil
+}
+
+// flushParquetDay merges rows into the existing day file (if any) and writes
+// the result durably. Returns the file path.
+func flushParquetDay(coldDir string, year, month, day int, rows []parquetSampleRow) (string, error) {
+	// Sort by ts to maximize compression and make consumer scans linear.
+	sort.Slice(rows, func(i, j int) bool { return rows[i].TsMs < rows[j].TsMs })
+
+	dayDir := filepath.Join(coldDir, fmt.Sprintf("%04d/%02d", year, month))
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %s: %w", dayDir, err)
+	}
+	path := filepath.Join(dayDir, fmt.Sprintf("%02d.parquet", day))
+	if existing, err := readParquetDay(path); err == nil {
+		rows = mergeParquetRows(existing, rows)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read existing %s: %w", path, err)
+	}
+	if err := writeParquetDay(path, rows); err != nil {
+		return "", fmt.Errorf("write %s: %w", path, err)
+	}
+	return path, nil
 }
 
 func writeParquetDay(path string, rows []parquetSampleRow) error {
@@ -105,11 +134,37 @@ func writeParquetDay(path string, rows []parquetSampleRow) error {
 		os.Remove(tmp)
 		return err
 	}
+	// fsync before rename: the caller deletes the SQLite rows as soon as this
+	// returns, so a power cut must not be able to leave a truncated file
+	// behind an already-visible rename (rename is only atomic for data that
+	// has reached disk).
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir fsyncs a directory so a completed rename survives power loss.
+// Best-effort on platforms where directories can't be fsynced (Windows).
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil && runtime.GOOS != "windows" {
+		return err
+	}
+	return nil
 }
 
 func readParquetDay(path string) ([]parquetSampleRow, error) {
