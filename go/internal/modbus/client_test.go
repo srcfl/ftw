@@ -1,6 +1,7 @@
 package modbus
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -101,9 +102,9 @@ func TestReadReconnectsAfterServerClosesConnection(t *testing.T) {
 					hdr[0], hdr[1], // tx id
 					0, 0, // protocol
 					0, 5, // length
-					hdr[6],      // unit id
-					hdr[7],      // function code
-					2,           // byte count
+					hdr[6], // unit id
+					hdr[7], // function code
+					2,      // byte count
 					byte(v >> 8), byte(v),
 				}
 				_, _ = c.Write(resp)
@@ -184,10 +185,10 @@ func TestReadReconnectsAfterServerTimesOut(t *testing.T) {
 					hdr[0], hdr[1], // tx id
 					0, 0, // protocol
 					0, 5, // length
-					hdr[6],   // unit id
-					hdr[7],   // function code
-					2,        // byte count
-					0, 222,   // value = 222
+					hdr[6], // unit id
+					hdr[7], // function code
+					2,      // byte count
+					0, 222, // value = 222
 				}
 				_, _ = c.Write(resp)
 			}(c, mute)
@@ -217,6 +218,92 @@ func TestReadReconnectsAfterServerTimesOut(t *testing.T) {
 	}
 }
 
+func TestWriteSingleAndMultiEncodeRequests(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	reqs := make(chan []byte, 2)
+	go func() {
+		c, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for i := 0; i < 2; i++ {
+			hdr := make([]byte, 7)
+			if _, err := io.ReadFull(c, hdr); err != nil {
+				return
+			}
+			length := int(binary.BigEndian.Uint16(hdr[4:6]))
+			pdu := make([]byte, length-1)
+			if _, err := io.ReadFull(c, pdu); err != nil {
+				return
+			}
+			reqs <- append([]byte(nil), pdu...)
+			var respPDU []byte
+			switch pdu[0] {
+			case modbusWriteSingleRegister:
+				respPDU = append([]byte(nil), pdu...)
+			case modbusWriteMultipleRegs:
+				respPDU = []byte{pdu[0], pdu[1], pdu[2], pdu[3], pdu[4]}
+			default:
+				return
+			}
+			resp := make([]byte, 7+len(respPDU))
+			copy(resp[0:2], hdr[0:2])
+			binary.BigEndian.PutUint16(resp[4:6], uint16(len(respPDU)+1))
+			resp[6] = hdr[6]
+			copy(resp[7:], respPDU)
+			_, _ = c.Write(resp)
+		}
+	}()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	if _, err := fmtSscan(portStr, &port); err != nil {
+		t.Fatalf("bad listener port: %v", err)
+	}
+	cap, err := Dial(host, port, 7)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cap.Close()
+
+	if err := cap.WriteSingle(0x1234, 0x00ab); err != nil {
+		t.Fatalf("write single: %v", err)
+	}
+	if err := cap.WriteMulti(0x2000, []uint16{0x0102, 0x0304}); err != nil {
+		t.Fatalf("write multi: %v", err)
+	}
+
+	gotSingle := <-reqs
+	wantSingle := []byte{modbusWriteSingleRegister, 0x12, 0x34, 0x00, 0xab}
+	if !bytesEqual(gotSingle, wantSingle) {
+		t.Fatalf("write single pdu = % x, want % x", gotSingle, wantSingle)
+	}
+	gotMulti := <-reqs
+	wantMulti := []byte{modbusWriteMultipleRegs, 0x20, 0x00, 0x00, 0x02, 0x04, 0x01, 0x02, 0x03, 0x04}
+	if !bytesEqual(gotMulti, wantMulti) {
+		t.Fatalf("write multi pdu = % x, want % x", gotMulti, wantMulti)
+	}
+}
+
+func TestConfigureTCPKeepAlive(t *testing.T) {
+	conn := &fakeKeepAliveConn{}
+	if err := configureTCPKeepAlive(conn, 15*time.Second); err != nil {
+		t.Fatalf("configure keepalive: %v", err)
+	}
+	if !conn.enabled {
+		t.Fatal("keepalive was not enabled")
+	}
+	if conn.period != 15*time.Second {
+		t.Fatalf("keepalive period = %v, want 15s", conn.period)
+	}
+}
+
 // tiny strconv-free int parser to avoid pulling strconv in a single spot.
 func fmtSscan(s string, out *int) (int, error) {
 	n := 0
@@ -230,3 +317,44 @@ func fmtSscan(s string, out *int) (int, error) {
 	*out = n
 	return len(s), nil
 }
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+type fakeKeepAliveConn struct {
+	enabled bool
+	period  time.Duration
+}
+
+func (f *fakeKeepAliveConn) SetKeepAlive(enabled bool) error {
+	f.enabled = enabled
+	return nil
+}
+
+func (f *fakeKeepAliveConn) SetKeepAlivePeriod(period time.Duration) error {
+	f.period = period
+	return nil
+}
+
+func (f *fakeKeepAliveConn) Read([]byte) (int, error)         { return 0, io.EOF }
+func (f *fakeKeepAliveConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (f *fakeKeepAliveConn) Close() error                     { return nil }
+func (f *fakeKeepAliveConn) LocalAddr() net.Addr              { return fakeAddr("local") }
+func (f *fakeKeepAliveConn) RemoteAddr() net.Addr             { return fakeAddr("remote") }
+func (f *fakeKeepAliveConn) SetDeadline(time.Time) error      { return nil }
+func (f *fakeKeepAliveConn) SetReadDeadline(time.Time) error  { return nil }
+func (f *fakeKeepAliveConn) SetWriteDeadline(time.Time) error { return nil }
+
+type fakeAddr string
+
+func (a fakeAddr) Network() string { return string(a) }
+func (a fakeAddr) String() string  { return string(a) }

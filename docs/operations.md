@@ -6,7 +6,9 @@ Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (bu
 
 ## 1. Build + cross-compile
 
-Pure-Go build, no CGO, single static binary:
+The core runtime is a pure-Go, no-CGO static binary. The optional primary MPC
+optimizer is a local Python/CVXPY worker; official containers include it, while
+native installs can provide it separately or use the built-in Go-DP fallback:
 
 ```bash
 git clone https://github.com/srcfl/ftw
@@ -29,14 +31,19 @@ make release       # → local tarballs with binary + drivers + web + config.exa
 ```
 
 `make release` bakes in the git tag via `-ldflags "-X main.Version=..."`, so the running binary reports its version in the startup log.
-Official tags, release notes, binaries, docker images, and Raspberry Pi images
-are produced by the Changesets + GitHub Actions release flow.
+Official tags, release notes, binaries, and Docker images are produced by the
+Changesets + GitHub Actions release flow. The Raspberry Pi installer image has
+a separate monthly/on-change lifecycle because first boot pulls the current
+stable containers.
 
 ## 2. Native file layout
 
 The Pi needs:
 
-- **The binary** — single file, no runtime dependencies.
+- **The core binary** — one static file with no runtime dependencies.
+- **`optimizer/` + Python environment** — optional for the full CVXPY/HiGHS
+  planner; without it FTW logs the failure and uses the Go-DP fallback. See
+  [`optimizer.md`](optimizer.md).
 - **`web/`** — static UI assets (`index.html`, `app.js`, `style.css`, `models.js`, `settings.js`, `plan.js`, `twins.js`, `favicon.svg`).
 - **`drivers/`** — the Lua driver files (`ferroamp.lua`, `sungrow.lua`, …).
 - **`config.yaml`** — operator-edited; see [`config.example.yaml`](../config.example.yaml) for the schema and [configuration.md](configuration.md) for every field.
@@ -48,7 +55,8 @@ The supported native unit uses portable system paths:
 ├── ftw                     # canonical binary
 ├── forty-two-watts         # compatibility symlink
 ├── web/                    # static UI
-└── drivers/                # bundled Lua drivers
+├── drivers/                # bundled Lua drivers
+└── optimizer/              # optional Python optimizer package
 
 /etc/ftw/config.yaml        # operator configuration
 
@@ -58,10 +66,15 @@ The supported native unit uses portable system paths:
 └── drivers/                # persistent custom Lua drivers
 ```
 
-The binary only takes two command-line flags:
+The long-running service accepts four operator-facing path flags:
 
 - `-config /etc/ftw/config.yaml` — path to the config file.
 - `-web /opt/ftw/web` — path to the static UI directory.
+- `-drivers /opt/ftw/drivers` — immutable bundled-driver directory.
+- `-user-drivers /var/lib/ftw/drivers` — persistent user-driver overlay.
+
+It also has developer-only `-backfill*` flags and the `nova-claim` / `pair`
+subcommands; run `ftw -help` for the exact current surface.
 
 Relative Lua driver paths in `config.yaml` are resolved against the config
 file's directory, so keep `drivers/` side by side with the config.

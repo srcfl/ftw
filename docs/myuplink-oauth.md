@@ -4,6 +4,12 @@ The `myuplink` driver reads heat-pump telemetry — compressor power and
 hot-water / indoor / outdoor temperatures — from the MyUplink Cloud API. It is
 **read-only**: it observes the pump, it cannot control it.
 
+MyUplink may still require the OAuth app to grant both `READSYSTEM` and
+`WRITESYSTEM` before its authorization page accepts the request. FTW asks
+for that known-working scope set by default, but the driver never calls write
+endpoints. If your MyUplink app accepts a narrower read-only grant, set
+`oauth_scope: "READSYSTEM offline_access"` in the driver config.
+
 > There is **no `mode` field**. One physical pump = one driver. The driver does
 > not split into hot-water / heating instances. (Earlier troubleshooting advice
 > that mentioned `mode: hotwater | heating` was wrong — ignore it.)
@@ -93,6 +99,7 @@ compressor power and temperatures, plus a 24-hour power sparkline.
 | Symptom | Cause / fix |
 |---|---|
 | `invalid_client` at startup | Old `client_credentials` build, or wrong Client ID/Secret. Update FTW and re-enter the credentials. |
+| MyUplink authorize page shows `invalid_request` | Re-save the MyUplink app with the exact Callback URL shown in FTW, then try again. If you overrode `oauth_scope`, remove the override or include `WRITESYSTEM READSYSTEM offline_access`; MyUplink can reject read-only-only auth even for telemetry integrations. |
 | Connect button: "save the Client ID first" | Save the settings before clicking Connect — `/start` reads the *saved* Client ID. |
 | Redirected to a "connection failed — invalid state" page | The consent took longer than 10 minutes, or you started Connect from a different address than you finished on. Start again from the address you registered as the callback. |
 | Badge stays "Not connected" after consent | Reload the Settings page; the badge reflects the last config load. |

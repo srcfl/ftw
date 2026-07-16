@@ -12,7 +12,8 @@ workflow consumes accumulated changesets to:
 1. Open / update a "Version Packages" PR with the bumped version in
    `package.json` and an updated `CHANGELOG.md`.
 2. When that PR is merged, cut the git tag, build binaries / Docker
-   images / RPi image, and post the announcement.
+   images, and post the announcement. The RPi installer has an independent
+   monthly/on-change build because it pulls stable containers on first boot.
 
 No changeset → nothing to release. The "changeset check" workflow on
 PRs enforces this.

@@ -114,14 +114,23 @@ describe("C3 — next-app.js mints the session silently (device-PoP), passkey on
   it("does not burn the one silent-auth attempt before P2P is direct", () => {
     assert.match(APP, /function ownerTransportReady\(\)/,
       "setupAuth needs a cheap readiness check before consuming silentAuthTried");
-    assert.match(APP, /if \(!ownerTransportReady\(\)\)\s*\{\s*showWaitingOrLandingGate\(\);[\s\S]*?return;\s*\}[\s\S]*?silentAuthTried\s*=\s*true/,
-      "setupAuth must stay in connecting until direct transport exists, then try silent auth");
+    assert.match(APP, /if \(!ownerTransportReady\(\)\)\s*\{\s*showUnavailableOwnerTransportGate\(\);[\s\S]*?return;\s*\}[\s\S]*?silentAuthTried\s*=\s*true/,
+      "setupAuth must resolve unavailable transport before consuming silentAuthTried, then try silent auth only once direct");
     assert.match(APP, /function showWaitingOrLandingGate\(\)[\s\S]*?!hasDecryptableDirectory\(\)[\s\S]*?showSignInGate\(\)/,
       "fresh public browsers without a directory must land on setup/sign-in instead of guessing a site_id");
     assert.match(APP, /function scheduleAuthRetry\(delayMs\)/,
       "connecting auth checks must retry so Chrome cannot stay on the initial gate forever");
     assert.match(APP, /return waitForOwnerTransport\(10000\)[\s\S]*?return waitForDeviceKeyStore\(3000\)/,
       "runDevicePoP itself must wait for direct owner transport before challenge/pop");
+  });
+
+  it("does not leave a failed remote transport on the reaching-home gate forever", () => {
+    assert.match(APP, /function ownerTransportConnecting\(\)/,
+      "gate routing must distinguish an active connect attempt from a settled failed attempt");
+    assert.match(APP, /function showUnavailableOwnerTransportGate\(\)[\s\S]*?ownerTransportConnecting\(\)[\s\S]*?showWaitingOrLandingGate\(\)[\s\S]*?showSignInGate\(\)[\s\S]*?scheduleAuthRetry\(5000\)/,
+      "after a failed P2P attempt the UI must show the actionable sign-in/setup gate while background retries continue");
+    assert.match(APP, /if \(!ownerTransportReady\(\)\)\s*\{\s*showUnavailableOwnerTransportGate\(\);[\s\S]*?return;[\s\S]*?\}/,
+      "setupAuth must not keep routing every unavailable transport state to the connecting gate");
   });
 
   it("suppresses setup/no-devices prompts while the auth gate is connecting", () => {

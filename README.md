@@ -5,12 +5,21 @@
 > Local-first home energy coordination.
 
 FTW is an open-source local energy runtime for solar, batteries, grid and EV
-charging. It runs as a single Go binary on a Raspberry Pi or Linux host,
-coordinates devices through Lua drivers, and keeps the core control loop local.
+charging. Its core runs as a single Go binary on a Raspberry Pi or Linux host,
+coordinates devices through Lua drivers, and keeps the control loop local. The
+optional full mathematical optimizer uses Python/CVXPY; official containers
+include that runtime and native installs fall back safely to the Go planner when
+it is unavailable.
 
 FTW is maintained by Sourceful Labs AB and project contributors. It is a
 self-hosted open-source project, not a hosted Sourceful service; the local
 control path does not depend on Sourceful cloud services.
+
+> **Upgrading an existing Forty Two Watts installation?** Follow the
+> step-by-step [legacy upgrade guide in Swedish and English](docs/upgrade-from-legacy.md).
+> Its migration command moves older Docker Compose and local-development
+> layouts to the official Sourceful images while preserving the existing
+> service, directory, configuration, history, and device data.
 
 The project is active and runs on real hardware, but API and config fields
 can still change before a stable 1.0 release. Version numbers come from
@@ -64,15 +73,16 @@ Recommended: point **Raspberry Pi Imager** at the FTW image repository
 (**App Options → Content Repository → Use custom file**):
 
 ```
-https://github.com/srcfl/ftw/releases/latest/download/os_list.json
+https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
 ```
 
 Then pick **FTW**, set your hostname / SSH user / Wi-Fi in the
 customisation panel, and write — Imager downloads the image for you. Boot the
 Pi and open `http://ftw.local/`.
 
-You can instead download the `ftw-rpi4-arm64-vX.Y.Z.img.xz` release asset and
-flash it directly, but that skips the customisation panel (default
+You can instead download the latest dated `.img.xz` from the dedicated
+[`rpi-installer` release](https://github.com/srcfl/ftw/releases/tag/rpi-installer)
+and flash it directly, but that skips the customisation panel (default
 credentials, Wi-Fi via the `ftw-setup` captive portal) — not recommended.
 
 Full walkthrough: [`docs/rpi-image.md`](docs/rpi-image.md).
@@ -106,8 +116,10 @@ make test         # unit + integration tests
 make build-arm64  # cross-compile for Raspberry Pi
 ```
 
-Copy `config.example.yaml` to `config.yaml`, fill in your device
-capabilities, and open the web UI.
+The first `make dev` copies the tracked simulator template to the gitignored
+`config.local.yaml`, starts both simulators, and opens the app on port 8080.
+For real hardware, copy `config.example.yaml` to `config.yaml` and fill in your
+device capabilities instead.
 
 ## How It Works
 
@@ -137,13 +149,20 @@ touching power math.
 
 ## Remote Access
 
+> **Transition status:** local control is unaffected, but the new Sourceful
+> relay/TURN endpoints are not yet declared operational. Treat remote access as
+> unavailable unless the deployment runbook has been completed and verified;
+> this infrastructure cutover is tracked separately from the repository
+> migration.
+
 Remote access is opt-in and still keeps the home site local-first. Enable it
 from the local dashboard under **Settings -> Access**, save, and restart when
 prompted. The Pi then registers an opaque, high-entropy `site_id` with the
 public relay and publishes only the minimal information needed for a browser to
 find that Pi.
 
-The public `home.fortytwowatts.com` route works in three layers:
+Once that infrastructure has been provisioned and verified, the public
+`home.fortytwowatts.com` route works in three layers:
 
 1. The relay serves a small loader and owner-access pages from the
    `ftw-relay-web.tar.gz` release asset.
@@ -172,7 +191,7 @@ not copy the Pi dashboard `web/` directory to the relay. Deployment details:
 **Get started**
 
 - [`docs/rpi-image.md`](docs/rpi-image.md) - SD-card image and captive portal
-- [`docs/setup-guide/`](docs/setup-guide/) - first-time setup wizard
+- [`docs/setup-guide/`](docs/setup-guide/) - alternative generic Raspberry Pi OS + Docker setup
 - [`docs/configuration.md`](docs/configuration.md) - YAML config reference
 - [`docs/driver-catalog.md`](docs/driver-catalog.md) - bundled Lua drivers
 
@@ -225,8 +244,11 @@ Releases are driven by Changesets and GitHub Actions:
 4. Merge that Version PR to bump `package.json`, update `CHANGELOG.md`, create
    the `vX.Y.Z` tag, and publish the GitHub Release.
 5. The `release-assets` workflow builds and uploads Linux/Windows binaries,
-   `ftw-relay` binaries, Docker images, the Raspberry Pi image, and
-   `ftw-relay-web.tar.gz`.
+   `ftw-relay` binaries, Docker images, and `ftw-relay-web.tar.gz`.
+
+The Raspberry Pi installer image has its own monthly/on-change workflow and
+permanent `rpi-installer` channel. It pulls the current stable containers on
+first boot, so application patch releases do not rebuild the base OS image.
 
 Do not hand-edit `CHANGELOG.md` or manually bump `package.json`; pending
 release notes live in `.changeset/*.md`.

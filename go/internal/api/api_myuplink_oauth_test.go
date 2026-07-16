@@ -91,7 +91,7 @@ func TestMyUplinkOAuthStartBuildsAuthorizeURL(t *testing.T) {
 	if q.Get("response_type") != "code" {
 		t.Errorf("response_type = %q, want code", q.Get("response_type"))
 	}
-	if q.Get("scope") != "READSYSTEM offline_access" {
+	if q.Get("scope") != "WRITESYSTEM READSYSTEM offline_access" {
 		t.Errorf("scope = %q", q.Get("scope"))
 	}
 	if q.Get("state") == "" {
@@ -109,6 +109,33 @@ func TestMyUplinkOAuthStartBuildsAuthorizeURL(t *testing.T) {
 	}
 	if q.Get("redirect_uri") != wantRedirect {
 		t.Errorf("authorize redirect_uri = %q, want %q", q.Get("redirect_uri"), wantRedirect)
+	}
+}
+
+func TestMyUplinkOAuthStartAllowsScopeOverride(t *testing.T) {
+	srv, cfg, _ := buildMyUplinkOAuthServer(t)
+	cfg.Drivers[0].Config["oauth_scope"] = "READSYSTEM"
+
+	req := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/start?driver=myuplink", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("start status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		AuthorizeURL string `json:"authorize_url"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Scope != "READSYSTEM offline_access" {
+		t.Fatalf("response scope = %q, want READSYSTEM offline_access", resp.Scope)
+	}
+	u, _ := url.Parse(resp.AuthorizeURL)
+	if got := u.Query().Get("scope"); got != "READSYSTEM offline_access" {
+		t.Fatalf("authorize scope = %q, want READSYSTEM offline_access", got)
 	}
 }
 

@@ -2079,6 +2079,47 @@ func TestEnergyDispatchPlannedGridCapCoversLoadSurgeOnSurplusSlot(t *testing.T) 
 	}
 }
 
+// BatteryCoversEV is an explicit operator request that stationary batteries may
+// cover EV draw too. In passive_arbitrage PV-surplus charge slots, the charge
+// plan is not a hard grid-charge commitment; if the EV pushes the site into
+// import, the soft planned-grid cap must be allowed to back through zero so the
+// battery covers the EV instead of keeping a PV charge while the EV imports.
+func TestEnergyDispatchPassiveArbitrageBatteryCoversEVCoversEVOnPVChargeSlot(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:       now,
+		SlotEnd:         now.Add(15 * time.Minute),
+		BatteryEnergyWh: 1200, // ~4800 W average planned PV-surplus charge
+		Strategy:        "passive_arbitrage",
+		PlannedGridW:    0, // plan expected PV to cover load + charge
+		HasPlannedGridW: true,
+	}
+	// Live meter imports +682 W while the EV is drawing. Executing the
+	// +4800 W charge plan would project +5482 W import; covering the EV/load
+	// means a discharge of ~682 W (projected grid -> 0).
+	store := seedStore(682, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.7},
+	})
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.EVChargingW = 4000
+	st.BatteryCoversEV = true
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	got := targets[0].TargetW
+	if got > -582 || got < -782 {
+		t.Errorf("TargetW = %f W — passive_arbitrage PV-charge slot with BatteryCoversEV=true "+
+			"must discharge to cover EV import (~-682 W), not floor at 0 or keep charging", got)
+	}
+}
+
 // TestEnergyDispatchPlannedGridCapKeepsFloorOnGridChargeSlot guards the
 // scope of the cover-load discharge above: on a DELIBERATE grid-charge
 // slot (PlannedGridW > 0 — the DP chose to buy from the grid to refill),

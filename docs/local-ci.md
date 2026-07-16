@@ -42,8 +42,7 @@ make ci
 
 This runs:
 
-- `make test`
-- `make e2e`
+- `make test` (optimizer + all Go packages, including `go/test/e2e`)
 - native build via `make build`
 - linux/arm64 build via `make build-arm64`
 - a temporary local stack with the bundled simulators

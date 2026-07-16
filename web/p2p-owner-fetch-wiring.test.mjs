@@ -24,12 +24,14 @@ const P2P_SRC = readFileSync(join(__dirname, "p2p.js"), "utf8");
 // open a real channel at load — we only care about the exposed surface + wiring.
 function loadP2P({ pathname = "/", hostname = "home.fortytwowatts.com" } = {}) {
   const store = new Map();
+  const fetchCalls = [];
   const win = {
     // no RTCPeerConnection → supported() false → no connect() at load
     localStorage: {
       getItem: (k) => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, String(v)),
     },
+    _fetchCalls: fetchCalls,
   };
   const sandbox = {
     window: win,
@@ -37,7 +39,10 @@ function loadP2P({ pathname = "/", hostname = "home.fortytwowatts.com" } = {}) {
     localStorage: win.localStorage,
     crypto: { getRandomValues: (a) => a },
     Headers: class {},
-    fetch: () => Promise.resolve({ ok: true, status: 200 }),
+    fetch: (url, opts) => {
+      fetchCalls.push({ url, opts });
+      return Promise.resolve({ ok: true, status: 200, _raw: true });
+    },
     setTimeout: () => 0,
     clearTimeout: () => {},
     console: { warn() {}, log() {} },
@@ -82,6 +87,44 @@ describe("p2p.js owner-fetch wiring (FIX-B)", () => {
     });
     assert.equal(r.ok, false);
     assert.equal(r.status, 503, "public-origin no-channel strict call must fail closed with 503");
+  });
+
+  it("window.p2pFetch auto-fails closed for direct state-changing owner API calls on public origins", async () => {
+    const r = await win.p2pFetch("/api/owner-access/login/finish?ceremony_token=repro", {
+      method: "POST",
+      body: "FTW_SENTINEL_WEBAUTHN_BODY",
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 503);
+    assert.deepEqual(win._fetchCalls, [], "owner ceremony body must not be raw-fetched to the relay");
+  });
+
+  it("window.p2pFetch auto-fails closed for direct state-changing control API calls on public origins", async () => {
+    const r = await win.p2pFetch("/api/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode: "self_consumption" }),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.status, 503);
+    assert.deepEqual(win._fetchCalls, [], "state-changing owner/control API calls must not hit relay fallback");
+  });
+
+  it("window.p2pFetch keeps read-only relay fallback for non-strict API calls", async () => {
+    const r = await win.p2pFetch("/api/status");
+    assert.equal(r._raw, true);
+    assert.equal(win._fetchCalls.length, 1);
+    assert.equal(win._fetchCalls[0].url, "/api/status");
+  });
+
+  it("window.p2pFetch may raw-fetch state-changing API calls on genuine LAN origins", async () => {
+    win = loadP2P({ hostname: "192.168.1.42" });
+    const r = await win.p2pFetch("/api/mode", {
+      method: "POST",
+      body: JSON.stringify({ mode: "self_consumption" }),
+    });
+    assert.equal(r._raw, true);
+    assert.equal(win._fetchCalls.length, 1);
+    assert.equal(win._fetchCalls[0].url, "/api/mode");
   });
 
   it("p2p.js source assigns ownerFetch from p2pFetchStrict (no duplicated logic)", () => {

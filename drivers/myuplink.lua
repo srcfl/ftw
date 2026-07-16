@@ -5,8 +5,9 @@
 --
 -- Observe-only by design: the EMS reads heat-pump telemetry so a proper
 -- thermal-store model + control primitive can be grounded in a later step.
--- It cannot actuate the pump, so it cannot cause harm. The OAuth scope is
--- READSYSTEM only (least privilege).
+-- It cannot actuate the pump, so it cannot cause harm. MyUplink's OAuth
+-- authorize flow may still require WRITESYSTEM alongside READSYSTEM; FTW never
+-- calls write endpoints from this driver.
 --
 -- AUTH (authorization-code + refresh-token):
 --   MyUplink's developer portal issues authorization-code apps (you register
@@ -30,6 +31,9 @@
 --         client_secret: "..."     # masked via config_secrets
 --         refresh_token: "..."     # written by the OAuth connect flow; masked
 --         # device_id: "..."       # optional; auto-detected if omitted
+--         # oauth_scope: "READSYSTEM offline_access" # optional; default also
+--                                                    # asks WRITESYSTEM because
+--                                                    # MyUplink may reject read-only auth
 --       capabilities:
 --         http:
 --           allowed_hosts: ["api.myuplink.com"]

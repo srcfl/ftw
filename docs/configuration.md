@@ -209,6 +209,28 @@ api:
 
 The API port is bound at process startup and requires restart to change.
 
+## `remote_access`
+
+Remote owner access is explicit opt-in and disabled when this block is omitted:
+
+```yaml
+remote_access:
+  enabled: false
+  turn:
+    enabled: false
+    url: ""
+```
+
+Enabling it lets the Pi register with the configured relay and establish an
+end-to-end encrypted browser↔Pi WebRTC DataChannel. TURN is an optional blind
+ICE fallback that relays DTLS ciphertext only. Relay/TURN deployment is a
+separate infrastructure step; local control continues normally when those
+services are unavailable. See [`remote-access.md`](remote-access.md) and the
+current provisioning warning in [`relay-deploy.md`](relay-deploy.md).
+
+Remote-access enablement and TURN/relay changes require a process restart; the
+outbound registration loop is constructed at startup.
+
 ## `homeassistant`
 
 ```yaml
@@ -223,6 +245,40 @@ homeassistant:
 
 The HA bridge uses MQTT autodiscovery. Broker changes require restart
 because the bridge connection is built at startup.
+
+## `caldav`
+
+FTW can host an in-process CalDAV server and turn calendar events into planner
+intents while publishing EV-session history and planned energy windows:
+
+```yaml
+caldav:
+  enabled: false
+  listen: ":5232"
+  url: http://localhost:5232
+  username: ftw
+  manage_credentials: true
+  calendar_path: /ftw/energy/
+  poll_interval_s: 300
+  horizon_days: 7
+  ev_default_target_soc_pct: 80
+  evse_history: true
+  history_path: /ftw/history/
+  publish_plan: true
+  plan_path: /ftw/plan/
+  plan_publish_interval_s: 900
+```
+
+`manage_credentials` defaults on when CalDAV is enabled. FTW generates the
+password, stores it in `state.db` rather than YAML, and shows it in Settings →
+Calendar. `calendar_path`, `history_path`, and `plan_path` must remain distinct
+so generated events are never re-read as inbound constraints. Keyword lists and
+the default EV loadpoint can be localized/selected; see
+[`caldav-integration.md`](caldav-integration.md).
+
+Enabling/disabling the server or changing `listen`, credentials, or collection
+layout requires restart. Planner inputs derived by the already-running calendar
+service update on its polling interval.
 
 ## `state`
 
@@ -378,7 +434,7 @@ Prefer per-driver `max_charge_w` / `max_discharge_w` for hardware command
 caps. The `batteries` map remains useful for strategy weights and explicit
 SoC policy.
 
-## EV, V2X, OCPP, Notifications, Nova
+## EV, OCPP, Notifications, Nova
 
 Additional optional blocks exist for:
 
@@ -408,6 +464,8 @@ these specialized blocks.
 | `api.port` | no | Socket bind happens at startup. |
 | `state.path`, `state.cold_dir` | no | Store opens at startup. |
 | `homeassistant.*` | no | Broker connection is built at startup. |
+| `remote_access.*` | no | Relay registration and ICE configuration are built at startup. |
+| `caldav.*` | no | The in-process server and calendar service are built at startup. |
 | `price.*`, `weather.*` | yes | Picked up by the next fetch. |
 
 When in doubt, restart the service after structural changes.

@@ -3,6 +3,21 @@ name: edge channel
 on:
   push:
     branches: [master]
+    # Only files copied into, compiled into, or used to publish the images can
+    # change an edge digest. Release metadata and documentation must not spend
+    # 15-20 minutes rebuilding an identical runtime.
+    paths:
+      - '.github/workflows/edge.yml'
+      - '.dockerignore'
+      - 'Dockerfile'
+      - 'Dockerfile.updater'
+      - 'LICENSE'
+      - 'NOTICE'
+      - 'go/**'
+      - 'optimizer/**'
+      - 'drivers/**'
+      - 'web/**'
+      - 'scripts/inspect-image-digest.sh'
   workflow_dispatch:
 
 permissions:
@@ -77,8 +92,10 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             VERSION=${{ needs.meta.outputs.tag }}
-          cache-from: type=gha,scope=edge-${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=edge-${{ matrix.target }}
+          # Share content-addressed layers with beta and stable. Channel tags
+          # change, but dependency/runtime layers overwhelmingly do not.
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
       - name: Login to compatibility GHCR namespace
         uses: docker/login-action@v3

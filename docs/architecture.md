@@ -1,7 +1,10 @@
 # Architecture overview
 
-This is the canonical system map for FTW. For the sign
-convention every number in the rest of this document obeys, see
+This is the canonical map of FTW's core control and data path. Optional
+subsystems such as remote access, CalDAV, notifications, Nova federation,
+self-update, OCPP, and thermal/EV integrations are documented in their own
+guides and connect through the API/config/state boundaries described here. For
+the sign convention every number in the rest of this document obeys, see
 [site-convention.md](site-convention.md) first.
 
 ## System summary
@@ -87,6 +90,8 @@ Runs every `site.control_interval_s` seconds (default 2). Modes:
 - `planner_self` / `planner_cheap` / `planner_arbitrage` — pull
   `grid_target_w` from the MPC plan for the current slot; fall back
   to `self_consumption` with target 0 when the plan is stale
+- `planner_passive_arbitrage` — follow the planner's passive-arbitrage target
+  while retaining the same stale-plan safety fallback
 
 Outputs one `DispatchTarget` per battery driver (site convention:
 + = charge, − = discharge) after slew-rate and fuse-guard clamping.
@@ -118,7 +123,7 @@ for model internals.
 Sources: `go/internal/api/`, `web/`.
 
 HTTP REST + static UI served on port 8080 by default
-(`go/internal/config/config.go:270`). The UI reads live telemetry,
+(`go/internal/config/`). The UI reads live telemetry,
 drives mode/target changes, and exposes the planner + model views.
 Config writes go through the API to the same `config.yaml` file.
 

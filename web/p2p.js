@@ -5,8 +5,10 @@
 // channel, and resolves the matching ResponseFrame (correlated by req_id).
 // Signaling rides the authenticated owner tunnel: POST <base>/api/p2p/offer
 // carries the ftw_owner cookie, so only an authenticated owner can open a
-// channel. Everything degrades to the normal relay fetch when the channel
+// channel. Read-only calls degrade to the normal relay fetch when the channel
 // can't open (hard NAT, no STUN reachability, opt-out) — invisible to callers.
+// State-changing owner/control API calls fail closed on public relay origins so
+// WebAuthn bodies and owner commands never cross the relay in plaintext.
 //
 // Classic script (next-app.js is a plain IIFE, not a module): exposes
 // window.p2pFetch + window.ftwP2P. No build step.
@@ -802,9 +804,27 @@
     };
   }
 
+  function pathOnly(path) {
+    var s = String(path || "");
+    var q = s.indexOf("?");
+    if (q >= 0) s = s.slice(0, q);
+    var h = s.indexOf("#");
+    if (h >= 0) s = s.slice(0, h);
+    return s;
+  }
+
+  function forcesStrictAPI(path, method) {
+    var p = pathOnly(path);
+    if (p === "/api/identity") return false;
+    if (p.indexOf("/api/") !== 0) return false;
+    var m = String(method || "GET").toUpperCase();
+    if (p.indexOf("/api/owner-access/") === 0) return true;
+    return m !== "GET" && m !== "HEAD" && m !== "OPTIONS";
+  }
+
   // p2pFetch: fetch-compatible. Routes over the DataChannel when available,
   // else the normal relay fetch. Never rejects on transport failure — it always
-  // falls back — so callers treat it as a drop-in fetch.
+  // falls back for read-only calls — so callers treat it as a drop-in fetch.
   //
   // STRICT mode (opts.strict === true, FIX-2): for owner /api/* calls that carry
   // secrets (WebAuthn assertion, ceremony token, owner session). On the PUBLIC
@@ -815,7 +835,7 @@
   // in the path). When in doubt → not LAN → fail closed.
   function p2pFetch(path, opts) {
     opts = opts || {};
-    var strict = opts.strict === true;
+    var strict = opts.strict === true || forcesStrictAPI(path, opts.method);
     var canFallBack = !strict || isLanOrigin();
     var relayFallback = function () {
       var o = {};

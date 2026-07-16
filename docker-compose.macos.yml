@@ -68,7 +68,7 @@ services:
 
     volumes:
       - ./data:/app/data
-      # Shared tmpfs with the updater — the main app reads state.json from
+      # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
 

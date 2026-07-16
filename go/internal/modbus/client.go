@@ -7,44 +7,40 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"sync"
 	"syscall"
-	"time"
 
 	sv "github.com/simonvetter/modbus"
 
 	"github.com/srcfl/ftw/go/internal/drivers"
 )
 
-// Capability wraps a simonvetter/modbus client. Each call serializes through
+// Capability wraps a Modbus TCP client. Each call serializes through
 // the mutex; on a transport-level error a single reconnect + retry is
 // attempted so a silently closed TCP socket (common on Sungrow + several
 // other inverter firmwares after idle timeout or after receiving a write)
 // doesn't condemn the driver to silent zeros until a full process restart.
 type Capability struct {
 	mu     sync.Mutex
-	client *sv.ModbusClient
+	client *tcpClient
 	url    string
+	addr   string
 	unitID int
 }
 
 // Dial opens a Modbus TCP connection.
 func Dial(host string, port, unitID int) (*Capability, error) {
-	url := fmt.Sprintf("tcp://%s:%d", host, port)
-	cli, err := sv.NewClient(&sv.ClientConfiguration{
-		URL:     url,
-		Timeout: 5 * time.Second,
-	})
-	if err != nil {
-		return nil, err
-	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	url := "tcp://" + addr
+	cli := newTCPClient(addr, modbusRequestTimeout, modbusTCPKeepAlive)
 	if err := cli.Open(); err != nil {
 		return nil, err
 	}
 	if unitID > 0 {
-		_ = cli.SetUnitId(uint8(unitID))
+		cli.SetUnitId(uint8(unitID))
 	}
-	return &Capability{client: cli, url: url, unitID: unitID}, nil
+	return &Capability{client: cli, url: url, addr: addr, unitID: unitID}, nil
 }
 
 // Close the underlying connection.
@@ -58,23 +54,23 @@ func (c *Capability) Close() error {
 func (c *Capability) Read(addr, count uint16, kind int32) ([]uint16, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var rt sv.RegType
+	var fc byte
 	switch kind {
 	case drivers.ModbusInput:
-		rt = sv.INPUT_REGISTER
+		fc = modbusReadInputRegisters
 	case drivers.ModbusHolding:
-		rt = sv.HOLDING_REGISTER
+		fc = modbusReadHoldingRegisters
 	default:
-		rt = sv.INPUT_REGISTER
+		fc = modbusReadInputRegisters
 	}
-	regs, err := c.client.ReadRegisters(addr, count, rt)
+	regs, err := c.client.ReadRegisters(addr, count, fc)
 	if err == nil || !isTransportError(err) {
 		return regs, err
 	}
 	if rerr := c.reconnect(); rerr != nil {
 		return nil, fmt.Errorf("read after reconnect: %w (original: %v)", rerr, err)
 	}
-	return c.client.ReadRegisters(addr, count, rt)
+	return c.client.ReadRegisters(addr, count, fc)
 }
 
 // WriteSingle — implements drivers.ModbusCap. Reconnects once on transport error.
@@ -105,24 +101,17 @@ func (c *Capability) WriteMulti(addr uint16, values []uint16) error {
 	return c.client.WriteRegisters(addr, values)
 }
 
-// reconnect tears down the current socket and dials a fresh one. Caller
-// must hold c.mu. The simonvetter client doesn't self-heal from a closed
-// TCP socket — subsequent reads return errors forever until Open() is
-// called again.
+// reconnect tears down the current socket and dials a fresh one. Caller must
+// hold c.mu. Some inverter firmwares leave Modbus TCP sessions stale after idle
+// time or a write; a fresh socket is the only reliable recovery.
 func (c *Capability) reconnect() error {
 	_ = c.client.Close()
-	cli, err := sv.NewClient(&sv.ClientConfiguration{
-		URL:     c.url,
-		Timeout: 5 * time.Second,
-	})
-	if err != nil {
-		return err
-	}
+	cli := newTCPClient(c.addr, modbusRequestTimeout, modbusTCPKeepAlive)
 	if err := cli.Open(); err != nil {
 		return err
 	}
 	if c.unitID > 0 {
-		_ = cli.SetUnitId(uint8(c.unitID))
+		cli.SetUnitId(uint8(c.unitID))
 	}
 	c.client = cli
 	slog.Info("modbus reconnected", "url", c.url)

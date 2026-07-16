@@ -2777,7 +2777,9 @@ func firstLoadpointID(src []config.Loadpoint) string {
 	return ""
 }
 
-// caldavUsername resolves the CalDAV username (default fortytwowatts).
+// caldavUsername resolves the configured CalDAV username. The runtime fallback
+// remains the former default so an existing config that omitted the field does
+// not silently move its principal; fresh UI/example configs write `ftw`.
 func caldavUsername(cv *config.CalDAV) string {
 	if cv != nil && strings.TrimSpace(cv.Username) != "" {
 		return strings.TrimSpace(cv.Username)

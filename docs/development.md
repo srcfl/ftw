@@ -15,10 +15,20 @@ production topology.
 
 ## Host-native `go run`
 
+For the complete simulator loop, use the fresh-clone-safe target from the repo
+root. On first run it creates the ignored `config.local.yaml` from
+`config.local.example.yaml`:
+
+```bash
+make dev
+```
+
+To run only the app against that local configuration:
+
 ```bash
 cd go
 go run ./cmd/ftw \
-  -config ../data/config.yaml \
+  -config ../config.local.yaml \
   -web ../web
 ```
 
@@ -42,7 +52,7 @@ FTW_SELFUPDATE_ENABLED=
 ```bash
 cd go
 set -a; source ../.env.local; set +a
-go run ./cmd/ftw -config ../data/config.yaml -web ../web
+go run ./cmd/ftw -config ../config.local.yaml -web ../web
 ```
 
 On boot you'll see:

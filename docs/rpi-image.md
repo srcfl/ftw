@@ -21,7 +21,7 @@ the fallback, not the recommended path.
 1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) 2.0 or newer.
 2. **App Options → Content Repository → EDIT → Use custom file** → paste the FTW repository URL, then **APPLY & RESTART**:
    ```
-   https://github.com/srcfl/ftw/releases/latest/download/os_list.json
+   https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
    ```
 3. **CHOOSE OS → FTW**, **CHOOSE STORAGE → your SD card**, then set **hostname / SSH user+password / WiFi** in the customisation panel and **WRITE**.
 4. Insert SD card → power on the Pi → wait ~90 s.
@@ -70,29 +70,29 @@ path if the dashboard ever gets stuck.
 > the [repository flow](#tldr-recommended) instead — it downloads the
 > image for you.
 
-### Stable releases
+### Latest installer image
 
-Each tagged release publishes the image as a release asset:
+The installer image is published independently from FTW application releases:
 
 ```
-https://github.com/srcfl/ftw/releases/latest
+https://github.com/srcfl/ftw/releases/tag/rpi-installer
 ```
 
-Look for `ftw-rpi4-arm64-vX.Y.Z.img.xz` under "Assets". This is a
-**direct file download** — your browser saves the `.img.xz` and you
-flash it as-is.
+Look for the newest `ftw-rpi4-arm64-YYYYMMDD-<sha>.img.xz` under "Assets".
+This is a **direct file download** — your browser saves the `.img.xz` and you
+flash it as-is. New installations still receive the current stable FTW
+application because first boot pulls the containers from GHCR.
 
-### PR previews (for testers)
+### Hardware-test candidates (for maintainers)
 
-Open pull requests that touch the image scaffolding auto-publish a
-draft pre-release tagged `pr-<N>-image-preview`. Repo collaborators
-can find these under [Releases → Drafts](https://github.com/srcfl/ftw/releases) — same direct
-`.img.xz` download, no zip wrapper.
+Pull requests only run fast structural checks. When a change needs a real-card
+test before merge, dispatch the **rpi installer image** workflow with
+`publish=false`. Its workflow artifact contains the `.img.xz`, checksum, and
+rendered repository metadata for 14 days.
 
-> **Don't use the GitHub Actions "Artifacts" download for flashing.**
-> GitHub auto-wraps every workflow artifact in a `.zip`, and neither
-> Imager nor Etcher knows how to look inside that wrapper. The
-> Releases page (above) gives you the raw `.img.xz` directly.
+> GitHub wraps the workflow artifact in a `.zip`. Extract that outer wrapper
+> once, then flash the enclosed `.img.xz` without decompressing it. Normal
+> users should use the permanent Imager repository or installer release above.
 
 ---
 
@@ -111,7 +111,7 @@ the FTW repository so it does:
 1. Install [Raspberry Pi Imager](https://www.raspberrypi.com/software/) (2.0 or newer).
 2. **App Options → Content Repository → EDIT → Use custom file** → paste:
    ```
-   https://github.com/srcfl/ftw/releases/latest/download/os_list.json
+   https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
    ```
    → **APPLY & RESTART**. (CLI equivalent: `rpi-imager --repo <url>`.)
 3. **CHOOSE OS** → **FTW** now appears in the list.
@@ -319,6 +319,8 @@ Output lands at `deploy/pi-gen/pi-gen/deploy/ftw-rpi4-arm64-*.img.xz`.
 Build takes ~25–30 minutes on a decent laptop and uses ~15 GB of
 working disk.
 
-CI runs the same script on every PR that touches `deploy/pi-gen/**`
-or the workflow itself (`.github/workflows/rpi-image-build.yml`),
-plus on every tagged release (`.github/workflows/release.yml`).
+CI runs fast shell/template/Compose validation on pull requests that touch the
+installer. A full image is built after installer inputs land on `master`, on a
+monthly refresh schedule, or by explicit dispatch. Application tags do not
+rebuild it: first boot pulls the current stable FTW containers, and installed
+systems continue updating through the normal updater.

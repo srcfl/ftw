@@ -287,7 +287,8 @@ type CalDAV struct {
 	Password string `yaml:"-" json:"password,omitempty"` // persisted in state.db, not YAML
 
 	// CalendarPath is the collection path polled for events, relative to URL
-	// (e.g. "/fortytwowatts/energy/").
+	// (e.g. "/ftw/energy/" for new configs). The runtime fallback below keeps
+	// the former path for configs that omitted this field before the rebrand.
 	CalendarPath string `yaml:"calendar_path,omitempty" json:"calendar_path,omitempty"`
 
 	// PollIntervalS is how often the collection is re-fetched. Default 300s.

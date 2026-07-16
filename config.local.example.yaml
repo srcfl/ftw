@@ -1,0 +1,48 @@
+# Local simulator configuration used by `make dev`.
+#
+# On first run the Makefile copies this file to the gitignored
+# `config.local.yaml`. Edit that copy freely; this template remains a
+# reproducible fresh-clone default.
+
+site:
+  name: "FTW simulator"
+  control_interval_s: 2
+  grid_target_w: 0
+  grid_tolerance_w: 42
+  watchdog_timeout_s: 60
+
+fuse:
+  max_amps: 16
+  phases: 3
+  voltage: 230
+
+drivers:
+  # sim-ferroamp includes its own MQTT broker on localhost:1883.
+  - name: ferroamp-sim
+    lua: drivers/ferroamp.lua
+    is_site_meter: true
+    battery_capacity_wh: 15200
+    capabilities:
+      mqtt:
+        host: 127.0.0.1
+        port: 1883
+        username: extapi
+        password: ferroampExtApi
+
+  # sim-sungrow exposes Modbus TCP on localhost:5502.
+  - name: sungrow-sim
+    lua: drivers/sungrow.lua
+    battery_capacity_wh: 9600
+    capabilities:
+      modbus:
+        host: 127.0.0.1
+        port: 5502
+        unit_id: 1
+
+api:
+  port: 8080
+
+state:
+  # `make dev` starts the Go process from go/, so keep disposable state in
+  # the repo's ignored dev-data/ directory.
+  path: ../dev-data/state.db

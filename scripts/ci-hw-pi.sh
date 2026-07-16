@@ -93,9 +93,8 @@ wait_remote_health() {
 }
 
 if [ "${FTW_SKIP_LOCAL:-0}" != "1" ]; then
-  log "running local tests before Pi deploy"
+  log "running local tests before Pi deploy (including full-stack e2e)"
   (cd "$ROOT" && make test)
-  (cd "$ROOT" && make e2e)
 fi
 
 log "building linux/arm64 candidate"

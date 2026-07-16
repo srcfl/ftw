@@ -14,6 +14,7 @@ data/
 # These are dev build outputs, never shipped — releases build into bin/ via
 # the Makefile / release-assets workflow. Keep this list in sync with go/cmd/.
 /go/forty-two-watts
+/go/ftw
 /go/ftw-pair
 /go/ftw-relay
 /go/ftw-updater
@@ -26,7 +27,7 @@ data/
 config.local.yaml
 
 # Local dev playground — state.db + config.local.yaml + logs seeded by
-# `forty-two-watts -backfill N`. Per-machine, nothing here is shipped.
+# `ftw -backfill N`. Per-machine, nothing here is shipped.
 dev-data/
 
 # Local dev env overrides (proxy upstream, dev toggles) — not shipped.
@@ -34,6 +35,7 @@ dev-data/
 
 # Per-user Claude Code harness settings — machine-local.
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Per-user Claude Code worktrees — machine-local, never tracked.
 .claude/worktrees/
@@ -45,8 +47,8 @@ dev-data/
 # deploy/pi-gen/ subtree, plus the per-build copies of files that
 # the stage pulls from the repo root at build time.
 /deploy/pi-gen/pi-gen/
-/deploy/pi-gen/stage-42w/01-ftw-setup/files/docker-compose.yml
-/deploy/pi-gen/stage-42w/01-ftw-setup/files/mosquitto.conf
+/deploy/pi-gen/stage-ftw/01-ftw-setup/files/docker-compose.yml
+/deploy/pi-gen/stage-ftw/01-ftw-setup/files/mosquitto.conf
 
 # State DB
 *.db

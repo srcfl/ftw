@@ -12,6 +12,9 @@ permissions:
 jobs:
   active-copy:
     name: no new legacy product copy
+    if: |
+      !(github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, 'chore(release): version packages')) &&
+      !(github.event_name == 'push' && startsWith(github.event.head_commit.message, 'chore(release): version packages'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -19,10 +22,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Install ripgrep
+      - name: Ensure ripgrep is available
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes ripgrep
+          if ! command -v rg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
 
       - name: Check classified brand inventory
         env:

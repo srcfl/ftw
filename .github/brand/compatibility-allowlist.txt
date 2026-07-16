@@ -1,6 +1,12 @@
 # Anchored Bash regular expressions for active former-name lines that are part
 # of a documented compatibility contract. Keep these narrow; historical files
 # are excluded separately and presentation copy belongs in FTW.
+^docs/api\.md:detected `ftw` or legacy `forty-two-watts` service at the immutable target\.$
+^docs/self-update\.md:.*`forty-two-watts:optimizer-…`.*$
+^docs/self-update\.md:  forty-two-watts: # or ftw; detected from the persistent /app/data mount$
+^docs/upgrade-from-legacy\.md:.*$
+^README\.md:> \*\*Upgrading an existing Forty Two Watts installation\?\*\* Follow the$
+^go/cmd/ftw-updater/main_test\.go:.*forty-two-watts.*$
 ^Makefile:.*-C \"\$\$stage\" ftw forty-two-watts ftw-pair.*$
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
@@ -12,5 +18,4 @@
 ^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
 ^scripts/install-macos\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
 ^scripts/install-macos\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
-^scripts/install\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
-^scripts/install\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
+^scripts/migrate-legacy-compose\.sh:.*forty-two-watts.*$

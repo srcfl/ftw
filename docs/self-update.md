@@ -24,7 +24,7 @@ processes so the main container never touches the Docker socket.
 │  │  - reads state.json     │     │     [--force-recreate]       │   │
 │  └─────────┬───────────────┘     └──────────┬───────────────────┘   │
 │            │                                │                       │
-│            │    update-ipc (tmpfs volume)   │    /var/run/docker.sock │
+│            │    update-ipc (Docker volume)  │    /var/run/docker.sock │
 │            └────────────────┬───────────────┘    (bind mount)       │
 │                             │                                       │
 │                      state.json + sock                              │
@@ -50,7 +50,7 @@ for discovery and manual inspection only. The updater never installs them.
 
 ## Why immutable tags, not moving aliases
 
-A GitHub Release is published the moment release-please's PR merges;
+A GitHub Release is published when the Changesets version PR merges;
 the GitHub Actions workflow that builds and pushes the image to GHCR
 runs *after* that. The `:latest` tag is also retagged after the build,
 which means there's a window where:
@@ -79,12 +79,36 @@ The sidecar accepts only `vX.Y.Z`, `vX.Y.Z-beta.N`, or
 `edge-YYYYMMDDTHHMMSSZ-<sha>`. Falling through to a moving alias is exactly
 what this boundary prevents.
 
+### Compatibility with older Compose files
+
+Some installations created before the Sourceful migration — and some developer
+deployments — have a hard-coded main image such as
+`forty-two-watts:optimizer-…`. Exporting `FTW_IMAGE_TAG` cannot affect such a
+file. For update, restart, and state rollback jobs the sidecar therefore
+appends an updater-owned Compose override from the updater container's private
+temporary filesystem:
+
+```yaml
+services:
+  forty-two-watts: # or ftw; detected from the persistent /app/data mount
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+```
+
+The override is applied after the base file and user overrides, and exists only
+for the active updater job. Immutable updates pin the requested tag, restart
+uses the normal `latest` default, and state rollback temporarily tags the exact
+running image ID so the rollback cannot also change application version. The
+host Compose file remains read-only and unchanged; its project name, service
+name, networking, volumes, and data bind are preserved. The override is
+deliberately not stored in the shared, main-container-writable status volume.
+Missing or ambiguous `/app/data` ownership still fails closed.
+
 The GH Releases API is still consulted, but only as a best-effort
 lookup for the changelog body shown in the upgrade modal. A 404 there
 (release not yet published, or never paired with the image) doesn't
 block the upgrade.
 
-`restart` is the dev-convenience action — no target required, no env
+`restart` is the dev-convenience action — no target required, no tag env
 override, falls through to compose's `:latest` default and
 `--force-recreate`s. It exists so the full pull→recreate→reload flow
 can be exercised locally without waiting for a real release.
@@ -98,22 +122,26 @@ the main service's recreate cycle handles this cleanly.
 
 Giving the main container access to `/var/run/docker.sock` would also
 grant it root-equivalent access to the host. The sidecar localizes that
-privilege to one small binary (~250 LOC, no network, no persistent
-storage, a read-only bind of `docker-compose.yml`).
+privilege to one purpose-built binary with no network listener, a small shared
+status volume, and a read-only bind of the Compose project.
 
 ## State transitions
 
-`state.json` is written to the shared `update-ipc` tmpfs volume. Every
+`state.json` is written to the shared `update-ipc` Docker volume. Every
 step rewrites the whole file atomically (`tmp → rename`). Both ends
 treat it as authoritative.
 
 ```
-idle → pulling → restarting → done
-                ↘
-                  failed (on error, with stderr tail)
+idle → starting → snapshotting → pulling → restarting → done
+          │             │            │          │
+          │             │            └──────────┴→ failed
+          │             │                               │
+          └─────────────┴───────────────────────────────┘
+
+rollback: starting → snapshotting → restoring → done | failed
 ```
 
-The tmpfs volume outlives the recreate of either container, so the new
+The shared volume outlives the recreate of either container, so the new
 main container reads `done` on startup and serves it to the UI that's
 still polling in the browser — which then hard-reloads.
 
@@ -131,25 +159,33 @@ ordering prevents the checker from offering a beta whose image is not ready.
 
 Stable continues through Changesets and `release.yml`. The stable asset
 workflow explicitly ignores beta tags so a prerelease can never retag
-`:latest` or emit stable RPi/Discord artifacts.
+`:latest` or emit a stable Discord announcement. The RPi installer image is
+published independently under the permanent `rpi-installer` prerelease.
 
-## Bootstrapping the first beta
+## Bootstrapping an older updater
 
-An updater released before channel support rejects beta and edge targets by
-design. The first beta installation therefore pins both containers once:
+The updater does not recreate itself during a main-service update. For an
+older deployment with a hard-coded, local, or pre-Sourceful main image, do not
+refresh only the sidecar: that leaves the stale host Compose reference in place.
+Run the one-time [legacy migration](upgrade-from-legacy.md), which validates the
+data bind, preserves the Compose identity and moves both services to canonical
+images with rollback.
 
-```env
-FTW_IMAGE_TAG=v0.128.0-beta.1
-FTW_UPDATER_IMAGE_TAG=v0.128.0-beta.1
+Only an installation whose main service already uses the canonical dynamic
+`ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}` form can refresh its sidecar alone:
+
+```bash
+cd ~/ftw  # or the existing ~/forty-two-watts directory
+docker compose pull ftw-updater
+docker compose up -d --no-deps ftw-updater
 ```
 
-Run `docker compose pull` and `docker compose up -d` with those values in
-the deployment's `.env`. After that pair is running, channel selection and
-future main-image updates work in the dashboard. The updater protocol is
-kept backward compatible; updating the sidecar itself remains an explicit
-compose operation.
+This does not restart the main service or touch `/app/data`. For an intentional
+beta or edge bootstrap, pin both `FTW_IMAGE_TAG` and
+`FTW_UPDATER_IMAGE_TAG` to the same currently published immutable tag; do not
+reuse the historical beta.1 tag.
 
-## The seven endpoints
+## HTTP endpoints
 
 | Endpoint | Purpose |
 |---|---|
@@ -160,6 +196,9 @@ compose operation.
 | `POST /api/version/update` | Trigger `pull` + `up -d` for the currently-latest tag. |
 | `POST /api/version/restart` | Trigger `pull` + `up -d --force-recreate`. Exists so the full flow can be exercised locally without waiting for a real release. |
 | `GET  /api/version/update/status` | Pass-through of the sidecar's `state.json`. Polled every 2 s by the UI during the countdown. |
+| `GET  /api/version/snapshots` | List retained pre-update and pre-rollback snapshots. |
+| `DELETE /api/version/snapshots/{id}` | Delete one retained snapshot. |
+| `POST /api/version/rollback` `{snapshot_id}` | Capture a safety snapshot, restore the selected state/config snapshot, and restart the service. |
 
 ## Testing locally
 
@@ -201,8 +240,9 @@ a version you hid earlier resurfaces as soon as you ask about it.
 - **Image signature verification**: call `cosign verify` inside the
   sidecar before `up -d`, rejecting images that don't match the
   release-signing key.
-- **Rollback**: snapshot the pre-update image digest so a subsequent
-  "Rollback" button can retag and recreate.
+
+State/config snapshot rollback and automatic previous-image rollback are
+already implemented; signature verification remains the primary hardening gap.
 
 ## Enabling and disabling
 
