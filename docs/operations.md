@@ -74,16 +74,23 @@ The long-running service accepts four operator-facing path flags:
 - `-drivers /opt/ftw/drivers` — immutable bundled-driver directory.
 - `-user-drivers /var/lib/ftw/drivers` — persistent user-driver overlay.
 
-Older Compose installations can add the optimizer service without replacing
-their base file:
+The Linux migration command and the rerunnable macOS installer automatically
+add the optimizer sidecar to an older safe Compose layout. They create a
+standard override instead of replacing the base file, validate the merged
+project, start the optimizer before core, and remove the override again if the
+migration rolls back.
+
+Operators who only want to activate the modular stack can run the same helper
+directly:
 
 ```bash
 bash scripts/enable-modular-stack.sh /path/to/docker-compose.yml
 ```
 
-The script creates a standard Compose override only when none exists, validates
-the merged project, starts the sidecar, and restores the base stack if startup
-fails. Existing custom overrides must be merged manually rather than overwritten.
+The helper is idempotent when the merged project already contains
+`ftw-optimizer`. Existing custom overrides that do not contain the service must
+still be merged manually; the automation fails closed instead of overwriting
+operator-owned YAML.
 
 Independently published drivers are configured under `device_repository` and
 stored below `/var/lib/ftw/driver-repository`; see

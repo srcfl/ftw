@@ -222,14 +222,21 @@ harmless as long as the driver sets make + serial. See
 
 The `ftw-updater` sidecar is wired into `docker-compose.macos.yml` and
 works on Docker Desktop — its `FTW_UPDATER_COMPOSE` points at the macOS
-file so the Update / Restart buttons recreate the right containers. If
-you'd rather upgrade by hand, the manual path is:
+file so the Update / Restart buttons recreate the right containers. Rerunning
+the one-shot macOS installer upgrades a safe older layout by adding
+`ftw-optimizer` in `docker-compose.override.yml`; it keeps the base file and
+data intact. The installer prints the exact multi-file management command.
+
+For a migrated layout, the manual path is:
 
 ```bash
 cd ~/ftw
-docker compose -f docker-compose.macos.yml pull
-docker compose -f docker-compose.macos.yml up -d
+docker compose -f docker-compose.macos.yml -f docker-compose.override.yml pull
+docker compose -f docker-compose.macos.yml -f docker-compose.override.yml up -d
 ```
+
+Fresh layouts already contain the service in the base file and need only the
+original single `-f docker-compose.macos.yml` argument.
 
 ### Keeping it running
 

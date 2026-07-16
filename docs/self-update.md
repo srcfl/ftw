@@ -83,6 +83,14 @@ what this boundary prevents.
 
 ### Compatibility with older Compose files
 
+An older Compose file cannot gain a new service merely by replacing the core
+image. Core therefore keeps its local Python and Go-DP fallbacks, while the
+Linux migration command (or rerunnable macOS installer) performs the one-time,
+rollback-safe creation of `docker-compose.override.yml`. The updater then
+auto-discovers that persistent override for every selective optimizer update.
+It does not write the host project itself because its Compose mount remains
+read-only by design.
+
 Some installations created before the Sourceful migration — and some developer
 deployments — have a hard-coded main image such as
 `forty-two-watts:optimizer-…`. Exporting `FTW_IMAGE_TAG` cannot affect such a

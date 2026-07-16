@@ -84,6 +84,9 @@ jobs:
             echo "No Go/optimizer/driver/web changes; required check completes without heavy setup."
           fi
 
+      - name: Test modular Compose migration
+        run: make compose-migration-test
+
       - name: Setup Go
         if: steps.changes.outputs.go == 'true'
         uses: actions/setup-go@v5
