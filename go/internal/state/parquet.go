@@ -55,6 +55,19 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 		if err != nil {
 			return err
 		}
+		// Delete this day's rows as soon as its file is durable, in
+		// hour-sized transactions. A single end-of-run DELETE over a large
+		// backlog holds the write lock for minutes and loses the race
+		// against the control loop's writers (observed as SQLITE_BUSY in
+		// production, leaving the rolloff to redo everything each hour).
+		dayStart := time.Date(cur.year, time.Month(cur.month), cur.day, 0, 0, 0, 0, time.UTC).UnixMilli()
+		dayEnd := dayStart + 24*60*60*1000
+		if dayEnd > cutoff {
+			dayEnd = cutoff
+		}
+		if err := s.deleteSamplesChunked(ctx, dayStart, dayEnd); err != nil {
+			return fmt.Errorf("delete day %04d-%02d-%02d: %w", cur.year, cur.month, cur.day, err)
+		}
 		files = append(files, path)
 		rolledRows += int64(len(rows))
 		rows = rows[:0]
@@ -85,14 +98,28 @@ func (s *Store) RolloffToParquet(ctx context.Context, coldDir string) (rolledRow
 	if rolledRows == 0 {
 		return 0, nil, nil
 	}
-
-	// Delete the rolled-off rows from SQLite — only after every day file is
-	// durably on disk (flushParquetDay fsyncs), so a crash between the two
-	// steps re-rolls and merges rather than losing data.
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM ts_samples WHERE ts_ms < ?`, cutoff); err != nil {
-		return rolledRows, files, fmt.Errorf("delete rolled rows: %w", err)
-	}
 	return rolledRows, files, nil
+}
+
+// deleteSamplesChunked removes ts_samples in [fromMs, toMs) one hour-window
+// transaction at a time, so the write lock is released between chunks and
+// live writers interleave instead of timing out.
+func (s *Store) deleteSamplesChunked(ctx context.Context, fromMs, toMs int64) error {
+	const windowMs = 60 * 60 * 1000
+	for start := fromMs; start < toMs; start += windowMs {
+		end := start + windowMs
+		if end > toMs {
+			end = toMs
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ?`, start, end); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // flushParquetDay merges rows into the existing day file (if any) and writes

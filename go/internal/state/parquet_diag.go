@@ -89,12 +89,24 @@ func (s *Store) RolloffDiagnosticsToParquet(ctx context.Context, coldDir string)
 		rolledRows += int64(newRows)
 	}
 
-	// Atomic delete of the rolled-off rows.
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM planner_diagnostics WHERE ts_ms < ?`, cutoff); err != nil {
-		return rolledRows, files, fmt.Errorf("delete rolled diagnostics: %w", err)
+	// Delete the rolled-off rows in bounded batches. Diagnostic rows are
+	// huge (~85 kB JSON each on a real site), so an unbounded DELETE frees
+	// hundreds of MB of pages inside one write lock — same writer-starvation
+	// shape as the 2026-07-16 prune incident. The IN-subquery form works
+	// without the DELETE...LIMIT compile flag.
+	for {
+		if err := ctx.Err(); err != nil {
+			return rolledRows, files, err
+		}
+		res, err := s.db.ExecContext(ctx, `DELETE FROM planner_diagnostics WHERE ts_ms IN (
+			SELECT ts_ms FROM planner_diagnostics WHERE ts_ms < ? LIMIT 200)`, cutoff)
+		if err != nil {
+			return rolledRows, files, fmt.Errorf("delete rolled diagnostics: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n < 200 {
+			return rolledRows, files, nil
+		}
 	}
-	return rolledRows, files, nil
 }
 
 func writeParquetDiagDay(path string, rows []parquetDiagRow) error {
