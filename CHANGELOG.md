@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.129.0
+
+### Minor Changes
+
+- 8d61001: Add Sungrow PV curtail support, reset stale inverter control state when the driver loads, and surface hardware fault states such as thermal shutdowns in diagnostics.
+- af005b9: Database hardening and richer history access.
+
+  **Durability & SD-card resilience**
+
+  - Parquet rolloff now fsyncs day files (and their directory) before the atomic rename — a power cut can no longer lose a day of rolled-off samples whose SQLite rows were already deleted.
+  - The rolloff streams one UTC day at a time instead of buffering the whole backlog in memory (a multi-week backlog could OOM a Pi and then never complete).
+  - Planner-diagnostics day files are merged instead of overwritten — the hourly rolloff previously discarded every earlier hour of the same day from cold storage.
+  - One-time `VACUUM` at boot when a large share of state.db is freelist (reclaims the high-water mark left by big prunes), guarded by a free-disk check.
+  - Truncating WAL checkpoint after every hourly rolloff; each control-loop tick (history + metrics) is now persisted in a single transaction, halving the WAL commit rate.
+
+  **Faster history queries**
+
+  - Downsampled `/api/history` and `/api/series` queries aggregate per bucket in SQL instead of fetching every raw row into Go (a month view used to materialize >1M rows per request), and buckets carry a min/max envelope so short power spikes stay visible zoomed out.
+
+  **Richer history over REST**
+
+  - `/api/series` windows older than 14 days transparently include the cold Parquet tier.
+  - `/api/series` supports comma-separated multi-metric queries, absolute `since`/`until` bounds, and `format=csv` export.
+  - `/api/series/catalog` reports each metric's display unit; units from `host.emit_metric` are now persisted across restarts.
+
+  **Growth control**
+
+  - New `state.cold_retention_days` config bounds the cold Parquet tier (default 0 = keep everything).
+  - Low-disk warning (log + event feed) when free space drops below 500 MB.
+
+### Patch Changes
+
+- af005b9: Run the wide-history retention tiers during the hourly storage rolloff so old full-resolution dashboard rows are aggregated instead of growing `state.db` indefinitely.
+- a4c695a: Decouple the Raspberry Pi installer image from application releases and reduce redundant CI work while retaining required validation.
+- 3e1b98a: Fail closed for direct state-changing `p2pFetch` API calls on public relay origins so owner ceremony and control request bodies are never raw-fetched to the relay.
+
+  Enable short TCP keepalive on Modbus TCP driver sockets to make stale inverter sessions recover faster after network/controller interruptions.
+
+  Use MyUplink's known-working OAuth scope set by default and expose an override for installations that can use narrower read-only auth.
+
+  Let `BatteryCoversEV` take effect in passive-arbitrage PV-surplus charge slots by allowing the planned-grid cap to back off charging and cover EV import while preserving deliberate grid-charge slots.
+
+  Resolve failed remote-home P2P attempts to the actionable sign-in/setup gate instead of leaving the page on "Reaching your home..." forever.
+
 ## 0.128.1
 
 ### Patch Changes
