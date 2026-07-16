@@ -56,10 +56,34 @@ jobs:
           fi
 
       - name: Checkout
-        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
+      - name: Validate package and lockfile metadata
+        run: node --test web/release-metadata.test.mjs
+
+      # Presence alone is not enough: a Changeset can reference a package that
+      # no longer exists after a rename. Validate the complete pending queue
+      # with Changesets itself so an invalid entry fails on the PR instead of
+      # breaking every release run after it reaches master.
+      - name: Setup Node for Changesets validation
+        if: steps.version_pr.outputs.skip != 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install Changesets dependencies
+        if: steps.version_pr.outputs.skip != 'true'
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Validate pending Changesets
+        if: steps.version_pr.outputs.skip != 'true'
+        # pull_request workflows run on a detached merge ref. Compare against
+        # the fetched remote base because no local `master` branch exists.
+        run: npx changeset status --since="origin/${{ github.base_ref }}"
 
       - name: Verify changeset present (or PR is allowlisted)
         if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'

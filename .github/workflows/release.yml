@@ -101,12 +101,13 @@ jobs:
         id: changesets
         uses: changesets/action@v1
         with:
-          # `version` runs `changeset version` to bump package.json
-          # and rewrite CHANGELOG.md when consumed changesets exist.
+          # `version-packages` runs `changeset version` to bump package.json
+          # and rewrite CHANGELOG.md, then synchronizes package-lock.json's
+          # root package metadata with the generated version.
           # We deliberately do NOT pass `publish:` — see the header
           # comment for the rationale. The publish step below does
           # the tag + GitHub Release manually, idempotently.
-          version: npx changeset version
+          version: npm run version-packages
           title:  "chore(release): version packages"
           commit: "chore(release): version packages"
         env:
