@@ -37,6 +37,7 @@ Every configured driver must be granted its protocol capability in
 | Deye hybrid inverter | Deye | Modbus | meter, pv, battery | SUN-SG03LP1, SUN-SG04LP3 | `drivers/deye.lua` |
 | Easee Cloud | Easee | HTTP | ev | Home, Charge | `drivers/easee_cloud.lua` |
 | Eastron SDM630 meter | Eastron | Modbus | meter | SDM630 Modbus, SDM72D-M | `drivers/sdm630.lua` |
+| ESPHome DSMR (P1) | ESPHome | HTTP | meter | Sourceful Zap P1 (ESPHome firmware) | `drivers/esphome_dsmr.lua` |
 | Ferroamp DC2 V2X | Ferroamp | MQTT | v2x_charger | DC2 V2X 20 kW | `drivers/ferroamp_dc2_v2x.lua` |
 | Ferroamp EnergyHub | Ferroamp | MQTT | meter, pv, battery | EnergyHub XL | `drivers/ferroamp.lua` |
 | Ferroamp EnergyHub (Modbus) | Ferroamp | Modbus | meter, pv, battery | EnergyHub XL | `drivers/ferroamp_modbus.lua` |
@@ -44,8 +45,11 @@ Every configured driver must be granted its protocol capability in
 | Fronius Smart Meter | Fronius | Modbus | meter | Smart Meter 50kA-3, 63A-3, TS 65A-3 | `drivers/fronius_smart_meter.lua` |
 | GoodWe hybrid inverter | GoodWe | Modbus | meter, pv, battery | ET-Plus, EH series | `drivers/goodwe.lua` |
 | Growatt hybrid inverter | Growatt | Modbus | meter, pv, battery | SPH, MOD | `drivers/growatt.lua` |
+| Panasonic Aquarea (Heishamon) | Panasonic | MQTT | heatpump | WH-SXC09H3E8 | `drivers/heishamon.lua` |
 | Huawei SUN2000 Hybrid Inverter | Huawei | Modbus | meter, pv, battery | SUN2000L1, SUN2000-LUNA2000 | `drivers/huawei.lua` |
 | Kostal Plenticore | Kostal | Modbus | meter, pv, battery | Plenticore Plus, Piko IQ | `drivers/kostal.lua` |
+| MyUplink Heat Pump (telemetry) | MyUplink | HTTP | apicreds | NIBE F1145, NIBE S1255, NIBE F730 | `drivers/myuplink.lua` |
+| NIBE REST API S-series | NIBE | HTTP | apicreds | NIBE S735 | `drivers/nibe_local.lua` |
 | Pixii PowerShaper | Pixii | Modbus | battery, meter | PowerShaper | `drivers/pixii.lua` |
 | Pixii PowerShaper (PV + meter) | Pixii | MQTT | pv, meter | PowerShaper PV telemetry | `drivers/pixii_pv.lua` |
 | SMA hybrid inverter | SMA | Modbus | meter, pv, battery | Sunny Tripower, Sunny Boy Storage | `drivers/sma.lua` |

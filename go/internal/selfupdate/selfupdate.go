@@ -12,8 +12,8 @@
 //     numerically).
 //
 //  2. The OCI registry's /tags/list confirms the image for that tag
-//     has actually been pushed. A GH Release is published the moment
-//     release-please's PR merges, but the build workflow that pushes
+//     has actually been pushed. A GH Release is published when the
+//     Changesets version PR merges, but the build workflow that pushes
 //     the image runs after that. Without this verification we'd
 //     dispatch a pull whose only guaranteed-resolvable target is
 //     :latest — still aliased to the previous image, no digest
@@ -174,6 +174,7 @@ type UpdateStatus struct {
 	State     string    `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
 	Action    string    `json:"action,omitempty"`
 	Target    string    `json:"target,omitempty"`
+	Snapshot  string    `json:"snapshot,omitempty"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 	Message   string    `json:"message,omitempty"`

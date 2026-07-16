@@ -26,17 +26,25 @@ jobs:
           TAG: pr-${{ github.event.pull_request.number }}-image-preview
           REPO: ${{ github.repository }}
         run: |
-          # Both calls are best-effort: a PR that never had a preview
-          # build (no image-affecting paths touched) will simply 404
-          # on both. We swallow exit codes so the cleanup workflow
-          # itself never goes red and noisily for what is a no-op.
-          set +e
           echo "Attempting to delete preview release ${TAG}..."
-          gh release delete "${TAG}" --repo "${REPO}" --yes --cleanup-tag 2>&1 || \
-            echo "  (no release with that tag — fine, nothing to delete)"
-          # --cleanup-tag in newer gh versions removes the underlying
-          # ref automatically; older versions need an explicit delete.
-          # Belt-and-suspenders so the tag is gone either way.
-          gh api "repos/${REPO}/git/refs/tags/${TAG}" -X DELETE 2>&1 || \
-            echo "  (no dangling tag — fine)"
-          exit 0
+          # Draft releases do not always have a real git tag, and `gh release
+          # delete <tag>` can therefore miss them. Resolve the draft by its API
+          # release ID first; this is also reliable after a repository transfer.
+          release_id="$({
+            gh api --paginate "repos/${REPO}/releases?per_page=100" \
+              --jq '.[] | [.id, .tag_name, .draft] | @tsv'
+          } | awk -F '\t' -v tag="${TAG}" '$2 == tag && $3 == "true" { id=$1 } END { print id }')"
+          if [ -n "${release_id}" ]; then
+            gh api "repos/${REPO}/releases/${release_id}" -X DELETE
+            echo "Deleted draft release id=${release_id}."
+          else
+            echo "No draft release with tag ${TAG}; nothing to delete."
+          fi
+
+          # A published/partially-created preview can have a backing tag. Drafts
+          # normally do not, so probe before issuing the ancillary delete.
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" --silent \
+            -H 'Accept: application/vnd.github+json' >/dev/null 2>&1; then
+            gh api "repos/${REPO}/git/refs/tags/${TAG}" -X DELETE
+            echo "Deleted backing tag."
+          fi

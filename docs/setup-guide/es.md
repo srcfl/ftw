@@ -2,6 +2,8 @@
 
 Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquila — es más fácil de lo que parece. Basta con seguir los pasos, uno a uno.
 
+> **Ruta manual alternativa:** la instalación recomendada usa la imagen FTW preparada que se describe en [`../rpi-image.md`](../rpi-image.md). Continúa aquí solo si quieres instalar Raspberry Pi OS + Docker manualmente.
+
 > **¿No tienes Raspberry Pi?** También puedes ejecutar FTW en un NUC, un portátil viejo o cualquier otro hardware que tengas por ahí — siempre que pueda ejecutar Docker. Esta guía se centra en empezar con una Raspberry Pi; si usas otra máquina, echa un vistazo rápido a los pasos de hardware y pasa directamente al **Paso 11 — Instalar FTW** (el script de instalación asume Debian o Ubuntu).
 
 ## Lo que necesitas
@@ -60,7 +62,7 @@ Haz clic en **Next**. El programa pregunta si quieres personalizar los ajustes �
 
 Rellena:
 
-- **Hostname:** `fortytwo`
+- **Hostname:** `ftw`
 - **Localization:** elige tu país
 - **Usuario:** p. ej. `pi`
 - **Contraseña:** elige una que recuerdes — pero no "1234"
@@ -83,7 +85,7 @@ Haz clic en el botón que escribe todo en la tarjeta de memoria. Espera a que te
 
 Tu Raspberry Pi tiene ahora una **dirección IP** en tu red de casa.
 
-Entra en tu router. Mira en "dispositivos conectados". Busca algo que se llame **fortytwo**.
+Entra en tu router. Mira en "dispositivos conectados". Busca algo que se llame **ftw**.
 
 Apunta la dirección IP. Se ve así: **192.168.1.xxx**.
 
@@ -131,7 +133,7 @@ Escribe tu contraseña una vez más. Ahora se instala todo. Tarda unos minutos. 
 Abre el navegador en tu ordenador normal y ve a la interfaz web:
 
 ```
-http://fortytwo:8080/
+http://ftw.local:8080/
 ```
 
 Si esa dirección no funciona — prueba con la dirección IP que apuntaste, p. ej. `http://192.168.1.123:8080/`.
@@ -143,4 +145,4 @@ Si esa dirección no funciona — prueba con la dirección IP que apuntaste, p. 
 - **La luz no se enciende nada** → revisa que el adaptador de corriente esté bien conectado.
 - **No encuentras la dirección IP** → reinicia el router, espera 5 minutos, vuelve a mirar.
 - **SSH dice "Connection refused"** → espera un poco más. El primer arranque tarda.
-- **Nada de esto funciona** → pásate por nuestro Discord y pide ayuda amablemente: **https://discord.gg/7Ewr45rd**
+- **Nada de esto funciona** → pásate por nuestro Discord y pide ayuda amablemente: **https://discord.gg/25xcBzQaux**

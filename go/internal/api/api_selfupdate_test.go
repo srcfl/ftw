@@ -477,6 +477,33 @@ func TestVersionSnapshots_DeleteByID(t *testing.T) {
 	}
 }
 
+func TestVersionSnapshots_DeleteRejectedDuringUpdate(t *testing.T) {
+	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-status.json")
+	c := newCheckerAgainstWithStatus(t, "v1.5.0", "v1.4.0", statusPath)
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+	snap, err := srv.createPreUpdateSnapshot("update", "v0.0.0", "v0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteStatus(selfupdate.UpdateStatus{State: "pulling", Action: "update", Target: "v1.5.0"}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/version/snapshots/"+snap.ID, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("DELETE during update = %d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(snap.Path); err != nil {
+		t.Fatalf("snapshot should remain after rejected DELETE: %v", err)
+	}
+}
+
 // Traversal + missing-id guards. A rogue client can't escape SnapshotDir
 // or delete arbitrary files via the endpoint.
 func TestVersionSnapshots_DeleteRejectsInvalidID(t *testing.T) {

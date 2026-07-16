@@ -486,12 +486,12 @@ func TestStatus_MissingFileReturnsIdle(t *testing.T) {
 func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")
-	fresh := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now()}
+	fresh := UpdateStatus{State: "restoring", Action: "rollback", Snapshot: "snapshot-123", UpdatedAt: time.Now()}
 	writeJSON(t, path, fresh)
 
 	c := New(Config{StatusPath: path}, newMemStore())
-	if s := c.Status(); s.State != "pulling" {
-		t.Errorf("fresh state = %q, want pulling", s.State)
+	if s := c.Status(); s.State != "restoring" || s.Snapshot != "snapshot-123" {
+		t.Errorf("fresh status = %+v, want restoring snapshot-123", s)
 	}
 
 	stale := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now().Add(-10 * time.Minute)}

@@ -2,6 +2,8 @@
 
 Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de panique — c'est plus simple qu'il n'y paraît. Il suffit de suivre les étapes, une par une.
 
+> **Parcours manuel alternatif :** l'installation recommandée utilise l'image FTW prête à l'emploi décrite dans [`../rpi-image.md`](../rpi-image.md). Continuez ici uniquement si vous souhaitez installer vous-même Raspberry Pi OS + Docker.
+
 > **Pas de Raspberry Pi ?** Vous pouvez aussi faire tourner FTW sur un NUC, un vieux portable ou tout autre matériel qui traîne — du moment qu'il peut exécuter Docker. Ce guide se concentre sur la mise en route avec un Raspberry Pi ; si vous êtes sur une autre machine, survolez les étapes matérielles et passez directement à l'**Étape 11 — Installer FTW** (le script d'installation suppose Debian ou Ubuntu).
 
 ## Ce dont vous avez besoin
@@ -60,7 +62,7 @@ Cliquez sur **Next**. Le programme demande si vous voulez personnaliser les rég
 
 Remplissez :
 
-- **Hostname :** `fortytwo`
+- **Hostname :** `ftw`
 - **Localization :** choisissez votre pays
 - **Nom d'utilisateur :** p. ex. `pi`
 - **Mot de passe :** choisissez-en un que vous retiendrez — mais pas "1234"
@@ -83,7 +85,7 @@ Cliquez sur le bouton qui écrit tout sur la carte mémoire. Attendez que ce soi
 
 Votre Raspberry Pi a maintenant une **adresse IP** sur votre réseau domestique.
 
-Connectez-vous à votre box internet. Regardez dans "appareils connectés". Cherchez quelque chose appelé **fortytwo**.
+Connectez-vous à votre box internet. Regardez dans "appareils connectés". Cherchez quelque chose appelé **ftw**.
 
 Notez l'adresse IP. Elle ressemble à : **192.168.1.xxx**.
 
@@ -131,7 +133,7 @@ Tapez votre mot de passe une dernière fois. Tout s'installe maintenant. Cela pr
 Ouvrez le navigateur sur votre ordinateur habituel et allez à l'interface web :
 
 ```
-http://fortytwo:8080/
+http://ftw.local:8080/
 ```
 
 Si cette adresse ne fonctionne pas — essayez l'adresse IP que vous avez notée, p. ex. `http://192.168.1.123:8080/`.
@@ -143,4 +145,4 @@ Si cette adresse ne fonctionne pas — essayez l'adresse IP que vous avez notée
 - **La lumière ne s'allume pas du tout** → vérifiez que l'adaptateur secteur est bien branché.
 - **Pas d'adresse IP trouvée** → redémarrez la box, attendez 5 minutes, regardez à nouveau.
 - **SSH dit "Connection refused"** → attendez encore un peu. Le premier démarrage prend du temps.
-- **Rien de tout cela ne marche** → passez sur notre Discord et demandez gentiment de l'aide : **https://discord.gg/7Ewr45rd**
+- **Rien de tout cela ne marche** → passez sur notre Discord et demandez gentiment de l'aide : **https://discord.gg/25xcBzQaux**

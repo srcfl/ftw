@@ -129,22 +129,22 @@ caldav:
   enabled: false
   # listen: ":5232"          # bind address for the in-process CalDAV server
   url: http://localhost:5232
-  username: fortytwowatts
+  username: ftw
   # manage_credentials (default true): FTW generates the password and the
   # in-process server authenticates against it, then shows it (with a QR) in
   # Settings → Calendar. Set false to set `password` here by hand.
   manage_credentials: true
   password: ""
-  calendar_path: /fortytwowatts/energy/
+  calendar_path: /ftw/energy/
   poll_interval_s: 300
   ev_default_target_soc_pct: 80
   # ev_loadpoint_id: ""            # defaults to the first configured loadpoint
   # away_keywords: [away, vacation, holiday]
   # ev_keywords:   [ev, car, charge]
   evse_history: true               # write a calendar event per EV charge session
-  history_path: /fortytwowatts/history/
+  history_path: /ftw/history/
   publish_plan: true               # publish upcoming charge/discharge windows (read-only)
-  plan_path: /fortytwowatts/plan/
+  plan_path: /ftw/plan/
   # plan_publish_interval_s: 900   # how often the plan calendar is reconciled
 
 # Persistent state (SQLite)

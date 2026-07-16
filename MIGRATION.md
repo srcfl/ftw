@@ -1,15 +1,14 @@
 # Migrating to FTW
 
 > [!IMPORTANT]
-> Implementation is in progress, but no migration release has been published.
-> The currently published repository, binaries, images, installer and
-> remote-access infrastructure may still use legacy identifiers. Do not change
-> a production installation based on target values in this document until a
-> release is listed as available below.
+> The repository transfer completed on 2026-07-16. The transition release,
+> `v0.128.0`, is available from `srcfl/ftw` and publishes canonical FTW
+> binaries and images while retaining compatibility aliases. Relay, TURN,
+> passkey and old-domain infrastructure remain a separate follow-up programme.
 
-The project is becoming **FTW** and its canonical stewardship and distribution
-will move under Sourceful. The migration is designed to preserve configuration,
-state, history, device identity and owner access.
+The project is **FTW**, and its canonical stewardship and distribution are under
+Sourceful. The migration preserves configuration, state, history, device
+identity and owner access.
 
 FTW is maintained by Sourceful Labs AB and project contributors.
 
@@ -17,21 +16,24 @@ FTW is maintained by Sourceful Labs AB and project contributors.
 
 | Milestone | Release/date | Status |
 |---|---|---|
-| Compatibility foundation | TBD | Not released |
-| Transition release from `frahlg/forty-two-watts` | TBD | Not released |
-| Repository transfer to `srcfl/ftw` | TBD | Not started |
-| First canonical FTW release | TBD | Not released |
+| Compatibility foundation | `v0.128.0` / 2026-07-15 | Complete |
+| Transition release from `frahlg/forty-two-watts` | `v0.128.0` / 2026-07-15 | Complete |
+| Repository transfer to `srcfl/ftw` | 2026-07-16 | Complete |
+| First post-transfer release from `srcfl/ftw` | Next release | Pending |
 | Website cutover | TBD | Not started |
 | New-domain passkey migration | Separate programme | Not started |
-| Earliest compatibility-alias retirement | TBD | Not scheduled |
+| Earliest compatibility-alias retirement | At least 90 days and two releases after the first post-transfer release | Not scheduled |
 
-The compatibility clock starts with the first canonical release from
-`srcfl/ftw`. It runs for at least two published releases and at least 90
-days, using the longer period. Exact versions and dates will be recorded here.
+`v0.128.0` established the compatibility foundation before the repository
+transfer. Per ADR 0002, the retirement clock starts only when the first release
+is published from `srcfl/ftw`; that release is still pending. From then it runs
+through at least two subsequent published releases and at least 90 days, using
+the longer period. Compatibility aliases must not be removed merely because the
+calendar date has passed.
 
 ## Identifier map
 
-| Surface | Current | Target | Existing-install behaviour |
+| Surface | Legacy | Canonical | Existing-install behaviour |
 |---|---|---|---|
 | Repository | `frahlg/forty-two-watts` | `srcfl/ftw` | Old Git URL retained through GitHub redirect |
 | Go module | `github.com/frahlg/forty-two-watts/go` | `github.com/srcfl/ftw/go` | Source builds update imports after cutover |
@@ -46,9 +48,34 @@ days, using the longer period. Exact versions and dates will be recorded here.
 
 ## Existing Docker installations
 
-No action is required before a transition release is announced.
+`v0.128.0` is the transition release. Existing managed installations should
+use their normal stable update path; no directory, Compose project, service or
+volume rename is required. Fresh installations pull from `ghcr.io/srcfl`, while
+the legacy `ghcr.io/frahlg/forty-two-watts*` tags remain exact manifest mirrors
+during the compatibility window.
 
-The supported upgrade path will:
+Starting with the first updater fix after `v0.128.0`, an older Compose file that
+hard-codes `forty-two-watts:<tag>` is handled automatically. The updater adds a
+temporary canonical image override for update, restart, and rollback jobs,
+without rewriting the host file, renaming the service, or moving the data bind.
+It removes the override when the job ends; state rollback additionally pins the
+exact running image so restoring data cannot also change application version.
+
+Installations already running the `v0.128.0` updater need to refresh that
+sidecar once before retrying the in-app update:
+
+```bash
+cd ~/ftw  # or the existing ~/forty-two-watts directory
+docker compose pull ftw-updater
+docker compose up -d --no-deps ftw-updater
+```
+
+This one-time bootstrap does not restart the main FTW service or touch its data.
+For a copy-and-paste operator walkthrough, including verification and
+troubleshooting, see the bilingual
+[legacy upgrade guide](docs/upgrade-from-legacy.md).
+
+The supported upgrade path:
 
 1. honour an explicit `FTW_DIR`;
 2. reuse `~/ftw` when it already exists;
@@ -62,38 +89,74 @@ Do not manually rename the deployment directory or copy `data/` into a fresh
 directory. A parallel empty bind can look like successful startup while hiding
 the real configuration and state.
 
-Manual Compose deployments will receive exact, release-specific instructions
-here when the compatibility release is published.
+For a manually managed Compose deployment whose main image already uses
+`${FTW_IMAGE_TAG}`, run the normal update from the existing deployment
+directory:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Do not copy state into a new directory as part of this update.
+
+If the existing Compose file instead hard-codes an image tag such as
+`forty-two-watts:<tag>`, refreshing the updater and using the in-app update is
+the supported migration path. A plain `docker compose pull` cannot select a new
+tag when the tag is hard-coded.
 
 ## Native binaries
 
-The canonical executable will be `ftw`. Release archives will also contain a
-`forty-two-watts` compatibility launcher or alias during the compatibility
-window. Service startup through the legacy name will not emit deprecation noise.
-
-Exact archive names and installation commands will be added when the transition
-release exists.
+The canonical executable is `ftw`. The `v0.128.0` Linux and Windows archives
+also contain `forty-two-watts` / `forty-two-watts.exe` compatibility binaries.
+Canonical `ftw-*` and legacy `forty-two-watts-*` release assets have identical
+payload digests and remain available during the compatibility window. Service
+startup through the legacy name does not emit deprecation noise.
 
 ## Source checkouts
 
-After the repository transfer is complete, update an existing clone with:
+Update an existing clone with:
 
 ```bash
 git remote set-url origin https://github.com/srcfl/ftw.git
 ```
 
-Do not run this yet. The target repository is not declared live until the
-transfer milestone above is marked complete.
+The old GitHub and Git clone URLs redirect to `srcfl/ftw`, but updating the
+remote makes the canonical ownership explicit and avoids relying on redirects.
 
-The Go module-path change lands as one atomic code change. There is no supported
+The Go module-path change landed as one atomic code change. There is no supported
 public library API in the module today, but all local imports, build scripts and
 tooling still have to move together.
 
 ## Raspberry Pi installations
 
-New images will use `ftw.local` and FTW-branded host services. Existing devices
-keep their configured hostname, including `42w.local`, and continue updating
-the container without requiring an SD-card reflash.
+The `v0.128.0` SD-card image uses `ftw.local` and FTW-branded host services.
+Raspberry Pi Imager metadata is published at
+`https://github.com/srcfl/ftw/releases/latest/download/os_list.json`. Existing
+devices keep their configured hostname, including `42w.local`, and continue
+updating the container without requiring an SD-card reflash.
+
+## Post-transfer verification
+
+Verified on 2026-07-16:
+
+- `frahlg/forty-two-watts` redirects to `srcfl/ftw`;
+- releases, assets, issues and pull-request history are preserved under
+  `srcfl/ftw`;
+- `master` protection still requires the strict `go test + vet` check;
+- Actions permissions, repository secrets, variables and environments survived
+  the transfer;
+- `v0.128.0` and `latest` are public multi-architecture images under
+  `ghcr.io/srcfl`, with exact compatibility mirrors under `ghcr.io/frahlg`;
+- the Sourceful GHCR package pages are public; their repository linkage still
+  requires an authenticated package-settings confirmation after the transfer.
+
+GitHub currently redirects the old repository, PR and release URLs. Some
+numbered issue URLs under the old namespace returned 404 immediately after the
+transfer even though their canonical `srcfl/ftw/issues/<number>` pages and API
+records exist. This is being treated as transfer propagation/support follow-up;
+do not recreate a repository at the old path, because that would disable the
+repository redirect.
 
 ## Home Assistant and Nova
 

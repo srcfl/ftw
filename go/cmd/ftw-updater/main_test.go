@@ -71,6 +71,7 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		pullRetryDelay:  time.Millisecond,
 		runner:          runner.run,
 		healthCheck:     func(context.Context, string) error { return nil },
+		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
 	}
 	writeCompose(t, s.composeFile, `services:
   ftw:
@@ -264,12 +265,15 @@ func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
 	}
 }
 
-func TestHandleUpdate_FailsWhenComposeDoesNotReadImageTag(t *testing.T) {
+func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) {
 	s, runner := newTestServer(t)
 	writeCompose(t, s.composeFile, `services:
-  ftw:
-    image: ghcr.io/srcfl/ftw:latest
+  forty-two-watts:
+    image: forty-two-watts:optimizer-champion-recourse-b10acacd
+    volumes:
+      - ./data:/app/data
 `)
+	s.mainServiceName = legacyMainServiceName
 
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
 	rr := httptest.NewRecorder()
@@ -277,12 +281,112 @@ func TestHandleUpdate_FailsWhenComposeDoesNotReadImageTag(t *testing.T) {
 	if rr.Code != 202 {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
-	st := waitForState(t, s, "failed")
-	if !strings.Contains(st.Message, "FTW_IMAGE_TAG") {
-		t.Fatalf("failure should explain stale compose image pinning, got %+v", st)
+	waitForState(t, s, "done")
+	calls := runner.snapshot()
+	if len(calls) != 2 {
+		t.Fatalf("want pull + up, got %v", calls)
 	}
-	if calls := runner.snapshot(); len(calls) != 0 {
-		t.Fatalf("preflight failure should not call docker, got %v", calls)
+	for _, call := range calls {
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "-f "+s.composeFile+" -f ") || !strings.Contains(joined, "ftw-compose-update-") {
+			t.Fatalf("legacy update must append compatibility override after base file: %v", call)
+		}
+		if call[len(call)-1] != legacyMainServiceName {
+			t.Fatalf("legacy service identity must be preserved: %v", call)
+		}
+	}
+}
+
+func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  forty-two-watts:
+    image: forty-two-watts:optimizer-champion-recourse-b10acacd
+    volumes:
+      - ./data:/app/data
+`)
+	s.mainServiceName = legacyMainServiceName
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"restart"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	waitForState(t, s, "done")
+	for _, call := range runner.snapshot() {
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "ftw-compose-update-") {
+			t.Fatalf("legacy restart must use compatibility override: %v", call)
+		}
+		if call[len(call)-1] != legacyMainServiceName {
+			t.Fatalf("legacy service identity must be preserved: %v", call)
+		}
+	}
+}
+
+func TestPrepareUpdateImagePin_LeavesHostComposeUntouched(t *testing.T) {
+	s, _ := newTestServer(t)
+	original := `name: forty-two-watts
+services:
+  forty-two-watts:
+    image: ghcr.io/frahlg/forty-two-watts:latest
+    volumes:
+      - ./data:/app/data
+`
+	writeCompose(t, s.composeFile, original)
+	s.mainServiceName = legacyMainServiceName
+
+	cleanup, err := s.prepareUpdateImagePin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.updateOverrideFile == "" {
+		t.Fatal("hard-coded image should create an updater-owned override")
+	}
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), legacyMainServiceName)
+	if err != nil || !ok {
+		t.Fatalf("effective image: %q, %v, %v", image, ok, err)
+	}
+	if image != canonicalMainImage+":${FTW_IMAGE_TAG:-latest}" {
+		t.Fatalf("effective image = %q", image)
+	}
+	got, err := os.ReadFile(s.composeFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != original {
+		t.Fatal("compatibility migration modified the host Compose file")
+	}
+	overridePath := s.updateOverrideFile
+	cleanup()
+	if s.updateOverrideFile != "" {
+		t.Fatal("cleanup should remove the override from the Compose chain")
+	}
+	if _, err := os.Stat(overridePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transient override still exists: %v", err)
+	}
+}
+
+func TestPrepareUpdateImagePin_WinsOverHardcodedUserOverride(t *testing.T) {
+	s, _ := newTestServer(t)
+	userOverride := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
+	writeCompose(t, userOverride, `services:
+  ftw:
+    image: local-ftw:developer-build
+`)
+	s.overrideFiles = []string{userOverride}
+
+	cleanup, err := s.prepareUpdateImagePin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	args := s.composeArgs("pull", canonicalMainServiceName)
+	joined := strings.Join(args, " ")
+	wantOrder := "-f " + s.composeFile + " -f " + userOverride + " -f " + s.updateOverrideFile + " pull"
+	if !strings.Contains(joined, wantOrder) {
+		t.Fatalf("generated override must be last in Compose order:\n got %s\nwant fragment %s", joined, wantOrder)
 	}
 }
 
@@ -336,25 +440,35 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	}
 
 	calls := runner.snapshot()
-	// Expected sequence: compose stop → cp state.db → cp config.yaml → compose up.
-	if len(calls) != 4 {
-		t.Fatalf("want 4 docker calls, got %d: %v", len(calls), calls)
+	// Expected sequence: preserve image → compose stop → cp state.db →
+	// cp config.yaml → compose up → remove the temporary tag.
+	if len(calls) != 6 {
+		t.Fatalf("want 6 docker calls, got %d: %v", len(calls), calls)
 	}
-	if !strings.Contains(strings.Join(calls[0], " "), "stop") {
-		t.Errorf("first call must be compose stop: %v", calls[0])
+	if got := strings.Join(calls[0], " "); !strings.Contains(got, "image tag sha256:current") || !strings.Contains(got, "ftw-state-rollback-") {
+		t.Errorf("first call must preserve the running image: %v", calls[0])
+	}
+	if !strings.Contains(strings.Join(calls[1], " "), "stop") {
+		t.Errorf("second call must be compose stop: %v", calls[1])
 	}
 	for i, f := range []string{"state.db", "config.yaml"} {
-		joined := strings.Join(calls[i+1], " ")
+		joined := strings.Join(calls[i+2], " ")
 		if !strings.HasPrefix(joined, "cp ") || !strings.Contains(joined, f) {
-			t.Errorf("call %d should be docker cp for %s: %v", i+1, f, calls[i+1])
+			t.Errorf("call %d should be docker cp for %s: %v", i+2, f, calls[i+2])
 		}
 		if !strings.Contains(joined, snapID) {
-			t.Errorf("call %d should reference snapshot id %s: %v", i+1, snapID, calls[i+1])
+			t.Errorf("call %d should reference snapshot id %s: %v", i+2, snapID, calls[i+2])
 		}
 	}
-	up := strings.Join(calls[3], " ")
+	up := strings.Join(calls[4], " ")
 	if !strings.Contains(up, "up -d") || !strings.Contains(up, "--force-recreate") {
-		t.Errorf("final call must be compose up -d --force-recreate: %v", calls[3])
+		t.Errorf("fifth call must be compose up -d --force-recreate: %v", calls[4])
+	}
+	if env := runner.envSnapshot()[4]; len(env) != 1 || !strings.HasPrefix(env[0], "FTW_IMAGE_TAG=ftw-state-rollback-") {
+		t.Errorf("rollback recreate must pin preserved image, env=%v", env)
+	}
+	if got := strings.Join(calls[5], " "); !strings.Contains(got, "image rm") || !strings.Contains(got, "ftw-state-rollback-") {
+		t.Errorf("final call must remove the temporary image tag: %v", calls[5])
 	}
 }
 
@@ -497,6 +611,13 @@ func TestSelectMainServiceRejectsAmbiguousDataOwners(t *testing.T) {
 
 func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  forty-two-watts:
+    image: forty-two-watts:optimizer-champion-recourse-b10acacd
+    volumes:
+      - ./data:/app/data
+`)
+	s.mainServiceName = legacyMainServiceName
 	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
 	checks := 0
 	s.healthCheck = func(context.Context, string) error {
@@ -520,6 +641,12 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 	}
 	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
 		t.Fatalf("third call should tag previous image, got %q", got)
+	}
+	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":ftw-rollback-") {
+		t.Fatalf("previous legacy image should be retagged into canonical repository, got %q", got)
+	}
+	if got := strings.Join(calls[3], " "); !strings.Contains(got, "ftw-compose-update-") || calls[3][len(calls[3])-1] != legacyMainServiceName {
+		t.Fatalf("rollback must reuse transient pin and legacy service identity, got %q", got)
 	}
 }
 

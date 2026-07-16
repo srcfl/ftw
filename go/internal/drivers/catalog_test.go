@@ -3,6 +3,7 @@ package drivers
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -96,5 +97,23 @@ func TestLoadCatalogMultiMissingDirSkipped(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("want 1 entry from bundledDir, got %d", len(entries))
+	}
+}
+
+func TestBundledDriverCatalogDocumentationIsComplete(t *testing.T) {
+	repoRoot := filepath.Join("..", "..", "..")
+	entries, err := LoadCatalog(filepath.Join(repoRoot, "drivers"))
+	if err != nil {
+		t.Fatalf("load bundled catalog: %v", err)
+	}
+	doc, err := os.ReadFile(filepath.Join(repoRoot, "docs", "driver-catalog.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		needle := "`" + filepath.ToSlash(entry.Path) + "`"
+		if !strings.Contains(string(doc), needle) {
+			t.Errorf("docs/driver-catalog.md is missing %s (%s)", entry.Name, needle)
+		}
 	}
 }

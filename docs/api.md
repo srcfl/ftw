@@ -1221,7 +1221,7 @@ Handler: `go/internal/api/api.go:670`
 
 In-app version check and pull+restart dispatch to the `ftw-updater`
 sidecar. See [self-update.md](self-update.md) for the end-to-end
-architecture (UDS, shared tmpfs state.json, skip semantics).
+architecture (UDS, shared-volume state.json, snapshots, skip semantics).
 
 ### GET /api/version/check
 
@@ -1282,10 +1282,12 @@ action so a previously-hidden version resurfaces.
 
 ### POST /api/version/update
 
-Signal the sidecar to `docker compose pull FTW` +
-`docker compose up -d FTW`. Returns 202 as soon as the
-sidecar acknowledges; the UI polls `/api/version/update/status` for
-progress. 502 if the sidecar socket isn't reachable.
+Create a pre-update state/config snapshot (unless the request explicitly sets
+`{"skip_snapshot":true}`), then signal the sidecar to pull and recreate the
+detected `ftw` or legacy `forty-two-watts` service at the immutable target.
+Returns 202 once the asynchronous operation starts; the UI polls
+`/api/version/update/status` for progress. 502 if the sidecar socket is not
+reachable.
 
 ### POST /api/version/restart
 
@@ -1295,7 +1297,7 @@ exercise the full update flow end-to-end before cutting a release.
 
 ### GET /api/version/update/status
 
-Pass-through of the sidecar's `state.json` from the shared tmpfs volume.
+Pass-through of the sidecar's `state.json` from the shared Docker volume.
 Polled every 2 s by the UI during the countdown.
 
 **Response (200):**
@@ -1311,9 +1313,35 @@ Polled every 2 s by the UI during the countdown.
 }
 ```
 
-`state` is one of `idle | pulling | restarting | done | failed`. A
+`state` is one of `idle | starting | snapshotting | pulling | restarting |
+restoring | done | failed`. A
 stale in-flight state (no heartbeat for 5 min) is surfaced as `failed`
-so the UI overlay unblocks.
+so the UI overlay unblocks. Rollback states also include `snapshot` with the
+selected snapshot ID.
+
+### GET /api/version/snapshots
+
+List the retained pre-update and pre-rollback snapshots, newest first. Entries
+include their IDs, timestamps, version metadata, action, and size. Returns 503
+when snapshots are not configured.
+
+### DELETE /api/version/snapshots/{id}
+
+Delete one retained snapshot. Path separators and traversal-shaped IDs are
+rejected, and an update/rollback in progress cannot be deleted out from under
+the sidecar.
+
+### POST /api/version/rollback
+
+Restore `state.db` and `config.yaml` from a retained snapshot and restart the
+main service without changing its image. The handler first creates a mandatory
+pre-rollback safety snapshot so the operator can roll forward again.
+
+**Request body:** `{"snapshot_id":"<snapshot-id>"}`
+
+Returns 202 with the selected snapshot and the new safety-snapshot ID. Missing,
+partial, or traversal-shaped snapshots fail before the running service is
+stopped.
 
 ## Loadpoints
 

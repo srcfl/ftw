@@ -60,7 +60,7 @@ services:
 
     volumes:
       - ./data:/app/data
-      # Shared tmpfs with the updater — the main app reads state.json from
+      # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
 
@@ -109,7 +109,7 @@ services:
       # which is the invocation flow documented in operations.md.
       - ${PWD:-.}:${PWD:-.}:ro
       # Shared with the main container so the update status survives the
-      # main app being recreated (tmpfs contents outlive the container
+      # main app being recreated (volume contents outlive the container
       # lifecycle of individual services that mount the same volume).
       - update-ipc:/run/ftw-update
 

@@ -1,6 +1,7 @@
 # FTW brand and compatibility inventory
 
-- **Baseline target:** locally known `origin/master` at `6638f1ac` (2026-07-15)
+- **Implementation baseline:** `origin/master` at `6638f1ac` (2026-07-15),
+  retained as the historical comparison point for the migration
 - **Decision source:** [ADR 0002](adr/0002-ftw-name-and-sourceful-stewardship.md)
 - **Implementation source:** [FTW rebrand and Sourceful migration](superpowers/specs/2026-07-13-ftw-rebrand-and-sourceful-migration.md)
 
@@ -53,8 +54,9 @@ or explain compatibility.
   aliases.
 - `package.json` and every pending Changeset target package `ftw` atomically.
 - Release asset and self-update workflows depend on the repository/image name.
-- Workflows publish canonical `srcfl` images and transition aliases; GHCR access
-  to both owner namespaces remains an external release gate.
+- Workflows publish canonical `srcfl` images and transition aliases. Public
+  canonical and legacy manifests were verified after the transfer; authenticated
+  package-to-repository linkage remains an administrative follow-up.
 
 ### Docker and installers
 
@@ -96,6 +98,15 @@ or explain compatibility.
 - `web/owner-access/**`, `web/p2p.js` and the relay use origin-bound cookies,
   localStorage, sessionStorage and IndexedDB data.
 - `home.fortytwowatts.com` remains the WebAuthn RP ID during Programme A.
+- CalDAV's runtime fallbacks in `go/internal/config/config.go` retain the former
+  username and collection paths for existing configs that omitted those fields.
+  Fresh configs and Settings defaults use `ftw` and `/ftw/...`; changing an
+  already-subscribed collection implicitly would break calendar clients.
+- `docs/upgrade-from-legacy.md` and its README callout deliberately name the
+  former product, directory, service, and example image so operators can
+  identify affected installations and safely cross the `v0.128.0` updater
+  bootstrap boundary. Keep this guide while upgrades from the transition
+  release remain supported; archive it only after that supported path ends.
 - Relay and TURN references move to `relay.ftw.sourceful.energy` and
   `turn.ftw.sourceful.energy`; their replacement infrastructure is a Programme B
   operational follow-up, so remote access may be unavailable between the steps.
@@ -103,8 +114,7 @@ or explain compatibility.
 ### License and history
 
 - `LICENSE` is Apache-2.0.
-- `NOTICE` correctly records prior MIT history but still uses the legacy active
-  heading.
+- `NOTICE` uses the FTW heading and correctly records prior MIT history.
 - Active project-level MIT claims must be corrected; package-lock dependency
   metadata and accurate third-party MIT references remain intact.
 - `CHANGELOG.md` and `docs/archive/**` are historical and are not rewritten.
@@ -117,10 +127,13 @@ Run:
 .github/brand/check-brand-cleanup.sh
 ```
 
-The check intentionally targets standalone product-copy forms such as
+The comparison check intentionally targets standalone product-copy forms such as
 `forty-two-watts`, `42W` and `42-watts`. URLs, Go imports, image names, remote
 domains and stable wire identifiers are governed by the classification table
 and phase-specific tests instead of being hidden inside a broad text allowlist.
+Operational skill copies are additionally required to stay in sync and contain
+canonical command/image defaults, because stale executable instructions cannot
+be safely grandfathered as prose.
 
 When a new active legacy-copy line is genuinely required, document its class
 and removal condition here before applying an explicit CI exception. Prefer FTW

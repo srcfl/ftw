@@ -2,6 +2,8 @@
 
 Diese Anleitung ist für dich, wenn du noch nie einen Raspberry Pi eingerichtet hast. Keine Sorge — es ist leichter, als es klingt. Folge den Schritten einfach einer nach dem anderen.
 
+> **Alternativer manueller Weg:** empfohlen wird das fertige FTW-Image aus [`../rpi-image.md`](../rpi-image.md). Fahre hier nur fort, wenn du ausdrücklich Raspberry Pi OS + Docker selbst installieren möchtest.
+
 > **Kein Raspberry Pi?** Du kannst FTW auch auf einem NUC, einem alten Laptop oder anderer Hardware laufen lassen, die du herumliegen hast — solange sie Docker ausführen kann. Diese Anleitung konzentriert sich auf die Einrichtung mit einem Raspberry Pi; wenn du eine andere Maschine nutzt, überspringe die Hardware-Schritte und gehe direkt zu **Schritt 11 — FTW installieren** (das Installationsskript setzt Debian oder Ubuntu voraus).
 
 ## Was du brauchst
@@ -60,7 +62,7 @@ Klicke auf **Next**. Das Programm fragt, ob du die Einstellungen anpassen möcht
 
 Trage ein:
 
-- **Hostname:** `fortytwo`
+- **Hostname:** `ftw`
 - **Localization:** wähle dein Land
 - **Benutzername:** z.B. `pi`
 - **Passwort:** wähle eins, das du dir merken kannst — aber nicht "1234"
@@ -83,7 +85,7 @@ Klicke auf die Schaltfläche, die alles auf die Speicherkarte schreibt. Warte, b
 
 Dein Raspberry Pi hat jetzt eine **IP-Adresse** in deinem Heimnetzwerk.
 
-Melde dich bei deinem Router an. Schau unter "verbundene Geräte". Such nach etwas namens **fortytwo**.
+Melde dich bei deinem Router an. Schau unter "verbundene Geräte". Such nach etwas namens **ftw**.
 
 Schreibe die IP-Adresse auf. Sie sieht so aus: **192.168.1.xxx**.
 
@@ -131,7 +133,7 @@ Gib dein Passwort noch einmal ein. Jetzt wird alles installiert. Das dauert ein 
 Öffne den Browser auf deinem normalen Computer und rufe die Web-Oberfläche auf:
 
 ```
-http://fortytwo:8080/
+http://ftw.local:8080/
 ```
 
 Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufgeschrieben hast, z.B. `http://192.168.1.123:8080/`.
@@ -143,4 +145,4 @@ Wenn diese Adresse nicht funktioniert — probiere die IP-Adresse, die du aufges
 - **Das Lämpchen leuchtet gar nicht** → prüfe, ob das Netzteil richtig eingesteckt ist.
 - **Keine IP-Adresse zu finden** → starte den Router neu, warte 5 Minuten, schau nochmal.
 - **SSH sagt "Connection refused"** → warte noch etwas. Der erste Start dauert.
-- **Das alles hilft nicht** → schau auf unserem Discord vorbei und frage freundlich nach Hilfe: **https://discord.gg/7Ewr45rd**
+- **Das alles hilft nicht** → schau auf unserem Discord vorbei und frage freundlich nach Hilfe: **https://discord.gg/25xcBzQaux**

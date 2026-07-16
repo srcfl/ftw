@@ -1008,3 +1008,14 @@ func TestResolveDriverPathsUserEmptyBackCompat(t *testing.T) {
 		t.Errorf("got %q, want %q", c.Drivers[0].Lua, want)
 	}
 }
+
+func TestLocalSimulatorExampleParses(t *testing.T) {
+	repoRoot := filepath.Join("..", "..", "..")
+	data, err := os.ReadFile(filepath.Join(repoRoot, "config.local.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(data, repoRoot); err != nil {
+		t.Fatalf("config.local.example.yaml: %v", err)
+	}
+}
