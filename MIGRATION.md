@@ -2,9 +2,10 @@
 
 > [!IMPORTANT]
 > The repository transfer completed on 2026-07-16. The transition release,
-> `v0.128.0`, is available from `srcfl/ftw` and publishes canonical FTW
-> binaries and images while retaining compatibility aliases. Relay, TURN,
-> passkey and old-domain infrastructure remain a separate follow-up programme.
+> `v0.128.0`, and first post-transfer release, `v0.128.1`, are available from
+> `srcfl/ftw`. Canonical FTW binaries and images retain compatibility aliases.
+> Relay, TURN, passkey and old-domain infrastructure remain a separate
+> follow-up programme.
 
 The project is **FTW**, and its canonical stewardship and distribution are under
 Sourceful. The migration preserves configuration, state, history, device
@@ -19,17 +20,16 @@ FTW is maintained by Sourceful Labs AB and project contributors.
 | Compatibility foundation | `v0.128.0` / 2026-07-15 | Complete |
 | Transition release from `frahlg/forty-two-watts` | `v0.128.0` / 2026-07-15 | Complete |
 | Repository transfer to `srcfl/ftw` | 2026-07-16 | Complete |
-| First post-transfer release from `srcfl/ftw` | Next release | Pending |
+| First post-transfer release from `srcfl/ftw` | `v0.128.1` / 2026-07-16 | Complete |
 | Website cutover | TBD | Not started |
 | New-domain passkey migration | Separate programme | Not started |
-| Earliest compatibility-alias retirement | At least 90 days and two releases after the first post-transfer release | Not scheduled |
+| Earliest compatibility-alias retirement | Not before 2026-10-14 and two later published releases | Not scheduled |
 
 `v0.128.0` established the compatibility foundation before the repository
-transfer. Per ADR 0002, the retirement clock starts only when the first release
-is published from `srcfl/ftw`; that release is still pending. From then it runs
-through at least two subsequent published releases and at least 90 days, using
-the longer period. Compatibility aliases must not be removed merely because the
-calendar date has passed.
+transfer. Per ADR 0002, `v0.128.1` started the retirement clock on 2026-07-16.
+Compatibility aliases remain through at least two subsequent published
+releases and at least 90 days, using the longer period. They must not be removed
+merely because the calendar date has passed.
 
 ## Identifier map
 
@@ -129,11 +129,18 @@ Verified on 2026-07-16:
   `srcfl/ftw`;
 - `master` protection still requires the strict `go test + vet` check;
 - Actions permissions, repository secrets, variables and environments survived
-  the transfer;
-- `v0.128.0` and `latest` are public multi-architecture images under
-  `ghcr.io/srcfl`, with exact compatibility mirrors under `ghcr.io/frahlg`;
-- the Sourceful GHCR package pages are public; their repository linkage still
-  requires an authenticated package-settings confirmation after the transfer.
+  the transfer. The stored `CI_TOKEN` did not retain pull-request access to the
+  transferred repository and must be re-authorized or replaced; the
+  `v0.128.1` Version Packages PR was opened manually from the branch that
+  Changesets generated;
+- `v0.128.0`, `v0.128.1` and `latest` are public multi-architecture images
+  under `ghcr.io/srcfl`, with exact compatibility mirrors under
+  `ghcr.io/frahlg`;
+- the one-command legacy migration, the `v0.128.0` to `v0.128.1` in-app update,
+  and a post-update sidecar restart were verified end to end on an ARM64
+  Raspberry Pi while retaining the original Compose project and data bind;
+- the Sourceful GHCR package pages are public, and their repository linkage was
+  confirmed after the transfer.
 
 GitHub currently redirects the old repository, PR and release URLs. Some
 numbered issue URLs under the old namespace returned 404 immediately after the
