@@ -4,6 +4,8 @@
 -- Protocol: Modbus TCP/RTU, INPUT registers, IEEE 754 F32 BE pairs.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sdm630",
   name         = "Eastron SDM630 meter",
   manufacturer = "Eastron",

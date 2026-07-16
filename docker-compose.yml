@@ -47,6 +47,11 @@ services:
       # sidecar below; native / OS-image deploys leave this unset so the
       # UI hides the feature entirely. See docs/self-update.md.
       FTW_SELFUPDATE_ENABLED: "1"
+      # Prefer the independently versioned optimizer sidecar. During the
+      # migration window core falls back to its bundled Python worker, then
+      # to the Go DP planner, if this socket is unavailable or incompatible.
+      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}
+      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 
     # Host networking is required for:
     #   - Modbus TCP to inverters / meters on the LAN
@@ -63,6 +68,17 @@ services:
       # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
+      - optimizer-ipc:/run/ftw-optimizer
+
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+    container_name: ftw-optimizer
+    restart: unless-stopped
+    network_mode: none
+    environment:
+      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
+    volumes:
+      - optimizer-ipc:/run/ftw-optimizer
 
   ftw-updater:
     # Normally follows :latest. The separate variable is only needed for
@@ -158,4 +174,5 @@ services:
 
 volumes:
   update-ipc:
+  optimizer-ipc:
   mosquitto-data:

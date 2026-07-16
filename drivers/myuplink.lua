@@ -43,6 +43,8 @@
 -- (param_power_id, param_hw_temp_id, param_indoor_temp_id, param_outdoor_temp_id).
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "myuplink",
   name         = "MyUplink Heat Pump (telemetry)",
   manufacturer = "MyUplink (NIBE, Bosch, Atlantic, Daikin, ...)",

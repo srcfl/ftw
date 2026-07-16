@@ -8,6 +8,8 @@
 -- READ-ONLY: control not implemented.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "goodwe",
   name         = "GoodWe hybrid inverter",
   manufacturer = "GoodWe",

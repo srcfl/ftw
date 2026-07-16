@@ -1,0 +1,26 @@
+# Independently releasable FTW mathematical optimizer.
+FROM python:3.12-slim-bookworm AS build
+
+COPY optimizer/ /src/optimizer/
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir /src/optimizer
+
+FROM python:3.12-slim-bookworm
+
+ARG VERSION=dev
+ARG BUILD_SHA=""
+ENV FTW_OPTIMIZER_VERSION=${VERSION} \
+    FTW_OPTIMIZER_BUILD_SHA=${BUILD_SHA} \
+    FTW_OPTIMIZER_SOCKET=/run/ftw-optimizer/optimizer.sock
+
+COPY --from=build /opt/venv /opt/venv
+COPY LICENSE NOTICE /usr/share/doc/ftw/
+
+RUN mkdir -p /run/ftw-optimizer && chown -R 100:101 /run/ftw-optimizer /opt/venv
+
+USER 100:101
+VOLUME ["/run/ftw-optimizer"]
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=6 \
+  CMD ["/opt/venv/bin/ftw-optimizer-healthcheck"]
+
+ENTRYPOINT ["/opt/venv/bin/ftw-optimizer"]

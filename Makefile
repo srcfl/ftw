@@ -13,7 +13,7 @@
 
 .PHONY: help test optimizer-install optimizer-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-        verify verify-all install-hooks \
+		verify verify-all install-hooks driver-repository-validate driver-versions \
         e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
@@ -37,6 +37,8 @@ help:
 	@echo "  verify               pre-commit: vet + test + build (mirrors CI 'go test + vet' workflow)"
 	@echo "  verify-all           pre-push: verify + cross-compile linux/arm64, linux/amd64, windows"
 	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
+	@echo "  driver-repository-validate  build and validate unsigned driver release artifacts"
+	@echo "  driver-versions      require changed Lua drivers to increase SemVer"
 	@echo "  ci                   run local CI incl. browser smoke"
 	@echo "  ci-ui                browser smoke against FTW_BASE_URL"
 	@echo "  ci-hw-pi             deploy candidate to Pi CI slot + browser smoke"
@@ -60,6 +62,13 @@ optimizer/.venv/bin/pytest: optimizer/pyproject.toml
 
 e2e:
 	cd go && go test ./test/e2e -v -timeout 180s
+
+driver-repository-validate:
+	cd go && go run ./cmd/ftw-driver-repository publish -unsigned -drivers ../drivers -output ../dist/driver-repository -base-url https://example.invalid/releases/download/drivers-local -repository https://github.com/srcfl/ftw
+
+DRIVER_BASE ?= origin/master
+driver-versions:
+	cd go && go run ./cmd/ftw-driver-repository check-versions -repo-root .. -base $(DRIVER_BASE) -head WORKTREE
 
 ci:
 	./scripts/ci-local.sh

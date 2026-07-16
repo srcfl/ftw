@@ -31,8 +31,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
+	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -122,6 +124,7 @@ func main() {
 	// UserDriversDirOverride is the persistent overlay — probed first.
 	// Empty when -user-drivers is not supplied (back-compat).
 	config.UserDriversDirOverride = *userDriversDirFlag
+	config.ManagedDriversDirOverride = filepath.Join(filepath.Dir(*configPath), "driver-repository", "active")
 
 	// ---- Load config ----
 	cfg, err := config.Load(*configPath)
@@ -158,6 +161,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+
+	// The repository is entirely local on startup: existing active symlinks are
+	// usable offline and remote refresh never blocks core boot.
+	driverRepository := driverrepo.New(cfg.DeviceRepository, filepath.Dir(statePath), st)
+	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
+	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
+	cfg.ResolveDriverPaths(filepath.Dir(*configPath))
 
 	// ---- Dev backfill (flag-gated, one-shot) ----
 	// When -backfill N (N>0) is set, seed N days of synthetic history
@@ -296,6 +306,9 @@ func main() {
 	// ---- Driver registry ----
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if cfg.DeviceRepository != nil && cfg.DeviceRepository.Enabled {
+		go driverRepositoryRefreshLoop(ctx, driverRepository, cfg.DeviceRepository.RefreshIntervalH)
+	}
 	reg := drivers.NewRegistry(tel)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
@@ -1628,6 +1641,71 @@ func main() {
 		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
 	}
 
+	// ---- Anonymous fleet statistics (explicit opt-in) ----
+	// The reporter snapshots only public component IDs/versions and coarse
+	// health. It never receives raw telemetry, driver config, hardware IDs, or
+	// network endpoints. A disabled reporter is still constructed so Settings
+	// can preview the exact payload before the operator opts in.
+	fleetCfg := fleetstats.Config{}
+	if cfg.FleetStatistics != nil {
+		fleetCfg.Enabled = cfg.FleetStatistics.Enabled
+		fleetCfg.Endpoint = cfg.FleetStatistics.Endpoint
+		fleetCfg.Interval = time.Duration(cfg.FleetStatistics.IntervalH) * time.Hour
+	}
+	fleetReporter, err := fleetstats.NewReporter(fleetCfg, st, func(snapshotCtx context.Context) (fleetstats.Payload, error) {
+		cfgMu.RLock()
+		configuredDrivers := append([]config.Driver(nil), cfg.Drivers...)
+		cfgMu.RUnlock()
+
+		catalog, err := drivers.LoadCatalogSources(
+			drivers.CatalogSource{Dir: *userDriversDirFlag, Source: "local"},
+			drivers.CatalogSource{Dir: driverRepository.ActiveDir(), Source: "managed"},
+			drivers.CatalogSource{Dir: resolveDriverDir(), Source: "bundled"},
+		)
+		if err != nil {
+			return fleetstats.Payload{}, err
+		}
+		catalog = driverRepository.EnrichCatalog(catalog)
+
+		channel := "native"
+		if selfUpdater != nil {
+			channel = string(selfUpdater.Info().Channel)
+		}
+		optimizer := &fleetstats.OptimizerStats{Status: "not_configured"}
+		if mpcSvc != nil && mpcSvc.Optimizer != nil {
+			optimizer.Status = "degraded"
+			if health, ok := mpcSvc.Optimizer.(interface {
+				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
+			}); ok {
+				info, healthErr := health.Health(snapshotCtx)
+				if healthErr == nil {
+					optimizer.Status = "healthy"
+					optimizer.Version = info.Version
+					optimizer.Transport = info.Transport
+					optimizer.ProtocolVersion = info.ProtocolVersion
+				}
+			}
+		}
+		return fleetstats.BuildSnapshot(fleetstats.SnapshotInput{
+			CoreVersion: Version,
+			Channel:     channel,
+			Optimizer:   optimizer,
+			Drivers:     configuredDrivers,
+			Catalog:     catalog,
+			Health:      tel.AllHealth(),
+		}), nil
+	})
+	if err != nil {
+		slog.Error("fleet statistics configuration", "err", err)
+		os.Exit(1)
+	}
+	if fleetReporter.Enabled() {
+		go fleetReporter.Run(ctx)
+		slog.Info("anonymous fleet statistics enabled", "interval", fleetCfg.Interval)
+	} else {
+		slog.Info("anonymous fleet statistics disabled (opt-in)")
+	}
+
 	// ---- Start HTTP API ----
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
@@ -1697,20 +1775,22 @@ func main() {
 		// from the state.db path rather than the config path because
 		// `state.db` is always in the main data volume; the config
 		// can legitimately live elsewhere (e.g. mounted RO from /etc).
-		SnapshotDir:   filepath.Join(filepath.Dir(statePath), "snapshots"),
-		Prices:        priceSvc,
-		Forecast:      forecastSvc,
-		MPC:           mpcSvc,
-		PVModel:       pvSvc,
-		LoadModel:     loadSvc,
-		Loadpoints:    lpMgr,
-		LoadpointCtrl: lpController,
-		CalDAV:        calSvc,
-		HA:            haBridge,
-		Registry:      reg,
-		Events:        bus,
-		Notifications: notifSvc,
-		SelfUpdate:    selfUpdater,
+		SnapshotDir:      filepath.Join(filepath.Dir(statePath), "snapshots"),
+		Prices:           priceSvc,
+		Forecast:         forecastSvc,
+		MPC:              mpcSvc,
+		PVModel:          pvSvc,
+		LoadModel:        loadSvc,
+		Loadpoints:       lpMgr,
+		LoadpointCtrl:    lpController,
+		CalDAV:           calSvc,
+		HA:               haBridge,
+		Registry:         reg,
+		DriverRepository: driverRepository,
+		Events:           bus,
+		Notifications:    notifSvc,
+		SelfUpdate:       selfUpdater,
+		FleetStats:       fleetReporter,
 		// ---- Owner remote access ----
 		// rp.id defaults to the production home host (home.fortytwowatts.com),
 		// the origin the owner actually visits. Override with
@@ -3064,6 +3144,20 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		engine = "python"
 	}
 	if engine == "python" {
+		transportMode := pl.OptimizerTransport
+		if fromEnv := os.Getenv("FTW_OPTIMIZER_TRANSPORT"); fromEnv != "" {
+			transportMode = fromEnv
+		}
+		if transportMode == "" {
+			transportMode = "process"
+		}
+		socketPath := pl.OptimizerSocket
+		if fromEnv := os.Getenv("FTW_OPTIMIZER_SOCKET"); fromEnv != "" {
+			socketPath = fromEnv
+		}
+		if socketPath == "" {
+			socketPath = "/run/ftw-optimizer/optimizer.sock"
+		}
 		python := pl.OptimizerCommand
 		if python == "" {
 			python = envOr("FTW_OPTIMIZER_PYTHON", "python3")
@@ -3103,6 +3197,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		ext, err := mpc.NewExternalOptimizer(mpc.ExternalOptimizerConfig{
 			Command:   []string{python, "-m", "ftw_optimizer.worker"},
 			ModuleDir: moduleDir, Timeout: timeout,
+			TransportMode: transportMode, SocketPath: socketPath,
 			Solver: pl.OptimizerSolver, Formulation: pl.OptimizerFormulation,
 			MIPRelGap:  pl.OptimizerMIPRelGap,
 			CVaRWeight: cvarWeight, CVaRAlpha: pl.OptimizerCVaRAlpha,
@@ -3123,7 +3218,8 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 				svc.RecourseNonAnticipativeSlots = 1
 			}
 			slog.Info("mpc: Python optimizer configured", "python", python,
-				"module_dir", moduleDir, "timeout", timeout, "idle_timeout", idleTimeout,
+				"module_dir", moduleDir, "transport", transportMode, "socket", socketPath,
+				"timeout", timeout, "idle_timeout", idleTimeout,
 				"recourse_shadow", svc.EnableRecourseShadow,
 				"challenger_policy", svc.ChallengerPolicy,
 				"recourse_non_anticipative_slots", svc.RecourseNonAnticipativeSlots)
@@ -3152,6 +3248,30 @@ func resolveOptimizerDir() string {
 		}
 	}
 	return "optimizer"
+}
+
+func driverRepositoryRefreshLoop(ctx context.Context, repository *driverrepo.Manager, intervalHours int) {
+	if intervalHours <= 0 {
+		intervalHours = 24
+	}
+	refresh := func() {
+		refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := repository.Refresh(refreshCtx, ""); err != nil {
+			slog.Warn("driver repository refresh failed; keeping last-good cache", "err", err)
+		}
+	}
+	refresh()
+	ticker := time.NewTicker(time.Duration(intervalHours) * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refresh()
+		}
+	}
 }
 
 // isConfigMissing checks whether the error from config.Load indicates the

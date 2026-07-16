@@ -6,6 +6,8 @@
 --   PV w is always negative because generation reduces grid import.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "solis-string",
   name         = "Solis string inverter",
   manufacturer = "Ginlong Solis",

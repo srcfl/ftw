@@ -29,6 +29,8 @@
 --   `power - powerProduction` (giving negative numbers on export).
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "tibber",
   name         = "Tibber Pulse",
   manufacturer = "Tibber",

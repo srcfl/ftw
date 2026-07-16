@@ -3,6 +3,8 @@
 -- Emits: PV, Battery, Meter telemetry
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "ferroamp",
   name         = "Ferroamp EnergyHub",
   manufacturer = "Ferroamp",

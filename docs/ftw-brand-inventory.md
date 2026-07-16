@@ -66,6 +66,11 @@ or explain compatibility.
   previously running image on failure.
 - Installers prefer an explicit directory, then existing canonical/legacy
   directories, and back up and retain an existing validated Compose layout.
+- `scripts/enable-modular-stack.sh` detects the canonical `ftw` service or the
+  legacy `forty-two-watts` service when adding the optimizer override to an
+  existing Compose installation. The former name is a service-identity
+  compatibility alias only; retire it with the other Compose aliases after at
+  least two canonical releases and 90 days.
 - The main container uses host networking, so two main containers cannot be
   treated as a normal blue/green deployment.
 - The canonical Docker image exposes an application health check.

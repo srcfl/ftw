@@ -52,6 +52,8 @@
 -- in the bulk GET /api/v1/devices/<serial>/points).
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "nibe-local",
   name         = "NIBE REST API S-series",
   manufacturer = "NIBE",

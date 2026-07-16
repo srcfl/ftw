@@ -106,6 +106,56 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	}
 }
 
+func TestOptimizerUpdateTargetsOnlyOptimizerService(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.skipPull = true
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes: ["./data:/app/data"]
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+`)
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","component":"optimizer","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	state := waitForState(t, s, "done")
+	if state.Component != "optimizer" {
+		t.Fatalf("component = %q", state.Component)
+	}
+	calls, envs := runner.snapshot(), runner.envSnapshot()
+	if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "up -d ftw-optimizer") {
+		t.Fatalf("unexpected calls: %v", calls)
+	}
+	if len(envs) != 1 || len(envs[0]) != 1 || envs[0][0] != "FTW_OPTIMIZER_IMAGE_TAG=v1.2.3" {
+		t.Fatalf("unexpected env: %v", envs)
+	}
+}
+
+func TestComponentRollbackHistorySurvivesOtherComponentUpdates(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.writeState(State{
+		State: "done", Component: "optimizer", PreviousImageID: "sha256:optimizer-old",
+	})
+	s.writeState(State{
+		State: "done", Component: "core", PreviousImageID: "sha256:core-old",
+	})
+
+	state := s.readState()
+	if got := state.PreviousImages["optimizer"]; got != "sha256:optimizer-old" {
+		t.Fatalf("optimizer history = %q", got)
+	}
+	if got := state.PreviousImages["core"]; got != "sha256:core-old" {
+		t.Fatalf("core history = %q", got)
+	}
+	if got := s.previousImageID("optimizer"); got != "sha256:optimizer-old" {
+		t.Fatalf("optimizer rollback image = %q", got)
+	}
+}
+
 func waitForState(t *testing.T, s *server, want string) State {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

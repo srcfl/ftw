@@ -44,6 +44,8 @@
 --   unchanged — no boundary sign flip.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sourceful-zap",
   name         = "Sourceful Zap",
   manufacturer = "Sourceful",

@@ -17,6 +17,7 @@ test = ["pytest==8.4.2"]
 
 [project.scripts]
 ftw-optimizer = "ftw_optimizer.worker:main"
+ftw-optimizer-healthcheck = "ftw_optimizer.healthcheck:main"
 ftw-optimizer-replay = "ftw_optimizer.replay:main"
 ftw-optimizer-backtest = "ftw_optimizer.backtest:main"
 

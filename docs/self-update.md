@@ -1,7 +1,9 @@
 # Self-update
 
 In-app "Update" and "Restart" buttons trigger `docker compose pull` +
-recreate of the main service. The mechanism is split across three
+recreate of the selected component. Core retains the snapshot flow; optimizer
+updates recreate only `ftw-optimizer`, health-check it, and automatically
+restore its previous image on failure. The mechanism is split across three
 processes so the main container never touches the Docker socket.
 
 ## Architecture
@@ -75,7 +77,7 @@ The fix is to ignore `:latest`, `:beta`, and `:edge` as pull targets:
   — so the pull resolves a *specific*, immutable tag and the recreate
   is guaranteed to move the digest. No race possible.
 
-The sidecar accepts only `vX.Y.Z`, `vX.Y.Z-beta.N`, or
+The sidecar accepts only allowlisted `core` and `optimizer` components and only `vX.Y.Z`, `vX.Y.Z-beta.N`, or
 `edge-YYYYMMDDTHHMMSSZ-<sha>`. Falling through to a moving alias is exactly
 what this boundary prevents.
 

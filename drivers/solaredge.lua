@@ -14,6 +14,8 @@
 --     host.emit_metric into the long-format TS DB.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "solaredge",
   name         = "SolarEdge inverter + meter",
   manufacturer = "SolarEdge",

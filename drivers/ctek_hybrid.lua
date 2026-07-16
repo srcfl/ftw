@@ -65,6 +65,8 @@
 --         mqtt_max_stale_ms:     30000                          # after this, fall back to Modbus
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "ctek-chargestorm-hybrid",
   name         = "CTEK Chargestorm (Modbus + MQTT)",
   manufacturer = "CTEK",

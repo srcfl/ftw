@@ -125,7 +125,7 @@ func (s *Server) sweepFingerprint(protocol, host string, port, unit int) []drive
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.managedDriverDir(), dir)
 	if err != nil {
 		return nil
 	}

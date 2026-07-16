@@ -3,6 +3,8 @@
 -- Emits: PV, Battery, Meter telemetry (READ-ONLY)
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "victron",
   name         = "Victron Energy GX",
   manufacturer = "Victron Energy",

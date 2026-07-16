@@ -28,6 +28,8 @@
 --     instead of silently emitting zeros forever.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "solaredge-legacy",
   name         = "SolarEdge legacy (K-series with display)",
   manufacturer = "SolarEdge",

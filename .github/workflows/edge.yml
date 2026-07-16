@@ -11,6 +11,7 @@ on:
       - '.dockerignore'
       - 'Dockerfile'
       - 'Dockerfile.updater'
+      - 'Dockerfile.optimizer'
       - 'LICENSE'
       - 'NOTICE'
       - 'go/**'
@@ -57,6 +58,9 @@ jobs:
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
+          - target: optimizer
+            dockerfile: ./Dockerfile.optimizer
+            image_suffix: "-optimizer"
     steps:
       - name: Checkout source commit
         uses: actions/checkout@v5
@@ -92,6 +96,7 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             VERSION=${{ needs.meta.outputs.tag }}
+            BUILD_SHA=${{ github.sha }}
           # Share content-addressed layers with beta and stable. Channel tags
           # change, but dependency/runtime layers overwhelmingly do not.
           cache-from: type=gha,scope=${{ matrix.target }}

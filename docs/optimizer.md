@@ -1,5 +1,18 @@
 # Mathematical optimizer
 
+## Modular runtime
+
+Official Compose deployments run `ghcr.io/srcfl/ftw-optimizer` separately from
+core. The worker listens on `/run/ftw-optimizer/optimizer.sock` and negotiates
+protocol v1 plus `champion`, `recourse`, and `multistage` features. Core owns
+request construction and validates every candidate with `ValidatePlan`; the
+optimizer receives no telemetry access, secrets, hardware access, `/app/data`,
+or network access.
+
+`planner.optimizer_transport` accepts `auto`, `unix`, or `process`. Compose uses
+`auto`, which tries the sidecar and falls back to the bundled worker during the
+migration window. Failure of both Python transports uses the Go DP planner.
+
 The primary MPC engine is a local Python worker built with CVXPY. HiGHS solves
 linear and mixed-integer models; CLARABEL is available for continuous convex
 models. The Go host remains responsible for forecasts, configuration, safety

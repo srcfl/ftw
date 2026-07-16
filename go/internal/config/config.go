@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,25 +20,66 @@ import (
 
 // Config is the full application config.
 type Config struct {
-	Site          Site               `yaml:"site" json:"site"`
-	Fuse          Fuse               `yaml:"fuse" json:"fuse"`
-	Drivers       []Driver           `yaml:"drivers" json:"drivers"`
-	API           API                `yaml:"api" json:"api"`
-	HomeAssistant *HomeAssistant     `yaml:"homeassistant,omitempty" json:"homeassistant,omitempty"`
-	State         *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
-	Price         *Price             `yaml:"price,omitempty" json:"price,omitempty"`
-	Weather       *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
-	Planner       *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
-	Batteries     map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
-	OCPP          *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
-	EVCharger     *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
-	CalDAV        *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
-	Loadpoints    []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
-	V2X           *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
-	Notifications *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
-	Nova          *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
-	RemoteAccess  *RemoteAccess      `yaml:"remote_access,omitempty" json:"remote_access,omitempty"`
+	Site             Site               `yaml:"site" json:"site"`
+	Fuse             Fuse               `yaml:"fuse" json:"fuse"`
+	Drivers          []Driver           `yaml:"drivers" json:"drivers"`
+	API              API                `yaml:"api" json:"api"`
+	HomeAssistant    *HomeAssistant     `yaml:"homeassistant,omitempty" json:"homeassistant,omitempty"`
+	State            *StateConf         `yaml:"state,omitempty" json:"state,omitempty"`
+	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
+	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
+	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
+	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
+	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
+	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
+	CalDAV           *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
+	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
+	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
+	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
+	RemoteAccess     *RemoteAccess      `yaml:"remote_access,omitempty" json:"remote_access,omitempty"`
+	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
+	FleetStatistics  *FleetStatistics   `yaml:"fleet_statistics,omitempty" json:"fleet_statistics,omitempty"`
 }
+
+// DeviceRepository configures independently distributed Lua drivers. Remote
+// refresh never changes an active driver; activation is always an explicit API
+// action. TrustedKeys maps key IDs to base64-encoded Ed25519 public keys.
+type DeviceRepository struct {
+	Enabled          bool                     `yaml:"enabled" json:"enabled"`
+	RefreshIntervalH int                      `yaml:"refresh_interval_h,omitempty" json:"refresh_interval_h,omitempty"`
+	RootDir          string                   `yaml:"root_dir,omitempty" json:"root_dir,omitempty"`
+	Repositories     []DriverRepositorySource `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+}
+
+type DriverRepositorySource struct {
+	ID            string            `yaml:"id" json:"id"`
+	Name          string            `yaml:"name,omitempty" json:"name,omitempty"`
+	ManifestURL   string            `yaml:"manifest_url" json:"manifest_url"`
+	Enabled       bool              `yaml:"enabled" json:"enabled"`
+	TrustedKeys   map[string]string `yaml:"trusted_keys,omitempty" json:"trusted_keys,omitempty"`
+	AllowUnsigned bool              `yaml:"allow_unsigned,omitempty" json:"allow_unsigned,omitempty"`
+	AllowInsecure bool              `yaml:"allow_insecure,omitempty" json:"allow_insecure,omitempty"`
+}
+
+const (
+	DefaultDriverRepositoryID           = "ftw-official"
+	DefaultDriverRepositoryName         = "FTW official drivers"
+	DefaultDriverRepositoryManifestURL  = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
+	DefaultDriverRepositorySigningKeyID = "ftw-drivers-2026-01"
+	DefaultDriverRepositoryPublicKey    = "MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc="
+)
+
+// FleetStatistics is disabled by default. When explicitly enabled, FTW sends
+// a coarse anonymous component-health heartbeat. The payload never contains
+// raw telemetry, device identities, endpoints, configuration, or secrets.
+type FleetStatistics struct {
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	Endpoint  string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	IntervalH int    `yaml:"interval_h,omitempty" json:"interval_h,omitempty"`
+}
+
+const DefaultFleetStatisticsEndpoint = "https://relay.ftw.sourceful.energy/fleet/heartbeat"
 
 // RemoteAccess opts the Pi into the owner remote-access home route. DEFAULT OFF:
 // the Pi makes NO outgoing connection to the signaling relay unless Enabled is
@@ -489,6 +531,8 @@ type Planner struct {
 	// fixed by the host to avoid shell parsing and configuration injection.
 	OptimizerCommand                      string               `yaml:"optimizer_command,omitempty" json:"optimizer_command,omitempty"`
 	OptimizerDir                          string               `yaml:"optimizer_dir,omitempty" json:"optimizer_dir,omitempty"`
+	OptimizerTransport                    string               `yaml:"optimizer_transport,omitempty" json:"optimizer_transport,omitempty"`
+	OptimizerSocket                       string               `yaml:"optimizer_socket,omitempty" json:"optimizer_socket,omitempty"`
 	OptimizerSolver                       string               `yaml:"optimizer_solver,omitempty" json:"optimizer_solver,omitempty"`
 	OptimizerFormulation                  string               `yaml:"optimizer_formulation,omitempty" json:"optimizer_formulation,omitempty"`
 	OptimizerTimeoutS                     float64              `yaml:"optimizer_timeout_s,omitempty" json:"optimizer_timeout_s,omitempty"`
@@ -1131,6 +1175,11 @@ var DriversDirOverride string
 // (back-compat).
 var UserDriversDirOverride string
 
+// ManagedDriversDirOverride contains stable active symlinks maintained by the
+// signed driver repository. It is checked after the local user overlay and
+// before the bundled recovery snapshot.
+var ManagedDriversDirOverride string
+
 // ResolveDriverPaths joins relative Lua driver paths with baseDir, or
 // with DriversDirOverride when the relative path starts with "drivers/".
 // When UserDriversDirOverride is also set, paths starting with "drivers/"
@@ -1147,6 +1196,13 @@ func (c *Config) ResolveDriverPaths(baseDir string) {
 			rel := strings.TrimPrefix(p, "drivers/")
 			if UserDriversDirOverride != "" {
 				candidate := filepath.Join(UserDriversDirOverride, rel)
+				if _, err := os.Stat(candidate); err == nil {
+					c.Drivers[i].Lua = candidate
+					continue
+				}
+			}
+			if ManagedDriversDirOverride != "" {
+				candidate := filepath.Join(ManagedDriversDirOverride, rel)
 				if _, err := os.Stat(candidate); err == nil {
 					c.Drivers[i].Lua = candidate
 					continue
@@ -1189,6 +1245,13 @@ func (c *Config) UnresolveDriverPaths(baseDir string) {
 					continue
 				}
 			}
+			if ManagedDriversDirOverride != "" {
+				rel, err := filepath.Rel(ManagedDriversDirOverride, p)
+				if err == nil && !strings.HasPrefix(rel, "..") {
+					c.Drivers[i].Lua = filepath.ToSlash(filepath.Join("drivers", rel))
+					continue
+				}
+			}
 			if DriversDirOverride != "" {
 				rel, err := filepath.Rel(DriversDirOverride, p)
 				if err == nil && !strings.HasPrefix(rel, "..") {
@@ -1217,6 +1280,33 @@ func relToBaseDir(baseDir, p string) string {
 
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
+	if c.DeviceRepository != nil {
+		if c.DeviceRepository.RefreshIntervalH == 0 {
+			c.DeviceRepository.RefreshIntervalH = 24
+		}
+		// Merely omitting device_repository remains bundled-only. Once an
+		// operator explicitly adds the block, however, the official signed
+		// stable source is a useful secure default and needs no copied key.
+		if len(c.DeviceRepository.Repositories) == 0 {
+			c.DeviceRepository.Repositories = []DriverRepositorySource{{
+				ID:          DefaultDriverRepositoryID,
+				Name:        DefaultDriverRepositoryName,
+				ManifestURL: DefaultDriverRepositoryManifestURL,
+				Enabled:     true,
+				TrustedKeys: map[string]string{
+					DefaultDriverRepositorySigningKeyID: DefaultDriverRepositoryPublicKey,
+				},
+			}}
+		}
+	}
+	if c.FleetStatistics != nil {
+		if c.FleetStatistics.Endpoint == "" {
+			c.FleetStatistics.Endpoint = DefaultFleetStatisticsEndpoint
+		}
+		if c.FleetStatistics.IntervalH == 0 {
+			c.FleetStatistics.IntervalH = 24
+		}
+	}
 	if c.Site.ControlIntervalS == 0 {
 		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
 		// dispatching twice on the same telemetry sample, and halves
@@ -1541,6 +1631,11 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("planner.optimizer_formulation must be auto, milp, or relaxed, got %q", p.OptimizerFormulation)
 		}
+		switch p.OptimizerTransport {
+		case "", "auto", "unix", "process":
+		default:
+			return fmt.Errorf("planner.optimizer_transport must be auto, unix, or process, got %q", p.OptimizerTransport)
+		}
 		if p.OptimizerTimeoutS < 0 || p.OptimizerIdleTimeoutS < 0 || p.OptimizerMIPRelGap < 0 || (p.OptimizerCVaRWeight != nil && *p.OptimizerCVaRWeight < 0) {
 			return errors.New("planner optimizer timeout, idle timeout, MIP gap, and CVaR weight must be non-negative")
 		}
@@ -1581,6 +1676,48 @@ func (c *Config) Validate() error {
 			case "", "auto", "extensive", "progressive_hedging":
 			default:
 				return fmt.Errorf("planner.optimizer_multistage.decomposition_method is invalid: %q", ms.DecompositionMethod)
+			}
+		}
+	}
+	if repoCfg := c.DeviceRepository; repoCfg != nil {
+		if repoCfg.RefreshIntervalH < 0 {
+			return errors.New("device_repository.refresh_interval_h must be non-negative")
+		}
+		seen := make(map[string]bool, len(repoCfg.Repositories))
+		for _, repo := range repoCfg.Repositories {
+			if repo.ID == "" || strings.ContainsAny(repo.ID, "/\\") {
+				return fmt.Errorf("device_repository repository has invalid id %q", repo.ID)
+			}
+			if seen[repo.ID] {
+				return fmt.Errorf("device_repository has duplicate repository id %q", repo.ID)
+			}
+			seen[repo.ID] = true
+			if !repo.Enabled {
+				continue
+			}
+			u, err := url.Parse(repo.ManifestURL)
+			if err != nil || u.Scheme == "" {
+				return fmt.Errorf("device_repository %s has invalid manifest_url", repo.ID)
+			}
+			if u.Scheme != "https" && !repo.AllowInsecure {
+				return fmt.Errorf("device_repository %s manifest_url must use https", repo.ID)
+			}
+			if repo.AllowUnsigned && u.Scheme != "file" {
+				return fmt.Errorf("device_repository %s allow_unsigned is restricted to local file manifests", repo.ID)
+			}
+			if !repo.AllowUnsigned && len(repo.TrustedKeys) == 0 {
+				return fmt.Errorf("device_repository %s requires at least one trusted Ed25519 key", repo.ID)
+			}
+		}
+	}
+	if stats := c.FleetStatistics; stats != nil {
+		if stats.IntervalH < 0 || stats.IntervalH > 168 {
+			return errors.New("fleet_statistics.interval_h must be 0 (default) or between 1 and 168")
+		}
+		if stats.Enabled {
+			u, err := url.Parse(stats.Endpoint)
+			if err != nil || u.Scheme != "https" || u.Host == "" {
+				return errors.New("fleet_statistics.endpoint must be absolute HTTPS")
 			}
 		}
 	}

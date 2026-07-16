@@ -5,6 +5,8 @@
 -- Byte order: Little-Endian for multi-register U32 values
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "deye",
   name         = "Deye hybrid inverter",
   manufacturer = "Deye",

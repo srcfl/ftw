@@ -48,6 +48,8 @@
 -- Solis firmware NACKs back-to-back holding writes; space them ~100 ms.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "solis",
   name         = "Solis hybrid inverter",
   manufacturer = "Ginlong Solis",

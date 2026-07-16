@@ -1445,3 +1445,47 @@ operator just read off the car. Only valid while the loadpoint is
 plugged in. `404` for unknown id.
 
 **Body:** `{"soc_pct": 51}`
+
+## Component delivery and fleet statistics
+
+### GET /api/components
+
+Returns the running core version, optimizer protocol/transport health, driver
+host-API/repository status, and independent update state.
+
+### GET /api/device_repository/status
+
+Returns configured signed repositories, last refresh errors, cache state, and
+active managed driver artifacts.
+
+### GET /api/device_repository/catalog
+
+Returns signed upstream driver candidates with their public metadata,
+compatibility, installed version, and update availability.
+
+### POST /api/device_repository/refresh
+
+Refreshes enabled signed manifests. This is read-only with respect to active
+drivers.
+
+### POST /api/device_repository/drivers/{id}/install
+
+Downloads and verifies an immutable driver artifact, atomically activates it,
+restarts configured instances of that public driver ID, and requires fresh
+telemetry. On failure the previous active artifact is restored.
+
+### POST /api/device_repository/drivers/{id}/rollback
+
+Restores the previous managed artifact for the public driver ID.
+
+### GET /api/fleet_statistics/preview
+
+Returns `enabled` plus the exact anonymous fleet payload that would be sent.
+The endpoint works while reporting is disabled so an operator can inspect it
+before opting in.
+
+### POST /api/fleet_statistics/submit
+
+Submits one heartbeat immediately. Returns `409` when fleet statistics are
+disabled and does not affect the periodic schedule. See
+[fleet-statistics.md](fleet-statistics.md) for the privacy boundary.

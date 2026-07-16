@@ -4,7 +4,7 @@ name: release-assets
 #   - cross-platform main binaries (linux amd64/arm64, windows amd64)
 #   - linux ftw-relay relay binaries
 #   - tiny ftw-relay web bootstrap bundle
-#   - docker images for main + ftw-updater pushed to GHCR
+#   - docker images for core + updater + optimizer pushed to GHCR
 #   - Discord release announcement
 #
 # Triggered by `release.yml` via `gh workflow run release-assets.yml
@@ -272,10 +272,9 @@ jobs:
     name: docker build + push (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: meta
-    # Build both the main image and the ftw-updater sidecar image from
-    # the same tag. They're paired — `docker compose pull` upgrades them
-    # together — so tagging in lockstep (latest, vX.Y.Z, sha) keeps the
-    # shared state.json schema in sync on both sides of update-ipc.
+    # Build core, updater, and the independently restartable optimizer from
+    # the same release commit. Runtime compatibility is still negotiated by
+    # protocol rather than requiring versions to match.
     strategy:
       fail-fast: false
       matrix:
@@ -290,6 +289,11 @@ jobs:
             image_suffix: "-updater"
             title: FTW updater
             description: Sidecar that executes docker compose pull + up for in-app updates
+          - target: optimizer
+            dockerfile: ./Dockerfile.optimizer
+            image_suffix: "-optimizer"
+            title: FTW optimizer
+            description: Independently updatable mathematical planning sidecar
     steps:
       - name: Checkout tag
         uses: actions/checkout@v5
@@ -338,6 +342,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ needs.meta.outputs.tag }}
+            BUILD_SHA=${{ github.sha }}
           # Use the GHA cache backend so subsequent builds reuse layers.
           # Per-target scope keeps main + updater from evicting each other.
           cache-from: type=gha,scope=${{ matrix.target }}
