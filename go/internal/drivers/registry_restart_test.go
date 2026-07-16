@@ -164,6 +164,18 @@ function driver_poll() return 1000 end
 function driver_command(action, w, cmd) end
 `
 
+const registryPVCurtailConfigTestDriver = `
+function driver_init(config)
+  local enabled = 0
+  if config ~= nil and config._supports_pv_curtail == true then
+    enabled = 1
+  end
+  host.emit_metric("supports_pv_curtail", enabled)
+end
+function driver_poll() return 1000 end
+function driver_command(action, w, cmd) end
+`
+
 // The restart bug: when a driver is removed, the MQTT capability's
 // Close() was never called. The paho client stayed connected under the
 // same clientID; the next Add raced a new Dial against that stale
@@ -315,6 +327,27 @@ func TestAddInjectsGlobalTroubleshootingMode(t *testing.T) {
 	}
 	if !sawMetricValue(r.tel.FlushSamples(), "d1", "troubleshooting_mode_enabled", 1) {
 		t.Fatal("expected troubleshooting_mode_enabled=1 metric")
+	}
+}
+
+func TestAddInjectsPVCurtailOwnershipWithoutMutatingConfig(t *testing.T) {
+	r := NewRegistry(telemetry.NewStore())
+	path := writeTestDriver(t, registryPVCurtailConfigTestDriver)
+	cfg := config.Driver{
+		Name:              "d1",
+		Lua:               path,
+		SupportsPVCurtail: true,
+		Config:            map[string]any{"local": true},
+	}
+	if err := r.Add(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	defer r.ShutdownAll()
+	if _, ok := cfg.Config["_supports_pv_curtail"]; ok {
+		t.Fatal("runtime pv-curtail key leaked into driver config map")
+	}
+	if !sawMetricValue(r.tel.FlushSamples(), "d1", "supports_pv_curtail", 1) {
+		t.Fatal("expected supports_pv_curtail=1 metric")
 	}
 }
 

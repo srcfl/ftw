@@ -88,15 +88,21 @@ func (l *luaRuntime) Cleanup(ctx context.Context) error     { l.LuaDriver.Cleanu
 func (l *luaRuntime) Env() *HostEnv                         { return l.LuaDriver.Env }
 
 func driverInitConfigJSON(cfg config.Driver, troubleshootingMode bool) []byte {
-	if len(cfg.Config) == 0 && !troubleshootingMode {
+	if len(cfg.Config) == 0 && !troubleshootingMode && !cfg.SupportsPVCurtail {
 		return nil
 	}
-	m := make(map[string]any, len(cfg.Config)+1)
+	m := make(map[string]any, len(cfg.Config)+2)
 	for k, v := range cfg.Config {
 		m[k] = v
 	}
 	if troubleshootingMode {
 		m["_troubleshooting_mode"] = true
+	}
+	if cfg.SupportsPVCurtail {
+		// Runtime-only ownership signal. A curtail-capable driver may use
+		// this to release an FTW-owned stale limit on startup without
+		// touching inverter limits when the operator has not opted in.
+		m["_supports_pv_curtail"] = true
 	}
 	b, _ := json.Marshal(m)
 	return b

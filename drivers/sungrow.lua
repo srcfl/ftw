@@ -7,9 +7,9 @@ DRIVER = {
   id           = "sungrow-shx",
   name         = "Sungrow SH Hybrid Inverter",
   manufacturer = "Sungrow",
-  version      = "1.0.0",
+  version      = "1.1.0",
   protocols    = { "modbus" },
-  capabilities = { "meter", "pv", "battery" },
+  capabilities = { "meter", "pv", "battery", "pv-curtail" },
   description  = "Sungrow SH-series hybrid inverters with LFP battery, via Modbus TCP.",
   homepage     = "https://en.sungrowpower.com",
   authors      = { "FTW contributors" },
@@ -17,7 +17,7 @@ DRIVER = {
   verification_status = "production",
   verified_by = { "frahlg@homelab-rpi:14d" },
   verified_at = "2026-04-18",
-  verification_notes = "Battery control + telemetry in continuous use on homelab-rpi. Device type 0x0E0E (SH10RT).",
+  verification_notes = "Battery control + telemetry in continuous use on homelab-rpi. Device type 0x0E0E (SH8.0RT-V112).",
   connection_defaults = {
     port    = 502,
     unit_id = 1,
@@ -33,19 +33,41 @@ DRIVER = {
 --   positive W = charging (grid → battery)
 --   negative W = discharging (battery → grid)
 --
--- Control registers:
---   13049: EMS mode (0=self-consumption, 2=forced, 3=external EMS)
---   13050: Force cmd (0xAA=charge, 0xBB=discharge, 0xCC=stop)
---   13051: Force power (0-5000W)
---   33046: Max charge power (scale 0.01 kW, holding)
---   33047: Max discharge power (scale 0.01 kW, holding)
---   13057: Max SoC (scale 0.1%, holding)
---   13058: Min SoC (scale 0.1%, holding)
+-- Host addresses are zero-based (the Sungrow protocol's documented register
+-- number minus one):
+--   13049: EMS mode (documented 13050; 0=self, 2=forced, 3=external EMS)
+--   13050: Force cmd (documented 13051; AA=charge, BB=discharge, CC=stop)
+--   13051: Force power (documented 13052; watts)
+--   13073: Feed-in limit value (documented 13074; watts)
+--   13086: Feed-in limit enable (documented 13087; read-only to this driver)
+--   13088: Active power limit enable (documented 13089; AA=on, 55=off)
+--   13089: Active power limit ratio (documented 13090; 0.1%)
+--   33046: Max charge power (documented 33047; scale 0.01 kW)
+--   33047: Max discharge power (documented 33048; scale 0.01 kW)
+--   13057: Max SoC (documented 13058; scale 0.1%)
+--   13058: Min SoC (documented 13059; scale 0.1%)
 
 PROTOCOL = "modbus"
 
 local sn_read = false
 local init_verified = false
+local rated_ac_w = 0
+local pv_curtail_control_enabled = false
+local pv_curtail_active = false
+local pv_curtail_method = "active_power"
+local feed_in_release_w = 0
+local latest_non_export_w = 0
+
+local function first_write_error(a, b, c)
+    if a ~= nil and a ~= "" then return tostring(a) end
+    if b ~= nil and b ~= "" then return tostring(b) end
+    if c ~= nil and c ~= "" then return tostring(c) end
+    return nil
+end
+
+local function bit_is_set(value, bit)
+    return math.floor(value / (2 ^ bit)) % 2 == 1
+end
 
 ----------------------------------------------------------------------------
 -- Fingerprint
@@ -85,12 +107,46 @@ end
 ----------------------------------------------------------------------------
 
 function driver_init(config)
+    config = config or {}
     host.set_make("Sungrow")
+
+    -- The generic supports_pv_curtail opt-in is injected by the host as a
+    -- runtime-only key. It gives FTW ownership of the Active Power Limitation
+    -- registers without touching a separately configured feed-in/export limit.
+    pv_curtail_control_enabled = config._supports_pv_curtail == true
+    if config.pv_curtail_method == "feed_in" then
+        pv_curtail_method = "feed_in"
+    end
+    feed_in_release_w = tonumber(config.feed_in_release_w) or 0
 
     -- Read and log device info
     local ok, dev = pcall(host.modbus_read, 4999, 1, "input")
     if ok and dev then
         host.log("info", "Device type code: " .. tostring(dev[1]))
+    end
+
+    -- Cache rated AC power before the first poll so a manual curtail command
+    -- can be converted from watts to Sungrow's 0.1% ratio immediately.
+    local ok_rated, rated = pcall(host.modbus_read, 5000, 1, "input")
+    if ok_rated and rated and rated[1] and rated[1] > 0 then
+        rated_ac_w = rated[1] * 0.1 * 1000
+    end
+
+    -- A container update can terminate while the inverter still holds the
+    -- last forced charge/discharge command. Always establish the safe native
+    -- mode before the driver is admitted to dispatch, including a zeroed
+    -- stale power register. Verification failures remain visible in logs and
+    -- the normal watchdog still has a chance to retry default mode.
+    if not set_self_consumption() then
+        host.log("warn", "Sungrow: startup control-state reset did not verify")
+    end
+
+    -- Only operators who opted into PV curtail give FTW ownership of a limit.
+    -- Clear a stale FTW limit after an abrupt restart. Active-power mode owns
+    -- its enable+ratio pair; explicit feed-in mode restores only the configured
+    -- absolute release value and never changes the installer's enable flag.
+    if pv_curtail_control_enabled and not set_pv_curtail_disabled() then
+        host.log("warn", "Sungrow: startup PV curtail release did not verify")
     end
 
     -- Verify and configure power limits for battery control
@@ -169,12 +225,18 @@ function driver_poll()
         end
     end
 
-    -- Running status: input 13000
-    -- Bit 2 (0x0004) = discharging, Bit 1 (0x0002) = charging
-    local ok_status, status_regs = pcall(host.modbus_read, 13000, 1, "input")
-    local status = 0
-    if ok_status and status_regs then status = status_regs[1] end
-    local is_discharging = (math.floor(status / 4) % 2) == 1
+    -- Sungrow running state is documented register 13000 (host address
+    -- 12999). Power-flow status is documented 13001 (host address 13000):
+    -- bit 2 = discharging, bit 1 = charging. Keep both as diagnostics so a
+    -- reachable-but-stopped inverter is no longer misreported as merely 0 W.
+    local ok_running, running_regs = pcall(host.modbus_read, 12999, 1, "input")
+    local running_state = 0
+    if ok_running and running_regs then running_state = running_regs[1] end
+
+    local ok_flow, flow_regs = pcall(host.modbus_read, 13000, 1, "input")
+    local power_flow_status = 0
+    if ok_flow and flow_regs then power_flow_status = flow_regs[1] end
+    local is_discharging = (math.floor(power_flow_status / 4) % 2) == 1
 
     -- PV power: 5016-5017, U32 LE, watts
     -- Observed on at least one SH-series firmware: this register stays
@@ -228,9 +290,10 @@ function driver_poll()
 
     -- Rated power: 5000, U16 × 0.1 kW
     local ok_rated, rated_regs = pcall(host.modbus_read, 5000, 1, "input")
-    local rated_w = 0
+    local rated_w = rated_ac_w
     if ok_rated and rated_regs then
         rated_w = rated_regs[1] * 0.1 * 1000
+        if rated_w > 0 then rated_ac_w = rated_w end
     end
 
     -- Heatsink temp: 5007, I16 × 0.1 C
@@ -275,6 +338,58 @@ function driver_poll()
     host.emit_metric("pv_mppt2_w",       mppt2_w)
     host.emit_metric("inverter_temp_c",  heatsink_c)
     host.emit_metric("grid_hz",          hz)
+    host.emit_metric("sungrow_running_state", running_state)
+    host.emit_metric("sungrow_power_flow_status", power_flow_status)
+    host.emit_metric("sungrow_pv_curtail_method", pv_curtail_method == "feed_in" and 2 or 1)
+
+    -- Contiguous bitfields from documented input registers 13050-13079
+    -- (zero-based host addresses 13049-13078). One read gives enough evidence
+    -- to distinguish thermal, grid, PV/DC, battery and BMS shutdowns.
+    local ok_faults, fault_regs = pcall(host.modbus_read, 13049, 30, "input")
+    local fault_values = {}
+    if ok_faults and fault_regs and #fault_regs >= 30 then
+        local fault_names = {
+            "sungrow_inverter_alarm_bits",
+            "sungrow_grid_fault_bits",
+            "sungrow_system_fault1_bits",
+            "sungrow_system_fault2_bits",
+            "sungrow_dc_fault_bits",
+            "sungrow_permanent_fault_bits",
+            "sungrow_bdc_fault_bits",
+            "sungrow_bdc_permanent_fault_bits",
+            "sungrow_battery_fault_bits",
+            "sungrow_battery_alarm_bits",
+            "sungrow_bms_alarm_bits",
+            "sungrow_bms_protection_bits",
+            "sungrow_bms_fault1_bits",
+            "sungrow_bms_fault2_bits",
+            "sungrow_bms_alarm2_bits",
+        }
+        for i, name in ipairs(fault_names) do
+            local j = (i - 1) * 2 + 1
+            local value = host.decode_u32_le(fault_regs[j], fault_regs[j + 1])
+            fault_values[i] = value
+            host.emit_metric(name, value)
+        end
+    end
+
+    -- A faulted inverter can keep returning perfectly fresh Modbus telemetry,
+    -- which previously made /api/status and Diagnose say "ok" while PV and
+    -- battery actuation were physically unavailable. Surface Sungrow's actual
+    -- running state through the host's device-fault channel. RecordSuccess does
+    -- not clear this flag; only a later non-fault running-state poll does.
+    if running_state == 0x5500 or running_state == 0x0100 then
+        local reason = string.format("Sungrow fault (running state 0x%04X)", running_state)
+        local system_fault2 = fault_values[4] or 0
+        if bit_is_set(system_fault2, 1) then
+            reason = string.format(
+                "Sungrow fault: excessively high ambient temperature (%.1f C, state 0x%04X)",
+                heatsink_c, running_state)
+        end
+        host.set_device_fault(true, reason)
+    elseif ok_running and running_regs and running_regs[1] ~= nil then
+        host.set_device_fault(false, "")
+    end
 
     -- Battery: 13019-13022 (voltage, current, power, SoC)
     local ok_bat, bat_regs = pcall(host.modbus_read, 13019, 4, "input")
@@ -402,6 +517,16 @@ function driver_poll()
     host.emit_metric("meter_l2_a", l2_a)
     host.emit_metric("meter_l3_a", l3_a)
 
+    -- Feed-in fallback translation: a PV allowance is the power that may
+    -- serve local load, charge the battery, or leave the site. Sungrow's
+    -- legacy SHxRT register controls only the last term, so subtract current
+    -- non-export absorption. This preserves useful self-consumption while
+    -- preventing paid/negative-price export. A manual cap below live local
+    -- absorption cannot force DC PV lower on this firmware; it safely floors
+    -- the export allowance at zero instead.
+    local load_w = meter_w - bat_w + pv_w
+    latest_non_export_w = math.max(0, load_w + math.max(0, bat_w))
+
     return 5000
 end
 
@@ -418,9 +543,15 @@ function driver_command(action, power_w, cmd)
     elseif action == "battery" then
         return set_battery_power(power_w)
     elseif action == "curtail" then
-        return set_export_limit(math.abs(power_w))
-    elseif action == "curtail_disable" or action == "deinit" then
-        return set_self_consumption()
+        return set_pv_curtail_limit(math.abs(power_w))
+    elseif action == "curtail_disable" then
+        return set_pv_curtail_disabled()
+    elseif action == "deinit" then
+        local pv_ok = true
+        if pv_curtail_control_enabled or pv_curtail_active then
+            pv_ok = set_pv_curtail_disabled()
+        end
+        return set_self_consumption() and pv_ok
     end
     return false
 end
@@ -453,9 +584,14 @@ function set_battery_power(power_w)
 
     -- Order: mode first (so the inverter is ready to latch cmd/power),
     -- then cmd (which register is honoured), then power setpoint.
-    host.modbus_write(13049, 2)         -- 1. forced mode
-    host.modbus_write(13050, want_cmd)  -- 2. force charge/discharge cmd
-    host.modbus_write(13051, watts)     -- 3. power setpoint
+    local mode_err = host.modbus_write(13049, 2)         -- 1. forced mode
+    local cmd_err = host.modbus_write(13050, want_cmd)   -- 2. charge/discharge cmd
+    local power_err = host.modbus_write(13051, watts)    -- 3. power setpoint
+    local write_err = first_write_error(mode_err, cmd_err, power_err)
+    if write_err then
+        host.log("warn", "Sungrow: force command write failed: " .. write_err)
+        return false
+    end
     host.log("debug", string.format("Sungrow: force %s %dW",
         want_cmd == 0xAA and "charge" or "discharge", watts))
 
@@ -476,7 +612,7 @@ function set_battery_power(power_w)
             ems[2], want_cmd))
         return false
     end
-    if math.abs(ems[3] - watts) > 1 then -- 1W rounding tolerance
+    if math.abs(ems[3] - watts) > 10 then -- observed firmware quantizes to 10 W
         host.log("warn", string.format("Sungrow: force_power not latched (got %dW want %dW)",
             ems[3], watts))
         return false
@@ -488,9 +624,14 @@ end
 -- autonomous self-consumption mode. Otherwise a 0W planner target can still
 -- let Sungrow charge from PV surplus on its own.
 function set_battery_idle()
-    host.modbus_write(13049, 2)     -- forced mode
-    host.modbus_write(13050, 0xCC)  -- stop forced charge/discharge
-    host.modbus_write(13051, 0)     -- zero power setpoint
+    local mode_err = host.modbus_write(13049, 2)     -- forced mode
+    local cmd_err = host.modbus_write(13050, 0xCC)   -- stop forced charge/discharge
+    local power_err = host.modbus_write(13051, 0)    -- zero power setpoint
+    local write_err = first_write_error(mode_err, cmd_err, power_err)
+    if write_err then
+        host.log("warn", "Sungrow: idle write failed: " .. write_err)
+        return false
+    end
     host.log("debug", "Sungrow: force idle 0W")
 
     local ok, ems = pcall(host.modbus_read, 13049, 3, "holding")
@@ -510,25 +651,191 @@ end
 
 -- Return to self-consumption mode (safe default)
 function set_self_consumption()
-    host.modbus_write(13050, 0xCC)  -- stop forced charge/discharge
-    host.modbus_write(13049, 0)     -- self-consumption mode
+    -- Stop first, clear the stale power setpoint, then hand control back to
+    -- the inverter. This makes the post-restart state deterministic instead
+    -- of leaving e.g. mode=0/cmd=CC/power=880W latched in diagnostics.
+    local cmd_err = host.modbus_write(13050, 0xCC)
+    local power_err = host.modbus_write(13051, 0)
+    local mode_err = host.modbus_write(13049, 0)
+    local write_err = first_write_error(cmd_err, power_err, mode_err)
+    if write_err then
+        host.log("warn", "Sungrow: self-consumption reset write failed: " .. write_err)
+        return false
+    end
     host.log("debug", "Sungrow: self-consumption mode")
+
+    local ok, ems = pcall(host.modbus_read, 13049, 3, "holding")
+    if not ok or not ems then return true end
+    if ems[1] ~= 0 or ems[2] ~= 0xCC or ems[3] ~= 0 then
+        host.log("warn", string.format(
+            "Sungrow: self-consumption reset not latched (mode=%d cmd=0x%02x power=%dW)",
+            ems[1] or -1, ems[2] or -1, ems[3] or -1))
+        return false
+    end
     return true
 end
 
--- Set export power limit
-function set_export_limit(watts)
-    host.modbus_write(13073, math.floor(watts))
-    host.log("debug", "Sungrow: export limit " .. tostring(watts) .. "W")
+-- Cap inverter AC output using Sungrow's Active Power Limitation pair
+-- (documented registers 13089/13090, zero-based addresses 13088/13089).
+-- This is the preferred control point for FTW's PV power cap. SHxRT firmware
+-- that does not expose this pair can explicitly select the feed-in method;
+-- that path preserves self-consumption and restores a configured installer
+-- ceiling verbatim instead of taking ownership of its enable flag.
+function set_pv_curtail_limit(watts)
+    if pv_curtail_method == "feed_in" then
+        return set_feed_in_curtail_limit(watts)
+    end
+
+    if rated_ac_w <= 0 then
+        local ok, rated = pcall(host.modbus_read, 5000, 1, "input")
+        if ok and rated and rated[1] and rated[1] > 0 then
+            rated_ac_w = rated[1] * 0.1 * 1000
+        end
+    end
+    if rated_ac_w <= 0 then
+        host.log("warn", "Sungrow: PV curtail refused — rated AC power unavailable")
+        return false
+    end
+
+    local clamped_w = math.max(0, math.min(watts, rated_ac_w))
+    local ratio_x10 = math.floor((clamped_w / rated_ac_w) * 1000 + 0.5)
+    -- Use separate FC 0x06 writes because some Sungrow gateways reject a
+    -- combined FC 0x10 write here. Set the inert ratio first and enable last:
+    -- if either step fails, a stale low ratio cannot be enabled.
+    local ratio_err = host.modbus_write(13089, ratio_x10)
+    local enable_err = nil
+    if ratio_err == nil or ratio_err == "" then
+        enable_err = host.modbus_write(13088, 0xAA)
+    end
+    local write_err = first_write_error(ratio_err, enable_err, nil)
+    if write_err then
+        host.log("warn", "Sungrow: PV curtail write failed: " .. write_err)
+        return false
+    end
+
+    local ok, regs = pcall(host.modbus_read, 13088, 2, "holding")
+    if ok and regs and (regs[1] ~= 0xAA or regs[2] ~= ratio_x10) then
+        host.log("warn", string.format(
+            "Sungrow: PV curtail not latched (enable=0x%02x ratio=%d want=%d)",
+            regs[1] or -1, regs[2] or -1, ratio_x10))
+        return false
+    end
+
+    pv_curtail_active = true
+    host.emit_metric("sungrow_pv_limit_w", clamped_w)
+    host.emit_metric("sungrow_pv_limit_ratio_x10", ratio_x10)
+    host.log("debug", string.format("Sungrow: PV limit %.0fW (%.1f%%)",
+        clamped_w, ratio_x10 * 0.1))
+    return true
+end
+
+function set_pv_curtail_disabled()
+    if pv_curtail_method == "feed_in" then
+        if feed_in_release_w <= 0 then
+            host.log("warn", "Sungrow: feed-in curtail release refused — config.feed_in_release_w is required")
+            return false
+        end
+        local err = host.modbus_write(13073, math.floor(feed_in_release_w))
+        if err ~= nil and err ~= "" then
+            host.log("warn", "Sungrow: feed-in curtail release failed: " .. tostring(err))
+            return false
+        end
+        local ok, regs = pcall(host.modbus_read, 13073, 1, "holding")
+        if ok and regs and regs[1] ~= math.floor(feed_in_release_w) then
+            host.log("warn", string.format(
+                "Sungrow: feed-in release not latched (got %dW want %.0fW)",
+                regs[1] or -1, feed_in_release_w))
+            return false
+        end
+        pv_curtail_active = false
+        host.emit_metric("sungrow_feed_in_limit_w", feed_in_release_w)
+        host.emit_metric("sungrow_pv_limit_w", rated_ac_w)
+        host.log("debug", string.format(
+            "Sungrow: feed-in limit restored to %.0fW", feed_in_release_w))
+        return true
+    end
+
+    -- Disable first, then reset the inert ratio to 100%. This ordering is
+    -- safe on the SHxRT firmwares that require separate FC 0x06 writes: an
+    -- interrupted release cannot leave the low limit enabled.
+    local disable_err = host.modbus_write(13088, 0x55)
+    local ratio_err = nil
+    if disable_err == nil or disable_err == "" then
+        ratio_err = host.modbus_write(13089, 1000)
+    end
+    local write_err = first_write_error(disable_err, ratio_err, nil)
+    if write_err then
+        host.log("warn", "Sungrow: PV curtail release failed: " .. write_err)
+        return false
+    end
+
+    local ok, regs = pcall(host.modbus_read, 13088, 2, "holding")
+    if ok and regs and (regs[1] ~= 0x55 or regs[2] ~= 1000) then
+        host.log("warn", string.format(
+            "Sungrow: PV curtail release not latched (enable=0x%02x ratio=%d)",
+            regs[1] or -1, regs[2] or -1))
+        return false
+    end
+
+    pv_curtail_active = false
+    host.emit_metric("sungrow_pv_limit_w", rated_ac_w)
+    host.emit_metric("sungrow_pv_limit_ratio_x10", 1000)
+    host.log("debug", "Sungrow: PV limit disabled")
+    return true
+end
+
+function set_feed_in_curtail_limit(watts)
+    if feed_in_release_w <= 0 then
+        host.log("warn", "Sungrow: feed-in curtail refused — config.feed_in_release_w is required")
+        return false
+    end
+
+    -- Never take ownership of an installer-disabled export control. This
+    -- fallback changes only the already-enabled absolute limit value and
+    -- restores the configured baseline verbatim on release.
+    local ok_enabled, enabled = pcall(host.modbus_read, 13086, 1, "holding")
+    if not ok_enabled or not enabled or enabled[1] ~= 0xAA then
+        host.log("warn", "Sungrow: feed-in curtail refused — Feed-in Limitation is not enabled")
+        return false
+    end
+
+    local export_limit_w = math.max(0, watts - latest_non_export_w)
+    export_limit_w = math.min(export_limit_w, feed_in_release_w, 65535)
+    export_limit_w = math.floor(export_limit_w + 0.5)
+    local err = host.modbus_write(13073, export_limit_w)
+    if err ~= nil and err ~= "" then
+        host.log("warn", "Sungrow: feed-in curtail write failed: " .. tostring(err))
+        return false
+    end
+
+    local ok, regs = pcall(host.modbus_read, 13073, 1, "holding")
+    if ok and regs and math.abs(regs[1] - export_limit_w) > 10 then
+        host.log("warn", string.format(
+            "Sungrow: feed-in curtail not latched (got %dW want %dW)",
+            regs[1] or -1, export_limit_w))
+        return false
+    end
+    local latched_export_w = export_limit_w
+    if ok and regs and regs[1] ~= nil then latched_export_w = regs[1] end
+
+    pv_curtail_active = true
+    host.emit_metric("sungrow_feed_in_limit_w", latched_export_w)
+    host.emit_metric("sungrow_pv_limit_w", watts)
+    host.log("debug", string.format(
+        "Sungrow: PV allowance %.0fW → feed-in limit %dW (local absorption %.0fW)",
+        watts, latched_export_w, latest_non_export_w))
     return true
 end
 
 -- Watchdog fallback: always revert to self-consumption
 function driver_default_mode()
     host.log("info", "Sungrow: watchdog → reverting to self-consumption")
-    set_self_consumption()
+    return set_self_consumption()
 end
 
 function driver_cleanup()
+    if pv_curtail_control_enabled or pv_curtail_active then
+        set_pv_curtail_disabled()
+    end
     set_self_consumption()
 end
