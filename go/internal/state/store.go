@@ -240,6 +240,10 @@ var snapshotExcludedTables = map[string]bool{
 	"history_warm": true,
 	"history_cold": true,
 	"ts_samples":   true,
+	// ~85 kB JSON per replan (measured 485 MB at 30 d retention on a real
+	// site) and recoverable from the diagnostics Parquet rolloff — the same
+	// rationale as ts_samples. Including it made every snapshot ~470 MB.
+	"planner_diagnostics": true,
 }
 
 func (s *Store) SnapshotTo(dstPath string) error {
@@ -1311,55 +1315,127 @@ func (s *Store) HistoryCounts() (hot, warm, cold int, err error) {
 	return
 }
 
+// pruneChunkSpanMS bounds how much history one prune transaction may age.
+// The write lock is held per chunk, not for the whole backlog: a DB that
+// missed months of pruning is worked off in ~24 h bites of ~40 k rows
+// (sub-second each) instead of one transaction that starves every writer.
+// 2026-07-16 incident: the first prune of a 93-day backlog held the write
+// lock for 4+ hours and every control-loop tick failed with SQLITE_BUSY.
+// Var, not const, so tests can force multiple chunks with small data.
+var pruneChunkSpanMS = int64(24 * 60 * 60 * 1000)
+
 // Prune ages old hot rows into warm buckets, old warm into cold daily buckets.
-// This is pure SQL — no custom Go bucketing needed. Idempotent; safe to call often.
+// Chunked and linear: each chunk is one short transaction whose boundaries are
+// aligned DOWN to whole buckets, so a bucket is always aggregated from its
+// complete row set (a cutoff mid-bucket would otherwise INSERT OR REPLACE the
+// bucket twice, each time from a partial slice, keeping only the second).
+// Idempotent; safe to call often.
 func (s *Store) Prune(ctx context.Context) error {
 	nowMs := time.Now().UnixMilli()
-	hotCutoff := nowMs - int64(HotRetention.Milliseconds())
-	warmCutoff := nowMs - int64(WarmRetention.Milliseconds())
+	t0 := time.Now()
 
+	// hot → warm (15-min buckets). The bare json column rides along with
+	// MAX(ts_ms): SQLite's bare-column rule picks it from the newest row of
+	// each bucket in the same linear pass. The previous correlated subquery
+	// re-scanned history_hot once per bucket — O(buckets × rows).
+	hotAged, hotChunks, err := s.pruneTier(ctx, "history_hot", "history_warm",
+		nowMs-HotRetention.Milliseconds(), WarmBucketMS)
+	if err != nil {
+		return fmt.Errorf("hot→warm: %w", err)
+	}
+
+	// warm → cold (1-day buckets)
+	warmAged, warmChunks, err := s.pruneTier(ctx, "history_warm", "history_cold",
+		nowMs-WarmRetention.Milliseconds(), ColdBucketMS)
+	if err != nil {
+		return fmt.Errorf("warm→cold: %w", err)
+	}
+
+	// Maintenance must never be silent — the 4-hour lock above was invisible
+	// precisely because a running/finished prune logged nothing.
+	if hotAged > 0 || warmAged > 0 {
+		slog.Info("state: history prune complete",
+			"hot_rows_aged", hotAged, "warm_rows_aged", warmAged,
+			"chunks", hotChunks+warmChunks,
+			"elapsed", time.Since(t0).Round(time.Millisecond))
+	}
+	return nil
+}
+
+// pruneTier ages rows older than cutoffMs from src into bucketMs-wide averaged
+// buckets in dst, in bounded per-chunk transactions. Returns rows aged and
+// chunks used. Table names are compile-time constants at every call site.
+func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucketMs int64) (aged int64, chunks int, err error) {
+	// Only age complete buckets: align the cutoff down to a bucket boundary.
+	cutoffMs = (cutoffMs / bucketMs) * bucketMs
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return aged, chunks, err
+		}
+		var minTs sql.NullInt64
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT MIN(ts_ms) FROM `+src).Scan(&minTs); err != nil {
+			return aged, chunks, err
+		}
+		if !minTs.Valid || minTs.Int64 >= cutoffMs {
+			return aged, chunks, nil
+		}
+		// Chunk upper bound: at most pruneChunkSpanMS of rows, never past the
+		// cutoff, always on a bucket boundary.
+		chunkEnd := minTs.Int64 + pruneChunkSpanMS
+		if chunkEnd > cutoffMs {
+			chunkEnd = cutoffMs
+		}
+		chunkEnd = (chunkEnd / bucketMs) * bucketMs
+		if chunkEnd <= minTs.Int64 {
+			chunkEnd = (minTs.Int64/bucketMs + 1) * bucketMs
+			if chunkEnd > cutoffMs {
+				chunkEnd = cutoffMs
+			}
+		}
+
+		n, err := s.pruneChunk(ctx, src, dst, minTs.Int64, chunkEnd, bucketMs)
+		if err != nil {
+			return aged, chunks, err
+		}
+		aged += n
+		chunks++
+	}
+}
+
+// pruneChunk aggregates+deletes src rows in [fromMs, toMs) in one short
+// transaction.
+func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, bucketMs int64) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 
-	// 1. hot → warm (15-min buckets)
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT OR REPLACE INTO history_warm (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		SELECT
-			(ts_ms / %d) * %d + %d AS bucket_ts,
-			AVG(grid_w), AVG(pv_w), AVG(bat_w), AVG(load_w), AVG(bat_soc),
-			-- Pick any JSON from the bucket; aggregation via SQL is too fiddly.
-			(SELECT json FROM history_hot h2 WHERE h2.ts_ms / %d = h.ts_ms / %d LIMIT 1)
-		FROM history_hot h
-		WHERE ts_ms < ?
-		GROUP BY ts_ms / %d
-	`, WarmBucketMS, WarmBucketMS, WarmBucketMS/2, WarmBucketMS, WarmBucketMS, WarmBucketMS), hotCutoff); err != nil {
-		return fmt.Errorf("aggregate hot→warm: %w", err)
+	// Bare-column rule: exactly one MAX() aggregate in the grouped inner
+	// query makes the un-aggregated json column come from that newest row.
+	q := fmt.Sprintf(`
+		INSERT OR REPLACE INTO %s (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+		SELECT b_ts, a_grid, a_pv, a_bat, a_load, a_soc, json FROM (
+			SELECT (ts_ms / %d) * %d + %d AS b_ts,
+			       AVG(grid_w) AS a_grid, AVG(pv_w) AS a_pv, AVG(bat_w) AS a_bat,
+			       AVG(load_w) AS a_load, AVG(bat_soc) AS a_soc,
+			       json, MAX(ts_ms) AS newest
+			FROM %s
+			WHERE ts_ms >= ? AND ts_ms < ?
+			GROUP BY ts_ms / %d
+		)`, dst, bucketMs, bucketMs, bucketMs/2, src, bucketMs)
+	if _, err := tx.ExecContext(ctx, q, fromMs, toMs); err != nil {
+		return 0, fmt.Errorf("aggregate: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM history_hot WHERE ts_ms < ?`, hotCutoff); err != nil {
-		return fmt.Errorf("delete old hot: %w", err)
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM `+src+` WHERE ts_ms >= ? AND ts_ms < ?`, fromMs, toMs)
+	if err != nil {
+		return 0, fmt.Errorf("delete: %w", err)
 	}
-
-	// 2. warm → cold (1-day buckets)
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT OR REPLACE INTO history_cold (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		SELECT
-			(ts_ms / %d) * %d + %d AS bucket_ts,
-			AVG(grid_w), AVG(pv_w), AVG(bat_w), AVG(load_w), AVG(bat_soc),
-			(SELECT json FROM history_warm w2 WHERE w2.ts_ms / %d = w.ts_ms / %d LIMIT 1)
-		FROM history_warm w
-		WHERE ts_ms < ?
-		GROUP BY ts_ms / %d
-	`, ColdBucketMS, ColdBucketMS, ColdBucketMS/2, ColdBucketMS, ColdBucketMS, ColdBucketMS), warmCutoff); err != nil {
-		return fmt.Errorf("aggregate warm→cold: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM history_warm WHERE ts_ms < ?`, warmCutoff); err != nil {
-		return fmt.Errorf("delete old warm: %w", err)
-	}
-
-	return tx.Commit()
+	n, _ := res.RowsAffected()
+	return n, tx.Commit()
 }
 
 // ---- Prices ----

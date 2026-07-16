@@ -8,10 +8,13 @@ import (
 )
 
 // DiagnosticsRecentRetention is how long planner snapshots stay queryable
-// in SQLite before rolling off to daily Parquet files. 30 days matches the
-// typical "how far back do you need to look to debug?" window while
-// keeping the hot table small (~2880 rows at 15-min cadence × 30 d).
-const DiagnosticsRecentRetention = 30 * 24 * time.Hour
+// in SQLite before rolling off to daily Parquet files. The time-travel UI
+// falls through to Parquet transparently for anything older, so this only
+// buys query latency on recent incidents — and the rows are heavy: a real
+// site measured ~85 kB JSON per replan ≈ 485 MB in SQLite at 30 days,
+// which also ballooned every state snapshot. 7 days keeps the common
+// debugging window fast at ~115 MB.
+const DiagnosticsRecentRetention = 7 * 24 * time.Hour
 
 // DiagnosticSummary is the light-weight row the timeline UI consumes. No
 // full JSON blob — the UI fetches that on demand via LoadDiagnosticAt.
