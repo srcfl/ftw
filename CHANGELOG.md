@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.128.1
+
+### Patch Changes
+
+- dcffc61: Add a one-command, rollback-safe migration from legacy Docker Compose and
+  local-development images to the official Sourceful images. Include license
+  and notice files in Docker build contexts so canonical main and updater images
+  publish successfully.
+- 43e2d1b: Repair self-updates from legacy or developer Compose layouts by applying a
+  temporary canonical image override without rewriting the host deployment, and
+  preserve automatic image and state rollback on that path. Add a bilingual
+  legacy-upgrade runbook and refresh migration/operator documentation,
+  fresh-clone simulator defaults, driver catalog coverage, release-image
+  selection, and license payloads after the Sourceful transfer.
+
 ## 0.128.0
 
 ### Minor Changes
