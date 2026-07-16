@@ -1,6 +1,6 @@
 {
   "name": "ftw",
-  "version": "0.129.0",
+  "version": "0.130.0",
   "private": true,
   "type": "module",
   "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is Python/CVXPY.",

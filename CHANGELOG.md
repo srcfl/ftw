@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.130.0
+
+### Minor Changes
+
+- eba5722: Add independently updatable optimizer and Lua-driver modules with protocol negotiation, signed monorepo driver releases, content-addressed activation, selective restart, health verification, and rollback while retaining bundled and Go-DP safety fallbacks. Add explicit opt-in anonymous fleet statistics for active installations and public driver/component health.
+
+### Patch Changes
+
+- a4f0b33: Repair the setup wizard and pair-session component after the FTW rename, and add CI guards for browser JavaScript, release metadata, and stale Changeset package names.
+
 ## 0.129.0
 
 ### Minor Changes
