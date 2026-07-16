@@ -12,6 +12,10 @@ const releaseWorkflow = readFileSync(
   join(repoRoot, ".github", "workflows", "release.yml"),
   "utf8",
 );
+const changesetCheckWorkflow = readFileSync(
+  join(repoRoot, ".github", "workflows", "changeset-check.yml"),
+  "utf8",
+);
 
 describe("release metadata", () => {
   it("keeps package.json and package-lock.json root identity in sync", () => {
@@ -28,5 +32,12 @@ describe("release metadata", () => {
       /changeset version.+npm install --package-lock-only/,
     );
     assert.match(releaseWorkflow, /version:\s+npm run version-packages/);
+  });
+
+  it("validates Changesets against the fetched PR base", () => {
+    assert.match(
+      changesetCheckWorkflow,
+      /changeset status --since=["']origin\/\$\{\{ github\.base_ref \}\}["']/,
+    );
   });
 });

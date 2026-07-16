@@ -81,7 +81,9 @@ jobs:
 
       - name: Validate pending Changesets
         if: steps.version_pr.outputs.skip != 'true'
-        run: npx changeset status
+        # pull_request workflows run on a detached merge ref. Compare against
+        # the fetched remote base because no local `master` branch exists.
+        run: npx changeset status --since="origin/${{ github.base_ref }}"
 
       - name: Verify changeset present (or PR is allowlisted)
         if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
