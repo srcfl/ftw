@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # FTW one-shot installer.
 #
-# Designed for a freshly-installed Raspberry Pi OS (arm64) but works on
-# any Debian/Ubuntu-flavoured Linux with curl + sudo.
+# Designed for a fresh Raspberry Pi OS (arm64) host but works on any
+# Debian/Ubuntu-flavoured Linux with curl + sudo. Existing installations use
+# scripts/migrate-legacy-compose.sh instead.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
@@ -11,13 +12,10 @@
 #   1. Installs Docker Engine + the `docker compose` plugin via
 #      get.docker.com (skipped if Docker is already present).
 #   2. Adds your user to the `docker` group.
-#   3. Reuses an existing FTW/legacy install, or creates ~/ftw, with data/
-#      in-container ftw user (uid 100 / gid 101).
+#   3. Creates ~/ftw with data/ owned by the in-container ftw user
+#      (uid 100 / gid 101).
 #   4. Fetches docker-compose.yml from the repo.
 #   5. Pulls the multi-arch image from GHCR and starts the container.
-#
-# Safe to re-run — every step is idempotent, and `docker compose up -d`
-# picks up config changes without destroying the state volume.
 #
 # Override via env vars (optional):
 #   FTW_DIR=/srv/ftw       # explicit install location
@@ -30,14 +28,17 @@ REPO="srcfl/ftw"
 BRANCH="${FTW_BRANCH:-master}"
 if [ -n "${FTW_DIR:-}" ]; then
   INSTALL_DIR="$FTW_DIR"
+elif [ -f "$HOME/ftw/docker-compose.yml" ]; then
+  INSTALL_DIR="$HOME/ftw"
+elif [ -f "$HOME/forty-two-watts/docker-compose.yml" ]; then
+  INSTALL_DIR="$HOME/forty-two-watts"
 elif [ -d "$HOME/ftw" ]; then
   INSTALL_DIR="$HOME/ftw"
-elif [ -d "$HOME/forty-two-watts" ]; then
-  INSTALL_DIR="$HOME/forty-two-watts"
 else
   INSTALL_DIR="$HOME/ftw"
 fi
 COMPOSE_URL="${FTW_COMPOSE_URL:-https://raw.githubusercontent.com/${REPO}/${BRANCH}/docker-compose.yml}"
+MIGRATION_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/migrate-legacy-compose.sh"
 
 # Banner
 cat <<'BANNER'
@@ -67,6 +68,20 @@ On macOS, install Docker Desktop and use docker-compose.macos.yml:
 Full walkthrough: docs/deploy-platforms.md
 EOF
   exit 1
+fi
+
+if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
+  cat >&2 <<EOF
+An existing FTW Docker Compose installation was found at:
+  $INSTALL_DIR
+
+The fresh installer will not overwrite it. Run the rollback-safe migration:
+
+  curl -fsSL $MIGRATION_URL -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh --dir "$INSTALL_DIR"
+
+Guide: https://github.com/srcfl/ftw/blob/$BRANCH/docs/upgrade-from-legacy.md
+EOF
+  exit 2
 fi
 
 # ---- Prerequisites ----
@@ -143,26 +158,7 @@ $SUDO chown -R 100:101 "$INSTALL_DIR/data"
 echo ""
 echo "==[4/5]== Preparing docker-compose.yml from $BRANCH"
 COMPOSE_PATH="$INSTALL_DIR/docker-compose.yml"
-if [ -f "$COMPOSE_PATH" ]; then
-  # Existing deployments keep their service, project, bind path, and image
-  # namespace. The updater supports both layouts and legacy images remain
-  # published during the compatibility window.
-  SERVICES="$($SUDO docker compose -f "$COMPOSE_PATH" config --services)"
-  MAIN_COUNT="$(printf '%s\n' "$SERVICES" | grep -Ec '^(ftw|forty-two-watts)$' || true)"
-  if [ "$MAIN_COUNT" -ne 1 ]; then
-    echo "ERROR: existing compose must contain exactly one ftw/forty-two-watts service; leaving it untouched." >&2
-    exit 1
-  fi
-  MAIN_SERVICE="$(printf '%s\n' "$SERVICES" | grep -E '^(ftw|forty-two-watts)$')"
-  if ! $SUDO docker compose -f "$COMPOSE_PATH" config "$MAIN_SERVICE" | grep -q '/app/data'; then
-    echo "ERROR: existing main service has no visible /app/data mount; leaving it untouched." >&2
-    exit 1
-  fi
-  cp "$COMPOSE_PATH" "$COMPOSE_PATH.pre-ftw.bak"
-  echo "    Existing safe deployment layout retained (backup: docker-compose.yml.pre-ftw.bak)."
-else
-  curl -fsSL "$COMPOSE_URL" -o "$COMPOSE_PATH"
-fi
+curl -fsSL "$COMPOSE_URL" -o "$COMPOSE_PATH"
 
 # ---- 5. Pull + start ----
 # Run Docker as the invoking user when its current shell already has access.

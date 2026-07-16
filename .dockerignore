@@ -6,6 +6,8 @@
 
 !Dockerfile
 !.dockerignore
+!LICENSE
+!NOTICE
 !go/
 !drivers/
 !web/
