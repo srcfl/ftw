@@ -1992,7 +1992,11 @@ func main() {
 	}
 
 	// ---- Background: Parquet rolloff (>14d → cold dir) ----
-	go rolloffLoop(ctx, st, coldDir)
+	coldRetentionDays := 0
+	if cfg.State != nil {
+		coldRetentionDays = cfg.State.ColdRetentionDays
+	}
+	go rolloffLoop(ctx, st, coldDir, coldRetentionDays)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -2408,18 +2412,17 @@ func main() {
 				}
 			}
 
-			// ---- Record history snapshot ----
-			recordHistory(st, tel, ctrl, nowMs)
-
-			// ---- Flush per-driver metrics into long-format TS DB ----
-			if samples := tel.FlushSamples(); len(samples) > 0 {
-				stSamples := make([]state.Sample, len(samples))
-				for i, sm := range samples {
-					stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
-				}
-				if err := st.RecordSamples(stSamples); err != nil {
-					slog.Warn("ts samples flush failed", "n", len(samples), "err", err)
-				}
+			// ---- Persist the tick: history snapshot + flushed metrics ----
+			// One transaction for both — separate commits doubled the WAL
+			// commit rate for no isolation benefit (SD-card wear).
+			hp := buildHistoryPoint(tel, ctrl, nowMs)
+			samples := tel.FlushSamples()
+			stSamples := make([]state.Sample, len(samples))
+			for i, sm := range samples {
+				stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
+			}
+			if err := st.RecordTick(hp, stSamples); err != nil {
+				slog.Warn("tick persistence failed", "samples", len(samples), "err", err)
 			}
 
 			// ---- Periodic battery-model persistence (every 12 cycles ≈ 60s) ----
@@ -2473,17 +2476,46 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 // rolloffLoop runs the SQLite → Parquet roll-off once per hour. Cheap when
 // nothing is due (a single SELECT returns 0 rows); only does real work once
 // data crosses the 14-day boundary into cold storage.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string) {
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
+	var lastDiskWarn time.Time
+	run := func() {
+		doRolloff(ctx, st, coldDir)
+
+		// The bulk DELETEs above just generated a WAL burst; reclaim it now
+		// instead of letting the -wal file ratchet upward on the SD card.
+		st.CheckpointWAL()
+
+		if removed, err := state.PruneColdParquet(coldDir, coldRetentionDays, time.Now()); err != nil {
+			slog.Warn("cold parquet retention prune failed", "err", err)
+		} else if len(removed) > 0 {
+			slog.Info("cold parquet retention", "removed_files", len(removed), "retention_days", coldRetentionDays)
+		}
+
+		// Disk watch: an SD card that fills up takes SQLite down with it.
+		// Warn loudly (log + event feed) at most once per day.
+		if avail, err := state.DiskAvail(coldDir); err == nil {
+			const lowWater = 500 << 20 // 500 MB
+			if avail < lowWater && time.Since(lastDiskWarn) > 24*time.Hour {
+				lastDiskWarn = time.Now()
+				slog.Error("disk space low — history rolloff and SQLite writes are at risk",
+					"avail_mb", avail>>20)
+				if err := st.RecordEvent(fmt.Sprintf(
+					"disk space low: %d MB available — consider state.cold_retention_days", avail>>20)); err != nil {
+					slog.Warn("record disk-low event failed", "err", err)
+				}
+			}
+		}
+	}
 	// Run once at startup so a fresh boot catches any backlog.
-	doRolloff(ctx, st, coldDir)
+	run()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			doRolloff(ctx, st, coldDir)
+			run()
 		}
 	}
 }
@@ -3134,7 +3166,7 @@ func isConfigMissing(err error) bool {
 	return strings.Contains(err.Error(), "no such file")
 }
 
-func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64) {
+func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) state.HistoryPoint {
 	gridW := 0.0
 	if r := tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
 		gridW = r.SmoothedW
@@ -3208,11 +3240,9 @@ func recordHistory(st *state.Store, tel *telemetry.Store, ctrl *control.State, n
 		"v2x_w":        v2xW,
 		"load_house_w": loadW,
 	})
-	if err := st.RecordHistory(state.HistoryPoint{
+	return state.HistoryPoint{
 		TsMs: nowMs, GridW: gridW, PVW: pvW, BatW: batW, LoadW: loadW, BatSoC: avgSoC,
 		JSON: string(jsonBlob),
-	}); err != nil {
-		slog.Warn("failed to persist history point", "err", err)
 	}
 }
 

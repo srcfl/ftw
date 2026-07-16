@@ -232,12 +232,19 @@ Persistent state uses SQLite:
 state:
   path: state.db
   cold_dir: cold
+  cold_retention_days: 0 # 0 = keep cold Parquet forever (default)
 ```
 
 The SQLite DB stores config overrides, events, device identities, battery
 models, price/weather state, recent history, and long-format time-series
 samples. Samples older than the recent retention window are rolled off to
 Parquet under `cold_dir`.
+
+`cold_retention_days` bounds the cold Parquet tier: day files older than
+this are deleted by the hourly rolloff. The default `0` keeps everything —
+a year of ~50 metrics is a few GB, so bounding is opt-in for small SD
+cards. The rolloff loop also warns (log + event feed, at most daily) when
+free disk drops below 500 MB.
 
 Changing `state.path` or `state.cold_dir` requires restart.
 

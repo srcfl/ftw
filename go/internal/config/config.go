@@ -843,9 +843,15 @@ type HomeAssistant struct {
 // Path is the SQLite file (default "state.db"). ColdDir is the directory
 // where >14d-old time-series data is rolled off as Parquet, partitioned
 // YYYY/MM/DD.parquet (default "cold/" alongside Path).
+//
+// ColdRetentionDays bounds the cold Parquet tier: day files older than
+// this are deleted by the hourly rolloff. 0 (default) keeps everything —
+// a year of ~50 metrics is a few GB, so bounding is opt-in for small
+// SD cards.
 type StateConf struct {
-	Path    string `yaml:"path" json:"path"`
-	ColdDir string `yaml:"cold_dir" json:"cold_dir"`
+	Path              string `yaml:"path" json:"path"`
+	ColdDir           string `yaml:"cold_dir" json:"cold_dir"`
+	ColdRetentionDays int    `yaml:"cold_retention_days,omitempty" json:"cold_retention_days,omitempty"`
 }
 
 // Price is the spot-price source config.
@@ -1363,6 +1369,9 @@ func applyDefaults(c *Config) {
 
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
+	if c.State != nil && c.State.ColdRetentionDays < 0 {
+		return fmt.Errorf("state.cold_retention_days must be >= 0, got %d", c.State.ColdRetentionDays)
+	}
 	if c.EVCharger != nil {
 		c.EVCharger.Normalize()
 		if err := c.EVCharger.Validate(); err != nil {

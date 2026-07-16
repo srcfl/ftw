@@ -203,6 +203,60 @@ func (s *Store) RecordSamples(samples []Sample) error {
 	return tx.Commit()
 }
 
+// RecordTick persists one control-loop tick — the history snapshot plus the
+// flushed metric samples — in a single transaction. The loop used to commit
+// these separately, doubling the WAL commit rate (~90k commits/day at a 2 s
+// tick) for no isolation benefit. Same deadlock note as RecordSamples:
+// intern IDs are pre-resolved before the tx opens.
+func (s *Store) RecordTick(p HistoryPoint, samples []Sample) error {
+	if err := s.hydrateIntern(); err != nil {
+		return err
+	}
+	type resolved struct {
+		dID, mID int64
+		ts       int64
+		v        float64
+	}
+	rs := make([]resolved, 0, len(samples))
+	for _, sm := range samples {
+		dID, err := s.driverID(sm.Driver)
+		if err != nil {
+			return fmt.Errorf("driver intern %s: %w", sm.Driver, err)
+		}
+		mID, err := s.metricID(sm.Metric, sm.Unit)
+		if err != nil {
+			return fmt.Errorf("metric intern %s: %w", sm.Metric, err)
+		}
+		rs = append(rs, resolved{dID: dID, mID: mID, ts: sm.TsMs, v: sm.Value})
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
+	); err != nil {
+		return err
+	}
+	if len(rs) > 0 {
+		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for _, r := range rs {
+			if _, err := stmt.Exec(r.dID, r.mID, r.ts, r.v); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
 // LoadSeries returns one metric's history for one driver in [sinceMs, untilMs].
 // Result is sorted ascending by ts_ms. maxPoints=0 means every raw sample;
 // otherwise samples are bucket-averaged in SQL down to at most maxPoints rows
