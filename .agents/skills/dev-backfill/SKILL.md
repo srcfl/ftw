@@ -1,6 +1,6 @@
 ---
 name: dev-backfill
-description: Seed a local forty-two-watts state.db with synthetic history so the dashboard has something to render during UI / perf work. Use when the user says "backfill history", "seed the dev DB", "fill /api/energy/daily with test data", or "I need fake days to look at". Do NOT invoke against production data — the tool has a safety gate, respect it.
+description: Seed a local FTW state.db with synthetic history so the dashboard has something to render during UI / perf work. Use when the user says "backfill history", "seed the dev DB", "fill /api/energy/daily with test data", or "I need fake days to look at". Do NOT invoke against production data — the tool has a safety gate, respect it.
 ---
 
 # dev-backfill — seed synthetic history into a local state.db
@@ -15,12 +15,12 @@ events. Output looks plausibly like real telemetry without being real.
 
 ## Invocation — it's baked into the main binary
 
-The generator ships inside `forty-two-watts` itself, not a separate
+The generator ships inside `ftw` itself, not a separate
 command. There is NO `go/cmd/backfill-history` binary.
 
 ```bash
 # one-shot: seed 30 days at 5s resolution, then exit.
-./forty-two-watts -config ./config.local.yaml -backfill 30
+./ftw -config ./config.local.yaml -backfill 30
 ```
 
 Flags:
@@ -56,18 +56,17 @@ that contains a mixture of real and synthetic rows.
 
 ```bash
 # from repo root, with the local dev config pointing to dev-data/state.db:
-wsl -e bash -lc 'cd /mnt/c/code/forty-two-watts/go && \
-  go build -o /tmp/ftw-dev ./cmd/forty-two-watts'
+cd go
+go build -o /tmp/ftw-dev ./cmd/ftw
 
 # seed 30 days (default step = 5s) — exits after seeding.
-wsl -e bash -lc 'cd /mnt/c/code/forty-two-watts/dev-data && \
-  /tmp/ftw-dev -config ./config.local.yaml -backfill 30'
+cd ../dev-data
+/tmp/ftw-dev -config ../config.local.yaml -backfill 30
 
 # then start the service normally (no -backfill flag).
-wsl -e bash -lc 'cd /mnt/c/code/forty-two-watts/dev-data && \
-  /tmp/ftw-dev -config ./config.local.yaml \
-    -web /mnt/c/code/forty-two-watts/web \
-    -drivers /mnt/c/code/forty-two-watts/drivers'
+/tmp/ftw-dev -config ../config.local.yaml \
+  -web ../web \
+  -drivers ../drivers
 ```
 
 Open http://localhost:8080, the history cards will have 30 days of bars.
@@ -96,7 +95,7 @@ rm -f dev-data/state.db dev-data/state.db-wal dev-data/state.db-shm
 ## Underlying source
 
 - Generator: `go/internal/devtools/backfill.go`
-- CLI wiring: `go/cmd/forty-two-watts/main.go` (flags + one-shot dispatch)
+- CLI wiring: `go/cmd/ftw/main.go` (flags + one-shot dispatch)
 - Safety-gate query: `(*state.Store).CountNonSyntheticHistory` in
   `go/internal/state/store.go`
 - Marker: JSON string literal `{"source":"backfill"}` stored in the

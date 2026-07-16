@@ -79,6 +79,7 @@ COPY --from=optimizer /opt/venv          /opt/venv
 COPY optimizer/                          /app/optimizer/
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
+COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update && \

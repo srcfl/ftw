@@ -169,7 +169,7 @@ release: build-arm64 build-amd64 build-windows-amd64
 		cp "bin/ftw-pair-linux-$$arch"        "$$stage/ftw-pair"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
 			-C "$$stage" ftw forty-two-watts ftw-pair \
-			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml; \
+			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
@@ -183,7 +183,7 @@ release: build-arm64 build-amd64 build-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe forty-two-watts.exe
-	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd release && for f in \
 		ftw-linux-arm64.tar.gz forty-two-watts-linux-arm64.tar.gz \
@@ -196,6 +196,11 @@ release: build-arm64 build-amd64 build-windows-amd64
 
 # ---- Dev workflow ----
 
+config.local.yaml: config.local.example.yaml
+	@cp config.local.example.yaml config.local.yaml
+	@mkdir -p dev-data
+	@echo "Created config.local.yaml from the simulator template."
+
 run-sim:
 	@echo "Starting simulators (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
@@ -203,7 +208,8 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	wait
 
-dev: optimizer/.venv/bin/pytest
+dev: optimizer/.venv/bin/pytest config.local.yaml
+	@mkdir -p dev-data
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
 	(cd go && go run ./cmd/sim-ferroamp) & \

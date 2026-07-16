@@ -1,8 +1,8 @@
 # FTW rebrand and Sourceful migration
 
-- **Status:** In implementation; publishing and external cutover gates remain manual
-- **Current repository:** `frahlg/forty-two-watts`
-- **Canonical repository after cutover:** `srcfl/ftw`
+- **Status:** Programme A repository/distribution cutover completed 2026-07-16; first post-transfer release and Programme B infrastructure remain pending
+- **Canonical repository:** `srcfl/ftw`
+- **Former repository:** `frahlg/forty-two-watts` (GitHub redirect retained)
 - **Website repository:** `frahlg/forty-two-watts-web` → `srcfl/ftw-web`
 - **Canonical project name:** **FTW**
 - **License:** Apache License 2.0

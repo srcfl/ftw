@@ -230,6 +230,15 @@ func (s *Server) handleVersionSnapshotDelete(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
+	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	if !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	defer s.versionUpdateMu.Unlock()
 	if s.deps.SnapshotDir == "" {
 		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
 		return

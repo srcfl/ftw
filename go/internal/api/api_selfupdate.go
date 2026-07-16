@@ -338,7 +338,7 @@ func (s *Server) handleVersionRestart(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleVersionUpdateStatus passes through the sidecar's state.json. The
-// shared tmpfs volume makes this survive the main container being recreated:
+// shared Docker volume makes this survive the main container being recreated:
 // the new container reads the same file written by the (still-running)
 // sidecar and serves the last transition (pulling → restarting → done) to
 // the UI which is still polling from the browser.

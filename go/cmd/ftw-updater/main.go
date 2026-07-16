@@ -3,7 +3,7 @@
 //
 // It runs in its own container with the Docker socket mounted in and a
 // read-only bind to docker-compose.yml, and listens on a Unix socket shared
-// with the main container via a tmpfs volume. The main container never
+// with the main container via a shared Docker volume. The main container never
 // touches the Docker socket itself — all destructive actions cross this
 // one-way boundary.
 //
@@ -36,6 +36,7 @@ import (
 const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
+	canonicalMainImage       = "ghcr.io/srcfl/ftw"
 )
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
@@ -59,8 +60,13 @@ type server struct {
 	// sees the same merged config the user sees when running compose by
 	// hand from the project dir.
 	overrideFiles []string
-	statusPath    string
-	stateMu       sync.Mutex
+	// updateOverrideFile is a short-lived, updater-owned Compose override
+	// appended after the host's files when an older deployment hard-codes its
+	// main image. It lets immutable updates migrate safely without modifying
+	// the read-only host Compose file or changing its service/data layout.
+	updateOverrideFile string
+	statusPath         string
+	stateMu            sync.Mutex
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
 	// becomes a no-op. Needed for local smoke tests where the image lives
 	// only on the dev machine (`docker compose pull` would fail, or worse,
@@ -99,7 +105,18 @@ func (s *server) composeArgs(sub ...string) []string {
 	for _, o := range s.overrideFiles {
 		out = append(out, "-f", o)
 	}
+	if s.updateOverrideFile != "" {
+		out = append(out, "-f", s.updateOverrideFile)
+	}
 	return append(out, sub...)
+}
+
+func (s *server) composeFiles() []string {
+	files := append([]string{s.composeFile}, s.overrideFiles...)
+	if s.updateOverrideFile != "" {
+		files = append(files, s.updateOverrideFile)
+	}
+	return files
 }
 
 // discoverOverrides looks for the standard override filenames in the same
@@ -190,7 +207,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("ftw-updater starting", "socket", *socket, "status", *statusPath, "compose", *compose)
 
-	// Guarantee the shared status/socket dir exists even if the tmpfs mount
+	// Guarantee the shared status/socket dir exists even if the volume mount
 	// is empty. It must be writable by the non-root main container too,
 	// because the main service publishes early states while it captures the
 	// pre-update snapshot.
@@ -244,7 +261,7 @@ func main() {
 		slog.Error("listen unix", "err", err)
 		os.Exit(1)
 	}
-	// Socket is in a shared tmpfs volume; restrict to world-rw so the main
+	// Socket is in a shared Docker volume; restrict to world-rw so the main
 	// container (ftw uid=100) can connect without caring about ownership.
 	if err := os.Chmod(*socket, 0o666); err != nil {
 		slog.Warn("chmod socket", "err", err)
@@ -363,7 +380,15 @@ func (s *server) runJob(action, target string) {
 	if target != "" {
 		env = []string{"FTW_IMAGE_TAG=" + target}
 	}
-	if action == "update" {
+	if action == "update" || action == "restart" {
+		cleanup, err := s.prepareUpdateImagePin()
+		if err != nil {
+			msg := "compose preflight failed: " + err.Error()
+			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
+			slog.Error("compose preflight failed", "err", err)
+			return
+		}
+		defer cleanup()
 		if err := s.validateComposeImagePin(); err != nil {
 			msg := "compose preflight failed: " + err.Error()
 			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
@@ -460,7 +485,7 @@ func (s *server) runJob(action, target string) {
 }
 
 func (s *server) restorePreviousImage(imageID string) error {
-	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), s.mainServiceName)
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
 	if err != nil {
 		return err
 	}
@@ -490,6 +515,77 @@ func (s *server) restorePreviousImage(imageID string) error {
 	return nil
 }
 
+// prepareUpdateImagePin makes old Compose layouts safe for immutable updates.
+// Older and developer installations often hard-code an image tag, so merely
+// exporting FTW_IMAGE_TAG would leave the running service on the old digest.
+// The project directory is deliberately mounted read-only in the updater;
+// instead of rewriting user configuration, add a generated override last in
+// the Compose file chain for this update only. Compose keeps the original
+// project, service, volumes, networking, and every other user setting.
+func (s *server) prepareUpdateImagePin() (func(), error) {
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
+	if err != nil {
+		return func() {}, err
+	}
+	if !ok {
+		return func() {}, fmt.Errorf("service %q is missing an image entry in compose files", s.mainServiceName)
+	}
+	if strings.Contains(image, "FTW_IMAGE_TAG") {
+		return func() {}, nil
+	}
+
+	type imageService struct {
+		Image string `yaml:"image"`
+	}
+	doc := struct {
+		Services map[string]imageService `yaml:"services"`
+	}{
+		Services: map[string]imageService{
+			s.mainServiceName: {Image: canonicalMainImage + ":${FTW_IMAGE_TAG:-latest}"},
+		},
+	}
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		return func() {}, fmt.Errorf("build compatibility override: %w", err)
+	}
+
+	// Keep the override on the updater's private container filesystem. The
+	// shared status directory must be writable by the unprivileged main
+	// container; placing Compose input there would create an unlink/replace
+	// race across the Docker-socket trust boundary.
+	f, err := os.CreateTemp("", "ftw-compose-update-*.yml")
+	if err != nil {
+		return func() {}, fmt.Errorf("write compatibility override: %w", err)
+	}
+	path := f.Name()
+	removeOnError := func() {
+		_ = f.Close()
+		_ = os.Remove(path)
+	}
+	if _, err := f.Write(data); err != nil {
+		removeOnError()
+		return func() {}, fmt.Errorf("write compatibility override: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		removeOnError()
+		return func() {}, fmt.Errorf("sync compatibility override: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return func() {}, fmt.Errorf("close compatibility override: %w", err)
+	}
+	s.updateOverrideFile = path
+	slog.Warn("using transient canonical image override for legacy compose", "service", s.mainServiceName, "previous_image", image)
+
+	cleanup := func() {
+		s.updateOverrideFile = ""
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("remove compatibility override", "path", path, "err", err)
+		}
+	}
+	return cleanup, nil
+}
+
 func composeImageRepository(image string) (string, error) {
 	if i := strings.Index(image, ":${FTW_IMAGE_TAG"); i > 0 {
 		return image[:i], nil
@@ -502,7 +598,7 @@ func composeImageRepository(image string) (string, error) {
 // read, so the sidecar can report "done" while the main service stays on the
 // previous image.
 func (s *server) validateComposeImagePin() error {
-	image, ok, err := serviceImageFromComposeFiles(append([]string{s.composeFile}, s.overrideFiles...), s.mainServiceName)
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
 	if err != nil {
 		return err
 	}
@@ -510,7 +606,7 @@ func (s *server) validateComposeImagePin() error {
 		return fmt.Errorf("service %q is missing an image entry in compose files", s.mainServiceName)
 	}
 	if !strings.Contains(image, "FTW_IMAGE_TAG") {
-		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG; update docker-compose.yml from the latest install script", s.mainServiceName, image)
+		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG", s.mainServiceName, image)
 	}
 	return nil
 }
@@ -590,10 +686,54 @@ func (s *server) runRollback(snapshotID string, files []string) {
 		return
 	}
 
+	// A state rollback must not silently change the application version. Pin
+	// the exact image object that backs the running container to a temporary
+	// tag, then use that tag for the recreate below. This also makes rollback
+	// safe for legacy Compose files that hard-code an obsolete local tag.
+	cleanup, err := s.prepareUpdateImagePin()
+	if err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error()})
+		return
+	}
+	defer cleanup()
+	if err := s.validateComposeImagePin(); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error()})
+		return
+	}
+	if s.imageID == nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: image inspection unavailable"})
+		return
+	}
+	imageID, err := s.imageID(ctx, s.mainServiceName)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
+		return
+	}
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
+	if err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("service %q has no image", s.mainServiceName)
+		}
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
+		return
+	}
+	repository, err := composeImageRepository(image)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
+		return
+	}
+	rollbackTag := fmt.Sprintf("ftw-state-rollback-%d", time.Now().UnixNano())
+	rollbackRef := repository + ":" + rollbackTag
+	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
+		return
+	}
+	env := []string{"FTW_IMAGE_TAG=" + rollbackTag}
+
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
 	stopArgs := s.composeArgs("stop", s.mainServiceName)
-	if err := s.runner(ctx, nil, stopArgs...); err != nil {
+	if err := s.runner(ctx, env, stopArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose stop failed: " + err.Error()})
 		return
 	}
@@ -621,7 +761,7 @@ func (s *server) runRollback(snapshotID string, files []string) {
 			// service back anyway so the operator isn't stranded.
 			slog.Error("rollback docker cp failed", "file", f, "err", err)
 			s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "docker cp " + f + " failed: " + err.Error()})
-			_ = s.runner(ctx, nil, s.composeArgs("up", "-d", s.mainServiceName)...)
+			_ = s.runner(ctx, env, s.composeArgs("up", "-d", s.mainServiceName)...)
 			return
 		}
 	}
@@ -631,10 +771,15 @@ func (s *server) runRollback(snapshotID string, files []string) {
 	// restart flow).
 	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
 	upArgs := s.composeArgs("up", "-d", "--force-recreate", s.mainServiceName)
-	if err := s.runner(ctx, nil, upArgs...); err != nil {
+	if err := s.runner(ctx, env, upArgs...); err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d failed: " + err.Error()})
 		return
 	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := s.runner(cleanupCtx, nil, "image", "rm", rollbackRef); err != nil {
+		slog.Warn("rollback: remove temporary image tag", "image", rollbackRef, "err", err)
+	}
+	cleanupCancel()
 	s.writeState(State{State: "done", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "rollback complete"})
 }
 

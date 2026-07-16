@@ -1,7 +1,7 @@
 # Nova Core federation (opt-in)
 
 FTW can federate its telemetry into [Sourceful Nova
-Core](https://github.com/srcful/srcful-novacore) — the central backend
+Core](https://github.com/srcfl/srcful-novacore) — the central backend
 the ZAP gateway fleet reports into. Federation is strictly opt-in: when
 disabled (default), FTW ships no data off-site.
 

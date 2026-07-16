@@ -67,7 +67,7 @@ Calendar**.
    account** panel that appears — copy the username + password, or scan the QR
    to get the subscribe URL onto your phone — and add a CalDAV account in your
    calendar app pointing at the shown URL, e.g.
-   `http://<host-ip>:5232/fortytwowatts/energy/` (the tab rewrites `localhost`
+   `http://<host-ip>:5232/ftw/energy/` (the tab rewrites `localhost`
    to the dashboard's host for you).
 
 That's the whole flow.
@@ -99,7 +99,7 @@ while the rest of the series is unchanged.
 ## EVSE history (outbound)
 
 When an EV charge session ends, FTW writes a VEVENT into a **separate**
-collection (`history_path`, default `/fortytwowatts/history/`) — e.g.
+collection (`history_path`, fresh-install default `/ftw/history/`) — e.g.
 `EV charged 12.3 kWh`, spanning the charge window. The history collection is
 deliberately distinct from the intent calendar so FTW never re-reads its own
 events as intents. Subscribe to it read-only. Disable with `evse_history:
@@ -108,7 +108,7 @@ false`.
 ## Plan publishing (outbound, forward-looking)
 
 FTW also publishes the planner's **upcoming** decisions as a read-only calendar
-you can subscribe to (`plan_path`, default `/fortytwowatts/plan/`). On each
+you can subscribe to (`plan_path`, fresh-install default `/ftw/plan/`). On each
 publish it coalesces the MPC plan into charge/discharge windows — e.g.
 `Charge battery ~3.2 kW` from 02:00–05:00 — marked `TENTATIVE` (it's a plan,
 not a commitment).

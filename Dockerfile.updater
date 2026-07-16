@@ -1,6 +1,6 @@
 # ftw-updater sidecar — the one process allowed to touch the Docker socket.
 #
-# It listens on a Unix socket in a shared tmpfs volume, accepts signals
+# It listens on a Unix socket in a shared Docker volume, accepts signals
 # from the main FTW container, and updates the in-use Compose service in place
 # through the host's Docker daemon. See docs/self-update.md.
 #
@@ -35,6 +35,7 @@ FROM docker:27-cli
 
 # Compose pull hits GHCR over TLS; docker:cli already bundles ca-certs.
 COPY --from=builder /out/ftw-updater /usr/local/bin/ftw-updater
+COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 # The sidecar runs as root so it can talk to /var/run/docker.sock. The
 # docker socket is the only privileged resource it touches — it has no

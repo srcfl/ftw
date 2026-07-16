@@ -117,4 +117,28 @@ if [ -s "${UNCLASSIFIED}" ]; then
   exit 1
 fi
 
+# Operational skills are copied for both Codex and Claude. Unlike prose, stale
+# commands here can be executed against a real host, so do not grandfather
+# removed command paths and keep the two tool surfaces byte-identical.
+if ! diff -ru "${ROOT}/.agents/skills" "${ROOT}/.claude/skills" >/dev/null; then
+  echo "operational skill copies under .agents/skills and .claude/skills differ" >&2
+  diff -ru "${ROOT}/.agents/skills" "${ROOT}/.claude/skills" >&2 || true
+  exit 1
+fi
+
+if rg --no-heading --line-number '(?:\./cmd/forty-two-watts|go/cmd/forty-two-watts)' \
+  "${ROOT}/.agents/skills" "${ROOT}/.claude/skills"; then
+  echo "operational skills reference the removed Go command path" >&2
+  exit 1
+fi
+
+rg -q '\./cmd/ftw' "${ROOT}/.agents/skills/dev-backfill/SKILL.md" || {
+  echo "dev-backfill skill is missing the canonical ./cmd/ftw build path" >&2
+  exit 1
+}
+rg -q 'ghcr\.io/srcfl/ftw' "${ROOT}/.agents/skills/switching-ftw-deploy-mode/SKILL.md" || {
+  echo "deploy-mode skill is missing the canonical Sourceful image" >&2
+  exit 1
+}
+
 echo "brand cleanup check passed: no unclassified active legacy-product copy"

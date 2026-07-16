@@ -2,6 +2,8 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
+> **Alternativ manuell väg:** den rekommenderade installationen använder den färdiga FTW-imagen och Raspberry Pi Imager-katalogen i [`../rpi-image.md`](../rpi-image.md). Fortsätt här bara om du uttryckligen vill köra generell Raspberry Pi OS + Docker.
+
 > **Ingen Raspberry Pi?** Du kan lika gärna köra FTW på en NUC, en gammal bärbar, eller annan hårdvara du har liggande — så länge den kan köra Docker. Den här guiden fokuserar på att komma igång med en Raspberry Pi; är du på en annan burk kan du skumma hårdvarustegen och gå direkt till **Steg 11 — Installera FTW** (installationsskriptet förutsätter Debian eller Ubuntu).
 
 ## Vad du behöver
@@ -60,7 +62,7 @@ Klicka på **Next**. Programmet frågar om du vill anpassa inställningar — sv
 
 Fyll i så här:
 
-- **Hostname:** `fortytwo`
+- **Hostname:** `ftw`
 - **Localization:** **Sweden / SE**
 - **Användarnamn:** t.ex. `pi`
 - **Lösenord:** välj något du kommer ihåg, men inte "1234"
@@ -83,7 +85,7 @@ Klicka på knappen som skriver allt till minneskortet. Vänta tills det är fär
 
 Din Raspberry Pi har fått en **IP-adress** på ditt hemnätverk.
 
-Logga in på din router. Titta under "anslutna enheter". Leta efter något som heter **fortytwo**.
+Logga in på din router. Titta under "anslutna enheter". Leta efter något som heter **ftw**.
 
 Skriv ner IP-adressen. Den ser ut som **192.168.1.xxx**.
 
@@ -131,7 +133,7 @@ Skriv in ditt lösenord en gång till. Nu installeras allt. Det tar några minut
 Öppna webbläsaren på din vanliga dator och gå till webb-gränssnittet:
 
 ```
-http://fortytwo:8080/
+http://ftw.local:8080/
 ```
 
 Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192.168.1.123:8080/`.
@@ -143,4 +145,4 @@ Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192
 - **Lampan lyser inte alls** → kolla att strömadaptern sitter i.
 - **Hittar ingen IP-adress** → starta om routern, vänta 5 minuter, titta igen.
 - **SSH säger "Connection refused"** → vänta lite till. Första uppstarten tar tid.
-- **Det hjälper inte** → kika in på vår Discord och fråga snällt om hjälp: **https://discord.gg/7Ewr45rd**
+- **Det hjälper inte** → kika in på vår Discord och fråga snällt om hjälp: **https://discord.gg/25xcBzQaux**

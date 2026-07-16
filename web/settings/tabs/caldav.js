@@ -121,13 +121,18 @@
         '<div class="field-row"><div>' +
         field("Server URL", "caldav.url", "text", "http://localhost:5232", "Base URL of the CalDAV server. Defaults to FTW's built-in in-process server.") +
         "</div><div>" +
-        field("Calendar path", "caldav.calendar_path", "text", "/fortytwowatts/energy/", "Collection FTW reads events from.") +
+        field("Calendar path", "caldav.calendar_path", "text", "/ftw/energy/", "Collection FTW reads events from.") +
         "</div></div>" +
-        field("Username", "caldav.username", "text", "fortytwowatts");
+        field("Username", "caldav.username", "text", "ftw");
       if (!managed) {
         html += field("Password", "caldav.password", "password", "", "Only used when FTW is not managing the password.");
       }
       html +=
+        '<div class="field-row"><div>' +
+        field("History path", "caldav.history_path", "text", "/ftw/history/", "Read-only EV charging history collection.") +
+        "</div><div>" +
+        field("Plan path", "caldav.plan_path", "text", "/ftw/plan/", "Read-only planned energy windows collection.") +
+        "</div></div>" +
         '<div class="field-row"><div>' +
         field("Poll interval (s)", "caldav.poll_interval_s", "number", 300) +
         "</div><div>" +

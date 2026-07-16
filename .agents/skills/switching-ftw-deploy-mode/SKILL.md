@@ -1,96 +1,126 @@
 ---
 name: switching-ftw-deploy-mode
-description: Use when the user wants to flip a forty-two-watts host between the official-image deploy and the dev-binary deploy, either direction. Triggers include "switch to the binary", "switch to docker", "run the raw binary on the pi", "reset my instance to the official version", "put my instance back on latest", "stop the binary, reload with docker-compose".
+description: Use when the user wants to flip an FTW host between the official container image and a host-built development binary, in either direction. Detect and preserve legacy service, directory, and binary aliases rather than assuming them.
 ---
 
-# Switching forty-two-watts deploy mode (official ↔ dev binary)
+# Switching FTW deploy mode (official image ↔ development binary)
 
-## Overview
+## Safety contract
 
-A forty-two-watts host runs `docker compose` in both modes. The difference is a single override file:
+Both modes use the existing Compose project and the same persistent `/app/data`
+bind. Never create a second install directory, rename the Compose project, or
+copy the data directory as part of this switch. Back up an override before
+changing it, and use `docker compose up -d <main-service>` rather than
+`down`.
 
-| Mode | `docker-compose.override.yml` | Running binary |
+The canonical layout is:
+
+| Surface | Canonical | Supported legacy |
 |---|---|---|
-| **Official** | absent (or `.bak`) | `/app/forty-two-watts` baked into `ghcr.io/frahlg/forty-two-watts:latest` |
-| **Dev binary** | present | Host file (typically `~/ftw-dev/bin/forty-two-watts`) bind-mounted over `/app/forty-two-watts` |
+| Install directory | `~/ftw` | `~/forty-two-watts` |
+| Compose service | `ftw` | `forty-two-watts` |
+| Container binary | `/app/ftw` | `/app/forty-two-watts` |
+| Official image | `ghcr.io/srcfl/ftw:latest` | mirrored `ghcr.io/frahlg/forty-two-watts:latest` |
+| Dev binary | `~/ftw-dev/bin/ftw` | `~/ftw-dev/bin/forty-two-watts` |
 
-Switching = enable/disable the override, then `docker compose up -d` to recreate. The state volume (`./data`) is shared across both modes — no data migration.
+## Required input
 
-## Required inputs
+The SSH target (`user@host`) must come from the user. Do not guess or reuse a
+host from unrelated context. The default development directory is
+`~/ftw-dev`; confirm any different path before writing an override.
 
-Before running anything, confirm you have:
+## Detect the installed layout first
 
-- **SSH target** — `user@host` (e.g. `pi@10.0.0.5`). If the user didn't provide it, ask. **Do not assume or hard-code a host.**
-- **Compose directory** — default `~/forty-two-watts` on the host.
-- **Dev-binary dir** (only for dev-mode switches) — default `~/ftw-dev` on the host. The override mounts `$DEV_DIR/bin/forty-two-watts` + `$DEV_DIR/drivers` + `$DEV_DIR/web`.
-
-## Probe current state first
+Run a read-only probe:
 
 ```sh
-ssh "$HOST" "cd ~/forty-two-watts &&
-  ls docker-compose.override.yml* 2>&1 | head -5
-  docker inspect forty-two-watts --format '{{.Config.Image}} | version={{index .Config.Labels \"org.opencontainers.image.version\"}} | rev={{index .Config.Labels \"org.opencontainers.image.revision\"}}'
-  docker exec forty-two-watts /app/forty-two-watts -version 2>/dev/null || true"
+ssh "$HOST" 'set -eu
+  if [ -d "$HOME/ftw" ]; then dir="$HOME/ftw"
+  elif [ -d "$HOME/forty-two-watts" ]; then dir="$HOME/forty-two-watts"
+  else echo "no FTW Compose directory found" >&2; exit 1
+  fi
+  cd "$dir"
+  services="$(docker compose config --services)"
+  count="$(printf "%s\n" "$services" | grep -Ec "^(ftw|forty-two-watts)$" || true)"
+  [ "$count" -eq 1 ] || { echo "expected exactly one FTW main service" >&2; exit 1; }
+  service="$(printf "%s\n" "$services" | grep -E "^(ftw|forty-two-watts)$")"
+  docker compose config "$service" | grep -q "/app/data" ||
+    { echo "main service does not map persistent /app/data" >&2; exit 1; }
+  cid="$(docker compose ps -q "$service")"
+  printf "dir=%s service=%s container=%s\n" "$dir" "$service" "$cid"
+  docker inspect "$cid" --format "image={{.Config.Image}}"
+  ls -1 docker-compose.override.yml* 2>/dev/null || true'
 ```
 
-`docker-compose.override.yml` present → currently dev mode.
-`.bak` variants only → currently official mode.
+Stop if both main service names own `/app/data`, neither does, or the data bind
+is absent. Those layouts are ambiguous and must not be recreated automatically.
 
-## Switching TO official (away from dev binary)
+## Switch to the official image
+
+Disable the development override by renaming it, then pull and recreate only the
+detected main service:
 
 ```sh
-ssh "$HOST" "set -e
-  cd ~/forty-two-watts
-  # Disable override (rename, don't delete — user may want to switch back)
+ssh "$HOST" 'set -eu
+  if [ -d "$HOME/ftw" ]; then cd "$HOME/ftw"; else cd "$HOME/forty-two-watts"; fi
+  service="$(docker compose config --services | grep -E "^(ftw|forty-two-watts)$")"
   if [ -f docker-compose.override.yml ]; then
-    mv docker-compose.override.yml \"docker-compose.override.yml.bak-\$(date +%Y%m%d-%H%M%S)\"
+    mv docker-compose.override.yml "docker-compose.override.yml.dev-$(date +%Y%m%d-%H%M%S).bak"
   fi
-  docker compose pull forty-two-watts
-  docker compose up -d forty-two-watts
-  docker inspect forty-two-watts --format 'version={{index .Config.Labels \"org.opencontainers.image.version\"}} rev={{index .Config.Labels \"org.opencontainers.image.revision\"}}'"
+  docker compose pull "$service"
+  docker compose up -d "$service"
+  cid="$(docker compose ps -q "$service")"
+  docker inspect "$cid" --format "image={{.Config.Image}} version={{index .Config.Labels \"org.opencontainers.image.version\"}}"'
 ```
 
-Verify the reported `version=` matches the latest GitHub release tag.
+The effective image after removing the override must be the canonical Sourceful
+image or its published compatibility mirror. If it is still a local,
+hard-coded developer tag, stop: the base Compose file itself was customized and
+needs an explicit reviewed migration. Do not silently replace the whole file.
 
-## Switching TO dev binary (away from official)
+## Switch to a development binary
 
-Pre-flight — user must have built the binary onto the host. Confirm:
+First locate a canonical or legacy host binary and verify its architecture:
 
 ```sh
-ssh "$HOST" "ls -la ~/ftw-dev/bin/forty-two-watts && file ~/ftw-dev/bin/forty-two-watts"
+ssh "$HOST" 'set -eu
+  for bin in "$HOME/ftw-dev/bin/ftw" "$HOME/ftw-dev/bin/forty-two-watts"; do
+    if [ -x "$bin" ]; then file "$bin"; exit 0; fi
+  done
+  echo "no executable FTW dev binary found" >&2
+  exit 1'
 ```
 
-If missing or wrong arch, STOP and tell the user to run `make build-arm64` + scp. Don't improvise.
-
-Re-enable override + recreate:
+Prefer restoring the newest saved development override. It preserves the
+user's actual service name and paths:
 
 ```sh
-ssh "$HOST" "set -e
-  cd ~/forty-two-watts
-  # Restore most recent backup if present, else write a fresh one
-  latest_bak=\$(ls -1t docker-compose.override.yml.bak-* 2>/dev/null | head -1)
-  if [ -n \"\$latest_bak\" ]; then
-    cp \"\$latest_bak\" docker-compose.override.yml
-  else
-    cat > docker-compose.override.yml <<'YAML'
-services:
-  forty-two-watts:
-    volumes:
-      - /home/pi/ftw-dev/bin/forty-two-watts:/app/forty-two-watts:ro
-      - /home/pi/ftw-dev/drivers:/app/drivers:ro
-      - /home/pi/ftw-dev/web:/app/web:ro
-YAML
-  fi
-  docker compose up -d forty-two-watts"
+ssh "$HOST" 'set -eu
+  if [ -d "$HOME/ftw" ]; then cd "$HOME/ftw"; else cd "$HOME/forty-two-watts"; fi
+  service="$(docker compose config --services | grep -E "^(ftw|forty-two-watts)$")"
+  saved="$(ls -1t docker-compose.override.yml.dev-*.bak 2>/dev/null | head -n1 || true)"
+  [ -n "$saved" ] || {
+    echo "no saved dev override; review service and host paths before creating one" >&2
+    exit 1
+  }
+  cp "$saved" docker-compose.override.yml
+  docker compose up -d "$service"'
 ```
 
-Verify the running binary reports the dev build's git-describe (e.g. `v0.43.0-20-g718acab`) — check via the web UI's About/version display, `docker logs forty-two-watts | head` at startup, or `docker exec forty-two-watts /app/forty-two-watts -version` if the binary supports it.
+Only create a new override after the user confirms the detected service, host
+binary path, and container target (`/app/ftw` for canonical images,
+`/app/forty-two-watts` for a legacy image). A wrong target can leave the
+container running the bundled official binary and make the switch look
+successful when it was not.
 
-## Common mistakes
+## Verification
 
-- **Hard-coding the host.** The target host is always a user-supplied parameter. Ask if missing.
-- **Writing a fresh override with wrong paths.** If the user's dev dir isn't `/home/pi/ftw-dev`, the heredoc above is wrong — prefer restoring `.bak-*` over generating one.
-- **Skipping `docker compose pull` when switching to official.** Without it, you'll run whatever stale `:latest` is in the local cache — possibly the exact version the user is trying to move off.
-- **`docker compose down && up`.** Unnecessary churn — `up -d` alone recreates containers whose config changed.
-- **Deleting the override instead of renaming.** Losing the override loses the record of which host paths were mounted; backup-rename is cheap.
-- **Production hosts.** User memory pins this: "docker only in production". Don't switch a production host to dev-binary mode without explicit per-host confirmation.
+Verify all three independently:
+
+1. `docker compose ps <service>` reports one healthy/running container.
+2. `docker inspect <container>` shows the intended image and bind mount.
+3. The dashboard version/about field or startup log matches the intended
+   official tag or development revision.
+
+Do not treat a successful `docker compose up` alone as proof that the mounted
+binary is running.

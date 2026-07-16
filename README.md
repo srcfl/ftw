@@ -5,12 +5,21 @@
 > Local-first home energy coordination.
 
 FTW is an open-source local energy runtime for solar, batteries, grid and EV
-charging. It runs as a single Go binary on a Raspberry Pi or Linux host,
-coordinates devices through Lua drivers, and keeps the core control loop local.
+charging. Its core runs as a single Go binary on a Raspberry Pi or Linux host,
+coordinates devices through Lua drivers, and keeps the control loop local. The
+optional full mathematical optimizer uses Python/CVXPY; official containers
+include that runtime and native installs fall back safely to the Go planner when
+it is unavailable.
 
 FTW is maintained by Sourceful Labs AB and project contributors. It is a
 self-hosted open-source project, not a hosted Sourceful service; the local
 control path does not depend on Sourceful cloud services.
+
+> **Upgrading an existing Forty Two Watts installation?** Follow the
+> step-by-step [legacy upgrade guide in Swedish and English](docs/upgrade-from-legacy.md).
+> It covers the one-time updater refresh required by older Docker Compose
+> installations and preserves the existing service, directory, configuration,
+> history, and device data.
 
 The project is active and runs on real hardware, but API and config fields
 can still change before a stable 1.0 release. Version numbers come from
@@ -106,8 +115,10 @@ make test         # unit + integration tests
 make build-arm64  # cross-compile for Raspberry Pi
 ```
 
-Copy `config.example.yaml` to `config.yaml`, fill in your device
-capabilities, and open the web UI.
+The first `make dev` copies the tracked simulator template to the gitignored
+`config.local.yaml`, starts both simulators, and opens the app on port 8080.
+For real hardware, copy `config.example.yaml` to `config.yaml` and fill in your
+device capabilities instead.
 
 ## How It Works
 
@@ -137,13 +148,20 @@ touching power math.
 
 ## Remote Access
 
+> **Transition status:** local control is unaffected, but the new Sourceful
+> relay/TURN endpoints are not yet declared operational. Treat remote access as
+> unavailable unless the deployment runbook has been completed and verified;
+> this infrastructure cutover is tracked separately from the repository
+> migration.
+
 Remote access is opt-in and still keeps the home site local-first. Enable it
 from the local dashboard under **Settings -> Access**, save, and restart when
 prompted. The Pi then registers an opaque, high-entropy `site_id` with the
 public relay and publishes only the minimal information needed for a browser to
 find that Pi.
 
-The public `home.fortytwowatts.com` route works in three layers:
+Once that infrastructure has been provisioned and verified, the public
+`home.fortytwowatts.com` route works in three layers:
 
 1. The relay serves a small loader and owner-access pages from the
    `ftw-relay-web.tar.gz` release asset.
@@ -172,7 +190,7 @@ not copy the Pi dashboard `web/` directory to the relay. Deployment details:
 **Get started**
 
 - [`docs/rpi-image.md`](docs/rpi-image.md) - SD-card image and captive portal
-- [`docs/setup-guide/`](docs/setup-guide/) - first-time setup wizard
+- [`docs/setup-guide/`](docs/setup-guide/) - alternative generic Raspberry Pi OS + Docker setup
 - [`docs/configuration.md`](docs/configuration.md) - YAML config reference
 - [`docs/driver-catalog.md`](docs/driver-catalog.md) - bundled Lua drivers
 

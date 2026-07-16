@@ -155,7 +155,7 @@ jobs:
             cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
             (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe forty-two-watts.exe)
             zip -qr "release/ftw-${PLATFORM}.zip" \
-              drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+              drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
           else
             cp "bin/${BINARY}" "${STAGE}/ftw"
@@ -163,7 +163,7 @@ jobs:
             cp "bin/ftw-pair-${PLATFORM}" "${STAGE}/ftw-pair"
             tar czf "release/ftw-${PLATFORM}.tar.gz" \
               -C "${STAGE}" ftw forty-two-watts ftw-pair \
-              -C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml
+              -C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
           (
@@ -430,9 +430,21 @@ jobs:
         # self-identifying when users download it later.
         run: |
           set -euo pipefail
-          SRC="$(ls deploy/pi-gen/pi-gen/deploy/*.img.xz | head -n1)"
+          # Pick the FTW stage output specifically. A naive ls|head can select
+          # the stock *-lite image when pi-gen leaves both files behind.
+          shopt -s nullglob
+          candidates=( deploy/pi-gen/pi-gen/deploy/*ftw-rpi4-arm64.img.xz )
+          SRC=""
+          for candidate in "${candidates[@]}"; do
+            case "${candidate}" in
+              *-lite.img.xz) continue ;;
+            esac
+            SRC="${candidate}"
+            break
+          done
           if [ -z "${SRC}" ]; then
-            echo "pi-gen produced no .img.xz — check build log above" >&2
+            echo "pi-gen produced no FTW rpi4 image — check build log above" >&2
+            ls -lah deploy/pi-gen/pi-gen/deploy/ || true
             exit 1
           fi
           DST="deploy/pi-gen/pi-gen/deploy/ftw-rpi4-arm64-${{ needs.meta.outputs.tag }}.img.xz"
