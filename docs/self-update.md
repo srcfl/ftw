@@ -159,7 +159,8 @@ ordering prevents the checker from offering a beta whose image is not ready.
 
 Stable continues through Changesets and `release.yml`. The stable asset
 workflow explicitly ignores beta tags so a prerelease can never retag
-`:latest` or emit stable RPi/Discord artifacts.
+`:latest` or emit a stable Discord announcement. The RPi installer image is
+published independently under the permanent `rpi-installer` prerelease.
 
 ## Bootstrapping an older updater
 

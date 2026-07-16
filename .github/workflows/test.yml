@@ -1,9 +1,9 @@
 name: test
 
-# Runs the Go test suite on every PR targeting master and on pushes to
-# master. The release workflow is separate and only runs on master
-# pushes — keeping test as its own job means PR authors get fast,
-# focused feedback without waiting for docker builds / semantic-release.
+# Keep the required check present on every PR/push, but only provision the
+# language runtimes whose source changed. Version PRs and docs-only changes
+# finish after the classifier instead of reinstalling Python and compiling the
+# full Go tree. The job name stays stable for master branch protection.
 on:
   pull_request:
     branches: [master]
@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: go test + vet
@@ -20,14 +24,65 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Classify changed paths
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if { [ "${EVENT_NAME}" = pull_request ] && [[ "${PR_TITLE}" == "chore(release): version packages"* ]]; } || \
+             { [ "${EVENT_NAME}" = push ] && [[ "${COMMIT_MESSAGE}" == "chore(release): version packages"* ]]; }; then
+            echo "go=false" >> "${GITHUB_OUTPUT}"
+            echo "web=false" >> "${GITHUB_OUTPUT}"
+            echo "Generated Version Packages change; required check completes without heavy setup."
+            exit 0
+          fi
+
+          if [ -z "${BASE_SHA}" ] || [[ "${BASE_SHA}" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-parse HEAD^)"
+          fi
+
+          go_changed=false
+          web_changed=false
+          changed_files="$(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")"
+          while IFS= read -r file; do
+            [ -n "${file}" ] || continue
+            case "${file}" in
+              go/*|drivers/*|optimizer/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
+                go_changed=true
+                ;;
+              web/*|package.json|package-lock.json)
+                web_changed=true
+                ;;
+              .github/workflows/test.yml|Makefile|scripts/ci-local.sh|scripts/ci-hw-pi.sh|scripts/ci-ui-browser.sh)
+                go_changed=true
+                web_changed=true
+                ;;
+            esac
+          done <<< "${changed_files}"
+
+          echo "go=${go_changed}" >> "${GITHUB_OUTPUT}"
+          echo "web=${web_changed}" >> "${GITHUB_OUTPUT}"
+          if [ "${go_changed}" = false ] && [ "${web_changed}" = false ]; then
+            echo "No Go/optimizer/driver/web changes; required check completes without heavy setup."
+          fi
 
       - name: Setup Go
+        if: steps.changes.outputs.go == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
 
       - name: Setup Python
+        if: steps.changes.outputs.go == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -35,28 +90,33 @@ jobs:
           cache-dependency-path: optimizer/pyproject.toml
 
       - name: Install optimizer
+        if: steps.changes.outputs.go == 'true'
         run: pip install -e 'optimizer[test]'
 
       - name: Optimizer tests
+        if: steps.changes.outputs.go == 'true'
         run: pytest -q optimizer/tests
 
       - name: Go vet
+        if: steps.changes.outputs.go == 'true'
         working-directory: go
         run: go vet ./...
 
       - name: Go test
+        if: steps.changes.outputs.go == 'true'
         working-directory: go
         env:
           FTW_TEST_OPTIMIZER_PYTHON: python
-        # -count=1 disables the test cache so CI always re-runs, avoiding
-        # cached-pass-on-broken-cache surprises.
-        #
-        # -race was tried and surfaced pre-existing concurrent writes to
-        # telemetry.DriverHealth from the OCPP handler path (the charge-
-        # point library fires OnConnect and OnBootNotification on separate
-        # goroutines for the same charger). CLAUDE.md already documents
-        # DriverHealth as single-writer — the fix is to lock or serialize
-        # the OCPP path, which is a separate piece of work. Until then,
-        # omit -race here so CI doesn't punish unrelated PRs for a known
-        # pre-existing race. Re-add once OCPP is hardened.
+        # -count=1 deliberately re-runs tests while retaining the compiler
+        # build cache restored by setup-go.
         run: go test -count=1 ./...
+
+      - name: Setup Node
+        if: steps.changes.outputs.web == 'true'
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Web tests
+        if: steps.changes.outputs.web == 'true'
+        run: npm test

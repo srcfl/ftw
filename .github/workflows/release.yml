@@ -3,7 +3,7 @@ name: release
 # Changesets-driven release. Pattern lifted from umara/u-front.
 #
 # This workflow ONLY handles the changesets flow + tag + GitHub Release
-# creation. The cross-platform binaries, docker images, RPi image, and
+# creation. The cross-platform binaries, docker images, and
 # Discord announcement live in `release-assets.yml` and are triggered
 # explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
 # the end of the publish step. Keeping the heavy build matrix out of
@@ -34,6 +34,16 @@ name: release
 on:
   push:
     branches: [master]
+    # Every releasable PR adds a changeset. The generated Version Packages PR
+    # then changes package/lock/changelog while consuming those files. Those
+    # are the only master pushes that need the Changesets orchestration job.
+    paths:
+      - '.changeset/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'CHANGELOG.md'
+      - 'scripts/apply-codename.cjs'
+      - '.github/workflows/release.yml'
   workflow_dispatch:
 
 # changesets/action needs to push the Version PR. The publish step

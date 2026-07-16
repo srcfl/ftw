@@ -31,8 +31,10 @@ make release       # → local tarballs with binary + drivers + web + config.exa
 ```
 
 `make release` bakes in the git tag via `-ldflags "-X main.Version=..."`, so the running binary reports its version in the startup log.
-Official tags, release notes, binaries, docker images, and Raspberry Pi images
-are produced by the Changesets + GitHub Actions release flow.
+Official tags, release notes, binaries, and Docker images are produced by the
+Changesets + GitHub Actions release flow. The Raspberry Pi installer image has
+a separate monthly/on-change lifecycle because first boot pulls the current
+stable containers.
 
 ## 2. Native file layout
 

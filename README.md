@@ -73,15 +73,16 @@ Recommended: point **Raspberry Pi Imager** at the FTW image repository
 (**App Options → Content Repository → Use custom file**):
 
 ```
-https://github.com/srcfl/ftw/releases/latest/download/os_list.json
+https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
 ```
 
 Then pick **FTW**, set your hostname / SSH user / Wi-Fi in the
 customisation panel, and write — Imager downloads the image for you. Boot the
 Pi and open `http://ftw.local/`.
 
-You can instead download the `ftw-rpi4-arm64-vX.Y.Z.img.xz` release asset and
-flash it directly, but that skips the customisation panel (default
+You can instead download the latest dated `.img.xz` from the dedicated
+[`rpi-installer` release](https://github.com/srcfl/ftw/releases/tag/rpi-installer)
+and flash it directly, but that skips the customisation panel (default
 credentials, Wi-Fi via the `ftw-setup` captive portal) — not recommended.
 
 Full walkthrough: [`docs/rpi-image.md`](docs/rpi-image.md).
@@ -243,8 +244,11 @@ Releases are driven by Changesets and GitHub Actions:
 4. Merge that Version PR to bump `package.json`, update `CHANGELOG.md`, create
    the `vX.Y.Z` tag, and publish the GitHub Release.
 5. The `release-assets` workflow builds and uploads Linux/Windows binaries,
-   `ftw-relay` binaries, Docker images, the Raspberry Pi image, and
-   `ftw-relay-web.tar.gz`.
+   `ftw-relay` binaries, Docker images, and `ftw-relay-web.tar.gz`.
+
+The Raspberry Pi installer image has its own monthly/on-change workflow and
+permanent `rpi-installer` channel. It pulls the current stable containers on
+first boot, so application patch releases do not rebuild the base OS image.
 
 Do not hand-edit `CHANGELOG.md` or manually bump `package.json`; pending
 release notes live in `.changeset/*.md`.

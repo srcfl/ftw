@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Full local CI pass: Go tests, e2e tests, native/arm64 builds, then a
-# browser smoke test against a temporary local stack with simulators.
+# Full local CI pass: optimizer + Go tests (including e2e), native/arm64
+# builds, then a browser smoke test against a temporary local stack.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -174,11 +174,8 @@ YAML
 }
 
 log "artifacts: $ARTIFACT_DIR"
-log "running Go suite"
+log "running optimizer + Go suite (including full-stack e2e)"
 (cd "$ROOT" && make test)
-
-log "running full-stack e2e"
-(cd "$ROOT" && make e2e)
 
 log "building native binaries"
 (cd "$ROOT" && make build)
