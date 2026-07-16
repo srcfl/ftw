@@ -49,31 +49,16 @@ calendar date has passed.
 ## Existing Docker installations
 
 `v0.128.0` is the transition release. Existing managed installations should
-use their normal stable update path; no directory, Compose project, service or
-volume rename is required. Fresh installations pull from `ghcr.io/srcfl`, while
-the legacy `ghcr.io/frahlg/forty-two-watts*` tags remain exact manifest mirrors
-during the compatibility window.
+run the one-time migration in the bilingual
+[legacy upgrade guide](docs/upgrade-from-legacy.md). The migration rewrites
+only the two effective image references to `ghcr.io/srcfl`, while retaining the
+directory, Compose project, main-service name, environment, volumes and exact
+host data bind. It downloads both images before stopping the main service and
+keeps Compose/container rollback backups.
 
-Starting with the first updater fix after `v0.128.0`, an older Compose file that
-hard-codes `forty-two-watts:<tag>` is handled automatically. The updater adds a
-temporary canonical image override for update, restart, and rollback jobs,
-without rewriting the host file, renaming the service, or moving the data bind.
-It removes the override when the job ends; state rollback additionally pins the
-exact running image so restoring data cannot also change application version.
-
-Installations already running the `v0.128.0` updater need to refresh that
-sidecar once before retrying the in-app update:
-
-```bash
-cd ~/ftw  # or the existing ~/forty-two-watts directory
-docker compose pull ftw-updater
-docker compose up -d --no-deps ftw-updater
-```
-
-This one-time bootstrap does not restart the main FTW service or touch its data.
-For a copy-and-paste operator walkthrough, including verification and
-troubleshooting, see the bilingual
-[legacy upgrade guide](docs/upgrade-from-legacy.md).
+Do not rely on refreshing only `ftw-updater` when the Compose main image is
+hard-coded or still local. That cannot change the host's stale image reference
+and was the source of the `does not reference FTW_IMAGE_TAG` failure.
 
 The supported upgrade path:
 
@@ -82,16 +67,16 @@ The supported upgrade path:
 3. otherwise reuse an existing `~/forty-two-watts`;
 4. create `~/ftw` only for a fresh installation;
 5. retain the existing Compose project, service and data-bind identity;
-6. snapshot state, recreate the main service in place, verify health and roll
-   back to the previous image if startup fails.
+6. back up the Compose/container deployment, recreate the main service in
+   place, verify the exact data bind and health, and roll back if startup fails.
 
 Do not manually rename the deployment directory or copy `data/` into a fresh
 directory. A parallel empty bind can look like successful startup while hiding
 the real configuration and state.
 
 For a manually managed Compose deployment whose main image already uses
-`${FTW_IMAGE_TAG}`, run the normal update from the existing deployment
-directory:
+`ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}` and whose updater is also under
+`ghcr.io/srcfl`, run the normal update from the existing deployment directory:
 
 ```bash
 docker compose pull
@@ -101,9 +86,8 @@ docker compose up -d
 Do not copy state into a new directory as part of this update.
 
 If the existing Compose file instead hard-codes an image tag such as
-`forty-two-watts:<tag>`, refreshing the updater and using the in-app update is
-the supported migration path. A plain `docker compose pull` cannot select a new
-tag when the tag is hard-coded.
+`forty-two-watts:<tag>`, use the legacy migration guide. A plain
+`docker compose pull` cannot select a new tag when the tag is hard-coded.
 
 ## Native binaries
 

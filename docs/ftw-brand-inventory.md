@@ -107,6 +107,10 @@ or explain compatibility.
   identify affected installations and safely cross the `v0.128.0` updater
   bootstrap boundary. Keep this guide while upgrades from the transition
   release remain supported; archive it only after that supported path ends.
+- `scripts/migrate-legacy-compose.sh` is the executable counterpart to that
+  guide. It detects the former directory/service/image names solely to migrate
+  them to canonical Sourceful images while preserving state and rollback
+  identity. Retire it on the same schedule as the legacy upgrade guide.
 - Relay and TURN references move to `relay.ftw.sourceful.energy` and
   `turn.ftw.sourceful.energy`; their replacement infrastructure is a Programme B
   operational follow-up, so remote access may be unavailable between the steps.

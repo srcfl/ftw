@@ -163,9 +163,15 @@ workflow explicitly ignores beta tags so a prerelease can never retag
 
 ## Bootstrapping an older updater
 
-The updater does not recreate itself during a main-service update. An
-installation still running the `v0.128.0` updater must therefore refresh the
-sidecar once to receive the legacy-Compose compatibility fix:
+The updater does not recreate itself during a main-service update. For an
+older deployment with a hard-coded, local, or pre-Sourceful main image, do not
+refresh only the sidecar: that leaves the stale host Compose reference in place.
+Run the one-time [legacy migration](upgrade-from-legacy.md), which validates the
+data bind, preserves the Compose identity and moves both services to canonical
+images with rollback.
+
+Only an installation whose main service already uses the canonical dynamic
+`ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}` form can refresh its sidecar alone:
 
 ```bash
 cd ~/ftw  # or the existing ~/forty-two-watts directory
@@ -173,10 +179,10 @@ docker compose pull ftw-updater
 docker compose up -d --no-deps ftw-updater
 ```
 
-This does not restart the main service or touch `/app/data`. Once the refreshed
-sidecar is running, retry Update in the dashboard. For an intentional beta or
-edge bootstrap, pin both `FTW_IMAGE_TAG` and `FTW_UPDATER_IMAGE_TAG` to the same
-currently published immutable tag; do not reuse the historical beta.1 tag.
+This does not restart the main service or touch `/app/data`. For an intentional
+beta or edge bootstrap, pin both `FTW_IMAGE_TAG` and
+`FTW_UPDATER_IMAGE_TAG` to the same currently published immutable tag; do not
+reuse the historical beta.1 tag.
 
 ## HTTP endpoints
 

@@ -17,9 +17,9 @@ control path does not depend on Sourceful cloud services.
 
 > **Upgrading an existing Forty Two Watts installation?** Follow the
 > step-by-step [legacy upgrade guide in Swedish and English](docs/upgrade-from-legacy.md).
-> It covers the one-time updater refresh required by older Docker Compose
-> installations and preserves the existing service, directory, configuration,
-> history, and device data.
+> Its migration command moves older Docker Compose and local-development
+> layouts to the official Sourceful images while preserving the existing
+> service, directory, configuration, history, and device data.
 
 The project is active and runs on real hardware, but API and config fields
 can still change before a stable 1.0 release. Version numbers come from

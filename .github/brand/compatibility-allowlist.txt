@@ -18,5 +18,4 @@
 ^scripts/deploy-go\.sh:.*ln -sf ftw forty-two-watts$
 ^scripts/install-macos\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
 ^scripts/install-macos\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
-^scripts/install\.sh:.*MAIN_COUNT=.*forty-two-watts.*$
-^scripts/install\.sh:.*MAIN_SERVICE=.*forty-two-watts.*$
+^scripts/migrate-legacy-compose\.sh:.*forty-two-watts.*$
