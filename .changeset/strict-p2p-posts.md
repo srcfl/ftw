@@ -1,5 +1,5 @@
 ---
-"forty-two-watts": patch
+"ftw": patch
 ---
 
 Fail closed for direct state-changing `p2pFetch` API calls on public relay origins so owner ceremony and control request bodies are never raw-fetched to the relay.
