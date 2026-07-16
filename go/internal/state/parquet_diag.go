@@ -106,6 +106,12 @@ func (s *Store) RolloffDiagnosticsToParquet(ctx context.Context, coldDir string)
 		if n, _ := res.RowsAffected(); n < 200 {
 			return rolledRows, files, nil
 		}
+		// Writer-fairness gap between batches (see pruneChunkPause).
+		select {
+		case <-ctx.Done():
+			return rolledRows, files, ctx.Err()
+		case <-time.After(maintenancePause):
+		}
 	}
 }
 

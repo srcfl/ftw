@@ -18,10 +18,12 @@ func TestPruneLargeBacklogWithConcurrentWriter(t *testing.T) {
 	}
 	s := freshStore(t)
 
-	// Force many chunks even though the seeded volume is time-compressed.
-	origChunk := pruneChunkSpanMS
+	// Force many chunks even though the seeded volume is time-compressed,
+	// and shrink the fairness pause so 60 chunks don't dominate test time.
+	origChunk, origPause := pruneChunkSpanMS, pruneChunkPause
 	pruneChunkSpanMS = 24 * 60 * 60 * 1000
-	t.Cleanup(func() { pruneChunkSpanMS = origChunk })
+	pruneChunkPause = 10 * time.Millisecond
+	t.Cleanup(func() { pruneChunkSpanMS, pruneChunkPause = origChunk, origPause })
 
 	// 60 days of history at 20 s cadence = 259k rows, all older than
 	// HotRetention (30 d) by at least 30 days.

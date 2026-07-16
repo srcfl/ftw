@@ -1401,8 +1401,24 @@ func (s *Store) pruneTier(ctx context.Context, src, dst string, cutoffMs, bucket
 		}
 		aged += n
 		chunks++
+
+		// Yield between chunks. Short transactions alone are not enough:
+		// SQLite's busy handler retries with backoff and no fairness, so a
+		// back-to-back chunk loop re-acquires the lock before any waiting
+		// writer wins its retry — observed in production as tick-persistence
+		// SQLITE_BUSY all through a 93-day backlog migration even with ~1 s
+		// chunks. A real pause guarantees every waiter a window.
+		select {
+		case <-ctx.Done():
+			return aged, chunks, ctx.Err()
+		case <-time.After(pruneChunkPause):
+		}
 	}
 }
+
+// pruneChunkPause is the writer-fairness gap between prune chunks. Var so
+// tests can shrink it.
+var pruneChunkPause = 250 * time.Millisecond
 
 // pruneChunk aggregates+deletes src rows in [fromMs, toMs) in one short
 // transaction.
