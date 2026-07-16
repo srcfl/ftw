@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -65,17 +66,27 @@ func (s *Store) RolloffDiagnosticsToParquet(ctx context.Context, coldDir string)
 
 	diagDir := filepath.Join(coldDir, "diagnostics")
 	for k, rows := range byDay {
-		sort.Slice(rows, func(i, j int) bool { return rows[i].TsMs < rows[j].TsMs })
+		newRows := len(rows)
 		dayDir := filepath.Join(diagDir, fmt.Sprintf("%04d/%02d", k.year, k.month))
 		if err := os.MkdirAll(dayDir, 0o755); err != nil {
 			return rolledRows, files, fmt.Errorf("mkdir %s: %w", dayDir, err)
 		}
 		path := filepath.Join(dayDir, fmt.Sprintf("%02d.parquet", k.day))
+		// Merge with the existing day file. The hourly rolloff writes the same
+		// UTC day many times (the cutoff advances one hour per run), so an
+		// overwrite here would throw away every previously rolled hour of the
+		// day — each run would leave only its own newest rows in cold storage.
+		if existing, err := readParquetDiagDay(path); err == nil {
+			rows = mergeParquetDiagRows(existing, rows)
+		} else if !os.IsNotExist(err) {
+			return rolledRows, files, fmt.Errorf("read existing %s: %w", path, err)
+		}
+		sort.Slice(rows, func(i, j int) bool { return rows[i].TsMs < rows[j].TsMs })
 		if err := writeParquetDiagDay(path, rows); err != nil {
 			return rolledRows, files, fmt.Errorf("write %s: %w", path, err)
 		}
 		files = append(files, path)
-		rolledRows += int64(len(rows))
+		rolledRows += int64(newRows)
 	}
 
 	// Atomic delete of the rolled-off rows.
@@ -104,11 +115,73 @@ func writeParquetDiagDay(path string, rows []parquetDiagRow) error {
 		os.Remove(tmp)
 		return err
 	}
+	// Same durability contract as writeParquetDay: rows are deleted from
+	// SQLite right after this returns, so the file must be on disk before
+	// the rename makes it visible.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// readParquetDiagDay loads one diagnostics day file in full. os.IsNotExist
+// on the returned error distinguishes "no file yet" from real read failures.
+func readParquetDiagDay(path string) ([]parquetDiagRow, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	pf, err := parquet.OpenFile(f, stat.Size())
+	if err != nil {
+		return nil, err
+	}
+	reader := parquet.NewGenericReader[parquetDiagRow](pf)
+	defer reader.Close()
+
+	rows := make([]parquetDiagRow, 0, 256)
+	buf := make([]parquetDiagRow, 256)
+	for {
+		n, err := reader.Read(buf)
+		rows = append(rows, buf[:n]...)
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			return rows, nil
+		}
+		return rows, err
+	}
+}
+
+// mergeParquetDiagRows deduplicates on ts_ms (the planner_diagnostics PK),
+// current rows winning over existing on collision.
+func mergeParquetDiagRows(existing, current []parquetDiagRow) []parquetDiagRow {
+	byTs := make(map[int64]parquetDiagRow, len(existing)+len(current))
+	for _, r := range existing {
+		byTs[r.TsMs] = r
+	}
+	for _, r := range current {
+		byTs[r.TsMs] = r
+	}
+	out := make([]parquetDiagRow, 0, len(byTs))
+	for _, r := range byTs {
+		out = append(out, r)
+	}
+	return out
 }
 
 // LoadDiagnosticsFromParquet reads snapshot summaries from cold storage
