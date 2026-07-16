@@ -5,7 +5,8 @@
   "type": "module",
   "description": "FTW — local-first home energy coordination. Version metadata only; the runtime is Go and the mathematical planner is Python/CVXPY.",
   "scripts": {
-    "test": "node --test 'web/**/*.test.mjs'"
+    "test": "node --test 'web/**/*.test.mjs'",
+    "version-packages": "changeset version && npm install --package-lock-only --ignore-scripts --no-audit --no-fund"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.10"

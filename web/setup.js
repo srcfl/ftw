@@ -663,7 +663,7 @@
       })
       .catch(function (err) {
         btn.disabled = false;
-        btn.textContent = 'Start FTW's;
+        btn.textContent = 'Start FTW';
         var errEl = document.getElementById('save-error');
         errEl.className = 'error-msg';
         errEl.textContent = err.message;
