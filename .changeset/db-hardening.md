@@ -1,5 +1,5 @@
 ---
-"forty-two-watts": minor
+"ftw": minor
 ---
 
 Database hardening and richer history access.
