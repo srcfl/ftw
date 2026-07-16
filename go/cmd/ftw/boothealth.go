@@ -11,19 +11,21 @@ import (
 // unbound port during a 25-minute compaction makes the Docker healthcheck
 // fail and the self-update sidecar roll the deploy back mid-VACUUM.
 type swappableHandler struct {
-	h atomic.Value // http.Handler
+	// atomic.Pointer, not atomic.Value: the boot handler and the wired mux
+	// are different concrete types, and Value panics on that.
+	h atomic.Pointer[http.Handler]
 }
 
 func newSwappableHandler(initial http.Handler) *swappableHandler {
 	s := &swappableHandler{}
-	s.h.Store(initial)
+	s.h.Store(&initial)
 	return s
 }
 
-func (s *swappableHandler) Swap(h http.Handler) { s.h.Store(h) }
+func (s *swappableHandler) Swap(h http.Handler) { s.h.Store(&h) }
 
 func (s *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.h.Load().(http.Handler).ServeHTTP(w, r)
+	(*s.h.Load()).ServeHTTP(w, r)
 }
 
 // bootPhaseHandler answers health probes 200 while the process initializes,
