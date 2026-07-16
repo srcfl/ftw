@@ -118,9 +118,20 @@ func (s *Store) deleteSamplesChunked(ctx context.Context, fromMs, toMs int64) er
 			`DELETE FROM ts_samples WHERE ts_ms >= ? AND ts_ms < ?`, start, end); err != nil {
 			return err
 		}
+		// Writer-fairness gap — see pruneChunkPause for why bounded
+		// transactions alone don't let waiting writers in.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(maintenancePause):
+		}
 	}
 	return nil
 }
+
+// maintenancePause is the inter-transaction yield for chunked rolloff
+// deletes. Var so tests can shrink it.
+var maintenancePause = 100 * time.Millisecond
 
 // flushParquetDay merges rows into the existing day file (if any) and writes
 // the result durably. Returns the file path.
