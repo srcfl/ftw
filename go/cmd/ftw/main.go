@@ -155,6 +155,27 @@ func main() {
 	if abs, err := filepath.Abs(statePath); err == nil {
 		statePath = abs
 	}
+
+	// Bind the API port BEFORE the potentially slow state open. A boot that
+	// runs a one-time VACUUM or a full integrity check on a multi-GB DB can
+	// take 25+ minutes, and an unbound port for that long makes the Docker
+	// healthcheck fail and the self-update sidecar judge the deploy failed —
+	// observed 2026-07-16 as an auto-rollback in the middle of a VACUUM.
+	// Until the real mux is wired, /api/health answers 200 "starting" and
+	// everything else 503.
+	apiHandler := newSwappableHandler(bootPhaseHandler())
+	httpSrv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
+		Handler:           apiHandler,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		slog.Info("HTTP API listening (boot phase)", "addr", httpSrv.Addr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("http server", "err", err)
+		}
+	}()
+
 	st, err := state.Open(statePath)
 	if err != nil {
 		slog.Error("open state", "err", err)
@@ -1876,17 +1897,10 @@ func main() {
 			"upstream", u.String(),
 			"read_only", readOnly)
 	}
-	httpSrv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		slog.Info("HTTP API listening", "addr", httpSrv.Addr)
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("http server", "err", err)
-		}
-	}()
+	// Swap the boot-phase handler for the fully wired mux — the listener
+	// bound at startup stays; no port gap for healthcheck probes.
+	apiHandler.Swap(handler)
+	slog.Info("HTTP API ready", "addr", httpSrv.Addr)
 
 	// Belt-and-suspenders integrity scan, off the startup hot path: a clean
 	// restart skips the blocking boot check (so a multi-GB DB starts in seconds),
