@@ -24,6 +24,8 @@
 --         vin: "5YJ3E1EA1KF000000"
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "tesla-vehicle",
   name         = "Tesla Vehicle (BLE Proxy)",
   manufacturer = "Tesla",

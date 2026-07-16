@@ -8,6 +8,8 @@
 -- not wired up here.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sma",
   name         = "SMA hybrid inverter",
   manufacturer = "SMA",

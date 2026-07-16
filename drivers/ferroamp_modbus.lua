@@ -19,6 +19,8 @@
 --   at the driver boundary to match drivers/ferroamp.lua (the MQTT variant).
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "ferroamp-modbus",
   name         = "Ferroamp EnergyHub (Modbus)",
   manufacturer = "Ferroamp",

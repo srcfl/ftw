@@ -21,6 +21,8 @@
 -- Read-only driver: no control surface implemented.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sofar",
   name         = "Sofar hybrid inverter",
   manufacturer = "Sofar Solar",

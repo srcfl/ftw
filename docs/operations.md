@@ -6,9 +6,9 @@ Sign convention reminder: throughout this doc, `grid_w > 0` means **import** (bu
 
 ## 1. Build + cross-compile
 
-The core runtime is a pure-Go, no-CGO static binary. The optional primary MPC
-optimizer is a local Python/CVXPY worker; official containers include it, while
-native installs can provide it separately or use the built-in Go-DP fallback:
+The core runtime is a pure-Go, no-CGO static binary. Official Compose runs the
+primary Python/CVXPY optimizer as the network-isolated `ftw-optimizer` sidecar;
+native installs can use a local worker or the built-in Go-DP fallback:
 
 ```bash
 git clone https://github.com/srcfl/ftw
@@ -63,7 +63,8 @@ The supported native unit uses portable system paths:
 /var/lib/ftw/
 ├── state.db                # SQLite state
 ├── cold/                   # Parquet rolloff
-└── drivers/                # persistent custom Lua drivers
+├── drivers/                # persistent custom Lua drivers
+└── driver-repository/      # signed cache, artifacts, active symlinks
 ```
 
 The long-running service accepts four operator-facing path flags:
@@ -72,6 +73,23 @@ The long-running service accepts four operator-facing path flags:
 - `-web /opt/ftw/web` — path to the static UI directory.
 - `-drivers /opt/ftw/drivers` — immutable bundled-driver directory.
 - `-user-drivers /var/lib/ftw/drivers` — persistent user-driver overlay.
+
+Older Compose installations can add the optimizer service without replacing
+their base file:
+
+```bash
+bash scripts/enable-modular-stack.sh /path/to/docker-compose.yml
+```
+
+The script creates a standard Compose override only when none exists, validates
+the merged project, starts the sidecar, and restores the base stack if startup
+fails. Existing custom overrides must be merged manually rather than overwritten.
+
+Independently published drivers are configured under `device_repository` and
+stored below `/var/lib/ftw/driver-repository`; see
+[device-repository.md](device-repository.md). Anonymous component-health
+statistics are a separate, disabled-by-default `fleet_statistics` opt-in; see
+[fleet-statistics.md](fleet-statistics.md).
 
 It also has developer-only `-backfill*` flags and the `nova-claim` / `pair`
 subcommands; run `ftw -help` for the exact current surface.

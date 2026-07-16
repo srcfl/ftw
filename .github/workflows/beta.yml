@@ -68,6 +68,9 @@ jobs:
           - target: updater
             dockerfile: ./Dockerfile.updater
             image_suffix: "-updater"
+          - target: optimizer
+            dockerfile: ./Dockerfile.optimizer
+            image_suffix: "-optimizer"
     steps:
       - name: Checkout beta tag
         uses: actions/checkout@v5
@@ -105,6 +108,7 @@ jobs:
             org.opencontainers.image.licenses=Apache-2.0
           build-args: |
             VERSION=${{ needs.tag.outputs.version }}
+            BUILD_SHA=${{ github.sha }}
           # Reuse the same content-addressed layers as edge and stable.
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}

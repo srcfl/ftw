@@ -26,6 +26,8 @@
 --         safe_offset: 0
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "heishamon",
   name         = "Panasonic Aquarea (Heishamon)",
   manufacturer = "Panasonic",

@@ -9,6 +9,8 @@
 --           before reaching this driver.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "zuidwijk-p1",
   name         = "Zuidwijk P1 Reader Ethernet",
   manufacturer = "Zuidwijk",

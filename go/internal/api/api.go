@@ -28,9 +28,11 @@ import (
 	"github.com/srcfl/ftw/go/internal/calendar"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -138,6 +140,12 @@ type Deps struct {
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
 	Registry *drivers.Registry
+	// DriverRepository manages signed, content-addressed Lua artifacts. Nil
+	// keeps bundled/local-only operation and returns 503 from repository APIs.
+	DriverRepository *driverrepo.Manager
+	// FleetStats is an explicitly opt-in anonymous component-health reporter.
+	// Nil keeps both preview and submission endpoints unavailable.
+	FleetStats *fleetstats.Reporter
 	// Factories mirrored from the runtime registry so /api/drivers/test can
 	// run a short-lived probe without persisting config.
 	DriverMQTTFactory   func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error)
@@ -330,6 +338,16 @@ func (s *Server) routes() {
 	s.handle("POST /api/drivers/{name}/restart", s.handleDriverRestart)
 	s.handle("POST /api/drivers/{name}/disable", s.handleDriverDisable)
 	s.handle("POST /api/drivers/{name}/enable", s.handleDriverEnable)
+	s.handle("GET  /api/device_repository/status", s.handleDeviceRepositoryStatus)
+	s.handle("GET  /api/device_repository/catalog", s.handleDeviceRepositoryCatalog)
+	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
+	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
+	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
+	s.handle("GET  /api/components", s.handleComponents)
+	s.handle("POST /api/components/optimizer/update", s.handleOptimizerComponentUpdate)
+	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
+	s.handle("GET  /api/fleet_statistics/preview", s.handleFleetStatisticsPreview)
+	s.handle("POST /api/fleet_statistics/submit", s.handleFleetStatisticsSubmit)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
@@ -1147,7 +1165,7 @@ func (s *Server) driverSecretKeys() map[string][]string {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
+	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.managedDriverDir(), dir)
 	if err != nil {
 		return nil
 	}
@@ -1533,11 +1551,22 @@ func (s *Server) handleDriversCatalog(w http.ResponseWriter, r *http.Request) {
 	if dir == "" {
 		dir = filepath.Join(filepath.Dir(s.deps.ConfigPath), "drivers")
 	}
-	// User-drivers dir (persistent volume) takes precedence over bundled dir.
-	entries, err := drivers.LoadCatalogMulti(s.deps.UserDriverDir, dir)
+	managedDir := ""
+	if s.deps.DriverRepository != nil {
+		managedDir = s.deps.DriverRepository.ActiveDir()
+	}
+	// Local override > activated managed artifact > bundled recovery snapshot.
+	entries, err := drivers.LoadCatalogSources(
+		drivers.CatalogSource{Dir: s.deps.UserDriverDir, Source: "local"},
+		drivers.CatalogSource{Dir: managedDir, Source: "managed"},
+		drivers.CatalogSource{Dir: dir, Source: "bundled"},
+	)
 	if err != nil {
 		writeJSON(w, 200, map[string]any{"path": dir, "entries": []any{}, "error": err.Error()})
 		return
+	}
+	if s.deps.DriverRepository != nil {
+		entries = s.deps.DriverRepository.EnrichCatalog(entries)
 	}
 	writeJSON(w, 200, map[string]any{"path": dir, "entries": entries})
 }
@@ -2707,7 +2736,7 @@ func (s *Server) configuredV2XDrivers() map[string]bool {
 	s.deps.CfgMu.RLock()
 	cfgDrivers = append(cfgDrivers, s.deps.Cfg.Drivers...)
 	s.deps.CfgMu.RUnlock()
-	catalog, _ := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.deps.DriverDir)
+	catalog, _ := drivers.LoadCatalogMulti(s.deps.UserDriverDir, s.managedDriverDir(), s.deps.DriverDir)
 	for _, d := range cfgDrivers {
 		if d.Disabled || d.Name == "" {
 			continue

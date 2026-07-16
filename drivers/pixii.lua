@@ -21,6 +21,8 @@
 -- the EMS side. The driver negates at the setpoint boundary.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "pixii",
   name         = "Pixii PowerShaper",
   manufacturer = "Pixii",

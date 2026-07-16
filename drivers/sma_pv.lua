@@ -9,6 +9,8 @@
 -- on the same address space — fleet-uniform register map.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sma_pv",
   name         = "SMA PV inverter (non-hybrid)",
   manufacturer = "SMA",

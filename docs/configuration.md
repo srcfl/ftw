@@ -359,6 +359,8 @@ planner:
   soc_max_pct: 90
   optimizer_solver: HIGHS
   optimizer_formulation: auto
+  optimizer_transport: auto
+  optimizer_socket: /run/ftw-optimizer/optimizer.sock
   optimizer_timeout_s: 30
   optimizer_idle_timeout_s: 120
   optimizer_mip_rel_gap: 0.005
@@ -395,6 +397,64 @@ The Python/CVXPY engine is primary. `engine: dp` selects the former in-process
 planner for emergency rollback. Any worker timeout, solver failure, or rejected
 trajectory automatically uses that DP for the affected replan. Full model,
 deployment, validation, and replay details are in [optimizer.md](optimizer.md).
+
+`optimizer_transport` is `process` by default for native/backwards-compatible
+installs. Official Compose sets it to `auto`: use the Unix sidecar when its
+protocol-v1 handshake succeeds, otherwise retry through the bundled process.
+`unix` makes the socket mandatory at the Python boundary (Go DP remains the
+planner fallback).
+
+## `device_repository`
+
+```yaml
+device_repository:
+  enabled: true
+  refresh_interval_h: 24
+  repositories:
+    - id: ftw-official
+      name: FTW official drivers
+      manifest_url: https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json
+      enabled: true
+      trusted_keys:
+        ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+```
+
+Every enabled repository must pin at least one Ed25519 public key or explicitly
+set `allow_unsigned: true`. The latter and `allow_insecure` exist for local
+development only. Refresh updates the last-good cache; installation and driver
+restart are a separate operator action.
+
+Drivers are published from this monorepo but on their own edge/beta/stable
+release channels. See [Independent driver repository](device-repository.md).
+Because the official public signing key is pinned in FTW, the shorter explicit
+opt-in below resolves to the same stable repository:
+
+```yaml
+device_repository:
+  enabled: true
+```
+
+Omitting `device_repository` entirely remains bundled-only and performs no
+repository network requests.
+
+## `fleet_statistics`
+
+Anonymous fleet statistics are disabled by default and require explicit opt-in:
+
+```yaml
+fleet_statistics:
+  enabled: true
+  endpoint: https://relay.ftw.sourceful.energy/fleet/heartbeat
+  interval_h: 24
+```
+
+FTW sends a random installation ID, core/optimizer versions and coarse health,
+public driver IDs/versions/source/health, and whether the configured site meter
+is healthy. It never sends raw energy telemetry, local driver names, config,
+serial numbers, MAC/IP addresses, endpoints, or secrets. The exact payload can
+be inspected in Settings → System before enabling. Changing this block requires
+a restart so opt-in state and the background schedule change atomically. See
+[Fleet statistics](fleet-statistics.md).
 
 `optimizer_recourse_shadow` runs a storage-only stochastic challenger after the
 active champion solve. `optimizer_challenger_policy` selects the two-stage

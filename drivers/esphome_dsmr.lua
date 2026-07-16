@@ -48,6 +48,8 @@
 -- without hammering the ESP32's tiny TCP stack.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "esphome-dsmr",
   name         = "ESPHome DSMR (P1)",
   manufacturer = "ESPHome",

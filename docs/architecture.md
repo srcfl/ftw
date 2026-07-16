@@ -100,12 +100,40 @@ Outputs one `DispatchTarget` per battery driver (site convention:
 Sources: `go/internal/mpc/`, `optimizer/`.
 
 CVXPY formulates a continuous or mixed-integer 48-hour model and HiGHS solves
-it every 15 minutes by default. It consumes prices, scenario-based PV/load
+it every 15 minutes by default. Official Compose deployments run it in the
+independently updatable `ftw-optimizer` container over a shared Unix socket;
+native/all-in-one installs retain the process transport. It consumes prices, scenario-based PV/load
 forecasts, asset states, deadlines, comfort constraints, and site limits. Go
 validates the complete returned trajectory before exposing it through the
 existing energy-allocation contract. CLARABEL handles continuous convex
-fallbacks; the former Go DP is retained only as an emergency fallback. See
+fallbacks. Socket/process failure falls back to the Go DP without taking core
+or the control loop down. See
 [optimizer.md](optimizer.md).
+
+### Driver delivery
+
+Lua drivers still execute in core's gopher-lua capability sandbox. Their files
+come from a local override, an explicitly activated signed repository artifact,
+or the bundled recovery snapshot, in that order. Refresh never activates code.
+Install verifies Ed25519 signature, SHA-256, safe paths, Lua metadata, and
+driver host API v1 before atomically switching the active path. SQLite retains
+the previous artifact for rollback.
+
+Driver source and publisher tooling remain in this monorepo, but signed
+edge/beta/stable driver manifests are released independently of core. See
+[device-repository.md](device-repository.md).
+
+### Fleet statistics
+
+Source: `go/internal/fleetstats/`; collector transport in `go/cmd/ftw-relay/`.
+
+An optional, default-off reporter emits a daily privacy-bounded component
+heartbeat. It contains a random installation ID plus public core, optimizer,
+and driver versions with coarse health — never power telemetry, configuration,
+hardware/network identity, or local names. The relay retains only the newest
+heartbeat per anonymous installation and exposes token-protected aggregates.
+Failure is fail-soft and has no path into planning or dispatch. See
+[fleet-statistics.md](fleet-statistics.md).
 
 ### ML twins
 Sources: `go/internal/pvmodel/`, `go/internal/loadmodel/`,

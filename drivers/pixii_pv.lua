@@ -9,6 +9,8 @@
 -- only, and does not declare a battery capability.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "pixii-pv",
   name         = "Pixii PowerShaper (PV + meter)",
   manufacturer = "Pixii",

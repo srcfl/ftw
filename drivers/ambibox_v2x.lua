@@ -7,6 +7,8 @@
 --   v2x_charger.w < 0 = vehicle discharging into the site/grid
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "ambibox-v2x",
   name         = "Ambibox V2X",
   manufacturer = "Ambibox",

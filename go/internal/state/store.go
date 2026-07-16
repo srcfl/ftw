@@ -617,6 +617,27 @@ func (s *Store) migrate() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_log(ts_ms DESC)`,
 
+		// Independently installed Lua drivers. Content lives on disk; SQLite
+		// records activation history and the exact previous artifact used for
+		// one-click rollback.
+		`CREATE TABLE IF NOT EXISTS driver_repo_installs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			repo_url TEXT NOT NULL,
+			repo_id TEXT NOT NULL,
+			driver_id TEXT NOT NULL,
+			logical_path TEXT NOT NULL,
+			version TEXT NOT NULL,
+			sha256 TEXT NOT NULL,
+			installed_path TEXT NOT NULL,
+			previous_installed_path TEXT NOT NULL DEFAULT '',
+			installed_at_ms INTEGER NOT NULL,
+			active INTEGER NOT NULL DEFAULT 0
+		) STRICT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_artifact
+			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
+			ON driver_repo_installs(logical_path) WHERE active = 1`,
+
 		`CREATE TABLE IF NOT EXISTS nova_ders (
 			device_id   TEXT NOT NULL,
 			der_type    TEXT NOT NULL,

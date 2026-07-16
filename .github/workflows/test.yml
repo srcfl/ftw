@@ -41,6 +41,7 @@ jobs:
              { [ "${EVENT_NAME}" = push ] && [[ "${COMMIT_MESSAGE}" == "chore(release): version packages"* ]]; }; then
             echo "go=false" >> "${GITHUB_OUTPUT}"
             echo "web=false" >> "${GITHUB_OUTPUT}"
+            echo "drivers=false" >> "${GITHUB_OUTPUT}"
             echo "Generated Version Packages change; required check completes without heavy setup."
             exit 0
           fi
@@ -51,11 +52,12 @@ jobs:
 
           go_changed=false
           web_changed=false
+          drivers_changed=false
           changed_files="$(git diff --name-only "${BASE_SHA}"..."${HEAD_SHA}")"
           while IFS= read -r file; do
             [ -n "${file}" ] || continue
             case "${file}" in
-              go/*|drivers/*|optimizer/*|config*.yaml|Dockerfile|Dockerfile.updater|.dockerignore)
+              go/*|drivers/*|optimizer/*|config*.yaml|Dockerfile|Dockerfile.updater|Dockerfile.optimizer|.dockerignore)
                 go_changed=true
                 ;;
               web/*|package.json|package-lock.json)
@@ -66,10 +68,18 @@ jobs:
                 web_changed=true
                 ;;
             esac
+            case "${file}" in
+              drivers/*.lua)
+                drivers_changed=true
+                ;;
+            esac
           done <<< "${changed_files}"
 
           echo "go=${go_changed}" >> "${GITHUB_OUTPUT}"
           echo "web=${web_changed}" >> "${GITHUB_OUTPUT}"
+          echo "drivers=${drivers_changed}" >> "${GITHUB_OUTPUT}"
+          echo "base_sha=${BASE_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "head_sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
           if [ "${go_changed}" = false ] && [ "${web_changed}" = false ]; then
             echo "No Go/optimizer/driver/web changes; required check completes without heavy setup."
           fi
@@ -110,6 +120,27 @@ jobs:
         # -count=1 deliberately re-runs tests while retaining the compiler
         # build cache restored by setup-go.
         run: go test -count=1 ./...
+
+      - name: Validate driver publication
+        if: steps.changes.outputs.go == 'true'
+        working-directory: go
+        run: >-
+          go run ./cmd/ftw-driver-repository publish
+          -unsigned
+          -drivers ../drivers
+          -output "${RUNNER_TEMP}/ftw-driver-publication"
+          -base-url https://example.invalid/releases/download/drivers-ci
+          -repository https://github.com/${GITHUB_REPOSITORY}
+          -commit "${GITHUB_SHA}"
+
+      - name: Require driver version bumps
+        if: steps.changes.outputs.drivers == 'true'
+        working-directory: go
+        run: >-
+          go run ./cmd/ftw-driver-repository check-versions
+          -repo-root ..
+          -base "${{ steps.changes.outputs.base_sha }}"
+          -head "${{ steps.changes.outputs.head_sha }}"
 
       - name: Setup Node
         if: steps.changes.outputs.web == 'true'

@@ -11,6 +11,8 @@
 --   v2x_charger.w < 0 = vehicle discharging into site/grid
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id = "ferroamp-dc2-v2x",
   name = "Ferroamp DC2 V2X",
   manufacturer = "Ferroamp",

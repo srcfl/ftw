@@ -20,6 +20,8 @@
 --         serial: "EHHZBKPF"    # optional — auto-detected if omitted
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "easee-cloud",
   name         = "Easee Cloud",
   manufacturer = "Easee",

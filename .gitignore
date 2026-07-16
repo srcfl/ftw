@@ -7,6 +7,7 @@ data/
 # Go build artifacts
 /go/bin/
 /go/dist/
+/dist/driver-repository/
 *.test
 *.out
 

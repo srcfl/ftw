@@ -16,6 +16,8 @@
 -- to site convention without a flip.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "growatt",
   name         = "Growatt hybrid inverter",
   manufacturer = "Growatt",

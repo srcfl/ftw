@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
@@ -40,6 +41,8 @@ func main() {
 	multiTenant := flag.Bool("multi-tenant", false, "public multi-tenant home route: home.* serves only a tiny relay-disk loader until the browser decrypts its directory; dashboard static GETs then forward to the selected Pi, while owner data stays P2P. Requires -home-web; -require-device-key remains an optional extra gate; -home-site/-home-pubkey become no-ops.")
 	walletBlobDir := flag.String("wallet-blob-dir", "", "directory holding the per-wallet encrypted directory blobs (one <user_handle>.blob file each). Required under -multi-tenant; the one piece of durable relay state. The relay never decrypts the contents.")
 	walletBlobMaxBytes := flag.Int("wallet-blob-max-bytes", 65536, "per-wallet ciphertext byte cap; a PUT over this is rejected 413 so a hostile client can't grow the blob store without bound")
+	fleetStatsFile := flag.String("fleet-stats-file", os.Getenv("FTW_FLEET_STATS_FILE"), "persistent anonymous fleet heartbeat file; empty disables collection (or FTW_FLEET_STATS_FILE)")
+	fleetAdminToken := flag.String("fleet-admin-token", os.Getenv("FTW_FLEET_ADMIN_TOKEN"), "Bearer token protecting GET /fleet/stats (or FTW_FLEET_ADMIN_TOKEN)")
 	flag.Parse()
 
 	if *version {
@@ -103,6 +106,21 @@ func main() {
 		slog.Info("ftw-relay: multi-tenant mode", "wallet_blob_dir", *walletBlobDir, "max_bytes", *walletBlobMaxBytes)
 	}
 
+	var fleetCollector *fleetstats.Collector
+	if *fleetStatsFile != "" {
+		if *fleetAdminToken == "" {
+			slog.Error("ftw-relay: -fleet-stats-file requires -fleet-admin-token")
+			os.Exit(1)
+		}
+		collector, err := fleetstats.NewCollector(*fleetStatsFile, 0)
+		if err != nil {
+			slog.Error("ftw-relay: fleet statistics store", "err", err)
+			os.Exit(1)
+		}
+		fleetCollector = collector
+		slog.Info("ftw-relay: anonymous fleet statistics enabled", "path", *fleetStatsFile)
+	}
+
 	r := &Relay{
 		Queue:            tunnel.NewQueue(),
 		Tokens:           NewTokenRegistry(),
@@ -123,6 +141,8 @@ func main() {
 		MultiTenant:      *multiTenant,
 		WalletBlobs:      walletBlobs,
 		Bootstrap:        bootstrap,
+		Fleet:            fleetCollector,
+		FleetAdminToken:  *fleetAdminToken,
 	}
 
 	srv := &http.Server{
@@ -187,6 +207,11 @@ func main() {
 				if r.ICELimit != nil {
 					if n := r.ICELimit.GC(offerBucketIdleTTL); n > 0 {
 						slog.Info("ftw-relay: ice-limit GC", "removed", n)
+					}
+				}
+				if r.FleetLimit != nil {
+					if n := r.FleetLimit.GC(offerBucketIdleTTL); n > 0 {
+						slog.Info("ftw-relay: fleet-limit GC", "removed", n)
 					}
 				}
 				// Reap expired first-enrollment bootstraps so an abandoned onboarding

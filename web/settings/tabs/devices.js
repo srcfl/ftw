@@ -57,6 +57,7 @@
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
           '<span class="device-meta">lua · ' + protocol + ' · ' + escHtml(driverFile) + '</span>' +
+          '<span class="driver-module-status" data-drv-lua="' + escHtml(d.lua || '') + '"></span>' +
           '<button class="btn-remove" data-remove-idx="' + idx + '">Remove</button>' +
           '</div>' +
           '<div class="field-row device-core-row' + (supportsBattery ? '' : ' field-row-single') + '"><div>' +
@@ -346,6 +347,50 @@
         // catalog-driven driver kinds (e.g. "vehicle") on re-renders
         // without waiting for the fetch to resolve again.
         S.catalogByLua = byLua;
+        bodyEl.querySelectorAll(".driver-module-status").forEach(function (slot) {
+          var entry = byLua[slot.getAttribute("data-drv-lua")];
+          if (!entry) return;
+          var source = entry.source || "bundled";
+          var version = entry.installed_version || entry.version || "unknown";
+          var html = '<span class="creds-badge">' + escHtml(source) + ' · v' + escHtml(version) + '</span>';
+          if (entry.update_available && entry.repository_id) {
+            html += ' <button class="btn-add drv-module-update" type="button" data-driver-id="' + escHtml(entry.id) +
+              '" data-repository-id="' + escHtml(entry.repository_id) + '" data-version="' + escHtml(entry.upstream_version) + '">Update to v' +
+              escHtml(entry.upstream_version) + '</button>';
+          }
+          if (source === "managed") {
+            html += ' <button class="btn-add drv-module-rollback" type="button" data-driver-id="' + escHtml(entry.id) +
+              '" data-logical-path="' + escHtml(entry.path) + '">Rollback</button>';
+          }
+          html += ' <span class="drv-module-action"></span>';
+          slot.innerHTML = html;
+        });
+        bodyEl.querySelectorAll(".drv-module-update").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            btn.disabled = true;
+            var status = btn.parentElement.querySelector(".drv-module-action");
+            if (status) status.textContent = " Validating and activating…";
+            ownerFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/install", {
+              method: "POST", headers: {"Content-Type":"application/json"},
+              body: JSON.stringify({repository_id: btn.dataset.repositoryId, version: btn.dataset.version})
+            }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "install failed"); return body; }); })
+              .then(function () { if (status) status.textContent = " Updated; fresh telemetry verified."; btn.remove(); })
+              .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-module-rollback").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            btn.disabled = true;
+            var status = btn.parentElement.querySelector(".drv-module-action");
+            if (status) status.textContent = " Rolling back…";
+            ownerFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/rollback", {
+              method: "POST", headers: {"Content-Type":"application/json"},
+              body: JSON.stringify({logical_path: btn.dataset.logicalPath})
+            }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
+              .then(function () { if (status) status.textContent = " Previous driver restored."; })
+              .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
+          });
+        });
         // Populate per-driver secret inputs (api_token, etc.) using the
         // catalog's config_secrets list. Each input uses the standard
         // data-path="drivers.<idx>.config.<key>" so the settings shell

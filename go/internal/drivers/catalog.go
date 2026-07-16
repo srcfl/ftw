@@ -20,6 +20,13 @@ type CatalogEntry struct {
 	Name               string         `json:"name"`
 	Manufacturer       string         `json:"manufacturer,omitempty"`
 	Version            string         `json:"version,omitempty"`
+	HostAPIMin         int            `json:"host_api_min,omitempty"`
+	HostAPIMax         int            `json:"host_api_max,omitempty"`
+	Source             string         `json:"source,omitempty"` // local | managed | bundled | upstream
+	RepositoryID       string         `json:"repository_id,omitempty"`
+	InstalledVersion   string         `json:"installed_version,omitempty"`
+	UpstreamVersion    string         `json:"upstream_version,omitempty"`
+	UpdateAvailable    bool           `json:"update_available,omitempty"`
 	Protocols          []string       `json:"protocols,omitempty"`    // mqtt / modbus / http
 	Capabilities       []string       `json:"capabilities,omitempty"` // meter / pv / battery
 	HTTPHosts          []string       `json:"http_hosts,omitempty"`
@@ -57,6 +64,11 @@ func LoadCatalog(dir string) ([]CatalogEntry, error) {
 	return LoadCatalogMulti(dir)
 }
 
+type CatalogSource struct {
+	Dir    string
+	Source string
+}
+
 // LoadCatalogMulti scans one or more directories for .lua driver files and
 // merges the results. Directories are scanned in order; when the same
 // filename appears in more than one directory the first occurrence wins
@@ -66,10 +78,21 @@ func LoadCatalog(dir string) ([]CatalogEntry, error) {
 // Directories that don't exist or can't be read are silently skipped so
 // callers don't need to guard against an empty user-drivers dir.
 func LoadCatalogMulti(dirs ...string) ([]CatalogEntry, error) {
+	sources := make([]CatalogSource, 0, len(dirs))
+	for _, dir := range dirs {
+		sources = append(sources, CatalogSource{Dir: dir})
+	}
+	return LoadCatalogSources(sources...)
+}
+
+// LoadCatalogSources is LoadCatalogMulti with explicit provenance labels.
+// Source order is resolver order, so the first matching filename wins.
+func LoadCatalogSources(sources ...CatalogSource) ([]CatalogEntry, error) {
 	seen := make(map[string]struct{}) // keyed by Filename (e.g. "ferroamp.lua")
 	var out []CatalogEntry
 
-	for _, dir := range dirs {
+	for _, source := range sources {
+		dir := source.Dir
 		if dir == "" {
 			continue
 		}
@@ -97,6 +120,7 @@ func LoadCatalogMulti(dirs ...string) ([]CatalogEntry, error) {
 			rel, _ := filepath.Rel(dir, path)
 			entry.Path = filepath.ToSlash(filepath.Join("drivers", rel))
 			entry.Filename = filename
+			entry.Source = source.Source
 			seen[filename] = struct{}{}
 			out = append(out, entry)
 			return nil
@@ -137,6 +161,14 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Name = pickString(block, "name")
 	e.Manufacturer = pickString(block, "manufacturer")
 	e.Version = pickString(block, "version")
+	e.HostAPIMin = pickInt(block, "host_api_min")
+	e.HostAPIMax = pickInt(block, "host_api_max")
+	if e.HostAPIMin == 0 {
+		e.HostAPIMin = 1
+	}
+	if e.HostAPIMax == 0 {
+		e.HostAPIMax = e.HostAPIMin
+	}
 	e.Description = pickString(block, "description")
 	e.Homepage = pickString(block, "homepage")
 	e.Protocols = pickList(block, "protocols")
@@ -151,6 +183,11 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.ConfigSecrets = pickList(block, "config_secrets")
 	return e, nil
 }
+
+// ParseCatalogFile exposes the same lightweight metadata parser to the signed
+// repository installer, so bundled and downloaded drivers are checked against
+// one contract.
+func ParseCatalogFile(path string) (CatalogEntry, error) { return parseCatalogEntry(path) }
 
 // IsEVOrVehicleDriver reports whether the driver at luaPath is an EV
 // charger (capabilities contains "ev") or a vehicle telemetry source
@@ -220,6 +257,16 @@ func pickString(block, name string) string {
 		return ""
 	}
 	return m[1]
+}
+
+func pickInt(block, name string) int {
+	re := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*([0-9]+)`)
+	m := re.FindStringSubmatch(block)
+	if len(m) < 2 {
+		return 0
+	}
+	v, _ := strconv.Atoi(m[1])
+	return v
 }
 
 // pickList matches `name = { "a", "b", "c" }` inside the block.

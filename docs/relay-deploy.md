@@ -487,6 +487,42 @@ relay can't ride the enroll forward without both the PIN *and* a proof only the
 genuine browser can compute — and even then it cannot alter a single forwarded byte
 (including `device_pubkey`) without invalidating that proof.
 
+## Optional anonymous fleet-statistics collector
+
+The opt-in client defaults to `POST /fleet/heartbeat` on the official relay.
+Collection is disabled in `ftw-relay` unless both a persistent file and an
+admin token are configured. Generate a token and put it in the existing
+root-readable environment file:
+
+```bash
+openssl rand -base64 32
+
+sudo tee -a /etc/ftw-relay.env >/dev/null <<'EOF'
+FTW_FLEET_STATS_FILE=/var/lib/ftw-relay/fleet-statistics.json
+FTW_FLEET_ADMIN_TOKEN=<paste-random-token>
+EOF
+```
+
+When the systemd unit uses `DynamicUser=yes`, add
+`StateDirectory=ftw-relay` so `/var/lib/ftw-relay` is writable, then reload and
+restart the service. Do not pass the admin token on the command line because it
+would appear in `ps`.
+
+Verify ingest and read the aggregate:
+
+```bash
+curl -i -X POST https://relay.ftw.sourceful.energy/fleet/heartbeat \
+  -H 'Content-Type: application/json' --data-binary @known-good-preview.json
+
+curl https://relay.ftw.sourceful.energy/fleet/stats \
+  -H 'Authorization: Bearer <admin-token>' | jq .
+```
+
+The HTTP server necessarily sees source IPs and uses them transiently for rate
+limiting, but the persisted collector records no IP or other network identity.
+See [fleet-statistics.md](fleet-statistics.md) for schema, retention, and
+interpretation.
+
 ## Migration from the old subetha relay
 
 `subetha.fortytwowatts.com:7777` runs the raw-TCP byte-pipe relay

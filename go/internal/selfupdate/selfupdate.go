@@ -171,13 +171,16 @@ const MaxReleaseBodyBytes = 16 * 1024
 // through unchanged. The main service may also write early states before
 // handing off to the sidecar, e.g. starting/snapshotting.
 type UpdateStatus struct {
-	State     string    `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
-	Action    string    `json:"action,omitempty"`
-	Target    string    `json:"target,omitempty"`
-	Snapshot  string    `json:"snapshot,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	Message   string    `json:"message,omitempty"`
+	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
+	Action          string            `json:"action,omitempty"`
+	Component       string            `json:"component,omitempty"`
+	Target          string            `json:"target,omitempty"`
+	Snapshot        string            `json:"snapshot,omitempty"`
+	StartedAt       time.Time         `json:"started_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	PreviousImageID string            `json:"previous_image_id,omitempty"`
+	PreviousImages  map[string]string `json:"previous_images,omitempty"`
 }
 
 // Checker is the background version-check service.
@@ -563,13 +566,24 @@ func (c *Checker) Unskip() error {
 // socket. Returns as soon as the sidecar accepts the request — the actual
 // pull + compose up runs async; observe progress via Status().
 func (c *Checker) Trigger(ctx context.Context, action, target string) error {
+	return c.TriggerComponent(ctx, action, target, "core")
+}
+
+// TriggerComponent requests a selective core or optimizer compose update.
+func (c *Checker) TriggerComponent(ctx context.Context, action, target, component string) error {
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
-	if action != "update" && action != "restart" {
+	if action != "update" && action != "restart" && action != "component_rollback" {
 		return fmt.Errorf("selfupdate: invalid action %q", action)
 	}
-	body, _ := json.Marshal(map[string]string{"action": action, "target": target})
+	if component != "core" && component != "optimizer" {
+		return fmt.Errorf("selfupdate: invalid component %q", component)
+	}
+	if action == "component_rollback" && component != "optimizer" {
+		return errors.New("selfupdate: component rollback is only available for optimizer")
+	}
+	body, _ := json.Marshal(map[string]string{"action": action, "target": target, "component": component})
 	return c.postSidecar(ctx, body)
 }
 
@@ -657,6 +671,26 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 	}
 	if st.UpdatedAt.IsZero() {
 		st.UpdatedAt = c.cfg.Now()
+	}
+	previous := c.Status()
+	previousImages := make(map[string]string)
+	for component, imageID := range previous.PreviousImages {
+		previousImages[component] = imageID
+	}
+	if previous.Component != "" && previous.PreviousImageID != "" && previousImages[previous.Component] == "" {
+		previousImages[previous.Component] = previous.PreviousImageID
+	}
+	for component, imageID := range st.PreviousImages {
+		previousImages[component] = imageID
+	}
+	if st.Component != "" && st.PreviousImageID != "" {
+		previousImages[st.Component] = st.PreviousImageID
+	}
+	if len(previousImages) > 0 {
+		st.PreviousImages = previousImages
+		if st.Component != "" && st.PreviousImageID == "" {
+			st.PreviousImageID = previousImages[st.Component]
+		}
 	}
 	tmp := c.cfg.StatusPath + ".tmp"
 	f, err := os.Create(tmp)

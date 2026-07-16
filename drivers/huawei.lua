@@ -18,6 +18,8 @@
 -- power + per-phase current are all negated at the boundary.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "huawei-sun2000",
   name         = "Huawei SUN2000 Hybrid Inverter",
   manufacturer = "Huawei",

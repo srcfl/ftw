@@ -56,6 +56,8 @@ populates the Settings → Devices "Add from catalog" dropdown.
 
 ```lua
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "my-device",
   name         = "My Device Brand X",
   manufacturer = "BrandCo",
@@ -68,6 +70,12 @@ DRIVER = {
   tested_models = { "BX-5000", "BX-10000" },
 }
 ```
+
+`host_api_min` / `host_api_max` are mandatory for repository-distributed
+drivers. They declare which capability surface the file was written against;
+FTW rejects an incompatible managed artifact before it can replace a running
+driver. Bundled legacy metadata defaults to v1, but new drivers should always
+state the range explicitly.
 
 Keep it well-formed: the regex in `catalog.go:95` requires a
 `DRIVER = { … \n}` block with plain `key = "value"` string fields and

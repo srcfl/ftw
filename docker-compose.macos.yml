@@ -53,6 +53,8 @@ services:
       # In-app self-update feature (version banner + Update/Restart
       # buttons). Wired to the ftw-updater sidecar below.
       FTW_SELFUPDATE_ENABLED: "1"
+      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}
+      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 
     # Bridge networking + a published port. The dashboard is reachable at
     # http://localhost:8080/ on the Mac itself and http://<mac-ip>:8080/
@@ -71,6 +73,17 @@ services:
       # Shared volume with the updater — the main app reads state.json from
       # here to render update progress in the UI; it never writes to it.
       - update-ipc:/run/ftw-update
+      - optimizer-ipc:/run/ftw-optimizer
+
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+    container_name: ftw-optimizer
+    restart: unless-stopped
+    network_mode: none
+    environment:
+      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
+    volumes:
+      - optimizer-ipc:/run/ftw-optimizer
 
   ftw-updater:
     image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
@@ -139,4 +152,5 @@ services:
 
 volumes:
   update-ipc:
+  optimizer-ipc:
   mosquitto-data:

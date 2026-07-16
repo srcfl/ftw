@@ -151,6 +151,28 @@ caldav:
 state:
   path: state.db
 
+# Independently distributed Lua drivers. Refresh is read-only; activation is
+# always an explicit Settings/API action. Pin the repository maintainer's key.
+# device_repository:
+#   enabled: true
+#   refresh_interval_h: 24
+#   repositories:
+#     - id: ftw-official
+#       name: FTW official drivers
+#       manifest_url: https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json
+#       enabled: true
+#       trusted_keys:
+#         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+
+# Anonymous component-health statistics. Disabled by default and fail-soft:
+# control never depends on the collector. Preview the exact payload under
+# Settings → System before opting in. No raw telemetry, hardware/network IDs,
+# config values, or user-chosen driver names are included.
+# fleet_statistics:
+#   enabled: false
+#   endpoint: https://relay.ftw.sourceful.energy/fleet/heartbeat
+#   interval_h: 24
+
 # Mathematical MPC optimizer. The official container includes Python/CVXPY;
 # native installs can set optimizer_command to their venv's Python executable.
 # planner:
@@ -163,6 +185,8 @@ state:
 #   soc_max_pct: 95
 #   optimizer_solver: HIGHS
 #   optimizer_formulation: auto
+#   optimizer_transport: auto # auto | unix | process
+#   optimizer_socket: /run/ftw-optimizer/optimizer.sock
 #   optimizer_timeout_s: 30
 #   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts
 #   optimizer_mip_rel_gap: 0.005

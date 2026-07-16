@@ -66,6 +66,8 @@
 --         voltage_v: 230        # nominal per-phase voltage; default 230
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "ctek-chargestorm",
   name         = "CTEK Chargestorm (API v1)",
   manufacturer = "CTEK",

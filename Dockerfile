@@ -82,8 +82,8 @@ COPY web/     /app/web/
 COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
-    mkdir -p /app/data /app/data/drivers /run/ftw-update && \
-    chown -R 100:101 /app /run/ftw-update /opt/venv
+    mkdir -p /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer && \
+    chown -R 100:101 /app /run/ftw-update /run/ftw-optimizer /opt/venv
 
 ENV HOME=/app/data \
     FTW_OPTIMIZER_PYTHON=/opt/venv/bin/python \

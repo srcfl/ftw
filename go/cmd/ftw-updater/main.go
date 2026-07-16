@@ -37,18 +37,23 @@ const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
 	canonicalMainImage       = "ghcr.io/srcfl/ftw"
+	optimizerServiceName     = "ftw-optimizer"
+	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
 )
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State     string    `json:"state"`            // idle, pulling, restarting, restoring, done, failed
-	Action    string    `json:"action,omitempty"` // update, restart, rollback (#152)
-	Target    string    `json:"target,omitempty"`
-	Snapshot  string    `json:"snapshot,omitempty"` // snapshot id (rollback only, #152)
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	Message   string    `json:"message,omitempty"`
+	State           string            `json:"state"`            // idle, pulling, restarting, restoring, done, failed
+	Action          string            `json:"action,omitempty"` // update, restart, rollback (#152)
+	Component       string            `json:"component,omitempty"`
+	Target          string            `json:"target,omitempty"`
+	Snapshot        string            `json:"snapshot,omitempty"` // snapshot id (rollback only, #152)
+	StartedAt       time.Time         `json:"started_at,omitempty"`
+	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
+	Message         string            `json:"message,omitempty"`
+	PreviousImageID string            `json:"previous_image_id,omitempty"`
+	PreviousImages  map[string]string `json:"previous_images,omitempty"`
 }
 
 type server struct {
@@ -284,13 +289,25 @@ func main() {
 
 func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action   string   `json:"action"`
-		Target   string   `json:"target,omitempty"`
-		Snapshot string   `json:"snapshot,omitempty"` // rollback-only (#152)
-		Files    []string `json:"files,omitempty"`    // rollback: basenames to restore
+		Action    string   `json:"action"`
+		Component string   `json:"component,omitempty"`
+		Target    string   `json:"target,omitempty"`
+		Snapshot  string   `json:"snapshot,omitempty"` // rollback-only (#152)
+		Files     []string `json:"files,omitempty"`    // rollback: basenames to restore
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
+		return
+	}
+	if body.Component == "" {
+		body.Component = "core"
+	}
+	if body.Component != "core" && body.Component != "optimizer" {
+		http.Error(w, "component must be core or optimizer", 400)
+		return
+	}
+	if body.Component == "optimizer" && body.Action != "update" && body.Action != "restart" && body.Action != "component_rollback" {
+		http.Error(w, "optimizer component supports update, restart, or component_rollback", 400)
 		return
 	}
 	switch body.Action {
@@ -328,8 +345,17 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	case "component_rollback":
+		if body.Component != "optimizer" {
+			http.Error(w, "component_rollback is only available for optimizer", 400)
+			return
+		}
+		if s.previousImageID(body.Component) == "" {
+			http.Error(w, "no previous optimizer image is available", 409)
+			return
+		}
 	default:
-		http.Error(w, "action must be update, restart, or rollback", 400)
+		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
 		return
 	}
 	if !s.runMu.TryLock() {
@@ -343,17 +369,20 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		defer s.runMu.Unlock()
 		if body.Action == "rollback" {
 			s.runRollback(body.Snapshot, body.Files)
+		} else if body.Action == "component_rollback" {
+			s.runComponentRollback(body.Component)
 		} else {
-			s.runJob(body.Action, body.Target)
+			s.runComponentJob(body.Action, body.Target, body.Component)
 		}
 	}()
 
 	w.WriteHeader(202)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":   "started",
-		"action":   body.Action,
-		"target":   body.Target,
-		"snapshot": body.Snapshot,
+		"status":    "started",
+		"action":    body.Action,
+		"component": body.Component,
+		"target":    body.Target,
+		"snapshot":  body.Snapshot,
 	})
 }
 
@@ -373,25 +402,34 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // target falls through to compose's default (`:latest`) — that's the
 // dev path for exercising the flow without a real release.
 func (s *server) runJob(action, target string) {
+	s.runComponentJob(action, target, "core")
+}
+
+func (s *server) runComponentJob(action, target, component string) {
 	now := time.Now()
-	s.writeState(State{State: "pulling", Action: action, Target: target, StartedAt: now, UpdatedAt: now})
+	spec, err := s.componentSpec(component)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
+		return
+	}
+	s.writeState(State{State: "pulling", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now})
 
 	var env []string
 	if target != "" {
-		env = []string{"FTW_IMAGE_TAG=" + target}
+		env = []string{spec.tagEnv + "=" + target}
 	}
 	if action == "update" || action == "restart" {
-		cleanup, err := s.prepareUpdateImagePin()
+		cleanup, err := s.prepareComponentImagePin(spec)
 		if err != nil {
 			msg := "compose preflight failed: " + err.Error()
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
 			slog.Error("compose preflight failed", "err", err)
 			return
 		}
 		defer cleanup()
-		if err := s.validateComposeImagePin(); err != nil {
+		if err := s.validateComponentImagePin(spec); err != nil {
 			msg := "compose preflight failed: " + err.Error()
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
 			slog.Error("compose preflight failed", "err", err)
 			return
 		}
@@ -404,16 +442,16 @@ func (s *server) runJob(action, target string) {
 	if action == "update" && s.imageID != nil {
 		inspectCtx, cancelInspect := context.WithTimeout(context.Background(), 30*time.Second)
 		var err error
-		previousImageID, err = s.imageID(inspectCtx, s.mainServiceName)
+		previousImageID, err = s.imageID(inspectCtx, spec.service)
 		cancelInspect()
 		if err != nil {
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot capture current image for rollback: " + err.Error()})
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot capture current image for rollback: " + err.Error()})
 			return
 		}
 	}
 
 	if !s.skipPull {
-		pullArgs := s.composeArgs("pull", s.mainServiceName)
+		pullArgs := s.composeArgs("pull", spec.service)
 		var pullErr error
 		for attempt := 1; ; attempt++ {
 			// Per-attempt timeout: each pull gets a full 2 h window so a
@@ -432,7 +470,7 @@ func (s *server) runJob(action, target string) {
 			time.Sleep(s.pullRetryDelay)
 		}
 		if pullErr != nil {
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
 			slog.Error("pull failed", "err", pullErr)
 			return
 		}
@@ -440,40 +478,40 @@ func (s *server) runJob(action, target string) {
 		slog.Info("skip-pull active; continuing straight to compose up")
 	}
 
-	s.writeState(State{State: "restarting", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now()})
+	s.writeState(State{State: "restarting", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now()})
 
 	// compose up -d just recreates the container from an already-pulled
 	// image — should complete in seconds, 10 min is a generous upper bound.
 	upCtx, upCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer upCancel()
 
-	upArgs := s.composeArgs("up", "-d", s.mainServiceName)
+	upArgs := s.composeArgs("up", "-d", spec.service)
 	if action == "restart" {
 		// --force-recreate is what makes restart actually restart when the
 		// image digest didn't change — exactly the dev/test path the main
 		// UI exposes as the "Restart" button.
-		upArgs = s.composeArgs("up", "-d", "--force-recreate", s.mainServiceName)
+		upArgs = s.composeArgs("up", "-d", "--force-recreate", spec.service)
 	}
 	if err := s.runner(upCtx, env, upArgs...); err != nil {
-		s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
+		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return
 	}
 
 	if s.healthCheck != nil {
 		healthCtx, cancelHealth := context.WithTimeout(context.Background(), 3*time.Minute)
-		healthErr := s.healthCheck(healthCtx, s.mainServiceName)
+		healthErr := s.healthCheck(healthCtx, spec.service)
 		cancelHealth()
 		if healthErr != nil {
 			if action == "update" && previousImageID != "" {
-				if rollbackErr := s.restorePreviousImage(previousImageID); rollbackErr == nil {
-					s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "new image failed health check; previous image restored: " + healthErr.Error()})
+				if rollbackErr := s.restorePreviousComponentImage(previousImageID, spec); rollbackErr == nil {
+					s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "new image failed health check; previous image restored: " + healthErr.Error()})
 					return
 				} else {
 					healthErr = fmt.Errorf("%v; automatic image rollback failed: %w", healthErr, rollbackErr)
 				}
 			}
-			s.writeState(State{State: "failed", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "health check failed: " + healthErr.Error()})
 			return
 		}
 	}
@@ -481,16 +519,67 @@ func (s *server) runJob(action, target string) {
 	// The main container is now being recreated. The brand-new replica
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
-	s.writeState(State{State: "done", Action: action, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed"})
+	s.writeState(State{State: "done", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed", PreviousImageID: previousImageID})
+}
+
+func (s *server) runComponentRollback(component string) {
+	now := time.Now()
+	previous := s.previousImageID(component)
+	spec, err := s.componentSpec(component)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	current, currentErr := s.imageID(ctx, spec.service)
+	cancel()
+	if currentErr != nil {
+		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: currentErr.Error(), PreviousImageID: previous})
+		return
+	}
+	s.writeState(State{State: "restoring", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "restoring previous component image", PreviousImageID: previous})
+	if err := s.restorePreviousComponentImage(previous, spec); err != nil {
+		s.writeState(State{State: "failed", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previous})
+		return
+	}
+	s.writeState(State{State: "done", Action: "component_rollback", Component: component, StartedAt: now, UpdatedAt: time.Now(), Message: "previous component image restored", PreviousImageID: current})
+}
+
+type componentSpec struct {
+	name, service, image, tagEnv, tagVariable string
+}
+
+func (s *server) componentSpec(component string) (componentSpec, error) {
+	switch component {
+	case "", "core":
+		return componentSpec{name: "core", service: s.mainServiceName, image: canonicalMainImage, tagEnv: "FTW_IMAGE_TAG", tagVariable: "FTW_IMAGE_TAG"}, nil
+	case "optimizer":
+		if _, ok, err := serviceImageFromComposeFiles(s.composeFiles(), optimizerServiceName); err != nil {
+			return componentSpec{}, err
+		} else if !ok {
+			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", optimizerServiceName)
+		}
+		return componentSpec{name: "optimizer", service: optimizerServiceName, image: canonicalOptimizerImage, tagEnv: "FTW_OPTIMIZER_IMAGE_TAG", tagVariable: "FTW_OPTIMIZER_IMAGE_TAG"}, nil
+	default:
+		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
+	}
 }
 
 func (s *server) restorePreviousImage(imageID string) error {
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
+	spec, err := s.componentSpec("core")
+	if err != nil {
+		return err
+	}
+	return s.restorePreviousComponentImage(imageID, spec)
+}
+
+func (s *server) restorePreviousComponentImage(imageID string, spec componentSpec) error {
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("service %q has no image", s.mainServiceName)
+		return fmt.Errorf("service %q has no image", spec.service)
 	}
 	repository, err := composeImageRepository(image)
 	if err != nil {
@@ -503,12 +592,12 @@ func (s *server) restorePreviousImage(imageID string) error {
 	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
 		return fmt.Errorf("tag previous image: %w", err)
 	}
-	env := []string{"FTW_IMAGE_TAG=" + rollbackTag}
-	if err := s.runner(ctx, env, s.composeArgs("up", "-d", s.mainServiceName)...); err != nil {
+	env := []string{spec.tagEnv + "=" + rollbackTag}
+	if err := s.runner(ctx, env, s.composeArgs("up", "-d", spec.service)...); err != nil {
 		return fmt.Errorf("recreate previous image: %w", err)
 	}
 	if s.healthCheck != nil {
-		if err := s.healthCheck(ctx, s.mainServiceName); err != nil {
+		if err := s.healthCheck(ctx, spec.service); err != nil {
 			return fmt.Errorf("previous image health check: %w", err)
 		}
 	}
@@ -523,14 +612,22 @@ func (s *server) restorePreviousImage(imageID string) error {
 // the Compose file chain for this update only. Compose keeps the original
 // project, service, volumes, networking, and every other user setting.
 func (s *server) prepareUpdateImagePin() (func(), error) {
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
+	spec, err := s.componentSpec("core")
+	if err != nil {
+		return func() {}, err
+	}
+	return s.prepareComponentImagePin(spec)
+}
+
+func (s *server) prepareComponentImagePin(spec componentSpec) (func(), error) {
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return func() {}, err
 	}
 	if !ok {
-		return func() {}, fmt.Errorf("service %q is missing an image entry in compose files", s.mainServiceName)
+		return func() {}, fmt.Errorf("service %q is missing an image entry in compose files", spec.service)
 	}
-	if strings.Contains(image, "FTW_IMAGE_TAG") {
+	if strings.Contains(image, spec.tagVariable) {
 		return func() {}, nil
 	}
 
@@ -541,7 +638,7 @@ func (s *server) prepareUpdateImagePin() (func(), error) {
 		Services map[string]imageService `yaml:"services"`
 	}{
 		Services: map[string]imageService{
-			s.mainServiceName: {Image: canonicalMainImage + ":${FTW_IMAGE_TAG:-latest}"},
+			spec.service: {Image: spec.image + ":${" + spec.tagVariable + ":-latest}"},
 		},
 	}
 	data, err := yaml.Marshal(doc)
@@ -575,7 +672,7 @@ func (s *server) prepareUpdateImagePin() (func(), error) {
 		return func() {}, fmt.Errorf("close compatibility override: %w", err)
 	}
 	s.updateOverrideFile = path
-	slog.Warn("using transient canonical image override for legacy compose", "service", s.mainServiceName, "previous_image", image)
+	slog.Warn("using transient canonical image override for legacy compose", "service", spec.service, "previous_image", image)
 
 	cleanup := func() {
 		s.updateOverrideFile = ""
@@ -587,10 +684,10 @@ func (s *server) prepareUpdateImagePin() (func(), error) {
 }
 
 func composeImageRepository(image string) (string, error) {
-	if i := strings.Index(image, ":${FTW_IMAGE_TAG"); i > 0 {
+	if i := strings.Index(image, ":${"); i > 0 {
 		return image[:i], nil
 	}
-	return "", fmt.Errorf("image %q does not use the supported repository:${FTW_IMAGE_TAG} form", image)
+	return "", fmt.Errorf("image %q does not use a supported repository:${*_IMAGE_TAG} form", image)
 }
 
 // validateComposeImagePin catches old host-side compose files that hard-code
@@ -598,15 +695,23 @@ func composeImageRepository(image string) (string, error) {
 // read, so the sidecar can report "done" while the main service stays on the
 // previous image.
 func (s *server) validateComposeImagePin() error {
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
+	spec, err := s.componentSpec("core")
+	if err != nil {
+		return err
+	}
+	return s.validateComponentImagePin(spec)
+}
+
+func (s *server) validateComponentImagePin(spec componentSpec) error {
+	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("service %q is missing an image entry in compose files", s.mainServiceName)
+		return fmt.Errorf("service %q is missing an image entry in compose files", spec.service)
 	}
-	if !strings.Contains(image, "FTW_IMAGE_TAG") {
-		return fmt.Errorf("service %q image %q does not reference FTW_IMAGE_TAG", s.mainServiceName, image)
+	if !strings.Contains(image, spec.tagVariable) {
+		return fmt.Errorf("service %q image %q does not reference %s", spec.service, image, spec.tagVariable)
 	}
 	return nil
 }
@@ -789,6 +894,33 @@ func (s *server) writeState(st State) {
 	if st.UpdatedAt.IsZero() {
 		st.UpdatedAt = time.Now()
 	}
+	// Rollback history belongs to the component, not to whichever update job
+	// happened most recently. Preserve it across all state transitions and
+	// migrate the original single previous_image_id field on first write.
+	previousImages := make(map[string]string)
+	if data, err := os.ReadFile(s.statusPath); err == nil {
+		var previous State
+		if json.Unmarshal(data, &previous) == nil {
+			for component, imageID := range previous.PreviousImages {
+				previousImages[component] = imageID
+			}
+			if previous.Component != "" && previous.PreviousImageID != "" && previousImages[previous.Component] == "" {
+				previousImages[previous.Component] = previous.PreviousImageID
+			}
+		}
+	}
+	for component, imageID := range st.PreviousImages {
+		previousImages[component] = imageID
+	}
+	if st.Component != "" && st.PreviousImageID != "" {
+		previousImages[st.Component] = st.PreviousImageID
+	}
+	if len(previousImages) > 0 {
+		st.PreviousImages = previousImages
+		if st.PreviousImageID == "" && st.Component != "" {
+			st.PreviousImageID = previousImages[st.Component]
+		}
+	}
 	tmp := s.statusPath + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -828,6 +960,19 @@ func (s *server) readState() State {
 		return State{State: "idle"}
 	}
 	return st
+}
+
+func (s *server) previousImageID(component string) string {
+	st := s.readState()
+	if imageID := st.PreviousImages[component]; imageID != "" {
+		return imageID
+	}
+	// Backward compatibility with state files written before per-component
+	// history was introduced.
+	if st.Component == component {
+		return st.PreviousImageID
+	}
+	return ""
 }
 
 // recoverCrashedState runs once at boot. If state.json says we're in-flight

@@ -8,6 +8,8 @@
 -- only want PV generation from the SolarEdge inverter.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "solaredge-pv",
   name         = "SolarEdge inverter (PV only)",
   manufacturer = "SolarEdge",

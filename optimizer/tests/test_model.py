@@ -12,7 +12,15 @@ from ftw_optimizer.scenario_tree import (
     decision_blocks,
     reduce_scenarios,
 )
-from ftw_optimizer.worker import handle
+from ftw_optimizer.worker import handle, handshake
+
+
+def test_worker_handshake_exposes_module_contract() -> None:
+    response = handshake({"type": "handshake", "protocol_version": 1})
+    assert response is not None
+    assert response["name"] == "ftw-optimizer"
+    assert response["protocol_version"] == 1
+    assert {"champion", "recourse", "multistage"}.issubset(response["features"])
 
 
 def base_request() -> dict:

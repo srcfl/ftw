@@ -544,6 +544,19 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 	return r.Restart(ctx, cfg)
 }
 
+// PollInterval returns the currently requested cadence for a running driver.
+// Repository activation uses it to wait for two fresh cycles before declaring
+// a new artifact healthy.
+func (r *Registry) PollInterval(name string) (time.Duration, bool) {
+	r.mu.Lock()
+	rd, ok := r.rec[name]
+	r.mu.Unlock()
+	if !ok {
+		return 0, false
+	}
+	return rd.env.PollInterval(), true
+}
+
 // tcpAllowedHostsFor builds the effective allowlist for a TCP-capable
 // driver. Explicit `capabilities.tcp.allowed_hosts` entries come first
 // (verbatim — operator can write either "host" or "host:port"). The

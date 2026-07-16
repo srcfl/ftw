@@ -9,6 +9,8 @@
 --   host.decode_f32         → inline IEEE-754 (two u16, big-endian words)
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "fronius-smart-meter",
   name         = "Fronius Smart Meter",
   manufacturer = "Fronius",

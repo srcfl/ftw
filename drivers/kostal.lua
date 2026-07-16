@@ -5,6 +5,8 @@
 -- READ-ONLY: no battery / curtail control.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "kostal",
   name         = "Kostal Plenticore",
   manufacturer = "Kostal",

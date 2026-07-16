@@ -46,6 +46,7 @@
         '  .sys-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: -4px; }' +
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-net-iface { color: var(--text-dim); margin-right: 8px; }' +
+		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +
         '</style>' +
         '<fieldset>' +
         '<legend>Host</legend>' +
@@ -96,6 +97,10 @@
         '  <input type="checkbox" id="sys-net-show-v6"> Show IPv6' +
         '</label>' +
         '<div class="sys-net" id="sys-network">—</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
+        '<legend>Components</legend>' +
+        '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
         '</fieldset>';
     },
 
@@ -170,7 +175,100 @@
         });
       }
 
+      function refreshComponents() {
+		Promise.all([
+		  ownerFetch("/api/components").then(function (r) { return r.json(); }),
+		  ownerFetch("/api/fleet_statistics/preview").then(function (r) {
+			return r.ok ? r.json() : null;
+		  }).catch(function () { return null; })
+		]).then(function (results) {
+		  var d = results[0];
+		  var fleet = results[1];
+          var el = document.getElementById("sys-components");
+          if (!el) return;
+          var core = d.core || {};
+          var optimizer = d.optimizer || {};
+          var runtime = optimizer.runtime || {};
+          var drivers = d.drivers || {};
+          var release = (d.updates || {}).release || {};
+          var updateStatus = (d.updates || {}).status || {};
+          var previousImages = updateStatus.previous_images || {};
+          var active = Array.isArray(drivers.active) ? drivers.active.length : 0;
+		  var fleetEnabled = !!(fleet && fleet.enabled);
+          var optimizerLabel = optimizer.configured
+            ? ((runtime.version || "unknown") + " · " + (runtime.transport || "unknown") + (optimizer.healthy === false ? " · degraded" : ""))
+            : "Go DP only";
+          el.innerHTML =
+            '<div class="sys-row"><span class="sys-label">Core</span><span>' + escHtml(core.version || "dev") +
+              ' · ' + escHtml(release.channel || "native") + '</span><span class="sys-value">safety</span></div>' +
+            '<div class="sys-row"><span class="sys-label">Optimizer</span><span>' + escHtml(optimizerLabel) +
+              '</span><span><button class="btn-add" id="sys-update-optimizer" type="button">Update</button>' +
+              ((previousImages.optimizer || (updateStatus.previous_image_id && updateStatus.component === "optimizer")) ? ' <button class="btn-add" id="sys-rollback-optimizer" type="button">Rollback</button>' : '') + '</span></div>' +
+            '<div class="sys-row"><span class="sys-label">Drivers</span><span>host API ' +
+              escHtml(drivers.driver_host_api || drivers.host_api || 1) + ' · ' + active +
+              ' managed</span><button class="btn-add" id="sys-refresh-drivers" type="button">Refresh</button></div>' +
+			'<div class="sys-row"><span class="sys-label">Fleet stats</span><span>' +
+			  (fleetEnabled ? 'On · anonymous heartbeat' : 'Off · explicit opt-in') +
+			  '</span><span><button class="btn-add" id="sys-preview-fleet" type="button">Preview</button>' +
+			  (fleetEnabled ? ' <button class="btn-add" id="sys-submit-fleet" type="button">Send now</button>' : '') + '</span></div>' +
+            '<div class="sys-meta" id="sys-component-action" style="grid-column:1/-1"></div>';
+          var status = document.getElementById("sys-component-action");
+          var optimizerBtn = document.getElementById("sys-update-optimizer");
+          if (optimizerBtn) optimizerBtn.onclick = function () {
+            optimizerBtn.disabled = true;
+            if (status) status.textContent = "Starting optimizer update…";
+            ownerFetch("/api/components/optimizer/update", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "update failed"); return body; }); })
+              .then(function () { if (status) status.textContent = "Optimizer update started; core remains online."; })
+              .catch(function (err) { if (status) status.textContent = err.message; optimizerBtn.disabled = false; });
+          };
+          var rollbackBtn = document.getElementById("sys-rollback-optimizer");
+          if (rollbackBtn) rollbackBtn.onclick = function () {
+            rollbackBtn.disabled = true;
+            if (status) status.textContent = "Restoring previous optimizer image…";
+            ownerFetch("/api/components/optimizer/rollback", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
+              .then(function () { if (status) status.textContent = "Optimizer rollback started; core remains online."; })
+              .catch(function (err) { if (status) status.textContent = err.message; rollbackBtn.disabled = false; });
+          };
+          var driverBtn = document.getElementById("sys-refresh-drivers");
+          if (driverBtn) driverBtn.onclick = function () {
+            driverBtn.disabled = true;
+            if (status) status.textContent = "Refreshing signed driver manifests…";
+            ownerFetch("/api/device_repository/refresh", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+              .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "refresh failed"); return body; }); })
+              .then(function () { if (status) status.textContent = "Driver catalog refreshed; no driver was activated."; driverBtn.disabled = false; })
+              .catch(function (err) { if (status) status.textContent = err.message; driverBtn.disabled = false; });
+          };
+		  var fleetPreviewBtn = document.getElementById("sys-preview-fleet");
+		  if (fleetPreviewBtn) fleetPreviewBtn.onclick = function () {
+			var existing = document.getElementById("sys-fleet-preview");
+			if (existing) { existing.remove(); fleetPreviewBtn.textContent = "Preview"; return; }
+			var preview = document.createElement("pre");
+			preview.id = "sys-fleet-preview";
+			preview.className = "sys-fleet-preview";
+			preview.textContent = fleet && fleet.payload
+			  ? JSON.stringify(fleet.payload, null, 2)
+			  : "Fleet statistics preview unavailable.";
+			el.appendChild(preview);
+			fleetPreviewBtn.textContent = "Hide";
+		  };
+		  var fleetSubmitBtn = document.getElementById("sys-submit-fleet");
+		  if (fleetSubmitBtn) fleetSubmitBtn.onclick = function () {
+			fleetSubmitBtn.disabled = true;
+			if (status) status.textContent = "Sending anonymous fleet heartbeat…";
+			ownerFetch("/api/fleet_statistics/submit", {method:"POST"})
+			  .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "submission failed"); return body; }); })
+			  .then(function () { if (status) status.textContent = "Anonymous fleet heartbeat sent."; fleetSubmitBtn.disabled = false; })
+			  .catch(function (err) { if (status) status.textContent = err.message; fleetSubmitBtn.disabled = false; });
+		  };
+        }).catch(function () {
+          setText("sys-components", "Component status unavailable");
+        });
+      }
+
       refresh();
+      refreshComponents();
       if (window._systemStatusTimer) clearInterval(window._systemStatusTimer);
       window._systemStatusTimer = setInterval(refresh, 5000);
     },

@@ -1,18 +1,13 @@
 package mpc
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
-	"os"
-	"os/exec"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -65,16 +60,21 @@ type MultistageOptimizerConfig struct {
 // argv array rather than a shell string, so configuration cannot accidentally
 // acquire shell expansion semantics.
 type ExternalOptimizerConfig struct {
-	Command     []string
-	ModuleDir   string
-	Timeout     time.Duration
-	Solver      string
-	Formulation string
-	MIPRelGap   float64
-	CVaRWeight  float64
-	CVaRAlpha   float64
-	IdleTimeout time.Duration
-	Multistage  MultistageOptimizerConfig
+	Command   []string
+	ModuleDir string
+	// Transport may be supplied by tests or alternate runtimes. When nil,
+	// TransportMode selects process, unix, or auto (unix with process fallback).
+	Transport     OptimizerTransport
+	TransportMode string
+	SocketPath    string
+	Timeout       time.Duration
+	Solver        string
+	Formulation   string
+	MIPRelGap     float64
+	CVaRWeight    float64
+	CVaRAlpha     float64
+	IdleTimeout   time.Duration
+	Multistage    MultistageOptimizerConfig
 }
 
 // ExternalOptimizer owns one warm JSON-lines worker process. Calls are
@@ -82,20 +82,11 @@ type ExternalOptimizerConfig struct {
 // that process. An optional idle timeout releases the worker's solver memory
 // between planning bursts.
 type ExternalOptimizer struct {
-	cfg ExternalOptimizerConfig
-
-	mu        sync.Mutex
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	scanner   *bufio.Scanner
-	waitCh    chan error
-	idleTimer *time.Timer
+	cfg       ExternalOptimizerConfig
+	transport OptimizerTransport
 }
 
 func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, error) {
-	if len(cfg.Command) == 0 || strings.TrimSpace(cfg.Command[0]) == "" {
-		return nil, errors.New("optimizer command is empty")
-	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 5 * time.Second
 	}
@@ -161,7 +152,42 @@ func NewExternalOptimizer(cfg ExternalOptimizerConfig) (*ExternalOptimizer, erro
 	if ms.PHToleranceW <= 0 {
 		ms.PHToleranceW = 5
 	}
-	return &ExternalOptimizer{cfg: cfg}, nil
+	transport := cfg.Transport
+	if transport == nil {
+		mode := strings.ToLower(strings.TrimSpace(cfg.TransportMode))
+		if mode == "" {
+			mode = "process"
+		}
+		processCfg := ProcessTransportConfig{
+			Command: cfg.Command, ModuleDir: cfg.ModuleDir,
+			IdleTimeout: cfg.IdleTimeout,
+		}
+		switch mode {
+		case "process":
+			var err error
+			transport, err = NewProcessTransport(processCfg)
+			if err != nil {
+				return nil, err
+			}
+		case "unix":
+			if strings.TrimSpace(cfg.SocketPath) == "" {
+				return nil, errors.New("optimizer socket path is empty")
+			}
+			transport = NewUnixTransport(cfg.SocketPath)
+		case "auto":
+			if strings.TrimSpace(cfg.SocketPath) == "" {
+				return nil, errors.New("optimizer socket path is empty")
+			}
+			fallback, err := NewProcessTransport(processCfg)
+			if err != nil {
+				return nil, fmt.Errorf("optimizer process fallback: %w", err)
+			}
+			transport = NewAutoTransport(NewUnixTransport(cfg.SocketPath), fallback)
+		default:
+			return nil, fmt.Errorf("optimizer transport must be auto, unix, or process, got %q", mode)
+		}
+	}
+	return &ExternalOptimizer{cfg: cfg, transport: transport}, nil
 }
 
 type externalRequest struct {
@@ -311,10 +337,6 @@ func (o *ExternalOptimizer) OptimizeMultistage(ctx context.Context, slots []Slot
 }
 
 func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params, scenarioPolicy string, nonAnticipativeSlots int) (Plan, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.cancelIdleStopLocked()
-
 	request := o.buildRequest(slots, p)
 	request.Settings.ScenarioPolicy = scenarioPolicy
 	request.Settings.NonAnticipativeSlots = nonAnticipativeSlots
@@ -342,60 +364,25 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 	if err != nil {
 		return Plan{}, fmt.Errorf("encode optimizer request: %w", err)
 	}
-	if err := o.ensureStartedLocked(); err != nil {
-		return Plan{}, err
-	}
-	if _, err := o.stdin.Write(append(payload, '\n')); err != nil {
-		o.stopLocked()
-		return Plan{}, fmt.Errorf("write optimizer request: %w", err)
-	}
-
 	timeoutCtx, cancel := context.WithTimeout(ctx, o.cfg.Timeout)
 	defer cancel()
-	type scanResult struct {
-		line []byte
-		err  error
-	}
-	resultCh := make(chan scanResult, 1)
-	go func() {
-		if !o.scanner.Scan() {
-			err := o.scanner.Err()
-			if err == nil {
-				err = io.ErrUnexpectedEOF
-			}
-			resultCh <- scanResult{err: err}
-			return
+	line, err := o.transport.RoundTrip(timeoutCtx, payload)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
+			return Plan{}, fmt.Errorf("optimizer timeout after %s: %w", o.cfg.Timeout, context.DeadlineExceeded)
 		}
-		line := append([]byte(nil), o.scanner.Bytes()...)
-		resultCh <- scanResult{line: line}
-	}()
-
-	var scanned scanResult
-	select {
-	case scanned = <-resultCh:
-	case <-timeoutCtx.Done():
-		o.stopLocked()
-		<-resultCh
-		return Plan{}, fmt.Errorf("optimizer timeout after %s: %w", o.cfg.Timeout, timeoutCtx.Err())
-	}
-	if scanned.err != nil {
-		o.stopLocked()
-		return Plan{}, fmt.Errorf("read optimizer response: %w", scanned.err)
+		return Plan{}, fmt.Errorf("optimizer transport: %w", err)
 	}
 	var response externalResponse
-	if err := json.Unmarshal(scanned.line, &response); err != nil {
-		o.stopLocked()
+	if err := json.Unmarshal(line, &response); err != nil {
 		return Plan{}, fmt.Errorf("decode optimizer response: %w", err)
 	}
 	if response.SchemaVersion != externalOptimizerSchemaVersion {
-		o.stopLocked()
 		return Plan{}, fmt.Errorf("optimizer schema version %d, want %d", response.SchemaVersion, externalOptimizerSchemaVersion)
 	}
 	if response.RequestID != request.RequestID && !(response.RequestID == "unknown" && !response.OK) {
-		o.stopLocked()
 		return Plan{}, fmt.Errorf("optimizer response request_id %q, want %q", response.RequestID, request.RequestID)
 	}
-	defer o.scheduleIdleStopLocked()
 	if !response.OK {
 		if response.Error == nil {
 			return Plan{}, errors.New("optimizer returned an unspecified error")
@@ -409,33 +396,6 @@ func (o *ExternalOptimizer) optimize(ctx context.Context, slots []Slot, p Params
 	}
 	return plan, nil
 }
-
-func (o *ExternalOptimizer) cancelIdleStopLocked() {
-	if o.idleTimer == nil {
-		return
-	}
-	o.idleTimer.Stop()
-	o.idleTimer = nil
-}
-
-func (o *ExternalOptimizer) scheduleIdleStopLocked() {
-	if o.cfg.IdleTimeout <= 0 || o.cmd == nil {
-		return
-	}
-	o.cancelIdleStopLocked()
-	var timer *time.Timer
-	timer = time.AfterFunc(o.cfg.IdleTimeout, func() {
-		o.mu.Lock()
-		defer o.mu.Unlock()
-		if o.idleTimer != timer {
-			return
-		}
-		o.idleTimer = nil
-		o.stopLocked()
-	})
-	o.idleTimer = timer
-}
-
 func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest {
 	req := externalRequest{
 		SchemaVersion: externalOptimizerSchemaVersion,
@@ -589,61 +549,15 @@ func (r externalResponse) toPlan(slots []Slot, p Params) Plan {
 	return plan
 }
 
-func (o *ExternalOptimizer) ensureStartedLocked() error {
-	if o.cmd != nil {
-		return nil
-	}
-	cmd := exec.Command(o.cfg.Command[0], o.cfg.Command[1:]...)
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-	if o.cfg.ModuleDir != "" {
-		cmd.Env = append(cmd.Env, "PYTHONPATH="+o.cfg.ModuleDir)
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("optimizer stdin: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("optimizer stdout: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start optimizer %q: %w", o.cfg.Command[0], err)
-	}
-	waitCh := make(chan error, 1)
-	go func() { waitCh <- cmd.Wait() }()
-	o.cmd, o.stdin, o.scanner, o.waitCh = cmd, stdin, bufio.NewScanner(stdout), waitCh
-	o.scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	return nil
-}
-
-func (o *ExternalOptimizer) stopLocked() {
-	o.cancelIdleStopLocked()
-	if o.cmd == nil {
-		return
-	}
-	_ = o.stdin.Close()
-	_ = o.cmd.Process.Kill()
-	<-o.waitCh
-	o.cmd, o.stdin, o.scanner, o.waitCh = nil, nil, nil, nil
-}
-
 func (o *ExternalOptimizer) Close() error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.cancelIdleStopLocked()
-	if o.cmd == nil {
-		return nil
-	}
-	_ = o.stdin.Close()
-	select {
-	case err := <-o.waitCh:
-		o.cmd, o.stdin, o.scanner, o.waitCh = nil, nil, nil, nil
-		return err
-	case <-time.After(time.Second):
-		o.stopLocked()
-		return nil
-	}
+	return o.transport.Close()
+}
+
+// Health negotiates the independent optimizer module contract. It is
+// intentionally separate from plan validation: a healthy worker can still
+// return an unsafe candidate, and ValidatePlan will reject it.
+func (o *ExternalOptimizer) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
+	return o.transport.Health(ctx)
 }
 
 // ValidatePlan independently replays a candidate plan against the canonical

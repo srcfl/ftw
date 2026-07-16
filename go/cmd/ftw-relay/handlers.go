@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/tunnel"
 )
 
@@ -143,6 +144,12 @@ type Relay struct {
 	// trust-parsed by the relay — see bootstrap.go / bootstrap_http.go. Nil outside
 	// multi-tenant mode.
 	Bootstrap *BootstrapStore
+	// Fleet is an optional, privacy-bounded collector for opt-in anonymous FTW
+	// component-health heartbeats. Source IPs are used only by FleetLimit and
+	// are never persisted. The aggregate endpoint requires FleetAdminToken.
+	Fleet           *fleetstats.Collector
+	FleetAdminToken string
+	FleetLimit      *IPRateLimiter
 }
 
 type registerRequest struct {
@@ -184,8 +191,17 @@ func (r *Relay) Handler() http.Handler {
 		// token. A more generous bucket keeps a legit reconnect loop from 429ing.
 		r.ICELimit = newIPRateLimiter(iceBucketCapacity, iceBucketRefillPerSec)
 	}
+	if r.Fleet != nil && r.FleetLimit == nil {
+		// One heartbeat per installation/day is normal. A 30-request burst and
+		// one-token/minute refill tolerate retries while bounding public noise.
+		r.FleetLimit = newIPRateLimiter(30, 1.0/60.0)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", r.healthz)
+	if r.Fleet != nil {
+		mux.HandleFunc("POST /fleet/heartbeat", r.fleetHeartbeat)
+		mux.HandleFunc("GET /fleet/stats", r.fleetAggregate)
+	}
 	mux.HandleFunc("GET /tunnel/{host_id}/next", r.tunnelNext)
 	mux.HandleFunc("POST /tunnel/{host_id}/response/{req_id}", r.tunnelResponse)
 	mux.HandleFunc("POST /tunnel/register", r.tunnelRegister)

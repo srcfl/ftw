@@ -122,37 +122,41 @@ func TestExternalOptimizerStopsWorkerAfterIdleTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer optimizer.Close()
+	transport, ok := optimizer.transport.(*ProcessTransport)
+	if !ok {
+		t.Fatalf("transport = %T, want *ProcessTransport", optimizer.transport)
+	}
 
-	optimizer.mu.Lock()
-	if err := optimizer.ensureStartedLocked(); err != nil {
-		optimizer.mu.Unlock()
+	transport.mu.Lock()
+	if err := transport.ensureStartedLocked(); err != nil {
+		transport.mu.Unlock()
 		t.Fatal(err)
 	}
-	firstProcess := optimizer.cmd.Process.Pid
-	optimizer.scheduleIdleStopLocked()
-	optimizer.mu.Unlock()
+	firstProcess := transport.cmd.Process.Pid
+	transport.scheduleIdleStopLocked()
+	transport.mu.Unlock()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		optimizer.mu.Lock()
-		stopped := optimizer.cmd == nil
-		optimizer.mu.Unlock()
+		transport.mu.Lock()
+		stopped := transport.cmd == nil
+		transport.mu.Unlock()
 		if stopped {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	optimizer.mu.Lock()
-	if optimizer.cmd != nil {
-		optimizer.mu.Unlock()
+	transport.mu.Lock()
+	if transport.cmd != nil {
+		transport.mu.Unlock()
 		t.Fatal("worker remained running after idle timeout")
 	}
-	if err := optimizer.ensureStartedLocked(); err != nil {
-		optimizer.mu.Unlock()
+	if err := transport.ensureStartedLocked(); err != nil {
+		transport.mu.Unlock()
 		t.Fatal(err)
 	}
-	secondProcess := optimizer.cmd.Process.Pid
-	optimizer.mu.Unlock()
+	secondProcess := transport.cmd.Process.Pid
+	transport.mu.Unlock()
 	if secondProcess == firstProcess {
 		t.Fatalf("worker did not restart: pid=%d", firstProcess)
 	}
@@ -256,11 +260,15 @@ func TestExternalOptimizerEndToEnd(t *testing.T) {
 	if multistage.Solver.PolicyConfig == "" || multistage.Solver.ModelVariables == 0 || multistage.Solver.ModelConstraints == 0 {
 		t.Fatalf("missing direct multistage topology metadata: %+v", multistage.Solver)
 	}
+	transport, ok := optimizer.transport.(*ProcessTransport)
+	if !ok {
+		t.Fatalf("transport = %T, want *ProcessTransport", optimizer.transport)
+	}
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		optimizer.mu.Lock()
-		stopped := optimizer.cmd == nil
-		optimizer.mu.Unlock()
+		transport.mu.Lock()
+		stopped := transport.cmd == nil
+		transport.mu.Unlock()
 		if stopped {
 			return
 		}

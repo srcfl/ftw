@@ -526,6 +526,28 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 	}
 }
 
+func TestWriteStatusPreservesPerComponentRollbackHistory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	c := New(Config{StatusPath: path}, newMemStore())
+
+	if err := c.WriteStatus(UpdateStatus{
+		State: "done", Component: "optimizer", PreviousImageID: "sha256:optimizer-old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.WriteStatus(UpdateStatus{
+		State: "starting", Component: "core", Target: "v1.5.0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := c.Status()
+	if got.PreviousImages["optimizer"] != "sha256:optimizer-old" {
+		t.Fatalf("optimizer rollback history = %+v", got.PreviousImages)
+	}
+}
+
 func writeJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	f, err := os.Create(path)

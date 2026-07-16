@@ -10,6 +10,8 @@
 --   host.scale(v, sf)       → local apply_sf(v, sf)
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "fronius",
   name         = "Fronius GEN24",
   manufacturer = "Fronius",

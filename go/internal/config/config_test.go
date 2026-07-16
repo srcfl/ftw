@@ -823,6 +823,48 @@ func TestNotificationsValidateRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+func TestDeviceRepositoryUnsignedManifestMustBeLocal(t *testing.T) {
+	base := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
+	base.DeviceRepository = &DeviceRepository{Enabled: true, Repositories: []DriverRepositorySource{{
+		ID: "dev", Enabled: true, ManifestURL: "https://example.test/manifest.json", AllowUnsigned: true,
+	}}}
+	applyDefaults(&base)
+	if err := base.Validate(); err == nil {
+		t.Fatal("unsigned remote manifest accepted")
+	}
+	base.DeviceRepository.Repositories[0].ManifestURL = "file:///tmp/ftw-driver-manifest.json"
+	base.DeviceRepository.Repositories[0].AllowInsecure = true
+	if err := base.Validate(); err != nil {
+		t.Fatalf("local unsigned development manifest rejected: %v", err)
+	}
+}
+
+func TestDeviceRepositoryOfficialTrustRootRequiresExplicitBlock(t *testing.T) {
+	absent := Config{}
+	applyDefaults(&absent)
+	if absent.DeviceRepository != nil {
+		t.Fatal("omitted device_repository must remain bundled-only")
+	}
+
+	present := Config{
+		Site:             Site{SmoothingAlpha: 0.3},
+		Fuse:             Fuse{MaxAmps: 16},
+		DeviceRepository: &DeviceRepository{Enabled: true},
+	}
+	applyDefaults(&present)
+	if len(present.DeviceRepository.Repositories) != 1 {
+		t.Fatalf("default repositories = %+v", present.DeviceRepository.Repositories)
+	}
+	repo := present.DeviceRepository.Repositories[0]
+	if repo.ID != DefaultDriverRepositoryID || repo.ManifestURL != DefaultDriverRepositoryManifestURL ||
+		repo.TrustedKeys[DefaultDriverRepositorySigningKeyID] != DefaultDriverRepositoryPublicKey {
+		t.Fatalf("official repository default = %+v", repo)
+	}
+	if err := present.Validate(); err != nil {
+		t.Fatalf("official repository default rejected: %v", err)
+	}
+}
+
 func TestNotificationsMaskSecrets(t *testing.T) {
 	c := Config{Notifications: &Notifications{
 		Provider: "ntfy",
@@ -989,6 +1031,46 @@ func TestResolveDriverPathsFallsBackToBundled(t *testing.T) {
 	}
 }
 
+func TestResolveDriverPathsPrefersManagedBeforeBundled(t *testing.T) {
+	bundledDir := t.TempDir()
+	managedDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bundledDir, "mydrv.lua"), []byte("bundled"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(managedDir, "mydrv.lua"), []byte("managed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig, origUser, origManaged := DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride
+	DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride = bundledDir, "", managedDir
+	t.Cleanup(func() {
+		DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride = orig, origUser, origManaged
+	})
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+	if want := filepath.Join(managedDir, "mydrv.lua"); c.Drivers[0].Lua != want {
+		t.Fatalf("got %q, want %q", c.Drivers[0].Lua, want)
+	}
+}
+
+func TestResolveDriverPathsLocalStillShadowsManaged(t *testing.T) {
+	bundledDir, managedDir, userDir := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, dir := range []string{bundledDir, managedDir, userDir} {
+		if err := os.WriteFile(filepath.Join(dir, "mydrv.lua"), []byte(dir), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	orig, origUser, origManaged := DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride
+	DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride = bundledDir, userDir, managedDir
+	t.Cleanup(func() {
+		DriversDirOverride, UserDriversDirOverride, ManagedDriversDirOverride = orig, origUser, origManaged
+	})
+	c := &Config{Drivers: []Driver{{Lua: "drivers/mydrv.lua"}}}
+	c.ResolveDriverPaths("/base")
+	if want := filepath.Join(userDir, "mydrv.lua"); c.Drivers[0].Lua != want {
+		t.Fatalf("got %q, want local %q", c.Drivers[0].Lua, want)
+	}
+}
+
 func TestResolveDriverPathsUserEmptyBackCompat(t *testing.T) {
 	bundledDir := t.TempDir()
 
@@ -1017,5 +1099,58 @@ func TestLocalSimulatorExampleParses(t *testing.T) {
 	}
 	if _, err := Parse(data, repoRoot); err != nil {
 		t.Fatalf("config.local.example.yaml: %v", err)
+	}
+}
+
+func TestFleetStatisticsDefaultsAreOptInAndHTTPS(t *testing.T) {
+	c := &Config{FleetStatistics: &FleetStatistics{}}
+	applyDefaults(c)
+	if c.FleetStatistics.Enabled {
+		t.Fatal("fleet statistics must remain disabled unless explicitly enabled")
+	}
+	if c.FleetStatistics.Endpoint != DefaultFleetStatisticsEndpoint || c.FleetStatistics.IntervalH != 24 {
+		t.Fatalf("fleet statistics defaults = %+v", c.FleetStatistics)
+	}
+}
+
+func TestFleetStatisticsRejectsInsecureEnabledEndpoint(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+fleet_statistics:
+  enabled: true
+  endpoint: http://collector.example/fleet/heartbeat
+`
+	_, err := Parse([]byte(yaml), ".")
+	if err == nil || !strings.Contains(err.Error(), "absolute HTTPS") {
+		t.Fatalf("expected insecure fleet endpoint rejection, got %v", err)
+	}
+}
+
+func TestFleetStatisticsEnabledUsesOfficialDefaultEndpoint(t *testing.T) {
+	yaml := `
+site: { name: x, smoothing_alpha: 0.3 }
+fuse: { max_amps: 16, phases: 3, voltage: 230 }
+drivers:
+  - name: m
+    lua: m.lua
+    is_site_meter: true
+    capabilities: { mqtt: { host: 1.1.1.1 } }
+api: { port: 8080 }
+fleet_statistics:
+  enabled: true
+`
+	c, err := Parse([]byte(yaml), ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.FleetStatistics.Endpoint != DefaultFleetStatisticsEndpoint || c.FleetStatistics.IntervalH != 24 {
+		t.Fatalf("fleet statistics = %+v", c.FleetStatistics)
 	}
 }

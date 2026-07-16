@@ -25,6 +25,8 @@
 --   site is exporting and the Sonnen is taking the surplus.
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sonnen",
   name         = "sonnenBatterie (local API)",
   manufacturer = "sonnen",

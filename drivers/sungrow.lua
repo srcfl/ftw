@@ -4,6 +4,8 @@
 -- Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
 
 DRIVER = {
+  host_api_min = 1,
+  host_api_max = 1,
   id           = "sungrow-shx",
   name         = "Sungrow SH Hybrid Inverter",
   manufacturer = "Sungrow",
