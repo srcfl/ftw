@@ -107,6 +107,11 @@ func Open(path string) (*Store, error) {
 	}
 	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
 
+	// Reclaim freelist space left behind by large prunes. No-op on a healthy
+	// file; a one-time multi-minute VACUUM on the boot after a bloated DB's
+	// first prune. Boot is the only window where no writer can be starved.
+	s.CompactIfBloated()
+
 	// Arm the verified-good marker: state.db opened + migrated successfully (it
 	// either passed quick_check, was restored from snapshot, or rebuilt fresh), so
 	// the next boot can SKIP the (slow on a large DB) integrity check. The marker
