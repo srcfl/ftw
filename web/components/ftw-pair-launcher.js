@@ -21,7 +21,7 @@
 
 import { FtwElement } from "./ftw-element.js";
 import { ownerFetch } from "./owner-fetch.js";
-import "./ftw-pair-card.js";
+import "./ftw-pair-card.js?v=ownerfetch1";
 import "./ftw-modal.js";
 
 const POLL_MS = 30_000;
