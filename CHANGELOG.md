@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.130.1
+
+### Patch Changes
+
+- d08c4cc: Automatically add and validate the independently updatable optimizer sidecar when upgrading safe existing Linux or macOS Compose installations, with rollback cleanup and fail-closed handling for operator-owned overrides.
+
 ## 0.130.0
 
 ### Minor Changes
