@@ -3028,12 +3028,17 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	return targets
 }
 
-// coverLoadChargeSlot reports whether the current plan slot is a
-// planner_arbitrage charge-from-PV-surplus slot: the DP meant to soak surplus
-// (PlannedGridW below the grid-charge import band), NOT buy from the grid.
-// Such a slot carries no hard charge commitment — when the forecast load is
-// wrong and the site is importing, the battery should reactively discharge to
-// cover it (the charge-side mirror of the discharge-slot cover-load carve-out).
+// coverLoadChargeSlot reports whether the current plan slot is a charge-from-
+// PV-surplus slot: the DP meant to soak surplus (PlannedGridW below the
+// grid-charge import band), NOT buy from the grid. Such a slot carries no hard
+// charge commitment — when the forecast load is wrong and the site is
+// importing, the battery may reactively discharge to cover it (the charge-side
+// mirror of the discharge-slot cover-load carve-out).
+//
+// planner_arbitrage always gets this carve-out. planner_passive_arbitrage gets
+// it only when BatteryCoversEV is explicitly enabled and the EV is really
+// drawing current: that resolves the EV-cover contract without changing passive
+// arbitrage's default "do not discharge in charge slots" behaviour.
 //
 // Three rails consult this so a legitimate cover-load discharge isn't undone:
 //   - the soft cap (ComputeDispatch) lets the back-off go negative,
@@ -3046,10 +3051,18 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 func coverLoadChargeSlot(state *State, dir SlotDirective) bool {
 	const idleWhGate = 50.0         // a near-zero per-slot energy is idle, not charge
 	const gridChargeImportW = 100.0 // PlannedGridW ≥ this ⇒ deliberate grid-charge
-	return state != nil && state.Mode == ModePlannerArbitrage &&
-		dir.HasPlannedGridW &&
-		dir.BatteryEnergyWh > idleWhGate &&
-		dir.PlannedGridW < gridChargeImportW
+	if state == nil ||
+		!dir.HasPlannedGridW ||
+		dir.BatteryEnergyWh <= idleWhGate ||
+		dir.PlannedGridW >= gridChargeImportW {
+		return false
+	}
+	if state.Mode == ModePlannerArbitrage {
+		return true
+	}
+	return state.Mode == ModePlannerPassiveArbitrage &&
+		state.BatteryCoversEV &&
+		state.EVChargingW > evActiveThresholdW
 }
 
 func planHasNonDischargeIntent(state *State) bool {
@@ -3086,7 +3099,8 @@ func planHasNonDischargeIntent(state *State) bool {
 	//
 	// Fix: planner_passive_arbitrage now participates in the carve-out
 	// for non-charge slots (BatteryEnergyWh ≤ idleWh). Charge slots
-	// remain authoritative — their non-discharge block is preserved.
+	// remain authoritative — except explicit BatteryCoversEV PV-surplus
+	// slots (coverLoadChargeSlot), where the EV-cover contract wins.
 	if state.Mode == ModePlannerSelf {
 		return false
 	}
@@ -3098,6 +3112,9 @@ func planHasNonDischargeIntent(state *State) bool {
 			// plan slot has explicit charge intent. Idle and discharge slots
 			// get no non-discharge block — reactive discharge may cover load.
 			if state.Mode == ModePlannerPassiveArbitrage {
+				if coverLoadChargeSlot(state, dir) {
+					return false
+				}
 				return dir.BatteryEnergyWh > idleWh
 			}
 			if state.Mode == ModePlannerArbitrage {

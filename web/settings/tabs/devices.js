@@ -204,6 +204,8 @@
             '<input type="text" data-path="drivers.' + idx + '.config.client_id" value="' + escHtml(acfg.client_id || '') + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
             '<label style="margin-top:8px">Client Secret ' + secretBadge + ' ' + help('The "Client Secret" from your MyUplink app. Stored masked; leave empty to keep the saved value.') + '</label>' +
             '<input type="password" autocomplete="off" data-path="drivers.' + idx + '.config.client_secret" value="" placeholder="' + (secretSaved ? '•••••••• (leave empty to keep)' : 'paste Client Secret') + '">' +
+            '<label style="margin-top:8px">OAuth scope ' + help('Advanced. Default is WRITESYSTEM READSYSTEM offline_access because MyUplink can reject read-only authorization. The driver remains read-only. Use READSYSTEM offline_access only if your MyUplink app accepts it.') + '</label>' +
+            '<input type="text" data-path="drivers.' + idx + '.config.oauth_scope" value="' + escHtml(acfg.oauth_scope || '') + '" placeholder="WRITESYSTEM READSYSTEM offline_access">' +
             '<div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">' +
             '<button class="btn-add myuplink-connect-btn" type="button" data-driver-idx="' + idx + '" data-driver-name="' + escHtml(d.name || '') + '">Connect to MyUplink</button>' +
             connBadge +

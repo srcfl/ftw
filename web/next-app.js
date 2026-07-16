@@ -126,6 +126,14 @@
       typeof window.ftwP2P.state === "function" &&
       window.ftwP2P.state() === "direct");
   }
+  function ownerTransportConnecting() {
+    if (isLanFallbackOrigin()) return false;
+    try {
+      return !!(window.ftwP2P &&
+        typeof window.ftwP2P.state === "function" &&
+        window.ftwP2P.state() === "connecting");
+    } catch (e) { return false; }
+  }
 
   // ---- Chart data ----
   var chartHistory = {
@@ -4553,6 +4561,14 @@
     showGate("connecting");
     scheduleAuthRetry(1500);
   }
+  function showUnavailableOwnerTransportGate() {
+    if (ownerTransportConnecting()) {
+      showWaitingOrLandingGate();
+      return;
+    }
+    showSignInGate();
+    if (hasDecryptableDirectory()) scheduleAuthRetry(5000);
+  }
 
   function setupAuth() {
     if (authRetryTimer) {
@@ -4600,7 +4616,7 @@
         // reconnect.
         if (signoutBtn) signoutBtn.hidden = true;
         if (!ownerTransportReady()) {
-          showWaitingOrLandingGate();
+          showUnavailableOwnerTransportGate();
           return;
         }
         if (manualSignoutActive()) {
@@ -4619,7 +4635,7 @@
       })
       .catch(function () {
         if (!ownerTransportReady()) {
-          showWaitingOrLandingGate();
+          showUnavailableOwnerTransportGate();
           return;
         }
         showSignInGate();

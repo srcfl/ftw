@@ -39,9 +39,11 @@ import (
 // myUplinkOAuthBase is the MyUplink OAuth + API host. Overridable in tests.
 var myUplinkOAuthBase = "https://api.myuplink.com"
 
-// myUplinkScope is the least-privilege scope set; offline_access is what
-// makes MyUplink return a refresh_token.
-const myUplinkScope = "READSYSTEM offline_access"
+// defaultMyUplinkScope is the MyUplink scope set used by their public API
+// OAuth flow. The driver itself remains read-only, but MyUplink currently
+// rejects some authorization-code app flows unless WRITESYSTEM is requested
+// alongside READSYSTEM. offline_access is what makes it return a refresh_token.
+const defaultMyUplinkScope = "WRITESYSTEM READSYSTEM offline_access"
 
 // myUplinkCallbackPath is the FTW route MyUplink redirects back to. The
 // operator registers <origin>+this as the Callback Url in the portal.
@@ -139,6 +141,24 @@ func (s *Server) driverConfigValue(driver, key string) (string, bool) {
 	return "", false
 }
 
+func myUplinkOAuthScope(configured string) string {
+	fields := strings.Fields(configured)
+	if len(fields) == 0 {
+		return defaultMyUplinkScope
+	}
+	hasOffline := false
+	for _, f := range fields {
+		if f == "offline_access" {
+			hasOffline = true
+			break
+		}
+	}
+	if !hasOffline {
+		fields = append(fields, "offline_access")
+	}
+	return strings.Join(fields, " ")
+}
+
 // handleMyUplinkOAuthStart: GET /api/oauth/myuplink/start?driver=<name>
 func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request) {
 	driver := r.URL.Query().Get("driver")
@@ -198,7 +218,8 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", clientID)
-	q.Set("scope", myUplinkScope)
+	scope, _ := s.driverConfigValue(driver, "oauth_scope")
+	q.Set("scope", myUplinkOAuthScope(scope))
 	q.Set("redirect_uri", redirectURI)
 	q.Set("state", stateTok)
 	q.Set("code_challenge", challenge)
@@ -209,6 +230,7 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 		"authorize_url": authorizeURL,
 		"redirect_uri":  redirectURI,
 		"callback":      redirectURI,
+		"scope":         myUplinkOAuthScope(scope),
 	})
 }
 
