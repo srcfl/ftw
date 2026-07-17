@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0
+
+### Minor Changes
+
+- ca37bef: Make the official core container a small static runtime and keep Python/CVXPY exclusively in the independently updatable optimizer image.
+
 ## 1.2.0
 
 ### Minor Changes
