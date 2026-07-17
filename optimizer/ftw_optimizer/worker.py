@@ -20,7 +20,7 @@ from .protocol import ProtocolError, error_response, parse_request
 
 
 PROTOCOL_VERSION = 1
-FEATURES = ["champion", "recourse", "multistage"]
+FEATURES = ["champion", "recourse", "multistage", "commercial_constraints_v1"]
 SOLVE_LOCK = threading.Lock()
 
 

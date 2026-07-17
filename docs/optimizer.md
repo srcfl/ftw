@@ -67,6 +67,11 @@ The model supports:
 - multiple load/PV scenarios with shared champion schedules;
 - an opt-in storage-only recourse shadow with a shared executable prefix;
 - expected cost plus configurable CVaR tail risk.
+- optional `commercial_constraints_v1` inputs for time-varying upward/downward
+  reserve power and energy, backup energy, robust P10/P90 site limits,
+  throughput degradation cost, and demand-charge windows. These fields extend
+  optimizer protocol v1 additively; workers advertise support through the
+  `commercial_constraints_v1` handshake feature before a caller may use them.
 
 If live storage energy starts outside a configured operating band, the initial
 violation is treated as a recoverable state rather than an invalid request. It

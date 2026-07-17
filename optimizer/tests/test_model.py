@@ -20,7 +20,97 @@ def test_worker_handshake_exposes_module_contract() -> None:
     assert response is not None
     assert response["name"] == "ftw-optimizer"
     assert response["protocol_version"] == 1
-    assert {"champion", "recourse", "multistage"}.issubset(response["features"])
+    assert {
+        "champion",
+        "recourse",
+        "multistage",
+        "commercial_constraints_v1",
+    }.issubset(response["features"])
+
+
+def test_commercial_constraints_hold_reserve_backup_and_demand_peak() -> None:
+    request = base_request()
+    request["slots"] = [
+        {
+            "start_ms": 1,
+            "len_min": 60,
+            "price_ore": 100,
+            "spot_ore": 20,
+            "confidence": 1,
+            "pv_w": 0,
+            "load_w": 8000,
+            "max_import_w": 10000,
+            "max_export_w": 10000,
+        },
+        {
+            "start_ms": 3600001,
+            "len_min": 60,
+            "price_ore": 100,
+            "spot_ore": 20,
+            "confidence": 1,
+            "pv_w": 0,
+            "load_w": 8000,
+            "max_import_w": 10000,
+            "max_export_w": 10000,
+        },
+    ]
+    request["storages"][0].update(
+        {
+            "initial_energy_wh": 8000,
+            "min_energy_wh": 1000,
+            "max_energy_wh": 9000,
+            "terminal_price_ore_kwh": 0,
+            "cycle_cost_ore_kwh": 0,
+            "throughput_cost_ore_kwh": 1,
+        }
+    )
+    request["commercial_constraints"] = {
+        "version": "srcful-commercial-v1",
+        "reserve_up_w": [2000, 2000],
+        "reserve_down_w": [0, 0],
+        "required_up_wh": [0, 0],
+        "required_down_wh": [0, 0],
+        "local_uncertainty_up_wh": [0, 0],
+        "local_uncertainty_down_wh": [0, 0],
+        "backup_min_usable_energy_wh": [4000, 4000],
+        "load_low_w": [8000, 8000],
+        "load_high_w": [8000, 8000],
+        "pv_low_w": [0, 0],
+        "pv_high_w": [0, 0],
+        "allow_pv_curtailment": False,
+        "demand_charge": {
+            "rate_ore_per_kw": 1000,
+            "billing_peak_so_far_w": 0,
+            "active_window": [True, True],
+        },
+    }
+    response = handle(request)
+    assert response["ok"], response
+    actions = response["plan"]["actions"]
+    assert all(action["battery_w"] >= -3000 - 2 for action in actions)
+    assert all(
+        action["storage_energy_wh"]["home"] >= 5000 - 2
+        for action in actions
+    )
+    assert max(action["grid_w"] for action in actions) < 8000
+    assert (
+        response["solver"]["objective_breakdown_ore"][
+            "demand_charge_increment"
+        ]
+        > 0
+    )
+
+
+def test_commercial_constraints_reject_negative_reserve() -> None:
+    request = base_request()
+    request["commercial_constraints"] = {
+        "version": "srcful-commercial-v1",
+        "reserve_up_w": [-1, 0],
+    }
+    response = handle(request)
+    assert not response["ok"]
+    assert response["error"]["code"] == "invalid_request"
+    assert "non-negative" in response["error"]["message"]
 
 
 def base_request() -> dict:

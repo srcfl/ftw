@@ -61,6 +61,10 @@ def parse_request(raw: Any) -> ParsedRequest:
     require_list(payload.get("storages", []), "storages")
     require_list(payload.get("flex_loads", []), "flex_loads")
     require_list(payload.get("thermal_loads", []), "thermal_loads")
+    require_dict(
+        payload.get("commercial_constraints", {}),
+        "commercial_constraints",
+    )
     return ParsedRequest(request_id=request_id, payload=payload)
 
 
