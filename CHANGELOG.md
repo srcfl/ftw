@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+### Minor Changes
+
+- 644d784: Add feature-negotiated commercial reserve, backup, robust forecast, degradation, and demand-charge constraints to optimizer protocol v1 for shared Sourceful Local EMS use.
+
 ## 1.0.0
 
 ### Major Changes
