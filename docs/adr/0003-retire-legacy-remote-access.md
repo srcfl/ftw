@@ -7,7 +7,7 @@
 
 ## Decision
 
-Retire the Forty Two Watts relay, TURN/WebRTC path, owner-passkey portal and
+Retire the legacy FTW relay, TURN/WebRTC path, owner-passkey portal and
 `ftw-pair` support tunnel. Do not migrate them to Sourceful domains.
 
 The full FTW dashboard and API are LAN-local. Operators who want that complete

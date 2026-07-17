@@ -154,7 +154,7 @@ public internet. If you need the complete interface away from home, use a VPN
 or private overlay that you operate and trust; this is a community-supported
 self-hosting path, not an official Sourceful remote-access service.
 
-The retired Forty Two Watts relay, TURN, browser passkey portal, WebRTC path
+The retired legacy FTW relay, TURN, browser passkey portal, WebRTC path
 and `ftw-pair` support tunnel are not part of FTW. The planned official remote
 experience is the Sourceful Energy app through an explicit, optional Novacore
 integration. It will start read-only and use outbound-only connections from

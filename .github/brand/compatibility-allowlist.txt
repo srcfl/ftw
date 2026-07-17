@@ -7,6 +7,7 @@
 ^docs/upgrade-from-legacy\.md:.*$
 ^README\.md:> \*\*Upgrading an existing Forty Two Watts installation\?\*\* Follow the$
 ^go/cmd/ftw-updater/main_test\.go:.*forty-two-watts.*$
+^Makefile:.*-C "\$\$stage" ftw forty-two-watts.*$
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
 ^docs/operations\.md:.*forty-two-watts.*compatibility symlink$
