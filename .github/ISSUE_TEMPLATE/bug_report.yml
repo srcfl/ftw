@@ -7,7 +7,11 @@ body:
     attributes:
       value: |
         Thanks for taking the time to report a bug. Please fill in the
-        details below so we can reproduce and fix it quickly.
+        details below so the community can reproduce and evaluate it.
+
+        FTW Community has no guaranteed response or resolution time. Do not
+        include credentials, access tokens, private keys, or unredacted
+        configuration and energy data.
   - type: textarea
     id: what-happened
     attributes:

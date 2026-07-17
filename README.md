@@ -11,9 +11,14 @@ optional full mathematical optimizer uses Python/CVXPY; official containers
 include that runtime and native installs fall back safely to the Go planner when
 it is unavailable.
 
-FTW is maintained by Sourceful Labs AB and project contributors. It is a
-self-hosted open-source project, not a hosted Sourceful service; the local
-control path does not depend on Sourceful cloud services.
+FTW Community is maintained by Sourceful Energy (Sourceful Labs AB) and project
+contributors. It is a self-hosted open-source project, not a hosted Sourceful
+service; the local control path does not depend on Sourceful cloud services.
+
+The Community edition is free under Apache-2.0 and comes without official
+support or service-level commitments. Help is provided by the community on a
+best-effort basis. Sourceful offers separate commercial services for teams that
+need supported deployments, integrations, fleet operations, or an SLA.
 
 > **Upgrading an existing Forty Two Watts installation?** Follow the
 > step-by-step [legacy upgrade guide in Swedish and English](docs/upgrade-from-legacy.md).
@@ -253,10 +258,29 @@ first boot, so application patch releases do not rebuild the base OS image.
 Do not hand-edit `CHANGELOG.md` or manually bump `package.json`; pending
 release notes live in `.changeset/*.md`.
 
-## Community
+## Community and Support
 
 - Discord: [discord.gg/25xcBzQaux](https://discord.gg/25xcBzQaux)
+- Discussions: [github.com/srcfl/ftw/discussions](https://github.com/srcfl/ftw/discussions)
 - Issues: [github.com/srcfl/ftw/issues](https://github.com/srcfl/ftw/issues)
+
+FTW Community is built in public. Bug reports, driver improvements,
+documentation, tests, and pull requests are welcome. Community channels do not
+carry guaranteed response times and are not a substitute for operational
+support. See [`SUPPORT.md`](SUPPORT.md) for the support boundary and responsible
+ways to ask for help.
+
+## Commercial Deployments
+
+Apache-2.0 permits commercial use of FTW Community; no separate license is
+required to use the open-source code. Sourceful's commercial offering is for
+organizations that need more than the community project provides: deployment
+and integration work, fleet and managed operations, long-term maintenance,
+certified device support, or contractual support and service levels.
+
+Contact [Sourceful Energy](https://www.sourceful.energy/contact) to scope a
+supported deployment. The open-source and commercial model is recorded in
+[`docs/adr/0004-community-and-commercial-model.md`](docs/adr/0004-community-and-commercial-model.md).
 
 ## License
 
