@@ -48,6 +48,22 @@ def _vector(value: Any, n: int, field: str) -> np.ndarray:
     return np.asarray([finite_number(v, f"{field}[{i}]") for i, v in enumerate(items)])
 
 
+def _non_negative_vector(value: Any, n: int, field: str) -> np.ndarray:
+    vector = _vector(value, n, field)
+    if np.any(vector < -1e-9):
+        raise ProtocolError(f"{field} must contain non-negative values")
+    return vector
+
+
+def _boolean_vector(value: Any, n: int, field: str) -> np.ndarray:
+    items = require_list(value, field)
+    if len(items) != n:
+        raise ProtocolError(f"{field} must have {n} entries")
+    if any(not isinstance(item, bool) for item in items):
+        raise ProtocolError(f"{field} must contain booleans")
+    return np.asarray(items, dtype=bool)
+
+
 def _mode(payload: dict[str, Any]) -> str:
     settings = require_dict(payload.get("settings", {}), "settings")
     mode = settings.get("mode", "self_consumption")
@@ -85,7 +101,19 @@ def _solver_options(settings: dict[str, Any], solver: str) -> dict[str, Any]:
 
 def solve(payload: dict[str, Any]) -> dict[str, Any]:
     settings = require_dict(payload.get("settings", {}), "settings")
+    commercial = require_dict(
+        payload.get("commercial_constraints", {}),
+        "commercial_constraints",
+    )
+    if commercial and commercial.get("version") != "srcful-commercial-v1":
+        raise ProtocolError(
+            "commercial_constraints.version must be srcful-commercial-v1"
+        )
     scenario_policy = settings.get("scenario_policy", "shared")
+    if commercial and scenario_policy != "shared":
+        raise ProtocolError(
+            "commercial_constraints_v1 is supported by the shared champion only"
+        )
     if scenario_policy == "recourse":
         # Imported lazily to keep the shared champion model independent. The
         # challenger is deliberately storage-only until scenario-dependent EV
@@ -126,6 +154,80 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     )
     if np.any(base_load < -1e-9) or np.any(base_pv > 1e-9):
         raise ProtocolError("site convention requires load_w >= 0 and pv_w <= 0")
+
+    reserve_up = _non_negative_vector(
+        commercial.get("reserve_up_w", [0.0] * n),
+        n,
+        "commercial_constraints.reserve_up_w",
+    )
+    reserve_down = _non_negative_vector(
+        commercial.get("reserve_down_w", [0.0] * n),
+        n,
+        "commercial_constraints.reserve_down_w",
+    )
+    required_up = _non_negative_vector(
+        commercial.get("required_up_wh", [0.0] * n),
+        n,
+        "commercial_constraints.required_up_wh",
+    )
+    required_down = _non_negative_vector(
+        commercial.get("required_down_wh", [0.0] * n),
+        n,
+        "commercial_constraints.required_down_wh",
+    )
+    uncertainty_up = _non_negative_vector(
+        commercial.get("local_uncertainty_up_wh", [0.0] * n),
+        n,
+        "commercial_constraints.local_uncertainty_up_wh",
+    )
+    uncertainty_down = _non_negative_vector(
+        commercial.get("local_uncertainty_down_wh", [0.0] * n),
+        n,
+        "commercial_constraints.local_uncertainty_down_wh",
+    )
+    backup_floor = _non_negative_vector(
+        commercial.get("backup_min_usable_energy_wh", [0.0] * n),
+        n,
+        "commercial_constraints.backup_min_usable_energy_wh",
+    )
+    robust_load_low = _vector(
+        commercial.get("load_low_w", base_load.tolist()),
+        n,
+        "commercial_constraints.load_low_w",
+    )
+    robust_load_high = _vector(
+        commercial.get("load_high_w", base_load.tolist()),
+        n,
+        "commercial_constraints.load_high_w",
+    )
+    robust_pv_low = _vector(
+        commercial.get("pv_low_w", base_pv.tolist()),
+        n,
+        "commercial_constraints.pv_low_w",
+    )
+    robust_pv_high = _vector(
+        commercial.get("pv_high_w", base_pv.tolist()),
+        n,
+        "commercial_constraints.pv_high_w",
+    )
+    if (
+        np.any(robust_load_low < -1e-9)
+        or np.any(robust_load_high < -1e-9)
+        or np.any(robust_pv_low > 1e-9)
+        or np.any(robust_pv_high > 1e-9)
+    ):
+        raise ProtocolError(
+            "commercial robust forecasts violate the site sign convention"
+        )
+    if (
+        np.any(robust_load_low > base_load + 1e-9)
+        or np.any(base_load > robust_load_high + 1e-9)
+        or np.any(robust_pv_low > base_pv + 1e-9)
+        or np.any(base_pv > robust_pv_high + 1e-9)
+    ):
+        raise ProtocolError(
+            "commercial robust forecasts must bracket the base forecast"
+        )
 
     raw_scenarios = require_list(payload.get("scenarios", []), "scenarios")
     scenarios: list[dict[str, Any]] = []
@@ -229,6 +331,62 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         total_discharge += discharge
         storages.append(StorageVars(spec, charge, discharge, energy))
 
+    if commercial:
+        if not storages and any(
+            np.any(values > 1e-9)
+            for values in (
+                reserve_up,
+                reserve_down,
+                required_up,
+                required_down,
+                uncertainty_up,
+                uncertainty_down,
+                backup_floor,
+            )
+        ):
+            raise ProtocolError(
+                "commercial reserve or backup constraints require storage"
+            )
+        total_max_charge = sum(
+            max(0.0, float(storage.spec.get("max_charge_w", 0)))
+            for storage in storages
+        )
+        total_max_discharge = sum(
+            max(0.0, float(storage.spec.get("max_discharge_w", 0)))
+            for storage in storages
+        )
+        total_storage_power = total_charge - total_discharge
+        constraints += [
+            total_storage_power - reserve_up >= -total_max_discharge,
+            total_storage_power + reserve_down <= total_max_charge,
+        ]
+        for t in range(n):
+            upward_floor = backup_floor[t] + required_up[t] + uncertainty_up[t]
+            downward_floor = required_down[t] + uncertainty_down[t]
+            for state_t in (t, t + 1):
+                usable_energy = cp.sum(
+                    cp.hstack(
+                        [
+                            storage.energy[state_t]
+                            - float(storage.spec.get("min_energy_wh", 0))
+                            for storage in storages
+                        ]
+                    )
+                ) if storages else cp.Constant(0.0)
+                charge_headroom = cp.sum(
+                    cp.hstack(
+                        [
+                            float(storage.spec.get("max_energy_wh", storage.spec["capacity_wh"]))
+                            - storage.energy[state_t]
+                            for storage in storages
+                        ]
+                    )
+                ) if storages else cp.Constant(0.0)
+                constraints += [
+                    usable_energy >= upward_floor,
+                    charge_headroom >= downward_floor,
+                ]
+
     flex_loads: list[FlexVars] = []
     total_flex: cp.Expression = cp.Constant(np.zeros(n))
     for i, raw in enumerate(require_list(payload.get("flex_loads", []), "flex_loads")):
@@ -326,6 +484,56 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
     )
     curtail = cp.Variable(n, nonneg=True, name="pv_curtail")
     constraints.append(curtail <= pv_generation)
+    allow_curtailment = commercial.get("allow_pv_curtailment", True)
+    if not isinstance(allow_curtailment, bool):
+        raise ProtocolError(
+            "commercial_constraints.allow_pv_curtailment must be a boolean"
+        )
+    if not allow_curtailment:
+        constraints.append(curtail == 0)
+
+    if commercial:
+        import_limit = np.asarray(
+            [
+                max(
+                    0.0,
+                    finite_number(
+                        slot.get("max_import_w", 0),
+                        f"slots[{t}].max_import_w",
+                    ),
+                )
+                for t, slot in enumerate(slots)
+            ]
+        )
+        export_limit = np.asarray(
+            [
+                max(
+                    0.0,
+                    finite_number(
+                        slot.get("max_export_w", 0),
+                        f"slots[{t}].max_export_w",
+                    ),
+                )
+                for t, slot in enumerate(slots)
+            ]
+        )
+        total_storage_power = total_charge - total_discharge
+        constraints += [
+            robust_load_high
+            + robust_pv_high
+            + total_flex
+            + total_thermal
+            + total_storage_power
+            + reserve_down
+            <= import_limit,
+            robust_load_low
+            + robust_pv_low
+            + total_flex
+            + total_thermal
+            + total_storage_power
+            - reserve_up
+            >= -export_limit,
+        ]
 
     scenario_vars: list[dict[str, Any]] = []
     expected_cost: cp.Expression = cp.Constant(0.0)
@@ -386,6 +594,42 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             )
         scenario_vars.append({"import": grid_import, "export": grid_export, "cost": scenario_cost})
 
+    demand_cost: cp.Expression = cp.Constant(0.0)
+    demand_spec = require_dict(
+        commercial.get("demand_charge", {}),
+        "commercial_constraints.demand_charge",
+    )
+    if demand_spec:
+        demand_rate = finite_number(
+            demand_spec.get("rate_ore_per_kw", 0),
+            "commercial_constraints.demand_charge.rate_ore_per_kw",
+        )
+        billing_peak = finite_number(
+            demand_spec.get("billing_peak_so_far_w", 0),
+            "commercial_constraints.demand_charge.billing_peak_so_far_w",
+        )
+        if demand_rate < 0 or billing_peak < 0:
+            raise ProtocolError(
+                "commercial demand-charge rate and billing peak must be non-negative"
+            )
+        active_window = _boolean_vector(
+            demand_spec.get("active_window", [False] * n),
+            n,
+            "commercial_constraints.demand_charge.active_window",
+        )
+        if demand_rate > 0 and np.any(active_window):
+            demand_peak = cp.Variable(nonneg=True, name="commercial_demand_peak_w")
+            constraints.append(demand_peak >= billing_peak)
+            base_index = next(
+                (i for i, scenario in enumerate(scenarios) if scenario["id"] == "base"),
+                0,
+            )
+            base_import = scenario_vars[base_index]["import"]
+            for t, active in enumerate(active_window):
+                if active:
+                    constraints.append(demand_peak >= base_import[t])
+            demand_cost = demand_rate * (demand_peak - billing_peak) / 1000.0
+
     storage_charge_active: cp.Variable | None = None
     storage_discharge_active: cp.Variable | None = None
     if storages and flex_loads and formulation != "relaxed":
@@ -433,6 +677,16 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         cycle_ore = max(0.0, finite_number(storage.spec.get("cycle_cost_ore_kwh", 0), "storage.cycle_cost_ore_kwh"))
         cycle_ore += max(0.0, finite_number(settings.get("min_arbitrage_spread_ore_kwh", 0), "settings.min_arbitrage_spread_ore_kwh"))
         cycle_cost += cycle_ore * cp.sum(cp.multiply(dt_h, storage.discharge)) / 1000.0
+        throughput_ore = max(
+            0.0,
+            finite_number(
+                storage.spec.get("throughput_cost_ore_kwh", 0),
+                "storage.throughput_cost_ore_kwh",
+            ),
+        )
+        cycle_cost += throughput_ore * cp.sum(
+            cp.multiply(dt_h, storage.charge + storage.discharge)
+        ) / 1000.0
         terminal_price = finite_number(storage.spec.get("terminal_price_ore_kwh", 0), "storage.terminal_price_ore_kwh")
         terminal_credit += terminal_price * storage.energy[-1] / 1000.0
 
@@ -455,7 +709,15 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
         probabilities = np.asarray([s["probability"] for s in scenarios])
         risk_cost = risk_weight * (threshold + probabilities @ excess / (1.0 - alpha))
 
-    cost_objective = expected_cost + strict_sc_penalty + cycle_cost - terminal_credit - pv_bonus + risk_cost
+    cost_objective = (
+        expected_cost
+        + strict_sc_penalty
+        + demand_cost
+        + cycle_cost
+        - terminal_credit
+        - pv_bonus
+        + risk_cost
+    )
     slack_problem = cp.Problem(cp.Minimize(service_slack), constraints)
     preferred_solver = str(settings.get("solver", "HIGHS")).upper()
     if preferred_solver not in {"HIGHS", "CLARABEL"}:
@@ -574,6 +836,12 @@ def solve(payload: dict[str, Any]) -> dict[str, Any]:
             "non_anticipative_slots": n,
             "cvar_weight": risk_weight,
             "cvar_alpha": finite_number(settings.get("cvar_alpha", 0.9), "settings.cvar_alpha"),
+            "objective_breakdown_ore": {
+                "energy": float(expected_cost.value),
+                "demand_charge_increment": float(demand_cost.value),
+                "degradation": float(cycle_cost.value),
+                "terminal_energy_value": -float(terminal_credit.value),
+            },
         },
         "plan": {
             "mode": mode,

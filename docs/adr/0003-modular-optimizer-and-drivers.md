@@ -15,6 +15,13 @@ validator before it can reach dispatch. Socket absence, timeout, malformed
 output, or incompatibility falls back first to the bundled Python worker during
 the migration window and always to the Go DP planner.
 
+Protocol v1 is additive and feature-negotiated. The
+`commercial_constraints_v1` feature adds optional time-varying reserve power,
+reserve/uncertainty energy, backup floors, robust P10/P90 site limits,
+throughput cost and demand-charge windows. A caller must observe that handshake
+feature before sending those fields; an older worker is incompatible rather
+than a license to discard commercial constraints.
+
 Lua drivers continue to run inside core's gopher-lua VM and capability sandbox;
 they do not become privileged per-driver containers. The initial host contract
 is `driver_host_api = 1`. Repository manifests declare an inclusive
