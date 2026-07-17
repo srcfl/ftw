@@ -25,14 +25,13 @@ func (s *Server) handleCalDAVStatus(w http.ResponseWriter, r *http.Request) {
 // handleCalDAVCredentials reveals the managed CalDAV credential (username +
 // password) plus subscribe URLs so the Settings → Calendar tab can show them
 // (and render a QR) for the operator to add the account to a phone/desktop
-// calendar app. It intentionally returns the password — the operator needs it.
-// It stays separate from the frequently-polled /status so the secret isn't read
-// on every poll. The FTW API is intended for trusted LANs only.
+// calendar app. It intentionally returns the password for the local operator
+// and is kept separate from the frequently-polled /status so the secret is not
+// read on every poll.
 func (s *Server) handleCalDAVCredentials(w http.ResponseWriter, r *http.Request) {
 	// Unlike the ordinary read APIs, this response contains a reusable secret.
 	// Do not use writeJSON: its wildcard CORS header would let any website open
-	// in a LAN browser read the managed CalDAV password cross-origin. Also
-	// prevent browser/proxy caching.
+	// in a LAN browser read the managed CalDAV password. Also prevent caching.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")

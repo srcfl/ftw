@@ -15,15 +15,9 @@ import "reflect"
 //     loadpoints, notifications, MPC capacity, the Weather subset
 //     {pv_rated_w, latitude, longitude}, and home_assistant.* reload live.
 //   - Everything else (api.port, state.path, price.*, planner.*, nova.*,
-//     ocpp.*, ev_charger.*, caldav.*, weather.provider/arrays,
+//     ev_charger.*, caldav.*, weather.provider/arrays,
 //     site.control_interval_s, site.watchdog_timeout_s, site.smoothing_alpha,
 //     site.gain) needs the binary restarted to take effect.
-//
-// The long-term goal is for this list to shrink to {state.path,
-// state.cold_dir, api.port}: the rest of the boot-time wiring can be made
-// hot-reloadable with the same Reload pattern (*ha.Bridge).Reload uses,
-// the only blocker is engineering time. Issues #TBD track the per-section
-// follow-ups.
 //
 // Keep this in sync with the applier whenever a section becomes
 // hot-reloadable. The cost of forgetting is benign: an unnecessary
@@ -70,9 +64,6 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 	}
 	if !pointerEqual(oldCfg.Nova, newCfg.Nova) {
 		reasons = append(reasons, "nova — federation client is constructed once at startup")
-	}
-	if !pointerEqual(oldCfg.OCPP, newCfg.OCPP) {
-		reasons = append(reasons, "ocpp — OCPP server is bound once at startup")
 	}
 	if !pointerEqual(oldCfg.EVCharger, newCfg.EVCharger) {
 		reasons = append(reasons, "ev_charger — EV charger client is constructed once at startup")

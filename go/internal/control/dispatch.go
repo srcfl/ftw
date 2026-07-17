@@ -106,7 +106,7 @@ func (m Mode) IsPlannerMode() bool {
 // respond. The plan is a scheduler, not a regulator.
 //
 // Legacy — the new contract (energy-allocation per slot, EMS converts to
-// power) uses SlotDirectiveFunc. See docs/plan-ems-contract.md.
+// power) uses SlotDirectiveFunc.
 type PlanTargetFunc func(now time.Time) (string, float64, bool)
 
 // SlotDirective mirrors mpc.SlotDirective — we redefine here to keep the
@@ -150,6 +150,12 @@ type SlotDirective struct {
 	// has HasPlannedGridW=false → cap opts out by default.
 	PlannedGridW    float64
 	HasPlannedGridW bool
+
+	// LivePVSurplusSoCCapPct mirrors mpc.SlotDirective. When non-zero,
+	// the plan has proved that a later grid-funded battery charge costs
+	// more than current export earns. Runtime may absorb live PV surprise
+	// now up to this planned future SoC. Zero preserves deliberate export.
+	LivePVSurplusSoCCapPct float64
 
 	// LoadpointEnergyWh is the current slot's planned EV charging budget.
 	// Runtime uses planned EV energy to keep surplus-only EV from being
@@ -417,8 +423,7 @@ type State struct {
 	// SlotDirective is the new plan→EMS callback (energy-allocation
 	// contract). When set AND UseEnergyDispatch is true, ComputeDispatch
 	// uses the energy-driven code path instead of the PI-on-grid-target
-	// path. Injected from main.go like PlanTarget. See
-	// docs/plan-ems-contract.md.
+	// path. Injected from main.go like PlanTarget.
 	SlotDirective SlotDirectiveFunc
 
 	// UseEnergyDispatch toggles between the legacy PI-on-grid path and
@@ -426,7 +431,7 @@ type State struct {
 	// and flipped via config. Default off preserves today's behavior.
 	UseEnergyDispatch bool
 
-	// PVSurplusAbsorbSoCCapPct is the opt-in PV-surplus absorber
+	// PVSurplusAbsorbSoCCapPct is the operator override for the PV-surplus absorber
 	// underlay: in planner_cheap / planner_arbitrage, when live grid is
 	// exporting more than PVSurplusAbsorbThresholdW BEYOND what the
 	// planner's slot allocation would produce, AND the fleet's average
@@ -434,9 +439,10 @@ type State struct {
 	// up by min(extra_export, cap_headroom_W) so the surprise lands in
 	// the battery instead of crossing the meter at low spot price.
 	//
-	// 0 = disabled (default — preserves the pre-2026-05 behavior
-	// asserted by TestEnergyDispatchDoesNotAbsorbPVSurprise). >0 turns
-	// the feature on with that percentage as the SoC ceiling.
+	// 0 = no operator override. The planner may still enable capture for
+	// a slot via SlotDirective.LivePVSurplusSoCCapPct when doing so moves
+	// a more expensive future grid charge into live PV. >0 turns the
+	// absorber on unconditionally with that percentage as the SoC ceiling.
 	//
 	// Never reverses a discharge plan: when the planner has already
 	// committed to discharge this slot (targetTotalW < 0, e.g.
@@ -447,7 +453,7 @@ type State struct {
 	// much live export beyond plan we tolerate before charging the
 	// battery instead. Defaults to 100 W (smaller than the PI
 	// deadband, but large enough to ignore meter quantisation noise).
-	// Only consulted when PVSurplusAbsorbSoCCapPct > 0.
+	// Consulted whenever either the operator or planner enables absorption.
 	PVSurplusAbsorbThresholdW float64
 
 	// currentDirective + slotDelivered track the active slot's energy
@@ -1132,9 +1138,7 @@ func ComputeDispatch(
 	//     no-battery baseline explicitly exports PV, in which case the EMS
 	//     holds battery power at 0 to preserve that export/headroom choice.
 	//     Honours the mode's contract ("never imports to charge, never
-	//     exports via the battery") against forecast error. See
-	//     docs/plan-ems-contract.md §"Exception: planner_self" and issue
-	//     #130.
+	//     exports via the battery") against forecast error.
 	//
 	//   * planner_cheap / planner_arbitrage with UseEnergyDispatch=true
 	//     (default): energy-allocation. Plan returns battery energy for
@@ -1492,9 +1496,13 @@ func ComputeDispatch(
 	// Battery stays at 0 in both directions for the slot — neither
 	// reactive charge from PV nor force-export discharge.
 	arbitrageFamilyIdleLiveExportGate := false
+	arbitrageFamilyIdleAbsorbCapPct := 0.0
+	if arbitrageFamilyIdleSlot {
+		arbitrageFamilyIdleAbsorbCapPct = pvSurplusAbsorbCapPct(state, currentDirective)
+	}
 	if arbitrageFamilyIdleSlot || coverLoadDischargeSlot {
 		baselineGridW := gridW - currentTotal
-		if baselineGridW < -mpc.IdleGateThresholdW {
+		if baselineGridW < -mpc.IdleGateThresholdW && arbitrageFamilyIdleAbsorbCapPct <= 0 {
 			arbitrageFamilyIdleLiveExportGate = true
 		}
 	}
@@ -1647,12 +1655,16 @@ func ComputeDispatch(
 			}
 		}
 
-		// PV surplus absorber underlay (opt-in). Catches the gap between
+		// PV surplus absorber underlay. Catches the gap between
 		// the MPC's 15-min slot allocation and live PV/load drift: when
 		// the plan's target would still leave grid exporting beyond the
 		// threshold AND average SoC is below cap AND we're not already
 		// in a planned discharge, redirect the leftover export into the
 		// battery instead of crossing the meter at low spot price.
+		// The cap comes either from the operator override or from an MPC
+		// proof that current export earns less than a later grid-funded
+		// battery charge costs. An explicit operator cap overrides the
+		// planner-derived cap, preserving the original opt-in policy.
 		//
 		// Only adds charge — never reverses a discharge plan. The slot
 		// Wh accumulator (state.slotDelivered) sees the extra and the
@@ -1661,35 +1673,18 @@ func ComputeDispatch(
 		// Order: runs BEFORE the surplus-only EV reserve cap below, so
 		// any addition the absorber makes is then re-capped if an EV is
 		// reserving PV headroom for itself.
-		if state.PVSurplusAbsorbSoCCapPct > 0 && targetTotalW >= 0 {
+		absorbCapPct := pvSurplusAbsorbCapPct(state, currentDirective)
+		if absorbCapPct > 0 && targetTotalW >= 0 {
 			threshold := state.PVSurplusAbsorbThresholdW
 			if threshold <= 0 {
 				threshold = 100
 			}
-			var sumSoCWh, totalCap float64
-			for _, b := range onlineBats {
-				sumSoCWh += b.soc * b.capacityWh
-				totalCap += b.capacityWh
-			}
-			var avgSoCPct float64
-			if totalCap > 0 {
-				avgSoCPct = (sumSoCWh / totalCap) * 100
-			}
-			if avgSoCPct < state.PVSurplusAbsorbSoCCapPct {
+			headroomW := pvSurplusAbsorbHeadroomW(onlineBats, absorbCapPct, remainingS)
+			if headroomW > 0 {
 				// Grid level if dispatch ran the plan as-is.
 				projectedGridW := gridW + (targetTotalW - currentTotal)
 				extraExportW := -projectedGridW
 				if extraExportW > threshold {
-					// Remaining headroom in Wh, converted to a power
-					// share over the rest of the slot. Floor remainingS
-					// at 60 s so the late-slot edge doesn't ask for
-					// implausibly high power.
-					socHeadroomWh := (state.PVSurplusAbsorbSoCCapPct - avgSoCPct) / 100 * totalCap
-					remainS := remainingS
-					if remainS < 60 {
-						remainS = 60
-					}
-					headroomW := socHeadroomWh * 3600 / remainS
 					addW := extraExportW
 					if addW > headroomW {
 						addW = headroomW
@@ -2043,6 +2038,26 @@ func ComputeDispatch(
 		// so live import is still covered.
 		if plannerSelfIdleGate {
 			chargeCeiling := plannerSelfIdleDesiredTotal(surplus, state)
+			targetTotal2 := currentTotal + totalCorrection
+			if targetTotal2 > chargeCeiling {
+				totalCorrection = chargeCeiling - currentTotal
+			}
+		}
+		// Economically replaceable arbitrage idle slot: unlike the default
+		// idle gate, allow reactive PI to absorb a genuine live PV surplus,
+		// but never beyond the later grid-charge SoC the plan supplied. The
+		// same branch still permits discharge when live load is importing.
+		if arbitrageFamilyIdleSlot && arbitrageFamilyIdleAbsorbCapPct > 0 {
+			threshold := state.PVSurplusAbsorbThresholdW
+			if threshold <= 0 {
+				threshold = 100
+			}
+			chargeCeiling := surplus.idleChargeOnlySurplusW(threshold)
+			remainingS := currentDirective.SlotEnd.Sub(time.Now()).Seconds()
+			headroomW := pvSurplusAbsorbHeadroomW(onlineBats, arbitrageFamilyIdleAbsorbCapPct, remainingS)
+			if chargeCeiling > headroomW {
+				chargeCeiling = headroomW
+			}
 			targetTotal2 := currentTotal + totalCorrection
 			if targetTotal2 > chargeCeiling {
 				totalCorrection = chargeCeiling - currentTotal
@@ -3018,6 +3033,51 @@ func plannerSelfIdleDesiredTotal(surplus surplusAccounting, state *State) float6
 	return surplus.idleChargeOnlySurplusW(threshold)
 }
 
+func pvSurplusAbsorbCapPct(state *State, dir SlotDirective) float64 {
+	if state == nil {
+		return 0
+	}
+	operatorCap := state.PVSurplusAbsorbSoCCapPct
+	plannerCap := dir.LivePVSurplusSoCCapPct
+	var capPct float64
+	switch {
+	case operatorCap > 0:
+		capPct = operatorCap
+	case plannerCap > 0:
+		capPct = plannerCap
+	}
+	if capPct > 100 {
+		return 100
+	}
+	return capPct
+}
+
+// pvSurplusAbsorbHeadroomW converts the fleet's quantified SoC headroom into
+// a charge-power ceiling over the remainder of the slot. The 60 s floor keeps
+// a late-slot call from turning a few Wh of headroom into an implausible power
+// spike; per-driver, fuse, and slew clamps still apply downstream.
+func pvSurplusAbsorbHeadroomW(batteries []batteryInfo, capPct, remainingS float64) float64 {
+	if capPct <= 0 {
+		return 0
+	}
+	var storedWh, totalCapWh float64
+	for _, b := range batteries {
+		storedWh += b.soc * b.capacityWh
+		totalCapWh += b.capacityWh
+	}
+	if totalCapWh <= 0 {
+		return 0
+	}
+	headroomWh := capPct/100*totalCapWh - storedWh
+	if headroomWh <= 0 {
+		return 0
+	}
+	if remainingS < 60 {
+		remainingS = 60
+	}
+	return headroomWh * 3600 / remainingS
+}
+
 func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 	for i := range targets {
 		if targets[i].TargetW < 0 {
@@ -3334,8 +3394,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// each phase, so a worst-phase overage of N watts requires 3 × N
 	// watts of total battery action to bring it under. Conservative
 	// for 1Φ batteries (Pixii Home etc.): they over-correct on the
-	// other phases, less import / export there, still safe. See PR
-	// #208 follow-up in `docs/safety.md` §3a.
+	// other phases, less import / export there, still safe.
 	//
 	// `perPhaseOverageW` is direction-agnostic — phase amps from the
 	// meter are absolute magnitudes. Attribute to whichever side the

@@ -33,6 +33,10 @@ type CatalogEntry struct {
 	Description        string         `json:"description,omitempty"`
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
+	// ReadOnly means the driver never accepts dispatch commands. The catalog
+	// UI uses it to avoid presenting battery capacity as a control opt-in and
+	// to enable battery_telemetry_only for gateway-style drivers.
+	ReadOnly bool `json:"read_only,omitempty"`
 
 	// Verification: who's actually run this driver against real
 	// hardware and how long. Populated from the DRIVER block's optional
@@ -175,6 +179,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Capabilities = pickList(block, "capabilities")
 	e.HTTPHosts = pickList(block, "http_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
+	e.ReadOnly = pickBool(block, "read_only")
 	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))
 	e.VerifiedBy = pickList(block, "verified_by")
 	e.VerifiedAt = pickString(block, "verified_at")
@@ -217,6 +222,23 @@ func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
 				}
 			}
 			return false
+		}
+	}
+	return false
+}
+
+// IsReadOnlyDriver reports whether the matched Lua catalog entry explicitly
+// declares read_only=true. Control-pool construction uses this as a safety
+// boundary for telemetry gateways such as Sourceful Zap.
+func IsReadOnlyDriver(catalog []CatalogEntry, luaPath string) bool {
+	if luaPath == "" {
+		return false
+	}
+	wantPath := filepath.ToSlash(luaPath)
+	wantFilename := filepath.Base(wantPath)
+	for _, e := range catalog {
+		if strings.EqualFold(e.Path, wantPath) || strings.EqualFold(e.Filename, wantFilename) {
+			return e.ReadOnly
 		}
 	}
 	return false
@@ -267,6 +289,12 @@ func pickInt(block, name string) int {
 	}
 	v, _ := strconv.Atoi(m[1])
 	return v
+}
+
+func pickBool(block, name string) bool {
+	re := regexp.MustCompile(`(?mi)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*(true|false)`)
+	m := re.FindStringSubmatch(block)
+	return len(m) >= 2 && strings.EqualFold(m[1], "true")
 }
 
 // pickList matches `name = { "a", "b", "c" }` inside the block.

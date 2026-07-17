@@ -15,7 +15,7 @@
 // collapses to a muted line and hides the sparkline.
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 
 class FtwSavingsCard extends FtwElement {
   static styles = `
@@ -357,7 +357,7 @@ class FtwSavingsCard extends FtwElement {
     const seq = ++this._reqSeq;
     const signal = this._abort.signal;
 
-    ownerFetch("/api/savings/daily?days=" + days, { signal })
+    apiFetch("/api/savings/daily?days=" + days, { signal })
       .then((r) => r.json())
       .then((resp) => {
         if (seq !== this._reqSeq) return;

@@ -8,8 +8,8 @@
       var field = ctx.field, selectField = ctx.selectField;
       if (!ctx.config.price) ctx.config.price = {};
       return '<fieldset><legend>Spot price</legend>' +
-        selectField("Provider", "price.provider", ["elprisetjustnu", "entsoe", "none"], "elprisetjustnu") +
-        selectField("Zone", "price.zone", ["SE1", "SE2", "SE3", "SE4", "NO1", "NO2", "NO3", "NO4", "DK1", "DK2", "FI", "DE"], "SE3") +
+        selectField("Provider", "price.provider", ["sourceful", "elprisetjustnu", "entsoe", "none"], "sourceful") +
+        selectField("Zone", "price.zone", ["SE1", "SE2", "SE3", "SE4", "NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "FI", "DE"], "SE3") +
         selectField("Currency", "price.currency", ["SEK", "NOK", "DKK", "EUR"], "SEK") +
         '<div class="field-row"><div>' +
         field("Grid tariff excl. VAT (öre/kWh)", "price.grid_tariff_ore_kwh", "number", 60,
@@ -29,8 +29,8 @@
         field("API key (ENTSO-E only)", "price.api_key", "text", "") +
         '</fieldset>' +
         '<p style="color:var(--text-dim);font-size:0.8rem;margin-top:8px">' +
-        'elprisetjustnu.se is free and requires no key (Sweden only). ENTSO-E covers all EU but needs an API key. ' +
-        'Currency applies to ENTSO-E only; FX rates come from ECB daily.' +
+        'Sourceful is the keyless default and covers European bidding zones. elprisetjustnu.se remains a Sweden-only alternative. ' +
+        'Direct ENTSO-E access needs an API key. Currency applies to ENTSO-E only; FX rates come from ECB daily.' +
         '</p>';
     },
     after: function (ctx) {

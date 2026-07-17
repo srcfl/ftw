@@ -11,7 +11,7 @@
 (function () {
   "use strict";
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -71,7 +71,7 @@
     // 404s silently — the UI simply hides the section.
     _refreshSnapshots() {
       if (this._disabled) return;
-      ownerFetch("/api/version/snapshots")
+      apiFetch("/api/version/snapshots")
         .then((r) => (r.ok ? r.json() : null))
         .then((body) => {
           if (!body) return;
@@ -86,7 +86,7 @@
       // Guard against rapid double-clicks while the request is pending.
       if (this._deletingSnapshot) return;
       this._deletingSnapshot = id;
-      ownerFetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
+      apiFetch("/api/version/snapshots/" + encodeURIComponent(id), { method: "DELETE" })
         .finally(() => {
           this._deletingSnapshot = null;
           this._refreshSnapshots();
@@ -143,7 +143,7 @@
     _refresh(force) {
       if (this._disabled) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
-      ownerFetch(url)
+      apiFetch(url)
         .then((r) => {
           // 503 = feature disabled by the backend. Stop polling and get out
           // of the way entirely — this is deployment config, not a bug.
@@ -169,7 +169,7 @@
     }
 
     _postJSON(url, body) {
-      return ownerFetch(url, {
+      return apiFetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: body ? JSON.stringify(body) : undefined,
@@ -286,7 +286,7 @@
 
     _tickStatus() {
       // 1) Poll sidecar state.json.
-      ownerFetch("/api/version/update/status")
+      apiFetch("/api/version/update/status")
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (st && this._statusMatchesCurrentRun(st)) {
@@ -355,7 +355,7 @@
       // Surface to the rest of the page via body class: the header's
       // green #conn-status dot sits right next to this badge, and
       // having both visible at once clutters the corner. CSS in
-      // next.css hides #conn-status when .has-update is on, so the
+      // app.css hides #conn-status when .has-update is on, so the
       // two dots swap instead of stacking.
       if (typeof document !== "undefined" && document.body) {
         document.body.classList.toggle("has-update", !!showDot);
@@ -427,7 +427,7 @@
 
       const channels = Array.isArray(info.channels) && info.channels.length
         ? info.channels
-        : ["stable", "beta", "edge"];
+        : ["stable", "beta"];
       const selectedChannel = info.channel || "stable";
       const channelButtons = channels.map((channel) => `
         <button class="channel-option${selectedChannel === channel ? " active" : ""}"
@@ -435,11 +435,9 @@
                 aria-pressed="${selectedChannel === channel ? "true" : "false"}">
           ${escapeHTML(channel)}
         </button>`).join("");
-      const channelNote = selectedChannel === "edge"
-        ? "Edge follows the newest verified development build."
-        : selectedChannel === "beta"
-          ? "Beta receives prereleases and promoted stable releases."
-          : "Stable receives production releases only.";
+      const channelNote = selectedChannel === "beta"
+        ? "Beta receives prereleases and promoted stable releases."
+        : "Stable receives production releases only.";
 
       return `
         <div class="backdrop" data-action="close"></div>
@@ -655,7 +653,7 @@
         :host { all: initial; font-family: inherit; }
         .hidden { display: none !important; }
         .badge {
-          /* Amber pulse — the system's single accent (DESIGN.md). The
+          /* Amber pulse — the system's single accent (the shared design system). The
              green connection dot next door is reserved for liveness
              state; the amber dot is an actionable affordance ("update
              available, open me"). Pulsing animation stays so it reads
@@ -689,7 +687,7 @@
              off-screen. Without this the modal clipped above the
              viewport and the operator saw only the middle "Release
              notes" block with no actionable buttons — reported on a
-             laptop-height browser running the /next dashboard. */
+             laptop-height browser running the dashboard. */
           max-height: 85vh;
           overflow-y: auto;
           background: var(--ink-raised, #1e293b);
@@ -941,7 +939,7 @@
         .btn-primary {
           background: var(--accent-e, #f59e0b);
           border-color: var(--accent-e, #f59e0b);
-          /* DESIGN.md: on-accent text is near-black (#0a0a0a), never
+          /* the shared design system: on-accent text is near-black (#0a0a0a), never
              white — keeps the amber legible without halation in dark
              mode and stays correct when the theme flips to light. */
           color: #0a0a0a;

@@ -1,20 +1,12 @@
 // Package loadpoint models an EV charge point as a first-class entity
 // the planner can reason about. A loadpoint couples a physical charger
-// driver (Easee, Zap, OCPP, …) with a specific vehicle and user intent
+// driver (Easee, Zap, …) with a specific vehicle and user intent
 // (target SoC by target time).
 //
-// This package currently hosts the config-facing types and a read-only
-// manager that surfaces configured loadpoints through the API. Phase 3
-// of the planner overhaul introduces the skeleton without wiring it to
-// the MPC's decision surface — that comes in Phase 4, where the DP is
-// extended with EV-SoC state and the dispatch layer gains a per-
-// loadpoint energy-budget path that mirrors the battery energy path.
-//
-// Keeping it lightweight is intentional: EVCC ships ~20 kLOC of
-// loadpoint machinery (hysteresis, enable/disable delays, phase
-// switching). We don't need most of that because the energy-budget
-// contract is continuous by construction (no flap-flapping). Phase
-// switching is a driver-local heuristic, not a planner concern.
+// The package owns loadpoint configuration, schedules, live state and
+// dispatch control. MPC consumes per-loadpoint planning specs and returns
+// energy budgets; the controller translates those budgets into commands.
+// Protocol details remain in drivers.
 package loadpoint
 
 import (

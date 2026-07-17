@@ -31,7 +31,7 @@
 
   if (!modal || !openBtn) return;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -44,7 +44,7 @@
   var currentTab = "control";
 
   openBtn.addEventListener("click", function () {
-    ownerFetch("/api/config")
+    apiFetch("/api/config")
       .then(function (r) { return r.json(); })
       .then(function (cfg) {
         currentConfig = cfg;
@@ -78,7 +78,7 @@
   saveBtn.addEventListener("click", function () {
     captureCurrentTab();
     setStatus("Saving...");
-    ownerFetch("/api/config", {
+    apiFetch("/api/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(currentConfig),
@@ -146,7 +146,7 @@
     progressEl.classList.remove("hidden");
     progressTextEl.textContent = "Restarting…";
 
-    ownerFetch("/api/restart", { method: "POST" })
+    apiFetch("/api/restart", { method: "POST" })
       .then(function (r) {
         if (!r.ok) {
           return r.json()
@@ -171,7 +171,7 @@
     var TIMEOUT_MS = 90 * 1000; // ~90 s; sidecar pull+up can be slow on Pi.
     function tick() {
       // Cache-bust so an intermediate proxy can't lie about reachability.
-      ownerFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
+      apiFetch("/api/health?_=" + Date.now(), { cache: "no-store" })
         .then(function (r) {
           if (r.ok) {
             progressTextEl.textContent = "Reloading…";
@@ -278,7 +278,7 @@
       setByPath: setByPath,
       captureCurrentTab: captureCurrentTab,
       renderTab: renderTab,
-      ownerFetch: ownerFetch,
+      apiFetch: apiFetch,
     };
     var html = "";
     try {

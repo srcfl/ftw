@@ -65,7 +65,7 @@ On macOS, install Docker Desktop and use docker-compose.macos.yml:
   curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/docker-compose.macos.yml -o docker-compose.macos.yml
   docker compose -f docker-compose.macos.yml up -d
 
-Full walkthrough: docs/deploy-platforms.md
+Operational notes: https://github.com/srcfl/ftw/blob/master/docs/operations.md
 EOF
   exit 1
 fi

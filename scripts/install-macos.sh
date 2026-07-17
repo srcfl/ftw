@@ -213,7 +213,7 @@ cat <<EOF
      ${COMPOSE_MANAGE} pull && ${COMPOSE_MANAGE} up -d  # upgrade
      ${COMPOSE_MANAGE} down                       # stop
 
-  macOS networking notes (see docs/deploy-platforms.md):
+  macOS networking notes:
      • In config.yaml, point MQTT drivers at host: mosquitto (NOT localhost).
      • Give every driver an explicit IP — mDNS (zap.local) and broadcast
        discovery do not cross the Docker Desktop VM boundary.

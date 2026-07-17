@@ -19,7 +19,7 @@
 
   if (!grid) return;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -33,7 +33,7 @@
   // ---- Model cache: refreshed once per /api/battery_models poll ----
 
   function fetchModels() {
-    ownerFetch("/api/battery_models")
+    apiFetch("/api/battery_models")
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
         if (!data) return;
@@ -63,7 +63,7 @@
     setStatus("");
     fetchModels();
     // Decide what to render: idle (checklist), active (progress), or done (diff)
-    ownerFetch("/api/self_tune/status")
+    apiFetch("/api/self_tune/status")
       .then(function (r) { return r.json(); })
       .then(function (s) {
         if (s.active) {
@@ -188,7 +188,7 @@
   function startTunePolling() {
     if (tunePollHandle) return;
     tunePollHandle = setInterval(function () {
-      ownerFetch("/api/self_tune/status")
+      apiFetch("/api/self_tune/status")
         .then(function (r) { return r.json(); })
         .then(function (s) {
           if (s.active) {
@@ -238,7 +238,7 @@
       return;
     }
     setStatus("Starting...");
-    ownerFetch("/api/self_tune/start", {
+    apiFetch("/api/self_tune/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ batteries: batteries }),
@@ -255,7 +255,7 @@
 
   if (cancelBtn) cancelBtn.addEventListener("click", function () {
     setStatus("Cancelling...");
-    ownerFetch("/api/self_tune/cancel", { method: "POST" })
+    apiFetch("/api/self_tune/cancel", { method: "POST" })
       .then(function () {
         stopTunePolling();
         setStatus("Cancelled");

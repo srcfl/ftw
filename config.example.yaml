@@ -76,6 +76,28 @@ drivers:
   #       host: sid-os.local
   #       port: 1883
 
+  # Sourceful Zap — official local-API integration. Zap can be the site meter
+  # and can aggregate every PV, battery and V2X DER attached to the gateway.
+  # The driver is telemetry-only: battery_telemetry_only admits battery data
+  # without making Zap a dispatch target. Zap firmware has semantic local
+  # command routes, but its REST path currently lacks expiring leases and a
+  # hardware-execution acknowledgement. FTW control therefore still uses the
+  # native inverter/charger driver; see docs/sourceful-zap.md.
+  #
+  # - name: sourceful-zap
+  #   lua: drivers/zap.lua
+  #   is_site_meter: true
+  #   battery_telemetry_only: true
+  #   capabilities:
+  #     http:
+  #       allowed_hosts: ["zap.local"]  # use the LAN IP if mDNS is unavailable
+  #   config:
+  #     host: zap.local
+  #     # meter_serial: p1m-...          # optional; P1 is auto-selected
+  #     # disable_pv: true               # if a native driver already emits PV
+  #     # disable_battery: true          # if a native driver emits the battery
+  #     # disable_v2x: true              # if a native V2X driver is configured
+
   # NIBE S-series heat pump — read-only telemetry over the on-prem Local
   # REST API (HTTPS + Basic auth). The pump presents a SELF-SIGNED cert, so
   # pin it: tls_pin_sha256 is the cert SHA-256 fingerprint (the

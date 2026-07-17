@@ -22,7 +22,7 @@
 // returns a boolean module matrix the caller can paint however it likes.
 //
 // Vendored (not via CDN / npm) so a fresh Pi boots and renders the onboarding QR
-// fully offline, per DESIGN.md ("No network fonts" / fresh-Pi-without-WAN rule).
+// fully offline, per the shared design system ("No network fonts" / fresh-Pi-without-WAN rule).
 
 // ---- GF(256) math (upstream QRMath) ----
 const EXP = new Array(256);

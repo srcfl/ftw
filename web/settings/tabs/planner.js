@@ -162,7 +162,7 @@
         '</p>';
     },
     after: function (ctx) {
-      var ownerFetch = ctx.ownerFetch || window.fetch.bind(window);
+      var apiFetch = ctx.apiFetch || window.fetch.bind(window);
 
       // ---- Active strategy (read-only, from the runtime, not the YAML) ----
       var stratEl = document.getElementById("planner-active-strategy");
@@ -170,11 +170,11 @@
         // /api/modes is the server-side mode catalog from PR #468; older
         // hosts 404 it — treat any failure as "no catalog" and fall back
         // to the local label table.
-        var catalogP = ownerFetch("/api/modes")
+        var catalogP = apiFetch("/api/modes")
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (d) { return d && d.modes ? d.modes : null; })
           .catch(function () { return null; });
-        var modeP = ownerFetch("/api/status")
+        var modeP = apiFetch("/api/status")
           .then(function (r) { return r.json(); })
           .then(function (d) { return d && d.mode; })
           .catch(function () { return null; });
@@ -187,7 +187,7 @@
       var hedgeEl = document.getElementById("planner-hedge-line");
       var kInput = document.querySelector('input[data-path="planner.pv_forecast_safety_k"]');
       if (hedgeEl && kInput) {
-        ownerFetch("/api/pvmodel")
+        apiFetch("/api/pvmodel")
           .then(function (r) { return r.json(); })
           .then(function (d) {
             if (!d || d.enabled === false) return; // pvmodel off → line stays hidden

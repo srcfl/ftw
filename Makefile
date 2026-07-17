@@ -1,7 +1,7 @@
 # Top-level build for FTW (pure Go + Lua drivers).
 #
 # Common targets:
-#   make test                 — full test suite
+#   make test                 — Go + Python suites (full-stack e2e is separate)
 #   make build                — native binaries for this machine
 #   make build-arm64          — cross-compile for linux/arm64 (RPi)
 #   make build-amd64          — cross-compile for linux/amd64 (x86_64 server)
@@ -13,7 +13,7 @@
 
 .PHONY: help test optimizer-install optimizer-test compose-migration-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
-		verify verify-all install-hooks driver-repository-validate driver-versions \
+		verify verify-all install-hooks driver-repository-validate driver-versions
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -24,7 +24,7 @@ help:
 	@echo "FTW — Go + Lua EMS"
 	@echo ""
 	@echo "Targets:"
-	@echo "  test                 run full test suite"
+	@echo "  test                 run Go + Python suites"
 	@echo "  build                native binaries into bin/"
 	@echo "  build-arm64          cross-compile for linux/arm64"
 	@echo "  build-amd64          cross-compile for linux/amd64"
@@ -33,7 +33,7 @@ help:
 	@echo "  run-sim              start Ferroamp + Sungrow simulators"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
-	@echo "  verify               pre-commit: vet + test + build (mirrors CI 'go test + vet' workflow)"
+	@echo "  verify               fast pre-commit: test + compose + vet + build"
 	@echo "  verify-all           pre-push: verify + cross-compile linux/arm64, linux/amd64, windows"
 	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
 	@echo "  driver-repository-validate  build and validate unsigned driver release artifacts"
@@ -46,25 +46,33 @@ help:
 
 # ---- Testing ----
 
-test: optimizer-test
-	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
+test: optimizer/.venv/.installed
+	@status=0; \
+	optimizer/.venv/bin/pytest -q optimizer/tests & py_pid=$$!; \
+	(cd go && go test ./...) & go_pid=$$!; \
+	wait $$py_pid || status=1; \
+	wait $$go_pid || status=1; \
+	exit $$status
+	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./internal/mpc \
+		-run 'TestExternalOptimizer(EndToEnd|PlansMultipleLoadpoints|PlansAndValidatesMultipleStorages)$$'
 
 optimizer-install:
 	$(PYTHON) -m venv optimizer/.venv
 	optimizer/.venv/bin/pip install -e 'optimizer[test]'
+	@touch optimizer/.venv/.installed
 
-optimizer-test: optimizer/.venv/bin/pytest
+optimizer-test: optimizer/.venv/.installed
 	optimizer/.venv/bin/pytest -q optimizer/tests
 
 compose-migration-test:
 	bash -n scripts/enable-modular-stack.sh scripts/migrate-legacy-compose.sh scripts/install-macos.sh
 	bash scripts/test-modular-compose.sh
 
-optimizer/.venv/bin/pytest: optimizer/pyproject.toml
+optimizer/.venv/.installed: optimizer/pyproject.toml
 	$(MAKE) optimizer-install
 
 e2e:
-	cd go && go test ./test/e2e -v -timeout 180s
+	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
 
 driver-repository-validate:
 	cd go && go run ./cmd/ftw-driver-repository publish -unsigned -drivers ../drivers -output ../dist/driver-repository -base-url https://example.invalid/releases/download/drivers-local -repository https://github.com/srcfl/ftw
@@ -82,18 +90,17 @@ ci-ui:
 ci-hw-pi:
 	./scripts/ci-hw-pi.sh
 
-# ---- Fast local verification (mirrors GitHub Actions) ----
+# ---- Fast local verification ----
 #
-# verify mirrors the "go test + vet" workflow in .github/workflows/test.yml.
-# When this passes, that CI workflow is guaranteed to pass (modulo network
-# deps or flakes). Keep the commands here in sync with that workflow file.
+# verify covers the fast implementation suites. Full-stack e2e and browser
+# smoke remain explicit so the common local loop does not pay their startup
+# cost; `make ci` runs both before handoff.
 #
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify: optimizer-test compose-migration-test
+verify: test compose-migration-test
 	cd go && go vet ./...
-	cd go && FTW_TEST_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) go test ./...
 	cd go && go build ./...
 	@echo "verify: vet + test + build clean"
 
@@ -142,7 +149,6 @@ build-windows-amd64:
 
 # ---- Release archives ----
 
-
 release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
 	@# Per-arch staging dirs ship ftw and its compatibility alias.
@@ -190,7 +196,7 @@ run-sim:
 	(cd go && go run ./cmd/sim-sungrow) & \
 	wait
 
-dev: optimizer/.venv/bin/pytest config.local.yaml
+dev: optimizer/.venv/.installed config.local.yaml
 	@mkdir -p dev-data
 	@echo "Starting sims + main app (Ctrl+C to stop)..."
 	@trap 'kill 0' SIGINT; \
@@ -199,7 +205,6 @@ dev: optimizer/.venv/bin/pytest config.local.yaml
 	sleep 2 && \
 	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/ftw -config ../config.local.yaml -web ../web) & \
 	wait
-
 
 # ---- Hygiene ----
 

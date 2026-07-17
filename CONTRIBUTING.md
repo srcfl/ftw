@@ -2,7 +2,7 @@
 
 Thanks for helping build the local energy coordination layer. This document
 covers the legal bits — for how the code is organized and how to add a driver,
-start with `CLAUDE.md` and `docs/writing-a-driver.md`.
+start with `AGENTS.md` and `docs/writing-a-driver.md`.
 
 ## License of contributions
 

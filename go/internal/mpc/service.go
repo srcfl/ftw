@@ -110,8 +110,7 @@ type Service struct {
 	// return + the trigger reason ("scheduled" / "reactive-pv" /
 	// "reactive-load" / "manual"). Nil disables persistence — the
 	// in-memory diagnose still works. Wired in main.go against
-	// state.Store.SaveDiagnostic so operators can time-travel past
-	// decisions; see docs/mpc-planner.md.
+	// state.Store.SaveDiagnostic so operators can inspect past decisions.
 	SaveDiag func(d *Diagnostic, reason string) error
 
 	// Reactive replan: when the integrated energy gap between actual
@@ -334,7 +333,7 @@ func (s *Service) Latest() *Plan {
 const MaxPlanAge = 30 * time.Minute
 
 // SlotDirective is the plan's per-slot instruction to the EMS under the
-// energy-allocation contract (see docs/plan-ems-contract.md). The plan
+// energy-allocation contract. The plan
 // allocates total battery energy (Wh, site-signed) for the slot; the
 // EMS converts to instantaneous power each tick from remaining energy
 // and remaining time. Grid flow is the residual — no PI target on it.
@@ -366,6 +365,14 @@ type SlotDirective struct {
 	// and docs/safety.md §8 for the asymmetry rationale.
 	GridW float64
 
+	// LivePVSurplusSoCCapPct enables economically justified live surplus
+	// capture for this slot. It is the highest SoC reached by a later
+	// grid-funded battery-charge action whose import price exceeds this
+	// slot's effective export revenue. Runtime may opportunistically move
+	// that future charge into live PV now, but only up to this SoC and only
+	// while the meter is exporting. Zero means preserve the slot exactly.
+	LivePVSurplusSoCCapPct float64
+
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
 	// this slot. Keyed by Loadpoint.ID. Positive = charging energy
 	// the plan allocated. Empty map when no loadpoints are
@@ -375,7 +382,7 @@ type SlotDirective struct {
 	LoadpointEnergyWh map[string]float64
 
 	// LoadpointSoCTargetPct is the plan's EV SoC at SlotEnd per
-	// loadpoint. Used by per-loadpoint divergence check in Phase 4.1.
+	// loadpoint. Used by the per-loadpoint divergence check.
 	LoadpointSoCTargetPct map[string]float64
 }
 
@@ -393,6 +400,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	s.mu.RLock()
 	p := s.last
 	lpID := s.lastLoadpointID
+	defaults := s.Defaults
 	s.mu.RUnlock()
 	if p == nil {
 		return SlotDirective{}, false
@@ -401,7 +409,7 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		return SlotDirective{}, false
 	}
 	nowMs := now.UnixMilli()
-	for _, a := range p.Actions {
+	for i, a := range p.Actions {
 		slotLenMs := int64(a.SlotLenMin) * 60 * 1000
 		endMs := a.SlotStartMs + slotLenMs
 		if nowMs < a.SlotStartMs || nowMs >= endMs {
@@ -410,13 +418,14 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 		// energy_wh = power_w * hours. a.SlotLenMin/60 gives hours.
 		energyWh := a.BatteryW * float64(a.SlotLenMin) / 60.0
 		d := SlotDirective{
-			SlotStart:       time.UnixMilli(a.SlotStartMs),
-			SlotEnd:         time.UnixMilli(endMs),
-			BatteryEnergyWh: energyWh,
-			SoCTargetPct:    a.SoCPct,
-			Strategy:        s.Defaults.Mode,
-			PVLimitW:        a.PVLimitW,
-			GridW:           a.GridW,
+			SlotStart:              time.UnixMilli(a.SlotStartMs),
+			SlotEnd:                time.UnixMilli(endMs),
+			BatteryEnergyWh:        energyWh,
+			SoCTargetPct:           a.SoCPct,
+			Strategy:               defaults.Mode,
+			PVLimitW:               a.PVLimitW,
+			GridW:                  a.GridW,
+			LivePVSurplusSoCCapPct: livePVSurplusSoCCapPct(p.Actions, i, defaults),
 		}
 		if len(a.LoadpointPowerW) > 0 {
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
@@ -439,12 +448,59 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	return SlotDirective{}, false
 }
 
+// livePVSurplusSoCCapPct returns a quantified ceiling for moving later
+// grid-funded charging into live PV in the current slot. This is deliberately
+// derived from decisions already present in the plan rather than a blanket
+// "always self-consume" override:
+//
+//   - a current discharge slot is never reversed;
+//   - a future action must charge the battery while the site imports, so the
+//     charge is actually replaceable grid energy rather than forecast PV;
+//   - that future import must cost more than exporting one kWh now earns,
+//     using the same fee/bonus/floor model as the optimizer;
+//   - the future action's planned SoC is the hard ceiling, so opportunistic
+//     capture cannot create more stored energy than the plan intended to buy.
+func livePVSurplusSoCCapPct(actions []Action, current int, p Params) float64 {
+	if current < 0 || current >= len(actions) {
+		return 0
+	}
+	cur := actions[current]
+	if cur.BatteryW < -IdleGateThresholdW || !finite(cur.SpotOre) {
+		return 0
+	}
+	exportOre := SlotExportPriceOre(Slot{SpotOre: cur.SpotOre}, p)
+	if !finite(exportOre) {
+		return 0
+	}
+
+	var capPct float64
+	for i := current + 1; i < len(actions); i++ {
+		a := actions[i]
+		// Both terms must be positive. min(BatteryW, GridW) is the portion
+		// of battery charge that can be attributed to simultaneous grid
+		// import; the threshold filters solver/rounding noise.
+		gridFundedChargeW := math.Min(a.BatteryW, a.GridW)
+		if gridFundedChargeW <= IdleGateThresholdW ||
+			!finite(a.PriceOre) || a.PriceOre <= exportOre ||
+			!finite(a.SoCPct) || a.SoCPct <= 0 {
+			continue
+		}
+		if a.SoCPct > capPct {
+			capPct = a.SoCPct
+		}
+	}
+	if capPct > 100 {
+		return 100
+	}
+	return capPct
+}
+
 // SlotAt returns the plan's directive for the slot containing `now`.
 // Returns (mode, grid_target_w, ok). Dispatch uses `mode` to select
 // the EMS strategy and `grid_target_w` as the PI setpoint. The plan is
 // a scheduler (decides WHEN); the EMS is the regulator (decides HOW).
 //
-// Legacy — the new path uses SlotDirectiveAt. See docs/plan-ems-contract.md.
+// Legacy — the new path uses SlotDirectiveAt.
 func (s *Service) SlotAt(now time.Time) (string, float64, bool) {
 	if s == nil {
 		return "", 0, false
@@ -1426,7 +1482,7 @@ func buildSlots(prices []state.PricePoint, forecasts []state.ForecastPoint, base
 		}
 		// Confidence from the price source: real day-ahead → 1.0,
 		// ML-forecasted → 0.6 (user-tunable hook for later). Anything
-		// else (seed data, ENTSOE, elprisetjustnu) → 1.0 too.
+		// else (seed data, Sourceful, ENTSOE, elprisetjustnu) → 1.0 too.
 		conf := 1.0
 		if pr.Source == "forecast" {
 			conf = 0.6

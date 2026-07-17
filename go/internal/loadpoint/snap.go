@@ -99,7 +99,7 @@ func FilterStepsByPhase(steps []float64, phases int, splitW float64) []float64 {
 
 // EnergyBudgetToPowerW translates a remaining-Wh budget over a
 // remaining-seconds window into instantaneous W. Mirrors the battery
-// energy-allocation dispatch path (see docs/plan-ems-contract.md)
+// energy-allocation dispatch path
 // so EV and battery share one mental model.
 //
 // Negative remaining energy (already overshot the plan) → 0 so we

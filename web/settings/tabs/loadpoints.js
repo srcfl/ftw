@@ -9,7 +9,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -168,7 +168,7 @@
       // The Devices tab also primes this; calling again is cheap because
       // the response is small and the browser caches it.
       if (!S.catalogByLua) {
-        ownerFetch('/api/drivers/catalog')
+        apiFetch('/api/drivers/catalog')
           .then(function (r) { return r.json(); })
           .then(function (data) {
             var byLua = {};

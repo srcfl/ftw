@@ -18,7 +18,7 @@ const (
 // the label, tooltip, and tier the dashboard renders. It is the single
 // source of truth for how a mode is shown, so the web UI no longer carries
 // its own hand-maintained button list. The JSON shape is the /api/modes
-// contract consumed by web/next-app.js.
+// contract consumed by web/app.js.
 type ModeInfo struct {
 	Key     Mode     `json:"key"`
 	Label   string   `json:"label"`

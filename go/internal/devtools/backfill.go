@@ -5,7 +5,6 @@
 package devtools
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -59,7 +58,7 @@ func Backfill(s *state.Store, cfg BackfillConfig, log *slog.Logger) error {
 	// ---- Production-safety gate ------------------------------------
 	// Any existing history row that doesn't carry our backfill marker
 	// is treated as real data — refuse to touch it.
-	existing, err := s.CountNonSyntheticHistory()
+	existing, err := s.CountHistoryWithoutMarker(backfillMarker)
 	if err != nil {
 		return fmt.Errorf("safety check: %w", err)
 	}
@@ -203,20 +202,5 @@ func Backfill(s *state.Store, cfg BackfillConfig, log *slog.Logger) error {
 		return fmt.Errorf("final flush: %w", err)
 	}
 	log.Info("backfill: done", "rows_written", written)
-
-	// Round-trip the marker through unmarshal+marshal so format drift
-	// (e.g. whitespace, key reordering) doesn't silently break the gate
-	// query in CountNonSyntheticHistory which compares the raw string.
-	var tmp map[string]any
-	if err := json.Unmarshal([]byte(backfillMarker), &tmp); err != nil {
-		return fmt.Errorf("invalid backfill marker JSON: %w", err)
-	}
-	roundTripped, err := json.Marshal(tmp)
-	if err != nil {
-		return fmt.Errorf("marshal backfill marker: %w", err)
-	}
-	if string(roundTripped) != backfillMarker {
-		return fmt.Errorf("backfill marker format drift: got %q, want %q", string(roundTripped), backfillMarker)
-	}
 	return nil
 }

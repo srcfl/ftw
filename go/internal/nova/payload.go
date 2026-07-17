@@ -72,18 +72,24 @@ type DerTelemetry struct {
 	VehicleSoC *float64 `json:"vehicle_soc,omitempty"` // 0..1 fraction
 
 	// V2X charger
-	SessionChargeWh    *float64 `json:"session_charge_wh,omitempty"`
-	SessionDischargeWh *float64 `json:"session_discharge_wh,omitempty"`
-	ChargePowerMinW    *float64 `json:"charge_power_min_w,omitempty"`
-	ChargePowerMaxW    *float64 `json:"charge_power_max_w,omitempty"`
-	DischargePowerMinW *float64 `json:"discharge_power_min_w,omitempty"`
-	DischargePowerMaxW *float64 `json:"discharge_power_max_w,omitempty"`
-	EVMaxEnergyReqWh   *float64 `json:"ev_max_energy_req_wh,omitempty"`
-	EVMinEnergyReqWh   *float64 `json:"ev_min_energy_req_wh,omitempty"`
-	RatedPowerW        *float64 `json:"rated_power_w,omitempty"`
-	Status             *string  `json:"status,omitempty"`
-	Protocol           *string  `json:"protocol,omitempty"`
-	ControlMode        *string  `json:"control_mode,omitempty"`
+	ACW                 *float64 `json:"ac_w,omitempty"`
+	ACV                 *float64 `json:"ac_v,omitempty"`
+	ACA                 *float64 `json:"ac_a,omitempty"`
+	SessionChargeWh     *float64 `json:"session_charge_wh,omitempty"`
+	SessionDischargeWh  *float64 `json:"session_discharge_wh,omitempty"`
+	ChargePowerMinW     *float64 `json:"charge_power_min_w,omitempty"`
+	ChargePowerMaxW     *float64 `json:"charge_power_max_w,omitempty"`
+	DischargePowerMinW  *float64 `json:"discharge_power_min_w,omitempty"`
+	DischargePowerMaxW  *float64 `json:"discharge_power_max_w,omitempty"`
+	EVTargetEnergyReqWh *float64 `json:"ev_target_energy_req_wh,omitempty"`
+	EVMaxEnergyReqWh    *float64 `json:"ev_max_energy_req_wh,omitempty"`
+	EVMinEnergyReqWh    *float64 `json:"ev_min_energy_req_wh,omitempty"`
+	RatedPowerW         *float64 `json:"rated_power_w,omitempty"`
+	Status              *string  `json:"status,omitempty"`
+	Protocol            *string  `json:"protocol,omitempty"`
+	ControlMode         *string  `json:"control_mode,omitempty"`
+	ConnectorStatus     *string  `json:"connector_status,omitempty"`
+	ChargingState       *string  `json:"charging_state,omitempty"`
 }
 
 // DerKind is the clean vocabulary. Matches telemetry.DerType.String().

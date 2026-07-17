@@ -581,7 +581,7 @@ class FtwPvArrays3d extends FtwElement {
 
     // Name label if present. Amber pill (--accent-e style) with
     // near-black text — matches the FTW eyebrow palette in
-    // DESIGN.md and reads from any rotation against either the
+    // the shared design system and reads from any rotation against either the
     // ground or the sky. Offset is kept tight to the panel's top
     // so the label lands right above the square instead of
     // floating far above where it loses its association.
@@ -697,7 +697,7 @@ function panelColor(azimuth, tilt) {
 
 // Build a Sprite with a text label. When `bgColor` is provided the
 // label renders as a filled rounded pill (amber FTW eyebrow look
-// per DESIGN.md, near-black on-accent text) — used for the per-
+// per the shared design system, near-black on-accent text) — used for the per-
 // panel name chip so it reads from any rotation without blending
 // into the panel colour. When `bgColor` is null, falls back to a
 // transparent-background sprite (used by the compass cardinals).

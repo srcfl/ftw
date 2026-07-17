@@ -109,6 +109,11 @@ type HostEnv struct {
 	// would otherwise mean-average a real battery's 24 % SoC with the
 	// phantom 0 % from a no-battery hybrid, halving the displayed SoC).
 	BatteryCapacityWh float64
+	// BatteryTelemetryOnly admits structured battery readings from a
+	// read-only gateway while keeping it out of the controllable battery pool.
+	// It is intentionally independent of BatteryCapacityWh: the latter is the
+	// dispatch opt-in, this flag is only a telemetry admission hint.
+	BatteryTelemetryOnly bool
 
 	mu sync.Mutex
 	// Desired poll interval — driver can set via host.set_poll_interval OR
@@ -273,7 +278,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	// store, /api/status drivers map, and the frontend's Combined view.
 	// Health success is still recorded — the driver IS alive, just emitting
 	// data the operator told us to ignore.
-	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 {
+	if t == telemetry.DerBattery && h.BatteryCapacityWh <= 0 && !h.BatteryTelemetryOnly {
 		if h.Telemetry != nil {
 			h.Telemetry.RecordDriverSuccess(h.DriverName)
 		}

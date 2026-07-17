@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FTW — next</title>
+  <title>FTW</title>
   <link rel="icon" type="image/jpeg" href="/logo.jpg">
   <!-- Leaflet is lazy-loaded by settings.js when the Weather tab opens
        the OSM picker — it's not needed on the main dashboard and
@@ -31,15 +31,12 @@
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=lp6">
-  <!-- /next-only visual redesign — layered on top of style.css and scoped
-       to body.ftw-next so legacy /index.html is untouched. -->
-  <link rel="stylesheet" href="/next.css?v=next7">
+  <!-- Dashboard layout is layered on the shared base styles. -->
+  <link rel="stylesheet" href="/app.css?v=app1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
-       so we have no supply-chain surface area and no SRI gap — an
-       importmap can't carry integrity hashes, and the legacy page's
-       Leaflet load does use SRI, so matching that posture here. The
-       modules themselves are only fetched when something imports
+       so the dashboard has no runtime CDN dependency. The modules
+       themselves are only fetched when something imports
        them (today: the Settings Weather tab's 3D PV-array preview
        via ftw-pv-arrays-3d.js, lazy-imported from settings.js).
        Declared here because importmaps must land before any
@@ -54,7 +51,7 @@
   </script>
   <script type="module" src="/components/index.js?v=histwrap7"></script>
 </head>
-<body class="ftw-next">
+<body class="ftw-app">
   <header>
     <img src="/logo.jpg" alt="FTW" class="header-logo"><h1>FTW</h1>
     <nav class="app-tabs" id="app-tabs" role="tablist">
@@ -89,7 +86,6 @@
       <span id="conn-status" class="conn-status connected" title="Connected">&#9679;</span>
     </div>
   </header>
-
 
   <!-- Settings Modal -->
   <div id="settings-modal" class="modal hidden">
@@ -152,7 +148,7 @@
 
   <main id="view-live">
     <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
-         EV bottom. next-app.js calls el.setReadings(...) each status tick. -->
+         EV bottom. app.js calls el.setReadings(...) each status tick. -->
     <section class="flow-hero">
       <ftw-energy-flow id="energy-flow" pv="0" grid="0" battery="0" load="0" ev="0" soc="0"></ftw-energy-flow>
     </section>
@@ -254,7 +250,7 @@
          drives all three daily-kWh tiles. Mirrors the fuse-card pattern:
          the outer card owns label + toggle chrome; each inner
          <ftw-history-card hide-toggle range=…> renders as a pure chart
-         tile. next-app.js binds #history-toggle to push range= onto all
+         tile. app.js binds #history-toggle to push range= onto all
          three children in lock-step. -->
     <section class="history-row">
       <div class="card history-group">
@@ -383,7 +379,7 @@
           </div>
         </div>
 
-        <!-- Hidden view toggle kept for app.js compatibility -->
+        <!-- Hidden view toggle used by the dashboard controller -->
         <div id="view-buttons" style="display:none">
           <button data-view="power" class="active"></button>
           <button data-view="energy"></button>
@@ -423,7 +419,7 @@
         <div class="plan-strategy">
           <span class="card-label plan-strategy-label">Strategy</span>
           <!-- Buttons are populated from GET /api/modes at load (see
-               renderModeCatalog in next-app.js) so the dashboard, the
+               renderModeCatalog in app.js) so the dashboard, the
                /api/mode validator, and Home Assistant discovery all derive
                from the same canonical control mode set and can't drift. -->
           <div class="mode-buttons mode-buttons-primary" id="mode-buttons-primary"></div>
@@ -459,7 +455,7 @@
     <!-- Advanced-mode toggle row. Sits between the Plan chart and the
          advanced-only sections so the affordance lands right where the
          extra UI surfaces appear. Same id as the previously-header
-         button so the existing click handler in next-app.js still
+         button so the existing click handler in app.js still
          binds; the previous .btn-link styling stays intact. -->
     <section id="ui-mode-row" class="ui-mode-row">
       <button id="ui-mode-toggle" class="btn-link"
@@ -681,7 +677,7 @@
     </div>
   </ftw-modal>
 
-  <script src="/next-app.js?v=next20"></script>
+  <script src="/app.js?v=app1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/tabs/devices.js?v=tabsplit7"></script>
@@ -706,7 +702,7 @@
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
-    // app.js stays untouched by the self-update feature. When the backend
+    // The dashboard controller stays untouched by the self-update feature. When the backend
     // reports the feature disabled (503 on /api/version/check — e.g. native
     // build with FTW_SELFUPDATE_ENABLED unset), the badge fires
     // `ftw-selfupdate-disabled` and we strip the pointer affordance here.
@@ -727,7 +723,7 @@
   </script>
   <!-- Status bar — always visible at bottom. Previously nested inside a
        <script> tag, which made the HTML parser treat it as text and the
-       bar never rendered. Lifted out so next-app.js can actually find
+       bar never rendered. Lifted out so app.js can actually find
        the sb-drivers / sb-version spans. -->
   <footer class="status-bar" id="status-bar">
     <span class="status-bar-item" id="sb-drivers">--</span>
@@ -822,7 +818,7 @@
     // stuck open when the user taps past it.
     (function () {
       var btn = document.getElementById('mobile-menu-btn');
-      var hdr = document.querySelector('body.ftw-next > header');
+      var hdr = document.querySelector('body.ftw-app > header');
       if (!btn || !hdr) return;
       function close() {
         hdr.classList.remove('menu-open');

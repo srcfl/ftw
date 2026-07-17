@@ -15,7 +15,7 @@
 // content silently and preserve modal/log scroll positions so the
 // operator's reading place isn't yanked away.
 (function () {
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -53,24 +53,24 @@
     return "unknown";
   }
 
-  // Inject modal CSS once. Tokens come from theme.css (DESIGN.md).
+  // Inject modal CSS once. Tokens come from theme.css (the shared design system).
   function ensureStyles() {
     if (document.getElementById("ftw-diag-modal-styles")) return;
     var style = document.createElement("style");
     style.id = "ftw-diag-modal-styles";
     style.textContent = [
       // Backdrop + shell — flat, hairline border, ink-raised surface.
-      // No drop shadow on the modal itself per DESIGN.md.
+      // No drop shadow on the modal itself per the shared design system.
       ".ftw-diag-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9000;display:flex;align-items:center;justify-content:center;}",
       ".ftw-diag-shell{width:min(740px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;overflow:hidden;}",
       // Header: eyebrow + driver name + status pill on the left,
       // ghost actions on the right.
       ".ftw-diag-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--ink);}",
       ".ftw-diag-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}",
-      // Eyebrow label per DESIGN.md: mono, 0.18em tracking, accent amber.
+      // Eyebrow label per the shared design system: mono, 0.18em tracking, accent amber.
       ".ftw-diag-title-eyebrow{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e);font-weight:500;}",
       ".ftw-diag-title-name{font-family:var(--mono);font-size:1rem;color:var(--fg);font-weight:500;}",
-      // Status pill: 999px per DESIGN.md, status dot uses the sanctioned
+      // Status pill: 999px per the shared design system, status dot uses the sanctioned
       // accent glow on a 6 px dot. Pill text colour follows status.
       ".ftw-diag-status-pill{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:0.7rem;letter-spacing:0.12em;text-transform:uppercase;padding:3px 10px;border:1px solid var(--line);border-radius:999px;color:var(--fg-dim);}",
       ".ftw-diag-status-pill::before{content:'';width:6px;height:6px;border-radius:999px;background:var(--line);}",
@@ -81,7 +81,7 @@
       ".ftw-diag-status-pill.ftw-diag-status-offline{color:var(--red-e);border-color:var(--red-e);}",
       ".ftw-diag-status-pill.ftw-diag-status-offline::before{background:var(--red-e);box-shadow:0 0 10px var(--red-e);}",
       ".ftw-diag-actions{display:flex;gap:8px;align-items:center;}",
-      // Ghost button per DESIGN.md: transparent bg, hover changes ONLY
+      // Ghost button per the shared design system: transparent bg, hover changes ONLY
       // the border colour (no bg or text-colour shift).
       ".ftw-diag-btn{font-family:var(--sans);font-size:0.78rem;font-weight:500;letter-spacing:0.02em;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--fg);cursor:pointer;transition:border-color 120ms ease;}",
       ".ftw-diag-btn:hover{border-color:var(--fg-dim);}",
@@ -219,7 +219,7 @@
 
   function downloadWithFeedback(url, title, message, fallbackName) {
     startJobOverlay(title, message);
-    ownerFetch(url)
+    apiFetch(url)
       .then(function (resp) {
         if (!resp.ok) {
           return resp.text().then(function (txt) {
@@ -339,8 +339,8 @@
     var n = state.name;
     if (!n) return;
     Promise.all([
-      ownerFetch("/api/drivers/" + encodeURIComponent(n)).then(function (r) { return r.json(); }),
-      ownerFetch("/api/drivers/" + encodeURIComponent(n) + "/logs?limit=200").then(function (r) { return r.json(); }).catch(function () { return { entries: [] }; }),
+      apiFetch("/api/drivers/" + encodeURIComponent(n)).then(function (r) { return r.json(); }),
+      apiFetch("/api/drivers/" + encodeURIComponent(n) + "/logs?limit=200").then(function (r) { return r.json(); }).catch(function () { return { entries: [] }; }),
     ]).then(function (results) {
       if (state.name !== n) return; // user closed or switched
       renderBody(results[0] || {}, results[1] || {}, isFirstPaint);

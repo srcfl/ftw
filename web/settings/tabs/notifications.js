@@ -6,7 +6,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -26,7 +26,7 @@
       // is non-fatal — fields just render empty (blank falls back to
       // default at render time on the server anyway).
       if (!window._notifDefaults) {
-        ownerFetch("/api/notifications/defaults")
+        apiFetch("/api/notifications/defaults")
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (d) {
             if (!d) return;

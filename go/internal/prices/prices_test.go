@@ -23,21 +23,107 @@ func TestApplierComputesConsumerPrice(t *testing.T) {
 	// spot in öre = 150, total = (150 + 30) * 1.25 = 225
 	a := Applier{GridTariffOreKwh: 30, VATPercent: 25}
 	spot, total := a.Apply(1.5)
-	if spot != 150 { t.Errorf("spot: %f, want 150", spot) }
-	if total != 225 { t.Errorf("total: %f, want 225", total) }
+	if spot != 150 {
+		t.Errorf("spot: %f, want 150", spot)
+	}
+	if total != 225 {
+		t.Errorf("total: %f, want 225", total)
+	}
 }
 
 func TestApplierZeroGridTariff(t *testing.T) {
 	a := Applier{GridTariffOreKwh: 0, VATPercent: 25}
 	_, total := a.Apply(2.0)
 	// 200 * 1.25 = 250
-	if total != 250 { t.Errorf("%f", total) }
+	if total != 250 {
+		t.Errorf("%f", total)
+	}
 }
 
 func TestApplierZeroVAT(t *testing.T) {
 	a := Applier{GridTariffOreKwh: 10, VATPercent: 0}
 	_, total := a.Apply(1.0)
-	if total != 110 { t.Errorf("%f", total) }
+	if total != 110 {
+		t.Errorf("%f", total)
+	}
+}
+
+// ---- Sourceful parse ----
+
+func TestSourcefulFetchesOneDayInSEK(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/SE3" {
+			t.Errorf("path: got %q, want /SE3", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("date"); got != "2026-07-17" {
+			t.Errorf("date: got %q", got)
+		}
+		if got := r.URL.Query().Get("days"); got != "1" {
+			t.Errorf("days: got %q, want 1", got)
+		}
+		if got := r.URL.Query().Get("currency"); got != "SEK" {
+			t.Errorf("currency: got %q, want SEK", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"area":       "SE3",
+			"currency":   "SEK",
+			"unit":       "SEK/MWh",
+			"resolution": "PT15M",
+			"timezone":   "UTC",
+			"prices": []map[string]any{
+				{"datetime": "2026-07-16T22:00:00+00:00", "price": 1079.579865},
+				{"datetime": "2026-07-16T22:15:00+00:00", "price": -12.5},
+			},
+		})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	p := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL}
+	day := time.Date(2026, 7, 17, 0, 0, 0, 0, time.Local)
+	rows, err := p.Fetch(context.Background(), "se3", day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows, want 2", len(rows))
+	}
+	if rows[0].SlotLenMin != 15 {
+		t.Errorf("slot len: got %d, want 15", rows[0].SlotLenMin)
+	}
+	if math.Abs(rows[0].SEKPerKWh-1.079579865) > 1e-9 {
+		t.Errorf("price conversion: got %g SEK/kWh", rows[0].SEKPerKWh)
+	}
+	if math.Abs(rows[1].SEKPerKWh-(-0.0125)) > 1e-9 {
+		t.Errorf("negative price conversion: got %g SEK/kWh", rows[1].SEKPerKWh)
+	}
+}
+
+func TestSourcefulHandlesUnpublishedDay(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	p := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL}
+	rows, err := p.Fetch(context.Background(), "SE3", time.Now())
+	if err != nil {
+		t.Fatalf("404 should not error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("404 should return empty, got %d", len(rows))
+	}
+}
+
+func TestSourcefulRejectsUnexpectedCurrency(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"area":"SE3","currency":"EUR","unit":"EUR/MWh","resolution":"PT15M","prices":[]}`)
+	}))
+	defer srv.Close()
+	p := &SourcefulProvider{Client: &http.Client{}, BaseURL: srv.URL}
+	_, err := p.Fetch(context.Background(), "SE3", time.Now())
+	if err == nil || !strings.Contains(err.Error(), "unexpected currency") {
+		t.Fatalf("got error %v, want unexpected currency", err)
+	}
 }
 
 // ---- Elpriser parse ----
@@ -59,7 +145,9 @@ func TestElpriserDetects15MinFromTimeEnd(t *testing.T) {
 	p := &ElpriserProvider{Client: &http.Client{}, BaseURL: srv.URL}
 	day, _ := time.Parse("2006-01-02", "2026-04-14")
 	rows, err := p.Fetch(context.Background(), "SE3", day)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rows) != 4 {
 		t.Fatalf("got %d rows, want 4 (15-min slots)", len(rows))
 	}
@@ -86,7 +174,9 @@ func TestElpriserDetects60MinFromSpacing(t *testing.T) {
 	p := &ElpriserProvider{Client: &http.Client{}, BaseURL: srv.URL}
 	day, _ := time.Parse("2006-01-02", "2026-04-14")
 	rows, err := p.Fetch(context.Background(), "SE3", day)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(rows) != 3 {
 		t.Fatalf("got %d rows", len(rows))
 	}
@@ -103,14 +193,21 @@ func TestElpriserHandles404(t *testing.T) {
 	defer srv.Close()
 	p := &ElpriserProvider{Client: &http.Client{}, BaseURL: srv.URL}
 	rows, err := p.Fetch(context.Background(), "SE3", time.Now())
-	if err != nil { t.Fatalf("404 should not error: %v", err) }
-	if len(rows) != 0 { t.Errorf("404 should return empty, got %d", len(rows)) }
+	if err != nil {
+		t.Fatalf("404 should not error: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("404 should return empty, got %d", len(rows))
+	}
 }
 
 func TestElpriserURL(t *testing.T) {
 	captured := make(chan string, 1)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select { case captured <- r.URL.Path: default: }
+		select {
+		case captured <- r.URL.Path:
+		default:
+		}
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	})
 	srv := httptest.NewServer(handler)
@@ -148,7 +245,9 @@ func TestServiceFetchesAndStores(t *testing.T) {
 	defer srv.Close()
 
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer st.Close()
 
 	s := &Service{
@@ -160,7 +259,9 @@ func TestServiceFetchesAndStores(t *testing.T) {
 	s.fetchAndStore(context.Background())
 
 	pts, err := st.LoadPrices("SE3", today.UnixMilli(), today.Add(time.Hour).UnixMilli())
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(pts) != 2 {
 		t.Fatalf("got %d prices, want 2", len(pts))
 	}
@@ -178,18 +279,33 @@ func TestServiceFetchesAndStores(t *testing.T) {
 // ---- FromConfig ----
 
 func TestFromConfigNilWhenDisabled(t *testing.T) {
-	if FromConfig(nil, nil, nil) != nil { t.Error("nil cfg → nil service") }
-	if FromConfig(&config.Price{Provider: "none"}, nil, nil) != nil { t.Error("none → nil service") }
-	if FromConfig(&config.Price{Provider: ""}, nil, nil) != nil { t.Error("empty → nil service") }
+	if FromConfig(nil, nil, nil) != nil {
+		t.Error("nil cfg → nil service")
+	}
+	if FromConfig(&config.Price{Provider: "none"}, nil, nil) != nil {
+		t.Error("none → nil service")
+	}
+	if FromConfig(&config.Price{Provider: ""}, nil, nil) != nil {
+		t.Error("empty → nil service")
+	}
 }
 
 func TestFromConfigDefaultsZoneAndVAT(t *testing.T) {
 	st, _ := state.Open(filepath.Join(t.TempDir(), "t.db"))
 	defer st.Close()
-	s := FromConfig(&config.Price{Provider: "elprisetjustnu"}, st, nil)
-	if s == nil { t.Fatal("expected service") }
-	if s.Zone != "SE3" { t.Errorf("default zone: %s", s.Zone) }
-	if s.Applier.VATPercent != 25 { t.Errorf("default VAT: %f", s.Applier.VATPercent) }
+	s := FromConfig(&config.Price{Provider: "sourceful"}, st, nil)
+	if s == nil {
+		t.Fatal("expected service")
+	}
+	if s.Provider.Name() != "sourceful" {
+		t.Errorf("default provider: %s", s.Provider.Name())
+	}
+	if s.Zone != "SE3" {
+		t.Errorf("default zone: %s", s.Zone)
+	}
+	if s.Applier.VATPercent != 25 {
+		t.Errorf("default VAT: %f", s.Applier.VATPercent)
+	}
 }
 
 // ---- ENTSOE minimal checks ----

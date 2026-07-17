@@ -43,7 +43,7 @@ class FtwProgressBar extends FtwElement {
 
     /* Gradient stops: reveal red→amber→green as the fill grows (ASC,
      * low=bad, high=good — SoC) or green→amber→red (DESC, low=good,
-     * high=bad — fuse/peak load). Uses the next-era functional tokens
+     * high=bad — fuse/peak load). Uses the application functional tokens
      * so the ramp flips correctly in the light theme. */
     .grad-asc {
       background: linear-gradient(90deg,

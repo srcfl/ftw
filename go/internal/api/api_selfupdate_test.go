@@ -194,7 +194,7 @@ func TestVersionChannel_BlockedWhileSidecarUpdateIsInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := New(&Deps{SelfUpdate: c})
-	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"edge"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/version/channel", strings.NewReader(`{"channel":"beta"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)

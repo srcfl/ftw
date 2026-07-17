@@ -3,7 +3,7 @@
 // flows, the control loop responds to transients, commands round-trip,
 // self-tune runs, battery models learn.
 //
-// Run with:  go test ./go/test/e2e -timeout 120s -v
+// Run with:  FTW_E2E=1 go test ./go/test/e2e -timeout 120s -v
 // Uses the repo's drivers/ferroamp.lua + drivers/sungrow.lua scripts.
 package e2e
 
@@ -449,6 +449,9 @@ func (s *stack) postJSON(path string, body, out any) int {
 // ---- The e2e test ----
 
 func TestE2E_FullStack(t *testing.T) {
+	if os.Getenv("FTW_E2E") != "1" {
+		t.Skip("full stack is explicit; run make e2e")
+	}
 	s := setupStack(t)
 	defer s.Close()
 

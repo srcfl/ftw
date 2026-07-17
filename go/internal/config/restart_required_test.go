@@ -78,7 +78,6 @@ func TestRestartRequiredFor_BootSections(t *testing.T) {
 		{"price provider", func(c *Config) { c.Price = &Price{Provider: "entsoe"} }, "price"},
 		{"planner toggled", func(c *Config) { c.Planner = &Planner{Enabled: true} }, "planner"},
 		{"nova toggled", func(c *Config) { c.Nova = &Nova{Enabled: true, URL: "https://x"} }, "nova"},
-		{"ocpp toggled", func(c *Config) { c.OCPP = &OCPP{Enabled: true} }, "ocpp"},
 		{"ev_charger added", func(c *Config) {
 			c.EVCharger = &EVCharger{Provider: "easee", Username: "a@b.c"}
 		}, "ev_charger"},

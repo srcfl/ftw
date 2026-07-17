@@ -85,18 +85,24 @@ marker, so the count of non-synthetic rows is 0. No `-force` needed.
 
 If they've been running the app with live drivers pointed at sims in the
 same DB, those rows ARE non-synthetic (driver-recorded) and will block
-the next backfill. The right move is to wipe `state.db*` before
-reseeding, not to pass `-backfill-force`:
+the next backfill. The safe move is to stop the dev service and move
+`state.db*` aside before reseeding, not to pass `-backfill-force` or destroy
+the only copy:
 
 ```bash
-rm -f dev-data/state.db dev-data/state.db-wal dev-data/state.db-shm
+stamp="$(date +%Y%m%d-%H%M%S)"
+backup="dev-data/backfill-backup-$stamp"
+mkdir -p "$backup"
+for file in dev-data/state.db*; do
+  [ ! -e "$file" ] || mv "$file" "$backup/"
+done
 ```
 
 ## Underlying source
 
 - Generator: `go/internal/devtools/backfill.go`
 - CLI wiring: `go/cmd/ftw/main.go` (flags + one-shot dispatch)
-- Safety-gate query: `(*state.Store).CountNonSyntheticHistory` in
+- Safety-gate query: `(*state.Store).CountHistoryWithoutMarker` in
   `go/internal/state/store.go`
 - Marker: JSON string literal `{"source":"backfill"}` stored in the
   `json` column of every row we write.

@@ -2,8 +2,7 @@
 //
 // Structural / lint-style tests for the setup wizard. setup.js is a
 // DOM-coupled IIFE that runs goStep(1) on load — it can't be imported
-// under `node --test` without a DOM polyfill (the repo ships none, see
-// other DOM-free UI tests for the same constraint). So we
+// under `node --test` without a DOM polyfill (the repo ships none). So we
 // regex over the source + the wizard HTML to lock in the Job 1 EV-setup
 // bug fixes:
 //   1. the id mismatch (#ev-username in HTML vs ev-email reads in JS)
@@ -20,6 +19,8 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JS = readFileSync(join(__dirname, "setup.js"), "utf8");
 const HTML = readFileSync(join(__dirname, "setup.html"), "utf8");
+const DEVICES_JS = readFileSync(join(__dirname, "settings", "tabs", "devices.js"), "utf8");
+const PRICE_JS = readFileSync(join(__dirname, "settings", "tabs", "price.js"), "utf8");
 
 describe("setup wizard EV charger — id mismatch fix (Job 1)", () => {
   it("never reads the non-existent #ev-email element", () => {
@@ -102,5 +103,37 @@ describe("setup wizard — fingerprinted network scan", () => {
   it("preselects the matched catalog driver for normal configuration", () => {
     assert.match(JS, /selectedDevice\.matchedFilename/);
     assert.match(JS, /entry\.filename === selectedDevice\.matchedFilename/);
+  });
+});
+
+describe("setup wizard — read-only battery gateways", () => {
+  it("never turns a read-only gateway into a controllable battery", () => {
+    assert.match(JS, /!selectedCatalog\.read_only/,
+      "battery capacity must be hidden and ignored for a read-only catalog entry");
+    assert.match(JS, /driver\.battery_telemetry_only\s*=\s*true/,
+      "read-only gateways still need their physical battery telemetry admitted");
+  });
+
+  it("honours a driver's local-API port instead of the generic HTTP default", () => {
+    assert.match(JS, /selectedCatalog\.connection_defaults\.port/,
+      "Sourceful Zap declares port 80 and setup must retain that default");
+  });
+
+  it("applies the same telemetry-only safety in Settings", () => {
+    assert.match(DEVICES_JS, /entry\.read_only\s*&&\s*entryCaps\.indexOf\("battery"\)/);
+    assert.match(DEVICES_JS, /driver\.battery_telemetry_only\s*=\s*true/);
+    assert.match(DEVICES_JS, /telemetry only/,
+      "operators should see why Zap has no battery-capacity control field");
+  });
+});
+
+describe("price provider defaults", () => {
+  it("offers Sourceful first and selects it for new setup configs", () => {
+    assert.match(HTML, /<select id=["']price-provider["']>\s*<option value=["']sourceful["']>/,
+      "the first option is the browser-selected default");
+  });
+
+  it("uses Sourceful as the Settings default while retaining alternatives", () => {
+    assert.match(PRICE_JS, /\["sourceful", "elprisetjustnu", "entsoe", "none"\], "sourceful"/);
   });
 });

@@ -1,256 +1,102 @@
-# FTW — project orientation
+# FTW project guide
 
-Unified Home Energy Management System, written in Go with Lua drivers.
-See `docs/archive/rust-go-wasm-migration-plan.md` only if you need the
-historical Rust→Go migration context.
+FTW is a local-first home energy management system written in Go, with Lua
+drivers and an optional Python/CVXPY optimizer.
 
-## Mental model
+## Architecture
 
-**Site sign convention**: positive W = energy flowing INTO the site across
-the grid-meter boundary. Grid import (+), PV generation (−), battery
-charge (+ as load), battery discharge (−). The driver layer is the ONLY
-place sign conversion happens — above it, every layer uses the site
-convention. Read `docs/site-convention.md` before touching any power-math
-code.
+The repository has three explicit modules:
 
-**Lua drivers**: `drivers/*.lua` loaded by `gopher-lua` are the only
-driver path. Each driver file implements the lifecycle (`driver_init`,
-`driver_poll`, `driver_command`, `driver_default_mode`,
-`driver_cleanup`) and talks to hardware through the `host.*` capabilities
-exposed by `go/internal/drivers/lua.go`. Drivers are hot-editable on the
-Pi and need no build step.
+- **Core** — `go/cmd/ftw`, `go/internal` and `web`. Core owns state,
+  telemetry, control, safety, API and UI.
+- **Drivers** — `drivers/*.lua`, hosted by `go/internal/drivers`. Drivers own
+  vendor protocols and are the only place power signs are converted.
+- **Optimizer** — `optimizer`, behind the contract in `go/internal/mpc`.
+  It proposes plans; core validates them and retains a Go fallback.
 
-**Clamping discipline**: every clamp must protect against a *quantifiable
-risk*. Read `docs/clamping.md` for the seven current clamps and the
-saturation-curve feedback-loop bug we shipped then fixed.
+Keep new functionality in core unless it has a narrow versioned contract,
+independent failure/update semantics and a safe unavailable state. Optional
+modules never bypass core safety.
 
-**Hardware-stable identity**: every device a driver talks to gets a
-`device_id` resolved in priority order — `make:serial` (from
-`host.set_make` + `host.set_sn`) > `mac:<arp-resolved>` (for TCP devices
-on the same L2) > `ep:<endpoint>` (fallback). Persistent state such as
-battery models is keyed on `device_id` internally, so renaming a driver
-in YAML or re-adding it doesn't orphan a trained model. See
-`go/internal/state/devices.go` and `go/internal/arp/arp.go`.
+Read [docs/architecture.md](docs/architecture.md) for the system map and
+[docs/site-convention.md](docs/site-convention.md) before changing power math.
 
-## Key packages
+## Non-negotiable invariants
 
-| Package | Purpose |
-|---|---|
-| `go/internal/config` | YAML config + validation + atomic save |
-| `go/internal/state` | SQLite persistence, tiered history, long-format TS + Parquet rolloff, devices |
-| `go/internal/telemetry` | DerStore with Kalman per signal + driver health + WatchdogScan |
-| `go/internal/control` | PI + dispatch modes + slew + fuse guard |
-| `go/internal/battery` | ARX(1) model + RLS + cascade + saturation curves |
-| `go/internal/selftune` | Step-response state machine + fitter |
-| `go/internal/drivers` | Lua host (`lua.go`) + Registry + capability interfaces |
-| `go/internal/api` | HTTP endpoints (Go 1.26+ method mux) |
-| `go/internal/configreload` | fsnotify watcher + reload dispatch |
-| `go/internal/ha` | Home Assistant MQTT autodiscovery + bridge |
-| `go/internal/mqtt` | paho client wrapper implementing drivers.MQTTCap |
-| `go/internal/modbus` | simonvetter wrapper implementing drivers.ModbusCap |
-| `go/internal/arp` | L2 MAC resolver for device identity (linux/darwin) |
-| `go/internal/sunpos` | Physics-only solar zenith/azimuth (Spencer 1971) |
-| `go/internal/priceforecast` | Price twin — fills beyond day-ahead publication |
-| `go/internal/loadmodel` | Household load twin (bucketed + heating coefficient) |
-| `go/internal/pvmodel` | PV twin (RLS over sunpos / cloud prior) |
-| `go/internal/mpc` | MPC planner — DP over SoC grid, 48 h horizon |
-| `drivers/` | Lua drivers (`ferroamp.lua`, `sungrow.lua`, …) |
-| `go/test/e2e` | Full-stack test: sims + main + drivers + HTTP |
+- Positive W means power into the site; negative W means power out.
+- Sign conversion happens only at the driver boundary.
+- Planner output is never sent directly to hardware.
+- Stale site-meter data stops dispatch.
+- A failed/stale driver receives its autonomous default mode.
+- Every clamp protects a quantified hardware or control risk.
+- Persistent device state is keyed by stable hardware identity, not a YAML name.
+- SQLite queries stay in `go/internal/state`.
 
-## Building & testing
+## Drivers
 
-```bash
-make test         # unit + integration tests
-make e2e          # full-stack end-to-end test
-make dev          # start sims + main app locally
-make build-arm64  # cross-compile for RPi
-make release      # tarballs for deploy
-```
+`go/internal/drivers/lua.go` is the source of truth for the Lua host API.
+Every driver implements `driver_init`, `driver_poll`, `driver_command` and a
+safe `driver_default_mode`; `driver_cleanup` is optional. Declare catalog
+metadata in the driver's `DRIVER` block and request only required capabilities.
+Report make and serial as soon as they are known.
 
-Lua drivers need no build step — `drivers/*.lua` ships verbatim with the
-release tarball and is loaded on startup.
-
-No CGo anywhere — pure Go + embedded Lua 5.1 (gopher-lua). `go build`
-produces a static single-binary distribution.
-
-## Releases (Changesets)
-
-The release pipeline is driven by [Changesets](https://github.com/changesets/changesets).
-**Every PR with a user-visible change needs a changeset file.** The pattern
-is lifted from `umara/u-front` — start there if you need a reference setup.
-
-**Workflow per PR.** From the repo root:
-
-```bash
-npx changeset      # interactive: pick bump (patch/minor/major) + summary
-```
-
-That writes a `.changeset/<name>.md` file you commit with your change. The
-`changeset-check` workflow on the PR enforces presence (or one of the
-exempt paths below).
-
-**Bump types.**
-- `patch` — bug fix, perf tweak, internal refactor, doc fix that affects
-  user-visible content.
-- `minor` — new driver, new feature flag, new API endpoint, new UI
-  surface, expanded device support.
-- `major` — breaking change (config schema rename, removed endpoint,
-  removed driver capability, sign-convention change at the boundary).
-  Pair with `BREAKING CHANGE:` notes in the changeset body.
-
-**Auto-exempt paths.** If a PR touches only `*.md` / `*.mdx` / `*.txt`,
-`docs/`, `.github/`, `.vscode/`, or root dotfiles (`.editorconfig`,
-`.gitignore`, `.gitattributes`, `LICENSE`), the gate auto-passes — no
-changeset required. The full allowlist lives in
-`.github/workflows/changeset-check.yml`; extend it in the same PR if a
-new "obviously doesn't ship to users" path appears.
-
-**Manual escape hatch.** Apply the `no-changeset` label to the PR if the
-allowlist doesn't cover your case but the change genuinely doesn't merit
-a release entry. Use sparingly — the allowlist exists to make this rare.
-
-**Release flow.**
-
-1. PR with changeset lands on master.
-2. `release.yml` runs `changesets/action`, which opens / updates the
-   "Version Packages" PR (titled `chore(release): version packages`).
-   That PR contains the bumped `package.json` version + a rewritten
-   `CHANGELOG.md` section + deletion of the consumed `.changeset/*.md`
-   files.
-3. Merge the Version PR when you're ready to cut a release.
-4. `release.yml` fires again on master, sees `hasChangesets == 'false'`,
-   tags `vX.Y.Z`, creates the GitHub Release with codename-annotated
-   notes, then triggers binaries / docker / rpi-image / discord jobs.
-
-**Key files.**
-- `package.json` — version source. Bumped automatically; do not edit
-  by hand. (Private package; this isn't published to npm.)
-- `.changeset/config.json` — Changesets config (preset, baseBranch).
-- `.changeset/<name>.md` — pending entries.
-- `CHANGELOG.md` — generated; first line `# Changelog`, entries
-  prepended above the legacy semantic-release history.
-- `scripts/apply-codename.cjs` — Hitchhiker codename header generator
-  for release notes. Deterministic per `MAJOR.MINOR` so patches share a
-  codename; "42 appears anywhere" triggers an Easter-egg ceremony line.
-- `.github/workflows/release.yml` — orchestrator.
-- `.github/workflows/changeset-check.yml` — PR gate.
-
-**Don't.** Don't hand-edit `CHANGELOG.md` (changesets rewrites it).
-Don't bump `package.json` version manually. Don't use the old
-`make release` Makefile target as a substitute for the workflow — it
-builds tarballs locally but doesn't tag or publish.
-
-## Adding a new driver
-
-1. Copy `drivers/ferroamp.lua` as a template to `drivers/mydevice.lua`.
-2. Implement `driver_init`, `driver_poll`, `driver_command`, and
-   (optionally) `driver_default_mode` / `driver_cleanup`. Use the
-   `host.*` helpers for I/O — full API in `go/internal/drivers/lua.go`.
-3. Call `host.set_make("…")` + `host.set_sn("…")` inside `driver_init`
-   as soon as you've read them off the device — that's what anchors
-   `device_id` to hardware identity.
-4. Use `host.emit_metric("name_unit", value)` for any scalar diagnostic
-   that doesn't fit the structured pv/battery/meter emit (temperatures,
-   DC voltages, MPPT currents, inverter heatsink, grid frequency). It
-   lands in the long-format TS DB, queryable for life.
-5. Add an entry to `config.yaml` with `lua: drivers/mydevice.lua` and
-   the appropriate `capabilities:` block.
-6. Driver starts on next restart (or hot-reload via the file watcher).
-
-Full walkthrough in `docs/writing-a-driver.md`.
-
-## Lua driver host
-
-See the top-of-file comment in `go/internal/drivers/lua.go`. The `host`
-global exposes:
-
-- `host.log(level, msg)`, `host.millis()`, `host.set_poll_interval(ms)`
-- `host.set_make(s)`, `host.set_sn(s)` — anchors device identity
-- `host.emit("battery"|"pv"|"meter", {…})` — structured telemetry
-- `host.emit_metric(name, value)` — arbitrary scalar diagnostics into TS DB
-- `host.mqtt_sub/pub/messages`, `host.modbus_read/write/write_multi`
-- `host.decode_u32_le/be`, `host.decode_i32_le/be`, `host.decode_i16`
-- `host.json_encode/decode`
-
-MQTT / Modbus / HTTP calls return an error string if the driver wasn't
-granted the capability in config.
-
-## Time-series DB (long-format)
-
-Every `host.emit_metric` call lands in three SQLite tables defined in
-`go/internal/state/store.go` and written through
-`go/internal/state/store_ts.go`:
-
-- `ts_drivers(id, name)` — interned driver names
-- `ts_metrics(id, name, unit)` — interned metric names
-- `ts_samples(driver_id, metric_id, ts_ms, value)` — `WITHOUT ROWID,
-  STRICT`, PK clusters rows by (driver, metric, ts) so the typical
-  "metric X for driver Y over range Z" query is a sequential scan.
-
-Samples older than `RecentRetention` (14 days) roll off to daily Parquet
-files under `<state.cold_dir>/YYYY/MM/DD.parquet` — see
-`go/internal/state/parquet.go`. Rolloff runs hourly from
-`go/cmd/ftw/main.go` (`rolloffLoop`). Parquet files are
-zstd-compressed and dictionary-encoded on `driver` + `metric`, so a
-year of 50 metrics is typically a few GB.
-
-## Watchdog + safety
-
-The control loop (`go/cmd/ftw/main.go`, the `ticker.C`
-branch) runs `tel.WatchdogScan(timeout)` every cycle. Any driver whose
-last successful telemetry is older than `site.watchdog_timeout_s`
-(default 60 s) flips to offline and receives `DefaultMode` — which in
-every driver means "drop into autonomous self-consumption". The host
-also short-circuits the dispatch cycle when the configured site-meter
-driver is stale, because a stale grid reading causes one battery to
-charge another.
+Drivers are hot-editable and ship without a compilation step. See
+[docs/writing-a-driver.md](docs/writing-a-driver.md).
 
 ## Code conventions
 
-- `slog` for all logging
-- Explicit mutexes — no atomic tricks unless measurably needed
-- SQLite queries in `internal/state/*.go`, nothing embedded elsewhere
-- Driver code in Lua; the Go side only owns capabilities, not protocol logic
-- Tests colocated with code, `_test.go` files
-- Integration tests in `go/test/e2e/` (separate package to keep public
-  and internal concerns cleanly split)
+- Use `slog` for logging.
+- Prefer explicit mutexes and simple ownership over clever atomics.
+- Keep packages cohesive; depend on narrow interfaces.
+- Put tests beside Go code as `_test.go`.
+- Keep full-stack tests in `go/test/e2e`.
+- Treat code, types, tests and driver metadata as the detailed documentation.
+- Add prose only for architecture, safety invariants or operator steps the code
+  cannot explain.
 
-## When things look weird
+## Build and test
 
-- **Sign is wrong somewhere**: it's ALWAYS a bug at the driver boundary.
-  Above the driver layer is always site convention.
-- **Battery drifting from target**: check confidence. Below 0.5 the
-  cascade bypasses the inverse model (gates on confidence intentionally).
-- **History queries slow**: check `idx_hot_ts` is there; SQL uses range
-  scans. `Prune()` should be running periodically to age data to warm/cold.
-- **Driver hung (tick_count not advancing)**: restart the service and
-  check `WatchdogScan` transitions in the logs — the loop should have
-  already flipped it offline and sent `DefaultMode`. If it didn't,
-  `tel.health[name].LastSuccess` never got bumped; confirm the driver
-  is actually calling `host.emit`.
-- **PV prediction wild**: the twin's RLS coefficients drifted on a
-  run of bad weather data. `POST /api/pvmodel/reset` wipes them and
-  falls back to the physics-only `sunpos` prior.
-- **Battery model orphaned after rename**: it shouldn't — models are
-  keyed on `device_id`, not driver name. Verify with `GET /api/devices`
-  that the rename preserved the same `device_id`. If not, the driver
-  isn't reporting a stable make+serial; fix it there.
+```bash
+make test         # Go and Python suites; independent work runs in parallel
+make verify       # tests, compose migration, vet and build
+make e2e          # full local stack
+make dev          # simulators + app
+make build-arm64  # Raspberry Pi binary
+make release      # local release artifacts only
+npm test          # web tests
+```
 
-## Docs for operators + devs
+Run the narrow package/test while iterating, then `make verify` before handoff.
+Lua drivers have syntax and contract checks in the Go test suite.
 
-- `docs/site-convention.md` — sign convention (must-read)
-- `docs/architecture.md` — system overview, layers, data flow (NEW)
-- `docs/writing-a-driver.md` — Lua driver tutorial (NEW)
-- `docs/tsdb.md` — long-format TS schema + Parquet rolloff (NEW)
-- `docs/device-identity.md` — `device_id` resolution + ARP (NEW)
-- `docs/safety.md` — watchdog, clamps, fuse guard, stale-meter guard (NEW)
-- `docs/ml-models.md` — PV + load + price twins, MPC inputs (NEW)
-- `docs/api.md` — HTTP endpoint reference (NEW)
-- `docs/operations.md` — deploy, backup, upgrade, troubleshooting (NEW)
-- `docs/testing.md` — test strategy, sims, e2e recipe (NEW)
-- `docs/configuration.md` — YAML schema reference
-- `docs/battery-models.md` — ARX(1), RLS, cascade, self-tune
-- `docs/clamping.md` — the safety clamps
-- `docs/mpc-planner.md` — MPC strategies, confidence blending
-- `docs/ha-integration.md` — Home Assistant MQTT bridge
-- `docs/archive/rust-go-wasm-migration-plan.md` — historical Rust→Go migration context
+## Releases
+
+Changesets drive versioning. Every user-visible code change needs a
+`.changeset/*.md` entry; documentation- and CI-only changes are auto-exempt.
+Do not edit `package.json` version or `CHANGELOG.md` manually.
+
+Only two release channels exist:
+
+- **beta** receives every new candidate;
+- **stable** promotes the exact commit already published and validated as beta.
+
+There is no edge channel. Core and signed driver artifacts can release
+independently but follow the same beta-to-stable progression. See
+[docs/self-update.md](docs/self-update.md).
+
+## Useful source entry points
+
+| Concern | Source |
+|---|---|
+| Process wiring and control tick | `go/cmd/ftw/main.go` |
+| Configuration schema | `go/internal/config`, `config.example.yaml` |
+| HTTP routes | `go/internal/api/api.go` |
+| Lua host and registry | `go/internal/drivers` |
+| Safety/control | `go/internal/control`, `go/internal/telemetry` |
+| Persistence | `go/internal/state` |
+| Planner contract/fallback | `go/internal/mpc` |
+| Optional optimizer | `optimizer` |
+| Driver catalog | `DRIVER` blocks in `drivers/*.lua` |
+
+When behavior looks wrong, inspect the source and its tests before adding a new
+document. Keep [docs/](docs/) small and current.

@@ -13,7 +13,7 @@
 # NUC, or a Linux VM. On macOS (e.g. a Mac mini) host networking binds to
 # the Docker Desktop VM, not to the Mac, so the dashboard is unreachable
 # and discovery breaks silently — use docker-compose.macos.yml instead.
-# See docs/deploy-platforms.md for the full Mac mini + generic-Linux guide.
+# Use docker-compose.macos.yml on Docker Desktop for Mac.
 #
 # Persistent state — config.yaml, state.db, battery models, cold/
 # Parquet files — lives in ./data and survives image upgrades. The
@@ -82,8 +82,8 @@ services:
 
   ftw-updater:
     # Normally follows :latest. The separate variable is only needed for
-    # bootstrapping a beta/edge pair before the installed stable updater
-    # understands that channel's immutable tag format.
+    # bootstrapping a beta pair before the installed stable updater
+    # understands that prerelease's immutable tag.
     image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
     container_name: ftw-updater
     restart: unless-stopped
@@ -167,7 +167,8 @@ services:
   #   - "Charge car 80%"     → have the EV ready by the event's start time.
   # FTW also writes read-only "EVSE history" and "plan" calendars you subscribe
   # to. Credentials are auto-managed and shown (with a QR) in Settings →
-  # Calendar. LAN-ONLY by design; nothing forwards port 5232 to the internet.
+  # Calendar. LAN-ONLY by design; nothing forwards port 5232 to the internet
+  # unless the operator does so separately.
   # See docs/caldav-integration.md.
   # ---------------------------------------------------------------------
 

@@ -58,6 +58,7 @@ type legacyPayload struct {
 	// Battery
 	A              *float64 `json:"A,omitempty"`
 	V              *float64 `json:"V,omitempty"`
+	ACW            *float64 `json:"ac_W,omitempty"`
 	DCW            *float64 `json:"dc_W,omitempty"`
 	DCV            *float64 `json:"dc_V,omitempty"`
 	DCA            *float64 `json:"dc_A,omitempty"`
@@ -76,17 +77,20 @@ type legacyPayload struct {
 	TotalGenerationWh *float64 `json:"total_generation_Wh,omitempty"`
 
 	// EV (ev_port in legacy vocabulary)
-	PlugConnected    *bool     `json:"plug_connected,omitempty"`
-	Status           *string   `json:"status,omitempty"`
-	Protocol         *string   `json:"protocol,omitempty"`
-	ControlMode      *string   `json:"control_mode,omitempty"`
-	VehicleSoCFract  *float64  `json:"vehicle_soc_fract,omitempty"`
-	EVMaxEnergyReqWh *float64  `json:"ev_max_energy_req_Wh,omitempty"`
-	EVMinEnergyReqWh *float64  `json:"ev_min_energy_req_Wh,omitempty"`
-	SessionChargeWh  *float64  `json:"session_charge_Wh,omitempty"`
-	SessionDischarWh *float64  `json:"session_discharge_Wh,omitempty"`
-	LowerLimitW      []float64 `json:"lower_limit_W,omitempty"`
-	UpperLimitW      []float64 `json:"upper_limit_W,omitempty"`
+	PlugConnected       *bool     `json:"plug_connected,omitempty"`
+	Status              *string   `json:"status,omitempty"`
+	Protocol            *string   `json:"protocol,omitempty"`
+	ControlMode         *string   `json:"control_mode,omitempty"`
+	ConnectorStatus     *string   `json:"connector_status,omitempty"`
+	ChargingState       *string   `json:"charging_state,omitempty"`
+	VehicleSoCFract     *float64  `json:"vehicle_soc_fract,omitempty"`
+	EVTargetEnergyReqWh *float64  `json:"ev_target_energy_req_Wh,omitempty"`
+	EVMaxEnergyReqWh    *float64  `json:"ev_max_energy_req_Wh,omitempty"`
+	EVMinEnergyReqWh    *float64  `json:"ev_min_energy_req_Wh,omitempty"`
+	SessionChargeWh     *float64  `json:"session_charge_Wh,omitempty"`
+	SessionDischarWh    *float64  `json:"session_discharge_Wh,omitempty"`
+	LowerLimitW         []float64 `json:"lower_limit_W,omitempty"`
+	UpperLimitW         []float64 `json:"upper_limit_W,omitempty"`
 }
 
 // toLegacy performs the translation. It is a pure function of the
@@ -138,6 +142,7 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 
 	// PV specifics.
 	if t.Type == KindPV {
+		out.RatedPowerW = t.RatedPowerW
 		out.MPPT1V, out.MPPT1A = t.MPPT1V, t.MPPT1A
 		out.MPPT2V, out.MPPT2A = t.MPPT2V, t.MPPT2A
 		out.TotalGenerationWh = t.TotalGenerationWh
@@ -155,6 +160,9 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 	if t.Type == KindV2X {
 		out.PlugConnected = t.Connected
 		out.VehicleSoCFract = t.VehicleSoC
+		out.ACW = t.ACW
+		out.V = t.ACV
+		out.A = t.ACA
 		out.DCW = t.DCW
 		out.DCV = t.DCV
 		out.DCA = t.DCA
@@ -163,6 +171,7 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 		out.TotalDischarWh = t.TotalDischargeWh
 		out.SessionChargeWh = t.SessionChargeWh
 		out.SessionDischarWh = t.SessionDischargeWh
+		out.EVTargetEnergyReqWh = t.EVTargetEnergyReqWh
 		out.EVMaxEnergyReqWh = t.EVMaxEnergyReqWh
 		out.EVMinEnergyReqWh = t.EVMinEnergyReqWh
 		if t.ChargePowerMinW != nil || t.ChargePowerMaxW != nil {
@@ -175,6 +184,8 @@ func toLegacy(t *DerTelemetry) *legacyPayload {
 		out.Status = t.Status
 		out.Protocol = t.Protocol
 		out.ControlMode = t.ControlMode
+		out.ConnectorStatus = t.ConnectorStatus
+		out.ChargingState = t.ChargingState
 	}
 	return out
 }

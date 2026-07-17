@@ -250,19 +250,25 @@
       selectedCatalog.protocols.some(function (p) { return p === 'modbus'; });
     document.getElementById('drv-unitid-group').style.display = isModbus ? 'block' : 'none';
 
-    // Show battery capacity if capabilities include battery
+    // Read-only gateway drivers may expose battery telemetry, but battery
+    // capacity is the control-pool opt-in. Never offer that field for them.
     var hasBattery = selectedCatalog.capabilities &&
-      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
+      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; }) &&
+      !selectedCatalog.read_only;
     document.getElementById('drv-battery-group').style.display = hasBattery ? 'block' : 'none';
 
     // First driver defaults to site meter
     document.getElementById('drv-site-meter').checked = configuredDrivers.length === 0;
 
-    // Default port based on protocol
+    // Default port based on protocol, with a driver-specific override for
+    // appliances whose official local API uses a different well-known port.
     if (!selectedDevice) {
       var defPort = 502;
       if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('mqtt') >= 0) defPort = 1883;
       if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('http') >= 0) defPort = 8080;
+      if (selectedCatalog.connection_defaults && selectedCatalog.connection_defaults.port) {
+        defPort = selectedCatalog.connection_defaults.port;
+      }
       document.getElementById('drv-port').value = defPort;
     }
 
@@ -298,7 +304,8 @@
     // battery_capacity_wh = 10000 that the control loop later tries to
     // target against a device with no battery.
     var hasBattery = selectedCatalog && selectedCatalog.capabilities &&
-      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
+      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; }) &&
+      !selectedCatalog.read_only;
     var batteryKwh = hasBattery
       ? (parseFloat(document.getElementById('drv-battery-kwh').value) || 0)
       : 0;
@@ -317,6 +324,12 @@
       is_site_meter: isSiteMeter,
       capabilities: {}
     };
+
+    var hasBatteryTelemetry = selectedCatalog && selectedCatalog.capabilities &&
+      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
+    if (hasBatteryTelemetry && selectedCatalog.read_only) {
+      driver.battery_telemetry_only = true;
+    }
 
     if (batteryKwh > 0) {
       driver.battery_capacity_wh = batteryKwh * 1000;
@@ -489,11 +502,6 @@
   function prepareIntegrations() {
     var zone = document.getElementById('price-zone').value;
     document.getElementById('price-zone-readonly').value = zone;
-
-    var providerSel = document.getElementById('price-provider');
-    if (zone.startsWith('SE') || zone.startsWith('NO') || zone.startsWith('DK') || zone === 'FI') {
-      providerSel.value = 'elprisetjustnu';
-    }
 
     populateEVProviders();
     syncEVFields();

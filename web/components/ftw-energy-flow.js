@@ -29,7 +29,7 @@
 //      turbulent rather than a rotating screw. Speed scales with |kW|.
 // Both effects are skipped when |kW| < 50 W so idle edges read as still.
 //
-// Update pattern — next-app.js calls `setReadings(...)` each status poll
+// Update pattern — app.js calls `setReadings(...)` each status poll
 // with a fully-resolved planet list. The component never introspects
 // /api/status itself and has no knowledge of driver roles — all
 // role→corner/color/sub-text logic lives in the caller.
@@ -59,7 +59,7 @@ import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
 // idle/balanced" threshold (in watts, magnitude). Used by:
 //   - this component (beam activation, sub-label "idle / charging /
 //     generating", aggregated-bubble greyscale, self-powered %)
-//   - web/next-app.js per-planet object construction (mirrors via
+//   - web/app.js per-planet object construction (mirrors via
 //     window.FTW_FLOW_IDLE_W set below — non-module script, can't
 //     import; falls back to the same literal if this module hasn't
 //     loaded yet)
@@ -141,7 +141,7 @@ const ANGLE_BOTTOM_CENTER =  Math.PI / 2;
 // Role-native color used on placeholder bubbles during the loading
 // phase so the dashed rings + role icons read as colored from the
 // first paint instead of a gray "unknown" blob. Once real telemetry
-// lands, the per-driver color (set by next-app.js) overrides this.
+// lands, the per-driver color (set by app.js) overrides this.
 const CORNER_PLACEHOLDER_COLOR = {
   "top-left":     "var(--amber)",
   "top-right":    "var(--cyan)",
@@ -295,7 +295,7 @@ class FtwEnergyFlow extends FtwElement {
        the top-right cluster against the hero's title). Only rendered
        when the current readings have >1 planet in any corner, so
        single-inverter setups never see the control. Amber track
-       (--accent-e) when ON per DESIGN.md: one accent, near-black
+       (--accent-e) when ON per the shared design system: one accent, near-black
        on-accent fill, 999 px radius, mono eyebrow label at 0.18 em. */
     .ef-toggle {
       position: absolute;
@@ -447,7 +447,7 @@ class FtwEnergyFlow extends FtwElement {
   constructor() {
     super();
     // Start with empty clusters; render shows placeholder slots until the
-    // first setReadings() push arrives from next-app.js.
+    // first setReadings() push arrives from app.js.
     this._readings = { load: 0, planets: [] };
     // Flipped true on the first setReadings(); the SVG carries an
     // `ef-loading` class until then, which a CSS keyframe uses to pulse
@@ -705,7 +705,7 @@ class FtwEnergyFlow extends FtwElement {
     }
     // Delegated click on the SVG — one listener per render covers every
     // planet group that opted in via data-role. The handler dispatches
-    // `ftw-planet-click` so callers (next-app.js) can route per-role
+    // `ftw-planet-click` so callers (app.js) can route per-role
     // (e.g. ev → open EV modal scoped to this driver).
     const svg = this.shadowRoot.querySelector('svg');
     if (svg) {

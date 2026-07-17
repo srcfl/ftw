@@ -85,7 +85,33 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 		L.Close()
 		return nil, fmt.Errorf("execute %s: %w", path, err)
 	}
+	// A read-only gateway can expose a real battery without being a battery
+	// controller. Honour the driver's own catalog declaration at runtime so
+	// existing configs gain telemetry after a driver upgrade even before the
+	// setup UI persists battery_telemetry_only. The dispatch pool remains a
+	// separate config concern and is filtered from the same metadata in main.
+	if driverDeclaresReadOnlyBattery(L) {
+		env.BatteryTelemetryOnly = true
+	}
 	return d, nil
+}
+
+func driverDeclaresReadOnlyBattery(L *lua.LState) bool {
+	meta, ok := L.GetGlobal("DRIVER").(*lua.LTable)
+	if !ok || meta.RawGetString("read_only") != lua.LTrue {
+		return false
+	}
+	caps, ok := meta.RawGetString("capabilities").(*lua.LTable)
+	if !ok {
+		return false
+	}
+	hasBattery := false
+	caps.ForEach(func(_, value lua.LValue) {
+		if strings.EqualFold(value.String(), "battery") {
+			hasBattery = true
+		}
+	})
+	return hasBattery
 }
 
 // Init calls driver_init(config) if defined. config is the optional
@@ -241,8 +267,11 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              phases (optional, 1 or 3)
 	//   v2x_charger -> w (positive = vehicle charging, negative = V2X discharge),
 	//              vehicle_soc (0..1 fraction), connected,
-	//              dc_w, dc_v, dc_a, session_charge_wh, session_discharge_wh,
-	//              rated_power_w, status, control_mode
+	//              ac_v, ac_a, dc_w, dc_v, dc_a, session_charge_wh,
+	//              session_discharge_wh, total_charge_wh, total_discharge_wh,
+	//              ev_target_energy_req_wh, ev_min_energy_req_wh,
+	//              ev_max_energy_req_wh, rated_power_w, status, protocol,
+	//              control_mode
 	//   vehicle -> soc (required, vehicle battery level % 0-100),
 	//              charge_limit_pct (optional, vehicle-configured limit),
 	//              charging_state (optional, e.g. "Charging"|"Stopped"|"Complete"),

@@ -5,7 +5,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -146,7 +146,7 @@
       if (v6cb) v6cb.addEventListener("change", renderNetwork);
 
       function refresh() {
-        ownerFetch("/api/system/info").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/system/info").then(function (r) { return r.json(); }).then(function (d) {
           setText("sys-hostname", d.hostname || "—");
           setText("sys-uptime", fmtUptime(d.uptime_s));
 
@@ -175,7 +175,7 @@
       }
 
       function refreshComponents() {
-        ownerFetch("/api/components").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/components").then(function (r) { return r.json(); }).then(function (d) {
           var el = document.getElementById("sys-components");
           if (!el) return;
           var core = d.core || {};
@@ -204,7 +204,7 @@
           if (optimizerBtn) optimizerBtn.onclick = function () {
             optimizerBtn.disabled = true;
             if (status) status.textContent = "Starting optimizer update…";
-            ownerFetch("/api/components/optimizer/update", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+            apiFetch("/api/components/optimizer/update", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
               .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "update failed"); return body; }); })
               .then(function () { if (status) status.textContent = "Optimizer update started; core remains online."; })
               .catch(function (err) { if (status) status.textContent = err.message; optimizerBtn.disabled = false; });
@@ -213,7 +213,7 @@
           if (rollbackBtn) rollbackBtn.onclick = function () {
             rollbackBtn.disabled = true;
             if (status) status.textContent = "Restoring previous optimizer image…";
-            ownerFetch("/api/components/optimizer/rollback", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+            apiFetch("/api/components/optimizer/rollback", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
               .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
               .then(function () { if (status) status.textContent = "Optimizer rollback started; core remains online."; })
               .catch(function (err) { if (status) status.textContent = err.message; rollbackBtn.disabled = false; });
@@ -222,7 +222,7 @@
           if (driverBtn) driverBtn.onclick = function () {
             driverBtn.disabled = true;
             if (status) status.textContent = "Refreshing signed driver manifests…";
-            ownerFetch("/api/device_repository/refresh", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
+            apiFetch("/api/device_repository/refresh", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"})
               .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "refresh failed"); return body; }); })
               .then(function () { if (status) status.textContent = "Driver catalog refreshed; no driver was activated."; driverBtn.disabled = false; })
               .catch(function (err) { if (status) status.textContent = err.message; driverBtn.disabled = false; });

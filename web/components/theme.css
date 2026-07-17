@@ -6,17 +6,15 @@
  * of the sheet (and every <ftw-*> element) resolves var(--x) correctly.
  *
  * Theme switching: <html> carries `data-theme="dark"` or `"light"`.
- * next-app.js (init block at the bottom of next.html) reads localStorage
- * then falls back to prefers-color-scheme. Absence of the attribute is
- * treated as dark so legacy /index.html keeps its historical appearance.
+ * app.js reads localStorage and then falls back to prefers-color-scheme.
+ * Absence of the attribute is treated as dark.
  *
- * LEGACY tokens (hex) live inside :root so /index.html continues to work
- * unchanged. The NEXT palette (oklch + typography) is what /next.html +
- * next.css read for the redesign.
+ * Base component tokens and the richer application palette both live on
+ * :root because style.css, app.css and shadow-DOM components share them.
  */
 
 :root {
-  /* ----- Legacy palette — /index.html depends on these. ----- */
+  /* ----- Base palette used by style.css and web components. ----- */
   --bg: #0f0f1a;
   --surface: #1a1a2e;
   --surface2: #22223a;
@@ -97,10 +95,8 @@
   --card-pad-tight: 12px 14px;
 }
 
-/* ----- Light theme — applied when <html data-theme="light"> is set.
-        Only the next-era tokens flip; legacy ones stay so /index.html
-        keeps its dark appearance even if a user flips the switch while
-        on the legacy route. ----- */
+/* ----- Light application theme. Base tokens remain stable for the setup
+        wizard and shared component fallbacks. ----- */
 html[data-theme="light"] {
   --ink:        oklch(0.985 0.005 250);
   --ink-raised: oklch(0.975 0.005 250);

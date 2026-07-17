@@ -18,7 +18,7 @@
 // only entry point — there's no auto-open behavior.
 
 import { FtwElement } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 
 class FtwBatteryControl extends FtwElement {
   static styles = `
@@ -156,7 +156,7 @@ class FtwBatteryControl extends FtwElement {
     .error.hidden { display: none; }
 
     /* Footer buttons — primary CTA is the accent, on-accent text is
-       near-black per DESIGN.md. The Stop button is a ghost variant
+       near-black per the shared design system. The Stop button is a ghost variant
        until a hold is active, then it switches to the red status hue
        to signal a destructive action. */
     .footer-btn {
@@ -364,7 +364,7 @@ class FtwBatteryControl extends FtwElement {
   }
 
   _refresh() {
-    ownerFetch("/api/battery/manual_hold")
+    apiFetch("/api/battery/manual_hold")
       .then((r) => r.json())
       .then((d) => this._renderActive(d))
       .catch(() => { /* network blip — leave previous state */ });
@@ -385,7 +385,7 @@ class FtwBatteryControl extends FtwElement {
       }
     }
     installBtn.disabled = true;
-    ownerFetch("/api/battery/manual_hold", {
+    apiFetch("/api/battery/manual_hold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ direction: dir, power_w: powerW, hold_s: holdS }),
@@ -407,7 +407,7 @@ class FtwBatteryControl extends FtwElement {
     this._showError("");
     const stopBtn = this.shadowRoot.querySelector("[data-stop]");
     stopBtn.disabled = true;
-    ownerFetch("/api/battery/manual_hold", { method: "DELETE" })
+    apiFetch("/api/battery/manual_hold", { method: "DELETE" })
       .then((r) => {
         if (!r.ok) throw new Error("HTTP " + r.status);
         return r.json();

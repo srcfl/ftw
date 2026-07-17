@@ -355,7 +355,7 @@ func (s *Server) researchSiteSummary() map[string]any {
 	out["fuse_max_power_w"] = cfg.Fuse.MaxPowerW()
 	out["driver_count"] = len(cfg.Drivers)
 	out["loadpoint_count"] = len(cfg.Loadpoints)
-	out["has_ev"] = len(cfg.Loadpoints) > 0 || cfg.EVCharger != nil || (cfg.OCPP != nil && cfg.OCPP.Enabled)
+	out["has_ev"] = len(cfg.Loadpoints) > 0 || cfg.EVCharger != nil
 
 	var batteryWh float64
 	loadpointDrivers := make(map[string]bool, len(cfg.Loadpoints))

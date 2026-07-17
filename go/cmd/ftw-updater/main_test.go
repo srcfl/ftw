@@ -268,7 +268,7 @@ func TestImmutableImageTagChannels(t *testing.T) {
 	}{
 		{"v1.2.3", true},
 		{"v1.3.0-beta.1", true},
-		{"edge-20260712T120000Z-a48529b", true},
+		{"edge-20260712T120000Z-a48529b", false},
 		{"latest", false},
 		{"beta", false},
 		{"edge", false},

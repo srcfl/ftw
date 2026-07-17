@@ -7,7 +7,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -85,7 +85,7 @@
     ]);
   }
 
-  // drawQR paints qrMatrix(text) into a <canvas>.
+  // drawQR paints qrMatrix(text) into a canvas.
   function drawQR(qrMatrix, text, target) {
     var matrix = qrMatrix(text);
     var n = matrix.length, quiet = 4, total = n + 2 * quiet;
@@ -153,7 +153,7 @@
       var qrEl = document.getElementById("caldav-qr");
 
       function refreshStatus() {
-        ownerFetch("/api/caldav/status").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/caldav/status").then(function (r) { return r.json(); }).then(function (d) {
           if (!ind) return;
           if (!d.enabled) {
             ind.className = "ha-status-indicator ha-off";
@@ -178,7 +178,7 @@
       }
 
       function refreshCreds() {
-        ownerFetch("/api/caldav/credentials").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/caldav/credentials").then(function (r) { return r.json(); }).then(function (d) {
           if (credsEl) {
             credsEl.textContent = "";
             if (d.managed && d.username && d.password) {

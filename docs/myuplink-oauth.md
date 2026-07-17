@@ -1,115 +1,48 @@
-# MyUplink heat-pump setup (NIBE, Bosch, Atlantic, Daikin, …)
+# MyUplink OAuth setup
 
-The `myuplink` driver reads heat-pump telemetry — compressor power and
-hot-water / indoor / outdoor temperatures — from the MyUplink Cloud API. It is
-**read-only**: it observes the pump, it cannot control it.
+`drivers/myuplink.lua` reads heat-pump telemetry from MyUplink. It is
+read-only: the driver does not call control endpoints.
 
-MyUplink may still require the OAuth app to grant both `READSYSTEM` and
-`WRITESYSTEM` before its authorization page accepts the request. FTW asks
-for that known-working scope set by default, but the driver never calls write
-endpoints. If your MyUplink app accepts a narrower read-only grant, set
-`oauth_scope: "READSYSTEM offline_access"` in the driver config.
+## Register the app
 
-> There is **no `mode` field**. One physical pump = one driver. The driver does
-> not split into hot-water / heating instances. (Earlier troubleshooting advice
-> that mentioned `mode: hotwater | heating` was wrong — ignore it.)
+1. Open <https://dev.myuplink.com> and create an application.
+2. In FTW, add the MyUplink driver under **Settings → Devices**.
+3. Copy the callback URL shown by FTW into the portal exactly.
+4. Copy the portal's Client Identifier and Client Secret into FTW and save.
 
-## Why there's a "Connect" step
+The callback must be reachable by the browser after consent. If MyUplink
+requires HTTPS, use an operator-managed HTTPS/private-network address and open
+FTW through that same origin before starting the connection.
 
-MyUplink's developer portal issues **authorization-code** apps: you register a
-*Callback URL*, get a *Client Identifier* and a *Client Secret*, and the user
-grants access through a browser sign-in. It does **not** support the
-`client_credentials` grant — an app of that kind fails at startup with:
+MyUplink may require `WRITESYSTEM READSYSTEM offline_access` for the consent
+page even though this driver only reads. A portal that accepts a narrower grant
+can use `oauth_scope: "READSYSTEM offline_access"`.
 
-```
-MyUplink: token request failed: HTTP 400: {"error":"invalid_client", ...}
-```
+## Connect
 
-So FTW does a one-time browser consent for you and stores the resulting
-refresh token. After that the driver refreshes silently; you never paste a
-token by hand. (Background: issue #496.)
+Click **Connect to MyUplink**, sign in and grant access. Normally the browser
+returns to FTW, which exchanges the code, stores the refresh token and restarts
+the driver.
 
-## Step 1 — register an application
+If the browser cannot reach the callback, copy the full redirected URL
+containing `code` and `state`, paste it into the fallback field in Settings
+and click **Complete connection**. FTW then performs the exchange through its
+outbound HTTPS connection. The state is single-use and expires after 15
+minutes.
 
-1. Go to the MyUplink **developer web portal**: <https://dev.myuplink.com> →
-   **Applications** → create an application. (This is the *web* portal — not the
-   iOS/Android MyUplink app, which will not show a FTW client.)
-2. In FTW, open **Settings → Devices**, add the **MyUplink** driver from
-   the catalogue, and copy the **Callback URL** it shows you (it looks like
-   `http://<your-ftw-address>/api/oauth/myuplink/callback`).
-3. Paste that exact string into the portal's **Callback Url** field. It must
-   match the address you use to reach FTW, character for character.
-4. Save the portal app and copy its **Client Identifier** and **Client
-   Secret**.
-
-> **Callback URL must be reachable by your browser after sign-in.** If you reach
-> FTW over plain `http://<lan-ip>:8080` and MyUplink rejects a non-HTTPS
-> callback, use an HTTPS address instead — e.g. your relay URL
-> (`https://…`) — and register *that* as the callback. Whatever address you
-> register is the one you must be on when you click Connect.
-
-## Step 2 — enter credentials in FTW
-
-In **Settings → Devices**, on the MyUplink driver's **MyUplink connection**
-fieldset (the field labels match the portal exactly so nothing gets swapped):
-
-- **Client Identifier** → paste the portal's *Client Identifier* (the UUID,
-  e.g. `xxxxxxxx-xxxx-…`). This is **not** the secret.
-- **Client Secret** → paste the portal's *Client Secret* (masked once saved).
-- **Save** the settings (the Connect button reads the *saved* values).
-
-## Step 3 — connect
-
-Click **Connect to MyUplink**. A new tab opens MyUplink's sign-in; log in and
-grant access.
-
-**If you're redirected back to FTW** (typical for LAN-direct access): it
-exchanges the code, stores the refresh token, and restarts the driver. Return to
-Settings and **reload** — the badge flips to **✓ Connected**.
-
-**If you're _not_ redirected back** — you reach FTW over the relay / home
-route, or the portal rejected an `http` LAN callback — the browser still lands
-on a URL containing `?code=…&state=…` in the address bar. This is expected.
-Then:
-
-1. Copy the **full address** from your browser's address bar.
-2. Back in Settings → Devices, expand **"Not redirected back? Paste the URL
-   instead"**, paste it, and click **Complete connection**.
-
-FTW exchanges the code over its own outbound HTTPS — no inbound callback
-needed — so this path works on any origin (relay, headless, http LAN). Reload to
-see the **✓ Connected** badge. Do this within ~15 minutes of clicking Connect
-(the consent state expires).
-
-Within a minute the **Heat pump** card appears on the dashboard with live
-compressor power and temperatures, plus a 24-hour power sparkline.
-
-## How the token is kept fresh
-
-- The refresh token is stored as a masked `config_secret` (shown as "saved",
-  never echoed back to the browser).
-- At runtime the driver exchanges it for short-lived access tokens
-  (`grant_type=refresh_token`).
-- MyUplink (Azure B2C) rotates the refresh token on each refresh; the driver
-  persists the rotated value via `host.persist_secret` into the state database,
-  so it survives restarts without you reconnecting.
+Refresh tokens are stored as masked config secrets. MyUplink rotates them; the
+driver persists the replacement through `host.persist_secret`.
 
 ## Troubleshooting
 
-| Symptom | Cause / fix |
+| Symptom | Action |
 |---|---|
-| `invalid_client` at startup | Old `client_credentials` build, or wrong Client ID/Secret. Update FTW and re-enter the credentials. |
-| MyUplink authorize page shows `invalid_request` | Re-save the MyUplink app with the exact Callback URL shown in FTW, then try again. If you overrode `oauth_scope`, remove the override or include `WRITESYSTEM READSYSTEM offline_access`; MyUplink can reject read-only-only auth even for telemetry integrations. |
-| Connect button: "save the Client ID first" | Save the settings before clicking Connect — `/start` reads the *saved* Client ID. |
-| Redirected to a "connection failed — invalid state" page | The consent took longer than 10 minutes, or you started Connect from a different address than you finished on. Start again from the address you registered as the callback. |
-| Badge stays "Not connected" after consent | Reload the Settings page; the badge reflects the last config load. |
-| "awaiting OAuth connect" in the logs | Credentials saved but consent not completed — click Connect. |
-| Card never appears | The pump has not reported `hp_power_w` yet (first poll is ~1 min), or the parameter IDs don't match your model — override `param_power_id` etc. in config (see the driver header). |
+| `invalid_client` | Recheck the saved Client Identifier and Secret. |
+| Authorize page says `invalid_request` | Match the callback URL exactly and use the default scope. |
+| FTW reports invalid state | Start Connect again and finish within 15 minutes from the same origin. |
+| Badge remains disconnected | Reload Settings after completing consent. |
+| `awaiting OAuth connect` | Credentials exist but browser consent is incomplete. |
+| No heat-pump card | Wait for the first poll, then verify parameter IDs in the driver header. |
 
-## Parameter IDs
-
-The defaults target common NIBE models (`10012` compressor power, `40013` BT6
-hot-water top, `40033` BT50 indoor, `40004` BT1 outdoor). If your model differs,
-list your device's points via `GET /v2/devices/{deviceId}/points` and override
-`param_power_id`, `param_hw_temp_id`, `param_indoor_temp_id`,
-`param_outdoor_temp_id` in the driver config.
+Common NIBE defaults and per-model override names live next to the mapping in
+`drivers/myuplink.lua`; that file is the reference.

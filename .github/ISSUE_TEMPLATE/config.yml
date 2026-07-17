@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Community support policy
+    url: https://github.com/srcfl/ftw/blob/master/SUPPORT.md
+    about: Read what community support covers, how to ask for help, and where commercial support begins.
   - name: Discussions
     url: https://github.com/srcfl/ftw/discussions
     about: Questions, ideas, and open-ended conversation belong here. Issues are for concrete bugs and feature requests.
+  - name: FTW Discord
+    url: https://discord.gg/25xcBzQaux
+    about: Join the community for setup questions, driver work, and peer-to-peer help.

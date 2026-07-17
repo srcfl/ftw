@@ -95,6 +95,7 @@ func TestEncode_LegacyPVTypeAndGeneration(t *testing.T) {
 		MPPT1V:            p(420.0),
 		MPPT1A:            p(7.8),
 		TempC:             p(38.0),
+		RatedPowerW:       p(6000),
 		TotalGenerationWh: p(1_234_000),
 	}
 	raw, _ := Encode(in, SchemaLegacy)
@@ -111,6 +112,9 @@ func TestEncode_LegacyPVTypeAndGeneration(t *testing.T) {
 	}
 	if m["heatsink_C"].(float64) != 38.0 {
 		t.Fatalf("temp_c→heatsink_C failed")
+	}
+	if m["rated_power_W"].(float64) != 6000 {
+		t.Fatalf("rated_power_w→rated_power_W failed")
 	}
 }
 
@@ -181,26 +185,34 @@ func TestEncode_LegacyV2X(t *testing.T) {
 	status := "discharging"
 	mode := "manual"
 	protocol := "mqtt"
+	connectorStatus := "occupied"
+	chargingState := "discharging"
 	in := &DerTelemetry{
-		Type:               KindV2X,
-		TimestampMs:        1_713_610_245_123,
-		W:                  -5000,
-		Connected:          &connected,
-		VehicleSoC:         p(0.64),
-		DCW:                p(-5200),
-		DCV:                p(400),
-		DCA:                p(-13),
-		SessionDischargeWh: p(1250),
-		ChargePowerMinW:    p(1400),
-		ChargePowerMaxW:    p(20000),
-		DischargePowerMinW: p(1400),
-		DischargePowerMaxW: p(15000),
-		EVMaxEnergyReqWh:   p(50000),
-		EVMinEnergyReqWh:   p(10000),
-		RatedPowerW:        p(20000),
-		Status:             &status,
-		ControlMode:        &mode,
-		Protocol:           &protocol,
+		Type:                KindV2X,
+		TimestampMs:         1_713_610_245_123,
+		W:                   -5000,
+		Connected:           &connected,
+		VehicleSoC:          p(0.64),
+		ACW:                 p(-5000),
+		ACV:                 p(230.5),
+		ACA:                 p(-21.7),
+		DCW:                 p(-5200),
+		DCV:                 p(400),
+		DCA:                 p(-13),
+		SessionDischargeWh:  p(1250),
+		ChargePowerMinW:     p(1400),
+		ChargePowerMaxW:     p(20000),
+		DischargePowerMinW:  p(1400),
+		DischargePowerMaxW:  p(15000),
+		EVTargetEnergyReqWh: p(5300),
+		EVMaxEnergyReqWh:    p(50000),
+		EVMinEnergyReqWh:    p(-10000),
+		RatedPowerW:         p(20000),
+		Status:              &status,
+		ControlMode:         &mode,
+		Protocol:            &protocol,
+		ConnectorStatus:     &connectorStatus,
+		ChargingState:       &chargingState,
 	}
 	raw, _ := Encode(in, SchemaLegacy)
 	var m map[string]any
@@ -217,6 +229,13 @@ func TestEncode_LegacyV2X(t *testing.T) {
 	if m["dc_W"].(float64) != -5200 || m["dc_V"].(float64) != 400 || m["dc_A"].(float64) != -13 {
 		t.Fatalf("dc fields failed: %+v", m)
 	}
+	if m["V"].(float64) != 230.5 || m["A"].(float64) != -21.7 {
+		t.Fatalf("ac fields failed: %+v", m)
+	}
+	if m["ac_W"].(float64) != -5000 || m["connector_status"] != "occupied" ||
+		m["charging_state"] != "discharging" {
+		t.Fatalf("v2x firmware status fields failed: %+v", m)
+	}
 	if m["session_discharge_Wh"].(float64) != 1250 {
 		t.Fatalf("session discharge failed: %v", m["session_discharge_Wh"])
 	}
@@ -228,7 +247,8 @@ func TestEncode_LegacyV2X(t *testing.T) {
 	if lower[0].(float64) != -15000 || lower[2].(float64) != -1400 {
 		t.Fatalf("lower limits failed: %+v", lower)
 	}
-	if m["ev_max_energy_req_Wh"].(float64) != 50000 || m["ev_min_energy_req_Wh"].(float64) != 10000 {
+	if m["ev_target_energy_req_Wh"].(float64) != 5300 ||
+		m["ev_max_energy_req_Wh"].(float64) != 50000 || m["ev_min_energy_req_Wh"].(float64) != -10000 {
 		t.Fatalf("energy request fields failed: %+v", m)
 	}
 	if m["status"] != "discharging" || m["control_mode"] != "manual" || m["protocol"] != "mqtt" {

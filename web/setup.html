@@ -11,12 +11,11 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css">
   <style>
-    /* Setup wizard styling — matches the /next UI tokens
+    /* Setup wizard styling — matches the dashboard UI tokens
        (components/theme.css) and the look of ftw.sourceful.energy:
        dark ink canvas, hairline 1px borders, flat cards, warm amber
        single-accent, Inter body + JetBrains Mono eyebrows. Kept inline
-       so the wizard's chrome is self-contained and doesn't cross into
-       legacy style.css rules on the dashboard. */
+       so the wizard's chrome is self-contained. */
 
     body {
       background: var(--ink);
@@ -778,6 +777,7 @@
       <div class="form-group">
         <label for="price-provider">Provider</label>
         <select id="price-provider">
+          <option value="sourceful">Sourceful</option>
           <option value="elprisetjustnu">elprisetjustnu</option>
           <option value="entsoe">ENTSO-E</option>
           <option value="">None</option>
@@ -820,7 +820,7 @@
 <!-- Components: load only <ftw-update-check> (pre-setup update banner)
      and its transitive deps (ftw-element + ftw-modal). Pulling the full
      /components/index.js registry here would eagerly import the whole
-     /next dashboard catalogue (ftw-energy-flow etc.) — dead weight on
+     dashboard component catalogue (ftw-energy-flow etc.) — dead weight on
      the first setup paint. -->
 <script type="module" src="/components/ftw-update-check.js"></script>
 <script src="/setup.js"></script>

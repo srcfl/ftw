@@ -5022,6 +5022,40 @@ func TestPVSurplusAbsorberAbsorbsExtraExportWhenEnabled(t *testing.T) {
 	}
 }
 
+// The MPC can enable the same live absorber without an operator-wide override
+// when it has a later, more expensive grid-funded charge to displace. The
+// directive's SoC cap is the future planned SoC, so this remains bounded by
+// energy the plan already intended to store.
+func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:              now,
+		SlotEnd:                now.Add(15 * time.Minute),
+		BatteryEnergyWh:        200, // plan only asked for ~800 W now
+		Strategy:               "arbitrage",
+		LivePVSurplusSoCCapPct: 80, // later expensive grid charge ends here
+	}
+	store := seedStore(-4000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	store.Update("pv-1", telemetry.DerPV, -4800, nil, nil)
+	store.DriverHealthMut("pv-1").RecordSuccess()
+
+	st := newStateWithEnergyDispatch(dir, "ferroamp")
+	// No PVSurplusAbsorbSoCCapPct operator override: the plan directive
+	// alone must enable this economically justified slot.
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if got := targets[0].TargetW; got < 3600 || got > 4400 {
+		t.Errorf("TargetW = %.0f W, want about 4000 W to absorb live PV and displace later grid charge", got)
+	}
+}
+
 // Defaults preserve back-compat: PVSurplusAbsorbSoCCapPct = 0 means
 // disabled; original "don't absorb surprise" behavior holds.
 func TestPVSurplusAbsorberDisabledByDefault(t *testing.T) {
@@ -5807,6 +5841,42 @@ func TestPlannerArbitrageIdleSlotDoesNotAbsorbLiveSurplus(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW) > 1 {
 		t.Errorf("TargetW = %f W — planner_arbitrage idle slot with live PV surplus must NOT absorb (DP picked idle)", targets[0].TargetW)
+	}
+}
+
+// An idle slot normally preserves the DP's export decision (test above). When
+// the directive proves that the same energy would otherwise be bought back in
+// a later, more expensive grid-charge slot, reactive PI may capture live PV.
+func TestPlannerArbitrageIdleSlotAbsorbsSurplusThatDisplacesGridCharge(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:              now,
+		SlotEnd:                now.Add(15 * time.Minute),
+		BatteryEnergyWh:        0,
+		Strategy:               "arbitrage",
+		PlannedGridW:           2000, // plan forecast a load deficit
+		HasPlannedGridW:        true,
+		LivePVSurplusSoCCapPct: 80,
+	}
+	store := seedStore(-2000, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"ferroamp", 0, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if got := targets[0].TargetW; got <= 0 || got > 2000 {
+		t.Errorf("TargetW = %.0f W, want positive charge bounded by the 2 kW live surplus", got)
 	}
 }
 

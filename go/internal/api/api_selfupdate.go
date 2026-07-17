@@ -241,8 +241,7 @@ func (s *Server) writeVersionUpdateStatus(st selfupdate.UpdateStatus) {
 // Scope of this endpoint (#152):
 //   - Soft rollback only. Image version stays on the currently-running
 //     tag. If the snapshot predates a state-schema change, a forward
-//     rollback to the same version (or an explicit image pin) is needed
-//     — tracked as a follow-up in #140 Phase 3.
+//     rollback to the same version or an explicit image pin may be needed.
 //   - Pre-rollback safety snapshot is always created; no opt-out (unlike
 //     the routine #149 opt-out). If disk is tight, delete older
 //     snapshots via DELETE /api/version/snapshots/{id} first.
