@@ -2,13 +2,12 @@
 // FTW can manage the calendar credential itself and show it here (with a QR)
 // to add to a phone/desktop calendar app. All server-supplied values are
 // rendered via textContent / DOM nodes (never innerHTML) so a hostile or
-// MITM'd CalDAV server cannot inject markup into this gated settings page.
+// MITM'd CalDAV server cannot inject markup into the local settings page.
 (function () {
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 
@@ -86,7 +85,7 @@
     ]);
   }
 
-  // drawQR paints qrMatrix(text) into a <canvas> (mirrors owner-access QR).
+  // drawQR paints qrMatrix(text) into a <canvas>.
   function drawQR(qrMatrix, text, target) {
     var matrix = qrMatrix(text);
     var n = matrix.length, quiet = 4, total = n + 2 * quiet;

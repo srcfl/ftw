@@ -1,5 +1,9 @@
 # FTW rebrand and Sourceful migration
 
+> Historical implementation specification. Programme B was superseded by
+> [ADR 0003](../../adr/0003-retire-legacy-remote-access.md), which retired the
+> legacy remote-access stack instead of migrating its domains and passkeys.
+
 - **Status:** Programme A repository/distribution cutover completed 2026-07-16; first post-transfer release and Programme B infrastructure remain pending
 - **Canonical repository:** `srcfl/ftw`
 - **Former repository:** `frahlg/forty-two-watts` (GitHub redirect retained)

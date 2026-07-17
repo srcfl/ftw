@@ -8,9 +8,9 @@ generated route inventory.
 ## Conventions
 
 - **Base URL:** `http://<host>:8080` by default; configured via `api.port`.
-- **Access model:** local deployments assume a trusted LAN. Remote/owner
-  access paths have their own pairing and tunnel flow. Do not expose the
-  local API directly to the public internet without auth and TLS.
+- **Access model:** FTW assumes a trusted LAN and has no built-in public remote
+  authentication layer. Do not expose the API through port forwarding. Use a
+  trusted owner-operated VPN if you need the full local surface remotely.
 - **Content type:** `application/json` for both requests and responses
 - **CORS:** JSON responses set permissive CORS headers for the local UI/API
   workflow.
@@ -1477,15 +1477,3 @@ telemetry. On failure the previous active artifact is restored.
 ### POST /api/device_repository/drivers/{id}/rollback
 
 Restores the previous managed artifact for the public driver ID.
-
-### GET /api/fleet_statistics/preview
-
-Returns `enabled` plus the exact anonymous fleet payload that would be sent.
-The endpoint works while reporting is disabled so an operator can inspect it
-before opting in.
-
-### POST /api/fleet_statistics/submit
-
-Submits one heartbeat immediately. Returns `409` when fleet statistics are
-disabled and does not affect the periodic schedule. See
-[fleet-statistics.md](fleet-statistics.md) for the privacy boundary.

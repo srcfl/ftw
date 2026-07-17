@@ -17,7 +17,6 @@
   'use strict';
 
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 

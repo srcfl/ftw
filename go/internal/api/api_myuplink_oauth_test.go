@@ -142,8 +142,8 @@ func TestMyUplinkOAuthStartAllowsScopeOverride(t *testing.T) {
 func TestMyUplinkOAuthStartHonoursBrowserRedirectURI(t *testing.T) {
 	srv, _, _ := buildMyUplinkOAuthServer(t)
 
-	// Browser on a relay origin supplies its own callback URL.
-	browserCb := "https://homelab.relay.example/api/oauth/myuplink/callback"
+	// A browser behind a reverse proxy supplies its externally-visible callback.
+	browserCb := "https://energy.example/api/oauth/myuplink/callback"
 	req := httptest.NewRequest("GET", "http://pi.local/api/oauth/myuplink/start?driver=myuplink&redirect_uri="+url.QueryEscape(browserCb), nil)
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)

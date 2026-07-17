@@ -1,7 +1,7 @@
 # Architecture overview
 
 This is the canonical map of FTW's core control and data path. Optional
-subsystems such as remote access, CalDAV, notifications, Nova federation,
+subsystems such as CalDAV, notifications, Nova federation,
 self-update, OCPP, and thermal/EV integrations are documented in their own
 guides and connect through the API/config/state boundaries described here. For
 the sign convention every number in the rest of this document obeys, see
@@ -122,18 +122,6 @@ the previous artifact for rollback.
 Driver source and publisher tooling remain in this monorepo, but signed
 edge/beta/stable driver manifests are released independently of core. See
 [device-repository.md](device-repository.md).
-
-### Fleet statistics
-
-Source: `go/internal/fleetstats/`; collector transport in `go/cmd/ftw-relay/`.
-
-An optional, default-off reporter emits a daily privacy-bounded component
-heartbeat. It contains a random installation ID plus public core, optimizer,
-and driver versions with coarse health — never power telemetry, configuration,
-hardware/network identity, or local names. The relay retains only the newest
-heartbeat per anonymous installation and exposes token-protected aggregates.
-Failure is fail-soft and has no path into planning or dispatch. See
-[fleet-statistics.md](fleet-statistics.md).
 
 ### ML twins
 Sources: `go/internal/pvmodel/`, `go/internal/loadmodel/`,

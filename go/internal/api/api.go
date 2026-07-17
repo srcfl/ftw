@@ -32,14 +32,12 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
 	"github.com/srcfl/ftw/go/internal/events"
-	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/notifications"
-	"github.com/srcfl/ftw/go/internal/p2p"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/pvmodel"
 	"github.com/srcfl/ftw/go/internal/scanner"
@@ -61,18 +59,6 @@ const (
 	// without revealing the actual value.
 	maskedPlaceholder = "••••••••"
 )
-
-// InstanceSigner signs the owner-access instance descriptor with the Pi's
-// self-sovereign ES256 identity. *nova.Identity satisfies it. PublicKeyHex
-// returns the uncompressed P-256 public key (X||Y, 128 lowercase hex chars);
-// SignRawHex returns the raw r||s 64-byte signature as a 128-char hex string
-// (the handler re-encodes it to base64url for the wire). Declared as an
-// interface here so internal/api does not import internal/nova (matches the
-// relaySigner pattern in cmd/ftw/owner_relay_register.go).
-type InstanceSigner interface {
-	PublicKeyHex() string
-	SignRawHex(msg string) (string, error)
-}
 
 // Deps is the full set of runtime dependencies the API handlers need.
 // One instance is shared across all handlers; mutations use the contained
@@ -143,9 +129,6 @@ type Deps struct {
 	// DriverRepository manages signed, content-addressed Lua artifacts. Nil
 	// keeps bundled/local-only operation and returns 503 from repository APIs.
 	DriverRepository *driverrepo.Manager
-	// FleetStats is an explicitly opt-in anonymous component-health reporter.
-	// Nil keeps both preview and submission endpoints unavailable.
-	FleetStats *fleetstats.Reporter
 	// Factories mirrored from the runtime registry so /api/drivers/test can
 	// run a short-lived probe without persisting config.
 	DriverMQTTFactory   func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error)
@@ -176,82 +159,6 @@ type Deps struct {
 	Restart func(ctx context.Context) error
 
 	Version string
-
-	// PairStore holds the currently-active ftw-pair sidecar session (if
-	// any). Nil is safe — routes are still registered; GET returns 404.
-	// T20/T21 can reach in via deps.PairStore for SSE heartbeat support.
-	PairStore *PairStatusStore
-
-	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
-
-	// OwnerAccessRPID is the WebAuthn Relying Party ID for owner-access
-	// passkeys. Must match the hostname the browser sees. Defaults to
-	// "home.fortytwowatts.com"; override to "localhost" for local dev.
-	OwnerAccessRPID string
-
-	// OwnerAccessOrigins is the list of permitted browser origins for
-	// owner-access ceremonies. Defaults to ["https://"+OwnerAccessRPID].
-	OwnerAccessOrigins []string
-
-	// OwnerAccessLANBypass, when true, treats any request from a loopback
-	// host (127.0.0.1, localhost, ::1) as already authenticated. Used by
-	// the LAN-served dashboard so the operator doesn't have to re-auth at
-	// home. NEVER enable when the server is reachable from the public
-	// internet directly (without the relay in front).
-	OwnerAccessLANBypass bool
-
-	// TunnelMarker is a per-process random secret. The relay long-poll
-	// reverse-proxy (cmd/ftw/owner_relay_register.go) sets it
-	// as the X-FTW-Tunnel header on every request it forwards from the
-	// relay to the local API server. A request carrying this exact value
-	// is therefore known to have arrived via the relay tunnel (remote) and
-	// MUST NOT inherit LAN-bypass — even though it lands on a loopback host.
-	// Empty disables tunnel detection (pure-LAN deployments with no relay).
-	TunnelMarker string
-
-	// SiteIdentityPubHex is the uncompressed P-256 public key (X||Y, 128 hex
-	// chars) of this Pi's self-sovereign ES256 identity — generated on first
-	// boot regardless of Nova (see cmd/ftw/main.go). Empty if
-	// identity load failed; the /api/identity endpoint then returns 503.
-	SiteIdentityPubHex string
-
-	// SiteID is this Pi's stable owner-routing identifier. New installs use an
-	// opaque high-entropy "site:<token>"; legacy installs may keep "site:<name>"
-	// until their encrypted directory is migrated. Published via /api/identity so
-	// the browser can pin it and rebuild the canonical DTLS fingerprint signing
-	// string (which binds the signature to this site).
-	SiteID string
-
-	// RelayBaseURL is the base URL of the owner-access relay this Pi registers
-	// with. main.go defaults it to the official relay after remote_access opt-in
-	// and lets FTW_RELAY_URL override it for self-hosted/dev relays. Used to
-	// self-publish the signed instance descriptor to PUT
-	// {RelayBaseURL}/bootstrap/{site_id} during the brief first-enrollment window
-	// (see bootstrap_publish.go). Empty means setup links cannot be published.
-	RelayBaseURL string
-
-	// InstanceSigner is the Pi's self-sovereign ES256 identity used to sign the
-	// owner-access instance descriptor (GET /api/owner-access/instance-descriptor)
-	// over the P2P channel. Satisfied by *nova.Identity — the same key behind
-	// SiteIdentityPubHex. Nil when identity load failed on boot; the descriptor
-	// endpoint then returns 503.
-	InstanceSigner InstanceSigner
-
-	// P2P is the Pi-side WebRTC manager (Phase 5). It answers browser SDP
-	// offers (POST /api/p2p/offer) and serves the resulting direct DataChannel
-	// with a p2p.Bridge over the ungated API mux (injected via SetLocalAPI in
-	// main.go after New). Nil is safe — the offer endpoint returns 503.
-	P2P *p2p.Manager
-
-	// ownerAccess is the lazy-initialised ceremony + session map. Built
-	// on first request via Server.ownerAccess().
-	ownerAccess *ownerAccessState
-
-	// PairSelfExe overrides the binary path used by POST /api/pair/start to
-	// spawn child pair sessions. Empty means "use os.Executable()". Tests
-	// inject "/bin/true" (or a fake echo binary) here so they don't actually
-	// launch a sidecar.
-	PairSelfExe string
 }
 
 // Server wraps the http.ServeMux and adds shared middleware (logging,
@@ -259,10 +166,6 @@ type Deps struct {
 type Server struct {
 	deps *Deps
 	mux  *http.ServeMux
-
-	// mu protects lazy-initialised per-server caches (currently just
-	// the owner-access ceremony state on Deps.ownerAccess).
-	mu sync.Mutex
 
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
@@ -289,9 +192,6 @@ func New(deps *Deps) *Server {
 	if deps.WebDir == "" {
 		deps.WebDir = "web"
 	}
-	if deps.PairStore == nil {
-		deps.PairStore = NewPairStatusStore()
-	}
 	s := &Server{
 		deps:       deps,
 		mux:        http.NewServeMux(),
@@ -301,18 +201,14 @@ func New(deps *Deps) *Server {
 	return s
 }
 
-// Handler returns the http.Handler suitable for `http.ListenAndServe`.
-// The mux is wrapped by the owner auth-gate so remote (relay-tunnelled)
-// requests can't reach the dashboard or control endpoints without a passkey
-// session; genuine LAN/loopback requests pass via LAN-bypass.
-func (s *Server) Handler() http.Handler { return s.gate(s.mux) }
+// Handler returns the LAN-local HTTP API and static dashboard.
+func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
-	s.handle("POST /api/p2p/offer", s.handleP2POffer)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
@@ -346,8 +242,6 @@ func (s *Server) routes() {
 	s.handle("GET  /api/components", s.handleComponents)
 	s.handle("POST /api/components/optimizer/update", s.handleOptimizerComponentUpdate)
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
-	s.handle("GET  /api/fleet_statistics/preview", s.handleFleetStatisticsPreview)
-	s.handle("POST /api/fleet_statistics/submit", s.handleFleetStatisticsSubmit)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
@@ -410,39 +304,6 @@ func (s *Server) routes() {
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("POST /api/restart", s.handleRestart)
-
-	// ---- Pair sidecar endpoints ----
-	// Pass the self-exe path so POST /api/pair/start can spawn "self pair ..."
-	// as a detached child. Tests inject a fake path via deps.PairSelfExe.
-	selfExe := s.deps.PairSelfExe
-	if selfExe == "" {
-		selfExe = resolvedSelfExe()
-	}
-	RegisterPairRoutes(s.mux, s.deps.PairStore, selfExe, s.authorizeOwnerManage)
-
-	// ---- Owner remote access (Phase 3, WebAuthn passkey) ----
-	s.handle("GET  /api/owner-access/enroll-pin", s.handleOwnerEnrollPin)
-	s.handle("POST /api/owner-access/enroll/start", s.handleOwnerEnrollStart)
-	s.handle("POST /api/owner-access/enroll/finish", s.handleOwnerEnrollFinish)
-	s.handle("POST /api/owner-access/login/start", s.handleOwnerLoginStart)
-	s.handle("POST /api/owner-access/login/finish", s.handleOwnerLoginFinish)
-	s.handle("GET  /api/owner-access/devices", s.handleOwnerDevicesList)
-	s.handle("DELETE /api/owner-access/devices/{credential_id_b64}", s.handleOwnerDeviceDelete)
-	s.handle("GET  /api/owner-access/browser-keys", s.handleOwnerBrowserKeysList)
-	s.handle("DELETE /api/owner-access/browser-keys/{browser_key_id}", s.handleOwnerBrowserKeyDelete)
-	s.handle("GET  /api/owner-access/sessions", s.handleOwnerSessionsList)
-	s.handle("DELETE /api/owner-access/sessions/{session_id}", s.handleOwnerSessionDelete)
-	s.handle("GET  /api/owner-access/whoami", s.handleOwnerWhoami)
-	s.handle("POST /api/owner-access/logout", s.handleOwnerLogout)
-	// C3 — silent device-key PoP login over the P2P channel (open, pre-session).
-	s.handle("GET  /api/owner-access/device-challenge", s.handleOwnerDeviceChallenge)
-	s.handle("POST /api/owner-access/device-pop", s.handleOwnerDevicePoP)
-	// Multi-tenant home route: Pi-signed instance descriptor, owner-authed,
-	// served over the P2P channel (see api_owner_instance_descriptor.go).
-	s.handle("GET  /api/owner-access/instance-descriptor", s.handleOwnerInstanceDescriptor)
-
-	// ---- Self-sovereign site identity (Phase 2) ----
-	s.handle("GET  /api/identity", s.handleIdentity)
 
 	// ---- Static web UI ----
 	// Everything not matched above falls through to the static server.

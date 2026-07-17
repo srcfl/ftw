@@ -327,9 +327,8 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 
-	// Copy each essential table's rows over in parent-before-child order. Some
-	// state tables carry real FK constraints (trusted_device_pubkeys ->
-	// trusted_devices), so alphabetic sqlite_master order is not safe.
+	// Copy each essential table's rows in foreign-key-safe order; alphabetic
+	// sqlite_master order is not guaranteed to preserve dependencies.
 	copyItems, err := snapshotTableCopyOrder(ctx, conn, items, snapshotExcludedTables)
 	if err != nil {
 		return fmt.Errorf("snapshot: order tables: %w", err)
@@ -679,80 +678,11 @@ func (s *Store) migrate() error {
 			load_wh           REAL NOT NULL,
 			computed_at_ms    INTEGER NOT NULL
 		) STRICT`,
-
-		// Passkeys (WebAuthn credentials) registered by the operator for
-		// owner remote access via the relay. One row per device enrolled.
-		// credential_id is the raw bytes returned by the authenticator
-		// (Touch ID handle, Windows Hello CredID, etc.); we look up by
-		// this on every login. public_key is the COSE-encoded ES256 /
-		// EdDSA pubkey for signature verification. sign_count guards
-		// against cloned authenticators (must monotonically increase).
-		`CREATE TABLE IF NOT EXISTS trusted_devices (
-			credential_id BLOB    PRIMARY KEY NOT NULL,
-			public_key    BLOB    NOT NULL,
-			sign_count    INTEGER NOT NULL DEFAULT 0,
-			aaguid        BLOB    NOT NULL DEFAULT x'',
-			transports    TEXT    NOT NULL DEFAULT '',
-			friendly_name TEXT    NOT NULL,
-			created_at_ms INTEGER NOT NULL,
-			last_used_ms  INTEGER NOT NULL DEFAULT 0,
-			wallet_handle TEXT    NOT NULL DEFAULT '',
-			backup_eligible INTEGER NOT NULL DEFAULT 0,
-			backup_state    INTEGER NOT NULL DEFAULT 0,
-			device_pubkey TEXT    NOT NULL DEFAULT ''
-		) STRICT`,
-		`CREATE TABLE IF NOT EXISTS owner_sessions (
-			token         TEXT    PRIMARY KEY NOT NULL,
-			credential_id BLOB    NOT NULL DEFAULT x'',
-			expires_at_ms INTEGER NOT NULL
-		) STRICT`,
-		// One WebAuthn credential can be synced across several browsers/devices
-		// (for example iCloud passkeys on iPhone + Safari on Mac). Each browser has
-		// its own local device key, so keep a one-to-many table instead of the
-		// legacy single trusted_devices.device_pubkey slot.
-		`CREATE TABLE IF NOT EXISTS trusted_device_pubkeys (
-			device_pubkey TEXT    PRIMARY KEY NOT NULL,
-			credential_id BLOB    NOT NULL,
-			created_at_ms INTEGER NOT NULL DEFAULT 0,
-			last_used_ms  INTEGER NOT NULL DEFAULT 0,
-			FOREIGN KEY (credential_id) REFERENCES trusted_devices(credential_id) ON DELETE CASCADE
-		) STRICT`,
-		`CREATE INDEX IF NOT EXISTS idx_trusted_device_pubkeys_credential
-			ON trusted_device_pubkeys(credential_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
 		}
-	}
-	if err := s.addColumnIfMissing("trusted_devices", "wallet_handle",
-		"wallet_handle TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("migrate trusted_devices.wallet_handle: %w", err)
-	}
-	for _, col := range []struct{ name, ddl string }{
-		{"backup_eligible", "backup_eligible INTEGER NOT NULL DEFAULT 0"},
-		{"backup_state", "backup_state INTEGER NOT NULL DEFAULT 0"},
-		// device_pubkey is the per-credential P-256 device key (X||Y, 128 hex
-		// chars) minted at LAN enrollment (C4). It backs the silent device-PoP
-		// login (C3) and is published to the relay so the browser can prove it
-		// before a signaling offer is forwarded (C1/C2). Empty for credentials
-		// enrolled before this column existed; such a device can be upgraded by
-		// re-presenting the key on a later enroll/login finish.
-		{"device_pubkey", "device_pubkey TEXT NOT NULL DEFAULT ''"},
-	} {
-		if err := s.addColumnIfMissing("trusted_devices", col.name, col.ddl); err != nil {
-			return fmt.Errorf("migrate trusted_devices.%s: %w", col.name, err)
-		}
-	}
-	// Seed the multi-device-key table from the legacy single-key column. This is
-	// idempotent and keeps existing remembered browsers working after upgrade.
-	if _, err := s.db.Exec(`
-		INSERT OR IGNORE INTO trusted_device_pubkeys
-			(device_pubkey, credential_id, created_at_ms, last_used_ms)
-		SELECT device_pubkey, credential_id, created_at_ms, last_used_ms
-		FROM trusted_devices
-		WHERE device_pubkey <> ''`); err != nil {
-		return fmt.Errorf("migrate trusted_device_pubkeys seed: %w", err)
 	}
 
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
@@ -791,33 +721,6 @@ func (s *Store) migrate() error {
 		}
 	}
 	return nil
-}
-
-// addColumnIfMissing runs ALTER TABLE ADD COLUMN only when the column is
-// absent, so upgrades from a pre-column schema are idempotent. SQLite has no
-// ADD COLUMN IF NOT EXISTS, so we inspect PRAGMA table_info first.
-func (s *Store) addColumnIfMissing(table, column, ddl string) error {
-	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, ctype string
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == column {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + ddl)
-	return err
 }
 
 // migrateLegacyTierSplit moves prices/forecasts rows from a pre-tiering

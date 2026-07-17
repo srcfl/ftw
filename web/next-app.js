@@ -41,98 +41,11 @@
   let lastPushAt = 0;                // browser-clock timestamp of last push attempt — for dedupe (NEVER mix with server ts)
   let lastFlashAt = 0;               // browser-clock timestamp of last "new data" flash
 
-  // ---- Owner / CONTROL fetch (FIX-B) ----------------------------------------
-  // Every owner + state-changing API call (mode, target, peak limit, EV command,
-  // loadpoint schedule, driver lifecycle, sign-out, …) must ride the STRICT P2P
-  // transport so its body + the owner session cookie never traverse the untrusted
-  // relay on the public home route. p2pFetchStrict fails closed (synthetic 503)
-  // when the channel is down on a public origin; we additionally fail closed when
-  // p2p.js never LOADED at all on a non-LAN origin, instead of raw-fetching the
-  // owner/control body to the relay. Read-only GETs of non-secret data may still
-  // use plain fetch (no body, cookie stripped) — this is for OWNER + CONTROL calls
-  // only.
-  function isLanFallbackOrigin() {
-    // Genuine-LAN origin = the Pi serves this page directly (relay not in path),
-    // so a raw fetch is safe. Prefer p2p.js's own isLanOrigin (single source of
-    // truth); only when p2p.js never loaded do we conservatively treat a dotted
-    // public host as NOT-LAN and fail closed.
-    if (window.ftwP2P && typeof window.ftwP2P.isLanOrigin === "function") {
-      try { return window.ftwP2P.isLanOrigin(); } catch (e) { /* fall through */ }
-    }
-    if (/^\/me\/[^/]+\//.test(location.pathname)) return false; // relay tunnel prefix
-    var h = (location.hostname || "").toLowerCase();
-    if (h === "localhost" || h === "::1" || h === "[::1]") return true;
-    if (h.slice(-6) === ".local" || h.indexOf(".") === -1) return true; // *.local / single-label
-    if (/^10\./.test(h) || /^127\./.test(h) || /^192\.168\./.test(h) ||
-        /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
-        /^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(h)) return true; // 100.64/10 CGNAT (Tailscale)
-    var hv6 = h.replace(/^\[|\]$/g, "");
-    if (/^f[cd][0-9a-f]{2}:/.test(hv6) || /^fe[89ab][0-9a-f]:/.test(hv6)) return true;
-    return false; // dotted public host → NOT LAN → fail closed
-  }
-  // ownerWriteFailClosed mimics enough of a fetch Response that callers handle it
-  // uniformly; the owner/control body NEVER leaves the browser.
-  function ownerWriteFailClosed(path) {
-    var msg = "Secure channel unavailable — reconnecting. This control request was NOT sent to the relay.";
-    return Promise.resolve({
-      ok: false, status: 503, url: path, headers: new Headers(),
-      json: function () { return Promise.resolve({ error: msg, retry: true }); },
-      text: function () { return Promise.resolve(msg); }
-    });
-  }
-  // ownerFetch is the single owner/CONTROL fetch entry point. Strict when the P2P
-  // transport is present; fail-closed on a public origin when it isn't; raw fetch
-  // only on a genuine LAN.
+  // ---- Local API transport -----------------------------------------------
+  // The complete dashboard is served by the FTW host on the LAN. Owners who
+  // extend that LAN with a private VPN use the same same-origin API.
   function ownerFetch(path, opts) {
-    opts = opts || {};
-    if (typeof window.p2pFetchStrict === "function") return window.p2pFetchStrict(path, opts);
-    if (window.p2pFetch) return window.p2pFetch(path, Object.assign({ strict: true }, opts));
-    if (!isLanFallbackOrigin()) return ownerWriteFailClosed(path);
     return fetch(path, opts);
-  }
-
-  function waitForOwnerTransport(timeoutMs) {
-    if (!window.ftwP2P || isLanFallbackOrigin()) return Promise.resolve(true);
-    if (typeof window.ftwP2P.state === "function" && window.ftwP2P.state() === "direct") {
-      return Promise.resolve(true);
-    }
-    var connectP = typeof window.ftwP2P.connect === "function"
-      ? window.ftwP2P.connect().catch(function () { return false; })
-      : Promise.resolve(false);
-    return new Promise(function (resolve) {
-      var done = false;
-      var timer = setTimeout(function () {
-        if (done) return;
-        done = true;
-        resolve(false);
-      }, timeoutMs || 9000);
-      function finish(ok) {
-        if (done) return;
-        if (!ok) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(true);
-      }
-      if (typeof window.ftwP2P.onState === "function") {
-        window.ftwP2P.onState(function (s) { finish(s === "direct"); });
-      }
-      connectP.then(finish);
-    });
-  }
-
-  function ownerTransportReady() {
-    if (isLanFallbackOrigin()) return true;
-    return !!(window.ftwP2P &&
-      typeof window.ftwP2P.state === "function" &&
-      window.ftwP2P.state() === "direct");
-  }
-  function ownerTransportConnecting() {
-    if (isLanFallbackOrigin()) return false;
-    try {
-      return !!(window.ftwP2P &&
-        typeof window.ftwP2P.state === "function" &&
-        window.ftwP2P.state() === "connecting");
-    } catch (e) { return false; }
   }
 
   // ---- Chart data ----
@@ -2195,7 +2108,6 @@
   // ---- API ----
   var firstLoad = true;
   var setupBannerShown = false;
-  var ownerDataPrimed = false;
   // Loadpoint cache — keyed by driver_name so the EV-planet builder
   // in render() can look up vehicle SoC + charge-limit without a
   // second round of fetches per status tick. Refreshed in parallel
@@ -2208,21 +2120,7 @@
   // facts like siteHasPV() without re-fetching. `null` until the
   // first fetch lands; consumers MUST handle null.
   var lastStatusPayload = null;
-  function ownerDataAllowed() {
-    return isLanFallbackOrigin() || (!authGateActive && !ownerNotAuthed);
-  }
   function fetchStatus() {
-    if (!ownerDataAllowed()) return Promise.resolve(false);
-    // Route the hot poll over the direct P2P DataChannel when it's up. STRICT
-    // mode (FIX-2): the owner API (/api/status etc.) must never ride the cleartext
-    // relay on the public home route — strict fails closed (synthetic 503) if the
-    // channel is down, while still allowing the relay fallback on a genuine-LAN
-    // origin where the Pi serves the page directly. A 503 here just shows
-    // "reconnecting" until the channel recovers (p2p.js auto-retries).
-    // Owner reads carry the owner session cookie, so route them STRICT too (FIX-B):
-    // ownerFetch fails closed on a public origin when no channel/transport is
-    // available rather than sending the cookie to the relay. A 503 here just shows
-    // "reconnecting" until the channel recovers (p2p.js auto-retries).
     var xfetch = ownerFetch;
     return Promise.all([
       xfetch("/api/status").then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }),
@@ -2327,7 +2225,6 @@
   // ---- Setup banner (bootstrap mode — no config yet) ----
   function showSetupBanner() {
     if (setupBannerShown) return;
-    if (authGateActive || ownerNotAuthed) return; // auth-pending/logged-out empty status is not config state
     var banner = document.createElement("div");
     banner.id = "setup-banner";
     banner.className = "setup-banner";
@@ -2345,7 +2242,6 @@
   // ---- "Add a device" prompt when drivers object is empty ----
   function updateNoDevicesPrompt(drivers) {
     var existing = document.getElementById("no-devices-prompt");
-    if (authGateActive || ownerNotAuthed) { if (existing) existing.remove(); return; } // not our config to judge before auth
     var hasDrivers = drivers && typeof drivers === "object" && Object.keys(drivers).length > 0;
     if (hasDrivers) {
       if (existing) existing.remove();
@@ -2364,7 +2260,6 @@
   }
 
   function setMode(mode) {
-    // CONTROL write — strict (FIX-B): never send the mode change to the relay.
     ownerFetch("/api/mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3758,9 +3653,7 @@
 
   // ---- History loader ----
   function loadHistory(range) {
-    if (!ownerDataAllowed()) return Promise.resolve(null);
     var points = CHART_POINTS;
-    // Owner read (carries the session cookie) — strict (FIX-B).
     return ownerFetch("/api/history?range=" + (range || "5m") + "&points=" + points)
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
@@ -4074,10 +3967,7 @@
   // otherwise fan out into many identical requests. Coalesce in-flight calls
   // and reuse a fresh result for a short TTL; pass force=true to bypass the
   // cache when a genuinely fresh sample is wanted (the periodic poll).
-  // Mirrors ftw-history-card.js's dailyFetchCache. Routed through ownerFetch
-  // (strict / FIX-B): /api/history is an owner read carrying the session cookie,
-  // so it must never traverse the relay in cleartext on the public home route
-  // (master used a plain fetch here; the P2P-only route keeps it strict).
+  // Mirrors ftw-history-card.js's dailyFetchCache.
   var HISTORY_CACHE_TTL_MS = 15000;
   var historyFetchCache = Object.create(null); // "range|points" -> { at, data?, promise? }
   function fetchHistory(range, points, force) {
@@ -4102,7 +3992,6 @@
 
   var lastLiveHistFetch = 0;
   function fetchLiveHistory(force) {
-    if (!ownerDataAllowed()) return Promise.resolve();
     lastLiveHistFetch = Date.now();
     return fetchHistory("24h", 288, force) // 5-min cadence
       .then(function (d) {
@@ -4112,574 +4001,11 @@
       .catch(function () { /* silent — chart just shows last state */ });
   }
 
-  // ---- P2P transport indicator ----
-  // Reflects window.ftwP2P state (direct / relay / connecting). PURELY
-  // INFORMATIONAL — it explains how your browser is talking to your Pi; it is
-  // NOT a toggle. (The old click-to-toggle "disable direct P2P" made no sense on
-  // the P2P-only home route — there's no cleartext relay fallback for owner data,
-  // so disabling it just broke the channel. Tap/hover now only reveals the
-  // explanation.)
-  function setupP2PIndicator() {
-    var el = document.getElementById("p2p-status");
-    if (!window.ftwP2P) return;
-    var label = el && el.querySelector(".p2p-label");
-    var titles = {
-      direct: "Direct & end-to-end encrypted between your browser and your Pi — the relay sees nothing.",
-      relay: "Relayed via a blind TURN server — still end-to-end encrypted; the relay only forwards ciphertext.",
-      connecting: "Opening a direct, encrypted channel to your Pi…",
-      off: "Direct channel unavailable.",
-    };
-    var text = { direct: "Direct", relay: "Relayed", connecting: "Connecting…", off: "" };
-    if (el) el.style.cursor = "default";
-
-    // The sign-in gate's trust line mirrors the same transport, so a visitor sees
-    // the security story BEFORE they're signed in. Direct = end-to-end to the Pi;
-    // Relayed = still E2E, relay forwards ciphertext only.
-    var trust = document.getElementById("signin-gate-trust");
-    var trustText = document.getElementById("signin-gate-trust-text");
-    var trustCopy = {
-      direct: "Direct & end-to-end encrypted to your Pi. The relay never sees your home.",
-      relay: "End-to-end encrypted. The relay only forwards ciphertext — it never sees your home.",
-      connecting: "Opening an encrypted channel to your Pi…",
-      off: "End-to-end encrypted to your Pi. The relay never sees your home.",
-    };
-
-    window.ftwP2P.onState(function (s) {
-      if (el) {
-        if (s === "off") { el.hidden = true; }
-        else {
-          el.hidden = false;
-          el.classList.remove("p2p-direct", "p2p-relay", "p2p-connecting");
-          el.classList.add("p2p-" + s);
-          if (label) label.textContent = text[s] || "";
-          el.title = titles[s] || "Transport";
-        }
-      }
-      if (trust) {
-        trust.classList.remove("is-relay", "is-connecting");
-        if (s === "relay") trust.classList.add("is-relay");
-        else if (s === "connecting") trust.classList.add("is-connecting");
-        if (trustText && trustCopy[s]) trustText.textContent = trustCopy[s];
-      }
-    });
-  }
-
-  // ---- Owner auth: inline sign-in + sign-out (the dashboard IS the door) ----
-  // whoami reports whether the viewer is signed in (and whether there's a
-  // session to revoke). On the LAN (bypass) there's nothing to sign in/out of.
-  // Remotely, when NOT signed in, we reveal an inline passkey sign-in (a discreet
-  // banner + a header key) and run the ceremony over the SAME strict P2P channel —
-  // no redirect to /owner-access/login.html, which would spawn a fresh channel
-  // with no session. All three calls (whoami, login/*, logout) ride ownerFetch
-  // (strict / FIX-B) so they never traverse the relay in cleartext.
-
-  // Minimal WebAuthn codec — mirrors owner-access/webauthn.js. next-app.js is a
-  // classic script, so it can't `import` the module; these few helpers are tiny.
-  function b64urlToBuf(s) {
-    if (typeof s !== "string") return s;
-    var pad = "=".repeat((4 - (s.length % 4)) % 4);
-    var b64 = (s + pad).replace(/-/g, "+").replace(/_/g, "/");
-    var bin = atob(b64), buf = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-    return buf.buffer;
-  }
-  function bufToB64url(buf) {
-    var bytes = new Uint8Array(buf), bin = "";
-    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  }
-  function decodeAssertionOptions(opts) {
-    opts = JSON.parse(JSON.stringify(opts));
-    if (opts.publicKey) opts = opts.publicKey;
-    opts.challenge = b64urlToBuf(opts.challenge);
-    if (Array.isArray(opts.allowCredentials)) {
-      opts.allowCredentials = opts.allowCredentials.map(function (c) {
-        return Object.assign({}, c, { id: b64urlToBuf(c.id) });
-      });
-    }
-    return opts;
-  }
-  function encodeAssertionResult(cred) {
-    return {
-      id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type,
-      response: {
-        clientDataJSON: bufToB64url(cred.response.clientDataJSON),
-        authenticatorData: bufToB64url(cred.response.authenticatorData),
-        signature: bufToB64url(cred.response.signature),
-        userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
-      },
-      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
-    };
-  }
-
-  // hasDecryptableDirectory reports whether instance-sync has a usable directory
-  // cached (the user already authenticated + PRF-decrypted this session, or a
-  // migrated single-home record seeded the browser-carried copy). When false the
-  // visitor is anonymous and gets the PUBLIC landing — never any instance data.
-  function hasDecryptableDirectory() {
-    try {
-      var sync = window.ftwInstanceSync;
-      if (!sync || typeof sync.getCachedInstances !== "function") return false;
-      var list = sync.getCachedInstances() || [];
-      return list.length >= 1;
-    } catch (e) { return false; }
-  }
-
-  // The sign-in GATE replaces the dashboard when the viewer isn't signed in on a
-  // remote origin — so a logged-out visitor sees a clean "sign in to reach your
-  // home", never the empty dashboard chrome (which falsely reads as an
-  // unconfigured instance). On the LAN (bypass) the gate never shows. ownerNotAuthed
-  // also suppresses the "no devices configured" prompt for logged-out viewers.
-  var ownerNotAuthed = false;
-  var authGateActive = false;
-  function showGate(mode) {
-    document.documentElement.classList.add("ftw-gated"); // CSS shows the gate, hides nothing else needed (opaque overlay)
-    var g = document.getElementById("signin-gate");
-    if (g) g.setAttribute("data-mode", mode || "signin");
-    authGateActive = true;
-    ownerNotAuthed = (mode !== "connecting");
-    try { hideSetupBanner(); } catch (e) {}
-    try {
-      var noDevices = document.getElementById("no-devices-prompt");
-      if (noDevices) noDevices.remove();
-    } catch (e) {}
-  }
-  function hideGate() {
-    document.documentElement.classList.remove("ftw-gated");
-    authGateActive = false;
-    ownerNotAuthed = false;
-  }
-
-  // ---- C3: silent device-key sign-in (no passkey) ---------------------------
-  // A device that was set up on the LAN (C4) holds a NON-EXTRACTABLE key the Pi
-  // pinned. Once the channel is open we can prove that key to the Pi to mint the
-  // owner session SILENTLY — no Face ID. Flow:
-  //   GET  /api/owner-access/device-challenge -> {challenge, exp_ms}
-  //   sign "ftw-device-pop:v1:<site>:<challenge>" with the device key
-  //   POST /api/owner-access/device-pop {device_pubkey, challenge, sig}
-  // All over ownerFetch (strict P2P), so the proof never crosses the relay in
-  // cleartext. Resolves true iff the session was minted. Resolves false (never
-  // throws) for "no device key", "no site", or any PoP failure — the caller then
-  // falls back to the passkey ceremony.
-  var devicePoPBusy = false;
-  function waitForDeviceKeyStore(timeoutMs) {
-    if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
-      return Promise.resolve(window.ftwDeviceKey);
-    }
-    return new Promise(function (resolve) {
-      var deadline = Date.now() + (timeoutMs || 3000);
-      function tick() {
-        if (window.ftwDeviceKey && typeof window.ftwDeviceKey.hasDeviceKey === "function") {
-          resolve(window.ftwDeviceKey);
-          return;
-        }
-        if (Date.now() >= deadline) { resolve(null); return; }
-        setTimeout(tick, 50);
-      }
-      tick();
-    });
-  }
-
-  function runDevicePoP() {
-    if (devicePoPBusy) return Promise.resolve(false);
-    // Need both the device-key store and the pinned site (for the signing string).
-    // device-key.js is an ES module loaded before this classic script, but modules
-    // are deferred and can still finish after setupAuth's first direct-channel
-    // tick. Wait briefly so a reload does not burn the one silent-auth attempt
-    // before window.ftwDeviceKey exists.
-    if (!window.ftwP2P || typeof window.ftwP2P.site !== "function") {
-      return Promise.resolve(false);
-    }
-    devicePoPBusy = true;
-    return waitForOwnerTransport(10000)
-      .then(function (transportOk) {
-        if (!transportOk) return false;
-        return waitForDeviceKeyStore(3000);
-      })
-      .then(function (store) {
-        if (!store) return false;
-        return store.hasDeviceKey()
-          .then(function (has) {
-            if (!has) return false; // never enrolled on this device → passkey path
-            return Promise.all([store.getOrCreate(), window.ftwP2P.site()])
-              .then(function (pair) {
-                var key = pair[0], site = pair[1];
-                if (!site) return false;
-                return ownerFetch("/api/owner-access/device-challenge", { credentials: "same-origin" })
-                  .then(function (r) { return r.ok ? r.json() : null; })
-                  .then(function (ch) {
-                    if (!ch || !ch.challenge) return false;
-                    var msg = "ftw-device-pop:v1:" + site + ":" + ch.challenge;
-                    return key.sign(msg).then(function (sig) {
-                      return ownerFetch("/api/owner-access/device-pop", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ device_pubkey: key.pubHex, challenge: ch.challenge, sig: sig }),
-                        credentials: "same-origin",
-                      }).then(function (pop) { return !!(pop && pop.ok); });
-                    });
-                  });
-              });
-          });
-      })
-      .catch(function () { return false; })
-      .then(function (ok) { devicePoPBusy = false; return ok; });
-  }
-
-  // applySignedIn refreshes the dashboard in place once a session is minted
-  // (passkey OR silent device-PoP). Shared so both paths converge.
-  function refreshOwnerData(forceHistory) {
-    ownerDataPrimed = true;
-    fetchStatus();
-    fetchLiveHistory(!!forceHistory);
-    loadHistory(chartRange);
-  }
-  function primeOwnerData() {
-    if (ownerDataPrimed) return;
-    refreshOwnerData(true);
-  }
-  function applySignedIn() {
-    hideGate();
-    var signoutBtn = document.getElementById("signout-btn");
-    if (signoutBtn && !isLanFallbackOrigin()) signoutBtn.hidden = false;
-    refreshOwnerData(true);
-    announceOwnerAuthenticated();
-  }
-
-  function announceOwnerAuthenticated() {
-    window.dispatchEvent(new CustomEvent("ftw-owner-authenticated"));
-  }
-
-  // Explicit logout is a local browser intent, not just a server session revoke:
-  // if we let C3 run immediately afterwards, the remembered device-key silently
-  // mints a fresh session and "logout" appears to do nothing. Keep a local guard
-  // until the next successful passkey ceremony; normal reloads still auto-remember
-  // as long as the user did not press Sign out.
-  var MANUAL_SIGNOUT_KEY = "ftw.owner.manual_signout.v1";
-  function manualSignoutActive() {
-    try { return localStorage.getItem(MANUAL_SIGNOUT_KEY) === "1"; }
-    catch (e) { return false; }
-  }
-  function markManualSignout() {
-    try { localStorage.setItem(MANUAL_SIGNOUT_KEY, "1"); } catch (e) {}
-    silentAuthTried = true;
-  }
-  function clearManualSignout() {
-    try { localStorage.removeItem(MANUAL_SIGNOUT_KEY); } catch (e) {}
-  }
-
-  // runSignIn: explicit button-driven sign-in over the dashboard's strict P2P
-  // transport. The button says "passkey", so it must run the passkey ceremony
-  // directly; the SILENT device-key path is only for automatic remembered-device
-  // checks in setupAuth(), and is disabled after an explicit logout until passkey
-  // auth succeeds.
-  var signInBusy = false;
-  function runSignIn(opts) {
-    opts = opts || {};
-    var allowSilent = opts.allowSilent === true && !manualSignoutActive();
-    if (signInBusy) return Promise.resolve(false);
-    signInBusy = true;
-    // say updates whichever message line is on screen. The same ceremony runs
-    // from both the returning-visitor gate (#signin-banner-msg) and the public
-    // landing (#signin-landing-msg); writing both keeps feedback visible without
-    // forking the flow.
-    var msgEls = ["signin-banner-msg", "signin-landing-msg"]
-      .map(function (id) { return document.getElementById(id); })
-      .filter(function (el) { return !!el; });
-    function say(t, cls) {
-      for (var i = 0; i < msgEls.length; i++) {
-        msgEls[i].textContent = t || "";
-        msgEls[i].className = "signin-gate-msg" + (cls ? " " + cls : "");
-      }
-    }
-    if (!allowSilent) return runPasskeySignIn(say);
-
-    say("Reaching your home…");
-    return runDevicePoP().then(function (silentOk) {
-      if (silentOk) {
-        signInBusy = false;
-        say("Signed in — this device is remembered.", "ok");
-        applySignedIn();
-        return true;
-      }
-      return runPasskeySignIn(say);
-    });
-  }
-
-  // openDirectoryAfterAssertion derives the directory ENCRYPTION key from THIS
-  // login assertion's PRF output (prf.js: outputFrom → deriveEncKey), loads +
-  // decrypts the relay directory blob (instance-sync.js: loadDirectory), and
-  // routes. v1 contract: the directory is a LIST. Exactly 1 entry → auto-open
-  // (no picker). >1 → auto-open the FIRST and leave a clearly-marked picker TODO.
-  // 0 → "finish setup on your home network" guidance (no error). When the PRF
-  // output is absent (Firefox, or a passkey enrolled without prf), we fall back to
-  // loadDirectory(W, null, origin) — the browser-carried copy — and surface that
-  // encrypted home sync is unavailable here. A PRF/decrypt failure is NEVER fatal:
-  // the dashboard still opens; instance-sync's local cache is the source of truth.
-  function openDirectoryAfterAssertion(cred, say) {
-    var prf = window.ftwPrf, sync = window.ftwInstanceSync;
-    if (!prf || typeof prf.outputFrom !== "function" || typeof prf.deriveEncKey !== "function" ||
-        !sync || typeof sync.loadDirectory !== "function") {
-      return Promise.resolve(); // crypto modules absent → carry-local only
-    }
-    // W = base64url(assertion.response.userHandle) — the opaque wallet handle the
-    // relay keys the encrypted blob on.
-    var W = null;
-    try {
-      var uh = cred && cred.response ? cred.response.userHandle : null;
-      if (uh) W = bufToB64url(uh);
-    } catch (e) {}
-    if (!W) return Promise.resolve(); // no wallet handle → nothing to fetch
-    var origin = location.origin;
-    function route(dir) {
-      var list = (dir && dir.instances) || [];
-      if (list.length === 1) {
-        // Exactly one home — auto-open. The pin re-resolves from the freshly
-        // cached directory entry (p2p.js::pinnedIdentity), so the next owner
-        // fetch connects to the right site with no relay round-trip.
-        return;
-      }
-      if (list.length > 1) {
-        // TODO(multi-instance picker): v1 has no picker, so auto-open the FIRST
-        // entry. instance-sync's getCachedInstances()[0] is what p2p.js pins, so
-        // "the first" is already the chosen one. Replace this with a picker UI
-        // when multi-home support lands.
-        try { console.log("ftw: " + list.length + " homes in directory; auto-opening the first (picker TODO)"); } catch (e) {}
-        return;
-      }
-      // 0 entries — the wallet has no home registered yet. This isn't an error;
-      // the user just hasn't finished setup on their home network.
-      say("Finish setting up FTW on your home network, then return here.", "ok");
-    }
-    var prfOut = null;
-    try { prfOut = prf.outputFrom(cred); } catch (e) { prfOut = null; }
-    if (!prfOut) {
-      // No PRF on this browser/passkey — fall back to the browser-carried copy.
-      say("Signed in. (Encrypted home sync isn’t available on this browser.)", "ok");
-      return sync.loadDirectory(W, null, origin).then(route).catch(function () {});
-    }
-    return prf.deriveEncKey(prfOut)
-      .then(function (encKey) { return sync.loadDirectory(W, encKey, origin); })
-      .then(route)
-      .catch(function () { /* PRF/decrypt failure → carry-local; never blocks login */ });
-  }
-
-  // runPasskeySignIn is the explicit passkey ceremony — the fallback when the
-  // silent device path isn't available. Kept as its own function so runSignIn can
-  // try silent first without duplicating the WebAuthn flow. The assertion requests
-  // the PRF extension (prf.extensionInput): the same passkey tap yields the
-  // directory-decryption key, so after finish we load + route the directory.
-  function runPasskeySignIn(say) {
-    say("Opening secure channel…");
-    return waitForOwnerTransport(25000)
-      .then(function (ok) {
-        if (!ok) {
-          say("Still opening the encrypted channel to your Pi. Try again in a moment.");
-          scheduleAuthRetry(1000);
-          return null;
-        }
-        say("Waiting for your passkey…");
-        return ownerFetch("/api/owner-access/login/start", { method: "POST" });
-      })
-      .then(function (start) {
-        if (!start) return null;
-        if (start.status === 404) { say("No passkey here yet — set up this device on your home network first.", "err"); return null; }
-        if (!start.ok) { say("Sign-in unavailable (" + start.status + ").", "err"); return null; }
-        return start.json();
-      })
-      .then(function (data) {
-        if (!data) return false;
-        var getOpts = { publicKey: decodeAssertionOptions(data.options) };
-        // Request the PRF extension so the authenticator evaluates the per-wallet
-        // secret we HKDF into the directory key (prf.js). Harmless on browsers /
-        // authenticators that don't support it — they simply return no prf result
-        // and we fall back to the browser-carried directory copy.
-        try {
-          if (window.ftwPrf && typeof window.ftwPrf.extensionInput === "function") {
-            getOpts.publicKey.extensions = Object.assign(
-              {}, getOpts.publicKey.extensions, window.ftwPrf.extensionInput());
-          }
-        } catch (e) {}
-        return navigator.credentials.get(getOpts).then(function (cred) {
-          if (!cred) { say(""); return false; }
-          var finishBody = encodeAssertionResult(cred);
-          var devicePubP = Promise.resolve(null);
-          if (window.ftwDeviceKey && typeof window.ftwDeviceKey.exportPubHex === "function") {
-            devicePubP = window.ftwDeviceKey.exportPubHex().catch(function () { return null; });
-          }
-          return devicePubP.then(function (devicePubHex) {
-            if (devicePubHex) finishBody.device_pubkey = devicePubHex;
-            return ownerFetch("/api/owner-access/login/finish?ceremony_token=" + encodeURIComponent(data.ceremony_token), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(finishBody),
-              credentials: "same-origin",
-            });
-          }).then(function (finish) {
-            if (!finish.ok) { say("Sign-in failed (" + finish.status + ").", "err"); return false; }
-            // Session minted. Now derive the directory key from this SAME
-            // assertion's PRF output, load + decrypt the relay directory, and
-            // route (auto-open on exactly 1). Non-fatal: a PRF/decrypt failure
-            // still signs the user in against the browser-carried copy.
-            return openDirectoryAfterAssertion(cred, say).then(function () {
-              clearManualSignout();
-              say("Signed in.", "ok");
-              return true;
-            });
-          });
-        });
-      })
-      .catch(function (e) {
-        if (e && e.name === "AbortError") { say(""); return false; }
-        say((e && e.message) || "Sign-in error.", "err");
-        return false;
-      })
-      .then(function (ok) {
-        signInBusy = false;
-        if (ok) applySignedIn();
-        return ok;
-      });
-  }
-
-  // setupAuth wires the gate/signout buttons once, then reflects the current
-  // whoami state. Safe to call repeatedly (on load and whenever the P2P channel
-  // (re)connects), since whoami needs the channel up to answer on a remote origin.
-  var authRetryTimer = null;
-  function scheduleAuthRetry(delayMs) {
-    if (authRetryTimer || isLanFallbackOrigin()) return;
-    authRetryTimer = setTimeout(function () {
-      authRetryTimer = null;
-      setupAuth();
-    }, delayMs || 1500);
-  }
-
-  function showWaitingOrLandingGate() {
-    if (!hasDecryptableDirectory()) {
-      showSignInGate();
-      return;
-    }
-    showGate("connecting");
-    scheduleAuthRetry(1500);
-  }
-  function showUnavailableOwnerTransportGate() {
-    if (ownerTransportConnecting()) {
-      showWaitingOrLandingGate();
-      return;
-    }
-    showSignInGate();
-    if (hasDecryptableDirectory()) scheduleAuthRetry(5000);
-  }
-
-  function setupAuth() {
-    if (authRetryTimer) {
-      clearTimeout(authRetryTimer);
-      authRetryTimer = null;
-    }
-    var signoutBtn = document.getElementById("signout-btn");
-    var gateBtn = document.getElementById("signin-gate-btn");
-    if (gateBtn && !gateBtn._wired) { gateBtn._wired = true; gateBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
-    // The public-landing button runs the SAME ceremony as the gate button — one
-    // runSignIn(), not a fork — so the landing and the returning-visitor card
-    // converge on the identical passkey + PRF + directory flow.
-    var landingBtn = document.getElementById("signin-landing-btn");
-    if (landingBtn && !landingBtn._wired) { landingBtn._wired = true; landingBtn.onclick = function () { runSignIn({ allowSilent: false }); }; }
-    if (signoutBtn && !signoutBtn._wired) {
-      signoutBtn._wired = true;
-      signoutBtn.onclick = function () {
-        markManualSignout();
-        ownerFetch("/api/owner-access/logout", { method: "POST", credentials: "same-origin" })
-          .catch(function () {})
-          .then(function () { location.reload(); });
-      };
-    }
-    ownerFetch("/api/owner-access/whoami", { credentials: "same-origin" })
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (me) {
-        if (me && me.can_sign_out) {            // signed-in remote session
-          if (signoutBtn) signoutBtn.hidden = false;
-          hideGate();
-          primeOwnerData();
-          announceOwnerAuthenticated();
-          return;
-        }
-        if (me && me.authenticated) {           // genuine-LAN bypass — full access
-          if (signoutBtn) signoutBtn.hidden = true;
-          hideGate();
-          primeOwnerData();
-          announceOwnerAuthenticated();
-          return;
-        }
-        // Not signed in (remote). Try the SILENT device-key path (C3) ONCE before
-        // showing the gate — a remembered device signs in with no Face ID. Only
-        // when there's no device key / PoP fails do we fall back to the passkey
-        // gate. silentAuthTried guards against re-running it on every channel
-        // reconnect.
-        if (signoutBtn) signoutBtn.hidden = true;
-        if (!ownerTransportReady()) {
-          showUnavailableOwnerTransportGate();
-          return;
-        }
-        if (manualSignoutActive()) {
-          showSignInGate();
-          return;
-        }
-        if (!silentAuthTried) {
-          silentAuthTried = true;
-          runDevicePoP().then(function (ok) {
-            if (ok) { applySignedIn(); return; }
-            showSignInGate();
-          });
-          return;
-        }
-        showSignInGate();
-      })
-      .catch(function () {
-        if (!ownerTransportReady()) {
-          showUnavailableOwnerTransportGate();
-          return;
-        }
-        showSignInGate();
-      });
-  }
-
-  // silentAuthTried: the C3 silent device-PoP is attempted at most once per page
-  // load (it's idempotent but pointless to repeat on every reconnect).
-  var silentAuthTried = false;
-
-  // showSignInGate routes the gate. The multi-tenant PUBLIC home route is purely
-  // ADDITIVE: a visitor with NO decryptable directory (anonymous, fresh browser)
-  // gets the public landing — brand + passkey + Learn more, and NO instance data.
-  // Once a directory is cached (this session's PRF decrypt, or a migrated
-  // single-home record) the existing single-tenant copy applies: the normal
-  // "signin" card, or the "setup" card when p2p.js reports this origin is
-  // UNENROLLED (no device key — never set up on the LAN). On the LAN the gate
-  // never shows at all, so the existing flow there is untouched.
-  function showSignInGate() {
-    if (!hasDecryptableDirectory()) { showGate("public-landing"); return; }
-    var unEnrolled = false;
-    try {
-      unEnrolled = !!(window.ftwP2P && window.ftwP2P.isUnenrolled && window.ftwP2P.isUnenrolled());
-    } catch (e) { /* default to the normal sign-in gate */ }
-    showGate(unEnrolled ? "setup" : "signin");
-  }
-
   // ---- Init ----
-  // On a remote/public origin, cover the dashboard with the gate ("connecting…")
-  // BEFORE any data fetch renders, so a logged-out visitor never sees the empty
-  // dashboard chrome. setupAuth() resolves it to the dashboard (signed in) or the
-  // sign-in card (not). On the LAN (bypass) the gate never shows.
-  if (typeof isLanFallbackOrigin === "function" && !isLanFallbackOrigin()) showGate("connecting");
   renderModeCatalog(); // build mode buttons from the server's canonical catalog
   loadHistory(chartRange);
   fetchStatus();
   fetchLiveHistory();
-  setupP2PIndicator();
-  setupAuth();
-  // whoami needs the P2P channel up to answer on a remote origin, so the load-time
-  // call may race the connection — re-check whenever the channel (re)connects.
-  if (window.ftwP2P && typeof window.ftwP2P.onState === "function") {
-    window.ftwP2P.onState(function (s) { if (s === "direct" || s === "relay") setupAuth(); });
-  }
   setInterval(fetchStatus, POLL_INTERVAL);
   setInterval(function () { fetchLiveHistory(true); }, 60_000); // 1-min refresh — always fresh
   window.addEventListener("resize", function () {

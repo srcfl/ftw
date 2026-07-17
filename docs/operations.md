@@ -94,12 +94,10 @@ operator-owned YAML.
 
 Independently published drivers are configured under `device_repository` and
 stored below `/var/lib/ftw/driver-repository`; see
-[device-repository.md](device-repository.md). Anonymous component-health
-statistics are a separate, disabled-by-default `fleet_statistics` opt-in; see
-[fleet-statistics.md](fleet-statistics.md).
+[device-repository.md](device-repository.md).
 
-It also has developer-only `-backfill*` flags and the `nova-claim` / `pair`
-subcommands; run `ftw -help` for the exact current surface.
+It also has developer-only `-backfill*` flags and the `nova-claim` subcommand;
+run `ftw -help` for the exact current surface.
 
 Relative Lua driver paths in `config.yaml` are resolved against the config
 file's directory, so keep `drivers/` side by side with the config.

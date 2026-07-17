@@ -16,7 +16,6 @@
 // operator's reading place isn't yanked away.
 (function () {
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 

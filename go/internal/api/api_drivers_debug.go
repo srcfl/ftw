@@ -319,7 +319,7 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/support/dump — gzipped tarball with everything a developer
-// needs to triage a remote incident: redacted config, full driver
+// needs to triage a support incident: redacted config, full driver
 // health JSON, recent global + per-driver logs, last 1 h of TS samples
 // per (driver, metric), and a manifest. SQLite is NOT included; the
 // dump is intended to be small enough to email or paste-link.

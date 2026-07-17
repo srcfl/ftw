@@ -14,7 +14,6 @@
 .PHONY: help test optimizer-install optimizer-test compose-migration-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions \
-        e2e-docker-up e2e-docker-logs e2e-docker-down e2e-docker-tier2
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.Version=$(VERSION)
@@ -116,8 +115,6 @@ build:
 	@mkdir -p bin
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw ./cmd/ftw
 	@ln -sf ftw bin/forty-two-watts
-	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair ./cmd/ftw-pair
-	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay ./cmd/ftw-relay
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
 	@ls -la bin/
@@ -127,22 +124,14 @@ build-arm64:
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-arm64 ./cmd/ftw
 	@cp bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64
-	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-arm64 ./cmd/ftw-pair
-	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-arm64 ./cmd/ftw-relay
-	@ls -la bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64 bin/ftw-pair-linux-arm64 bin/ftw-relay-linux-arm64
+	@ls -la bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64
 
 build-amd64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-amd64 ./cmd/ftw
 	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
-	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-pair-linux-amd64 ./cmd/ftw-pair
-	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-relay-linux-amd64 ./cmd/ftw-relay
-	@ls -la bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64 bin/ftw-pair-linux-amd64 bin/ftw-relay-linux-amd64
+	@ls -la bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 
 build-windows-amd64:
 	@mkdir -p bin
@@ -153,43 +142,23 @@ build-windows-amd64:
 
 # ---- Release archives ----
 
-RELAY_WEB_MANIFEST := web/relay-bootstrap-files.txt
-
-relay-web:
-	@rm -rf bin/ftw-relay-web
-	@mkdir -p bin/ftw-relay-web release
-	@while IFS= read -r f; do \
-		[ -n "$$f" ] || continue; \
-		case "$$f" in \#*) continue ;; esac; \
-		mkdir -p "bin/ftw-relay-web/$$(dirname "$$f")"; \
-		cp "web/$$f" "bin/ftw-relay-web/$$f"; \
-	done < "$(RELAY_WEB_MANIFEST)"
-	@COPYFILE_DISABLE=1 tar --no-xattrs -czf release/ftw-relay-web.tar.gz -C bin/ftw-relay-web .
-	@cd release && shasum -a 256 ftw-relay-web.tar.gz > ftw-relay-web.tar.gz.sha256
-	@printf "built release/ftw-relay-web.tar.gz (%s bytes)\n" \
-		"$$(wc -c <release/ftw-relay-web.tar.gz)"
 
 release: build-arm64 build-amd64 build-windows-amd64
 	@mkdir -p release
-	@# Per-arch staging dirs ship ftw, its compatibility alias, and
-	@# ftw-pair as siblings (the `ftw pair` subcommand
-	@# locates ftw-pair next to itself by default).
+	@# Per-arch staging dirs ship ftw and its compatibility alias.
 	@for arch in arm64 amd64; do \
 		stage="bin/stage-linux-$$arch"; \
 		mkdir -p "$$stage"; \
 		cp "bin/ftw-linux-$$arch"             "$$stage/ftw"; \
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
-		cp "bin/ftw-pair-linux-$$arch"        "$$stage/ftw-pair"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
-			-C "$$stage" ftw forty-two-watts ftw-pair \
+			-C "$$stage" ftw forty-two-watts \
 			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
 			"$$(wc -c <release/ftw-linux-$$arch.tar.gz)"; \
 	done
-	@# Windows: .zip — pair sidecar is Linux-only (uses fowld + systemctl)
-	@# so we don't ship it on Windows. Delete first so rerunning release
-	@# doesn't keep appending to a stale archive.
+	@# Windows: delete first so rerunning release does not append to a stale archive.
 	@rm -rf bin/stage-windows-amd64
 	@mkdir -p bin/stage-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/ftw.exe
@@ -231,39 +200,6 @@ dev: optimizer/.venv/bin/pytest config.local.yaml
 	(cd go && FTW_OPTIMIZER_PYTHON=$(OPTIMIZER_PYTHON) FTW_OPTIMIZER_DIR=../optimizer go run ./cmd/ftw -config ../config.local.yaml -web ../web) & \
 	wait
 
-# ---- Local docker E2E harness (relay + Pi on this machine) ----
-#
-# Brings up ftw-relay + an FTW "Pi" wired to dial it, so the whole
-# home-route / owner-access / pair / P2P flow runs locally with no real Pi,
-# relay VM, or Cloudflare. See docs/local-e2e-docker.md.
-#   Pi:         http://localhost:8080/
-#   Home route: http://home.fortytwowatts.localhost/
-
-e2e-docker-up:
-	docker compose -f docker-compose.e2e.yml up --build -d
-	@echo "Pi: http://localhost:8080/   Home route: http://home.fortytwowatts.localhost/"
-
-e2e-docker-logs:
-	docker compose -f docker-compose.e2e.yml logs -f
-
-e2e-docker-down:
-	docker compose -f docker-compose.e2e.yml down -v
-
-# ---- Tier 2: container-side browser P2P + passkey proof ----
-#
-# Brings up relay + Pi (patched with the harness WebAuthn RP-ID) PLUS a
-# headless-Chromium (Playwright) container on the SAME bridge net, and runs a
-# test that: enrolls + logs in with a virtual WebAuthn authenticator, asserts
-# the REAL P2P DataChannel reaches `direct` (container-to-container, no NAT),
-# and makes one authenticated owner API call over it. Exits non-zero on failure.
-# See docs/local-e2e-docker.md.
-E2E_TIER2_COMPOSE := -f docker-compose.e2e.yml -f docker-compose.e2e-tier2.yml
-
-e2e-docker-tier2:
-	@set -e; \
-	trap 'docker compose $(E2E_TIER2_COMPOSE) --profile tier2 down -v >/dev/null 2>&1 || true' EXIT; \
-	docker compose $(E2E_TIER2_COMPOSE) --profile tier2 up \
-		--build --abort-on-container-exit --exit-code-from playwright
 
 # ---- Hygiene ----
 

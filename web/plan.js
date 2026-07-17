@@ -7,11 +7,7 @@
 
   const PLAN_REFRESH_MS = 30000;
 
-  // ownerFetch routes owner API calls over the STRICT P2P transport on the public
-  // home route. Wired in p2p.js to the shared fail-closed strict function; falls
-  // back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 
@@ -854,19 +850,6 @@
     window.addEventListener('resize', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
-    if (window.ftwP2P && typeof window.ftwP2P.onState === 'function') {
-      var waitingForDirect = false;
-      window.ftwP2P.onState(function (s) {
-        if (s !== 'direct') {
-          waitingForDirect = true;
-          return;
-        }
-        if (!waitingForDirect) return;
-        waitingForDirect = false;
-        fetchAll();
-        renderStrategyHint();
-      });
-    }
 
     // Horizon toggle wiring. Each click flips state.horizon, persists
     // the choice, marks the right button active, and re-renders. The

@@ -37,9 +37,7 @@ type Config struct {
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
-	RemoteAccess     *RemoteAccess      `yaml:"remote_access,omitempty" json:"remote_access,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
-	FleetStatistics  *FleetStatistics   `yaml:"fleet_statistics,omitempty" json:"fleet_statistics,omitempty"`
 }
 
 // DeviceRepository configures independently distributed Lua drivers. Remote
@@ -69,48 +67,6 @@ const (
 	DefaultDriverRepositorySigningKeyID = "ftw-drivers-2026-01"
 	DefaultDriverRepositoryPublicKey    = "MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc="
 )
-
-// FleetStatistics is disabled by default. When explicitly enabled, FTW sends
-// a coarse anonymous component-health heartbeat. The payload never contains
-// raw telemetry, device identities, endpoints, configuration, or secrets.
-type FleetStatistics struct {
-	Enabled   bool   `yaml:"enabled" json:"enabled"`
-	Endpoint  string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	IntervalH int    `yaml:"interval_h,omitempty" json:"interval_h,omitempty"`
-}
-
-const DefaultFleetStatisticsEndpoint = "https://relay.ftw.sourceful.energy/fleet/heartbeat"
-
-// RemoteAccess opts the Pi into the owner remote-access home route. DEFAULT OFF:
-// the Pi makes NO outgoing connection to the signaling relay unless Enabled is
-// true — even if FTW_RELAY_URL is present in the environment. A fresh install
-// stays fully local (Local Over Cloud), and an operator who reaches their Pi
-// over a VPN never has to carry an unnecessary outbound connection.
-//
-// When enabled, owner traffic rides a direct browser↔Pi DTLS WebRTC DataChannel
-// (the relay is a blind signaling rendezvous, never a plaintext tunnel). See
-// docs/archive/agent-artifacts/superpowers/specs/2026-06-04-p2p-only-home-route-v1-design.md.
-type RemoteAccess struct {
-	Enabled bool `yaml:"enabled" json:"enabled"`
-	// TURN is a BLIND, self-hostable ICE fallback for hard-NAT / CGNAT peers
-	// where direct P2P can't form. It relays DTLS ciphertext only — it cannot
-	// read or MITM the channel (anti-MITM is the signed fingerprint, not TURN),
-	// so it costs zero trustlessness. Default OFF; enabling it is config-only.
-	TURN *TURN `yaml:"turn,omitempty" json:"turn,omitempty"`
-}
-
-// TURN is the optional, blind, ciphertext-only ICE relay fallback.
-type TURN struct {
-	Enabled bool   `yaml:"enabled" json:"enabled"`
-	URL     string `yaml:"url,omitempty" json:"url,omitempty"`
-	Secret  string `yaml:"secret,omitempty" json:"secret,omitempty"`
-}
-
-// RemoteAccessEnabled reports whether the owner remote-access home route is
-// opted in. Nil-safe: a config with no remote_access block is OFF.
-func (c *Config) RemoteAccessEnabled() bool {
-	return c.RemoteAccess != nil && c.RemoteAccess.Enabled
-}
 
 // Notifications configures outbound push notifications. Exactly one
 // transport provider is active at a time, selected by Provider. Today
@@ -379,7 +335,7 @@ type CalDAV struct {
 	ManageCredentials *bool `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
 
 	// Listen is the bind address for the in-process CalDAV server. Default
-	// ":5232". FTW binds it on the LAN (never routed through the owner relay).
+	// ":5232". FTW binds it on the trusted LAN.
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
 }
 
@@ -1299,14 +1255,6 @@ func applyDefaults(c *Config) {
 			}}
 		}
 	}
-	if c.FleetStatistics != nil {
-		if c.FleetStatistics.Endpoint == "" {
-			c.FleetStatistics.Endpoint = DefaultFleetStatisticsEndpoint
-		}
-		if c.FleetStatistics.IntervalH == 0 {
-			c.FleetStatistics.IntervalH = 24
-		}
-	}
 	if c.Site.ControlIntervalS == 0 {
 		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
 		// dispatching twice on the same telemetry sample, and halves
@@ -1707,17 +1655,6 @@ func (c *Config) Validate() error {
 			}
 			if !repo.AllowUnsigned && len(repo.TrustedKeys) == 0 {
 				return fmt.Errorf("device_repository %s requires at least one trusted Ed25519 key", repo.ID)
-			}
-		}
-	}
-	if stats := c.FleetStatistics; stats != nil {
-		if stats.IntervalH < 0 || stats.IntervalH > 168 {
-			return errors.New("fleet_statistics.interval_h must be 0 (default) or between 1 and 168")
-		}
-		if stats.Enabled {
-			u, err := url.Parse(stats.Endpoint)
-			if err != nil || u.Scheme != "https" || u.Host == "" {
-				return errors.New("fleet_statistics.endpoint must be absolute HTTPS")
 			}
 		}
 	}

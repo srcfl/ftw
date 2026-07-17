@@ -14,13 +14,7 @@ VERSION=${1:?Usage: $0 <version>}
 REPO="srcfl/ftw"
 
 echo "Building FTW ${VERSION} (linux arm64/amd64, windows amd64)…"
-make release relay-web
-
-for f in bin/ftw-relay-linux-arm64 bin/ftw-relay-linux-amd64; do
-    dir="${f%/*}"
-    base="${f##*/}"
-    (cd "$dir" && shasum -a 256 "$base" > "$base.sha256")
-done
+make release
 
 ASSETS=(
     release/ftw-linux-arm64.tar.gz
@@ -35,12 +29,6 @@ ASSETS=(
     release/forty-two-watts-linux-amd64.tar.gz.sha256
     release/forty-two-watts-windows-amd64.zip
     release/forty-two-watts-windows-amd64.zip.sha256
-    bin/ftw-relay-linux-arm64
-    bin/ftw-relay-linux-arm64.sha256
-    bin/ftw-relay-linux-amd64
-    bin/ftw-relay-linux-amd64.sha256
-    release/ftw-relay-web.tar.gz
-    release/ftw-relay-web.tar.gz.sha256
 )
 
 for f in "${ASSETS[@]}"; do

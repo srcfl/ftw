@@ -202,9 +202,6 @@ class FtwPriceChart extends FtwElement {
     this._vatPct = 25;        // fallback; overwritten from /api/config
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
-    this._p2pStateListener = null;
-    this._waitingForDirect = false;
-    this._authListener = null;
   }
 
   connectedCallback() {
@@ -221,31 +218,6 @@ class FtwPriceChart extends FtwElement {
       if (this._mql.addEventListener) this._mql.addEventListener("change", this._mqlListener);
       else if (this._mql.addListener) this._mql.addListener(this._mqlListener);
     }
-    if (typeof window !== "undefined" &&
-        window.ftwP2P &&
-        typeof window.ftwP2P.onState === "function") {
-      const listener = (s) => {
-        if (this._p2pStateListener !== listener) return;
-        if (s !== "direct") {
-          this._waitingForDirect = true;
-          return;
-        }
-        if (!this._waitingForDirect || !this.isConnected) return;
-        this._waitingForDirect = false;
-        this._loadConfig();
-        this._loadPrices();
-      };
-      this._p2pStateListener = listener;
-      window.ftwP2P.onState(listener);
-    }
-    if (typeof window !== "undefined") {
-      this._authListener = () => {
-        if (!this.isConnected) return;
-        this._loadConfig();
-        this._loadPrices();
-      };
-      window.addEventListener("ftw-owner-authenticated", this._authListener);
-    }
   }
 
   disconnectedCallback() {
@@ -258,11 +230,6 @@ class FtwPriceChart extends FtwElement {
       else if (this._mql.removeListener) this._mql.removeListener(this._mqlListener);
       this._mql = null;
       this._mqlListener = null;
-    }
-    this._p2pStateListener = null;
-    if (this._authListener && typeof window !== "undefined") {
-      window.removeEventListener("ftw-owner-authenticated", this._authListener);
-      this._authListener = null;
     }
   }
 

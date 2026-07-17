@@ -1,9 +1,12 @@
 # ADR 0001 — WebAuthn RP-ID for owner remote access
 
-- Status: Accepted (2026-06-03)
+- Status: Superseded by [ADR 0003](0003-retire-legacy-remote-access.md)
 - Context: [archived home-route passkey design](../archive/agent-artifacts/superpowers/specs/2026-06-03-home-route-passkey-design.md)
 
 ## Decision
+
+> Historical decision only. FTW no longer operates an owner passkey portal or
+> uses a WebAuthn RP ID.
 
 The production WebAuthn Relying Party ID for owner passkeys is the dedicated
 host **`home.fortytwowatts.com`** — never the apex `fortytwowatts.com`.

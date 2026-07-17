@@ -33,18 +33,6 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw ./cmd/ftw
-RUN cd go && \
-    target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
-    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
-    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/ftw-pair ./cmd/ftw-pair
-
-# Note: the standalone relay (ftw-relay) is NOT bundled in this image.
-# It is built and deployed separately; this image only includes the main
-# service and the local ftw-pair sidecar.
-# The cross-platform binaries are published as GitHub release assets
-# (ftw-relay-linux-{amd64,arm64}) for operators who self-host.
-
 # --- Optimizer -------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS optimizer
 
@@ -74,7 +62,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/ftw             /app/ftw
-COPY --from=builder /out/ftw-pair        /app/ftw-pair
 COPY --from=optimizer /opt/venv          /opt/venv
 COPY optimizer/                          /app/optimizer/
 COPY drivers/ /app/drivers/
