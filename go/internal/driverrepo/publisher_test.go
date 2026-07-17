@@ -104,7 +104,7 @@ func TestPublicationRejectsWrongExpectedPublicKey(t *testing.T) {
 	wrongPublic, _, _ := ed25519.GenerateKey(rand.Reader)
 	_, err := BuildPublication(PublicationOptions{
 		DriversDir: driversDir, OutputDir: filepath.Join(dir, "publication"),
-		BaseURL: "https://example.test/drivers-edge", Repository: "https://github.com/srcfl/ftw",
+		BaseURL: "https://example.test/drivers-beta", Repository: "https://github.com/srcfl/ftw",
 		KeyID: "test", PrivateKey: private, ExpectedPublicKey: wrongPublic,
 	})
 	if err == nil || !strings.Contains(err.Error(), "does not match") {

@@ -1,7 +1,0 @@
-# Generated inside the Playwright container (the test bind-mounts this dir and
-# runs `npm install` + `playwright test` there). None of it belongs in git.
-node_modules/
-test-results/
-playwright-report/
-blob-report/
-.last-run.json

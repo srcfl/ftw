@@ -1875,7 +1875,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   background: transparent;
 }
 .lp-badge-on {
-  /* On-accent text MUST be near-black per DESIGN.md, not white. */
+  /* On-accent text MUST be near-black per the shared design system, not white. */
   color: #0a0a0a;
   background: var(--amber, var(--accent, #5566ff));
   border-color: transparent;

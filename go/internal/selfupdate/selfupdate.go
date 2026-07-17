@@ -1,12 +1,11 @@
-// Package selfupdate resolves the selected stable, beta, or edge release
+// Package selfupdate resolves the selected stable or beta release
 // stream and triggers pull+restart via the ftw-updater sidecar over a Unix
 // socket.
 //
 // Two signals are required, both for safety reasons:
 //
-//  1. GitHub Releases identifies stable and beta targets. Edge uses
-//     timestamped immutable GHCR tags. We can't use raw semver descending
-//     over every registry tag because the repo's tag
+//  1. GitHub Releases identifies stable and beta targets. We cannot use raw
+//     semver descending over every registry tag because the repo's tag
 //     history isn't monotonic (e.g. an older `2.x.y` tag scheme
 //     still in the registry would outrank the current `v0.X.Y` line
 //     numerically).
@@ -19,9 +18,8 @@
 //     :latest — still aliased to the previous image, no digest
 //     change, sidecar writes state=done with the version unmoved.
 //
-// Stable and beta require both signals: GitHub tells us *what's released*,
-// GHCR tells us *is it deployable yet*. Edge is registry-native but still
-// installs only its immutable timestamped tag, never the moving alias.
+// Stable and beta require both signals: GitHub tells us *what is released*,
+// and GHCR tells us whether it is deployable yet.
 //
 // Dispatch passes the resolved version tag (not :latest) to the
 // sidecar, which sets FTW_IMAGE_TAG=<target> on the docker exec so
@@ -71,21 +69,20 @@ const (
 )
 
 // Channel controls which immutable release stream the checker follows.
-// Stable remains the default; beta and edge are explicit operator opt-ins.
+// Stable remains the default; beta is an explicit operator opt-in.
 type Channel string
 
 const (
 	ChannelStable Channel = "stable"
 	ChannelBeta   Channel = "beta"
-	ChannelEdge   Channel = "edge"
 )
 
-var availableChannels = []Channel{ChannelStable, ChannelBeta, ChannelEdge}
+var availableChannels = []Channel{ChannelStable, ChannelBeta}
 
 func ParseChannel(v string) (Channel, error) {
 	channel := Channel(strings.ToLower(strings.TrimSpace(v)))
 	switch channel {
-	case ChannelStable, ChannelBeta, ChannelEdge:
+	case ChannelStable, ChannelBeta:
 		return channel, nil
 	default:
 		return "", fmt.Errorf("selfupdate: invalid channel %q", v)
@@ -226,7 +223,10 @@ func New(cfg Config, store Store) *Checker {
 	channel := inferChannel(cfg.CurrentVersion)
 	if store != nil {
 		if persisted, ok := store.LoadConfig(channelKey); ok && persisted != "" {
-			if parsed, err := ParseChannel(persisted); err == nil {
+			if persisted == "edge" {
+				channel = ChannelBeta
+				_ = store.SaveConfig(channelKey, string(ChannelBeta))
+			} else if parsed, err := ParseChannel(persisted); err == nil {
 				channel = parsed
 			}
 		}
@@ -294,11 +294,11 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		repo:       c.cfg.Image,
 		service:    c.cfg.RegistryService,
 	}
-	rel, deployable, err := c.resolveChannel(ctx, channel, rp)
+	rel, deployable, err := c.resolveChannel(ctx, channel)
 	if err != nil {
 		return c.recordErr(err)
 	}
-	if rel.TagName != "" && channel != ChannelEdge {
+	if rel.TagName != "" {
 		ok, err := rp.hasTag(ctx, rel.TagName)
 		if err != nil {
 			return c.recordErr(fmt.Errorf("registry probe: %w", err))
@@ -319,7 +319,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
-		c.info.UpdateAvailable = channelUpdateAvailable(channel, rel.TagName, c.info.Current)
+		c.info.UpdateAvailable = channelUpdateAvailable(rel.TagName, c.info.Current)
 	} else {
 		// Either GH has no published release yet, or the build workflow
 		// hasn't pushed the image for this release yet. Keep the prior
@@ -350,7 +350,7 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	return info, nil
 }
 
-func (c *Checker) resolveChannel(ctx context.Context, channel Channel, rp *registryProbe) (ghRelease, bool, error) {
+func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, bool, error) {
 	switch channel {
 	case ChannelStable:
 		rel, err := c.fetchLatestRelease(ctx)
@@ -358,12 +358,6 @@ func (c *Checker) resolveChannel(ctx context.Context, channel Channel, rp *regis
 	case ChannelBeta:
 		rel, err := c.fetchBetaRelease(ctx)
 		return rel, rel.TagName != "", err
-	case ChannelEdge:
-		tag, err := rp.latestEdgeTag(ctx)
-		if err != nil {
-			return ghRelease{}, false, fmt.Errorf("registry edge probe: %w", err)
-		}
-		return ghRelease{TagName: tag, PublishedAt: edgeTagTime(tag)}, tag != "", nil
 	default:
 		return ghRelease{}, false, fmt.Errorf("selfupdate: unsupported channel %q", channel)
 	}
@@ -723,7 +717,9 @@ func isInFlightState(state string) bool {
 func inferChannel(version string) Channel {
 	switch {
 	case strings.HasPrefix(version, "edge-"):
-		return ChannelEdge
+		// Releases before the two-channel model used immutable edge tags. Treat
+		// a running legacy edge build as beta so it can converge automatically.
+		return ChannelBeta
 	case isBetaTag(version):
 		return ChannelBeta
 	default:
@@ -731,12 +727,9 @@ func inferChannel(version string) Channel {
 	}
 }
 
-func channelUpdateAvailable(channel Channel, latest, current string) bool {
+func channelUpdateAvailable(latest, current string) bool {
 	if latest == "" || latest == current {
 		return false
-	}
-	if channel == ChannelEdge {
-		return true
 	}
 	return isNewer(latest, current)
 }
@@ -744,15 +737,6 @@ func channelUpdateAvailable(channel Channel, latest, current string) bool {
 func isBetaTag(tag string) bool {
 	v := parseSemanticVersion(tag)
 	return v != nil && len(v.pre) == 2 && v.pre[0] == "beta" && isDigits(v.pre[1])
-}
-
-func edgeTagTime(tag string) time.Time {
-	parts := strings.Split(tag, "-")
-	if len(parts) < 3 || parts[0] != "edge" {
-		return time.Time{}
-	}
-	t, _ := time.Parse("20060102T150405Z", parts[1])
-	return t
 }
 
 // isNewer implements the SemVer precedence needed by stable and beta,

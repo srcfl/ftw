@@ -16,7 +16,7 @@
 (function () {
   'use strict';
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -69,7 +69,7 @@
     if (!b) return;
     if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
     location.hash = '#' + b.dataset.view;
-    const hdr = document.querySelector('body.ftw-next > header');
+    const hdr = document.querySelector('body.ftw-app > header');
     if (hdr) {
       hdr.classList.remove('menu-open');
       const mbtn = document.getElementById('mobile-menu-btn');
@@ -109,7 +109,7 @@
     const until = Date.now();
     const since = until - state.rangeMs;
     try {
-      const r = await ownerFetch(`/api/mpc/diagnose/history?since=${since}&until=${until}&limit=2000`);
+      const r = await apiFetch(`/api/mpc/diagnose/history?since=${since}&until=${until}&limit=2000`);
       const j = await r.json();
       state.timeline = (j && j.snapshots) || [];
       renderTimeline();
@@ -164,7 +164,7 @@
     if (el) el.innerHTML = '<div class="diagnose-empty">Loading snapshot…</div>';
     renderTimeline();  // refresh "active" class
     try {
-      const r = await ownerFetch('/api/mpc/diagnose/at?ts=' + tsMs);
+      const r = await apiFetch('/api/mpc/diagnose/at?ts=' + tsMs);
       const j = await r.json();
       // Discard stale responses: if the user clicked a different
       // snapshot while this fetch was in flight, state.selectedTs

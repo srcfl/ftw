@@ -599,9 +599,9 @@ func joinURL(base, path string) string {
 }
 
 // CredentialView is the managed-credential reveal rendered by
-// GET /api/caldav/credentials for the Settings → Calendar tab. It intentionally
-// returns the password (the operator needs it to add the account to their phone).
-// The endpoint is only intended to be exposed on a trusted LAN.
+// GET /api/caldav/credentials for the Settings → Calendar tab. It returns the
+// password so the local operator can add the account to another device. Keep
+// the API on a trusted LAN or operator-managed private network.
 type CredentialView struct {
 	Managed      bool   `json:"managed"`
 	Username     string `json:"username,omitempty"`

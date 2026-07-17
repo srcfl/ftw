@@ -59,6 +59,11 @@ local rated_power_w = 0
 -- fuse / grid subscription, not the battery's max charge rate. Overridable
 -- via config.max_grid_charge_a; default 31 A matches Zap's init profile.
 local grid_charge_current_a = 31
+-- These limits are read during driver_init(), so their declarations must be
+-- above that function. Declaring them near the command helpers made init see
+-- nil globals instead of the intended driver-local defaults.
+local soc_max = 100
+local soc_min = 20
 
 ----------------------------------------------------------------------------
 -- Initialization
@@ -119,7 +124,7 @@ function driver_init(config)
     end
 
     host.log("info", string.format(
-        "Deye: driver_init (rated=%dW, max_grid_charge=%dA, soc=%d..%d)",
+        "Deye: driver_init (rated=%.0fW, max_grid_charge=%dA, soc=%d..%d)",
         rated_power_w, grid_charge_current_a, soc_min, soc_max))
 end
 
@@ -422,8 +427,6 @@ local EMS_EXTERNAL    = 3  -- forced setpoints via reg 108/154
 -- SoC targets written to reg 166. Charge commands aim for soc_max,
 -- discharge commands floor at soc_min. Defaults match Zap; overridable
 -- via config.soc_max / config.soc_min.
-local soc_max = 100
-local soc_min = 20
 
 local CHARGE_CURRENT_DEFAULT_A = 31  -- matches Zap init profile
 

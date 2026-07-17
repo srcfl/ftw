@@ -35,22 +35,18 @@ Two directions:
 
 ## Security / network posture
 
-- The CalDAV server listens on **`:5232`** (all interfaces) — i.e. it is
-  reachable from **any device on your home network**, not just loopback, so
-  phones can sync. It is **not** forwarded to the internet by the FTW deployment
-  (no port-forward is created), so it stays on your LAN unless you deliberately
-  expose port `5232`. Do not do that; use a trusted VPN if you need it away from
-  home. Off your network it simply doesn't sync, then catches up when you're
-  home.
+- The CalDAV server listens on **`:5232`** (all interfaces), so it is
+  reachable from devices on the home network. FTW does not publish a relay or
+  create an internet port-forward. Off the LAN it does not sync unless the
+  operator separately provides private network access.
 - Authentication is HTTP Basic over **plain HTTP** — credentials are
   base64-encoded (not encrypted). This is standard for self-hosted CalDAV on a
   **trusted** home network. If your LAN has guest WiFi or untrusted IoT
   devices, treat this as a weaker boundary: use a strong password, leave the
   feature off (it is opt-in), or put FTW behind a TLS reverse proxy. The server
   fails closed — an empty configured password rejects every request.
-- The FTW API surface for this feature (`/api/caldav/*`) is LAN-local like the
-  rest of FTW. Its credential response disables wildcard CORS and caching, but
-  the LAN remains the trust boundary.
+- The FTW API and CalDAV endpoint are local-network services. Do not expose
+  either directly to the public internet.
 - DoS hardening: FTW's client caps the CalDAV response it will read (25 MiB) and
   the number of events it parses per poll (10k), and bounds each poll with a
   timeout, so a hostile/MITM'd server can't exhaust the Pi or stall the calendar
@@ -145,37 +141,3 @@ deploy mode with nothing extra to install:
   sidecar at all, so no deploy-mode is gated off.
 
 Objects persist in `state.db`, so events survive restarts and image upgrades.
-
-## Implementation
-
-- `go/internal/caldavserver` — the native server: a go-webdav `caldav.Handler`
-  (`server.go`) + a `state.db`-backed `caldav.Backend` (`backend.go`) +
-  server-side recurrence expansion (`expand.go`).
-- `go/internal/calendar` — CalDAV client poll loop (`service.go`), title→intent
-  parser (`parse.go`), EVSE session detector + writer (`history.go`), plan
-  reconciler (`plan.go`).
-- Inbound wiring (`go/cmd/ftw/main.go`): away intervals drive
-  `loadmodel.SetProfile` (live) + an away-aware `mpc.Service.Load` predictor
-  (horizon); EV deadlines call `loadpoint.Manager.SetTarget`.
-- `GET /api/caldav/status` + `GET /api/caldav/credentials`
-  (`go/internal/api/api_caldav.go`) back the Settings tab.
-
-### Third-party libraries
-
-The CalDAV stack is built entirely on **Emerson Tan's `emersion/*` libraries**
-(all **MIT**-licensed, pure Go — no CGo), which keep FTW a single permissively
-licensed static binary:
-
-- [`github.com/emersion/go-webdav`](https://github.com/emersion/go-webdav) — the
-  CalDAV **client** (poll/read/write) **and** the CalDAV **server**
-  (`caldav` subpackage) behind the in-process native server.
-- [`github.com/emersion/go-ical`](https://github.com/emersion/go-ical) —
-  iCalendar (RFC 5545) parsing + encoding, and the recurrence set used by
-  `expand.go`.
-- [`github.com/teambition/rrule-go`](https://github.com/teambition/rrule-go) —
-  RRULE/RDATE/EXDATE expansion (reached via go-ical's `RecurrenceSet`).
-
-### Future work
-
-- Verify interop against the full matrix of iOS / Google / Thunderbird (today
-  it's proven against FTW's own go-webdav client).

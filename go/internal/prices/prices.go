@@ -2,6 +2,9 @@
 // and persists them to the state DB.
 //
 // Supported:
+//   - sourceful — Default. Keyless European day-ahead prices through
+//     Sourceful's cached ENTSO-E API. Resolution varies per bidding zone
+//     (currently 15m in the Nordics).
 //   - elprisetjustnu — Sweden, zones SE1-SE4, no API key. Since late 2025
 //     NordPool publishes in 15-minute PTU (quarterly) resolution; this
 //     package defaults to the quarterly endpoint and can fall back to
@@ -23,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +36,7 @@ import (
 )
 
 // Provider is implemented by each concrete price source. Fetch returns
-// hourly spot prices in SEK/kWh (we convert to öre later).
+// spot-price slots in SEK/kWh (we convert to öre later).
 type Provider interface {
 	// Name returns a short identifier for logging / store.source column.
 	Name() string
@@ -50,9 +54,93 @@ type RawPrice struct {
 	SEKPerKWh  float64
 }
 
+// ---- Sourceful ----
+
+// SourcefulProvider uses the same keyless, cached ENTSO-E price API as the
+// Sourceful Energy app. The API returns the requested currency per MWh; FTW
+// always requests SEK so the package-wide SEK/kWh invariant remains true.
+type SourcefulProvider struct {
+	Client  *http.Client
+	BaseURL string // override in tests
+}
+
+// NewSourceful returns a provider pointed at Sourceful's production API.
+func NewSourceful() *SourcefulProvider {
+	return &SourcefulProvider{
+		Client:  &http.Client{Timeout: 15 * time.Second},
+		BaseURL: "https://novacore-mainnet.sourceful.dev/services/price/electricity",
+	}
+}
+
+func (s *SourcefulProvider) Name() string { return "sourceful" }
+
+func (s *SourcefulProvider) Fetch(ctx context.Context, zone string, day time.Time) ([]RawPrice, error) {
+	zone = strings.ToUpper(strings.TrimSpace(zone))
+	endpoint := fmt.Sprintf("%s/%s?currency=SEK&date=%s&days=1",
+		strings.TrimRight(s.BaseURL, "/"), url.PathEscape(zone), day.Format("2006-01-02"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := s.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("sourceful: status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Area       string `json:"area"`
+		Currency   string `json:"currency"`
+		Unit       string `json:"unit"`
+		Resolution string `json:"resolution"`
+		Prices     []struct {
+			Datetime string  `json:"datetime"`
+			Price    float64 `json:"price"`
+		} `json:"prices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, fmt.Errorf("sourceful: decode: %w", err)
+	}
+	if payload.Area != "" && !strings.EqualFold(payload.Area, zone) {
+		return nil, fmt.Errorf("sourceful: response area %q does not match %q", payload.Area, zone)
+	}
+	if !strings.EqualFold(payload.Currency, "SEK") {
+		return nil, fmt.Errorf("sourceful: unexpected currency %q", payload.Currency)
+	}
+	if !strings.HasSuffix(strings.ToUpper(strings.TrimSpace(payload.Unit)), "MWH") {
+		return nil, fmt.Errorf("sourceful: unexpected unit %q", payload.Unit)
+	}
+	slotMin := resolutionMinutes(payload.Resolution)
+	if slotMin <= 0 {
+		return nil, fmt.Errorf("sourceful: bad resolution %q", payload.Resolution)
+	}
+
+	out := make([]RawPrice, 0, len(payload.Prices))
+	for _, point := range payload.Prices {
+		t, err := time.Parse(time.RFC3339, point.Datetime)
+		if err != nil {
+			return nil, fmt.Errorf("sourceful: datetime %q: %w", point.Datetime, err)
+		}
+		out = append(out, RawPrice{
+			SlotStart:  t,
+			SlotLenMin: slotMin,
+			SEKPerKWh:  point.Price / 1000.0,
+		})
+	}
+	return out, nil
+}
+
 // ---- elprisetjustnu ----
 
-// ElpriserProvider is the default Sweden provider — keyless.
+// ElpriserProvider is the legacy Sweden-only provider — keyless.
 //
 // Since NordPool's transition to 15-min PTU in late 2025, the single
 // endpoint /api/v1/prices/YYYY/MM-DD_SEZ.json returns 96 rows × 15 min
@@ -78,9 +166,13 @@ func (e *ElpriserProvider) Fetch(ctx context.Context, zone string, day time.Time
 	url := fmt.Sprintf("%s/%d/%02d-%02d_%s.json",
 		e.BaseURL, day.Year(), day.Month(), day.Day(), zone)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	resp, err := e.Client.Do(req)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 404 {
 		return nil, nil
@@ -100,12 +192,16 @@ func (e *ElpriserProvider) Fetch(ctx context.Context, zone string, day time.Time
 	out := make([]RawPrice, 0, len(rows))
 	for _, r := range rows {
 		t, err := time.Parse(time.RFC3339, r.TimeStart)
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		slotMin := 60
 		if r.TimeEnd != "" {
 			if te, err := time.Parse(time.RFC3339, r.TimeEnd); err == nil {
 				d := int(te.Sub(t).Minutes())
-				if d >= 5 && d <= 120 { slotMin = d }
+				if d >= 5 && d <= 120 {
+					slotMin = d
+				}
 			}
 		}
 		out = append(out, RawPrice{SlotStart: t, SlotLenMin: slotMin, SEKPerKWh: r.SEKPerKWh})
@@ -114,7 +210,9 @@ func (e *ElpriserProvider) Fetch(ctx context.Context, zone string, day time.Time
 	if len(out) >= 2 && out[0].SlotLenMin == 60 {
 		delta := int(out[1].SlotStart.Sub(out[0].SlotStart).Minutes())
 		if delta > 0 && delta < 60 {
-			for i := range out { out[i].SlotLenMin = delta }
+			for i := range out {
+				out[i].SlotLenMin = delta
+			}
 		}
 	}
 	return out, nil
@@ -138,8 +236,8 @@ type ENTSOEProvider struct {
 
 	// Currency is the ISO code the caller wants prices in (default SEK).
 	// ENTSOE publishes EUR/MWh; we convert via EURToNative if non-nil.
-	Currency     string
-	EURToNative  func(eur float64) float64 // returns amount in native currency
+	Currency    string
+	EURToNative func(eur float64) float64 // returns amount in native currency
 }
 
 // NewENTSOE returns a provider — caller must set APIKey.
@@ -180,20 +278,26 @@ func (e *ENTSOEProvider) Fetch(ctx context.Context, zone string, day time.Time) 
 		return nil, fmt.Errorf("entsoe: unknown zone %q", zone)
 	}
 	periodStart := day.UTC().Format("200601021504")
-	periodEnd := day.Add(24*time.Hour).UTC().Format("200601021504")
+	periodEnd := day.Add(24 * time.Hour).UTC().Format("200601021504")
 	url := fmt.Sprintf("%s?documentType=A44&in_Domain=%s&out_Domain=%s&periodStart=%s&periodEnd=%s&securityToken=%s",
 		e.BaseURL, eic, eic, periodStart, periodEnd, e.APIKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	resp, err := e.Client.Do(req)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("entsoe: status %d: %s", resp.StatusCode, string(body))
 	}
 	body, err := io.ReadAll(resp.Body)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return e.parseXML(body)
 }
 
@@ -392,6 +496,8 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 	}
 	var p Provider
 	switch cfg.Provider {
+	case "sourceful":
+		p = NewSourceful()
 	case "elprisetjustnu":
 		p = NewElpriser()
 	case "entsoe":
@@ -413,9 +519,13 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 		return nil
 	}
 	zone := cfg.Zone
-	if zone == "" { zone = "SE3" }
+	if zone == "" {
+		zone = "SE3"
+	}
 	vat := cfg.VATPercent
-	if vat == 0 { vat = 25 }
+	if vat == 0 {
+		vat = 25
+	}
 	return &Service{
 		Provider: p,
 		Store:    st,
@@ -465,13 +575,17 @@ func (s *Service) fetchAndStore(ctx context.Context) {
 			slog.Warn("price fetch failed", "zone", s.Zone, "day", day.Format("2006-01-02"), "err", err)
 			continue
 		}
-		if len(rows) == 0 { continue }
+		if len(rows) == 0 {
+			continue
+		}
 		points := make([]state.PricePoint, 0, len(rows))
 		nowMs := time.Now().UnixMilli()
 		for _, r := range rows {
 			spotOre, totalOre := s.Applier.Apply(r.SEKPerKWh)
 			slot := r.SlotLenMin
-			if slot <= 0 { slot = 60 }
+			if slot <= 0 {
+				slot = 60
+			}
 			points = append(points, state.PricePoint{
 				Zone:        s.Zone,
 				SlotTsMs:    r.SlotStart.UnixMilli(),

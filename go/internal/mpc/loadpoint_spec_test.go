@@ -62,7 +62,7 @@ func TestActiveGate(t *testing.T) {
 	}
 }
 
-// TestOptimizePrefersCheapSlotsForEV is the core contract of Phase 4:
+// TestOptimizePrefersCheapSlotsForEV is the core EV-planning contract:
 // MPC should schedule EV charging in cheap slots and skip expensive
 // ones, given the EV can wait until cheaper prices arrive before its
 // deadline.

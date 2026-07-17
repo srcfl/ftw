@@ -537,6 +537,26 @@ func TestHistoryCounts(t *testing.T) {
 	}
 }
 
+func TestCountHistoryWithoutMarker(t *testing.T) {
+	s := freshStore(t)
+	const marker = `{"source":"synthetic-test"}`
+	if err := s.BulkRecordHistory([]HistoryPoint{
+		{TsMs: 1, JSON: marker},
+		{TsMs: 2, JSON: `{"source":"real"}`},
+		{TsMs: 3, JSON: marker},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.CountHistoryWithoutMarker(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("count without marker = %d, want 1", got)
+	}
+}
+
 func TestHistoryPruneAggregates(t *testing.T) {
 	s := freshStore(t)
 	// Insert 20 rows, all older than HotRetention

@@ -11,13 +11,11 @@ data/
 *.test
 *.out
 
-# go/cmd/* binaries built straight into go/ (e.g. `go build ./cmd/ftw-relay`).
+# go/cmd/* binaries built straight into go/.
 # These are dev build outputs, never shipped — releases build into bin/ via
 # the Makefile / release-assets workflow. Keep this list in sync with go/cmd/.
 /go/forty-two-watts
 /go/ftw
-/go/ftw-pair
-/go/ftw-relay
 /go/ftw-updater
 /go/sim-ferroamp
 /go/sim-sungrow
@@ -69,12 +67,11 @@ optimizer/.venv/
 optimizer/.pytest_cache/
 optimizer/**/__pycache__/
 
-# TLS material — never commit. Public certs go on the deploy host, private keys never leave the browser.
+# TLS material — never commit.
 *.pem
 *.crt
 *.key
 deploy/secrets/*
-!deploy/secrets/README.md
 
 # superpowers brainstorm visual companion (local only)
 .superpowers/

@@ -54,7 +54,7 @@ class FtwModal extends FtwElement {
       color: var(--fg);
       border: 1px solid var(--line);
       border-radius: var(--radius-sm);
-      /* No shadow — DESIGN.md forbids drop-shadows on cards/modals.
+      /* No shadow — the shared design system forbids drop-shadows on cards/modals.
          The 0.55 backdrop carries the elevation contrast instead. */
     }
     header {

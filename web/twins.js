@@ -9,14 +9,14 @@
   const REFRESH_MS = 10000;
   let refreshTimer = null;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
   async function fetchAll() {
     const [pv, load] = await Promise.all([
-      ownerFetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
-      ownerFetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      apiFetch('/api/pvmodel').then(r => r.json()).catch(() => ({ enabled: false })),
+      apiFetch('/api/loadmodel').then(r => r.json()).catch(() => ({ enabled: false })),
     ]);
     render(pv, load);
   }
@@ -52,7 +52,7 @@
 
   // Matches the battery-model reset button in models.js — same class
   // `.btn-reset-model` so both paths share the theme-aware styling
-  // declared in next.css (ghost look per DESIGN.md: transparent bg,
+  // declared in app.css (ghost look per the shared design system: transparent bg,
   // --line border, --fg text, theme-aware). The old inline style
   // referenced the legacy --surface2 / --border / --text-dim hex
   // tokens that don't flip with the light-mode switch, so this
@@ -113,7 +113,7 @@
     const profile = e.target && e.target.dataset && e.target.dataset.loadmodelProfile;
     if (profile) {
       if (e.target.classList.contains('active')) return;
-      ownerFetch('/api/loadmodel/profile', {
+      apiFetch('/api/loadmodel/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profile })
@@ -133,7 +133,7 @@
       'predictions while it collects samples again.')) {
       return;
     }
-    ownerFetch(endpoint, { method: 'POST' })
+    apiFetch(endpoint, { method: 'POST' })
       .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
       .then(() => fetchAll())
       .catch(err => alert('Reset failed: ' + err.message));

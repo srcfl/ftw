@@ -527,7 +527,7 @@ homeassistant:
 state:
   path: state.db
 price:
-  provider: elprisetjustnu
+  provider: sourceful
   zone: SE3
   vat_percent: 25
 weather:

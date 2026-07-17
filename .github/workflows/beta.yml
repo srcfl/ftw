@@ -38,6 +38,13 @@ jobs:
             echo "version must match vX.Y.Z-beta.N" >&2
             exit 1
           fi
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          BASE_VERSION="${TAG#v}"
+          BASE_VERSION="${BASE_VERSION%-beta.*}"
+          if [ "${BASE_VERSION}" != "${PACKAGE_VERSION}" ]; then
+            echo "${TAG} does not match package.json version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -109,7 +116,7 @@ jobs:
           build-args: |
             VERSION=${{ needs.tag.outputs.version }}
             BUILD_SHA=${{ github.sha }}
-          # Reuse the same content-addressed layers as edge and stable.
+          # Reuse the same content-addressed layers as stable.
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 

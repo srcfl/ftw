@@ -19,7 +19,7 @@ func evCatalog() []drivers.CatalogEntry {
 		{Path: "drivers/easee_cloud.lua", Filename: "easee_cloud.lua", Capabilities: []string{"ev"}},
 		{Path: "drivers/ctek_hybrid.lua", Filename: "ctek_hybrid.lua", Capabilities: []string{"ev"}},
 		{Path: "drivers/tesla_vehicle.lua", Filename: "tesla_vehicle.lua", Capabilities: []string{"vehicle"}},
-		{Path: "drivers/zap.lua", Filename: "zap.lua", Capabilities: []string{"meter", "pv"}},
+		{Path: "drivers/zap.lua", Filename: "zap.lua", Capabilities: []string{"meter", "pv", "battery", "v2x_charger"}, ReadOnly: true},
 		{Path: "drivers/p1meter.lua", Filename: "p1meter.lua", Capabilities: []string{"meter"}},
 		{Path: "drivers/huawei_battery.lua", Filename: "huawei_battery.lua", Capabilities: []string{"battery"}},
 		{Path: "drivers/sim_ev.lua", Filename: "sim_ev.lua", Capabilities: []string{"meter"}},
@@ -66,6 +66,23 @@ func TestDriverCapacitiesFromNoLoadpointsBehavesAsBefore(t *testing.T) {
 	}
 	if _, ok := got["meter"]; ok {
 		t.Error("zero-capacity driver should not appear")
+	}
+}
+
+func TestDriverCapacitiesFromExcludesTelemetryOnlyAndReadOnly(t *testing.T) {
+	driverConfigs := []config.Driver{
+		{Name: "ferroamp", Lua: "drivers/ferroamp.lua", BatteryCapacityWh: 15200},
+		// Old or hand-written Zap configs may carry a capacity but lack the
+		// new explicit flag. Catalog read_only must still be authoritative.
+		{Name: "zap", Lua: "drivers/zap.lua", BatteryCapacityWh: 60000},
+		{Name: "custom-gateway", Lua: "drivers/custom.lua", BatteryCapacityWh: 10000, BatteryTelemetryOnly: true},
+	}
+	got := driverCapacitiesFrom(driverConfigs, nil, evCatalog())
+	if len(got) != 1 || got["ferroamp"] != 15200 {
+		t.Fatalf("telemetry-only gateways entered battery control pool: %v", got)
+	}
+	if !drivers.IsReadOnlyDriver(evCatalog(), "zap.lua") {
+		t.Fatal("Zap read_only catalog declaration was not matched by filename")
 	}
 }
 
@@ -174,7 +191,7 @@ func TestIsEVOrVehicleDriverByCapabilities(t *testing.T) {
 		{"drivers/sungrow.lua", false},
 		{"drivers/p1meter.lua", false},
 		{"drivers/huawei_battery.lua", false},
-		{"drivers/zap.lua", false}, // declares meter+pv, not ev
+		{"drivers/zap.lua", false}, // read-only battery gateway, not ev
 		// A filename that LOOKS EV-ish but the driver self-declares
 		// otherwise — the previous filename-prefix heuristic would
 		// have over-matched anything starting with "sim_ev", and the

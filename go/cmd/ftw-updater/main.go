@@ -321,7 +321,7 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !isImmutableImageTag(body.Target) {
-			http.Error(w, "target must be stable vX.Y.Z, beta vX.Y.Z-beta.N, or immutable edge tag", 400)
+			http.Error(w, "target must be stable vX.Y.Z or beta vX.Y.Z-beta.N", 400)
 			return
 		}
 	case "restart":
@@ -1092,26 +1092,10 @@ func envOr(key, def string) string {
 	return def
 }
 
-// isImmutableImageTag accepts only tags produced by the stable, beta, and
-// edge publishers. Moving aliases (:latest, :beta, :edge), arbitrary
-// prereleases, metadata, and shell-shaped input are rejected at the Docker
-// boundary.
+// isImmutableImageTag accepts only tags produced by the stable and beta
+// publishers. Moving aliases, arbitrary prereleases, metadata, and shell-shaped
+// input are rejected at the Docker boundary.
 func isImmutableImageTag(s string) bool {
-	if strings.HasPrefix(s, "edge-") {
-		parts := strings.Split(s, "-")
-		if len(parts) != 3 || len(parts[2]) < 7 {
-			return false
-		}
-		if _, err := time.Parse("20060102T150405Z", parts[1]); err != nil {
-			return false
-		}
-		for _, r := range parts[2] {
-			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
-				return false
-			}
-		}
-		return true
-	}
 	if !strings.HasPrefix(s, "v") {
 		return false
 	}

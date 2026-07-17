@@ -12,7 +12,7 @@
 // Drop anywhere in the header/toolbar; keeps its own state and is safe
 // to mount alongside other persistent header bits.
 import { FtwElement } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 
 // Shared, deduped notification-history fetch, keyed on the full URL
 // (endpoint + limit). When several callers hit the SAME key in a short
@@ -22,7 +22,7 @@ import { ownerFetch } from "./owner-fetch.js";
 // into repeated identical GET /api/notifications/history. (The 30s badge
 // poll at limit=50 and a modal open at limit=100 are different keys, so the
 // cache coalesces bursts, not the steady-state poll.) Pass force=true (the
-// manual Refresh button) to bypass it. Mirrors next-app.js's fetchHistory /
+// manual Refresh button) to bypass it. Mirrors app.js's fetchHistory /
 // ftw-history-card's dailyFetchCache.
 const NOTIF_CACHE_TTL_MS = 5000;
 const notifFetchCache = new Map(); // "endpoint?limit" -> { at, rows?, promise? }
@@ -38,7 +38,7 @@ function fetchNotifRows(url, force) {
   // entry that still references THIS request may write it, so a slow older
   // request can't clobber a newer (e.g. forced-refresh) entry that replaced it.
   const owns = () => { const cur = notifFetchCache.get(url); return cur && cur.promise === promise; };
-  const promise = ownerFetch(url)
+  const promise = apiFetch(url)
     .then((r) => {
       // Don't cache a non-OK response — drop our entry so the next call
       // retries instead of serving a stale empty list for the TTL.

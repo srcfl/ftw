@@ -5,7 +5,7 @@
 // driver actually reports hp_power_w, so a site without a heat pump never
 // sees an empty card. Discovery runs once on load (one /api/drivers/{name}
 // fetch per driver); steady-state polling then only touches the heat-pump
-// drivers.
+// drivers, avoiding unnecessary work every 30 seconds.
 //
 // See docs/myuplink-oauth.md. No control here — telemetry only.
 
@@ -21,7 +21,7 @@
   var historyCache = Object.create(null);
   var refreshInFlight = false;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -173,7 +173,7 @@
   }
 
   function fetchJSON(path) {
-    return ownerFetch(path).then(function (r) { return r.json(); }).catch(function () { return null; });
+    return apiFetch(path).then(function (r) { return r.json(); }).catch(function () { return null; });
   }
 
   // One-time discovery: list drivers, fetch each detail, keep the ones that
@@ -377,8 +377,8 @@
   }
 
   // The live values are cheap and refresh every 30 s. Month/year history is
-  // comparatively expensive (SQLite/Parquet range scans, possibly over the
-  // dashboard), so cache those series for five minutes per heat pump.
+  // comparatively expensive SQLite/Parquet range scans, so cache those series
+  // for five minutes per heat pump.
   function fetchPumpHistory(name) {
     var cached = historyCache[name];
     var now = Date.now();

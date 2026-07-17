@@ -23,15 +23,9 @@ KEYBOARD_KEYMAP="us"
 KEYBOARD_LAYOUT="English (US)"
 TIMEZONE_DEFAULT="UTC"
 
-# Trixie note: stage2 is now INCLUDED. On bookworm we skipped stage2 and
-# hand-installed the few packages we needed, but trixie moved the
-# first-boot machinery (cloud-init + netplan + the systemd.run= resize
-# path that replaced the old init=…firstboot mechanism) into stage2
-# (stage2/04-cloud-init and friends). Replicating that actively-changing
-# wiring by hand is fragile and boot-loop-prone, so we ride pi-gen's
-# maintained stage2. Stage3-5 (desktop + NOOBS) stay skipped via SKIP
-# files in build.sh; stage2's own image export is suppressed there too
-# (SKIP_IMAGES) so stage-ftw produces the only image.
+# Stage2 supplies cloud-init, netplan and filesystem expansion. Stage3-5
+# (desktop + NOOBS) stay skipped in build.sh, and SKIP_IMAGES ensures that
+# stage-ftw produces the only exported image.
 STAGE_LIST="stage0 stage1 stage2 stage-ftw"
 
 # First-login creds. Users who flash with Raspberry Pi Imager will
@@ -42,9 +36,9 @@ STAGE_LIST="stage0 stage1 stage2 stage-ftw"
 FIRST_USER_NAME="ftw"
 FIRST_USER_PASS="ftw"
 
-# SSH enabled by default — the image has no console, so without SSH
-# (or wifi-connect captive portal, landing in Phase 3) there's no
-# recovery path if the web UI won't come up. Raspberry Pi Imager's
+# SSH enabled by default — the image has no console, so without SSH or
+# the Wi-Fi captive portal there is no recovery path if the web UI fails.
+# Raspberry Pi Imager's
 # advanced options can disable it per-flash if needed.
 ENABLE_SSH=1
 

@@ -89,12 +89,9 @@ func (id *Identity) PublicKeyHex() string {
 // R||S 64-byte signature as a 128-char hex string. This is the exact
 // format Nova's ownership.verifyES256Signature expects for claim proofs.
 //
-// DOMAIN SEPARATION (load-bearing): this key signs SHA-256(msg) with NO built-in
-// domain tag, and it is reused across protocols (JWTs sign base64url(header)."."
-// base64url(payload); claim proofs sign their versioned claim message). Every
-// caller MUST therefore prefix msg with a unique, versioned "ftw-<purpose>:v1:"
-// tag so a signature minted for one purpose can never be replayed as another.
-// NEVER pass attacker-influenced bytes to SignRawHex without such a prefix.
+// DOMAIN SEPARATION: this key also signs JWTs. Every raw-message caller must
+// prefix msg with a unique, versioned purpose tag. Never pass
+// attacker-influenced bytes without that prefix.
 func (id *Identity) SignRawHex(msg string) (string, error) {
 	hash := sha256.Sum256([]byte(msg))
 	r, s, err := ecdsa.Sign(rand.Reader, id.priv, hash[:])

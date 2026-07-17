@@ -5,7 +5,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -45,7 +45,9 @@
         var modbus = cap.modbus || d.modbus;
         var protocol = mqtt ? "mqtt" : (modbus ? "modbus" : (cap.http ? "http" : "?"));
         var driverFile = d.lua || "(none)";
-        var supportsBattery = catalogHasCapability(d.lua, "battery");
+        var entryForDriver = catalogEntryForLua(d.lua);
+        var supportsBattery = catalogHasCapability(d.lua, "battery") &&
+          !(entryForDriver && entryForDriver.read_only);
         html += '<div class="device-item">' +
           '<div class="device-item-header">' +
           '<strong>' + escHtml(d.name) + '</strong>' +
@@ -206,13 +208,13 @@
             '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
             '</div>' +
             // Manual fallback: when the automatic redirect can't reach this
-            // device (for example when the portal rejected an HTTP LAN
+            // device (or the portal rejected an http LAN
             // callback), the operator copies the redirected URL from the
             // address bar and pastes it here. The Pi exchanges the code over
             // its own outbound HTTPS, so no inbound callback is needed.
             '<details style="margin-top:10px">' +
             '<summary style="cursor:pointer;font-size:0.8rem;color:var(--text-dim)">Not redirected back? Paste the URL instead</summary>' +
-            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here if the page did not return to FTW automatically.</p>' +
+            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here if the page did not return to FTW.</p>' +
             '<input type="text" class="myuplink-manual-url" data-driver-idx="' + idx + '" placeholder=".../api/oauth/myuplink/callback?code=...&amp;state=..." style="font-family:var(--mono);font-size:0.78rem">' +
             '<button class="btn-add myuplink-manual-btn" type="button" data-driver-idx="' + idx + '" style="margin-top:6px">Complete connection</button>' +
             '</details>' +
@@ -327,7 +329,7 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
-      ownerFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+      apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
         // on drivers whose catalog entry advertises BOTH meter and pv.
@@ -346,6 +348,9 @@
           var source = entry.source || "bundled";
           var version = entry.installed_version || entry.version || "unknown";
           var html = '<span class="creds-badge">' + escHtml(source) + ' · v' + escHtml(version) + '</span>';
+          if (entry.read_only) {
+            html += ' <span class="creds-badge">telemetry only</span>';
+          }
           if (entry.update_available && entry.repository_id) {
             html += ' <button class="btn-add drv-module-update" type="button" data-driver-id="' + escHtml(entry.id) +
               '" data-repository-id="' + escHtml(entry.repository_id) + '" data-version="' + escHtml(entry.upstream_version) + '">Update to v' +
@@ -363,7 +368,7 @@
             btn.disabled = true;
             var status = btn.parentElement.querySelector(".drv-module-action");
             if (status) status.textContent = " Validating and activating…";
-            ownerFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/install", {
+            apiFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/install", {
               method: "POST", headers: {"Content-Type":"application/json"},
               body: JSON.stringify({repository_id: btn.dataset.repositoryId, version: btn.dataset.version})
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "install failed"); return body; }); })
@@ -376,7 +381,7 @@
             btn.disabled = true;
             var status = btn.parentElement.querySelector(".drv-module-action");
             if (status) status.textContent = " Rolling back…";
-            ownerFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/rollback", {
+            apiFetch("/api/device_repository/drivers/" + encodeURIComponent(btn.dataset.driverId) + "/rollback", {
               method: "POST", headers: {"Content-Type":"application/json"},
               body: JSON.stringify({logical_path: btn.dataset.logicalPath})
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
@@ -465,7 +470,7 @@
           var entry = lua && byLua[lua];
           var row = wrap.closest(".device-core-row");
           var caps = (entry && entry.capabilities) || [];
-          var show = caps.indexOf("battery") >= 0;
+          var show = caps.indexOf("battery") >= 0 && !(entry && entry.read_only);
           wrap.hidden = !show;
           wrap.style.display = show ? "" : "none";
           if (row) row.classList.toggle("field-row-single", !show);
@@ -500,6 +505,7 @@
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
           opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
           opt.dataset.verificationStatus = e.verification_status || "experimental";
+          opt.dataset.readOnly = e.read_only ? "true" : "false";
           if (e.verification_notes) opt.title = e.verification_notes;
           sel.appendChild(opt);
         });
@@ -527,6 +533,11 @@
           // untouched.
           var entry = (S.catalogByLua || {})[sel.value];
           var entryCaps = (entry && entry.capabilities) || [];
+          if (entry && entry.read_only && entryCaps.indexOf("battery") >= 0) {
+            // Admit the battery reading without adding the gateway to the
+            // dispatch pool. battery_capacity_wh remains the control opt-in.
+            driver.battery_telemetry_only = true;
+          }
           var connHost = chosen.dataset.connectionHost || "";
           if (entryCaps.indexOf("vehicle") >= 0) {
             driver.config = { ip: "", vin: "" };
@@ -585,7 +596,7 @@
               .replace(/_cloud$/i, "");
             if (!provider) provider = "easee";
           }
-          ownerFetch("/api/ev/chargers", {
+          apiFetch("/api/ev/chargers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ provider: provider, email: email, password: pw }),
@@ -641,7 +652,7 @@
           }
           if (statusEl) { statusEl.textContent = "Verifying…"; statusEl.style.color = "var(--text-dim)"; }
           vbtn.disabled = true;
-          ownerFetch("/api/drivers/verify_tesla", {
+          apiFetch("/api/drivers/verify_tesla", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ ip: ip, vin: vin }),
@@ -673,8 +684,8 @@
       // MyUplink (and any OAuth authorization-code apicreds driver): open the
       // provider consent in a new tab. /start reads the SAVED client_id, so
       // the operator must save the row first; we pass the browser's own
-      // callback URL (location.origin) so the server uses the exact LAN origin
-      // the browser sees. The refresh_token lands server-side; the operator
+      // callback URL (location.origin) so the server does not need to infer it.
+      // The refresh_token lands server-side; the operator
       // reloads to see the badge flip to Connected.
       bodyEl.querySelectorAll(".myuplink-connect-btn").forEach(function (cbtn) {
         cbtn.addEventListener("click", function () {
@@ -690,7 +701,7 @@
           var redirectURI = location.origin + "/api/oauth/myuplink/callback";
           var qs = "?driver=" + encodeURIComponent(name) +
             "&redirect_uri=" + encodeURIComponent(redirectURI);
-          ownerFetch("/api/oauth/myuplink/start" + qs)
+          apiFetch("/api/oauth/myuplink/start" + qs)
             .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, body: j }; }); })
             .then(function (res) {
               if (!res.ok || !res.body || !res.body.authorize_url) {
@@ -720,7 +731,7 @@
           if (!url) { setStatus("Paste the redirect URL first", "var(--red-e)"); return; }
           setStatus("Completing…");
           mbtn.disabled = true;
-          ownerFetch("/api/oauth/myuplink/exchange", {
+          apiFetch("/api/oauth/myuplink/exchange", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ redirect_url: url }),
@@ -758,7 +769,7 @@
             outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
           }
           testBtn.disabled = true;
-          ownerFetch("/api/drivers/test", {
+          apiFetch("/api/drivers/test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(driver),

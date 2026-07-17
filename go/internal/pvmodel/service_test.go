@@ -21,7 +21,7 @@ func TestResetPersistsSurvivesRestart(t *testing.T) {
 	cs := func(time.Time) float64 { return 500 }
 	cl := func(time.Time) (float64, bool) { return 20, true }
 
-	// --- Phase 1: seed a "trained" model and persist it ---
+	// --- Step 1: seed a "trained" model and persist it ---
 	svc := NewService(db, nil, cs, cl, ratedW)
 	// Mutate the model to simulate training.
 	svc.mu.Lock()
@@ -44,7 +44,7 @@ func TestResetPersistsSurvivesRestart(t *testing.T) {
 		t.Fatalf("expected 200 samples in stored model, got %d", trained.Samples)
 	}
 
-	// --- Phase 2: reset ---
+	// --- Step 2: reset ---
 	svc.Reset()
 
 	// Verify the reset state is now in the DB (samples=0, fresh beta).
@@ -63,7 +63,7 @@ func TestResetPersistsSurvivesRestart(t *testing.T) {
 		t.Fatalf("expected Beta[0]=0 after reset, got %f", reset.Beta[0])
 	}
 
-	// --- Phase 3: simulate restart ---
+	// --- Step 3: simulate restart ---
 	svc2 := NewService(db, nil, cs, cl, ratedW)
 	m := svc2.Model()
 	if m.Samples != 0 {

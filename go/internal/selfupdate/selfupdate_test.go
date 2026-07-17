@@ -289,31 +289,6 @@ func TestCheck_BetaChannelSelectsNewestBetaAndPersistsChannel(t *testing.T) {
 	}
 }
 
-func TestCheck_EdgeChannelUsesNewestImmutableTag(t *testing.T) {
-	const repo = "srcfl/ftw"
-	reg := newFakeRegistry(t, repo)
-	reg.addTag("edge")
-	reg.addTag("edge-20260711T100000Z-abcdef0")
-	reg.addTag("edge-not-a-time-deadbee")
-	reg.addTag("edge-20260712T120000Z-1234abc")
-	rsrv := reg.server()
-	defer rsrv.Close()
-
-	st := newMemStore()
-	st.m[channelKey] = "edge"
-	c := New(Config{Repo: repo, CurrentVersion: "edge-20260711T100000Z-abcdef0", RegistryBaseURL: rsrv.URL}, st)
-	info, err := c.Check(context.Background(), true)
-	if err != nil {
-		t.Fatalf("Check: %v", err)
-	}
-	if info.Channel != ChannelEdge || info.Latest != "edge-20260712T120000Z-1234abc" || !info.UpdateAvailable {
-		t.Fatalf("edge info = %+v", info)
-	}
-	if want := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC); !info.PublishedAt.Equal(want) {
-		t.Fatalf("published = %s, want %s", info.PublishedAt, want)
-	}
-}
-
 func TestNew_InfersChannelFromBuildVersion(t *testing.T) {
 	for _, tc := range []struct {
 		version string
@@ -321,12 +296,24 @@ func TestNew_InfersChannelFromBuildVersion(t *testing.T) {
 	}{
 		{"v1.2.3", ChannelStable},
 		{"v1.3.0-beta.4", ChannelBeta},
-		{"edge-20260712T120000Z-1234abc", ChannelEdge},
+		{"edge-20260712T120000Z-1234abc", ChannelBeta},
 	} {
 		c := New(Config{CurrentVersion: tc.version}, newMemStore())
 		if got := c.Info().Channel; got != tc.want {
 			t.Errorf("version %q inferred %q, want %q", tc.version, got, tc.want)
 		}
+	}
+}
+
+func TestNew_MigratesPersistedEdgeChannelToBeta(t *testing.T) {
+	st := newMemStore()
+	st.m[channelKey] = "edge"
+	c := New(Config{CurrentVersion: "v1.2.3"}, st)
+	if got := c.Info().Channel; got != ChannelBeta {
+		t.Fatalf("channel = %q, want beta", got)
+	}
+	if got := st.m[channelKey]; got != "beta" {
+		t.Fatalf("persisted channel = %q, want beta", got)
 	}
 }
 

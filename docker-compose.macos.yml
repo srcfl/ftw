@@ -17,7 +17,7 @@
 # fail silently. This file uses bridge networking with published ports
 # instead, which is the only thing that works on Docker Desktop.
 #
-# NETWORKING CAVEATS ON macOS (read docs/deploy-platforms.md for detail):
+# NETWORKING CAVEATS ON macOS:
 #   - The app reaches the embedded broker by SERVICE NAME, not localhost.
 #     In config.yaml set the MQTT host to `mosquitto` (port 1883), NOT
 #     `localhost` / `127.0.0.1`. There is no host networking to make
@@ -30,7 +30,7 @@
 #     reach it at <mac-ip>:1883 because port 1883 is published below.
 #   - ARP-based device identity (`mac:<addr>`) won't resolve across the
 #     VM boundary, so device_id falls back to `make:serial` (preferred,
-#     set by the driver) or `ep:<endpoint>`. See docs/device-identity.md.
+#     set by the driver) or `ep:<endpoint>`.
 #
 # PERSISTENT STATE.  config.yaml, state.db, battery models and the cold/
 # Parquet archive live in ./data and survive image upgrades. Unlike the

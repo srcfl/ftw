@@ -660,13 +660,24 @@ func TestSlotDirectiveAt(t *testing.T) {
 		Defaults: Params{Mode: ModeArbitrage},
 		last: &Plan{
 			GeneratedAtMs: now.Add(-time.Minute).UnixMilli(),
-			Actions: []Action{{
-				SlotStartMs: slotStart.UnixMilli(),
-				SlotLenMin:  slotLenMin,
-				BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
-				SoCPct:      45.5,
-				GridW:       -150, // plan expects 150 W export
-			}},
+			Actions: []Action{
+				{
+					SlotStartMs: slotStart.UnixMilli(),
+					SlotLenMin:  slotLenMin,
+					SpotOre:     40,
+					BatteryW:    800, // 800 W × 15/60 h = 200 Wh for the slot
+					SoCPct:      45.5,
+					GridW:       -150, // plan expects 150 W export
+				},
+				{
+					SlotStartMs: slotStart.Add(15 * time.Minute).UnixMilli(),
+					SlotLenMin:  slotLenMin,
+					PriceOre:    120, // later grid charge costs more than export earns now
+					BatteryW:    2000,
+					GridW:       1500,
+					SoCPct:      80,
+				},
+			},
 		},
 	}
 
@@ -694,6 +705,43 @@ func TestSlotDirectiveAt(t *testing.T) {
 	// silently breaks, the cap silently never fires.
 	if d.GridW != -150 {
 		t.Errorf("GridW = %f, want −150 (must propagate from Action.GridW)", d.GridW)
+	}
+	if d.LivePVSurplusSoCCapPct != 80 {
+		t.Errorf("LivePVSurplusSoCCapPct = %f, want 80 from later expensive grid charge", d.LivePVSurplusSoCCapPct)
+	}
+}
+
+func TestLivePVSurplusSoCCapPctEconomicGate(t *testing.T) {
+	base := []Action{
+		{SpotOre: 50, BatteryW: 0, SoCPct: 40},
+		{PriceOre: 120, BatteryW: 2000, GridW: 1500, SoCPct: 75},
+	}
+	tests := []struct {
+		name    string
+		mutate  func([]Action)
+		wantCap float64
+	}{
+		{name: "later expensive grid charge is replaceable", wantCap: 75},
+		{name: "profitable current export is preserved", mutate: func(a []Action) {
+			a[0].SpotOre = 150
+		}, wantCap: 0},
+		{name: "future PV charge is not grid funded", mutate: func(a []Action) {
+			a[1].GridW = -500
+		}, wantCap: 0},
+		{name: "current discharge is never reversed", mutate: func(a []Action) {
+			a[0].BatteryW = -1000
+		}, wantCap: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			actions := append([]Action(nil), base...)
+			if tc.mutate != nil {
+				tc.mutate(actions)
+			}
+			if got := livePVSurplusSoCCapPct(actions, 0, Params{}); got != tc.wantCap {
+				t.Errorf("cap = %.1f, want %.1f", got, tc.wantCap)
+			}
+		})
 	}
 }
 

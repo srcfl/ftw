@@ -3,7 +3,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -33,7 +33,7 @@
       var el = document.getElementById("ha-status-indicator");
       if (!el) return;
       function refresh() {
-        ownerFetch("/api/ha/status").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/ha/status").then(function (r) { return r.json(); }).then(function (d) {
           if (!d.enabled) {
             el.className = "ha-status-indicator ha-off";
             el.textContent = "○  disabled in config";

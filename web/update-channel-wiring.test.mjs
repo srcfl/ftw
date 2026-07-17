@@ -4,8 +4,8 @@ import test from "node:test";
 
 const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 
-test("update dialog exposes stable beta and edge as a segmented channel control", () => {
-  assert.match(badge, /\["stable", "beta", "edge"\]/);
+test("update dialog exposes stable and beta as a segmented channel control", () => {
+  assert.match(badge, /\["stable", "beta"\]/);
   assert.match(badge, /role="group" aria-label="Update channel"/);
   assert.match(badge, /aria-pressed=/);
 });

@@ -37,14 +37,8 @@ RG_ARGS=(
   --glob '!release/**'
   --glob '!optimizer/.venv/**'
   --glob '!**/__pycache__/**'
-  --glob '!docs/archive/**'
-  --glob '!docs/blog/**'
   --glob '!CHANGELOG.md'
   --glob '!.changeset/**'
-  --glob '!MIGRATION.md'
-  --glob '!docs/adr/0002-ftw-name-and-sourceful-stewardship.md'
-  --glob '!docs/ftw-brand-inventory.md'
-  --glob '!docs/superpowers/specs/2026-07-13-ftw-rebrand-and-sourceful-migration.md'
   --glob '!.github/brand/**'
   --glob '!package-lock.json'
   --glob '!deploy/local-e2e/tier2/package-lock.json'
@@ -112,8 +106,8 @@ if [ -s "${UNCLASSIFIED}" ]; then
   echo "New active legacy-brand copy is not classified:" >&2
   sed 's/^/  /' "${UNCLASSIFIED}" >&2
   echo >&2
-  echo "Use FTW wording, or document the compatibility reason in" >&2
-  echo "docs/ftw-brand-inventory.md before adding a narrow exception." >&2
+  echo "Use FTW wording, or add a narrow compatibility exception in" >&2
+  echo ".github/brand/compatibility-allowlist.txt." >&2
   exit 1
 fi
 

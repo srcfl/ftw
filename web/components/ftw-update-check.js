@@ -26,15 +26,13 @@
 //      should make from the dashboard itself.
 //
 // Reuse:
-//   - <ftw-modal> (already shipped for /next) supplies the overlay
+//   - <ftw-modal> supplies the overlay
 //     chrome, ESC/backdrop-close handling, and theming tokens.
-//   - Tokens (--surface, --border, --accent, --text-dim, --radius) are
-//     legacy palette values declared on :root in /components/theme.css,
-//     so the component looks at home in /setup.html (legacy look) and
-//     in /next.html (redesign) without per-context styling.
+//   - Shared tokens declared on :root in /components/theme.css keep the
+//     component consistent in setup and the dashboard.
 
 import { FtwElement } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
@@ -49,9 +47,7 @@ class FtwUpdateCheck extends FtwElement {
     :host(.hidden) { display: none; }
 
     /* Tokens resolved against /components/theme.css — amber single-
-       accent palette (--accent-e), oklch ink canvas, hairline 1px
-       borders. The component looks native to /setup (legacy page
-       wrapper re-skinned onto the same tokens) and /next (dashboard). */
+       accent palette, ink canvas and hairline borders. */
     .banner {
       display: flex;
       flex-direction: column;
@@ -193,7 +189,7 @@ class FtwUpdateCheck extends FtwElement {
 
   // ---- data ----
   _check() {
-    ownerFetch("/api/version/check")
+    apiFetch("/api/version/check")
       .then((r) => {
         // 503 = self-update disabled by deploy. Stay invisible — this
         // is config, not an error.
@@ -215,7 +211,7 @@ class FtwUpdateCheck extends FtwElement {
     this._updateStartedAt = Date.now();
     this.update();
 
-    ownerFetch("/api/version/update", {
+    apiFetch("/api/version/update", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
     })
@@ -260,7 +256,7 @@ class FtwUpdateCheck extends FtwElement {
 
   _tick() {
     const signal = this._pollAbort ? this._pollAbort.signal : undefined;
-    ownerFetch("/api/version/update/status", { signal })
+    apiFetch("/api/version/update/status", { signal })
       .then((r) => (r.ok ? r.json() : null))
       .then((st) => {
         // Belt-and-braces: if the phase was reset while the fetch was in

@@ -264,6 +264,20 @@ end
 	}
 }
 
+func TestEmitBatteryAllowedForTelemetryOnlyDriver(t *testing.T) {
+	tel := telemetry.NewStore()
+	env := NewHostEnv("read-only-gateway", tel)
+	env.BatteryTelemetryOnly = true
+
+	if err := env.emitTelemetry([]byte(`{"type":"battery","w":750,"soc":0.61}`)); err != nil {
+		t.Fatalf("emitTelemetry: %v", err)
+	}
+	got := tel.Get("read-only-gateway", telemetry.DerBattery)
+	if got == nil || got.RawW != 750 || got.SoC == nil || *got.SoC != 0.61 {
+		t.Fatalf("telemetry-only battery reading = %+v, want w=750 soc=0.61", got)
+	}
+}
+
 func TestEmitBatteryPassesWhenCapacitySet(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.lua")

@@ -2,7 +2,7 @@
 //
 // This is the single source of truth that the file-watcher re-parses on
 // every change and that the settings UI writes back. All fields are
-// hot-reloadable unless noted otherwise. See docs/configuration.md.
+// hot-reloadable unless noted otherwise.
 package config
 
 import (
@@ -30,7 +30,6 @@ type Config struct {
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
-	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	CalDAV           *CalDAV            `yaml:"caldav,omitempty" json:"caldav,omitempty"`
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
@@ -146,9 +145,7 @@ type Nova struct {
 }
 
 // Loadpoint is one EV charge point the planner can reason about.
-// Phase 3 introduces the schema + observable surface; Phase 4 wires
-// it into the DP state space so the MPC optimizes battery + EV jointly.
-// See docs/plan-ems-contract.md + go/internal/loadpoint.
+// The planner and go/internal/loadpoint optimize battery + EV jointly.
 type Loadpoint struct {
 	ID                string    `yaml:"id" json:"id"`
 	DriverName        string    `yaml:"driver_name" json:"driver_name"`
@@ -195,21 +192,6 @@ type V2XPolicy struct {
 	ExportAllowed       bool    `yaml:"export_allowed" json:"export_allowed"`
 	GridChargingAllowed bool    `yaml:"grid_charging_allowed" json:"grid_charging_allowed"`
 	CycleCostOreKWh     float64 `yaml:"cycle_cost_ore_kwh,omitempty" json:"cycle_cost_ore_kwh,omitempty"`
-}
-
-// OCPP configures the embedded OCPP 1.6J Central System for EV chargers.
-// When enabled, EV chargers connect to ws://<bind>:<port>/<chargerId>
-// and their power readings flow into telemetry.Store as DerEV samples,
-// which the dispatch clamp uses to keep home batteries from feeding
-// the car. See go/internal/ocpp.
-type OCPP struct {
-	Enabled            bool   `yaml:"enabled" json:"enabled"`
-	Bind               string `yaml:"bind,omitempty" json:"bind,omitempty"`
-	Port               int    `yaml:"port,omitempty" json:"port,omitempty"`
-	Path               string `yaml:"path,omitempty" json:"path,omitempty"`
-	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
-	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
-	HeartbeatIntervalS int    `yaml:"heartbeat_interval_s,omitempty" json:"heartbeat_interval_s,omitempty"`
 }
 
 // EVCharger is the high-level EV charger config written by the Settings UI.
@@ -335,7 +317,7 @@ type CalDAV struct {
 	ManageCredentials *bool `yaml:"manage_credentials,omitempty" json:"manage_credentials,omitempty"`
 
 	// Listen is the bind address for the in-process CalDAV server. Default
-	// ":5232". FTW binds it on the trusted LAN.
+	// ":5232". FTW binds it on the LAN.
 	Listen string `yaml:"listen,omitempty" json:"listen,omitempty"`
 }
 
@@ -554,8 +536,7 @@ type Planner struct {
 	// energy-allocation path back to the legacy PI-on-grid-target
 	// path. Provided for emergency rollback only — the energy path
 	// respects the principle "plan allocates energy, EMS reacts to
-	// live data" and is the correct architecture (see
-	// docs/plan-ems-contract.md).
+	// live data".
 	LegacyDispatch bool `yaml:"legacy_dispatch,omitempty" json:"legacy_dispatch,omitempty"`
 
 	// UseEnergyDispatch is the deprecated inverse of LegacyDispatch.
@@ -604,13 +585,15 @@ type Site struct {
 	// on existing installs.
 	SlewEnabled *bool `yaml:"slew_enabled,omitempty" json:"slew_enabled,omitempty"`
 
-	// PVSurplusAbsorbSoCCapPct enables the opt-in PV-surplus absorber
-	// underlay in the energy-dispatch path (planner_cheap /
+	// PVSurplusAbsorbSoCCapPct is the operator override for the PV-surplus
+	// absorber underlay in the energy-dispatch path (planner_cheap /
 	// planner_arbitrage). When the planner's slot allocation would still
 	// leave grid exporting beyond pv_surplus_absorb_threshold_w AND
 	// average SoC is below this cap, the dispatch redirects the leftover
 	// export into the battery instead of crossing the meter. Never
-	// reverses a discharge plan. 0 = disabled (default).
+	// reverses a discharge plan. 0 = no operator override; the planner can
+	// still enable a slot when capture displaces a more expensive future
+	// grid-funded charge.
 	//
 	// Suggested 88 — leaves 2 pp margin below the planner's typical
 	// soc_max_pct = 90 so the absorber doesn't slam into the wall.
@@ -618,8 +601,8 @@ type Site struct {
 
 	// PVSurplusAbsorbThresholdW is the trigger threshold for the
 	// absorber: only fires when projected grid export exceeds this many
-	// watts after the plan's target. Defaults to 100 W when the cap is
-	// set but this isn't.
+	// watts after the plan's target. Defaults to 100 W whenever the
+	// operator or planner enables absorption.
 	PVSurplusAbsorbThresholdW float64 `yaml:"pv_surplus_absorb_threshold_w,omitempty" json:"pv_surplus_absorb_threshold_w,omitempty"`
 
 	// DCLinkProtectionEnabled opts into a live-state PV curtail that
@@ -702,6 +685,13 @@ type Driver struct {
 	Lua               string  `yaml:"lua,omitempty" json:"lua,omitempty"` // path to .lua file
 	IsSiteMeter       bool    `yaml:"is_site_meter,omitempty" json:"is_site_meter,omitempty"`
 	BatteryCapacityWh float64 `yaml:"battery_capacity_wh,omitempty" json:"battery_capacity_wh,omitempty"`
+	// BatteryTelemetryOnly allows a read-only gateway driver to publish a
+	// physical battery's telemetry without making that driver eligible for
+	// battery dispatch. It is an explicit control-pool opt-out and wins even if
+	// a stale or hand-written config also contains BatteryCapacityWh.
+	// Sourceful Zap is the canonical user: its local API exposes battery data,
+	// but no stable semantic set-power endpoint.
+	BatteryTelemetryOnly bool `yaml:"battery_telemetry_only,omitempty" json:"battery_telemetry_only,omitempty"`
 	// MaxChargeW + MaxDischargeW set this driver's per-command power
 	// ceiling (site-signed +/-). Both optional; zero = fall through to
 	// the global MaxCommandW = 5 kW default the dispatcher has shipped
@@ -719,7 +709,7 @@ type Driver struct {
 	// whose group also has live PV output — staying DC-coupled on the
 	// same inverter avoids the DC→AC→AC→DC conversion overhead of
 	// cross-charging. Untagged drivers keep today's capacity-proportional
-	// behavior. See issue #143 and docs/configuration.md.
+	// behavior. See issue #143.
 	InverterGroup string `yaml:"inverter_group,omitempty" json:"inverter_group,omitempty"`
 	// SupportsPVCurtail flags this driver as one that handles the
 	// `curtail` / `curtail_disable` actions in its lua. Drivers with
@@ -857,7 +847,7 @@ type StateConf struct {
 
 // Price is the spot-price source config.
 type Price struct {
-	Provider         string  `yaml:"provider" json:"provider"` // elprisetjustnu | entsoe | none
+	Provider         string  `yaml:"provider" json:"provider"` // sourceful | elprisetjustnu | entsoe | none
 	Zone             string  `yaml:"zone,omitempty" json:"zone,omitempty"`
 	GridTariffOreKwh float64 `yaml:"grid_tariff_ore_kwh,omitempty" json:"grid_tariff_ore_kwh,omitempty"`
 	VATPercent       float64 `yaml:"vat_percent,omitempty" json:"vat_percent,omitempty"`
@@ -966,11 +956,6 @@ func (c Config) MaskSecrets() Config {
 		cp.Password = ""
 		out.HomeAssistant = &cp
 	}
-	if out.OCPP != nil {
-		cp := *out.OCPP
-		cp.Password = ""
-		out.OCPP = &cp
-	}
 	if out.Price != nil {
 		cp := *out.Price
 		cp.APIKey = ""
@@ -1045,9 +1030,6 @@ func (incoming *Config) PreserveMaskedSecrets(existing *Config) {
 	}
 	if incoming.HomeAssistant != nil && existing.HomeAssistant != nil && incoming.HomeAssistant.Password == "" {
 		incoming.HomeAssistant.Password = existing.HomeAssistant.Password
-	}
-	if incoming.OCPP != nil && existing.OCPP != nil && incoming.OCPP.Password == "" {
-		incoming.OCPP.Password = existing.OCPP.Password
 	}
 	if incoming.Price != nil && existing.Price != nil && incoming.Price.APIKey == "" {
 		incoming.Price.APIKey = existing.Price.APIKey

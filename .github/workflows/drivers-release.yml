@@ -15,14 +15,14 @@ on:
         description: Driver channel to publish from the selected Git ref
         type: choice
         required: true
-        default: edge
-        options: [edge, beta, stable]
+        default: beta
+        options: [beta, stable]
 
 permissions:
   contents: write
 
 concurrency:
-  group: drivers-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'edge' }}
+  group: drivers-release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'beta' }}
   cancel-in-progress: false
 
 jobs:
@@ -56,7 +56,7 @@ jobs:
       - name: Select channel
         id: channel
         env:
-          REQUESTED_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'edge' }}
+          REQUESTED_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'beta' }}
         run: |
           set -euo pipefail
           tag="drivers-${REQUESTED_CHANNEL}"
@@ -64,6 +64,27 @@ jobs:
           echo "name=${REQUESTED_CHANNEL}" >> "${GITHUB_OUTPUT}"
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "base_url=${base_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: Require exact beta before stable promotion
+        if: steps.channel.outputs.name == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          beta_dir="${RUNNER_TEMP}/ftw-driver-beta"
+          mkdir -p "${beta_dir}"
+          gh release download drivers-beta \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern manifest.payload.json \
+            --dir "${beta_dir}" \
+            --clobber
+          beta_commit="$(jq -r '.commit // empty' "${beta_dir}/manifest.payload.json")"
+          if [ "${beta_commit}" != "${GITHUB_SHA}" ]; then
+            echo "drivers-beta contains ${beta_commit:-no commit}, not stable candidate ${GITHUB_SHA}." >&2
+            echo "Publish and validate this exact commit on beta before promotion." >&2
+            exit 1
+          fi
+          echo "Promoting tested driver beta ${beta_commit}."
 
       - name: Build signed publication
         working-directory: go

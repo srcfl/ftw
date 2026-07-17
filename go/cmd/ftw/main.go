@@ -43,7 +43,6 @@ import (
 	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/nova"
-	"github.com/srcfl/ftw/go/internal/ocpp"
 	"github.com/srcfl/ftw/go/internal/priceforecast"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
@@ -291,9 +290,9 @@ func main() {
 			}
 		}
 	}
-	for _, d := range cfg.Drivers {
-		if d.BatteryCapacityWh > 0 && models[d.Name] == nil {
-			models[d.Name] = battery.New(d.Name)
+	for name := range capacities {
+		if models[name] == nil {
+			models[name] = battery.New(name)
 		}
 	}
 
@@ -408,8 +407,8 @@ func main() {
 	// ---- EV loadpoints ----
 	// Manager is created early so the config hot-reload closure can
 	// reference it; actual Load() runs against initial cfg below.
-	// Phase 4 wires the first plugged-in loadpoint's state into the
-	// MPC's DP so battery + EV are co-optimized in one DP.
+	// The planner consumes loadpoint state so battery and EV can be
+	// co-optimized in one DP.
 	lpMgr := loadpoint.NewManager()
 	if len(cfg.Loadpoints) > 0 {
 		lpMgr.Load(buildLoadpointConfigs(cfg.Loadpoints))
@@ -1142,9 +1141,8 @@ func main() {
 			mpcSvc.GridTariffOreKwh = cfg.Price.GridTariffOreKwh
 			mpcSvc.VATPercent = cfg.Price.VATPercent
 		}
-		// Persist every replan's Diagnostic so operators can time-
-		// travel. See docs/mpc-planner.md + planner_diagnostics
-		// table in state/store.go.
+		// Persist every replan's Diagnostic so operators can inspect
+		// past decisions in the planner_diagnostics table.
 		mpcSvc.SaveDiag = func(d *mpc.Diagnostic, reason string) error {
 			js, err := json.Marshal(d)
 			if err != nil {
@@ -1159,7 +1157,7 @@ func main() {
 		//   PlanTarget — legacy grid-target path (grid_target_w, mode str)
 		//   SlotDirective — new energy-allocation path (Wh per slot)
 		// State.UseEnergyDispatch picks which one is actually used when a
-		// planner mode is active; see docs/plan-ems-contract.md.
+		// planner mode is active.
 		ctrl.PlanTarget = mpcSvc.SlotAt
 		ctrl.SlotDirective = func(now time.Time) (control.SlotDirective, bool) {
 			d, ok := mpcSvc.SlotDirectiveAt(now)
@@ -1167,21 +1165,22 @@ func main() {
 				return control.SlotDirective{}, false
 			}
 			return control.SlotDirective{
-				SlotStart:         d.SlotStart,
-				SlotEnd:           d.SlotEnd,
-				BatteryEnergyWh:   d.BatteryEnergyWh,
-				SoCTargetPct:      d.SoCTargetPct,
-				Strategy:          string(d.Strategy),
-				PVLimitW:          d.PVLimitW,
-				PlannedGridW:      d.GridW,
-				HasPlannedGridW:   true,
-				LoadpointEnergyWh: d.LoadpointEnergyWh,
+				SlotStart:              d.SlotStart,
+				SlotEnd:                d.SlotEnd,
+				BatteryEnergyWh:        d.BatteryEnergyWh,
+				SoCTargetPct:           d.SoCTargetPct,
+				Strategy:               string(d.Strategy),
+				PVLimitW:               d.PVLimitW,
+				PlannedGridW:           d.GridW,
+				HasPlannedGridW:        true,
+				LivePVSurplusSoCCapPct: d.LivePVSurplusSoCCapPct,
+				LoadpointEnergyWh:      d.LoadpointEnergyWh,
 			}, true
 		}
 		// Default to the energy-allocation path. The plan is a
 		// scheduler (decides WHEN each strategy applies); the EMS is
 		// the regulator (decides HOW batteries react — from live
-		// telemetry, not plan forecasts). See docs/plan-ems-contract.md.
+		// telemetry, not plan forecasts).
 		// `planner.legacy_dispatch: true` opts back to the old
 		// PI-on-grid-target path for emergency rollback.
 		//
@@ -1235,14 +1234,8 @@ func main() {
 	}
 
 	// ---- EV loadpoint controller ----
-	// Phase 1 of the EV-arch refactor (issue #172): the per-tick EV
-	// dispatch that used to live inline in the control loop is now
-	// owned by loadpoint.Controller. Behaviour is identical — same
-	// 5 s cadence, same energy-allocation contract, same snap. The
-	// separation exists so follow-up PRs can give each loadpoint its
-	// own goroutine + driver-declared cadence (#172 PR 2) and a
-	// phase/step state machine (#172 PR 3) without disturbing
-	// battery dispatch.
+	// loadpoint.Controller owns per-tick EV dispatch, including the
+	// energy-allocation contract, snapping and phase transitions.
 	//
 	// Adapters here keep loadpoint independent of mpc/telemetry
 	// (mpc already imports loadpoint — the cycle must go this way).
@@ -1659,6 +1652,21 @@ func main() {
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
+	// Self-sovereign site identity: always generated on first boot, Nova-
+	// format (P-256 PEM) so federation can reuse it, but never dependent on
+	// Nova being enabled. Canonical path is the same nova.key default so
+	// existing federated gateways keep their claimed key.
+	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
+	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
+		identityKeyPath = cfg.Nova.KeyPath
+	}
+	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+	if err != nil {
+		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
+	} else {
+		slog.Info("site identity ready", "pubkey_prefix", siteIdentity.PublicKeyHex()[:16])
+	}
+
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1695,7 +1703,6 @@ func main() {
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
-
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -1882,27 +1889,6 @@ func main() {
 				"mqtt", fmt.Sprintf("%s:%d", cfg.Nova.MQTTHost, cfg.Nova.MQTTPort),
 				"gateway_serial", cfg.Nova.GatewaySerial,
 				"schema_mode", cfg.Nova.SchemaMode)
-		}
-	}
-
-	// ---- OCPP 1.6J Central System (EV chargers) ----
-	if cfg.OCPP != nil && cfg.OCPP.Enabled {
-		ocppCfg := &ocpp.Config{
-			Enabled:            cfg.OCPP.Enabled,
-			Bind:               cfg.OCPP.Bind,
-			Port:               cfg.OCPP.Port,
-			Path:               cfg.OCPP.Path,
-			Username:           cfg.OCPP.Username,
-			Password:           cfg.OCPP.Password,
-			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
-		}
-		ocppSrv, err := ocpp.Start(ctx, ocppCfg, tel)
-		if err != nil {
-			slog.Warn("OCPP central system failed to start", "err", err)
-		} else {
-			defer ocppSrv.Stop()
-			// API surface for /api/ev_chargers etc. lands in Unit 5.
-			_ = ocppSrv
 		}
 	}
 
@@ -2554,6 +2540,11 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
+		if d.BatteryTelemetryOnly || drivers.IsReadOnlyDriver(catalog, d.Lua) {
+			// A telemetry gateway must never enter MPC/dispatch even if an old
+			// or hand-written config also carries a battery capacity.
+			continue
+		}
 		if _, isEV := evDrivers[d.Name]; isEV {
 			// Don't count EV vehicle capacity as battery capacity.
 			// (Value remains in cfg.Drivers for any driver-side use.)
@@ -2758,7 +2749,7 @@ func evSamplesFromTelemetry(tel *telemetry.Store) []calendar.EVSample {
 }
 
 // planSlotsFromMPC projects the latest MPC plan into the shape the calendar
-// service's plan publisher consumes (#498, Phase 2). nil-safe: returns nil
+// service's plan publisher consumes. Nil-safe: returns nil
 // when the planner is disabled or has no plan yet.
 func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
 	if mpcSvc == nil {
@@ -3170,7 +3161,7 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 			row["meter_w"] = r.SmoothedW
 		}
 		// EV charge power: required for the live chart's EV series
-		// (web/next-app.js reads `d.ev_w` per driver from /api/history).
+		// (web/app.js reads `d.ev_w` per driver from /api/history).
 		// Without it the chart's EV trace is always zero — the in-memory
 		// /api/status DOES carry ev_w, but history rows never did until
 		// this row was added.

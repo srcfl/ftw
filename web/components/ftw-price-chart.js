@@ -17,7 +17,7 @@
 // config endpoint is missing.
 
 import { FtwElement } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -235,7 +235,7 @@ class FtwPriceChart extends FtwElement {
 
   async _loadConfig() {
     try {
-      const r = await ownerFetch("/api/config");
+      const r = await apiFetch("/api/config");
       const j = await r.json();
       const v = j && j.price && j.price.vat_percent;
       if (typeof v === "number" && v > 0) {
@@ -255,7 +255,7 @@ class FtwPriceChart extends FtwElement {
       midnight.setHours(0, 0, 0, 0);
       const since = midnight.getTime();
       const until = Date.now() + 48 * 3600_000;
-      const r = await ownerFetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
+      const r = await apiFetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
       const j = await r.json();
       if (!j || !Array.isArray(j.items)) {
         this._data = null;

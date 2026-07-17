@@ -12,8 +12,7 @@
 #
 # Either way we touch a sentinel so the service doesn't run on every
 # boot. Users who want to re-onboard (e.g. moved the pi to a new
-# house) can either `rm /var/lib/ftw/wifi-configured && reboot` or
-# use the factory-reset endpoint (future work).
+# house) can `rm /var/lib/ftw/wifi-configured && reboot`.
 
 set -euo pipefail
 

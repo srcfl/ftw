@@ -3,7 +3,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -61,7 +61,7 @@
       var el = document.getElementById("ev-status-indicator");
       if (!el) return;
       function refresh() {
-        ownerFetch("/api/status").then(function (r) { return r.json(); }).then(function (d) {
+        apiFetch("/api/status").then(function (r) { return r.json(); }).then(function (d) {
           var badge = document.getElementById("ev-creds-badge");
           if (badge) {
             if (d.ev_credentials_saved) {

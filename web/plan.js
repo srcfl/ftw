@@ -7,7 +7,7 @@
 
   const PLAN_REFRESH_MS = 30000;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
@@ -82,10 +82,10 @@
 
   async function fetchAll() {
     const [p, f, m, c] = await Promise.all([
-      ownerFetch('/api/prices').then(r => r.json()).catch(() => ({})),
-      ownerFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
-      ownerFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
-      ownerFetch('/api/config').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
@@ -106,7 +106,7 @@
 
   async function replan() {
     try {
-      const r = await ownerFetch('/api/mpc/replan', { method: 'POST' });
+      const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
       if (j && j.plan) state.plan = j.plan;
       render();
@@ -450,7 +450,7 @@
 
     // Skip every battery-related draw layer (action band, bars, SoC
     // line + axis labels) when the site has no battery reporter.
-    // next-app.js flips body.no-battery on the same /api/status tick
+    // app.js flips body.no-battery on the same /api/status tick
     // that drives this chart, so the two signals stay in sync.
     const noBattery = document.body.classList.contains('no-battery');
 
@@ -831,7 +831,7 @@
     idle: 'Battery idle — no dispatch.',
   };
   function renderStrategyHint() {
-    ownerFetch('/api/status')
+    apiFetch('/api/status')
       .then(function (r) { return r.json(); })
       .then(function (d) {
         const el = document.getElementById('strategy-hint');
@@ -850,7 +850,6 @@
     window.addEventListener('resize', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
-
     // Horizon toggle wiring. Each click flips state.horizon, persists
     // the choice, marks the right button active, and re-renders. The
     // visual style (.toggle .active) is shared with the VAT pill.

@@ -29,14 +29,14 @@
   // typical overnight charging window plus the next afternoon.
   const SCHEDULE_SLOTS = 96;
 
-  function ownerFetch(path, opts) {
+  function apiFetch(path, opts) {
     return fetch(path, opts);
   }
 
   async function fetchAll() {
     const [lps, plan] = await Promise.all([
-      ownerFetch('/api/loadpoints').then(r => r.json()).catch(() => ({ loadpoints: [] })),
-      ownerFetch('/api/mpc/plan').then(r => r.json()).catch(() => null),
+      apiFetch('/api/loadpoints').then(r => r.json()).catch(() => ({ loadpoints: [] })),
+      apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => null),
     ]);
     render(lps && lps.loadpoints ? lps.loadpoints : [], plan);
   }
@@ -75,7 +75,7 @@
   }
 
   // Badge: small pill matching the existing .ftw-badge convention from
-  // ftw-badge.js / next.css. Uses theme tokens so light mode flips
+  // ftw-badge.js / app.css. Uses theme tokens so light mode flips
   // correctly. Two variants: "on" = amber accent (matches .accent-e
   // affordance), "off" = muted hairline.
   function badge(label, on) {
@@ -271,7 +271,7 @@
     const val = parseFloat(inp.value);
     if (!isFinite(val) || val < 0 || val > 100) { if (msg) msg.textContent = '0–100 only'; return; }
     btn.disabled = true;
-    ownerFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/soc', {
+    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/soc', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ soc_pct: val }),

@@ -141,6 +141,7 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 
 	env := NewHostEnv(cfg.Name, r.tel)
 	env.BatteryCapacityWh = cfg.BatteryCapacityWh
+	env.BatteryTelemetryOnly = cfg.BatteryTelemetryOnly
 	// Wire durable secret write-back (rotated OAuth tokens). The closure
 	// reads r.SecretPersister lazily at call time so main.go may set it
 	// either before or after the initial Add loop; persists only ever
@@ -650,6 +651,7 @@ func sameDriverConfig(a, b config.Driver) bool {
 	if a.Lua != b.Lua ||
 		a.IsSiteMeter != b.IsSiteMeter ||
 		a.BatteryCapacityWh != b.BatteryCapacityWh ||
+		a.BatteryTelemetryOnly != b.BatteryTelemetryOnly ||
 		a.Disabled != b.Disabled {
 		return false
 	}

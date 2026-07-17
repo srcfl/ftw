@@ -25,7 +25,7 @@ DRIVER = {
   id           = "easee-cloud",
   name         = "Easee Cloud",
   manufacturer = "Easee",
-  version      = "1.0.0",
+  version      = "1.0.1",
   protocols    = { "http" },
   capabilities = { "ev" },
   description  = "Easee Home/Charge via Cloud REST API. No local protocol needed.",
@@ -95,8 +95,12 @@ local EASEE_MAX_A = 32
 --   * mode "auto" or empty + missing fuse data: legacy 3Φ fallback
 --     (preserves pre-switching behaviour for sites that don't pass
 --     fuse data in the cmd)
---   * mode "auto" with fuse data: pick 1Φ when wantW fits below the
---     1Φ ceiling (= max_a × voltage), else 3Φ. Hysteresis suppresses
+--   * mode "auto" with fuse data: pick 1Φ while wantW is below both
+--     the configured split and the first deliverable 3Φ step. This
+--     avoids the physical dead zone between a 16 A 1Φ ceiling
+--     (3.68 kW at 230 V) and Easee's 6 A/phase 3Φ minimum (4.14 kW):
+--     the 1Φ command saturates safely instead of a 3Φ command mapping
+--     to 0 A. Hysteresis suppresses
 --     a flip when less than `hold_s` seconds have passed since the
 --     last change — Easee's contactor + cloud-API round-trip is
 --     ~5-10 s, so flapping at every controller tick would burn the
@@ -115,6 +119,16 @@ local function pick_phases(mode, want_w, voltage, max_a_per_phase, split_w, hold
             s = 3680
         end
     end
+
+    -- Never switch to 3Φ before Easee can deliver its minimum current
+    -- on every phase. A lower phase_split_w (explicit or fuse-derived)
+    -- would otherwise turn e.g. 3.6–4.0 kW into 5 A/phase, which
+    -- per_phase_amps must correctly pause as 0 A. Staying on 1Φ may
+    -- saturate at the fuse ceiling for this narrow band, but it keeps
+    -- useful current flowing without exceeding the installation limit.
+    local v = (voltage and voltage > 0) and voltage or 230
+    local min_3p_w = v * 3 * EASEE_MIN_A
+    if s < min_3p_w then s = min_3p_w end
 
     local desired = (want_w < s) and 1 or 3
 

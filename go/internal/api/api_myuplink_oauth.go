@@ -108,7 +108,7 @@ func pruneOAuthStateLocked(now time.Time) {
 }
 
 // requestOrigin reconstructs the externally-visible scheme://host the browser
-// used, honouring a reverse proxy's X-Forwarded-Proto. The redirect URI must match
+// used, honouring X-Forwarded-Proto from a reverse proxy. The redirect URI must match
 // byte-for-byte across authorize + token exchange + portal registration, so
 // it is derived once and stored with the pending state.
 func requestOrigin(r *http.Request) string {
@@ -174,9 +174,9 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 
 	// The redirect URI must match byte-for-byte across the portal
 	// registration, the authorize call, and the token exchange. Prefer an
-	// explicit redirect_uri from the browser (location.origin) because a reverse
-	// proxy can make the request Host differ from the browser's origin. Fall back
-	// to the request origin for plain LAN access. Validate the passed
+	// explicit redirect_uri from the browser (location.origin), since a
+	// reverse proxy may make the request Host differ from the browser origin.
+	// Fall back to the request origin. Validate the passed
 	// value so our authorize state can't be used as an open redirect.
 	redirectURI := requestOrigin(r) + myUplinkCallbackPath
 	if ru := r.URL.Query().Get("redirect_uri"); ru != "" {
@@ -209,7 +209,7 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 		codeVerifier: verifier,
 		// 15 min: enough headroom for the manual-paste path (sign in, copy
 		// the redirected URL, paste it back) when the auto-callback can't
-		// reach the Pi (for example when an HTTP LAN callback is rejected).
+		// reach the Pi (for example when the portal rejects an HTTP callback).
 		expires: now.Add(15 * time.Minute),
 	}
 	oauthMu.Unlock()
@@ -237,7 +237,7 @@ func (s *Server) handleMyUplinkOAuthStart(w http.ResponseWriter, r *http.Request
 //
 // The happy path on a LAN-direct origin: MyUplink redirects the browser here,
 // we complete the consent and render a result page. When the callback can't
-// reach the Pi (for example when the portal rejects an HTTP LAN callback), the
+// reach the Pi (for example when the portal rejects an HTTP callback), the
 // operator instead copies the redirected URL and pastes it
 // into the manual exchange endpoint below — same completion logic.
 func (s *Server) handleMyUplinkOAuthCallback(w http.ResponseWriter, r *http.Request) {

@@ -327,8 +327,8 @@ func (s *Store) SnapshotTo(dstPath string) error {
 		}
 	}
 
-	// Copy each essential table's rows in foreign-key-safe order; alphabetic
-	// sqlite_master order is not guaranteed to preserve dependencies.
+	// Copy each essential table's rows over in parent-before-child order.
+	// Alphabetic sqlite_master order is not safe when a schema contains FKs.
 	copyItems, err := snapshotTableCopyOrder(ctx, conn, items, snapshotExcludedTables)
 	if err != nil {
 		return fmt.Errorf("snapshot: order tables: %w", err)
@@ -684,7 +684,6 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
 		}
 	}
-
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
 	// separate file so its corruption (or a deliberate flush) never risks the
 	// precious state.db — and recovery is just "rebuild empty + re-fetch".
@@ -893,7 +892,7 @@ func (s *Store) SaveBatteryModel(name, json string) error {
 // the pattern stays — pre-resolving lookups before the main scan still
 // produces simpler, faster code.
 func (s *Store) LoadAllBatteryModels() (map[string]string, error) {
-	// Phase 1: build device_id → driver_name reverse map.
+	// Step 1: build device_id → driver_name reverse map.
 	rev := make(map[string]string)
 	if drows, err := s.db.Query(`SELECT device_id, driver_name FROM devices`); err == nil {
 		for drows.Next() {
@@ -904,7 +903,7 @@ func (s *Store) LoadAllBatteryModels() (map[string]string, error) {
 		}
 		drows.Close()
 	}
-	// Phase 2: read battery_models, translating keys via rev.
+	// Step 2: read battery_models, translating keys via rev.
 	rows, err := s.db.Query(`SELECT name, json FROM battery_models`)
 	if err != nil {
 		return nil, err
@@ -1189,12 +1188,10 @@ func (s *Store) SaveDailyEnergy(day string, de DayEnergy) error {
 	return err
 }
 
-// CountNonSyntheticHistory returns the number of history rows across all
-// three tiers whose JSON payload is NOT the backfill marker — i.e. rows
-// that look like real recorded data. Used by the dev-backfill safety
-// gate so pointing the seeder at a production DB aborts cleanly.
-func (s *Store) CountNonSyntheticHistory() (int, error) {
-	const marker = `{"source":"backfill"}`
+// CountHistoryWithoutMarker returns the number of history rows across all
+// three tiers whose JSON payload differs from marker. Developer tooling uses
+// this as a safety gate before adding synthetic data to an existing database.
+func (s *Store) CountHistoryWithoutMarker(marker string) (int, error) {
 	const q = `
 		SELECT
 			(SELECT COUNT(*) FROM history_hot  WHERE json IS NOT ?) +
@@ -1360,8 +1357,9 @@ func (s *Store) pruneChunk(ctx context.Context, src, dst string, fromMs, toMs, b
 // ---- Prices ----
 
 // PricePoint is one time-slot's spot price row. Slot length varies by source:
-// NordPool/elprisetjustnu is 15 min since late 2025; ENTSOE is mostly still
-// hourly. Consumers should honor SlotLenMin when plotting or aggregating.
+// Sourceful and NordPool/elprisetjustnu are 15 min in Nordic zones; direct
+// ENTSOE varies by zone. Consumers should honor SlotLenMin when plotting or
+// aggregating.
 type PricePoint struct {
 	Zone        string  `json:"zone"`
 	SlotTsMs    int64   `json:"slot_ts_ms"`

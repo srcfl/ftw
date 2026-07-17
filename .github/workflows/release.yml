@@ -20,16 +20,13 @@ name: release
 #        `changeset publish` / `changeset tag` silently no-op'd in
 #        CI, and the action's built-in `createGithubReleases` defaults
 #        to true and 422-collides with our own `gh release create`.
-#      - When the Version PR is merged, the next push has no pending
-#        changesets, so `steps.changesets.outputs.hasChangesets ==
-#        'false'`. The "Tag and create GitHub Release" step then runs
-#        idempotently: independent existence checks for the tag and
-#        the release let a partial-failure rerun finish the job, then
-#        dispatches `release-assets.yml` against the new tag.
+#      - After the Version PR merges, dispatch beta.yml from that exact commit
+#        and validate it on real sites.
+#      - Manually dispatch this workflow to promote the tested commit to stable.
+#        Promotion refuses a version without a matching beta tag on that commit.
 #
-# Manual workflow_dispatch is still available as an emergency lever
-# (e.g. re-running the publish step against partial state) but the
-# day-to-day trigger is "Version Packages" PR merge.
+# Stable publication is deliberately workflow_dispatch-only. A merge creates
+# the version candidate; an operator chooses when its beta is ready to promote.
 
 on:
   push:
@@ -128,13 +125,9 @@ jobs:
 
       - name: Tag and create GitHub Release
         id: publish
-        # Fires after the Version Packages PR is merged: at that point
-        # the consumed `.changeset/*.md` files are gone, so the action
-        # reports `hasChangesets == 'false'`. This branch is also
-        # entered on every direct push to master that happens to have
-        # no pending changesets — the idempotent existence checks
-        # below turn those into a clean no-op.
-        if: steps.changesets.outputs.hasChangesets == 'false'
+        # Stable is an explicit promotion after real beta validation. Pushes
+        # still maintain the Version Packages PR but never publish stable.
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -163,6 +156,22 @@ jobs:
             } >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+
+          # Stable is a promotion, never the first public channel for a commit.
+          # beta.yml also checks that the prerelease base matches package.json.
+          git fetch --force --tags origin
+          BETA_TAG="$(git tag --list "${TAG}-beta.*" --sort=-v:refname | head -n 1)"
+          if [ -z "${BETA_TAG}" ]; then
+            echo "No ${TAG}-beta.N tag exists. Publish and validate beta first, then rerun release." >&2
+            exit 1
+          fi
+          BETA_COMMIT="$(git rev-list -n 1 "${BETA_TAG}")"
+          if [ "${BETA_COMMIT}" != "${GITHUB_SHA}" ]; then
+            echo "${BETA_TAG} points to ${BETA_COMMIT}, but stable candidate is ${GITHUB_SHA}." >&2
+            echo "Publish a beta from this exact commit before promotion." >&2
+            exit 1
+          fi
+          echo "Promoting tested ${BETA_TAG} to ${TAG}."
 
           # Build codename-annotated release notes. The script extracts
           # the latest section from CHANGELOG.md (between `## <version>`

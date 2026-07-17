@@ -12,8 +12,7 @@ import (
 // /api/mode validator, and the Home Assistant discovery `select` all derive
 // from the same canonical control mode set and can't drift apart.
 //
-// Static, non-sensitive metadata. Commands still go through the strict
-// /api/mode path.
+// Static, non-sensitive metadata; commands use the separate /api/mode path.
 func (s *Server) handleModes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"modes": control.ModeCatalog()})
 }

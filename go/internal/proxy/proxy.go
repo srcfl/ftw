@@ -3,7 +3,7 @@
 // upstream FTW instance so the local dev server can render
 // the UI against live data without running real drivers locally.
 //
-// Static assets (/, /index.html, /legacy.html, /components/*.css, *.js, …)
+// Static assets (/, /index.html, /components/*.css, *.js, …)
 // always serve locally — those are the files being iterated on.
 //
 // Safety: read-only mode (on by default when an upstream is configured)

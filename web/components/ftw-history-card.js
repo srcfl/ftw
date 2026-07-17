@@ -27,7 +27,7 @@
 // JS wiring needed beyond placing the element in HTML.
 
 import { FtwElement, ftwDebugDelay } from "./ftw-element.js";
-import { ownerFetch } from "./owner-fetch.js";
+import { apiFetch } from "./api-fetch.js";
 import "./ftw-bar-chart.js";
 
 const FIELD_BY_METRIC = {
@@ -64,7 +64,7 @@ function fetchDailyEnergy(days) {
     return cached.promise;
   }
 
-  const promise = ownerFetch("/api/energy/daily?days=" + days)
+  const promise = apiFetch("/api/energy/daily?days=" + days)
     .then((r) => {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
@@ -103,7 +103,7 @@ class FtwHistoryCard extends FtwElement {
       padding: var(--card-pad, 14px 16px);
     }
     /* Nested mode — when the host has the hide-toggle attribute, the card is sitting
-       inside an outer wrapper (see .history-group in next.css) that owns
+       inside an outer wrapper (see .history-group in app.css) that owns
        the label/toggle chrome. Flip the surface to --ink-sunken so the
        nested tile reads as recessed, matching the fuse-card → phase-box
        pattern. */
@@ -127,7 +127,7 @@ class FtwHistoryCard extends FtwElement {
       letter-spacing: 0.1em;
       text-transform: uppercase;
     }
-    /* Week / Month toggle — a segmented pill following DESIGN.md:
+    /* Week / Month toggle — a segmented pill following the shared design system:
        eyebrow type (mono 0.18em, UPPERCASE, 500 weight), one accent
        (--accent-e amber — never the legacy --accent purple), pill
        radius 999px, near-black #0a0a0a on-accent text. The active

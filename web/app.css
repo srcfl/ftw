@@ -1,0 +1,1865 @@
+/* FTW dashboard layout.
+ *
+ * Loaded after /style.css and scoped to `body.ftw-app`. The base sheet is
+ * shared with setup; this sheet owns dashboard-specific layout and themes.
+ *
+ * Structure matches index.html top-to-bottom.
+ */
+
+/* ---- Page chrome ---- */
+body.ftw-app {
+  background: var(--ink);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+body.ftw-app::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%,
+      oklch(0.25 0.08 var(--accent-hue) / 0.25), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 90% 100%,
+      oklch(0.25 0.1 220 / 0.15), transparent 60%),
+    linear-gradient(to bottom, transparent 0%, oklch(0.1 0.015 250) 100%);
+}
+body.ftw-app > main,
+body.ftw-app > footer,
+body.ftw-app > section {
+  position: relative;
+  z-index: 1;
+}
+/* Header sits in its own stacking context above main so the
+   <ftw-update-badge> modal (rendered inside the header pill) can cover
+   the energy-flow hero. Without this the header and main share z-index 1
+   and main wins on paint order, clipping the modal behind the hero. */
+body.ftw-app > header {
+  position: relative;
+  z-index: 10;
+}
+
+/* Drawer-only Live / Diagnose nav duplicates are hidden everywhere by
+   default and only revealed when the mobile drawer is open (see the
+   ≤720 px block further down). The primary .app-tabs in the header
+   row is what the operator sees on wider viewports. */
+body.ftw-app .drawer-nav-btn { display: none; }
+
+body.ftw-app main {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 0 28px 60px;
+  gap: 16px;
+}
+
+/* ---- Header — rounded pill with backdrop blur.
+       Outer rectangle lines up with main's CONTENT box (not main's
+       outer box): width caps at 1560 − 2×28 = 1504 px on wide screens,
+       and `width: calc(100% - 56px)` keeps it 28 px inside the viewport
+       on narrower ones — so the pill's visible border sits in the same
+       column as the cards inside main's 28 px gutter. Without this the
+       pill's border hugged the viewport edges while the cards sat 28 px
+       in, producing the "header goes 100% wide when body doesn't" look.
+       Interior padding (12 × 28) then positions logo / tabs / actions
+       a further 28 px in — same as an additional card's padding. ---- */
+body.ftw-app > header {
+  box-sizing: border-box;
+  width: calc(100% - 56px);
+  max-width: 1504px;
+  margin: 20px auto 20px;
+  padding: 12px 28px;
+  border: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  /* Background + backdrop-filter live on the ::before below, NOT on
+     the header itself. Why: backdrop-filter on an element creates a
+     new containing block for its position:fixed descendants, which
+     made the <ftw-update-badge> modal center against the header pill
+     instead of the viewport — visibly half-off-screen on narrow
+     viewports. Moving the blur to a pseudo-element keeps the same
+     visual while leaving the header a normal flow element for
+     modal-positioning purposes. */
+}
+body.ftw-app > header::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: oklch(0.16 0.018 250 / 0.7);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-radius: inherit;
+  pointer-events: none;
+  z-index: -1;
+}
+/* On viewports wider than 1560 px, the header pill already has 28px of
+   horizontal padding so the brand / nav / right-cluster line up with
+   the grid cells below. On narrower viewports, header spans full width
+   (minus the side pads on main), giving the same alignment without
+   explicit margin math. */
+body.ftw-app > header h1 {
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 17px;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+body.ftw-app > header .header-logo {
+  height: 30px;
+  border-radius: 6px;
+}
+body.ftw-app .app-tabs {
+  gap: 4px;
+}
+body.ftw-app .tab-btn {
+  padding: 7px 14px;
+  font-size: 13px;
+  color: var(--fg-dim);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+}
+body.ftw-app .tab-btn:hover {
+  color: var(--fg);
+  background: oklch(0.22 0.02 250);
+}
+body.ftw-app .tab-btn.active {
+  background: var(--ink-raised);
+  color: var(--fg);
+  border-color: var(--line);
+}
+body.ftw-app button:focus-visible,
+body.ftw-app [role="button"]:focus-visible,
+body.ftw-app input:focus-visible,
+body.ftw-app select:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: 2px;
+}
+body.ftw-app .header-right {
+  gap: 10px;
+}
+body.ftw-app .version {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--fg-muted);
+  padding: 6px 12px;
+  border: 2px solid var(--fg-muted);
+  border-radius: 8px;
+}
+
+/* Green connection dot — the element itself is the colored disc
+   (background: currentColor picks up .connected/.disconnected from
+   style.css), wrapped in a 2px white ring + hairline --line outer
+   outline via layered box-shadows so it reads as a "status light"
+   on both dark and paper themes. The ● glyph is hidden (font-size 0)
+   since the background is doing the drawing now. */
+body.ftw-app .conn-status {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px var(--line);
+  font-size: 0;
+  line-height: 1;
+}
+
+/* When the update badge has something to announce (see
+   update-badge.js's _render toggling body.has-update) the green
+   connection dot yields the slot to the blue blinking update dot —
+   two dots next to each other was too noisy. */
+body.ftw-app.has-update #conn-status { display: none; }
+body.ftw-app .settings-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  display: grid;
+  place-items: center;
+  margin-right: 0;
+  transition: background .15s, color .15s;
+}
+body.ftw-app .settings-btn:hover {
+  background: var(--ink-raised);
+  color: var(--fg);
+  border-color: var(--line);
+}
+body.ftw-app #ui-mode-toggle {
+  color: var(--fg-dim);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: var(--mono);
+  background: transparent;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+body.ftw-app #ui-mode-toggle:hover {
+  color: var(--fg);
+  background: var(--ink-raised);
+}
+
+/* Header icon buttons (theme + hero-mode toggles). Same visual family
+   as the existing settings-btn but square so an icon glyph lands
+   centred regardless of which character is chosen. */
+body.ftw-app .icon-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-family: var(--sans);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  /* text-decoration:none keeps the <a id="setup-wizard-btn"> variant from
+     showing a default link underline; harmless for <button> icon-btns. */
+  text-decoration: none;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.ftw-app .icon-btn:hover {
+  background: var(--ink-raised);
+  color: var(--accent-e);
+  border-color: var(--accent-e);
+}
+body.ftw-app .icon-btn[aria-pressed="true"] {
+  color: var(--fg);
+  background: oklch(0.3 0.1 var(--accent-hue) / 0.2);
+  border-color: var(--accent-e);
+}
+body.ftw-app .icon-btn[aria-pressed="true"]:hover {
+  color: var(--fg);
+  background: color-mix(in oklab, var(--accent-e) 24%, transparent);
+}
+
+/* Hamburger — hidden on desktop, visible under 720 px. Lives next to
+   the header-right cluster so it's always reachable even when that
+   cluster is collapsed into the drawer below. */
+body.ftw-app .mobile-menu-btn {
+  display: none !important;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg);
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+body.ftw-app .mobile-menu-btn:hover {
+  background: var(--ink-raised);
+}
+
+/* ---- Energy flow hero slot ---- */
+body.ftw-app .flow-hero {
+  margin-bottom: 4px;
+}
+body.ftw-app .flow-hero ftw-energy-flow {
+  display: block;
+  /* Desktop breathing room under the planets. The Combined switch
+     sits inside this host at `position:absolute; bottom:14px`, so
+     padding-bottom controls how far BELOW the SVG it lands — growing
+     this value is what gives the toggle more top-margin, and the
+     extra padding also keeps the hero from crowding the cards right
+     below it. Mobile stays tight (no extra padding). */
+  padding-bottom: 80px;
+}
+@media (max-width: 900px) {
+  body.ftw-app .flow-hero ftw-energy-flow { padding-bottom: 0; }
+}
+
+/* ---- Hero / numbers mode switch ---- */
+/* Default body has mode-hero OR mode-numbers applied from the init
+   block at the bottom of index.html. mode-hero hides the four big-number
+   tiles for Grid/PV/Battery/Load (they duplicate the hero); mode-numbers
+   hides the hero. Non-dup tiles (SoC, Fuse, EV, energy totals, controls,
+   charts) stay visible in both modes. */
+body.ftw-app.mode-hero    .ftw-hide-in-hero { display: none !important; }
+body.ftw-app.mode-numbers .flow-hero        { display: none !important; }
+/* In hero mode the summary-cards row only holds .ftw-hide-in-hero tiles
+   (SoC/EV/Fuse moved out), so the section collapses to zero height but
+   still claims a flex gap slot — visible as an extra ~16 px between the
+   hero and the history-row wrapper card. Hide the empty section to keep all
+   inter-section gaps uniform. */
+body.ftw-app.mode-hero    .summary-cards    { display: none !important; }
+
+/* ---- Card labels — single themeable rule shared by every .card-label
+       across the dashboard (summary, fuse, energy, control, history…).
+       Color is driven by --fg-label from theme.css so a one-line palette
+       tweak propagates everywhere and the brightness stays uniform
+       between cards. Spacing (margin-bottom) is set per-card since the
+       gap to the card's value differs by tile size. Anything that is
+       secondary text (subs, hints, targets) stays on --fg-muted.
+       The matching .fuse-phase-label (L1/L2/L3) and every label inside
+       a web-component shadow DOM should also read --fg-label so they
+       match these without a one-off override. */
+body.ftw-app .card-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-label);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* ---- Summary tiles ---- */
+body.ftw-app .summary-cards {
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+body.ftw-app .summary-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+  transition: border-color .2s;
+}
+body.ftw-app .summary-card:hover {
+  border-color: oklch(0.35 0.02 250);
+}
+
+/* Heat-pump card. heating.js renders into a bare `.card`, whose base rule in
+   style.css uses `--surface` — a token that is NOT flipped by
+   html[data-theme="light"], so the card stayed dark on a light page while
+   every other dashboard card (.summary-card/.fuse-card/.control-card/…) themed
+   via --ink-raised. Bring it onto the next palette so it themes to light too. */
+body.ftw-app .heating-row .card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+body.ftw-app .summary-card .card-label {
+  margin-bottom: 8px;
+}
+body.ftw-app .summary-card .card-value {
+  font-family: var(--mono);
+  font-size: 1.55rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  line-height: 1.1;
+}
+body.ftw-app .summary-card .card-sub {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+  letter-spacing: 0.02em;
+}
+body.ftw-app .card-target {
+  font-family: var(--mono);
+  color: var(--fg-muted);
+  opacity: 0.8;
+}
+
+/* Directional colour accents — preserve legacy val-* hooks but rebind
+   them to the oklch palette so they read cleanly on the new ink bg. */
+body.ftw-app .val-import      { color: var(--red-e); }
+body.ftw-app .val-export      { color: var(--green-e); }
+body.ftw-app .val-generation  { color: var(--amber); }
+body.ftw-app .val-charging    { color: var(--cyan); }
+body.ftw-app .val-discharging { color: var(--cyan-dim); }
+body.ftw-app .val-neutral     { color: var(--fg); }
+body.ftw-app .val-ev-charging { color: var(--green-e); }
+body.ftw-app .val-ev-connected{ color: var(--amber); }
+
+/* Fuse — own row, one box per phase. */
+body.ftw-app .fuse-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-app .fuse-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-app .fuse-card .card-label {
+  margin-bottom: 10px;
+}
+body.ftw-app .fuse-phase-boxes {
+  display: grid;
+  /* Always 3 equal columns so the per-phase tiles line up vertically
+     with the phase-power row below, regardless of viewport. The
+     previous auto-fit minmax(140px, 1fr) collapsed to fewer columns
+     on narrow screens and the two rows stopped aligning. */
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+body.ftw-app .fuse-phase-col {
+  /* Wrapper for one phase column: the boxed tile sits on top, the
+     signed-W readout sits OUTSIDE the box just below it. Keeps the
+     box visually clean (label + A val + bar) while still carrying
+     the W diagnostic in the same column position. */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+body.ftw-app .fuse-phase-box {
+  /* Sub-card sits INSIDE the fuse card, so pick --ink-sunken (the
+     recessed-surface token) — theme-aware: a very light gray in
+     light mode, slightly darker than --ink-raised in dark mode.
+     The old hardcoded oklch(0.18 …) locked the sub-card to a dark
+     navy regardless of theme, which rendered as a black box on
+     paper-white light mode and hid the labels. */
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  display: grid;
+  grid-template-rows: auto auto auto;
+  gap: 6px;
+}
+body.ftw-app .fuse-phase-col .fuse-phase-w {
+  /* Smaller, dimmer than the A reading — diagnostic, not primary.
+     Lives outside the box so it doesn't take padding/border real
+     estate. Sign convention matches the bar's export class. */
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--fg-label);
+  text-align: left;
+  line-height: 1.1;
+  padding: 0 4px;
+}
+body.ftw-app .fuse-phase-col .fuse-phase-w.export {
+  color: var(--cyan);
+}
+body.ftw-app .fuse-phase-box .fuse-phase-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-label);
+  letter-spacing: 0.1em;
+}
+body.ftw-app .fuse-phase-box .fuse-phase-val {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  text-align: left;
+  line-height: 1.1;
+}
+body.ftw-app .fuse-phase-box .fuse-phase-bar {
+  height: 8px;
+  /* Bar track follows --line-soft so it stays legible on both
+     themes — a slightly-darker gray on paper, a slightly-lighter
+     panel on ink. Previously hardcoded oklch(0.22 …) which was
+     nearly black on light mode. */
+  background: var(--line-soft);
+  border-radius: 4px;
+  overflow: hidden;
+}
+body.ftw-app .fuse-phase-fill {
+  /* Horizontal bar (default): width tracks --fill-pct set by
+     app.js; height fills the bar's 8 px thickness. The mobile
+     override below rotates this to width 100% + height varies so
+     the bar becomes a vertical column that fills upward. */
+  width: var(--fill-pct, 0%);
+  height: 100%;
+  background: var(--green-e);
+  transition: width 0.3s, height 0.3s, background 0.3s;
+}
+body.ftw-app .fuse-fill {
+  height: 100%;
+  background: var(--green-e);
+  transition: width 0.3s, background 0.3s;
+}
+body.ftw-app .fuse-phase-fill.warn,
+body.ftw-app .fuse-fill.warn { background: var(--amber); }
+body.ftw-app .fuse-phase-fill.crit,
+body.ftw-app .fuse-fill.crit { background: var(--red-e); }
+body.ftw-app .fuse-phase-fill.export { background: var(--cyan); }
+body.ftw-app .fuse-bar {
+  /* Fallback single-bar track (used when the site meter doesn't
+     report per-phase amperage). Same theme-aware background as the
+     per-phase tracks so both paths read the same on light mode. */
+  background: var(--line-soft);
+  border-radius: 3px;
+  height: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+body.ftw-app .fuse-fallback-value {
+  font-family: var(--mono);
+  font-size: 1.2rem;
+  font-weight: 700;
+  margin-top: 6px;
+}
+
+/* ---- History — single outer card wrapping three daily-kWh tiles.
+   Mirrors the fuse-card pattern: the wrapper owns the card chrome
+   (label + a single shared Week/Month toggle), the inner tiles
+   render as recessed sub-cards via the [hide-toggle] attribute on
+   the web component. app.js wires #history-toggle to push a
+   `range="week"|"month"` attribute onto every child tile so the
+   pill drives all three charts in lock-step. */
+body.ftw-app .history-row {
+  margin-top: 12px;
+}
+/* Savings row — one card wide; web component owns its own chrome.
+   Just sets the top margin so it doesn't collide with the history
+   wrapper above. */
+body.ftw-app .savings-row {
+  margin-top: 12px;
+}
+body.ftw-app .history-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-app .history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* Two stacked toggle pills (Numbers/Cakes + Week/Month) ride to the
+   right of the panel label. Wrap onto a new line on narrow viewports
+   instead of squashing the label. */
+body.ftw-app .history-toggles {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+/* History view-mode swap: tiles vs cake. Both children of the panel
+   stay in the DOM so swapping is a CSS class flip, no fetch round-trip. */
+body.ftw-app .history-tiles.hidden,
+body.ftw-app .history-cake.hidden { display: none; }
+body.ftw-app .history-cake {
+  padding: 4px 0 6px;
+  transition: opacity 200ms ease;
+}
+/* Loading state — fired while /api/energy/daily resolves on a
+   Week/Month flip. Dims + pulses the existing cake (so the layout
+   stays put) instead of swapping in a skeleton. Pointer-events off
+   prevents stale interactions during the in-flight request. */
+body.ftw-app .history-cake.loading {
+  pointer-events: none;
+  animation: ftw-cake-pulse 1.2s ease-in-out infinite;
+}
+@keyframes ftw-cake-pulse {
+  0%, 100% { opacity: 0.45; }
+  50%      { opacity: 0.7; }
+}
+/* Shared Week/Month segmented pill — same visual as the per-card
+   toggle that used to live inside the shadow DOM so the brand
+   stays consistent. Kept here (not duplicated into a shared
+   component) because it's the only instance outside the card. */
+body.ftw-app .history-toggle {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ink-sunken);
+  padding: 2px;
+  isolation: isolate;
+}
+body.ftw-app .history-toggle::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  background: var(--accent-e);
+  border-radius: 999px;
+  transform: translateX(0);
+  transition: transform 260ms cubic-bezier(0.4, 0, 0.2, 1);
+  z-index: 0;
+}
+/* Slide the amber pill to the right side of the toggle when the
+   second option is active. Generalised so both Week/Month
+   (data-active="month") and Bars/Cakes (data-active="cakes") share
+   the same pill animation — the toggle markup is otherwise
+   identical and shouldn't need a special CSS branch per option set. */
+body.ftw-app .history-toggle[data-active="month"]::before,
+body.ftw-app .history-toggle[data-active="cakes"]::before {
+  transform: translateX(100%);
+}
+body.ftw-app .history-toggle button {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+  border: 0;
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: color 220ms ease;
+}
+body.ftw-app .history-toggle button.active { color: #0a0a0a; }
+body.ftw-app .history-toggle button:not(.active):hover { color: var(--fg); }
+body.ftw-app .history-toggle button:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+/* Inner tile grid — 2×2 on desktop (Imported / Produced / Consumed /
+   Exported), collapses to one column on narrow viewports so each
+   chart keeps a readable bar width. */
+body.ftw-app .history-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+@media (max-width: 900px) {
+  body.ftw-app .history-tiles { grid-template-columns: 1fr; }
+}
+
+/* ---- Electricity prices — full-width chart between fuse and energy
+   sections. Section height ≈ 2× fuse-card height per spec; the
+   <ftw-price-chart> component owns its own SVG geometry inside. */
+body.ftw-app .prices-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-app .prices-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+
+/* ---- Energy today — one outer card with sub-tiles, mirrors fuse-card ---- */
+body.ftw-app .energy-row {
+  display: block;
+  margin: 12px 0;
+}
+body.ftw-app .energy-group {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-app .energy-group > .card-label {
+  margin-bottom: 10px;
+}
+body.ftw-app .energy-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+body.ftw-app .energy-tile {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad-tight, 12px 14px);
+}
+body.ftw-app .energy-tile .card-label {
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+body.ftw-app .energy-tile .card-value {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+@media (max-width: 900px) {
+  body.ftw-app .energy-tiles  { grid-template-columns: repeat(2, 1fr); }
+  body.ftw-app .summary-cards { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---- Controls row (strategy + sliders) ---- */
+body.ftw-app .controls-row {
+  grid-template-columns: 1.2fr 1fr 1fr;
+  gap: 12px;
+  margin-top: 4px;
+}
+body.ftw-app .control-card {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--card-pad, 14px 16px);
+}
+body.ftw-app .control-card .card-label {
+  margin-bottom: 10px;
+}
+/* ftw-toggle: compact switch used inside control-cards for boolean
+   opt-ins (e.g. "Let battery cover EV"). Hides the native checkbox
+   and renders a pill + dot that slides on check. */
+body.ftw-app .ftw-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+body.ftw-app .ftw-toggle input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+body.ftw-app .ftw-toggle-slider {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  background: oklch(0.20 0.015 250);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  transition: background .15s, border-color .15s;
+}
+body.ftw-app .ftw-toggle-slider::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  background: var(--fg-dim);
+  border-radius: 50%;
+  transition: transform .18s ease, background .15s;
+}
+body.ftw-app .ftw-toggle input:checked + .ftw-toggle-slider {
+  background: oklch(0.55 0.12 155);
+  border-color: oklch(0.60 0.13 155);
+}
+body.ftw-app .ftw-toggle input:checked + .ftw-toggle-slider::after {
+  transform: translateX(18px);
+  background: oklch(0.98 0 0);
+}
+body.ftw-app .ftw-toggle-label {
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+body.ftw-app .mode-buttons {
+  gap: 6px;
+}
+body.ftw-app .mode-buttons button {
+  background: oklch(0.13 0.015 250);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  color: var(--fg-dim);
+  padding: 8px 10px;
+  font-family: var(--sans);
+  font-size: 12px;
+  transition: background .15s, color .15s, border-color .15s;
+}
+body.ftw-app .mode-buttons button:hover {
+  background: oklch(0.2 0.02 250);
+  color: var(--fg);
+}
+body.ftw-app .mode-buttons button.active {
+  background: oklch(0.3 0.1 var(--accent-hue) / 0.25);
+  border-color: var(--accent-e);
+  color: var(--fg);
+}
+body.ftw-app .strategy-hint {
+  margin-top: 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg);
+  line-height: 1.5;
+}
+body.ftw-app .slider-group-compact {
+  gap: 10px;
+}
+body.ftw-app .slider-group-compact input[type="range"] {
+  accent-color: var(--accent-e);
+}
+body.ftw-app .slider-group-compact input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+body.ftw-app .slider-group-compact:has(input[type="range"]:disabled) .slider-current {
+  color: var(--fg-muted);
+}
+body.ftw-app .slider-current {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+body.ftw-app .card-hint {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  margin-top: 8px;
+}
+/* Plan-chart horizon pill (Today / +Tomorrow / Tomorrow). Mirrors the
+   shadow-DOM .toggle inside <ftw-price-chart> so the affordance reads
+   as the same control across both charts. Lives in document scope
+   because the plan chart isn't a custom element. */
+body.ftw-app .plan-horizon {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 999px);
+  padding: 2px;
+  background: var(--ink-sunken);
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-right: 0.5rem;
+}
+body.ftw-app .plan-horizon button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--fg-dim);
+  cursor: pointer;
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-xs, 999px);
+  font: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+body.ftw-app .plan-horizon button:hover { color: var(--fg); }
+body.ftw-app .plan-horizon button.active {
+  background: var(--accent-e);
+  /* On-accent text is near-black per the shared design system, never white. */
+  color: #0a0a0a;
+}
+
+body.ftw-app .chart-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+body.ftw-app .grid-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--ink-sunken);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+body.ftw-app .grid-slot-badge.slot-import {
+  color: var(--red-e);
+  border-color: color-mix(in oklab, var(--red-e) 45%, var(--line));
+}
+
+body.ftw-app .grid-slot-badge.slot-export {
+  color: var(--green-e);
+  border-color: color-mix(in oklab, var(--green-e) 45%, var(--line));
+}
+
+/* Advanced-mode toggle row — sits between the live + plan charts and
+   the advanced-only sections, so the affordance lands right where
+   the extra UI surfaces appear when toggled on. Centered, quiet, and
+   only as wide as it needs to be. */
+body.ftw-app .ui-mode-row {
+  display: flex;
+  justify-content: center;
+  margin: 1.25rem 0 1.5rem;
+}
+
+/* Tile-mode cards that open a modal advertise their clickability —
+   pointer cursor + a subtle hover lift. Hero mode still uses the
+   energy-flow planets, so this only matters in tiles mode. */
+body.ftw-app .summary-card.clickable {
+  cursor: pointer;
+  transition: transform 80ms ease, border-color 120ms ease;
+}
+body.ftw-app .summary-card.clickable:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent-e);
+}
+
+body.ftw-app .card-hint.card-hint-active {
+  /* Used when the hint is the *active* explanation of a disabled
+     control (e.g. grid-target slider greyed out because the MPC
+     planner is driving). Lifts the colour from --fg-muted to --fg
+     and bumps size a hair so the reason for the disabled state
+     reads at the same weight as the control's label, not as quiet
+     small print. */
+  color: var(--fg);
+  font-size: 11px;
+}
+
+body.ftw-app .btn-send {
+  background: var(--accent-e);
+  border-color: var(--accent-e);
+  color: oklch(0.15 0.02 250);
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  transition: filter .15s;
+}
+body.ftw-app .btn-send:hover { filter: brightness(1.1); opacity: 1; }
+body.ftw-app .btn-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-decoration: none;
+  cursor: pointer;
+  padding: 4px 6px;
+}
+body.ftw-app .btn-link:hover { text-decoration: underline; }
+
+/* ---- Charts: live + plan side-by-side ---- */
+body.ftw-app .live-plan-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 4px;
+}
+@media (max-width: 1100px) {
+  body.ftw-app .live-plan-row { grid-template-columns: 1fr; }
+  body.ftw-app .controls-row  { grid-template-columns: 1fr; }
+}
+
+body.ftw-app #chart-section,
+body.ftw-app #plan-section {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px 18px;
+}
+body.ftw-app .chart-header h2 {
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin: 0;
+}
+body.ftw-app .chart-container {
+  background: transparent;
+  border: none;
+  padding: 4px 0 0;
+}
+
+/* Compact variant for the secondary chart stacks (Live's 24 h battery
+ * + SoC strip below the main power chart). Plays the same role as the
+ * Plan card's battery/SoC sub-charts: same vertical footprint, same
+ * border treatment, so the two cards are visually balanced. */
+body.ftw-app .chart-container-compact {
+  padding: 0;
+}
+
+/* Live stats strip — five tile-style values inline between the chart
+ * header and the chart canvas. Mono-typed and grid-aligned so an
+ * operator's eye can scan them at a glance, mirroring the Plan card's
+ * summary line directly above its own charts. */
+body.ftw-app .live-stats {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+body.ftw-app .live-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+body.ftw-app .live-stat-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+}
+body.ftw-app .live-stat-value {
+  font-family: var(--mono);
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+body.ftw-app .live-stat-value.is-import   { color: var(--red-e); }
+body.ftw-app .live-stat-value.is-export   { color: var(--green-e); }
+body.ftw-app .live-stat-value.is-charging { color: var(--accent-e); }
+body.ftw-app .live-stat-value.is-discharging { color: var(--blue-e, #60a5fa); }
+body.ftw-app .live-stat-value.is-neutral { color: var(--fg-dim); }
+
+/* 24 h battery + SoC history block — sits below the live power chart.
+ * Section label matches the Plan card's chart-section labels. */
+body.ftw-app .live-history {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+body.ftw-app .live-history-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+  opacity: 0.7;
+  margin-bottom: 4px;
+}
+@media (max-width: 720px) {
+  body.ftw-app .live-stats {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  body.ftw-app .live-stat:nth-child(n + 4) {
+    grid-column: span 1;
+  }
+}
+body.ftw-app .range-buttons button {
+  /* Ghost secondary per the shared design system: transparent bg, --line border,
+     --fg text. Theme-aware so the buttons keep their chrome on both
+     light and dark without the old hardcoded navy oklch(0.13 …)
+     turning the light theme into a black-on-white lozenge. */
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-app .range-buttons button:not(.active):hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+body.ftw-app .range-buttons button.active {
+  /* On-accent text per the shared design system is near-black, not white — so the
+     amber ON state is readable in both themes and stops looking
+     washed-out in light mode where the old oklch(0.15 …) barely
+     differed from pure black. */
+  background: var(--accent-e);
+  color: #0a0a0a;
+  border-color: var(--accent-e);
+  font-weight: 600;
+}
+body.ftw-app .chart-legend {
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  font-size: 11px;
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+body.ftw-app .plan-summary {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+body.ftw-app .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
+body.ftw-app .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
+body.ftw-app .plan-summary .s-value { color: var(--fg-dim); }
+body.ftw-app .plan-help {
+  font-family: var(--sans);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+  margin: 6px 0 4px;
+  max-width: 68ch;
+}
+body.ftw-app .plan-actions { gap: 10px; display: flex; align-items: center; }
+
+/* ---- Plan "?" help button + explanation modal ---- */
+body.ftw-app .plan-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+body.ftw-app .plan-help-btn {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-app .plan-help-btn:hover {
+  color: var(--accent-e);
+  border-color: var(--accent-e);
+}
+body.ftw-app .plan-help-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent-e);
+  color: var(--accent-e);
+}
+body.ftw-app .plan-help-body {
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg-dim);
+}
+body.ftw-app .plan-help-body p { margin: 0 0 10px; }
+body.ftw-app .plan-help-body h3 {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  margin: 14px 0 6px;
+  letter-spacing: -0.005em;
+}
+body.ftw-app .plan-help-body ul {
+  margin: 0 0 10px;
+  padding-left: 18px;
+}
+body.ftw-app .plan-help-body li { margin: 0 0 6px; }
+body.ftw-app .plan-help-body b { color: var(--fg); font-weight: 600; }
+body.ftw-app .plan-help-body code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  background: rgba(255,255,255,0.04);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+body.ftw-app .plan-help-note {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 4px;
+}
+
+/* ---- ML twins / drivers / calibration sections ---- */
+body.ftw-app .section-header h2,
+body.ftw-app #twins-section h2,
+body.ftw-app #drivers-section h2,
+body.ftw-app #models-section h2 {
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.005em;
+}
+
+body.ftw-app .driver-card,
+body.ftw-app #twins-grid > div {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+/* ---- Footer strip — single source of truth. Horizontal padding
+       matches main + header (28 px) so all three line up on desktop.
+       The ≤720 px override below shrinks this to 10/6 px for mobile. ---- */
+body.ftw-app footer {
+  max-width: 1560px;
+  margin: 16px auto 0;
+  padding: 12px 28px;
+  background: transparent;
+  border-top: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--fg-muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+body.ftw-app footer .refresh-label {
+  color: var(--fg-dim);
+}
+body.ftw-app .status-bar {
+  background: oklch(0.11 0.015 250);
+  border-top: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+
+/* ---- Modal refinements ---- */
+body.ftw-app .modal-content {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+body.ftw-app .modal-header,
+body.ftw-app .modal-footer,
+body.ftw-app .modal-tabs {
+  border-color: var(--line);
+}
+body.ftw-app .modal-header,
+body.ftw-app .modal-tabs {
+  background: var(--ink);
+}
+body.ftw-app .modal-header h2 {
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 1rem;
+  letter-spacing: 0;
+}
+body.ftw-app .modal-close {
+  color: var(--fg-muted);
+}
+body.ftw-app .modal-close:hover {
+  color: var(--fg);
+}
+body.ftw-app .ev-cover-info {
+  background: rgba(251,191,36,0.10);
+  border: 1px solid rgba(251,191,36,0.22);
+  border-radius: var(--radius-sm);
+  color: var(--fg);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  margin-top: 10px;
+  padding: 8px 10px;
+}
+body.ftw-app .modal-tabs {
+  gap: 0;
+  padding: 8px 16px 0;
+}
+body.ftw-app .modal-tabs button {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border-bottom-color: transparent;
+}
+body.ftw-app .modal-tabs button.active {
+  color: var(--accent-e);
+  border-bottom-color: var(--accent-e);
+}
+body.ftw-app .modal-body {
+  background: var(--ink-raised);
+}
+body.ftw-app .modal-body label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+body.ftw-app .modal-body label:has(input[type="checkbox"]) {
+  color: var(--fg-label);
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+body.ftw-app .modal-body input[type="text"],
+body.ftw-app .modal-body input[type="number"],
+body.ftw-app .modal-body input[type="password"],
+body.ftw-app .modal-body select {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  min-height: 38px;
+  padding: 10px 12px;
+}
+body.ftw-app .modal-body input:focus,
+body.ftw-app .modal-body select:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-app .modal-body input::placeholder {
+  color: var(--fg-muted);
+}
+body.ftw-app .modal-body fieldset,
+body.ftw-app .device-item {
+  background: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+body.ftw-app .modal-body fieldset {
+  padding: 14px 16px 16px;
+}
+body.ftw-app .modal-body fieldset legend {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  padding: 0 8px;
+  text-transform: uppercase;
+}
+body.ftw-app .field-row.field-row-single {
+  grid-template-columns: 1fr;
+}
+body.ftw-app .device-item {
+  padding: 14px;
+}
+body.ftw-app .device-item-header {
+  gap: 12px;
+}
+body.ftw-app .device-item-header strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.94rem;
+  font-weight: 600;
+}
+body.ftw-app .device-meta {
+  color: var(--fg-dim);
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+body.ftw-app .btn-add,
+body.ftw-app .btn-remove {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+body.ftw-app .btn-add:hover {
+  border-color: var(--fg-dim);
+  color: var(--fg);
+}
+body.ftw-app .btn-add:disabled {
+  color: var(--fg-muted);
+  cursor: wait;
+  opacity: 0.75;
+}
+body.ftw-app .btn-remove {
+  color: var(--red-e);
+  flex: 0 0 auto;
+}
+body.ftw-app .btn-remove:hover {
+  background: transparent;
+  border-color: var(--red-e);
+}
+body.ftw-app .settings-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+}
+body.ftw-app .settings-status.success { color: var(--green-e); }
+body.ftw-app .settings-status.error { color: var(--red-e); }
+body.ftw-app .creds-badge {
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+body.ftw-app .creds-badge.creds-saved {
+  background: color-mix(in srgb, var(--green-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--green-e) 35%, transparent);
+  color: var(--green-e);
+}
+body.ftw-app .creds-badge.creds-missing {
+  background: color-mix(in srgb, var(--accent-e) 10%, transparent);
+  border-color: color-mix(in srgb, var(--accent-e) 35%, transparent);
+  color: var(--accent-e);
+}
+body.ftw-app .driver-test-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+}
+body.ftw-app .driver-test-btn {
+  margin-top: 0;
+  width: auto;
+}
+body.ftw-app .driver-test-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+body.ftw-app .driver-test-status.ok {
+  color: var(--green-e);
+}
+body.ftw-app .driver-test-status.error {
+  color: var(--red-e);
+}
+body.ftw-app .driver-test-output {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  flex-basis: 100%;
+  padding: 10px 12px;
+}
+body.ftw-app .v2x-control-panel {
+  align-items: center;
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(92px, 1fr) repeat(3, auto);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+body.ftw-app .v2x-power-label {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-app .v2x-power-input {
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  min-height: 32px;
+  min-width: 0;
+  padding: 6px 8px;
+}
+body.ftw-app .v2x-power-input:focus {
+  border-color: var(--accent-e);
+  outline: none;
+}
+body.ftw-app .v2x-power-input:disabled,
+body.ftw-app .v2x-command-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+body.ftw-app .v2x-command-status {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 1 / -1;
+  min-height: 1em;
+}
+body.ftw-app .v2x-command-status.ok {
+  color: var(--green-e);
+}
+body.ftw-app .v2x-command-status.error {
+  color: var(--red-e);
+}
+@media (max-width: 720px) {
+  body.ftw-app .v2x-control-panel {
+    grid-template-columns: 1fr 1fr;
+  }
+  body.ftw-app .v2x-power-label,
+  body.ftw-app .v2x-power-input,
+  body.ftw-app .v2x-command-status {
+    grid-column: 1 / -1;
+  }
+}
+body.ftw-app .driver-test-kv,
+body.ftw-app .driver-test-metrics {
+  display: grid;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  gap: 5px 12px;
+  grid-template-columns: max-content 1fr;
+}
+body.ftw-app .driver-test-kv span,
+body.ftw-app .driver-test-metrics span {
+  color: var(--fg-label);
+}
+body.ftw-app .driver-test-kv strong,
+body.ftw-app .driver-test-metrics strong {
+  color: var(--fg);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+body.ftw-app .driver-test-values {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+body.ftw-app .driver-test-values div {
+  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 3px 10px;
+  grid-template-columns: 72px 1fr;
+  padding-top: 6px;
+}
+body.ftw-app .driver-test-values span {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-app .driver-test-values strong {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+body.ftw-app .driver-test-values small {
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  grid-column: 2;
+}
+body.ftw-app .driver-test-metrics {
+  border-top: 1px solid var(--line-soft);
+  grid-template-columns: 1fr auto;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+body.ftw-app .driver-test-error,
+body.ftw-app .driver-test-empty {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+body.ftw-app .driver-test-error {
+  color: var(--red-e);
+  margin-top: 8px;
+}
+
+/* ---- Diagnose ---- */
+body.ftw-app .diagnose-title h2 { font-family: var(--sans); }
+body.ftw-app .diagnose-timeline,
+body.ftw-app .diagnose-detail {
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+/* ---------- Mobile menu (≤720 px) ---------- */
+/* Below the breakpoint the header collapses: tabs + header-right fold
+   into a drawer anchored to the top-right corner of the header pill.
+   The hamburger button (#mobile-menu-btn) stays in the flex row. */
+@media (max-width: 720px) {
+  /* Whole-page density: shrink outer padding so content doesn't get
+     squeezed against the rounded corners, and pull the header closer
+     to the top edge. */
+  body.ftw-app main {
+    padding: 0 12px 48px;
+    gap: 12px;
+  }
+  /* Same rail alignment as desktop, but with the mobile 12 px gutter:
+     header's outer border sits 12 px inside the viewport, matching
+     main's 12 px content inset. */
+  body.ftw-app > header {
+    width: calc(100% - 24px);
+    margin: 10px auto 14px;
+    grid-template-columns: auto 1fr auto;
+    gap: 10px;
+    padding: 10px 12px;
+    position: relative;
+  }
+  body.ftw-app > header h1 { font-size: 15px; }
+  body.ftw-app > header .header-logo { height: 26px; }
+  body.ftw-app footer {
+    width: calc(100% - 24px);
+    margin: 10px auto 0;
+    padding: 10px 12px;
+  }
+
+  body.ftw-app .header-right,
+  body.ftw-app .app-tabs {
+    display: none;
+  }
+  body.ftw-app .mobile-menu-btn {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    justify-self: end;
+  }
+
+  /* Drawer-only navigation buttons — styling for when the hamburger
+     drawer is open. Base `display: none` is hoisted out of the media
+     query below so desktop hides them globally (previously the rule
+     only fired at ≤720 px and the ▶/⏲ glyphs leaked into the header
+     right-cluster on wider viewports). */
+  body.ftw-app .drawer-nav-btn {
+    background: transparent;
+    border: 1px solid var(--line);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 14px;
+    cursor: pointer;
+  }
+
+  /* Drawer layering: the drawer must sit above the energy-flow hero
+     (which owns its own stacking context via the :host gradient) and
+     the fuse-bar progress animations. 1000 is below the legacy modal
+     backdrop (also 1000) so an open modal still wins; but we only
+     ever show the drawer OR a modal, never both at once. */
+  body.ftw-app > header.menu-open {
+    z-index: 1000;
+  }
+  body.ftw-app > header.menu-open .header-right {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    min-width: 240px;
+    padding: 14px;
+    background: var(--ink-raised);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+    z-index: 1001;
+  }
+  /* .app-tabs stays hidden in the drawer — the drawer-nav-btn
+     duplicates replace it with consistent drawer styling. */
+  body.ftw-app > header.menu-open .app-tabs {
+    display: none;
+  }
+  body.ftw-app > header.menu-open .header-right .drawer-nav-btn,
+  body.ftw-app > header.menu-open .header-right .icon-btn,
+  body.ftw-app > header.menu-open .header-right .settings-btn {
+    width: 100%;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 0 12px;
+  }
+  body.ftw-app > header.menu-open .header-right .drawer-nav-btn.active {
+    background: var(--ink-raised);
+    border-color: var(--accent-e);
+    color: var(--accent-e);
+  }
+  body.ftw-app > header.menu-open .header-right #ui-mode-toggle,
+  body.ftw-app > header.menu-open .header-right .version {
+    text-align: left;
+  }
+  /* Labels render next to the glyph in the drawer. Without this the
+     hamburger menu is a column of cryptic icons — a hard-to-read UX
+     on a narrow screen where tooltips are harder to reach. */
+  body.ftw-app > header.menu-open .header-right .drawer-nav-btn[data-menu-label]::after,
+  body.ftw-app > header.menu-open .header-right .icon-btn[data-menu-label]::after,
+  body.ftw-app > header.menu-open .header-right .settings-btn[data-menu-label]::after {
+    content: attr(data-menu-label);
+    margin-left: 12px;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--fg);
+  }
+
+  /* Compact the summary/energy card padding so the smaller tiles
+     don't waste vertical space. */
+  body.ftw-app .summary-card { padding: 10px 12px; }
+  body.ftw-app .summary-card .card-value { font-size: 1.25rem; }
+  body.ftw-app .energy-tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  body.ftw-app .energy-tile  { padding: 9px 11px; }
+  body.ftw-app .energy-tile .card-value { font-size: 1rem; }
+
+  /* Charts stack vertically — the side-by-side live + plan layout
+     squeezes canvases too narrow to read on phones. */
+  body.ftw-app .live-plan-row { grid-template-columns: 1fr; gap: 12px; }
+  body.ftw-app #chart-section,
+  body.ftw-app #plan-section { padding: 12px 14px; }
+}
+
+/* ---------- Light-theme specific fixes ---------- */
+/* Most surfaces use tokens that flip automatically. These are the cases
+   where the dark-mode sheet hardcoded a rgba or hex that needs an
+   explicit override so the light variant reads correctly. */
+html[data-theme="light"] body.ftw-app::before {
+  background:
+    radial-gradient(ellipse 80% 60% at 50% -10%,
+      oklch(0.8 0.08 var(--accent-hue) / 0.20), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 90% 100%,
+      oklch(0.8 0.1 220 / 0.12), transparent 60%),
+    linear-gradient(to bottom, transparent 0%, oklch(0.94 0.012 250) 100%);
+}
+html[data-theme="light"] body.ftw-app > header::before {
+  background: oklch(0.98 0.005 250 / 0.7);
+}
+/* Light-mode header chrome:
+   - Remove the ambient pill border: the paper body + translucent
+     ::before already carry enough separation; the hairline ring on
+     a paper-ish background read as a dark frame that competed with
+     the header content for attention.
+   - Pull every text element in the header to the full --fg (very
+     near black). In dark mode the tabs and the Advanced link use
+     --fg-dim (a 0.7 L gray) so they don't steal focus from the
+     active tab, but on paper 0.7 L is muddy — the operator
+     complained it looked washed out. Black is correct contrast
+     for light mode; the active state still has the accent tint. */
+html[data-theme="light"] body.ftw-app > header {
+  border-color: transparent;
+}
+html[data-theme="light"] body.ftw-app > header h1,
+html[data-theme="light"] body.ftw-app > header .tab-btn,
+html[data-theme="light"] body.ftw-app > header .btn-link,
+html[data-theme="light"] body.ftw-app > header .version,
+html[data-theme="light"] body.ftw-app > header .icon-btn,
+html[data-theme="light"] body.ftw-app > header .settings-btn {
+  color: var(--fg);
+}
+html[data-theme="light"] body.ftw-app .mode-buttons button.active {
+  background: oklch(0.75 0.14 var(--accent-hue) / 0.25);
+}
+html[data-theme="light"] body.ftw-app .status-bar {
+  background: oklch(0.94 0.01 250);
+}
+/* Legacy val-* text colours are tuned for dark-on-dark in style.css;
+   tokens above re-point them but a few hex fallbacks slip through in
+   inline styles — use a readable dim for neutral text on light bg. */
+html[data-theme="light"] body.ftw-app .val-neutral { color: var(--fg); }
+html[data-theme="light"] body.ftw-app .summary-card .card-sub,
+html[data-theme="light"] body.ftw-app .card-target,
+html[data-theme="light"] body.ftw-app .plan-summary,
+html[data-theme="light"] body.ftw-app .chart-legend,
+html[data-theme="light"] body.ftw-app footer {
+  color: var(--fg-dim);
+}
+
+/* ---- Battery-absence gating ----
+   When no driver reports bat_w, app.js flips body.no-battery on
+   and every element tagged .bat-only disappears: the two "Bat
+   charged" / "Bat discharged" energy tiles and the Plan chart's
+   Charge/Discharge/SoC legend entries. The plan.js canvas drawing
+   checks the same class to skip the SoC band + battery bars. */
+body.ftw-app.no-battery .bat-only { display: none !important; }
+
+/* ---- Reset-model buttons ----
+   Used by models.js (per-battery model wipe) and twins.js (PV / load
+   twin reset). Ghost secondary per the shared design system so the button honours
+   the active theme — the original inline style reached for the
+   legacy --surface2 / --border / --text-dim hex tokens, which don't
+   flip to the light palette and rendered as black-on-white on paper
+   mode. */
+body.ftw-app .btn-reset-model {
+  margin-top: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 180ms ease, border-color 180ms ease;
+}
+body.ftw-app .btn-reset-model:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+body.ftw-app .btn-reset-model:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
+body.ftw-app .twin-profile-row {
+  align-items: center;
+}
+
+body.ftw-app .twin-profile-toggle {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(54px, 1fr));
+  width: 132px;
+  padding: 2px;
+  gap: 2px;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+body.ftw-app .twin-profile-toggle button {
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+body.ftw-app .twin-profile-toggle button.active {
+  background: var(--accent-e);
+  color: #0a0a0a;
+}
+
+body.ftw-app .twin-profile-toggle button:not(.active):hover {
+  color: var(--fg);
+}
+
+body.ftw-app .twin-profile-toggle button:focus-visible {
+  outline: 1px solid var(--accent-e);
+  outline-offset: 2px;
+}
+
+/* ---- Fuse card — vertical bars on small screens ----
+   Desktop shows each phase as a separate card with a big current
+   read-out and a horizontal bar underneath; that stacks three tall
+   cards on phone widths, which hides the fuse row below the fold.
+   On <=600 px we collapse all three phases into a single row with
+   a tall vertical bar per phase so the whole fuse picture reads at
+   a glance without scrolling. */
+@media (max-width: 600px) {
+  body.ftw-app .fuse-phase-boxes {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  body.ftw-app .fuse-phase-box {
+    padding: 8px 8px 10px;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    gap: 4px 8px;
+    align-items: start;
+  }
+  body.ftw-app .fuse-phase-box .fuse-phase-label {
+    grid-column: 2; grid-row: 1;
+    font-size: 10px;
+  }
+  body.ftw-app .fuse-phase-box .fuse-phase-val {
+    grid-column: 2; grid-row: 2;
+    font-size: 0.95rem;
+    line-height: 1.1;
+  }
+  body.ftw-app .fuse-phase-box .fuse-phase-bar {
+    grid-column: 1; grid-row: 1 / span 2;
+    /* Vertical bar: narrow strip, tall enough to read percentage
+       differences across phases. Fill rises from the bottom. */
+    width: 10px;
+    height: 48px;
+    display: flex;
+    align-items: flex-end;
+  }
+  body.ftw-app .fuse-phase-fill {
+    width: 100%;
+    height: var(--fill-pct, 0%);
+  }
+}

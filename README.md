@@ -4,245 +4,145 @@
 
 > Local-first home energy coordination.
 
-FTW is an open-source local energy runtime for solar, batteries, grid and EV
-charging. Its core runs as a single Go binary on a Raspberry Pi or Linux host,
-coordinates devices through Lua drivers, and keeps the control loop local. The
-optional full mathematical optimizer uses Python/CVXPY; official containers
-include that runtime and native installs fall back safely to the Go planner when
-it is unavailable.
+FTW coordinates solar, batteries, grid power, EV charging and thermal assets
+on a Raspberry Pi or Linux host. The safety-critical runtime is one Go binary,
+hardware integrations are sandboxed Lua drivers, and an optional Python/CVXPY
+optimizer handles long-horizon planning.
 
-FTW is maintained by Sourceful Labs AB and project contributors. It is a
-self-hosted open-source project, not a hosted Sourceful service; the local
-control path does not depend on Sourceful cloud services.
+The control path stays on the local network. Cloud price, weather and device
+integrations degrade independently; they are not required for safe local
+operation.
 
-> **Upgrading an existing Forty Two Watts installation?** Follow the
-> step-by-step [legacy upgrade guide in Swedish and English](docs/upgrade-from-legacy.md).
-> Its migration command moves older Docker Compose and local-development
-> layouts to the official Sourceful images while preserving the existing
-> service, directory, configuration, history, and device data.
+FTW Community is Apache-2.0 software maintained by Sourceful Energy and project
+contributors. Community help is best effort. See [SUPPORT.md](SUPPORT.md) for
+the boundary between community use and separate commercial services.
 
-The project is active and runs on real hardware, but API and config fields
-can still change before a stable 1.0 release. Version numbers come from
-git tags and `package.json`; use the GitHub releases page for the latest
-published build.
+## Architecture
 
-## What It Does
+FTW has three explicit modules:
 
-- **Self-consumption**: batteries discharge to cover household load, charge
-  from PV surplus, and keep the site meter near the configured target.
-- **MPC planning**: a 48-hour planner uses spot prices, weather, PV, load,
-  and battery state to choose charge, discharge, hold, or export targets.
-- **EV and V2X awareness**: EV charging is treated as load, and V2X chargers
-  can emit bidirectional vehicle power without confusing stationary batteries.
-- **Calendar planning (CalDAV)**: add events in your normal calendar app and
-  FTW turns them into planner intents — *Away* / *Vacation* conserves battery,
-  *Charge car 80%* sets an EV departure deadline — and publishes charging
-  windows + EVSE usage history back to a calendar you can subscribe to. FTW
-  hosts CalDAV itself, in-process, via [`emersion/go-webdav`](https://github.com/emersion/go-webdav)
-  — no extra container, recurring events supported, and it works as a Home
-  Assistant add-on. See [`docs/caldav-integration.md`](docs/caldav-integration.md).
-- **Multi-device control**: multiple meters, inverters, batteries, PV-only
-  devices, and chargers can run side by side.
-- **Local operation**: the control loop does not depend on a cloud service.
-  Prices, weather, notifications, and cloud drivers degrade independently.
+- **Core** owns configuration, telemetry, state, safety, dispatch, API and UI.
+- **Drivers** translate vendor protocols and power signs in isolated Lua VMs.
+- **Optimizer** proposes plans over a versioned contract; core validates every
+  result and keeps a Go fallback.
 
-## Supported Devices
+This separation lets drivers and the optimizer evolve independently without
+moving safety authority out of core. New module types should follow the same
+rule. See [docs/architecture.md](docs/architecture.md).
 
-Drivers are plain Lua files under [`drivers/`](drivers/). The in-app catalog
-is generated from each driver's `DRIVER` metadata block, and
-[`docs/driver-catalog.md`](docs/driver-catalog.md) mirrors that metadata for
-humans. The driver list should not be maintained as a number in this README.
+## Capabilities
 
-Current bundled driver families include:
+- self-consumption, peak shaving and explicit grid targets;
+- multi-battery allocation with fuse, SoC, slew and stale-data protection;
+- price-, weather-, PV- and load-aware planning;
+- EV charging, V2X and thermal planning;
+- local web UI, SQLite history and Parquet rolloff;
+- Home Assistant MQTT discovery;
+- CalDAV planning intents and published schedules;
+- hot-reloadable, independently released Lua drivers.
 
-| Category | Examples |
-|---|---|
-| Hybrid inverters | Sungrow, Ferroamp, Solis, Huawei, Deye, SMA, Fronius, GoodWe, Growatt, Sofar, Victron, Kostal |
-| PV and meters | SolarEdge, SMA PV, Pixii PV, Eastron SDM630, Fronius Smart Meter, Tibber Pulse, Zuidwijk P1, Sourceful Zap |
-| Batteries | Ferroamp, Pixii, sonnen, hybrid inverter batteries |
-| EV and V2X | Easee, CTEK Chargestorm, Tesla Vehicle, Ferroamp DC2 V2X, Ambibox V2X |
+The current device catalog is generated from the `DRIVER` metadata in
+[`drivers/*.lua`](drivers/); that source is authoritative.
 
-Adding a new device starts with
-[`docs/writing-a-driver.md`](docs/writing-a-driver.md).
+## Install on Linux
 
-## Quick Start
-
-### Option A: Raspberry Pi SD-card image
-
-Recommended: point **Raspberry Pi Imager** at the FTW image repository
-(**App Options → Content Repository → Use custom file**):
-
-```
-https://github.com/srcfl/ftw/releases/download/rpi-installer/os_list.json
-```
-
-Then pick **FTW**, set your hostname / SSH user / Wi-Fi in the
-customisation panel, and write — Imager downloads the image for you. Boot the
-Pi and open `http://ftw.local/`.
-
-You can instead download the latest dated `.img.xz` from the dedicated
-[`rpi-installer` release](https://github.com/srcfl/ftw/releases/tag/rpi-installer)
-and flash it directly, but that skips the customisation panel (default
-credentials, Wi-Fi via the `ftw-setup` captive portal) — not recommended.
-
-Full walkthrough: [`docs/rpi-image.md`](docs/rpi-image.md).
-
-### Option B: Docker installer
-
-On Raspberry Pi OS, Debian, or Ubuntu:
+The installer supports Raspberry Pi OS, Debian and Ubuntu:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/install.sh | bash
 ```
 
-Then open `http://<your-pi>:8080/setup`.
+It installs Docker when needed, creates `~/ftw`, downloads the Compose file
+and starts core, optimizer, updater and the local MQTT broker. Open
+`http://<host>:8080/setup` on the LAN.
 
-### Option C: Home Assistant OS add-on
+Existing Forty Two Watts or older FTW deployments must use the
+[legacy upgrade guide](docs/upgrade-from-legacy.md) so configuration and state
+are preserved. Raspberry Pi image installation is covered by
+[docs/rpi-image.md](docs/rpi-image.md).
 
-If you run Home Assistant OS or HA Supervised, install the add-on from
-[`erikarenhill/ha-addon-forty-two-watts`](https://github.com/erikarenhill/ha-addon-forty-two-watts).
+The dashboard is intentionally local. Use a VPN or another operator-managed
+private network when access is needed away from home; FTW does not ship a
+public relay.
 
-### Option D: Build from source
+## Local development
 
-Prerequisites: Go 1.26+, a Linux/Raspberry Pi target, and at least one
-supported device or simulator.
+Requirements are Go, Python 3 and Node.js. The optimizer environment is cached
+after its first install.
 
 ```bash
-git clone https://github.com/srcfl/ftw
+git clone https://github.com/srcfl/ftw.git
 cd ftw
-
-make dev          # simulators + app at http://localhost:8080
-make test         # unit + integration tests
-make build-arm64  # cross-compile for Raspberry Pi
+make dev
 ```
 
-The first `make dev` copies the tracked simulator template to the gitignored
-`config.local.yaml`, starts both simulators, and opens the app on port 8080.
-For real hardware, copy `config.example.yaml` to `config.yaml` and fill in your
-device capabilities instead.
+Useful checks:
 
-## How It Works
-
-```
-config.yaml
-    |
-    v
-Lua drivers: Modbus / MQTT / HTTP / WebSocket / raw TCP
-    |
-    v
-Telemetry store: latest readings, driver health, metric queue
-    |
-    v
-Control loop: PI, dispatch splitting, slew, fuse guard, watchdog
-    |
-    v
-MPC planner + PV/load/price twins + SQLite state
-    |
-    v
-HTTP API, dashboard, Home Assistant bridge, notifications
+```bash
+make test      # Go + Python, parallel where independent
+npm test       # web
+make verify    # fast test, compose, vet and build checks
+make e2e       # simulator-backed full stack
+make ci        # e2e, builds and browser smoke
 ```
 
-All power values above the driver boundary use the same site convention:
-positive W means energy flowing into the site across the grid-meter
-boundary. Read [`docs/site-convention.md`](docs/site-convention.md) before
-touching power math.
+See [docs/development.md](docs/development.md) for the small set of development
+workflows.
 
-## Remote Access
+## Configuration
 
-The full FTW dashboard and API are LAN-local. Do not port-forward them to the
-public internet. If you need the complete interface away from home, use a VPN
-or private overlay that you operate and trust; this is a community-supported
-self-hosting path, not an official Sourceful remote-access service.
+`config.example.yaml` and the validation types in `go/internal/config` are
+the configuration reference. Copy the example for a native development setup:
 
-The retired legacy FTW relay, TURN, browser passkey portal, WebRTC path
-and `ftw-pair` support tunnel are not part of FTW. The planned official remote
-experience is the Sourceful Energy app through an explicit, optional Novacore
-integration. It will start read-only and use outbound-only connections from
-FTW; local control and safety remain authoritative and work without Sourceful.
+```bash
+cp config.local.example.yaml config.local.yaml
+```
 
-See [the remote-access decision](docs/sourceful-remote-access-v2.md) and the
-[Sourceful Energy app integration plan](docs/sourceful-energy-app-integration.md).
+Power values above a driver use one convention: positive means into the site,
+negative means out. Drivers alone translate vendor conventions. Read
+[docs/site-convention.md](docs/site-convention.md) before editing power math or
+writing a driver.
+
+## Drivers
+
+Drivers are plain Lua files and need no compilation. A driver declares its
+catalog metadata, lifecycle and required capabilities in one file. The Go host
+provides capability-scoped Modbus, MQTT, HTTP, WebSocket and TCP access.
+
+Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Signed driver
+artifacts use the same `beta` → `stable` progression as core and can be
+installed or rolled back independently.
+
+## Releases
+
+There are two channels:
+
+- **beta** receives new release candidates for real-site validation;
+- **stable** promotes the exact commit already published and tested as beta.
+
+There is no edge channel. Changesets produce versions and changelog entries;
+GitHub Actions builds the binaries, containers and installer assets. Details
+for operators and maintainers are in [docs/self-update.md](docs/self-update.md).
 
 ## Documentation
 
-**Get started**
+The repository deliberately keeps prose small. Code, types, tests and driver
+metadata are the detailed reference.
 
-- [`docs/rpi-image.md`](docs/rpi-image.md) - SD-card image and captive portal
-- [`docs/setup-guide/`](docs/setup-guide/) - alternative generic Raspberry Pi OS + Docker setup
-- [`docs/configuration.md`](docs/configuration.md) - YAML config reference
-- [`docs/driver-catalog.md`](docs/driver-catalog.md) - bundled Lua drivers
+- [Architecture](docs/architecture.md)
+- [Power sign convention](docs/site-convention.md)
+- [Safety invariants](docs/safety.md)
+- [Operations and recovery](docs/operations.md)
+- [Writing a driver](docs/writing-a-driver.md)
+- [Self-update and release channels](docs/self-update.md)
+- [Home Assistant](docs/ha-integration.md)
+- [CalDAV](docs/caldav-integration.md)
 
-**Run it**
+Other files under `docs/` are focused installation or external-integration
+guides.
 
-- [`docs/operations.md`](docs/operations.md) - deploy, backup, logs, recovery
-- [`docs/self-update.md`](docs/self-update.md) - Docker updater sidecar
-- [`MIGRATION.md`](MIGRATION.md) - former-name compatibility and upgrade notes
-- [`docs/ha-integration.md`](docs/ha-integration.md) - MQTT autodiscovery
-- [`docs/caldav-integration.md`](docs/caldav-integration.md) - calendar planner constraints (CalDAV)
-- [`docs/sourceful-remote-access-v2.md`](docs/sourceful-remote-access-v2.md) - remote-access boundary
-- [`docs/sourceful-energy-app-integration.md`](docs/sourceful-energy-app-integration.md) - optional app integration plan
-- [`docs/safety.md`](docs/safety.md) - watchdog, clamps, fuse guard
+## Contributing
 
-**Understand it**
+Read [CONTRIBUTING.md](CONTRIBUTING.md). User-visible changes need a Changeset.
 
-- [`docs/architecture.md`](docs/architecture.md) - system map and data flow
-- [`docs/site-convention.md`](docs/site-convention.md) - sign convention
-- [`docs/ml-models.md`](docs/ml-models.md) - PV, load, and price twins
-- [`docs/mpc-planner.md`](docs/mpc-planner.md) - planner strategy details
-- [`docs/battery-models.md`](docs/battery-models.md) - ARX/RLS battery models
-- [`docs/api.md`](docs/api.md) - HTTP API reference
-
-**Build with it**
-
-- [`docs/writing-a-driver.md`](docs/writing-a-driver.md) - Lua driver guide
-- [`docs/host-api.md`](docs/host-api.md) - `host.*` Lua capability reference
-- [`docs/testing-drivers-live.md`](docs/testing-drivers-live.md) - live driver testing
-- [`docs/testing.md`](docs/testing.md) - repo test guide
-- [`docs/development.md`](docs/development.md) - local development loop
-
-Historical plans and early TODOs live under [`docs/archive/`](docs/archive/)
-when they are kept for context.
-
-## Development
-
-```bash
-make test
-make e2e
-make dev
-make ci
-make build-arm64
-```
-
-## Release Process
-
-Releases are driven by Changesets and GitHub Actions:
-
-1. Add a `.changeset/*.md` entry for each user-visible change.
-2. Merge the feature PR to `master`.
-3. The `release` workflow opens or updates the "Version Packages" PR.
-4. Merge that Version PR to bump `package.json`, update `CHANGELOG.md`, create
-   the `vX.Y.Z` tag, and publish the GitHub Release.
-5. The `release-assets` workflow builds and uploads Linux/Windows binaries and
-   Docker images.
-
-The Raspberry Pi installer image has its own monthly/on-change workflow and
-permanent `rpi-installer` channel. It pulls the current stable containers on
-first boot, so application patch releases do not rebuild the base OS image.
-
-Do not hand-edit `CHANGELOG.md` or manually bump `package.json`; pending
-release notes live in `.changeset/*.md`.
-
-## Community
-
-- Discord: [discord.gg/25xcBzQaux](https://discord.gg/25xcBzQaux)
-- Issues: [github.com/srcfl/ftw/issues](https://github.com/srcfl/ftw/issues)
-
-## License
-
-Licensed under the Apache License, Version 2.0 — see [`LICENSE`](LICENSE) and
-[`NOTICE`](NOTICE). Project naming guidance lives in [`TRADEMARKS.md`](TRADEMARKS.md).
-Contributions are accepted under the same license via the
-[Developer Certificate of Origin](CONTRIBUTING.md) (commit with `git commit -s`).
-
-> Prior to the adoption of Apache-2.0, the project was offered under the MIT
-> License. See [`NOTICE`](NOTICE) for details.
+Apache-2.0 — see [LICENSE](LICENSE).
