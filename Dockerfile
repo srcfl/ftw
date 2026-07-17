@@ -1,14 +1,13 @@
-# FTW container — static Go host + Python mathematical planner.
-#
-# Builder uses golang:alpine to keep the Go binary fully static. The runtime is
-# Debian slim because the CVXPY and HiGHS ARM64 wheels target glibc.
+# FTW core container — static Go host plus bundled Lua drivers and web assets.
+# The optional Python/CVXPY optimizer ships as its own independently updatable
+# image from Dockerfile.optimizer. Core falls back safely when it is absent.
 #
 # Multi-arch: linux/amd64 + linux/arm64 via docker buildx TARGETOS /
 # TARGETARCH when available. Plain `docker build` falls back to the
 # native Go arch inside the builder image.
 
 # --- Builder ---------------------------------------------------------------
-FROM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 # git is needed by `go build` to resolve VCS info baked into the binary
 # via -X main.Version. Everything else is in the base image.
@@ -33,20 +32,12 @@ RUN cd go && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
     -o /out/ftw ./cmd/ftw
-# --- Optimizer -------------------------------------------------------------
-FROM python:3.12-slim-bookworm AS optimizer
-
-COPY optimizer/ /src/optimizer/
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir /src/optimizer
-
 # --- Runtime ---------------------------------------------------------------
-FROM python:3.12-slim-bookworm
+FROM alpine:3.22
 
-# ca-certificates: HTTPS to elprisetjustnu / met.no / ECB FX.
-# tzdata: timezone-aware price + plan windows (Europe/Stockholm etc).
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && \
-    rm -rf /var/lib/apt/lists/*
+# HTTPS integrations and timezone-aware price/plan windows need these at
+# runtime. BusyBox wget provides the health check without adding Python/curl.
+RUN apk add --no-cache ca-certificates tzdata
 
 # Image layout:
 #   /app/ftw              binary (immutable, replaced on upgrade)
@@ -62,19 +53,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/ftw             /app/ftw
-COPY --from=optimizer /opt/venv          /opt/venv
-COPY optimizer/                          /app/optimizer/
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer && \
-    chown -R 100:101 /app /run/ftw-update /run/ftw-optimizer /opt/venv
+    chown -R 100:101 /app /run/ftw-update /run/ftw-optimizer
 
-ENV HOME=/app/data \
-    FTW_OPTIMIZER_PYTHON=/opt/venv/bin/python \
-    FTW_OPTIMIZER_DIR=/app/optimizer
+ENV HOME=/app/data
 
 USER 100:101
 WORKDIR /app/data
@@ -100,7 +87,7 @@ EXPOSE 8080
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health', timeout=4)" || exit 1
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:8080/api/health || exit 1
 
 ENTRYPOINT ["/app/ftw"]
 CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]
