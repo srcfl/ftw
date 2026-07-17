@@ -176,8 +176,9 @@ state:
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
 
-# Mathematical MPC optimizer. The official container includes Python/CVXPY;
-# native installs can set optimizer_command to their venv's Python executable.
+# Mathematical MPC optimizer. Official Compose runs it as the independently
+# updatable ftw-optimizer service; native installs can point optimizer_command
+# at their venv's Python executable.
 # planner:
 #   enabled: true
 #   engine: python

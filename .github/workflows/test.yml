@@ -69,7 +69,7 @@ jobs:
                 drivers/*.lua)
                   drivers=true
                   ;;
-                docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/install-macos.sh)
+                Dockerfile|Dockerfile.optimizer|docker-compose*.yml|scripts/enable-modular-stack.sh|scripts/migrate-legacy-compose.sh|scripts/test-modular-compose.sh|scripts/test-container-boundaries.sh|scripts/install-macos.sh)
                   compose=true
                   ;;
                 Makefile|.github/workflows/test.yml)
@@ -195,13 +195,13 @@ jobs:
           -head "${{ needs.changes.outputs.head_sha }}"
 
   compose:
-    name: compose migration
+    name: module boundaries
     needs: changes
     if: needs.changes.outputs.compose == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: make compose-migration-test
+      - run: make compose-migration-test container-boundary-test
 
   e2e:
     name: full stack
