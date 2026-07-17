@@ -20,8 +20,6 @@ import "./ftw-bar-chart.js";
 import "./ftw-history-card.js?v=ownerread2";
 import "./ftw-savings-card.js?v=ownerread1";
 import "./ftw-update-check.js?v=ownerfetch1";
-import "./ftw-pair-card.js?v=ownerfetch1";
-import "./ftw-pair-launcher.js?v=ownerfetch1";
 import "./ftw-notif-status.js?v=ownerfetch1";
 import "./ftw-notif-test-button.js";
 import "./ftw-notif-history.js?v=ownerfetch1";

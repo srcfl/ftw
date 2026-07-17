@@ -1,8 +1,7 @@
 // twins.js — advanced-mode ML diagnostics panel.
 // Renders a small card per twin (PV, load, price forecaster) with
 // sample count, MAE, quality bar, and last-updated time. Polls only
-// while advanced mode is visible; remote routes pay for every owner
-// request over the P2P channel.
+// while advanced mode is visible.
 
 (function () {
   'use strict';
@@ -10,13 +9,7 @@
   const REFRESH_MS = 10000;
   let refreshTimer = null;
 
-  // ownerFetch routes state-changing owner/CONTROL calls (load-twin profile
-  // switch, PV/load twin reset) over the STRICT P2P transport so their body never
-  // traverses the untrusted relay on the public home route. Wired in p2p.js to the
-  // shared fail-closed strict function; falls back to plain fetch only where
-  // p2p.js never loaded (genuine LAN / tests).
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 

@@ -38,18 +38,19 @@ Two directions:
 - The CalDAV server listens on **`:5232`** (all interfaces) — i.e. it is
   reachable from **any device on your home network**, not just loopback, so
   phones can sync. It is **not** forwarded to the internet by the FTW deployment
-  (no port-forward is created) and is **never** routed through the owner-access
-  relay, so it stays on your LAN unless you deliberately forward port `5232` on
-  your router. Off your network it simply doesn't sync, then catches up when
-  you're home.
+  (no port-forward is created), so it stays on your LAN unless you deliberately
+  expose port `5232`. Do not do that; use a trusted VPN if you need it away from
+  home. Off your network it simply doesn't sync, then catches up when you're
+  home.
 - Authentication is HTTP Basic over **plain HTTP** — credentials are
   base64-encoded (not encrypted). This is standard for self-hosted CalDAV on a
   **trusted** home network. If your LAN has guest WiFi or untrusted IoT
   devices, treat this as a weaker boundary: use a strong password, leave the
   feature off (it is opt-in), or put FTW behind a TLS reverse proxy. The server
   fails closed — an empty configured password rejects every request.
-- The FTW API surface for this feature (`/api/caldav/*`) is behind the normal
-  owner-auth gate; only the CalDAV port itself is on the open LAN.
+- The FTW API surface for this feature (`/api/caldav/*`) is LAN-local like the
+  rest of FTW. Its credential response disables wildcard CORS and caching, but
+  the LAN remains the trust boundary.
 - DoS hardening: FTW's client caps the CalDAV response it will read (25 MiB) and
   the number of events it parses per poll (10k), and bounds each poll with a
   timeout, so a hostile/MITM'd server can't exhaust the Pi or stall the calendar

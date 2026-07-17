@@ -5,14 +5,7 @@
   var S = (window.FTWSettings = window.FTWSettings || { tabs: {} });
   S.tabs = S.tabs || {};
 
-  // ownerFetch routes state-changing owner/CONTROL probes (EV-charger probe with
-  // email+password, Tesla verify with IP+VIN, driver test with the full driver
-  // config) over the STRICT P2P transport so those SENSITIVE bodies never traverse
-  // the untrusted relay on the public home route. Wired in p2p.js to the shared
-  // fail-closed strict function; falls back to plain fetch only where p2p.js never
-  // loaded (genuine LAN / tests).
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 
@@ -213,13 +206,13 @@
             '<span class="myuplink-connect-status" data-driver-idx="' + idx + '" style="font-size:0.82rem;color:var(--text-dim)"></span>' +
             '</div>' +
             // Manual fallback: when the automatic redirect can't reach this
-            // device (remote/relay access, or the portal rejected an http LAN
+            // device (for example when the portal rejected an HTTP LAN
             // callback), the operator copies the redirected URL from the
             // address bar and pastes it here. The Pi exchanges the code over
             // its own outbound HTTPS, so no inbound callback is needed.
             '<details style="margin-top:10px">' +
             '<summary style="cursor:pointer;font-size:0.8rem;color:var(--text-dim)">Not redirected back? Paste the URL instead</summary>' +
-            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here. Use this for remote/relay access or if the page didn\'t return to FTW.</p>' +
+            '<p style="color:var(--text-dim);font-size:0.72rem;margin:6px 0">After signing in at MyUplink, copy the full address from your browser\'s address bar and paste it here if the page did not return to FTW automatically.</p>' +
             '<input type="text" class="myuplink-manual-url" data-driver-idx="' + idx + '" placeholder=".../api/oauth/myuplink/callback?code=...&amp;state=..." style="font-family:var(--mono);font-size:0.78rem">' +
             '<button class="btn-add myuplink-manual-btn" type="button" data-driver-idx="' + idx + '" style="margin-top:6px">Complete connection</button>' +
             '</details>' +
@@ -680,8 +673,8 @@
       // MyUplink (and any OAuth authorization-code apicreds driver): open the
       // provider consent in a new tab. /start reads the SAVED client_id, so
       // the operator must save the row first; we pass the browser's own
-      // callback URL (location.origin) because on a relay origin the server
-      // can't derive it. The refresh_token lands server-side; the operator
+      // callback URL (location.origin) so the server uses the exact LAN origin
+      // the browser sees. The refresh_token lands server-side; the operator
       // reloads to see the badge flip to Connected.
       bodyEl.querySelectorAll(".myuplink-connect-btn").forEach(function (cbtn) {
         cbtn.addEventListener("click", function () {

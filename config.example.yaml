@@ -98,16 +98,6 @@ drivers:
 api:
   port: 8080
 
-# Owner remote access — reach your dashboard from anywhere over a direct,
-# end-to-end-encrypted browser↔Pi WebRTC channel (the relay only brokers the
-# connection; it never sees your traffic). OPT-IN, DEFAULT OFF: the Pi makes no
-# outgoing connection unless you enable it. Omit this block to stay fully local.
-# remote_access:
-#   enabled: false
-#   turn:                 # optional blind ICE fallback for hard-NAT/CGNAT peers
-#     enabled: false      # relays ciphertext only — costs zero trustlessness
-#     url: ""
-
 # Home Assistant MQTT bridge (optional)
 homeassistant:
   enabled: false
@@ -163,15 +153,6 @@ state:
 #       enabled: true
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
-
-# Anonymous component-health statistics. Disabled by default and fail-soft:
-# control never depends on the collector. Preview the exact payload under
-# Settings → System before opting in. No raw telemetry, hardware/network IDs,
-# config values, or user-chosen driver names are included.
-# fleet_statistics:
-#   enabled: false
-#   endpoint: https://relay.ftw.sourceful.energy/fleet/heartbeat
-#   interval_h: 24
 
 # Mathematical MPC optimizer. The official container includes Python/CVXPY;
 # native installs can set optimizer_command to their venv's Python executable.

@@ -14,5 +14,6 @@ languages. The recommended path is the ready-made FTW image in
 - Français — [fr.md](fr.md)
 - Español — [es.md](es.md)
 
-**Next step:** once it's running, open it from anywhere —
-[Reaching your home from anywhere](../remote-access.md) (one URL + passkey).
+**Next step:** once it is running, keep the dashboard on your trusted LAN. For
+community-supported full-UI access away from home, use a VPN or private overlay
+that you operate; see the [remote-access decision](../sourceful-remote-access-v2.md).

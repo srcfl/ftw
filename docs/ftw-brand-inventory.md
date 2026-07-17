@@ -1,5 +1,9 @@
 # FTW brand and compatibility inventory
 
+> Historical migration inventory. Its remote-origin and passkey programme was
+> superseded by [ADR 0003](adr/0003-retire-legacy-remote-access.md); those
+> entries do not describe the current runtime.
+
 - **Implementation baseline:** `origin/master` at `6638f1ac` (2026-07-15),
   retained as the historical comparison point for the migration
 - **Decision source:** [ADR 0002](adr/0002-ftw-name-and-sourceful-stewardship.md)

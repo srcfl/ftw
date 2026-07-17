@@ -1,7 +1,6 @@
 // loadpoints.js — advanced-mode panel: per-loadpoint configuration
 // summary + the planner's per-slot charging schedule. Refreshes every
-// 10 s only while advanced mode is visible; remote routes pay for every
-// owner request over the P2P channel.
+// 10 s only while advanced mode is visible.
 //
 // Data sources:
 //   GET /api/loadpoints  — array of LP states (id, driver, surplus_only,
@@ -31,7 +30,6 @@
   const SCHEDULE_SLOTS = 96;
 
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 
@@ -334,18 +332,6 @@
     }
     document.addEventListener('ftw-ui-mode-change', syncPolling);
     syncPolling();
-    if (window.ftwP2P && typeof window.ftwP2P.onState === 'function') {
-      var waitingForDirect = false;
-      window.ftwP2P.onState(function (s) {
-        if (s !== 'direct') {
-          waitingForDirect = true;
-          return;
-        }
-        if (!waitingForDirect) return;
-        waitingForDirect = false;
-        if (advancedVisible()) fetchAll();
-      });
-    }
   }
 
   if (document.readyState === 'loading') {

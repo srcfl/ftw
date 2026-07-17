@@ -11,13 +11,7 @@
 (function () {
   "use strict";
 
-  // ownerFetch routes state-changing owner/CONTROL calls (snapshot delete, and the
-  // skip/unskip/rollback/update/restart POSTs funnelled through _postJSON) over the
-  // STRICT P2P transport so their body never traverses the untrusted relay on the
-  // public home route. Wired in p2p.js to the shared fail-closed strict function;
-  // falls back to plain fetch only where p2p.js never loaded (genuine LAN / tests).
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 

@@ -149,42 +149,19 @@ touching power math.
 
 ## Remote Access
 
-> **Transition status:** local control is unaffected, but the new Sourceful
-> relay/TURN endpoints are not yet declared operational. Treat remote access as
-> unavailable unless the deployment runbook has been completed and verified;
-> this infrastructure cutover is tracked separately from the repository
-> migration.
+The full FTW dashboard and API are LAN-local. Do not port-forward them to the
+public internet. If you need the complete interface away from home, use a VPN
+or private overlay that you operate and trust; this is a community-supported
+self-hosting path, not an official Sourceful remote-access service.
 
-Remote access is opt-in and still keeps the home site local-first. Enable it
-from the local dashboard under **Settings -> Access**, save, and restart when
-prompted. The Pi then registers an opaque, high-entropy `site_id` with the
-public relay and publishes only the minimal information needed for a browser to
-find that Pi.
+The retired legacy FTW relay, TURN, browser passkey portal, WebRTC path
+and `ftw-pair` support tunnel are not part of FTW. The planned official remote
+experience is the Sourceful Energy app through an explicit, optional Novacore
+integration. It will start read-only and use outbound-only connections from
+FTW; local control and safety remain authoritative and work without Sourceful.
 
-Once that infrastructure has been provisioned and verified, the public
-`home.fortytwowatts.com` route works in three layers:
-
-1. The relay serves a small loader and owner-access pages from the
-   `ftw-relay-web.tar.gz` release asset.
-2. After a browser unlocks its encrypted local directory, static dashboard
-   files are fetched from the selected Pi through the relay route.
-3. Owner API calls, login, status, prices, history, plans, settings, and
-   control commands go over the strict WebRTC DataChannel to the Pi.
-
-The relay is therefore only a blind router and bootstrap host. It does not
-store the dashboard app bundle, does not terminate owner sessions, does not
-receive `ftw_owner` cookies, and does not inspect passkeys or owner data.
-Passkeys, remembered browser keys, and active sessions are managed locally in
-the Access tab, where they can also be revoked.
-
-First setup is a one-time bootstrap: the local Access screen shows a QR/link and
-PIN only before the first passkey exists, and only after the relay has accepted
-the live setup invitation. After one passkey is enrolled, add or revoke access
-from **Settings -> Access** while signed in.
-
-Relay operators should install the relay bootstrap bundle from each release,
-not copy the Pi dashboard `web/` directory to the relay. Deployment details:
-[`docs/relay-deploy.md`](docs/relay-deploy.md).
+See [the remote-access decision](docs/sourceful-remote-access-v2.md) and the
+[Sourceful Energy app integration plan](docs/sourceful-energy-app-integration.md).
 
 ## Documentation
 
@@ -202,6 +179,8 @@ not copy the Pi dashboard `web/` directory to the relay. Deployment details:
 - [`MIGRATION.md`](MIGRATION.md) - former-name compatibility and upgrade notes
 - [`docs/ha-integration.md`](docs/ha-integration.md) - MQTT autodiscovery
 - [`docs/caldav-integration.md`](docs/caldav-integration.md) - calendar planner constraints (CalDAV)
+- [`docs/sourceful-remote-access-v2.md`](docs/sourceful-remote-access-v2.md) - remote-access boundary
+- [`docs/sourceful-energy-app-integration.md`](docs/sourceful-energy-app-integration.md) - optional app integration plan
 - [`docs/safety.md`](docs/safety.md) - watchdog, clamps, fuse guard
 
 **Understand it**
@@ -243,8 +222,8 @@ Releases are driven by Changesets and GitHub Actions:
 3. The `release` workflow opens or updates the "Version Packages" PR.
 4. Merge that Version PR to bump `package.json`, update `CHANGELOG.md`, create
    the `vX.Y.Z` tag, and publish the GitHub Release.
-5. The `release-assets` workflow builds and uploads Linux/Windows binaries,
-   `ftw-relay` binaries, Docker images, and `ftw-relay-web.tar.gz`.
+5. The `release-assets` workflow builds and uploads Linux/Windows binaries and
+   Docker images.
 
 The Raspberry Pi installer image has its own monthly/on-change workflow and
 permanent `rpi-installer` channel. It pulls the current stable containers on

@@ -515,7 +515,3 @@ absolute paths leak into the config and it stays portable.
 > `docker compose pull && up -d` recreates the container and discards that
 > layer, and it can be lost on an unclean power-off. Use `./data/drivers/`
 > instead; that overlay exists precisely so you never have to.
-
-During a [pair session](ftw-pair.md) the friend's `deploy_driver` tool
-writes here automatically, so a driver added remotely is already
-persistent without any of the above.

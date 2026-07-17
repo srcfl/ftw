@@ -10,7 +10,7 @@ test("update dialog exposes stable beta and edge as a segmented channel control"
   assert.match(badge, /aria-pressed=/);
 });
 
-test("changing channel persists through the owner-authenticated API then forces a probe", () => {
+test("changing channel persists through the local API then forces a probe", () => {
   assert.match(badge, /_postJSON\("\/api\/version\/channel", \{ channel \}\)/);
   assert.match(badge, /this\._refresh\(true\)/);
 });

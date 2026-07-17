@@ -3,7 +3,8 @@
 - Status: Accepted (2026-07-15)
 - Supersedes: active product naming and stewardship statements that describe
   the project as `forty-two-watts`, `42W`, or as unaffiliated with a company
-- Follow-up: ADR 0003 will govern remote-domain and WebAuthn RP-ID migration
+- Follow-up: [ADR 0003](0003-retire-legacy-remote-access.md) retires the old
+  remote-access stack instead of migrating its domains or WebAuthn RP ID
 
 ## Context
 
@@ -77,15 +78,10 @@ release from `srcfl/ftw`.
 
 ## Remote-access boundary
 
-Programme A retains `home.fortytwowatts.com` as the WebAuthn RP ID. Relay and
-TURN references move to `relay.ftw.sourceful.energy` and
-`turn.ftw.sourceful.energy` now; provisioning those endpoints is a follow-up. A
-new passkey origin cannot be treated as a copy-only change: WebAuthn credentials
-and browser data in cookies, localStorage and IndexedDB are origin-scoped.
-
-ADR 0003 must define related-origin behaviour, credential RP-ID storage,
-browser-local identity recovery, dual-domain operation and retirement criteria
-before any remote default changes.
+ADR 0003 subsequently retired the owner passkey portal, relay, TURN and WebRTC
+path instead of migrating those security identities. The full UI is LAN-local;
+the optional managed remote experience is planned through the Sourceful Energy
+app and outbound-only Novacore integration.
 
 ## Detailed implementation specification
 

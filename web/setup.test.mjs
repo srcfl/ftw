@@ -3,7 +3,7 @@
 // Structural / lint-style tests for the setup wizard. setup.js is a
 // DOM-coupled IIFE that runs goStep(1) on load — it can't be imported
 // under `node --test` without a DOM polyfill (the repo ships none, see
-// web/components/ftw-pair-card.test.mjs for the same constraint). So we
+// other DOM-free UI tests for the same constraint). So we
 // regex over the source + the wizard HTML to lock in the Job 1 EV-setup
 // bug fixes:
 //   1. the id mismatch (#ev-username in HTML vs ev-email reads in JS)

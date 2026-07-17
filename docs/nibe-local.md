@@ -65,10 +65,9 @@ capture the Basic-auth password (Basic auth sends `base64(user:pass)` on every
 request — reversible, not encryption).
 
 Instead, `tls_pin_sha256` pins **exactly one** leaf certificate. A swapped cert
-is rejected at the TLS handshake even if it chains to a real CA. This is the
-same fingerprint-pinning approach the project uses for its DTLS/WebRTC identity.
-Drivers without a pin keep standard system-root verification — pinning is
-strictly opt-in and changes nothing for other HTTP drivers.
+is rejected at the TLS handshake even if it chains to a real CA. Drivers
+without a pin keep standard system-root verification — pinning is strictly
+opt-in and changes nothing for other HTTP drivers.
 
 Keep the pump on a trusted LAN / IoT VLAN and never expose port 8443 to the
 internet.

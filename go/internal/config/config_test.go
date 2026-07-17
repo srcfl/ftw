@@ -119,6 +119,23 @@ func TestLoadMinimalYAML(t *testing.T) {
 	}
 }
 
+func TestParseIgnoresRetiredRemoteAccessKeys(t *testing.T) {
+	legacy := minimalYAML + `
+remote_access:
+  enabled: true
+  turn:
+    enabled: true
+    url: turn:turn.example.test
+fleet_statistics:
+  enabled: true
+  endpoint: https://relay.example.test/fleet/heartbeat
+  interval_h: 24
+`
+	if _, err := Parse([]byte(legacy), "/tmp"); err != nil {
+		t.Fatalf("existing config with retired remote keys must keep loading: %v", err)
+	}
+}
+
 func TestSiteTroubleshootingModeParses(t *testing.T) {
 	raw := strings.Replace(minimalYAML, "name: Test", "name: Test\n  troubleshooting_mode: true", 1)
 	c, err := Parse([]byte(raw), "/tmp")
@@ -127,42 +144,6 @@ func TestSiteTroubleshootingModeParses(t *testing.T) {
 	}
 	if !c.Site.TroubleshootingMode {
 		t.Fatal("expected troubleshooting_mode=true")
-	}
-}
-
-// TestRemoteAccessOptInDefaultsOff: the owner remote-access home route is
-// opt-in / default-off. A config with no remote_access block must NOT dial out
-// (a Pi that merely inherits FTW_RELAY_URL stays local); only an explicit
-// enabled:true opts in. The blind TURN knob must parse while staying off.
-func TestRemoteAccessOptInDefaultsOff(t *testing.T) {
-	off, err := Parse([]byte(minimalYAML), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if off.RemoteAccess != nil {
-		t.Errorf("remote_access should be nil when unset, got %+v", off.RemoteAccess)
-	}
-	if off.RemoteAccessEnabled() {
-		t.Error("remote access must default OFF when no block is set")
-	}
-
-	on, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: true\n"), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !on.RemoteAccessEnabled() {
-		t.Error("remote_access.enabled: true must opt in")
-	}
-
-	turn, err := Parse([]byte(minimalYAML+"\nremote_access:\n  enabled: false\n  turn:\n    enabled: false\n    url: turn:relay.example:3478\n"), "/tmp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.RemoteAccessEnabled() {
-		t.Error("remote_access.enabled: false must stay off")
-	}
-	if turn.RemoteAccess == nil || turn.RemoteAccess.TURN == nil || turn.RemoteAccess.TURN.URL != "turn:relay.example:3478" {
-		t.Errorf("turn block did not parse: %+v", turn.RemoteAccess)
 	}
 }
 
@@ -1099,58 +1080,5 @@ func TestLocalSimulatorExampleParses(t *testing.T) {
 	}
 	if _, err := Parse(data, repoRoot); err != nil {
 		t.Fatalf("config.local.example.yaml: %v", err)
-	}
-}
-
-func TestFleetStatisticsDefaultsAreOptInAndHTTPS(t *testing.T) {
-	c := &Config{FleetStatistics: &FleetStatistics{}}
-	applyDefaults(c)
-	if c.FleetStatistics.Enabled {
-		t.Fatal("fleet statistics must remain disabled unless explicitly enabled")
-	}
-	if c.FleetStatistics.Endpoint != DefaultFleetStatisticsEndpoint || c.FleetStatistics.IntervalH != 24 {
-		t.Fatalf("fleet statistics defaults = %+v", c.FleetStatistics)
-	}
-}
-
-func TestFleetStatisticsRejectsInsecureEnabledEndpoint(t *testing.T) {
-	yaml := `
-site: { name: x, smoothing_alpha: 0.3 }
-fuse: { max_amps: 16, phases: 3, voltage: 230 }
-drivers:
-  - name: m
-    lua: m.lua
-    is_site_meter: true
-    capabilities: { mqtt: { host: 1.1.1.1 } }
-api: { port: 8080 }
-fleet_statistics:
-  enabled: true
-  endpoint: http://collector.example/fleet/heartbeat
-`
-	_, err := Parse([]byte(yaml), ".")
-	if err == nil || !strings.Contains(err.Error(), "absolute HTTPS") {
-		t.Fatalf("expected insecure fleet endpoint rejection, got %v", err)
-	}
-}
-
-func TestFleetStatisticsEnabledUsesOfficialDefaultEndpoint(t *testing.T) {
-	yaml := `
-site: { name: x, smoothing_alpha: 0.3 }
-fuse: { max_amps: 16, phases: 3, voltage: 230 }
-drivers:
-  - name: m
-    lua: m.lua
-    is_site_meter: true
-    capabilities: { mqtt: { host: 1.1.1.1 } }
-api: { port: 8080 }
-fleet_statistics:
-  enabled: true
-`
-	c, err := Parse([]byte(yaml), ".")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.FleetStatistics.Endpoint != DefaultFleetStatisticsEndpoint || c.FleetStatistics.IntervalH != 24 {
-		t.Fatalf("fleet statistics = %+v", c.FleetStatistics)
 	}
 }

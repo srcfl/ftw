@@ -4,12 +4,12 @@
 > The repository transfer completed on 2026-07-16. The transition release,
 > `v0.128.0`, and first post-transfer release, `v0.128.1`, are available from
 > `srcfl/ftw`. Canonical FTW binaries and images retain compatibility aliases.
-> Relay, TURN, passkey and old-domain infrastructure remain a separate
-> follow-up programme.
+> The legacy relay, TURN, passkey portal and support tunnel were retired on
+> 2026-07-17 rather than migrated to a new domain.
 
 The project is **FTW**, and its canonical stewardship and distribution are under
-Sourceful. The migration preserves configuration, state, history, device
-identity and owner access.
+Sourceful. The migration preserves configuration, state, history and device
+identity.
 
 FTW is maintained by Sourceful Labs AB and project contributors.
 
@@ -21,8 +21,8 @@ FTW is maintained by Sourceful Labs AB and project contributors.
 | Transition release from `frahlg/forty-two-watts` | `v0.128.0` / 2026-07-15 | Complete |
 | Repository transfer to `srcfl/ftw` | 2026-07-16 | Complete |
 | First post-transfer release from `srcfl/ftw` | `v0.128.1` / 2026-07-16 | Complete |
-| Website cutover | TBD | Not started |
-| New-domain passkey migration | Separate programme | Not started |
+| Website cutover | 2026-07-17 | Complete; old apex/www redirect to `ftw.sourceful.energy` |
+| Legacy relay/TURN/passkey retirement | 2026-07-17 | Complete; no replacement FTW portal |
 | Earliest compatibility-alias retirement | Not before 2026-10-14 and two later published releases | Not scheduled |
 
 `v0.128.0` established the compatibility foundation before the repository
@@ -42,9 +42,9 @@ merely because the calendar date has passed.
 | Updater image | `ghcr.io/frahlg/forty-two-watts-updater` | `ghcr.io/srcfl/ftw-updater` | Updater remains compatible with the installed Compose layout |
 | Fresh install directory | `~/forty-two-watts` | `~/ftw` | Existing directory is reused in place |
 | Fresh hostname | `42w.local` | `ftw.local` | Existing hostname is not changed automatically |
-| Project site | `fortytwowatts.com` | `ftw.sourceful.energy` | Old apex will redirect after cutover |
-| Owner home origin/RP ID | `home.fortytwowatts.com` | Separate Programme B | Unchanged during the basic rebrand |
-| Relay/TURN | legacy `fortytwowatts.com` hosts | `relay.ftw.sourceful.energy` / `turn.ftw.sourceful.energy` | Repository references move now; infrastructure validation follows in Programme B |
+| Project site | `fortytwowatts.com` | `ftw.sourceful.energy` | Old apex and `www` redirect to the canonical site |
+| Owner home origin/RP ID | `home.fortytwowatts.com` | Retired | Existing passkeys are no longer used by FTW |
+| Relay/TURN | legacy `fortytwowatts.com` hosts | Retired | No Sourceful replacement endpoint; old relay returns `410 Gone` |
 
 ## Existing Docker installations
 
@@ -162,16 +162,23 @@ Human-readable display names and documentation may change to FTW.
 
 ## Remote access and passkeys
 
-The basic rebrand does not change the production RP ID
-`home.fortytwowatts.com`. Existing passkeys remain valid at the old home origin.
+The old FTW relay, TURN service, WebRTC route, browser owner portal, local
+passkeys and `ftw-pair` support tunnel were retired instead of migrated. FTW's
+dashboard and API are LAN-local. Use an owner-operated VPN for community
+full-UI access; do not port-forward the FTW API.
 
-The future Sourceful-domain migration is a separate security-reviewed rollout.
-It must support both domains, account for origin-bound browser data and prevent
-removal of the last working credential. It will receive separate instructions
-and a minimum 12-month old-domain support period after the new-RP flow ships.
+Existing SQLite tables from the retired owner-access implementation are left
+untouched during upgrades so this cleanup does not destructively rewrite user
+state, but current FTW builds neither read nor populate them. Obsolete
+`remote_access` and `fleet_statistics` YAML keys are ignored and may be removed
+from operator configuration.
+
+The planned official remote experience is the optional Sourceful Energy app
+over outbound-only Novacore federation. It has a separate consent and security
+model; see [the decision](docs/sourceful-remote-access-v2.md).
 
 ## Rollback principle
 
 Rollback restores distribution or routing while leaving user state untouched.
-Never delete or recreate `config.yaml`, SQLite databases, cold history, device
-identity or owner credentials to recover from a rebrand rollout.
+Never delete or recreate `config.yaml`, SQLite databases, cold history or
+device identity to recover from a rebrand rollout.

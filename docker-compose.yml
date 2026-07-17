@@ -167,8 +167,7 @@ services:
   #   - "Charge car 80%"     → have the EV ready by the event's start time.
   # FTW also writes read-only "EVSE history" and "plan" calendars you subscribe
   # to. Credentials are auto-managed and shown (with a QR) in Settings →
-  # Calendar. LAN-ONLY by design: never routed through the owner-access relay,
-  # and nothing forwards port 5232 to the internet unless you do so yourself.
+  # Calendar. LAN-ONLY by design; nothing forwards port 5232 to the internet.
   # See docs/caldav-integration.md.
   # ---------------------------------------------------------------------
 

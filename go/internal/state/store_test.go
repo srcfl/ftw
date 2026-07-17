@@ -18,6 +18,62 @@ func freshStore(t *testing.T) *Store {
 	return s
 }
 
+func TestNewStoreDoesNotCreateRetiredOwnerTables(t *testing.T) {
+	s := freshStore(t)
+	for _, table := range []string{"trusted_devices", "owner_sessions", "trusted_device_pubkeys"} {
+		var count int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Errorf("retired table %q created in a new database", table)
+		}
+	}
+}
+
+func TestOpenPreservesRetiredOwnerTables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE trusted_devices (credential_id BLOB PRIMARY KEY, friendly_name TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO trusted_devices (credential_id, friendly_name) VALUES (x'0102', 'legacy browser')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("open database containing retired owner state: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	var name string
+	if err := reopened.db.QueryRow(`SELECT friendly_name FROM trusted_devices WHERE credential_id = x'0102'`).Scan(&name); err != nil {
+		t.Fatalf("legacy owner state was not preserved: %v", err)
+	}
+	if name != "legacy browser" {
+		t.Fatalf("legacy owner state changed: got %q", name)
+	}
+
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := reopened.SnapshotTo(snapshotPath); err != nil {
+		t.Fatalf("snapshot database containing retired owner state: %v", err)
+	}
+	snapshot, err := Open(snapshotPath)
+	if err != nil {
+		t.Fatalf("open snapshot containing retired owner state: %v", err)
+	}
+	t.Cleanup(func() { snapshot.Close() })
+	if err := snapshot.db.QueryRow(`SELECT friendly_name FROM trusted_devices WHERE credential_id = x'0102'`).Scan(&name); err != nil {
+		t.Fatalf("snapshot lost legacy owner state: %v", err)
+	}
+}
+
 func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 	dir := t.TempDir()
 	s1, err := Open(filepath.Join(dir, "one.db"))
@@ -583,63 +639,6 @@ func TestSnapshotToCapturesLiveState(t *testing.T) {
 	// present, proving the snapshot is point-in-time.
 	if _, ok := snap.LoadConfig("post_snap"); ok {
 		t.Error("snapshot contains row written after snapshot — VACUUM INTO isn't point-in-time as assumed")
-	}
-}
-
-func TestSnapshotToPreservesTrustedDevicePubkeys(t *testing.T) {
-	s := freshStore(t)
-	credID := []byte("credential-with-browser-keys")
-	if err := s.SaveTrustedDevice(TrustedDevice{
-		CredentialID:   credID,
-		PublicKey:      []byte("credential-public-key"),
-		FriendlyName:   "Safari",
-		CreatedAtMs:    1700000000000,
-		DevicePubkey:   "browser-key-at-enroll",
-		WalletHandle:   "wallet",
-		BackupEligible: true,
-		BackupState:    true,
-	}); err != nil {
-		t.Fatalf("save trusted device: %v", err)
-	}
-	if err := s.SetTrustedDevicePubkey(credID, "browser-key-after-login", false); err != nil {
-		t.Fatalf("set trusted device pubkey: %v", err)
-	}
-
-	dst := filepath.Join(t.TempDir(), "snap.db")
-	if err := s.SnapshotTo(dst); err != nil {
-		t.Fatalf("SnapshotTo with trusted_device_pubkeys: %v", err)
-	}
-
-	snap, err := Open(dst)
-	if err != nil {
-		t.Fatalf("open snapshot: %v", err)
-	}
-	t.Cleanup(func() { snap.Close() })
-
-	records, err := snap.TrustedDevicePubkeyRecords()
-	if err != nil {
-		t.Fatalf("snapshot trusted device pubkeys: %v", err)
-	}
-	got := map[string]bool{}
-	for _, r := range records {
-		got[r.DevicePubkey] = true
-	}
-	for _, want := range []string{"browser-key-at-enroll", "browser-key-after-login"} {
-		if !got[want] {
-			t.Fatalf("snapshot missing trusted device pubkey %q; records=%+v", want, records)
-		}
-	}
-
-	rows, err := snap.db.Query(`PRAGMA foreign_key_check`)
-	if err != nil {
-		t.Fatalf("foreign_key_check: %v", err)
-	}
-	defer rows.Close()
-	if rows.Next() {
-		t.Fatal("snapshot has foreign-key violations")
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("foreign_key_check rows: %v", err)
 	}
 }
 

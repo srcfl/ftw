@@ -19,12 +19,7 @@
 
   if (!grid) return;
 
-  // ownerFetch routes state-changing owner/CONTROL calls (self-tune start/cancel)
-  // over the STRICT P2P transport so their body never traverses the untrusted relay
-  // on the public home route. Wired in p2p.js to the shared fail-closed strict
-  // function; falls back to plain fetch only where p2p.js never loaded (LAN/tests).
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === "function") return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 

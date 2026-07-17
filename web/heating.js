@@ -5,7 +5,7 @@
 // driver actually reports hp_power_w, so a site without a heat pump never
 // sees an empty card. Discovery runs once on load (one /api/drivers/{name}
 // fetch per driver); steady-state polling then only touches the heat-pump
-// drivers, so remote routes don't pay for every driver every 30 s.
+// drivers.
 //
 // See docs/myuplink-oauth.md. No control here — telemetry only.
 
@@ -21,10 +21,7 @@
   var historyCache = Object.create(null);
   var refreshInFlight = false;
 
-  // Route reads over the owner/P2P transport when present (remote home
-  // route), else plain fetch (LAN / tests). Mirrors twins.js.
   function ownerFetch(path, opts) {
-    if (typeof window.ownerFetch === 'function') return window.ownerFetch(path, opts);
     return fetch(path, opts);
   }
 
@@ -381,7 +378,7 @@
 
   // The live values are cheap and refresh every 30 s. Month/year history is
   // comparatively expensive (SQLite/Parquet range scans, possibly over the
-  // owner relay), so cache those series for five minutes per heat pump.
+  // dashboard), so cache those series for five minutes per heat pump.
   function fetchPumpHistory(name) {
     var cached = historyCache[name];
     var now = Date.now();
@@ -600,7 +597,7 @@
       body.innerHTML = html;
       // Fetch trends only for the curated dashboard signals. A NIBE driver can
       // expose ~980 points; issuing one series query per point here could flood
-      // a Pi (and the remote relay) with nearly a thousand concurrent requests.
+      // a Pi with nearly a thousand concurrent requests.
       metrics.filter(function (m) { return !!infoForKey(m.name); }).forEach(function (m) {
         fetchJSON('/api/series?driver=' + encodeURIComponent(name) + '&metric=' + encodeURIComponent(m.name) + '&range=24h&points=120')
           .then(function (s) {

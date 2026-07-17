@@ -209,28 +209,6 @@ api:
 
 The API port is bound at process startup and requires restart to change.
 
-## `remote_access`
-
-Remote owner access is explicit opt-in and disabled when this block is omitted:
-
-```yaml
-remote_access:
-  enabled: false
-  turn:
-    enabled: false
-    url: ""
-```
-
-Enabling it lets the Pi register with the configured relay and establish an
-end-to-end encrypted browser↔Pi WebRTC DataChannel. TURN is an optional blind
-ICE fallback that relays DTLS ciphertext only. Relay/TURN deployment is a
-separate infrastructure step; local control continues normally when those
-services are unavailable. See [`remote-access.md`](remote-access.md) and the
-current provisioning warning in [`relay-deploy.md`](relay-deploy.md).
-
-Remote-access enablement and TURN/relay changes require a process restart; the
-outbound registration loop is constructed at startup.
-
 ## `homeassistant`
 
 ```yaml
@@ -437,25 +415,6 @@ device_repository:
 Omitting `device_repository` entirely remains bundled-only and performs no
 repository network requests.
 
-## `fleet_statistics`
-
-Anonymous fleet statistics are disabled by default and require explicit opt-in:
-
-```yaml
-fleet_statistics:
-  enabled: true
-  endpoint: https://relay.ftw.sourceful.energy/fleet/heartbeat
-  interval_h: 24
-```
-
-FTW sends a random installation ID, core/optimizer versions and coarse health,
-public driver IDs/versions/source/health, and whether the configured site meter
-is healthy. It never sends raw energy telemetry, local driver names, config,
-serial numbers, MAC/IP addresses, endpoints, or secrets. The exact payload can
-be inspected in Settings → System before enabling. Changing this block requires
-a restart so opt-in state and the background schedule change atomically. See
-[Fleet statistics](fleet-statistics.md).
-
 `optimizer_recourse_shadow` runs a storage-only stochastic challenger after the
 active champion solve. `optimizer_challenger_policy` selects the two-stage
 `recourse` reference or the hierarchical `multistage` policy. The first slot is
@@ -524,7 +483,6 @@ these specialized blocks.
 | `api.port` | no | Socket bind happens at startup. |
 | `state.path`, `state.cold_dir` | no | Store opens at startup. |
 | `homeassistant.*` | no | Broker connection is built at startup. |
-| `remote_access.*` | no | Relay registration and ICE configuration are built at startup. |
 | `caldav.*` | no | The in-process server and calendar service are built at startup. |
 | `price.*`, `weather.*` | yes | Picked up by the next fetch. |
 

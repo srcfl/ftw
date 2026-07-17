@@ -34,7 +34,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
-	"github.com/srcfl/ftw/go/internal/fleetstats"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
@@ -45,7 +44,6 @@ import (
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/nova"
 	"github.com/srcfl/ftw/go/internal/ocpp"
-	"github.com/srcfl/ftw/go/internal/p2p"
 	"github.com/srcfl/ftw/go/internal/priceforecast"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/proxy"
@@ -60,8 +58,6 @@ import (
 // local runs.
 var Version = "dev"
 
-const defaultOwnerRelayURL = "https://relay.ftw.sourceful.energy"
-
 func main() {
 	// Subcommand dispatch — a bare first non-flag argument selects one
 	// of the bootstrap CLIs, e.g. `ftw nova-claim --url=…`.
@@ -71,9 +67,6 @@ func main() {
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
-			return
-		case "pair":
-			runPair(os.Args[2:])
 			return
 		}
 	}
@@ -1662,119 +1655,10 @@ func main() {
 		slog.Info("selfupdate disabled — set FTW_SELFUPDATE_ENABLED=1 to turn on")
 	}
 
-	// ---- Anonymous fleet statistics (explicit opt-in) ----
-	// The reporter snapshots only public component IDs/versions and coarse
-	// health. It never receives raw telemetry, driver config, hardware IDs, or
-	// network endpoints. A disabled reporter is still constructed so Settings
-	// can preview the exact payload before the operator opts in.
-	fleetCfg := fleetstats.Config{}
-	if cfg.FleetStatistics != nil {
-		fleetCfg.Enabled = cfg.FleetStatistics.Enabled
-		fleetCfg.Endpoint = cfg.FleetStatistics.Endpoint
-		fleetCfg.Interval = time.Duration(cfg.FleetStatistics.IntervalH) * time.Hour
-	}
-	fleetReporter, err := fleetstats.NewReporter(fleetCfg, st, func(snapshotCtx context.Context) (fleetstats.Payload, error) {
-		cfgMu.RLock()
-		configuredDrivers := append([]config.Driver(nil), cfg.Drivers...)
-		cfgMu.RUnlock()
-
-		catalog, err := drivers.LoadCatalogSources(
-			drivers.CatalogSource{Dir: *userDriversDirFlag, Source: "local"},
-			drivers.CatalogSource{Dir: driverRepository.ActiveDir(), Source: "managed"},
-			drivers.CatalogSource{Dir: resolveDriverDir(), Source: "bundled"},
-		)
-		if err != nil {
-			return fleetstats.Payload{}, err
-		}
-		catalog = driverRepository.EnrichCatalog(catalog)
-
-		channel := "native"
-		if selfUpdater != nil {
-			channel = string(selfUpdater.Info().Channel)
-		}
-		optimizer := &fleetstats.OptimizerStats{Status: "not_configured"}
-		if mpcSvc != nil && mpcSvc.Optimizer != nil {
-			optimizer.Status = "degraded"
-			if health, ok := mpcSvc.Optimizer.(interface {
-				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
-			}); ok {
-				info, healthErr := health.Health(snapshotCtx)
-				if healthErr == nil {
-					optimizer.Status = "healthy"
-					optimizer.Version = info.Version
-					optimizer.Transport = info.Transport
-					optimizer.ProtocolVersion = info.ProtocolVersion
-				}
-			}
-		}
-		return fleetstats.BuildSnapshot(fleetstats.SnapshotInput{
-			CoreVersion: Version,
-			Channel:     channel,
-			Optimizer:   optimizer,
-			Drivers:     configuredDrivers,
-			Catalog:     catalog,
-			Health:      tel.AllHealth(),
-		}), nil
-	})
-	if err != nil {
-		slog.Error("fleet statistics configuration", "err", err)
-		os.Exit(1)
-	}
-	if fleetReporter.Enabled() {
-		go fleetReporter.Run(ctx)
-		slog.Info("anonymous fleet statistics enabled", "interval", fleetCfg.Interval)
-	} else {
-		slog.Info("anonymous fleet statistics disabled (opt-in)")
-	}
-
 	// ---- Start HTTP API ----
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
-	// Per-process secret stamped on every relay-tunnelled request so the API
-	// auth-gate can tell remote (relay) traffic from genuine LAN/loopback.
-	tunnelMarker := newTunnelMarker()
-
-	// Self-sovereign site identity: always generated on first boot, Nova-
-	// format (P-256 PEM) so federation can reuse it, but never dependent on
-	// Nova being enabled. Canonical path is the same nova.key default so
-	// existing federated gateways keep their claimed key.
-	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
-	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
-		identityKeyPath = cfg.Nova.KeyPath
-	}
-	var siteIdentityPubHex string
-	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
-	if err != nil {
-		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
-	} else {
-		siteIdentityPubHex = siteIdentity.PublicKeyHex()
-		slog.Info("site identity ready", "pubkey_prefix", siteIdentityPubHex[:16])
-	}
-	ownerSiteID := deriveOwnerSiteID(st)
-
-	// Browser P2P (Phase 5): the manager answers WebRTC SDP offers
-	// (POST /api/p2p/offer) and serves the resulting direct DataChannel with a
-	// p2p.Bridge over the ungated API mux. Signaling rides the authenticated
-	// owner tunnel — no relay changes. The local-API handler is injected after
-	// api.New (srv.Mux()) since srv does not exist yet at this point.
-	//
-	// STUN set is overridable for closed networks (the local docker E2E harness
-	// has no WAN, so resolving public STUN just wastes the ICE-gather budget).
-	// Unset → DefaultSTUNServers (production). FTW_P2P_STUN="none"/"off" →
-	// host-candidate-only gathering, which is all that's needed when both peers
-	// share an L2 (e.g. the docker bridge — direct host pairing, no NAT).
-	// Otherwise a comma-separated list of stun: URLs replaces the default.
-	p2pMgr := p2p.NewManager(slog.Default(), p2pSTUNFromEnv())
-	defer p2pMgr.Close()
-	// Sign every answer's DTLS fingerprint with the site identity so the browser
-	// can verify (against the key it pinned at first connect) that the answer is
-	// this Pi's — closing relay MITM of the signaling. Skip if there's no identity
-	// (then answers are unsigned and a verifying browser treats them as such).
-	if siteIdentity != nil {
-		p2pMgr.SetSigner(ownerSiteID, siteIdentity)
-	}
-
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
@@ -1811,33 +1695,6 @@ func main() {
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
-		FleetStats:       fleetReporter,
-		// ---- Owner remote access ----
-		// rp.id defaults to the production home host (home.fortytwowatts.com),
-		// the origin the owner actually visits. Override with
-		// FTW_OWNER_ACCESS_RPID for dev (e.g. "localhost"). NOTE: the RP-ID is a
-		// one-way door — passkeys enrolled under one RP-ID only work on that
-		// host's registrable suffix, so this must match the public origin before
-		// any passkey is enrolled. LAN bypass is on by default — the dashboard
-		// served on the local network is already implicitly trusted.
-		OwnerAccessRPID:      envOr("FTW_OWNER_ACCESS_RPID", "home.fortytwowatts.com"),
-		OwnerAccessOrigins:   parseOriginsEnv("FTW_OWNER_ACCESS_ORIGINS"),
-		OwnerAccessLANBypass: envBoolDefault("FTW_OWNER_ACCESS_LAN_BYPASS", true),
-		TunnelMarker:         tunnelMarker,
-		SiteIdentityPubHex:   siteIdentityPubHex,
-		SiteID:               ownerSiteID,
-		// RelayBaseURL lets the API self-publish its signed instance descriptor to
-		// {relay}/bootstrap during the first-enrollment window (multi-tenant
-		// onboarding). Same source the relay registration uses; empty (LAN-only)
-		// makes the self-publish a no-op. Gating on remote_access happens at the
-		// publish call site via the zero-device window — a Pi that isn't dialing
-		// the relay simply never has its descriptor claimed.
-		RelayBaseURL: ownerRelayURL(cfg),
-		// InstanceSigner signs the owner-access instance descriptor with the same
-		// self-sovereign ES256 key. nil-safe: if identity load failed above,
-		// siteIdentity is nil and the descriptor endpoint returns 503.
-		InstanceSigner: instanceSignerOrNil(siteIdentity),
-		P2P:            p2pMgr,
 
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
@@ -1866,11 +1723,6 @@ func main() {
 		Version: Version,
 	}
 	srv := api.New(deps)
-	// Wire the P2P bridge to the GATED API handler now that srv exists. The
-	// Bridge stamps each replayed request with the offer's auth context, so the
-	// gate authorizes them at the owner's real trust tier (remote over the
-	// relay, local on the LAN) — not an unconditional bypass.
-	p2pMgr.SetLocalAPI(srv.Handler())
 	// Dev-mode proxy: when FTW_PROXY_UPSTREAM is set (e.g.
 	// http://192.168.1.139:8080), /api/* is forwarded to that instance so
 	// the local UI renders live data without owning the control loop.
@@ -1912,43 +1764,6 @@ func main() {
 		defer c()
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
-
-	// ---- Relay registration for owner remote access (Phase 3) ----
-	// When Remote Access is enabled, post our (site_id, host_id) to the
-	// relay periodically so /me/<site_id>/* routes to this instance.
-	// host_id is derived once from site_id + a stable random suffix.
-	// OPT-IN, DEFAULT OFF: the Pi only dials the relay when config opts in.
-	// Once opted in, the official relay is the default so a normal release image
-	// works without a local FTW_RELAY_URL override. Operators can still override
-	// FTW_RELAY_URL for self-hosted/dev relays, or set it explicitly empty to
-	// disable dialing despite an enabled config.
-	if relayURL := ownerRelayURL(cfg); relayURL != "" {
-		switch {
-		case siteIdentity == nil:
-			// The relay requires an ES256-signed registration. Without a site
-			// identity we cannot sign, so we must not register (an unsigned
-			// mapping would be refused anyway) — fail loud, not silent.
-			slog.Error("owner-access: remote_access enabled but no site identity; skipping relay registration", "key_path", identityKeyPath)
-		default:
-			// C1: publish this site's trusted device_pubkeys on every /me/register
-			// so the relay can gate signaling on a device-key proof (no published
-			// key → the relay forwards no signaling, fail-closed). Wired here so
-			// owner_relay_register.go stays free of a *Store dependency.
-			trustedDevicePubkeysLoader = func() []string {
-				pks, err := st.TrustedDevicePubkeys()
-				if err != nil {
-					slog.Warn("owner-access: could not load trusted device_pubkeys for relay publish", "err", err)
-					return nil
-				}
-				return pks
-			}
-			go runOwnerRelayRegistration(ctx, relayURL, ownerSiteID, deriveOwnerHostID(st, cfg.Site.Name), tunnelMarker, cfg.API.Port, siteIdentity, p2pMgr)
-		}
-	} else if os.Getenv("FTW_RELAY_URL") != "" && !ownerRemoteAccessEnabled(cfg) {
-		slog.Info("owner-access: FTW_RELAY_URL set but remote access is not enabled — not dialing the relay (set remote_access.enabled=true)")
-	} else if ownerRemoteAccessEnabled(cfg) {
-		slog.Info("owner-access: remote_access enabled but relay URL is empty — not dialing the relay")
-	}
 
 	// ---- Notifications (always constructed so API + applier hold live refs) ----
 	// Provider selection uses the strategy registry in internal/notifications;
@@ -2049,10 +1864,16 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		// Reuse the already-loaded self-sovereign identity (same canonical
-		// path) so federation and local identity are one and the same key.
-		if siteIdentity == nil {
-			slog.Warn("nova federation disabled — site identity unavailable")
+		// Load the persistent gateway identity only for explicitly enabled
+		// federation. Keep the canonical nova.key path so already-claimed
+		// gateways retain their identity across upgrades.
+		identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
+		if cfg.Nova.KeyPath != "" {
+			identityKeyPath = cfg.Nova.KeyPath
+		}
+		siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+		if err != nil {
+			slog.Warn("nova federation disabled — gateway identity unavailable", "err", err, "path", identityKeyPath)
 		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
@@ -3550,27 +3371,6 @@ func envOr(key, def string) string {
 	return def
 }
 
-func ownerRemoteAccessEnabled(cfg *config.Config) bool {
-	return cfg != nil && cfg.RemoteAccess != nil && cfg.RemoteAccess.Enabled
-}
-
-func ownerRelayURL(cfg *config.Config) string {
-	if !ownerRemoteAccessEnabled(cfg) {
-		return ""
-	}
-	return strings.TrimRight(envOr("FTW_RELAY_URL", defaultOwnerRelayURL), "/")
-}
-
-// instanceSignerOrNil returns id as an api.InstanceSigner, or a genuine nil
-// interface when id is nil — so api's `InstanceSigner == nil` 503 guard fires
-// (a typed-nil *nova.Identity boxed into the interface would be non-nil).
-func instanceSignerOrNil(id *nova.Identity) api.InstanceSigner {
-	if id == nil {
-		return nil
-	}
-	return id
-}
-
 func troubleshootingGridW(tel *telemetry.Store, siteMeterDriver string) (float64, bool) {
 	if siteMeterDriver == "" {
 		return 0, false
@@ -3602,65 +3402,4 @@ func envBool(key string) bool {
 		return true
 	}
 	return false
-}
-
-// envBoolDefault is like envBool but returns def when the var is unset.
-// Negative explicit values (0/false/no/off) override the default to false;
-// any other explicit value parses as true.
-func envBoolDefault(key string, def bool) bool {
-	v, ok := os.LookupEnv(key)
-	if !ok {
-		return def
-	}
-	switch strings.ToLower(v) {
-	case "0", "false", "no", "off", "":
-		return false
-	}
-	return true
-}
-
-// p2pSTUNFromEnv resolves the WebRTC STUN server set from FTW_P2P_STUN.
-// Unset → p2p.DefaultSTUNServers (production NAT traversal). "none"/"off"/""
-// (explicit empty) → nil, i.e. host-candidate-only gathering for closed
-// networks like the docker E2E harness. Anything else is a comma-separated
-// list of stun: URLs that replaces the default.
-func p2pSTUNFromEnv() []string {
-	v, ok := os.LookupEnv("FTW_P2P_STUN")
-	if !ok {
-		return p2p.DefaultSTUNServers
-	}
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "none", "off":
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// parseOriginsEnv splits a comma-separated list of WebAuthn-acceptable
-// origins from an env var. Empty / unset returns nil — caller treats
-// nil as "derive from rp.id".
-func parseOriginsEnv(key string) []string {
-	v := os.Getenv(key)
-	if v == "" {
-		return nil
-	}
-	parts := strings.Split(v, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

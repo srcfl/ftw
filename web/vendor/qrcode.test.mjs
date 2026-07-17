@@ -25,7 +25,7 @@ test("qrMatrix places the three finder patterns (structural correctness)", () =>
 });
 
 test("qrMatrix grows the version with the payload and is deterministic", () => {
-  const url = "https://home.fortytwowatts.com/owner-access/enroll.html#b=" + "x".repeat(43);
+  const url = "https://ftw.local/setup#token=" + "x".repeat(43);
   const a = qrMatrix(url);
   const b = qrMatrix(url);
   assert.ok(a.length >= 25, "a real onboarding URL needs a larger version than 21");
