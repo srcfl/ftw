@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0
+
+### Minor Changes
+
+- 61c5250: Add Sourceful's keyless European spot-price API and make it the default provider for new FTW setups.
+- 61c5250: Promote Sourceful Zap to a first-class production integration with official local-API identity, meter, PV, read-only battery and full firmware-schema V2X telemetry, hot device discovery, a safe local-control activation contract, setup guidance, and explicit Zap-anchored or standalone Sourceful Energy onboarding.
+
+### Patch Changes
+
+- 61c5250: Fix Easee auto phase switching around the 1-phase/3-phase minimum-current gap, and let cheap/arbitrage dispatch absorb unexpected live PV when it economically displaces a later grid-funded battery charge.
+- 61c5250: Retire the unused relay, pairing, embedded OCPP and legacy-dashboard paths; reduce project documentation and make beta-to-stable promotion explicit for core and drivers.
+- 61c5250: Fix Deye driver initialization by declaring its default SoC limits before they are read.
+
 ## 1.1.0
 
 ### Minor Changes
