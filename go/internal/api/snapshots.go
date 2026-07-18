@@ -13,11 +13,9 @@ import (
 	"time"
 )
 
-// snapshotKeepCount caps how many snapshot directories we retain. A
-// fresh one is created before every self-update; older ones get pruned
-// after the new snapshot lands, so the on-disk set is always ≤ this
-// number. Picked so the whole safety-net fits in the low-MB-per-entry
-// ballpark without the operator having to manage it.
+// snapshotKeepCount caps the normal update snapshots we retain. A rollback
+// temporarily needs one additional safety backup while keeping its selected
+// target, so that path retains at most snapshotKeepCount+1 directories.
 const snapshotKeepCount = 5
 
 // SnapshotMeta is the JSON marker written inside each snapshot dir.
@@ -25,11 +23,12 @@ const snapshotKeepCount = 5
 // to restore when we add the rollback flow — pinning a schema now
 // lets future code read older snapshots without a guessing game.
 type SnapshotMeta struct {
-	SchemaVersion int       `json:"schema_version"`
-	CreatedAt     time.Time `json:"created_at"`
-	FromVersion   string    `json:"from_version,omitempty"`
-	ToVersion     string    `json:"to_version,omitempty"`
-	Action        string    `json:"action,omitempty"` // "update" | "restart"
+	SchemaVersion    int       `json:"schema_version"`
+	CreatedAt        time.Time `json:"created_at"`
+	FromVersion      string    `json:"from_version,omitempty"`
+	ToVersion        string    `json:"to_version,omitempty"`
+	Action           string    `json:"action,omitempty"` // "update" | "restart" | "pre-rollback"
+	CompleteDatabase bool      `json:"complete_database"`
 	// Files lists what was captured so a reader can distinguish a
 	// state-only snapshot (old) from a state+config one (current) and
 	// refuse to restore a partial set.
@@ -40,7 +39,7 @@ type SnapshotMeta struct {
 // dir changes (new required files, renamed meta fields). Older readers
 // see the number and can refuse with a clear error instead of silently
 // restoring an incomplete set.
-const snapshotSchemaVersion = 1
+const snapshotSchemaVersion = 2
 
 // SnapshotInfo is the UI-facing shape returned by GET /api/version/snapshots.
 type SnapshotInfo struct {
@@ -51,6 +50,7 @@ type SnapshotInfo struct {
 	ToVersion   string    `json:"to_version,omitempty"`
 	Action      string    `json:"action,omitempty"`
 	SizeBytes   int64     `json:"size_bytes"`
+	Restorable  bool      `json:"restorable"`
 }
 
 // createPreUpdateSnapshot captures state.db + config.yaml into
@@ -90,12 +90,13 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 
 	captured := []string{}
 
-	// 1. state.db via VACUUM INTO — point-in-time consistent even under
-	// live writes, no need to pause anything.
-	if err := s.deps.State.SnapshotTo(filepath.Join(dir, "state.db")); err != nil {
+	// 1. A complete state.db via VACUUM INTO + gzip. Rollback backups must
+	// include history and samples; the compact daily corruption-recovery
+	// snapshot deliberately excludes those large tables and is not safe here.
+	if err := s.deps.State.BackupToCompressed(filepath.Join(dir, "state.db.gz")); err != nil {
 		return SnapshotInfo{}, fmt.Errorf("state snapshot: %w", err)
 	}
-	captured = append(captured, "state.db")
+	captured = append(captured, "state.db.gz")
 
 	// 2. config.yaml — plain file copy. Missing/empty path means the
 	// caller wasn't wired with one; log and move on without failing
@@ -114,12 +115,13 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 
 	// 3. meta.json — the pointer the UI/rollback flow reads first.
 	meta := SnapshotMeta{
-		SchemaVersion: snapshotSchemaVersion,
-		CreatedAt:     time.Now().UTC(),
-		FromVersion:   fromVersion,
-		ToVersion:     toVersion,
-		Action:        action,
-		Files:         captured,
+		SchemaVersion:    snapshotSchemaVersion,
+		CreatedAt:        time.Now().UTC(),
+		FromVersion:      fromVersion,
+		ToVersion:        toVersion,
+		Action:           action,
+		CompleteDatabase: true,
+		Files:            captured,
 	}
 	metaPath := filepath.Join(dir, "meta.json")
 	metaBytes, err := json.MarshalIndent(&meta, "", "  ")
@@ -134,7 +136,17 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 
 	// Prune in the background-ish (synchronous but errors swallowed to
 	// slog — pruning failure isn't worth blocking the update).
-	if err := pruneSnapshots(s.deps.SnapshotDir, snapshotKeepCount); err != nil {
+	// A rollback safety snapshot temporarily takes the retained set to six.
+	// Keep both it and the selected target while pruning any older, unrelated
+	// entry so repeated rollbacks cannot grow this directory without bound.
+	keep := snapshotKeepCount
+	protected := map[string]bool{}
+	if action == "pre-rollback" {
+		keep++
+		protected[id] = true
+		protected[toVersion] = true
+	}
+	if err := pruneSnapshotsExcept(s.deps.SnapshotDir, keep, protected); err != nil {
 		// Use stdlib log so we don't introduce a new dep; this file
 		// stays slog-free.
 		// The snapshot itself was created successfully, so we return
@@ -151,6 +163,7 @@ func (s *Server) createPreUpdateSnapshot(action, fromVersion, toVersion string) 
 		ToVersion:   toVersion,
 		Action:      action,
 		SizeBytes:   dirSize(dir),
+		Restorable:  true,
 	}, nil
 }
 
@@ -189,6 +202,7 @@ func listSnapshots(snapshotDir string) ([]SnapshotInfo, []error) {
 			ToVersion:   meta.ToVersion,
 			Action:      meta.Action,
 			SizeBytes:   dirSize(dir),
+			Restorable:  snapshotMetaRestorable(meta),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -197,11 +211,32 @@ func listSnapshots(snapshotDir string) ([]SnapshotInfo, []error) {
 	return out, errs
 }
 
+func snapshotMetaRestorable(meta SnapshotMeta) bool {
+	if meta.SchemaVersion != snapshotSchemaVersion || !meta.CompleteDatabase {
+		return false
+	}
+	hasState := false
+	for _, file := range meta.Files {
+		switch file {
+		case "state.db.gz":
+			hasState = true
+		case "config.yaml":
+		default:
+			return false
+		}
+	}
+	return hasState
+}
+
 // pruneSnapshots keeps the `keep` newest snapshot dirs (by CreatedAt
 // from meta.json) and removes the rest. Broken meta files cause the
 // entry to be left alone — we don't want to delete something we
 // couldn't parse, because it might be a partial write in progress.
 func pruneSnapshots(snapshotDir string, keep int) error {
+	return pruneSnapshotsExcept(snapshotDir, keep, nil)
+}
+
+func pruneSnapshotsExcept(snapshotDir string, keep int, protected map[string]bool) error {
 	if keep <= 0 {
 		return nil
 	}
@@ -209,11 +244,17 @@ func pruneSnapshots(snapshotDir string, keep int) error {
 	if len(snaps) <= keep {
 		return nil
 	}
-	toRemove := snaps[keep:]
+	removeCount := len(snaps) - keep
 	var firstErr error
-	for _, s := range toRemove {
+	for i := len(snaps) - 1; i >= 0 && removeCount > 0; i-- {
+		s := snaps[i]
+		if protected[s.ID] {
+			continue
+		}
 		if err := os.RemoveAll(s.Path); err != nil && firstErr == nil {
 			firstErr = err
+		} else if err == nil {
+			removeCount--
 		}
 	}
 	return firstErr

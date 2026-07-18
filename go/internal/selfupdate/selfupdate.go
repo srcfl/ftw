@@ -583,21 +583,26 @@ func (c *Checker) TriggerComponent(ctx context.Context, action, target, componen
 
 // TriggerRollback asks the sidecar to restore a snapshot over the main
 // service's data volume (soft rollback: state.db + config.yaml only;
-// image stays). The main container will be stopped, the files copied
-// in via `docker cp`, and the service brought back up. Observe
-// progress via Status() — new states are "restoring" and "restarting".
-// Issue #152.
-func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files []string) error {
+// image stays). safetySnapshotID is mandatory so the sidecar can restore the
+// pre-rollback state automatically if the selected backup fails to boot.
+// Observe progress via Status() — new states are "restoring" and
+// "restarting". Issue #152.
+func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files []string, safetySnapshotID string, safetyFiles []string) error {
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
 	if snapshotID == "" {
 		return errors.New("selfupdate: rollback requires snapshot id")
 	}
+	if safetySnapshotID == "" {
+		return errors.New("selfupdate: rollback requires safety snapshot id")
+	}
 	body, _ := json.Marshal(map[string]any{
-		"action":   "rollback",
-		"snapshot": snapshotID,
-		"files":    files,
+		"action":          "rollback",
+		"snapshot":        snapshotID,
+		"files":           files,
+		"safety_snapshot": safetySnapshotID,
+		"safety_files":    safetyFiles,
 	})
 	return c.postSidecar(ctx, body)
 }

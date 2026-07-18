@@ -1,7 +1,10 @@
 package state
 
 import (
+	"compress/gzip"
 	"context"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -736,6 +739,70 @@ func TestSnapshotToRefusesExistingFile(t *testing.T) {
 	// bug.
 	if err := s.SnapshotTo(dst); err == nil {
 		t.Error("second SnapshotTo to existing path should fail")
+	}
+}
+
+func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
+	s := freshStore(t)
+	now := time.Now().UnixMilli()
+	if err := s.SaveConfig("mode", "planner_self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordHistory(HistoryPoint{TsMs: now, GridW: 1234}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordSamples([]Sample{{Driver: "meter", Metric: "grid_w", TsMs: now, Value: 1234}}); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(t.TempDir(), "state.db.gz")
+	if err := s.BackupToCompressed(dst); err != nil {
+		t.Fatalf("BackupToCompressed: %v", err)
+	}
+	raw := filepath.Join(t.TempDir(), "state.db")
+	in, err := os.Open(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := gzip.NewReader(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, zr); err != nil {
+		t.Fatal(err)
+	}
+	if err := zr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	backup, err := Open(raw)
+	if err != nil {
+		t.Fatalf("open complete backup: %v", err)
+	}
+	defer backup.Close()
+	if value, ok := backup.LoadConfig("mode"); !ok || value != "planner_self" {
+		t.Fatalf("backup config = %q, %v", value, ok)
+	}
+	hot, warm, cold, err := backup.HistoryCounts()
+	if err != nil || hot+warm+cold != 1 {
+		t.Fatalf("backup history counts = %d+%d+%d, %v", hot, warm, cold, err)
+	}
+	var samples int
+	if err := backup.db.QueryRow(`SELECT COUNT(*) FROM ts_samples`).Scan(&samples); err != nil || samples != 1 {
+		t.Fatalf("backup samples = %d, %v", samples, err)
+	}
+	if err := s.BackupToCompressed(dst); err == nil {
+		t.Fatal("second backup to existing destination should fail")
 	}
 }
 
