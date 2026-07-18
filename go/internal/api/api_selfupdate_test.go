@@ -714,6 +714,7 @@ func TestVersionRollbackRejectsIncompleteLegacySnapshot(t *testing.T) {
 
 	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
 	req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", strings.NewReader(`{"snapshot_id":"`+legacyID+`"}`))
+	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "losing history") {
