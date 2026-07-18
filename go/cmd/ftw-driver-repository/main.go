@@ -59,6 +59,7 @@ func publish(args []string) error {
 	publicKeyEnv := fs.String("expected-public-key-env", "FTW_DRIVER_SIGNING_PUBLIC_KEY", "optional environment variable containing the pinned public key")
 	unsigned := fs.Bool("unsigned", false, "build an unsigned local validation manifest")
 	generatedAt := fs.String("generated-at", "", "RFC3339 timestamp (defaults to now)")
+	previousManifest := fs.String("previous-manifest", "", "previous signed channel manifest to retain as version history")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -89,6 +90,7 @@ func publish(args []string) error {
 		DriversDir: *driversDir, OutputDir: *outputDir, BaseURL: *baseURL,
 		Repository: *repository, Commit: *commit, KeyID: *keyID,
 		PrivateKey: private, ExpectedPublicKey: expectedPublic, GeneratedAt: at, Unsigned: *unsigned,
+		PreviousManifestPath: *previousManifest,
 	})
 	if err != nil {
 		return err

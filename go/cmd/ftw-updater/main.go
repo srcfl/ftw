@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -306,13 +307,14 @@ func main() {
 
 func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action         string   `json:"action"`
-		Component      string   `json:"component,omitempty"`
-		Target         string   `json:"target,omitempty"`
-		Snapshot       string   `json:"snapshot,omitempty"` // rollback-only (#152)
-		Files          []string `json:"files,omitempty"`    // rollback: basenames to restore
-		SafetySnapshot string   `json:"safety_snapshot,omitempty"`
-		SafetyFiles    []string `json:"safety_files,omitempty"`
+		Action         string    `json:"action"`
+		Component      string    `json:"component,omitempty"`
+		Target         string    `json:"target,omitempty"`
+		Snapshot       string    `json:"snapshot,omitempty"` // rollback-only (#152)
+		Files          []string  `json:"files,omitempty"`    // rollback: basenames to restore
+		SafetySnapshot string    `json:"safety_snapshot,omitempty"`
+		SafetyFiles    []string  `json:"safety_files,omitempty"`
+		StartedAt      time.Time `json:"started_at,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
@@ -401,9 +403,9 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		if body.Action == "rollback" {
 			s.runRollback(body.Snapshot, body.Files, body.SafetySnapshot, body.SafetyFiles)
 		} else if body.Action == "component_rollback" {
-			s.runComponentRollback(body.Component)
+			s.runComponentRollback(body.Component, body.StartedAt)
 		} else {
-			s.runComponentJob(body.Action, body.Target, body.Component)
+			s.runComponentJob(body.Action, body.Target, body.Component, body.StartedAt)
 		}
 	}()
 
@@ -433,11 +435,14 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 // target falls through to compose's default (`:latest`) — that's the
 // dev path for exercising the flow without a real release.
 func (s *server) runJob(action, target string) {
-	s.runComponentJob(action, target, "core")
+	s.runComponentJob(action, target, "core", time.Time{})
 }
 
-func (s *server) runComponentJob(action, target, component string) {
-	now := time.Now()
+func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
+	now := startedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
 	spec, err := s.componentSpec(component)
 	if err != nil {
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
@@ -530,7 +535,7 @@ func (s *server) runComponentJob(action, target, component string) {
 	}
 
 	if s.healthCheck != nil {
-		healthCtx, cancelHealth := context.WithTimeout(context.Background(), 3*time.Minute)
+		healthCtx, cancelHealth := context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
 		healthErr := s.healthCheck(healthCtx, spec.service)
 		cancelHealth()
 		if healthErr != nil {
@@ -553,8 +558,11 @@ func (s *server) runComponentJob(action, target, component string) {
 	s.writeState(State{State: "done", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed", PreviousImageID: previousImageID})
 }
 
-func (s *server) runComponentRollback(component string) {
-	now := time.Now()
+func (s *server) runComponentRollback(component string, startedAt time.Time) {
+	now := startedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
 	previous := s.previousImageID(component)
 	spec, err := s.componentSpec(component)
 	if err != nil {
@@ -618,7 +626,11 @@ func (s *server) restorePreviousComponentImage(imageID string, spec componentSpe
 	}
 	rollbackTag := fmt.Sprintf("ftw-rollback-%d", time.Now().Unix())
 	rollbackRef := repository + ":" + rollbackTag
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	timeout := 10 * time.Minute
+	if spec.name == "core" {
+		timeout = 35 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
 		return fmt.Errorf("tag previous image: %w", err)
@@ -874,9 +886,7 @@ func (s *server) runRollback(snapshotID string, files []string, safetySnapshotID
 		return
 	}
 	if s.healthCheck != nil {
-		healthCtx, healthCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		healthErr := s.healthCheck(healthCtx, s.mainServiceName)
-		healthCancel()
+		healthErr := s.healthCheck(ctx, s.mainServiceName)
 		if healthErr != nil {
 			s.recoverRollbackSafety(ctx, base, safetySnapshotID, safetyFiles, containerID, imageID, "restored service failed health check: "+healthErr.Error())
 			return
@@ -1009,9 +1019,7 @@ func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySn
 		startErr = s.runner(ctx, nil, "start", containerID)
 	}
 	if restoreErr == nil && startErr == nil && s.healthCheck != nil {
-		healthCtx, healthCancel := context.WithTimeout(context.Background(), 3*time.Minute)
-		startErr = s.healthCheck(healthCtx, s.mainServiceName)
-		healthCancel()
+		startErr = s.healthCheck(ctx, s.mainServiceName)
 	}
 	message := cause
 	if restoreErr != nil {
@@ -1199,7 +1207,20 @@ func (s *server) waitForServiceHealth(ctx context.Context, service string) error
 		if inspectErr == nil {
 			switch status := strings.TrimSpace(out); status {
 			case "healthy", "running":
-				return nil
+				if service != s.mainServiceName {
+					return nil
+				}
+				// Core intentionally answers /api/health while opening or
+				// migrating a large database so Docker does not kill valid slow
+				// boots. /api/status is served only by the fully wired API, so
+				// require it before committing an update or restored state.
+				if _, readyErr := dockerOutput(ctx, "exec", containerID, "wget", "-q", "-T", "4", "-O", "/dev/null", "http://127.0.0.1:8080/api/status"); readyErr == nil {
+					return nil
+				}
+				restarts, _ := dockerOutput(ctx, "inspect", "--format", "{{.RestartCount}}", containerID)
+				if count, parseErr := strconv.Atoi(strings.TrimSpace(restarts)); parseErr == nil && count > 0 {
+					return fmt.Errorf("core restarted %d time(s) before its API became ready", count)
+				}
 			case "unhealthy", "exited", "dead":
 				return fmt.Errorf("container status is %s", status)
 			}
@@ -1210,6 +1231,13 @@ func (s *server) waitForServiceHealth(ctx context.Context, service string) error
 		case <-time.After(2 * time.Second):
 		}
 	}
+}
+
+func componentHealthTimeout(component string) time.Duration {
+	if component == "core" {
+		return 30 * time.Minute
+	}
+	return 3 * time.Minute
 }
 
 // dockerCompose shells out to the `docker` CLI (the compose plugin ships

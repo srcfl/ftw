@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,28 @@ func Open(path string) (*Store, error) {
 	// boot to run the full check + heal. This is what makes restarts reliably fast.
 	writeCleanMarker(path)
 	return s, nil
+}
+
+// OpenBackupSource opens an existing state.db without integrity healing,
+// migrations, cache creation, compaction, or clean-marker writes. It is for an
+// offline backup helper that must copy a legacy database byte-for-byte without
+// upgrading the source before the matching core is installed.
+func OpenBackupSource(path string) (*Store, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	u := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
 }
 
 // Close releases both DB files. Safe to call multiple times. The verified-good
@@ -707,6 +730,25 @@ func (s *Store) migrate() error {
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
 			ON driver_repo_installs(logical_path) WHERE active = 1`,
+
+		// Cross-component update audit. The operation key survives a core
+		// container recreation, allowing the new process to finish the event
+		// that the old process recorded before handing off to the updater.
+		`CREATE TABLE IF NOT EXISTS component_updates (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			operation_key TEXT NOT NULL UNIQUE,
+			kind TEXT NOT NULL,
+			component_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			from_version TEXT NOT NULL DEFAULT '',
+			to_version TEXT NOT NULL DEFAULT '',
+			outcome TEXT NOT NULL,
+			message TEXT NOT NULL DEFAULT '',
+			started_at_ms INTEGER NOT NULL,
+			finished_at_ms INTEGER NOT NULL DEFAULT 0
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_component_updates_component
+			ON component_updates(kind, component_id, started_at_ms DESC)`,
 
 		`CREATE TABLE IF NOT EXISTS nova_ders (
 			device_id   TEXT NOT NULL,

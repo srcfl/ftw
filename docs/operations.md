@@ -45,21 +45,16 @@ For the Compose deployment, `data/` contains:
 Do not store mutable state inside the container. The data directory must be
 writable by container uid 100/gid 101.
 
-Back up the entire directory. For a simple fully consistent backup:
+Create verified full backups from **FTW Update Center → Full backups**, then
+download the `.ftwbak` archive to another computer or disk. The format captures
+the entire persistent directory, verifies file hashes and SQLite, and records
+the installed component versions. Use the safe restore helper, which retains
+the current data and automatically reverts it if the restored service does not
+become healthy. See [backup-and-restore.md](backup-and-restore.md).
 
-```bash
-cd ~/ftw
-docker compose stop ftw
-sudo tar -C . -czf "ftw-backup-$(date +%F).tgz" data
-docker compose start ftw
-```
-
-To restore, stop core, replace `data/` from a backup, restore ownership and
-start core. Keep the current directory aside until the restored service and
-devices are healthy.
-
-The in-app updater also retains bounded pre-update snapshots. These protect
-configuration and SQLite state; keep an external backup for host or disk loss.
+The updater also retains bounded local pre-update rollback points. They protect
+configuration and SQLite state during a Core update but remain on the same
+disk; they cannot recover a failed SD card.
 If an older rollback leaves the service offline, follow the Swedish
 [failed-rollback recovery procedure](recover-failed-rollback.sv.md) before
 changing ownership or deleting any SQLite sidecar files.
@@ -142,7 +137,8 @@ Stop the conflicting service or change the configured API port, then restart.
 
 ## Native deployment
 
-`make build-arm64` and `make build-amd64` produce static core binaries.
+`make build-arm64` and `make build-amd64` produce static Core and `ftw-backup`
+binaries.
 `deploy/ftw.service` is the reference systemd unit. A conventional layout is:
 
 ```text

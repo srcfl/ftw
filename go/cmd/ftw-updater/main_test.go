@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -130,7 +131,9 @@ func TestOptimizerUpdateTargetsOnlyOptimizerService(t *testing.T) {
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","component":"optimizer","target":"v1.2.3"}`))
+	started := time.Date(2026, 7, 18, 9, 30, 0, 123000000, time.UTC)
+	body := fmt.Sprintf(`{"action":"update","component":"optimizer","target":"v1.2.3","started_at":%q}`, started.Format(time.RFC3339Nano))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -139,6 +142,9 @@ func TestOptimizerUpdateTargetsOnlyOptimizerService(t *testing.T) {
 	state := waitForState(t, s, "done")
 	if state.Component != "optimizer" {
 		t.Fatalf("component = %q", state.Component)
+	}
+	if !state.StartedAt.Equal(started) {
+		t.Fatalf("started_at = %s, want preserved audit time %s", state.StartedAt, started)
 	}
 	calls, envs := runner.snapshot(), runner.envSnapshot()
 	if len(calls) != 1 || !strings.Contains(strings.Join(calls[0], " "), "up -d ftw-optimizer") {

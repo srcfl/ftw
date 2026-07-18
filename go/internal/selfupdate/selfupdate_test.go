@@ -150,6 +150,51 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
+func TestPrefixedComponentReleaseUsesIndependentImageTag(t *testing.T) {
+	const image = "srcfl/ftw-optimizer"
+	reg := newFakeRegistry(t, image)
+	reg.addTag("v0.2.0")
+	rsrv := reg.server()
+	defer rsrv.Close()
+	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"tag_name": "v9.9.9", "prerelease": false},
+			{"tag_name": "optimizer-v0.2.0", "prerelease": false},
+		})
+	}))
+	defer releases.Close()
+	c := New(Config{
+		Repo: "srcfl/ftw", Image: image, CurrentVersion: "v0.1.0",
+		ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
+		RegistryBaseURL: rsrv.URL, ReleasesURL: releases.URL,
+	}, newMemStore())
+	info, err := c.Check(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Latest != "v0.2.0" || !info.UpdateAvailable {
+		t.Fatalf("optimizer info = %+v", info)
+	}
+}
+
+func TestComponentPreferencesUseSeparateStoreKeys(t *testing.T) {
+	store := newMemStore()
+	core := New(Config{CurrentVersion: "v1.0.0"}, store)
+	optimizer := New(Config{CurrentVersion: "v0.1.0", StoragePrefix: "optimizer."}, store)
+	if err := optimizer.SetChannel(ChannelBeta); err != nil {
+		t.Fatal(err)
+	}
+	if err := optimizer.Skip("v0.2.0-beta.1"); err != nil {
+		t.Fatal(err)
+	}
+	if core.Info().Channel != ChannelStable || core.Info().SkippedVersion != "" {
+		t.Fatalf("optimizer preference leaked into core: %+v", core.Info())
+	}
+	if optimizer.Info().Channel != ChannelBeta || optimizer.Info().SkippedVersion != "v0.2.0-beta.1" {
+		t.Fatalf("optimizer preferences = %+v", optimizer.Info())
+	}
+}
+
 // The original race: GH publishes the release seconds before the build
 // workflow finishes pushing the image to GHCR. Check must report
 // update_available=false in that window, then flip to true once the
@@ -532,6 +577,19 @@ func TestWriteStatusPreservesPerComponentRollbackHistory(t *testing.T) {
 	got := c.Status()
 	if got.PreviousImages["optimizer"] != "sha256:optimizer-old" {
 		t.Fatalf("optimizer rollback history = %+v", got.PreviousImages)
+	}
+}
+
+func TestSetCurrentVersionClearsSatisfiedComponentUpdate(t *testing.T) {
+	c := New(Config{CurrentVersion: "v1.0.0"}, newMemStore())
+	c.mu.Lock()
+	c.info.Latest = "v1.1.0"
+	c.info.UpdateAvailable = true
+	c.mu.Unlock()
+
+	c.SetCurrentVersion("v1.1.0")
+	if info := c.Info(); info.Current != "v1.1.0" || info.UpdateAvailable {
+		t.Fatalf("runtime version handshake did not satisfy update: %+v", info)
 	}
 }
 

@@ -67,24 +67,28 @@ type Deps struct {
 	Tel *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing       *telemetry.LogRing
-	Ctrl          *control.State
-	CtrlMu        *sync.Mutex
-	State         *state.Store
-	CapMu         *sync.RWMutex
-	Capacities    map[string]float64 // driver → battery_capacity_wh
-	CfgMu         *sync.RWMutex
-	Cfg           *config.Config
-	ConfigPath    string
-	DriverDir     string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir string // persistent user-drivers overlay; searched before DriverDir
-	Models        map[string]*battery.Model
-	ModelsMu      *sync.Mutex
-	SelfTune      *selftune.Coordinator
-	DtS           float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig    func(path string, c *config.Config) error // injection for testability
-	WebDir        string                                    // static assets root (default "web")
-	ColdDir       string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	LogRing           *telemetry.LogRing
+	Ctrl              *control.State
+	CtrlMu            *sync.Mutex
+	State             *state.Store
+	CapMu             *sync.RWMutex
+	Capacities        map[string]float64 // driver → battery_capacity_wh
+	CfgMu             *sync.RWMutex
+	Cfg               *config.Config
+	ConfigPath        string
+	DriverDir         string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir     string // persistent user-drivers overlay; searched before DriverDir
+	Models            map[string]*battery.Model
+	ModelsMu          *sync.Mutex
+	SelfTune          *selftune.Coordinator
+	DtS               float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig        func(path string, c *config.Config) error // injection for testability
+	WebDir            string                                    // static assets root (default "web")
+	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	DataDir           string                                    // complete persistent-data root used by portable backups
+	StatePath         string                                    // absolute primary SQLite path used by portable backups
+	BackupDir         string                                    // full .ftwbak output; may be an externally mounted path
+	DataMaintenanceMu *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -137,6 +141,9 @@ type Deps struct {
 	// Optional: background version-check + updater-sidecar dispatch.
 	// Nil disables every /api/version/* endpoint (returns 503).
 	SelfUpdate *selfupdate.Checker
+	// OptimizerUpdate resolves independently tagged optimizer releases. The
+	// privileged mutation still crosses SelfUpdate's shared updater socket.
+	OptimizerUpdate *selfupdate.Checker
 
 	// Events is the shared pub/sub bus. Nil is a safe no-op for
 	// handlers that publish (e.g. /api/notifications/test).
@@ -181,6 +188,8 @@ type Server struct {
 	savingsCache   map[string]daySavings
 
 	versionUpdateMu sync.Mutex
+	driverUpdateMu  sync.Mutex
+	backupMu        sync.Mutex
 }
 
 // New creates a new API server.
@@ -238,9 +247,13 @@ func (s *Server) routes() {
 	s.handle("POST /api/device_repository/refresh", s.handleDeviceRepositoryRefresh)
 	s.handle("POST /api/device_repository/drivers/{id}/install", s.handleDeviceRepositoryInstall)
 	s.handle("POST /api/device_repository/drivers/{id}/rollback", s.handleDeviceRepositoryRollback)
+	s.handle("GET  /api/device_repository/drivers/{id}/versions", s.handleDeviceRepositoryVersions)
+	s.handle("POST /api/device_repository/drivers/{id}/activate", s.handleDeviceRepositoryActivate)
 	s.handle("GET  /api/components", s.handleComponents)
+	s.handle("GET  /api/components/history", s.handleComponentHistory)
 	s.handle("POST /api/components/optimizer/update", s.handleOptimizerComponentUpdate)
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
+	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
@@ -300,7 +313,13 @@ func (s *Server) routes() {
 	s.handle("POST /api/version/restart", s.handleVersionRestart)
 	s.handle("GET  /api/version/update/status", s.handleVersionUpdateStatus)
 	s.handle("GET  /api/version/snapshots", s.handleVersionSnapshots)
+	s.handle("POST /api/version/snapshots", s.handleVersionSnapshotCreate)
 	s.handle("DELETE /api/version/snapshots/{id}", s.handleVersionSnapshotDelete)
+	s.handle("GET  /api/backups", s.handleBackups)
+	s.handle("POST /api/backups", s.handleBackupCreate)
+	s.handle("GET  /api/backups/{id}", s.handleBackupDownload)
+	s.handle("DELETE /api/backups/{id}", s.handleBackupDelete)
+	s.handle("POST /api/backups/{id}/verify", s.handleBackupVerify)
 	s.handle("POST /api/version/rollback", s.handleVersionRollback)
 	s.handle("POST /api/restart", s.handleRestart)
 

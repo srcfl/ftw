@@ -147,6 +147,18 @@ func main() {
 	if abs, err := filepath.Abs(statePath); err == nil {
 		statePath = abs
 	}
+	dataDir := filepath.Dir(statePath)
+	backupDir := filepath.Join(dataDir, "backups")
+	if cfg.State != nil && cfg.State.BackupDir != "" {
+		backupDir = cfg.State.BackupDir
+		if !filepath.IsAbs(backupDir) {
+			backupDir = filepath.Join(dataDir, backupDir)
+		}
+	}
+	if abs, err := filepath.Abs(coldDir); err == nil {
+		coldDir = abs
+	}
+	dataMaintenanceMu := &sync.Mutex{}
 
 	// Bind the API port BEFORE the potentially slow state open. A boot that
 	// runs a one-time VACUUM or a full integrity check on a multi-GB DB can
@@ -1613,6 +1625,7 @@ func main() {
 	// disabled, which makes every /api/version/* handler return 503 and the
 	// UI hide the badge.
 	var selfUpdater *selfupdate.Checker
+	var optimizerUpdater *selfupdate.Checker
 	// Implicitly enable for dev binaries (Version=="dev") so `make dev`
 	// users can click the version label and exercise the probe + modal
 	// without setting FTW_SELFUPDATE_ENABLED=1. Production builds (real
@@ -1641,6 +1654,26 @@ func main() {
 			Bus: bus,
 		}, st)
 		selfUpdater.Start(ctx)
+		optimizerCurrent := "dev"
+		if mpcSvc != nil && mpcSvc.Optimizer != nil {
+			if health, ok := mpcSvc.Optimizer.(interface {
+				Health(context.Context) (mpc.OptimizerRuntimeInfo, error)
+			}); ok {
+				healthCtx, healthCancel := context.WithTimeout(ctx, 2*time.Second)
+				if runtime, err := health.Health(healthCtx); err == nil && runtime.Version != "" {
+					optimizerCurrent = runtime.Version
+				}
+				healthCancel()
+			}
+		}
+		optimizerUpdater = selfupdate.New(selfupdate.Config{
+			Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
+			ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
+			CurrentVersion: optimizerCurrent,
+			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+		}, st)
+		optimizerUpdater.Start(ctx)
 		slog.Info("selfupdate enabled",
 			"socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			"channel", selfUpdater.Info().Channel)
@@ -1678,11 +1711,15 @@ func main() {
 		DriverModbusFactory: reg.ModbusFactory,
 		DriverARPLookup:     reg.ARPLookup,
 		Models:              models, ModelsMu: modelsMu,
-		SelfTune:   selfTune,
-		DtS:        float64(cfg.Site.ControlIntervalS),
-		SaveConfig: config.SaveAtomic,
-		WebDir:     *webDir,
-		ColdDir:    coldDir,
+		SelfTune:          selfTune,
+		DtS:               float64(cfg.Site.ControlIntervalS),
+		SaveConfig:        config.SaveAtomic,
+		WebDir:            *webDir,
+		ColdDir:           coldDir,
+		DataDir:           dataDir,
+		StatePath:         statePath,
+		BackupDir:         backupDir,
+		DataMaintenanceMu: dataMaintenanceMu,
 		// Snapshots live next to the rest of the persistent data so
 		// docker-compose deploys only need one bind (./data). Derived
 		// from the state.db path rather than the config path because
@@ -1703,6 +1740,7 @@ func main() {
 		Events:           bus,
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
+		OptimizerUpdate:  optimizerUpdater,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,
@@ -1897,7 +1935,7 @@ func main() {
 	if cfg.State != nil {
 		coldRetentionDays = cfg.State.ColdRetentionDays
 	}
-	go rolloffLoop(ctx, st, coldDir, coldRetentionDays)
+	go rolloffLoop(ctx, st, coldDir, coldRetentionDays, dataMaintenanceMu)
 
 	// ---- Background: daily state.db recovery snapshot ----
 	go snapshotLoop(ctx, st)
@@ -2377,11 +2415,15 @@ func snapshotLoop(ctx context.Context, st *state.Store) {
 // rolloffLoop runs the SQLite → Parquet roll-off once per hour. Cheap when
 // nothing is due (a single SELECT returns 0 rows); only does real work once
 // data crosses the 14-day boundary into cold storage.
-func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int) {
+func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, coldRetentionDays int, dataMaintenanceMu *sync.Mutex) {
 	tick := time.NewTicker(1 * time.Hour)
 	defer tick.Stop()
 	var lastDiskWarn time.Time
 	run := func() {
+		if dataMaintenanceMu != nil {
+			dataMaintenanceMu.Lock()
+			defer dataMaintenanceMu.Unlock()
+		}
 		doRolloff(ctx, st, coldDir)
 
 		// The bulk DELETEs above just generated a WAL burst; reclaim it now

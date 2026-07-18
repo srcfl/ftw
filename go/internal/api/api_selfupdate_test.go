@@ -350,12 +350,9 @@ func gunzipTestFile(t *testing.T, src, dst string) {
 	}
 }
 
-// Operator opt-out: POST {skip_snapshot: true} skips the snapshot
-// capture step and the handler proceeds to trigger the sidecar without
-// creating a rollback point. Used when the retained set already covers
-// the operator or when they consciously want to save the ~200 MB per
-// snapshot on a constrained SD card. Issue #149.
-func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
+// Legacy clients may still send skip_snapshot, but the server must ignore it:
+// every update gets a rollback point when snapshots are configured.
+func TestVersionUpdate_LegacySkipSnapshotCannotDisableRollbackPoint(t *testing.T) {
 	dir := t.TempDir()
 	statusPath := filepath.Join(dir, "update-state.json")
 	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
@@ -371,14 +368,13 @@ func TestVersionUpdate_SkipSnapshotOptOut(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, req)
 
-	// Sidecar trigger still fails, but the handler has already accepted
-	// the async job and must honour the skip — i.e. no snapshot appears.
+	// Sidecar trigger still fails, but the rollback point is created first.
 	if rr.Code != http.StatusAccepted {
 		t.Errorf("want 202, got %d body=%s", rr.Code, rr.Body.String())
 	}
 	waitUntil(t, func() bool { return c.Status().State == "failed" })
-	if entries, _ := os.ReadDir(snapDir); len(entries) != 0 {
-		t.Errorf("snapshots dir should be empty after skip_snapshot=true, found %d entries", len(entries))
+	if entries, _ := os.ReadDir(snapDir); len(entries) != 1 {
+		t.Errorf("legacy skip_snapshot must be ignored, found %d rollback points", len(entries))
 	}
 }
 
@@ -600,6 +596,48 @@ func TestVersionSnapshots_ListsNewestFirst(t *testing.T) {
 		if !out.Snapshots[i-1].CreatedAt.After(out.Snapshots[i].CreatedAt) {
 			t.Errorf("snapshots not ordered newest-first at idx %d", i)
 		}
+	}
+}
+
+func TestVersionSnapshots_CreateManualRollbackPoint(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.SaveConfig("manual-checkpoint", "present"); err != nil {
+		t.Fatal(err)
+	}
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/snapshots", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("manual snapshot = %d %s, want 201", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Status   string       `json:"status"`
+		Snapshot SnapshotInfo `json:"snapshot"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "created" || !out.Snapshot.Restorable || out.Snapshot.Action != "manual" {
+		t.Fatalf("manual snapshot response = %+v", out)
+	}
+	meta, err := readSnapshotMeta(out.Snapshot.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Action != "manual" || !snapshotMetaRestorable(meta) {
+		t.Fatalf("manual snapshot meta = %+v", meta)
+	}
+	if _, err := os.Stat(filepath.Join(out.Snapshot.Path, "state.db.gz")); err != nil {
+		t.Fatalf("manual snapshot database missing: %v", err)
 	}
 }
 

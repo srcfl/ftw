@@ -140,12 +140,34 @@ func TestSignedInstallUpdateAndRollback(t *testing.T) {
 	if got, _ := os.ReadFile(activePath); !strings.Contains(string(got), `version = "1.0.0"`) {
 		t.Fatalf("active after rollback: %q", got)
 	}
+	versions, err := manager.InstalledVersions("demo")
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("installed versions = %+v err=%v", versions, err)
+	}
+	reactivated, err := manager.ActivateInstalled("demo", "1.1.0", second.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reactivated.Version != "1.1.0" {
+		t.Fatalf("reactivated version = %s", reactivated.Version)
+	}
+	if got, _ := os.ReadFile(activePath); !strings.Contains(string(got), `version = "1.1.0"`) {
+		t.Fatalf("active after exact activation: %q", got)
+	}
 
 	// A fresh manager can serve the signed last-good cache without network.
 	server.Close()
 	reloaded := New(cfg, dir, store)
 	if catalog, err := reloaded.Catalog(); err != nil || len(catalog) != 1 {
 		t.Fatalf("offline catalog = %+v, %v", catalog, err)
+	}
+	if err := os.Remove(filepath.Join(dir, "driver-repository", "cache", "test.json")); err != nil {
+		t.Fatal(err)
+	}
+	withoutManifest := New(cfg, dir, store)
+	available, err := withoutManifest.AvailableVersions("demo")
+	if err != nil || len(available) != 2 || available[0].Installed == nil || available[1].Installed == nil {
+		t.Fatalf("retained offline versions = %+v, %v", available, err)
 	}
 }
 

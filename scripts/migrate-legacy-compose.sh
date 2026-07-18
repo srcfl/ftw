@@ -20,19 +20,29 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: migrate-legacy-compose.sh [--dir PATH]
+Usage: migrate-legacy-compose.sh [--dir PATH] [--backup-dir PATH]
 
 Without --dir, the script uses the current directory when it contains
 docker-compose.yml, then tries ~/ftw and ~/forty-two-watts.
+
+The full .ftwbak archive is written outside the live data directory. Use a
+mounted USB drive or another machine's mounted share for --backup-dir when
+possible. The default is <installation>/ftw-backups.
 EOF
 }
 
 requested_dir="${FTW_DIR:-}"
+requested_full_backup_dir="${FTW_BACKUP_DIR:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)
       [ "$#" -ge 2 ] || die "--dir requires a path"
       requested_dir="$2"
+      shift 2
+      ;;
+    --backup-dir)
+      [ "$#" -ge 2 ] || die "--backup-dir requires a path"
+      requested_full_backup_dir="$2"
       shift 2
       ;;
     -h|--help)
@@ -133,7 +143,9 @@ if ! mkdir "$lock_dir" 2>/dev/null; then
 fi
 
 success=false
-backup_dir=""
+compose_backup_dir=""
+full_backup_dir=""
+full_backup_archive=""
 renamed_container=""
 renamed_container_was_running=false
 main_service=""
@@ -190,8 +202,8 @@ restore_after_failure() {
       restore_ok=false
     fi
   fi
-  if [ -n "$backup_dir" ] && [ -d "$backup_dir" ]; then
-    for file in "$backup_dir"/*.yml "$backup_dir"/*.yaml; do
+  if [ -n "$compose_backup_dir" ] && [ -d "$compose_backup_dir" ]; then
+    for file in "$compose_backup_dir"/*.yml "$compose_backup_dir"/*.yaml; do
       [ -f "$file" ] || continue
       if ! cp -p "$file" "$install_dir/$(basename "$file")"; then
         restore_ok=false
@@ -276,7 +288,7 @@ restore_after_failure() {
   if [ "$restore_ok" = true ]; then
     printf '[FTW migration] Previous deployment and image references were restored. Data was not modified.\n' >&2
   else
-    printf '[FTW migration] ERROR: automatic rollback was incomplete. Compose backups remain in %s; data was not modified.\n' "${backup_dir:-<not-created>}" >&2
+    printf '[FTW migration] ERROR: automatic rollback was incomplete. Compose backups remain in %s; the verified full backup remains in %s.\n' "${compose_backup_dir:-<not-created>}" "${full_backup_archive:-<not-created>}" >&2
   fi
   return "$status"
 }
@@ -351,8 +363,52 @@ rm -f "$config_check"
 config_check=""
 
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
-backup_dir="$install_dir/.ftw-migration-backup-$timestamp"
-mkdir "$backup_dir"
+if [ -n "$requested_full_backup_dir" ]; then
+  full_backup_dir="$requested_full_backup_dir"
+else
+  full_backup_dir="$install_dir/ftw-backups"
+fi
+mkdir -p "$full_backup_dir"
+full_backup_dir="$(cd "$full_backup_dir" && pwd -P)"
+case "$full_backup_dir/" in
+  "$expected_data_source/"*) die "--backup-dir must be outside the live /app/data directory" ;;
+esac
+
+# Phase 1: make a portable, internally verified backup before changing a
+# service definition or stopping a container. OpenBackupSource is read-only and
+# deliberately performs no schema migration on the legacy database.
+state_path="$expected_data_source/state.db"
+[ -f "$state_path" ] || die "missing $state_path; use the manual backup procedure for a custom state.path"
+log "phase 1/4: pulling the backup helper (the running deployment is unchanged)"
+docker pull ghcr.io/srcfl/ftw:latest >/dev/null
+backup_json="$(docker run --rm --user 0:0 \
+  -v "$expected_data_source:/app/data:ro" \
+  -v "$full_backup_dir:/backup" \
+  --entrypoint /app/ftw-backup \
+  ghcr.io/srcfl/ftw:latest \
+  create -state /app/data/state.db -data /app/data -output /backup -core-version legacy)"
+full_backup_id="$(printf '%s\n' "$backup_json" | sed -n 's/^[[:space:]]*"id": "\([^"]*\.ftwbak\)",*$/\1/p')"
+case "$full_backup_id" in
+  ""|*/*|*..*) die "backup helper returned an invalid archive id" ;;
+esac
+full_backup_archive="$full_backup_dir/$full_backup_id"
+[ -f "$full_backup_archive" ] || die "backup helper did not publish $full_backup_archive"
+docker run --rm --user 0:0 \
+  -v "$full_backup_dir:/backup" \
+  --entrypoint /app/ftw-backup \
+  ghcr.io/srcfl/ftw:latest verify -archive "/backup/$full_backup_id" >/dev/null
+# The archive is intentionally 0600. Give it back to the operator who invoked
+# Docker so it can actually be copied off the host without root.
+backup_owner_uid="${SUDO_UID:-$(id -u)}"
+backup_owner_gid="${SUDO_GID:-$(id -g)}"
+docker run --rm --user 0:0 \
+  -v "$full_backup_dir:/backup" \
+  --entrypoint chown \
+  ghcr.io/srcfl/ftw:latest "$backup_owner_uid:$backup_owner_gid" "/backup/$full_backup_id"
+log "verified full backup: $full_backup_archive"
+
+compose_backup_dir="$install_dir/.ftw-migration-backup-$timestamp"
+mkdir "$compose_backup_dir"
 
 compose_files=(docker-compose.yml)
 for candidate in \
@@ -364,8 +420,8 @@ for candidate in \
     compose_files+=("$candidate")
   fi
 done
-cp -p "${compose_files[@]}" "$backup_dir/"
-log "backup: $backup_dir"
+cp -p "${compose_files[@]}" "$compose_backup_dir/"
+log "Compose rollback backup: $compose_backup_dir"
 
 if [ "$optimizer_service_added" = true ]; then
   modular_override_created="$install_dir/docker-compose.override.yml"
@@ -423,7 +479,7 @@ printf '%s\t%s\t%s\n' \
   "$main_service" "$previous_main_image_id" "$previous_main_image_ref" \
   ftw-updater "$previous_updater_image_id" "$previous_updater_image_ref" \
   ftw-optimizer "$previous_optimizer_image_id" "$previous_optimizer_image_ref" \
-  >"$backup_dir/previous-images.tsv"
+  >"$compose_backup_dir/previous-images.tsv"
 
 rewrite_service_image() {
   file="$1"
@@ -508,6 +564,7 @@ rewrite_service_image() {
 for file in "${compose_files[@]}"; do
   rewrite_service_image "$file" "$main_service" 'ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}'
   rewrite_service_image "$file" 'ftw-updater' 'ghcr.io/srcfl/ftw-updater:latest'
+  rewrite_service_image "$file" 'ftw-optimizer' 'ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
 done
 
 # A caller's shell or old .env file may contain a development tag. Use the
@@ -531,9 +588,8 @@ case "$effective_optimizer_image" in
   *) die "the effective ftw-optimizer image is not ghcr.io/srcfl/ftw-optimizer: $effective_optimizer_image" ;;
 esac
 
-log "pulling canonical Sourceful images"
-pull_services=("$main_service" ftw-updater ftw-optimizer)
-compose pull "${pull_services[@]}"
+log "phase 2/4: pulling the paired Core + updater control plane"
+compose pull "$main_service" ftw-updater
 
 # Some developer installations replaced the Compose-managed main container
 # with a manually created container of the same name. Preserve it as a stopped
@@ -564,10 +620,6 @@ if docker container inspect "$main_service" >/dev/null 2>&1; then
   fi
 fi
 
-log "starting ftw-optimizer from ghcr.io/srcfl/ftw-optimizer"
-optimizer_container_changed=true
-compose up -d --no-deps --force-recreate ftw-optimizer
-
 log "starting $main_service from ghcr.io/srcfl/ftw"
 containers_changed=true
 compose up -d --no-deps --force-recreate "$main_service"
@@ -578,12 +630,9 @@ new_main_id="$(compose ps -q --status running "$main_service" | tail -n 1)"
 [ -n "$new_main_id" ] || die "$main_service did not reach running state"
 updater_id="$(compose ps -q --status running ftw-updater | tail -n 1)"
 [ -n "$updater_id" ] || die "ftw-updater did not reach running state"
-optimizer_id="$(compose ps -q --status running ftw-optimizer | tail -n 1)"
-[ -n "$optimizer_id" ] || die "ftw-optimizer did not reach running state"
 
 main_image="$(docker inspect "$new_main_id" --format '{{.Config.Image}}')"
 updater_image="$(docker inspect "$updater_id" --format '{{.Config.Image}}')"
-optimizer_image="$(docker inspect "$optimizer_id" --format '{{.Config.Image}}')"
 case "$main_image" in
   ghcr.io/srcfl/ftw:*) ;;
   *) die "running main container uses unexpected image: $main_image" ;;
@@ -592,11 +641,6 @@ case "$updater_image" in
   ghcr.io/srcfl/ftw-updater:*) ;;
   *) die "running updater uses unexpected image: $updater_image" ;;
 esac
-case "$optimizer_image" in
-  ghcr.io/srcfl/ftw-optimizer:*) ;;
-  *) die "running optimizer uses unexpected image: $optimizer_image" ;;
-esac
-
 running_data_source="$(docker inspect "$new_main_id" --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}')"
 if [ -d "$running_data_source" ]; then
   running_data_source="$(cd "$running_data_source" && pwd -P)"
@@ -605,15 +649,78 @@ fi
   die "running main container uses unexpected /app/data source: $running_data_source"
 
 health_url="${FTW_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
+ready_url="${FTW_READY_URL:-${health_url%/api/health}/api/status}"
 healthy=false
-for _ in $(seq 1 60); do
-  if curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1; then
+health_deadline=$((SECONDS + 1800))
+while [ "$SECONDS" -lt "$health_deadline" ]; do
+  if curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1 && \
+    curl -fsS --max-time 3 "$ready_url" >/dev/null 2>&1; then
     healthy=true
     break
   fi
   sleep 2
 done
-[ "$healthy" = true ] || die "FTW did not answer at $health_url within 120 seconds"
+[ "$healthy" = true ] || die "FTW did not finish initialization at $ready_url within 30 minutes"
+
+# Phase 3 deliberately starts only after Core + updater have passed their
+# health gate. Optimizer has its own release and compatibility handshake; a
+# failed optimizer must never roll back a healthy Core or touch persistent
+# data. Core remains safe on its Go fallback while this phase is repaired.
+optimizer_image="unavailable (Core is using its safe fallback)"
+log "phase 3/4: updating Optimizer independently"
+if compose pull ftw-optimizer && \
+  compose up -d --no-deps --force-recreate ftw-optimizer; then
+  optimizer_container_changed=true
+  optimizer_id="$(compose ps -q --status running ftw-optimizer | tail -n 1)"
+  optimizer_healthy=false
+  if [ -n "$optimizer_id" ]; then
+    for _ in $(seq 1 60); do
+      optimizer_health="$(docker inspect "$optimizer_id" --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}' 2>/dev/null || true)"
+      if [ "$optimizer_health" = healthy ]; then
+        optimizer_healthy=true
+        break
+      fi
+      sleep 2
+    done
+  fi
+  if [ "$optimizer_healthy" = true ]; then
+    optimizer_image="$(docker inspect "$optimizer_id" --format '{{.Config.Image}}')"
+    case "$optimizer_image" in
+      ghcr.io/srcfl/ftw-optimizer:*) ;;
+      *) optimizer_healthy=false ;;
+    esac
+  fi
+else
+  optimizer_healthy=false
+fi
+
+if [ "${optimizer_healthy:-false}" != true ]; then
+  log "WARNING: Optimizer did not become healthy; Core stays online on its Go fallback"
+  if [ -n "$previous_optimizer_image_id" ]; then
+    # Restore the old image bits under the effective optimizer reference only.
+    # Core/updater and their Compose definitions remain committed.
+    if docker image tag "$previous_optimizer_image_id" "$effective_optimizer_image" && \
+      compose up -d --no-deps --force-recreate ftw-optimizer; then
+      optimizer_id="$(compose ps -q --status running ftw-optimizer | tail -n 1)"
+      if [ -n "$optimizer_id" ]; then
+        optimizer_image="restored previous image ($previous_optimizer_image_ref)"
+      fi
+    else
+      log "WARNING: previous Optimizer could not be restarted; Core remains healthy without it"
+    fi
+  else
+    compose rm -s -f ftw-optimizer >/dev/null 2>&1 || true
+  fi
+fi
+
+# Phase 4 refreshes signed metadata only. It does not activate or restart a
+# driver; drivers are updated one at a time later from the Update Center.
+log "phase 4/4: refreshing the signed driver catalog (no driver is activated)"
+if curl -fsS --max-time 10 -X POST "${health_url%/api/health}/api/device_repository/refresh" >/dev/null 2>&1; then
+  log "signed driver catalog refreshed"
+else
+  log "WARNING: driver catalog refresh failed; the running drivers are unchanged"
+fi
 
 success=true
 rmdir "$lock_dir"
@@ -623,7 +730,8 @@ log "migration complete"
 log "main image: $main_image"
 log "updater image: $updater_image"
 log "optimizer image: $optimizer_image"
-log "Compose backup: $backup_dir"
+log "verified full backup: $full_backup_archive"
+log "Compose rollback backup: $compose_backup_dir"
 if [ -n "$renamed_container" ]; then
   log "container rollback backup: $renamed_container"
 fi

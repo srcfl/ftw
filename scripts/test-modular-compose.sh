@@ -125,6 +125,54 @@ case "$command" in
   info)
     exit 0
     ;;
+  pull)
+    exit 0
+    ;;
+  run)
+    backup_mount=""
+    entrypoint=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --rm)
+          shift
+          ;;
+        --user|--entrypoint)
+          if [ "$1" = --entrypoint ]; then
+            entrypoint="${2:-}"
+          fi
+          shift 2
+          ;;
+        -v)
+          mount="${2:-}"
+          case "$mount" in
+            *:/backup) backup_mount="${mount%:/backup}" ;;
+          esac
+          shift 2
+          ;;
+        *)
+          shift
+          break
+          ;;
+      esac
+    done
+    if [ "$entrypoint" = /app/ftw-backup ]; then
+      case "${1:-}" in
+        create)
+          mkdir -p "$backup_mount"
+          : >"$backup_mount/ftw-full-backup-test.ftwbak"
+          printf '{\n  "id": "ftw-full-backup-test.ftwbak",\n  "verified": true\n}\n'
+          ;;
+        verify)
+          test -f "$backup_mount/ftw-full-backup-test.ftwbak"
+          ;;
+        *) exit 1 ;;
+      esac
+    elif [ "$entrypoint" = chown ]; then
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
   ps)
     if [ -n "${FAKE_PROJECT_NAME:-}" ]; then
       echo generated-container-id
@@ -174,6 +222,9 @@ case "$command" in
         ;;
       *State.Running*)
         echo true
+        ;;
+      *State.Health*)
+        echo healthy
         ;;
       *)
         echo '<no value>'
@@ -258,6 +309,7 @@ chmod +x \
   "$TMP/migrate/bin/curl" \
   "$TMP/migrate/bin/chmod" \
   "$TMP/migrate/bin/docker"
+touch "$TMP/migrate/data/state.db"
 
 PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/migrate/state" \
@@ -273,6 +325,7 @@ test -f "$TMP/migrate"/.ftw-migration-backup-*/previous-images.tsv
 # Generated container names still carry Compose labels. The migration must
 # reuse their explicit project name instead of creating a parallel default.
 mkdir -p "$TMP/project/data" "$TMP/project/state"
+touch "$TMP/project/data/state.db"
 cp "$TMP/migrate/docker-compose.yml" "$TMP/project/docker-compose.yml"
 PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/project/state" \
@@ -290,6 +343,7 @@ if [ -n "$REAL_DOCKER" ]; then
 fi
 
 mkdir -p "$TMP/rollback/data" "$TMP/rollback/state"
+touch "$TMP/rollback/data/state.db"
 cat >"$TMP/rollback/docker-compose.yml" <<'YAML'
 services:
   ftw:
@@ -317,6 +371,7 @@ test ! -e "$TMP/rollback/state/ftw-optimizer"
 # An already-modular legacy layout must update the optimizer too, and a later
 # failure must recreate its previous image alongside core + updater.
 mkdir -p "$TMP/rollback-existing/data" "$TMP/rollback-existing/state"
+touch "$TMP/rollback-existing/data/state.db"
 cat >"$TMP/rollback-existing/docker-compose.yml" <<'YAML'
 services:
   ftw:
@@ -347,5 +402,30 @@ test -e "$TMP/rollback-existing/state/ftw-optimizer"
 grep -q '^sha256:old-core example.invalid/old-core:latest$' "$TMP/rollback-existing/state/image-tags"
 grep -q '^sha256:old-updater example.invalid/old-updater:latest$' "$TMP/rollback-existing/state/image-tags"
 grep -q '^sha256:old-optimizer example.invalid/old-optimizer:latest$' "$TMP/rollback-existing/state/image-tags"
+
+# Optimizer is an independent, optional phase. A failed optimizer candidate
+# must leave the newly healthy Core + updater online and must not fail the
+# migration or activate a driver.
+mkdir -p "$TMP/optimizer-failure/data" "$TMP/optimizer-failure/state"
+touch "$TMP/optimizer-failure/data/state.db"
+cat >"$TMP/optimizer-failure/docker-compose.yml" <<'YAML'
+services:
+  ftw:
+    image: example.invalid/old-core:latest
+    volumes:
+      - ./data:/app/data
+  ftw-updater:
+    image: example.invalid/old-updater:latest
+YAML
+PATH="$TMP/migrate/bin:$PATH" \
+FAKE_STATE_DIR="$TMP/optimizer-failure/state" \
+FAKE_DATA_DIR="$TMP/optimizer-failure/data" \
+FAKE_FAIL_SERVICE=ftw-optimizer \
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/optimizer-failure" \
+  >/dev/null
+test -e "$TMP/optimizer-failure/state/ftw"
+test -e "$TMP/optimizer-failure/state/ftw-updater"
+test ! -e "$TMP/optimizer-failure/state/ftw-optimizer"
+grep -q 'ghcr.io/srcfl/ftw:' "$TMP/optimizer-failure/docker-compose.yml"
 
 echo "modular Compose migration tests passed"

@@ -1,161 +1,138 @@
 # Upgrade an older installation to Sourceful FTW
 
-Use this guide for an existing Linux Docker Compose installation of Forty Two
-Watts or FTW that has a `docker-compose.yml` file. Choose
-[Svenska](#svenska) or [English](#english).
-
-The migration keeps the existing directory, Compose project, service name,
-configuration, database, history, device identities, and `data/` directory. It
-also creates rollback backups before changing the running service.
+Use this guide for an existing Linux Docker Compose installation with a
+`docker-compose.yml`. The migration preserves its directory, Compose project,
+service name, configuration, database, history, hardware identities and
+persistent `data/` bind. Choose [Svenska](#svenska) or [English](#english).
 
 ---
 
 ## Svenska
 
-### Uppgradera
+### Innan du börjar
 
-Anslut till maskinen med SSH eller öppna dess terminal. Kör sedan:
+Anslut helst ett USB-minne eller montera en nätverkskatalog för backupen. Den
+verifierade `.ftwbak`-filen måste ligga utanför den aktiva `data/`-katalogen.
+Utan `--backup-dir` används `<installationen>/ftw-backups`, vilket skyddar mot
+en felaktig migrering men inte mot att hela SD-kortet går sönder.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh
-```
-
-Skriptet använder installationen i den aktuella katalogen, eller letar i
-`~/ftw` och `~/forty-two-watts`. Om båda hemkatalogerna innehåller en
-installation stoppar det och kräver `--dir` i stället för att gissa.
-
-Om installationen ligger någon annanstans:
+Kör från installationskatalogen:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh --dir /sökväg/till/installationen
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
+  -o /tmp/ftw-migrate.sh
+bash /tmp/ftw-migrate.sh \
+  --dir "$PWD" \
+  --backup-dir /media/$USER/FTW-BACKUP
 ```
 
-### Vad skriptet gör
+Om du saknar extern disk kan du utelämna `--backup-dir`, men kopiera den
+utskrivna `.ftwbak`-filen från `ftw-backups/` till en annan dator direkt efter
+migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
+`~/forty-two-watts`; om flera installationer hittas måste `--dir` anges.
 
-Skriptet:
+### Fyra oberoende faser
 
-1. kontrollerar att exakt en huvudservice (`ftw` eller `forty-two-watts`),
-   `ftw-updater` och den beständiga `/app/data`-mounten finns;
-2. säkerhetskopierar Compose-filerna och sparar oföränderliga image-ID:n för
-   befintliga berörda containrar innan någon tagg hämtas;
-3. behåller befintliga servicefält men ersätter image-referenserna med
-   `ghcr.io/srcfl/ftw`, `ghcr.io/srcfl/ftw-updater` och
-   `ghcr.io/srcfl/ftw-optimizer`; om optimizer-servicen saknas läggs dess
-   socket, volym och service i en separat Compose-override;
-4. validerar den sammanslagna Compose-konfigurationen och hämtar de officiella
-   multi-arch-imagerna;
-5. återskapar huvud-, updater- och optimizercontainrarna med samma katalog,
-   Compose-projekt, servicenamn, befintliga miljöinställningar, volymer och
-   data-bind; andra tjänster lämnas orörda;
-6. kontrollerar att alla tre containrarna och FTW:s lokala health-endpoint svarar.
+1. **Full backup.** Den nya backuphjälparen öppnar den äldre databasen
+   skrivskyddat, gör ingen schemamigrering, bygger en komplett `.ftwbak`,
+   verifierar filhashar och SQLite och stoppar vid minsta fel.
+2. **Core + updater.** Det parade kontrollplanet hämtas och återskapas med
+   samma data-bind. Core måste både vara frisk på `/api/health` och helt
+   startklar på `/api/status`; annars återställs Compose, tidigare
+   oföränderliga image-ID:n och containrar automatiskt.
+3. **Optimizer.** Optimizern hämtas och hälsokontrolleras separat. Om den
+   misslyckas ligger den friska Core kvar och använder sin säkra Go-fallback;
+   tidigare Optimizer återstartas när den finns.
+4. **Drivers.** Endast det signerade katalogmanifestet uppdateras. Ingen driver
+   installeras, aktiveras eller startas om under migreringen. Senare driverbyte
+   sker en driver i taget i Update Center.
 
-Om något steg misslyckas återställs tidigare Compose-filer och image-referenser.
-Befintliga berörda containrar återskapas; en optimizer som skriptet nyss lade
-till tas bort igen.
-`data/` kopieras, flyttas eller raderas aldrig.
+Compose-kopior och tidigare image-ID:n sparas dessutom i
+`.ftw-migration-backup-<tid>`. De är en snabb distributionsrollback; `.ftwbak`
+är den portabla datakopian.
 
 ### Verifiera
-
-Kör i installationskatalogen:
 
 ```bash
 docker compose config --images
 docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
+curl -fsS http://127.0.0.1:8080/api/status
 ```
 
-Du ska se images som börjar med:
+Core och updater ska vara igång på `ghcr.io/srcfl/ftw` respektive
+`ghcr.io/srcfl/ftw-updater`. Optimizern kan repareras senare utan att Core eller
+data rullas tillbaka. Det är normalt att en migrerad installation behåller
+katalogen `~/forty-two-watts` och servicenamnet `forty-two-watts`.
 
-```text
-ghcr.io/srcfl/ftw:
-ghcr.io/srcfl/ftw-updater:
-ghcr.io/srcfl/ftw-optimizer:
-```
-
-Det är normalt att en migrerad installation fortfarande ligger i
-`~/forty-two-watts` och har servicenamnet `forty-two-watts`. De identiteterna
-behålls avsiktligt så att ingen parallell tom installation skapas.
-
-### Om skriptet stoppar
-
-Skriptet stoppar hellre än att gissa om layouten är tvetydig, båda
-standardkatalogerna finns, updater saknas, `/app/data` inte är en befintlig
-host-bind, eller en befintlig override måste slås ihop manuellt. Dela då hela
-felmeddelandet i en
-[GitHub issue](https://github.com/srcfl/ftw/issues) eller projektets Discord.
-Kör inte en ny installation ovanpå den gamla och radera inte `data/`.
+Skriptet stoppar hellre än att gissa vid tvetydig layout, saknad updater,
+annan `state.path`, icke-beständig `/app/data` eller en override som kräver
+manuell sammanslagning. Dela hela felmeddelandet i en
+[GitHub issue](https://github.com/srcfl/ftw/issues). Installera inte en tom
+kopia ovanpå den gamla och radera inte `data/`.
 
 ---
 
 ## English
 
-### Upgrade
+### Before starting
 
-Connect to the host over SSH or open its terminal, then run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh
-```
-
-The script uses an installation in the current directory, or searches
-`~/ftw` and `~/forty-two-watts`. If both home-directory locations contain an
-installation, it stops and requires `--dir` instead of guessing.
-
-For an installation stored elsewhere:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh --dir /path/to/the/installation
-```
-
-### What the script does
-
-The script:
-
-1. verifies that exactly one main service (`ftw` or `forty-two-watts`),
-   `ftw-updater`, and the persistent `/app/data` mount exist;
-2. backs up the Compose files and records immutable image IDs for existing
-   affected containers before pulling any tag;
-3. preserves existing service fields while replacing the image references
-   with `ghcr.io/srcfl/ftw`, `ghcr.io/srcfl/ftw-updater`, and
-   `ghcr.io/srcfl/ftw-optimizer`; if the optimizer service is missing, its
-   socket, volume, and service are added in a separate Compose override;
-4. validates the merged Compose configuration and pulls the official
-   multi-architecture images;
-5. recreates the main, updater, and optimizer containers with the same
-   directory, Compose project, service name, existing environment, volumes,
-   and data bind; unrelated services are left untouched;
-6. verifies all three containers and the local FTW health endpoint.
-
-If a step fails, the previous Compose files and image references are restored.
-Existing affected containers are recreated; an optimizer just added by the
-script is removed again.
-`data/` is never copied, moved, or deleted.
-
-### Verify
+Prefer a mounted USB disk or network share for the backup. The verified
+`.ftwbak` must be outside the live `data/` directory. Without `--backup-dir`,
+the script uses `<installation>/ftw-backups`; that protects against a bad
+migration but not loss of the whole SD card.
 
 Run from the installation directory:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
+  -o /tmp/ftw-migrate.sh
+bash /tmp/ftw-migrate.sh \
+  --dir "$PWD" \
+  --backup-dir /media/$USER/FTW-BACKUP
+```
+
+If no external disk is available, omit `--backup-dir` and copy the printed
+archive from `ftw-backups/` to another computer immediately afterwards. The
+script can also discover the current directory, `~/ftw`, or
+`~/forty-two-watts`; ambiguous installations require `--dir`.
+
+### Four independent phases
+
+1. **Full backup.** The new helper opens the legacy database read-only, performs
+   no schema migration, creates a complete archive, and verifies file hashes
+   plus SQLite before any deployment change.
+2. **Core + updater.** The paired control plane is recreated on the same data
+   bind and must pass both `/api/health` and full readiness on `/api/status`.
+   Failure restores Compose, the prior immutable image IDs, and the previous
+   containers automatically.
+3. **Optimizer.** Optimizer is pulled and health-checked separately. Failure
+   leaves healthy Core online on its safe Go fallback and restores the prior
+   Optimizer when possible.
+4. **Drivers.** Only signed catalog metadata is refreshed. No driver is
+   installed, activated, or restarted during migration; later changes happen
+   one driver at a time in Update Center.
+
+Compose copies and prior image IDs are also retained under
+`.ftw-migration-backup-<time>`. They are a deployment rollback point; the
+`.ftwbak` is the portable data recovery copy.
+
+### Verify
+
+```bash
 docker compose config --images
 docker compose ps
+curl -fsS http://127.0.0.1:8080/api/health
+curl -fsS http://127.0.0.1:8080/api/status
 ```
 
-The output should include images beginning with:
+Core and updater must be running from `ghcr.io/srcfl/ftw` and
+`ghcr.io/srcfl/ftw-updater`. Optimizer can be repaired independently without
+rolling back Core or persistent data. Keeping a legacy directory or the
+`forty-two-watts` service name is intentional.
 
-```text
-ghcr.io/srcfl/ftw:
-ghcr.io/srcfl/ftw-updater:
-ghcr.io/srcfl/ftw-optimizer:
-```
-
-It is normal for a migrated installation to remain in `~/forty-two-watts` and
-keep the `forty-two-watts` service name. Those identities are deliberately
-preserved so the migration cannot create a parallel empty installation.
-
-### If the script stops
-
-The script stops instead of guessing when a layout is ambiguous, both default
-directories exist, the updater is missing, `/app/data` is not an existing host
-bind, or an existing override needs a manual merge. Share the complete error
-in a
-[GitHub issue](https://github.com/srcfl/ftw/issues) or the project Discord. Do
-not install a second copy over the old one, and do not delete `data/`.
+The script stops instead of guessing for ambiguous layouts, a missing updater,
+a custom `state.path`, non-persistent `/app/data`, or an override that needs a
+manual merge. Share the complete error in a
+[GitHub issue](https://github.com/srcfl/ftw/issues). Do not install an empty
+copy over the old one and do not delete `data/`.

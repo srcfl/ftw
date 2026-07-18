@@ -33,6 +33,21 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 			} else {
 				optimizer["healthy"] = true
 				optimizer["runtime"] = info
+				if s.deps.OptimizerUpdate != nil {
+					s.deps.OptimizerUpdate.SetCurrentVersion(info.Version)
+				}
+			}
+		}
+		if s.deps.OptimizerUpdate != nil {
+			if r.URL.Query().Get("force") == "1" {
+				if info, err := s.deps.OptimizerUpdate.Check(r.Context(), true); err != nil {
+					info.Err = err.Error()
+					optimizer["updates"] = info
+				} else {
+					optimizer["updates"] = info
+				}
+			} else {
+				optimizer["updates"] = s.deps.OptimizerUpdate.Info()
 			}
 		}
 		result["optimizer"] = optimizer
@@ -50,11 +65,11 @@ func (s *Server) handleComponents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOptimizerComponentUpdate(w http.ResponseWriter, r *http.Request) {
-	if s.deps.SelfUpdate == nil {
+	if s.deps.SelfUpdate == nil || s.deps.OptimizerUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	info := s.deps.SelfUpdate.Info()
+	info := s.deps.OptimizerUpdate.Info()
 	if !info.SidecarReady {
 		writeJSON(w, 502, map[string]string{"error": "updater sidecar not ready"})
 		return
@@ -83,15 +98,17 @@ func (s *Server) handleOptimizerComponentUpdate(w http.ResponseWriter, r *http.R
 		return
 	}
 	started := time.Now()
-	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
+	status := selfupdate.UpdateStatus{
 		State: "starting", Action: "update", Component: "optimizer", Target: body.Target,
 		StartedAt: started, UpdatedAt: started, Message: "starting optimizer update",
-	})
+	}
+	s.writeVersionUpdateStatus(status)
+	s.recordComponentStatus(status, s.optimizerCurrentVersion(r.Context()))
 	go func(target string) {
 		defer s.versionUpdateMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.deps.SelfUpdate.TriggerComponent(ctx, "update", target, "optimizer"); err != nil {
+		if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "update", target, "optimizer", started); err != nil {
 			s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 				State: "failed", Action: "update", Component: "optimizer", Target: target,
 				StartedAt: started, UpdatedAt: time.Now(), Message: err.Error(),
@@ -99,6 +116,36 @@ func (s *Server) handleOptimizerComponentUpdate(w http.ResponseWriter, r *http.R
 		}
 	}(body.Target)
 	writeJSON(w, 202, map[string]any{"status": "started", "component": "optimizer", "target": body.Target})
+}
+
+func (s *Server) handleOptimizerComponentChannel(w http.ResponseWriter, r *http.Request) {
+	if s.deps.OptimizerUpdate == nil {
+		writeJSON(w, 503, map[string]string{"error": "optimizer updates disabled"})
+		return
+	}
+	var body struct {
+		Channel string `json:"channel"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	channel, err := selfupdate.ParseChannel(body.Channel)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if err := s.deps.OptimizerUpdate.SetChannel(channel); err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	info, err := s.deps.OptimizerUpdate.Check(r.Context(), true)
+	if err != nil {
+		info.Err = err.Error()
+		writeJSON(w, 502, info)
+		return
+	}
+	writeJSON(w, 200, info)
 }
 
 func (s *Server) handleOptimizerComponentRollback(w http.ResponseWriter, r *http.Request) {
@@ -119,17 +166,42 @@ func (s *Server) handleOptimizerComponentRollback(w http.ResponseWriter, r *http
 		writeJSON(w, 409, map[string]string{"error": "component update already in progress"})
 		return
 	}
+	started := time.Now()
+	statusEvent := selfupdate.UpdateStatus{
+		State: "starting", Action: "component_rollback", Component: "optimizer",
+		StartedAt: started, UpdatedAt: started, Message: "starting optimizer rollback",
+		PreviousImageID: previousImageID, PreviousImages: status.PreviousImages,
+	}
+	s.writeVersionUpdateStatus(statusEvent)
+	s.recordComponentStatus(statusEvent, s.optimizerCurrentVersion(r.Context()))
 	go func() {
 		defer s.versionUpdateMu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := s.deps.SelfUpdate.TriggerComponent(ctx, "component_rollback", "", "optimizer"); err != nil {
+		if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "component_rollback", "", "optimizer", started); err != nil {
 			s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 				State: "failed", Action: "component_rollback", Component: "optimizer",
-				StartedAt: time.Now(), UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previousImageID,
+				StartedAt: started, UpdatedAt: time.Now(), Message: err.Error(), PreviousImageID: previousImageID,
 				PreviousImages: status.PreviousImages,
 			})
 		}
 	}()
 	writeJSON(w, 202, map[string]any{"status": "started", "component": "optimizer", "action": "rollback"})
+}
+
+func (s *Server) optimizerCurrentVersion(ctx context.Context) string {
+	if s.deps.MPC == nil || s.deps.MPC.Optimizer == nil {
+		return ""
+	}
+	health, ok := s.deps.MPC.Optimizer.(optimizerHealth)
+	if !ok {
+		return ""
+	}
+	healthCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	runtime, err := health.Health(healthCtx)
+	if err != nil {
+		return ""
+	}
+	return runtime.Version
 }

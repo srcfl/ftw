@@ -123,35 +123,13 @@ func (s *Server) handleVersionUnskip(w http.ResponseWriter, r *http.Request) {
 // (state.db + config.yaml) into SnapshotDir. A failed snapshot aborts
 // the update — the whole point of offering "Update" is that the user
 // knows they can back out, and shipping without the safety net breaks
-// that promise. Two exceptions skip the snapshot:
-//
-//   - SnapshotDir is empty (operator opted out at deploy time).
-//   - The request body sets {"skip_snapshot": true} (operator opted
-//     out for this specific update via the UI checkbox, typically
-//     because the existing 5 retained snapshots already cover them).
-//
-// Both exceptions return \`snapshot_skipped: true\` in the response so
-// the UI can differentiate "no snapshot taken on purpose" from "no
-// snapshot field because the field was elided".
+// that promise. SnapshotDir being disabled at deployment time is the only
+// exception. The legacy skip_snapshot request field is deliberately ignored:
+// an old client cannot silently remove the safety net from a new server.
 func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.deps.SelfUpdate == nil {
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
-	}
-
-	// Body is optional — empty body / null JSON yields the zero value
-	// (SkipSnapshot false), so pre-checkbox UIs keep getting the snapshot.
-	var body struct {
-		SkipSnapshot bool `json:"skip_snapshot,omitempty"`
-	}
-	// readJSON caps at 1 MB (api.go:153). Errors here include EOF on an
-	// empty body, which we treat as the operator using the legacy no-body
-	// path.
-	if r.ContentLength > 0 {
-		if err := readJSON(r, &body); err != nil {
-			writeJSON(w, 400, map[string]string{"error": "bad json: " + err.Error()})
-			return
-		}
 	}
 
 	info := s.deps.SelfUpdate.Info()
@@ -177,17 +155,21 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: time.Now(),
 		Message:   "starting update",
 	})
+	s.recordComponentStatus(selfupdate.UpdateStatus{
+		State: "starting", Action: "update", Component: "core", Target: info.Latest,
+		StartedAt: startedAt, UpdatedAt: startedAt, Message: "starting update",
+	}, info.Current)
 
-	go s.runVersionUpdate(startedAt, info.Current, info.Latest, body.SkipSnapshot)
+	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
 
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if body.SkipSnapshot || s.deps.SnapshotDir == "" {
+	if s.deps.SnapshotDir == "" {
 		resp["snapshot_skipped"] = true
 	}
 	writeJSON(w, 202, resp)
 }
 
-func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, skipSnapshot bool) {
+func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 	defer s.versionUpdateMu.Unlock()
 
 	writeUpdateStatus := func(state, message string) {
@@ -201,7 +183,7 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, s
 		})
 	}
 
-	snapshotSkipped := skipSnapshot || s.deps.SnapshotDir == ""
+	snapshotSkipped := s.deps.SnapshotDir == ""
 	if !snapshotSkipped {
 		writeUpdateStatus("snapshotting", "creating backup snapshot")
 		if _, err := s.createPreUpdateSnapshot("update", current, latest); err != nil {
@@ -212,7 +194,7 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, s
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := s.deps.SelfUpdate.Trigger(ctx, "update", latest); err != nil {
+	if err := s.deps.SelfUpdate.TriggerComponentAt(ctx, "update", latest, "core", startedAt); err != nil {
 		writeUpdateStatus("failed", err.Error())
 		return
 	}
@@ -225,6 +207,7 @@ func (s *Server) writeVersionUpdateStatus(st selfupdate.UpdateStatus) {
 	if err := s.deps.SelfUpdate.WriteStatus(st); err != nil {
 		slog.Warn("selfupdate: write status failed", "state", st.State, "action", st.Action, "err", err)
 	}
+	s.recordComponentStatus(st, "")
 }
 
 // handleVersionRollback restores a specific snapshot over the main
@@ -359,5 +342,7 @@ func (s *Server) handleVersionUpdateStatus(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
 		return
 	}
-	writeJSON(w, 200, s.deps.SelfUpdate.Status())
+	status := s.deps.SelfUpdate.Status()
+	s.recordComponentStatus(status, "")
+	writeJSON(w, 200, status)
 }

@@ -133,6 +133,7 @@ metadata are the detailed reference.
 - [Power sign convention](docs/site-convention.md)
 - [Safety invariants](docs/safety.md)
 - [Operations and recovery](docs/operations.md)
+- [Full backup and safe restore](docs/backup-and-restore.md)
 - [Writing a driver](docs/writing-a-driver.md)
 - [Self-update and release channels](docs/self-update.md)
 - [Home Assistant](docs/ha-integration.md)

@@ -48,6 +48,9 @@ type Manifest struct {
 	Commit        string           `json:"commit,omitempty"`
 	GeneratedAt   time.Time        `json:"generated_at"`
 	Drivers       []ManifestDriver `json:"drivers"`
+	// History retains older signed, content-addressed versions. Refresh still
+	// never activates anything; operators install a specific version.
+	History []ManifestDriver `json:"history,omitempty"`
 }
 
 type ManifestDriver struct {
@@ -79,6 +82,12 @@ type CatalogCandidate struct {
 	Driver          ManifestDriver           `json:"driver"`
 	Installed       *state.DriverRepoInstall `json:"installed,omitempty"`
 	UpdateAvailable bool                     `json:"update_available"`
+}
+
+type VersionCandidate struct {
+	RepositoryID string                   `json:"repository_id"`
+	Driver       ManifestDriver           `json:"driver"`
+	Installed    *state.DriverRepoInstall `json:"installed,omitempty"`
 }
 
 type Status struct {
@@ -443,6 +452,138 @@ func (m *Manager) Rollback(logicalPath string) (state.DriverRepoInstall, error) 
 	return activated, nil
 }
 
+// InstalledVersions lists locally retained, content-addressed artifacts for a
+// single driver. Remote refresh is not required, so an operator can return to
+// a previously validated driver even when the repository is unavailable.
+func (m *Manager) InstalledVersions(driverID string) ([]state.DriverRepoInstall, error) {
+	if m.store == nil {
+		return nil, errors.New("device repository store unavailable")
+	}
+	if safeSegment(driverID) != driverID || driverID == "" {
+		return nil, fmt.Errorf("unsafe driver id %q", driverID)
+	}
+	return m.store.DriverRepoInstallsByDriver(driverID)
+}
+
+// AvailableVersions merges the signed remote history with locally retained
+// artifacts. It is read-only and does not download or activate code.
+func (m *Manager) AvailableVersions(driverID string) ([]VersionCandidate, error) {
+	installed, err := m.InstalledVersions(driverID)
+	if err != nil {
+		return nil, err
+	}
+	installedByKey := make(map[string]state.DriverRepoInstall, len(installed))
+	for _, artifact := range installed {
+		installedByKey[artifact.RepoID+"\x00"+artifact.Version+"\x00"+strings.ToLower(artifact.SHA256)] = artifact
+	}
+	var out []VersionCandidate
+	seen := make(map[string]bool)
+	for _, repo := range m.cfg.Repositories {
+		if !repo.Enabled {
+			continue
+		}
+		manifest, err := m.manifestFor(repo)
+		if err != nil {
+			continue
+		}
+		for _, driver := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
+			if driver.ID != driverID {
+				continue
+			}
+			key := repo.ID + "\x00" + driver.Version + "\x00" + strings.ToLower(driver.SHA256)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			candidate := VersionCandidate{RepositoryID: repo.ID, Driver: driver}
+			if artifact, ok := installedByKey[key]; ok {
+				copy := artifact
+				candidate.Installed = &copy
+			}
+			out = append(out, candidate)
+		}
+	}
+	// Retained artifacts remain selectable even if the signed cache is
+	// temporarily unavailable. They were verified before installation and are
+	// re-hashed again by ActivateInstalled; no network metadata is required to
+	// return to a known local version.
+	for _, artifact := range installed {
+		key := artifact.RepoID + "\x00" + artifact.Version + "\x00" + strings.ToLower(artifact.SHA256)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		copy := artifact
+		out = append(out, VersionCandidate{
+			RepositoryID: artifact.RepoID,
+			Driver: ManifestDriver{
+				ID: artifact.DriverID, Path: artifact.LogicalPath,
+				Filename: filepath.Base(artifact.InstalledPath), Version: artifact.Version,
+				SHA256: artifact.SHA256,
+			},
+			Installed: &copy,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		cmp := compareSemver(out[i].Driver.Version, out[j].Driver.Version)
+		if cmp != 0 {
+			return cmp > 0
+		}
+		return out[i].RepositoryID < out[j].RepositoryID
+	})
+	return out, nil
+}
+
+// ActivateInstalled switches to any exact locally retained version. SHA256 is
+// required when the same version exists from more than one signed repository.
+func (m *Manager) ActivateInstalled(driverID, version, sha256 string) (state.DriverRepoInstall, error) {
+	if version == "" {
+		return state.DriverRepoInstall{}, errors.New("driver version is required")
+	}
+	versions, err := m.InstalledVersions(driverID)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	var matches []state.DriverRepoInstall
+	for _, candidate := range versions {
+		if candidate.Version == version && (sha256 == "" || strings.EqualFold(candidate.SHA256, sha256)) {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) == 0 {
+		return state.DriverRepoInstall{}, fmt.Errorf("driver %s version %s is not retained locally", driverID, version)
+	}
+	if len(matches) > 1 {
+		return state.DriverRepoInstall{}, errors.New("multiple retained artifacts match; specify sha256")
+	}
+	target := matches[0]
+	if !pathInside(filepath.Join(m.root, "installed"), target.InstalledPath) {
+		return state.DriverRepoInstall{}, errors.New("retained artifact is outside the managed repository")
+	}
+	if err := validateInstalledFile(target); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	current, currentErr := m.store.ActiveDriverRepoInstall(target.LogicalPath)
+	commitSymlink, cleanupSymlink, err := m.prepareSymlink(target.LogicalPath, target.InstalledPath)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	defer cleanupSymlink()
+	activated, err := m.store.ActivateDriverRepoInstall(target)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	if err := commitSymlink(); err != nil {
+		if currentErr == nil {
+			_, _ = m.store.ActivateDriverRepoInstall(current)
+		} else {
+			_ = m.store.DeactivateDriverRepoInstall(target.LogicalPath)
+		}
+		return state.DriverRepoInstall{}, err
+	}
+	return activated, nil
+}
+
 // Deactivate removes the managed resolver entry. It is used when the first
 // ever managed activation fails and there is no earlier managed artifact;
 // core can then restart the bundled recovery snapshot.
@@ -468,7 +609,7 @@ func (m *Manager) find(repositoryID, driverID, version string) (config.DriverRep
 		if err != nil {
 			return repo, Manifest{}, ManifestDriver{}, err
 		}
-		for _, d := range manifest.Drivers {
+		for _, d := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
 			if d.ID == driverID && (version == "" || d.Version == version) {
 				return repo, manifest, d, nil
 			}
@@ -575,40 +716,58 @@ func validateManifest(manifest Manifest, allowInsecure bool) error {
 	}
 	seen := make(map[string]struct{}, len(manifest.Drivers))
 	for _, d := range manifest.Drivers {
-		if d.ID == "" || d.Version == "" || d.URL == "" {
-			return errors.New("manifest driver requires id, version, and url")
-		}
-		if safeSegment(d.ID) != d.ID {
-			return fmt.Errorf("driver has unsafe id %q", d.ID)
+		if err := validateManifestDriver(d, allowInsecure); err != nil {
+			return err
 		}
 		if _, ok := seen[d.ID]; ok {
 			return fmt.Errorf("duplicate driver id %q", d.ID)
 		}
 		seen[d.ID] = struct{}{}
-		if !semverRE.MatchString(d.Version) {
-			return fmt.Errorf("driver %s has invalid semver %q", d.ID, d.Version)
+	}
+	historySeen := make(map[string]struct{}, len(manifest.History))
+	for _, d := range manifest.History {
+		if err := validateManifestDriver(d, allowInsecure); err != nil {
+			return fmt.Errorf("driver history: %w", err)
 		}
-		logical, err := safeLogicalPath(d.Path)
-		if err != nil {
-			return fmt.Errorf("driver %s: %w", d.ID, err)
+		key := d.ID + "\x00" + d.Version + "\x00" + strings.ToLower(d.SHA256)
+		if _, ok := historySeen[key]; ok {
+			return fmt.Errorf("duplicate driver history artifact %s@%s", d.ID, d.Version)
 		}
-		if d.Filename != filepath.Base(logical) || !strings.HasSuffix(d.Filename, ".lua") {
-			return fmt.Errorf("driver %s filename does not match path", d.ID)
-		}
-		decoded, err := hex.DecodeString(d.SHA256)
-		if err != nil || len(decoded) != sha256.Size {
-			return fmt.Errorf("driver %s has invalid sha256", d.ID)
-		}
-		if d.HostAPI.Min <= 0 || d.HostAPI.Max < d.HostAPI.Min {
-			return fmt.Errorf("driver %s has invalid host API range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max)
-		}
-		if !d.HostAPI.Includes(components.DriverHostAPIVersion) {
-			return fmt.Errorf("driver %s host API range %d..%d excludes host %d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIVersion)
-		}
-		u, err := url.Parse(d.URL)
-		if err != nil || (u.Scheme != "https" && !(allowInsecure && (u.Scheme == "http" || u.Scheme == "file"))) {
-			return fmt.Errorf("driver %s URL must use https", d.ID)
-		}
+		historySeen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateManifestDriver(d ManifestDriver, allowInsecure bool) error {
+	if d.ID == "" || d.Version == "" || d.URL == "" {
+		return errors.New("manifest driver requires id, version, and url")
+	}
+	if safeSegment(d.ID) != d.ID {
+		return fmt.Errorf("driver has unsafe id %q", d.ID)
+	}
+	if !semverRE.MatchString(d.Version) {
+		return fmt.Errorf("driver %s has invalid semver %q", d.ID, d.Version)
+	}
+	logical, err := safeLogicalPath(d.Path)
+	if err != nil {
+		return fmt.Errorf("driver %s: %w", d.ID, err)
+	}
+	if d.Filename != filepath.Base(logical) || !strings.HasSuffix(d.Filename, ".lua") {
+		return fmt.Errorf("driver %s filename does not match path", d.ID)
+	}
+	decoded, err := hex.DecodeString(d.SHA256)
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("driver %s has invalid sha256", d.ID)
+	}
+	if d.HostAPI.Min <= 0 || d.HostAPI.Max < d.HostAPI.Min {
+		return fmt.Errorf("driver %s has invalid host API range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max)
+	}
+	if !d.HostAPI.Includes(components.DriverHostAPIVersion) {
+		return fmt.Errorf("driver %s host API range %d..%d excludes host %d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIVersion)
+	}
+	u, err := url.Parse(d.URL)
+	if err != nil || (u.Scheme != "https" && !(allowInsecure && (u.Scheme == "http" || u.Scheme == "file"))) {
+		return fmt.Errorf("driver %s URL must use https", d.ID)
 	}
 	return nil
 }
