@@ -1,6 +1,7 @@
 # Anchored Bash regular expressions for former-name compatibility contracts.
 # Presentation copy belongs in FTW; keep exceptions narrow.
 ^docs/upgrade-from-legacy\.md:.*$
+^docs/recover-failed-rollback\.sv\.md:MAIN=.*forty-two-watts.*$
 ^go/cmd/ftw-updater/main_test\.go:.*forty-two-watts.*$
 ^docs/ha-integration\.md:> \*\*Compatibility contract:\*\* the MQTT prefix `forty-two-watts`, discovery$
 ^docs/ha-integration\.md:> identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing$
