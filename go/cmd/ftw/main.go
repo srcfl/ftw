@@ -1369,17 +1369,22 @@ func main() {
 		lpController.SetPerPhaseMeterAmps(func() (float64, float64, float64, bool) {
 			cfgMu.RLock()
 			siteMeter := cfg.SiteMeterDriver()
+			phaseCount := cfg.Fuse.Phases
+			watchdogTimeout := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
 			cfgMu.RUnlock()
 			if siteMeter == "" {
 				return 0, 0, 0, false
 			}
-			l1, _, ok1 := tel.LatestMetric(siteMeter, "meter_l1_a")
-			l2, _, ok2 := tel.LatestMetric(siteMeter, "meter_l2_a")
-			l3, _, ok3 := tel.LatestMetric(siteMeter, "meter_l3_a")
-			if !ok1 && !ok2 && !ok3 {
+			if watchdogTimeout <= 0 {
+				watchdogTimeout = 60 * time.Second
+			}
+			amps, available, fresh := sitePhaseCurrentsAt(
+				tel, siteMeter, phaseCount, watchdogTimeout, time.Now(),
+			)
+			if !available || !fresh {
 				return 0, 0, 0, false
 			}
-			return l1, l2, l3, true
+			return amps[0], amps[1], amps[2], true
 		})
 		// Wire the matched-vehicle reader for auto-wake. When the
 		// loadpoint is commanding power but the matched Tesla
@@ -1980,6 +1985,7 @@ func main() {
 	const evStopReplanCooldown = 60 * time.Second
 	const evStopHigh = 100.0 // W — "was actually drawing"
 	const evStopLow = 50.0   // W — "now essentially zero"
+	var staleDefaults staleSiteDefaultTracker
 	for {
 		select {
 		case <-sigc:
@@ -1995,7 +2001,8 @@ func main() {
 			}
 			return
 		case <-ticker.C:
-			nowMs := time.Now().UnixMilli()
+			tickNow := time.Now()
+			nowMs := tickNow.UnixMilli()
 
 			// ---- Continuous learning: feed (last_command, actual) per battery ----
 			// Skip while self-tune is active — the override would corrupt RLS.
@@ -2047,11 +2054,13 @@ func main() {
 			cfgMu.RLock()
 			troubleshootingMode := cfg.Site.TroubleshootingMode
 			cfgMu.RUnlock()
+			watchdogDefaulted := make(map[string]struct{})
 			for _, tr := range tel.WatchdogScan(watchdogTimeout) {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
 					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
+					watchdogDefaulted[tr.Name] = struct{}{}
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
 					slog.Info("driver telemetry recovered — back online", "name", tr.Name)
@@ -2063,19 +2072,47 @@ func main() {
 			// rules without the control loop knowing about them.
 			bus.Publish(events.HealthTick{Health: tel.AllHealth(), Now: time.Now()})
 
-			// ---- EV dispatch first — independent of the site meter ----
-			// Loadpoint Observe() reads its own telemetry (the EV
-			// charger driver), so it MUST run before the site-meter
-			// staleness guard below — otherwise a missing/stale site
-			// meter silently freezes the LP manager's plugged_in
-			// state, MPC never extends the DP with the EV dimension,
-			// and the operator sees "schedule set but EV never
-			// charges". The surplus-only clamp inside the LP controller
-			// already returns 0 when site surplus is unknown, so this
-			// is safe: bad grid signal → LP paused, but at least the
-			// LP state machine is alive.
-			lpMgr.RollSchedules(time.Now().UTC())
-			lpController.Tick(ctx, time.Now())
+			// ---- Shared pre-dispatch freshness boundary ----
+			// Compute one verdict before any normal EV/storage/PV command.
+			// A stale site meter, or stale phase currents once that fuse
+			// telemetry exists, closes every physical dispatch path. Safe
+			// standdown/default commands remain permitted.
+			ctrlMu.Lock()
+			siteMeterDriver := ctrl.SiteMeterDriver
+			siteFuseAmps := ctrl.SiteFuseAmps
+			siteFusePhases := ctrl.SiteFusePhases
+			ctrlMu.Unlock()
+			freshness := evaluateSiteDispatchFreshnessAt(
+				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
+			)
+			pendingDefaults, enteredStale, recovered := staleDefaults.update(
+				!freshness.Allowed(), siteMeterDriver, reg.Names(),
+			)
+			if enteredStale {
+				slog.Warn("site dispatch inhibited — reverting controllable drivers to autonomous",
+					"site_meter", siteMeterDriver, "reason", freshness.Reason,
+					"timeout", watchdogTimeout)
+				if troubleshootingMode {
+					slog.Info("troubleshooting: site dispatch inhibited",
+						"site_meter", siteMeterDriver, "reason", freshness.Reason,
+						"timeout", watchdogTimeout)
+				}
+			}
+			if recovered {
+				slog.Info("site dispatch freshness recovered", "site_meter", siteMeterDriver)
+			}
+			for _, name := range pendingDefaults {
+				if _, alreadyDefaulted := watchdogDefaulted[name]; alreadyDefaulted {
+					continue
+				}
+				sendDriverDefault(ctx, reg, name, freshness.Reason)
+			}
+
+			// Loadpoint observation and schedule rolling stay live while the
+			// gate is closed. TickWithDispatch sends an explicit 0 W standdown
+			// instead of executing a schedule or persistent manual hold.
+			lpMgr.RollSchedules(tickNow.UTC())
+			lpController.TickWithDispatch(ctx, tickNow, freshness.Allowed())
 
 			// Anchor each plugged-in loadpoint's inferred SoC to the live
 			// vehicle BMS reading when one is paired. Chargers like Easee
@@ -2101,31 +2138,7 @@ func main() {
 				lpMgr.AnchorVehicleSoC(st.ID, pick.SoCPct)
 			}
 
-			// ---- Safety: site meter stale → idle everything this cycle ----
-			// Otherwise stale grid readings cause one battery to charge another.
-			// Only meaningful when a site meter is actually configured;
-			// without one, IsStale("", DerMeter) is permanently true and
-			// the SendDefault loop below would fire on every tick — and
-			// SendDefault is a blocking send into each driver's cmdCh,
-			// which deadlocks the dispatch loop the first time any
-			// driver's channel buffer fills.
-			ctrlMu.Lock()
-			siteMeterDriver := ctrl.SiteMeterDriver
-			ctrlMu.Unlock()
-			siteMeterStale := false
-			if siteMeterDriver != "" {
-				siteMeterStale = tel.IsStale(siteMeterDriver, telemetry.DerMeter, watchdogTimeout)
-			}
-			if siteMeterStale {
-				slog.Warn("site meter telemetry stale — idling batteries this cycle",
-					"driver", siteMeterDriver)
-				if troubleshootingMode {
-					slog.Info("troubleshooting: site meter stale, dispatch skipped",
-						"site_meter", siteMeterDriver, "timeout", watchdogTimeout)
-				}
-				for _, n := range driversToDefaultOnSiteMeterStale(reg.Names(), siteMeterDriver) {
-					sendDriverDefault(ctx, reg, n, "site_meter_stale")
-				}
+			if !freshness.Allowed() {
 				continue
 			}
 
@@ -2527,24 +2540,6 @@ func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason 
 		slog.Warn("driver default command failed",
 			"name", name, "reason", reason, "timeout", driverDefaultTimeout, "err", err)
 	}
-}
-
-// driversToDefaultOnSiteMeterStale returns the driver names to revert to
-// DefaultMode when the site meter goes stale: every driver EXCEPT the
-// site-meter owner itself. Skipping the meter owner avoids a flap loop on
-// combined meter+battery devices (Pixii / Ferroamp-class) whose stale meter
-// reading is usually their own hung modbus poll — writing DefaultMode into
-// that same session cuts the battery in/out every minute. The "don't act on
-// a stale grid signal" protection only applies to the OTHER batteries.
-func driversToDefaultOnSiteMeterStale(names []string, siteMeterDriver string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		if n == siteMeterDriver {
-			continue
-		}
-		out = append(out, n)
-	}
-	return out
 }
 
 // driverCapacitiesFrom builds the driver-name → battery-capacity map

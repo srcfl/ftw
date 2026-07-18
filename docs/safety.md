@@ -16,9 +16,14 @@ The telemetry watchdog runs every control tick. A driver with no fresh
 successful reading within `site.watchdog_timeout_s` is marked offline and sent
 its autonomous `driver_default_mode`.
 
-The configured site meter is stricter: stale meter data stops the whole battery
-dispatch cycle. Without that guard, batteries can respond to an old grid value
-and charge one another. Recovery happens only after fresh telemetry arrives.
+The configured site meter is stricter: stale meter data stops all storage and
+loadpoint dispatch. If the meter exposes per-phase current, every configured
+phase must remain fresh as well because those readings are required to protect
+the site fuse. Core sends connected loadpoints an explicit zero-power standdown
+and reverts controllable drivers to autonomous mode once on the stale
+transition, including a combined site-meter/battery owner. Telemetry
+observation and schedule state continue advancing while actuation is blocked;
+normal dispatch resumes only after the required readings recover.
 
 Source and executable specification:
 
