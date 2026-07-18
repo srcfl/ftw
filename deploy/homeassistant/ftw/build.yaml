@@ -1,0 +1,19 @@
+# Per-arch base image for the local Supervisor build.
+#
+# Pin the canonical Sourceful image `ghcr.io/srcfl/ftw`. It is a single
+# multi-arch manifest (linux/amd64 + linux/arm64), so the SAME tag serves
+# both HA architectures — Docker selects the layer matching the build
+# platform.
+#
+# Pin a concrete release tag (never :latest) so the build is reproducible and
+# Supervisor's `version:` maps to exactly one image. Bump this together with
+# config.yaml `version:` on every release. GHCR also carries unrelated
+# edge/beta and legacy-mirror tags — ignore those; track the release line
+# (package.json), currently v1.4.0.
+build_from:
+  amd64: ghcr.io/srcfl/ftw:v1.4.0
+  aarch64: ghcr.io/srcfl/ftw:v1.4.0
+
+labels:
+  org.opencontainers.image.title: "FTW (Home Assistant add-on)"
+  org.opencontainers.image.source: "https://github.com/srcfl/ftw"

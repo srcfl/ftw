@@ -65,6 +65,14 @@ The dashboard is intentionally local. Use a VPN or another operator-managed
 private network when access is needed away from home; FTW does not ship a
 public relay.
 
+## Install as a Home Assistant add-on
+
+For Home Assistant OS / Supervised, a first-party add-on lives in
+[`deploy/homeassistant/`](deploy/homeassistant/). It wraps the released
+`ghcr.io/srcfl/ftw` image onto Supervisor's `/data` volume and is versioned in
+lockstep with releases. Setup, the optimizer/storage caveats, and the
+publishing plan are in [`docs/ha-addon.md`](docs/ha-addon.md).
+
 ## Local development
 
 Requirements are Go, Python 3 and Node.js. The optimizer environment is cached

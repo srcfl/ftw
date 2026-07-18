@@ -1,0 +1,58 @@
+# FTW — Home Assistant add-on manifest.
+#
+# Keep `version` in sync with the pinned base image tag in build.yaml and
+# with the repo's package.json version (both track the release line, e.g.
+# 1.4.0). Home Assistant Supervisor orders add-on updates by semver on this
+# `version`, so it must follow the same line as the published image tags.
+name: FTW
+version: "1.4.0"
+slug: ftw
+description: >-
+  Local-first home energy coordination — MPC battery dispatch, PV / load /
+  price planning, and hot-reloadable Lua device drivers.
+url: https://github.com/srcfl/ftw/tree/master/deploy/homeassistant/ftw
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+
+# Host networking is required, not optional, for the core value of the app:
+#   - Modbus TCP to inverters / meters on the LAN
+#   - MQTT brokers on the LAN (incl. the HA Mosquitto add-on at core-mosquitto)
+#   - mDNS / broadcast driver discovery (e.g. Sourceful Zap at zap.local)
+# Ingress is intentionally NOT enabled: the app is not X-Ingress-Path aware,
+# and host networking + ingress do not compose cleanly. Access is via the
+# direct port below.
+host_network: true
+
+ports:
+  "8080/tcp": 8080
+ports_description:
+  "8080/tcp": Web UI / HTTP API
+webui: "http://[HOST]:[PORT:8080]/"
+
+# Persistent state — config.yaml, state.db, battery models, cold/ Parquet —
+# lives in the add-on's /data volume and survives add-on updates. See the
+# wrapper Dockerfile for how /data is wired to the app, and DOCS.md for the
+# storage-growth caveat (the cold Parquet history grows ~a few GB/year and
+# is included in HA backups).
+#
+# share:rw lets operators keep hot-reloadable Lua drivers under /share, or
+# point the app's state.cold_dir there to keep history off the OS partition.
+map:
+  - share:rw
+
+# Configuration is done in the built-in web setup wizard
+# (http://<host>:8080/setup on first boot), which writes /data/config.yaml.
+# No options schema yet — wiring HA options.json through to the app's YAML
+# config is tracked as follow-up in docs/ha-addon.md.
+#
+# KNOWN LIMITATION (see docs/ha-addon.md): upstream runs the MPC optimizer as
+# a separate `ftw-optimizer` sidecar container. A HA add-on is single-
+# container, so that sidecar is not present here; the app runs with its
+# in-process / auto optimizer transport. Full optimizer parity needs either
+# graceful degradation in the app or bundling the optimizer via s6.
+options: {}
+schema: {}

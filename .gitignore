@@ -2,6 +2,9 @@
 /release
 *.redb
 config.yaml
+# The Home Assistant add-on manifest is literally named config.yaml but is
+# source, not user state — keep it tracked.
+!deploy/homeassistant/ftw/config.yaml
 data/
 
 # Go build artifacts

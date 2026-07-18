@@ -1,0 +1,17 @@
+# Home Assistant add-on repository descriptor.
+#
+# This directory (deploy/homeassistant/) is a self-contained Home Assistant
+# add-on repository: a repository.yaml at the root plus one directory per
+# add-on. It lives inside the main FTW repo so the add-on is versioned in
+# lockstep with the code it wraps — every release can bump the pinned image
+# tag and the add-on `version:` in the same commit, instead of the add-on
+# drifting in a separate, hand-maintained repo.
+#
+# Distribution note: a HA add-on repository must have repository.yaml at its
+# GIT ROOT, so the Supervisor cannot add the monorepo root URL directly.
+# Either publish/mirror this subtree to a dedicated repo (see docs/ha-addon.md)
+# or, for local testing, copy deploy/homeassistant/ onto the HA host under
+# /addons (Supervised) or /root/addons.
+name: FTW Add-ons
+url: https://github.com/srcfl/ftw
+maintainer: Sourceful Energy <https://github.com/srcfl/ftw>
