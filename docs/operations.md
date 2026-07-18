@@ -55,6 +55,19 @@ become healthy. See [backup-and-restore.md](backup-and-restore.md).
 The updater also retains bounded local pre-update rollback points. They protect
 configuration and SQLite state during a Core update but remain on the same
 disk; they cannot recover a failed SD card.
+
+Settings → System shows a read-only FTW storage inventory. It reports SQLite
+allocated/live/free pages and WAL, cold Parquet, recovery and rollback
+snapshots, full backups, uncategorized persistent data and free filesystem
+headroom. The accompanying 1,500 MiB budget advisor is a dry run only: it may
+identify future retention candidates but never deletes data, changes retention,
+checkpoints WAL, runs VACUUM or starts a backfill. The same inventory is
+available for operator diagnostics at:
+
+```bash
+curl -fsS http://localhost:8080/api/storage/inventory
+```
+
 If an older rollback leaves the service offline, follow the Swedish
 [failed-rollback recovery procedure](recover-failed-rollback.sv.md) before
 changing ownership or deleting any SQLite sidecar files.

@@ -10,7 +10,8 @@
   }
 
   function fmtBytes(n) {
-    if (!Number.isFinite(n) || n <= 0) return "—";
+    if (!Number.isFinite(n) || n < 0) return "—";
+    if (n === 0) return "0 B";
     var units = ["B", "KB", "MB", "GB", "TB"];
     var i = 0;
     while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
@@ -32,6 +33,80 @@
     return '<div class="sys-bar"><div class="sys-bar-fill" style="width:' + p.toFixed(1) + '%"></div></div>';
   }
 
+  function storageInventoryHTML(d, escHtml) {
+    d = d || {};
+    var databases = d.databases || {};
+    var files = d.files || {};
+    var fs = d.filesystem || {};
+    var advisor = d.advisor || {};
+    var maintenance = d.maintenance || {};
+    var incomplete = Array.isArray(d.incomplete_categories) ? d.incomplete_categories : [];
+
+    function physical(db) {
+      db = db || {};
+      return (Number(db.file_bytes) || 0) + (Number(db.wal_bytes) || 0) + (Number(db.shm_bytes) || 0);
+    }
+    function row(label, value, detail) {
+      return '<div class="sys-row sys-storage-row"><span class="sys-label">' + escHtml(label) + '</span>' +
+        '<span>' + escHtml(detail || "") + '</span><span class="sys-value">' + escHtml(value) + '</span></div>';
+    }
+    function artifactDetail(fp) {
+      fp = fp || {};
+      var where = fp.on_device === false ? "external" : "on device";
+      return (Number(fp.files) || 0) + " files · " + where;
+    }
+    function when(ms) {
+      if (!Number.isFinite(ms) || ms <= 0) return "not observed yet";
+      return new Date(ms).toLocaleString();
+    }
+
+    var stateDB = databases.state || {};
+    var cacheDB = databases.cache || {};
+    var parquet = files.parquet || {};
+    var recovery = files.recovery_snapshot || {};
+    var rollbacks = files.rollback_snapshots || {};
+    var backups = files.full_backups || {};
+    var other = files.other_data || {};
+    var status = String(advisor.status || "incomplete");
+    var statusClass = ["ok", "watch", "action_needed", "incomplete"].indexOf(status) >= 0 ? status : "incomplete";
+    var statusLabel = status.replace(/_/g, " ");
+    var rows = '';
+    rows += row("state.db", fmtBytes(physical(stateDB)),
+      "live " + fmtBytes(stateDB.live_bytes) + " · free pages " + fmtBytes(stateDB.free_bytes) + " · WAL " + fmtBytes(stateDB.wal_bytes));
+    rows += row("cache.db", fmtBytes(physical(cacheDB)),
+      "live " + fmtBytes(cacheDB.live_bytes) + " · free pages " + fmtBytes(cacheDB.free_bytes) + " · WAL " + fmtBytes(cacheDB.wal_bytes));
+    rows += row("Cold Parquet", fmtBytes(parquet.bytes),
+      artifactDetail(parquet) + " · diagnostics " + fmtBytes(parquet.diagnostics_bytes) +
+      " · retention " + ((Number(parquet.retention_days) || 0) > 0 ? parquet.retention_days + " days" : "unbounded"));
+    rows += row("Recovery copy", fmtBytes(recovery.bytes), artifactDetail(recovery));
+    rows += row("Rollback points", fmtBytes(rollbacks.bytes), artifactDetail(rollbacks));
+    rows += row("Full backups", fmtBytes(backups.bytes), artifactDetail(backups));
+    rows += row("Other data", fmtBytes(other.bytes), "config, models, drivers and uncategorized files");
+
+    var pressure = (Array.isArray(advisor.candidates) ? advisor.candidates : []).filter(function (candidate) {
+      return candidate && candidate.would_consider;
+    });
+    var actions = pressure.length
+      ? '<ul class="sys-storage-actions">' + pressure.map(function (candidate) {
+          return '<li><b>' + escHtml(candidate.category || "storage") + ':</b> ' + escHtml(candidate.action || "review retention") + '</li>';
+        }).join("") + '</ul>'
+      : '<div class="sys-meta">No retention action is indicated by this dry run.</div>';
+    var observed = 'Last durable outputs: Parquet ' + when(maintenance.last_parquet_success_ms) +
+      ' · recovery copy ' + when(maintenance.last_recovery_snapshot_success_ms) +
+      ' · verified full backup ' + when(maintenance.last_full_backup_verified_ms);
+    var partial = incomplete.length
+      ? '<div class="sys-storage-warning">Partial inventory: ' + escHtml(incomplete.join(", ")) + '</div>'
+      : '';
+
+    return rows +
+      '<div class="sys-storage-summary"><span class="sys-storage-status sys-storage-' + statusClass + '">' +
+        escHtml(statusLabel) + '</span><span>Dry-run target ' + fmtBytes(advisor.budget_bytes) +
+        ' · managed ' + fmtBytes(advisor.managed_bytes) + ' · filesystem available ' + fmtBytes(fs.available_bytes) +
+        ' · reserve ' + fmtBytes(advisor.filesystem_reserve_bytes) + '</span></div>' +
+      partial + actions + '<div class="sys-meta sys-storage-observed">' + escHtml(observed) + '</div>' +
+      '<div class="sys-meta">Read-only advisor: no files, retention settings or SQLite pages are changed.</div>';
+  }
+
   S.tabs.system = {
     render: function () {
       return '' +
@@ -46,6 +121,13 @@
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-net-iface { color: var(--text-dim); margin-right: 8px; }' +
 		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +
+        '  .sys-storage-row { grid-template-columns: 120px 1fr 90px; }' +
+        '  .sys-storage-summary { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:12px; }' +
+        '  .sys-storage-status { border:1px solid var(--line); border-radius:999px; padding:2px 8px; font:0.75rem var(--mono, monospace); text-transform:uppercase; }' +
+        '  .sys-storage-action_needed, .sys-storage-warning { color:var(--danger, #f88); }' +
+        '  .sys-storage-watch, .sys-storage-incomplete { color:var(--warning, #fc6); }' +
+        '  .sys-storage-actions { margin:10px 0; padding-left:20px; font-size:0.85rem; }' +
+        '  .sys-storage-observed { margin-top:10px; }' +
         '</style>' +
         '<fieldset>' +
         '<legend>Host</legend>' +
@@ -89,6 +171,11 @@
         '  </div>' +
         '  <div class="sys-meta" id="sys-disk-detail" style="grid-column: 1 / -1; margin-left: 110px">—</div>' +
         '</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
+        '<legend>FTW storage <span class="sys-meta">(read-only)</span></legend>' +
+        '<div class="sys-grid" id="sys-storage-inventory">Loading storage inventory…</div>' +
+        '<button class="btn-add" id="sys-storage-refresh" type="button" style="margin-top:10px">Refresh inventory</button>' +
         '</fieldset>' +
         '<fieldset>' +
         '<legend>Network</legend>' +
@@ -232,10 +319,35 @@
         });
       }
 
+      function refreshStorage() {
+        var el = document.getElementById("sys-storage-inventory");
+        var button = document.getElementById("sys-storage-refresh");
+        if (!el) return;
+        if (button) button.disabled = true;
+        apiFetch("/api/storage/inventory").then(function (r) {
+          return r.json().then(function (body) {
+            if (!r.ok) throw new Error(body.error || "storage inventory unavailable");
+            return body;
+          });
+        }).then(function (body) {
+          el.innerHTML = storageInventoryHTML(body, escHtml);
+        }).catch(function (err) {
+          el.textContent = err.message || "Storage inventory unavailable";
+        }).finally(function () {
+          if (button) button.disabled = false;
+        });
+      }
+
+      var storageRefresh = document.getElementById("sys-storage-refresh");
+      if (storageRefresh) storageRefresh.addEventListener("click", refreshStorage);
+
       refresh();
       refreshComponents();
+      refreshStorage();
       if (window._systemStatusTimer) clearInterval(window._systemStatusTimer);
       window._systemStatusTimer = setInterval(refresh, 5000);
     },
+
+    _pure: { fmtBytes: fmtBytes, storageInventoryHTML: storageInventoryHTML },
   };
 })();
