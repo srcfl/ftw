@@ -781,128 +781,40 @@ func TestFullCycleRespondsToTransient(t *testing.T) {
 	}
 }
 
-func TestSettlementGridTargetCompensatesPriorImportOnly(t *testing.T) {
+func TestSelfConsumptionDoesNotExportToCompensateEarlierImport(t *testing.T) {
 	st := NewState(0, 50, "ferroamp")
-	now := time.Date(2026, 5, 23, 14, 5, 0, 0, time.Local)
-	if got := st.settlementGridTarget(now, 0); got != 0 {
-		t.Fatalf("first sample target = %f, want 0", got)
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.MinDispatchIntervalS = 0
+
+	// Saturate the PI's memory with live import. The controller may discharge
+	// to cover that live load, but the imported energy is already settled and
+	// must not become a later export target.
+	for range 20 {
+		store := seedStore(2700, []struct {
+			name          string
+			currentW, soc float64
+		}{
+			{"ferroamp", 0, 0.8},
+		})
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+		if len(targets) != 1 || targets[0].TargetW >= 0 {
+			t.Fatalf("setup: live import should be covered by discharge, got %#v", targets)
+		}
 	}
 
-	got := st.settlementGridTarget(now.Add(time.Minute), 2700)
-	// 2700 W for one minute = 45 Wh. Nine minutes remain, so the raw
-	// compensating grid target is -300 W; the settlement target applies
-	// a low-pass and starts at 35% of that.
-	if math.Abs(got+105) > 0.1 {
-		t.Fatalf("target = %f, want -105", got)
-	}
-
-	// Prior export must not be repaid with intentional import.
-	st2 := NewState(0, 50, "ferroamp")
-	if got := st2.settlementGridTarget(now, 0); got != 0 {
-		t.Fatalf("first export sample target = %f, want 0", got)
-	}
-	st2.settlementNetWh = -100
-	got = st2.settlementGridTarget(now.Add(time.Minute), 0)
-	if got != 0 {
-		t.Fatalf("prior export target = %f, want 0", got)
-	}
-}
-
-func TestSelfConsumptionSettlementBiasExportsToRecoverSlotImport(t *testing.T) {
-	now := time.Now()
-	remaining := now.Truncate(settlementSlotDuration).Add(settlementSlotDuration).Sub(now)
-	if remaining < settlementMinRemainS*time.Second+time.Second {
-		t.Skip("too close to quarter boundary")
-	}
-	store := seedStore(0, []struct {
+	// Once live grid flow is balanced, prior import must not command battery
+	// discharge into the grid. A nil/idle target is the expected result.
+	balanced := seedStore(0, []struct {
 		name          string
 		currentW, soc float64
 	}{
 		{"ferroamp", 0, 0.8},
 	})
-	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
-	st.SettlementAwareSelfConsumption = true
-	st.SlewRateW = 100000
-	st.MinDispatchIntervalS = 0
-	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
-	st.settlementLastTs = now.Add(-time.Second)
-	st.settlementNetWh = 100
-
-	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 1 {
-		t.Fatalf("expected settlement recovery target, got %d", len(targets))
-	}
-	if targets[0].TargetW >= 0 {
-		t.Fatalf("settlement recovery should discharge/export, got %f", targets[0].TargetW)
-	}
-}
-
-func TestSelfConsumptionSettlementBiasDisabledByDefault(t *testing.T) {
-	now := time.Now()
-	store := seedStore(0, []struct {
-		name          string
-		currentW, soc float64
-	}{
-		{"ferroamp", 0, 0.8},
-	})
-	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
-	st.SlewRateW = 100000
-	st.MinDispatchIntervalS = 0
-	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
-	st.settlementLastTs = now.Add(-time.Second)
-	st.settlementNetWh = 100
-
-	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Fatalf("settlement bias is unsafe as a default; got %#v", targets)
-	}
-}
-
-func TestSelfConsumptionSettlementBiasDisabledAtLowSoC(t *testing.T) {
-	now := time.Now()
-	store := seedStore(0, []struct {
-		name          string
-		currentW, soc float64
-	}{
-		{"ferroamp", 0, 0.26},
-	})
-	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
-	st.SettlementAwareSelfConsumption = true
-	st.SlewRateW = 100000
-	st.MinDispatchIntervalS = 0
-	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
-	st.settlementLastTs = now.Add(-time.Second)
-	st.settlementNetWh = 100
-
-	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Fatalf("low SoC settlement recovery should not export battery, got %#v", targets)
-	}
-}
-
-func TestSelfConsumptionSettlementBiasDoesNotImportToRecoverExport(t *testing.T) {
-	now := time.Now()
-	store := seedStore(0, []struct {
-		name          string
-		currentW, soc float64
-	}{
-		{"ferroamp", 0, 0.8},
-	})
-	st := NewState(0, 50, "ferroamp")
-	st.Mode = ModeSelfConsumption
-	st.SettlementAwareSelfConsumption = true
-	st.SlewRateW = 100000
-	st.MinDispatchIntervalS = 0
-	st.settlementSlotStart = now.Truncate(settlementSlotDuration)
-	st.settlementLastTs = now.Add(-time.Second)
-	st.settlementNetWh = -100
-
-	targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
-	if len(targets) != 0 {
-		t.Fatalf("prior export should not trigger intentional import, got %#v", targets)
+	for _, target := range ComputeDispatch(balanced, st, caps(map[string]float64{"ferroamp": 15200}), 11040) {
+		if target.TargetW < 0 {
+			t.Fatalf("prior import triggered compensating export: %#v", target)
+		}
 	}
 }
 
