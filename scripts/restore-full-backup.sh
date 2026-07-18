@@ -49,7 +49,7 @@ main_service=""
 for candidate in ftw forty-two-watts; do
   if printf '%s\n' "$services" | grep -qx "$candidate"; then
     if [ -n "$main_service" ]; then
-      echo "both ftw and forty-two-watts services exist; refusing to guess" >&2
+      echo "multiple FTW core services exist; refusing to guess" >&2
       exit 2
     fi
     main_service="$candidate"
