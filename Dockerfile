@@ -31,7 +31,10 @@ RUN cd go && \
     target_arch="${TARGETARCH:-$(go env GOARCH)}" && \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
     go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
-    -o /out/ftw ./cmd/ftw
+    -o /out/ftw ./cmd/ftw && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${target_arch} \
+    go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" \
+    -o /out/ftw-backup ./cmd/ftw-backup
 # --- Runtime ---------------------------------------------------------------
 FROM alpine:3.22
 
@@ -53,6 +56,7 @@ RUN apk add --no-cache ca-certificates tzdata
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
 COPY --from=builder /out/ftw             /app/ftw
+COPY --from=builder /out/ftw-backup      /app/ftw-backup
 COPY drivers/ /app/drivers/
 COPY web/     /app/web/
 COPY LICENSE NOTICE /usr/share/doc/ftw/

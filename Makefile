@@ -124,6 +124,7 @@ install-hooks:
 build:
 	@mkdir -p bin
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw ./cmd/ftw
+	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-backup ./cmd/ftw-backup
 	@ln -sf ftw bin/forty-two-watts
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-ferroamp ./cmd/sim-ferroamp
 	cd go && go build -ldflags="$(LDFLAGS)" -o ../bin/sim-sungrow ./cmd/sim-sungrow
@@ -133,6 +134,8 @@ build-arm64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-arm64 ./cmd/ftw
+	cd go && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-backup-linux-arm64 ./cmd/ftw-backup
 	@cp bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64
 	@ls -la bin/ftw-linux-arm64 bin/forty-two-watts-linux-arm64
 
@@ -140,6 +143,8 @@ build-amd64:
 	@mkdir -p bin
 	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-linux-amd64 ./cmd/ftw
+	cd go && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-backup-linux-amd64 ./cmd/ftw-backup
 	@cp bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 	@ls -la bin/ftw-linux-amd64 bin/forty-two-watts-linux-amd64
 
@@ -147,6 +152,8 @@ build-windows-amd64:
 	@mkdir -p bin
 	cd go && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
 		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-windows-amd64.exe ./cmd/ftw
+	cd go && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+		go build -ldflags="$(LDFLAGS)" -o ../bin/ftw-backup-windows-amd64.exe ./cmd/ftw-backup
 	@cp bin/ftw-windows-amd64.exe bin/forty-two-watts-windows-amd64.exe
 	@ls -la bin/ftw-windows-amd64.exe bin/forty-two-watts-windows-amd64.exe
 
@@ -159,9 +166,10 @@ release: build-arm64 build-amd64 build-windows-amd64
 		stage="bin/stage-linux-$$arch"; \
 		mkdir -p "$$stage"; \
 		cp "bin/ftw-linux-$$arch"             "$$stage/ftw"; \
+		cp "bin/ftw-backup-linux-$$arch"      "$$stage/ftw-backup"; \
 		ln -sf ftw                              "$$stage/forty-two-watts"; \
 		tar czf release/ftw-linux-$$arch.tar.gz \
-			-C "$$stage" ftw forty-two-watts \
+			-C "$$stage" ftw ftw-backup forty-two-watts \
 			-C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE; \
 		cp "release/ftw-linux-$$arch.tar.gz" "release/forty-two-watts-linux-$$arch.tar.gz"; \
 		printf "built release/ftw-linux-%s.tar.gz (%s bytes)\n" "$$arch" \
@@ -171,9 +179,10 @@ release: build-arm64 build-amd64 build-windows-amd64
 	@rm -rf bin/stage-windows-amd64
 	@mkdir -p bin/stage-windows-amd64
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/ftw.exe
+	@cp bin/ftw-backup-windows-amd64.exe bin/stage-windows-amd64/ftw-backup.exe
 	@cp bin/ftw-windows-amd64.exe bin/stage-windows-amd64/forty-two-watts.exe
 	@rm -f release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
-	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe forty-two-watts.exe
+	@cd bin/stage-windows-amd64 && zip -q ../../release/ftw-windows-amd64.zip ftw.exe ftw-backup.exe forty-two-watts.exe
 	@zip -qr release/ftw-windows-amd64.zip drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
 	@cp release/ftw-windows-amd64.zip release/forty-two-watts-windows-amd64.zip
 	@cd release && for f in \

@@ -112,6 +112,36 @@ func TestPublicationRejectsWrongExpectedPublicKey(t *testing.T) {
 	}
 }
 
+func TestPublicationCarriesVerifiedVersionHistoryForward(t *testing.T) {
+	dir := t.TempDir()
+	driversDir := filepath.Join(dir, "drivers")
+	if err := os.MkdirAll(driversDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	public, private, _ := ed25519.GenerateKey(rand.Reader)
+	build := func(version, output, previous string) Publication {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(driversDir, "demo.lua"), testDriver(version), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		publication, err := BuildPublication(PublicationOptions{
+			DriversDir: driversDir, OutputDir: output,
+			BaseURL:    "https://example.test/releases/download/drivers-beta",
+			Repository: "https://github.com/srcfl/ftw", KeyID: "test",
+			PrivateKey: private, ExpectedPublicKey: public, PreviousManifestPath: previous,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return publication
+	}
+	first := build("1.0.0", filepath.Join(dir, "first"), "")
+	second := build("1.1.0", filepath.Join(dir, "second"), first.ManifestPath)
+	if len(second.Manifest.History) != 1 || second.Manifest.History[0].Version != "1.0.0" {
+		t.Fatalf("history = %+v", second.Manifest.History)
+	}
+}
+
 func TestPublicationRejectsDangerousOutputDirectories(t *testing.T) {
 	for _, path := range []string{"", ".", "..", string(filepath.Separator), filepath.Join(string(filepath.Separator), "tmp")} {
 		if err := validatePublicationOutput(path); err == nil {

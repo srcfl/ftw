@@ -2,7 +2,7 @@ name: release-assets
 
 # Build + publish the artefacts that accompany a tagged release:
 #   - cross-platform main binaries (linux amd64/arm64, windows amd64)
-#   - docker images for core + updater + optimizer pushed to GHCR
+#   - docker images for the paired core + updater control plane pushed to GHCR
 #   - a versioned os_list.json alias for Raspberry Pi Imager
 #   - Discord release announcement
 #
@@ -130,7 +130,12 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
             -o "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
             ./cmd/ftw
-          ls -la "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}"
+          go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            ./cmd/ftw-backup
+          ls -la \
+            "../bin/ftw-${GOOS}-${GOARCH}${{ matrix.ext }}" \
+            "../bin/ftw-backup-${GOOS}-${GOARCH}${{ matrix.ext }}"
 
       - name: Package
         env:
@@ -145,16 +150,18 @@ jobs:
           mkdir -p "${STAGE}"
           if [[ "${ARCHIVE}" == "zip" ]]; then
             cp "bin/${BINARY}" "${STAGE}/ftw.exe"
+            cp "bin/ftw-backup-${PLATFORM}.exe" "${STAGE}/ftw-backup.exe"
             cp "bin/${BINARY}" "${STAGE}/forty-two-watts.exe"
-            (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe forty-two-watts.exe)
+            (cd "${STAGE}" && zip -q "../../release/ftw-${PLATFORM}.zip" ftw.exe ftw-backup.exe forty-two-watts.exe)
             zip -qr "release/ftw-${PLATFORM}.zip" \
               drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.zip" "release/forty-two-watts-${PLATFORM}.zip"
           else
             cp "bin/${BINARY}" "${STAGE}/ftw"
+            cp "bin/ftw-backup-${PLATFORM}" "${STAGE}/ftw-backup"
             ln -s ftw "${STAGE}/forty-two-watts"
             tar czf "release/ftw-${PLATFORM}.tar.gz" \
-              -C "${STAGE}" ftw forty-two-watts \
+              -C "${STAGE}" ftw ftw-backup forty-two-watts \
               -C ../.. drivers web optimizer/pyproject.toml optimizer/ftw_optimizer config.example.yaml LICENSE NOTICE
             cp "release/ftw-${PLATFORM}.tar.gz" "release/forty-two-watts-${PLATFORM}.tar.gz"
           fi
@@ -206,9 +213,9 @@ jobs:
     name: docker build + push (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: meta
-    # Build core, updater, and the independently restartable optimizer from
-    # the same release commit. Runtime compatibility is still negotiated by
-    # protocol rather than requiring versions to match.
+    # Core and updater are a paired control plane. The optimizer has its own
+    # release workflow and version because compatibility is negotiated by
+    # protocol rather than by matching core tags.
     strategy:
       fail-fast: false
       matrix:
@@ -223,11 +230,6 @@ jobs:
             image_suffix: "-updater"
             title: FTW updater
             description: Sidecar that executes docker compose pull + up for in-app updates
-          - target: optimizer
-            dockerfile: ./Dockerfile.optimizer
-            image_suffix: "-optimizer"
-            title: FTW optimizer
-            description: Independently updatable mathematical planning sidecar
     steps:
       - name: Checkout tag
         uses: actions/checkout@v5

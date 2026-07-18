@@ -1,0 +1,145 @@
+name: optimizer release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Publish beta first, then promote the exact commit to stable
+        required: true
+        type: choice
+        default: beta
+        options: [beta, stable]
+      version:
+        description: Optimizer SemVer without prefix (for example 0.2.0-beta.1 or 0.2.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: optimizer-${{ inputs.channel }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: validate independent optimizer version
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      image_tag: ${{ steps.version.outputs.image_tag }}
+      alias: ${{ steps.version.outputs.alias }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: version
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          package_version="$(python3 - <<'PY'
+          import tomllib
+          with open('optimizer/pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          PY
+          )"
+          if [ "${CHANNEL}" = beta ]; then
+            [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]] || {
+              echo "beta version must match X.Y.Z-beta.N" >&2; exit 1;
+            }
+            base="${VERSION%-beta.*}"
+            alias=beta
+          else
+            [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "stable version must match X.Y.Z" >&2; exit 1;
+            }
+            base="${VERSION}"
+            alias=latest
+          fi
+          [ "${base}" = "${package_version}" ] || {
+            echo "${VERSION} does not match optimizer/pyproject.toml ${package_version}" >&2; exit 1;
+          }
+          if [ "${CHANNEL}" = stable ]; then
+            git fetch --tags --force
+            beta_commit="$(git tag --list "optimizer-v${VERSION}-beta.*" --sort=-v:refname | head -n 1)"
+            [ -n "${beta_commit}" ] || {
+              echo "No optimizer-v${VERSION}-beta.N tag exists; publish and validate beta first." >&2; exit 1;
+            }
+            [ "$(git rev-list -n 1 "${beta_commit}")" = "${GITHUB_SHA}" ] || {
+              echo "${beta_commit} is not this exact stable candidate commit." >&2; exit 1;
+            }
+          fi
+          release_tag="optimizer-v${VERSION}"
+          image_tag="v${VERSION}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+            [ "$(git rev-list -n 1 "${release_tag}")" = "${GITHUB_SHA}" ] || {
+              echo "${release_tag} already points at another commit" >&2; exit 1;
+            }
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${release_tag}" -m "FTW optimizer ${image_tag}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${release_tag}"
+          fi
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "alias=${alias}" >> "${GITHUB_OUTPUT}"
+
+  publish:
+    name: build optimizer image
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.release_tag }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
+          password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.optimizer
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/srcfl/ftw-optimizer:${{ needs.validate.outputs.image_tag }}
+            ghcr.io/srcfl/ftw-optimizer:${{ needs.validate.outputs.alias }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/srcfl/ftw
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.validate.outputs.image_tag }}
+            org.opencontainers.image.licenses=Apache-2.0
+          build-args: |
+            VERSION=${{ needs.validate.outputs.image_tag }}
+            BUILD_SHA=${{ github.sha }}
+          cache-from: type=gha,scope=optimizer
+          cache-to: type=gha,mode=max,scope=optimizer
+
+  release:
+    name: publish optimizer GitHub release
+    needs: [validate, publish]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.release_tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          prerelease=()
+          if [ "${CHANNEL}" = beta ]; then prerelease=(--prerelease); fi
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --title "FTW optimizer ${TAG#optimizer-}" --generate-notes --latest=false "${prerelease[@]}"

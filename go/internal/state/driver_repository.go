@@ -80,6 +80,28 @@ func (s *Store) ActiveDriverRepoInstalls() ([]DriverRepoInstall, error) {
 	return out, rows.Err()
 }
 
+// DriverRepoInstallsByDriver returns every locally retained compatible
+// artifact for a driver. Artifacts are content-addressed on disk; this list is
+// the version history that can be reactivated without relying on the network.
+func (s *Store) DriverRepoInstallsByDriver(driverID string) ([]DriverRepoInstall, error) {
+	rows, err := s.db.Query(`SELECT id, repo_url, repo_id, driver_id, logical_path,
+		version, sha256, installed_path, previous_installed_path, installed_at_ms, active
+		FROM driver_repo_installs WHERE driver_id = ? ORDER BY installed_at_ms DESC, id DESC`, driverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DriverRepoInstall
+	for rows.Next() {
+		got, err := scanDriverRepoInstall(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeactivateDriverRepoInstall(logicalPath string) error {
 	_, err := s.db.Exec(`UPDATE driver_repo_installs SET active = 0 WHERE logical_path = ?`, logicalPath)
 	return err

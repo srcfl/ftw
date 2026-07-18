@@ -820,29 +820,27 @@ func TestDeviceRepositoryUnsignedManifestMustBeLocal(t *testing.T) {
 	}
 }
 
-func TestDeviceRepositoryOfficialTrustRootRequiresExplicitBlock(t *testing.T) {
-	absent := Config{}
+func TestDeviceRepositoryOfficialTrustRootIsReadOnlyDiscoveryDefault(t *testing.T) {
+	absent := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
 	applyDefaults(&absent)
-	if absent.DeviceRepository != nil {
-		t.Fatal("omitted device_repository must remain bundled-only")
+	if absent.DeviceRepository == nil || !absent.DeviceRepository.Enabled {
+		t.Fatal("omitted device_repository must enable signed read-only discovery")
 	}
-
-	present := Config{
-		Site:             Site{SmoothingAlpha: 0.3},
-		Fuse:             Fuse{MaxAmps: 16},
-		DeviceRepository: &DeviceRepository{Enabled: true},
+	if len(absent.DeviceRepository.Repositories) != 1 {
+		t.Fatalf("default repositories = %+v", absent.DeviceRepository.Repositories)
 	}
-	applyDefaults(&present)
-	if len(present.DeviceRepository.Repositories) != 1 {
-		t.Fatalf("default repositories = %+v", present.DeviceRepository.Repositories)
-	}
-	repo := present.DeviceRepository.Repositories[0]
+	repo := absent.DeviceRepository.Repositories[0]
 	if repo.ID != DefaultDriverRepositoryID || repo.ManifestURL != DefaultDriverRepositoryManifestURL ||
 		repo.TrustedKeys[DefaultDriverRepositorySigningKeyID] != DefaultDriverRepositoryPublicKey {
 		t.Fatalf("official repository default = %+v", repo)
 	}
-	if err := present.Validate(); err != nil {
+	if err := absent.Validate(); err != nil {
 		t.Fatalf("official repository default rejected: %v", err)
+	}
+	disabled := Config{DeviceRepository: &DeviceRepository{Enabled: false}}
+	applyDefaults(&disabled)
+	if disabled.DeviceRepository.Enabled {
+		t.Fatal("explicit repository opt-out was overwritten")
 	}
 }
 

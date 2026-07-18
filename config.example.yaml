@@ -162,9 +162,11 @@ caldav:
 # Persistent state (SQLite)
 state:
   path: state.db
+  # backup_dir: backups            # use an absolute mounted path for off-device backups
 
-# Independently distributed Lua drivers. Refresh is read-only; activation is
-# always an explicit Settings/API action. Pin the repository maintainer's key.
+# Independently distributed Lua drivers. The signed stable catalog is refreshed
+# by default, but refresh never downloads, activates, or restarts a driver.
+# Add `device_repository: { enabled: false }` to opt out. The expanded form is:
 # device_repository:
 #   enabled: true
 #   refresh_interval_h: 24

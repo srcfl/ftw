@@ -86,6 +86,20 @@ jobs:
           fi
           echo "Promoting tested driver beta ${beta_commit}."
 
+      - name: Download previous signed channel history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.channel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          previous_dir="${RUNNER_TEMP}/ftw-driver-previous"
+          mkdir -p "${previous_dir}"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern manifest.json --dir "${previous_dir}" --clobber
+            echo "FTW_DRIVER_PREVIOUS_MANIFEST=${previous_dir}/manifest.json" >> "${GITHUB_ENV}"
+          fi
+
       - name: Build signed publication
         working-directory: go
         run: >-
@@ -96,6 +110,7 @@ jobs:
           -repository "https://github.com/${GITHUB_REPOSITORY}"
           -commit "${GITHUB_SHA}"
           -key-id "${FTW_DRIVER_KEY_ID}"
+          -previous-manifest "${FTW_DRIVER_PREVIOUS_MANIFEST:-}"
 
       - name: Verify signature and every artifact
         working-directory: go

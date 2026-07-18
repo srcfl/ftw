@@ -97,6 +97,13 @@ type Config struct {
 	// Image overrides the registry path if it differs from Repo (rare —
 	// normally the GH repo and the GHCR image share a name). Defaults to Repo.
 	Image string
+	// ReleaseTagPrefix selects component-specific GitHub Releases while the
+	// registry continues to use plain vX.Y.Z tags. Example: "optimizer-"
+	// resolves GitHub tag optimizer-v1.2.0 to GHCR tag v1.2.0.
+	ReleaseTagPrefix string
+	// StoragePrefix isolates channel/skip preferences for independent
+	// components sharing the same state store. Core leaves this empty.
+	StoragePrefix string
 	// RegistryBaseURL is the OCI registry root. Defaults to https://ghcr.io.
 	// Overridable for tests.
 	RegistryBaseURL string
@@ -188,6 +195,8 @@ type Checker struct {
 	mu               sync.RWMutex
 	info             Info
 	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for
+	skippedKey       string
+	channelKey       string
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -221,17 +230,19 @@ func New(cfg Config, store Store) *Checker {
 		cfg.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 	}
 	channel := inferChannel(cfg.CurrentVersion)
+	componentSkippedKey := cfg.StoragePrefix + skippedKey
+	componentChannelKey := cfg.StoragePrefix + channelKey
 	if store != nil {
-		if persisted, ok := store.LoadConfig(channelKey); ok && persisted != "" {
+		if persisted, ok := store.LoadConfig(componentChannelKey); ok && persisted != "" {
 			if persisted == "edge" {
 				channel = ChannelBeta
-				_ = store.SaveConfig(channelKey, string(ChannelBeta))
+				_ = store.SaveConfig(componentChannelKey, string(ChannelBeta))
 			} else if parsed, err := ParseChannel(persisted); err == nil {
 				channel = parsed
 			}
 		}
 	}
-	c := &Checker{cfg: cfg, store: store}
+	c := &Checker{cfg: cfg, store: store, skippedKey: componentSkippedKey, channelKey: componentChannelKey}
 	c.info.Current = cfg.CurrentVersion
 	c.info.Channel = channel
 	c.info.Channels = append([]Channel(nil), availableChannels...)
@@ -298,8 +309,9 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	if err != nil {
 		return c.recordErr(err)
 	}
-	if rel.TagName != "" {
-		ok, err := rp.hasTag(ctx, rel.TagName)
+	targetTag := c.releaseTargetTag(rel.TagName)
+	if targetTag != "" {
+		ok, err := rp.hasTag(ctx, targetTag)
 		if err != nil {
 			return c.recordErr(fmt.Errorf("registry probe: %w", err))
 		}
@@ -315,11 +327,11 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return info, nil
 	}
 	if deployable {
-		c.info.Latest = rel.TagName
+		c.info.Latest = targetTag
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
-		c.info.UpdateAvailable = channelUpdateAvailable(rel.TagName, c.info.Current)
+		c.info.UpdateAvailable = channelUpdateAvailable(targetTag, c.info.Current)
 	} else {
 		// Either GH has no published release yet, or the build workflow
 		// hasn't pushed the image for this release yet. Keep the prior
@@ -353,6 +365,10 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 func (c *Checker) resolveChannel(ctx context.Context, channel Channel) (ghRelease, bool, error) {
 	switch channel {
 	case ChannelStable:
+		if c.cfg.ReleaseTagPrefix != "" {
+			rel, err := c.fetchPrefixedRelease(ctx, false)
+			return rel, rel.TagName != "", err
+		}
 		rel, err := c.fetchLatestRelease(ctx)
 		return rel, rel.TagName != "", err
 	case ChannelBeta:
@@ -419,6 +435,28 @@ func (c *Checker) fetchLatestRelease(ctx context.Context) (ghRelease, error) {
 // Including stable releases means beta testers naturally converge back to a
 // promoted stable build instead of remaining pinned to the final prerelease.
 func (c *Checker) fetchBetaRelease(ctx context.Context) (ghRelease, error) {
+	if c.cfg.ReleaseTagPrefix != "" {
+		return c.fetchPrefixedRelease(ctx, true)
+	}
+	return c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+		return !rel.Prerelease || isBetaTag(rel.TagName)
+	})
+}
+
+func (c *Checker) fetchPrefixedRelease(ctx context.Context, includeBeta bool) (ghRelease, error) {
+	return c.fetchReleaseList(ctx, func(rel ghRelease) bool {
+		if !strings.HasPrefix(rel.TagName, c.cfg.ReleaseTagPrefix) {
+			return false
+		}
+		target := c.releaseTargetTag(rel.TagName)
+		if includeBeta {
+			return !rel.Prerelease || isBetaTag(target)
+		}
+		return !rel.Prerelease && isStableTag(target)
+	})
+}
+
+func (c *Checker) fetchReleaseList(ctx context.Context, accept func(ghRelease) bool) (ghRelease, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", c.cfg.ReleasesURL, nil)
 	if err != nil {
 		return ghRelease{}, err
@@ -442,11 +480,24 @@ func (c *Checker) fetchBetaRelease(ctx context.Context) (ghRelease, error) {
 		if rel.Draft {
 			continue
 		}
-		if !rel.Prerelease || isBetaTag(rel.TagName) {
+		if accept(rel) {
 			return rel, nil
 		}
 	}
 	return ghRelease{}, nil
+}
+
+func (c *Checker) releaseTargetTag(releaseTag string) string {
+	if releaseTag == "" {
+		return ""
+	}
+	if c.cfg.ReleaseTagPrefix == "" {
+		return releaseTag
+	}
+	if !strings.HasPrefix(releaseTag, c.cfg.ReleaseTagPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(releaseTag, c.cfg.ReleaseTagPrefix)
 }
 
 // Info returns the cached view. Skip state is re-read from the store on each
@@ -463,6 +514,20 @@ func (c *Checker) Info() Info {
 	return info
 }
 
+// SetCurrentVersion refreshes runtime-discovered component versions (notably
+// the optimizer sidecar handshake) without rebuilding the checker or changing
+// its selected channel.
+func (c *Checker) SetCurrentVersion(version string) {
+	if strings.TrimSpace(version) == "" {
+		return
+	}
+	c.mu.Lock()
+	c.info.Current = version
+	c.info.UpdateAvailable = channelUpdateAvailable(c.info.Latest, version)
+	c.reloadSkipLocked()
+	c.mu.Unlock()
+}
+
 // SetChannel persists an operator-selected release stream and clears the
 // cached target. It does not pull or restart anything; the caller performs a
 // fresh Check and the normal update endpoint remains the only mutation path.
@@ -474,7 +539,7 @@ func (c *Checker) SetChannel(channel Channel) error {
 	if c.store == nil {
 		return errors.New("selfupdate: no store configured")
 	}
-	if err := c.store.SaveConfig(channelKey, string(parsed)); err != nil {
+	if err := c.store.SaveConfig(c.channelKey, string(parsed)); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -511,7 +576,7 @@ func (c *Checker) reloadSkipLocked() {
 	if c.store == nil {
 		return
 	}
-	v, ok := c.store.LoadConfig(skippedKey)
+	v, ok := c.store.LoadConfig(c.skippedKey)
 	if !ok {
 		v = ""
 	}
@@ -530,7 +595,7 @@ func (c *Checker) Skip(version string) error {
 	if version == "" {
 		return errors.New("selfupdate: empty version")
 	}
-	if err := c.store.SaveConfig(skippedKey, version); err != nil {
+	if err := c.store.SaveConfig(c.skippedKey, version); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -546,7 +611,7 @@ func (c *Checker) Unskip() error {
 	if c.store == nil {
 		return errors.New("selfupdate: no store configured")
 	}
-	if err := c.store.SaveConfig(skippedKey, ""); err != nil {
+	if err := c.store.SaveConfig(c.skippedKey, ""); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -560,11 +625,17 @@ func (c *Checker) Unskip() error {
 // socket. Returns as soon as the sidecar accepts the request — the actual
 // pull + compose up runs async; observe progress via Status().
 func (c *Checker) Trigger(ctx context.Context, action, target string) error {
-	return c.TriggerComponent(ctx, action, target, "core")
+	return c.TriggerComponentAt(ctx, action, target, "core", time.Time{})
 }
 
 // TriggerComponent requests a selective core or optimizer compose update.
 func (c *Checker) TriggerComponent(ctx context.Context, action, target, component string) error {
+	return c.TriggerComponentAt(ctx, action, target, component, time.Time{})
+}
+
+// TriggerComponentAt preserves the audit operation's start time across a Core
+// container recreation so the new process finishes the same history record.
+func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, component string, startedAt time.Time) error {
 	if c.cfg.SocketPath == "" {
 		return errors.New("selfupdate: sidecar socket not configured")
 	}
@@ -577,7 +648,9 @@ func (c *Checker) TriggerComponent(ctx context.Context, action, target, componen
 	if action == "component_rollback" && component != "optimizer" {
 		return errors.New("selfupdate: component rollback is only available for optimizer")
 	}
-	body, _ := json.Marshal(map[string]string{"action": action, "target": target, "component": component})
+	body, _ := json.Marshal(map[string]any{
+		"action": action, "target": target, "component": component, "started_at": startedAt,
+	})
 	return c.postSidecar(ctx, body)
 }
 
@@ -742,6 +815,11 @@ func channelUpdateAvailable(latest, current string) bool {
 func isBetaTag(tag string) bool {
 	v := parseSemanticVersion(tag)
 	return v != nil && len(v.pre) == 2 && v.pre[0] == "beta" && isDigits(v.pre[1])
+}
+
+func isStableTag(tag string) bool {
+	v := parseSemanticVersion(tag)
+	return v != nil && len(v.pre) == 0
 }
 
 // isNewer implements the SemVer precedence needed by stable and beta,

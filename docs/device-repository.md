@@ -12,10 +12,24 @@ A configured driver resolves in this order:
 2. explicitly activated managed artifact;
 3. bundled recovery driver.
 
+The official signed stable repository is enabled by default when the
+`device_repository` block is omitted. `enabled: false` is an explicit opt-out.
 Refreshing a repository never activates code. Installation verifies and stores
-the artifact, then atomically switches the active version. SQLite records the
-previous artifact for rollback. Network or repository failure cannot prevent
-core from booting with its bundled set.
+one artifact, then atomically switches only that driver's active version.
+SQLite records the previous artifact and every update outcome. Network or
+repository failure cannot prevent Core from booting with its bundled set.
+
+The Update Center shows the signed remote history together with every retained
+local artifact. An operator can install a historical signed version or activate
+an exact already-retained version without changing Core, Optimizer or another
+driver.
+
+During activation Core sends the driver's safe default mode, restarts that
+driver, and waits for fresh telemetry. Success requires the same stable
+hardware identity (make/serial-derived state identity) that was present before
+the change. Missing telemetry, changed identity or restart failure triggers an
+automatic artifact rollback. Site-meter loss inhibits dispatch while the
+driver is unavailable.
 
 ## Channels
 
@@ -26,6 +40,10 @@ core from booting with its bundled set.
 
 Changes to `drivers/` on master publish beta automatically. Stable is an
 explicit workflow promotion. There is no edge driver channel.
+
+Each signed channel manifest carries prior versions in `history`. Old release
+artifacts remain immutable and addressable, so a single driver can move forward
+or backward independently of the current catalog head.
 
 ## Trust
 

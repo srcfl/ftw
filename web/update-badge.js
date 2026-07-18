@@ -38,15 +38,30 @@
       this._statusTimer = null;
       this._elapsedTimer = null;
       this._disabled = false;         // set true on 503 (feature gated off)
-      this._skipSnapshot = false;     // per-session opt-out toggle (#149)
       this._snapshots = null;         // last /api/version/snapshots payload (#150)
       this._deletingSnapshot = null;  // id being deleted right now (#150)
+      this._creatingSnapshot = false;
+      this._backups = null;
+      this._creatingBackup = false;
+      this._deletingBackup = "";
+      this._verifyingBackup = "";
+      this._components = null;
+      this._componentHistory = null;
+      this._driverCatalog = null;
+      this._driverVersions = {};
+      this._componentAction = "";
       this._render();
     }
 
     connectedCallback() {
       this._refresh(false);
-      this._checkTimer = setInterval(() => this._refresh(false), CHECK_INTERVAL_MS);
+      this._refreshComponents(false);
+      this._refreshDriverCatalog();
+      this._checkTimer = setInterval(() => {
+        this._refresh(false);
+        this._refreshComponents(false);
+        this._refreshDriverCatalog();
+      }, CHECK_INTERVAL_MS);
     }
 
     disconnectedCallback() {
@@ -64,6 +79,10 @@
       this._render();
       this._refresh(false); // surface the freshest info when opened
       this._refreshSnapshots(); // pull the list for the Snapshots accordion
+      this._refreshBackups();
+      this._refreshComponents(false);
+      this._refreshComponentHistory();
+      this._refreshDriverCatalog();
     }
 
     // Fetch the snapshot list so the operator sees the retained set and
@@ -90,6 +109,157 @@
         .finally(() => {
           this._deletingSnapshot = null;
           this._refreshSnapshots();
+        });
+    }
+
+    _createSnapshot() {
+      if (this._creatingSnapshot) return;
+      this._creatingSnapshot = true;
+      this._render();
+      apiFetch("/api/version/snapshots", { method: "POST" })
+        .then(async (resp) => {
+          const body = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(body.error || "failed to create rollback point");
+          return body;
+        })
+        .then(() => this._refreshSnapshots())
+        .catch((err) => window.alert("Rollback point failed: " + err.message))
+        .finally(() => {
+          this._creatingSnapshot = false;
+          this._render();
+        });
+    }
+
+    _refreshBackups() {
+      if (this._disabled) return;
+      apiFetch("/api/backups")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._backups = body;
+          this._render();
+        })
+        .catch(() => { /* full backup may not be enabled on native installs */ });
+    }
+
+    _createBackup() {
+      if (this._creatingBackup) return;
+      this._creatingBackup = true;
+      this._render();
+      apiFetch("/api/backups", { method: "POST" })
+        .then(async (resp) => {
+          const body = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(body.error || "failed to create full backup");
+          return body;
+        })
+        .then(() => this._refreshBackups())
+        .catch((err) => window.alert("Full backup failed: " + err.message))
+        .finally(() => {
+          this._creatingBackup = false;
+          this._render();
+        });
+    }
+
+    _verifyBackup(id) {
+      if (!id || this._verifyingBackup) return;
+      this._verifyingBackup = id;
+      this._render();
+      apiFetch("/api/backups/" + encodeURIComponent(id) + "/verify", { method: "POST" })
+        .then(async (resp) => {
+          const body = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(body.error || "verification failed");
+        })
+        .then(() => this._refreshBackups())
+        .catch((err) => window.alert("Backup verification failed: " + err.message))
+        .finally(() => {
+          this._verifyingBackup = "";
+          this._render();
+        });
+    }
+
+    _deleteBackup(id) {
+      if (!id || this._deletingBackup) return;
+      this._deletingBackup = id;
+      this._render();
+      apiFetch("/api/backups/" + encodeURIComponent(id), { method: "DELETE" })
+        .then(async (resp) => {
+          const body = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(body.error || "delete failed");
+        })
+        .then(() => this._refreshBackups())
+        .catch((err) => window.alert("Backup delete failed: " + err.message))
+        .finally(() => {
+          this._deletingBackup = "";
+          this._render();
+        });
+    }
+
+    _refreshComponents(force) {
+      if (this._disabled) return;
+      apiFetch("/api/components" + (force ? "?force=1" : ""))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._components = body;
+          this._render();
+        })
+        .catch(() => { /* diagnostics stay optional */ });
+    }
+
+    _refreshComponentHistory() {
+      apiFetch("/api/components/history?limit=20")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._componentHistory = body;
+          this._render();
+        })
+        .catch(() => { /* old backends do not expose history */ });
+    }
+
+    _refreshDriverCatalog() {
+      apiFetch("/api/device_repository/catalog")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body) return;
+          this._driverCatalog = body;
+          this._render();
+        })
+        .catch(() => { /* repository may be explicitly disabled */ });
+    }
+
+    _loadDriverVersions(id) {
+      if (!id) return;
+      apiFetch("/api/device_repository/drivers/" + encodeURIComponent(id) + "/versions")
+        .then(async (resp) => {
+          const body = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(body.error || "failed to load driver history");
+          this._driverVersions[id] = body;
+          this._render();
+        })
+        .catch((err) => window.alert("Driver history failed: " + err.message));
+    }
+
+    _changeDriverVersion(id, repositoryID, version, sha256, installed) {
+      if (!id || !version || this._componentAction) return;
+      this._componentAction = "driver:" + id;
+      this._render();
+      const url = "/api/device_repository/drivers/" + encodeURIComponent(id) + (installed ? "/activate" : "/install");
+      const body = installed
+        ? { version, sha256 }
+        : { repository_id: repositoryID, version };
+      this._postJSON(url, body)
+        .then((resp) => {
+          if (!resp.ok) throw new Error((resp.body && resp.body.error) || "driver update failed");
+          delete this._driverVersions[id];
+          this._refreshDriverCatalog();
+          this._refreshComponents(false);
+          this._refreshComponentHistory();
+        })
+        .catch((err) => window.alert("Driver update failed: " + err.message))
+        .finally(() => {
+          this._componentAction = "";
+          this._render();
         });
     }
 
@@ -213,6 +383,47 @@
         });
     }
 
+    _setOptimizerChannel(channel) {
+      const updates = this._components && this._components.optimizer && this._components.optimizer.updates;
+      if (!channel || (updates && updates.channel === channel)) return;
+      this._postJSON("/api/components/optimizer/channel", { channel })
+        .then((resp) => {
+          if (!resp.ok) throw new Error((resp.body && resp.body.error) || "failed to change optimizer channel");
+          this._refreshComponents(true);
+        })
+        .catch((err) => window.alert("Optimizer channel failed: " + err.message));
+    }
+
+    _beginOptimizerUpdate(rollback) {
+      const optimizer = this._components && this._components.optimizer;
+      const updates = optimizer && optimizer.updates;
+      const action = rollback ? "component_rollback" : "update";
+      const target = rollback ? "" : ((updates && updates.latest) || "");
+      this._phase = "updating";
+      this._updateStartedAt = Date.now();
+      this._updateOriginalVersion = updates ? updates.current : null;
+      this._expectedRun = { action, target, snapshot: "", component: "optimizer" };
+      this._sidecarState = { state: "starting", action, component: "optimizer", target };
+      this._render();
+      this._startElapsedTicker();
+      this._startStatusPolling();
+      const url = rollback ? "/api/components/optimizer/rollback" : "/api/components/optimizer/update";
+      const body = rollback ? null : { target };
+      this._postJSON(url, body)
+        .then((resp) => {
+          if (!resp.ok) {
+            this._sidecarState = { state: "failed", action, component: "optimizer", message: (resp.body && resp.body.error) || "failed to start" };
+            this._stopUpdateTimers();
+            this._render();
+          }
+        })
+        .catch((e) => {
+          this._sidecarState = { state: "failed", action, component: "optimizer", message: String(e) };
+          this._stopUpdateTimers();
+          this._render();
+        });
+    }
+
     _beginUpdate(action) {
       this._phase = "updating";
       this._updateStartedAt = Date.now();
@@ -228,14 +439,7 @@
       this._startStatusPolling();
 
       const url = action === "restart" ? "/api/version/restart" : "/api/version/update";
-      // For /update we ship a body so the operator can opt out of the
-      // pre-update snapshot (retained set already covers them / tight
-      // on disk). Restart doesn't snapshot anyway, so keep its body nil.
-      let body = null;
-      if (action === "update" && this._skipSnapshot) {
-        body = { skip_snapshot: true };
-      }
-      this._postJSON(url, body)
+      this._postJSON(url, null)
         .then((resp) => {
           if (!resp.ok) {
             this._sidecarState = { state: "failed", action, message: (resp.body && resp.body.error) || "failed to start" };
@@ -313,6 +517,7 @@
       if (st.action && st.action !== this._expectedRun.action) return false;
       if (this._expectedRun.target && st.target && st.target !== this._expectedRun.target) return false;
       if (this._expectedRun.snapshot && st.snapshot && st.snapshot !== this._expectedRun.snapshot) return false;
+      if (this._expectedRun.component && st.component && st.component !== this._expectedRun.component) return false;
 
       // Polling starts before POST /update returns, so the status file can
       // still contain an old "done" from the previous update. Never let that
@@ -350,7 +555,9 @@
     // ---- render ----
     _render() {
       const info = this._info || {};
-      const showDot = info.update_available && !info.skipped && this._phase !== "updating";
+      const optimizerUpdates = this._components && this._components.optimizer && this._components.optimizer.updates;
+      const driverUpdate = this._driverCatalog && Array.isArray(this._driverCatalog.entries) && this._driverCatalog.entries.some((entry) => entry.update_available);
+      const showDot = ((info.update_available && !info.skipped) || (optimizerUpdates && optimizerUpdates.update_available) || driverUpdate) && this._phase !== "updating";
 
       // Surface to the rest of the page via body class: the header's
       // green #conn-status dot sits right next to this badge, and
@@ -363,7 +570,7 @@
 
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
-        <button part="badge" class="badge${showDot ? "" : " hidden"}" title="Update available: ${escapeHTML(info.latest || "")}" aria-label="Update available">●</button>
+        <button part="badge" class="badge${showDot ? "" : " hidden"}" title="${info.latest ? `Core update available: ${escapeHTML(info.latest)}` : "Component update available"}" aria-label="Update available">●</button>
         ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
@@ -410,18 +617,11 @@
            </details>`
         : (hasUpdate && notesLink ? `<p class="changelog-link">${notesLink}</p>` : "");
 
-      // Reassure the operator that a rollback point will be captured
-      // before the update runs — and let them opt out for this update
-      // via a checkbox (the retained 5 older snapshots usually cover
-      // them; power-users on small SD cards may not want another
-      // ~200 MB). Default unchecked (safety first).
+      // Updates always create a local rollback point when snapshots are
+      // configured. Full, portable backups are managed separately below.
       const snapshotHint = hasUpdate
         ? `<div class="snapshot-hint">
-             <p>🛟 A complete compressed backup of your database and config is saved before each update so you can roll back without dropping history.</p>
-             <label class="snapshot-skip">
-               <input type="checkbox" data-action="toggle-skip-snapshot" ${this._skipSnapshot ? "checked" : ""}>
-               Skip backup for this update
-             </label>
+             <p>🛟 A local rollback point with a consistent database and config is saved before each Core update.</p>
            </div>`
         : "";
 
@@ -443,7 +643,7 @@
         <div class="backdrop" data-action="close"></div>
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
           <header>
-            <h3 id="ftw-upd-title">FTW</h3>
+            <h3 id="ftw-upd-title">FTW Update Center</h3>
             <button class="x" data-action="close" aria-label="Close">×</button>
           </header>
           <div class="body">
@@ -456,13 +656,15 @@
               <p class="channel-note">${escapeHTML(channelNote)}</p>
             </div>
             <dl>
-              <div><dt>Current</dt><dd>${escapeHTML(info.current || "?")}</dd></div>
+              <div><dt>Core current</dt><dd>${escapeHTML(info.current || "?")}</dd></div>
               ${info.latest ? `<div><dt>Latest</dt><dd>${escapeHTML(info.latest)}</dd></div>` : ""}
               ${info.skipped_version ? `<div><dt>Skipped</dt><dd>${escapeHTML(info.skipped_version)}</dd></div>` : ""}
             </dl>
             ${bodyHTML}
             ${snapshotHint}
+            ${this._componentsSectionHTML()}
             ${this._snapshotsSectionHTML()}
+            ${this._backupsSectionHTML()}
             ${info.err ? `<p class="err">Last check failed: ${escapeHTML(info.err)}</p>` : ""}
           </div>
           <footer>${actions}</footer>
@@ -476,13 +678,20 @@
       const snaps = Array.isArray(payload.snapshots) ? payload.snapshots : [];
       if (!snaps.length) {
         return `<details class="snapshots">
-                  <summary>Backup snapshots (0)</summary>
-                  <p class="dim snapshots-empty">No backups on disk yet. One is created before every update unless you opt out.</p>
+                  <summary>Local rollback points (0)</summary>
+                  <div class="snapshots-intro">
+                    <p class="dim">Stored on this device. They protect software changes, not SD-card failure.</p>
+                    <button class="btn btn-small" data-action="create-snapshot" ${this._creatingSnapshot ? "disabled" : ""}>${this._creatingSnapshot ? "Creating…" : "Create rollback point"}</button>
+                  </div>
                 </details>`;
       }
       const rows = snaps.map((s) => this._snapshotRowHTML(s)).join("");
       return `<details class="snapshots">
-                <summary>Backup snapshots (${snaps.length})</summary>
+                <summary>Local rollback points (${snaps.length})</summary>
+                <div class="snapshots-intro">
+                  <p class="dim">Stored on this device. They protect software changes, not SD-card failure.</p>
+                  <button class="btn btn-small" data-action="create-snapshot" ${this._creatingSnapshot ? "disabled" : ""}>${this._creatingSnapshot ? "Creating…" : "Create rollback point"}</button>
+                </div>
                 <table class="snapshots-table">
                   <thead>
                     <tr><th>Created</th><th>From → To</th><th>Size</th><th></th></tr>
@@ -494,7 +703,9 @@
 
     _snapshotRowHTML(s) {
       const when = s.created_at ? new Date(s.created_at).toLocaleString() : "?";
-      const range = (s.from_version || "?") + " → " + (s.to_version || "?");
+      const range = s.action === "manual"
+        ? (s.from_version || "current") + " checkpoint"
+        : (s.from_version || "?") + " → " + (s.to_version || "?");
       const sizeMB = s.size_bytes ? (s.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
       const deleting = this._deletingSnapshot === s.id;
       const restorable = s.restorable === true;
@@ -518,6 +729,122 @@
                 <td class="nowrap">${escapeHTML(sizeMB)}</td>
                 <td class="snapshot-actions">${rollbackBtn}${deleteBtn}</td>
               </tr>`;
+    }
+
+    _backupsSectionHTML() {
+      const payload = this._backups;
+      if (!payload || !payload.enabled) return "";
+      const backups = Array.isArray(payload.backups) ? payload.backups : [];
+      const location = payload.on_device
+        ? "Backups are currently staged on this device. Download them to another device or configure an external backup path; local files do not survive SD-card failure."
+        : "Backups are written to the configured external backup target.";
+      const rows = backups.map((b) => this._backupRowHTML(b)).join("");
+      return `<details class="snapshots full-backups">
+                <summary>Full backups (${backups.length})</summary>
+                <div class="snapshots-intro backup-intro">
+                  <p class="dim">${escapeHTML(location)}</p>
+                  <button class="btn btn-small" data-action="create-backup" ${this._creatingBackup ? "disabled" : ""}>${this._creatingBackup ? "Creating and verifying…" : "Create full backup"}</button>
+                </div>
+                ${backups.length ? `<table class="snapshots-table">
+                  <thead><tr><th>Created</th><th>Size</th><th>Status</th><th></th></tr></thead>
+                  <tbody>${rows}</tbody>
+                </table>` : `<p class="dim backups-empty">No full backups yet.</p>`}
+              </details>`;
+    }
+
+    _backupRowHTML(b) {
+      const when = b.created_at ? new Date(b.created_at).toLocaleString() : "?";
+      const sizeMB = b.size_bytes ? (b.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
+      const verified = b.verified === true;
+      const id = escapeHTML(b.id || "");
+      const verifyLabel = this._verifyingBackup === b.id ? "Verifying…" : "Verify";
+      const deleteLabel = this._deletingBackup === b.id ? "Deleting…" : "Delete";
+      const download = safeHref(b.download_url || "");
+      return `<tr>
+                <td class="nowrap">${escapeHTML(when)}</td>
+                <td class="nowrap">${escapeHTML(sizeMB)}</td>
+                <td>${verified ? "✓ verified" : "not verified"}${b.on_device ? " · on device" : " · external"}</td>
+                <td class="snapshot-actions">
+                  ${download ? `<a class="btn btn-small backup-download" href="${escapeHTML(download)}" download>Download</a>` : ""}
+                  <button class="btn btn-ghost btn-small" data-action="verify-backup" data-id="${id}" ${this._verifyingBackup ? "disabled" : ""}>${verifyLabel}</button>
+                  <button class="btn btn-ghost btn-small" data-action="delete-backup" data-id="${id}" ${this._deletingBackup ? "disabled" : ""}>${deleteLabel}</button>
+                </td>
+              </tr>`;
+    }
+
+    _componentsSectionHTML() {
+      const payload = this._components;
+      if (!payload) return "";
+      const optimizer = payload.optimizer || {};
+      const optimizerUpdates = optimizer.updates || {};
+      const optimizerRuntime = optimizer.runtime || {};
+      const sharedUpdateStatus = payload.updates && payload.updates.status;
+      const previousImages = (sharedUpdateStatus && sharedUpdateStatus.previous_images) || {};
+      const optimizerChannels = Array.isArray(optimizerUpdates.channels) ? optimizerUpdates.channels : ["stable", "beta"];
+      const optimizerChannelButtons = optimizerChannels.map((channel) => `
+        <button class="mini-channel${optimizerUpdates.channel === channel ? " active" : ""}"
+                data-action="set-optimizer-channel" data-channel="${escapeHTML(channel)}">${escapeHTML(channel)}</button>`).join("");
+      const optimizerAction = optimizerUpdates.update_available
+        ? `<button class="btn btn-small" data-action="optimizer-update">Update to ${escapeHTML(optimizerUpdates.latest || "")}</button>`
+        : `<span class="dim">${optimizer.configured ? "up to date" : "not configured"}</span>`;
+      const optimizerRollback = previousImages.optimizer
+        ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback">Roll back</button>`
+        : "";
+
+      const entries = this._driverCatalog && Array.isArray(this._driverCatalog.entries)
+        ? this._driverCatalog.entries : [];
+      const driverRows = entries.map((entry) => {
+        const driver = entry.driver || {};
+        const installed = entry.installed || {};
+        const busy = this._componentAction === "driver:" + driver.id;
+        const action = entry.update_available || !entry.installed
+          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(driver.id || "")}" data-repository="${escapeHTML(entry.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : (entry.installed ? "Update" : "Install")}</button>`
+          : `<span class="dim">current</span>`;
+        return `<div class="component-row">
+          <span><strong>${escapeHTML(driver.metadata && driver.metadata.name || driver.id || "driver")}</strong>
+            <span class="dim mono">${escapeHTML(installed.version || "not managed")} → ${escapeHTML(driver.version || "?")}</span></span>
+          <span class="component-actions">${action}<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(driver.id || "")}">History</button></span>
+          ${this._driverVersionsHTML(driver.id)}
+        </div>`;
+      }).join("");
+
+      const history = this._componentHistory && Array.isArray(this._componentHistory.events)
+        ? this._componentHistory.events.slice(0, 8) : [];
+      const historyRows = history.map((event) => {
+        const when = event.started_at_ms ? new Date(event.started_at_ms).toLocaleString() : "?";
+        const range = (event.from_version || "?") + " → " + (event.to_version || "?");
+        return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(event.kind + (event.kind === "driver" ? ":" + event.component_id : ""))}</td><td>${escapeHTML(range)}</td><td>${escapeHTML(event.outcome)}</td></tr>`;
+      }).join("");
+
+      return `<details class="snapshots components" open>
+        <summary>Components</summary>
+        <div class="component-card">
+          <div class="component-row"><span><strong>Core</strong><span class="dim mono">${escapeHTML(payload.core && payload.core.version || "?")}</span></span><span class="dim">safety authority · updated with updater</span></div>
+          <div class="component-row optimizer-row">
+            <span><strong>Optimizer</strong><span class="dim mono">${escapeHTML(optimizerUpdates.current || optimizerRuntime.version || "not running")}${optimizerUpdates.latest ? " → " + escapeHTML(optimizerUpdates.latest) : ""}</span></span>
+            <span class="component-actions"><span class="mini-channels">${optimizerChannelButtons}</span>${optimizerAction}${optimizerRollback}</span>
+          </div>
+        </div>
+        <div class="component-subtitle">Drivers · signed catalog, one driver at a time</div>
+        <div class="component-card">${driverRows || `<p class="dim">No managed driver candidates cached yet.</p>`}</div>
+        ${historyRows ? `<details class="component-history"><summary>Update history</summary><table class="snapshots-table"><thead><tr><th>When</th><th>Component</th><th>Version</th><th>Result</th></tr></thead><tbody>${historyRows}</tbody></table></details>` : ""}
+      </details>`;
+    }
+
+    _driverVersionsHTML(id) {
+      const payload = id && this._driverVersions[id];
+      if (!payload) return "";
+      const versions = Array.isArray(payload.available) ? payload.available : [];
+      if (!versions.length) return `<div class="driver-history dim">No signed or retained versions found.</div>`;
+      const rows = versions.map((candidate) => {
+        const driver = candidate.driver || {};
+        const installed = candidate.installed || null;
+        const active = installed && installed.active;
+        const label = active ? "active" : (installed ? "Activate" : "Install");
+        const button = active ? `<span class="dim">active</span>` : `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(id)}" data-repository="${escapeHTML(candidate.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-sha="${escapeHTML(driver.sha256 || "")}" data-installed="${installed ? "true" : "false"}" ${this._componentAction ? "disabled" : ""}>${label}</button>`;
+        return `<span class="driver-version"><span class="mono">${escapeHTML(driver.version || "?")}</span>${button}</span>`;
+      }).join("");
+      return `<div class="driver-history">${rows}</div>`;
     }
 
     _updatingModalHTML() {
@@ -548,7 +875,8 @@
       switch (action) {
         case "restart":  title = "Restarting service"; break;
         case "rollback": title = "Rolling back"; break;
-        default:         title = "Updating service";
+        case "component_rollback": title = "Rolling back optimizer"; break;
+        default:         title = st.component === "optimizer" ? "Updating optimizer" : "Updating service";
       }
 
       return `
@@ -609,14 +937,48 @@
             case "set-channel":
               this._setChannel(e.currentTarget.dataset.channel);
               break;
+            case "set-optimizer-channel":
+              this._setOptimizerChannel(e.currentTarget.dataset.channel);
+              break;
+            case "optimizer-update":
+              this._beginOptimizerUpdate(false);
+              break;
+            case "optimizer-rollback":
+              if (window.confirm("Roll back only the optimizer to its previous healthy image? Core and drivers stay unchanged.")) {
+                this._beginOptimizerUpdate(true);
+              }
+              break;
+            case "driver-versions":
+              this._loadDriverVersions(e.currentTarget.dataset.id);
+              break;
+            case "driver-change": {
+              const dataset = e.currentTarget.dataset;
+              const installed = dataset.installed === "true";
+              const verb = installed ? "activate" : "install";
+              if (window.confirm(`${verb} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
+                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed);
+              }
+              break;
+            }
             case "reload":
               this._attemptReload();
               break;
-            case "toggle-skip-snapshot":
-              // Don't re-render — the <input> element already reflects
-              // its own state and a full render would reset focus.
-              this._skipSnapshot = !!e.currentTarget.checked;
+            case "create-snapshot":
+              this._createSnapshot();
               break;
+            case "create-backup":
+              this._createBackup();
+              break;
+            case "verify-backup":
+              this._verifyBackup(e.currentTarget.dataset.id);
+              break;
+            case "delete-backup": {
+              const id = e.currentTarget.dataset.id;
+              if (id && window.confirm(`Delete full backup ${id}? This can't be undone.`)) {
+                this._deleteBackup(id);
+              }
+              break;
+            }
             case "delete-snapshot": {
               const id = e.currentTarget.dataset.id;
               // Simple confirm — this is a destructive operation but a
@@ -684,7 +1046,7 @@
           position: fixed;
           top: 50%; left: 50%;
           transform: translate(-50%, -50%);
-          width: min(92vw, 460px);
+          width: min(94vw, 720px);
           /* Cap height + scroll so shorter viewports can't push the
              header (close ×) or the footer (Update / Restart / Skip)
              off-screen. Without this the modal clipped above the
@@ -732,7 +1094,8 @@
         }
         .channel-options {
           display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-auto-flow: column;
+          grid-auto-columns: minmax(0, 1fr);
           border: 1px solid var(--line, #334155);
           border-radius: var(--radius-xs, 4px);
           overflow: hidden;
@@ -841,20 +1204,6 @@
           line-height: 1.4;
         }
         .snapshot-hint p { margin: 0; }
-        .snapshot-skip {
-          display: flex;
-          align-items: center;
-          gap: 0.4rem;
-          margin-top: 0.4rem;
-          font-size: 0.76rem;
-          color: var(--fg-dim, #94a3b8);
-          cursor: pointer;
-          user-select: none;
-        }
-        .snapshot-skip input[type="checkbox"] {
-          margin: 0;
-          cursor: pointer;
-        }
         .snapshots {
           margin-top: 0.75rem;
           border: 1px solid var(--line, #334155);
@@ -881,6 +1230,45 @@
           margin: 0.25rem 0.9rem 0.6rem;
           font-size: 0.78rem;
         }
+        .snapshots-intro {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 0.75rem;
+          padding: 0.1rem 0.75rem 0.6rem;
+        }
+        .snapshots-intro p { margin: 0; }
+        .backup-intro p { max-width: 70%; }
+        .backups-empty { margin: 0.25rem 0.75rem 0.7rem; }
+        .backup-download { text-decoration: none; }
+        .components > summary { color: var(--fg, #e2e8f0); }
+        .component-card {
+          margin: 0 0.75rem 0.65rem;
+          border: 1px solid var(--line, #334155);
+          border-radius: var(--radius-xs, 4px);
+          overflow: hidden;
+        }
+        .component-card > p { margin: 0.6rem 0.75rem; }
+        .component-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 0.6rem;
+          padding: 0.5rem 0.65rem;
+          border-top: 1px solid var(--line, #334155);
+        }
+        .component-row:first-child { border-top: 0; }
+        .component-row strong { display: block; font-size: 0.82rem; }
+        .component-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.3rem; flex-wrap: wrap; }
+        .component-subtitle { margin: 0.7rem 0.75rem 0.35rem; color: var(--fg-dim, #94a3b8); font-size: 0.75rem; }
+        .mini-channels { display: inline-flex; border: 1px solid var(--line, #334155); border-radius: 4px; overflow: hidden; }
+        .mini-channel { appearance: none; border: 0; border-right: 1px solid var(--line, #334155); padding: 0.2rem 0.35rem; background: transparent; color: var(--fg-dim, #94a3b8); font-size: 0.7rem; cursor: pointer; }
+        .mini-channel:last-child { border-right: 0; }
+        .mini-channel.active { background: var(--accent-e, #f59e0b); color: #0a0a0a; }
+        .driver-history { grid-column: 1 / -1; display: flex; gap: 0.35rem; flex-wrap: wrap; padding-top: 0.35rem; }
+        .driver-version { display: inline-flex; align-items: center; gap: 0.25rem; padding: 0.2rem 0.3rem; border: 1px solid var(--line, #334155); border-radius: 4px; }
+        .component-history { margin: 0.35rem 0.75rem 0.75rem; }
+        .component-history > summary { cursor: pointer; color: var(--fg-dim, #94a3b8); font-size: 0.75rem; }
         .snapshots-table {
           width: 100%;
           border-collapse: collapse;

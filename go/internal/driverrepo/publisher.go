@@ -36,6 +36,10 @@ type PublicationOptions struct {
 	ExpectedPublicKey ed25519.PublicKey
 	GeneratedAt       time.Time
 	Unsigned          bool
+	// PreviousManifestPath optionally carries the last signed channel
+	// manifest forward as installable history. Its signature is verified with
+	// the same expected public key before any entries are trusted.
+	PreviousManifestPath string
 }
 
 type Publication struct {
@@ -148,6 +152,46 @@ func BuildPublication(opts PublicationOptions) (Publication, error) {
 	}
 	if len(manifest.Drivers) == 0 {
 		return Publication{}, errors.New("drivers directory contains no Lua drivers")
+	}
+	if opts.PreviousManifestPath != "" {
+		previousRaw, err := os.ReadFile(opts.PreviousManifestPath)
+		if err != nil {
+			return Publication{}, fmt.Errorf("read previous manifest: %w", err)
+		}
+		var previous Manifest
+		if opts.Unsigned {
+			if err := json.Unmarshal(previousRaw, &previous); err != nil {
+				return Publication{}, fmt.Errorf("decode previous unsigned manifest: %w", err)
+			}
+		} else {
+			publicKey := opts.ExpectedPublicKey
+			if len(publicKey) == 0 {
+				publicKey = opts.PrivateKey.Public().(ed25519.PublicKey)
+			}
+			previous, err = VerifyPublication(previousRaw, opts.KeyID, base64.StdEncoding.EncodeToString(publicKey))
+			if err != nil {
+				return Publication{}, fmt.Errorf("verify previous manifest: %w", err)
+			}
+		}
+		current := make(map[string]bool, len(manifest.Drivers))
+		for _, driver := range manifest.Drivers {
+			current[driver.ID+"\x00"+driver.Version+"\x00"+strings.ToLower(driver.SHA256)] = true
+		}
+		seenHistory := make(map[string]bool)
+		for _, driver := range append(append([]ManifestDriver{}, previous.Drivers...), previous.History...) {
+			key := driver.ID + "\x00" + driver.Version + "\x00" + strings.ToLower(driver.SHA256)
+			if current[key] || seenHistory[key] {
+				continue
+			}
+			seenHistory[key] = true
+			manifest.History = append(manifest.History, driver)
+		}
+		sort.Slice(manifest.History, func(i, j int) bool {
+			if manifest.History[i].ID != manifest.History[j].ID {
+				return manifest.History[i].ID < manifest.History[j].ID
+			}
+			return compareSemver(manifest.History[i].Version, manifest.History[j].Version) > 0
+		})
 	}
 	if err := validateManifest(manifest, false); err != nil {
 		return Publication{}, err

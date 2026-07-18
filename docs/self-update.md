@@ -37,25 +37,48 @@ exists before a moving image alias has advanced.
 Release notes are best-effort UI data. Failure to fetch notes does not weaken
 tag resolution or image verification.
 
-## Runtime architecture
+## Update Center and component boundaries
 
-The main process checks versions and exposes update status. A separate
-`ftw-updater` container owns the Docker socket and performs the pull/recreate
-over a Unix-socket command from core. Core never mounts the Docker socket.
+The Update Center reports and records Core, Optimizer and Driver operations
+separately. A component history survives Core container recreation. Core stays
+the safety authority regardless of which optional component is being updated.
 
 ```text
-core ── update request/status ── Unix volume ── updater ── Docker socket
-  └── state/config snapshot                         └── pull immutable tag
+Core + updater    paired control plane; Core owns state, dispatch and safety
+Optimizer         independent image and version; protocol handshake; optional
+Drivers           signed Lua artifacts; one driver/version activated at a time
 ```
 
-Before update or rollback, core creates a complete, consistent, compressed
-backup of `state.db` plus configuration. Backups created by older releases that
-omitted history are shown but cannot be restored. The sidecar preserves file
-ownership, removes stale SQLite WAL files, and health-checks a restored service;
-on failure it automatically puts back the mandatory pre-rollback safety backup.
-Status is written atomically to the shared volume and survives recreation of
-core. Optimizer-only updates recreate and health-check the optimizer without
-replacing core; failure restores the previous optimizer image.
+The main process checks versions and exposes update status. A separate
+`ftw-updater` container owns the Docker socket and performs immutable
+pull/recreate operations over a Unix socket. Core never mounts the Docker
+socket.
+
+Before every Core update, Core creates a mandatory, consistent local rollback
+point for `state.db` and configuration. An older client request cannot skip it.
+These bounded points remain on the same disk and are deliberately labelled
+**Local rollback points**, not full backups. Older incomplete snapshots are
+visible but cannot be restored.
+
+Portable `.ftwbak` archives include the complete persistent directory, cold
+history, custom/managed drivers and component inventory. They are independently
+verified before publication and can be downloaded off-device. Safe restore
+retains the pre-restore directory and automatically reactivates it when the
+restored Core fails health. See [backup-and-restore.md](backup-and-restore.md).
+
+Optimizer-only updates use `optimizer-vX.Y.Z[-beta.N]`, recreate and
+health-check only `ftw-optimizer`, and never replace Core. Failure restores the
+previous Optimizer image while Core continues on its Go fallback.
+
+A Driver update downloads one signed artifact, verifies hash, metadata and host
+API compatibility, then atomically activates exactly that version. Core puts
+the affected device in its safe default mode during restart and accepts the new
+driver only after fresh telemetry reports the same stable hardware identity.
+Failure automatically reactivates the previous artifact; no other driver or
+system component changes.
+
+Status is written atomically to the shared volume and is reconciled into the
+persistent component history after Core recreation.
 
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.
@@ -66,13 +89,16 @@ The version badge selects `stable` or `beta`, checks availability and starts
 an update. Changing channel does not deploy anything. A skipped version remains
 hidden only until a newer version appears.
 
-For manual Compose operation:
+For manual Core + updater operation:
 
 ```bash
 cd ~/ftw
-docker compose pull
-docker compose up -d
+docker compose pull ftw ftw-updater
+docker compose up -d --no-deps ftw ftw-updater
 ```
+
+Manage Optimizer and Drivers independently in Update Center. A blanket
+`docker compose pull` is intentionally not the documented upgrade procedure.
 
 Use the [legacy upgrade guide](upgrade-from-legacy.md) before updating an older
 Compose layout with hard-coded or pre-FTW image names.
@@ -87,8 +113,12 @@ When self-update is disabled, production UI controls and handlers are disabled.
 An unstamped `dev` build keeps the probe visible so the restart flow can be
 tested locally.
 
-## Driver releases
+## Independent release progression
 
-Signed Lua drivers are versioned independently from core but follow the same
-policy: master changes publish `drivers-beta`; `drivers-stable` is an
-explicit promotion. See [device-repository.md](device-repository.md).
+- Core and the updater sidecar are built from Core `vX.Y.Z[-beta.N]` releases.
+- Optimizer uses its own `optimizer-vX.Y.Z[-beta.N]` GitHub tags and
+  `ftw-optimizer:vX.Y.Z[-beta.N]` images. Stable promotion requires the exact
+  beta commit.
+- Signed Lua drivers are versioned independently. Master publishes
+  `drivers-beta`; `drivers-stable` is an explicit promotion and retains signed
+  version history. See [device-repository.md](device-repository.md).

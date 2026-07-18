@@ -843,6 +843,10 @@ type StateConf struct {
 	Path              string `yaml:"path" json:"path"`
 	ColdDir           string `yaml:"cold_dir" json:"cold_dir"`
 	ColdRetentionDays int    `yaml:"cold_retention_days,omitempty" json:"cold_retention_days,omitempty"`
+	// BackupDir stores verified full-backup archives. Relative paths resolve
+	// beside state.db; an absolute path can point at an externally mounted
+	// USB disk or network share.
+	BackupDir string `yaml:"backup_dir,omitempty" json:"backup_dir,omitempty"`
 }
 
 // Price is the spot-price source config.
@@ -1218,13 +1222,18 @@ func relToBaseDir(baseDir, p string) string {
 
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
+	if c.DeviceRepository == nil {
+		// The official signed stable catalog is safe to discover by default:
+		// refresh is read-only and never activates or restarts a driver. An
+		// explicit enabled:false block remains the operator opt-out.
+		c.DeviceRepository = &DeviceRepository{Enabled: true}
+	}
 	if c.DeviceRepository != nil {
 		if c.DeviceRepository.RefreshIntervalH == 0 {
 			c.DeviceRepository.RefreshIntervalH = 24
 		}
-		// Merely omitting device_repository remains bundled-only. Once an
-		// operator explicitly adds the block, however, the official signed
-		// stable source is a useful secure default and needs no copied key.
+		// The pinned official trust root is a secure default and needs no key
+		// copied into every site configuration.
 		if len(c.DeviceRepository.Repositories) == 0 {
 			c.DeviceRepository.Repositories = []DriverRepositorySource{{
 				ID:          DefaultDriverRepositoryID,

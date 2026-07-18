@@ -125,7 +125,9 @@ There are two channels:
 - `beta`: every new release candidate, used for real-site validation;
 - `stable`: promotion of the exact commit already published and tested as beta.
 
-Core and drivers may release independently, but both use the same progression.
+Core, Optimizer and signed Drivers may release independently, but all use the
+same beta-to-stable progression. Core and its privileged updater remain a
+paired control plane; optional components negotiate compatibility with Core.
 There is no edge channel. See [self-update.md](self-update.md).
 
 ## Start reading

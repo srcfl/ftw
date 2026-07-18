@@ -27,7 +27,7 @@ type SnapshotMeta struct {
 	CreatedAt        time.Time `json:"created_at"`
 	FromVersion      string    `json:"from_version,omitempty"`
 	ToVersion        string    `json:"to_version,omitempty"`
-	Action           string    `json:"action,omitempty"` // "update" | "restart" | "pre-rollback"
+	Action           string    `json:"action,omitempty"` // "update" | "manual" | "pre-rollback"
 	CompleteDatabase bool      `json:"complete_database"`
 	// Files lists what was captured so a reader can distinguish a
 	// state-only snapshot (old) from a state+config one (current) and
@@ -258,6 +258,39 @@ func pruneSnapshotsExcept(snapshotDir string, keep int, protected map[string]boo
 		}
 	}
 	return firstErr
+}
+
+// handleVersionSnapshotCreate gives the operator an explicit rollback point
+// without requiring an update to be available. It uses the same complete,
+// compressed database path as automatic pre-update snapshots. Creation holds
+// the update mutex because pruning, deletion, update and rollback all operate
+// on the same bounded snapshot set.
+func (s *Server) handleVersionSnapshotCreate(w http.ResponseWriter, _ *http.Request) {
+	if s.deps.SelfUpdate == nil {
+		writeJSON(w, 503, map[string]string{"error": "self-update disabled"})
+		return
+	}
+	if s.deps.SnapshotDir == "" {
+		writeJSON(w, 503, map[string]string{"error": "snapshots disabled (no SnapshotDir)"})
+		return
+	}
+	if versionUpdateInFlight(s.deps.SelfUpdate.Status().State) {
+		writeJSON(w, 409, map[string]string{"error": "update already in progress"})
+		return
+	}
+	if !s.versionUpdateMu.TryLock() {
+		writeJSON(w, 409, map[string]string{"error": "snapshot or update already in progress"})
+		return
+	}
+	defer s.versionUpdateMu.Unlock()
+
+	current := s.deps.SelfUpdate.Info().Current
+	snapshot, err := s.createPreUpdateSnapshot("manual", current, "")
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": "snapshot failed: " + err.Error()})
+		return
+	}
+	writeJSON(w, 201, map[string]any{"status": "created", "snapshot": snapshot})
 }
 
 // handleVersionSnapshotDelete removes one snapshot by ID. Used from the
