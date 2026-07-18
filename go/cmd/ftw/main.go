@@ -1690,25 +1690,22 @@ func main() {
 	// haBridge is forward-declared at the top of the file so the config
 	// hot-reload closure can call Reload on it; the bridge instance gets
 	// wired further down (HA is optional + depends on reg.Names()).
-	// Self-sovereign site identity: always generated on first boot, Nova-
-	// format (P-256 PEM) so federation can reuse it, but never dependent on
-	// Nova being enabled. Canonical path is the same nova.key default so
-	// existing federated gateways keep their claimed key.
-	identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
-	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
-		identityKeyPath = cfg.Nova.KeyPath
-	}
-	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
+	// The Site Companion identity is deliberately separate from nova.key:
+	// existing Nova federation may have provisioned nova.key as a gateway,
+	// while this key may only be registered as a read-only site_controller.
+	siteControllerKeyPath := filepath.Join(filepath.Dir(statePath), "ftw-site-controller.key")
+	siteIdentity, err := nova.LoadOrCreateIdentity(siteControllerKeyPath)
 	if err != nil {
-		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
+		slog.Warn("site controller identity: load/create failed", "err", err, "path", siteControllerKeyPath)
 	} else {
-		slog.Info("site identity ready", "pubkey_prefix", siteIdentity.PublicKeyHex()[:16])
+		slog.Info("site controller identity ready", "pubkey_prefix", siteIdentity.PublicKeyHex()[:16])
 	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
-		State: st,
-		CapMu: capMu, Capacities: capacities,
+		State:                  st,
+		SiteControllerIdentity: siteIdentity,
+		CapMu:                  capMu, Capacities: capacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,

@@ -43,6 +43,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/scanner"
 	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/selfupdate"
+	"github.com/srcfl/ftw/go/internal/sitecontroller"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
@@ -67,28 +68,31 @@ type Deps struct {
 	Tel *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing           *telemetry.LogRing
-	Ctrl              *control.State
-	CtrlMu            *sync.Mutex
-	State             *state.Store
-	CapMu             *sync.RWMutex
-	Capacities        map[string]float64 // driver → battery_capacity_wh
-	CfgMu             *sync.RWMutex
-	Cfg               *config.Config
-	ConfigPath        string
-	DriverDir         string // where to scan for Lua drivers (default: <config-dir>/drivers)
-	UserDriverDir     string // persistent user-drivers overlay; searched before DriverDir
-	Models            map[string]*battery.Model
-	ModelsMu          *sync.Mutex
-	SelfTune          *selftune.Coordinator
-	DtS               float64                                   // control interval seconds (for model τ / age displays)
-	SaveConfig        func(path string, c *config.Config) error // injection for testability
-	WebDir            string                                    // static assets root (default "web")
-	ColdDir           string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
-	DataDir           string                                    // complete persistent-data root used by portable backups
-	StatePath         string                                    // absolute primary SQLite path used by portable backups
-	BackupDir         string                                    // full .ftwbak output; may be an externally mounted path
-	DataMaintenanceMu *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
+	LogRing *telemetry.LogRing
+	Ctrl    *control.State
+	CtrlMu  *sync.Mutex
+	State   *state.Store
+	// SiteControllerIdentity is the dedicated FTW Site Companion P-256
+	// identity. It must not reuse a Nova gateway publisher identity.
+	SiteControllerIdentity sitecontroller.Signer
+	CapMu                  *sync.RWMutex
+	Capacities             map[string]float64 // driver → battery_capacity_wh
+	CfgMu                  *sync.RWMutex
+	Cfg                    *config.Config
+	ConfigPath             string
+	DriverDir              string // where to scan for Lua drivers (default: <config-dir>/drivers)
+	UserDriverDir          string // persistent user-drivers overlay; searched before DriverDir
+	Models                 map[string]*battery.Model
+	ModelsMu               *sync.Mutex
+	SelfTune               *selftune.Coordinator
+	DtS                    float64                                   // control interval seconds (for model τ / age displays)
+	SaveConfig             func(path string, c *config.Config) error // injection for testability
+	WebDir                 string                                    // static assets root (default "web")
+	ColdDir                string                                    // cold-storage root for parquet rolloff; empty disables cold fallback
+	DataDir                string                                    // complete persistent-data root used by portable backups
+	StatePath              string                                    // absolute primary SQLite path used by portable backups
+	BackupDir              string                                    // full .ftwbak output; may be an externally mounted path
+	DataMaintenanceMu      *sync.Mutex                               // excludes Parquet rolloff/pruning while a full backup is captured
 	// SnapshotDir is where pre-update snapshots of state.db + config.yaml
 	// are written by the self-update flow. Defaults to
 	// `<cold_dir_parent>/snapshots`; main.go is responsible for passing
@@ -216,6 +220,8 @@ func (s *Server) routes() {
 	// ---- JSON endpoints ----
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
+	s.handle("POST /api/site-controller/pairing", s.handleSiteControllerPairing)
+	s.handle("GET  /api/site-controller/snapshot", s.handleSiteControllerSnapshot)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
