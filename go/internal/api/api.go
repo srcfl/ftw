@@ -64,7 +64,11 @@ const (
 // One instance is shared across all handlers; mutations use the contained
 // mutexes from each package.
 type Deps struct {
-	Tel *telemetry.Store
+	// MutationPolicy protects every state-changing route at the shared
+	// Handler boundary. Production requires tokens for non-local hostnames;
+	// the zero value retains local/test embedding compatibility.
+	MutationPolicy MutationPolicy
+	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
 	LogRing           *telemetry.LogRing
@@ -210,7 +214,9 @@ func New(deps *Deps) *Server {
 }
 
 // Handler returns the http.Handler suitable for http.ListenAndServe.
-func (s *Server) Handler() http.Handler { return s.mux }
+func (s *Server) Handler() http.Handler {
+	return SecureMutations(s.mux, s.deps.MutationPolicy)
+}
 
 func (s *Server) routes() {
 	// ---- JSON endpoints ----
@@ -344,7 +350,6 @@ func (s *Server) handle(methodPath string, h http.HandlerFunc) {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

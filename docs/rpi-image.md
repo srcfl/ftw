@@ -28,9 +28,10 @@ links such as
 valid when copied from a version release. Both forms point at the same current
 installer image; the image pulls the current stable containers on first boot.
 
-Use a unique SSH password or key. The dashboard has no public-internet
-authentication boundary and should remain on a trusted LAN or operator-managed
-private network.
+Use a unique SSH password or key. FTW blocks unauthenticated mutations through
+public hostnames, but the dashboard still has no public read-authentication
+boundary and should remain on a trusted LAN or behind an operator-managed,
+authenticated private/HTTPS proxy. See [operations.md](operations.md#lan-and-api-access).
 
 ## Direct image fallback
 

@@ -170,7 +170,7 @@ func main() {
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           apiHandler,
+		Handler:           api.SecureMutations(apiHandler, apiMutationPolicy()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

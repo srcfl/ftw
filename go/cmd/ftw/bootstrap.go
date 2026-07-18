@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/srcfl/ftw/go/internal/api"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
@@ -170,11 +172,19 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		}()
 	})
 
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           secureBootstrapMutations(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("bootstrap server", "err", err)
 		os.Exit(1)
 	}
+}
+
+func secureBootstrapMutations(next http.Handler) http.Handler {
+	return api.SecureMutations(next, apiMutationPolicy())
 }
 
 func serveStatic(w http.ResponseWriter, r *http.Request, webDir string) {
@@ -191,7 +201,6 @@ func serveStatic(w http.ResponseWriter, r *http.Request, webDir string) {
 
 func writeBootstrapJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
