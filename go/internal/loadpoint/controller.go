@@ -1157,18 +1157,28 @@ func (c *Controller) GetManualHold(id string, now time.Time) (ManualHold, bool) 
 //     preferences and the site's fuse parameters; the driver picks
 //     phases and converts W→A given that it knows the voltage.
 func (c *Controller) Tick(ctx context.Context, now time.Time) {
+	c.TickWithDispatch(ctx, now, true)
+}
+
+// TickWithDispatch runs the normal observation/state cycle while making the
+// final actuation permission explicit. When dispatchAllowed is false, charger
+// telemetry still updates Manager state and persistent schedules/holds remain
+// intact, but a connected loadpoint receives an explicit 0 W standdown and no
+// wake or contactor-cycle side effects are emitted. The caller owns the site
+// freshness decision so EV and storage share one pre-dispatch safety boundary.
+func (c *Controller) TickWithDispatch(ctx context.Context, now time.Time, dispatchAllowed bool) {
 	if c == nil || c.manager == nil {
 		return
 	}
-	if c.plan == nil {
+	if c.plan == nil && dispatchAllowed {
 		return
 	}
 	for _, lpCfg := range c.manager.Configs() {
-		c.tickOne(ctx, now, lpCfg)
+		c.tickOne(ctx, now, lpCfg, dispatchAllowed)
 	}
 }
 
-func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
+func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, dispatchAllowed bool) {
 	var sample EVSample
 	if c.tel != nil {
 		sample, _ = c.tel(lpCfg.DriverName)
@@ -1220,6 +1230,24 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config) {
 	}
 	if !wasPlugged {
 		c.resetSurplusSession(lpCfg.ID)
+	}
+	if !dispatchAllowed {
+		// The observation above is deliberately retained: dashboards, SoC
+		// inference and plug/unplug state must stay live while the site-meter
+		// safety gate is closed. Do not advance manual-hold completion timers
+		// or auto-wake state while we are the reason current is withheld; a
+		// persistent hold or schedule must resume normally after recovery.
+		payload, err := json.Marshal(map[string]any{
+			"action":  "ev_set_current",
+			"power_w": 0,
+		})
+		if err == nil && c.send != nil {
+			if err := c.send(ctx, lpCfg.DriverName, payload); err != nil {
+				slog.Warn("loadpoint safety standdown", "lp", lpCfg.ID,
+					"driver", lpCfg.DriverName, "err", err)
+			}
+		}
+		return
 	}
 	// Wallbox just started delivering current: fire a wake at the
 	// bound vehicle so the next vehicle-driver poll comes back with
