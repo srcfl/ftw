@@ -304,6 +304,108 @@ func TestConfigureTCPKeepAlive(t *testing.T) {
 	}
 }
 
+func TestReconnectBackoffSchedule(t *testing.T) {
+	c := &Capability{}
+	// First transport failure → immediate redial (Sungrow/CTEK path).
+	c.consecutiveTransportFails = 1
+	if got := c.reconnectBackoff(); got != 0 {
+		t.Fatalf("fails=1 backoff = %v, want 0", got)
+	}
+	// Consecutive mute failures → exponential up to 60s.
+	want := map[int]time.Duration{
+		2: 2 * time.Second,
+		3: 4 * time.Second,
+		4: 8 * time.Second,
+		5: 16 * time.Second,
+		6: 32 * time.Second,
+		7: 60 * time.Second, // 64 would exceed max
+		8: 60 * time.Second,
+	}
+	for n, w := range want {
+		c.consecutiveTransportFails = n
+		if got := c.reconnectBackoff(); got != w {
+			t.Errorf("fails=%d backoff = %v, want %v", n, got, w)
+		}
+	}
+}
+
+// TestReconnectBackoffSleepsOnConsecutiveMutes verifies that after the first
+// mute timeout the Capability waits before redialing. Single-session dongles
+// (GoodWe #522) accept TCP while ignoring Modbus until a ghost ages out;
+// immediate reconnect loops never recover without a dongle power cycle.
+func TestReconnectBackoffSleepsOnConsecutiveMutes(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	// Every accepted connection is mute: read request, never reply.
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 12)
+				_, _ = io.ReadFull(c, buf)
+				time.Sleep(50 * time.Millisecond) // keep socket open briefly
+			}(c)
+		}
+	}()
+
+	host, portStr, _ := net.SplitHostPort(listener.Addr().String())
+	var port int
+	if _, err := fmtSscan(portStr, &port); err != nil {
+		t.Fatalf("bad listener port: %v", err)
+	}
+
+	cap, err := Dial(host, port, 1)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cap.Close()
+	// Short request timeout so the test does not wait 5s per attempt.
+	// Reconnect dials reuse requestTimeout.
+	const shortTO = 40 * time.Millisecond
+	cap.requestTimeout = shortTO
+	cap.client.timeout = shortTO
+
+	var slept []time.Duration
+	fakeNow := time.Unix(1_700_000_000, 0)
+	cap.now = func() time.Time { return fakeNow }
+	cap.sleep = func(d time.Duration) {
+		slept = append(slept, d)
+		fakeNow = fakeNow.Add(d)
+	}
+
+	// First Read: timeout → fail=1 → reconnect with 0 wait → retry timeout → fail=2.
+	// Second Read: fail already ≥2 → reconnect sleeps 2s before dial.
+	_, _ = cap.Read(0, 1, drivers.ModbusInput)
+	if cap.consecutiveTransportFails < 2 {
+		t.Fatalf("after first mute read, fails = %d, want ≥2", cap.consecutiveTransportFails)
+	}
+
+	slept = nil
+	_, _ = cap.Read(0, 1, drivers.ModbusInput)
+	if len(slept) == 0 {
+		t.Fatal("expected reconnect backoff sleep on consecutive mute, got none")
+	}
+	if slept[0] < 2*time.Second {
+		t.Fatalf("backoff sleep = %v, want ≥2s", slept[0])
+	}
+}
+
+func TestNoteSuccessResetsTransportFails(t *testing.T) {
+	c := &Capability{consecutiveTransportFails: 5}
+	c.noteSuccess()
+	if c.consecutiveTransportFails != 0 {
+		t.Fatalf("fails after success = %d, want 0", c.consecutiveTransportFails)
+	}
+}
+
 // tiny strconv-free int parser to avoid pulling strconv in a single spot.
 func fmtSscan(s string, out *int) (int, error) {
 	n := 0

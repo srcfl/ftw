@@ -38,7 +38,7 @@ driver persists the replacement through `host.persist_secret`.
 | Symptom | Action |
 |---|---|
 | `invalid_client` | Recheck the saved Client Identifier and Secret. |
-| Authorize page says `invalid_request` | Match the callback URL exactly and use the default scope. |
+| Authorize page says `invalid_request` | Almost always a **callback URL mismatch**. Copy the callback field shown in Settings **exactly** into the MyUplink portal (scheme, host, port, path, no trailing slash). Use the default scope (`WRITESYSTEM READSYSTEM offline_access`) unless the portal rejects `WRITESYSTEM`. HTTP LAN callbacks are fine if the browser can reach the Pi; if the portal rejects HTTP, use an operator-managed HTTPS origin and open FTW from that same origin before Connect. |
 | FTW reports invalid state | Start Connect again and finish within 15 minutes from the same origin. |
 | Badge remains disconnected | Reload Settings after completing consent. |
 | `awaiting OAuth connect` | Credentials exist but browser consent is incomplete. |
