@@ -15,5 +15,7 @@ grep -q '/out/ftw-backup' Dockerfile
 grep -q '/app/ftw-backup' Dockerfile
 grep -q '^  ftw-optimizer:' docker-compose.yml
 grep -q 'FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock' docker-compose.yml
+grep -q 'http://127.0.0.1:8080/api/status' Dockerfile
+grep -q -- '--start-period=30m' Dockerfile
 
 echo "container module boundaries verified"

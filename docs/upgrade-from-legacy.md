@@ -21,7 +21,9 @@ Kör från installationskatalogen:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
+RELEASE=v1.4.1-beta.1 # ersätt med den verifierade release som operatören anger
 bash /tmp/ftw-migrate.sh \
+  --version "$RELEASE" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -36,7 +38,8 @@ migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
 1. **Full backup.** Den nya backuphjälparen öppnar den äldre databasen
    skrivskyddat, gör ingen schemamigrering, bygger en komplett `.ftwbak`,
    verifierar filhashar och SQLite och stoppar vid minsta fel.
-2. **Core + updater.** Det parade kontrollplanet hämtas och återskapas med
+2. **Core + updater.** Exakt samma oföränderliga release-tagg används för båda.
+   Updatern startas före Core, och det parade kontrollplanet återskapas med
    samma data-bind. Core måste både vara frisk på `/api/health` och helt
    startklar på `/api/status`; annars återställs Compose, tidigare
    oföränderliga image-ID:n och containrar automatiskt.
@@ -87,7 +90,9 @@ Run from the installation directory:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
+RELEASE=v1.4.1-beta.1 # replace with the operator-approved verified release
 bash /tmp/ftw-migrate.sh \
+  --version "$RELEASE" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -102,7 +107,8 @@ script can also discover the current directory, `~/ftw`, or
 1. **Full backup.** The new helper opens the legacy database read-only, performs
    no schema migration, creates a complete archive, and verifies file hashes
    plus SQLite before any deployment change.
-2. **Core + updater.** The paired control plane is recreated on the same data
+2. **Core + updater.** The same immutable release tag is used for both and the
+   updater starts first. The paired control plane is recreated on the same data
    bind and must pass both `/api/health` and full readiness on `/api/status`.
    Failure restores Compose, the prior immutable image IDs, and the previous
    containers automatically.

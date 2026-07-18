@@ -40,14 +40,23 @@ const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
 	canonicalMainImage       = "ghcr.io/srcfl/ftw"
+	updaterServiceName       = "ftw-updater"
+	canonicalUpdaterImage    = "ghcr.io/srcfl/ftw-updater"
 	optimizerServiceName     = "ftw-optimizer"
 	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
+	updaterProtocolVersion   = 2
+	controlPlaneCapability   = "control-plane-pair-v1"
 )
+
+// Version is stamped from the same release tag as Core. A matching value is a
+// readiness invariant, not display metadata: mixed control-plane versions are
+// not allowed to migrate state or commit an update.
+var Version = "dev"
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State           string            `json:"state"`            // idle, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"`            // idle, pulling, transacting, restarting, restoring, done, failed
 	Action          string            `json:"action,omitempty"` // update, restart, rollback (#152)
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
@@ -76,6 +85,7 @@ type server struct {
 	// main image. It lets immutable updates migrate safely without modifying
 	// the read-only host Compose file or changing its service/data layout.
 	updateOverrideFile string
+	socketPath         string
 	statusPath         string
 	stateMu            sync.Mutex
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
@@ -105,8 +115,11 @@ type server struct {
 	// healthCheck waits for the recreated service to become healthy. Both are
 	// injectable so the rollback path is testable without Docker.
 	imageID           func(ctx context.Context, service string) (string, error)
+	imageRef          func(ctx context.Context, service string) (string, error)
 	containerID       func(ctx context.Context, service string) (string, error)
 	healthCheck       func(ctx context.Context, service string) error
+	updaterReady      func(ctx context.Context, target string) error
+	launchTransaction func(target string, previous map[string]string, startedAt time.Time) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -217,6 +230,10 @@ func main() {
 	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
 	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
+	transactionTarget := flag.String("control-plane-transaction", "", "Internal: apply a paired Core/updater release")
+	transactionCoreImage := flag.String("previous-core-image", "", "Internal: previous Core image ID")
+	transactionUpdaterImage := flag.String("previous-updater-image", "", "Internal: previous updater image ID")
+	transactionStartedAt := flag.String("transaction-started-at", "", "Internal: RFC3339 transaction start")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -237,6 +254,7 @@ func main() {
 
 	srv := &server{
 		composeFile:    *compose,
+		socketPath:     *socket,
 		statusPath:     *statusPath,
 		skipPull:       *skipPull,
 		pullRetryDelay: 60 * time.Second,
@@ -258,6 +276,7 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
+	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
 	srv.chownFile = os.Chown
@@ -270,6 +289,16 @@ func main() {
 	slog.Info("ftw-updater: main service selected", "service", selectedService)
 	if *skipPull {
 		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
+	}
+	if *transactionTarget != "" {
+		startedAt, err := time.Parse(time.RFC3339Nano, *transactionStartedAt)
+		if err != nil {
+			startedAt = time.Now()
+		}
+		srv.runControlPlaneTransaction(*transactionTarget, map[string]string{
+			"core": *transactionCoreImage, "updater": *transactionUpdaterImage,
+		}, startedAt)
+		return
 	}
 	srv.recoverCrashedState()
 
@@ -391,6 +420,14 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
 		return
 	}
+	// The paired transaction is owned by a detached helper while this Compose
+	// service is replaced. runMu is process-local and therefore starts unlocked
+	// in the new updater; the shared transacting state is the cross-process lock
+	// that prevents a second mutation from racing the helper.
+	if st := s.readState(); st.State == "transacting" {
+		http.Error(w, "control-plane transaction already in progress", http.StatusConflict)
+		return
+	}
 	if !s.runMu.TryLock() {
 		http.Error(w, "update already in progress", 409)
 		return
@@ -422,7 +459,18 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	st := s.readState()
-	_ = json.NewEncoder(w).Encode(st)
+	response := struct {
+		State
+		ProtocolVersion int      `json:"protocol_version"`
+		UpdaterVersion  string   `json:"updater_version"`
+		Capabilities    []string `json:"capabilities"`
+	}{
+		State:           st,
+		ProtocolVersion: updaterProtocolVersion,
+		UpdaterVersion:  Version,
+		Capabilities:    []string{controlPlaneCapability},
+	}
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // runJob executes a pull+up (or pull+up --force-recreate) sequence,
@@ -439,6 +487,10 @@ func (s *server) runJob(action, target string) {
 }
 
 func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
+	if component == "core" && action == "update" {
+		s.runControlPlaneUpdate(target, startedAt)
+		return
+	}
 	now := startedAt
 	if now.IsZero() {
 		now = time.Now()
@@ -558,6 +610,324 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	s.writeState(State{State: "done", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed", PreviousImageID: previousImageID})
 }
 
+func controlPlaneEnv(target string) []string {
+	return []string{"FTW_IMAGE_TAG=" + target, "FTW_UPDATER_IMAGE_TAG=" + target}
+}
+
+func (s *server) startControlPlaneHeartbeat(target string) func() {
+	stop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				st := s.readState()
+				if st.Action == "update" && st.Component == "core" && st.Target == target && (st.State == "pulling" || st.State == "transacting") {
+					st.UpdatedAt = time.Now()
+					s.writeState(st)
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
+// runControlPlaneUpdate performs the non-destructive half of a paired update:
+// preflight, capture both rollback identities and pull both immutable tags. It
+// then starts a detached helper from the current updater image. The helper is
+// outside the Compose service, so replacing ftw-updater cannot kill the owner
+// of the transaction or its rollback path.
+func (s *server) runControlPlaneUpdate(target string, startedAt time.Time) {
+	stopHeartbeat := s.startControlPlaneHeartbeat(target)
+	defer stopHeartbeat()
+	now := startedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	base := State{State: "pulling", Action: "update", Component: "core", Target: target, StartedAt: now, UpdatedAt: time.Now()}
+	s.writeState(base)
+	cleanup, err := s.prepareControlPlaneImagePins()
+	if err != nil {
+		base.State, base.Message, base.UpdatedAt = "failed", "compose preflight failed: "+err.Error(), time.Now()
+		s.writeState(base)
+		return
+	}
+	defer cleanup()
+	if err := s.validateControlPlaneImagePins(); err != nil {
+		base.State, base.Message, base.UpdatedAt = "failed", "compose preflight failed: "+err.Error(), time.Now()
+		s.writeState(base)
+		return
+	}
+	specs, err := s.controlPlaneSpecs()
+	if err != nil {
+		base.State, base.Message, base.UpdatedAt = "failed", err.Error(), time.Now()
+		s.writeState(base)
+		return
+	}
+	previous := make(map[string]string, len(specs))
+	for _, spec := range specs {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		imageID, captureErr := s.imageID(ctx, spec.service)
+		cancel()
+		if captureErr != nil || imageID == "" {
+			if captureErr == nil {
+				captureErr = errors.New("empty image ID")
+			}
+			base.State, base.Message, base.UpdatedAt = "failed", "cannot capture "+spec.name+" image for rollback: "+captureErr.Error(), time.Now()
+			s.writeState(base)
+			return
+		}
+		previous[spec.name] = imageID
+	}
+	base.PreviousImages = previous
+	base.PreviousImageID = previous["core"]
+	s.writeState(base)
+
+	if !s.skipPull {
+		pullArgs := s.composeArgs("pull", s.mainServiceName, updaterServiceName)
+		var pullErr error
+		for attempt := 1; ; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			pullErr = s.runner(ctx, controlPlaneEnv(target), pullArgs...)
+			cancel()
+			if pullErr == nil {
+				break
+			}
+			if s.maxPullAttempts > 0 && attempt >= s.maxPullAttempts {
+				break
+			}
+			time.Sleep(s.pullRetryDelay)
+		}
+		if pullErr != nil {
+			base.State, base.Message, base.UpdatedAt = "failed", "paired pull failed: "+pullErr.Error(), time.Now()
+			s.writeState(base)
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	updaterContainer, err := s.containerID(ctx, updaterServiceName)
+	cancel()
+	if err != nil {
+		base.State, base.Message, base.UpdatedAt = "failed", "cannot locate updater container: "+err.Error(), time.Now()
+		s.writeState(base)
+		return
+	}
+	base.State = "transacting"
+	base.Message = "paired images pulled; detached transaction helper is taking ownership"
+	base.UpdatedAt = time.Now()
+	s.writeState(base)
+	if s.launchTransaction != nil {
+		if err := s.launchTransaction(target, previous, now); err != nil {
+			base.State, base.Message, base.UpdatedAt = "failed", "cannot start control-plane transaction helper: "+err.Error(), time.Now()
+			s.writeState(base)
+		}
+		return
+	}
+	helperName := fmt.Sprintf("ftw-control-plane-%d", time.Now().UnixNano())
+	args := []string{
+		"run", "--rm", "--detach", "--name", helperName, "--network", "none",
+		"--volumes-from", updaterContainer,
+	}
+	for _, pair := range []string{
+		"FTW_UPDATER_COMPOSE=" + s.composeFile,
+		"FTW_UPDATER_MAIN_SERVICE=" + s.mainServiceName,
+		"FTW_UPDATER_SOCKET=" + s.socketPath,
+		"FTW_UPDATER_STATUS=" + s.statusPath,
+		"COMPOSE_PROJECT_NAME=" + os.Getenv("COMPOSE_PROJECT_NAME"),
+	} {
+		args = append(args, "--env", pair)
+	}
+	args = append(args,
+		previous["updater"],
+		"-control-plane-transaction", target,
+		"-previous-core-image", previous["core"],
+		"-previous-updater-image", previous["updater"],
+		"-transaction-started-at", now.Format(time.RFC3339Nano),
+	)
+	launchCtx, cancelLaunch := context.WithTimeout(context.Background(), 2*time.Minute)
+	err = s.runner(launchCtx, nil, args...)
+	cancelLaunch()
+	if err != nil {
+		base.State, base.Message, base.UpdatedAt = "failed", "cannot start control-plane transaction helper: "+err.Error(), time.Now()
+		s.writeState(base)
+	}
+}
+
+// runControlPlaneTransaction runs inside the detached helper. Updater is
+// replaced first so the new Core sees a matching protocol/version before it
+// opens state. Any failure restores updater first and then Core while the
+// helper remains alive outside both Compose services.
+func (s *server) runControlPlaneTransaction(target string, previous map[string]string, startedAt time.Time) {
+	stopHeartbeat := s.startControlPlaneHeartbeat(target)
+	defer stopHeartbeat()
+	base := State{
+		State: "transacting", Action: "update", Component: "core", Target: target,
+		StartedAt: startedAt, UpdatedAt: time.Now(), PreviousImageID: previous["core"], PreviousImages: previous,
+	}
+	fail := func(cause error) {
+		s.rollbackControlPlane(base, cause)
+	}
+	if !isImmutableImageTag(target) || previous["core"] == "" || previous["updater"] == "" {
+		fail(errors.New("invalid paired transaction parameters"))
+		return
+	}
+	cleanup, err := s.prepareControlPlaneImagePins()
+	if err != nil {
+		fail(fmt.Errorf("compose preflight: %w", err))
+		return
+	}
+	defer cleanup()
+	if err := s.validateControlPlaneImagePins(); err != nil {
+		fail(fmt.Errorf("compose preflight: %w", err))
+		return
+	}
+	env := controlPlaneEnv(target)
+	base.Message = "replacing updater with matching release"
+	base.UpdatedAt = time.Now()
+	s.writeState(base)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	err = s.runner(ctx, env, s.composeArgs("up", "-d", updaterServiceName)...)
+	cancel()
+	if err != nil {
+		fail(fmt.Errorf("replace updater: %w", err))
+		return
+	}
+	compatCtx, cancelCompat := context.WithTimeout(context.Background(), 3*time.Minute)
+	if s.updaterReady != nil {
+		err = s.updaterReady(compatCtx, target)
+	} else {
+		err = s.waitForUpdaterRelease(compatCtx, target)
+	}
+	cancelCompat()
+	if err != nil {
+		fail(err)
+		return
+	}
+	if err := s.requireServiceImageRef(updaterServiceName, canonicalUpdaterImage+":"+target); err != nil {
+		fail(err)
+		return
+	}
+
+	base.Message = "matching updater ready; replacing Core"
+	base.UpdatedAt = time.Now()
+	s.writeState(base)
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+	err = s.runner(ctx, env, s.composeArgs("up", "-d", s.mainServiceName)...)
+	cancel()
+	if err != nil {
+		fail(fmt.Errorf("replace Core: %w", err))
+		return
+	}
+	if s.healthCheck != nil {
+		healthCtx, cancelHealth := context.WithTimeout(context.Background(), componentHealthTimeout("core"))
+		err = s.healthCheck(healthCtx, s.mainServiceName)
+		cancelHealth()
+		if err != nil {
+			fail(fmt.Errorf("new Core readiness: %w", err))
+			return
+		}
+	}
+	if err := s.requireServiceImageRef(s.mainServiceName, canonicalMainImage+":"+target); err != nil {
+		fail(err)
+		return
+	}
+	if err := s.requireServiceImageRef(updaterServiceName, canonicalUpdaterImage+":"+target); err != nil {
+		fail(err)
+		return
+	}
+	base.State = "done"
+	base.Message = "Core and updater committed as one release pair"
+	base.UpdatedAt = time.Now()
+	s.writeState(base)
+}
+
+func (s *server) waitForUpdaterRelease(ctx context.Context, target string) error {
+	for {
+		cli := &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", s.socketPath)
+			}},
+		}
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/status", nil)
+		resp, err := cli.Do(req)
+		if err == nil {
+			var status struct {
+				ProtocolVersion int      `json:"protocol_version"`
+				UpdaterVersion  string   `json:"updater_version"`
+				Capabilities    []string `json:"capabilities"`
+			}
+			decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&status)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK && decodeErr == nil && status.ProtocolVersion >= updaterProtocolVersion && status.UpdaterVersion == target {
+				for _, capability := range status.Capabilities {
+					if capability == controlPlaneCapability {
+						return nil
+					}
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("matching updater %s did not become ready: %w", target, ctx.Err())
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (s *server) requireServiceImageRef(service, want string) error {
+	if s.imageRef == nil {
+		return errors.New("image reference inspection is unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	got, err := s.imageRef(ctx, service)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("inspect %s image reference: %w", service, err)
+	}
+	if got != want {
+		return fmt.Errorf("service %s runs %s, want immutable release %s", service, got, want)
+	}
+	return nil
+}
+
+func (s *server) rollbackControlPlane(base State, cause error) {
+	base.State = "restoring"
+	base.Message = "paired update failed; restoring previous updater and Core: " + cause.Error()
+	base.UpdatedAt = time.Now()
+	s.writeState(base)
+	cleanup, preflightErr := s.prepareControlPlaneImagePins()
+	if preflightErr == nil {
+		defer cleanup()
+	}
+	var failures []string
+	if preflightErr != nil {
+		failures = append(failures, "rollback preflight: "+preflightErr.Error())
+	} else {
+		updaterSpec, _ := s.componentSpec("updater")
+		coreSpec, _ := s.componentSpec("core")
+		if err := s.restorePreviousComponentImage(base.PreviousImages["updater"], updaterSpec); err != nil {
+			failures = append(failures, "updater: "+err.Error())
+		}
+		if err := s.restorePreviousComponentImage(base.PreviousImages["core"], coreSpec); err != nil {
+			failures = append(failures, "Core: "+err.Error())
+		}
+	}
+	base.State = "failed"
+	base.UpdatedAt = time.Now()
+	if len(failures) == 0 {
+		base.Message = "paired update failed; previous Core/updater image pair restored: " + cause.Error()
+	} else {
+		base.Message = "paired update failed and automatic pair rollback was incomplete: " + cause.Error() + "; " + strings.Join(failures, "; ")
+	}
+	s.writeState(base)
+}
+
 func (s *server) runComponentRollback(component string, startedAt time.Time) {
 	now := startedAt
 	if now.IsZero() {
@@ -599,6 +969,13 @@ func (s *server) componentSpec(component string) (componentSpec, error) {
 			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", optimizerServiceName)
 		}
 		return componentSpec{name: "optimizer", service: optimizerServiceName, image: canonicalOptimizerImage, tagEnv: "FTW_OPTIMIZER_IMAGE_TAG", tagVariable: "FTW_OPTIMIZER_IMAGE_TAG"}, nil
+	case "updater":
+		if _, ok, err := serviceImageFromComposeFiles(s.composeFiles(), updaterServiceName); err != nil {
+			return componentSpec{}, err
+		} else if !ok {
+			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", updaterServiceName)
+		}
+		return componentSpec{name: "updater", service: updaterServiceName, image: canonicalUpdaterImage, tagEnv: "FTW_UPDATER_IMAGE_TAG", tagVariable: "FTW_UPDATER_IMAGE_TAG"}, nil
 	default:
 		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
 	}
@@ -660,6 +1037,96 @@ func (s *server) prepareUpdateImagePin() (func(), error) {
 		return func() {}, err
 	}
 	return s.prepareComponentImagePin(spec)
+}
+
+func (s *server) controlPlaneSpecs() ([]componentSpec, error) {
+	core, err := s.componentSpec("core")
+	if err != nil {
+		return nil, err
+	}
+	updater, err := s.componentSpec("updater")
+	if err != nil {
+		return nil, err
+	}
+	return []componentSpec{core, updater}, nil
+}
+
+// prepareControlPlaneImagePins creates one transient override containing every
+// legacy hard-coded service. A single file is important: two calls to the
+// component helper would replace updateOverrideFile and silently unpin the
+// first half of the pair.
+func (s *server) prepareControlPlaneImagePins() (func(), error) {
+	specs, err := s.controlPlaneSpecs()
+	if err != nil {
+		return func() {}, err
+	}
+	type imageService struct {
+		Image string `yaml:"image"`
+	}
+	doc := struct {
+		Services map[string]imageService `yaml:"services"`
+	}{Services: make(map[string]imageService)}
+	for _, spec := range specs {
+		image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), spec.service)
+		if err != nil {
+			return func() {}, err
+		}
+		if !ok {
+			return func() {}, fmt.Errorf("service %q is missing an image entry in compose files", spec.service)
+		}
+		if !strings.Contains(image, spec.tagVariable) {
+			doc.Services[spec.service] = imageService{Image: spec.image + ":${" + spec.tagVariable + ":-latest}"}
+		}
+	}
+	if len(doc.Services) == 0 {
+		return func() {}, nil
+	}
+	data, err := yaml.Marshal(doc)
+	if err != nil {
+		return func() {}, fmt.Errorf("build control-plane compatibility override: %w", err)
+	}
+	f, err := os.CreateTemp("", "ftw-control-plane-update-*.yml")
+	if err != nil {
+		return func() {}, fmt.Errorf("write control-plane compatibility override: %w", err)
+	}
+	path := f.Name()
+	removeOnError := func() {
+		_ = f.Close()
+		_ = os.Remove(path)
+	}
+	if _, err := f.Write(data); err != nil {
+		removeOnError()
+		return func() {}, err
+	}
+	if err := f.Sync(); err != nil {
+		removeOnError()
+		return func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return func() {}, err
+	}
+	s.updateOverrideFile = path
+	cleanup := func() {
+		s.updateOverrideFile = ""
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("remove control-plane compatibility override", "path", path, "err", err)
+		}
+	}
+	return cleanup, nil
+}
+
+func (s *server) validateControlPlaneImagePins() error {
+	specs, err := s.controlPlaneSpecs()
+	if err != nil {
+		return err
+	}
+	for _, spec := range specs {
+		if err := s.validateComponentImagePin(spec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *server) prepareComponentImagePin(spec componentSpec) (func(), error) {
@@ -1195,6 +1662,22 @@ func (s *server) currentServiceImageID(ctx context.Context, service string) (str
 		return "", errors.New("running container has no image ID")
 	}
 	return imageID, nil
+}
+
+func (s *server) currentServiceImageRef(ctx context.Context, service string) (string, error) {
+	containerID, err := s.serviceContainerID(ctx, service)
+	if err != nil {
+		return "", err
+	}
+	out, err := dockerOutput(ctx, "inspect", "--format", "{{.Config.Image}}", containerID)
+	if err != nil {
+		return "", err
+	}
+	ref := strings.TrimSpace(out)
+	if ref == "" {
+		return "", errors.New("running container has no image reference")
+	}
+	return ref, nil
 }
 
 func (s *server) waitForServiceHealth(ctx context.Context, service string) error {

@@ -20,7 +20,7 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: migrate-legacy-compose.sh [--dir PATH] [--backup-dir PATH]
+Usage: migrate-legacy-compose.sh --version vX.Y.Z[-beta.N] [--dir PATH] [--backup-dir PATH]
 
 Without --dir, the script uses the current directory when it contains
 docker-compose.yml, then tries ~/ftw and ~/forty-two-watts.
@@ -33,6 +33,7 @@ EOF
 
 requested_dir="${FTW_DIR:-}"
 requested_full_backup_dir="${FTW_BACKUP_DIR:-}"
+control_plane_version="${FTW_CONTROL_PLANE_VERSION:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)
@@ -45,6 +46,11 @@ while [ "$#" -gt 0 ]; do
       requested_full_backup_dir="$2"
       shift 2
       ;;
+    --version)
+      [ "$#" -ge 2 ] || die "--version requires an immutable release tag"
+      control_plane_version="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -54,6 +60,10 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+if [[ ! "$control_plane_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
+  die "--version must be an immutable vX.Y.Z or vX.Y.Z-beta.N release"
+fi
 
 [ "$(uname -s)" = Linux ] || die "automatic migration currently supports Linux Docker hosts only"
 command -v docker >/dev/null 2>&1 || die "docker is not installed"
@@ -130,7 +140,7 @@ if [ -n "$compose_project" ]; then
 fi
 compose() {
   if [ "$canonical_tags" = true ]; then
-    FTW_IMAGE_TAG=latest FTW_UPDATER_IMAGE_TAG=latest FTW_OPTIMIZER_IMAGE_TAG=latest \
+    FTW_IMAGE_TAG="$control_plane_version" FTW_UPDATER_IMAGE_TAG="$control_plane_version" FTW_OPTIMIZER_IMAGE_TAG=latest \
       "${compose_command[@]}" "$@"
   else
     "${compose_command[@]}" "$@"
@@ -214,14 +224,23 @@ restore_after_failure() {
   # A pull can move a mutable tag such as :latest before any container is
   # recreated. Put every previous immutable image back under its original
   # reference before Compose restores the old service definitions.
-  if ! restore_image_reference "$previous_main_image_id" "$previous_main_image_ref"; then
+  if ! restore_image_reference "$previous_updater_image_id" "$previous_updater_image_ref"; then
     restore_ok=false
   fi
-  if ! restore_image_reference "$previous_updater_image_id" "$previous_updater_image_ref"; then
+  if ! restore_image_reference "$previous_main_image_id" "$previous_main_image_ref"; then
     restore_ok=false
   fi
   if ! restore_image_reference "$previous_optimizer_image_id" "$previous_optimizer_image_ref"; then
     restore_ok=false
+  fi
+
+  # Restore the updater first. Fixed Core releases refuse readiness when their
+  # updater does not report the same release, so the reverse order can turn a
+  # healthy rollback into a restart loop.
+  if [ "$containers_changed" = true ]; then
+    if ! compose up -d --no-deps --force-recreate ftw-updater >/dev/null 2>&1; then
+      restore_ok=false
+    fi
   fi
 
   if [ -n "$renamed_container" ]; then
@@ -249,11 +268,6 @@ restore_after_failure() {
     fi
   elif [ "$containers_changed" = true ] && [ -n "$main_service" ]; then
     if ! compose up -d --no-deps --force-recreate "$main_service" >/dev/null 2>&1; then
-      restore_ok=false
-    fi
-  fi
-  if [ "$containers_changed" = true ]; then
-    if ! compose up -d --no-deps --force-recreate ftw-updater >/dev/null 2>&1; then
       restore_ok=false
     fi
   fi
@@ -563,26 +577,21 @@ rewrite_service_image() {
 
 for file in "${compose_files[@]}"; do
   rewrite_service_image "$file" "$main_service" 'ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}'
-  rewrite_service_image "$file" 'ftw-updater' 'ghcr.io/srcfl/ftw-updater:latest'
+  rewrite_service_image "$file" 'ftw-updater' 'ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}'
   rewrite_service_image "$file" 'ftw-optimizer' 'ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}'
 done
 
-# A caller's shell or old .env file may contain a development tag. Use the
-# canonical stable tag for this one-time migration; future in-app updates pass
-# their own immutable FTW_IMAGE_TAG to Compose.
+# A caller's shell or old .env file may contain a development tag. Pin both
+# control-plane services to the explicit immutable release selected above.
 canonical_tags=true
 compose config >/dev/null
 effective_main_image="$(compose config --images "$main_service")"
 effective_updater_image="$(compose config --images ftw-updater)"
 effective_optimizer_image="$(compose config --images ftw-optimizer)"
-case "$effective_main_image" in
-  ghcr.io/srcfl/ftw:*) ;;
-  *) die "the effective $main_service image is not ghcr.io/srcfl/ftw: $effective_main_image" ;;
-esac
-case "$effective_updater_image" in
-  ghcr.io/srcfl/ftw-updater:*) ;;
-  *) die "the effective ftw-updater image is not ghcr.io/srcfl/ftw-updater: $effective_updater_image" ;;
-esac
+[ "$effective_main_image" = "ghcr.io/srcfl/ftw:$control_plane_version" ] || \
+  die "the effective $main_service image is not the selected release: $effective_main_image"
+[ "$effective_updater_image" = "ghcr.io/srcfl/ftw-updater:$control_plane_version" ] || \
+  die "the effective ftw-updater image is not the selected release: $effective_updater_image"
 case "$effective_optimizer_image" in
   ghcr.io/srcfl/ftw-optimizer:*) ;;
   *) die "the effective ftw-optimizer image is not ghcr.io/srcfl/ftw-optimizer: $effective_optimizer_image" ;;
@@ -620,11 +629,11 @@ if docker container inspect "$main_service" >/dev/null 2>&1; then
   fi
 fi
 
-log "starting $main_service from ghcr.io/srcfl/ftw"
+log "starting ftw-updater from ghcr.io/srcfl/ftw-updater:$control_plane_version"
 containers_changed=true
-compose up -d --no-deps --force-recreate "$main_service"
-log "starting ftw-updater from ghcr.io/srcfl/ftw-updater"
 compose up -d --no-deps --force-recreate ftw-updater
+log "starting $main_service from ghcr.io/srcfl/ftw:$control_plane_version"
+compose up -d --no-deps --force-recreate "$main_service"
 
 new_main_id="$(compose ps -q --status running "$main_service" | tail -n 1)"
 [ -n "$new_main_id" ] || die "$main_service did not reach running state"
@@ -633,14 +642,10 @@ updater_id="$(compose ps -q --status running ftw-updater | tail -n 1)"
 
 main_image="$(docker inspect "$new_main_id" --format '{{.Config.Image}}')"
 updater_image="$(docker inspect "$updater_id" --format '{{.Config.Image}}')"
-case "$main_image" in
-  ghcr.io/srcfl/ftw:*) ;;
-  *) die "running main container uses unexpected image: $main_image" ;;
-esac
-case "$updater_image" in
-  ghcr.io/srcfl/ftw-updater:*) ;;
-  *) die "running updater uses unexpected image: $updater_image" ;;
-esac
+[ "$main_image" = "ghcr.io/srcfl/ftw:$control_plane_version" ] || \
+  die "running main container is not the selected release: $main_image"
+[ "$updater_image" = "ghcr.io/srcfl/ftw-updater:$control_plane_version" ] || \
+  die "running updater is not the selected release: $updater_image"
 running_data_source="$(docker inspect "$new_main_id" --format '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}')"
 if [ -d "$running_data_source" ]; then
   running_data_source="$(cd "$running_data_source" && pwd -P)"
@@ -651,7 +656,8 @@ fi
 health_url="${FTW_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
 ready_url="${FTW_READY_URL:-${health_url%/api/health}/api/status}"
 healthy=false
-health_deadline=$((SECONDS + 1800))
+health_timeout_s="${FTW_MIGRATION_HEALTH_TIMEOUT_S:-1800}"
+health_deadline=$((SECONDS + health_timeout_s))
 while [ "$SECONDS" -lt "$health_deadline" ]; do
   if curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1 && \
     curl -fsS --max-time 3 "$ready_url" >/dev/null 2>&1; then
@@ -660,7 +666,7 @@ while [ "$SECONDS" -lt "$health_deadline" ]; do
   fi
   sleep 2
 done
-[ "$healthy" = true ] || die "FTW did not finish initialization at $ready_url within 30 minutes"
+[ "$healthy" = true ] || die "FTW did not finish initialization at $ready_url within ${health_timeout_s}s"
 
 # Phase 3 deliberately starts only after Core + updater have passed their
 # health gate. Optimizer has its own release and compatibility handshake; a

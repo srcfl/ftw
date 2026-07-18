@@ -54,6 +54,11 @@ jobs:
       tag:     ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
     steps:
+      - name: Checkout stable tag
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Derive tag/version from ref
         id: meta
         env:
@@ -80,6 +85,30 @@ jobs:
           echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "Building assets for ${TAG} (version ${VERSION})"
+
+      - name: Set up Docker Buildx for promotion gate
+        uses: docker/setup-buildx-action@v3
+
+      - name: Repeat beta-to-stable pair gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_COMMIT="$(git rev-list -n 1 "${TAG}")"
+          test "${TAG_COMMIT}" = "${GITHUB_SHA}"
+          BETA_TAG="$(git tag --list "${TAG}-beta.*" --sort=-v:refname | head -n 1)"
+          test -n "${BETA_TAG}"
+          BETA_COMMIT="$(git rev-list -n 1 "${BETA_TAG}")"
+          test "${BETA_COMMIT}" = "${GITHUB_SHA}"
+          RELEASE_JSON="$(gh release view "${BETA_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease)"
+          test "$(jq -r .isDraft <<<"${RELEASE_JSON}")" = false
+          test "$(jq -r .isPrerelease <<<"${RELEASE_JSON}")" = true
+          mkdir beta-control-plane
+          gh release download "${BETA_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-control-plane.json --dir beta-control-plane
+          scripts/verify-control-plane-manifest.sh \
+            beta-control-plane/ftw-control-plane.json "${BETA_TAG}" "${GITHUB_SHA}"
 
   binaries:
     name: build + upload release binaries
@@ -249,8 +278,28 @@ jobs:
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
           password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to move an existing immutable tag
+        id: immutable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ needs.meta.outputs.tag }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! scripts/inspect-image-digest.sh "${IMAGE}" >/dev/null 2>&1; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          mkdir -p existing
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-control-plane.json --dir existing
+          scripts/verify-control-plane-manifest.sh \
+            existing/ftw-control-plane.json "${TAG}" "${GITHUB_SHA}"
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+
       - name: Compute image metadata
         id: meta
+        if: steps.immutable.outputs.skip != 'true'
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}
@@ -263,11 +312,13 @@ jobs:
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=${{ matrix.description }}
             org.opencontainers.image.source=https://github.com/srcfl/ftw
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.meta.outputs.version }}
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build and push
         id: build
+        if: steps.immutable.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -289,6 +340,7 @@ jobs:
       # canonical namespace, then copy that exact multi-platform manifest to
       # the temporary compatibility namespace under its own credentials.
       - name: Login to compatibility GHCR namespace
+        if: steps.immutable.outputs.skip != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -296,6 +348,7 @@ jobs:
           password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Mirror exact manifests to compatibility namespace
+        if: steps.immutable.outputs.skip != 'true'
         env:
           CANONICAL_TAGS: ${{ steps.meta.outputs.tags }}
           SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -309,13 +362,55 @@ jobs:
             test "${SOURCE_DIGEST}" = "${legacy_digest}"
           done
 
+  control-plane:
+    name: verify pair and publish release
+    runs-on: ubuntu-latest
+    needs: [meta, binaries, docker, imager-metadata]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout stable tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.meta.outputs.tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and verify immutable pair manifest
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/create-control-plane-manifest.sh "${TAG}" "${GITHUB_SHA}" ftw-control-plane.json
+          scripts/verify-control-plane-manifest.sh ftw-control-plane.json "${TAG}" "${GITHUB_SHA}"
+
+      - name: Attach pair manifest and make draft public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG}" ftw-control-plane.json \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+          IS_DRAFT="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)"
+          if [ "${IS_DRAFT}" = true ]; then
+            gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false
+          fi
+          # Re-download what operators will consume and verify it one last time.
+          mkdir published
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-control-plane.json --dir published
+          scripts/verify-control-plane-manifest.sh \
+            published/ftw-control-plane.json "${TAG}" "${GITHUB_SHA}"
+
   discord:
     name: announce release on Discord
     runs-on: ubuntu-latest
     # Wait for binaries + docker so the message links to assets that
     # actually exist. The independent rpi-installer channel is intentionally
     # outside the application release critical path.
-    needs: [meta, binaries, docker]
+    needs: [meta, control-plane]
     permissions:
       contents: read   # gh release view needs read access
     steps:

@@ -2,8 +2,8 @@ name: release
 
 # Changesets-driven release. Pattern lifted from umara/u-front.
 #
-# This workflow ONLY handles the changesets flow + tag + GitHub Release
-# creation. The cross-platform binaries, docker images, and
+# This workflow ONLY handles the changesets flow + tag + draft GitHub Release
+# creation. The cross-platform binaries, docker images, pair verification and
 # Discord announcement live in `release-assets.yml` and are triggered
 # explicitly via `gh workflow run release-assets.yml --ref vX.Y.Z` at
 # the end of the publish step. Keeping the heavy build matrix out of
@@ -123,6 +123,10 @@ jobs:
           # needs broader scope, and a narrow token bounds the blast radius.
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
 
+      - name: Set up Docker Buildx for promotion verification
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        uses: docker/setup-buildx-action@v3
+
       - name: Tag and create GitHub Release
         id: publish
         # Stable is an explicit promotion after real beta validation. Pushes
@@ -141,20 +145,31 @@ jobs:
             TAG_EXISTS=true
           fi
           RELEASE_EXISTS=false
+          RELEASE_DRAFT=false
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             RELEASE_EXISTS=true
+            RELEASE_DRAFT="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft)"
           fi
 
           # Already-done case: a previous run completed cleanly. No
           # new release was cut on THIS run, so the release-assets
           # dispatch below should skip — emit `published=false`.
-          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ]; then
+          if [ "${TAG_EXISTS}" = "true" ] && [ "${RELEASE_EXISTS}" = "true" ] && [ "${RELEASE_DRAFT}" = "false" ]; then
             echo "Tag ${TAG} and GitHub Release already exist — nothing to publish."
             {
               echo "published=false"
               echo "version=${VERSION}"
             } >> "${GITHUB_OUTPUT}"
             exit 0
+          fi
+
+          if [ "${TAG_EXISTS}" = "true" ]; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            TAG_COMMIT="$(git rev-list -n 1 "${TAG}")"
+            if [ "${TAG_COMMIT}" != "${GITHUB_SHA}" ]; then
+              echo "Existing ${TAG} points to ${TAG_COMMIT}, not ${GITHUB_SHA}; refusing to move it." >&2
+              exit 1
+            fi
           fi
 
           # Stable is a promotion, never the first public channel for a commit.
@@ -171,6 +186,18 @@ jobs:
             echo "Publish a beta from this exact commit before promotion." >&2
             exit 1
           fi
+          BETA_RELEASE_JSON="$(gh release view "${BETA_TAG}" --repo "${GITHUB_REPOSITORY}" --json isDraft,isPrerelease)"
+          if [ "$(jq -r .isDraft <<<"${BETA_RELEASE_JSON}")" != "false" ] || \
+             [ "$(jq -r .isPrerelease <<<"${BETA_RELEASE_JSON}")" != "true" ]; then
+            echo "${BETA_TAG} is not a published beta prerelease." >&2
+            exit 1
+          fi
+          rm -rf beta-control-plane
+          mkdir beta-control-plane
+          gh release download "${BETA_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-control-plane.json --dir beta-control-plane
+          scripts/verify-control-plane-manifest.sh \
+            beta-control-plane/ftw-control-plane.json "${BETA_TAG}" "${GITHUB_SHA}"
           echo "Promoting tested ${BETA_TAG} to ${TAG}."
 
           # Build codename-annotated release notes. The script extracts
@@ -196,14 +223,18 @@ jobs:
             gh release create "${TAG}" \
               --repo "${GITHUB_REPOSITORY}" \
               --title "${TAG}" \
-              --notes-file release-notes.md
+              --notes-file release-notes.md \
+              --draft
+          elif [ "${RELEASE_DRAFT}" != "true" ]; then
+            echo "Existing release ${TAG} is public but was not recognized as complete." >&2
+            exit 1
           fi
 
           {
             echo "published=true"
             echo "version=${VERSION}"
           } >> "${GITHUB_OUTPUT}"
-          echo "Published ${TAG}"
+          echo "Prepared draft ${TAG}; release-assets will publish only after pair verification"
 
       - name: Dispatch release-assets workflow
         # GitHub does NOT fire downstream `push: tags` workflows from

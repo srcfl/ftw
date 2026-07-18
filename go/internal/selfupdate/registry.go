@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,6 +42,52 @@ func (rp *registryProbe) hasTag(ctx context.Context, tag string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// manifestDigest resolves one immutable tag to its OCI/Docker content digest.
+// A missing manifest is a normal publication race and returns "", nil. The
+// release checker compares the value with the paired release manifest rather
+// than trusting tag membership alone.
+func (rp *registryProbe) manifestDigest(ctx context.Context, tag string) (string, error) {
+	tok, err := rp.token(ctx)
+	if err != nil {
+		return "", err
+	}
+	u := rp.base + "/v2/" + rp.repo + "/manifests/" + url.PathEscape(tag)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	req.Header.Set("Accept", strings.Join([]string{
+		"application/vnd.oci.image.index.v1+json",
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.manifest.v1+json",
+		"application/vnd.docker.distribution.manifest.v2+json",
+	}, ", "))
+	resp, err := rp.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("manifest %s: HTTP %d", tag, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return "", err
+	}
+	digest := strings.TrimSpace(resp.Header.Get("Docker-Content-Digest"))
+	if digest == "" {
+		// Distribution registries should send Docker-Content-Digest. Computing
+		// it from the exact response keeps compatible test/private registries
+		// usable without weakening the content-addressed comparison.
+		sum := sha256.Sum256(body)
+		digest = fmt.Sprintf("sha256:%x", sum[:])
+	}
+	return digest, nil
 }
 
 func (rp *registryProbe) token(ctx context.Context) (string, error) {

@@ -102,6 +102,7 @@ FAKE_UNAME
 
 cat >"$TMP/migrate/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
+[ "${FAKE_FAIL_READY:-}" != 1 ] || exit 1
 exit 0
 FAKE_CURL
 
@@ -205,10 +206,10 @@ case "$command" in
       *Config.Image*)
         case "$subject" in
           ftw-id)
-            if [ -f "$state/canonical-ftw" ]; then echo 'ghcr.io/srcfl/ftw:latest'; else echo 'example.invalid/old-core:latest'; fi
+            if [ -f "$state/canonical-ftw" ]; then echo "ghcr.io/srcfl/ftw:$(cat "$state/canonical-ftw")"; else echo 'example.invalid/old-core:latest'; fi
             ;;
           ftw-updater-id)
-            if [ -f "$state/canonical-ftw-updater" ]; then echo 'ghcr.io/srcfl/ftw-updater:latest'; else echo 'example.invalid/old-updater:latest'; fi
+            if [ -f "$state/canonical-ftw-updater" ]; then echo "ghcr.io/srcfl/ftw-updater:$(cat "$state/canonical-ftw-updater")"; else echo 'example.invalid/old-updater:latest'; fi
             ;;
           ftw-optimizer-id)
             if [ -f "$state/canonical-ftw-optimizer" ]; then echo 'ghcr.io/srcfl/ftw-optimizer:latest'; else echo 'example.invalid/old-optimizer:latest'; fi
@@ -256,8 +257,8 @@ case "$command" in
             ;;
           --images)
             case "${2:-}" in
-              ftw) echo 'ghcr.io/srcfl/ftw:latest' ;;
-              ftw-updater) echo 'ghcr.io/srcfl/ftw-updater:latest' ;;
+              ftw) echo "ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}" ;;
+              ftw-updater) echo "ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}" ;;
               ftw-optimizer) echo 'ghcr.io/srcfl/ftw-optimizer:latest' ;;
               *) exit 1 ;;
             esac
@@ -278,7 +279,12 @@ case "$command" in
           touch "$state/failure-consumed"
           exit 1
         fi
-        touch "$state/$service" "$state/$service-id" "$state/canonical-$service"
+        touch "$state/$service" "$state/$service-id"
+        case "$service" in
+          ftw) printf '%s\n' "${FTW_IMAGE_TAG:-latest}" >"$state/canonical-$service" ;;
+          ftw-updater) printf '%s\n' "${FTW_UPDATER_IMAGE_TAG:-latest}" >"$state/canonical-$service" ;;
+          ftw-optimizer) printf '%s\n' "${FTW_OPTIMIZER_IMAGE_TAG:-latest}" >"$state/canonical-$service" ;;
+        esac
         ;;
       ps)
         service="${*: -1}"
@@ -314,7 +320,7 @@ touch "$TMP/migrate/data/state.db"
 PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/migrate/state" \
 FAKE_DATA_DIR="$TMP/migrate/data" \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/migrate"
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/migrate"
 
 grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
@@ -332,7 +338,7 @@ FAKE_STATE_DIR="$TMP/project/state" \
 FAKE_DATA_DIR="$TMP/project/data" \
 FAKE_PROJECT_NAME=custom-energy \
 FAKE_INSTALL_DIR="$TMP/project" \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/project"
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/project"
 test -e "$TMP/project/state/project-custom-energy"
 
 if [ -n "$REAL_DOCKER" ]; then
@@ -358,7 +364,7 @@ if PATH="$TMP/migrate/bin:$PATH" \
   FAKE_STATE_DIR="$TMP/rollback/state" \
   FAKE_DATA_DIR="$TMP/rollback/data" \
   FAKE_FAIL_SERVICE=ftw \
-  bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/rollback" \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/rollback" \
   >/dev/null 2>&1; then
   echo "expected a failed core recreate to roll the modular migration back" >&2
   exit 1
@@ -392,7 +398,7 @@ if PATH="$TMP/migrate/bin:$PATH" \
   FAKE_STATE_DIR="$TMP/rollback-existing/state" \
   FAKE_DATA_DIR="$TMP/rollback-existing/data" \
   FAKE_FAIL_SERVICE=ftw \
-  bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/rollback-existing" \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/rollback-existing" \
   >/dev/null 2>&1; then
   echo "expected an existing modular migration failure to roll back" >&2
   exit 1
@@ -402,6 +408,35 @@ test -e "$TMP/rollback-existing/state/ftw-optimizer"
 grep -q '^sha256:old-core example.invalid/old-core:latest$' "$TMP/rollback-existing/state/image-tags"
 grep -q '^sha256:old-updater example.invalid/old-updater:latest$' "$TMP/rollback-existing/state/image-tags"
 grep -q '^sha256:old-optimizer example.invalid/old-optimizer:latest$' "$TMP/rollback-existing/state/image-tags"
+
+# A failure after both candidates were recreated must still restore both old
+# control-plane image IDs and never report migration success.
+mkdir -p "$TMP/readiness-rollback/data" "$TMP/readiness-rollback/state"
+touch "$TMP/readiness-rollback/data/state.db"
+touch "$TMP/readiness-rollback/state/ftw" "$TMP/readiness-rollback/state/ftw-updater"
+cat >"$TMP/readiness-rollback/docker-compose.yml" <<'YAML'
+services:
+  ftw:
+    image: example.invalid/old-core:latest
+    volumes:
+      - ./data:/app/data
+  ftw-updater:
+    image: example.invalid/old-updater:latest
+YAML
+if PATH="$TMP/migrate/bin:$PATH" \
+  FAKE_STATE_DIR="$TMP/readiness-rollback/state" \
+  FAKE_DATA_DIR="$TMP/readiness-rollback/data" \
+  FAKE_FAIL_READY=1 \
+  FTW_MIGRATION_HEALTH_TIMEOUT_S=1 \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/readiness-rollback" \
+  >/dev/null 2>&1; then
+  echo "expected readiness failure to roll back the paired migration" >&2
+  exit 1
+fi
+grep -q 'example.invalid/old-core:latest' "$TMP/readiness-rollback/docker-compose.yml"
+grep -q 'example.invalid/old-updater:latest' "$TMP/readiness-rollback/docker-compose.yml"
+grep -q '^sha256:old-core example.invalid/old-core:latest$' "$TMP/readiness-rollback/state/image-tags"
+grep -q '^sha256:old-updater example.invalid/old-updater:latest$' "$TMP/readiness-rollback/state/image-tags"
 
 # Optimizer is an independent, optional phase. A failed optimizer candidate
 # must leave the newly healthy Core + updater online and must not fail the
@@ -421,7 +456,7 @@ PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/optimizer-failure/state" \
 FAKE_DATA_DIR="$TMP/optimizer-failure/data" \
 FAKE_FAIL_SERVICE=ftw-optimizer \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/optimizer-failure" \
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/optimizer-failure" \
   >/dev/null
 test -e "$TMP/optimizer-failure/state/ftw"
 test -e "$TMP/optimizer-failure/state/ftw-updater"

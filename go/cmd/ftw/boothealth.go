@@ -28,15 +28,18 @@ func (s *swappableHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	(*s.h.Load()).ServeHTTP(w, r)
 }
 
-// bootPhaseHandler answers health probes 200 while the process initializes,
-// so a legitimately slow boot is distinguishable from a dead one. Everything
-// else gets 503 + Retry-After so clients and the UI know to come back.
+// bootPhaseHandler keeps the API port bound while state is opened or migrated,
+// but deliberately fails both health and readiness. A control-plane updater
+// must not commit a new Core image until the real mux is wired and /api/status
+// is available; reporting 200 here would turn a long-running migration into a
+// falsely successful update.
 func bootPhaseHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"starting","phase":"initializing state"}`))
+		w.Header().Set("Retry-After", "10")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"status":"starting","ready":false,"phase":"initializing state"}`))
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

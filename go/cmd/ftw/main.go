@@ -165,8 +165,9 @@ func main() {
 	// take 25+ minutes, and an unbound port for that long makes the Docker
 	// healthcheck fail and the self-update sidecar judge the deploy failed —
 	// observed 2026-07-16 as an auto-rollback in the middle of a VACUUM.
-	// Until the real mux is wired, /api/health answers 200 "starting" and
-	// everything else 503.
+	// Until the real mux is wired, health/readiness answer 503 "starting".
+	// The container stays alive, but no updater can mistake a migration for a
+	// successfully booted Core.
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
@@ -179,6 +180,32 @@ func main() {
 			slog.Error("http server", "err", err)
 		}
 	}()
+
+	// Core and updater are one versioned control plane. Check this before
+	// state.Open: a legacy updater can accept the request while replacing Core
+	// only, and the new Core must not run migrations or become ready in that
+	// mixed state. Keep the boot listener alive so an updater transaction can
+	// finish replacing its sidecar; the real mux is swapped in only after the
+	// exact release pair is present.
+	if envBool("FTW_SELFUPDATE_ENABLED") && Version != "dev" {
+		socketPath := envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock")
+		var lastCompatibilityLog time.Time
+		for {
+			probeCtx, cancelProbe := context.WithTimeout(context.Background(), 5*time.Second)
+			err := selfupdate.RequireUpdaterRelease(probeCtx, socketPath, Version)
+			cancelProbe()
+			if err == nil {
+				break
+			}
+			if time.Since(lastCompatibilityLog) >= 30*time.Second {
+				slog.Warn("Core readiness waiting for matching updater",
+					"core_version", Version, "socket", socketPath, "err", err)
+				lastCompatibilityLog = time.Now()
+			}
+			time.Sleep(2 * time.Second)
+		}
+		slog.Info("Core/updater release pair verified", "version", Version)
+	}
 
 	st, err := state.Open(statePath)
 	if err != nil {
@@ -1646,8 +1673,10 @@ func main() {
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
 			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			UpdaterVersion: Version,
+			PairedImage:    "srcfl/ftw-updater", PairManifestAsset: "ftw-control-plane.json",
+			SocketPath: envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath: envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 			// Publish events.UpdateAvailable when a new release lands so
 			// the notifications service (or any other subscriber) can act
 			// without polling the checker directly.
@@ -1670,6 +1699,7 @@ func main() {
 			Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
 			ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
 			CurrentVersion: optimizerCurrent,
+			UpdaterVersion: Version,
 			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
 			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 		}, st)

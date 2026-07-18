@@ -102,6 +102,14 @@ func startFakeSidecar(t *testing.T, statusCode int) string {
 		t.Fatalf("listen fake sidecar: %v", err)
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/status" {
+			_ = json.NewEncoder(w).Encode(selfupdate.UpdaterRuntimeInfo{
+				ProtocolVersion: selfupdate.UpdaterProtocolVersion,
+				Version:         "v1.4.0",
+				Capabilities:    []string{selfupdate.ControlPlanePairCapability},
+			})
+			return
+		}
 		w.WriteHeader(statusCode)
 		_, _ = w.Write([]byte(`{"status":"stub"}`))
 	})}

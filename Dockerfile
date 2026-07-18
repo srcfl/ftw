@@ -90,8 +90,11 @@ EXPOSE 8080
 # Without this the binary fails fast with "open state … unable to
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
-HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
-  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:8080/api/health || exit 1
+# Readiness, not the boot-phase health body, is the commit gate for Core.
+# State integrity checks and migrations can legitimately take close to 30 min
+# on large SD-card databases, so keep Docker in "starting" for that window.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30m --retries=12 \
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:8080/api/status || exit 1
 
 ENTRYPOINT ["/app/ftw"]
 CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]

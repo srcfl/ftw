@@ -39,7 +39,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -97,6 +96,11 @@ type Config struct {
 	// Image overrides the registry path if it differs from Repo (rare —
 	// normally the GH repo and the GHCR image share a name). Defaults to Repo.
 	Image string
+	// PairedImage and PairManifestAsset enable fail-closed Core/updater
+	// resolution. The manifest is attached to the GitHub release and pins both
+	// immutable GHCR tag digests plus their common source revision.
+	PairedImage       string
+	PairManifestAsset string
 	// ReleaseTagPrefix selects component-specific GitHub Releases while the
 	// registry continues to use plain vX.Y.Z tags. Example: "optimizer-"
 	// resolves GitHub tag optimizer-v1.2.0 to GHCR tag v1.2.0.
@@ -112,6 +116,10 @@ type Config struct {
 
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
+	// UpdaterVersion is the Core release the sidecar must report before it is
+	// actionable. Optimizer checkers set this to the running Core version rather
+	// than their independently negotiated optimizer version.
+	UpdaterVersion string
 	// CheckInterval is the probe cadence. 0 = 1 h.
 	CheckInterval time.Duration
 	// SocketPath is where the sidecar listens. Empty disables Trigger.
@@ -175,7 +183,7 @@ const MaxReleaseBodyBytes = 16 * 1024
 // through unchanged. The main service may also write early states before
 // handing off to the sidecar, e.g. starting/snapshotting.
 type UpdateStatus struct {
-	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"` // idle, starting, snapshotting, pulling, transacting, restarting, restoring, done, failed
 	Action          string            `json:"action,omitempty"`
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
@@ -311,11 +319,19 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
 	if targetTag != "" {
-		ok, err := rp.hasTag(ctx, targetTag)
-		if err != nil {
-			return c.recordErr(fmt.Errorf("registry probe: %w", err))
+		if c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
+			ok, err := c.verifyControlPlaneRelease(ctx, rel, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("control-plane release: %w", err))
+			}
+			deployable = ok
+		} else {
+			ok, err := rp.hasTag(ctx, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("registry probe: %w", err))
+			}
+			deployable = ok
 		}
-		deployable = ok
 	}
 
 	c.mu.Lock()
@@ -395,6 +411,10 @@ type ghRelease struct {
 	PublishedAt time.Time `json:"published_at"`
 	Draft       bool      `json:"draft"`
 	Prerelease  bool      `json:"prerelease"`
+	Assets      []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
 }
 
 // fetchLatestRelease asks GitHub for the most-recently-published
@@ -507,10 +527,10 @@ func (c *Checker) releaseTargetTag(releaseTag string) string {
 // periodic Check.
 func (c *Checker) Info() Info {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.reloadSkipLocked()
 	info := c.info
-	info.SidecarReady = c.sidecarReadyLocked()
+	c.mu.Unlock()
+	info.SidecarReady = c.sidecarReady()
 	return info
 }
 
@@ -557,19 +577,13 @@ func (c *Checker) SetChannel(channel Channel) error {
 	return nil
 }
 
-// sidecarReadyLocked reports whether the updater socket is present as an
-// actual Unix socket. An empty SocketPath means the feature was never
-// configured for this deploy — docker-compose sets it, native installs
-// typically don't.
-func (c *Checker) sidecarReadyLocked() bool {
-	if c.cfg.SocketPath == "" {
-		return false
-	}
-	fi, err := os.Stat(c.cfg.SocketPath)
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeSocket != 0
+// sidecarReady requires the explicit paired-control-plane handshake. This is
+// intentionally stronger than a socket stat because the v1.3.1 updater uses
+// the same socket and accepts update requests while replacing Core only.
+func (c *Checker) sidecarReady() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), updaterCompatibilityHTTPTimeout)
+	defer cancel()
+	return RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.UpdaterVersion) == nil
 }
 
 func (c *Checker) reloadSkipLocked() {
@@ -684,15 +698,10 @@ func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files 
 // endpoint. Shared by Trigger and TriggerRollback so the HTTP client
 // config (socket dialer + timeout) only lives in one place.
 func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
-	cli := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", c.cfg.SocketPath)
-			},
-		},
+	if err := RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.UpdaterVersion); err != nil {
+		return err
 	}
+	cli := updaterHTTPClient(c.cfg.SocketPath)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://unix/update", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := cli.Do(req)
@@ -785,7 +794,7 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 
 func isInFlightState(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "transacting", "restarting", "restoring":
 		return true
 	default:
 		return false
