@@ -125,6 +125,12 @@ case "$command" in
   info)
     exit 0
     ;;
+  ps)
+    if [ -n "${FAKE_PROJECT_NAME:-}" ]; then
+      echo generated-container-id
+    fi
+    exit 0
+    ;;
   container)
     [ "${1:-}" = inspect ] || exit 1
     [ -f "$state/${2:-}" ]
@@ -134,11 +140,31 @@ case "$command" in
     shift || true
     format="$*"
     case "$format" in
+      *'{{.Image}}'*)
+        case "$subject" in
+          ftw-id) echo 'sha256:old-core' ;;
+          ftw-updater-id) echo 'sha256:old-updater' ;;
+          ftw-optimizer-id) echo 'sha256:old-optimizer' ;;
+          *) exit 1 ;;
+        esac
+        ;;
+      *project.working_dir*)
+        echo "${FAKE_INSTALL_DIR:-<no value>}"
+        ;;
+      *com.docker.compose.project*)
+        echo "${FAKE_PROJECT_NAME:-<no value>}"
+        ;;
       *Config.Image*)
         case "$subject" in
-          ftw-id) echo 'ghcr.io/srcfl/ftw:latest' ;;
-          ftw-updater-id) echo 'ghcr.io/srcfl/ftw-updater:latest' ;;
-          ftw-optimizer-id) echo 'ghcr.io/srcfl/ftw-optimizer:latest' ;;
+          ftw-id)
+            if [ -f "$state/canonical-ftw" ]; then echo 'ghcr.io/srcfl/ftw:latest'; else echo 'example.invalid/old-core:latest'; fi
+            ;;
+          ftw-updater-id)
+            if [ -f "$state/canonical-ftw-updater" ]; then echo 'ghcr.io/srcfl/ftw-updater:latest'; else echo 'example.invalid/old-updater:latest'; fi
+            ;;
+          ftw-optimizer-id)
+            if [ -f "$state/canonical-ftw-optimizer" ]; then echo 'ghcr.io/srcfl/ftw-optimizer:latest'; else echo 'example.invalid/old-optimizer:latest'; fi
+            ;;
           *) exit 1 ;;
         esac
         ;;
@@ -156,6 +182,9 @@ case "$command" in
     ;;
   compose)
     while [ "${1:-}" = --project-name ] || [ "${1:-}" = -f ]; do
+      if [ "${1:-}" = --project-name ]; then
+        touch "$state/project-$2"
+      fi
       shift 2
     done
     subcommand="${1:-}"
@@ -169,8 +198,8 @@ case "$command" in
           --services)
             echo ftw
             echo ftw-updater
-            if [ -f docker-compose.override.yml ] && \
-              grep -q '^  ftw-optimizer:' docker-compose.override.yml; then
+            if grep -q '^  ftw-optimizer:' docker-compose.yml || \
+              { [ -f docker-compose.override.yml ] && grep -q '^  ftw-optimizer:' docker-compose.override.yml; }; then
               echo ftw-optimizer
             fi
             ;;
@@ -198,7 +227,7 @@ case "$command" in
           touch "$state/failure-consumed"
           exit 1
         fi
-        touch "$state/$service" "$state/$service-id"
+        touch "$state/$service" "$state/$service-id" "$state/canonical-$service"
         ;;
       ps)
         service="${*: -1}"
@@ -214,6 +243,10 @@ case "$command" in
         exit 1
         ;;
     esac
+    ;;
+  image)
+    [ "${1:-}" = tag ] || exit 1
+    printf '%s %s\n' "${2:-}" "${3:-}" >>"$state/image-tags"
     ;;
   *)
     exit 1
@@ -235,6 +268,19 @@ grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
 test -f "$TMP/migrate/state/ftw-updater"
 test -f "$TMP/migrate/state/ftw-optimizer"
+test -f "$TMP/migrate"/.ftw-migration-backup-*/previous-images.tsv
+
+# Generated container names still carry Compose labels. The migration must
+# reuse their explicit project name instead of creating a parallel default.
+mkdir -p "$TMP/project/data" "$TMP/project/state"
+cp "$TMP/migrate/docker-compose.yml" "$TMP/project/docker-compose.yml"
+PATH="$TMP/migrate/bin:$PATH" \
+FAKE_STATE_DIR="$TMP/project/state" \
+FAKE_DATA_DIR="$TMP/project/data" \
+FAKE_PROJECT_NAME=custom-energy \
+FAKE_INSTALL_DIR="$TMP/project" \
+bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/project"
+test -e "$TMP/project/state/project-custom-energy"
 
 if [ -n "$REAL_DOCKER" ]; then
   "$REAL_DOCKER" compose \
@@ -267,5 +313,39 @@ test ! -e "$TMP/rollback/docker-compose.override.yml"
 grep -q 'example.invalid/old-core:latest' "$TMP/rollback/docker-compose.yml"
 grep -q 'example.invalid/old-updater:latest' "$TMP/rollback/docker-compose.yml"
 test ! -e "$TMP/rollback/state/ftw-optimizer"
+
+# An already-modular legacy layout must update the optimizer too, and a later
+# failure must recreate its previous image alongside core + updater.
+mkdir -p "$TMP/rollback-existing/data" "$TMP/rollback-existing/state"
+cat >"$TMP/rollback-existing/docker-compose.yml" <<'YAML'
+services:
+  ftw:
+    image: example.invalid/old-core:latest
+    volumes:
+      - ./data:/app/data
+  ftw-updater:
+    image: example.invalid/old-updater:latest
+  ftw-optimizer:
+    image: example.invalid/old-optimizer:latest
+YAML
+touch \
+  "$TMP/rollback-existing/state/ftw" \
+  "$TMP/rollback-existing/state/ftw-updater" \
+  "$TMP/rollback-existing/state/ftw-optimizer"
+
+if PATH="$TMP/migrate/bin:$PATH" \
+  FAKE_STATE_DIR="$TMP/rollback-existing/state" \
+  FAKE_DATA_DIR="$TMP/rollback-existing/data" \
+  FAKE_FAIL_SERVICE=ftw \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" --dir "$TMP/rollback-existing" \
+  >/dev/null 2>&1; then
+  echo "expected an existing modular migration failure to roll back" >&2
+  exit 1
+fi
+grep -q 'example.invalid/old-optimizer:latest' "$TMP/rollback-existing/docker-compose.yml"
+test -e "$TMP/rollback-existing/state/ftw-optimizer"
+grep -q '^sha256:old-core example.invalid/old-core:latest$' "$TMP/rollback-existing/state/image-tags"
+grep -q '^sha256:old-updater example.invalid/old-updater:latest$' "$TMP/rollback-existing/state/image-tags"
+grep -q '^sha256:old-optimizer example.invalid/old-optimizer:latest$' "$TMP/rollback-existing/state/image-tags"
 
 echo "modular Compose migration tests passed"

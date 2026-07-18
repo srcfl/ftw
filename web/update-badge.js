@@ -417,7 +417,7 @@
       // ~200 MB). Default unchecked (safety first).
       const snapshotHint = hasUpdate
         ? `<div class="snapshot-hint">
-             <p>🛟 A snapshot of your data and config is saved before each update so you can roll back if needed.</p>
+             <p>🛟 A complete compressed backup of your database and config is saved before each update so you can roll back without dropping history.</p>
              <label class="snapshot-skip">
                <input type="checkbox" data-action="toggle-skip-snapshot" ${this._skipSnapshot ? "checked" : ""}>
                Skip backup for this update
@@ -497,6 +497,7 @@
       const range = (s.from_version || "?") + " → " + (s.to_version || "?");
       const sizeMB = s.size_bytes ? (s.size_bytes / (1024 * 1024)).toFixed(1) + " MB" : "?";
       const deleting = this._deletingSnapshot === s.id;
+      const restorable = s.restorable === true;
       // Rollback target for a *pre-rollback* safety snapshot takes the
       // operator forward again — the 'from' version is what was running
       // when we captured it. For a routine pre-update snapshot the 'from'
@@ -508,7 +509,9 @@
         : `<button class="btn btn-ghost btn-small" data-action="delete-snapshot" data-id="${escapeHTML(s.id)}" title="Delete this backup">Delete</button>`;
       const rollbackBtn = deleting
         ? ""
-        : `<button class="btn btn-small" data-action="rollback-snapshot" data-id="${escapeHTML(s.id)}" data-from="${escapeHTML(s.from_version || "")}" title="Restore this backup (service will restart)">Roll back</button>`;
+        : restorable
+        ? `<button class="btn btn-small" data-action="rollback-snapshot" data-id="${escapeHTML(s.id)}" data-from="${escapeHTML(s.from_version || "")}" title="Restore this complete backup (service will restart)">Roll back</button>`
+        : `<span class="dim" title="Older backups omitted history and are blocked to prevent data loss">legacy backup — restore disabled</span>`;
       return `<tr>
                 <td class="nowrap">${escapeHTML(when)}</td>
                 <td class="mono">${escapeHTML(range)}</td>

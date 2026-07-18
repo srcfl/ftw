@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,19 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		runner:          runner.run,
 		healthCheck:     func(context.Context, string) error { return nil },
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
+		containerID:     func(context.Context, string) (string, error) { return "ftw-container", nil },
+		chownFile:       func(string, int, int) error { return nil },
+	}
+	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
+		_, err := os.Stat(filepath.Join(dir, "data", "snapshots", snapshotID, file))
+		return err
+	}
+	s.stageSnapshotFile = func(_ context.Context, _ string, snapshotID, file, dst string) error {
+		data, err := os.ReadFile(filepath.Join(dir, "data", "snapshots", snapshotID, file))
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o600)
 	}
 	writeCompose(t, s.composeFile, `services:
   ftw:
@@ -468,16 +482,21 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	composeDir := filepath.Dir(s.composeFile)
 	snapID := "2026-04-20T10-00-00Z_0.30.0_to_0.31.0"
 	snapDir := filepath.Join(composeDir, "data", "snapshots", snapID)
+	safetyID := "2026-04-20T10-05-00Z_pre-rollback"
+	safetyDir := filepath.Join(composeDir, "data", "snapshots", safetyID)
 	if err := os.MkdirAll(snapDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"state.db", "config.yaml"} {
-		if err := os.WriteFile(filepath.Join(snapDir, f), []byte("fake"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(safetyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGzipFile(t, filepath.Join(snapDir, "state.db.gz"), []byte("target database"))
+	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("safety database"))
+	if err := os.WriteFile(filepath.Join(snapDir, "config.yaml"), []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db","config.yaml"]}`
+	body := `{"action":"rollback","snapshot":"` + snapID + `","files":["state.db.gz","config.yaml"],"safety_snapshot":"` + safetyID + `","safety_files":["state.db.gz"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
@@ -490,35 +509,25 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 	}
 
 	calls := runner.snapshot()
-	// Expected sequence: preserve image → compose stop → cp state.db →
-	// cp config.yaml → compose up → remove the temporary tag.
-	if len(calls) != 6 {
-		t.Fatalf("want 6 docker calls, got %d: %v", len(calls), calls)
+	// Expected sequence: stop exact container → archive-copy state/config →
+	// clear stale SQLite WAL sidecars → start the same container.
+	if len(calls) != 5 {
+		t.Fatalf("want 5 docker calls, got %d: %v", len(calls), calls)
 	}
-	if got := strings.Join(calls[0], " "); !strings.Contains(got, "image tag sha256:current") || !strings.Contains(got, "ftw-state-rollback-") {
-		t.Errorf("first call must preserve the running image: %v", calls[0])
-	}
-	if !strings.Contains(strings.Join(calls[1], " "), "stop") {
-		t.Errorf("second call must be compose stop: %v", calls[1])
+	if got := strings.Join(calls[0], " "); got != "stop --time 30 ftw-container" {
+		t.Errorf("first call must stop the exact running container: %v", calls[0])
 	}
 	for i, f := range []string{"state.db", "config.yaml"} {
-		joined := strings.Join(calls[i+2], " ")
-		if !strings.HasPrefix(joined, "cp ") || !strings.Contains(joined, f) {
-			t.Errorf("call %d should be docker cp for %s: %v", i+2, f, calls[i+2])
-		}
-		if !strings.Contains(joined, snapID) {
-			t.Errorf("call %d should reference snapshot id %s: %v", i+2, snapID, calls[i+2])
+		joined := strings.Join(calls[i+1], " ")
+		if !strings.HasPrefix(joined, "cp -a ") || !strings.Contains(joined, "ftw-container:/app/data/"+f) {
+			t.Errorf("call %d should archive-copy %s: %v", i+1, f, calls[i+1])
 		}
 	}
-	up := strings.Join(calls[4], " ")
-	if !strings.Contains(up, "up -d") || !strings.Contains(up, "--force-recreate") {
-		t.Errorf("fifth call must be compose up -d --force-recreate: %v", calls[4])
+	if got := strings.Join(calls[3], " "); !strings.Contains(got, "--volumes-from ftw-container") || !strings.Contains(got, "state.db-wal") {
+		t.Errorf("fourth call must clear SQLite WAL files: %v", calls[3])
 	}
-	if env := runner.envSnapshot()[4]; len(env) != 1 || !strings.HasPrefix(env[0], "FTW_IMAGE_TAG=ftw-state-rollback-") {
-		t.Errorf("rollback recreate must pin preserved image, env=%v", env)
-	}
-	if got := strings.Join(calls[5], " "); !strings.Contains(got, "image rm") || !strings.Contains(got, "ftw-state-rollback-") {
-		t.Errorf("final call must remove the temporary image tag: %v", calls[5])
+	if got := strings.Join(calls[4], " "); got != "start ftw-container" {
+		t.Errorf("final call must start the same container: %v", calls[4])
 	}
 }
 
@@ -527,7 +536,7 @@ func TestHandleUpdate_RollbackRestoresFiles(t *testing.T) {
 // files to restore.
 func TestHandleUpdate_RollbackMissingSnapshot(t *testing.T) {
 	s, runner := newTestServer(t)
-	body := `{"action":"rollback","snapshot":"nope","files":["state.db"]}`
+	body := `{"action":"rollback","snapshot":"nope","files":["state.db.gz"],"safety_snapshot":"safety","safety_files":["state.db.gz"]}`
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
@@ -535,11 +544,68 @@ func TestHandleUpdate_RollbackMissingSnapshot(t *testing.T) {
 		t.Fatalf("handler should 202 and fail async, got %d", rr.Code)
 	}
 	st := waitForState(t, s, "failed")
-	if !strings.Contains(st.Message, "snapshot not readable") {
+	if !strings.Contains(st.Message, "snapshot file") || !strings.Contains(st.Message, "not readable") {
 		t.Errorf("failure should mention missing snapshot: %+v", st)
 	}
 	if len(runner.snapshot()) != 0 {
 		t.Errorf("no docker calls should fire when snapshot is missing, got: %v", runner.snapshot())
+	}
+}
+
+func TestHandleUpdate_RollbackHealthFailureRestoresSafetyBackup(t *testing.T) {
+	s, runner := newTestServer(t)
+	checks := 0
+	var stagedMu sync.Mutex
+	var staged []string
+	originalStage := s.stageSnapshotFile
+	s.stageSnapshotFile = func(ctx context.Context, containerID, snapshotID, file, dst string) error {
+		stagedMu.Lock()
+		staged = append(staged, snapshotID+"/"+file)
+		stagedMu.Unlock()
+		return originalStage(ctx, containerID, snapshotID, file, dst)
+	}
+	s.healthCheck = func(context.Context, string) error {
+		checks++
+		if checks == 1 {
+			return errors.New("restored database did not boot")
+		}
+		return nil
+	}
+	root := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots")
+	for _, id := range []string{"target", "safety"} {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeGzipFile(t, filepath.Join(dir, "state.db.gz"), []byte(id+" database"))
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(id), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := `{"action":"rollback","snapshot":"target","files":["state.db.gz","config.yaml"],"safety_snapshot":"safety","safety_files":["state.db.gz","config.yaml"]}`
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("rollback = %d: %s", rr.Code, rr.Body.String())
+	}
+	state := waitForState(t, s, "failed")
+	if !strings.Contains(state.Message, "pre-rollback state restored and service recovered") {
+		t.Fatalf("safety recovery status = %+v", state)
+	}
+	calls := runner.snapshot()
+	if len(calls) != 10 {
+		t.Fatalf("target + safety recovery calls = %d: %v", len(calls), calls)
+	}
+	stagedMu.Lock()
+	stagedFiles := append([]string{}, staged...)
+	stagedMu.Unlock()
+	wantStaged := []string{"target/state.db.gz", "target/config.yaml", "safety/state.db.gz", "safety/config.yaml"}
+	if strings.Join(stagedFiles, ",") != strings.Join(wantStaged, ",") {
+		t.Fatalf("snapshot staging order = %v, want %v", stagedFiles, wantStaged)
+	}
+	if checks != 2 {
+		t.Fatalf("health checks = %d, want target + recovered safety", checks)
 	}
 }
 
@@ -548,13 +614,31 @@ func TestHandleUpdate_RollbackMissingSnapshot(t *testing.T) {
 func TestHandleUpdate_RollbackRejectsTraversal(t *testing.T) {
 	s, _ := newTestServer(t)
 	for _, evil := range []string{"", "..", "../foo", "a/b"} {
-		body := `{"action":"rollback","snapshot":"` + evil + `"}`
+		body := `{"action":"rollback","snapshot":"` + evil + `","files":["state.db.gz"],"safety_snapshot":"safety","safety_files":["state.db.gz"]}`
 		req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(body))
 		rr := httptest.NewRecorder()
 		s.handleUpdate(rr, req)
 		if rr.Code != 400 {
 			t.Errorf("snapshot %q: want 400, got %d", evil, rr.Code)
 		}
+	}
+}
+
+func writeGzipFile(t *testing.T, path string, body []byte) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := gzip.NewWriter(f)
+	if _, err := zw.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -702,9 +786,33 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 
 func TestRecoverCrashedState(t *testing.T) {
 	s, _ := newTestServer(t)
-	s.writeState(State{State: "pulling", UpdatedAt: time.Now().Add(-10 * time.Minute)})
+	s.writeState(State{State: "pulling", UpdatedAt: time.Now()})
 	s.recoverCrashedState()
 	if st := s.readState(); st.State != "failed" {
 		t.Errorf("recovery should have flipped state to failed, got %q", st.State)
+	}
+}
+
+func TestRecoverCrashedRollbackRestoresSafetyBackup(t *testing.T) {
+	s, runner := newTestServer(t)
+	safetyDir := filepath.Join(filepath.Dir(s.composeFile), "data", "snapshots", "safety")
+	if err := os.MkdirAll(safetyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeGzipFile(t, filepath.Join(safetyDir, "state.db.gz"), []byte("current state"))
+	s.writeState(State{
+		State: "restoring", Action: "rollback", Snapshot: "target",
+		SafetySnapshot: "safety", SafetyFiles: []string{"state.db.gz"},
+		StartedAt: time.Now().Add(-time.Minute), UpdatedAt: time.Now(),
+	})
+
+	s.recoverCrashedState()
+	state := s.readState()
+	if state.State != "failed" || !strings.Contains(state.Message, "pre-rollback state restored and service recovered") {
+		t.Fatalf("crashed rollback recovery = %+v", state)
+	}
+	calls := runner.snapshot()
+	if len(calls) != 4 || strings.Join(calls[0], " ") != "stop --time 30 ftw-container" || strings.Join(calls[3], " ") != "start ftw-container" {
+		t.Fatalf("crashed rollback recovery calls = %v", calls)
 	}
 }

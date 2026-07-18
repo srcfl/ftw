@@ -282,11 +282,18 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "snapshot has no files recorded; cannot restore safely"})
 		return
 	}
+	if !snapshotMetaRestorable(meta) {
+		writeJSON(w, 409, map[string]string{
+			"error": "this legacy snapshot is incomplete and cannot be restored without losing history; create a new backup first",
+		})
+		return
+	}
 
 	// Safety-net snapshot before we swap files. If the rolled-back
 	// state turns out to be wrong, this is the forward-rollback point.
 	info := s.deps.SelfUpdate.Info()
 	safetyID := ""
+	var safetyFiles []string
 	if safety, serr := s.createPreUpdateSnapshot("pre-rollback", info.Current, body.SnapshotID); serr != nil {
 		writeJSON(w, 500, map[string]string{
 			"error": "failed to capture pre-rollback safety snapshot: " + serr.Error(),
@@ -295,9 +302,15 @@ func (s *Server) handleVersionRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	} else {
 		safetyID = safety.ID
+		safetyMeta, metaErr := readSnapshotMeta(safety.Path)
+		if metaErr != nil {
+			writeJSON(w, 500, map[string]string{"error": "failed to read pre-rollback safety snapshot: " + metaErr.Error()})
+			return
+		}
+		safetyFiles = safetyMeta.Files
 	}
 
-	if err := s.deps.SelfUpdate.TriggerRollback(r.Context(), body.SnapshotID, meta.Files); err != nil {
+	if err := s.deps.SelfUpdate.TriggerRollback(r.Context(), body.SnapshotID, meta.Files, safetyID, safetyFiles); err != nil {
 		writeJSON(w, 502, map[string]string{"error": err.Error()})
 		return
 	}

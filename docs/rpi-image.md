@@ -21,6 +21,13 @@ credentials and Wi-Fi before writing the card.
 6. Write the card, insert it and power on the Pi.
 7. After first-boot provisioning, open `http://ftw.local/` on the same network.
 
+`rpi-installer` is the permanent repository URL and is the recommended value
+to save in Imager. Stable application releases also mirror this small file, so
+links such as
+`https://github.com/srcfl/ftw/releases/download/v1.3.0/os_list.json` remain
+valid when copied from a version release. Both forms point at the same current
+installer image; the image pulls the current stable containers on first boot.
+
 Use a unique SSH password or key. The dashboard has no public-internet
 authentication boundary and should remain on a trusted LAN or operator-managed
 private network.

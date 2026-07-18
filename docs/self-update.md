@@ -48,11 +48,14 @@ core ── update request/status ── Unix volume ── updater ── Docke
   └── state/config snapshot                         └── pull immutable tag
 ```
 
-Before update or rollback, core creates a consistent bounded snapshot of state
-and configuration. Status is written atomically to the shared volume and
-survives recreation of core. Optimizer-only updates recreate and health-check
-the optimizer without replacing core; failure restores the previous optimizer
-image.
+Before update or rollback, core creates a complete, consistent, compressed
+backup of `state.db` plus configuration. Backups created by older releases that
+omitted history are shown but cannot be restored. The sidecar preserves file
+ownership, removes stale SQLite WAL files, and health-checks a restored service;
+on failure it automatically puts back the mandatory pre-rollback safety backup.
+Status is written atomically to the shared volume and survives recreation of
+core. Optimizer-only updates recreate and health-check the optimizer without
+replacing core; failure restores the previous optimizer image.
 
 The updater accepts only known components and `vX.Y.Z` or
 `vX.Y.Z-beta.N` targets.

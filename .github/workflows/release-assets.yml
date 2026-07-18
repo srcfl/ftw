@@ -3,6 +3,7 @@ name: release-assets
 # Build + publish the artefacts that accompany a tagged release:
 #   - cross-platform main binaries (linux amd64/arm64, windows amd64)
 #   - docker images for core + updater + optimizer pushed to GHCR
+#   - a versioned os_list.json alias for Raspberry Pi Imager
 #   - Discord release announcement
 #
 # Triggered by `release.yml` via `gh workflow run release-assets.yml
@@ -173,6 +174,33 @@ jobs:
         # --clobber lets a workflow re-run replace a prior upload without
         # failing — useful when this workflow is re-dispatched manually.
         run: gh release upload "${TAG}" "${ASSET}" "${ASSET}.sha256" "${LEGACY_ASSET}" "${LEGACY_ASSET}.sha256" --clobber
+
+  imager-metadata:
+    name: attach Raspberry Pi Imager metadata
+    runs-on: ubuntu-latest
+    needs: meta
+    permissions:
+      contents: write
+    steps:
+      - name: Mirror permanent installer metadata onto the version release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p installer
+          gh release download rpi-installer \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern os_list.json \
+            --dir installer
+          jq -e '
+            .os_list | length == 1
+            and .[0].name == "FTW"
+            and (.[0].url | contains("/releases/download/rpi-installer/"))
+            and (.[0].extract_sha256 | test("^[0-9a-f]{64}$"))
+          ' installer/os_list.json >/dev/null
+          gh release upload "${TAG}" installer/os_list.json \
+            --repo "${GITHUB_REPOSITORY}" --clobber
 
   docker:
     name: docker build + push (${{ matrix.target }})

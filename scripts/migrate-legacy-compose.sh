@@ -56,6 +56,8 @@ if [ -n "$requested_dir" ]; then
   install_dir="$requested_dir"
 elif [ -f "$PWD/docker-compose.yml" ]; then
   install_dir="$PWD"
+elif [ -f "$HOME/ftw/docker-compose.yml" ] && [ -f "$HOME/forty-two-watts/docker-compose.yml" ]; then
+  die "both ~/ftw and ~/forty-two-watts contain installations; rerun with --dir PATH"
 elif [ -f "$HOME/ftw/docker-compose.yml" ]; then
   install_dir="$HOME/ftw"
 elif [ -f "$HOME/forty-two-watts/docker-compose.yml" ]; then
@@ -75,18 +77,39 @@ cd "$install_dir"
 # container. This covers deployments originally launched with
 # COMPOSE_PROJECT_NAME instead of the directory-derived default.
 compose_project=""
-for known_container in ftw forty-two-watts ftw-updater; do
-  if ! docker container inspect "$known_container" >/dev/null 2>&1; then
-    continue
-  fi
-  candidate_project="$(docker inspect "$known_container" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+remember_compose_project() {
+  candidate_project="$1"
   case "$candidate_project" in
-    ""|"<no value>") continue ;;
+    ""|"<no value>") return ;;
   esac
   if [ -n "$compose_project" ] && [ "$candidate_project" != "$compose_project" ]; then
     die "existing FTW containers belong to different Compose projects"
   fi
   compose_project="$candidate_project"
+}
+for known_container in ftw forty-two-watts ftw-updater; do
+  if ! docker container inspect "$known_container" >/dev/null 2>&1; then
+    continue
+  fi
+  candidate_project="$(docker inspect "$known_container" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+  remember_compose_project "$candidate_project"
+done
+
+# container_name is optional. Locate generated Compose container names by
+# their service + working-directory labels so a deployment started with an
+# exported COMPOSE_PROJECT_NAME cannot be duplicated under the directory
+# default during migration.
+for known_service in ftw forty-two-watts ftw-updater; do
+  while IFS= read -r container_id; do
+    [ -n "$container_id" ] || continue
+    candidate_workdir="$(docker inspect "$container_id" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}')"
+    if [ -d "$candidate_workdir" ]; then
+      candidate_workdir="$(cd "$candidate_workdir" && pwd -P)"
+    fi
+    [ "$candidate_workdir" = "$install_dir" ] || continue
+    candidate_project="$(docker inspect "$container_id" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+    remember_compose_project "$candidate_project"
+  done < <(docker ps -aq --filter "label=com.docker.compose.service=$known_service")
 done
 
 compose_command=(docker compose)
@@ -123,6 +146,22 @@ optimizer_container_changed=false
 modular_override_created=""
 modular_tmp=""
 optimizer_id=""
+previous_main_image_id=""
+previous_main_image_ref=""
+previous_updater_image_id=""
+previous_updater_image_ref=""
+previous_optimizer_image_id=""
+previous_optimizer_image_ref=""
+
+restore_image_reference() {
+  local image_id="$1"
+  local image_ref="$2"
+  [ -n "$image_id" ] && [ -n "$image_ref" ] || return 0
+  case "$image_ref" in
+    "<no value>"|sha256:*|*@sha256:*) return 0 ;;
+  esac
+  docker image tag "$image_id" "$image_ref"
+}
 
 restore_after_failure() {
   status=$?
@@ -160,6 +199,19 @@ restore_after_failure() {
     done
   fi
 
+  # A pull can move a mutable tag such as :latest before any container is
+  # recreated. Put every previous immutable image back under its original
+  # reference before Compose restores the old service definitions.
+  if ! restore_image_reference "$previous_main_image_id" "$previous_main_image_ref"; then
+    restore_ok=false
+  fi
+  if ! restore_image_reference "$previous_updater_image_id" "$previous_updater_image_ref"; then
+    restore_ok=false
+  fi
+  if ! restore_image_reference "$previous_optimizer_image_id" "$previous_optimizer_image_ref"; then
+    restore_ok=false
+  fi
+
   if [ -n "$renamed_container" ]; then
     # Remove any replacement by Compose service identity as well as by exact
     # ID/name. A Compose file without container_name uses a generated name.
@@ -193,6 +245,11 @@ restore_after_failure() {
       restore_ok=false
     fi
   fi
+  if [ "$optimizer_container_changed" = true ] && [ "$optimizer_service_added" = false ]; then
+    if ! compose up -d --no-deps --force-recreate ftw-optimizer >/dev/null 2>&1; then
+      restore_ok=false
+    fi
+  fi
 
   if [ -n "$renamed_container" ]; then
     if ! docker container inspect "$main_service" >/dev/null 2>&1; then
@@ -210,10 +267,14 @@ restore_after_failure() {
     [ -z "$(compose ps -q --status running ftw-updater 2>/dev/null)" ]; then
     restore_ok=false
   fi
+  if [ "$optimizer_container_changed" = true ] && [ "$optimizer_service_added" = false ] && \
+    [ -z "$(compose ps -q --status running ftw-optimizer 2>/dev/null)" ]; then
+    restore_ok=false
+  fi
 
   rmdir "$lock_dir" 2>/dev/null || restore_ok=false
   if [ "$restore_ok" = true ]; then
-    printf '[FTW migration] Previous Compose files and container were restored. Data was not modified.\n' >&2
+    printf '[FTW migration] Previous deployment and image references were restored. Data was not modified.\n' >&2
   else
     printf '[FTW migration] ERROR: automatic rollback was incomplete. Compose backups remain in %s; data was not modified.\n' "${backup_dir:-<not-created>}" >&2
   fi
@@ -337,6 +398,33 @@ if [ "$optimizer_service_added" = true ]; then
   log "added modular optimizer override: $modular_override_created"
 fi
 
+capture_service_image() {
+  local service="$1"
+  local container_id=""
+  captured_image_id=""
+  captured_image_ref=""
+  container_id="$(compose ps -q --all "$service" | tail -n 1)"
+  [ -n "$container_id" ] || return 0
+  captured_image_id="$(docker inspect "$container_id" --format '{{.Image}}')"
+  captured_image_ref="$(docker inspect "$container_id" --format '{{.Config.Image}}')"
+}
+
+# Keep immutable rollback points before pull can move any mutable image tag.
+capture_service_image "$main_service"
+previous_main_image_id="$captured_image_id"
+previous_main_image_ref="$captured_image_ref"
+capture_service_image ftw-updater
+previous_updater_image_id="$captured_image_id"
+previous_updater_image_ref="$captured_image_ref"
+capture_service_image ftw-optimizer
+previous_optimizer_image_id="$captured_image_id"
+previous_optimizer_image_ref="$captured_image_ref"
+printf '%s\t%s\t%s\n' \
+  "$main_service" "$previous_main_image_id" "$previous_main_image_ref" \
+  ftw-updater "$previous_updater_image_id" "$previous_updater_image_ref" \
+  ftw-optimizer "$previous_optimizer_image_id" "$previous_optimizer_image_ref" \
+  >"$backup_dir/previous-images.tsv"
+
 rewrite_service_image() {
   file="$1"
   service="$2"
@@ -444,10 +532,7 @@ case "$effective_optimizer_image" in
 esac
 
 log "pulling canonical Sourceful images"
-pull_services=("$main_service" ftw-updater)
-if [ "$optimizer_service_added" = true ]; then
-  pull_services+=(ftw-optimizer)
-fi
+pull_services=("$main_service" ftw-updater ftw-optimizer)
 compose pull "${pull_services[@]}"
 
 # Some developer installations replaced the Compose-managed main container
@@ -479,11 +564,9 @@ if docker container inspect "$main_service" >/dev/null 2>&1; then
   fi
 fi
 
-if [ "$optimizer_service_added" = true ]; then
-  log "starting ftw-optimizer from ghcr.io/srcfl/ftw-optimizer"
-  optimizer_container_changed=true
-  compose up -d --no-deps --force-recreate ftw-optimizer
-fi
+log "starting ftw-optimizer from ghcr.io/srcfl/ftw-optimizer"
+optimizer_container_changed=true
+compose up -d --no-deps --force-recreate ftw-optimizer
 
 log "starting $main_service from ghcr.io/srcfl/ftw"
 containers_changed=true

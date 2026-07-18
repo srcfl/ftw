@@ -7,10 +7,12 @@
 package state
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -219,18 +221,18 @@ func (s *Store) HealEvents() []HealEvent {
 }
 
 // SnapshotTo writes a self-contained, defragmented copy of the database
-// to dstPath using SQLite's VACUUM INTO. The source DB remains open for
-// the duration; readers and writers continue unimpeded. Used by the
-// self-update flow to capture state before pulling a new image, so
-// operators can roll back if the new version misbehaves.
+// to dstPath. The source DB remains open for the duration; readers and writers
+// continue unimpeded. This compact copy is for automatic corruption recovery;
+// it intentionally omits bulky time-series tables. User-visible update
+// rollback must use BackupToCompressed instead.
 //
 // dstPath must not exist — SQLite refuses to overwrite an existing file.
 // Safe to call while the Store is serving live traffic.
 // snapshotExcludedTables lists tables whose contents are intentionally
-// dropped from rollback snapshots. They're the bulky time-series stores
+// dropped from compact recovery snapshots. They're the bulky time-series stores
 // — recoverable from cold parquet roll-off, so excluding them from
-// snapshots drops disk + wall-clock cost without losing rollback safety
-// for the config / planner / model state that matters.
+// snapshots drops disk + wall-clock cost while retaining the config, planner,
+// identity, and model state needed for corruption recovery.
 //
 // 2026-05-25 measurement on a 1 GB state.db: VACUUM INTO took ~30 s
 // and produced a 1 GB snapshot. After this exclusion the same path
@@ -342,6 +344,71 @@ func (s *Store) SnapshotTo(dstPath string) error {
 			return fmt.Errorf("snapshot: copy table %s: %w", r.name, err)
 		}
 	}
+	return nil
+}
+
+// BackupToCompressed writes a complete, point-in-time copy of state.db as a
+// gzip stream. Unlike SnapshotTo, this is a user-data backup: it includes the
+// history and sample tables as well as configuration, models, and identities.
+// The self-update rollback flow must use this method; restoring the compact
+// recovery snapshot produced by SnapshotTo would intentionally erase recent
+// time-series data.
+//
+// SQLite cannot stream VACUUM INTO, so the complete raw copy is materialised
+// next to dstPath, compressed, synced, and removed. dstPath must not exist.
+func (s *Store) BackupToCompressed(dstPath string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("store: backup on nil store")
+	}
+	if _, err := os.Stat(dstPath); err == nil {
+		return fmt.Errorf("backup: destination already exists: %s", dstPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("backup: stat dst %s: %w", dstPath, err)
+	}
+
+	rawPath := dstPath + ".raw.tmp"
+	_ = os.Remove(rawPath)
+	defer os.Remove(rawPath)
+	escaped := strings.ReplaceAll(rawPath, "'", "''")
+	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		return fmt.Errorf("backup to %s: %w", rawPath, err)
+	}
+
+	in, err := os.Open(rawPath)
+	if err != nil {
+		return fmt.Errorf("open backup temp: %w", err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create compressed backup: %w", err)
+	}
+	committed := false
+	defer func() {
+		_ = out.Close()
+		if !committed {
+			_ = os.Remove(dstPath)
+		}
+	}()
+
+	zw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
+	if err != nil {
+		return fmt.Errorf("create gzip writer: %w", err)
+	}
+	if _, err := io.Copy(zw, in); err != nil {
+		_ = zw.Close()
+		return fmt.Errorf("compress backup: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("finish compressed backup: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync compressed backup: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close compressed backup: %w", err)
+	}
+	committed = true
 	return nil
 }
 

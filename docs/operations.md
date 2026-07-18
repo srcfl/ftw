@@ -60,6 +60,9 @@ devices are healthy.
 
 The in-app updater also retains bounded pre-update snapshots. These protect
 configuration and SQLite state; keep an external backup for host or disk loss.
+If an older rollback leaves the service offline, follow the Swedish
+[failed-rollback recovery procedure](recover-failed-rollback.sv.md) before
+changing ownership or deleting any SQLite sidecar files.
 
 ## Configuration
 

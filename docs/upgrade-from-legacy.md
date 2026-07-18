@@ -20,8 +20,9 @@ Anslut till maskinen med SSH eller öppna dess terminal. Kör sedan:
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh
 ```
 
-Klart. Skriptet hittar automatiskt en befintlig installation i den aktuella
-katalogen, `~/ftw` eller `~/forty-two-watts`.
+Skriptet använder installationen i den aktuella katalogen, eller letar i
+`~/ftw` och `~/forty-two-watts`. Om båda hemkatalogerna innehåller en
+installation stoppar det och kräver `--dir` i stället för att gissa.
 
 Om installationen ligger någon annanstans:
 
@@ -35,17 +36,22 @@ Skriptet:
 
 1. kontrollerar att exakt en huvudservice (`ftw` eller `forty-two-watts`),
    `ftw-updater` och den beständiga `/app/data`-mounten finns;
-2. säkerhetskopierar de aktiva Compose-filerna;
-3. ändrar endast service-image till `ghcr.io/srcfl/ftw` och
-   `ghcr.io/srcfl/ftw-updater` samt skapar en separat Compose-override för
-   `ghcr.io/srcfl/ftw-optimizer` när den saknas;
+2. säkerhetskopierar Compose-filerna och sparar oföränderliga image-ID:n för
+   befintliga berörda containrar innan någon tagg hämtas;
+3. behåller befintliga servicefält men ersätter image-referenserna med
+   `ghcr.io/srcfl/ftw`, `ghcr.io/srcfl/ftw-updater` och
+   `ghcr.io/srcfl/ftw-optimizer`; om optimizer-servicen saknas läggs dess
+   socket, volym och service i en separat Compose-override;
 4. validerar den sammanslagna Compose-konfigurationen och hämtar de officiella
    multi-arch-imagerna;
-5. startar optimizercontainern och återskapar övriga tjänster med samma katalog, Compose-projekt, servicenamn,
-   miljöinställningar, volymer och data-bind;
+5. återskapar huvud-, updater- och optimizercontainrarna med samma katalog,
+   Compose-projekt, servicenamn, befintliga miljöinställningar, volymer och
+   data-bind; andra tjänster lämnas orörda;
 6. kontrollerar att alla tre containrarna och FTW:s lokala health-endpoint svarar.
 
-Om något steg misslyckas återställs tidigare Compose-filer och container.
+Om något steg misslyckas återställs tidigare Compose-filer och image-referenser.
+Befintliga berörda containrar återskapas; en optimizer som skriptet nyss lade
+till tas bort igen.
 `data/` kopieras, flyttas eller raderas aldrig.
 
 ### Verifiera
@@ -71,8 +77,10 @@ behålls avsiktligt så att ingen parallell tom installation skapas.
 
 ### Om skriptet stoppar
 
-Skriptet stoppar hellre än att gissa om layouten är tvetydig, saknar updater,
-eller använder en oväntad data-mount. Dela då hela felmeddelandet i en
+Skriptet stoppar hellre än att gissa om layouten är tvetydig, båda
+standardkatalogerna finns, updater saknas, `/app/data` inte är en befintlig
+host-bind, eller en befintlig override måste slås ihop manuellt. Dela då hela
+felmeddelandet i en
 [GitHub issue](https://github.com/srcfl/ftw/issues) eller projektets Discord.
 Kör inte en ny installation ovanpå den gamla och radera inte `data/`.
 
@@ -88,8 +96,9 @@ Connect to the host over SSH or open its terminal, then run:
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh
 ```
 
-That is all. The script automatically finds an existing installation in the
-current directory, `~/ftw`, or `~/forty-two-watts`.
+The script uses an installation in the current directory, or searches
+`~/ftw` and `~/forty-two-watts`. If both home-directory locations contain an
+installation, it stops and requires `--dir` instead of guessing.
 
 For an installation stored elsewhere:
 
@@ -103,17 +112,22 @@ The script:
 
 1. verifies that exactly one main service (`ftw` or `forty-two-watts`),
    `ftw-updater`, and the persistent `/app/data` mount exist;
-2. backs up the active Compose files;
-3. changes only the service images to `ghcr.io/srcfl/ftw` and
-   `ghcr.io/srcfl/ftw-updater`, and creates a separate Compose override for
-   `ghcr.io/srcfl/ftw-optimizer` when it is missing;
+2. backs up the Compose files and records immutable image IDs for existing
+   affected containers before pulling any tag;
+3. preserves existing service fields while replacing the image references
+   with `ghcr.io/srcfl/ftw`, `ghcr.io/srcfl/ftw-updater`, and
+   `ghcr.io/srcfl/ftw-optimizer`; if the optimizer service is missing, its
+   socket, volume, and service are added in a separate Compose override;
 4. validates the merged Compose configuration and pulls the official
    multi-architecture images;
-5. starts the optimizer container and recreates the other services with the same directory, Compose project, service
-   name, environment, volumes, and data bind;
+5. recreates the main, updater, and optimizer containers with the same
+   directory, Compose project, service name, existing environment, volumes,
+   and data bind; unrelated services are left untouched;
 6. verifies all three containers and the local FTW health endpoint.
 
-If a step fails, the previous Compose files and container are restored.
+If a step fails, the previous Compose files and image references are restored.
+Existing affected containers are recreated; an optimizer just added by the
+script is removed again.
 `data/` is never copied, moved, or deleted.
 
 ### Verify
@@ -139,7 +153,9 @@ preserved so the migration cannot create a parallel empty installation.
 
 ### If the script stops
 
-The script stops instead of guessing when a layout is ambiguous, lacks the
-updater, or uses an unexpected data mount. Share the complete error in a
+The script stops instead of guessing when a layout is ambiguous, both default
+directories exist, the updater is missing, `/app/data` is not an existing host
+bind, or an existing override needs a manual merge. Share the complete error
+in a
 [GitHub issue](https://github.com/srcfl/ftw/issues) or the project Discord. Do
 not install a second copy over the old one, and do not delete `data/`.

@@ -13,11 +13,13 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -49,6 +51,9 @@ type State struct {
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
 	Snapshot        string            `json:"snapshot,omitempty"` // snapshot id (rollback only, #152)
+	Files           []string          `json:"files,omitempty"`
+	SafetySnapshot  string            `json:"safety_snapshot,omitempty"`
+	SafetyFiles     []string          `json:"safety_files,omitempty"`
 	StartedAt       time.Time         `json:"started_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 	Message         string            `json:"message,omitempty"`
@@ -98,8 +103,12 @@ type server struct {
 	// imageID captures the image backing the running service before an update.
 	// healthCheck waits for the recreated service to become healthy. Both are
 	// injectable so the rollback path is testable without Docker.
-	imageID     func(ctx context.Context, service string) (string, error)
-	healthCheck func(ctx context.Context, service string) error
+	imageID           func(ctx context.Context, service string) (string, error)
+	containerID       func(ctx context.Context, service string) (string, error)
+	healthCheck       func(ctx context.Context, service string) error
+	chownFile         func(string, int, int) error
+	checkSnapshotFile func(context.Context, string, string, string) error
+	stageSnapshotFile func(context.Context, string, string, string, string) error
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -248,7 +257,15 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
+	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
+	srv.chownFile = os.Chown
+	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
+		return srv.runner(ctx, nil, "exec", containerID, "test", "-f", "/app/data/snapshots/"+snapshotID+"/"+file)
+	}
+	srv.stageSnapshotFile = func(ctx context.Context, containerID, snapshotID, file, dst string) error {
+		return srv.runner(ctx, nil, "cp", "-a", containerID+":/app/data/snapshots/"+snapshotID+"/"+file, dst)
+	}
 	slog.Info("ftw-updater: main service selected", "service", selectedService)
 	if *skipPull {
 		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
@@ -289,11 +306,13 @@ func main() {
 
 func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action    string   `json:"action"`
-		Component string   `json:"component,omitempty"`
-		Target    string   `json:"target,omitempty"`
-		Snapshot  string   `json:"snapshot,omitempty"` // rollback-only (#152)
-		Files     []string `json:"files,omitempty"`    // rollback: basenames to restore
+		Action         string   `json:"action"`
+		Component      string   `json:"component,omitempty"`
+		Target         string   `json:"target,omitempty"`
+		Snapshot       string   `json:"snapshot,omitempty"` // rollback-only (#152)
+		Files          []string `json:"files,omitempty"`    // rollback: basenames to restore
+		SafetySnapshot string   `json:"safety_snapshot,omitempty"`
+		SafetyFiles    []string `json:"safety_files,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
@@ -333,17 +352,29 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "rollback requires snapshot id", 400)
 			return
 		}
+		if body.SafetySnapshot == "" {
+			http.Error(w, "rollback requires safety snapshot id", 400)
+			return
+		}
 		// Basename-only — never let a client traverse out of the
 		// conventional snapshots dir on the host.
-		if strings.ContainsAny(body.Snapshot, "/\\") || body.Snapshot == "." || body.Snapshot == ".." {
+		if !validSnapshotID(body.Snapshot) {
 			http.Error(w, "invalid snapshot id", 400)
 			return
 		}
-		for _, f := range body.Files {
-			if strings.ContainsAny(f, "/\\") || f == "." || f == ".." {
+		if !validSnapshotID(body.SafetySnapshot) {
+			http.Error(w, "invalid safety snapshot id", 400)
+			return
+		}
+		for _, f := range append(append([]string{}, body.Files...), body.SafetyFiles...) {
+			if !validRollbackFile(f) {
 				http.Error(w, "invalid file in rollback request", 400)
 				return
 			}
+		}
+		if !hasRollbackState(body.Files) || !hasRollbackState(body.SafetyFiles) {
+			http.Error(w, "rollback and safety snapshots must include state.db.gz", 400)
+			return
 		}
 	case "component_rollback":
 		if body.Component != "optimizer" {
@@ -368,7 +399,7 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer s.runMu.Unlock()
 		if body.Action == "rollback" {
-			s.runRollback(body.Snapshot, body.Files)
+			s.runRollback(body.Snapshot, body.Files, body.SafetySnapshot, body.SafetyFiles)
 		} else if body.Action == "component_rollback" {
 			s.runComponentRollback(body.Component)
 		} else {
@@ -760,132 +791,237 @@ func serviceImageFromComposeFile(path, service string) (string, bool, error) {
 // volume, keeping the image unchanged ("soft" rollback). The sequence is
 // intentionally simple:
 //
-//  1. compose stop <main-service> — main releases its SQLite handle so
+//  1. docker stop <container> — main releases its SQLite handle so
 //     the swap doesn't write into a live DB.
-//  2. docker cp each file from the snapshot dir on the host into the
-//     stopped container. Bind-mount semantics make this a direct write
-//     to the host-side data dir; no read-only/writable bind trick needed.
-//  3. compose up -d <main-service> — main comes up on the restored state.
+//  2. docker cp each file out of the stopped container's /app/data mount,
+//     prepare it in a private temporary file, then archive-copy it back to
+//     /app/data. Going through the container makes named volumes and custom
+//     host-bind locations behave exactly like the default ./data bind.
+//  3. docker start <container> — the same container/image comes up on the
+//     restored state.
 //
-// Paths: the snapshots live at <host_project_dir>/data/snapshots/<id>.
-// We compute host_project_dir from FTW_UPDATER_COMPOSE (an absolute host
-// path already, documented in docker-compose.yml). Operators who move
-// the data bind off the default `./data:/app/data` layout would need a
-// separate override; tracked as a follow-up if we hit that in practice.
-//
-// A failed file restore leaves state: "failed" with a descriptive message
-// and attempts compose up -d before returning so the main container is not
-// stranded offline. A failed start remains visible as a failed state.
-func (s *server) runRollback(snapshotID string, files []string) {
+// Any restore or health failure automatically restores the mandatory safety
+// backup captured immediately before rollback and starts the original state.
+func (s *server) runRollback(snapshotID string, files []string, safetySnapshotID string, safetyFiles []string) {
 	now := time.Now()
-	base := State{Action: "rollback", Snapshot: snapshotID, StartedAt: now}
-	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: now, Message: "stopping main service"})
+	base := State{
+		Action: "rollback", Snapshot: snapshotID, Files: append([]string{}, files...),
+		SafetySnapshot: safetySnapshotID, SafetyFiles: append([]string{}, safetyFiles...), StartedAt: now,
+	}
+	initial := base
+	initial.State = "restoring"
+	initial.UpdatedAt = now
+	initial.Message = "stopping main service"
+	s.writeState(initial)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
-	hostProjectDir := filepath.Dir(s.composeFile)
-	hostSnapDir := filepath.Join(hostProjectDir, "data", "snapshots", snapshotID)
-	if _, err := os.Stat(hostSnapDir); err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "snapshot not readable from sidecar: " + err.Error()})
-		return
-	}
-
-	// A state rollback must not silently change the application version. Pin
-	// the exact image object that backs the running container to a temporary
-	// tag, then use that tag for the recreate below. This also makes rollback
-	// safe for legacy Compose files that hard-code an obsolete local tag.
-	cleanup, err := s.prepareUpdateImagePin()
-	if err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error()})
-		return
-	}
-	defer cleanup()
-	if err := s.validateComposeImagePin(); err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose preflight failed: " + err.Error()})
-		return
-	}
 	if s.imageID == nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: image inspection unavailable"})
 		return
+	}
+	if s.containerID == nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot locate main container: container inspection unavailable"})
+		return
+	}
+	containerID, err := s.containerID(ctx, s.mainServiceName)
+	if err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot locate main container: " + err.Error()})
+		return
+	}
+	if s.checkSnapshotFile == nil || s.stageSnapshotFile == nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "snapshot access unavailable"})
+		return
+	}
+	preflight := []struct {
+		label string
+		id    string
+		files []string
+	}{{"snapshot", snapshotID, files}, {"safety snapshot", safetySnapshotID, safetyFiles}}
+	for _, backup := range preflight {
+		for _, file := range backup.files {
+			if err := s.checkSnapshotFile(ctx, containerID, backup.id, file); err != nil {
+				s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: backup.label + " file " + file + " not readable: " + err.Error()})
+				return
+			}
+		}
 	}
 	imageID, err := s.imageID(ctx, s.mainServiceName)
 	if err != nil {
 		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
 		return
 	}
-	image, ok, err := serviceImageFromComposeFiles(s.composeFiles(), s.mainServiceName)
-	if err != nil || !ok {
-		if err == nil {
-			err = fmt.Errorf("service %q has no image", s.mainServiceName)
-		}
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
-		return
-	}
-	repository, err := composeImageRepository(image)
-	if err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
-		return
-	}
-	rollbackTag := fmt.Sprintf("ftw-state-rollback-%d", time.Now().UnixNano())
-	rollbackRef := repository + ":" + rollbackTag
-	if err := s.runner(ctx, nil, "image", "tag", imageID, rollbackRef); err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "cannot preserve current image: " + err.Error()})
-		return
-	}
-	env := []string{"FTW_IMAGE_TAG=" + rollbackTag}
 
 	// 1. Stop the main service so SQLite isn't holding a file handle
 	// while we swap state.db under it.
-	stopArgs := s.composeArgs("stop", s.mainServiceName)
-	if err := s.runner(ctx, env, stopArgs...); err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose stop failed: " + err.Error()})
+	if err := s.runner(ctx, nil, "stop", "--time", "30", containerID); err != nil {
+		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "container stop failed: " + err.Error()})
 		return
 	}
 
-	// 2. Restore each requested file via docker cp. Defaults to the
-	// ones we always snapshot — state.db + config.yaml — when the
-	// caller left Files empty.
-	if len(files) == 0 {
-		files = []string{"state.db", "config.yaml"}
-	}
 	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "copying snapshot files"})
-	for _, f := range files {
-		src := filepath.Join(hostSnapDir, f)
-		if _, err := os.Stat(src); err != nil {
-			// Optional files (e.g. config.yaml when the operator
-			// runs with defaults and no YAML on disk) just get
-			// skipped — not a rollback failure.
-			slog.Info("rollback: source missing, skipping", "file", f, "err", err)
-			continue
-		}
-		dst := "/app/data/" + f
-		cpArgs := []string{"cp", src, s.mainServiceName + ":" + dst}
-		if err := s.runner(ctx, nil, cpArgs...); err != nil {
-			// File-swap failure is serious. Try to bring the
-			// service back anyway so the operator isn't stranded.
-			slog.Error("rollback docker cp failed", "file", f, "err", err)
-			s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "docker cp " + f + " failed: " + err.Error()})
-			_ = s.runner(ctx, env, s.composeArgs("up", "-d", s.mainServiceName)...)
+	if err := s.restoreSnapshotFiles(ctx, snapshotID, files, containerID, imageID); err != nil {
+		s.recoverRollbackSafety(ctx, base, safetySnapshotID, safetyFiles, containerID, imageID, "restore failed: "+err.Error())
+		return
+	}
+
+	// 3. Start the exact stopped container again. This guarantees a state-only
+	// rollback cannot silently move the application to another image tag.
+	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
+	if err := s.runner(ctx, nil, "start", containerID); err != nil {
+		s.recoverRollbackSafety(ctx, base, safetySnapshotID, safetyFiles, containerID, imageID, "container start failed: "+err.Error())
+		return
+	}
+	if s.healthCheck != nil {
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		healthErr := s.healthCheck(healthCtx, s.mainServiceName)
+		healthCancel()
+		if healthErr != nil {
+			s.recoverRollbackSafety(ctx, base, safetySnapshotID, safetyFiles, containerID, imageID, "restored service failed health check: "+healthErr.Error())
 			return
 		}
 	}
-
-	// 3. Start the main service again. --force-recreate so the new
-	// process certainly sees the swapped files (same semantics as the
-	// restart flow).
-	s.writeState(State{State: "restarting", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "starting main service on restored state"})
-	upArgs := s.composeArgs("up", "-d", "--force-recreate", s.mainServiceName)
-	if err := s.runner(ctx, env, upArgs...); err != nil {
-		s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d failed: " + err.Error()})
-		return
-	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	if err := s.runner(cleanupCtx, nil, "image", "rm", rollbackRef); err != nil {
-		slog.Warn("rollback: remove temporary image tag", "image", rollbackRef, "err", err)
-	}
-	cleanupCancel()
 	s.writeState(State{State: "done", Action: base.Action, Snapshot: base.Snapshot, StartedAt: now, UpdatedAt: time.Now(), Message: "rollback complete"})
+}
+
+func validRollbackFile(file string) bool {
+	return file == "state.db.gz" || file == "config.yaml"
+}
+
+func validSnapshotID(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, "/\\")
+}
+
+func hasRollbackState(files []string) bool {
+	for _, file := range files {
+		if file == "state.db.gz" {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreSnapshotFiles copies only allowlisted backup files into the stopped
+// container. docker cp defaults container-side ownership to root, which made
+// the uid-100 FTW process unable to write a restored database. Archive mode
+// preserves uid/gid; compressed databases are materialised with uid 100:101
+// first so the same rule applies.
+func (s *server) restoreSnapshotFiles(ctx context.Context, snapshotID string, files []string, containerID, imageRef string) error {
+	for _, file := range files {
+		if !validRollbackFile(file) {
+			return fmt.Errorf("unsupported rollback file %q", file)
+		}
+		staged, err := os.CreateTemp("", "ftw-rollback-source-*")
+		if err != nil {
+			return fmt.Errorf("create snapshot staging file: %w", err)
+		}
+		stagedPath := staged.Name()
+		_ = staged.Close()
+		_ = os.Remove(stagedPath)
+		defer os.Remove(stagedPath)
+		if s.stageSnapshotFile == nil {
+			return errors.New("snapshot staging unavailable")
+		}
+		if err := s.stageSnapshotFile(ctx, containerID, snapshotID, file, stagedPath); err != nil {
+			return fmt.Errorf("stage %s: %w", file, err)
+		}
+		copySrc := stagedPath
+		dstName := file
+		if file == "state.db.gz" {
+			dstName = "state.db"
+			tmp, err := os.CreateTemp("", "ftw-rollback-state-*.db")
+			if err != nil {
+				return fmt.Errorf("create rollback temp: %w", err)
+			}
+			tmpPath := tmp.Name()
+			_ = tmp.Close()
+			_ = os.Remove(tmpPath)
+			defer os.Remove(tmpPath)
+			if err := decompressGzipFile(stagedPath, tmpPath); err != nil {
+				return fmt.Errorf("decompress state.db.gz: %w", err)
+			}
+			if s.chownFile == nil {
+				return errors.New("set restored database owner: chown unavailable")
+			}
+			if err := s.chownFile(tmpPath, 100, 101); err != nil {
+				return fmt.Errorf("set restored database owner: %w", err)
+			}
+			if err := os.Chmod(tmpPath, 0o600); err != nil {
+				return fmt.Errorf("set restored database mode: %w", err)
+			}
+			copySrc = tmpPath
+		}
+		if err := s.runner(ctx, nil, "cp", "-a", copySrc, containerID+":/app/data/"+dstName); err != nil {
+			return fmt.Errorf("docker cp %s: %w", file, err)
+		}
+	}
+	// A clean stop normally removes SQLite's WAL sidecars. Remove any stale
+	// remnants explicitly so pages from the pre-rollback database cannot be
+	// replayed over the restored main file.
+	if err := s.runner(ctx, nil, "run", "--rm", "--network", "none", "--user", "0:0", "--volumes-from", containerID, "--entrypoint", "rm", imageRef, "-f", "/app/data/state.db-wal", "/app/data/state.db-shm"); err != nil {
+		return fmt.Errorf("remove stale SQLite WAL files: %w", err)
+	}
+	return nil
+}
+
+func decompressGzipFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	zr, err := gzip.NewReader(in)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		_ = out.Close()
+		if !committed {
+			_ = os.Remove(dst)
+		}
+	}()
+	if _, err := io.Copy(out, zr); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySnapshotID string, safetyFiles []string, containerID, imageRef, cause string) {
+	s.writeState(State{State: "restoring", Action: base.Action, Snapshot: base.Snapshot, StartedAt: base.StartedAt, UpdatedAt: time.Now(), Message: "rollback failed; restoring pre-rollback safety backup"})
+	_ = s.runner(ctx, nil, "stop", "--time", "30", containerID)
+	restoreErr := s.restoreSnapshotFiles(ctx, safetySnapshotID, safetyFiles, containerID, imageRef)
+	var startErr error
+	if restoreErr == nil {
+		startErr = s.runner(ctx, nil, "start", containerID)
+	}
+	if restoreErr == nil && startErr == nil && s.healthCheck != nil {
+		healthCtx, healthCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		startErr = s.healthCheck(healthCtx, s.mainServiceName)
+		healthCancel()
+	}
+	message := cause
+	if restoreErr != nil {
+		message += "; safety backup restore failed: " + restoreErr.Error()
+	} else if startErr != nil {
+		message += "; safety backup restored but service recovery failed: " + startErr.Error()
+	} else {
+		message += "; pre-rollback state restored and service recovered"
+	}
+	s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: base.StartedAt, UpdatedAt: time.Now(), Message: message})
 }
 
 func (s *server) writeState(st State) {
@@ -901,6 +1037,17 @@ func (s *server) writeState(st State) {
 	if data, err := os.ReadFile(s.statusPath); err == nil {
 		var previous State
 		if json.Unmarshal(data, &previous) == nil {
+			if st.Action == "rollback" && previous.Action == "rollback" && st.Snapshot == previous.Snapshot {
+				if len(st.Files) == 0 {
+					st.Files = append([]string{}, previous.Files...)
+				}
+				if st.SafetySnapshot == "" {
+					st.SafetySnapshot = previous.SafetySnapshot
+				}
+				if len(st.SafetyFiles) == 0 {
+					st.SafetyFiles = append([]string{}, previous.SafetyFiles...)
+				}
+			}
 			for component, imageID := range previous.PreviousImages {
 				previousImages[component] = imageID
 			}
@@ -975,25 +1122,47 @@ func (s *server) previousImageID(component string) string {
 	return ""
 }
 
-// recoverCrashedState runs once at boot. If state.json says we're in-flight
-// but the heartbeat is older than 5 min, we know the previous updater
-// process was killed mid-run and we flip to failed so the UI unblocks.
+// recoverCrashedState runs once at boot. Any in-flight state belongs to the
+// updater process that just died; waiting for a stale timeout would leave the
+// UI stuck forever. Rollback carries its safety backup in state.json, so it
+// can restore the pre-rollback data before reporting failure.
 func (s *server) recoverCrashedState() {
 	st := s.readState()
-	if (st.State == "pulling" || st.State == "restarting") && time.Since(st.UpdatedAt) > 5*time.Minute {
-		prev := st.State
-		st.State = "failed"
-		if st.Message == "" {
-			st.Message = "updater process restarted while in-flight"
-		}
-		st.UpdatedAt = time.Now()
-		s.writeState(st)
-		slog.Warn("recovered in-flight state as failed", "prev_state", prev)
+	if st.State != "pulling" && st.State != "restarting" && st.State != "restoring" {
+		return
 	}
+	prev := st.State
+	if st.Action == "rollback" && validSnapshotID(st.SafetySnapshot) && hasRollbackState(st.SafetyFiles) && rollbackFilesValid(st.SafetyFiles) && s.containerID != nil && s.imageID != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		containerID, containerErr := s.containerID(ctx, s.mainServiceName)
+		imageID, imageErr := s.imageID(ctx, s.mainServiceName)
+		if containerErr == nil && imageErr == nil {
+			s.recoverRollbackSafety(ctx, st, st.SafetySnapshot, st.SafetyFiles, containerID, imageID, "updater restarted during rollback")
+			slog.Warn("recovered interrupted rollback from safety backup", "prev_state", prev)
+			return
+		}
+		st.Message = fmt.Sprintf("updater restarted during rollback; safety recovery unavailable: container=%v image=%v", containerErr, imageErr)
+	} else if st.Message == "" {
+		st.Message = "updater process restarted while in-flight"
+	}
+	st.State = "failed"
+	st.UpdatedAt = time.Now()
+	s.writeState(st)
+	slog.Warn("recovered in-flight state as failed", "prev_state", prev)
+}
+
+func rollbackFilesValid(files []string) bool {
+	for _, file := range files {
+		if !validRollbackFile(file) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *server) serviceContainerID(ctx context.Context, service string) (string, error) {
-	out, err := dockerOutput(ctx, s.composeArgs("ps", "-q", service)...)
+	out, err := dockerOutput(ctx, s.composeArgs("ps", "-q", "--all", service)...)
 	if err != nil {
 		return "", err
 	}

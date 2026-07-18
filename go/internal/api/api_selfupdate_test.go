@@ -1,7 +1,9 @@
 package api
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -298,16 +300,18 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("want 1 snapshot dir, got %d", len(entries))
 	}
-	// Snapshot dir should contain state.db + meta.json (no config.yaml
+	// Snapshot dir should contain a complete compressed state.db + meta.json (no config.yaml
 	// because ConfigPath was empty).
 	snapPath := filepath.Join(snapDir, entries[0].Name())
-	for _, f := range []string{"state.db", "meta.json"} {
+	for _, f := range []string{"state.db.gz", "meta.json"} {
 		if _, err := os.Stat(filepath.Join(snapPath, f)); err != nil {
 			t.Errorf("snapshot missing %s: %v", f, err)
 		}
 	}
-	// state.db in the snapshot must be usable.
-	snap, err := state.Open(filepath.Join(snapPath, "state.db"))
+	// The compressed state.db in the snapshot must be usable.
+	restoredPath := filepath.Join(t.TempDir(), "state.db")
+	gunzipTestFile(t, filepath.Join(snapPath, "state.db.gz"), restoredPath)
+	snap, err := state.Open(restoredPath)
 	if err != nil {
 		t.Fatalf("snapshot state.db unusable: %v", err)
 	}
@@ -319,6 +323,30 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	gotStatus := c.Status()
 	if gotStatus.State != "failed" || gotStatus.Action != "update" || gotStatus.Target != "v1.5.0" {
 		t.Errorf("trigger failure should be published to status file, got %+v", gotStatus)
+	}
+}
+
+func gunzipTestFile(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	zr, err := gzip.NewReader(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, zr); err != nil {
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -623,6 +651,77 @@ func TestVersionRollback_CreatesSafetySnapshotBeforeTrigger(t *testing.T) {
 	}
 	if !foundSafety {
 		t.Error("expected a snapshot with meta.action = pre-rollback after rollback request")
+	}
+}
+
+func TestVersionRollbackRejectsIncompleteLegacySnapshot(t *testing.T) {
+	c := newCheckerAgainst(t, "v1.5.0", "v1.4.0")
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	legacyID := "2026-07-01T00-00-00Z_legacy"
+	legacyDir := filepath.Join(snapDir, legacyID)
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := json.Marshal(SnapshotMeta{
+		SchemaVersion: 1,
+		CreatedAt:     time.Now().Add(-time.Hour),
+		Files:         []string{"state.db"},
+	})
+	if err := os.WriteFile(filepath.Join(legacyDir, "meta.json"), meta, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+	req := httptest.NewRequest(http.MethodPost, "/api/version/rollback", strings.NewReader(`{"snapshot_id":"`+legacyID+`"}`))
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "losing history") {
+		t.Fatalf("legacy rollback = %d %s, want 409 data-loss guard", rr.Code, rr.Body.String())
+	}
+	entries, _ := os.ReadDir(snapDir)
+	if len(entries) != 1 {
+		t.Fatalf("legacy rejection must not create a safety snapshot, got %d entries", len(entries))
+	}
+}
+
+func TestPreRollbackSafetySnapshotDoesNotPruneSelectedTarget(t *testing.T) {
+	dir := t.TempDir()
+	st, _ := state.Open(filepath.Join(dir, "state.db"))
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	oldestID := ""
+	for i := 0; i < snapshotKeepCount; i++ {
+		id := "snapshot-" + strconv.Itoa(i)
+		if i == 0 {
+			oldestID = id
+		}
+		entryDir := filepath.Join(snapDir, id)
+		if err := os.MkdirAll(entryDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		meta, _ := json.Marshal(SnapshotMeta{
+			SchemaVersion:    snapshotSchemaVersion,
+			CreatedAt:        time.Now().Add(time.Duration(i) * time.Minute),
+			CompleteDatabase: true,
+			Files:            []string{"state.db.gz"},
+		})
+		if err := os.WriteFile(filepath.Join(entryDir, "meta.json"), meta, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv := New(&Deps{State: st, SnapshotDir: snapDir})
+	if _, err := srv.createPreUpdateSnapshot("pre-rollback", "v1.4.0", oldestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(snapDir, oldestID)); err != nil {
+		t.Fatalf("selected rollback target was pruned: %v", err)
+	}
+	entries, _ := os.ReadDir(snapDir)
+	if len(entries) != snapshotKeepCount+1 {
+		t.Fatalf("pre-rollback retention = %d, want temporary %d", len(entries), snapshotKeepCount+1)
 	}
 }
 
