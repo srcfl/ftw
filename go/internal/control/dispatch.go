@@ -600,21 +600,6 @@ type State struct {
 	// leaves the rest uncapped. Hot-installed via POST
 	// /api/pv/manual_hold; auto-expires. Zero ExpiresAt means inactive.
 	ManualPVHold PVManualHold
-
-	// SettlementAwareSelfConsumption lets self_consumption look at the
-	// running net Wh inside the current fixed 15-minute settlement window
-	// (00/15/30/45) and bias the live grid target negative when the slot
-	// has already accumulated import. It is intentionally asymmetric:
-	// prior import may be worked back by exporting from the battery, but
-	// prior export is not "repaid" by importing from grid. That preserves
-	// the self-consumption contract while matching how operators judge
-	// the system over a billing window rather than one noisy second.
-	SettlementAwareSelfConsumption bool
-
-	settlementSlotStart time.Time
-	settlementLastTs    time.Time
-	settlementNetWh     float64
-	settlementTargetW   float64
 }
 
 // BatteryManualHold is the full payload of a battery manual override.
@@ -828,89 +813,6 @@ func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Tim
 	state.slotActualPlannedWh = dir.BatteryEnergyWh
 }
 
-const (
-	settlementSlotDuration = 15 * time.Minute
-	settlementEnterNetWh   = 30.0
-	settlementExitNetWh    = 10.0
-	settlementMinRemainS   = 30.0
-	settlementMaxDtS       = 60.0
-	settlementTargetAlpha  = 0.35
-	settlementMinSoC       = 0.50
-)
-
-func (s *State) resetSettlementAccounting() {
-	s.settlementSlotStart = time.Time{}
-	s.settlementLastTs = time.Time{}
-	s.settlementNetWh = 0
-	s.settlementTargetW = 0
-}
-
-func (s *State) settlementGridTarget(now time.Time, gridW float64) float64 {
-	slotStart := now.Truncate(settlementSlotDuration)
-	if s.settlementSlotStart.IsZero() ||
-		!s.settlementSlotStart.Equal(slotStart) ||
-		s.settlementLastTs.IsZero() ||
-		s.settlementLastTs.Before(slotStart) ||
-		s.settlementLastTs.After(now) {
-		s.settlementSlotStart = slotStart
-		s.settlementLastTs = now
-		s.settlementNetWh = 0
-		s.settlementTargetW = 0
-		return 0
-	}
-
-	dtS := now.Sub(s.settlementLastTs).Seconds()
-	s.settlementLastTs = now
-	if dtS > 0 {
-		if dtS > settlementMaxDtS {
-			dtS = settlementMaxDtS
-		}
-		s.settlementNetWh += gridW * dtS / 3600.0
-	}
-
-	remainingS := slotStart.Add(settlementSlotDuration).Sub(now).Seconds()
-	if remainingS < settlementMinRemainS {
-		s.settlementTargetW = 0
-		return 0
-	}
-
-	threshold := settlementEnterNetWh
-	if s.settlementTargetW < 0 {
-		threshold = settlementExitNetWh
-	}
-	if s.settlementNetWh <= threshold {
-		s.settlementTargetW = smoothSettlementTarget(s.settlementTargetW, 0)
-		return 0
-	}
-	rawTargetW := -s.settlementNetWh * 3600.0 / remainingS
-	s.settlementTargetW = smoothSettlementTarget(s.settlementTargetW, rawTargetW)
-	return s.settlementTargetW
-}
-
-func smoothSettlementTarget(prev, next float64) float64 {
-	if math.Abs(next) < 1 && math.Abs(prev) < 1 {
-		return 0
-	}
-	out := prev + (next-prev)*settlementTargetAlpha
-	if next == 0 && math.Abs(out) < 5 {
-		return 0
-	}
-	return out
-}
-
-func minBatterySoC(bats []batteryInfo) float64 {
-	if len(bats) == 0 {
-		return 0
-	}
-	min := 1.0
-	for _, b := range bats {
-		if b.soc < min {
-			min = b.soc
-		}
-	}
-	return min
-}
-
 type plannerSelfDecision struct {
 	idleGate          bool
 	exportSurplusGate bool
@@ -996,21 +898,20 @@ func NewState(gridTargetW, gridToleranceW float64, siteMeter string) *State {
 	pi := NewPI(0.5, 0.1, 3000, 10000)
 	pi.Setpoint = gridTargetW
 	return &State{
-		Mode:                           ModeSelfConsumption,
-		GridTargetW:                    gridTargetW,
-		GridToleranceW:                 gridToleranceW,
-		SiteMeterDriver:                siteMeter,
-		PriorityOrder:                  nil,
-		Weights:                        map[string]float64{},
-		PeakLimitW:                     5000,
-		EVChargingW:                    0,
-		PI:                             pi,
-		SlewRateW:                      500,
-		SlewEnabled:                    true,
-		MinDispatchIntervalS:           5,
-		PrevTargets:                    map[string]float64{},
-		UseCascade:                     true,
-		SettlementAwareSelfConsumption: false,
+		Mode:                 ModeSelfConsumption,
+		GridTargetW:          gridTargetW,
+		GridToleranceW:       gridToleranceW,
+		SiteMeterDriver:      siteMeter,
+		PriorityOrder:        nil,
+		Weights:              map[string]float64{},
+		PeakLimitW:           5000,
+		EVChargingW:          0,
+		PI:                   pi,
+		SlewRateW:            500,
+		SlewEnabled:          true,
+		MinDispatchIntervalS: 5,
+		PrevTargets:          map[string]float64{},
+		UseCascade:           true,
 	}
 }
 
@@ -1334,7 +1235,6 @@ func ComputeDispatch(
 	// ---- Idle + Charge short-circuits ----
 	switch effectiveMode {
 	case ModeIdle:
-		state.resetSettlementAccounting()
 		// Even in idle, the reactive fuse-saver runs: an unplanned
 		// load (manual_hold injecting EV power, oven turning on,
 		// neighbour's pool pump on the same fuse) can push grid
@@ -1352,7 +1252,6 @@ func ComputeDispatch(
 		}
 		return out
 	case ModeCharge:
-		state.resetSettlementAccounting()
 		targets := chargeAll(store, driverCapacities, state.DriverLimits)
 		return applyDispatchSafetyPipeline(targets, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 			updatePrevTargets: true,
@@ -1517,14 +1416,12 @@ func ComputeDispatch(
 	var totalCorrection float64
 	switch {
 	case manualHoldActive:
-		state.resetSettlementAccounting()
 		// Drive the aggregate battery toward the operator's setpoint.
 		// PI was already reset above; deadband is intentionally skipped
 		// so even small setpoints are honoured exactly. Slew, SoC clamps,
 		// and the fuse guard still apply downstream.
 		totalCorrection = manualHold.PowerW - currentTotal
 	case useEnergyPath:
-		state.resetSettlementAccounting()
 		// Energy-allocation path: plan's slot directive says "this many Wh
 		// over this slot". Derive the instantaneous power needed to hit the
 		// remaining energy in the remaining time, then pass (target - currentTotal)
@@ -1828,18 +1725,10 @@ func ComputeDispatch(
 			// gridW >= 0: leave biasedGridW = gridW (import behavior).
 		}
 
+		// Self-consumption follows the live grid target only. Fixed-window
+		// import/export energy is observed separately by the API; accumulated
+		// import must never lower this target and cause battery-fed export.
 		activeGridTargetW := state.GridTargetW
-		if effectiveMode == ModeSelfConsumption &&
-			!noSelfDischarge &&
-			state.SettlementAwareSelfConsumption &&
-			minBatterySoC(onlineBats) >= settlementMinSoC {
-			settlementTargetW := state.settlementGridTarget(time.Now(), gridW)
-			if settlementTargetW < activeGridTargetW {
-				activeGridTargetW = settlementTargetW
-			}
-		} else {
-			state.resetSettlementAccounting()
-		}
 
 		var errW float64
 		switch effectiveMode {
