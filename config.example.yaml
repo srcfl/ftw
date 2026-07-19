@@ -173,10 +173,13 @@ state:
 #   repositories:
 #     - id: ftw-official
 #       name: FTW official drivers
+#       format: ftw.manifest/v1       # transitional legacy format
 #       manifest_url: https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json
 #       enabled: true
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+# After the Device Support production index and fleet trust root are deployed,
+# set format: sourceful.driver-index/v1 and manifest_url to that signed index.
 
 # Mathematical MPC optimizer. Official Compose runs it as the independently
 # updatable ftw-optimizer service; native installs can point optimizer_command
