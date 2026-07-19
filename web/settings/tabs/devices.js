@@ -61,6 +61,10 @@
           '</div><div class="driver-battery-capacity" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
           '<label>Battery capacity (kWh) ' + help('Nameplate storage capacity in kilowatt-hours. Stored internally as Wh.') + '</label>' +
           '<input type="number" step="0.1" data-path="drivers.' + idx + '.battery_capacity_wh" data-unit-scale="1000" value="' + ((d.battery_capacity_wh || 0) / 1000) + '">' +
+          '<label class="driver-observe-only" data-drv-lua="' + escHtml(d.lua || '') + '"' + (supportsBattery ? '' : ' hidden style="display:none"') + '>' +
+          '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.observe_only"' + (d.observe_only ? ' checked' : '') + '> Observe only ' +
+          help('Poll battery telemetry and show it in the dashboard, but never send charge/discharge commands. Use when another party (e.g. a retailer VPP) controls the battery.') +
+          '</label>' +
           '</div></div>' +
           '<label><input type="checkbox" data-checkbox-path="drivers.' + idx + '.is_site_meter"' + (d.is_site_meter ? ' checked' : '') + '> Site meter ' + help('Exactly one driver should be the site meter — its grid reading defines the point-of-measurement the PI loop balances.') + '</label>';
         if (mqtt) {

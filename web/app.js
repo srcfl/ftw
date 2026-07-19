@@ -384,6 +384,14 @@
     return "target " + formatW(targetW);
   }
 
+  function hasControllableBatteryDrivers(data) {
+    var drvs = (data && data.drivers) || {};
+    return Object.keys(drvs).some(function (name) {
+      var d = drvs[name] || {};
+      return d.bat_w != null && !d.observe_only;
+    });
+  }
+
   function smoothDisplayNumber(key, value, now) {
     if (value == null || !isFinite(value)) return value;
     var prev = statusDisplayState[key];
@@ -498,13 +506,26 @@
     // poll so plugging in a battery lights everything back up
     // without a reload.
     var hasBattery = false;
+    var hasControllableBattery = false;
     var drvMap = data.drivers || {};
     for (var drvName in drvMap) {
       if (drvMap[drvName] && drvMap[drvName].bat_w != null) {
-        hasBattery = true; break;
+        hasBattery = true;
+        if (!drvMap[drvName].observe_only) hasControllableBattery = true;
       }
     }
     document.body.classList.toggle("no-battery", !hasBattery);
+    var cardBatEl = document.getElementById("card-bat");
+    if (cardBatEl) {
+      cardBatEl.classList.toggle("clickable", hasControllableBattery);
+      if (hasControllableBattery) {
+        cardBatEl.setAttribute("role", "button");
+        cardBatEl.setAttribute("tabindex", "0");
+      } else {
+        cardBatEl.removeAttribute("role");
+        cardBatEl.removeAttribute("tabindex");
+      }
+    }
 
     // PUSH CHART DATA FIRST — never let a DOM render error somewhere below
     // silently kill the chart-update path. (Prior bug: missing #dispatch-list
@@ -706,7 +727,9 @@
           // wordy charging/discharging sub-label.
           var bColor = bIdle ? "var(--cyan)" :
                        (bKw >= 0 ? "var(--green-e)" : "var(--red-e)");
-          var bTargetLine = batteryTargetLine(batteryTargetsByDriver[name]);
+          var bTargetLine = d.observe_only
+            ? "observe only"
+            : batteryTargetLine(batteryTargetsByDriver[name]);
           planets.push({
             id: "bat-" + name, corner: "top-right", title: "BATTERY", name: name, role: "battery",
             kw: bKw, toHub: bKw < 0,
@@ -716,6 +739,7 @@
             dailyKwhParts: batDailyParts,
             dailyScope: "aggregate",
             dailyAggregateMembers: batDailyMembers,
+            clickable: !d.observe_only,
           });
         }
         // EV — always consumes from the house side. When a loadpoint
@@ -2012,7 +2036,7 @@
         var batteryRow =
           '  <span class="stat-label">Battery</span><span class="stat-value">' + formatW(batWVal) + "</span>";
         var disp = (dispatchByDriver || {})[name];
-        if (disp && d.bat_w != null) {
+        if (disp && d.bat_w != null && !d.observe_only) {
           var dev = batWVal - disp.target_w;
           var devClass = Math.abs(dev) > 200 ? "stat-warn" : "stat-dim";
           batteryRow =
@@ -2027,6 +2051,9 @@
           '  <span class="stat-label">Meter</span><span class="stat-value">' + formatW(meterW) + "</span>" +
           '  <span class="stat-label">PV</span><span class="stat-value">' + formatW(-pvWVal) + "</span>" +
           batteryRow +
+          (d.observe_only
+            ? '  <span class="stat-label">Control</span><span class="stat-value stat-dim">observe only</span>'
+            : "") +
           '  <span class="stat-label">SoC</span><span class="stat-value">' + formatSoc(batSocVal) + "</span>" +
           '  <span class="stat-label">Ticks</span><span class="stat-value">' + ticks + "</span>" +
           '  <span class="stat-label">Errors</span><span class="stat-value">' + errors + "</span>" +
@@ -3457,6 +3484,9 @@
         var d = (e && e.detail) || {};
         if (d.role === "ev") openEvModal(d.name || null);
         if (d.role === "battery") {
+          var drv = (lastStatusPayload && lastStatusPayload.drivers) || {};
+          var clicked = drv[d.name || ""] || {};
+          if (clicked.observe_only) return;
           var bc = document.getElementById("battery-control");
           if (bc && typeof bc.open === "function") bc.open();
         }
@@ -3492,11 +3522,14 @@
       });
     }
     if (cardBat) {
-      cardBat.classList.add("clickable");
-      cardBat.setAttribute("role", "button");
-      cardBat.setAttribute("tabindex", "0");
-      cardBat.setAttribute("aria-label", "Open battery controls");
+      if (hasControllableBatteryDrivers(lastStatusPayload)) {
+        cardBat.classList.add("clickable");
+        cardBat.setAttribute("role", "button");
+        cardBat.setAttribute("tabindex", "0");
+        cardBat.setAttribute("aria-label", "Open battery controls");
+      }
       var openBat = function () {
+        if (!hasControllableBatteryDrivers(lastStatusPayload)) return;
         var bc = document.getElementById("battery-control");
         if (bc && typeof bc.open === "function") bc.open();
       };

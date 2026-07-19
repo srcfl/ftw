@@ -692,6 +692,13 @@ type Driver struct {
 	// Sourceful Zap is the canonical user: its local API exposes battery data,
 	// but no stable semantic set-power endpoint.
 	BatteryTelemetryOnly bool `yaml:"battery_telemetry_only,omitempty" json:"battery_telemetry_only,omitempty"`
+	// ObserveOnly keeps structured battery telemetry (host.emit "battery")
+	// and UI visibility while excluding this driver from dispatch, MPC,
+	// battery-model training, and watchdog DefaultMode commands. Use when
+	// another party (e.g. a retailer VPP) owns actuation. Requires
+	// battery_capacity_wh > 0 — without capacity, battery emits are
+	// dropped at the host boundary anyway.
+	ObserveOnly bool `yaml:"observe_only,omitempty" json:"observe_only,omitempty"`
 	// MaxChargeW + MaxDischargeW set this driver's per-command power
 	// ceiling (site-signed +/-). Both optional; zero = fall through to
 	// the global MaxCommandW = 5 kW default the dispatcher has shipped
@@ -1439,6 +1446,9 @@ func (c *Config) Validate() error {
 			d.Capabilities.HTTP == nil && d.Capabilities.WebSocket == nil &&
 			d.Capabilities.TCP == nil {
 			return fmt.Errorf("driver %q: must have mqtt, modbus, http, websocket, or tcp capability", d.Name)
+		}
+		if d.ObserveOnly && d.BatteryCapacityWh <= 0 {
+			return fmt.Errorf("driver %q: observe_only requires battery_capacity_wh > 0", d.Name)
 		}
 	}
 	if len(c.Drivers) > 0 && siteMeters == 0 {

@@ -49,6 +49,7 @@ drivers:
   #   lua: drivers/pixii.lua
   #   is_site_meter: true
   #   battery_capacity_wh: 20000
+  #   observe_only: true   # retailer VPP controls actuation — FTW reads only
   #   capabilities:
   #     modbus:
   #       host: 192.168.1.50

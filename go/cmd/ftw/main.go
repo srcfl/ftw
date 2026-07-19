@@ -286,7 +286,9 @@ func main() {
 	// ---- Driver capacities (site, for control + fuse guard) ----
 	// Loadpoint drivers are filtered out — their battery_capacity_wh
 	// is vehicle capacity, not site-battery capacity.
-	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog)
+	capacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, true)
+	telemetryCapacities := driverCapacitiesFrom(cfg.Drivers, cfg.Loadpoints, driverCatalog, false)
+	observeOnly := config.ObserveOnlyDriverSet(cfg)
 	warnIfEVHasBatteryCapacity(cfg.Drivers, cfg.Loadpoints, driverCatalog)
 
 	// ---- Battery models — restore from SQLite + ensure one per driver ----
@@ -562,6 +564,9 @@ func main() {
 			for k := range capacities {
 				delete(capacities, k)
 			}
+			for k := range telemetryCapacities {
+				delete(telemetryCapacities, k)
+			}
 			// Re-scan the catalog so a hot-edited Lua driver's
 			// capability change is picked up by the EV-classification
 			// filter on the very next reload tick.
@@ -573,9 +578,13 @@ func main() {
 			} else {
 				driverCatalog = reloadCatalog
 			}
-			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog) {
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, true) {
 				capacities[k] = v
 			}
+			for k, v := range driverCapacitiesFrom(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog, false) {
+				telemetryCapacities[k] = v
+			}
+			observeOnly = config.ObserveOnlyDriverSet(newCfg)
 			capMu.Unlock()
 			warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
 
@@ -1708,7 +1717,7 @@ func main() {
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
 		State: st,
-		CapMu: capMu, Capacities: capacities,
+		CapMu: capMu, Capacities: capacities, TelemetryCapacities: telemetryCapacities,
 		CfgMu: cfgMu, Cfg: cfg, ConfigPath: *configPath,
 		DriverDir:           resolveDriverDir(),
 		UserDriverDir:       *userDriversDirFlag,
@@ -2054,12 +2063,15 @@ func main() {
 			cfgMu.RLock()
 			troubleshootingMode := cfg.Site.TroubleshootingMode
 			cfgMu.RUnlock()
+			capMu.RLock()
+			observeOnlySnap := observeOnly
+			capMu.RUnlock()
 			watchdogDefaulted := make(map[string]struct{})
 			for _, tr := range tel.WatchdogScan(watchdogTimeout) {
 				if !tr.Online {
 					slog.Warn("driver telemetry stale — marking offline + reverting to autonomous",
 						"name", tr.Name, "timeout", watchdogTimeout)
-					sendDriverDefault(ctx, reg, tr.Name, "watchdog")
+					sendDriverDefault(ctx, reg, tr.Name, "watchdog", observeOnlySnap)
 					watchdogDefaulted[tr.Name] = struct{}{}
 					bus.Publish(events.DriverLost{Driver: tr.Name, At: time.Now()})
 				} else {
@@ -2105,7 +2117,7 @@ func main() {
 				if _, alreadyDefaulted := watchdogDefaulted[name]; alreadyDefaulted {
 					continue
 				}
-				sendDriverDefault(ctx, reg, name, freshness.Reason)
+				sendDriverDefault(ctx, reg, name, freshness.Reason, observeOnlySnap)
 			}
 
 			// Loadpoint observation and schedule rolling stay live while the
@@ -2253,6 +2265,9 @@ func main() {
 
 			// ---- Dispatch to drivers ----
 			for _, t := range finalTargets {
+				if observeOnlySnap[t.Driver] {
+					continue
+				}
 				payload, _ := json.Marshal(map[string]any{"action": "battery", "power_w": t.TargetW})
 				if err := reg.Send(ctx, t.Driver, payload); err != nil {
 					slog.Warn("driver send", "name", t.Driver, "err", err)
@@ -2533,7 +2548,10 @@ func registerAllDevices(st *state.Store, reg *drivers.Registry) {
 
 const driverDefaultTimeout = 2 * time.Second
 
-func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string) {
+func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason string, observeOnly map[string]bool) {
+	if observeOnly[name] {
+		return
+	}
 	cmdCtx, cancel := context.WithTimeout(ctx, driverDefaultTimeout)
 	defer cancel()
 	if err := reg.SendDefault(cmdCtx, name); err != nil {
@@ -2545,6 +2563,11 @@ func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason 
 // driverCapacitiesFrom builds the driver-name → battery-capacity map
 // the MPC sums into Params.CapacityWh and the control layer uses for
 // fuse-guard / peak-shave sizing.
+//
+// When controllableOnly is true, drivers with observe_only or
+// battery_telemetry_only are omitted — they still emit battery telemetry
+// for the UI and site-balance math but must not receive dispatch
+// commands or land in the planner pool.
 //
 // Critically: drivers that are referenced by a loadpoint entry are
 // EV chargers, not home batteries — their `battery_capacity_wh`
@@ -2558,7 +2581,7 @@ func sendDriverDefault(ctx context.Context, reg *drivers.Registry, name, reason 
 // Filtering here rather than at config-parse time means the vehicle
 // capacity is still available for EV-side logic (loadpoint manager)
 // without a schema migration.
-func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry) map[string]float64 {
+func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint, catalog []drivers.CatalogEntry, controllableOnly bool) map[string]float64 {
 	evDrivers := make(map[string]struct{}, len(loadpoints))
 	for _, lp := range loadpoints {
 		// Only treat a loadpoint row as authoritative when it's
@@ -2577,7 +2600,10 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 		if d.BatteryCapacityWh <= 0 {
 			continue
 		}
-		if d.BatteryTelemetryOnly || drivers.IsReadOnlyDriver(catalog, d.Lua) {
+		if controllableOnly && d.ObserveOnly {
+			continue
+		}
+		if controllableOnly && (d.BatteryTelemetryOnly || drivers.IsReadOnlyDriver(catalog, d.Lua)) {
 			// A telemetry gateway must never enter MPC/dispatch even if an old
 			// or hand-written config also carries a battery capacity.
 			continue
@@ -2612,6 +2638,9 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery) map[string]control.PowerLimits {
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
+		if d.ObserveOnly {
+			continue
+		}
 		chg, dis := d.MaxChargeW, d.MaxDischargeW
 		if b, ok := batteries[d.Name]; ok {
 			if chg == 0 && b.MaxChargeW != nil && *b.MaxChargeW > 0 {
