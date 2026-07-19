@@ -1656,6 +1656,17 @@ func (s *Server) handleSelfTuneStart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
 	}
+	s.deps.CfgMu.RLock()
+	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
+	for _, name := range req.Batteries {
+		if observeOnly[name] {
+			writeJSON(w, 400, map[string]string{
+				"error": "battery " + name + " is observe_only and cannot be self-tuned",
+			})
+			return
+		}
+	}
 	s.deps.ModelsMu.Lock()
 	err := s.deps.SelfTune.Start(req.Batteries, s.deps.Models, s.deps.DtS)
 	s.deps.ModelsMu.Unlock()
