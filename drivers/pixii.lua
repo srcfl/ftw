@@ -189,10 +189,17 @@ local function read_battery_status()
             .. " vendor_state=" .. tostring(vendor_state)
             .. " event1=" .. tostring(event1))
         if charge_status == 7 then
-            host.log("warn", "Pixii: charge status is TESTING; Pixii may be calibrating/testing and may ignore external setpoints")
+            host.log("warn", "Pixii: charge status is TESTING; excluding from dispatch until calibration finishes")
         end
         last_status_key = key
     end
+
+    -- SunSpec 802 ChaSt=testing (7): Pixii is calibrating and ignores
+    -- external setpoints. Flag a device fault so dispatch + MPC exclude it
+    -- while keeping telemetry and site-meter data live.
+    local calibrating = charge_status == 7
+    host.set_device_fault(calibrating,
+        calibrating and "Pixii battery calibrating/testing (SunSpec ChaSt=testing)" or "")
 
     return {
         charge_status = charge_status,
