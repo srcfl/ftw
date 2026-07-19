@@ -199,6 +199,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.core == 'true'
     runs-on: ubuntu-latest
+    env:
+      DEVICE_SUPPORT_TOKEN: ${{ secrets.SOURCEFUL_CI_REPO_TOKEN }}
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
@@ -211,16 +213,33 @@ jobs:
           for key in repository commit driver version; do
             echo "${key}=$(jq -r ".${key}" "${baseline}")" >> "${GITHUB_OUTPUT}"
           done
-      - uses: actions/checkout@v5
-        with:
-          repository: ${{ steps.baseline.outputs.repository }}
-          ref: ${{ steps.baseline.outputs.commit }}
-          path: .device-support
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
           cache-dependency-path: go/go.sum
-      - name: Build and sign the canonical SDM630 package and index
+
+      - name: Verify pinned Python-signed fixture and FTW Lua target
+        working-directory: go
+        env:
+          FTW_DEVICE_SUPPORT_INDEX: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1/index.envelope.json
+          FTW_DEVICE_SUPPORT_PACKAGE: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1/manifest.envelope.json
+          FTW_DEVICE_SUPPORT_ARTIFACT_DIR: ${{ github.workspace }}/go/internal/driverrepo/testdata/device-support-v1
+        run: |
+          public_key="$(tr -d '\n' < internal/driverrepo/testdata/device-support-v1/public.raw.b64)"
+          FTW_DEVICE_SUPPORT_PUBLIC_KEY="${public_key}" \
+            go test -count=1 ./internal/driverrepo -run '^TestDeviceSupportPythonContract$'
+
+      - name: Check out canonical Device Support package source
+        if: env.DEVICE_SUPPORT_TOKEN != ''
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ steps.baseline.outputs.repository }}
+          ref: ${{ steps.baseline.outputs.commit }}
+          path: .device-support
+          token: ${{ env.DEVICE_SUPPORT_TOKEN }}
+
+      - name: Build and sign the canonical SDM630 package and index from source
+        if: env.DEVICE_SUPPORT_TOKEN != ''
         env:
           DRIVER: ${{ steps.baseline.outputs.driver }}
           VERSION: ${{ steps.baseline.outputs.version }}
@@ -274,7 +293,8 @@ jobs:
             --key "${output}/private.pem" \
             --key-id sourceful-test-1 \
             --output "${output}/index.envelope.json"
-      - name: Verify Python signatures, package binding and FTW Lua target in Go
+      - name: Verify source-built Python signatures, package binding and FTW Lua target in Go
+        if: env.DEVICE_SUPPORT_TOKEN != ''
         working-directory: go
         env:
           FTW_DEVICE_SUPPORT_INDEX: ${{ runner.temp }}/device-support-package/index.envelope.json
