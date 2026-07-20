@@ -1,6 +1,6 @@
 # FTW
 
-<img src="web/logo.jpg" alt="FTW" width="120" align="right">
+<img src="web/logo.svg" alt="FTW" width="120" align="right">
 
 > Local-first home energy coordination.
 
