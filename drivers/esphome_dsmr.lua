@@ -14,15 +14,26 @@
 -- Endpoint contract (ESPHome web_server v3):
 --   GET /sensor/<object_id>        → {"id":"sensor-<…>","value":<num>,"state":"<num+unit>"}
 --   GET /text_sensor/<object_id>   → {"id":"text_sensor-<…>","value":"<str>","state":"<str>"}
--- Object IDs come from the `name:` of each entity, lowercased with spaces
--- → underscores. The reference firmware (srcful-zap-p1.yaml) defines:
---   energy_consumed / energy_produced       (kWh, lifetime import/export)
---   power_consumed  / power_produced        (kW,  total import/export)
---   power_consumed_l1..l3 / power_produced_l1..l3   (kW, per phase)
---   voltage_l1..l3                          (V)
---   current_l1..l3                          (A)
---   text_sensor/electric_meter_equipment_id (DSMR equipment id, often empty)
---   text_sensor/meter_identification        (e.g. "LGF5E360")
+-- Object IDs vary by firmware YAML. ESPHome derives them from each
+-- entity's `name:` (lower-cased, spaces → underscores) unless an
+-- explicit `object_id:` is set. The driver probes aliases in order
+-- and uses the first hit:
+--
+--   Totals (kW): power_consumed|power_delivered,
+--                power_produced|power_returned
+--   Per-phase kW: power_{consumed|delivered}_lN or _phase_N
+--   Voltage (V): voltage_lN or voltage_phase_N
+--   Current (A): current_lN or current_phase_N
+--   Energy (kWh): energy_consumed|energy_delivered,
+--                 energy_produced|energy_returned
+--
+-- Sourceful Zap pins explicit object_ids (*_consumed, current_l1, …).
+-- Default ESPHome DSMR YAMLs (community P1 readers, DIY ESP32, etc.)
+-- usually slug each entity's `name:` instead (current_phase_1, …) and
+-- expose import/export totals as power_delivered / power_returned unless
+-- the operator renamed them.
+-- Serial: electric_meter_equipment_id, meter_identification,
+--          dsmr_identification
 --
 -- Sign convention (SITE = positive W flows INTO the site):
 --   meter.w = (power_consumed - power_produced) * 1000
@@ -53,15 +64,18 @@ DRIVER = {
   id           = "esphome-dsmr",
   name         = "ESPHome DSMR (P1)",
   manufacturer = "ESPHome",
-  version      = "1.0.0",
+  version      = "1.0.1",
   protocols    = { "http" },
   capabilities = { "meter" },
   description  = "Smart meter via ESPHome web_server v3 + dsmr component (Sourceful Zap on open firmware, DIY ESP32+P1, etc.).",
   homepage     = "https://github.com/erikarenhill/sourceful-zap-esphome",
   authors      = { "FTW contributors" },
-  tested_models = { "Sourceful Zap P1 (sourceful-zap-esphome firmware)" },
+  tested_models = {
+    "Sourceful Zap P1 (sourceful-zap-esphome firmware)",
+    "ESPHome DSMR P1 readers using name-derived object_ids (SlimmeLezer+)",
+  },
   verification_status = "experimental",
-  verification_notes = "Built and validated against the live HTTP responses of an LGF5E360 meter behind a Sourceful Zap running the open-source ESPHome firmware. Awaiting a second site to promote to beta.",
+  verification_notes = "Validated on Sourceful Zap open firmware and a live SlimmeLezer+ running ESPHome DSMR YAML with name-derived phase object_ids (current_phase_N, power_consumed_phase_N).",
   connection_defaults = {
     -- No host default — the operator must point us at their device's
     -- IP or mDNS hostname. We deliberately don't guess: ESPHome devices
@@ -147,17 +161,36 @@ local function fetch_num(object_id)
     return n, nil
 end
 
+-- Try numeric sensor ids in order; first success wins. Returns (n, nil)
+-- or (nil, last_err). 404s on earlier aliases are expected — callers
+-- only log when every alias misses.
+local function fetch_num_first(ids)
+    local last_err = nil
+    for _, id in ipairs(ids) do
+        local n, err = fetch_num(id)
+        if n ~= nil then return n, nil end
+        last_err = err
+    end
+    return nil, last_err
+end
+
 -- Best-effort serial discovery. Tries the dedicated DSMR equipment-id
 -- text_sensor first (newer meters populate it), falls back to the OBIS
 -- meter-identification line (e.g. LGF5E360 on the LG meters Sourceful
--- typically ships against). Returns "" on any failure — the host falls
--- back to MAC ARP / endpoint hashing for `device_id`, so a missing SN
--- is a soft failure, not a fatal one.
+-- typically ships against), then the common ESPHome dsmr
+-- text_sensor `identification` slug (dsmr_identification).
+-- Returns "" on any failure — the host falls back to MAC ARP / endpoint
+-- hashing for `device_id`, so a missing SN is a soft failure, not a fatal one.
 local function fetch_serial()
-    local v, err = fetch_entity("text_sensor", "electric_meter_equipment_id")
-    if not err and type(v) == "string" and v ~= "" then return v end
-    v, err = fetch_entity("text_sensor", "meter_identification")
-    if not err and type(v) == "string" and v ~= "" then return v end
+    local ids = {
+        "electric_meter_equipment_id",
+        "meter_identification",
+        "dsmr_identification",
+    }
+    for _, id in ipairs(ids) do
+        local v, err = fetch_entity("text_sensor", id)
+        if not err and type(v) == "string" and v ~= "" then return v end
+    end
     return ""
 end
 
@@ -209,16 +242,16 @@ function driver_poll()
     -- offline if it persists. Failures bump `consecutive_failures` so
     -- subsequent polls back off exponentially instead of hammering a
     -- meter that's gone offline.
-    local pc_kw, err = fetch_num("power_consumed")
+    local pc_kw, err = fetch_num_first({ "power_consumed", "power_delivered" })
     if err then
         consecutive_failures = consecutive_failures + 1
-        host.log("warn", "esphome_dsmr: power_consumed read failed (backoff " .. backoff_ms() .. "ms): " .. err)
+        host.log("warn", "esphome_dsmr: site import power read failed (backoff " .. backoff_ms() .. "ms): " .. err)
         return backoff_ms()
     end
-    local pp_kw, err2 = fetch_num("power_produced")
+    local pp_kw, err2 = fetch_num_first({ "power_produced", "power_returned" })
     if err2 then
         consecutive_failures = consecutive_failures + 1
-        host.log("warn", "esphome_dsmr: power_produced read failed (backoff " .. backoff_ms() .. "ms): " .. err2)
+        host.log("warn", "esphome_dsmr: site export power read failed (backoff " .. backoff_ms() .. "ms): " .. err2)
         return backoff_ms()
     end
     -- Both totals succeeded — clear any prior backoff streak.
@@ -236,13 +269,21 @@ function driver_poll()
     -- (Single-phase meters won't expose L2/L3 entities at all.)
     local phase_w = {}
     for i = 1, 3 do
-        local c, ec = fetch_num("power_consumed_l" .. i)
-        local p, ep = fetch_num("power_produced_l" .. i)
+        local c, ec = fetch_num_first({
+            "power_consumed_l" .. i,
+            "power_consumed_phase_" .. i,
+            "power_delivered_l" .. i,
+        })
+        local p, ep = fetch_num_first({
+            "power_produced_l" .. i,
+            "power_produced_phase_" .. i,
+            "power_returned_l" .. i,
+        })
         if ec then
-            host.log("debug", "esphome_dsmr: power_consumed_l" .. i .. " unavailable: " .. ec)
+            host.log("debug", "esphome_dsmr: L" .. i .. " import power unavailable: " .. ec)
         end
         if ep then
-            host.log("debug", "esphome_dsmr: power_produced_l" .. i .. " unavailable: " .. ep)
+            host.log("debug", "esphome_dsmr: L" .. i .. " export power unavailable: " .. ep)
         end
         if c ~= nil and p ~= nil then
             phase_w[i] = (c - p) * 1000.0
@@ -253,13 +294,13 @@ function driver_poll()
     local v = {}
     local a = {}
     for i = 1, 3 do
-        v[i] = fetch_num("voltage_l" .. i)
-        a[i] = fetch_num("current_l" .. i)
+        v[i] = fetch_num_first({ "voltage_l" .. i, "voltage_phase_" .. i })
+        a[i] = fetch_num_first({ "current_l" .. i, "current_phase_" .. i })
     end
 
     -- Lifetime energy counters: ESPHome serves these in kWh, we emit in Wh.
-    local imp_kwh = fetch_num("energy_consumed")
-    local exp_kwh = fetch_num("energy_produced")
+    local imp_kwh = fetch_num_first({ "energy_consumed", "energy_delivered" })
+    local exp_kwh = fetch_num_first({ "energy_produced", "energy_returned" })
 
     -- Optional phase/counter values are omitted when their HTTP read fails.
     -- Publishing a synthetic 0 A would disable the per-phase fuse guard, and
