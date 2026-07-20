@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.1
+
+### Patch Changes
+
+- ce90d5d: Pixii: exclude batteries from dispatch and MPC while SunSpec ChaSt reports `testing` (calibration), using the same device-fault path as Ferroamp Fault Mode. Telemetry and site-meter data stay live.
+
 ## 1.8.0
 
 ### Minor Changes
