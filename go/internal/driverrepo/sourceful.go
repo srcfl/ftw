@@ -528,7 +528,7 @@ func (m *Manager) sourcefulPackageDriver(
 		Version: pkg.Version, HostAPIMin: runtime.HostAPI.Min, HostAPIMax: runtime.HostAPI.Max,
 		Source: "upstream", Protocols: sourcefulProtocols(pkg.Permissions),
 		Capabilities: sourcefulFTWCapabilities(pkg.Capabilities.Telemetry),
-		Description:  "Canonical Sourceful driver package from Device Support.",
+		Description:  "Signed Sourceful driver package from drivers.sourceful.energy.",
 		ReadOnly:     pkg.ReadOnly, VerificationStatus: "experimental",
 		TestedModels: sourcefulTestedModels(pkg.DeviceMatches),
 	}
@@ -548,8 +548,8 @@ func (m *Manager) sourcefulPackageDriver(
 }
 
 // RuntimePolicy verifies the package envelope stored with an active managed
-// artifact and derives the v2 host policy without a network call. A local,
-// bundled, legacy repository or read-only Sourceful artifact returns nil.
+// artifact and derives its host permissions without a network call. Local,
+// bundled and legacy repository artifacts return nil.
 func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, error) {
 	if m.store == nil {
 		if cfg.Control != nil && cfg.Control.Enabled {
@@ -620,7 +620,7 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 	if err != nil {
 		return nil, fmt.Errorf("validate installed signed package: %w", err)
 	}
-	if !compatible || entry.ReadOnly || !entry.ControlEnabled {
+	if !compatible {
 		if cfg.Control != nil && cfg.Control.Enabled {
 			return nil, errors.New("control opt-in targets an artifact without an enabled FTW v2 control target")
 		}
@@ -628,6 +628,26 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 	}
 	if !strings.EqualFold(entry.SHA256, installed.SHA256) || entry.Version != installed.Version || entry.ID != installed.DriverID {
 		return nil, errors.New("installed artifact does not match its signed package envelope")
+	}
+	permissions := make(map[string]bool, len(entry.Permissions))
+	for _, permission := range entry.Permissions {
+		permissions[permission] = true
+	}
+	if entry.ReadOnly {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in targets a read-only signed artifact")
+		}
+		return &drivers.RuntimePolicy{
+			PackageID: entry.PackageID, Version: entry.Version, ArtifactSHA256: strings.ToLower(entry.SHA256),
+			RuntimeABI: entry.RuntimeABI, HostAPIProfile: entry.HostAPIProfile,
+			ReadOnly: true, Permissions: permissions,
+		}, nil
+	}
+	if !entry.ControlEnabled {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in targets an artifact without an enabled FTW v2 control target")
+		}
+		return nil, nil
 	}
 
 	siteEnabled := false
@@ -637,10 +657,6 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 			return nil, errors.New("control opt-in package/version/hash pin does not match the active signed artifact")
 		}
 		siteEnabled = true
-	}
-	permissions := make(map[string]bool, len(entry.Permissions))
-	for _, permission := range entry.Permissions {
-		permissions[permission] = true
 	}
 	commands := make(map[string]drivers.RuntimeCommand, len(entry.Commands))
 	for _, command := range entry.Commands {

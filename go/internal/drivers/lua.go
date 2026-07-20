@@ -78,14 +78,15 @@ func NewLuaDriver(path string, env *HostEnv) (*LuaDriver, error) {
 	return NewLuaDriverWithPolicy(path, env, nil)
 }
 
-// NewLuaDriverWithPolicy selects the restricted v2 surface only from verified
-// managed package metadata. Local, bundled and v1 managed drivers keep the
-// existing Lua 5.1 environment.
+// NewLuaDriverWithPolicy binds verified managed package permissions to the
+// host. Only control v2 also gets the restricted Lua library surface. Local,
+// bundled and legacy repository drivers keep the existing Lua 5.1 environment.
 func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*LuaDriver, error) {
 	if policy != nil {
 		if err := policy.validate(); err != nil {
-			return nil, fmt.Errorf("control runtime policy: %w", err)
+			return nil, fmt.Errorf("driver runtime policy: %w", err)
 		}
+		env.WithRuntimePolicy(policy)
 	}
 	src, err := os.ReadFile(path)
 	if err != nil {
@@ -95,7 +96,6 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 	L := lua.NewState(lua.Options{SkipOpenLibs: restricted})
 	if restricted {
 		openRestrictedLibraries(L)
-		env.WithRuntimePolicy(policy)
 	}
 	d := &LuaDriver{Env: env, Path: path, L: L}
 	registerHost(L, env)

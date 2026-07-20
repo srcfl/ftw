@@ -29,6 +29,7 @@ type RuntimePolicy struct {
 	ArtifactSHA256 string
 	RuntimeABI     string
 	HostAPIProfile string
+	ReadOnly       bool
 	Permissions    map[string]bool
 	Commands       map[string]RuntimeCommand
 	DefaultMode    string
@@ -58,7 +59,29 @@ func (p *RuntimePolicy) IsControlV2() bool {
 	return p != nil && p.RuntimeABI == ControlRuntimeABIV2 && p.HostAPIProfile == ControlHostAPIProfileV2
 }
 
+func (p *RuntimePolicy) IsReadOnly() bool {
+	return p != nil && p.ReadOnly
+}
+
 func (p *RuntimePolicy) validate() error {
+	if p.IsReadOnly() {
+		if !strings.HasPrefix(p.PackageID, "com.sourceful.driver.") || p.Version == "" ||
+			!controlHashRE.MatchString(p.ArtifactSHA256) || p.RuntimeABI == "" || p.HostAPIProfile == "" ||
+			p.SiteEnabled || len(p.Commands) != 0 || p.DefaultMode != "" {
+			return errors.New("invalid read-only runtime identity")
+		}
+		for permission, allowed := range p.Permissions {
+			if !allowed {
+				continue
+			}
+			switch permission {
+			case "http.get", "modbus.read", "mqtt.subscribe", "serial.read":
+			default:
+				return fmt.Errorf("read-only runtime has write-capable permission %q", permission)
+			}
+		}
+		return nil
+	}
 	if !p.IsControlV2() || !strings.HasPrefix(p.PackageID, "com.sourceful.driver.") || p.Version == "" ||
 		!controlHashRE.MatchString(p.ArtifactSHA256) || p.DefaultMode != "driver_default_mode_v2" {
 		return errors.New("invalid control v2 runtime identity")

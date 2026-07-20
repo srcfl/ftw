@@ -41,9 +41,11 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - CalDAV planning intents and published schedules;
 - hot-reloadable, independently released Lua drivers.
 
-The local catalog is generated from `DRIVER` metadata. Device Support owns
-canonical Sourceful driver versions and signed target artifacts; the
-[`drivers/*.lua`](drivers/) tree remains FTW's bundled, offline recovery set.
+The local catalog is generated from `DRIVER` metadata. The public
+[`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo is the
+editable source for shared drivers. Device Support builds and signs an exact
+public commit. The [`drivers/*.lua`](drivers/) tree remains FTW's bundled,
+offline recovery set.
 
 ## Install on Linux
 
@@ -110,9 +112,10 @@ Drivers are plain Lua files and need no compilation. A driver declares its
 catalog metadata, lifecycle and required capabilities in one file. The Go host
 provides capability-scoped Modbus, MQTT, HTTP, WebSocket and TCP access.
 
-Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Signed driver
-artifacts are published once by Device Support, selected for FTW's explicit
-GopherLua target, and can be installed or rolled back independently.
+Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Send shared
+driver changes to `srcfl/device-drivers`. Device Support signs approved target
+artifacts, and FTW installs them from `drivers.sourceful.energy`. A driver can
+update or roll back without a new FTW core release.
 
 ## Releases
 

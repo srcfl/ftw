@@ -99,9 +99,9 @@ type HostEnv struct {
 	// callers / tests can inspect what was granted.
 	TCPAllowedHosts []string
 	Start           time.Time // monotonic start; host.millis() computed from here
-	// RuntimePolicy is nil for bundled, local and managed v1 drivers. A signed
-	// v2 policy narrows every host call and permits writes only inside a bounded
-	// command/default-mode call.
+	// RuntimePolicy is nil for bundled, local and legacy repository drivers. A
+	// signed read-only policy denies writes in every phase. A signed v2 control
+	// policy also limits writes to a bounded command/default-mode call.
 	RuntimePolicy *RuntimePolicy
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
