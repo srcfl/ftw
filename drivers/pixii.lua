@@ -1,4 +1,6 @@
 -- Pixii PowerShaper Driver
+-- Bundled offline recovery snapshot for Device Support package pixii 1.2.0.
+-- Canonical shared releases live in srcfl/srcful-device-support.
 -- Emits: Battery, Meter
 -- Protocol: Modbus TCP — SunSpec-compliant commercial battery storage
 -- Register type: ALL HOLDING (FC 0x03)
@@ -26,12 +28,12 @@ DRIVER = {
   id           = "pixii",
   name         = "Pixii PowerShaper",
   manufacturer = "Pixii",
-  version      = "1.0.0",
+  version      = "1.2.0",
   protocols    = { "modbus" },
   capabilities = { "battery", "meter" },
   description  = "Pixii PowerShaper commercial battery storage via Modbus TCP.",
   homepage     = "https://pixii.com",
-  authors      = { "FTW contributors" },
+  authors      = { "Tommy Lindgren", "Sourceful contributors" },
   tested_models = { "PowerShaper" },
   verification_status = "experimental",
   verification_notes = "Ported from a reference implementation. Not yet verified against live hardware on a FTW site.",
@@ -197,9 +199,11 @@ local function read_battery_status()
     -- SunSpec 802 ChaSt=testing (7): Pixii is calibrating and ignores
     -- external setpoints. Flag a device fault so dispatch + MPC exclude it
     -- while keeping telemetry and site-meter data live.
-    local calibrating = charge_status == 7
-    host.set_device_fault(calibrating,
-        calibrating and "Pixii battery calibrating/testing (SunSpec ChaSt=testing)" or "")
+    if charge_status ~= nil then
+        local calibrating = charge_status == 7
+        host.set_device_fault(calibrating,
+            calibrating and "Pixii battery calibrating/testing (SunSpec ChaSt=testing)" or "")
+    end
 
     return {
         charge_status = charge_status,

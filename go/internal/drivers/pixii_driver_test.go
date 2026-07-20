@@ -114,6 +114,17 @@ func TestPixiiTroubleshootingStatusAndSetpoint(t *testing.T) {
 	if h.IsOnline() {
 		t.Fatal("calibrating Pixii must be offline for control")
 	}
+	modbus.regs[40137] = 4 // charging: calibration finished
+	if _, err := d.Poll(context.Background()); err != nil {
+		t.Fatalf("recovery poll: %v", err)
+	}
+	h = tel.DriverHealth("pixii")
+	if h == nil || h.DeviceFault || !h.IsOnline() {
+		t.Fatalf("expected online Pixii after calibration, got %+v", h)
+	}
+	if tel.Get("pixii", telemetry.DerBattery) == nil || tel.Get("pixii", telemetry.DerMeter) == nil {
+		t.Fatal("expected battery and site-meter telemetry through calibration recovery")
+	}
 
 	if err := d.Command(context.Background(), []byte(`{"action":"battery","power_w":-1000}`)); err != nil {
 		t.Fatalf("command: %v", err)
