@@ -53,6 +53,9 @@ services:
       # In-app self-update feature (version banner + Update/Restart
       # buttons). Wired to the ftw-updater sidecar below.
       FTW_SELFUPDATE_ENABLED: "1"
+      # Optional Bearer token for mutations through public/FQDN hostnames.
+      # Store it in .env so updater-driven recreates retain it.
+      FTW_API_TOKEN: ${FTW_API_TOKEN:-}
       FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}
       FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 

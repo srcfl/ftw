@@ -518,7 +518,7 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Battery-covers-EV as HA switch ----
 	bceMsg := b.withAvail(map[string]any{
-		"name":          "Battery Covers EV",
+		"name":          "Legacy Site-wide Battery Cover",
 		"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
 		"state_topic":   b.stateTopic("battery_covers_ev"),
 		"command_topic": b.cmdTopic("battery_covers_ev"),

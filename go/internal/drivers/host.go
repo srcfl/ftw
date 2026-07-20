@@ -99,6 +99,10 @@ type HostEnv struct {
 	// callers / tests can inspect what was granted.
 	TCPAllowedHosts []string
 	Start           time.Time // monotonic start; host.millis() computed from here
+	// RuntimePolicy is nil for bundled, local and managed v1 drivers. A signed
+	// v2 policy narrows every host call and permits writes only inside a bounded
+	// command/default-mode call.
+	RuntimePolicy *RuntimePolicy
 
 	// BatteryCapacityWh mirrors the operator's `battery_capacity_wh`
 	// declaration for this driver. Zero means "no physical battery
@@ -135,6 +139,11 @@ type HostEnv struct {
 	// closure (see registry.go SecretPersister). Keep the value small:
 	// it is round-tripped through config.yaml as a plain string.
 	PersistSecret func(key, value string) error
+	writePhase    string
+	writeDeadline time.Time
+	writeAttempts int
+	writeCount    int
+	writeEvidence map[string]bool
 }
 
 // NewHostEnv creates a fresh host environment for a driver.
@@ -146,6 +155,105 @@ func NewHostEnv(name string, tel *telemetry.Store) *HostEnv {
 		Start:          time.Now(),
 		PollIntervalMS: 5000,
 	}
+}
+
+func (h *HostEnv) WithRuntimePolicy(policy *RuntimePolicy) *HostEnv {
+	h.RuntimePolicy = policy
+	return h
+}
+
+func (h *HostEnv) permissionAllowed(permission string) bool {
+	return h.RuntimePolicy == nil || h.RuntimePolicy.allows(permission)
+}
+
+func (h *HostEnv) beginWriteScope(phase string, deadline time.Time) error {
+	if h.RuntimePolicy == nil {
+		return nil
+	}
+	if !h.RuntimePolicy.IsControlV2() {
+		return errors.New("managed driver has an unsupported control runtime")
+	}
+	if phase != "command" && phase != "default" {
+		return fmt.Errorf("invalid driver write phase %q", phase)
+	}
+	if deadline.IsZero() || !time.Now().Before(deadline) {
+		return errors.New("driver write scope has expired")
+	}
+	h.mu.Lock()
+	h.writePhase = phase
+	h.writeDeadline = deadline
+	h.writeAttempts = 0
+	h.writeCount = 0
+	h.writeEvidence = make(map[string]bool)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *HostEnv) endWriteScope() (int, []string) {
+	if h.RuntimePolicy == nil {
+		return 0, nil
+	}
+	h.mu.Lock()
+	writes := h.writeCount
+	evidence := make([]string, 0, len(h.writeEvidence))
+	for _, name := range []string{"write_ack", "vendor_ack", "readback"} {
+		if h.writeEvidence[name] {
+			evidence = append(evidence, name)
+		}
+	}
+	h.writePhase = ""
+	h.writeDeadline = time.Time{}
+	h.writeAttempts = 0
+	h.writeCount = 0
+	h.writeEvidence = nil
+	h.mu.Unlock()
+	return writes, evidence
+}
+
+func (h *HostEnv) allowWrite(permission string) error {
+	if h.RuntimePolicy == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.RuntimePolicy.allows(permission) {
+		return fmt.Errorf("%s: permission not granted by signed package", permission)
+	}
+	if h.writePhase != "command" && h.writePhase != "default" {
+		return fmt.Errorf("%s: write is not allowed during init, poll, or cleanup", permission)
+	}
+	if h.writeDeadline.IsZero() || !time.Now().Before(h.writeDeadline) {
+		h.writePhase = ""
+		return fmt.Errorf("%s: write scope expired", permission)
+	}
+	if h.writeAttempts >= h.RuntimePolicy.maxWrites() {
+		return fmt.Errorf("%s: write budget exhausted", permission)
+	}
+	h.writeAttempts++
+	return nil
+}
+
+func (h *HostEnv) recordWriteEvidence(name string) {
+	if h.RuntimePolicy == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.writePhase == "command" || h.writePhase == "default" {
+		if name == "write_ack" {
+			h.writeCount++
+		}
+		// Readback proves an applied write only when the read happened after
+		// at least one successful host write in this scope.
+		if name == "readback" && h.writeCount == 0 {
+			h.mu.Unlock()
+			return
+		}
+		if h.writeEvidence == nil {
+			h.writeEvidence = make(map[string]bool)
+		}
+		h.writeEvidence[name] = true
+	}
+	h.mu.Unlock()
 }
 
 // WithMQTT binds an MQTT capability to this host.

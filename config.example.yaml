@@ -174,10 +174,24 @@ state:
 #   repositories:
 #     - id: ftw-official
 #       name: FTW official drivers
+#       format: ftw.manifest/v1       # transitional legacy format
 #       manifest_url: https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json
 #       enabled: true
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
+# Test the Device Support beta channel on one site before the fleet cutover:
+# device_repository:
+#   enabled: true
+#   refresh_interval_h: 24
+#   repositories:
+#     - id: sourceful-device-support-beta
+#       name: Sourceful Device Support beta
+#       format: sourceful.driver-index/v1
+#       manifest_url: https://drivers.sourceful.energy/v1/channels/beta/index.envelope.json
+#       enabled: true
+#       trusted_keys:
+#         sourceful-drivers-2026-01: VfRKapKx1JDs+uSAM5MRhMcWLhfmY1kktrOlDrANn2o=
+# Refresh only updates the signed catalog. Install and activation stay explicit.
 
 # Mathematical MPC optimizer. Official Compose runs it as the independently
 # updatable ftw-optimizer service; native installs can point optimizer_command

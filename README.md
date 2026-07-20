@@ -1,6 +1,6 @@
 # FTW
 
-<img src="web/logo.jpg" alt="FTW" width="120" align="right">
+<img src="web/logo.svg" alt="FTW" width="120" align="right">
 
 > Local-first home energy coordination.
 
@@ -41,8 +41,9 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - CalDAV planning intents and published schedules;
 - hot-reloadable, independently released Lua drivers.
 
-The current device catalog is generated from the `DRIVER` metadata in
-[`drivers/*.lua`](drivers/); that source is authoritative.
+The local catalog is generated from `DRIVER` metadata. Device Support owns
+canonical Sourceful driver versions and signed target artifacts; the
+[`drivers/*.lua`](drivers/) tree remains FTW's bundled, offline recovery set.
 
 ## Install on Linux
 
@@ -110,8 +111,8 @@ catalog metadata, lifecycle and required capabilities in one file. The Go host
 provides capability-scoped Modbus, MQTT, HTTP, WebSocket and TCP access.
 
 Start with [docs/writing-a-driver.md](docs/writing-a-driver.md). Signed driver
-artifacts use the same `beta` → `stable` progression as core and can be
-installed or rolled back independently.
+artifacts are published once by Device Support, selected for FTW's explicit
+GopherLua target, and can be installed or rolled back independently.
 
 ## Releases
 
@@ -130,6 +131,7 @@ The repository deliberately keeps prose small. Code, types, tests and driver
 metadata are the detailed reference.
 
 - [Architecture](docs/architecture.md)
+- [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)
 - [Safety invariants](docs/safety.md)
 - [Operations and recovery](docs/operations.md)

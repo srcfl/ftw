@@ -4,8 +4,11 @@ Drivers are the hardware boundary. A driver translates one vendor protocol to
 FTW's site convention and runs in its own capability-scoped Lua 5.1 VM. No Go
 build is needed.
 
-Start from the closest existing file in `drivers/`, not from a generic
-template.
+For a Sourceful-supported device, create or change the canonical source and
+package metadata in `srcful-device-support`. Start from David's hardware-near
+Blixt implementation when it is the best protocol reference, then prove an
+explicit `ftw-core` target against this host. The `drivers/` tree here is the
+bundled FTW recovery snapshot; operator-only drivers may still live locally.
 
 ## Metadata
 
@@ -28,9 +31,10 @@ DRIVER = {
 }
 ```
 
-The `DRIVER` table feeds validation, signed artifacts and the in-app catalog.
-Do not duplicate the catalog in Markdown. Executable or public metadata changes
-require a version bump.
+The `DRIVER` table feeds target validation and FTW's in-app catalog. Its id,
+version, host API and `read_only` value must agree with the signed Device
+Support package. Do not duplicate the catalog in Markdown. Executable or
+public metadata changes require one canonical package version bump.
 
 ## Lifecycle
 
@@ -110,24 +114,23 @@ not belong in structured meter/PV/battery/EV telemetry.
 
 ## Implementation sequence
 
-1. Copy the closest protocol/device driver and replace its metadata.
+1. Add or update the canonical driver and package source in Device Support.
 2. Implement read-only polling and verify signs against real vendor values.
-3. Add stable identity and stale-cache handling.
-4. Add commands only after telemetry is trustworthy.
-5. Implement and test default mode before enabling automatic dispatch.
-6. Add configuration example only when the integration needs non-obvious
+3. Build the explicit FTW GopherLua/Lua 5.1 target and run FTW host tests.
+4. Add stable identity and stale-cache handling.
+5. Add commands only after telemetry is trustworthy.
+6. Implement and test default mode, leases and structured command results
+   before enabling automatic dispatch.
+7. Add configuration example only when the integration needs non-obvious
    operator input.
-7. Add Go-hosted Lua tests beside `go/internal/drivers`.
+8. Add Go-hosted Lua tests beside `go/internal/drivers`.
 
 Useful checks:
 
 ```bash
 cd go
 go test ./internal/drivers
-go run ./cmd/ftw-driver-repository publish \
-  -unsigned -drivers ../drivers -output ../dist/driver-repository \
-  -base-url https://example.invalid/drivers \
-  -repository https://github.com/srcfl/ftw
+go test ./internal/driverrepo
 ```
 
 For live work, start with telemetry only and a physically supervised device.
@@ -141,5 +144,6 @@ Custom drivers belong in the persistent user-driver directory, not inside a
 container layer. Managed drivers are signed, installed atomically and
 rollbackable; see [device-repository.md](device-repository.md).
 
-New driver code publishes to `beta` first. Promote the same reviewed version
-to `stable` only after hardware validation.
+Device Support publishes new driver packages to `beta` first. Promote the same
+reviewed source, target hashes and version to `stable` only after hardware
+validation. FTW does not fork or independently renumber that release.

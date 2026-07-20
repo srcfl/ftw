@@ -81,11 +81,12 @@
   }
 
   async function fetchAll() {
-    const [p, f, m, c] = await Promise.all([
+    const [p, f, m, c, s] = await Promise.all([
       apiFetch('/api/prices').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/forecast').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/mpc/plan').then(r => r.json()).catch(() => ({})),
       apiFetch('/api/config').then(r => r.json()).catch(() => ({})),
+      apiFetch('/api/status').then(r => r.json()).catch(() => ({})),
     ]);
     state.prices = (p && p.items) || [];
     state.forecast = (f && f.items) || [];
@@ -95,6 +96,7 @@
     // Tariff breakdown pulled from /api/config so the price bars can be
     // stacked as spot + grid tariff + VAT instead of one opaque number.
     state.priceCfg = (c && c.price) || null;
+    state.status = s || {};
     state.enabled = {
       prices: p && p.enabled,
       forecast: f && f.enabled,
@@ -117,6 +119,144 @@
     const d = new Date(ts);
     return d.getHours().toString().padStart(2, '0') + ':' +
            d.getMinutes().toString().padStart(2, '0');
+  }
+
+  function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function readableReason(reason) {
+    if (!reason) return 'Balancing expected energy use and supply';
+    const known = {
+      scheduled: 'Regular schedule refresh',
+      manual: 'You requested a fresh plan',
+      'reactive-pv': 'Solar production changed more than expected',
+      'reactive-load': 'Home use changed more than expected',
+      'twin-drift-pv': 'The solar forecast was corrected',
+      'twin-drift-load': 'The home-use forecast was corrected',
+      'surplus_only_disabled': 'EV surplus-only charging was changed',
+      'loadpoint_schedule_changed': 'An EV schedule was changed',
+      'loadpoint_target_changed': 'An EV charge target was changed',
+    };
+    if (known[reason]) return known[reason];
+    const text = String(reason).replace(/[_-]+/g, ' ').trim();
+    return text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
+  function actionLabel(action) {
+    if (!action) return 'Hold current operation';
+    if ((action.loadpoint_w || 0) > 100) return `Charge EV at ${(action.loadpoint_w / 1000).toFixed(1)} kW`;
+    if ((action.pv_limit_w || 0) > 0) return `Limit solar output to ${(action.pv_limit_w / 1000).toFixed(1)} kW`;
+    if ((action.battery_w || 0) > 100) return `Charge battery at ${(action.battery_w / 1000).toFixed(1)} kW`;
+    if ((action.battery_w || 0) < -100) return `Use battery at ${(Math.abs(action.battery_w) / 1000).toFixed(1)} kW`;
+    return 'Keep the battery steady';
+  }
+
+  function briefPower(w) {
+    const value = Number(w) || 0;
+    return Math.abs(value) >= 1000 ? `${(value / 1000).toFixed(1)} kW` : `${Math.round(value)} W`;
+  }
+
+  function renderPlanBrief(plan) {
+    const status = state.status || {};
+    const plannerActive = String(status.mode || '').startsWith('planner_');
+    const stale = !!status.plan_stale;
+    const badge = document.getElementById('plan-state-badge');
+    if (badge) badge.className = 'plan-state-badge';
+
+    if (!state.enabled || !state.enabled.mpc) {
+      setText('plan-state-badge', 'Planner off');
+      if (badge) badge.classList.add('is-idle');
+      setText('plan-next-action', 'Manual control is active');
+      setText('plan-next-time', 'Choose a planning strategy to create a schedule');
+      setText('plan-main-reason', 'Planning is not controlling the battery');
+      setText('plan-constraint', 'FTW safety limits still apply to manual control');
+      setText('plan-forecast-state', 'No plan forecast');
+      setText('plan-forecast-detail', 'Live readings continue without a forward schedule');
+      setText('plan-expected-soc', Number.isFinite(status.bat_soc) ? `${(status.bat_soc * 100).toFixed(0)}% now` : 'Live value unavailable');
+      setText('plan-soc-detail', 'Expected charge needs an active plan');
+      setText('plan-solver-state', 'Planner off');
+      setText('plan-solver-detail', 'Select a planning strategy to enable it');
+      return;
+    }
+    if (!plan || !Array.isArray(plan.actions) || !plan.actions.length) {
+      setText('plan-state-badge', 'Preparing');
+      if (badge) badge.classList.add('is-warn');
+      setText('plan-next-action', 'Waiting for the first plan');
+      setText('plan-next-time', 'FTW needs current price and forecast data');
+      setText('plan-main-reason', 'Gathering enough data to plan safely');
+      setText('plan-constraint', 'No schedule is being dispatched');
+      setText('plan-forecast-state', 'Inputs pending');
+      setText('plan-forecast-detail', 'Price and energy forecasts are still loading');
+      setText('plan-expected-soc', Number.isFinite(status.bat_soc) ? `${(status.bat_soc * 100).toFixed(0)}% now` : 'Live value unavailable');
+      setText('plan-soc-detail', 'No planned charge path yet');
+      setText('plan-solver-state', 'Waiting');
+      setText('plan-solver-detail', 'No plan has passed validation yet');
+      return;
+    }
+
+    const solver = plan.solver || {};
+    if (stale) {
+      setText('plan-state-badge', 'Fallback active');
+      if (badge) badge.classList.add('is-warn');
+    } else if (solver.fallback) {
+      setText('plan-state-badge', 'Built-in plan active');
+      if (badge) badge.classList.add('is-warn');
+    } else if (plannerActive) {
+      setText('plan-state-badge', 'Plan active');
+      if (badge) badge.classList.add('is-active');
+    } else {
+      setText('plan-state-badge', 'Plan ready');
+      if (badge) badge.classList.add('is-idle');
+    }
+
+    const now = Date.now();
+    const live = plan.actions.find(a => now >= a.slot_start_ms && now < a.slot_start_ms + a.slot_len_min * 60000);
+    const futureMeaningful = plan.actions.find(a => a.slot_start_ms >= now &&
+      (Math.abs(a.battery_w || 0) > 100 || (a.loadpoint_w || 0) > 100 || (a.pv_limit_w || 0) > 0));
+    const next = live && (Math.abs(live.battery_w || 0) > 100 || (live.loadpoint_w || 0) > 100 || (live.pv_limit_w || 0) > 0)
+      ? live : futureMeaningful || live || plan.actions.find(a => a.slot_start_ms >= now) || plan.actions[plan.actions.length - 1];
+    const isNow = next && live === next;
+    const nextEnd = next ? next.slot_start_ms + next.slot_len_min * 60000 : null;
+    setText('plan-next-action', actionLabel(next));
+    setText('plan-next-time', next
+      ? (isNow ? `Now, until ${fmtHHMM(nextEnd)}` : `At ${fmtHHMM(next.slot_start_ms)}`)
+      : 'No action inside the current horizon');
+    setText('plan-main-reason', readableReason(next && next.reason));
+
+    const clamps = (status.dispatch || []).filter(d => d.clamped);
+    if (clamps.length) {
+      const adjusted = clamps.map(d => `${d.driver || 'device'} to ${briefPower(d.target_w)}`).join(', ');
+      setText('plan-constraint', `Safety adjusted ${adjusted} to stay within battery or site limits`);
+    } else if (stale) {
+      setText('plan-constraint', 'The schedule is old, so FTW is using safe live balancing');
+    } else {
+      setText('plan-constraint', 'No active safety adjustment');
+    }
+
+    const uncertain = plan.actions.filter(a => a.confidence != null && a.confidence < 0.999);
+    if (uncertain.length) {
+      const first = uncertain[0];
+      const average = uncertain.reduce((sum, a) => sum + a.confidence, 0) / uncertain.length;
+      setText('plan-forecast-state', average >= 0.75 ? 'Some modeled inputs' : 'Higher uncertainty later');
+      setText('plan-forecast-detail', `Observed market data to ${fmtHHMM(first.slot_start_ms)}; forecast after that`);
+    } else {
+      setText('plan-forecast-state', 'Current published inputs');
+      setText('plan-forecast-detail', 'No modeled price period in this plan');
+    }
+
+    const finalAction = plan.actions[plan.actions.length - 1];
+    const nextSoc = next && Number.isFinite(next.soc_pct) ? `${next.soc_pct.toFixed(0)}% after next step` : '—';
+    setText('plan-expected-soc', nextSoc);
+    setText('plan-soc-detail', finalAction && Number.isFinite(finalAction.soc_pct)
+      ? `${finalAction.soc_pct.toFixed(0)}% at the end of the plan` : 'No battery forecast available');
+
+    const solverName = [solver.engine, solver.backend].filter(Boolean).join(' / ') || 'FTW planner';
+    setText('plan-solver-state', solver.fallback ? 'Built-in fallback' : solverName);
+    setText('plan-solver-detail', solver.fallback
+      ? readableReason(solver.fallback_reason || 'Primary solver unavailable')
+      : (solver.status ? `Plan result: ${readableReason(solver.status)}` : 'Plan passed FTW validation'));
   }
 
   function render() {
@@ -168,6 +308,7 @@
     // alias — removing it leaves those `plan` references undefined and
     // the whole render throws, wiping the chart.
     const plan = state.plan;
+    renderPlanBrief(plan);
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
     // Scale off the fuse (what the site can *physically* deliver) plus a

@@ -31,6 +31,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
@@ -170,7 +171,7 @@ func main() {
 	apiHandler := newSwappableHandler(bootPhaseHandler())
 	httpSrv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.API.Port),
-		Handler:           apiHandler,
+		Handler:           api.SecureMutations(apiHandler, apiMutationPolicy()),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
@@ -189,7 +190,9 @@ func main() {
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
-	driverRepository := driverrepo.New(cfg.DeviceRepository, filepath.Dir(statePath), st)
+	driverRepository := driverrepo.NewWithHostVersion(
+		cfg.DeviceRepository, filepath.Dir(statePath), st, Version,
+	)
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
 	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))
@@ -338,6 +341,15 @@ func main() {
 	}
 	reg := drivers.NewRegistry(tel)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
+	reg.RuntimePolicyResolver = driverRepository.RuntimePolicy
+	reg.CommandResultSink = func(driverName string, result drivers.DriverCommandResultV1) {
+		if err := st.RecordDriverCommandResult(
+			result.ID, driverName, result.Command, result.Status, result.Code,
+			result.CompletedAt.UnixMilli(), result.JSON(),
+		); err != nil {
+			slog.Error("persist driver command result", "driver", driverName, "command_id", result.ID, "err", err)
+		}
+	}
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
 	}
@@ -971,6 +983,24 @@ func main() {
 				if !st.PluggedIn {
 					continue
 				}
+				// An active boost lease may carry a session-local EV target and
+				// departure. It overrides planning inputs without mutating the
+				// operator's recurring loadpoint schedule; once the lease stops,
+				// the normal schedule is still exactly as it was.
+				effectiveTargetPct := st.TargetSoCPct
+				effectiveTargetTime := st.TargetTime
+				boostActive := false
+				if lpController != nil {
+					if lease, status := lpController.BatteryBoost(st.ID, time.Now()); status.Active {
+						boostActive = true
+						if lease.EVTargetSoCPct > 0 {
+							effectiveTargetPct = lease.EVTargetSoCPct
+						}
+						if !lease.DepartureAt.IsZero() {
+							effectiveTargetTime = lease.DepartureAt
+						}
+					}
+				}
 				// Schedule gate: only extend the DP with an EV-SoC
 				// dimension when the operator has set BOTH a target SoC
 				// and a future deadline. Without a schedule the DP
@@ -979,8 +1009,8 @@ func main() {
 				// against a target the operator never asked for. With
 				// no schedule, EV is left to the loadpoint controller's
 				// reactive surplus-only behaviour.
-				if st.TargetSoCPct <= 0 || st.TargetTime.IsZero() ||
-					!st.TargetTime.After(time.Now()) {
+				if effectiveTargetPct <= 0 || effectiveTargetTime.IsZero() ||
+					!effectiveTargetTime.After(time.Now()) {
 					continue
 				}
 				// Pull capacity off the configured loadpoint.
@@ -1021,8 +1051,8 @@ func main() {
 					slotLenMin = 60
 				}
 				targetSlot := -1
-				if !st.TargetTime.IsZero() {
-					delta := time.Until(st.TargetTime)
+				if !effectiveTargetTime.IsZero() {
+					delta := time.Until(effectiveTargetTime)
 					if delta > 0 {
 						targetSlot = int(delta / (time.Duration(slotLenMin) * time.Minute))
 					}
@@ -1033,7 +1063,7 @@ func main() {
 				// so planning past it is wasted DP grid space. When
 				// the limit is unknown, fall back to the deadline
 				// target itself; never plan beyond what was requested.
-				maxPct := st.TargetSoCPct
+				maxPct := effectiveTargetPct
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < maxPct {
 					maxPct = vehicleChargeLimit
 				}
@@ -1046,11 +1076,11 @@ func main() {
 				// and MPC keeps committing grid charging chasing an
 				// unreachable goal. Cap target_pct to whatever the
 				// car will physically accept.
-				targetPct := st.TargetSoCPct
+				targetPct := effectiveTargetPct
 				if vehicleChargeLimit > 0 && vehicleChargeLimit < targetPct {
 					targetPct = vehicleChargeLimit
 					slog.Info("mpc: target capped to vehicle charge limit",
-						"lp", st.ID, "operator_target_pct", st.TargetSoCPct,
+						"lp", st.ID, "operator_target_pct", effectiveTargetPct,
 						"vehicle_limit_pct", vehicleChargeLimit)
 				}
 				// Guard against degenerate grids: if current SoC > maxPct
@@ -1085,19 +1115,19 @@ func main() {
 						}
 					}
 					if !latestEnd.IsZero() &&
-						st.TargetTime.After(latestEnd) &&
-						time.Until(st.TargetTime) > 3*time.Hour {
+						effectiveTargetTime.After(latestEnd) &&
+						time.Until(effectiveTargetTime) > 3*time.Hour {
 						deferGridPlan = true
 					}
 				}
 				slog.Debug("mpc: loadpoint spec",
 					"id", st.ID, "soc_pct", initSoC, "soc_source", socSource,
-					"target_pct", st.TargetSoCPct, "target_slot", targetSlot,
+					"target_pct", effectiveTargetPct, "target_slot", targetSlot,
 					"max_pct", maxPct, "vehicle_limit_pct", vehicleChargeLimit,
 					"defer_grid_plan", deferGridPlan)
 				if deferGridPlan {
 					slog.Info("mpc: LP grid-funded planning deferred — target past published prices",
-						"lp", st.ID, "target", st.TargetTime, "hours_to_target", time.Until(st.TargetTime).Hours())
+						"lp", st.ID, "target", effectiveTargetTime, "hours_to_target", time.Until(effectiveTargetTime).Hours())
 				}
 				// Mirror the deferral into the runtime controller so live
 				// dispatch enforces "no grid import" too. Without this,
@@ -1134,7 +1164,7 @@ func main() {
 				// while live execution held the battery at house-only
 				// levels. Take ctrlMu for the bool read.
 				ctrlMu.Lock()
-				noBatteryToEV := !ctrl.BatteryCoversEV
+				noBatteryToEV := !(ctrl.BatteryCoversEV || boostActive)
 				ctrlMu.Unlock()
 				specs = append(specs, &mpc.LoadpointSpec{
 					ID:               st.ID,
@@ -1322,6 +1352,85 @@ func main() {
 			}
 			return ctrl.FuseEVMaxW, true
 		})
+		// Every lease is preflighted and re-evaluated on each loadpoint tick.
+		// This closure owns site/battery health because those concepts belong
+		// to core, not to the protocol-neutral loadpoint package.
+		lpController.SetBatteryBoostSafety(func(id string, lease loadpoint.BatteryBoostLease) loadpoint.BatteryBoostStopReason {
+			ctrlMu.Lock()
+			mode := ctrl.Mode
+			fuseBlocked := ctrl.FuseSaturated
+			_, batteryHeld := ctrl.GetBatteryManualHold(time.Now())
+			siteMeter := ctrl.SiteMeterDriver
+			ctrlMu.Unlock()
+			if mode == control.ModeIdle || mode == control.ModeCharge {
+				return loadpoint.BatteryBoostStoppedCoreMode
+			}
+			if batteryHeld {
+				return loadpoint.BatteryBoostStoppedBatteryHold
+			}
+			if fuseBlocked {
+				return loadpoint.BatteryBoostStoppedFuseSafety
+			}
+			cfgMu.RLock()
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			staticFloor := make(map[string]float64, len(cfg.Batteries))
+			for name, batteryCfg := range cfg.Batteries {
+				if batteryCfg.SoCMin != nil {
+					staticFloor[name] = *batteryCfg.SoCMin
+				}
+			}
+			cfgMu.RUnlock()
+			if watchdog <= 0 {
+				watchdog = 60 * time.Second
+			}
+			if siteMeter == "" || tel.IsStale(siteMeter, telemetry.DerMeter, watchdog) {
+				return loadpoint.BatteryBoostStoppedSiteSafety
+			}
+			if h := tel.DriverHealth(siteMeter); h == nil || !h.IsOnline() {
+				return loadpoint.BatteryBoostStoppedSiteSafety
+			}
+			lpState, ok := lpMgr.State(id)
+			if !ok {
+				return loadpoint.BatteryBoostStoppedLoadpointDriver
+			}
+			lpHealth := tel.DriverHealth(lpState.DriverName)
+			if lpHealth == nil || !lpHealth.IsOnline() || tel.IsStale(lpState.DriverName, telemetry.DerEV, watchdog) {
+				return loadpoint.BatteryBoostStoppedLoadpointDriver
+			}
+			capMu.RLock()
+			batteryNames := make([]string, 0, len(capacities))
+			for name := range capacities {
+				batteryNames = append(batteryNames, name)
+			}
+			capMu.RUnlock()
+			usable := 0
+			for _, name := range batteryNames {
+				h := tel.DriverHealth(name)
+				// A configured-but-never-started battery has no health row and is
+				// ignored (for example a disabled config entry). Once a source
+				// has participated, stale/offline/faulted state withdraws the
+				// whole lease rather than silently changing its reserve basis.
+				if h == nil {
+					continue
+				}
+				r := tel.Get(name, telemetry.DerBattery)
+				if !h.IsOnline() || r == nil || r.SoC == nil || tel.IsStale(name, telemetry.DerBattery, watchdog) {
+					return loadpoint.BatteryBoostStoppedBatteryUnavailable
+				}
+				usable++
+				floor := lease.MinBatterySoCPct / 100
+				if staticFloor[name] > floor {
+					floor = staticFloor[name]
+				}
+				if *r.SoC <= floor {
+					return loadpoint.BatteryBoostStoppedBatteryReserve
+				}
+			}
+			if usable == 0 {
+				return loadpoint.BatteryBoostStoppedBatteryUnavailable
+			}
+			return ""
+		})
 		// Persist operator manual holds (the amp-slider "Start") so they
 		// survive reboot / firmware update and the EV keeps charging across
 		// the restart — the in-memory hold would otherwise be lost (Stefan
@@ -1366,6 +1475,46 @@ func main() {
 			if err := st.SaveConfig(key, string(b)); err != nil {
 				slog.Warn("failed to persist manual hold", "lp", id, "err", err)
 			}
+		})
+		const lpBatteryBoostKeyPrefix = "loadpoint_battery_boost:"
+		for _, lpState := range lpMgr.States() {
+			key := lpBatteryBoostKeyPrefix + lpState.ID
+			v, ok := st.LoadConfig(key)
+			if !ok || v == "" || v == "{}" {
+				continue
+			}
+			var lease loadpoint.BatteryBoostLease
+			if err := json.Unmarshal([]byte(v), &lease); err != nil ||
+				!lpController.RestoreBatteryBoost(lpState.ID, lease, time.Now()) {
+				_ = st.SaveConfig(key, "{}")
+				slog.Warn("discarded invalid persisted battery boost lease", "lp", lpState.ID, "err", err)
+				continue
+			}
+			slog.Info("restored bounded battery boost lease", "lp", lpState.ID, "expires_at", lease.ExpiresAt)
+		}
+		lpController.SetBatteryBoostSaver(func(id string, lease loadpoint.BatteryBoostLease, cleared bool) {
+			key := lpBatteryBoostKeyPrefix + id
+			if cleared {
+				if err := st.SaveConfig(key, "{}"); err != nil {
+					slog.Warn("failed to clear persisted battery boost lease", "lp", id, "err", err)
+				}
+				return
+			}
+			b, err := json.Marshal(lease)
+			if err != nil {
+				slog.Warn("failed to marshal battery boost lease", "lp", id, "err", err)
+				return
+			}
+			if err := st.SaveConfig(key, string(b)); err != nil {
+				slog.Warn("failed to persist battery boost lease", "lp", id, "err", err)
+			}
+		})
+		lpController.SetBatteryBoostStopped(func(id string, reason loadpoint.BatteryBoostStopReason) {
+			if mpcSvc == nil {
+				return
+			}
+			go mpcSvc.ReplanWithReason(context.Background(), "loadpoint_battery_boost_stopped")
+			slog.Info("battery boost stopped — replan requested", "lp", id, "reason", reason)
 		})
 		// Wire the live per-phase site-meter current reader. The control
 		// package's fuse guard is site-TOTAL only (sum across phases);
@@ -1933,7 +2082,23 @@ func main() {
 		siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
 		if err != nil {
 			slog.Warn("nova federation disabled — gateway identity unavailable", "err", err, "path", identityKeyPath)
-		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
+		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel,
+			nova.WithDriverInventory(func(now time.Time) (driverinventory.Snapshot, error) {
+				cfgMu.RLock()
+				driverCfg := append([]config.Driver(nil), cfg.Drivers...)
+				cfgMu.RUnlock()
+				return driverinventory.Build(now, driverinventory.Input{
+					HostVersion:       Version,
+					Drivers:           driverCfg,
+					RunningNames:      reg.Names(),
+					Health:            tel.AllHealth(),
+					UserDriverDir:     *userDriversDirFlag,
+					ManagedDriverDir:  driverRepository.ActiveDir(),
+					BundledDriverDir:  resolveDriverDir(),
+					RepositoryDrivers: inventoryRepositoryArtifacts(driverRepository),
+				})
+			}),
+		); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()
@@ -2124,7 +2289,9 @@ func main() {
 			// gate is closed. TickWithDispatch sends an explicit 0 W standdown
 			// instead of executing a schedule or persistent manual hold.
 			lpMgr.RollSchedules(tickNow.UTC())
-			lpController.TickWithDispatch(ctx, tickNow, freshness.Allowed())
+			if lpController != nil {
+				lpController.TickWithDispatch(ctx, tickNow, freshness.Allowed())
+			}
 
 			// Anchor each plugged-in loadpoint's inferred SoC to the live
 			// vehicle BMS reading when one is paired. Chargers like Easee
@@ -2213,10 +2380,13 @@ func main() {
 			// with SoC headroom so PV isn't cut when a vehicle could
 			// resume charging.
 			evCurtailHeadroomW := loadpoint.SurplusPotentialW(lpStatesSnapshot)
+			boostEVW, boostReserveSoC := activeBatteryBoostTotals(lpController, lpStatesSnapshot, tickNow)
 
 			ctrlMu.Lock()
 			ctrl.EVSurplusOnlyReserveW = evReserveW
 			ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
+			ctrl.BatteryBoostEVChargingW = boostEVW
+			ctrl.BatteryBoostReserveSoC = boostReserveSoC
 			fuseMaxW := ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)
 			targets := control.ComputeDispatch(tel, ctrl, capsSnap, fuseMaxW)
 			planMissingNow := ctrl.Mode.IsPlannerMode() && ctrl.PlanStale
@@ -2388,7 +2558,8 @@ func main() {
 			for i, sm := range samples {
 				stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
 			}
-			if err := st.RecordTick(hp, stSamples); err != nil {
+			energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+			if err := st.RecordTickWithEnergy(hp, stSamples, energyObservations); err != nil {
 				slog.Warn("tick persistence failed", "samples", len(samples), "err", err)
 			}
 
@@ -2407,6 +2578,45 @@ func main() {
 			}
 		}
 	}
+}
+
+func inventoryRepositoryArtifacts(manager *driverrepo.Manager) []driverinventory.RepositoryArtifact {
+	if manager == nil {
+		return nil
+	}
+	active := manager.Status().Active
+	out := make([]driverinventory.RepositoryArtifact, 0, len(active))
+	for _, installed := range active {
+		item := driverinventory.RepositoryArtifact{
+			LogicalPath:   installed.LogicalPath,
+			InstalledPath: installed.InstalledPath,
+			DriverID:      installed.DriverID,
+			Version:       installed.Version,
+			SHA256:        installed.SHA256,
+			RepositoryID:  installed.RepoID,
+		}
+		versions, err := manager.AvailableVersions(installed.DriverID)
+		if err == nil {
+			for _, candidate := range versions {
+				driver := candidate.Driver
+				if candidate.RepositoryID != installed.RepoID || driver.Version != installed.Version || !strings.EqualFold(driver.SHA256, installed.SHA256) {
+					continue
+				}
+				item.PackageID = driver.PackageID
+				item.PackageChannel = driver.Channel
+				if driver.PackageID != "" {
+					if driver.Metadata.ReadOnly {
+						item.ControlClass = "read_only"
+					} else {
+						item.ControlClass = "control"
+					}
+				}
+				break
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // snapshotLoop writes a recovery snapshot of state.db daily and once on
@@ -2498,6 +2708,11 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	// ts_samples is correctly moved to Parquet.
 	if err := st.Prune(ctx); err != nil {
 		slog.Warn("history tier prune failed", "err", err)
+	}
+	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
+		slog.Warn("energy ledger retention failed", "err", err)
+	} else if rolled > 0 || expired > 0 {
+		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
 	}
 
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
@@ -2842,6 +3057,16 @@ func planSlotsFromMPC(mpcSvc *mpc.Service) []calendar.PlanSlot {
 		})
 	}
 	return out
+}
+
+// activeBatteryBoostTotals keeps the core dispatch tick safe when the optional
+// planner is disabled. The loadpoint controller currently shares the planner's
+// lifecycle, so no controller means there can be no active boost permission.
+func activeBatteryBoostTotals(controller *loadpoint.Controller, states []loadpoint.State, now time.Time) (float64, float64) {
+	if controller == nil {
+		return 0, 0
+	}
+	return controller.ActiveBatteryBoostTotals(states, now)
 }
 
 // buildLoadpointConfigs adapts YAML-facing config.Loadpoint entries

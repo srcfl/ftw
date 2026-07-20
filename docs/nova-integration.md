@@ -17,8 +17,21 @@ FTW keeps its clean snake_case site convention internally. The default
 vocabulary and battery sign at this one boundary. `schema_mode: unified`
 publishes the clean schema when the target Nova deployment supports it.
 
-Only DER telemetry and registered device identity are published. Operator
-credentials and FTW configuration are not telemetry payloads.
+Only DER telemetry, registered device identity and the bounded driver inventory
+are published. Operator credentials and FTW configuration are not payloads.
+
+## Driver inventory
+
+When Nova federation is enabled, FTW also publishes
+`sourceful.driver-inventory/v1` on connect, after a loaded-driver change and at
+least every 15 minutes. It reports driver ID, version, loaded source or package
+hash, package channel, declared control class, instance counts and health.
+
+The report does not contain instance or site names, driver config, connection
+details, device IDs, tokens, logs, command inputs or vendor responses. Nova
+uses the authenticated MQTT identity for gateway and organization ownership.
+Fleet reports must show how many FTW gateways sent a fresh inventory; the first
+beta counts do not cover FTW sites that have not enabled Nova federation.
 
 ## Claim and provision
 

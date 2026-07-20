@@ -97,6 +97,18 @@ type Controller struct {
 	// Timed/diagnostic holds are intentionally NOT persisted (ephemeral).
 	manualHoldSaver func(id string, h ManualHold, cleared bool)
 
+	// batteryBoost leases are explicit, time-bounded authorisations for the
+	// home battery to cover this loadpoint's charging draw. They are separate
+	// from manual holds: a hold pins charger power, while a boost only relaxes
+	// the normally-on battery-to-EV block and never bypasses charger, fuse, or
+	// battery safety clamps. See battery_boost.go.
+	batteryBoostMu      sync.Mutex
+	batteryBoost        map[string]BatteryBoostLease
+	batteryBoostStatus  map[string]BatteryBoostStatus
+	batteryBoostSaver   func(id string, lease BatteryBoostLease, cleared bool)
+	batteryBoostSafety  BatteryBoostSafetyFunc
+	batteryBoostStopped func(id string, reason BatteryBoostStopReason)
+
 	// surplusMu protects surplusWin + surplusPaused, the per-loadpoint
 	// state that smooths the surplus_only pause/resume decision over
 	// a small rolling window so brief PV dips don't cycle the EV
@@ -403,7 +415,14 @@ type SenderFunc func(ctx context.Context, driver string, payload []byte) error
 // NewController wires the dependencies. Passing nil for plan, tel,
 // or send disables the corresponding step — useful in tests.
 func NewController(mgr *Manager, plan PlanFunc, tel TelemetryFunc, send SenderFunc) *Controller {
-	return &Controller{manager: mgr, plan: plan, tel: tel, send: send}
+	return &Controller{
+		manager:            mgr,
+		plan:               plan,
+		tel:                tel,
+		send:               send,
+		batteryBoost:       map[string]BatteryBoostLease{},
+		batteryBoostStatus: map[string]BatteryBoostStatus{},
+	}
 }
 
 // SetFuseEVMax wires the joint allocator's verdict from control.State.
@@ -1219,6 +1238,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, d
 	selfWithheld := surplusOn && enteringSurplusPaused
 	c.manager.SetSurplusWithheld(lpCfg.ID, selfWithheld)
 	c.manager.Observe(lpCfg.ID, sample.Connected, sample.PowerW, sample.SessionWh, sample.RequestActive)
+	c.evaluateBatteryBoost(lpCfg.ID, now, sample.Connected, dispatchAllowed)
 	if !sample.Connected {
 		c.resetSurplusSession(lpCfg.ID)
 		// Release any manual override when the vehicle unplugs. A

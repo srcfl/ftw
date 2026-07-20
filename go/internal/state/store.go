@@ -730,6 +730,17 @@ func (s *Store) migrate() error {
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
 			ON driver_repo_installs(logical_path) WHERE active = 1`,
+		`CREATE TABLE IF NOT EXISTS driver_command_results (
+			id TEXT PRIMARY KEY NOT NULL,
+			driver_name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			status TEXT NOT NULL,
+			code TEXT NOT NULL,
+			completed_at_ms INTEGER NOT NULL,
+			result_json TEXT NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_driver_command_results_completed
+			ON driver_command_results(completed_at_ms DESC)`,
 
 		// Cross-component update audit. The operation key survives a core
 		// container recreation, allowing the new process to finish the event
@@ -787,11 +798,63 @@ func (s *Store) migrate() error {
 			load_wh           REAL NOT NULL,
 			computed_at_ms    INTEGER NOT NULL
 		) STRICT`,
+
+		// ---- Versioned energy ledger ----
+		// Energy is stored as non-negative directional quantities. Asset IDs
+		// are derived from stable hardware identity (or the reserved site
+		// identity for the inferred household consumer), never config names.
+		`CREATE TABLE IF NOT EXISTS energy_ledger_meta (
+			key   TEXT PRIMARY KEY NOT NULL,
+			value TEXT NOT NULL
+		) STRICT`,
+		`INSERT OR IGNORE INTO energy_ledger_meta(key, value)
+			VALUES ('schema_version', '1')`,
+		`CREATE TABLE IF NOT EXISTS energy_assets (
+			asset_id       TEXT PRIMARY KEY NOT NULL,
+			device_id      TEXT NOT NULL DEFAULT '',
+			kind           TEXT NOT NULL,
+			label          TEXT NOT NULL DEFAULT '',
+			read_only      INTEGER NOT NULL DEFAULT 0 CHECK(read_only IN (0, 1)),
+			first_seen_ms  INTEGER NOT NULL,
+			last_seen_ms   INTEGER NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_energy_assets_device
+			ON energy_assets(device_id, kind)`,
+		`CREATE TABLE IF NOT EXISTS energy_ledger_entries (
+			schema_version INTEGER NOT NULL,
+			asset_id       TEXT NOT NULL,
+			flow           TEXT NOT NULL,
+			bucket_start_ms INTEGER NOT NULL,
+			bucket_len_ms   INTEGER NOT NULL CHECK(bucket_len_ms > 0),
+			energy_wh      REAL NOT NULL CHECK(energy_wh >= 0),
+			source         TEXT NOT NULL,
+			quality        TEXT NOT NULL,
+			provenance     TEXT NOT NULL,
+			sample_count   INTEGER NOT NULL DEFAULT 1 CHECK(sample_count > 0),
+			observed_at_ms INTEGER NOT NULL,
+			PRIMARY KEY (
+				schema_version, asset_id, flow, bucket_start_ms,
+				bucket_len_ms, source, quality, provenance
+			)
+		) WITHOUT ROWID, STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_energy_ledger_time
+			ON energy_ledger_entries(bucket_start_ms, asset_id, flow)`,
+		`CREATE TABLE IF NOT EXISTS energy_ledger_cursors (
+			asset_id   TEXT NOT NULL,
+			flow       TEXT NOT NULL,
+			cursor_kind TEXT NOT NULL,
+			value      REAL NOT NULL,
+			ts_ms      INTEGER NOT NULL,
+			PRIMARY KEY(asset_id, flow, cursor_kind)
+		) WITHOUT ROWID, STRICT`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return fmt.Errorf("migration %q: %w", stmt[:40]+"…", err)
 		}
+	}
+	if err := s.ensureEnergyLedgerVersion(); err != nil {
+		return err
 	}
 	// Disposable tier (cache.db): re-fetchable market + weather data. Kept in a
 	// separate file so its corruption (or a deliberate flush) never risks the

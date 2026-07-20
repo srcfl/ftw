@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.7.0
+
+### Minor Changes
+
+- a49f248: Add the signed Device Support control v2 host with exact site pins, short leases, default-mode recovery, a restricted Lua API, Modbus-only permissions, and local command-result records. Existing bundled, local, and read-only v1 drivers keep their current runtime.
+
+## 1.6.0
+
+### Minor Changes
+
+- eb92509: Report a bounded driver inventory to Nova when federation is enabled. Reports include loaded code hashes and package provenance, but no site config, device IDs, endpoints or credentials.
+
+## 1.5.0
+
+### Minor Changes
+
+- 36ac4f6: Add a per-loadpoint Battery boost lease with a four-hour maximum, explicit home-battery reserve, optional EV target and departure, restart-safe persistence, API controls, and visible stop reasons in the Loadpoints UI.
+
+  Battery boost automatically stops on expiry, reserve, unplug, operator holds, surplus-only policy, stale or unavailable meter/drivers, incompatible core modes, and fuse safety. The legacy site-wide `battery_covers_ev` control remains available for compatibility.
+
+- adb70f2: Consume signed canonical Device Support driver indexes and FTW target packages while preserving explicit Core activation, offline recovery and automatic rollback. The first package gate is read-only; control packages remain blocked pending safety-lifecycle HIL acceptance.
+- f7d2da9: Give the dashboard five focused Overview, Energy, Plan, History and More destinations, with a mobile bottom navigation and matching desktop tabs. Add a plain-language active-plan briefing for next actions, fallback or stale operation, forecast uncertainty, expected battery charge and active safety adjustments.
+- 22ab07c: Add a versioned energy history ledger keyed by stable asset identity, with separate grid and battery directions, hardware-counter preference, marked integration fallback, data-quality provenance, bounded system/asset APIs, CSV export, and a read-only History view.
+
+  Existing hot/warm/cold history and Parquet roll-off remain unchanged. XLSX export is deferred to a later phase to avoid adding a heavyweight runtime dependency.
+
+  Five-minute ledger detail is retained for 30 days, then atomically rolled into honest hourly buckets and bounded to the two-year API horizon.
+
+### Patch Changes
+
+- bdc47c8: Publish a gated NOW/NEXT/LATER roadmap for the current P0 work, the optional outbound-only FTW Home Link, and evidence required before later product directions can advance.
+- 630cc69: Consolidate the FTW logo into matching SVG, PNG, JPEG, and favicon assets, and use the scalable or square format appropriate for the dashboard, setup wizard, README, and Raspberry Pi Imager.
+- 5d902a3: Stop EV charging and storage dispatch when the site meter or required per-phase fuse telemetry is stale, while preserving schedules and persistent manual holds for automatic recovery.
+- 1d1e852: Harden the LAN/API trust boundary in setup and normal operation: remove wildcard CORS, block browser cross-site mutations and active reads, require JSON content types, and require an opt-in Bearer token for protected requests addressed through public or fully qualified hostnames. Existing loopback and private-LAN UI/API clients remain compatible, with documented remote-access onboarding and local recovery.
+- eb6979d: Remove the dormant settlement-aware self-consumption path that could offset earlier import by exporting battery energy later in the same 15-minute window. Quarter-hour import and export remain separate observational totals and no longer have a control path that can net one against the other.
+
 ## 1.4.0
 
 ### Minor Changes
