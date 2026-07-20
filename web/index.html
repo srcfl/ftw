@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=lp6">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=app1">
+  <link rel="stylesheet" href="/app.css?v=ia1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -54,23 +54,18 @@
 <body class="ftw-app">
   <header>
     <img src="/logo.svg" alt="FTW" class="header-logo"><h1>FTW</h1>
-    <nav class="app-tabs" id="app-tabs" role="tablist">
-      <button data-view="live" class="tab-btn active" role="tab">Live</button>
-      <button data-view="history" class="tab-btn" role="tab">History</button>
-      <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
+    <nav class="app-tabs" id="app-tabs" role="tablist" aria-label="Primary navigation">
+      <button data-view="overview" class="tab-btn app-nav-btn active" role="tab" aria-controls="view-overview" aria-selected="true">Overview</button>
+      <button data-view="energy" class="tab-btn app-nav-btn" role="tab" aria-controls="view-energy" aria-selected="false">Energy</button>
+      <button data-view="plan" class="tab-btn app-nav-btn" role="tab" aria-controls="view-plan" aria-selected="false">Plan</button>
+      <button data-view="history" class="tab-btn app-nav-btn" role="tab" aria-controls="view-history" aria-selected="false">History</button>
+      <button data-view="more" class="tab-btn app-nav-btn" role="tab" aria-controls="view-more" aria-selected="false">More</button>
     </nav>
     <!-- Hamburger — visible only on narrow viewports. Opens the header
          drawer (tabs + toggles + settings + version) via CSS class flip
          handled in the init block at the bottom of this file. -->
     <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
     <div class="header-right">
-      <!-- Drawer-only navigation shortcuts (hidden on desktop). These
-           share [data-view] with the main .app-tabs so the global view
-           router in diagnose.js treats them the same as the top-row
-           tabs. Added so the mobile hamburger menu exposes Diagnose. -->
-      <button data-view="live" class="drawer-nav-btn" data-menu-label="Live view">&#9654;</button>
-      <button data-view="history" class="drawer-nav-btn" data-menu-label="Energy history">&#9638;</button>
-      <button data-view="diagnose" class="drawer-nav-btn" data-menu-label="Diagnose">&#9202;</button>
       <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <!-- Advanced toggle moved below the Plan chart so it's visually
@@ -148,7 +143,7 @@
     </div>
   </div>
 
-  <main id="view-live">
+  <main id="view-overview" class="app-view" role="tabpanel" aria-label="Overview">
     <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
          EV bottom. app.js calls el.setReadings(...) each status tick. -->
     <section class="flow-hero">
@@ -412,6 +407,40 @@
           </div>
         </div>
 
+        <!-- Plain-language plan briefing. The chart remains the detailed
+             evidence, while this strip answers the first operational
+             questions without requiring hover or optimizer vocabulary. -->
+        <section id="plan-now" class="plan-now" aria-live="polite" aria-label="Current plan status">
+          <div class="plan-now-lead">
+            <span id="plan-state-badge" class="plan-state-badge">Checking plan…</span>
+            <div>
+              <span class="plan-now-label">Next</span>
+              <strong id="plan-next-action">Waiting for a plan</strong>
+              <small id="plan-next-time">—</small>
+            </div>
+          </div>
+          <div class="plan-now-item">
+            <span class="plan-now-label">Why</span>
+            <strong id="plan-main-reason">—</strong>
+            <small id="plan-constraint">No active limit reported</small>
+          </div>
+          <div class="plan-now-item">
+            <span class="plan-now-label">Forecast</span>
+            <strong id="plan-forecast-state">—</strong>
+            <small id="plan-forecast-detail">—</small>
+          </div>
+          <div class="plan-now-item">
+            <span class="plan-now-label">Expected charge</span>
+            <strong id="plan-expected-soc">—</strong>
+            <small id="plan-soc-detail">—</small>
+          </div>
+          <div class="plan-now-item">
+            <span class="plan-now-label">Planner</span>
+            <strong id="plan-solver-state">—</strong>
+            <small id="plan-solver-detail">—</small>
+          </div>
+        </section>
+
         <!-- Strategy — the operator-facing knob that drives plan
              behaviour. Lives inside the Plan card because that's what
              it controls; the standalone "controls row" above
@@ -499,8 +528,32 @@
 
   </main>
 
-  <!-- History view — read-only energy ledger for system and stable assets. -->
-  <main id="view-history" class="hidden">
+  <!-- Destination shells are populated by diagnose.js from the existing
+       dashboard sections. Keeping one copy of each section preserves the
+       component instances, polling state and keyboard bindings. -->
+  <main id="view-energy" class="app-view hidden" role="tabpanel" aria-label="Energy and assets">
+    <section class="view-heading">
+      <p class="view-kicker">Energy</p>
+      <h2>Flows and assets</h2>
+      <p>Current power, today’s energy, prices and the last 24 hours.</p>
+    </section>
+  </main>
+
+  <main id="view-plan" class="app-view hidden" role="tabpanel" aria-label="Plan">
+    <section class="view-heading">
+      <p class="view-kicker">Plan</p>
+      <h2>What FTW will do next</h2>
+      <p>The active schedule, its inputs and the limits that shape it.</p>
+    </section>
+  </main>
+
+  <!-- History view — energy history plus persisted planner decisions. -->
+  <main id="view-history" class="app-view hidden" role="tabpanel" aria-label="History">
+    <section class="view-heading">
+      <p class="view-kicker">History</p>
+      <h2>Energy and past decisions</h2>
+      <p>Review measured outcomes first, then inspect what informed an earlier plan.</p>
+    </section>
     <section class="energy-history-header">
       <div>
         <h2>Energy history</h2>
@@ -529,14 +582,10 @@
       </table>
     </section>
     <p class="energy-history-note">CSV is the supported export format in this phase. XLSX export is planned for a later phase.</p>
-  </main>
-
-  <!-- Diagnose view — time-travel through persisted planner snapshots -->
-  <main id="view-diagnose" class="hidden">
     <section class="diagnose-header">
       <div class="diagnose-header-row">
         <div class="diagnose-title">
-          <h2>Diagnose</h2>
+          <h2>Plan decisions</h2>
           <span class="plan-summary" id="diagnose-meta">—</span>
         </div>
         <div class="diagnose-range">
@@ -562,10 +611,40 @@
 
       <!-- Right: detail pane for selected snapshot -->
       <section class="diagnose-detail" id="diagnose-detail">
-        <div class="diagnose-empty">Select a snapshot from the timeline to inspect what the planner saw and decided.</div>
+        <div class="diagnose-empty">Select a decision to inspect what FTW expected and chose.</div>
       </section>
     </section>
   </main>
+
+  <main id="view-more" class="app-view hidden" role="tabpanel" aria-label="More">
+    <section class="view-heading">
+      <p class="view-kicker">More</p>
+      <h2>Setup, settings and system</h2>
+      <p>Configure FTW, check for updates or open advanced operational details.</p>
+    </section>
+    <section class="more-actions" aria-label="System actions">
+      <button id="more-settings-btn" class="more-action" type="button">
+        <span class="more-action-icon" aria-hidden="true">⚙</span>
+        <span><strong>Settings</strong><small>Control, devices, prices, planner and system</small></span>
+      </button>
+      <a class="more-action" href="/setup">
+        <span class="more-action-icon" aria-hidden="true">⌁</span>
+        <span><strong>Setup</strong><small>Run the guided setup again</small></span>
+      </a>
+      <button id="more-update-btn" class="more-action" type="button">
+        <span class="more-action-icon" aria-hidden="true">↻</span>
+        <span><strong>Version and updates</strong><small>Check, update now or restore a snapshot</small></span>
+      </button>
+    </section>
+  </main>
+
+  <nav class="mobile-destinations" id="mobile-destinations" role="tablist" aria-label="Primary navigation">
+    <button class="app-nav-btn active" data-view="overview" role="tab" aria-controls="view-overview" aria-selected="true"><span aria-hidden="true">⌂</span><span>Overview</span></button>
+    <button class="app-nav-btn" data-view="energy" role="tab" aria-controls="view-energy" aria-selected="false"><span aria-hidden="true">↯</span><span>Energy</span></button>
+    <button class="app-nav-btn" data-view="plan" role="tab" aria-controls="view-plan" aria-selected="false"><span aria-hidden="true">◇</span><span>Plan</span></button>
+    <button class="app-nav-btn" data-view="history" role="tab" aria-controls="view-history" aria-selected="false"><span aria-hidden="true">◷</span><span>History</span></button>
+    <button class="app-nav-btn" data-view="more" role="tab" aria-controls="view-more" aria-selected="false"><span aria-hidden="true">•••</span><span>More</span></button>
+  </nav>
 
   <!-- Self-tune Modal -->
   <div id="self-tune-modal" class="modal hidden">
@@ -725,12 +804,12 @@
   <script src="/settings/tabs/system.js?v=tabsplit2"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
   <script src="/models.js?v=diag2"></script>
-  <script src="/plan.js?v=cvxpy1"></script>
+  <script src="/plan.js?v=ia1"></script>
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=lp4"></script>
   <script src="/energy-history.js?v=ledger1"></script>
-  <script src="/diagnose.js?v=diag2"></script>
+  <script src="/diagnose.js?v=ia1"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal

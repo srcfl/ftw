@@ -55,6 +55,31 @@ body.ftw-app main {
   padding: 0 28px 60px;
   gap: 16px;
 }
+body.ftw-app .app-view.hidden { display: none; }
+body.ftw-app .view-heading {
+  margin: 0 0 16px;
+  padding: 2px 2px 0;
+}
+body.ftw-app .view-heading h2 {
+  margin: 2px 0 3px;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: clamp(20px, 2.4vw, 28px);
+  letter-spacing: -0.025em;
+}
+body.ftw-app .view-heading > p:last-child {
+  max-width: 62ch;
+  color: var(--fg-dim);
+}
+body.ftw-app .view-kicker {
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+body.ftw-app .mobile-destinations { display: none; }
 
 /* ---- Header — rounded pill with backdrop blur.
        Outer rectangle lines up with main's CONTENT box (not main's
@@ -942,6 +967,7 @@ body.ftw-app .live-plan-row {
 @media (max-width: 1100px) {
   body.ftw-app .live-plan-row { grid-template-columns: 1fr; }
   body.ftw-app .controls-row  { grid-template-columns: 1fr; }
+  body.ftw-app .plan-now { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 body.ftw-app #chart-section,
@@ -1084,6 +1110,72 @@ body.ftw-app .plan-summary {
 body.ftw-app .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
 body.ftw-app .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
 body.ftw-app .plan-summary .s-value { color: var(--fg-dim); }
+body.ftw-app .plan-now {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.2fr) repeat(4, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 10px 0 12px;
+}
+body.ftw-app .plan-now-lead,
+body.ftw-app .plan-now-item {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--ink-sunken);
+}
+body.ftw-app .plan-now-lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+body.ftw-app .plan-now-item,
+body.ftw-app .plan-now-lead > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+body.ftw-app .plan-now-label {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-app .plan-now strong {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+body.ftw-app .plan-now small {
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1.35;
+}
+body.ftw-app .plan-state-badge {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--fg-dim);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+body.ftw-app .plan-state-badge.is-active {
+  border-color: color-mix(in oklch, var(--green-e) 55%, var(--line));
+  color: var(--green-e);
+}
+body.ftw-app .plan-state-badge.is-warn {
+  border-color: color-mix(in oklch, var(--accent-e) 60%, var(--line));
+  color: var(--accent-e);
+}
+body.ftw-app .plan-state-badge.is-idle { color: var(--fg-muted); }
 body.ftw-app .plan-help {
   font-family: var(--sans);
   font-size: 12px;
@@ -1093,6 +1185,49 @@ body.ftw-app .plan-help {
   max-width: 68ch;
 }
 body.ftw-app .plan-actions { gap: 10px; display: flex; align-items: center; }
+
+body.ftw-app .more-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+body.ftw-app .more-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 76px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--ink-raised);
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+body.ftw-app .more-action:hover {
+  border-color: var(--accent-e);
+  background: color-mix(in oklch, var(--ink-raised) 92%, var(--accent-e));
+}
+body.ftw-app .more-action > span:last-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+body.ftw-app .more-action small { color: var(--fg-dim); }
+body.ftw-app .more-action-icon {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink-sunken);
+  color: var(--accent-e);
+  font-size: 18px;
+}
 
 /* ---- Plan "?" help button + explanation modal ---- */
 body.ftw-app .plan-title {
@@ -1561,9 +1696,11 @@ body.ftw-app .diagnose-detail {
      squeezed against the rounded corners, and pull the header closer
      to the top edge. */
   body.ftw-app main {
-    padding: 0 12px 48px;
+    padding: 0 12px 104px;
     gap: 12px;
   }
+  body.ftw-app .view-heading { margin-bottom: 12px; }
+  body.ftw-app .view-heading h2 { font-size: 22px; }
   /* Same rail alignment as desktop, but with the mobile 12 px gutter:
      header's outer border sits 12 px inside the viewport, matching
      main's 12 px content inset. */
@@ -1586,6 +1723,47 @@ body.ftw-app .diagnose-detail {
   body.ftw-app .header-right,
   body.ftw-app .app-tabs {
     display: none;
+  }
+  body.ftw-app .mobile-destinations {
+    position: fixed;
+    right: 8px;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    left: 8px;
+    z-index: 900;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: color-mix(in oklch, var(--ink-raised) 92%, transparent);
+    box-shadow: 0 12px 36px rgba(0, 0, 0, 0.38);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  body.ftw-app .mobile-destinations button {
+    display: flex;
+    min-width: 0;
+    min-height: 48px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    padding: 3px 1px;
+    border: 0;
+    border-radius: 11px;
+    background: transparent;
+    color: var(--fg-muted);
+    font-family: var(--sans);
+    font-size: 10px;
+    cursor: pointer;
+  }
+  body.ftw-app .mobile-destinations button > span:first-child {
+    font-size: 17px;
+    line-height: 1;
+  }
+  body.ftw-app .mobile-destinations button.active {
+    background: var(--ink-sunken);
+    color: var(--accent-e);
   }
   body.ftw-app .mobile-menu-btn {
     display: inline-flex !important;
@@ -1683,6 +1861,21 @@ body.ftw-app .diagnose-detail {
   body.ftw-app .live-plan-row { grid-template-columns: 1fr; gap: 12px; }
   body.ftw-app #chart-section,
   body.ftw-app #plan-section { padding: 12px 14px; }
+  body.ftw-app .plan-now { grid-template-columns: 1fr; }
+  body.ftw-app .plan-now-lead { flex-direction: column; }
+  body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
+  body.ftw-app .more-actions { grid-template-columns: 1fr; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.ftw-app *,
+  body.ftw-app *::before,
+  body.ftw-app *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* ---------- Light-theme specific fixes ---------- */
