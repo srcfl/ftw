@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.8.0
+
+### Minor Changes
+
+- cc7de6d: Add `observe_only` on battery drivers: keep structured telemetry and dashboard visibility while excluding the driver from dispatch, MPC, and watchdog commands. For sites where a retailer VPP owns battery actuation.
+
+### Patch Changes
+
+- bb2d644: Fix the battery self-tune "Run again" button so it reuses the batteries from the completed calibration when the results view no longer shows checkboxes.
+
 ## 1.7.0
 
 ### Minor Changes
