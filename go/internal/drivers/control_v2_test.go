@@ -114,6 +114,16 @@ func testControlV2Policy(enabled bool) *RuntimePolicy {
 	}
 }
 
+func TestControlV2PolicyRejectsNetworkPermissions(t *testing.T) {
+	for _, permission := range []string{"http.get", "http.post", "mqtt.subscribe", "mqtt.publish"} {
+		policy := testControlV2Policy(true)
+		policy.Permissions[permission] = true
+		if err := policy.validate(); err == nil || !strings.Contains(err.Error(), "only supports Modbus") {
+			t.Fatalf("permission %q validation error = %v", permission, err)
+		}
+	}
+}
+
 func loadControlV2Driver(t *testing.T, policy *RuntimePolicy) (*LuaDriver, *controlV2Modbus) {
 	return loadControlV2DriverSource(t, policy, controlV2Lua)
 }

@@ -74,11 +74,11 @@ func (p *RuntimePolicy) validate() error {
 			continue
 		}
 		switch permission {
-		case "http.get", "http.post", "modbus.read", "modbus.write", "mqtt.publish", "mqtt.subscribe":
+		case "modbus.read", "modbus.write":
 		default:
-			return fmt.Errorf("unsupported control v2 permission %q", permission)
+			return fmt.Errorf("FTW control v2 only supports Modbus permissions, got %q", permission)
 		}
-		if permission == "http.post" || permission == "modbus.write" || permission == "mqtt.publish" {
+		if permission == "modbus.write" {
 			hasWrite = true
 		}
 	}
