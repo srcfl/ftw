@@ -6,6 +6,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -727,6 +728,11 @@ type Driver struct {
 	// Disabled skips this driver at startup / reload. Set via the UI when
 	// you want to temporarily take a driver out without editing yaml.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	// Control opts this one site into one exact signed control artifact.
+	// The runtime rejects control unless all three pins match the active
+	// Device Support package. Merely selecting the beta channel or installing
+	// a control-capable artifact never enables writes.
+	Control *DriverControlOptIn `yaml:"control,omitempty" json:"control,omitempty"`
 	// HasPassword is a JSON-only signal to the UI that Config["password"]
 	// holds a non-empty value on disk. Populated by MaskSecrets after the
 	// real password is blanked out so the operator can still tell apart
@@ -746,6 +752,15 @@ type Driver struct {
 	// for backwards compatibility with master-branch configs).
 	MQTT   *MQTTConfig   `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
 	Modbus *ModbusConfig `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+}
+
+// DriverControlOptIn is a per-site, fail-closed control grant. PackageID,
+// Version and ArtifactSHA256 must match signed active package metadata.
+type DriverControlOptIn struct {
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	PackageID      string `yaml:"package_id" json:"package_id"`
+	Version        string `yaml:"version" json:"version"`
+	ArtifactSHA256 string `yaml:"artifact_sha256" json:"artifact_sha256"`
 }
 
 // Capabilities explicitly scope what host resources a driver can access.
@@ -1438,6 +1453,15 @@ func (c *Config) Validate() error {
 		}
 		if d.Lua == "" {
 			return fmt.Errorf("driver %q: must specify `lua`", d.Name)
+		}
+		if d.Control != nil && d.Control.Enabled {
+			if !strings.HasPrefix(d.Control.PackageID, "com.sourceful.driver.") || d.Control.Version == "" {
+				return fmt.Errorf("driver %q: control requires an exact Sourceful package_id and version", d.Name)
+			}
+			hash, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(d.Control.ArtifactSHA256)))
+			if err != nil || len(hash) != 32 {
+				return fmt.Errorf("driver %q: control artifact_sha256 must be 64 hexadecimal characters", d.Name)
+			}
 		}
 		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil &&
 			d.Capabilities.HTTP == nil && d.Capabilities.WebSocket == nil &&

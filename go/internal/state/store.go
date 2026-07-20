@@ -730,6 +730,17 @@ func (s *Store) migrate() error {
 			ON driver_repo_installs(repo_id, driver_id, version, sha256)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_driver_repo_active_path
 			ON driver_repo_installs(logical_path) WHERE active = 1`,
+		`CREATE TABLE IF NOT EXISTS driver_command_results (
+			id TEXT PRIMARY KEY NOT NULL,
+			driver_name TEXT NOT NULL,
+			command TEXT NOT NULL,
+			status TEXT NOT NULL,
+			code TEXT NOT NULL,
+			completed_at_ms INTEGER NOT NULL,
+			result_json TEXT NOT NULL
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_driver_command_results_completed
+			ON driver_command_results(completed_at_ms DESC)`,
 
 		// Cross-component update audit. The operation key survives a core
 		// container recreation, allowing the new process to finish the event
