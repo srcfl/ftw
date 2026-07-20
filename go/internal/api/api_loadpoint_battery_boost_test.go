@@ -57,6 +57,30 @@ func TestBatteryBoostAPIEnableStatusCancelLifecycle(t *testing.T) {
 	}
 }
 
+func TestBatteryBoostAPIMutationRejectsUnauthenticatedRemoteRequest(t *testing.T) {
+	srv, ctrl := newBatteryBoostServer(t)
+	srv.deps.MutationPolicy = MutationPolicy{
+		RequireTokenForRemote: true,
+		Token:                 testMutationToken,
+	}
+	req := httptest.NewRequest(http.MethodPost,
+		"https://ftw.example.com/api/loadpoints/garage/battery_boost",
+		strings.NewReader(`{"duration_s":3600,"min_battery_soc_pct":30}`))
+	req.RemoteAddr = "203.0.113.10:43210"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://ftw.example.com")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if _, status := ctrl.BatteryBoost("garage", time.Now()); status.Active {
+		t.Fatal("remote request installed a boost lease without a token")
+	}
+}
+
 func TestBatteryBoostAPIValidatesBoundedContract(t *testing.T) {
 	srv, _ := newBatteryBoostServer(t)
 	expires := time.Now().Add(time.Hour).UnixMilli()
