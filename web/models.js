@@ -26,6 +26,7 @@
   let lastModels = {};
   let observeOnlyDrivers = {};
   let tunePollHandle = null;
+  let lastTuneStatus = null;
 
   // Keep the latest models payload available for advanced diagnostics and
   // self-tune, but do not render model internals on normal driver cards.
@@ -104,7 +105,29 @@
       });
   }
 
+  function batteriesFromChecklist() {
+    var batteries = [];
+    body.querySelectorAll("[data-tune-battery]").forEach(function (c) {
+      if (c.checked) batteries.push(c.dataset.tuneBattery);
+    });
+    return batteries;
+  }
+
+  function batteriesFromStatus(s) {
+    if (!s || !s.after) return [];
+    return Object.keys(s.after).filter(function (n) {
+      return !observeOnlyDrivers[n];
+    });
+  }
+
+  function selectedBatteries() {
+    var fromChecklist = batteriesFromChecklist();
+    if (fromChecklist.length > 0) return fromChecklist;
+    return batteriesFromStatus(lastTuneStatus);
+  }
+
   function renderChecklist() {
+    lastTuneStatus = null;
     var names = controllableTuneBatteries();
     var checklistHtml = names.length
       ? names.map(function (n) {
@@ -174,6 +197,7 @@
   }
 
   function renderDiff(s) {
+    lastTuneStatus = s;
     var rows = '';
     var names = Object.keys(s.after);
     names.forEach(function (n) {
@@ -252,9 +276,7 @@
   if (modal) modal.addEventListener("click", function (e) { if (e.target === modal) closeModal(); });
 
   if (startBtn) startBtn.addEventListener("click", function () {
-    var checks = body.querySelectorAll("[data-tune-battery]");
-    var batteries = [];
-    checks.forEach(function (c) { if (c.checked) batteries.push(c.dataset.tuneBattery); });
+    var batteries = selectedBatteries();
     if (batteries.length === 0) {
       setStatus("Select at least one battery", "error");
       return;
