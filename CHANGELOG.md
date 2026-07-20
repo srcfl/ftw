@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.6.0
+
+### Minor Changes
+
+- eb92509: Report a bounded driver inventory to Nova when federation is enabled. Reports include loaded code hashes and package provenance, but no site config, device IDs, endpoints or credentials.
+
 ## 1.5.0
 
 ### Minor Changes
