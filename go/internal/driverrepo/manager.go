@@ -54,19 +54,34 @@ type Manifest struct {
 }
 
 type ManifestDriver struct {
-	ID       string                     `json:"id"`
-	Path     string                     `json:"path"`
-	Filename string                     `json:"filename"`
-	Version  string                     `json:"version"`
-	SHA256   string                     `json:"sha256"`
-	URL      string                     `json:"url"`
-	HostAPI  components.CompatibleRange `json:"host_api"`
-	Metadata drivers.CatalogEntry       `json:"metadata"`
+	ID                    string                     `json:"id"`
+	Path                  string                     `json:"path"`
+	Filename              string                     `json:"filename"`
+	Version               string                     `json:"version"`
+	SHA256                string                     `json:"sha256"`
+	SizeBytes             int64                      `json:"size_bytes,omitempty"`
+	URL                   string                     `json:"url"`
+	HostAPI               components.CompatibleRange `json:"host_api"`
+	Metadata              drivers.CatalogEntry       `json:"metadata"`
+	PackageID             string                     `json:"package_id,omitempty"`
+	Target                string                     `json:"target,omitempty"`
+	ArtifactID            string                     `json:"artifact_id,omitempty"`
+	RuntimeName           string                     `json:"runtime_name,omitempty"`
+	RuntimeSemantics      string                     `json:"runtime_semantics,omitempty"`
+	RuntimeVersion        string                     `json:"runtime_version,omitempty"`
+	RuntimeABI            string                     `json:"runtime_abi,omitempty"`
+	HostAPIProfile        string                     `json:"host_api_profile,omitempty"`
+	PackageKeyID          string                     `json:"package_key_id,omitempty"`
+	PackageEnvelopeURL    string                     `json:"package_envelope_url,omitempty"`
+	PackageEnvelopeSHA256 string                     `json:"package_envelope_sha256,omitempty"`
+	SourceCommit          string                     `json:"source_commit,omitempty"`
+	Channel               string                     `json:"channel,omitempty"`
 }
 
 type RepositoryStatus struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name,omitempty"`
+	Format      string    `json:"format"`
 	ManifestURL string    `json:"manifest_url"`
 	Enabled     bool      `json:"enabled"`
 	LastRefresh time.Time `json:"last_refresh,omitempty"`
@@ -99,10 +114,11 @@ type Status struct {
 }
 
 type Manager struct {
-	cfg    config.DeviceRepository
-	root   string
-	store  *state.Store
-	client *http.Client
+	cfg         config.DeviceRepository
+	root        string
+	store       *state.Store
+	hostVersion string
+	client      *http.Client
 
 	mu        sync.Mutex
 	manifests map[string]Manifest
@@ -110,6 +126,12 @@ type Manager struct {
 }
 
 func New(cfg *config.DeviceRepository, persistentDir string, store *state.Store) *Manager {
+	return NewWithHostVersion(cfg, persistentDir, store, "dev")
+}
+
+// NewWithHostVersion binds Sourceful package compatibility to the running FTW
+// release. Local "dev" builds remain fail-closed for canonical packages.
+func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, store *state.Store, hostVersion string) *Manager {
 	effective := config.DeviceRepository{}
 	if cfg != nil {
 		effective = *cfg
@@ -121,7 +143,7 @@ func New(cfg *config.DeviceRepository, persistentDir string, store *state.Store)
 		root = filepath.Join(persistentDir, root)
 	}
 	manager := &Manager{
-		cfg: effective, root: root, store: store,
+		cfg: effective, root: root, store: store, hostVersion: strings.TrimPrefix(hostVersion, "v"),
 		client:    &http.Client{Timeout: 15 * time.Second},
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
@@ -191,7 +213,7 @@ func (m *Manager) Status() Status {
 	statuses := make([]RepositoryStatus, 0, len(m.cfg.Repositories))
 	for _, repo := range m.cfg.Repositories {
 		st := m.statuses[repo.ID]
-		st.ID, st.Name, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repo.ManifestURL, repo.Enabled
+		st.ID, st.Name, st.Format, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repositoryFormat(repo), repo.ManifestURL, repo.Enabled
 		statuses = append(statuses, st)
 	}
 	sort.Slice(statuses, func(i, j int) bool { return statuses[i].ID < statuses[j].ID })
@@ -227,6 +249,9 @@ func (m *Manager) Refresh(ctx context.Context, repositoryID string) error {
 }
 
 func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySource) error {
+	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
+		return m.refreshSourceful(ctx, repo)
+	}
 	raw, err := m.fetch(ctx, repo.ManifestURL, maxManifestBytes, repo.AllowInsecure)
 	if err != nil {
 		m.recordError(repo, err)
@@ -249,7 +274,7 @@ func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySo
 	m.mu.Lock()
 	m.manifests[repo.ID] = manifest
 	m.statuses[repo.ID] = RepositoryStatus{
-		ID: repo.ID, Name: repo.Name, ManifestURL: repo.ManifestURL, Enabled: repo.Enabled,
+		ID: repo.ID, Name: repo.Name, Format: repositoryFormat(repo), ManifestURL: repo.ManifestURL, Enabled: repo.Enabled,
 		LastRefresh: time.Now(), Cached: true, KeyID: keyID, DriverCount: len(manifest.Drivers),
 	}
 	m.mu.Unlock()
@@ -259,7 +284,7 @@ func (m *Manager) refreshOne(ctx context.Context, repo config.DriverRepositorySo
 func (m *Manager) recordError(repo config.DriverRepositorySource, err error) {
 	m.mu.Lock()
 	st := m.statuses[repo.ID]
-	st.ID, st.Name, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repo.ManifestURL, repo.Enabled
+	st.ID, st.Name, st.Format, st.ManifestURL, st.Enabled = repo.ID, repo.Name, repositoryFormat(repo), repo.ManifestURL, repo.Enabled
 	st.LastRefresh, st.LastError = time.Now(), err.Error()
 	_, cacheErr := os.Stat(filepath.Join(m.root, "cache", safeSegment(repo.ID)+".json"))
 	st.Cached = cacheErr == nil
@@ -350,6 +375,14 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	if err != nil {
 		return Manifest{}, err
 	}
+	if repositoryFormat(repo) == config.DriverRepositoryFormatSourcefulIndexV1 {
+		manifest, keyID, err := m.cachedSourcefulManifest(repo, raw)
+		if err != nil {
+			return Manifest{}, err
+		}
+		m.cacheManifest(repo, manifest, keyID)
+		return manifest, nil
+	}
 	manifest, keyID, err := verifyManifest(raw, repo)
 	if err != nil {
 		return Manifest{}, err
@@ -364,6 +397,15 @@ func (m *Manager) manifestFor(repo config.DriverRepositorySource) (Manifest, err
 	m.statuses[repo.ID] = st
 	m.mu.Unlock()
 	return manifest, nil
+}
+
+func (m *Manager) cacheManifest(repo config.DriverRepositorySource, manifest Manifest, keyID string) {
+	m.mu.Lock()
+	m.manifests[repo.ID] = manifest
+	st := m.statuses[repo.ID]
+	st.Cached, st.KeyID, st.DriverCount = true, keyID, len(manifest.Drivers)
+	m.statuses[repo.ID] = st
+	m.mu.Unlock()
 }
 
 // Install downloads and validates an artifact, stores it content-addressed,
@@ -382,6 +424,9 @@ func (m *Manager) Install(ctx context.Context, repositoryID, driverID, version s
 	gotHash := hex.EncodeToString(sum[:])
 	if !strings.EqualFold(gotHash, entry.SHA256) {
 		return state.DriverRepoInstall{}, fmt.Errorf("driver sha256 %s, want %s", gotHash, entry.SHA256)
+	}
+	if entry.SizeBytes > 0 && int64(len(raw)) != entry.SizeBytes {
+		return state.DriverRepoInstall{}, fmt.Errorf("driver size %d, want %d", len(raw), entry.SizeBytes)
 	}
 	installPath := filepath.Join(m.root, "installed", safeSegment(repo.ID), safeSegment(entry.ID), entry.Version, strings.ToLower(entry.SHA256), entry.Filename)
 	if err := atomicWrite(installPath, raw, 0o600); err != nil {
@@ -762,6 +807,9 @@ func validateManifestDriver(d ManifestDriver, allowInsecure bool) error {
 	if d.HostAPI.Min <= 0 || d.HostAPI.Max < d.HostAPI.Min {
 		return fmt.Errorf("driver %s has invalid host API range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max)
 	}
+	if d.SizeBytes < 0 || d.SizeBytes > maxDriverBytes {
+		return fmt.Errorf("driver %s has invalid size %d", d.ID, d.SizeBytes)
+	}
 	if !d.HostAPI.Includes(components.DriverHostAPIVersion) {
 		return fmt.Errorf("driver %s host API range %d..%d excludes host %d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIVersion)
 	}
@@ -788,6 +836,9 @@ func validateLuaArtifact(path string, manifest ManifestDriver) error {
 	}
 	if metadata.ID != manifest.ID || metadata.Version != manifest.Version {
 		return fmt.Errorf("driver metadata id/version %s@%s, want %s@%s", metadata.ID, metadata.Version, manifest.ID, manifest.Version)
+	}
+	if manifest.PackageID != "" && metadata.ReadOnly != manifest.Metadata.ReadOnly {
+		return fmt.Errorf("driver metadata read_only %t, want %t", metadata.ReadOnly, manifest.Metadata.ReadOnly)
 	}
 	source := string(raw)
 	if !regexp.MustCompile(`(?m)^\s*host_api_min\s*=\s*[0-9]+`).MatchString(source) ||
