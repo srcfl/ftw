@@ -394,6 +394,14 @@ type State struct {
 	// "battery_covers_ev"; toggled from HA and POST /api/battery_covers_ev.
 	BatteryCoversEV bool
 
+	// BatteryBoostEVChargingW is the live charging draw belonging to
+	// loadpoints with a currently valid, per-loadpoint battery-boost lease.
+	// Unlike BatteryCoversEV, it never authorises unrelated EV/V2X flow.
+	// BatteryBoostReserveSoC is the strictest active lease reserve (0..1).
+	// main.go refreshes both from loadpoint.Controller every dispatch tick.
+	BatteryBoostEVChargingW float64
+	BatteryBoostReserveSoC  float64
+
 	// PI controller (outer, site-level)
 	PI *PIController
 
@@ -1312,9 +1320,8 @@ func ComputeDispatch(
 	// self-consumption the EV/V2X import/export is left outside stationary
 	// battery dispatch unless BatteryCoversEV is enabled.
 	gridW := rawGridW
-	coverEV := state.BatteryCoversEV
-	if !coverEV {
-		gridW -= state.EVChargingW
+	if !state.BatteryCoversEV {
+		gridW -= state.uncoveredEVChargingW()
 		gridW -= vehicleFlow.V2XDischargeW
 	}
 
@@ -1523,7 +1530,6 @@ func ComputeDispatch(
 		// TestEnergyDispatchIgnoresEVChargingWNoiseUnderThreshold,
 		// TestEnergyDispatchClampsDischargeWhenEVActuallyCharging.
 		//
-		evActive := state.EVChargingW > evActiveThresholdW
 		// CANONICAL "battery may not feed EV" accounting. The MPC's
 		// NoBatteryToEV DP feasibility rule (mpc.go, see the
 		// houseResidualW check inside the action loop) mirrors this
@@ -1540,13 +1546,14 @@ func ComputeDispatch(
 			}
 		}
 		surplusOnlyPlannedEV := state.EVSurplusOnlyReserveW > 0 && plannedLoadpointEnergyWh > 0
-		if ((!state.BatteryCoversEV && evActive) || surplusOnlyPlannedEV) && targetTotalW < 0 {
-			// House-side grid excludes vehicle interactions (EV charge +
-			// V2X discharge), mirroring how gridW is derived above, so the
-			// reactive floor never asks stationary batteries to cover EV
-			// draw or to backstop V2X export.
-			houseGridW := rawGridW - state.EVChargingW - vehicleFlow.V2XDischargeW
-			reactiveTotal := currentTotal - houseGridW
+		uncoveredEVW := state.uncoveredEVChargingW()
+		if ((!state.BatteryCoversEV && uncoveredEVW > evActiveThresholdW) || surplusOnlyPlannedEV) && targetTotalW < 0 {
+			// Protected grid excludes only unauthorised vehicle interactions.
+			// A per-loadpoint lease may cover its own live watts, while other
+			// EV draw and every V2X export stay outside stationary-battery
+			// dispatch. The legacy site-wide toggle preserves its old scope.
+			protectedGridW := rawGridW - uncoveredEVW - vehicleFlow.V2XDischargeW
+			reactiveTotal := currentTotal - protectedGridW
 			if targetTotalW < reactiveTotal {
 				targetTotalW = reactiveTotal
 			}
@@ -2178,6 +2185,12 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 
+	// A battery-boost lease may never draw the stationary fleet below its
+	// explicit reserve. Apply this immediately before forceFuseDischarge:
+	// normal planning/operator intent is constrained, while the physical fuse
+	// emergency remains superior and may still discharge to prevent a trip.
+	targets = applyBatteryBoostReserve(targets, store, state, driverCapacities)
+
 	// forceFuseDischarge runs LAST. A fuse overflow can demand a battery
 	// target far beyond what slew would allow in one tick; slew-limiting that
 	// response would leave the fuse violated for multiple ticks.
@@ -2244,6 +2257,74 @@ func recordDispatchTargets(targets []DispatchTarget, state *State, updatePrevTar
 		}
 	}
 	state.LastTargets = targets
+}
+
+func (s *State) coveredEVChargingW() float64 {
+	if s == nil {
+		return 0
+	}
+	if s.BatteryCoversEV {
+		return s.EVChargingW
+	}
+	w := s.BatteryBoostEVChargingW
+	if w < 0 {
+		return 0
+	}
+	if w > s.EVChargingW {
+		return s.EVChargingW
+	}
+	return w
+}
+
+func (s *State) uncoveredEVChargingW() float64 {
+	if s == nil || s.BatteryCoversEV {
+		return 0
+	}
+	w := s.EVChargingW - s.coveredEVChargingW()
+	if w < 0 {
+		return 0
+	}
+	return w
+}
+
+func (s *State) batteryMayCoverEV() bool {
+	return s != nil && (s.BatteryCoversEV || s.BatteryBoostEVChargingW > evActiveThresholdW)
+}
+
+func applyBatteryBoostReserve(targets []DispatchTarget, store *telemetry.Store, state *State, driverCapacities map[string]float64) []DispatchTarget {
+	if state == nil || store == nil || state.BatteryBoostReserveSoC <= 0 {
+		return targets
+	}
+	out := make([]DispatchTarget, len(targets))
+	copy(out, targets)
+	for i := range out {
+		if out[i].TargetW >= 0 {
+			continue
+		}
+		r := store.Get(out[i].Driver, telemetry.DerBattery)
+		capacityWh := driverCapacities[out[i].Driver]
+		if r == nil || r.SoC == nil || capacityWh <= 0 || *r.SoC <= state.BatteryBoostReserveSoC {
+			out[i].TargetW = 0
+			out[i].Clamped = true
+			continue
+		}
+		// Bound the next control interval's discharge energy to the SoC
+		// headroom above reserve. A 0.9 discharge-efficiency factor is
+		// deliberately conservative: delivering 1 Wh to the AC bus costs
+		// more than 1 Wh inside the pack. This closes the between-ticks
+		// overshoot that a threshold-only clamp would permit.
+		dtS := float64(state.MinDispatchIntervalS)
+		if dtS <= 0 {
+			dtS = 5
+		}
+		headroomWh := (*r.SoC - state.BatteryBoostReserveSoC) * capacityWh
+		maxDischargeW := headroomWh * 0.9 * 3600 / dtS
+		if -out[i].TargetW > maxDischargeW {
+			out[i].TargetW = -maxDischargeW
+			out[i].Clamped = true
+		}
+	}
+	return out
 }
 
 // ComputePVCurtail returns one CurtailTarget per affected driver for
@@ -3010,7 +3091,7 @@ func coverLoadChargeSlot(state *State, dir SlotDirective) bool {
 		return true
 	}
 	return state.Mode == ModePlannerPassiveArbitrage &&
-		state.BatteryCoversEV &&
+		state.batteryMayCoverEV() &&
 		state.EVChargingW > evActiveThresholdW
 }
 

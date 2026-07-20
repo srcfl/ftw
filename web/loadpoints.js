@@ -74,6 +74,64 @@
     return `${d.toLocaleDateString()} ${hh}:${mm}`;
   }
 
+  function fmtRemaining(ms) {
+    const leftS = Math.max(0, Math.ceil((ms - Date.now()) / 1000));
+    const h = Math.floor(leftS / 3600);
+    const m = Math.ceil((leftS % 3600) / 60);
+    return h > 0 ? `${h} h ${m} min` : `${m} min`;
+  }
+
+  const BOOST_STOP_LABELS = {
+    cancelled: 'Cancelled by operator',
+    expired: 'Time limit reached',
+    vehicle_unplugged: 'Vehicle unplugged',
+    ev_target_reached: 'EV target reached',
+    departure_reached: 'Departure time reached',
+    operator_hold: 'Loadpoint hold took priority',
+    surplus_only: 'Surplus-only policy took priority',
+    site_safety_block: 'Site meter safety stopped boost',
+    loadpoint_driver_unavailable: 'Loadpoint driver unavailable',
+    battery_unavailable: 'Home battery unavailable',
+    battery_reserve_reached: 'Home battery reserve reached',
+    battery_hold: 'Battery hold took priority',
+    core_mode: 'Core mode does not allow boost',
+    fuse_safety_block: 'Fuse protection stopped boost',
+    restart_lease_invalid: 'Saved lease was no longer safe',
+  };
+
+  function batteryBoostBlock(lp) {
+    const boost = lp.battery_boost || { state: 'inactive', active: false };
+    if (boost.active) {
+      const target = boost.ev_target_soc_pct > 0 ? ` · EV target ${boost.ev_target_soc_pct.toFixed(0)}%` : '';
+      return '<div class="lp-boost lp-boost-active">' +
+        '<div class="lp-boost-title">Battery boost ' + badge('ACTIVE', true) + '</div>' +
+        `<div class="lp-boost-copy">${fmtRemaining(boost.expires_at_ms)} left · home reserve ${boost.min_battery_soc_pct.toFixed(0)}%${target}</div>` +
+        `<button class="lp-boost-cancel" type="button" data-lp="${lp.id}">Stop boost</button>` +
+        '</div>';
+    }
+    const stopped = boost.stop_reason
+      ? `<div class="lp-boost-reason">Last stop: ${BOOST_STOP_LABELS[boost.stop_reason] || boost.stop_reason}</div>`
+      : '';
+    const blocked = !lp.plugged_in || lp.manual_active || lp.surplus_only;
+    let why = '';
+    if (!lp.plugged_in) why = 'Plug in a vehicle first.';
+    else if (lp.manual_active) why = 'Release the loadpoint hold first.';
+    else if (lp.surplus_only) why = 'Turn off surplus-only first.';
+    return '<div class="lp-boost">' +
+      '<div class="lp-boost-title">Battery boost</div>' +
+      '<div class="lp-boost-copy">Temporarily let the home battery support this car. Core fuse, reserve, health and operator limits still apply.</div>' +
+      '<div class="lp-boost-fields">' +
+        '<label>Reserve %<input class="lp-boost-reserve" type="number" min="5" max="100" step="1" value="30"></label>' +
+        '<label>Duration<select class="lp-boost-duration"><option value="1800">30 min</option><option value="3600" selected>1 h</option><option value="7200">2 h</option><option value="14400">4 h</option></select></label>' +
+        '<label>EV target %<input class="lp-boost-target" type="number" min="1" max="100" step="1" placeholder="optional"></label>' +
+        '<label>Departure<input class="lp-boost-departure" type="datetime-local"></label>' +
+      '</div>' +
+      `<button class="lp-boost-enable" type="button" data-lp="${lp.id}" ${blocked ? 'disabled' : ''}>Enable boost</button>` +
+      (why ? `<span class="lp-boost-blocked">${why}</span>` : '') + stopped +
+      '<div class="lp-boost-msg" aria-live="polite"></div>' +
+      '</div>';
+  }
+
   // Badge: small pill matching the existing .ftw-badge convention from
   // ftw-badge.js / app.css. Uses theme tokens so light mode flips
   // correctly. Two variants: "on" = amber accent (matches .accent-e
@@ -185,7 +243,7 @@
     return `<div class="lp-card" data-lp-id="${lp.id}">` +
       `<div class="lp-card-header"><h3>${lp.id}</h3></div>` +
       '<div class="lp-card-body">' +
-      configBlock(lp) +
+      '<div>' + configBlock(lp) + batteryBoostBlock(lp) + '</div>' +
       scheduleTable(lp, plan) +
       '</div></div>';
   }
@@ -286,6 +344,50 @@
 
   function cancelSoc() { socEditingId = null; fetchAll(); }
 
+  function boostRequest(btn) {
+    const panel = btn.closest('.lp-boost');
+    const msg = panel && panel.querySelector('.lp-boost-msg');
+    const reserve = panel && parseFloat(panel.querySelector('.lp-boost-reserve').value);
+    const duration = panel && parseInt(panel.querySelector('.lp-boost-duration').value, 10);
+    const targetText = panel && panel.querySelector('.lp-boost-target').value;
+    const departureText = panel && panel.querySelector('.lp-boost-departure').value;
+    const target = targetText ? parseFloat(targetText) : 0;
+    const departure = departureText ? new Date(departureText).getTime() : 0;
+    if (!isFinite(reserve) || reserve < 5 || reserve > 100) {
+      if (msg) msg.textContent = 'Reserve must be 5–100%.';
+      return;
+    }
+    if (targetText && (!isFinite(target) || target < 1 || target > 100)) {
+      if (msg) msg.textContent = 'EV target must be 1–100%.';
+      return;
+    }
+    btn.disabled = true;
+    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/battery_boost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        duration_s: duration,
+        min_battery_soc_pct: reserve,
+        ev_target_soc_pct: target,
+        departure_at_ms: departure,
+      }),
+    })
+      .then(r => r.json().then(body => ({ ok: r.ok, body })))
+      .then(res => {
+        if (res.ok) fetchAll();
+        else { if (msg) msg.textContent = (res.body && res.body.error) || 'Boost could not start.'; btn.disabled = false; }
+      })
+      .catch(err => { if (msg) msg.textContent = err.message; btn.disabled = false; });
+  }
+
+  function boostCancel(btn) {
+    btn.disabled = true;
+    apiFetch('/api/loadpoints/' + encodeURIComponent(btn.dataset.lp) + '/battery_boost', { method: 'DELETE' })
+      .then(r => r.json().then(body => ({ ok: r.ok, body })))
+      .then(res => { if (res.ok) fetchAll(); else btn.disabled = false; })
+      .catch(() => { btn.disabled = false; });
+  }
+
   function onGridClick(e) {
     const edit = e.target.closest && e.target.closest('.lp-soc-edit');
     if (edit) { openSocEditor(edit); return; }
@@ -293,6 +395,10 @@
     if (save) { saveSoc(save); return; }
     const cancel = e.target.closest && e.target.closest('.lp-soc-cancel');
     if (cancel) { cancelSoc(); return; }
+    const boostEnable = e.target.closest && e.target.closest('.lp-boost-enable');
+    if (boostEnable) { boostRequest(boostEnable); return; }
+    const boostStop = e.target.closest && e.target.closest('.lp-boost-cancel');
+    if (boostStop) { boostCancel(boostStop); return; }
   }
 
   function onGridKey(e) {

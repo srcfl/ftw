@@ -617,20 +617,18 @@
     <div id="ev-modal-body">
       <p style="color:var(--text-dim)">Loading...</p>
     </div>
-    <!-- Battery-covers-EV toggle lives in the EV modal (operator opens
-         it from the EV planet click). When ON, self-consumption lets
-         the home battery discharge into the EV — useful when grid
-         prices are high now and cheap PV/off-peak is expected later. -->
+    <!-- Kept for API/UI backward compatibility. New operation should use the
+         bounded per-loadpoint Battery boost lease in the Loadpoints panel. -->
     <div class="control-card" style="margin-top:1rem">
-      <div class="card-label">Let battery cover EV</div>
+      <div class="card-label">Legacy site-wide battery cover</div>
       <label class="ftw-toggle">
         <input type="checkbox" id="battery-covers-ev-toggle">
         <span class="ftw-toggle-slider"></span>
         <span class="ftw-toggle-label" id="battery-covers-ev-label">Off</span>
       </label>
-      <div class="card-sub card-hint">Default off. On lets the home battery discharge into EV charging. Surplus-only loadpoints still use real PV surplus only.</div>
+      <div class="card-sub card-hint">Compatibility control. Prefer Battery boost on a loadpoint for a time limit, reserve and visible stop reason. Surplus-only loadpoints still use real PV surplus only.</div>
       <div class="ev-cover-info" id="battery-covers-ev-info" hidden>
-        This can drain the home battery into the car. Use it only when EV charging should be part of the site battery plan.
+        This site-wide setting has no lease or reserve of its own. Use the loadpoint Battery boost for normal operation.
       </div>
     </div>
     <!-- Start/Pause/Resume footer buttons removed: the Manual tab's
@@ -696,7 +694,7 @@
   <script src="/plan.js?v=cvxpy1"></script>
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
-  <script src="/loadpoints.js?v=lp3"></script>
+  <script src="/loadpoints.js?v=lp4"></script>
   <script src="/diagnose.js?v=diag2"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>
