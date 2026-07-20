@@ -189,7 +189,9 @@ func main() {
 
 	// The repository is entirely local on startup: existing active symlinks are
 	// usable offline and remote refresh never blocks core boot.
-	driverRepository := driverrepo.New(cfg.DeviceRepository, filepath.Dir(statePath), st)
+	driverRepository := driverrepo.NewWithHostVersion(
+		cfg.DeviceRepository, filepath.Dir(statePath), st, Version,
+	)
 	cfg.UnresolveDriverPaths(filepath.Dir(*configPath))
 	config.ManagedDriversDirOverride = driverRepository.ActiveDir()
 	cfg.ResolveDriverPaths(filepath.Dir(*configPath))

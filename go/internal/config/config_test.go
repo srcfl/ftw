@@ -844,6 +844,28 @@ func TestDeviceRepositoryOfficialTrustRootIsReadOnlyDiscoveryDefault(t *testing.
 	}
 }
 
+func TestDeviceRepositorySourcefulFormatMustBeSignedAndKnown(t *testing.T) {
+	base := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
+	base.DeviceRepository = &DeviceRepository{Enabled: true, Repositories: []DriverRepositorySource{{
+		ID: "sourceful", Format: DriverRepositoryFormatSourcefulIndexV1,
+		ManifestURL: "file:///tmp/sourceful-driver-index.json", Enabled: true,
+		AllowInsecure: true, AllowUnsigned: true,
+	}}}
+	applyDefaults(&base)
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "must be signed") {
+		t.Fatalf("unsigned Sourceful index error = %v", err)
+	}
+	base.DeviceRepository.Repositories[0].AllowUnsigned = false
+	base.DeviceRepository.Repositories[0].TrustedKeys = map[string]string{"test": strings.Repeat("A", 44)}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("signed Sourceful source rejected: %v", err)
+	}
+	base.DeviceRepository.Repositories[0].Format = "sourceful.driver-index/v9"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "unsupported format") {
+		t.Fatalf("unknown repository format error = %v", err)
+	}
+}
+
 func TestNotificationsMaskSecrets(t *testing.T) {
 	c := Config{Notifications: &Notifications{
 		Provider: "ntfy",
