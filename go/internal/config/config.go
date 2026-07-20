@@ -52,6 +52,7 @@ type DeviceRepository struct {
 type DriverRepositorySource struct {
 	ID            string            `yaml:"id" json:"id"`
 	Name          string            `yaml:"name,omitempty" json:"name,omitempty"`
+	Format        string            `yaml:"format,omitempty" json:"format,omitempty"`
 	ManifestURL   string            `yaml:"manifest_url" json:"manifest_url"`
 	Enabled       bool              `yaml:"enabled" json:"enabled"`
 	TrustedKeys   map[string]string `yaml:"trusted_keys,omitempty" json:"trusted_keys,omitempty"`
@@ -60,6 +61,9 @@ type DriverRepositorySource struct {
 }
 
 const (
+	DriverRepositoryFormatFTWManifestV1    = "ftw.manifest/v1"
+	DriverRepositoryFormatSourcefulIndexV1 = "sourceful.driver-index/v1"
+
 	DefaultDriverRepositoryID           = "ftw-official"
 	DefaultDriverRepositoryName         = "FTW official drivers"
 	DefaultDriverRepositoryManifestURL  = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
@@ -1644,6 +1648,11 @@ func (c *Config) Validate() error {
 			if !repo.Enabled {
 				continue
 			}
+			switch repo.Format {
+			case "", DriverRepositoryFormatFTWManifestV1, DriverRepositoryFormatSourcefulIndexV1:
+			default:
+				return fmt.Errorf("device_repository %s has unsupported format %q", repo.ID, repo.Format)
+			}
 			u, err := url.Parse(repo.ManifestURL)
 			if err != nil || u.Scheme == "" {
 				return fmt.Errorf("device_repository %s has invalid manifest_url", repo.ID)
@@ -1653,6 +1662,9 @@ func (c *Config) Validate() error {
 			}
 			if repo.AllowUnsigned && u.Scheme != "file" {
 				return fmt.Errorf("device_repository %s allow_unsigned is restricted to local file manifests", repo.ID)
+			}
+			if repo.Format == DriverRepositoryFormatSourcefulIndexV1 && repo.AllowUnsigned {
+				return fmt.Errorf("device_repository %s Sourceful indexes must be signed", repo.ID)
 			}
 			if !repo.AllowUnsigned && len(repo.TrustedKeys) == 0 {
 				return fmt.Errorf("device_repository %s requires at least one trusted Ed25519 key", repo.ID)
