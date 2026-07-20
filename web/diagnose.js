@@ -1,9 +1,8 @@
 // diagnose.js — time-travel through persisted planner snapshots.
 //
-// Listens to hash routing:
-//   #live                 → show Live view (default)
-//   #diagnose             → show Diagnose, no specific snapshot selected
-//   #diagnose/<ts_ms>     → show Diagnose and load that snapshot's detail
+// Owns the five-destination dashboard router. Historical deep links remain
+// compatible: #live maps to #overview and #diagnose/<ts> maps to
+// #history/<ts>.
 //
 // Fetches from /api/mpc/diagnose/history for the timeline list and
 // /api/mpc/diagnose/at?ts=<ms> for the detail pane. Persistence lands
@@ -20,54 +19,89 @@
     return fetch(path, opts);
   }
 
-  // ---- Tab routing ----
-  const tabs = document.getElementById('app-tabs');
-  const viewLive = document.getElementById('view-live');
-  const viewDiag = document.getElementById('view-diagnose');
+  // ---- Destination layout + routing ----
+  const VIEW_NAMES = ['overview', 'energy', 'plan', 'history', 'more'];
+
+  // The dashboard predates top-level destinations. Move the existing,
+  // stateful sections into their destination shells rather than cloning
+  // them: custom elements, canvas bindings and polling timers keep the same
+  // DOM identity.
+  function organizeDestinations() {
+    const energy = document.getElementById('view-energy');
+    const plan = document.getElementById('view-plan');
+    const historyView = document.getElementById('view-history');
+    const more = document.getElementById('view-more');
+    const historyAnchor = historyView && historyView.querySelector('.diagnose-header');
+    const append = (host, selector) => {
+      const el = document.querySelector(selector);
+      if (host && el) host.appendChild(el);
+    };
+    const insertHistory = (selector) => {
+      const el = document.querySelector(selector);
+      if (historyView && historyAnchor && el) historyView.insertBefore(el, historyAnchor);
+    };
+
+    ['.prices-row', '.energy-row', '#heating-section', '#chart-section']
+      .forEach(selector => append(energy, selector));
+    append(plan, '#plan-section');
+    ['.history-row', '.savings-row'].forEach(insertHistory);
+    ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
+      .forEach(selector => append(more, selector));
+
+    const oldChartRow = document.getElementById('live-plan-row');
+    if (oldChartRow && oldChartRow.children.length === 0) oldChartRow.remove();
+
+    const settingsShortcut = document.getElementById('more-settings-btn');
+    if (settingsShortcut) settingsShortcut.addEventListener('click', () => {
+      const settings = document.getElementById('settings-btn');
+      if (settings) settings.click();
+    });
+    const updateShortcut = document.getElementById('more-update-btn');
+    if (updateShortcut) updateShortcut.addEventListener('click', () => {
+      const badge = document.querySelector('ftw-update-badge');
+      if (badge && typeof badge.open === 'function') badge.open();
+    });
+  }
 
   function applyHash() {
-    const h = (location.hash || '#live').replace(/^#/, '');
+    const h = (location.hash || '#overview').replace(/^#/, '');
     const parts = h.split('/');
-    const view = parts[0] === 'diagnose' ? 'diagnose' : 'live';
-    viewLive.classList.toggle('hidden', view !== 'live');
-    viewDiag.classList.toggle('hidden', view !== 'diagnose');
-    // Sync active state across both the top-row .tab-btn cluster AND
-    // the drawer-nav-btn duplicates inside the mobile header-right
-    // drawer. Query the whole document so both get the active pill.
-    document.querySelectorAll('.tab-btn[data-view], .drawer-nav-btn[data-view]').forEach(b => {
-      if (b.dataset.view === 'live' || b.dataset.view === 'diagnose') {
-        b.classList.toggle('active', b.dataset.view === view);
-      }
+    const requested = parts[0] === 'live' ? 'overview'
+      : parts[0] === 'diagnose' ? 'history'
+      : parts[0];
+    const view = VIEW_NAMES.includes(requested) ? requested : 'overview';
+    document.querySelectorAll('.app-view').forEach(panel => {
+      panel.classList.toggle('hidden', panel.id !== 'view-' + view);
     });
-    if (view === 'diagnose') {
+    document.querySelectorAll('.app-nav-btn[data-view]').forEach(b => {
+      const active = b.dataset.view === view;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+      b.tabIndex = active ? 0 : -1;
+    });
+    document.body.dataset.view = view;
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+    if (view === 'history') {
+      if (typeof window.ftwEnergyHistoryLoad === 'function') {
+        window.ftwEnergyHistoryLoad();
+      }
       state.selectedTs = parts[1] ? Number(parts[1]) : null;
       loadTimeline().then(() => {
         if (state.selectedTs) loadDetail(state.selectedTs);
         else if (state.timeline.length > 0) {
           // Default selection: newest snapshot, update hash without
-          // pushing history so "back" still returns to Live.
+          // pushing history so Back still returns to the previous destination.
           const ts = state.timeline[0].ts_ms;
-          history.replaceState(null, '', '#diagnose/' + ts);
+          history.replaceState(null, '', '#history/' + ts);
           loadDetail(ts);
         }
       });
     }
   }
 
-  if (tabs) {
-    tabs.addEventListener('click', (e) => {
-      const b = e.target.closest('.tab-btn');
-      if (!b) return;
-      location.hash = b.dataset.view === 'diagnose' ? '#diagnose' : '#live';
-    });
-  }
-  // Drawer navigation duplicates (mobile). Same behavior as the
-  // top-row tabs but they also close the drawer so the user lands
-  // straight on the target view.
   document.addEventListener('click', (e) => {
-    const b = e.target.closest('.drawer-nav-btn[data-view]');
+    const b = e.target.closest('.app-nav-btn[data-view]');
     if (!b) return;
-    if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
     location.hash = '#' + b.dataset.view;
     const hdr = document.querySelector('body.ftw-app > header');
     if (hdr) {
@@ -75,6 +109,19 @@
       const mbtn = document.getElementById('mobile-menu-btn');
       if (mbtn) mbtn.setAttribute('aria-expanded', 'false');
     }
+  });
+  document.querySelectorAll('[role="tablist"]').forEach(tablist => {
+    tablist.addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      const buttons = [...tablist.querySelectorAll('.app-nav-btn[data-view]')];
+      if (!buttons.length) return;
+      const current = Math.max(0, buttons.indexOf(document.activeElement));
+      let next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+        : (current + (e.key === 'ArrowRight' ? 1 : -1) + buttons.length) % buttons.length;
+      e.preventDefault();
+      buttons[next].focus();
+      buttons[next].click();
+    });
   });
   window.addEventListener('hashchange', applyHash);
 
@@ -142,7 +189,7 @@
     el.querySelectorAll('.diag-row').forEach(b => {
       b.addEventListener('click', () => {
         const ts = Number(b.dataset.ts);
-        location.hash = '#diagnose/' + ts;
+        location.hash = '#history/' + ts;
       });
     });
     const activeRow = el.querySelector('.diag-row.active');
@@ -536,6 +583,7 @@
   }
 
   // ---- Boot ----
-  // Apply hash on load so refreshing the page keeps you on Diagnose.
+  // Build the destination layout before first paint and keep deep links.
+  organizeDestinations();
   applyHash();
 })();

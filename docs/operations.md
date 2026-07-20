@@ -70,6 +70,54 @@ paths and some integration transports are startup bindings; restart after
 changing them. When unsure, inspect the restart classification in
 `go/internal/config/restart_required.go`.
 
+## LAN and API access
+
+FTW accepts state-changing requests without credentials only when they are
+addressed through a local name or address: loopback, private/link-local IP,
+an unqualified hostname, `.local`, `.localhost`, or `.home.arpa`. The setup
+wizard follows the same rule, and the actual client address must also be local.
+Browser writes must also be same-origin; FTW checks `Origin`, `Host`, and
+`Sec-Fetch-Site` and does not advertise CORS.
+Local non-browser clients such as `curl` and Home Assistant may omit browser
+fetch headers, but JSON bodies must use `Content-Type: application/json`.
+Active reads that start discovery, begin an authorization flow, or force an
+external update check pass through the same boundary. Cached and ordinary
+read-only requests remain compatible.
+
+Mutation requests addressed through any other hostname or a public IP fail
+closed. To expose that API intentionally, generate a random token of at least
+32 characters and set `FTW_API_TOKEN`. Compose deployments should store it in
+the project `.env` file so updater-driven container recreates retain it:
+
+```dotenv
+FTW_API_TOKEN=<random-secret-at-least-32-characters>
+```
+
+Keep `.env` readable only by the operator (for example, mode `0600`).
+
+Then recreate Core and send the token as a Bearer credential:
+
+```bash
+docker compose up -d ftw
+curl -X POST -H "Authorization: Bearer <same-random-secret>" \
+  https://ftw.example.net/api/restart
+```
+
+The built-in browser UI does not store API tokens. For a public/FQDN browser
+deployment, put FTW behind an operator-managed HTTPS reverse proxy with login
+or session authentication and have that trusted proxy inject the Bearer header
+upstream. This token protects mutations, not read-only dashboard data, so FTW
+must not be published directly to the internet.
+
+Recovery cannot be disabled by a bad token: connect through `localhost`, the
+host's private IP, or its `.local` name, correct/remove `FTW_API_TOKEN`, and
+restart Core. Tokens shorter than 32 characters are ignored and remote
+mutations remain locked.
+
+`FTW_API_TOKEN` is an operator-managed migration mechanism, not the identity or
+tunnel credential for future remote access. That expansion point is described in
+[architecture.md](architecture.md#future-remote-access-boundary).
+
 ## Logs and health
 
 ```bash
