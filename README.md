@@ -130,6 +130,7 @@ The repository deliberately keeps prose small. Code, types, tests and driver
 metadata are the detailed reference.
 
 - [Architecture](docs/architecture.md)
+- [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)
 - [Safety invariants](docs/safety.md)
 - [Operations and recovery](docs/operations.md)
