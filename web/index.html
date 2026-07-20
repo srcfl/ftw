@@ -56,6 +56,7 @@
     <img src="/logo.svg" alt="FTW" class="header-logo"><h1>FTW</h1>
     <nav class="app-tabs" id="app-tabs" role="tablist">
       <button data-view="live" class="tab-btn active" role="tab">Live</button>
+      <button data-view="history" class="tab-btn" role="tab">History</button>
       <button data-view="diagnose" class="tab-btn" role="tab" title="Time-travel through past planner decisions">Diagnose</button>
     </nav>
     <!-- Hamburger — visible only on narrow viewports. Opens the header
@@ -68,6 +69,7 @@
            router in diagnose.js treats them the same as the top-row
            tabs. Added so the mobile hamburger menu exposes Diagnose. -->
       <button data-view="live" class="drawer-nav-btn" data-menu-label="Live view">&#9654;</button>
+      <button data-view="history" class="drawer-nav-btn" data-menu-label="Energy history">&#9638;</button>
       <button data-view="diagnose" class="drawer-nav-btn" data-menu-label="Diagnose">&#9202;</button>
       <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
@@ -497,6 +499,38 @@
 
   </main>
 
+  <!-- History view — read-only energy ledger for system and stable assets. -->
+  <main id="view-history" class="hidden">
+    <section class="energy-history-header">
+      <div>
+        <h2>Energy history</h2>
+        <p>Directional totals from hardware counters when available, with marked power integration as fallback.</p>
+      </div>
+      <div class="energy-history-controls">
+        <label>Asset
+          <select id="energy-history-asset"><option value="">System</option></select>
+        </label>
+        <label>Range
+          <select id="energy-history-range">
+            <option value="24h">24 hours</option>
+            <option value="7d" selected>7 days</option>
+            <option value="30d">30 days</option>
+          </select>
+        </label>
+        <button id="energy-history-refresh" class="btn-send">Refresh</button>
+        <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
+      </div>
+    </section>
+    <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
+    <section class="energy-history-table-wrap">
+      <table class="energy-history-table">
+        <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
+        <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
+      </table>
+    </section>
+    <p class="energy-history-note">CSV is the supported export format in this phase. XLSX export is planned for a later phase.</p>
+  </main>
+
   <!-- Diagnose view — time-travel through persisted planner snapshots -->
   <main id="view-diagnose" class="hidden">
     <section class="diagnose-header">
@@ -695,6 +729,7 @@
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=lp4"></script>
+  <script src="/energy-history.js?v=ledger1"></script>
   <script src="/diagnose.js?v=diag2"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>

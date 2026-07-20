@@ -101,7 +101,52 @@ header h1 {
   height: calc(100vh - 120px);
 }
 #view-diagnose.hidden,
+#view-history.hidden,
 #view-live.hidden { display: none; }
+
+/* ---- Energy history ---- */
+#view-history {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem 1.5rem;
+}
+.energy-history-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+.energy-history-header h2 { font-size: 1rem; }
+.energy-history-header p,
+.energy-history-note { color: var(--text-dim); font-size: 0.82rem; }
+.energy-history-controls { display: flex; align-items: flex-end; gap: 0.6rem; flex-wrap: wrap; }
+.energy-history-controls label { display: grid; gap: 0.2rem; color: var(--text-dim); font-size: 0.78rem; }
+.energy-history-controls select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0.35rem 0.5rem;
+}
+.energy-history-controls a { text-decoration: none; }
+.energy-history-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+.energy-history-summary article {
+  display: grid; gap: 0.2rem; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.8rem 1rem;
+}
+.energy-history-summary span { color: var(--text-dim); font-size: 0.78rem; }
+.energy-history-summary strong { font-size: 1.05rem; }
+.energy-history-table-wrap { overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.energy-history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.energy-history-table th, .energy-history-table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.energy-history-table th { color: var(--text-dim); font-weight: 500; }
+.energy-quality { border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.4rem; }
+.energy-quality-measured { color: var(--green); }
+.energy-quality-integrated { color: var(--yellow); }
+.energy-quality-gap, .energy-quality-reset { color: var(--red); }
 
 .diagnose-header {
   background: var(--surface);

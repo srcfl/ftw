@@ -23,22 +23,28 @@
   // ---- Tab routing ----
   const tabs = document.getElementById('app-tabs');
   const viewLive = document.getElementById('view-live');
+  const viewHistory = document.getElementById('view-history');
   const viewDiag = document.getElementById('view-diagnose');
 
   function applyHash() {
     const h = (location.hash || '#live').replace(/^#/, '');
     const parts = h.split('/');
-    const view = parts[0] === 'diagnose' ? 'diagnose' : 'live';
+    const view = parts[0] === 'diagnose' ? 'diagnose' :
+      (parts[0] === 'history' ? 'history' : 'live');
     viewLive.classList.toggle('hidden', view !== 'live');
+    if (viewHistory) viewHistory.classList.toggle('hidden', view !== 'history');
     viewDiag.classList.toggle('hidden', view !== 'diagnose');
     // Sync active state across both the top-row .tab-btn cluster AND
     // the drawer-nav-btn duplicates inside the mobile header-right
     // drawer. Query the whole document so both get the active pill.
     document.querySelectorAll('.tab-btn[data-view], .drawer-nav-btn[data-view]').forEach(b => {
-      if (b.dataset.view === 'live' || b.dataset.view === 'diagnose') {
+      if (b.dataset.view === 'live' || b.dataset.view === 'history' || b.dataset.view === 'diagnose') {
         b.classList.toggle('active', b.dataset.view === view);
       }
     });
+    if (view === 'history' && typeof window.ftwEnergyHistoryLoad === 'function') {
+      window.ftwEnergyHistoryLoad();
+    }
     if (view === 'diagnose') {
       state.selectedTs = parts[1] ? Number(parts[1]) : null;
       loadTimeline().then(() => {
@@ -58,7 +64,7 @@
     tabs.addEventListener('click', (e) => {
       const b = e.target.closest('.tab-btn');
       if (!b) return;
-      location.hash = b.dataset.view === 'diagnose' ? '#diagnose' : '#live';
+      location.hash = '#' + (b.dataset.view || 'live');
     });
   }
   // Drawer navigation duplicates (mobile). Same behavior as the
@@ -67,7 +73,7 @@
   document.addEventListener('click', (e) => {
     const b = e.target.closest('.drawer-nav-btn[data-view]');
     if (!b) return;
-    if (b.dataset.view !== 'live' && b.dataset.view !== 'diagnose') return;
+    if (b.dataset.view !== 'live' && b.dataset.view !== 'history' && b.dataset.view !== 'diagnose') return;
     location.hash = '#' + b.dataset.view;
     const hdr = document.querySelector('body.ftw-app > header');
     if (hdr) {

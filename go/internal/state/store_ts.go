@@ -209,6 +209,12 @@ func (s *Store) RecordSamples(samples []Sample) error {
 // tick) for no isolation benefit. Same deadlock note as RecordSamples:
 // intern IDs are pre-resolved before the tx opens.
 func (s *Store) RecordTick(p HistoryPoint, samples []Sample) error {
+	return s.RecordTickWithEnergy(p, samples, nil)
+}
+
+// RecordTickWithEnergy persists legacy history, long-format samples, and the
+// versioned energy ledger in one transaction.
+func (s *Store) RecordTickWithEnergy(p HistoryPoint, samples []Sample, observations []EnergyObservation) error {
 	if err := s.hydrateIntern(); err != nil {
 		return err
 	}
@@ -253,6 +259,9 @@ func (s *Store) RecordTick(p HistoryPoint, samples []Sample) error {
 				return err
 			}
 		}
+	}
+	if err := recordEnergyObservationsTx(tx, observations); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

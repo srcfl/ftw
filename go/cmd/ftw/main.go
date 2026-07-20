@@ -2515,7 +2515,8 @@ func main() {
 			for i, sm := range samples {
 				stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
 			}
-			if err := st.RecordTick(hp, stSamples); err != nil {
+			energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+			if err := st.RecordTickWithEnergy(hp, stSamples, energyObservations); err != nil {
 				slog.Warn("tick persistence failed", "samples", len(samples), "err", err)
 			}
 
@@ -2625,6 +2626,11 @@ func doRolloff(ctx context.Context, st *state.Store, coldDir string) {
 	// ts_samples is correctly moved to Parquet.
 	if err := st.Prune(ctx); err != nil {
 		slog.Warn("history tier prune failed", "err", err)
+	}
+	if rolled, expired, err := st.PruneEnergyLedger(ctx, time.Now()); err != nil {
+		slog.Warn("energy ledger retention failed", "err", err)
+	} else if rolled > 0 || expired > 0 {
+		slog.Info("energy ledger retention", "detailed_rows_rolled_up", rolled, "expired_rows", expired)
 	}
 
 	rows, files, err := st.RolloffToParquet(ctx, coldDir)
