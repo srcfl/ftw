@@ -339,6 +339,15 @@ func main() {
 	}
 	reg := drivers.NewRegistry(tel)
 	reg.SetTroubleshootingMode(cfg.Site.TroubleshootingMode)
+	reg.RuntimePolicyResolver = driverRepository.RuntimePolicy
+	reg.CommandResultSink = func(driverName string, result drivers.DriverCommandResultV1) {
+		if err := st.RecordDriverCommandResult(
+			result.ID, driverName, result.Command, result.Status, result.Code,
+			result.CompletedAt.UnixMilli(), result.JSON(),
+		); err != nil {
+			slog.Error("persist driver command result", "driver", driverName, "command_id", result.ID, "err", err)
+		}
+	}
 	reg.MQTTFactory = func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 		return mqttcli.Dial(c.Host, c.Port, c.Username, c.Password, "ftw-"+name)
 	}

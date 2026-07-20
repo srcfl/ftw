@@ -26,20 +26,23 @@ import (
 )
 
 const (
-	sourcefulIndexSchema           = "sourceful.driver-index/v1"
-	sourcefulIndexEnvelopeSchema   = "sourceful.driver-index-envelope/v1"
-	sourcefulIndexPayloadType      = "application/vnd.sourceful.driver-index.v1+json"
-	sourcefulPackageSchema         = "sourceful.driver-package/v1"
-	sourcefulPackageEnvelopeSchema = "sourceful.driver-package-envelope/v1"
-	sourcefulPackagePayloadType    = "application/vnd.sourceful.driver-package.v1+json"
-	sourcefulCanonicalJSON         = "sourceful.canonical-json/v1"
-	sourcefulFTWTarget             = "ftw-core"
-	sourcefulFTWHostProduct        = "ftw"
-	sourcefulFTWRuntime            = "gopher-lua"
-	sourcefulFTWSemantics          = "lua-5.1"
-	sourcefulFTWRuntimeVersion     = "1.1.2"
-	sourcefulFTWABI                = "gopher-lua-source-v1"
-	sourcefulFTWHostAPIProfile     = "sourceful.host/ftw-core/v1"
+	sourcefulIndexSchema              = "sourceful.driver-index/v1"
+	sourcefulIndexEnvelopeSchema      = "sourceful.driver-index-envelope/v1"
+	sourcefulIndexPayloadType         = "application/vnd.sourceful.driver-index.v1+json"
+	sourcefulPackageSchema            = "sourceful.driver-package/v1"
+	sourcefulPackageEnvelopeSchema    = "sourceful.driver-package-envelope/v1"
+	sourcefulPackagePayloadType       = "application/vnd.sourceful.driver-package.v1+json"
+	sourcefulCanonicalJSON            = "sourceful.canonical-json/v1"
+	sourcefulFTWTarget                = "ftw-core"
+	sourcefulFTWHostProduct           = "ftw"
+	sourcefulFTWRuntime               = "gopher-lua"
+	sourcefulFTWSemantics             = "lua-5.1"
+	sourcefulFTWRuntimeVersion        = "1.1.2"
+	sourcefulFTWABIV1                 = "gopher-lua-source-v1"
+	sourcefulFTWHostAPIProfileV1      = "sourceful.host/ftw-core/v1"
+	sourcefulFTWABIV2                 = drivers.ControlRuntimeABIV2
+	sourcefulFTWHostAPIProfileV2      = drivers.ControlHostAPIProfileV2
+	sourcefulInstalledPackageEnvelope = "sourceful-package.envelope.json"
 )
 
 var (
@@ -47,6 +50,7 @@ var (
 	sourcefulHashRE      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	sourcefulCommitRE    = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sourcefulKeyIDRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$`)
+	sourcefulCommandRE   = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$`)
 )
 
 type sourcefulSignedEnvelope struct {
@@ -427,23 +431,6 @@ func (m *Manager) sourcefulPackageDriver(
 		pkg.Telemetry.SignConvention != "sourceful.site-import-positive/v1" {
 		return ManifestDriver{}, false, errors.New("signed package device or telemetry contract is invalid")
 	}
-	// Phase 1 is deliberately telemetry-only. FTW Core already owns a robust
-	// control safety lifecycle, but canonical control packages remain gated on
-	// explicit lease/default-mode/command-result HIL acceptance.
-	if !pkg.ReadOnly || len(pkg.Commands) != 0 || len(pkg.Capabilities.Control) != 0 ||
-		pkg.DefaultMode.Strategy != "not_applicable" || pkg.DefaultMode.Entrypoint != "" ||
-		pkg.LeasePolicy.RequiredForControl || pkg.LeasePolicy.MaxDurationSeconds != nil ||
-		pkg.LeasePolicy.HeartbeatIntervalSeconds != nil || pkg.LeasePolicy.ExpiryAction != "not_applicable" {
-		return ManifestDriver{}, false, errors.New("FTW Device Support pilot accepts read-only packages only")
-	}
-	for _, permission := range pkg.Permissions {
-		switch permission {
-		case "http.get", "modbus.read", "mqtt.subscribe", "serial.read":
-		default:
-			return ManifestDriver{}, false, fmt.Errorf("read-only package requests write-capable permission %q", permission)
-		}
-	}
-
 	var target *sourcefulCompatibility
 	for i := range pkg.Compatibility {
 		if pkg.Compatibility[i].Target != sourcefulFTWTarget {
@@ -457,9 +444,6 @@ func (m *Manager) sourcefulPackageDriver(
 	if target == nil {
 		return ManifestDriver{}, false, errors.New("index advertises ftw-core but package has no ftw-core compatibility")
 	}
-	if target.ControlEnabled {
-		return ManifestDriver{}, false, errors.New("read-only package enables FTW control")
-	}
 	if target.Host.Product != sourcefulFTWHostProduct || !semverRE.MatchString(target.Host.MinVersion) ||
 		(target.Host.MaxVersionExclusive != "" && !semverRE.MatchString(target.Host.MaxVersionExclusive)) {
 		return ManifestDriver{}, false, errors.New("invalid FTW host compatibility")
@@ -471,12 +455,31 @@ func (m *Manager) sourcefulPackageDriver(
 		(target.Host.MaxVersionExclusive != "" && compareSemver(m.hostVersion, target.Host.MaxVersionExclusive) >= 0) {
 		return ManifestDriver{}, false, nil
 	}
+	controlV2 := !pkg.ReadOnly
+	if pkg.ReadOnly {
+		if err := validateSourcefulReadOnlyContract(pkg, *target); err != nil {
+			return ManifestDriver{}, false, err
+		}
+	} else {
+		// A staged control source with control_enabled=false stays out of the
+		// FTW catalog. It cannot be installed or activated by accident.
+		if !target.ControlEnabled {
+			return ManifestDriver{}, false, nil
+		}
+		if err := validateSourcefulControlContract(pkg); err != nil {
+			return ManifestDriver{}, false, err
+		}
+	}
+
 	runtime := target.Runtime
+	wantABI, wantProfile, wantAPI := sourcefulFTWABIV1, sourcefulFTWHostAPIProfileV1, 1
+	if controlV2 {
+		wantABI, wantProfile, wantAPI = sourcefulFTWABIV2, sourcefulFTWHostAPIProfileV2, 2
+	}
 	if runtime.Name != sourcefulFTWRuntime || runtime.Semantics != sourcefulFTWSemantics ||
-		runtime.Version != sourcefulFTWRuntimeVersion || runtime.ABI != sourcefulFTWABI ||
-		runtime.HostAPI.Profile != sourcefulFTWHostAPIProfile || runtime.HostAPI.Min <= 0 ||
-		runtime.HostAPI.Max < runtime.HostAPI.Min ||
-		components.DriverHostAPIVersion < runtime.HostAPI.Min || components.DriverHostAPIVersion > runtime.HostAPI.Max {
+		runtime.Version != sourcefulFTWRuntimeVersion || runtime.ABI != wantABI ||
+		runtime.HostAPI.Profile != wantProfile || runtime.HostAPI.Min != wantAPI || runtime.HostAPI.Max != wantAPI ||
+		wantAPI < components.DriverHostAPIMinVersion || wantAPI > components.DriverHostAPIVersion {
 		return ManifestDriver{}, false, nil
 	}
 
@@ -526,7 +529,7 @@ func (m *Manager) sourcefulPackageDriver(
 		Source: "upstream", Protocols: sourcefulProtocols(pkg.Permissions),
 		Capabilities: sourcefulFTWCapabilities(pkg.Capabilities.Telemetry),
 		Description:  "Canonical Sourceful driver package from Device Support.",
-		ReadOnly:     true, VerificationStatus: "experimental",
+		ReadOnly:     pkg.ReadOnly, VerificationStatus: "experimental",
 		TestedModels: sourcefulTestedModels(pkg.DeviceMatches),
 	}
 	return ManifestDriver{
@@ -538,7 +541,205 @@ func (m *Manager) sourcefulPackageDriver(
 		RuntimeVersion: runtime.Version, RuntimeABI: runtime.ABI, HostAPIProfile: runtime.HostAPI.Profile,
 		PackageEnvelopeURL:    ref.EnvelopeURL,
 		PackageEnvelopeSHA256: ref.EnvelopeSHA256, SourceCommit: pkg.Source.Commit, Channel: pkg.Channel,
+		ControlEnabled: target.ControlEnabled, ReadOnly: pkg.ReadOnly,
+		Permissions: append([]string(nil), pkg.Permissions...), Commands: append([]sourcefulCommand(nil), pkg.Commands...),
+		DefaultMode: pkg.DefaultMode, LeasePolicy: pkg.LeasePolicy,
 	}, true, nil
+}
+
+// RuntimePolicy verifies the package envelope stored with an active managed
+// artifact and derives the v2 host policy without a network call. A local,
+// bundled, legacy repository or read-only Sourceful artifact returns nil.
+func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, error) {
+	if m.store == nil {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in requires the managed driver state store")
+		}
+		return nil, nil
+	}
+	resolved, err := filepath.EvalSymlinks(cfg.Lua)
+	installedRoot, rootErr := filepath.EvalSymlinks(filepath.Join(m.root, "installed"))
+	if err != nil || rootErr != nil || !pathInside(installedRoot, resolved) {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in requires an active managed Device Support artifact")
+		}
+		return nil, nil
+	}
+	recordedPath := filepath.Clean(cfg.Lua)
+	if target, linkErr := os.Readlink(cfg.Lua); linkErr == nil {
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(cfg.Lua), target)
+		}
+		recordedPath = filepath.Clean(target)
+	}
+	installed, err := m.store.DriverRepoInstallByPath(recordedPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve managed driver activation: %w", err)
+	}
+	if !installed.Active {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in requires the active managed artifact")
+		}
+		return nil, nil
+	}
+	var repo *config.DriverRepositorySource
+	for i := range m.cfg.Repositories {
+		if m.cfg.Repositories[i].ID == installed.RepoID {
+			repo = &m.cfg.Repositories[i]
+			break
+		}
+	}
+	if repo == nil || repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in requires a configured Device Support trust root")
+		}
+		return nil, nil
+	}
+	packageRaw, err := readLimitedFile(filepath.Join(filepath.Dir(resolved), sourcefulInstalledPackageEnvelope), maxManifestBytes)
+	if err != nil {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, fmt.Errorf("read installed signed package envelope: %w", err)
+		}
+		return nil, nil
+	}
+	payloadRaw, _, err := verifySourcefulEnvelope(packageRaw, *repo, sourcefulPackageEnvelopeSchema, sourcefulPackagePayloadType)
+	if err != nil {
+		return nil, fmt.Errorf("verify installed signed package envelope: %w", err)
+	}
+	var pkg sourcefulPackage
+	if err := strictJSON(payloadRaw, &pkg); err != nil {
+		return nil, fmt.Errorf("decode installed signed package: %w", err)
+	}
+	envelopeHash := sha256.Sum256(packageRaw)
+	ref := sourcefulDriverPackageRef{
+		PackageID: pkg.PackageID, Version: pkg.Version,
+		EnvelopeURL:    "https://installed.invalid/" + sourcefulInstalledPackageEnvelope,
+		EnvelopeSHA256: hex.EncodeToString(envelopeHash[:]), Targets: []string{sourcefulFTWTarget},
+	}
+	entry, compatible, err := m.sourcefulPackageDriver(pkg, ref, pkg.Channel, repo.AllowInsecure)
+	if err != nil {
+		return nil, fmt.Errorf("validate installed signed package: %w", err)
+	}
+	if !compatible || entry.ReadOnly || !entry.ControlEnabled {
+		if cfg.Control != nil && cfg.Control.Enabled {
+			return nil, errors.New("control opt-in targets an artifact without an enabled FTW v2 control target")
+		}
+		return nil, nil
+	}
+	if !strings.EqualFold(entry.SHA256, installed.SHA256) || entry.Version != installed.Version || entry.ID != installed.DriverID {
+		return nil, errors.New("installed artifact does not match its signed package envelope")
+	}
+
+	siteEnabled := false
+	if cfg.Control != nil && cfg.Control.Enabled {
+		if cfg.Control.PackageID != entry.PackageID || cfg.Control.Version != entry.Version ||
+			!strings.EqualFold(strings.TrimSpace(cfg.Control.ArtifactSHA256), entry.SHA256) {
+			return nil, errors.New("control opt-in package/version/hash pin does not match the active signed artifact")
+		}
+		siteEnabled = true
+	}
+	permissions := make(map[string]bool, len(entry.Permissions))
+	for _, permission := range entry.Permissions {
+		permissions[permission] = true
+	}
+	commands := make(map[string]drivers.RuntimeCommand, len(entry.Commands))
+	for _, command := range entry.Commands {
+		inputs := make(map[string]drivers.RuntimeCommandInput, len(command.Inputs))
+		for _, input := range command.Inputs {
+			inputs[input.Name] = drivers.RuntimeCommandInput{Type: input.Type, Required: input.Required}
+		}
+		commands[command.ID] = drivers.RuntimeCommand{
+			ID: command.ID, RuntimeAction: command.RuntimeAction, Inputs: inputs,
+		}
+	}
+	return &drivers.RuntimePolicy{
+		PackageID: entry.PackageID, Version: entry.Version, ArtifactSHA256: strings.ToLower(entry.SHA256),
+		RuntimeABI: entry.RuntimeABI, HostAPIProfile: entry.HostAPIProfile,
+		Permissions: permissions, Commands: commands, DefaultMode: entry.DefaultMode.Entrypoint,
+		Lease: drivers.RuntimeLeasePolicy{
+			MaxDuration:       time.Duration(*entry.LeasePolicy.MaxDurationSeconds) * time.Second,
+			HeartbeatInterval: time.Duration(*entry.LeasePolicy.HeartbeatIntervalSeconds) * time.Second,
+			ExpiryAction:      entry.LeasePolicy.ExpiryAction,
+		},
+		SiteEnabled: siteEnabled, MaxWrites: 128,
+	}, nil
+}
+
+func validateSourcefulReadOnlyContract(pkg sourcefulPackage, target sourcefulCompatibility) error {
+	if !pkg.ReadOnly || target.ControlEnabled || len(pkg.Commands) != 0 || len(pkg.Capabilities.Control) != 0 ||
+		pkg.DefaultMode.Strategy != "not_applicable" || pkg.DefaultMode.Entrypoint != "" ||
+		pkg.LeasePolicy.RequiredForControl || pkg.LeasePolicy.MaxDurationSeconds != nil ||
+		pkg.LeasePolicy.HeartbeatIntervalSeconds != nil || pkg.LeasePolicy.ExpiryAction != "not_applicable" {
+		return errors.New("read-only package has a control contract")
+	}
+	for _, permission := range pkg.Permissions {
+		switch permission {
+		case "http.get", "modbus.read", "mqtt.subscribe", "serial.read":
+		default:
+			return fmt.Errorf("read-only package requests write-capable permission %q", permission)
+		}
+	}
+	return nil
+}
+
+func validateSourcefulControlContract(pkg sourcefulPackage) error {
+	if pkg.ReadOnly || len(pkg.Commands) == 0 || len(pkg.Capabilities.Control) == 0 ||
+		pkg.DefaultMode.Strategy != "vendor_autonomous" || pkg.DefaultMode.Entrypoint != "driver_default_mode_v2" ||
+		!pkg.LeasePolicy.RequiredForControl || pkg.LeasePolicy.MaxDurationSeconds == nil ||
+		pkg.LeasePolicy.HeartbeatIntervalSeconds == nil || pkg.LeasePolicy.ExpiryAction != "return_to_default" {
+		return errors.New("control package lacks the FTW v2 lifecycle contract")
+	}
+	maxSeconds, heartbeatSeconds := *pkg.LeasePolicy.MaxDurationSeconds, *pkg.LeasePolicy.HeartbeatIntervalSeconds
+	if maxSeconds < 1 || maxSeconds > 300 || heartbeatSeconds < 1 || heartbeatSeconds > maxSeconds {
+		return errors.New("control package lease bounds are invalid")
+	}
+	writePermission := false
+	for _, permission := range pkg.Permissions {
+		switch permission {
+		case "modbus.read", "modbus.write":
+		default:
+			return fmt.Errorf("FTW control v2 only supports Modbus permissions, got %q", permission)
+		}
+		if permission == "modbus.write" {
+			writePermission = true
+		}
+	}
+	if !writePermission {
+		return errors.New("control package has no write permission")
+	}
+	permissions := make(map[string]bool, len(pkg.Permissions))
+	for _, permission := range pkg.Permissions {
+		permissions[permission] = true
+	}
+	if permissions["modbus.write"] && !permissions["modbus.read"] {
+		return errors.New("control package modbus writes require readback permission")
+	}
+	controlCapabilities := make(map[string]bool, len(pkg.Capabilities.Control))
+	for _, capability := range pkg.Capabilities.Control {
+		if !sourcefulCommandRE.MatchString(capability) || controlCapabilities[capability] {
+			return errors.New("control package capabilities are invalid or duplicated")
+		}
+		controlCapabilities[capability] = true
+	}
+	commands := make(map[string]bool, len(pkg.Commands))
+	runtimeActions := make(map[string]bool, len(pkg.Commands))
+	for _, command := range pkg.Commands {
+		if !sourcefulCommandRE.MatchString(command.ID) || !sourcefulCommandRE.MatchString(command.RuntimeAction) ||
+			commands[command.ID] || runtimeActions[command.RuntimeAction] || !controlCapabilities[command.Capability] {
+			return errors.New("control package command identity is invalid or duplicated")
+		}
+		commands[command.ID] = true
+		runtimeActions[command.RuntimeAction] = true
+		inputs := make(map[string]bool, len(command.Inputs))
+		for _, input := range command.Inputs {
+			if !sourcefulCommandRE.MatchString(input.Name) || inputs[input.Name] ||
+				(input.Type != "number" && input.Type != "boolean" && input.Type != "string") {
+				return fmt.Errorf("control package command %q has an invalid input", command.ID)
+			}
+			inputs[input.Name] = true
+		}
+	}
+	return nil
 }
 
 func validateSourcefulPackageMetadata(pkg sourcefulPackage) error {

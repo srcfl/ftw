@@ -76,6 +76,12 @@ type ManifestDriver struct {
 	PackageEnvelopeSHA256 string                     `json:"package_envelope_sha256,omitempty"`
 	SourceCommit          string                     `json:"source_commit,omitempty"`
 	Channel               string                     `json:"channel,omitempty"`
+	ControlEnabled        bool                       `json:"control_enabled,omitempty"`
+	ReadOnly              bool                       `json:"read_only,omitempty"`
+	Permissions           []string                   `json:"permissions,omitempty"`
+	Commands              []sourcefulCommand         `json:"commands,omitempty"`
+	DefaultMode           sourcefulDefaultMode       `json:"default_mode,omitempty"`
+	LeasePolicy           sourcefulLeasePolicy       `json:"lease_policy,omitempty"`
 }
 
 type RepositoryStatus struct {
@@ -434,6 +440,19 @@ func (m *Manager) Install(ctx context.Context, repositoryID, driverID, version s
 	}
 	if err := validateLuaArtifact(installPath, entry); err != nil {
 		return state.DriverRepoInstall{}, err
+	}
+	if entry.PackageID != "" {
+		packageRaw, err := readLimitedFile(m.sourcefulPackageCachePath(repo, entry.PackageEnvelopeSHA256), maxManifestBytes)
+		if err != nil {
+			return state.DriverRepoInstall{}, fmt.Errorf("read verified package envelope for install: %w", err)
+		}
+		sum := sha256.Sum256(packageRaw)
+		if hex.EncodeToString(sum[:]) != entry.PackageEnvelopeSHA256 {
+			return state.DriverRepoInstall{}, errors.New("cached package envelope hash changed before install")
+		}
+		if err := atomicWrite(filepath.Join(filepath.Dir(installPath), sourcefulInstalledPackageEnvelope), packageRaw, 0o600); err != nil {
+			return state.DriverRepoInstall{}, fmt.Errorf("persist package envelope with artifact: %w", err)
+		}
 	}
 	logical := filepath.ToSlash(entry.Path)
 	installed := state.DriverRepoInstall{
@@ -810,8 +829,8 @@ func validateManifestDriver(d ManifestDriver, allowInsecure bool) error {
 	if d.SizeBytes < 0 || d.SizeBytes > maxDriverBytes {
 		return fmt.Errorf("driver %s has invalid size %d", d.ID, d.SizeBytes)
 	}
-	if !d.HostAPI.Includes(components.DriverHostAPIVersion) {
-		return fmt.Errorf("driver %s host API range %d..%d excludes host %d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIVersion)
+	if !d.HostAPI.OverlapsDriverHost() {
+		return fmt.Errorf("driver %s host API range %d..%d excludes host range %d..%d", d.ID, d.HostAPI.Min, d.HostAPI.Max, components.DriverHostAPIMinVersion, components.DriverHostAPIVersion)
 	}
 	u, err := url.Parse(d.URL)
 	if err != nil || (u.Scheme != "https" && !(allowInsecure && (u.Scheme == "http" || u.Scheme == "file"))) {
@@ -845,7 +864,7 @@ func validateLuaArtifact(path string, manifest ManifestDriver) error {
 		!regexp.MustCompile(`(?m)^\s*host_api_max\s*=\s*[0-9]+`).MatchString(source) {
 		return errors.New("managed driver must declare host_api_min and host_api_max")
 	}
-	if metadata.HostAPIMin > components.DriverHostAPIVersion || metadata.HostAPIMax < components.DriverHostAPIVersion {
+	if metadata.HostAPIMin > components.DriverHostAPIVersion || metadata.HostAPIMax < components.DriverHostAPIMinVersion {
 		return fmt.Errorf("driver metadata host API range %d..%d is incompatible", metadata.HostAPIMin, metadata.HostAPIMax)
 	}
 	return nil
