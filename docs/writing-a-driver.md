@@ -4,11 +4,12 @@ Drivers are the hardware boundary. A driver translates one vendor protocol to
 FTW's site convention and runs in its own capability-scoped Lua 5.1 VM. No Go
 build is needed.
 
-For a Sourceful-supported device, create or change the canonical source and
-package metadata in `srcful-device-support`. Start from David's hardware-near
-Blixt implementation when it is the best protocol reference, then prove an
-explicit `ftw-core` target against this host. The `drivers/` tree here is the
-bundled FTW recovery snapshot; operator-only drivers may still live locally.
+For a shared device, create or change the source and package recipe in the
+public [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo.
+Prove an explicit `ftw-core` target against this host. Private Device Support
+builds and signs an exact reviewed public commit. The `drivers/` tree here is
+the bundled FTW recovery snapshot; operator-only drivers may still live
+locally.
 
 ## Metadata
 
@@ -32,9 +33,9 @@ DRIVER = {
 ```
 
 The `DRIVER` table feeds target validation and FTW's in-app catalog. Its id,
-version, host API and `read_only` value must agree with the signed Device
-Support package. Do not duplicate the catalog in Markdown. Executable or
-public metadata changes require one canonical package version bump.
+version, host API and `read_only` value must agree with the signed package. Do
+not duplicate the catalog in Markdown. Executable or public metadata changes
+require one public package version bump.
 
 ## Lifecycle
 
@@ -114,7 +115,7 @@ not belong in structured meter/PV/battery/EV telemetry.
 
 ## Implementation sequence
 
-1. Add or update the canonical driver and package source in Device Support.
+1. Add or update the driver and package recipe in `srcfl/device-drivers`.
 2. Implement read-only polling and verify signs against real vendor values.
 3. Build the explicit FTW GopherLua/Lua 5.1 target and run FTW host tests.
 4. Add stable identity and stale-cache handling.
@@ -141,9 +142,62 @@ device-specific safety knowledge in the driver next to the code it constrains.
 ## Local overrides and release
 
 Custom drivers belong in the persistent user-driver directory, not inside a
-container layer. Managed drivers are signed, installed atomically and
-rollbackable; see [device-repository.md](device-repository.md).
+container layer:
 
-Device Support publishes new driver packages to `beta` first. Promote the same
-reviewed source, target hashes and version to `stable` only after hardware
-validation. FTW does not fork or independently renumber that release.
+- Docker: `/app/data/drivers`, which is the host's `./data/drivers` bind;
+- systemd: `/var/lib/ftw/drivers`;
+- another native run: pass `-user-drivers <dir>`.
+
+Keep the config path portable:
+
+```yaml
+drivers:
+  - name: example
+    lua: drivers/example.lua
+    capabilities:
+      modbus:
+        host: 192.168.1.20
+        port: 502
+        unit_id: 1
+```
+
+FTW resolves that file as local, then managed signed, then bundled. Settings
+and fleet inventory mark the first case `local / unsigned`. Local code works
+offline and never needs GitHub, Device Support or `drivers.sourceful.energy`.
+It gets no auto-update or promotion and cannot claim signed package control.
+The normal host capabilities and lifecycle still apply.
+
+Use **Test connection** in Settings, or call `POST /api/drivers/test`. The test
+starts a short-lived driver, runs init and poll with the declared hardware
+capabilities, and does not save config. Start read-only on a test device. The
+endpoint reads the Lua file again for each test. FTW does not watch Lua files:
+an active driver needs an FTW restart or a real config change that restarts its
+registry entry after the file changes.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/api/drivers/test \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"example-test","lua":"drivers/example.lua","capabilities":{"modbus":{"host":"192.168.1.20","port":502,"unit_id":1}}}'
+```
+
+Restart Docker with `docker compose restart ftw`, or systemd with
+`sudo systemctl restart ftw`. To roll back a local overlay, move the local file
+out of the user-driver directory and restart. FTW then selects the managed or
+bundled file without changing its managed cache.
+
+Before a public pull request, clone `srcfl/device-drivers`, place the driver in
+its public layout, and run:
+
+```bash
+make test-driver ID=example
+make package-driver ID=example TARGET=ftw-core
+make check
+```
+
+Managed drivers are signed, installed atomically and rollbackable; see
+[device-repository.md](device-repository.md).
+
+Device Support publishes new driver packages to `beta` first. Promote without
+rebuilding after hardware validation: package v1 changes the signed channel,
+but keeps the exact artifact bytes, hashes, public source commit and materials.
+FTW does not fork or independently renumber that release.

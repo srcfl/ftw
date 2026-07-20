@@ -116,8 +116,54 @@ func TestBuildDowngradesChangedManagedFileToLocalOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	row := snapshot.Drivers[0]
-	if row.Source != "local_override" || row.SourceSHA256 == "" || row.PackageID != "" || row.ArtifactSHA256 != "" {
+	if row.Source != "local" || row.SourceSHA256 == "" || row.PackageID != "" || row.ArtifactSHA256 != "" {
 		t.Fatalf("row = %+v", row)
+	}
+}
+
+func TestBuildLocalOverrideDoesNotMutateManagedArtifact(t *testing.T) {
+	localDir, managedDir, bundledDir := t.TempDir(), t.TempDir(), t.TempDir()
+	localPath, localSHA := writeDriver(t, localDir, "meter.lua", "meter", "2.0.0-local", true)
+	managedPath, managedSHA := writeDriver(t, managedDir, "meter.lua", "meter", "1.1.2", true)
+	before, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origBundled, origLocal, origManaged := config.DriversDirOverride, config.UserDriversDirOverride, config.ManagedDriversDirOverride
+	config.DriversDirOverride, config.UserDriversDirOverride, config.ManagedDriversDirOverride = bundledDir, localDir, managedDir
+	t.Cleanup(func() {
+		config.DriversDirOverride, config.UserDriversDirOverride, config.ManagedDriversDirOverride = origBundled, origLocal, origManaged
+	})
+	cfg := config.Config{Drivers: []config.Driver{{Name: "meter", Lua: "drivers/meter.lua"}}}
+	cfg.ResolveDriverPaths(t.TempDir())
+	if cfg.Drivers[0].Lua != localPath {
+		t.Fatalf("resolved path = %q, want local %q", cfg.Drivers[0].Lua, localPath)
+	}
+
+	snapshot, err := Build(time.Now(), Input{
+		HostVersion: "1.8.1-beta.1", Drivers: cfg.Drivers,
+		UserDriverDir: localDir, ManagedDriverDir: managedDir, BundledDriverDir: bundledDir,
+		RepositoryDrivers: []RepositoryArtifact{{
+			LogicalPath: "drivers/meter.lua", InstalledPath: managedPath,
+			DriverID: "meter", Version: "1.1.2", SHA256: managedSHA,
+			RepositoryID: "sourceful", PackageID: "com.sourceful.driver.meter",
+			PackageChannel: "beta", ControlClass: "read_only",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := snapshot.Drivers[0]
+	if row.Source != "local" || row.SourceSHA256 != localSHA || row.PackageID != "" || row.ArtifactSHA256 != "" {
+		t.Fatalf("local inventory row = %+v", row)
+	}
+	after, err := os.ReadFile(managedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("local override changed the managed artifact")
 	}
 }
 

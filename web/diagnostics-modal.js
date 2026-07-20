@@ -15,6 +15,9 @@
 // content silently and preserve modal/log scroll positions so the
 // operator's reading place isn't yanked away.
 (function () {
+  var DRIVER_ISSUE_URL = "https://github.com/srcfl/device-drivers/issues/new?template=driver_issue.yml";
+  var DRIVER_REQUEST_URL = "https://github.com/srcfl/device-drivers/issues/new?template=driver_request.yml";
+
   function apiFetch(path, opts) {
     return fetch(path, opts);
   }
@@ -65,7 +68,7 @@
       ".ftw-diag-shell{width:min(740px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;overflow:hidden;}",
       // Header: eyebrow + driver name + status pill on the left,
       // ghost actions on the right.
-      ".ftw-diag-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--ink);}",
+      ".ftw-diag-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--ink);flex-wrap:wrap;}",
       ".ftw-diag-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap;}",
       // Eyebrow label per the shared design system: mono, 0.18em tracking, accent amber.
       ".ftw-diag-title-eyebrow{font-family:var(--mono);font-size:0.7rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--accent-e);font-weight:500;}",
@@ -80,7 +83,7 @@
       ".ftw-diag-status-pill.ftw-diag-status-degraded::before{background:var(--accent-e);box-shadow:0 0 10px var(--accent-e);}",
       ".ftw-diag-status-pill.ftw-diag-status-offline{color:var(--red-e);border-color:var(--red-e);}",
       ".ftw-diag-status-pill.ftw-diag-status-offline::before{background:var(--red-e);box-shadow:0 0 10px var(--red-e);}",
-      ".ftw-diag-actions{display:flex;gap:8px;align-items:center;}",
+      ".ftw-diag-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}",
       // Ghost button per the shared design system: transparent bg, hover changes ONLY
       // the border colour (no bg or text-colour shift).
       ".ftw-diag-btn{font-family:var(--sans);font-size:0.78rem;font-weight:500;letter-spacing:0.02em;padding:8px 14px;border:1px solid var(--line);border-radius:8px;background:transparent;color:var(--fg);cursor:pointer;transition:border-color 120ms ease;}",
@@ -131,6 +134,14 @@
       ".ftw-diag-job-meta{font-family:var(--mono);font-size:0.78rem;color:var(--fg-dim);}",
       ".ftw-diag-job-error{color:var(--red-e);font-family:var(--mono);font-size:0.82rem;margin-top:10px;}",
       ".ftw-diag-job-actions{display:flex;justify-content:center;gap:8px;margin-top:14px;}",
+      ".ftw-diag-review{position:fixed;inset:0;background:rgba(0,0,0,0.68);z-index:9200;display:flex;align-items:center;justify-content:center;}",
+      ".ftw-diag-review-card{width:min(680px,94vw);max-height:90vh;overflow:auto;background:var(--ink-raised);border:1px solid var(--line);border-radius:10px;padding:18px;color:var(--fg);}",
+      ".ftw-diag-review-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;}",
+      ".ftw-diag-review-head h3{margin:0;font:500 0.9rem var(--mono);letter-spacing:0.12em;text-transform:uppercase;color:var(--accent-e);}",
+      ".ftw-diag-review-note{color:var(--fg-dim);font-size:0.84rem;line-height:1.45;margin:0 0 10px;}",
+      ".ftw-diag-review textarea{box-sizing:border-box;width:100%;min-height:300px;resize:vertical;background:var(--ink-sunken);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:0.78rem/1.45 var(--mono);}",
+      ".ftw-diag-review-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:10px;flex-wrap:wrap;}",
+      ".ftw-diag-review-status{margin-right:auto;color:var(--fg-dim);font-size:0.78rem;}",
     ].join("");
     document.head.appendChild(style);
   }
@@ -144,9 +155,12 @@
     keyHandler: null,
     jobOverlay: null,
     jobTimer: null,
+    issueOverlay: null,
+    detail: null,
   };
 
   function close() {
+    closeIssueReview();
     if (state.timer) { clearInterval(state.timer); state.timer = null; }
     if (state.keyHandler) {
       document.removeEventListener("keydown", state.keyHandler);
@@ -159,6 +173,145 @@
     state.bodyEl = null;
     state.statusPillEl = null;
     state.name = null;
+    state.detail = null;
+  }
+
+  function closeIssueReview() {
+    if (state.issueOverlay && state.issueOverlay.parentNode) {
+      state.issueOverlay.parentNode.removeChild(state.issueOverlay);
+    }
+    state.issueOverlay = null;
+  }
+
+  function safeDiagnosticValue(value) {
+    var text = String(value == null ? "" : value).trim();
+    if (!text || text.length > 80) return "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9 ._+\/-]*$/.test(text)) return "";
+    if (/\b\d{1,3}(?:\.\d{1,3}){3}\b/.test(text) || text.indexOf("://") >= 0) return "";
+    return text;
+  }
+
+  function diagnosticSource(entry) {
+    if (entry && entry.source === "managed" && entry.package_id && entry.artifact_sha256) {
+      return "managed / signed";
+    }
+    if (entry && entry.source === "local") return "local / unsigned";
+    if (entry && entry.source === "bundled") return "bundled";
+    return "unknown";
+  }
+
+  function buildDriverDiagnostics(cfg, entry, components) {
+    var detail = state.detail || {};
+    var health = detail.Health || detail.health || {};
+    var rawID = entry && entry.id;
+    var driverID = safeDiagnosticValue(rawID) || "local-custom";
+    var version = safeDiagnosticValue((entry && (entry.installed_version || entry.version)) || "unknown") || "unknown";
+    var source = diagnosticSource(entry);
+    var core = (components && components.core) || {};
+    var versionEl = document.getElementById("version");
+    var ftwVersion = safeDiagnosticValue(core.version || (versionEl && versionEl.textContent) || "dev") || "dev";
+    var status = statusName(health.Status);
+    var configData = (cfg && cfg.config) || {};
+    var make = safeDiagnosticValue((entry && entry.manufacturer) || "");
+    var model = safeDiagnosticValue(configData.model || "");
+    var firmware = safeDiagnosticValue(configData.firmware || "");
+    var hostAPI = "unknown";
+    if (entry && entry.host_api_min) {
+      hostAPI = String(entry.host_api_min);
+      if (entry.host_api_max && entry.host_api_max !== entry.host_api_min) {
+        hostAPI += "-" + String(entry.host_api_max);
+      }
+    }
+    var lines = [
+      "## FTW driver diagnostics",
+      "",
+      "- Driver: `" + driverID + "`",
+      "- Driver version: `" + version + "`",
+      "- Source: `" + source + "`",
+    ];
+    if (source === "managed / signed") {
+      lines.push("- Package: `" + safeDiagnosticValue(entry.package_id) + "`");
+      lines.push("- Channel: `" + (safeDiagnosticValue(entry.package_channel) || "unknown") + "`");
+      if (/^[0-9a-f]{64}$/.test(entry.artifact_sha256 || "")) {
+        lines.push("- Artifact SHA-256: `" + entry.artifact_sha256 + "`");
+      }
+    }
+    lines.push("- FTW version: `" + ftwVersion + "`");
+    lines.push("- Host API: `" + hostAPI + "`");
+    lines.push("- Runtime ABI: `" + (safeDiagnosticValue(entry && entry.runtime_abi) || "gopher-lua-source-v1") + "`");
+    if (make) lines.push("- Device make: `" + make + "`");
+    if (model) lines.push("- Device model: `" + model + "`");
+    if (firmware) lines.push("- Firmware: `" + firmware + "`");
+    lines.push("- Health: `" + status + "`");
+    lines.push("- Last error: " + (health.LastError ? "present; omitted here for privacy" : "none reported"));
+    lines.push("");
+    lines.push("## Test steps");
+    lines.push("");
+    lines.push("1. Opened the driver Diagnose view.");
+    lines.push("2. Checked current health and telemetry.");
+    lines.push("3. Add the steps that reproduce the issue, without IP addresses, serial numbers, credentials, site IDs, raw config, or logs.");
+    return {
+      body: lines.join("\n"),
+      issueURL: DRIVER_ISSUE_URL + "&title=" + encodeURIComponent("[" + driverID + "] Driver issue on " + version),
+    };
+  }
+
+  function copyText(textarea, statusEl) {
+    function done() { if (statusEl) statusEl.textContent = "Diagnostics copied."; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(textarea.value).then(done).catch(function () {
+        textarea.select();
+        document.execCommand("copy");
+        done();
+      });
+      return;
+    }
+    textarea.select();
+    document.execCommand("copy");
+    done();
+  }
+
+  function openIssueReview() {
+    var name = state.name;
+    if (!name) return;
+    Promise.all([
+      apiFetch("/api/config").then(function (r) { return r.json(); }),
+      apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }),
+      apiFetch("/api/components").then(function (r) { return r.json(); }).catch(function () { return {}; }),
+    ]).then(function (results) {
+      if (state.name !== name) return;
+      var cfg = ((results[0] && results[0].drivers) || []).find(function (item) { return item.name === name; }) || {};
+      var entries = (results[1] && results[1].entries) || [];
+      var entry = entries.find(function (item) { return item.path === cfg.lua; }) || null;
+      var report = buildDriverDiagnostics(cfg, entry, results[2]);
+      closeIssueReview();
+      var overlay = document.createElement("div");
+      overlay.className = "ftw-diag-review";
+      overlay.innerHTML =
+        '<div class="ftw-diag-review-card" role="dialog" aria-modal="true" aria-label="Review driver diagnostics">' +
+        '  <div class="ftw-diag-review-head"><h3>Review driver report</h3><button class="ftw-diag-close" data-role="close-review" aria-label="Close">×</button></div>' +
+        '  <p class="ftw-diag-review-note">Check the text before GitHub opens. FTW leaves raw errors, logs, IP addresses, serial numbers, credentials, site IDs and config out.</p>' +
+        '  <textarea data-role="diagnostics" aria-label="Sanitized driver diagnostics">' + escHtml(report.body) + '</textarea>' +
+        '  <div class="ftw-diag-review-actions"><span class="ftw-diag-review-status" data-role="copy-status" aria-live="polite"></span>' +
+        '    <button class="ftw-diag-btn" data-role="copy-diagnostics">Copy diagnostics</button>' +
+        '    <button class="ftw-diag-btn ftw-diag-btn-primary" data-role="open-issue">Open GitHub issue</button>' +
+        '  </div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      state.issueOverlay = overlay;
+      overlay.addEventListener("click", function (event) { if (event.target === overlay) closeIssueReview(); });
+      overlay.querySelector('[data-role="close-review"]').addEventListener("click", closeIssueReview);
+      var textarea = overlay.querySelector('[data-role="diagnostics"]');
+      var copyStatus = overlay.querySelector('[data-role="copy-status"]');
+      overlay.querySelector('[data-role="copy-diagnostics"]').addEventListener("click", function () {
+        copyText(textarea, copyStatus);
+      });
+      overlay.querySelector('[data-role="open-issue"]').addEventListener("click", function () {
+        window.open(report.issueURL, "_blank", "noopener");
+      });
+    }).catch(function (error) {
+      alert("Could not prepare driver report: " + error.message);
+    });
   }
 
   function startJobOverlay(title, message) {
@@ -314,6 +467,11 @@
     }
     html += '</div>';
 
+    html += '<div class="ftw-diag-section"><h4>Local exports</h4><div class="ftw-diag-actions">' +
+      '<button class="ftw-diag-btn" data-role="dump">Download recent logs</button>' +
+      '<button class="ftw-diag-btn" data-role="research">Download load research</button>' +
+      '</div></div>';
+
     // Preserve scroll positions across the silent re-render so the
     // 5 s auto-refresh doesn't yank the operator off what they're
     // reading. On first paint there's nothing to preserve.
@@ -325,6 +483,23 @@
       : true;
 
     state.bodyEl.innerHTML = html;
+
+    state.bodyEl.querySelector('[data-role="dump"]').addEventListener("click", function () {
+      downloadWithFeedback(
+        "/api/support/dump",
+        "Preparing support bundle",
+        "Collecting logs, redacted config, driver health, and recent telemetry.",
+        "ftw-support.tar.gz"
+      );
+    });
+    state.bodyEl.querySelector('[data-role="research"]').addEventListener("click", function () {
+      downloadWithFeedback(
+        "/api/research/load/dump?days=120",
+        "Preparing load research",
+        "Building the anonymized 120-day research bundle. This can take a while on large databases.",
+        "ftw-load-research.tar.gz"
+      );
+    });
 
     if (!isFirstPaint) state.bodyEl.scrollTop = prevBodyTop;
     var newLogs = state.bodyEl.querySelector(".ftw-diag-logs");
@@ -343,7 +518,8 @@
       apiFetch("/api/drivers/" + encodeURIComponent(n) + "/logs?limit=200").then(function (r) { return r.json(); }).catch(function () { return { entries: [] }; }),
     ]).then(function (results) {
       if (state.name !== n) return; // user closed or switched
-      renderBody(results[0] || {}, results[1] || {}, isFirstPaint);
+      state.detail = results[0] || {};
+      renderBody(state.detail, results[1] || {}, isFirstPaint);
     }).catch(function (e) {
       if (state.name !== n) return;
       state.bodyEl.innerHTML = '<div class="ftw-diag-error">Failed to load: ' + escHtml(e.message) + '</div>';
@@ -366,8 +542,8 @@
       '      <span class="ftw-diag-status-pill" data-role="status">…</span>' +
       '    </div>' +
       '    <div class="ftw-diag-actions">' +
-      '      <button class="ftw-diag-btn" data-role="dump" title="Download a gzipped tarball with recent logs, redacted config, driver health, and 1 h of telemetry — small enough to email a developer.">Download recent logs</button>' +
-      '      <button class="ftw-diag-btn" data-role="research" title="Download an anonymized 120-day load research bundle with 15-minute site aggregates, EV split out, weather, prices, and load-model state.">Download load research</button>' +
+      '      <button class="ftw-diag-btn ftw-diag-btn-primary" data-role="report-driver">Report driver issue</button>' +
+      '      <button class="ftw-diag-btn" data-role="request-driver">Request a driver</button>' +
       '      <button class="ftw-diag-close" data-role="close" aria-label="Close">×</button>' +
       '    </div>' +
       '  </div>' +
@@ -384,21 +560,9 @@
       if (ev.target === backdrop) close();
     });
     backdrop.querySelector('[data-role="close"]').addEventListener("click", close);
-    backdrop.querySelector('[data-role="dump"]').addEventListener("click", function () {
-      downloadWithFeedback(
-        "/api/support/dump",
-        "Preparing support bundle",
-        "Collecting logs, redacted config, driver health, and recent telemetry.",
-        "ftw-support.tar.gz"
-      );
-    });
-    backdrop.querySelector('[data-role="research"]').addEventListener("click", function () {
-      downloadWithFeedback(
-        "/api/research/load/dump?days=120",
-        "Preparing load research",
-        "Building the anonymized 120-day research bundle. This can take a while on large databases.",
-        "ftw-load-research.tar.gz"
-      );
+    backdrop.querySelector('[data-role="report-driver"]').addEventListener("click", openIssueReview);
+    backdrop.querySelector('[data-role="request-driver"]').addEventListener("click", function () {
+      window.open(DRIVER_REQUEST_URL, "_blank", "noopener");
     });
 
     state.keyHandler = function (ev) { if (ev.key === "Escape") close(); };

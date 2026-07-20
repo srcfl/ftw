@@ -1134,13 +1134,13 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 // Empty string preserves the historical "sibling-of-config" behaviour.
 var DriversDirOverride string
 
-// UserDriversDirOverride is the second lookup path tried before
-// DriversDirOverride. Designed for persistent user-supplied drivers in
+// UserDriversDirOverride is the first lookup path. It is tried before managed
+// signed drivers and DriversDirOverride. It holds persistent user drivers in
 // the docker deploy where DriversDirOverride lives in the immutable
 // image layer. When set, ResolveDriverPaths checks whether a file
 // exists in this directory first and uses it when found; otherwise
-// falls back to DriversDirOverride. Empty = single-dir behaviour
-// (back-compat).
+// falls back to the managed and bundled directories. Empty = single-dir
+// behaviour (back-compat).
 var UserDriversDirOverride string
 
 // ManagedDriversDirOverride contains stable active symlinks maintained by the
@@ -1151,8 +1151,8 @@ var ManagedDriversDirOverride string
 // ResolveDriverPaths joins relative Lua driver paths with baseDir, or
 // with DriversDirOverride when the relative path starts with "drivers/".
 // When UserDriversDirOverride is also set, paths starting with "drivers/"
-// are first probed in UserDriversDirOverride; only if the file is absent
-// there do they fall through to DriversDirOverride.
+// are first probed there. They then fall through to the managed directory
+// and DriversDirOverride.
 func (c *Config) ResolveDriverPaths(baseDir string) {
 	for i := range c.Drivers {
 		c.Drivers[i].Lua = stripLeadingDotDot(c.Drivers[i].Lua)

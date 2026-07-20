@@ -1,10 +1,13 @@
-# Device Support driver packages
+# Driver source and signed packages
 
-`srcful-device-support` is the canonical owner of Sourceful driver source,
-SemVer, package metadata and signed target artifacts. FTW is a target consumer:
-it accepts only the exact `ftw-core` runtime profile and runs downloaded Lua in
-the same capability-scoped sandbox as bundled drivers. Core remains the
-activation and safety authority.
+`srcfl/device-drivers` is the only editable source for shared driver code,
+versions, package recipes, target adapters, contracts and tests. Private Device
+Support consumes an exact public commit, builds it and signs release data. It
+does not own a second editable driver tree. `drivers.sourceful.energy` is the
+runtime distribution point.
+
+FTW accepts only the exact `ftw-core` runtime profile. It never loads code from
+GitHub. Core remains the activation and safety authority.
 
 ## Resolution and recovery
 
@@ -44,7 +47,7 @@ driver is unavailable.
 
 | Format | Role |
 |---|---|
-| `sourceful.driver-index/v1` | Canonical signed Device Support discovery index and package envelopes |
+| `sourceful.driver-index/v1` | Signed discovery index and package envelopes from `drivers.sourceful.energy` |
 | `ftw.manifest/v1` | Transitional FTW-owned manifest retained until production cutover |
 
 Use the beta channel only on a chosen pilot site:
@@ -69,7 +72,10 @@ the same pinned key. Change that default only after stable promotion. A catalog
 refresh never installs or activates a driver.
 
 Device Support publishes `beta` packages and promotes the exact reviewed
-version and target hashes to `stable`. There is no edge driver channel.
+version to `stable` without rebuilding the artifact. Package v1 signs the
+channel inside its payload, so stable has a new envelope and signature. The
+artifact bytes, hashes, URLs, public source commit, materials and provenance
+must stay the same. There is no edge driver channel.
 
 The Device Support index may reference several immutable versions. FTW adapts
 the newest compatible version into the Update Center and keeps older compatible
@@ -90,22 +96,29 @@ host/runtime compatibility and immutable target artifacts. Core verifies:
 - HTTPS URLs, safe paths, exact artifact size and SHA-256;
 - Lua lifecycle and matching id/version/host API/`read_only` metadata.
 
-Remote Lua is never executed directly from a URL. Unsigned and insecure sources
-remain limited to the legacy local-development format. Sourceful index/package
-envelopes are always signed. Cached indexes and packages are reverified before
-offline discovery.
+Remote Lua is never executed directly from a URL. Local unsigned drivers need
+an explicit operator overlay and never claim managed or signed status.
+Sourceful index/package envelopes are always signed. Cached indexes and
+packages are reverified before offline discovery. A signed read-only package
+also gets a host policy that denies write calls during init, poll, command,
+default mode and cleanup.
 
-Phase 1 accepts read-only packages only. Packages with commands, control
-capabilities, write permissions or control-enabled FTW targets fail closed.
-That gate is removed only after default-mode invocation, bounded lease expiry,
-structured command results and physical control HIL have explicit acceptance.
+The live beta path accepts read-only packages only. Packages with commands,
+control capabilities, write permissions or control-enabled FTW targets stay
+off. Control also needs per-driver process or heap isolation, default-mode and
+lease proof, structured command results, readback, and physical HIL.
+
+Before stable control, the trust policy must add key overlap and rotation,
+emergency deny lists for keys, packages, versions and artifact hashes, and a
+monotonic index policy. An offline host may keep its last verified artifact,
+but an old or expired index must not offer a new install or activation.
 
 ## Driver versions
 
-Each driver declares public runtime metadata in its `DRIVER` table, while
-Device Support owns the canonical package version. Executable or public
-metadata changes require a higher package SemVer. FTW refuses artifacts whose
-Lua id/version/read-only contract differs from the signed package.
+Each driver declares public runtime metadata in its `DRIVER` table. The public
+repo owns the package version. Executable or public metadata changes require a
+higher package SemVer. FTW refuses artifacts whose Lua id, version or
+read-only value differs from the signed package.
 
 ```bash
 cd go
@@ -114,7 +127,7 @@ go run ./cmd/ftw-driver-repository check-versions \
 ```
 
 `go/cmd/ftw-driver-repository` and `.github/workflows/drivers-release.yml` are
-legacy migration tooling, not the future canonical publisher. They remain until
-the Device Support stable endpoint, trust-root provisioning and recovery
-cutover have been exercised. New shared driver releases happen in Device
-Support once, not in FTW.
+old migration tools, not the shared source or future publisher. New source
+changes start in `srcfl/device-drivers`. Device Support releases only an exact,
+reviewed public commit. A public commit pin in FTW may serve as a contract test;
+it must not make a core release necessary for a driver update.

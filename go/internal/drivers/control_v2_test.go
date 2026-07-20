@@ -192,6 +192,48 @@ func TestControlV2RestrictsWritesAndReturnsHostEvidence(t *testing.T) {
 	}
 }
 
+func TestSignedReadOnlyPolicyDeniesWritesInEveryLifecyclePhase(t *testing.T) {
+	source := `
+function driver_init(config) host.modbus_write(10, 1) end
+function driver_poll() host.modbus_write(10, 2) return 1000 end
+function driver_command(action, value, command) host.modbus_write(10, 3) end
+function driver_default_mode() host.modbus_write(10, 4) end
+function driver_cleanup() host.modbus_write(10, 5) end
+`
+	path := filepath.Join(t.TempDir(), "read-only.lua")
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	modbus := &controlV2Modbus{registers: make(map[uint16]uint16)}
+	policy := &RuntimePolicy{
+		PackageID: "com.sourceful.driver.read-only", Version: "1.0.0",
+		ArtifactSHA256: strings.Repeat("b", 64), RuntimeABI: "gopher-lua-source-v1",
+		HostAPIProfile: "sourceful.host/ftw-core/v1", ReadOnly: true,
+		Permissions: map[string]bool{"modbus.read": true},
+	}
+	env := NewHostEnv("read-only", telemetry.NewStore()).WithModbus(modbus)
+	driver, err := NewLuaDriverWithPolicy(path, env, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Init(context.Background(), map[string]interface{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := driver.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.Command(context.Background(), []byte(`{"action":"test","power_w":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := driver.DefaultMode(); err != nil {
+		t.Fatal(err)
+	}
+	driver.Cleanup()
+	if modbus.writes != 0 {
+		t.Fatalf("signed read-only driver reached hardware: %d writes", modbus.writes)
+	}
+}
+
 func TestControlV2RequiresExactSiteOptIn(t *testing.T) {
 	driver, modbus := loadControlV2Driver(t, testControlV2Policy(false))
 	now := time.Now()
