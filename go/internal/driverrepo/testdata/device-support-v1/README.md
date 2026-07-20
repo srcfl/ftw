@@ -13,4 +13,3 @@ rebuild the pinned source with `uv` and verify the live canonical output.
 
 Regenerate the fixture only with the Device Support package tool through
 `uv`; never edit signed JSON or Lua artifacts by hand.
-

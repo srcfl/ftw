@@ -178,8 +178,19 @@ state:
 #       enabled: true
 #       trusted_keys:
 #         ftw-drivers-2026-01: MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc=
-# After the Device Support production index and fleet trust root are deployed,
-# set format: sourceful.driver-index/v1 and manifest_url to that signed index.
+# Test the Device Support beta channel on one site before the fleet cutover:
+# device_repository:
+#   enabled: true
+#   refresh_interval_h: 24
+#   repositories:
+#     - id: sourceful-device-support-beta
+#       name: Sourceful Device Support beta
+#       format: sourceful.driver-index/v1
+#       manifest_url: https://drivers.sourceful.energy/v1/channels/beta/index.envelope.json
+#       enabled: true
+#       trusted_keys:
+#         sourceful-drivers-2026-01: VfRKapKx1JDs+uSAM5MRhMcWLhfmY1kktrOlDrANn2o=
+# Refresh only updates the signed catalog. Install and activation stay explicit.
 
 # Mathematical MPC optimizer. Official Compose runs it as the independently
 # updatable ftw-optimizer service; native installs can point optimizer_command

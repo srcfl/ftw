@@ -23,10 +23,10 @@ previous artifact and every update outcome. Network or repository failure
 cannot prevent Core from booting with its bundled set.
 
 The current FTW-signed stable manifest remains the default during migration.
-It uses `ftw.manifest/v1`. Cutover to
-`sourceful.driver-index/v1` requires a deployed Device Support stable-index URL
-and production public key; neither is invented in FTW. `enabled: false` remains
-the explicit operator opt-out.
+It uses `ftw.manifest/v1`. The Device Support host and production public key are
+now provisioned, but the default stays unchanged until the signed stable index
+has passed the SDM630 beta pilot and offline recovery test. `enabled: false`
+remains the explicit operator opt-out.
 
 The Update Center shows the signed remote history together with every retained
 local artifact. An operator can install a historical signed version or activate
@@ -47,22 +47,26 @@ driver is unavailable.
 | `sourceful.driver-index/v1` | Canonical signed Device Support discovery index and package envelopes |
 | `ftw.manifest/v1` | Transitional FTW-owned manifest retained until production cutover |
 
-Example explicit Device Support source after its endpoint and trust root have
-been provisioned:
+Use the beta channel only on a chosen pilot site:
 
 ```yaml
 device_repository:
   enabled: true
   refresh_interval_h: 24
   repositories:
-    - id: sourceful-device-support
-      name: Sourceful Device Support
+    - id: sourceful-device-support-beta
+      name: Sourceful Device Support beta
       format: sourceful.driver-index/v1
-      manifest_url: https://<production-host>/drivers/stable/index.envelope.json
+      manifest_url: https://drivers.sourceful.energy/v1/channels/beta/index.envelope.json
       enabled: true
       trusted_keys:
-        sourceful-drivers-<rotation>: <base64-raw-Ed25519-public-key>
+        sourceful-drivers-2026-01: VfRKapKx1JDs+uSAM5MRhMcWLhfmY1kktrOlDrANn2o=
 ```
+
+The future fleet default uses
+`https://drivers.sourceful.energy/v1/channels/stable/index.envelope.json` with
+the same pinned key. Change that default only after stable promotion. A catalog
+refresh never installs or activates a driver.
 
 Device Support publishes `beta` packages and promotes the exact reviewed
 version and target hashes to `stable`. There is no edge driver channel.
