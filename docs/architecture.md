@@ -11,7 +11,7 @@ make dispatch unsafe.
 | Module | Source | Runtime | Responsibility |
 |---|---|---|---|
 | Core | `go/cmd/ftw`, `go/internal`, `web` | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
-| Drivers | `drivers/*.lua`, host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
+| Drivers | Canonical packages in Device Support; bundled recovery in `drivers/*.lua`; host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
 | Optimizer | `optimizer`, contract in `go/internal/mpc` | Optional Python service/process | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
@@ -65,8 +65,10 @@ Planner output is an input to that loop, never a direct device command.
 
 ## Drivers
 
-Each `drivers/*.lua` file contains its own `DRIVER` metadata and implements the
-driver lifecycle. `go/internal/drivers/lua.go` is the source of truth for the
+Device Support owns canonical Sourceful driver source, SemVer, permissions,
+provenance and signed target artifacts. FTW selects only the `ftw-core` target.
+Each Lua artifact still contains its own `DRIVER` metadata and implements the
+FTW lifecycle. `go/internal/drivers/lua.go` is the source of truth for FTW's
 host API and capability sandbox. Network and protocol capabilities must be
 granted in configuration.
 
@@ -78,9 +80,10 @@ Drivers are the only hardware-specific layer. They must:
 - avoid policy decisions that belong in core;
 - remain independently testable and hot-editable.
 
-Bundled drivers provide the recovery set. Signed driver artifacts can be
-updated independently through `beta` and `stable`; activation is explicit and
-atomic. See [writing-a-driver.md](writing-a-driver.md) and
+Bundled drivers provide the offline recovery set. A signed Device Support
+index is discovery only; FTW independently verifies the selected package and
+artifact, while activation remains explicit and atomic. See
+[writing-a-driver.md](writing-a-driver.md) and
 [device-repository.md](device-repository.md).
 
 ## Optimizer

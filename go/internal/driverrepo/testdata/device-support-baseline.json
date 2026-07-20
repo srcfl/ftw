@@ -1,0 +1,6 @@
+{
+  "repository": "srcfl/srcful-device-support",
+  "commit": "8eecfd6efef0932a28fc35301d4354cc15245a54",
+  "driver": "sdm630",
+  "version": "1.1.1"
+}
