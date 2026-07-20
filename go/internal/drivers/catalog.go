@@ -37,6 +37,9 @@ type CatalogEntry struct {
 	// UI uses it to avoid presenting battery capacity as a control opt-in and
 	// to enable battery_telemetry_only for gateway-style drivers.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// ReadOnlyDeclared distinguishes an explicit false value from old metadata
+	// that did not state whether the driver can control hardware.
+	ReadOnlyDeclared bool `json:"-"`
 
 	// Verification: who's actually run this driver against real
 	// hardware and how long. Populated from the DRIVER block's optional
@@ -179,7 +182,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.Capabilities = pickList(block, "capabilities")
 	e.HTTPHosts = pickList(block, "http_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
-	e.ReadOnly = pickBool(block, "read_only")
+	e.ReadOnly, e.ReadOnlyDeclared = pickOptionalBool(block, "read_only")
 	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))
 	e.VerifiedBy = pickList(block, "verified_by")
 	e.VerifiedAt = pickString(block, "verified_at")
@@ -292,9 +295,17 @@ func pickInt(block, name string) int {
 }
 
 func pickBool(block, name string) bool {
+	value, _ := pickOptionalBool(block, name)
+	return value
+}
+
+func pickOptionalBool(block, name string) (bool, bool) {
 	re := regexp.MustCompile(`(?mi)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*(true|false)`)
 	m := re.FindStringSubmatch(block)
-	return len(m) >= 2 && strings.EqualFold(m[1], "true")
+	if len(m) < 2 {
+		return false, false
+	}
+	return strings.EqualFold(m[1], "true"), true
 }
 
 // pickList matches `name = { "a", "b", "c" }` inside the block.

@@ -5,9 +5,43 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
+
+func TestDriverInventoryContentSHAIgnoresGeneratedAt(t *testing.T) {
+	first := driverinventory.Snapshot{
+		SchemaVersion: driverinventory.SchemaVersion,
+		GeneratedAt:   time.Unix(1, 0),
+		Host: driverinventory.Host{
+			Product: "ftw", Version: "1.5.0-beta.1", UpdateChannel: "beta",
+			Target: "ftw-core", RuntimeABI: driverinventory.RuntimeABI, HostAPI: driverinventory.HostAPI,
+		},
+		Drivers: []driverinventory.Driver{{
+			DriverID: "sdm630", Version: "1.1.1", Source: "bundled",
+			SourceSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			ControlClass: "read_only", ConfiguredInstances: 1, RunningInstances: 1,
+			Health: driverinventory.Health{OK: 1},
+		}},
+	}
+	second := first
+	second.GeneratedAt = time.Unix(2, 0)
+	firstSHA, err := driverInventoryContentSHA(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSHA, err := driverInventoryContentSHA(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstSHA != secondSHA {
+		t.Fatal("generated_at changed content identity")
+	}
+	if got := driverInventoryTopic("f42w-gw-1"); got != "gateways/f42w-gw-1/inventory/drivers/json/v1" {
+		t.Fatalf("topic = %q", got)
+	}
+}
 
 // TestAssemble_PicksUpClean Snake CaseFromLuaEmit confirms that
 // arbitrary fields a Lua driver emits inside host.emit() flow into

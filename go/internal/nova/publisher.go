@@ -1,6 +1,7 @@
 package nova
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,9 +11,26 @@ import (
 	paho "github.com/eclipse/paho.mqtt.golang"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
+
+const (
+	driverInventoryCheckInterval = 30 * time.Second
+	driverInventoryMaxInterval   = 15 * time.Minute
+	driverInventoryMaxBytes      = 128 * 1024
+)
+
+type DriverInventoryProvider func(now time.Time) (driverinventory.Snapshot, error)
+
+type Option func(*Publisher)
+
+// WithDriverInventory adds the canonical FTW driver inventory heartbeat.
+// It does not change driver install, activation or control state.
+func WithDriverInventory(provider DriverInventoryProvider) Option {
+	return func(p *Publisher) { p.driverInventory = provider }
+}
 
 // Publisher owns one MQTT connection to Nova's broker plus a periodic
 // publish loop. It mirrors the shape of internal/ha.Bridge so the
@@ -32,13 +50,19 @@ type Publisher struct {
 	lastPublishMs  int64
 	publishedCount int64
 	missingDERs    map[string]bool // one-shot WARN dedupe per (device,type)
+
+	driverInventory       DriverInventoryProvider
+	driverInventoryWake   chan struct{}
+	lastInventorySHA      [sha256.Size]byte
+	lastInventoryPublish  time.Time
+	inventoryPublishCount int64
 }
 
 // Start connects to Nova's MQTT broker (JWT-as-password) and begins the
 // publish loop. Returns immediately; the goroutine runs until Stop.
 // Safe to pass a nil cfg — returns (nil, nil) so callers can gate on
 // `cfg.Nova != nil && cfg.Nova.Enabled`.
-func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.Store) (*Publisher, error) {
+func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.Store, options ...Option) (*Publisher, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, nil
 	}
@@ -46,13 +70,17 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 		return nil, fmt.Errorf("nova.Start: identity is required")
 	}
 	p := &Publisher{
-		cfg:         cfg,
-		id:          id,
-		store:       store,
-		tel:         tel,
-		stop:        make(chan struct{}),
-		done:        make(chan struct{}),
-		missingDERs: make(map[string]bool),
+		cfg:                 cfg,
+		id:                  id,
+		store:               store,
+		tel:                 tel,
+		stop:                make(chan struct{}),
+		done:                make(chan struct{}),
+		missingDERs:         make(map[string]bool),
+		driverInventoryWake: make(chan struct{}, 1),
+	}
+	for _, option := range options {
+		option(p)
 	}
 
 	scheme := "tcp"
@@ -80,6 +108,7 @@ func Start(cfg *config.Nova, id *Identity, store *state.Store, tel *telemetry.St
 			slog.Info("nova MQTT connected",
 				"broker", fmt.Sprintf("%s:%d", cfg.MQTTHost, cfg.MQTTPort),
 				"gateway_serial", cfg.GatewaySerial)
+			p.requestDriverInventory()
 		}).
 		SetConnectionLostHandler(func(_ paho.Client, err error) {
 			slog.Warn("nova MQTT connection lost", "err", err)
@@ -143,14 +172,88 @@ func (p *Publisher) run() {
 	defer close(p.done)
 	tick := time.NewTicker(time.Duration(p.cfg.PublishIntervalS) * time.Second)
 	defer tick.Stop()
+	inventoryTick := time.NewTicker(driverInventoryCheckInterval)
+	defer inventoryTick.Stop()
 	for {
 		select {
 		case <-p.stop:
 			return
 		case <-tick.C:
 			p.publishOnce()
+		case <-inventoryTick.C:
+			p.publishDriverInventory(false)
+		case <-p.driverInventoryWake:
+			p.publishDriverInventory(true)
 		}
 	}
+}
+
+func (p *Publisher) requestDriverInventory() {
+	if p.driverInventory == nil {
+		return
+	}
+	select {
+	case p.driverInventoryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Publisher) publishDriverInventory(force bool) {
+	if p.driverInventory == nil || p.client == nil || !p.client.IsConnected() {
+		return
+	}
+	now := time.Now().UTC()
+	snapshot, err := p.driverInventory(now)
+	if err != nil {
+		slog.Warn("nova: build driver inventory", "err", err)
+		return
+	}
+	contentSHA, err := driverInventoryContentSHA(snapshot)
+	if err != nil {
+		slog.Warn("nova: hash driver inventory", "err", err)
+		return
+	}
+	p.mu.Lock()
+	unchanged := contentSHA == p.lastInventorySHA
+	recent := now.Sub(p.lastInventoryPublish) < driverInventoryMaxInterval
+	p.mu.Unlock()
+	if !force && unchanged && recent {
+		return
+	}
+	snapshot.GeneratedAt = now
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		slog.Warn("nova: encode driver inventory", "err", err)
+		return
+	}
+	if len(wire) > driverInventoryMaxBytes {
+		slog.Warn("nova: driver inventory exceeds payload limit", "bytes", len(wire))
+		return
+	}
+	topic := driverInventoryTopic(p.cfg.GatewaySerial)
+	tok := p.client.Publish(topic, 1, true, wire)
+	if !tok.WaitTimeout(2*time.Second) || tok.Error() != nil {
+		slog.Warn("nova: publish driver inventory", "topic", topic, "err", tok.Error())
+		return
+	}
+	p.mu.Lock()
+	p.lastInventorySHA = contentSHA
+	p.lastInventoryPublish = now
+	p.inventoryPublishCount++
+	p.mu.Unlock()
+}
+
+func driverInventoryContentSHA(snapshot driverinventory.Snapshot) ([sha256.Size]byte, error) {
+	snapshot.GeneratedAt = time.Time{}
+	wire, err := json.Marshal(snapshot)
+	if err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	return sha256.Sum256(wire), nil
+}
+
+func driverInventoryTopic(gatewaySerial string) string {
+	return fmt.Sprintf("gateways/%s/inventory/drivers/json/v1", sanitizeTopicSegment(gatewaySerial))
 }
 
 // publishOnce snapshots every registered device × der_type, assembles

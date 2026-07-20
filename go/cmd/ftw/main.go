@@ -31,6 +31,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
+	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
@@ -2063,7 +2064,23 @@ func main() {
 		siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
 		if err != nil {
 			slog.Warn("nova federation disabled — gateway identity unavailable", "err", err, "path", identityKeyPath)
-		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel); err != nil {
+		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel,
+			nova.WithDriverInventory(func(now time.Time) (driverinventory.Snapshot, error) {
+				cfgMu.RLock()
+				driverCfg := append([]config.Driver(nil), cfg.Drivers...)
+				cfgMu.RUnlock()
+				return driverinventory.Build(now, driverinventory.Input{
+					HostVersion:       Version,
+					Drivers:           driverCfg,
+					RunningNames:      reg.Names(),
+					Health:            tel.AllHealth(),
+					UserDriverDir:     *userDriversDirFlag,
+					ManagedDriverDir:  driverRepository.ActiveDir(),
+					BundledDriverDir:  resolveDriverDir(),
+					RepositoryDrivers: inventoryRepositoryArtifacts(driverRepository),
+				})
+			}),
+		); err != nil {
 			slog.Warn("nova publisher failed to start", "err", err)
 		} else if pub != nil {
 			defer pub.Stop()
@@ -2537,6 +2554,45 @@ func main() {
 			}
 		}
 	}
+}
+
+func inventoryRepositoryArtifacts(manager *driverrepo.Manager) []driverinventory.RepositoryArtifact {
+	if manager == nil {
+		return nil
+	}
+	active := manager.Status().Active
+	out := make([]driverinventory.RepositoryArtifact, 0, len(active))
+	for _, installed := range active {
+		item := driverinventory.RepositoryArtifact{
+			LogicalPath:   installed.LogicalPath,
+			InstalledPath: installed.InstalledPath,
+			DriverID:      installed.DriverID,
+			Version:       installed.Version,
+			SHA256:        installed.SHA256,
+			RepositoryID:  installed.RepoID,
+		}
+		versions, err := manager.AvailableVersions(installed.DriverID)
+		if err == nil {
+			for _, candidate := range versions {
+				driver := candidate.Driver
+				if candidate.RepositoryID != installed.RepoID || driver.Version != installed.Version || !strings.EqualFold(driver.SHA256, installed.SHA256) {
+					continue
+				}
+				item.PackageID = driver.PackageID
+				item.PackageChannel = driver.Channel
+				if driver.PackageID != "" {
+					if driver.Metadata.ReadOnly {
+						item.ControlClass = "read_only"
+					} else {
+						item.ControlClass = "control"
+					}
+				}
+				break
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // snapshotLoop writes a recovery snapshot of state.db daily and once on
