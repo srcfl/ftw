@@ -76,7 +76,8 @@ type Deps struct {
 	CtrlMu            *sync.Mutex
 	State             *state.Store
 	CapMu             *sync.RWMutex
-	Capacities        map[string]float64 // driver → battery_capacity_wh
+	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
 	CfgMu             *sync.RWMutex
 	Cfg               *config.Config
 	ConfigPath        string
@@ -446,11 +447,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CtrlMu.Unlock()
 
 	s.deps.CapMu.RLock()
-	caps := make(map[string]float64, len(s.deps.Capacities))
-	for k, v := range s.deps.Capacities {
+	capSrc := s.deps.TelemetryCapacities
+	if len(capSrc) == 0 {
+		capSrc = s.deps.Capacities
+	}
+	caps := make(map[string]float64, len(capSrc))
+	for k, v := range capSrc {
 		caps[k] = v
 	}
 	s.deps.CapMu.RUnlock()
+
+	s.deps.CfgMu.RLock()
+	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
 
 	// Aggregate live readings. Offline readings stay in telemetry so detailed
 	// driver views can show the last known value, but they must not leak into
@@ -555,6 +564,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if r.SoC != nil {
 				d["bat_soc"] = *r.SoC
 			}
+		}
+		if observeOnly[name] {
+			d["observe_only"] = true
 		}
 		// Vehicle (DerVehicle) — read-only BMS readings emitted by
 		// drivers like tesla_vehicle.lua. Surfaced so the per-driver
@@ -1654,6 +1666,17 @@ func (s *Server) handleSelfTuneStart(w http.ResponseWriter, r *http.Request) {
 	if err := readJSON(r, &req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": err.Error()})
 		return
+	}
+	s.deps.CfgMu.RLock()
+	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	s.deps.CfgMu.RUnlock()
+	for _, name := range req.Batteries {
+		if observeOnly[name] {
+			writeJSON(w, 400, map[string]string{
+				"error": "battery " + name + " is observe_only and cannot be self-tuned",
+			})
+			return
+		}
 	}
 	s.deps.ModelsMu.Lock()
 	err := s.deps.SelfTune.Start(req.Batteries, s.deps.Models, s.deps.DtS)

@@ -631,7 +631,7 @@ class FtwEnergyFlow extends FtwElement {
         socStale: !p.placeholder && !!p.socStale,
         socSource: p.placeholder ? null : p.socSource,
         radius: p._r,
-        clickable: !p.placeholder && !!p.role,
+        clickable: p.clickable === false ? false : (!p.placeholder && !!p.role),
         role: p.role || "",
         name: p.name || "",
         id: p.id,

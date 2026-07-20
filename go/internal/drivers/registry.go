@@ -863,6 +863,7 @@ func sameDriverConfig(a, b config.Driver) bool {
 		a.IsSiteMeter != b.IsSiteMeter ||
 		a.BatteryCapacityWh != b.BatteryCapacityWh ||
 		a.BatteryTelemetryOnly != b.BatteryTelemetryOnly ||
+		a.ObserveOnly != b.ObserveOnly ||
 		a.Disabled != b.Disabled ||
 		!reflect.DeepEqual(a.Control, b.Control) {
 		return false
