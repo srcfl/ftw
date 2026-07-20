@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
@@ -269,6 +270,26 @@ func TestSourcefulIndexPackageInstallAndOfflineCache(t *testing.T) {
 	active, err := os.ReadFile(filepath.Join(manager.ActiveDir(), "sdm630.lua"))
 	if err != nil || string(active) != string(fixture.artifact) {
 		t.Fatalf("active artifact mismatch: %v", err)
+	}
+	managed := manager.EnrichCatalog([]drivers.CatalogEntry{{
+		Path: "drivers/sdm630.lua", ID: "sdm630", Version: "1.1.1", Source: "managed",
+	}})[0]
+	if managed.PackageID != "com.sourceful.driver.sdm630" || managed.PackageChannel != "beta" ||
+		managed.ArtifactSHA256 != installed.SHA256 || managed.RuntimeABI != sourcefulFTWABIV1 ||
+		managed.HostAPIProfile != sourcefulFTWHostAPIProfileV1 {
+		t.Fatalf("managed catalog provenance = %+v", managed)
+	}
+	local := manager.EnrichCatalog([]drivers.CatalogEntry{{
+		Path: "drivers/sdm630.lua", ID: "sdm630", Version: "local", Source: "local",
+	}})[0]
+	if local.RepositoryID != "" || local.PackageID != "" || local.ArtifactSHA256 != "" || local.UpdateAvailable {
+		t.Fatalf("local catalog claimed managed provenance = %+v", local)
+	}
+	policy, err := manager.RuntimePolicy(config.Driver{
+		Name: "sdm630", Lua: filepath.Join(manager.ActiveDir(), "sdm630.lua"),
+	})
+	if err != nil || policy == nil || !policy.IsReadOnly() || !policy.Permissions["modbus.read"] || policy.Permissions["modbus.write"] {
+		t.Fatalf("signed read-only runtime policy = %+v, %v", policy, err)
 	}
 
 	// A failed refresh cannot replace the last-good in-memory or on-disk view.

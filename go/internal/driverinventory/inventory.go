@@ -67,7 +67,7 @@ type Snapshot struct {
 }
 
 // RepositoryArtifact describes one activated repository file. PackageID and
-// Channel are set only when a signed canonical package supplied them.
+// Channel are set only when a signed package supplied them.
 type RepositoryArtifact struct {
 	LogicalPath    string
 	InstalledPath  string
@@ -199,16 +199,16 @@ func inspectDriver(path string, in Input, artifacts map[string]RepositoryArtifac
 			return row, nil
 		}
 		// A missing or changed activation must not claim signed provenance.
-		row.Source = "local_override"
+		row.Source = "local"
 		row.SourceSHA256 = loadedSHA
 		return row, nil
 	}
 	if within(path, in.UserDriverDir) {
-		row.Source = "local_override"
+		row.Source = "local"
 	} else if within(path, in.BundledDriverDir) {
 		row.Source = "bundled"
 	} else {
-		row.Source = "local_override"
+		row.Source = "local"
 	}
 	row.SourceSHA256 = loadedSHA
 	return row, nil

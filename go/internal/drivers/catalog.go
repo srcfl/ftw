@@ -24,6 +24,11 @@ type CatalogEntry struct {
 	HostAPIMax         int            `json:"host_api_max,omitempty"`
 	Source             string         `json:"source,omitempty"` // local | managed | bundled | upstream
 	RepositoryID       string         `json:"repository_id,omitempty"`
+	PackageID          string         `json:"package_id,omitempty"`
+	PackageChannel     string         `json:"package_channel,omitempty"`
+	ArtifactSHA256     string         `json:"artifact_sha256,omitempty"`
+	RuntimeABI         string         `json:"runtime_abi,omitempty"`
+	HostAPIProfile     string         `json:"host_api_profile,omitempty"`
 	InstalledVersion   string         `json:"installed_version,omitempty"`
 	UpstreamVersion    string         `json:"upstream_version,omitempty"`
 	UpdateAvailable    bool           `json:"update_available,omitempty"`

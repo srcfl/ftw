@@ -11,7 +11,7 @@ make dispatch unsafe.
 | Module | Source | Runtime | Responsibility |
 |---|---|---|---|
 | Core | `go/cmd/ftw`, `go/internal`, `web` | One Go binary | Configuration, telemetry, state, API/UI, safety, control and fallback planning |
-| Drivers | Canonical packages in Device Support; bundled recovery in `drivers/*.lua`; host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
+| Drivers | Editable source in `srcfl/device-drivers`; bundled recovery in `drivers/*.lua`; host in `go/internal/drivers` | One sandboxed Lua VM per configured device | Vendor protocol, sign conversion and device commands |
 | Optimizer | `optimizer`, contract in `go/internal/mpc` | Optional Python service/process | Solve the long-horizon mathematical plan |
 
 Core can run without the optimizer. Hardware cannot be accessed without a
@@ -65,8 +65,12 @@ Planner output is an input to that loop, never a direct device command.
 
 ## Drivers
 
-Device Support owns canonical Sourceful driver source, SemVer, permissions,
-provenance and signed target artifacts. FTW selects only the `ftw-core` target.
+The public `srcfl/device-drivers` repo owns editable driver source, versions,
+package recipes, target adapters, contracts and tests. Private Device Support
+locks an exact public commit, builds it, signs immutable packages and publishes
+the indexes served by `drivers.sourceful.energy`. FTW never fetches executable
+code from GitHub. It selects only a signed `ftw-core` target.
+
 Each Lua artifact still contains its own `DRIVER` metadata and implements the
 FTW lifecycle. `go/internal/drivers/lua.go` is the source of truth for FTW's
 host API and capability sandbox. Network and protocol capabilities must be
@@ -80,8 +84,8 @@ Drivers are the only hardware-specific layer. They must:
 - avoid policy decisions that belong in core;
 - remain independently testable and hot-editable.
 
-Bundled drivers provide the offline recovery set. A signed Device Support
-index is discovery only; FTW independently verifies the selected package and
+Bundled drivers provide the offline recovery set. A signed distribution index
+is discovery only; FTW independently verifies the selected package and
 artifact, while activation remains explicit and atomic. See
 [writing-a-driver.md](writing-a-driver.md) and
 [device-repository.md](device-repository.md).

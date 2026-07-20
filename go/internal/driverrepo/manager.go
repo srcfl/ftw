@@ -348,9 +348,25 @@ func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.Catalo
 		activeByLogical[in.LogicalPath] = in
 	}
 	for i := range entries {
-		if in, ok := activeByLogical[entries[i].Path]; ok {
+		if entries[i].Source == "local" {
+			continue
+		}
+		if in, ok := activeByLogical[entries[i].Path]; ok && entries[i].Source == "managed" {
 			entries[i].InstalledVersion = in.Version
 			entries[i].RepositoryID = in.RepoID
+			for _, candidate := range candidates {
+				driver := candidate.Driver
+				if candidate.RepositoryID != in.RepoID || driver.ID != in.DriverID || driver.Version != in.Version ||
+					!strings.EqualFold(driver.SHA256, in.SHA256) {
+					continue
+				}
+				entries[i].PackageID = driver.PackageID
+				entries[i].PackageChannel = driver.Channel
+				entries[i].ArtifactSHA256 = strings.ToLower(driver.SHA256)
+				entries[i].RuntimeABI = driver.RuntimeABI
+				entries[i].HostAPIProfile = driver.HostAPIProfile
+				break
+			}
 		}
 		for _, candidate := range candidates {
 			if candidate.Driver.ID != entries[i].ID {

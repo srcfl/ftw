@@ -46,6 +46,8 @@
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-net-iface { color: var(--text-dim); margin-right: 8px; }' +
 		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +
+		'  .sys-help-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }' +
+		'  .sys-help-secondary { margin:10px 0 0; color:var(--text-dim); font-size:0.8rem; }' +
         '</style>' +
         '<fieldset>' +
         '<legend>Host</legend>' +
@@ -100,6 +102,14 @@
         '<fieldset>' +
         '<legend>Components</legend>' +
         '<div class="sys-grid" id="sys-components">Loading component status…</div>' +
+        '</fieldset>' +
+        '<fieldset>' +
+        '<legend>Help</legend>' +
+        '<div class="sys-help-actions">' +
+        '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=bug_report.yml" target="_blank" rel="noopener">Report FTW bug</a>' +
+        '  <a class="btn-add" href="https://github.com/srcfl/ftw/issues/new?template=feature_request.yml" target="_blank" rel="noopener">Request FTW feature</a>' +
+        '</div>' +
+        '<p class="sys-help-secondary">GitHub tracks bugs and features. For setup help, <a href="https://discord.gg/25xcBzQaux" target="_blank" rel="noopener">ask on Discord</a>.</p>' +
         '</fieldset>';
     },
 
