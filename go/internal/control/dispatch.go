@@ -152,9 +152,10 @@ type SlotDirective struct {
 	HasPlannedGridW bool
 
 	// LivePVSurplusSoCCapPct mirrors mpc.SlotDirective. When non-zero,
-	// the plan has proved that a later grid-funded battery charge costs
-	// more than current export earns. Runtime may absorb live PV surprise
-	// now up to this planned future SoC. Zero preserves deliberate export.
+	// the plan has proved that enough later grid-funded battery charge clears
+	// the economic threshold. Runtime may absorb live PV surprise now up to
+	// the current planned SoC plus that replaceable energy. Zero preserves
+	// deliberate export.
 	LivePVSurplusSoCCapPct float64
 
 	// LoadpointEnergyWh is the current slot's planned EV charging budget.
@@ -1568,7 +1569,8 @@ func ComputeDispatch(
 		// The cap comes either from the operator override or from an MPC
 		// proof that current export earns less than a later grid-funded
 		// battery charge costs. An explicit operator cap overrides the
-		// planner-derived cap, preserving the original opt-in policy.
+		// planner-derived cap, preserving the original opt-in policy. When the
+		// plan already exports, only export beyond that planned amount is eligible.
 		//
 		// Only adds charge — never reverses a discharge plan. The slot
 		// Wh accumulator (state.slotDelivered) sees the extra and the
@@ -1587,7 +1589,7 @@ func ComputeDispatch(
 			if headroomW > 0 {
 				// Grid level if dispatch ran the plan as-is.
 				projectedGridW := gridW + (targetTotalW - currentTotal)
-				extraExportW := -projectedGridW
+				extraExportW := unexpectedExportBeyondPlanW(projectedGridW, currentDirective)
 				if extraExportW > threshold {
 					addW := extraExportW
 					if addW > headroomW {
@@ -1941,14 +1943,14 @@ func ComputeDispatch(
 		}
 		// Economically replaceable arbitrage idle slot: unlike the default
 		// idle gate, allow reactive PI to absorb a genuine live PV surplus,
-		// but never beyond the later grid-charge SoC the plan supplied. The
+		// but never beyond the energy-derived SoC cap the plan supplied. The
 		// same branch still permits discharge when live load is importing.
 		if arbitrageFamilyIdleSlot && arbitrageFamilyIdleAbsorbCapPct > 0 {
 			threshold := state.PVSurplusAbsorbThresholdW
 			if threshold <= 0 {
 				threshold = 100
 			}
-			chargeCeiling := surplus.idleChargeOnlySurplusW(threshold)
+			chargeCeiling := unexpectedIdleExportBeyondPlanW(surplus, currentDirective, threshold)
 			remainingS := currentDirective.SlotEnd.Sub(time.Now()).Seconds()
 			headroomW := pvSurplusAbsorbHeadroomW(onlineBats, arbitrageFamilyIdleAbsorbCapPct, remainingS)
 			if chargeCeiling > headroomW {
@@ -3001,6 +3003,30 @@ func plannerSelfIdleDesiredTotal(surplus surplusAccounting, state *State) float6
 		threshold = state.PVSurplusAbsorbThresholdW
 	}
 	return surplus.idleChargeOnlySurplusW(threshold)
+}
+
+// unexpectedExportBeyondPlanW is the export runtime may redirect without
+// replacing export already present in the plan. A missing grid forecast keeps
+// the original absorber behavior and treats all projected export as surprise.
+func unexpectedExportBeyondPlanW(projectedGridW float64, dir SlotDirective) float64 {
+	plannedExportW := 0.0
+	if dir.HasPlannedGridW && dir.PlannedGridW < 0 {
+		plannedExportW = -dir.PlannedGridW
+	}
+	unexpectedW := -projectedGridW - plannedExportW
+	if unexpectedW < 0 {
+		return 0
+	}
+	return unexpectedW
+}
+
+func unexpectedIdleExportBeyondPlanW(surplus surplusAccounting, dir SlotDirective, thresholdW float64) float64 {
+	unexpectedW := unexpectedExportBeyondPlanW(-surplus.trueMeterExportWithoutBatteryW(), dir)
+	unexpectedW -= surplus.evReserveRemainingW
+	if unexpectedW <= thresholdW {
+		return 0
+	}
+	return unexpectedW
 }
 
 func pvSurplusAbsorbCapPct(state *State, dir SlotDirective) float64 {

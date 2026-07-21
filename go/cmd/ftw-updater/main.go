@@ -448,6 +448,14 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now, Message: err.Error()})
 		return
 	}
+	if action == "update" && spec.name == "core" {
+		if err := s.requireHealthyOptimizer(); err != nil {
+			msg := "core update blocked: " + err.Error()
+			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: msg})
+			slog.Error("core update blocked", "err", err)
+			return
+		}
+	}
 	s.writeState(State{State: "pulling", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now})
 
 	var env []string
@@ -556,6 +564,26 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
 	s.writeState(State{State: "done", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed", PreviousImageID: previousImageID})
+}
+
+// requireHealthyOptimizer keeps a Core image without embedded Python from
+// replacing a legacy image before its optimizer sidecar works. It only reads
+// the merged Compose files and running container state. In particular, it
+// never rewrites an operator-owned override file.
+func (s *server) requireHealthyOptimizer() error {
+	spec, err := s.componentSpec("optimizer")
+	if err != nil {
+		return fmt.Errorf("a healthy %s service is required; add the optimizer sidecar with scripts/migrate-legacy-compose.sh or follow docs/upgrade-from-legacy.md: %w", optimizerServiceName, err)
+	}
+	if s.healthCheck == nil {
+		return fmt.Errorf("cannot verify that %s is healthy", optimizerServiceName)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
+	defer cancel()
+	if err := s.healthCheck(ctx, spec.service); err != nil {
+		return fmt.Errorf("%s must be running and healthy before Core can update: %w", optimizerServiceName, err)
+	}
+	return nil
 }
 
 func (s *server) runComponentRollback(component string, startedAt time.Time) {
