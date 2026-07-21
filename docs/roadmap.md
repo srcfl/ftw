@@ -67,8 +67,8 @@ Proposed domain layout:
 | `home.sourceful.energy` | Stable WebAuthn relying-party ID; no account directory |
 | `uplink.home.sourceful.energy` | FTW machine connection endpoint |
 
-`drivers.sourceful.energy` remains the separate driver-package service. It is
-not a pairing, authentication or Home Link endpoint.
+The public `srcfl/device-drivers` release channel remains separate from pairing,
+authentication and Home Link.
 
 The three-word name is derived from the stable gateway ID in the exact order
 adjective–color–animal. It is a display name and DNS alias, never an
@@ -150,14 +150,13 @@ These are bounded follow-on directions, not scheduled commitments:
 | V2X automation | Bidirectional capability, metering, lease ownership, interlocks and fallback are proven for the complete local actuation path. |
 | General vehicle snapshot adapter | A minimal vendor-neutral snapshot has stable vehicle identity, freshness and consent semantics without becoming a second control path. |
 
-## Active parallel program — canonical driver packages
+## Later — Device Support package promotion
 
-Canonical driver-package delivery through `drivers.sourceful.energy` is already
-an active, separate program. This roadmap neither duplicates that work nor sets
-a device-count target. It does not change bundled Lua recovery drivers, the
-device-repository format or its defaults. Core consumes only packages that pass
-the existing host-contract, signature, compatibility, activation and rollback
-rules.
+Device Support may later consume an exact `srcfl/device-drivers` commit for
+another product or a higher support level. That work must not create a second
+editable source or replace FTW's public default channel. Core will consume only
+packages that pass its host contract, signature, compatibility, activation and
+rollback checks.
 
 The architectural decision for NEXT is recorded in
 [ADR 0005](adr/0005-outbound-site-link.md).

@@ -4,12 +4,12 @@ Drivers are the hardware boundary. A driver translates one vendor protocol to
 FTW's site convention and runs in its own capability-scoped Lua 5.1 VM. No Go
 build is needed.
 
-For a shared device, create or change the source and package recipe in the
-public [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo.
-Prove an explicit `ftw-core` target against this host. Private Device Support
-builds and signs an exact reviewed public commit. The `drivers/` tree here is
-the bundled FTW recovery snapshot; operator-only drivers may still live
-locally.
+For a shared device, create or change the source and manifest in the public
+[`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) repo. Its
+signed channel is FTW's default source. Device Support may later consume an
+exact reviewed commit and does not own a second editable source. The `drivers/`
+tree here is the bundled FTW recovery snapshot; operator-only drivers may still
+live locally.
 
 ## Metadata
 
@@ -115,7 +115,7 @@ not belong in structured meter/PV/battery/EV telemetry.
 
 ## Implementation sequence
 
-1. Add or update the driver and package recipe in `srcfl/device-drivers`.
+1. Add or update the driver and manifest in `srcfl/device-drivers`.
 2. Implement read-only polling and verify signs against real vendor values.
 3. Build the explicit FTW GopherLua/Lua 5.1 target and run FTW host tests.
 4. Add stable identity and stale-cache handling.
@@ -163,7 +163,7 @@ drivers:
 
 FTW resolves that file as local, then managed signed, then bundled. Settings
 and fleet inventory mark the first case `local / unsigned`. Local code works
-offline and never needs GitHub, Device Support or `drivers.sourceful.energy`.
+offline and never needs GitHub or Device Support.
 It gets no auto-update or promotion and cannot claim signed package control.
 The normal host capabilities and lifecycle still apply.
 
@@ -197,7 +197,6 @@ make check
 Managed drivers are signed, installed atomically and rollbackable; see
 [device-repository.md](device-repository.md).
 
-Device Support publishes new driver packages to `beta` first. Promote without
-rebuilding after hardware validation: package v1 changes the signed channel,
-but keeps the exact artifact bytes, hashes, public source commit and materials.
-FTW does not fork or independently renumber that release.
+The public repository publishes new drivers to `drivers-beta` first. Promote
+the exact signed beta commit after hardware validation. Each changed artifact
+needs a higher driver SemVer. FTW does not fork or renumber that release.

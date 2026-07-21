@@ -23,6 +23,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
+	"github.com/srcfl/ftw/go/internal/state"
 )
 
 const (
@@ -547,9 +548,9 @@ func (m *Manager) sourcefulPackageDriver(
 	}, true, nil
 }
 
-// RuntimePolicy verifies the package envelope stored with an active managed
-// artifact and derives its host permissions without a network call. Local,
-// bundled and legacy repository artifacts return nil.
+// RuntimePolicy verifies signed metadata for an active managed artifact and
+// derives its host permissions without a network call. Local and bundled
+// drivers return nil.
 func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, error) {
 	if m.store == nil {
 		if cfg.Control != nil && cfg.Control.Enabled {
@@ -589,11 +590,14 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 			break
 		}
 	}
-	if repo == nil || repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
+	if repo == nil {
 		if cfg.Control != nil && cfg.Control.Enabled {
 			return nil, errors.New("control opt-in requires a configured Device Support trust root")
 		}
 		return nil, nil
+	}
+	if repositoryFormat(*repo) != config.DriverRepositoryFormatSourcefulIndexV1 {
+		return m.directManifestRuntimePolicy(cfg, *repo, installed)
 	}
 	packageRaw, err := readLimitedFile(filepath.Join(filepath.Dir(resolved), sourcefulInstalledPackageEnvelope), maxManifestBytes)
 	if err != nil {
@@ -678,6 +682,73 @@ func (m *Manager) RuntimePolicy(cfg config.Driver) (*drivers.RuntimePolicy, erro
 			ExpiryAction:      entry.LeasePolicy.ExpiryAction,
 		},
 		SiteEnabled: siteEnabled, MaxWrites: 128,
+	}, nil
+}
+
+func (m *Manager) directManifestRuntimePolicy(
+	cfg config.Driver,
+	repo config.DriverRepositorySource,
+	installed state.DriverRepoInstall,
+) (*drivers.RuntimePolicy, error) {
+	if cfg.Control != nil && cfg.Control.Enabled {
+		return nil, errors.New("control opt-in requires a signed Device Support control package")
+	}
+	manifest, err := m.manifestFor(repo)
+	if err != nil {
+		if installed.RepoURL != "https://github.com/srcfl/device-drivers" {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("verify signed driver manifest for runtime: %w", err)
+	}
+	var matched *ManifestDriver
+	for i := range manifest.Drivers {
+		entry := &manifest.Drivers[i]
+		if entry.ID == installed.DriverID && entry.Version == installed.Version &&
+			strings.EqualFold(entry.SHA256, installed.SHA256) {
+			matched = entry
+			break
+		}
+	}
+	if matched == nil {
+		for i := range manifest.History {
+			entry := &manifest.History[i]
+			if entry.ID == installed.DriverID && entry.Version == installed.Version &&
+				strings.EqualFold(entry.SHA256, installed.SHA256) {
+				matched = entry
+				break
+			}
+		}
+	}
+	if matched == nil {
+		// Old FTW releases did not carry runtime policy fields and may not
+		// appear in the new public channel history. Keep those installed
+		// artifacts on their former v1 behavior. New public installs fail
+		// closed if their signed entry disappears.
+		if installed.RepoURL == "https://github.com/srcfl/device-drivers" {
+			return nil, errors.New("active public driver is absent from its signed manifest")
+		}
+		return nil, nil
+	}
+	if !matched.ReadOnly || !matched.Metadata.ReadOnly || matched.ControlEnabled {
+		// This preserves the former runtime for old direct manifests. The new
+		// public channel marks both manifest and Lua metadata as read-only.
+		if installed.RepoURL == "https://github.com/srcfl/device-drivers" {
+			return nil, errors.New("public FTW driver lacks signed read-only policy")
+		}
+		return nil, nil
+	}
+	permissions := make(map[string]bool, len(matched.Permissions))
+	for _, permission := range matched.Permissions {
+		permissions[permission] = true
+	}
+	return &drivers.RuntimePolicy{
+		PackageID:      "com.sourceful.driver." + matched.ID,
+		Version:        matched.Version,
+		ArtifactSHA256: strings.ToLower(matched.SHA256),
+		RuntimeABI:     sourcefulFTWABIV1,
+		HostAPIProfile: sourcefulFTWHostAPIProfileV1,
+		ReadOnly:       true,
+		Permissions:    permissions,
 	}, nil
 }
 

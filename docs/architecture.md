@@ -66,10 +66,11 @@ Planner output is an input to that loop, never a direct device command.
 ## Drivers
 
 The public `srcfl/device-drivers` repo owns editable driver source, versions,
-package recipes, target adapters, contracts and tests. Private Device Support
-locks an exact public commit, builds it, signs immutable packages and publishes
-the indexes served by `drivers.sourceful.energy`. FTW never fetches executable
-code from GitHub. It selects only a signed `ftw-core` target.
+contracts, tests and FTW's signed release channel. FTW downloads only an
+explicitly selected, content-addressed Lua asset after it verifies the signed
+manifest. It never runs raw code from the repository branch. Device Support
+may later consume an exact public commit for other products or a higher support
+level.
 
 Each Lua artifact still contains its own `DRIVER` metadata and implements the
 FTW lifecycle. `go/internal/drivers/lua.go` is the source of truth for FTW's

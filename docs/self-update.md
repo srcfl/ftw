@@ -125,6 +125,7 @@ tested locally.
 - Optimizer uses its own `optimizer-vX.Y.Z[-beta.N]` GitHub tags and
   `ftw-optimizer:vX.Y.Z[-beta.N]` images. Stable promotion requires the exact
   beta commit.
-- Signed Lua drivers are versioned independently. Master publishes
-  `drivers-beta`; `drivers-stable` is an explicit promotion and retains signed
-  version history. See [device-repository.md](device-repository.md).
+- Signed Lua drivers are versioned independently in `srcfl/device-drivers`.
+  Main publishes `drivers-beta`; `drivers-stable` promotes the exact signed
+  beta commit and retains per-driver version history. See
+  [device-repository.md](device-repository.md).

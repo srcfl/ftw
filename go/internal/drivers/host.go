@@ -45,6 +45,12 @@ type ModbusCap interface {
 	Close() error
 }
 
+// SerialCap is read-only access to one serial device.
+type SerialCap interface {
+	Read(maxBytes int, timeout time.Duration) ([]byte, error)
+	Close() error
+}
+
 // WSCap is the host's WebSocket capability. One driver = one upstream
 // connection (matches MQTTCap's single-broker shape) — drivers that
 // need multiple streams can multiplex via GraphQL subscriptions or
@@ -69,6 +75,7 @@ type HostEnv struct {
 	Telemetry  *telemetry.Store
 	MQTT       MQTTCap   // nil → mqtt_* calls return ErrNoCapability
 	Modbus     ModbusCap // nil → modbus_* calls return ErrNoCapability
+	Serial     SerialCap // nil → serial_read returns ErrNoCapability
 	HTTP       bool      // false → http_* calls return ErrNoCapability
 	// HTTPAllowedHosts, when non-empty, restricts which hosts this
 	// driver can reach via host.http_get / host.http_post. Each entry
@@ -144,6 +151,24 @@ type HostEnv struct {
 	writeAttempts int
 	writeCount    int
 	writeEvidence map[string]bool
+
+	// Poll-scoped Modbus evidence prevents a Modbus driver from turning failed
+	// reads into fresh zero-valued telemetry. The Lua runtime holds emissions
+	// until driver_poll ends, then commits them only when every read succeeded.
+	requiresFreshModbusRead bool
+	pollActive              bool
+	pollModbusAttempts      int
+	pollModbusSuccesses     int
+	pollTelemetry           [][]byte
+	pollMetrics             []pollMetric
+}
+
+type pollMetric struct {
+	name     string
+	value    float64
+	unit     string
+	register string
+	title    string
 }
 
 // NewHostEnv creates a fresh host environment for a driver.
@@ -256,11 +281,87 @@ func (h *HostEnv) recordWriteEvidence(name string) {
 	h.mu.Unlock()
 }
 
+func (h *HostEnv) beginPollEvidence() {
+	h.mu.Lock()
+	h.pollActive = true
+	h.pollModbusAttempts = 0
+	h.pollModbusSuccesses = 0
+	h.pollTelemetry = nil
+	h.pollMetrics = nil
+	h.mu.Unlock()
+}
+
+func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err error) {
+	h.mu.Lock()
+	attempts = h.pollModbusAttempts
+	successes = h.pollModbusSuccesses
+	fresh := commit && attempts > 0 && attempts == successes
+	var pendingTelemetry [][]byte
+	var pendingMetrics []pollMetric
+	if h.requiresFreshModbusRead && fresh {
+		pendingTelemetry = h.pollTelemetry
+		pendingMetrics = h.pollMetrics
+	}
+	h.pollActive = false
+	h.pollModbusAttempts = 0
+	h.pollModbusSuccesses = 0
+	h.pollTelemetry = nil
+	h.pollMetrics = nil
+	h.mu.Unlock()
+
+	for _, rawJSON := range pendingTelemetry {
+		if emitErr := h.emitTelemetry(rawJSON); emitErr != nil {
+			return attempts, successes, emitErr
+		}
+	}
+	for _, metric := range pendingMetrics {
+		if emitErr := h.emitMetric(metric.name, metric.value, metric.unit, metric.register, metric.title); emitErr != nil {
+			return attempts, successes, emitErr
+		}
+	}
+	return attempts, successes, nil
+}
+
+func (h *HostEnv) recordPollModbusRead(success bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive {
+		return
+	}
+	h.pollModbusAttempts++
+	if success {
+		h.pollModbusSuccesses++
+	}
+}
+
+func (h *HostEnv) bufferPollTelemetry(rawJSON []byte) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive || !h.requiresFreshModbusRead {
+		return false
+	}
+	h.pollTelemetry = append(h.pollTelemetry, append([]byte(nil), rawJSON...))
+	return true
+}
+
+func (h *HostEnv) bufferPollMetric(metric pollMetric) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.pollActive || !h.requiresFreshModbusRead {
+		return false
+	}
+	h.pollMetrics = append(h.pollMetrics, metric)
+	return true
+}
+
 // WithMQTT binds an MQTT capability to this host.
 func (h *HostEnv) WithMQTT(m MQTTCap) *HostEnv { h.MQTT = m; return h }
 
 // WithModbus binds a Modbus capability.
 func (h *HostEnv) WithModbus(m ModbusCap) *HostEnv { h.Modbus = m; return h }
+
+// WithSerial binds a read-only serial capability.
+func (h *HostEnv) WithSerial(s SerialCap) *HostEnv { h.Serial = s; return h }
 
 // WithHTTP enables the HTTP capability.
 func (h *HostEnv) WithHTTP() *HostEnv { h.HTTP = true; return h }
@@ -378,6 +479,12 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 			soc = env.VehicleSoCFract
 		}
 	}
+	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
+		return fmt.Errorf("emit_telemetry: %w", err)
+	}
+	if h.bufferPollTelemetry(rawJSON) {
+		return nil
+	}
 	// Drop battery emits from drivers the operator declared as no-battery
 	// (battery_capacity_wh ≤ 0). Hybrid inverters used PV-only still expose
 	// battery registers in firmware, and the driver dutifully emits whatever
@@ -391,9 +498,6 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 			h.Telemetry.RecordDriverSuccess(h.DriverName)
 		}
 		return nil
-	}
-	if err := telemetry.ValidateReading(t, rawW, soc); err != nil {
-		return fmt.Errorf("emit_telemetry: %w", err)
 	}
 	if h.Telemetry != nil {
 		h.Telemetry.Update(h.DriverName, t, rawW, soc, rawJSON)
@@ -412,6 +516,9 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 func (h *HostEnv) emitMetric(name string, value float64, unit, register, title string) error {
 	if math.IsNaN(value) || math.IsInf(value, 0) {
 		return fmt.Errorf("emit_metric: %s is non-finite: %v", name, value)
+	}
+	if h.bufferPollMetric(pollMetric{name: name, value: value, unit: unit, register: register, title: title}) {
+		return nil
 	}
 	if h.Telemetry == nil {
 		return nil
@@ -508,9 +615,12 @@ func (h *HostEnv) mqttPollMessages() ([]MQTTMessage, error) {
 
 func (h *HostEnv) modbusRead(addr, count uint16, kind int32) ([]uint16, error) {
 	if h.Modbus == nil {
+		h.recordPollModbusRead(false)
 		return nil, ErrNoCapability
 	}
-	return h.Modbus.Read(addr, count, kind)
+	regs, err := h.Modbus.Read(addr, count, kind)
+	h.recordPollModbusRead(err == nil)
+	return regs, err
 }
 
 func (h *HostEnv) modbusWriteSingle(addr, value uint16) error {

@@ -24,6 +24,8 @@
 //	host.modbus_read(addr, count, kind)  -- kind: "coil"|"discrete"|"holding"|"input"
 //	host.modbus_write(addr, value)
 //	host.modbus_write_multi(addr, values)
+//	host.serial_read(max_bytes, timeout_ms) -- raw read-only serial bytes
+//	host.aes_gcm_decrypt(key, iv, ciphertext, aad, tag)
 //	host.json_decode(s)             -- convenience JSON → Lua table
 //	host.json_encode(t)             -- Lua table → JSON string
 //	host.http_get(url, headers)     -- HTTP GET, returns (body, nil) or (nil, err)
@@ -44,6 +46,8 @@ package drivers
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
@@ -114,6 +118,7 @@ func NewLuaDriverWithPolicy(path string, env *HostEnv, policy *RuntimePolicy) (*
 		L.Close()
 		return nil, fmt.Errorf("execute %s: %w", path, err)
 	}
+	env.requiresFreshModbusRead = driverRequiresFreshModbusRead(L, env.Modbus != nil)
 	// A read-only gateway can expose a real battery without being a battery
 	// controller. Honour the driver's own catalog declaration at runtime so
 	// existing configs gain telemetry after a driver upgrade even before the
@@ -201,16 +206,46 @@ func (d *LuaDriver) Poll(ctx context.Context) (time.Duration, error) {
 	}
 	cleanup := d.setLifecycleContext(ctx, 10*time.Second)
 	defer cleanup()
+	d.Env.beginPollEvidence()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
+		_, _, _ = d.Env.endPollEvidence(false)
 		return 0, err
 	}
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
+	attempts, successes, emitErr := d.Env.endPollEvidence(true)
+	if emitErr != nil {
+		return 0, emitErr
+	}
+	if d.Env.requiresFreshModbusRead && attempts > successes {
+		return 0, fmt.Errorf("driver_poll: %d of %d modbus reads failed", attempts-successes, attempts)
+	}
 	// Driver may return an int number of milliseconds.
 	if n, ok := ret.(lua.LNumber); ok && n > 0 {
 		return time.Duration(n) * time.Millisecond, nil
 	}
 	return 0, nil
+}
+
+func driverRequiresFreshModbusRead(L *lua.LState, hasModbusCapability bool) bool {
+	if protocol, ok := L.GetGlobal("PROTOCOL").(lua.LString); ok && strings.TrimSpace(string(protocol)) != "" {
+		return strings.EqualFold(string(protocol), "modbus")
+	}
+	meta, ok := L.GetGlobal("DRIVER").(*lua.LTable)
+	if !ok {
+		return hasModbusCapability
+	}
+	protocols, ok := meta.RawGetString("protocols").(*lua.LTable)
+	if !ok || protocols.Len() == 0 {
+		return hasModbusCapability
+	}
+	usesModbus := false
+	protocols.ForEach(func(_, value lua.LValue) {
+		if strings.EqualFold(value.String(), "modbus") {
+			usesModbus = true
+		}
+	})
+	return usesModbus
 }
 
 // Command sends a command to the driver. Matches the existing Lua
@@ -763,27 +798,92 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 1
 	}))
 
+	host.RawSetString("serial_read", L.NewFunction(func(L *lua.LState) int {
+		maxBytes := L.CheckInt(1)
+		timeoutMS := L.CheckInt(2)
+		if !env.permissionAllowed("serial.read") {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("serial.read: permission not granted by signed package"))
+			return 2
+		}
+		if env.Serial == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("no serial capability"))
+			return 2
+		}
+		data, err := env.Serial.Read(maxBytes, time.Duration(timeoutMS)*time.Millisecond)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		L.Push(lua.LString(string(data)))
+		return 1
+	}))
+
+	host.RawSetString("aes_gcm_decrypt", L.NewFunction(func(L *lua.LState) int {
+		key, err := aesKeyBytes(L.CheckString(1))
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		iv := []byte(L.CheckString(2))
+		ciphertext := []byte(L.CheckString(3))
+		aad := aesAADBytes(L.CheckString(4))
+		tag := []byte(L.CheckString(5))
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		var gcm cipher.AEAD
+		if len(tag) == 16 {
+			gcm, err = cipher.NewGCM(block)
+		} else {
+			gcm, err = cipher.NewGCMWithTagSize(block, len(tag))
+		}
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: %v", err)
+			return 0
+		}
+		if len(iv) != gcm.NonceSize() {
+			L.RaiseError("aes_gcm_decrypt: nonce is %d bytes, want %d", len(iv), gcm.NonceSize())
+			return 0
+		}
+		sealed := append(append([]byte(nil), ciphertext...), tag...)
+		plaintext, err := gcm.Open(nil, iv, sealed, aad)
+		if err != nil {
+			L.RaiseError("aes_gcm_decrypt: authentication failed")
+			return 0
+		}
+		L.Push(lua.LString(string(plaintext)))
+		return 1
+	}))
+
 	host.RawSetString("modbus_read", L.NewFunction(func(L *lua.LState) int {
 		addr := L.CheckInt(1)
 		count := L.CheckInt(2)
 		kindS := L.CheckString(3)
 		if !env.permissionAllowed("modbus.read") {
+			env.recordPollModbusRead(false)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("modbus.read: permission not granted by signed package"))
 			return 2
 		}
 		if env.Modbus == nil {
+			env.recordPollModbusRead(false)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("no modbus capability"))
 			return 2
 		}
 		kind, ok := modbusKindFromString(kindS)
 		if !ok {
+			env.recordPollModbusRead(false)
 			L.Push(lua.LNil)
 			L.Push(lua.LString("unknown modbus kind: " + kindS))
 			return 2
 		}
-		regs, err := env.Modbus.Read(uint16(addr), uint16(count), kind)
+		regs, err := env.modbusRead(uint16(addr), uint16(count), kind)
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
@@ -1284,6 +1384,28 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		}
 	}
 	L.SetGlobal("host", host)
+}
+
+func aesKeyBytes(value string) ([]byte, error) {
+	if len(value) == 32 || len(value) == 48 || len(value) == 64 {
+		if decoded, err := hex.DecodeString(value); err == nil {
+			return decoded, nil
+		}
+	}
+	key := []byte(value)
+	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+		return nil, errors.New("key must be 16, 24, or 32 raw bytes or their hex form")
+	}
+	return key, nil
+}
+
+func aesAADBytes(value string) []byte {
+	if len(value) == 33 {
+		if authKey, err := hex.DecodeString(value[1:]); err == nil {
+			return append([]byte{value[0]}, authKey...)
+		}
+	}
+	return []byte(value)
 }
 
 // splitHostPortLower parses an allowlist entry as "host" or "host:port".

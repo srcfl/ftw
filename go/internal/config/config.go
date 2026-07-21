@@ -66,10 +66,13 @@ const (
 	DriverRepositoryFormatSourcefulIndexV1 = "sourceful.driver-index/v1"
 
 	DefaultDriverRepositoryID           = "ftw-official"
-	DefaultDriverRepositoryName         = "FTW official drivers"
-	DefaultDriverRepositoryManifestURL  = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
+	DefaultDriverRepositoryName         = "FTW device drivers"
+	DefaultDriverRepositoryManifestURL  = "https://github.com/srcfl/device-drivers/releases/download/drivers-stable/manifest.json"
 	DefaultDriverRepositorySigningKeyID = "ftw-drivers-2026-01"
 	DefaultDriverRepositoryPublicKey    = "MX+j27UBkyM099hTyJlmMLK9qlTTDUJsaK/vH12fFKc="
+
+	legacyDriverRepositoryName        = "FTW official drivers"
+	legacyDriverRepositoryManifestURL = "https://github.com/srcfl/ftw/releases/download/drivers-stable/manifest.json"
 )
 
 // Notifications configures outbound push notifications. Exactly one
@@ -772,11 +775,13 @@ type DriverControlOptIn struct {
 
 // Capabilities explicitly scope what host resources a driver can access.
 type Capabilities struct {
-	MQTT      *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
-	Modbus    *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
-	HTTP      *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
-	WebSocket *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
-	TCP       *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	MQTT       *MQTTConfig     `yaml:"mqtt,omitempty" json:"mqtt,omitempty"`
+	Modbus     *ModbusConfig   `yaml:"modbus,omitempty" json:"modbus,omitempty"`
+	Serial     *SerialConfig   `yaml:"serial,omitempty" json:"serial,omitempty"`
+	HTTP       *HTTPCapability `yaml:"http,omitempty" json:"http,omitempty"`
+	WebSocket  *WSCapability   `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	TCP        *TCPCapability  `yaml:"tcp,omitempty" json:"tcp,omitempty"`
+	Standalone bool            `yaml:"standalone,omitempty" json:"standalone,omitempty"`
 }
 
 // MQTTConfig grants access to one MQTT broker.
@@ -792,6 +797,16 @@ type ModbusConfig struct {
 	Host   string `yaml:"host" json:"host"`
 	Port   int    `yaml:"port,omitempty" json:"port,omitempty"`       // default 502
 	UnitID int    `yaml:"unit_id,omitempty" json:"unit_id,omitempty"` // default 1
+}
+
+// SerialConfig grants read-only access to one local serial device.
+type SerialConfig struct {
+	Address       string `yaml:"address" json:"address"`
+	BaudRate      int    `yaml:"baud_rate,omitempty" json:"baud_rate,omitempty"`
+	DataBits      int    `yaml:"data_bits,omitempty" json:"data_bits,omitempty"`
+	StopBits      int    `yaml:"stop_bits,omitempty" json:"stop_bits,omitempty"`
+	Parity        string `yaml:"parity,omitempty" json:"parity,omitempty"`
+	ReadTimeoutMS int    `yaml:"read_timeout_ms,omitempty" json:"read_timeout_ms,omitempty"`
 }
 
 // HTTPCapability grants HTTP access to specific hostnames (future).
@@ -1255,6 +1270,12 @@ func applyDefaults(c *Config) {
 		c.DeviceRepository = &DeviceRepository{Enabled: true}
 	}
 	if c.DeviceRepository != nil {
+		// Move only the exact built-in FTW source. Sites that changed the URL,
+		// trust root, security flags, name, or source count keep their config.
+		if len(c.DeviceRepository.Repositories) == 1 && isLegacyDefaultDriverRepository(c.DeviceRepository.Repositories[0]) {
+			c.DeviceRepository.Repositories[0].Name = DefaultDriverRepositoryName
+			c.DeviceRepository.Repositories[0].ManifestURL = DefaultDriverRepositoryManifestURL
+		}
 		if c.DeviceRepository.RefreshIntervalH == 0 {
 			c.DeviceRepository.RefreshIntervalH = 24
 		}
@@ -1331,6 +1352,23 @@ func applyDefaults(c *Config) {
 			}
 			if cap.UnitID == 0 {
 				cap.UnitID = 1
+			}
+		}
+		if cap := d.Capabilities.Serial; cap != nil {
+			if cap.BaudRate == 0 {
+				cap.BaudRate = 115200
+			}
+			if cap.DataBits == 0 {
+				cap.DataBits = 8
+			}
+			if cap.StopBits == 0 {
+				cap.StopBits = 1
+			}
+			if cap.Parity == "" {
+				cap.Parity = "N"
+			}
+			if cap.ReadTimeoutMS == 0 {
+				cap.ReadTimeoutMS = 500
 			}
 		}
 		if cap := d.MQTT; cap != nil && cap.Port == 0 {
@@ -1423,6 +1461,16 @@ func applyDefaults(c *Config) {
 	}
 }
 
+func isLegacyDefaultDriverRepository(repo DriverRepositorySource) bool {
+	if repo.ID != DefaultDriverRepositoryID || repo.ManifestURL != legacyDriverRepositoryManifestURL ||
+		(repo.Name != "" && repo.Name != legacyDriverRepositoryName) ||
+		(repo.Format != "" && repo.Format != DriverRepositoryFormatFTWManifestV1) ||
+		repo.AllowUnsigned || repo.AllowInsecure || len(repo.TrustedKeys) != 1 {
+		return false
+	}
+	return repo.TrustedKeys[DefaultDriverRepositorySigningKeyID] == DefaultDriverRepositoryPublicKey
+}
+
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
 	if c.State != nil && c.State.ColdRetentionDays < 0 {
@@ -1471,9 +1519,26 @@ func (c *Config) Validate() error {
 			}
 		}
 		if d.EffectiveMQTT() == nil && d.EffectiveModbus() == nil &&
+			d.Capabilities.Serial == nil && !d.Capabilities.Standalone &&
 			d.Capabilities.HTTP == nil && d.Capabilities.WebSocket == nil &&
 			d.Capabilities.TCP == nil {
-			return fmt.Errorf("driver %q: must have mqtt, modbus, http, websocket, or tcp capability", d.Name)
+			return fmt.Errorf("driver %q: must have mqtt, modbus, serial, http, websocket, tcp, or standalone capability", d.Name)
+		}
+		if serial := d.Capabilities.Serial; serial != nil {
+			if strings.TrimSpace(serial.Address) == "" {
+				return fmt.Errorf("driver %q: serial address is required", d.Name)
+			}
+			if serial.BaudRate <= 0 || serial.ReadTimeoutMS <= 0 || serial.ReadTimeoutMS > 60_000 {
+				return fmt.Errorf("driver %q: serial baud_rate and read_timeout_ms must be valid", d.Name)
+			}
+			if serial.DataBits < 5 || serial.DataBits > 8 || (serial.StopBits != 1 && serial.StopBits != 2) {
+				return fmt.Errorf("driver %q: serial data_bits or stop_bits is invalid", d.Name)
+			}
+			switch strings.ToUpper(serial.Parity) {
+			case "N", "E", "O":
+			default:
+				return fmt.Errorf("driver %q: serial parity must be N, E, or O", d.Name)
+			}
 		}
 		if d.ObserveOnly && d.BatteryCapacityWh <= 0 {
 			return fmt.Errorf("driver %q: observe_only requires battery_capacity_wh > 0", d.Name)
