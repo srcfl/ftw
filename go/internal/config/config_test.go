@@ -844,6 +844,64 @@ func TestDeviceRepositoryOfficialTrustRootIsReadOnlyDiscoveryDefault(t *testing.
 	}
 }
 
+func TestDeviceRepositoryMigratesOnlyTheExactFormerFTWSource(t *testing.T) {
+	legacy := DriverRepositorySource{
+		ID: DefaultDriverRepositoryID, Name: legacyDriverRepositoryName,
+		ManifestURL: legacyDriverRepositoryManifestURL, Enabled: false,
+		TrustedKeys: map[string]string{
+			DefaultDriverRepositorySigningKeyID: DefaultDriverRepositoryPublicKey,
+		},
+	}
+	cfg := Config{DeviceRepository: &DeviceRepository{
+		Enabled: false, RootDir: "kept", RefreshIntervalH: 12,
+		Repositories: []DriverRepositorySource{legacy},
+	}}
+	applyDefaults(&cfg)
+	got := cfg.DeviceRepository.Repositories[0]
+	if got.ManifestURL != DefaultDriverRepositoryManifestURL || got.Name != DefaultDriverRepositoryName {
+		t.Fatalf("former FTW source was not migrated: %+v", got)
+	}
+	if got.Enabled || cfg.DeviceRepository.Enabled || cfg.DeviceRepository.RootDir != "kept" || cfg.DeviceRepository.RefreshIntervalH != 12 {
+		t.Fatalf("repository settings changed during migration: %+v", cfg.DeviceRepository)
+	}
+
+	custom := legacy
+	custom.Name = "My pinned mirror"
+	cfg.DeviceRepository.Repositories[0] = custom
+	applyDefaults(&cfg)
+	if cfg.DeviceRepository.Repositories[0].ManifestURL != legacyDriverRepositoryManifestURL {
+		t.Fatalf("custom source was migrated: %+v", cfg.DeviceRepository.Repositories[0])
+	}
+}
+
+func TestSerialAndStandaloneDriverCapabilities(t *testing.T) {
+	serialCfg := Config{
+		Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16},
+		Drivers: []Driver{{
+			Name: "p1", Lua: "p1.lua", IsSiteMeter: true,
+			Capabilities: Capabilities{Serial: &SerialConfig{Address: "/dev/ttyUSB0"}},
+		}},
+	}
+	applyDefaults(&serialCfg)
+	serial := serialCfg.Drivers[0].Capabilities.Serial
+	if serial.BaudRate != 115200 || serial.DataBits != 8 || serial.StopBits != 1 ||
+		serial.Parity != "N" || serial.ReadTimeoutMS != 500 {
+		t.Fatalf("serial defaults = %+v", serial)
+	}
+	if err := serialCfg.Validate(); err != nil {
+		t.Fatalf("serial driver rejected: %v", err)
+	}
+
+	standalone := serialCfg
+	standalone.Drivers = []Driver{{
+		Name: "local", Lua: "local.lua", IsSiteMeter: true,
+		Capabilities: Capabilities{Standalone: true},
+	}}
+	if err := standalone.Validate(); err != nil {
+		t.Fatalf("standalone driver rejected: %v", err)
+	}
+}
+
 func TestDeviceRepositorySourcefulFormatMustBeSignedAndKnown(t *testing.T) {
 	base := Config{Site: Site{SmoothingAlpha: 0.3}, Fuse: Fuse{MaxAmps: 16}}
 	base.DeviceRepository = &DeviceRepository{Enabled: true, Repositories: []DriverRepositorySource{{

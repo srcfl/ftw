@@ -29,6 +29,8 @@ type Registry struct {
 	MQTTFactory func(name string, c *config.MQTTConfig) (MQTTCap, error)
 	// ModbusFactory creates a Modbus capability.
 	ModbusFactory func(name string, c *config.ModbusConfig) (ModbusCap, error)
+	// SerialFactory opens one read-only local serial device.
+	SerialFactory func(name string, c *config.SerialConfig) (SerialCap, error)
 	// ARPLookup resolves a hostname/IP to a MAC for L2-stable identity.
 	// Optional — when nil, devices fall back to endpoint-hash IDs.
 	ARPLookup func(host string) (mac string, ok bool)
@@ -212,6 +214,14 @@ func (r *Registry) Add(ctx context.Context, cfg config.Driver) error {
 			}
 		}
 	}
+	if serialCfg := cfg.Capabilities.Serial; serialCfg != nil && r.SerialFactory != nil {
+		cap, err := r.SerialFactory(cfg.Name, serialCfg)
+		if err != nil {
+			return fmt.Errorf("serial capability: %w", err)
+		}
+		env.WithSerial(cap)
+		env.SetEndpoint("serial://" + serialCfg.Address)
+	}
 	if cfg.Capabilities.HTTP != nil {
 		env.WithHTTP()
 		hosts := mergeAllowedHosts(cfg.Capabilities.HTTP.AllowedHosts, cfg.Config)
@@ -369,6 +379,9 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 			if rd.env.Modbus != nil {
 				_ = rd.env.Modbus.Close()
+			}
+			if rd.env.Serial != nil {
+				_ = rd.env.Serial.Close()
 			}
 			if rd.env.WS != nil {
 				_ = rd.env.WS.Close()
@@ -881,6 +894,10 @@ func sameDriverConfig(a, b config.Driver) bool {
 		return false
 	}
 	if aMb != nil && (aMb.Host != bMb.Host || aMb.Port != bMb.Port || aMb.UnitID != bMb.UnitID) {
+		return false
+	}
+	if !reflect.DeepEqual(a.Capabilities.Serial, b.Capabilities.Serial) ||
+		a.Capabilities.Standalone != b.Capabilities.Standalone {
 		return false
 	}
 	aTCP, bTCP := a.Capabilities.TCP, b.Capabilities.TCP

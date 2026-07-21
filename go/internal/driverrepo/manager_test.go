@@ -171,6 +171,74 @@ func TestSignedInstallUpdateAndRollback(t *testing.T) {
 	}
 }
 
+func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &signedFixture{private: private}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(fixture.envelope(t))
+		case "/demo.lua":
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			_, _ = w.Write(fixture.driver)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	fixture.setVersion(server.URL, "1.0.0")
+	fixture.mu.Lock()
+	fixture.manifest.Repository = "https://github.com/srcfl/device-drivers"
+	fixture.manifest.Drivers[0].ReadOnly = true
+	fixture.manifest.Drivers[0].Permissions = []string{"http.get"}
+	fixture.manifest.Drivers[0].Metadata.ReadOnly = true
+	fixture.mu.Unlock()
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.DeviceRepository{Enabled: true, Repositories: []config.DriverRepositorySource{{
+		ID: "ftw-official", ManifestURL: server.URL + "/manifest.json", Enabled: true,
+		AllowInsecure: true, TrustedKeys: map[string]string{"test": base64.StdEncoding.EncodeToString(public)},
+	}}}
+	manager := New(cfg, dir, store)
+	if err := manager.Refresh(context.Background(), "ftw-official"); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := manager.Install(context.Background(), "ftw-official", "demo", "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := manager.RuntimePolicy(config.Driver{
+		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
+	})
+	if err != nil || policy == nil || !policy.IsReadOnly() || !policy.Permissions["http.get"] {
+		t.Fatalf("direct runtime policy = %+v, %v", policy, err)
+	}
+	if policy.ArtifactSHA256 != installed.SHA256 || policy.Version != installed.Version ||
+		policy.PackageID != "com.sourceful.driver.demo" {
+		t.Fatalf("direct runtime identity = %+v", policy)
+	}
+
+	manager.mu.Lock()
+	manifest := manager.manifests["ftw-official"]
+	manifest.Drivers[0].ReadOnly = false
+	manager.manifests["ftw-official"] = manifest
+	manager.mu.Unlock()
+	if _, err := manager.RuntimePolicy(config.Driver{
+		Name: "demo", Lua: filepath.Join(manager.ActiveDir(), "demo.lua"),
+	}); err == nil || !strings.Contains(err.Error(), "lacks signed read-only policy") {
+		t.Fatalf("unsigned write policy error = %v", err)
+	}
+}
+
 func TestManifestRejectsTamperTraversalAndHashMismatch(t *testing.T) {
 	public, private, _ := ed25519.GenerateKey(rand.Reader)
 	repo := config.DriverRepositorySource{TrustedKeys: map[string]string{"test": base64.StdEncoding.EncodeToString(public)}}

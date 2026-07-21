@@ -91,6 +91,36 @@ func TestSignedMonorepoPublicationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPublicDeviceDriversPythonContract(t *testing.T) {
+	manifestPath := os.Getenv("FTW_DEVICE_DRIVERS_MANIFEST")
+	artifactsDir := os.Getenv("FTW_DEVICE_DRIVERS_ARTIFACT_DIR")
+	publicKey := os.Getenv("FTW_DEVICE_DRIVERS_PUBLIC_KEY")
+	keyID := os.Getenv("FTW_DEVICE_DRIVERS_KEY_ID")
+	if manifestPath == "" || artifactsDir == "" || publicKey == "" || keyID == "" {
+		t.Skip("public device-driver cross-language fixture not configured")
+	}
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := VerifyPublication(raw, keyID, publicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Drivers) != 61 {
+		t.Fatalf("public driver count = %d, want 61", len(manifest.Drivers))
+	}
+	for _, driver := range manifest.Drivers {
+		if !driver.ReadOnly || !driver.Metadata.ReadOnly || driver.ControlEnabled ||
+			driver.SourceCommit != manifest.Commit {
+			t.Fatalf("unsafe public driver entry = %+v", driver)
+		}
+	}
+	if err := VerifyPublicationArtifacts(manifest, artifactsDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPublicationRejectsWrongExpectedPublicKey(t *testing.T) {
 	dir := t.TempDir()
 	driversDir := filepath.Join(dir, "drivers")

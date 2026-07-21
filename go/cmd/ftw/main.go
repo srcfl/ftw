@@ -356,6 +356,9 @@ func main() {
 	reg.ModbusFactory = func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
 		return modbuscli.Dial(c.Host, c.Port, c.UnitID)
 	}
+	reg.SerialFactory = func(name string, c *config.SerialConfig) (drivers.SerialCap, error) {
+		return drivers.OpenSerial(c)
+	}
 	reg.ARPLookup = arp.Lookup
 	// Spawn initial drivers. config.Load has already joined relative Lua
 	// paths with the config directory — nothing to resolve here.

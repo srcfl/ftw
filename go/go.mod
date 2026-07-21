@@ -7,6 +7,7 @@ require (
 	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
 	github.com/emersion/go-webdav v0.7.0
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/goburrow/serial v0.1.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/mochi-mqtt/server/v2 v2.7.9
@@ -24,7 +25,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/goburrow/serial v0.1.0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
