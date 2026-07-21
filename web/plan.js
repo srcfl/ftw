@@ -257,6 +257,28 @@
     setText('plan-solver-detail', solver.fallback
       ? readableReason(solver.fallback_reason || 'Primary solver unavailable')
       : (solver.status ? `Plan result: ${readableReason(solver.status)}` : 'Plan passed FTW validation'));
+
+  }
+
+  function renderOptimizerFallbackAlert(plan) {
+    const section = document.getElementById('plan-section');
+    if (!section) return;
+    let alert = document.getElementById('plan-optimizer-fallback');
+    const solver = plan && plan.solver;
+    if (!solver || !solver.fallback) {
+      if (alert) alert.remove();
+      return;
+    }
+    if (!alert) {
+      alert = document.createElement('div');
+      alert.id = 'plan-optimizer-fallback';
+      alert.setAttribute('role', 'alert');
+      alert.style.cssText = 'margin:8px 0;padding:9px 11px;border:1px solid #f59e0b;border-radius:6px;background:rgba(245,158,11,.12);font-size:12px;line-height:1.45;overflow-wrap:anywhere';
+      const help = section.querySelector('.plan-help');
+      section.insertBefore(alert, help || section.firstChild);
+    }
+    const reason = solver.fallback_reason ? ' ' + solver.fallback_reason : '';
+    alert.textContent = 'Mathematical optimizer unavailable. This plan uses the built-in Go fallback.' + reason;
   }
 
   function render() {
@@ -309,6 +331,7 @@
     // the whole render throws, wiping the chart.
     const plan = state.plan;
     renderPlanBrief(plan);
+    renderOptimizerFallbackAlert(plan);
     const powerY0 = modeBandY0 + modeBandH + 4;
     const powerH = plotH * 0.42;
     // Scale off the fuse (what the site can *physically* deliver) plus a

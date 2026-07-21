@@ -41,3 +41,10 @@ test("Update Center wires independent Optimizer and Driver history actions", () 
   assert.match(badge, /\/versions/);
   assert.match(badge, /\/activate/);
 });
+
+test("optimizer fallback is visible in the global header and Update Center", () => {
+  assert.match(badge, /Planner fallback active/);
+  assert.match(badge, /aria-label="\$\{showOptimizerWarning \? "Planner fallback active"/);
+  assert.match(badge, /class="component-warning" role="alert"/);
+  assert.match(badge, /optimizer\.fallback_reason \|\| optimizer\.health_error/);
+});

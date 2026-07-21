@@ -4936,8 +4936,8 @@ func TestPVSurplusAbsorberAbsorbsExtraExportWhenEnabled(t *testing.T) {
 
 // The MPC can enable the same live absorber without an operator-wide override
 // when it has a later, more expensive grid-funded charge to displace. The
-// directive's SoC cap is the future planned SoC, so this remains bounded by
-// energy the plan already intended to store.
+// directive's SoC cap is derived from replaceable future grid-charge energy,
+// so this remains bounded by energy the plan already intended to store.
 func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 	now := time.Now()
 	dir := SlotDirective{
@@ -4945,7 +4945,9 @@ func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 		SlotEnd:                now.Add(15 * time.Minute),
 		BatteryEnergyWh:        200, // plan only asked for ~800 W now
 		Strategy:               "arbitrage",
-		LivePVSurplusSoCCapPct: 80, // later expensive grid charge ends here
+		PlannedGridW:           -1000, // preserve 1 kW of planned PV export
+		HasPlannedGridW:        true,
+		LivePVSurplusSoCCapPct: 80, // energy-derived replacement ceiling
 	}
 	store := seedStore(-4000, []struct {
 		name          string
@@ -4963,8 +4965,8 @@ func TestPVSurplusAbsorberDisplacesLaterGridCharge(t *testing.T) {
 	if len(targets) != 1 {
 		t.Fatalf("want 1 target, got %d", len(targets))
 	}
-	if got := targets[0].TargetW; got < 3600 || got > 4400 {
-		t.Errorf("TargetW = %.0f W, want about 4000 W to absorb live PV and displace later grid charge", got)
+	if got := targets[0].TargetW; got < 2600 || got > 3400 {
+		t.Errorf("TargetW = %.0f W, want about 3000 W so the planned 1 kW export remains", got)
 	}
 }
 
@@ -5753,6 +5755,46 @@ func TestPlannerArbitrageIdleSlotDoesNotAbsorbLiveSurplus(t *testing.T) {
 	}
 	if math.Abs(targets[0].TargetW) > 1 {
 		t.Errorf("TargetW = %f W — planner_arbitrage idle slot with live PV surplus must NOT absorb (DP picked idle)", targets[0].TargetW)
+	}
+}
+
+// A planner-derived absorber cap must not erase export the passive-arbitrage
+// plan explicitly kept. This mirrors the .40 regression: the battery was
+// already charging, the meter was near zero, and removing battery power showed
+// exactly the export planned for the idle slot. Runtime must unwind charge to
+// zero rather than chase grid zero and hide the planned export.
+func TestPlannerPassiveArbitrageIdleSlotPreservesPlannedExportWithAbsorber(t *testing.T) {
+	now := time.Now()
+	dir := SlotDirective{
+		SlotStart:              now,
+		SlotEnd:                now.Add(15 * time.Minute),
+		BatteryEnergyWh:        0,
+		Strategy:               "passive_arbitrage",
+		PlannedGridW:           -2000,
+		HasPlannedGridW:        true,
+		LivePVSurplusSoCCapPct: 80,
+	}
+	// Meter exports only 100 W because the battery is already absorbing
+	// 1900 W. Without battery charge the site would export the planned 2 kW.
+	store := seedStore(-100, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"sungrow", 1900, 0.5},
+	})
+	st := NewState(0, 0, "ferroamp")
+	st.Mode = ModePlannerPassiveArbitrage
+	st.UseEnergyDispatch = true
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"sungrow": 10000}), 11040)
+	if len(targets) != 1 {
+		t.Fatalf("want 1 target, got %d", len(targets))
+	}
+	if got := targets[0].TargetW; math.Abs(got) > 1 {
+		t.Errorf("TargetW = %.0f W, want 0 so the planned 2 kW export remains", got)
 	}
 }
 

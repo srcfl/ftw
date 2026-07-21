@@ -366,11 +366,12 @@ type SlotDirective struct {
 	GridW float64
 
 	// LivePVSurplusSoCCapPct enables economically justified live surplus
-	// capture for this slot. It is the highest SoC reached by a later
-	// grid-funded battery-charge action whose import price exceeds this
-	// slot's effective export revenue. Runtime may opportunistically move
-	// that future charge into live PV now, but only up to this SoC and only
-	// while the meter is exporting. Zero means preserve the slot exactly.
+	// capture for this slot. It is the current planned SoC plus the stored
+	// energy from later grid-funded charge actions whose import price clears
+	// this slot's effective export revenue and minimum spread. Runtime may
+	// opportunistically move that future charge into live PV now, but only up
+	// to this SoC and only while the meter exports beyond plan. Zero means
+	// preserve the slot exactly.
 	LivePVSurplusSoCCapPct float64
 
 	// LoadpointEnergyWh carries per-loadpoint EV energy budgets for
@@ -394,13 +395,17 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 	if s == nil {
 		return SlotDirective{}, false
 	}
-	// Snapshot plan + loadpoint ID together under the same RLock so
-	// a concurrent replan() can't swap one without the other — a
-	// classic read-race that Codex flagged.
+	// Snapshot the plan, loadpoint ID and the exact params that produced the
+	// plan under one lock so a concurrent replan cannot mix generations.
 	s.mu.RLock()
 	p := s.last
 	lpID := s.lastLoadpointID
-	defaults := s.Defaults
+	params := s.lastParams
+	if params.Mode == "" {
+		// Tests and the short startup window before the first replan have no
+		// effective-params snapshot yet. Keep the historical fallback there.
+		params = s.Defaults
+	}
 	s.mu.RUnlock()
 	if p == nil {
 		return SlotDirective{}, false
@@ -422,10 +427,10 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 			SlotEnd:                time.UnixMilli(endMs),
 			BatteryEnergyWh:        energyWh,
 			SoCTargetPct:           a.SoCPct,
-			Strategy:               defaults.Mode,
+			Strategy:               params.Mode,
 			PVLimitW:               a.PVLimitW,
 			GridW:                  a.GridW,
-			LivePVSurplusSoCCapPct: livePVSurplusSoCCapPct(p.Actions, i, defaults),
+			LivePVSurplusSoCCapPct: livePVSurplusSoCCapPct(p.Actions, i, params),
 		}
 		if len(a.LoadpointPowerW) > 0 {
 			d.LoadpointEnergyWh = make(map[string]float64, len(a.LoadpointPowerW))
@@ -456,24 +461,35 @@ func (s *Service) SlotDirectiveAt(now time.Time) (SlotDirective, bool) {
 //   - a current discharge slot is never reversed;
 //   - a future action must charge the battery while the site imports, so the
 //     charge is actually replaceable grid energy rather than forecast PV;
-//   - that future import must cost more than exporting one kWh now earns,
-//     using the same fee/bonus/floor model as the optimizer;
-//   - the future action's planned SoC is the hard ceiling, so opportunistic
-//     capture cannot create more stored energy than the plan intended to buy.
+//   - that future import must beat current export by the configured minimum
+//     arbitrage spread, using the same fee/bonus/floor model as the optimizer;
+//   - only the grid-funded part of later charge actions contributes headroom,
+//     so opportunistic capture cannot store more energy than the plan intended
+//     to buy from the grid.
 func livePVSurplusSoCCapPct(actions []Action, current int, p Params) float64 {
 	if current < 0 || current >= len(actions) {
 		return 0
 	}
 	cur := actions[current]
-	if cur.BatteryW < -IdleGateThresholdW || !finite(cur.SpotOre) {
+	if cur.BatteryW < -IdleGateThresholdW || !finite(cur.SpotOre) ||
+		!finite(cur.SoCPct) || cur.SoCPct <= 0 ||
+		!finite(p.CapacityWh) || p.CapacityWh <= 0 {
 		return 0
 	}
 	exportOre := SlotExportPriceOre(Slot{SpotOre: cur.SpotOre}, p)
 	if !finite(exportOre) {
 		return 0
 	}
+	minSpread := p.MinArbitrageSpreadOreKwh
+	if !finite(minSpread) || minSpread < 0 {
+		minSpread = 0
+	}
+	chargeEfficiency := p.ChargeEfficiency
+	if !finite(chargeEfficiency) || chargeEfficiency <= 0 || chargeEfficiency > 1 {
+		chargeEfficiency = 0.95
+	}
 
-	var capPct float64
+	var replaceableStoredWh float64
 	for i := current + 1; i < len(actions); i++ {
 		a := actions[i]
 		// Both terms must be positive. min(BatteryW, GridW) is the portion
@@ -481,13 +497,18 @@ func livePVSurplusSoCCapPct(actions []Action, current int, p Params) float64 {
 		// import; the threshold filters solver/rounding noise.
 		gridFundedChargeW := math.Min(a.BatteryW, a.GridW)
 		if gridFundedChargeW <= IdleGateThresholdW ||
-			!finite(a.PriceOre) || a.PriceOre <= exportOre ||
-			!finite(a.SoCPct) || a.SoCPct <= 0 {
+			!finite(a.PriceOre) || a.PriceOre <= exportOre+minSpread ||
+			a.SlotLenMin <= 0 {
 			continue
 		}
-		if a.SoCPct > capPct {
-			capPct = a.SoCPct
-		}
+		replaceableStoredWh += gridFundedChargeW * float64(a.SlotLenMin) / 60.0 * chargeEfficiency
+	}
+	if replaceableStoredWh <= 0 {
+		return 0
+	}
+	capPct := cur.SoCPct + replaceableStoredWh/p.CapacityWh*100
+	if p.SoCMaxPct > 0 && capPct > p.SoCMaxPct {
+		capPct = p.SoCMaxPct
 	}
 	if capPct > 100 {
 		return 100

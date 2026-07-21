@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.1
+
+### Patch Changes
+
+- 3352ab0: Block in-app Core updates until the Compose optimizer sidecar is present and healthy. Legacy operator override files remain unchanged and the update error points to the migration guide.
+- 3352ab0: Report the mathematical optimizer as degraded when its worker cannot answer a compatible handshake or the active plan uses the Go fallback, and show the fallback reason in the dashboard and system status.
+- 3352ab0: Preserve planned PV export when live surplus replaces a later grid charge, honor the configured arbitrage spread, and limit early charging to the later grid-funded energy it can replace.
+
 ## 1.9.0
 
 ### Minor Changes

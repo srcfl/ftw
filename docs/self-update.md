@@ -60,6 +60,12 @@ These bounded points remain on the same disk and are deliberately labelled
 **Local rollback points**, not full backups. Older incomplete snapshots are
 visible but cannot be restored.
 
+The updater also requires a running, healthy `ftw-optimizer` service before it
+updates Core. If the merged Compose files lack that service, or its health
+check fails, the update stops before pulling or replacing Core. The updater
+does not edit operator override files; use the
+[legacy upgrade guide](upgrade-from-legacy.md) to add the sidecar safely.
+
 Portable `.ftwbak` archives include the complete persistent directory, cold
 history, custom/managed drivers and component inventory. They are independently
 verified before publication and can be downloaded off-device. Safe restore
