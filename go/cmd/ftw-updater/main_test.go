@@ -93,6 +93,8 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
     image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	return s, runner
 }
@@ -212,6 +214,82 @@ func TestHandleUpdate_HappyPath(t *testing.T) {
 	up := strings.Join(calls[1], " ")
 	if !strings.Contains(up, "up -d") || strings.Contains(up, "--force-recreate") {
 		t.Errorf("update path should NOT force-recreate: %v", calls[1])
+	}
+}
+
+func TestHandleUpdate_BlocksCoreUpdateWithoutOptimizer(t *testing.T) {
+	s, runner := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
+`)
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	state := waitForState(t, s, "failed")
+	if !strings.Contains(state.Message, "core update blocked") ||
+		!strings.Contains(state.Message, optimizerServiceName) ||
+		!strings.Contains(state.Message, "migrate-legacy-compose.sh") {
+		t.Fatalf("missing migration guidance: %+v", state)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("blocked update must not call Docker: %v", calls)
+	}
+}
+
+func TestHandleUpdate_BlocksCoreUpdateWhenOptimizerIsUnhealthy(t *testing.T) {
+	s, runner := newTestServer(t)
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == optimizerServiceName {
+			return errors.New("container status is unhealthy")
+		}
+		return nil
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	state := waitForState(t, s, "failed")
+	if !strings.Contains(state.Message, "must be running and healthy") ||
+		!strings.Contains(state.Message, "container status is unhealthy") {
+		t.Fatalf("optimizer health failure is unclear: %+v", state)
+	}
+	if calls := runner.snapshot(); len(calls) != 0 {
+		t.Fatalf("blocked update must not call Docker: %v", calls)
+	}
+}
+
+func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) {
+	s, _ := newTestServer(t)
+	writeCompose(t, s.composeFile, `services:
+  ftw:
+    image: ghcr.io/srcfl/ftw:${FTW_IMAGE_TAG:-latest}
+    volumes:
+      - ./data:/app/data
+`)
+	override := filepath.Join(filepath.Dir(s.composeFile), "docker-compose.override.yml")
+	original := []byte("services:\n  ftw:\n    environment:\n      OPERATOR_SETTING: preserved\n")
+	if err := os.WriteFile(override, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.overrideFiles = []string{override}
+
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	rr := httptest.NewRecorder()
+	s.handleUpdate(rr, req)
+	waitForState(t, s, "failed")
+	got, err := os.ReadFile(override)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("operator override changed:\n%s", got)
 	}
 }
 
@@ -342,6 +420,8 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -374,6 +454,8 @@ func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *test
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -756,11 +838,16 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
     image: forty-two-watts:optimizer-champion-recourse-b10acacd
     volumes:
       - ./data:/app/data
+  ftw-optimizer:
+    image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
 	checks := 0
-	s.healthCheck = func(context.Context, string) error {
+	s.healthCheck = func(_ context.Context, service string) error {
+		if service == optimizerServiceName {
+			return nil
+		}
 		checks++
 		if checks == 1 {
 			return errors.New("unhealthy")

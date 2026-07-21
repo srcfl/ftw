@@ -555,9 +555,18 @@
     // ---- render ----
     _render() {
       const info = this._info || {};
-      const optimizerUpdates = this._components && this._components.optimizer && this._components.optimizer.updates;
+      const optimizer = this._components && this._components.optimizer;
+      const optimizerUpdates = optimizer && optimizer.updates;
       const driverUpdate = this._driverCatalog && Array.isArray(this._driverCatalog.entries) && this._driverCatalog.entries.some((entry) => entry.update_available);
       const showDot = ((info.update_available && !info.skipped) || (optimizerUpdates && optimizerUpdates.update_available) || driverUpdate) && this._phase !== "updating";
+      const showOptimizerWarning = !!(optimizer && optimizer.configured && (optimizer.degraded === true || optimizer.healthy === false)) && this._phase !== "updating";
+      const showBadge = showDot || showOptimizerWarning;
+      const activeSolver = optimizer && optimizer.active_solver;
+      const optimizerFallbackActive = !!(activeSolver && (activeSolver.fallback || activeSolver.engine === "go-dp"));
+      const optimizerReason = optimizer && (optimizer.fallback_reason || optimizer.health_error || optimizer.error);
+      const badgeTitle = showOptimizerWarning
+        ? (optimizerFallbackActive ? "Planner fallback active" : "Optimizer unavailable") + (optimizerReason ? ": " + optimizerReason : "")
+        : (info.latest ? `Core update available: ${info.latest}` : "Component update available");
 
       // Surface to the rest of the page via body class: the header's
       // green #conn-status dot sits right next to this badge, and
@@ -565,12 +574,12 @@
       // app.css hides #conn-status when .has-update is on, so the
       // two dots swap instead of stacking.
       if (typeof document !== "undefined" && document.body) {
-        document.body.classList.toggle("has-update", !!showDot);
+        document.body.classList.toggle("has-update", !!showBadge);
       }
 
       this._shadow.innerHTML = `
         <style>${this._styles()}</style>
-        <button part="badge" class="badge${showDot ? "" : " hidden"}" title="${info.latest ? `Core update available: ${escapeHTML(info.latest)}` : "Component update available"}" aria-label="Update available">●</button>
+        <button part="badge" class="badge${showOptimizerWarning ? " warning" : ""}${showBadge ? "" : " hidden"}" title="${escapeHTML(badgeTitle)}" aria-label="${showOptimizerWarning ? "Planner fallback active" : "Update available"}">${showOptimizerWarning ? "!" : "●"}</button>
         ${this._phase !== "idle" ? this._modalHTML() : ""}
       `;
 
@@ -790,6 +799,12 @@
       const optimizerRollback = previousImages.optimizer
         ? `<button class="btn btn-ghost btn-small" data-action="optimizer-rollback">Roll back</button>`
         : "";
+      const activeSolver = optimizer.active_solver || {};
+      const optimizerFallbackActive = activeSolver.fallback || activeSolver.engine === "go-dp";
+      const optimizerReason = optimizer.fallback_reason || optimizer.health_error || optimizer.error || "";
+      const optimizerWarning = optimizer.degraded === true || optimizer.healthy === false
+        ? `<p class="component-warning" role="alert"><strong>${optimizerFallbackActive ? "Planner fallback active." : "Optimizer unavailable."}</strong>${optimizerFallbackActive ? " Core is using the built-in Go planner." : " The current plan stays active until the next replan."}${optimizerReason ? " " + escapeHTML(optimizerReason) : ""}</p>`
+        : "";
 
       const entries = this._driverCatalog && Array.isArray(this._driverCatalog.entries)
         ? this._driverCatalog.entries : [];
@@ -818,6 +833,7 @@
 
       return `<details class="snapshots components" open>
         <summary>Components</summary>
+        ${optimizerWarning}
         <div class="component-card">
           <div class="component-row"><span><strong>Core</strong><span class="dim mono">${escapeHTML(payload.core && payload.core.version || "?")}</span></span><span class="dim">safety authority · updated with updater</span></div>
           <div class="component-row optimizer-row">
@@ -1249,6 +1265,7 @@
           overflow: hidden;
         }
         .component-card > p { margin: 0.6rem 0.75rem; }
+        .component-warning { margin: 0 0.75rem 0.65rem; padding: 0.55rem 0.65rem; border: 1px solid var(--accent-e, #f59e0b); border-radius: var(--radius-xs, 4px); background: rgba(245,158,11,0.12); color: var(--fg, #e2e8f0); font-size: 0.78rem; line-height: 1.4; overflow-wrap: anywhere; }
         .component-row {
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,68 @@ func TestUnixTransportHandshakeAndRoundTrip(t *testing.T) {
 	response, err := transport.RoundTrip(ctx, []byte(`{"schema_version":1}`))
 	if err != nil || string(response) != `{"ok":true}` {
 		t.Fatalf("round trip = %s, %v", response, err)
+	}
+}
+
+func TestProcessTransportHealthPerformsCompatibleHandshake(t *testing.T) {
+	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "process-health-helper" {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			_, _ = os.Stdout.WriteString(`{"name":"ftw-optimizer","version":"test","protocol_version":1,"features":["champion"]}` + "\n")
+		}
+		return
+	}
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{os.Args[0], "-test.run=TestProcessTransportHealthPerformsCompatibleHandshake", "--", "process-health-helper"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	info, err := transport.Health(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Name != "ftw-optimizer" || info.Version != "test" || info.Transport != "process" {
+		t.Fatalf("unexpected process handshake: %+v", info)
+	}
+}
+
+func TestProcessTransportHealthReportsMissingWorker(t *testing.T) {
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{"/definitely/missing/ftw-optimizer-python"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := transport.Health(ctx); err == nil || !strings.Contains(err.Error(), "start optimizer") {
+		t.Fatalf("Health error = %v, want worker start failure", err)
+	}
+}
+
+func TestProcessTransportHealthRejectsIncompatibleHandshake(t *testing.T) {
+	if len(os.Args) > 0 && os.Args[len(os.Args)-1] == "process-incompatible-helper" {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			_, _ = os.Stdout.WriteString(`{"name":"ftw-optimizer","version":"test","protocol_version":2,"features":["champion"]}` + "\n")
+		}
+		return
+	}
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{os.Args[0], "-test.run=TestProcessTransportHealthRejectsIncompatibleHandshake", "--", "process-incompatible-helper"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := transport.Health(ctx); err == nil || !strings.Contains(err.Error(), "protocol version 2") {
+		t.Fatalf("Health error = %v, want protocol mismatch", err)
 	}
 }
 

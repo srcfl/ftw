@@ -85,13 +85,36 @@ func (t *ProcessTransport) RoundTrip(ctx context.Context, payload []byte) ([]byt
 	return line, nil
 }
 
-func (t *ProcessTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
-	return OptimizerRuntimeInfo{
-		Name: "ftw-optimizer", Version: "bundled",
-		ProtocolVersion: OptimizerProtocolVersion,
-		Features:        []string{"champion", "recourse", "multistage"},
-		Transport:       "process",
-	}, nil
+func (t *ProcessTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cancelIdleStopLocked()
+	if err := ctx.Err(); err != nil {
+		return OptimizerRuntimeInfo{}, err
+	}
+	if err := t.ensureStartedLocked(); err != nil {
+		return OptimizerRuntimeInfo{}, err
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"type":             "handshake",
+		"protocol_version": OptimizerProtocolVersion,
+	})
+	if _, err := t.stdin.Write(append(payload, '\n')); err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, fmt.Errorf("write optimizer handshake: %w", err)
+	}
+	line, err := scanLine(ctx, t.scanner)
+	if err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, fmt.Errorf("read optimizer handshake: %w", err)
+	}
+	info, err := decodeOptimizerHandshake(line, "process")
+	if err != nil {
+		t.stopLocked()
+		return OptimizerRuntimeInfo{}, err
+	}
+	t.scheduleIdleStopLocked()
+	return info, nil
 }
 
 func (t *ProcessTransport) ensureStartedLocked() error {
@@ -110,9 +133,12 @@ func (t *ProcessTransport) ensureStartedLocked() error {
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		_ = stdin.Close()
 		return fmt.Errorf("optimizer stdout: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return fmt.Errorf("start optimizer %q: %w", t.cfg.Command[0], err)
 	}
 	waitCh := make(chan error, 1)
@@ -210,14 +236,24 @@ func (t *UnixTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error
 	if err != nil {
 		return OptimizerRuntimeInfo{}, err
 	}
+	return decodeOptimizerHandshake(line, "unix")
+}
+
+func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeInfo, error) {
 	var info OptimizerRuntimeInfo
 	if err := json.Unmarshal(line, &info); err != nil {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("decode optimizer handshake: %w", err)
 	}
+	if info.Name != "ftw-optimizer" {
+		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer handshake name %q, want %q", info.Name, "ftw-optimizer")
+	}
 	if info.ProtocolVersion != OptimizerProtocolVersion {
 		return OptimizerRuntimeInfo{}, fmt.Errorf("optimizer protocol version %d, want %d", info.ProtocolVersion, OptimizerProtocolVersion)
 	}
-	info.Transport = "unix"
+	if !optimizerHasFeature(info, "champion") {
+		return OptimizerRuntimeInfo{}, errors.New("optimizer handshake is missing required champion feature")
+	}
+	info.Transport = transport
 	return info, nil
 }
 
