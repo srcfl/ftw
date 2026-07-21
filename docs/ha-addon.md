@@ -79,9 +79,11 @@ Design choices:
 
 - **Target the canonical `ghcr.io/srcfl/ftw`** (pinned `v1.4.0`), not the
   legacy mirror.
-- **Rebase wrapper, not a plain `image:`.** HA add-ons cannot override CMD on
-  a prebuilt `image:`; the wrapper repoints WORKDIR/USER/CMD at `/data` in one
-  place. Supervisor builds it locally on install; no add-on-side CI.
+- **All-in-one image (core + optimizer).** Rather than a thin single-image
+  wrapper that ships without the CVXPY optimizer, the add-on bundles core and
+  the optimizer into one container — see the next section. HA add-ons also
+  cannot override CMD on a prebuilt `image:`, so a local build is required
+  anyway; Supervisor builds it on install, no add-on-side CI.
 - **Restore `-user-drivers /data/drivers`** so hot-reload drivers persist
   across add-on updates.
 - **Host networking, no Ingress** (Modbus TCP / LAN MQTT / mDNS; app isn't
@@ -91,8 +93,9 @@ Design choices:
 ### Verification performed
 
 - Confirmed the mirror identity (`srcfl/ftw:latest` == mirror `latest`, same
-  manifest digest) and that `ghcr.io/srcfl/ftw:v1.4.0` exists for the pinned
-  arches, directly against the GHCR registry.
+  manifest digest) and that `ghcr.io/srcfl/ftw:v1.4.0` and
+  `ghcr.io/srcfl/ftw-optimizer:v1.3.1` both exist as multi-arch
+  (amd64 + aarch64) manifests, directly against the GHCR registry.
 - Confirmed the current ENTRYPOINT / CMD / USER / WORKDIR / HEALTHCHECK from
   `master`'s `Dockerfile`, and that the flag interface the wrapper depends on
   is unchanged.
@@ -100,6 +103,48 @@ Design choices:
   available in the authoring environment, and the image blob CDN
   (`pkg-containers.githubusercontent.com`) is blocked by the outbound proxy,
   so a container smoke-test is a remaining manual step (below).
+
+## Multiple containers → one image (all-in-one)
+
+Upstream now ships FTW as several containers (`docker-compose.yml`):
+
+| Service | Image | Role | In the add-on? |
+|---|---|---|---|
+| `ftw` | `ghcr.io/srcfl/ftw` | Go core: state, safety, dispatch, API, UI | **yes** |
+| `ftw-optimizer` | `ghcr.io/srcfl/ftw-optimizer` | Python/CVXPY long-horizon optimizer | **yes — bundled** |
+| `ftw-updater` | `ghcr.io/srcfl/ftw-updater` | Docker-socket self-update sidecar | no — Supervisor owns updates |
+| `mosquitto` | `eclipse-mosquitto:2` | optional embedded MQTT broker | no — use the HA Mosquitto add-on |
+
+A Home Assistant add-on is **single-container**, so the two that matter for the
+app — core and optimizer — are combined into one image. The key enabler is
+that **core ↔ optimizer already talk over a Unix socket**
+(`/run/ftw-optimizer/optimizer.sock`, `FTW_OPTIMIZER_TRANSPORT=auto`,
+`ftw-optimizer` runs `network_mode: none`). Inside one container the two
+processes simply share that socket path — no networking, no orchestration.
+
+Build (`deploy/homeassistant/ftw/Dockerfile`):
+
+- **Base = the optimizer image** (Debian `python:3.12-slim` + the CVXPY venv at
+  `/opt/venv`). The core binary is a **fully static, CGO-free** Go build, so it
+  is `COPY --from`'d onto the Debian base and runs unchanged.
+- **`run.sh` supervises both** under `tini` (PID 1): it starts the optimizer
+  daemon, then core (`transport=auto` → the socket); if either exits it tears
+  the other down and exits non-zero so Supervisor restarts the add-on as a
+  whole. (`s6-overlay` would be the heavier, more granular alternative — a
+  simple two-process supervisor is enough here.)
+- **Version pairing.** Core and the optimizer **version independently** (core
+  `v1.4.0`; the optimizer's own latest stable is `v1.3.1`). `build.yaml` pins
+  both — the tags the compose `latest` stack resolves to — and they move
+  together each release. Because `transport=auto` falls back to the in-Go DP
+  planner, a mismatched pair degrades safely rather than breaking.
+- **Trade-off: size.** Bundling numpy/scipy/CVXPY makes the image a few hundred
+  MB (vs tens of MB for core alone) — a one-time pull. On very small SD-card
+  hosts a slim, optimizer-less build (drop the `core` copy target and base on
+  `srcfl/ftw` instead) is a trivial derivative; core then falls back to the Go
+  DP planner.
+
+This is what makes it a genuine "install one add-on and it all works" trial —
+the point of packaging it for Home Assistant.
 
 ## Storage & sizing
 
@@ -133,11 +178,10 @@ Refs: [HA — free up storage](https://www.home-assistant.io/more-info/free-spac
 
 ## Packaging limitations to resolve before release
 
-- [ ] **Optimizer sidecar.** Upstream runs the MPC optimizer as a separate
-      `ftw-optimizer` container. A HA add-on is single-container. Decide:
-      (a) confirm the app degrades gracefully with no sidecar (built-in / Go
-      fallback), or (b) bundle the optimizer process in the same image via an
-      s6 / supervisor init. Biggest open item.
+- [x] **Optimizer sidecar** → resolved by the all-in-one image (core +
+      optimizer bundled, supervised by `tini`). Remaining sub-decisions: pin a
+      CI-validated core/optimizer tag pair, and decide whether to also offer a
+      slim optimizer-less variant for tiny hosts.
 - [ ] **Storage defaults.** Point `state.cold_dir` off the OS partition (e.g.
       `/share`), expose retention, and document a min-storage recommendation —
       see Storage & sizing above.
@@ -152,9 +196,13 @@ Refs: [HA — free up storage](https://www.home-assistant.io/more-info/free-spac
       common knobs (site name, currency, MQTT) so basic setup doesn't require
       the web wizard.
 - [ ] **Icon/logo** (`icon.png`, `logo.png`).
-- [ ] **Smoke test.** `docker build --build-arg
-      BUILD_FROM=ghcr.io/srcfl/ftw:v1.4.0 deploy/homeassistant/ftw`, install
-      via Supervisor, run the setup wizard, confirm `/data` persistence and the
-      `/data/drivers` overlay.
+- [ ] **Smoke test** (needs Docker; not run in the authoring env). Build the
+      all-in-one:
+      `docker build --build-arg BUILD_FROM=ghcr.io/srcfl/ftw-optimizer:v1.3.1
+      --build-arg FTW_CORE_FROM=ghcr.io/srcfl/ftw:v1.4.0
+      deploy/homeassistant/ftw`. Then install via Supervisor, run the setup
+      wizard, confirm the optimizer socket comes up (core logs
+      `transport=auto` connected, not the DP fallback), `/data` persistence,
+      and the `/data/drivers` overlay.
 - [ ] Decide whether to archive/redirect the community
       `erikarenhill/ha-addon-forty-two-watts` repo.

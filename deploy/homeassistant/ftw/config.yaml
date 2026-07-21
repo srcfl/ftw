@@ -49,10 +49,11 @@ map:
 # No options schema yet — wiring HA options.json through to the app's YAML
 # config is tracked as follow-up in docs/ha-addon.md.
 #
-# KNOWN LIMITATION (see docs/ha-addon.md): upstream runs the MPC optimizer as
-# a separate `ftw-optimizer` sidecar container. A HA add-on is single-
-# container, so that sidecar is not present here; the app runs with its
-# in-process / auto optimizer transport. Full optimizer parity needs either
-# graceful degradation in the app or bundling the optimizer via s6.
+# This is an ALL-IN-ONE image: upstream runs FTW as several containers (core,
+# Python/CVXPY optimizer, updater, Mosquitto), but a HA add-on is single-
+# container, so the Dockerfile bundles core + optimizer into one and supervises
+# both. The optimizer is included — no separate sidecar needed. See
+# docs/ha-addon.md. (Trade-off: the CVXPY stack makes the image a few hundred
+# MB; on very small SD-card hosts a slim optimizer-less build is possible.)
 options: {}
 schema: {}

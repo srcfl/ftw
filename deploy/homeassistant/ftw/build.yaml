@@ -1,19 +1,21 @@
-# Per-arch base image for the local Supervisor build.
+# Base images for the all-in-one add-on build (see Dockerfile).
 #
-# Pin the canonical Sourceful image `ghcr.io/srcfl/ftw`. It is a single
-# multi-arch manifest (linux/amd64 + linux/arm64), so the SAME tag serves
-# both HA architectures — Docker selects the layer matching the build
-# platform.
+# build_from = the OPTIMIZER image (Debian python:3.12-slim + the CVXPY venv);
+# the static Go core is copied in from FTW_CORE_FROM. Both are multi-arch
+# manifests, so the same tags serve amd64 + aarch64.
 #
-# Pin a concrete release tag (never :latest) so the build is reproducible and
-# Supervisor's `version:` maps to exactly one image. Bump this together with
-# config.yaml `version:` on every release. GHCR also carries unrelated
-# edge/beta and legacy-mirror tags — ignore those; track the release line
-# (package.json), currently v1.4.0.
+# The two images VERSION INDEPENDENTLY — core follows the app release line
+# (v1.4.0) while the optimizer has its own (v1.3.1 stable). Pin both to a
+# validated pair (the tags the docker-compose `latest` stack resolves to) and
+# bump them together with config.yaml `version:` each release. Never :latest —
+# the build must be reproducible.
 build_from:
-  amd64: ghcr.io/srcfl/ftw:v1.4.0
-  aarch64: ghcr.io/srcfl/ftw:v1.4.0
+  amd64: ghcr.io/srcfl/ftw-optimizer:v1.3.1
+  aarch64: ghcr.io/srcfl/ftw-optimizer:v1.3.1
+
+args:
+  FTW_CORE_FROM: ghcr.io/srcfl/ftw:v1.4.0
 
 labels:
-  org.opencontainers.image.title: "FTW (Home Assistant add-on)"
+  org.opencontainers.image.title: "FTW (Home Assistant add-on, all-in-one)"
   org.opencontainers.image.source: "https://github.com/srcfl/ftw"

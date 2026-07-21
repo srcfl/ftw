@@ -34,13 +34,17 @@ Because of host networking, the UI is served directly on **port 8080** of the
 Home Assistant host (not via Ingress). If something else already uses port
 8080 on that host, the add-on will fail to bind.
 
-### Optimizer
+### Optimizer (included)
 
-Upstream runs the long-horizon (CVXPY) optimizer as a **separate
-`ftw-optimizer` container**. A Home Assistant add-on is single-container, so
-that sidecar is not bundled here and the app runs with its built-in / Go
-fallback planning. Core safety and dispatch are unaffected; advanced
-long-horizon optimization may be reduced.
+Upstream runs FTW as several containers — the Go core, the Python/CVXPY
+optimizer, an updater sidecar and (optionally) Mosquitto. A Home Assistant
+add-on is single-container, so this is an **all-in-one image**: it bundles the
+**core and the optimizer together** and supervises both, so you get the full
+CVXPY optimizer with no extra setup. (The updater is dropped — Supervisor
+handles updates — and Mosquitto is left to the HA Mosquitto add-on.)
+
+Because the CVXPY stack (numpy/scipy) is bundled, the image is a few hundred MB
+— a one-time download. If either process stops the add-on restarts as a whole.
 
 ### Adding your own Lua drivers
 

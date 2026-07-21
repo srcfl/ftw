@@ -10,11 +10,16 @@ deploy/homeassistant/
 ├── repository.yaml          # add-on repository descriptor
 └── ftw/
     ├── config.yaml          # add-on manifest (arch, ports, host_network, map)
-    ├── build.yaml           # per-arch base image (pinned upstream tag)
-    ├── Dockerfile           # rebases upstream image onto Supervisor's /data
+    ├── build.yaml           # pinned base images (optimizer + core), per arch
+    ├── Dockerfile           # all-in-one: core + optimizer in one container
+    ├── run.sh               # tini-supervised two-process entrypoint
     ├── DOCS.md              # user-facing docs shown in the HA UI
     └── README.md            # this add-on's short description
 ```
+
+This is an **all-in-one** image: HA add-ons are single-container, so the Go
+core and the Python/CVXPY optimizer (normally separate containers) are bundled
+and supervised together. See [`docs/ha-addon.md`](../../docs/ha-addon.md).
 
 ## Why it lives here
 
