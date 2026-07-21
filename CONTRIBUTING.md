@@ -4,6 +4,13 @@ Thanks for helping build the local energy coordination layer. This document
 covers the legal bits — for how the code is organized and how to add a driver,
 start with `AGENTS.md` and `docs/writing-a-driver.md`.
 
+## Website
+
+The public website (<https://ftw.sourceful.energy>) lives in its own
+repository, [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web). Landing-page
+copy, install instructions and other site content are edited there, not in this
+repo — open a pull request against `srcfl/ftw-web` for website changes.
+
 ## License of contributions
 
 This project is licensed under the **Apache License, Version 2.0** (see
