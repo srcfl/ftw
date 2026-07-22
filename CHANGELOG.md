@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.10.0
+
+### Minor Changes
+
+- 3985c82: Use `srcfl/device-drivers` as FTW's default signed driver source, bind its
+  read-only manifest policy at runtime, and add serial and AES-GCM host support
+  for public P1 drivers.
+- 29731f1: Add a read-only Core storage check for SQLite page use and data-volume headroom.
+
+### Patch Changes
+
+- 7e85444: Start the independent Optimizer release line at 1.3.2 so existing 1.3.1 installations see component releases as upgrades.
+- 9f98463: Sync the bundled ESPHome DSMR recovery driver with the signed 1.0.2 community asset so name-derived and delivered/returned object IDs keep per-phase meter data available offline.
+- 3985c82: Keep Modbus drivers offline when a poll has a failed register read instead of accepting zero-filled telemetry as fresh data, and recover mute TCP sessions with a non-blocking reconnect cooldown.
+
 ## 1.9.1
 
 ### Patch Changes
