@@ -166,7 +166,7 @@ func TestFreshDetachedHelperLeaseIsNotRecovered(t *testing.T) {
 		StartedAt: now.Add(-time.Minute), UpdatedAt: now,
 		PreviousImages:  map[string]string{"core": "sha256:core-old", "updater": "sha256:updater-old"},
 		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-		TransactionID: testControlPlaneTransactionID,
+		TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
 	})
 	launches := 0
 	s.launchRecovery = func(State) error { launches++; return nil }
@@ -188,7 +188,7 @@ func TestStoppedHelperHeartbeatRestoresUpdaterThenCore(t *testing.T) {
 		State: "transacting", Action: "update", Component: "core", Target: release.Target,
 		StartedAt: now.Add(-time.Minute), UpdatedAt: now, PreviousImages: previous,
 		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-		TransactionID: testControlPlaneTransactionID,
+		TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
 	})
 	s.launchRecovery = func(st State) error {
 		s.runControlPlaneRecovery(st)
@@ -229,7 +229,7 @@ func TestHostRestartAfterUpdaterReplacementLaunchesRecoveryHelper(t *testing.T) 
 		Message: "matching updater ready; replacing Core", StartedAt: now.Add(-10 * time.Minute),
 		UpdatedAt: now.Add(-controlPlaneStaleAfter - time.Second), PreviousImages: previous,
 		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-		TransactionID: testControlPlaneTransactionID,
+		TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
 	})
 	var recovered State
 	s.launchRecovery = func(st State) error { recovered = st; return nil }
@@ -244,7 +244,7 @@ func TestHostRestartAfterUpdaterReplacementLaunchesRecoveryHelper(t *testing.T) 
 	}
 }
 
-func TestStoppedRecoveryHelperIsFencedBeforeRelaunch(t *testing.T) {
+func TestStaleRestoringNormalHelperIsFencedBeforeRecovery(t *testing.T) {
 	s, runner := newTestServer(t)
 	now := time.Date(2026, 7, 22, 8, 20, 0, 0, time.UTC)
 	s.now = func() time.Time { return now }
@@ -254,7 +254,30 @@ func TestStoppedRecoveryHelperIsFencedBeforeRelaunch(t *testing.T) {
 		StartedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-controlPlaneStaleAfter - time.Second),
 		PreviousImages:  map[string]string{"core": "sha256:core-old", "updater": "sha256:updater-old"},
 		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-		TransactionID: testControlPlaneTransactionID,
+		TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
+	})
+	launches := 0
+	s.launchRecovery = func(State) error { launches++; return nil }
+	if recovered := s.recoverStaleControlPlaneTransaction(); !recovered {
+		t.Fatal("stale normal rollback helper was not reclaimed")
+	}
+	calls := runner.snapshot()
+	if launches != 1 || len(calls) != 1 || strings.Join(calls[0], " ") != "rm -f "+controlPlaneHelperName(false, testControlPlaneTransactionID) {
+		t.Fatalf("normal rollback helper fence: launches=%d calls=%v", launches, calls)
+	}
+}
+
+func TestStaleRestoringRecoveryHelperIsFencedBeforeRelaunch(t *testing.T) {
+	s, runner := newTestServer(t)
+	now := time.Date(2026, 7, 22, 8, 30, 0, 0, time.UTC)
+	s.now = func() time.Time { return now }
+	release := testControlPlaneRelease("v1.2.3")
+	s.writeState(State{
+		State: "restoring", Action: "update", Component: "core", Target: release.Target,
+		StartedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-controlPlaneStaleAfter - time.Second),
+		PreviousImages:  map[string]string{"core": "sha256:core-old", "updater": "sha256:updater-old"},
+		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
+		TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperRecovery,
 	})
 	launches := 0
 	s.launchRecovery = func(State) error { launches++; return nil }
@@ -264,5 +287,53 @@ func TestStoppedRecoveryHelperIsFencedBeforeRelaunch(t *testing.T) {
 	calls := runner.snapshot()
 	if launches != 1 || len(calls) != 1 || strings.Join(calls[0], " ") != "rm -f "+controlPlaneHelperName(true, testControlPlaneTransactionID) {
 		t.Fatalf("recovery helper fence: launches=%d calls=%v", launches, calls)
+	}
+}
+
+func TestHeartbeatCannotOverwriteTerminalState(t *testing.T) {
+	for _, terminalState := range []string{"done", "failed"} {
+		t.Run(terminalState, func(t *testing.T) {
+			s, _ := newTestServer(t)
+			target := "v1.2.3"
+			s.writeState(State{
+				State: "transacting", Action: "update", Component: "core", Target: target,
+				UpdatedAt: time.Now(), TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
+			})
+			afterRead := make(chan struct{})
+			allowHeartbeatWrite := make(chan struct{})
+			s.heartbeatAfterRead = func() {
+				close(afterRead)
+				<-allowHeartbeatWrite
+			}
+			heartbeatDone := make(chan struct{})
+			go func() {
+				s.refreshControlPlaneHeartbeat(target, testControlPlaneTransactionID, controlPlaneHelperNormal, map[string]bool{"transacting": true})
+				close(heartbeatDone)
+			}()
+			<-afterRead
+
+			terminalStarted := make(chan struct{})
+			terminalDone := make(chan struct{})
+			go func() {
+				close(terminalStarted)
+				s.writeState(State{
+					State: terminalState, Action: "update", Component: "core", Target: target,
+					UpdatedAt: time.Now(), TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
+				})
+				close(terminalDone)
+			}()
+			<-terminalStarted
+			select {
+			case <-terminalDone:
+				t.Fatal("terminal write passed heartbeat while its read-modify-write lock was held")
+			default:
+			}
+			close(allowHeartbeatWrite)
+			<-heartbeatDone
+			<-terminalDone
+			if state := s.readState(); state.State != terminalState {
+				t.Fatalf("heartbeat restored stale in-flight state: %+v", state)
+			}
+		})
 	}
 }

@@ -10,9 +10,16 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	controlPlaneHelperUpdater  = "updater"
+	controlPlaneHelperNormal   = "normal"
+	controlPlaneHelperRecovery = "recovery"
 )
 
 type controlPlaneRelease struct {
@@ -59,30 +66,45 @@ func controlPlaneEnv(target string) []string {
 	return []string{"FTW_IMAGE_TAG=" + target, "FTW_UPDATER_IMAGE_TAG=" + target}
 }
 
-func (s *server) startControlPlaneHeartbeat(target, transactionID string, states ...string) func() {
+func (s *server) startControlPlaneHeartbeat(target, transactionID, helperKind string, states ...string) func() {
 	allowed := make(map[string]bool, len(states))
 	for _, state := range states {
 		allowed[state] = true
 	}
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				st := s.readState()
-				if st.Action == "update" && st.Component == "core" && st.Target == target &&
-					st.TransactionID == transactionID && allowed[st.State] {
-					st.UpdatedAt = s.nowTime()
-					s.writeState(st)
-				}
+				s.refreshControlPlaneHeartbeat(target, transactionID, helperKind, allowed)
 			case <-stop:
 				return
 			}
 		}
 	}()
-	return func() { close(stop) }
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(stop) })
+		<-done
+	}
+}
+
+func (s *server) refreshControlPlaneHeartbeat(target, transactionID, helperKind string, allowed map[string]bool) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	st := s.readStateLocked()
+	if s.heartbeatAfterRead != nil {
+		s.heartbeatAfterRead()
+	}
+	if st.Action == "update" && st.Component == "core" && st.Target == target &&
+		st.TransactionID == transactionID && st.HelperKind == helperKind && allowed[st.State] {
+		st.UpdatedAt = s.nowTime()
+		s.writeStateLocked(st)
+	}
 }
 
 // runControlPlaneUpdate captures both rollback images and pulls the matched
@@ -91,12 +113,13 @@ func (s *server) startControlPlaneHeartbeat(target, transactionID string, states
 func (s *server) runControlPlaneUpdate(release controlPlaneRelease, startedAt time.Time) {
 	target := release.Target
 	transactionID := newControlPlaneTransactionID(startedAt)
-	stopHeartbeat := s.startControlPlaneHeartbeat(target, transactionID, "pulling", "transacting")
+	stopHeartbeat := s.startControlPlaneHeartbeat(target, transactionID, controlPlaneHelperUpdater, "pulling")
 	defer stopHeartbeat()
 	base := State{
 		State: "pulling", Action: "update", Component: "core", Target: target,
 		StartedAt: startedAt, UpdatedAt: s.nowTime(), ReleaseRevision: release.Revision,
 		CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest, TransactionID: transactionID,
+		HelperKind: controlPlaneHelperUpdater,
 	}
 	s.writeState(base)
 	if err := release.validate(); err != nil {
@@ -181,7 +204,11 @@ func (s *server) runControlPlaneUpdate(release controlPlaneRelease, startedAt ti
 	// detached helper creates its own digest-pinned override.
 	cleanup()
 	cleanupActive = false
+	// The detached helper becomes the sole state writer at handoff. Wait for
+	// this updater's heartbeat before publishing helper ownership.
+	stopHeartbeat()
 	base.State = "transacting"
+	base.HelperKind = controlPlaneHelperNormal
 	base.Message = "paired images pulled; detached helper owns the transaction"
 	base.UpdatedAt = s.nowTime()
 	s.writeState(base)
@@ -339,7 +366,19 @@ func (s *server) recoverStaleControlPlaneTransaction() bool {
 		return true
 	}
 
-	recoveryHelper := st.State == "restoring"
+	var recoveryHelper bool
+	switch st.HelperKind {
+	case controlPlaneHelperNormal:
+		recoveryHelper = false
+	case controlPlaneHelperRecovery:
+		recoveryHelper = true
+	default:
+		st.State = "failed"
+		st.Message = "stale control-plane transaction has no valid helper owner; manual recovery required"
+		st.UpdatedAt = s.nowTime()
+		s.writeState(st)
+		return true
+	}
 	st.State = "restoring"
 	st.Message = "detached helper heartbeat expired; stopping it before updater-first pair recovery"
 	st.UpdatedAt = s.nowTime()
@@ -366,6 +405,7 @@ func (s *server) recoverStaleControlPlaneTransaction() bool {
 		return true
 	}
 	st.State = "restoring"
+	st.HelperKind = controlPlaneHelperRecovery
 	st.Message = "detached helper stopped; launching updater-first pair recovery"
 	st.UpdatedAt = s.nowTime()
 	s.writeState(st)
@@ -399,9 +439,10 @@ func (s *server) launchControlPlaneRecoveryHelper(st State) error {
 }
 
 func (s *server) runControlPlaneRecovery(st State) {
-	stopHeartbeat := s.startControlPlaneHeartbeat(st.Target, st.TransactionID, "restoring")
+	st.HelperKind = controlPlaneHelperRecovery
+	stopHeartbeat := s.startControlPlaneHeartbeat(st.Target, st.TransactionID, controlPlaneHelperRecovery, "restoring")
 	defer stopHeartbeat()
-	s.rollbackControlPlane(st, errors.New("detached transaction helper stopped heartbeating"))
+	s.rollbackControlPlane(st, errors.New("detached transaction helper stopped heartbeating"), stopHeartbeat)
 }
 
 func controlPlaneRecoveryInFlight(st State) bool {
@@ -417,13 +458,13 @@ func (s *server) failControlPlanePreflight(base State, err error) {
 }
 
 func (s *server) runControlPlaneTransaction(release controlPlaneRelease, previous map[string]string, startedAt time.Time, transactionID string) {
-	stopHeartbeat := s.startControlPlaneHeartbeat(release.Target, transactionID, "transacting", "restoring")
+	stopHeartbeat := s.startControlPlaneHeartbeat(release.Target, transactionID, controlPlaneHelperNormal, "transacting", "restoring")
 	defer stopHeartbeat()
 	base := State{
 		State: "transacting", Action: "update", Component: "core", Target: release.Target,
 		StartedAt: startedAt, UpdatedAt: s.nowTime(), PreviousImageID: previous["core"], PreviousImages: previous,
 		ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-		TransactionID: transactionID,
+		TransactionID: transactionID, HelperKind: controlPlaneHelperNormal,
 	}
 	cleanup := func() {}
 	cleanupActive := false
@@ -432,7 +473,7 @@ func (s *server) runControlPlaneTransaction(release controlPlaneRelease, previou
 			cleanup()
 			cleanupActive = false
 		}
-		s.rollbackControlPlane(base, err)
+		s.rollbackControlPlane(base, err, stopHeartbeat)
 	}
 	if err := release.validate(); err != nil || previous["core"] == "" || previous["updater"] == "" || !validControlPlaneTransactionID(transactionID) {
 		if err == nil {
@@ -520,6 +561,7 @@ func (s *server) runControlPlaneTransaction(release controlPlaneRelease, previou
 	base.State = "done"
 	base.Message = "Core and updater committed as one digest-locked release pair"
 	base.UpdatedAt = s.nowTime()
+	stopHeartbeat()
 	s.writeState(base)
 }
 
@@ -575,7 +617,7 @@ func (s *server) requireServiceImageRef(service, want string) error {
 	return nil
 }
 
-func (s *server) rollbackControlPlane(base State, cause error) {
+func (s *server) rollbackControlPlane(base State, cause error, stopHeartbeat func()) {
 	base.State = "restoring"
 	base.Message = "paired update failed; restoring previous updater and Core: " + cause.Error()
 	base.UpdatedAt = s.nowTime()
@@ -604,6 +646,7 @@ func (s *server) rollbackControlPlane(base State, cause error) {
 	} else {
 		base.Message = "paired update failed and pair rollback was incomplete: " + cause.Error() + "; " + strings.Join(failures, "; ")
 	}
+	stopHeartbeat()
 	s.writeState(base)
 }
 

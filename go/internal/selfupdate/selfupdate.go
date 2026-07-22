@@ -193,6 +193,7 @@ type UpdateStatus struct {
 	CoreDigest      string            `json:"core_digest,omitempty"`
 	UpdaterDigest   string            `json:"updater_digest,omitempty"`
 	TransactionID   string            `json:"transaction_id,omitempty"`
+	HelperKind      string            `json:"helper_kind,omitempty"`
 }
 
 // Checker is the background version-check service.

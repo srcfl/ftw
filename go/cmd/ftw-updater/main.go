@@ -72,6 +72,7 @@ type State struct {
 	CoreDigest      string            `json:"core_digest,omitempty"`
 	UpdaterDigest   string            `json:"updater_digest,omitempty"`
 	TransactionID   string            `json:"transaction_id,omitempty"`
+	HelperKind      string            `json:"helper_kind,omitempty"`
 }
 
 type server struct {
@@ -128,6 +129,7 @@ type server struct {
 	launchTransaction     func(release controlPlaneRelease, previous map[string]string, startedAt time.Time, transactionID string) error
 	launchRecovery        func(State) error
 	stopTransactionHelper func(string, bool) error
+	heartbeatAfterRead    func()
 	chownFile             func(string, int, int) error
 	checkSnapshotFile     func(context.Context, string, string, string) error
 	stageSnapshotFile     func(context.Context, string, string, string, string) error
@@ -324,7 +326,7 @@ func main() {
 				State: "restoring", Action: "update", Component: "core", Target: release.Target,
 				StartedAt: startedAt, UpdatedAt: srv.nowTime(), PreviousImageID: previous["core"], PreviousImages: previous,
 				ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
-				TransactionID: *transactionID,
+				TransactionID: *transactionID, HelperKind: controlPlaneHelperRecovery,
 			})
 		} else {
 			srv.runControlPlaneTransaction(release, previous, startedAt, *transactionID)
@@ -1166,6 +1168,11 @@ func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySn
 func (s *server) writeState(st State) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	s.writeStateLocked(st)
+}
+
+// writeStateLocked writes state while the caller holds stateMu.
+func (s *server) writeStateLocked(st State) {
 	if st.UpdatedAt.IsZero() {
 		st.UpdatedAt = time.Now()
 	}
@@ -1237,6 +1244,11 @@ func (s *server) writeState(st State) {
 func (s *server) readState() State {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	return s.readStateLocked()
+}
+
+// readStateLocked reads state while the caller holds stateMu.
+func (s *server) readStateLocked() State {
 	data, err := os.ReadFile(s.statusPath)
 	if err != nil {
 		return State{State: "idle"}
