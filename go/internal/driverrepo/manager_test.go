@@ -235,6 +235,18 @@ func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
 	}
 }
 
+func TestOfficialBetaChannelDoesNotShareConfiguredRepositoryState(t *testing.T) {
+	manager := New(&config.DeviceRepository{Repositories: []config.DriverRepositorySource{{
+		ID: config.DefaultDriverRepositoryBetaID,
+	}}}, t.TempDir(), nil)
+	if manager.betaRepo.ID == config.DefaultDriverRepositoryBetaID {
+		t.Fatalf("beta repository reused configured id %q", manager.betaRepo.ID)
+	}
+	if manager.betaRepo.ManifestURL != config.DefaultDriverRepositoryBetaManifestURL {
+		t.Fatalf("beta manifest URL = %q", manager.betaRepo.ManifestURL)
+	}
+}
+
 func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

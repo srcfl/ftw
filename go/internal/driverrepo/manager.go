@@ -151,18 +151,36 @@ func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, stor
 	}
 	manager := &Manager{
 		cfg: effective, root: root, store: store, hostVersion: strings.TrimPrefix(hostVersion, "v"),
-		client: &http.Client{Timeout: 15 * time.Second},
-		betaRepo: config.DriverRepositorySource{
-			ID: config.DefaultDriverRepositoryBetaID, Name: config.DefaultDriverRepositoryBetaName,
-			ManifestURL: config.DefaultDriverRepositoryBetaManifestURL, Enabled: true,
-			TrustedKeys: map[string]string{
-				config.DefaultDriverRepositorySigningKeyID: config.DefaultDriverRepositoryPublicKey,
-			},
-		},
+		client:    &http.Client{Timeout: 15 * time.Second},
+		betaRepo:  officialBetaRepository(effective.Repositories),
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
 	manager.reconcileActive()
 	return manager
+}
+
+func officialBetaRepository(configured []config.DriverRepositorySource) config.DriverRepositorySource {
+	id := config.DefaultDriverRepositoryBetaID
+	for {
+		available := true
+		for _, repo := range configured {
+			if repo.ID == id {
+				available = false
+				id += "-channel"
+				break
+			}
+		}
+		if available {
+			break
+		}
+	}
+	return config.DriverRepositorySource{
+		ID: id, Name: config.DefaultDriverRepositoryBetaName,
+		ManifestURL: config.DefaultDriverRepositoryBetaManifestURL, Enabled: true,
+		TrustedKeys: map[string]string{
+			config.DefaultDriverRepositorySigningKeyID: config.DefaultDriverRepositoryPublicKey,
+		},
+	}
 }
 
 func (m *Manager) ActiveDir() string { return filepath.Join(m.root, "active") }
