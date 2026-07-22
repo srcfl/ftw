@@ -171,6 +171,70 @@ func TestSignedInstallUpdateAndRollback(t *testing.T) {
 	}
 }
 
+func TestOfficialBetaChannelInstallsOneSignedDriver(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &signedFixture{private: private}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(fixture.envelope(t))
+		case "/demo.lua":
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			_, _ = w.Write(fixture.driver)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	fixture.setVersion(server.URL, "1.1.0-beta.1")
+
+	dir := t.TempDir()
+	store, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	manager := New(nil, dir, store)
+	manager.betaRepo = config.DriverRepositorySource{
+		ID:            config.DefaultDriverRepositoryBetaID,
+		Name:          config.DefaultDriverRepositoryBetaName,
+		ManifestURL:   server.URL + "/manifest.json",
+		Enabled:       true,
+		AllowInsecure: true,
+		TrustedKeys: map[string]string{
+			"test": base64.StdEncoding.EncodeToString(public),
+		},
+	}
+
+	catalog, err := manager.ChannelCatalog(context.Background(), "beta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog) != 1 || catalog[0].RepositoryID != config.DefaultDriverRepositoryBetaID ||
+		catalog[0].Driver.ID != "demo" || catalog[0].Driver.Version != "1.1.0-beta.1" {
+		t.Fatalf("beta catalog = %+v", catalog)
+	}
+	installed, err := manager.InstallChannel(context.Background(), "beta", "demo", "1.1.0-beta.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.RepoID != config.DefaultDriverRepositoryBetaID || installed.Version != "1.1.0-beta.1" {
+		t.Fatalf("installed beta = %+v", installed)
+	}
+	if got, err := os.ReadFile(filepath.Join(manager.ActiveDir(), "demo.lua")); err != nil ||
+		!strings.Contains(string(got), `version = "1.1.0-beta.1"`) {
+		t.Fatalf("active beta = %q, %v", got, err)
+	}
+	if _, err := manager.InstallChannel(context.Background(), "stable", "demo", "1.1.0-beta.1"); err == nil ||
+		!strings.Contains(err.Error(), "unsupported driver channel") {
+		t.Fatalf("unsupported channel error = %v", err)
+	}
+}
+
 func TestDirectManifestBindsReadOnlyRuntimePolicy(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

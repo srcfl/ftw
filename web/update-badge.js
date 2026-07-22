@@ -225,14 +225,18 @@
       Promise.all([
         apiFetch("/api/drivers/catalog").then((r) => (r.ok ? r.json() : null)),
         apiFetch("/api/config").then((r) => (r.ok ? r.json() : null)),
+        apiFetch("/api/device_repository/catalog?channel=beta").then((r) => (r.ok ? r.json() : { entries: [] })),
       ])
-        .then(([catalog, config]) => {
+        .then(([catalog, config, betaCatalog]) => {
           if (!catalog || !config) return;
           const configured = new Set((Array.isArray(config.drivers) ? config.drivers : [])
             .map((driver) => driverFileKey(driver && driver.lua))
             .filter(Boolean));
+          const betaByID = new Map((betaCatalog && Array.isArray(betaCatalog.entries) ? betaCatalog.entries : [])
+            .map((candidate) => [candidate && candidate.driver && candidate.driver.id, candidate]));
           const entries = (Array.isArray(catalog.entries) ? catalog.entries : [])
-            .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))));
+            .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))))
+            .map((entry) => ({ ...entry, beta_candidate: betaByID.get(entry.id) || null }));
           this._driverCatalog = { entries };
           this._render();
         })
@@ -251,14 +255,14 @@
         .catch((err) => window.alert("Driver history failed: " + err.message));
     }
 
-    _changeDriverVersion(id, repositoryID, version, sha256, installed) {
+    _changeDriverVersion(id, repositoryID, version, sha256, installed, channel) {
       if (!id || !version || this._componentAction) return;
       this._componentAction = "driver:" + id;
       this._render();
       const url = "/api/device_repository/drivers/" + encodeURIComponent(id) + (installed ? "/activate" : "/install");
       const body = installed
         ? { version, sha256 }
-        : { repository_id: repositoryID, version };
+        : { repository_id: repositoryID, version, ...(channel ? { channel } : {}) };
       this._postJSON(url, body)
         .then((resp) => {
           if (!resp.ok) throw new Error((resp.body && resp.body.error) || "driver update failed");
@@ -823,9 +827,15 @@
         const current = entry.installed_version || entry.version || "unknown";
         const latest = entry.upstream_version || current;
         const busy = this._componentAction === "driver:" + entry.id;
-        const action = entry.update_available && entry.repository_id && entry.upstream_version
+        const canReplace = entry.source !== "local";
+        const action = canReplace && entry.update_available && entry.repository_id && entry.upstream_version
           ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Update to " + escapeHTML(entry.upstream_version)}</button>`
           : `<span class="dim">current</span>`;
+        const beta = entry.beta_candidate || {};
+        const betaDriver = beta.driver || {};
+        const betaAction = canReplace && betaDriver.version && betaDriver.version !== current
+          ? `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(beta.repository_id || "")}" data-version="${escapeHTML(betaDriver.version)}" data-channel="beta" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Try beta " + escapeHTML(betaDriver.version)}</button>`
+          : "";
         const history = entry.repository_id
           ? `<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(entry.id || "")}">History</button>`
           : "";
@@ -833,7 +843,7 @@
         return `<div class="component-row">
           <span><strong>${escapeHTML(entry.name || entry.id || "driver")}</strong>
             <span class="dim mono">${escapeHTML(versions)} · ${escapeHTML(entry.source || "unknown")}</span></span>
-          <span class="component-actions">${action}${history}</span>
+          <span class="component-actions">${action}${betaAction}${history}</span>
           ${this._driverVersionsHTML(entry.id)}
         </div>`;
       }).join("");
@@ -986,8 +996,9 @@
               const dataset = e.currentTarget.dataset;
               const installed = dataset.installed === "true";
               const verb = installed ? "activate" : "install";
-              if (window.confirm(`${verb} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
-                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed);
+              const channel = dataset.channel || "stable";
+              if (window.confirm(`${verb} ${channel} driver ${dataset.id} ${dataset.version}? Only affected driver instances restart and must return fresh telemetry.`)) {
+                this._changeDriverVersion(dataset.id, dataset.repository, dataset.version, dataset.sha || "", installed, dataset.channel || "");
               }
               break;
             }

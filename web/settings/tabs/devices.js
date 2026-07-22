@@ -25,11 +25,14 @@
       if (!config.drivers) config.drivers = [];
       var html = '<fieldset><legend>Add from catalog</legend>' +
         '<div class="field-row"><div>' +
+        '<label>Channel</label>' +
+        '<select id="driver-catalog-channel"><option value="stable">Stable</option><option value="beta">Beta · test one driver</option></select>' +
+        '</div><div>' +
         '<label>Driver <span class="help" data-help="Pick a Lua driver from the drivers/ directory. Each driver declares its capabilities (MQTT/Modbus) + which manufacturer/model it supports.">?</span></label>' +
         '<select id="driver-catalog-picker"><option value="">Loading catalog…</option></select>' +
-        '</div><div>' +
+        '</div></div><div class="field-row"><div>' +
         '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
-        '</div></div>' +
+        '</div><div><p style="color:var(--text-dim);font-size:0.75rem;margin:24px 0 0">Beta installs only the selected signed driver. Core and other drivers stay unchanged.</p></div></div>' +
         '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
         '<a href="https://github.com/srcfl/device-drivers/blob/main/SUPPORT_STATUS.md" target="_blank" rel="noopener" style="color:var(--accent-e)">Driver support and hardware test status</a>' +
@@ -330,6 +333,32 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
+      function populateCatalogPicker(entries, channel) {
+        var sel = document.getElementById("driver-catalog-picker");
+        if (!sel) return;
+        sel.innerHTML = "";
+        if (entries.length === 0) {
+          sel.innerHTML = "<option value=''>(no drivers found)</option>";
+          return;
+        }
+        entries.forEach(function (e) {
+          var opt = document.createElement("option");
+          opt.value = e.path;
+          var protoLabel = (e.protocols || []).join("+");
+          opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
+          opt.dataset.protocols = protoLabel;
+          opt.dataset.capabilities = JSON.stringify(e.capabilities || []);
+          opt.dataset.id = e.id || "";
+          opt.dataset.version = e.version || "";
+          opt.dataset.channel = channel;
+          opt.dataset.httpHosts = (e.http_hosts || []).join(",");
+          opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
+          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
+          opt.dataset.readOnly = e.read_only ? "true" : "false";
+          sel.appendChild(opt);
+        });
+      }
+
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
@@ -485,26 +514,43 @@
           var caps = (entry && entry.capabilities) || [];
           wrap.hidden = caps.indexOf("apicreds") < 0;
         });
-        var sel = document.getElementById("driver-catalog-picker");
-        if (!sel) return;
-        sel.innerHTML = "";
-        if (entries.length === 0) {
-          sel.innerHTML = "<option value=''>(no drivers found in drivers/)</option>";
+        populateCatalogPicker(entries, "stable");
+      });
+
+      var channelSelect = document.getElementById("driver-catalog-channel");
+      if (channelSelect) channelSelect.addEventListener("change", function () {
+        if (channelSelect.value === "stable") {
+          apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+            populateCatalogPicker((data && data.entries) || [], "stable");
+          });
           return;
         }
-        entries.forEach(function (e) {
-          var opt = document.createElement("option");
-          opt.value = e.path;
-          var protoLabel = (e.protocols || []).join("+");
-          opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
-          opt.dataset.protocols = protoLabel;
-          opt.dataset.id = e.id || "";
-          opt.dataset.httpHosts = (e.http_hosts || []).join(",");
-          opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
-          opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
-          opt.dataset.readOnly = e.read_only ? "true" : "false";
-          sel.appendChild(opt);
-        });
+        var sel = document.getElementById("driver-catalog-picker");
+        if (sel) sel.innerHTML = "<option value=''>Loading signed beta…</option>";
+        apiFetch("/api/device_repository/catalog?channel=beta")
+          .then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "beta catalog failed"); return body; }); })
+          .then(function (data) {
+            var entries = ((data && data.entries) || []).map(function (candidate) {
+              var signed = (candidate && candidate.driver) || {};
+              return Object.assign({}, signed.metadata || {}, {
+                id: signed.id,
+                path: signed.path,
+                filename: signed.filename,
+                version: signed.version,
+                read_only: signed.read_only
+              });
+            });
+            populateCatalogPicker(entries, "beta");
+          })
+          .catch(function (err) {
+            if (sel) {
+              sel.innerHTML = "";
+              var opt = document.createElement("option");
+              opt.value = "";
+              opt.textContent = err.message;
+              sel.appendChild(opt);
+            }
+          });
       });
 
       var btn = document.getElementById("driver-catalog-add");
@@ -527,7 +573,10 @@
           // {host} or {email,password,serial}. Detect via catalog
           // capability so existing local-HTTP and cloud branches stay
           // untouched.
-          var entry = (S.catalogByLua || {})[sel.value];
+          var entry = (S.catalogByLua || {})[sel.value] || {
+            capabilities: JSON.parse(chosen.dataset.capabilities || "[]"),
+            read_only: chosen.dataset.readOnly === "true"
+          };
           var entryCaps = (entry && entry.capabilities) || [];
           if (entry && entry.read_only && entryCaps.indexOf("battery") >= 0) {
             // Admit the battery reading without adding the gateway to the
@@ -566,8 +615,26 @@
             driver.config = { email: "", password: "", serial: "" };
           }
         }
-        config.drivers.push(driver);
-        ctx.renderTab("devices");
+        var finishAdd = function () {
+          config.drivers.push(driver);
+          ctx.renderTab("devices");
+        };
+        if (chosen.dataset.channel !== "beta") {
+          finishAdd();
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "Installing signed beta…";
+        apiFetch("/api/device_repository/drivers/" + encodeURIComponent(chosen.dataset.id) + "/install", {
+          method: "POST", headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({channel: "beta", version: chosen.dataset.version})
+        }).then(function (r) {
+          return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "beta install failed"); return body; });
+        }).then(finishAdd).catch(function (err) {
+          window.alert("Beta driver install failed: " + err.message);
+          btn.disabled = false;
+          btn.textContent = "+ Add selected";
+        });
       });
 
       // Cloud-driver Connect buttons.
