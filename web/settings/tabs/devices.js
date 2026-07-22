@@ -182,12 +182,9 @@
           // Backend auto-derives capabilities.http.allowed_hosts from config.host.
           var localCreds = caps.indexOf('apicreds') >= 0;
           var pin = (cap.http && cap.http.tls_pin_sha256) || '';
-          // Render the Disable-PV checkbox for every HTTP driver; the
-          // post-fetch pass in `after` hides it for drivers whose
-          // catalog doesn't advertise BOTH meter + pv capabilities
-          // (only those can double-count generation). Hiding via a
-          // post-render DOM edit mirrors the site-meter pattern above
-          // and avoids a re-render race with the async catalog fetch.
+          // Render overlap controls for local HTTP gateways. The post-fetch
+          // pass reveals each one only when the signed catalog says that the
+          // gateway reports both the site meter and that DER kind.
           html += '<fieldset><legend>HTTP</legend>' +
             '<label>Host / IP ' + help('Hostname (e.g. zap.local) or IP address of the device. mDNS names work when your OS resolver supports them; otherwise use the LAN IP.') + '</label>' +
             '<input type="text" data-path="drivers.' + idx + '.config.host" value="' + escHtml(lcfg.host || '') + '" placeholder="zap.local">' +
@@ -200,6 +197,12 @@
               (lcfg.disable_pv ? ' checked' : '') + '>' +
               'Disable PV readings ' +
               help('Use this gateway for the P1 meter only. When another driver already owns PV aggregation, set this so the two drivers don\'t double-count generation.') +
+            '</label>' +
+            '<label class="drv-disable-battery" data-drv-lua="' + escHtml(d.lua || '') + '" style="margin-top:8px;display:none;align-items:center;gap:6px;font-weight:normal">' +
+              '<input type="checkbox" data-checkbox-path="drivers.' + idx + '.config.disable_battery"' +
+              (lcfg.disable_battery ? ' checked' : '') + '>' +
+              'Disable battery readings ' +
+              help('Turn this on when another driver reports the same physical battery. It removes the duplicate battery and prevents Combined from counting its power twice.') +
             '</label>' +
             '<div class="drv-local-creds" data-drv-lua="' + escHtml(d.lua || '') + '"' + (localCreds ? '' : ' hidden') + '>' +
               '<label style="margin-top:8px">Certificate fingerprint (SHA-256) ' + help('Pin the device\'s self-signed HTTPS certificate by its SHA-256 fingerprint (the "fingeravtryck" in the myUplink app, or from "openssl x509 -fingerprint -sha256"). 64 hex chars; colons and case are ignored. Leave empty for normal certificate verification.') + '</label>' +
@@ -575,6 +578,15 @@
           if (!entry) return;
           var caps = entry.capabilities || [];
           if (caps.indexOf("meter") >= 0 && caps.indexOf("pv") >= 0) {
+            lbl.style.display = "flex";
+          }
+        });
+        bodyEl.querySelectorAll(".drv-disable-battery").forEach(function (lbl) {
+          var lua = lbl.getAttribute("data-drv-lua");
+          var entry = lua && byLua[lua];
+          if (!entry) return;
+          var caps = entry.capabilities || [];
+          if (caps.indexOf("meter") >= 0 && caps.indexOf("battery") >= 0) {
             lbl.style.display = "flex";
           }
         });
