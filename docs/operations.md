@@ -55,6 +55,15 @@ become healthy. See [backup-and-restore.md](backup-and-restore.md).
 The updater also retains bounded local pre-update rollback points. They protect
 configuration and SQLite state during a Core update but remain on the same
 disk; they cannot recover a failed SD card.
+
+Core exposes a read-only storage check at
+`GET /api/storage/inventory`. It reports allocated, live and free SQLite pages
+for `state.db` and `cache.db`, their WAL/SHM sizes, and free space on the volume
+that contains the data directory. It does not expose paths, scan a storage
+engine's internal files, change retention, checkpoint WAL, run `VACUUM`, or
+delete data. Use `GET /api/backups` and `GET /api/version/snapshots` for the
+existing backup and rollback-point size lists.
+
 If an older rollback leaves the service offline, follow the Swedish
 [failed-rollback recovery procedure](recover-failed-rollback.sv.md) before
 changing ownership or deleting any SQLite sidecar files.
