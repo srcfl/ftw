@@ -32,10 +32,7 @@
         '</div></div>' +
         '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
-        '🟢 production — verified on real hardware at ≥1 site · ' +
-        '🟡 beta — working on a single site, awaiting a second · ' +
-        '🔴 experimental — ported from reference, not yet proven against live hardware. ' +
-        'Hover a driver for site + date notes.' +
+        '<a href="https://github.com/srcfl/device-drivers/blob/main/SUPPORT_STATUS.md" target="_blank" rel="noopener" style="color:var(--accent-e)">Driver support and hardware test status</a>' +
         '</p>' +
         '</fieldset>';
       html += '<div class="devices-list">';
@@ -499,18 +496,13 @@
           var opt = document.createElement("option");
           opt.value = e.path;
           var protoLabel = (e.protocols || []).join("+");
-          var badge =
-            e.verification_status === "production" ? "🟢 " :
-            e.verification_status === "beta" ? "🟡 " : "🔴 ";
-          opt.textContent = badge + (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
+          opt.textContent = (e.name || e.filename) + "  —  " + (e.manufacturer || "?") + "  [" + protoLabel + "]" + (e.version ? "  v" + e.version : "");
           opt.dataset.protocols = protoLabel;
           opt.dataset.id = e.id || "";
           opt.dataset.httpHosts = (e.http_hosts || []).join(",");
           opt.dataset.connectionHost = (e.connection_defaults && e.connection_defaults.host) || "";
           opt.dataset.connPort = (e.connection_defaults && e.connection_defaults.port) || "";
-          opt.dataset.verificationStatus = e.verification_status || "experimental";
           opt.dataset.readOnly = e.read_only ? "true" : "false";
-          if (e.verification_notes) opt.title = e.verification_notes;
           sel.appendChild(opt);
         });
       });

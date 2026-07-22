@@ -15,6 +15,10 @@
     return fetch(path, opts);
   }
 
+  function driverFileKey(path) {
+    return String(path || "").replace(/\\/g, "/").split("/").pop().toLowerCase();
+  }
+
   // Upstream version checks don't change often; 3 h is plenty of
   // headroom to surface a new release on a normal workday without
   // hammering /api/version/check (which can hit GitHub each tick if
@@ -218,14 +222,21 @@
     }
 
     _refreshDriverCatalog() {
-      apiFetch("/api/device_repository/catalog")
-        .then((r) => (r.ok ? r.json() : null))
-        .then((body) => {
-          if (!body) return;
-          this._driverCatalog = body;
+      Promise.all([
+        apiFetch("/api/drivers/catalog").then((r) => (r.ok ? r.json() : null)),
+        apiFetch("/api/config").then((r) => (r.ok ? r.json() : null)),
+      ])
+        .then(([catalog, config]) => {
+          if (!catalog || !config) return;
+          const configured = new Set((Array.isArray(config.drivers) ? config.drivers : [])
+            .map((driver) => driverFileKey(driver && driver.lua))
+            .filter(Boolean));
+          const entries = (Array.isArray(catalog.entries) ? catalog.entries : [])
+            .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))));
+          this._driverCatalog = { entries };
           this._render();
         })
-        .catch(() => { /* repository may be explicitly disabled */ });
+        .catch(() => { /* config or repository discovery may be unavailable */ });
     }
 
     _loadDriverVersions(id) {
@@ -809,17 +820,21 @@
       const entries = this._driverCatalog && Array.isArray(this._driverCatalog.entries)
         ? this._driverCatalog.entries : [];
       const driverRows = entries.map((entry) => {
-        const driver = entry.driver || {};
-        const installed = entry.installed || {};
-        const busy = this._componentAction === "driver:" + driver.id;
-        const action = entry.update_available || !entry.installed
-          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(driver.id || "")}" data-repository="${escapeHTML(entry.repository_id || "")}" data-version="${escapeHTML(driver.version || "")}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : (entry.installed ? "Update" : "Install")}</button>`
+        const current = entry.installed_version || entry.version || "unknown";
+        const latest = entry.upstream_version || current;
+        const busy = this._componentAction === "driver:" + entry.id;
+        const action = entry.update_available && entry.repository_id && entry.upstream_version
+          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Update to " + escapeHTML(entry.upstream_version)}</button>`
           : `<span class="dim">current</span>`;
+        const history = entry.repository_id
+          ? `<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(entry.id || "")}">History</button>`
+          : "";
+        const versions = entry.update_available ? `${current} → ${latest}` : current;
         return `<div class="component-row">
-          <span><strong>${escapeHTML(driver.metadata && driver.metadata.name || driver.id || "driver")}</strong>
-            <span class="dim mono">${escapeHTML(installed.version || "not managed")} → ${escapeHTML(driver.version || "?")}</span></span>
-          <span class="component-actions">${action}<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(driver.id || "")}">History</button></span>
-          ${this._driverVersionsHTML(driver.id)}
+          <span><strong>${escapeHTML(entry.name || entry.id || "driver")}</strong>
+            <span class="dim mono">${escapeHTML(versions)} · ${escapeHTML(entry.source || "unknown")}</span></span>
+          <span class="component-actions">${action}${history}</span>
+          ${this._driverVersionsHTML(entry.id)}
         </div>`;
       }).join("");
 
@@ -841,8 +856,8 @@
             <span class="component-actions"><span class="mini-channels">${optimizerChannelButtons}</span>${optimizerAction}${optimizerRollback}</span>
           </div>
         </div>
-        <div class="component-subtitle">Drivers · signed catalog, one driver at a time</div>
-        <div class="component-card">${driverRows || `<p class="dim">No managed driver candidates cached yet.</p>`}</div>
+        <div class="component-subtitle">Installed drivers · signed updates, one driver at a time</div>
+        <div class="component-card">${driverRows || `<p class="dim">No configured drivers found.</p>`}</div>
         ${historyRows ? `<details class="component-history"><summary>Update history</summary><table class="snapshots-table"><thead><tr><th>When</th><th>Component</th><th>Version</th><th>Result</th></tr></thead><tbody>${historyRows}</tbody></table></details>` : ""}
       </details>`;
     }
