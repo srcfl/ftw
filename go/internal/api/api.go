@@ -224,6 +224,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/health", s.handleHealth)
 	s.handle("GET  /api/status", s.handleStatus)
 	s.handle("GET  /api/system/info", s.handleSysInfo)
+	s.handle("GET  /api/storage/inventory", s.handleStorageInventory)
 	s.handle("GET  /api/config", s.handleGetConfig)
 	s.handle("POST /api/config", s.handlePostConfig)
 	s.handle("POST /api/drivers/verify_tesla", s.handleVerifyTesla)
