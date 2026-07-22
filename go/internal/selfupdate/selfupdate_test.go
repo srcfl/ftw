@@ -150,21 +150,21 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
-func TestPrefixedComponentReleaseUsesIndependentImageTag(t *testing.T) {
+func TestPrefixedOptimizerBootstrapIsMonotonicFromLegacyBeta(t *testing.T) {
 	const image = "srcfl/ftw-optimizer"
 	reg := newFakeRegistry(t, image)
-	reg.addTag("v0.2.0")
+	reg.addTag("v1.3.2-beta.1")
 	rsrv := reg.server()
 	defer rsrv.Close()
 	releases := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"tag_name": "v9.9.9", "prerelease": false},
-			{"tag_name": "optimizer-v0.2.0", "prerelease": false},
+			{"tag_name": "optimizer-v1.3.2-beta.1", "prerelease": true},
 		})
 	}))
 	defer releases.Close()
 	c := New(Config{
-		Repo: "srcfl/ftw", Image: image, CurrentVersion: "v0.1.0",
+		Repo: "srcfl/ftw", Image: image, CurrentVersion: "v1.3.1-beta.1",
 		ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
 		RegistryBaseURL: rsrv.URL, ReleasesURL: releases.URL,
 	}, newMemStore())
@@ -172,7 +172,7 @@ func TestPrefixedComponentReleaseUsesIndependentImageTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Latest != "v0.2.0" || !info.UpdateAvailable {
+	if info.Latest != "v1.3.2-beta.1" || !info.UpdateAvailable {
 		t.Fatalf("optimizer info = %+v", info)
 	}
 }
@@ -622,6 +622,8 @@ func TestIsNewer(t *testing.T) {
 		{"v1.3.0", "v1.3.0-beta.2", true},
 		{"v1.3.0-beta.2", "v1.3.0", false},
 		{"1.2.3", "1.2.2", true},
+		{"v1.3.2-beta.1", "v1.3.1-beta.1", true},
+		{"v1.3.2-beta.1", "v1.3.1", true},
 	}
 	for _, tc := range cases {
 		if got := isNewer(tc.latest, tc.current); got != tc.want {
