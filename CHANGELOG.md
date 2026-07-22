@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.2
+
+### Patch Changes
+
+- 94f8ac5: Show only configured drivers in Update Center, let operators try a signed beta for one driver without updating Core, offer stable updates only for newer versions, and move driver support status out of the Devices picker.
+
 ## 1.10.1
 
 ### Patch Changes
