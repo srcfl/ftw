@@ -21,10 +21,9 @@
 // Stable and beta require both signals: GitHub tells us *what is released*,
 // and GHCR tells us whether it is deployable yet.
 //
-// Dispatch passes the resolved version tag (not :latest) to the
-// sidecar, which sets FTW_IMAGE_TAG=<target> on the docker exec so
-// `docker compose pull` resolves a specific, immutable tag. No race
-// possible.
+// Dispatch passes the resolved version plus both verified manifest digests to
+// the sidecar. The paired transaction pulls and runs those digest refs, so a
+// tag move after Check cannot change the installed bytes.
 //
 // The check is probe-only — nothing mutates the host until the user
 // explicitly POSTs /api/version/update or /api/version/restart and the
@@ -39,7 +38,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -97,6 +95,10 @@ type Config struct {
 	// Image overrides the registry path if it differs from Repo (rare —
 	// normally the GH repo and the GHCR image share a name). Defaults to Repo.
 	Image string
+	// PairedImage and PairManifestAsset make release checks require both
+	// control-plane images and their pinned digests.
+	PairedImage       string
+	PairManifestAsset string
 	// ReleaseTagPrefix selects component-specific GitHub Releases while the
 	// registry continues to use plain vX.Y.Z tags. Example: "optimizer-"
 	// resolves GitHub tag optimizer-v1.2.0 to GHCR tag v1.2.0.
@@ -112,6 +114,8 @@ type Config struct {
 
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
+	// RequiredUpdaterVersion is the Core release that the updater must report.
+	RequiredUpdaterVersion string
 	// CheckInterval is the probe cadence. 0 = 1 h.
 	CheckInterval time.Duration
 	// SocketPath is where the sidecar listens. Empty disables Trigger.
@@ -185,6 +189,11 @@ type UpdateStatus struct {
 	Message         string            `json:"message,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
+	ReleaseRevision string            `json:"release_revision,omitempty"`
+	CoreDigest      string            `json:"core_digest,omitempty"`
+	UpdaterDigest   string            `json:"updater_digest,omitempty"`
+	TransactionID   string            `json:"transaction_id,omitempty"`
+	HelperKind      string            `json:"helper_kind,omitempty"`
 }
 
 // Checker is the background version-check service.
@@ -197,6 +206,7 @@ type Checker struct {
 	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for
 	skippedKey       string
 	channelKey       string
+	verifiedPair     verifiedControlPlaneRelease
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -310,12 +320,24 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return c.recordErr(err)
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
+	var verifiedPair verifiedControlPlaneRelease
 	if targetTag != "" {
-		ok, err := rp.hasTag(ctx, targetTag)
-		if err != nil {
-			return c.recordErr(fmt.Errorf("registry probe: %w", err))
+		if c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
+			record, ok, err := c.verifyControlPlaneRelease(ctx, rel, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("control-plane release: %w", err))
+			}
+			deployable = ok
+			if ok {
+				verifiedPair = record
+			}
+		} else {
+			ok, err := rp.hasTag(ctx, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("registry probe: %w", err))
+			}
+			deployable = ok
 		}
-		deployable = ok
 	}
 
 	c.mu.Lock()
@@ -332,11 +354,13 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
 		c.info.UpdateAvailable = channelUpdateAvailable(targetTag, c.info.Current)
+		c.verifiedPair = verifiedPair
 	} else {
 		// Either GH has no published release yet, or the build workflow
 		// hasn't pushed the image for this release yet. Keep the prior
 		// Latest visible (so the UI doesn't flicker) but don't dispatch.
 		c.info.UpdateAvailable = false
+		c.verifiedPair = verifiedControlPlaneRelease{}
 	}
 	c.info.CheckedAt = c.cfg.Now()
 	c.info.Err = ""
@@ -395,6 +419,10 @@ type ghRelease struct {
 	PublishedAt time.Time `json:"published_at"`
 	Draft       bool      `json:"draft"`
 	Prerelease  bool      `json:"prerelease"`
+	Assets      []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
 }
 
 // fetchLatestRelease asks GitHub for the most-recently-published
@@ -507,10 +535,10 @@ func (c *Checker) releaseTargetTag(releaseTag string) string {
 // periodic Check.
 func (c *Checker) Info() Info {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.reloadSkipLocked()
 	info := c.info
-	info.SidecarReady = c.sidecarReadyLocked()
+	c.mu.Unlock()
+	info.SidecarReady = c.sidecarReady()
 	return info
 }
 
@@ -553,23 +581,15 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.Err = ""
 	c.info.Skipped = false
 	c.lastAnnouncedTag = ""
+	c.verifiedPair = verifiedControlPlaneRelease{}
 	c.mu.Unlock()
 	return nil
 }
 
-// sidecarReadyLocked reports whether the updater socket is present as an
-// actual Unix socket. An empty SocketPath means the feature was never
-// configured for this deploy — docker-compose sets it, native installs
-// typically don't.
-func (c *Checker) sidecarReadyLocked() bool {
-	if c.cfg.SocketPath == "" {
-		return false
-	}
-	fi, err := os.Stat(c.cfg.SocketPath)
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeSocket != 0
+func (c *Checker) sidecarReady() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), updaterCompatibilityHTTPTimeout)
+	defer cancel()
+	return RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.RequiredUpdaterVersion) == nil
 }
 
 func (c *Checker) reloadSkipLocked() {
@@ -648,9 +668,21 @@ func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, compon
 	if action == "component_rollback" && component != "optimizer" {
 		return errors.New("selfupdate: component rollback is only available for optimizer")
 	}
-	body, _ := json.Marshal(map[string]any{
+	request := map[string]any{
 		"action": action, "target": target, "component": component, "started_at": startedAt,
-	})
+	}
+	if action == "update" && component == "core" && c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
+		c.mu.RLock()
+		record := c.verifiedPair
+		c.mu.RUnlock()
+		if record.Target != target || record.Revision == "" || record.CoreDigest == "" || record.UpdaterDigest == "" {
+			return fmt.Errorf("selfupdate: no verified control-plane release record for %q", target)
+		}
+		request["release_revision"] = record.Revision
+		request["core_digest"] = record.CoreDigest
+		request["updater_digest"] = record.UpdaterDigest
+	}
+	body, _ := json.Marshal(request)
 	return c.postSidecar(ctx, body)
 }
 
@@ -684,15 +716,10 @@ func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files 
 // endpoint. Shared by Trigger and TriggerRollback so the HTTP client
 // config (socket dialer + timeout) only lives in one place.
 func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
-	cli := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", c.cfg.SocketPath)
-			},
-		},
+	if err := RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.RequiredUpdaterVersion); err != nil {
+		return err
 	}
+	cli := updaterHTTPClient(c.cfg.SocketPath)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://unix/update", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := cli.Do(req)
@@ -785,7 +812,7 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 
 func isInFlightState(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "transacting", "restarting", "restoring":
 		return true
 	default:
 		return false

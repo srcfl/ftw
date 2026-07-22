@@ -34,9 +34,12 @@ func runBootstrap(configPath, webDir, driverDir string) {
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
-			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			CurrentVersion:         current,
+			RequiredUpdaterVersion: Version,
+			PairedImage:            "srcfl/ftw-updater",
+			PairManifestAsset:      "ftw-control-plane.json",
+			SocketPath:             envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:             envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 		}, nil)
 		selfUpdater.Start(context.Background())
 		slog.Info("selfupdate enabled in bootstrap", "socket", envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"))

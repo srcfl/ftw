@@ -75,9 +75,12 @@ if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then
 An existing FTW Docker Compose installation was found at:
   $INSTALL_DIR
 
-The fresh installer will not overwrite it. Run the rollback-safe migration:
+The fresh installer will not overwrite it. Download the rollback-safe
+migration, then run it with the approved release and both digests from
+ftw-control-plane.json:
 
-  curl -fsSL $MIGRATION_URL -o /tmp/ftw-migrate.sh && bash /tmp/ftw-migrate.sh --dir "$INSTALL_DIR"
+  curl -fsSL $MIGRATION_URL -o /tmp/ftw-migrate.sh
+  bash /tmp/ftw-migrate.sh --version vX.Y.Z --core-digest sha256:... --updater-digest sha256:... --dir "$INSTALL_DIR"
 
 Guide: https://github.com/srcfl/ftw/blob/$BRANCH/docs/upgrade-from-legacy.md
 EOF
