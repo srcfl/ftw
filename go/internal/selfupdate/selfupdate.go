@@ -21,10 +21,9 @@
 // Stable and beta require both signals: GitHub tells us *what is released*,
 // and GHCR tells us whether it is deployable yet.
 //
-// Dispatch passes the resolved version tag (not :latest) to the
-// sidecar, which sets FTW_IMAGE_TAG=<target> on the docker exec so
-// `docker compose pull` resolves a specific, immutable tag. No race
-// possible.
+// Dispatch passes the resolved version plus both verified manifest digests to
+// the sidecar. The paired transaction pulls and runs those digest refs, so a
+// tag move after Check cannot change the installed bytes.
 //
 // The check is probe-only — nothing mutates the host until the user
 // explicitly POSTs /api/version/update or /api/version/restart and the
@@ -190,6 +189,10 @@ type UpdateStatus struct {
 	Message         string            `json:"message,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
+	ReleaseRevision string            `json:"release_revision,omitempty"`
+	CoreDigest      string            `json:"core_digest,omitempty"`
+	UpdaterDigest   string            `json:"updater_digest,omitempty"`
+	TransactionID   string            `json:"transaction_id,omitempty"`
 }
 
 // Checker is the background version-check service.
@@ -202,6 +205,7 @@ type Checker struct {
 	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for
 	skippedKey       string
 	channelKey       string
+	verifiedPair     verifiedControlPlaneRelease
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -315,13 +319,17 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return c.recordErr(err)
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
+	var verifiedPair verifiedControlPlaneRelease
 	if targetTag != "" {
 		if c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
-			ok, err := c.verifyControlPlaneRelease(ctx, rel, targetTag)
+			record, ok, err := c.verifyControlPlaneRelease(ctx, rel, targetTag)
 			if err != nil {
 				return c.recordErr(fmt.Errorf("control-plane release: %w", err))
 			}
 			deployable = ok
+			if ok {
+				verifiedPair = record
+			}
 		} else {
 			ok, err := rp.hasTag(ctx, targetTag)
 			if err != nil {
@@ -345,11 +353,13 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		c.info.ReleaseNotesURL = rel.HtmlURL
 		c.info.ReleaseBody = truncateBody(rel.Body)
 		c.info.UpdateAvailable = channelUpdateAvailable(targetTag, c.info.Current)
+		c.verifiedPair = verifiedPair
 	} else {
 		// Either GH has no published release yet, or the build workflow
 		// hasn't pushed the image for this release yet. Keep the prior
 		// Latest visible (so the UI doesn't flicker) but don't dispatch.
 		c.info.UpdateAvailable = false
+		c.verifiedPair = verifiedControlPlaneRelease{}
 	}
 	c.info.CheckedAt = c.cfg.Now()
 	c.info.Err = ""
@@ -570,6 +580,7 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.Err = ""
 	c.info.Skipped = false
 	c.lastAnnouncedTag = ""
+	c.verifiedPair = verifiedControlPlaneRelease{}
 	c.mu.Unlock()
 	return nil
 }
@@ -656,9 +667,21 @@ func (c *Checker) TriggerComponentAt(ctx context.Context, action, target, compon
 	if action == "component_rollback" && component != "optimizer" {
 		return errors.New("selfupdate: component rollback is only available for optimizer")
 	}
-	body, _ := json.Marshal(map[string]any{
+	request := map[string]any{
 		"action": action, "target": target, "component": component, "started_at": startedAt,
-	})
+	}
+	if action == "update" && component == "core" && c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
+		c.mu.RLock()
+		record := c.verifiedPair
+		c.mu.RUnlock()
+		if record.Target != target || record.Revision == "" || record.CoreDigest == "" || record.UpdaterDigest == "" {
+			return fmt.Errorf("selfupdate: no verified control-plane release record for %q", target)
+		}
+		request["release_revision"] = record.Revision
+		request["core_digest"] = record.CoreDigest
+		request["updater_digest"] = record.UpdaterDigest
+	}
+	body, _ := json.Marshal(request)
 	return c.postSidecar(ctx, body)
 }
 

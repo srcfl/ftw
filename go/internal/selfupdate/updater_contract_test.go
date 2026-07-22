@@ -103,3 +103,40 @@ func TestUpdaterReleaseMismatchFailsClosed(t *testing.T) {
 		t.Fatalf("RequireUpdaterRelease error = %v", err)
 	}
 }
+
+func TestTriggerCarriesVerifiedControlPlaneDigests(t *testing.T) {
+	const target = "v1.4.0"
+	fixture := newPairReleaseFixture(target)
+	releaseServer := pairReleaseServer(t, target, &fixture)
+	requestBody := make(chan map[string]any, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(UpdaterRuntimeInfo{
+			ProtocolVersion: UpdaterProtocolVersion,
+			Version:         "v1.3.1",
+			Capabilities:    []string{ControlPlanePairCapability},
+		})
+	})
+	mux.HandleFunc("POST /update", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requestBody <- body
+		w.WriteHeader(http.StatusAccepted)
+	})
+	socket := serveUnixUpdater(t, mux)
+
+	c := pairChecker(releaseServer)
+	c.cfg.SocketPath = socket
+	c.cfg.RequiredUpdaterVersion = "v1.3.1"
+	info, err := c.Check(context.Background(), true)
+	if err != nil || !info.UpdateAvailable {
+		t.Fatalf("verified release = %+v, %v", info, err)
+	}
+	if err := c.Trigger(context.Background(), "update", target); err != nil {
+		t.Fatal(err)
+	}
+	body := <-requestBody
+	if body["release_revision"] != testRevision || body["core_digest"] != testCoreDigest || body["updater_digest"] != testUpdaterDigest {
+		t.Fatalf("update request lost verified record: %+v", body)
+	}
+}

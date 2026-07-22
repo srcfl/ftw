@@ -28,6 +28,26 @@ type fakeRunner struct {
 	failOn string
 }
 
+const testControlPlaneTransactionID = "0123456789abcdef"
+
+func testControlPlaneRelease(target string) controlPlaneRelease {
+	return controlPlaneRelease{
+		Target: target, Revision: "0123456789abcdef0123456789abcdef01234567",
+		CoreDigest:    "sha256:" + strings.Repeat("a", 64),
+		UpdaterDigest: "sha256:" + strings.Repeat("b", 64),
+	}
+}
+
+func controlPlaneUpdateJSON(target string) string {
+	release := testControlPlaneRelease(target)
+	body, _ := json.Marshal(map[string]string{
+		"action": "update", "target": release.Target,
+		"release_revision": release.Revision, "core_digest": release.CoreDigest,
+		"updater_digest": release.UpdaterDigest,
+	})
+	return string(body)
+}
+
 func (f *fakeRunner) run(ctx context.Context, env []string, args ...string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -72,6 +92,9 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		socketPath:      filepath.Join(dir, "updater.sock"),
 		statusPath:      filepath.Join(dir, "state.json"),
 		pullRetryDelay:  time.Millisecond,
+		now:             time.Now,
+		transactionTTL:  controlPlaneStaleAfter,
+		recoveryPoll:    time.Hour,
 		runner:          runner.run,
 		healthCheck:     func(context.Context, string) error { return nil },
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
@@ -89,18 +112,21 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 		updaterReady: func(context.Context, string) error { return nil },
 		chownFile:    func(string, int, int) error { return nil },
 	}
-	s.launchTransaction = func(target string, previous map[string]string, startedAt time.Time) error {
+	s.stopTransactionHelper = func(transactionID string, recovery bool) error {
+		return s.runner(context.Background(), nil, "rm", "-f", controlPlaneHelperName(recovery, transactionID))
+	}
+	s.launchTransaction = func(release controlPlaneRelease, previous map[string]string, startedAt time.Time, transactionID string) error {
 		s.imageRef = func(_ context.Context, service string) (string, error) {
 			switch service {
 			case canonicalMainServiceName, legacyMainServiceName:
-				return canonicalMainImage + ":" + target, nil
+				return release.coreRef(), nil
 			case updaterServiceName:
-				return canonicalUpdaterImage + ":" + target, nil
+				return release.updaterRef(), nil
 			default:
 				return "", fmt.Errorf("unknown service %q", service)
 			}
 		}
-		s.runControlPlaneTransaction(target, previous, startedAt)
+		s.runControlPlaneTransaction(release, previous, startedAt, transactionID)
 		return nil
 	}
 	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
@@ -138,7 +164,7 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	s, runner := newTestServer(t)
 	s.skipPull = true
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	waitForState(t, s, "done")
@@ -222,7 +248,7 @@ func waitForState(t *testing.T, s *server, want string) State {
 
 func TestHandleUpdate_HappyPath(t *testing.T) {
 	s, runner := newTestServer(t)
-	body := bytes.NewBufferString(`{"action":"update","target":"v1.2.3"}`)
+	body := bytes.NewBufferString(controlPlaneUpdateJSON("v1.2.3"))
 	req := httptest.NewRequest(http.MethodPost, "/update", body)
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
@@ -257,7 +283,7 @@ func TestHandleUpdate_BlocksCoreUpdateWithoutOptimizer(t *testing.T) {
       - ./data:/app/data
 `)
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -283,7 +309,7 @@ func TestHandleUpdate_BlocksCoreUpdateWhenOptimizerIsUnhealthy(t *testing.T) {
 		return nil
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	state := waitForState(t, s, "failed")
@@ -311,7 +337,7 @@ func TestHandleUpdate_MissingOptimizerLeavesUserOverrideUntouched(t *testing.T) 
 	}
 	s.overrideFiles = []string{override}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	waitForState(t, s, "failed")
@@ -344,7 +370,7 @@ func TestHandleUpdate_PullFailure(t *testing.T) {
 	runner.fail = true
 	s.maxPullAttempts = 3 // cap retries so the always-fail runner doesn't loop forever
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")
@@ -357,7 +383,7 @@ func TestHandleUpdate_UpFailure(t *testing.T) {
 	s, runner := newTestServer(t)
 	runner.failOn = "up"
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")
@@ -419,7 +445,7 @@ func TestImmutableImageTagChannels(t *testing.T) {
 // the exact image and is immune to the :latest-retag race.
 func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
 	s, runner := newTestServer(t)
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v0.44.0")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	if rr.Code != 202 {
@@ -460,7 +486,7 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
 `)
 	s.mainServiceName = legacyMainServiceName
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v0.44.0"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v0.44.0")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	if rr.Code != 202 {
@@ -787,7 +813,7 @@ func TestHandleUpdate_ConcurrentRejected(t *testing.T) {
 		return nil
 	}
 
-	req1 := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req1 := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr1 := httptest.NewRecorder()
 	s.handleUpdate(rr1, req1)
 	if rr1.Code != 202 {
@@ -899,7 +925,7 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 		return nil
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
+	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(controlPlaneUpdateJSON("v1.2.3")))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")

@@ -20,7 +20,9 @@ die() {
 
 usage() {
   cat <<'EOF'
-Usage: migrate-legacy-compose.sh --version vX.Y.Z[-beta.N] [--dir PATH] [--backup-dir PATH]
+Usage: migrate-legacy-compose.sh --version vX.Y.Z[-beta.N] \
+  --core-digest sha256:... --updater-digest sha256:... \
+  [--dir PATH] [--backup-dir PATH]
 
 Without --dir, the script uses the current directory when it contains
 docker-compose.yml, then tries ~/ftw and ~/forty-two-watts.
@@ -34,6 +36,8 @@ EOF
 requested_dir="${FTW_DIR:-}"
 requested_full_backup_dir="${FTW_BACKUP_DIR:-}"
 control_plane_version="${FTW_CONTROL_PLANE_VERSION:-}"
+core_digest="${FTW_CONTROL_PLANE_CORE_DIGEST:-}"
+updater_digest="${FTW_CONTROL_PLANE_UPDATER_DIGEST:-}"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dir)
@@ -51,6 +55,16 @@ while [ "$#" -gt 0 ]; do
       control_plane_version="$2"
       shift 2
       ;;
+    --core-digest)
+      [ "$#" -ge 2 ] || die "--core-digest requires a sha256 digest"
+      core_digest="$2"
+      shift 2
+      ;;
+    --updater-digest)
+      [ "$#" -ge 2 ] || die "--updater-digest requires a sha256 digest"
+      updater_digest="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -63,6 +77,12 @@ done
 
 if [[ ! "$control_plane_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]]; then
   die "--version must be an immutable vX.Y.Z or vX.Y.Z-beta.N release"
+fi
+if [[ ! "$core_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  die "--core-digest must match the verified ftw-control-plane.json Core digest"
+fi
+if [[ ! "$updater_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  die "--updater-digest must match the verified ftw-control-plane.json updater digest"
 fi
 
 [ "$(uname -s)" = Linux ] || die "automatic migration currently supports Linux Docker hosts only"
@@ -174,6 +194,8 @@ previous_updater_image_id=""
 previous_updater_image_ref=""
 previous_optimizer_image_id=""
 previous_optimizer_image_ref=""
+pinned_main_image_id=""
+pinned_updater_image_id=""
 
 restore_image_reference() {
   local image_id="$1"
@@ -596,8 +618,17 @@ case "$effective_optimizer_image" in
   *) die "the effective ftw-optimizer image is not ghcr.io/srcfl/ftw-optimizer: $effective_optimizer_image" ;;
 esac
 
-log "phase 2/4: pulling the paired Core + updater control plane"
-compose pull "$main_service" ftw-updater
+core_digest_ref="ghcr.io/srcfl/ftw@$core_digest"
+updater_digest_ref="ghcr.io/srcfl/ftw-updater@$updater_digest"
+log "phase 2/4: pulling the digest-locked Core + updater control plane"
+docker pull "$core_digest_ref" >/dev/null
+docker pull "$updater_digest_ref" >/dev/null
+pinned_main_image_id="$(docker image inspect "$core_digest_ref" --format '{{.Id}}')"
+pinned_updater_image_id="$(docker image inspect "$updater_digest_ref" --format '{{.Id}}')"
+[ -n "$pinned_main_image_id" ] || die "could not inspect the verified Core digest"
+[ -n "$pinned_updater_image_id" ] || die "could not inspect the verified updater digest"
+docker image tag "$core_digest_ref" "ghcr.io/srcfl/ftw:$control_plane_version"
+docker image tag "$updater_digest_ref" "ghcr.io/srcfl/ftw-updater:$control_plane_version"
 
 # Some developer installations replaced the Compose-managed main container
 # with a manually created container of the same name. Preserve it as a stopped
@@ -630,14 +661,36 @@ fi
 
 log "starting ftw-updater from ghcr.io/srcfl/ftw-updater:$control_plane_version"
 containers_changed=true
-compose up -d --no-deps --force-recreate ftw-updater
+compose up -d --no-deps --pull never --force-recreate ftw-updater
+updater_id="$(compose ps -q --status running ftw-updater | tail -n 1)"
+[ -n "$updater_id" ] || die "ftw-updater did not reach running state"
+running_updater_image_id="$(docker inspect "$updater_id" --format '{{.Image}}')"
+[ "$running_updater_image_id" = "$pinned_updater_image_id" ] || \
+  die "running updater does not match the verified digest: $running_updater_image_id"
+
+# v1.10.0-beta.1 cannot drive the new paired transaction. Its one-time bridge
+# starts only the verified updater while old Core remains live, then replaces
+# Core. Any loss of old Core health here triggers the existing image-ID restore.
+health_url="${FTW_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
+ready_url="${FTW_READY_URL:-${health_url%/api/health}/api/status}"
+curl -fsS --max-time 3 "$health_url" >/dev/null 2>&1 || \
+  die "old Core lost health after the updater-first bootstrap"
+log "old Core remained healthy after the updater-first bootstrap"
+
 log "starting $main_service from ghcr.io/srcfl/ftw:$control_plane_version"
-compose up -d --no-deps --force-recreate "$main_service"
+compose up -d --no-deps --pull never --force-recreate "$main_service"
 
 new_main_id="$(compose ps -q --status running "$main_service" | tail -n 1)"
 [ -n "$new_main_id" ] || die "$main_service did not reach running state"
 updater_id="$(compose ps -q --status running ftw-updater | tail -n 1)"
 [ -n "$updater_id" ] || die "ftw-updater did not reach running state"
+
+running_main_image_id="$(docker inspect "$new_main_id" --format '{{.Image}}')"
+running_updater_image_id="$(docker inspect "$updater_id" --format '{{.Image}}')"
+[ "$running_main_image_id" = "$pinned_main_image_id" ] || \
+  die "running Core does not match the verified digest: $running_main_image_id"
+[ "$running_updater_image_id" = "$pinned_updater_image_id" ] || \
+  die "running updater does not match the verified digest: $running_updater_image_id"
 
 main_image="$(docker inspect "$new_main_id" --format '{{.Config.Image}}')"
 updater_image="$(docker inspect "$updater_id" --format '{{.Config.Image}}')"
@@ -652,8 +705,6 @@ fi
 [ "$running_data_source" = "$expected_data_source" ] || \
   die "running main container uses unexpected /app/data source: $running_data_source"
 
-health_url="${FTW_HEALTH_URL:-http://127.0.0.1:8080/api/health}"
-ready_url="${FTW_READY_URL:-${health_url%/api/health}/api/status}"
 healthy=false
 health_timeout_s="${FTW_MIGRATION_HEALTH_TIMEOUT_S:-1800}"
 health_deadline=$((SECONDS + health_timeout_s))

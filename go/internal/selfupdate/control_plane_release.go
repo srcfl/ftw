@@ -33,7 +33,14 @@ type controlPlaneReleaseComponent struct {
 	Digest string `json:"digest"`
 }
 
-func (c *Checker) verifyControlPlaneRelease(ctx context.Context, rel ghRelease, targetTag string) (bool, error) {
+type verifiedControlPlaneRelease struct {
+	Target        string
+	Revision      string
+	CoreDigest    string
+	UpdaterDigest string
+}
+
+func (c *Checker) verifyControlPlaneRelease(ctx context.Context, rel ghRelease, targetTag string) (verifiedControlPlaneRelease, bool, error) {
 	assetURL := ""
 	for _, asset := range rel.Assets {
 		if asset.Name == c.cfg.PairManifestAsset {
@@ -42,55 +49,58 @@ func (c *Checker) verifyControlPlaneRelease(ctx context.Context, rel ghRelease, 
 		}
 	}
 	if assetURL == "" {
-		return false, nil
+		return verifiedControlPlaneRelease{}, false, nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
 	if err != nil {
-		return false, err
+		return verifiedControlPlaneRelease{}, false, err
 	}
 	req.Header.Set("Accept", "application/octet-stream")
 	req.Header.Set("User-Agent", "FTW-selfupdate")
 	resp, err := c.cfg.HTTPClient.Do(req)
 	if err != nil {
-		return false, err
+		return verifiedControlPlaneRelease{}, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
+		return verifiedControlPlaneRelease{}, false, nil
 	}
 	if resp.StatusCode >= 400 {
-		return false, fmt.Errorf("pair manifest HTTP %d", resp.StatusCode)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("pair manifest HTTP %d", resp.StatusCode)
 	}
 	var manifest controlPlaneReleaseManifest
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 64<<10))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&manifest); err != nil {
-		return false, fmt.Errorf("decode pair manifest: %w", err)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("decode pair manifest: %w", err)
 	}
 	if err := c.validateControlPlaneManifest(manifest, targetTag); err != nil {
-		return false, err
+		return verifiedControlPlaneRelease{}, false, err
 	}
 
 	coreProbe := &registryProbe{httpClient: c.cfg.HTTPClient, base: c.cfg.RegistryBaseURL, repo: c.cfg.Image, service: c.cfg.RegistryService}
 	updaterProbe := &registryProbe{httpClient: c.cfg.HTTPClient, base: c.cfg.RegistryBaseURL, repo: c.cfg.PairedImage, service: c.cfg.RegistryService}
 	coreDigest, err := coreProbe.manifestDigest(ctx, targetTag)
 	if err != nil {
-		return false, fmt.Errorf("Core digest: %w", err)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("Core digest: %w", err)
 	}
 	updaterDigest, err := updaterProbe.manifestDigest(ctx, targetTag)
 	if err != nil {
-		return false, fmt.Errorf("updater digest: %w", err)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("updater digest: %w", err)
 	}
 	if coreDigest == "" || updaterDigest == "" {
-		return false, nil
+		return verifiedControlPlaneRelease{}, false, nil
 	}
 	if coreDigest != manifest.Components.Core.Digest {
-		return false, fmt.Errorf("Core tag digest %s does not match release manifest %s", coreDigest, manifest.Components.Core.Digest)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("Core tag digest %s does not match release manifest %s", coreDigest, manifest.Components.Core.Digest)
 	}
 	if updaterDigest != manifest.Components.Updater.Digest {
-		return false, fmt.Errorf("updater tag digest %s does not match release manifest %s", updaterDigest, manifest.Components.Updater.Digest)
+		return verifiedControlPlaneRelease{}, false, fmt.Errorf("updater tag digest %s does not match release manifest %s", updaterDigest, manifest.Components.Updater.Digest)
 	}
-	return true, nil
+	return verifiedControlPlaneRelease{
+		Target: targetTag, Revision: manifest.Revision,
+		CoreDigest: coreDigest, UpdaterDigest: updaterDigest,
+	}, true, nil
 }
 
 func (c *Checker) validateControlPlaneManifest(manifest controlPlaneReleaseManifest, targetTag string) error {

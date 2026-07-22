@@ -88,11 +88,11 @@ mkdir -p "$TMP/migrate/bin" "$TMP/migrate/data" "$TMP/migrate/state"
 cat >"$TMP/migrate/docker-compose.yml" <<'YAML'
 services:
   ftw:
-    image: example.invalid/old-core:latest
+    image: ghcr.io/srcfl/ftw:v1.10.0-beta.1
     volumes:
       - ./data:/app/data
   ftw-updater:
-    image: example.invalid/old-updater:latest
+    image: ghcr.io/srcfl/ftw-updater:v1.10.0-beta.1
 YAML
 
 cat >"$TMP/migrate/bin/uname" <<'FAKE_UNAME'
@@ -102,7 +102,10 @@ FAKE_UNAME
 
 cat >"$TMP/migrate/bin/curl" <<'FAKE_CURL'
 #!/usr/bin/env bash
-[ "${FAKE_FAIL_READY:-}" != 1 ] || exit 1
+printf 'curl %s\n' "$*" >>"${FAKE_STATE_DIR:?}/events"
+if [ "${FAKE_FAIL_READY:-}" = 1 ] && [[ "$*" == *"/api/status"* ]]; then
+  exit 1
+fi
 exit 0
 FAKE_CURL
 
@@ -191,8 +194,12 @@ case "$command" in
     case "$format" in
       *'{{.Image}}'*)
         case "$subject" in
-          ftw-id) echo 'sha256:old-core' ;;
-          ftw-updater-id) echo 'sha256:old-updater' ;;
+          ftw-id)
+            if [ -f "$state/canonical-ftw" ]; then echo 'sha256:pinned-core'; else echo 'sha256:old-core'; fi
+            ;;
+          ftw-updater-id)
+            if [ -f "$state/canonical-ftw-updater" ]; then echo 'sha256:pinned-updater'; else echo 'sha256:old-updater'; fi
+            ;;
           ftw-optimizer-id) echo 'sha256:old-optimizer' ;;
           *) exit 1 ;;
         esac
@@ -280,6 +287,7 @@ case "$command" in
           exit 1
         fi
         touch "$state/$service" "$state/$service-id"
+        printf 'up %s\n' "$service" >>"$state/events"
         case "$service" in
           ftw) printf '%s\n' "${FTW_IMAGE_TAG:-latest}" >"$state/canonical-$service" ;;
           ftw-updater) printf '%s\n' "${FTW_UPDATER_IMAGE_TAG:-latest}" >"$state/canonical-$service" ;;
@@ -302,8 +310,21 @@ case "$command" in
     esac
     ;;
   image)
-    [ "${1:-}" = tag ] || exit 1
-    printf '%s %s\n' "${2:-}" "${3:-}" >>"$state/image-tags"
+    subcommand="${1:-}"
+    shift || true
+    case "$subcommand" in
+      inspect)
+        case "${1:-}" in
+          ghcr.io/srcfl/ftw@*) echo 'sha256:pinned-core' ;;
+          ghcr.io/srcfl/ftw-updater@*) echo 'sha256:pinned-updater' ;;
+          *) exit 1 ;;
+        esac
+        ;;
+      tag)
+        printf '%s %s\n' "${1:-}" "${2:-}" >>"$state/image-tags"
+        ;;
+      *) exit 1 ;;
+    esac
     ;;
   *)
     exit 1
@@ -316,17 +337,33 @@ chmod +x \
   "$TMP/migrate/bin/chmod" \
   "$TMP/migrate/bin/docker"
 touch "$TMP/migrate/data/state.db"
+CORE_DIGEST="sha256:$(printf 'a%.0s' {1..64})"
+UPDATER_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
+PAIR_VERSION=v1.10.1-beta.1
+PAIR_ARGS=(
+  --version "$PAIR_VERSION"
+  --core-digest "$CORE_DIGEST"
+  --updater-digest "$UPDATER_DIGEST"
+)
 
 PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/migrate/state" \
 FAKE_DATA_DIR="$TMP/migrate/data" \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/migrate"
+bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/migrate"
 
 grep -q '^  ftw-optimizer:' "$TMP/migrate/docker-compose.override.yml"
 test -f "$TMP/migrate/state/ftw"
 test -f "$TMP/migrate/state/ftw-updater"
 test -f "$TMP/migrate/state/ftw-optimizer"
 test -f "$TMP/migrate"/.ftw-migration-backup-*/previous-images.tsv
+grep -q "^ghcr.io/srcfl/ftw@$CORE_DIGEST ghcr.io/srcfl/ftw:$PAIR_VERSION$" "$TMP/migrate/state/image-tags"
+grep -q "^ghcr.io/srcfl/ftw-updater@$UPDATER_DIGEST ghcr.io/srcfl/ftw-updater:$PAIR_VERSION$" "$TMP/migrate/state/image-tags"
+awk '
+  $0 == "up ftw-updater" && !updater { updater = NR }
+  $1 == "curl" && $0 ~ /api\/health/ && !health { health = NR }
+  $0 == "up ftw" && !core { core = NR }
+  END { exit !(updater && health && core && updater < health && health < core) }
+' "$TMP/migrate/state/events"
 
 # Generated container names still carry Compose labels. The migration must
 # reuse their explicit project name instead of creating a parallel default.
@@ -338,7 +375,7 @@ FAKE_STATE_DIR="$TMP/project/state" \
 FAKE_DATA_DIR="$TMP/project/data" \
 FAKE_PROJECT_NAME=custom-energy \
 FAKE_INSTALL_DIR="$TMP/project" \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/project"
+bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/project"
 test -e "$TMP/project/state/project-custom-energy"
 
 if [ -n "$REAL_DOCKER" ]; then
@@ -364,7 +401,7 @@ if PATH="$TMP/migrate/bin:$PATH" \
   FAKE_STATE_DIR="$TMP/rollback/state" \
   FAKE_DATA_DIR="$TMP/rollback/data" \
   FAKE_FAIL_SERVICE=ftw \
-  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/rollback" \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/rollback" \
   >/dev/null 2>&1; then
   echo "expected a failed core recreate to roll the modular migration back" >&2
   exit 1
@@ -398,7 +435,7 @@ if PATH="$TMP/migrate/bin:$PATH" \
   FAKE_STATE_DIR="$TMP/rollback-existing/state" \
   FAKE_DATA_DIR="$TMP/rollback-existing/data" \
   FAKE_FAIL_SERVICE=ftw \
-  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/rollback-existing" \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/rollback-existing" \
   >/dev/null 2>&1; then
   echo "expected an existing modular migration failure to roll back" >&2
   exit 1
@@ -428,7 +465,7 @@ if PATH="$TMP/migrate/bin:$PATH" \
   FAKE_DATA_DIR="$TMP/readiness-rollback/data" \
   FAKE_FAIL_READY=1 \
   FTW_MIGRATION_HEALTH_TIMEOUT_S=1 \
-  bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/readiness-rollback" \
+  bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/readiness-rollback" \
   >/dev/null 2>&1; then
   echo "expected readiness failure to roll back the paired migration" >&2
   exit 1
@@ -456,7 +493,7 @@ PATH="$TMP/migrate/bin:$PATH" \
 FAKE_STATE_DIR="$TMP/optimizer-failure/state" \
 FAKE_DATA_DIR="$TMP/optimizer-failure/data" \
 FAKE_FAIL_SERVICE=ftw-optimizer \
-bash "$ROOT/scripts/migrate-legacy-compose.sh" --version v1.4.0 --dir "$TMP/optimizer-failure" \
+bash "$ROOT/scripts/migrate-legacy-compose.sh" "${PAIR_ARGS[@]}" --dir "$TMP/optimizer-failure" \
   >/dev/null
 test -e "$TMP/optimizer-failure/state/ftw"
 test -e "$TMP/optimizer-failure/state/ftw-updater"

@@ -46,6 +46,8 @@ const (
 	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
 	updaterProtocolVersion   = 2
 	controlPlaneCapability   = "control-plane-pair-v1"
+	controlPlaneStaleAfter   = 5 * time.Minute
+	controlPlaneRecoveryPoll = 15 * time.Second
 )
 
 var Version = "dev"
@@ -66,6 +68,10 @@ type State struct {
 	Message         string            `json:"message,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
+	ReleaseRevision string            `json:"release_revision,omitempty"`
+	CoreDigest      string            `json:"core_digest,omitempty"`
+	UpdaterDigest   string            `json:"updater_digest,omitempty"`
+	TransactionID   string            `json:"transaction_id,omitempty"`
 }
 
 type server struct {
@@ -99,6 +105,9 @@ type server struct {
 	// after an arbitrary N. Tests that exercise the "always-fail" path set
 	// this to a small value to avoid looping forever.
 	maxPullAttempts int
+	now             func() time.Time
+	transactionTTL  time.Duration
+	recoveryPoll    time.Duration
 
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
@@ -111,15 +120,17 @@ type server struct {
 	// imageID captures the image backing the running service before an update.
 	// healthCheck waits for the recreated service to become healthy. Both are
 	// injectable so the rollback path is testable without Docker.
-	imageID           func(ctx context.Context, service string) (string, error)
-	imageRef          func(ctx context.Context, service string) (string, error)
-	containerID       func(ctx context.Context, service string) (string, error)
-	healthCheck       func(ctx context.Context, service string) error
-	updaterReady      func(ctx context.Context, target string) error
-	launchTransaction func(target string, previous map[string]string, startedAt time.Time) error
-	chownFile         func(string, int, int) error
-	checkSnapshotFile func(context.Context, string, string, string) error
-	stageSnapshotFile func(context.Context, string, string, string, string) error
+	imageID               func(ctx context.Context, service string) (string, error)
+	imageRef              func(ctx context.Context, service string) (string, error)
+	containerID           func(ctx context.Context, service string) (string, error)
+	healthCheck           func(ctx context.Context, service string) error
+	updaterReady          func(ctx context.Context, target string) error
+	launchTransaction     func(release controlPlaneRelease, previous map[string]string, startedAt time.Time, transactionID string) error
+	launchRecovery        func(State) error
+	stopTransactionHelper func(string, bool) error
+	chownFile             func(string, int, int) error
+	checkSnapshotFile     func(context.Context, string, string, string) error
+	stageSnapshotFile     func(context.Context, string, string, string, string) error
 }
 
 // composeArgs returns the common prefix of every `docker compose` invocation
@@ -228,9 +239,14 @@ func main() {
 	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
 	transactionTarget := flag.String("control-plane-transaction", "", "Internal: apply a paired Core/updater release")
+	transactionRecovery := flag.Bool("control-plane-recovery", false, "Internal: restore a stale paired transaction")
 	transactionCoreImage := flag.String("previous-core-image", "", "Internal: previous Core image ID")
 	transactionUpdaterImage := flag.String("previous-updater-image", "", "Internal: previous updater image ID")
 	transactionStartedAt := flag.String("transaction-started-at", "", "Internal: RFC3339 transaction start")
+	transactionID := flag.String("transaction-id", "", "Internal: durable paired transaction ID")
+	transactionRevision := flag.String("release-revision", "", "Internal: verified control-plane source revision")
+	transactionCoreDigest := flag.String("core-digest", "", "Internal: verified Core image digest")
+	transactionUpdaterDigest := flag.String("updater-digest", "", "Internal: verified updater image digest")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -256,6 +272,9 @@ func main() {
 		skipPull:       *skipPull,
 		pullRetryDelay: 60 * time.Second,
 		runner:         dockerCompose,
+		now:            time.Now,
+		transactionTTL: controlPlaneStaleAfter,
+		recoveryPoll:   controlPlaneRecoveryPoll,
 	}
 	// Auto-discover override files alongside the base, the same way the
 	// compose CLI does when invoked without -f. Without this the sidecar
@@ -275,6 +294,7 @@ func main() {
 	srv.imageID = srv.currentServiceImageID
 	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
+	srv.stopTransactionHelper = removeControlPlaneTransactionHelper
 	srv.healthCheck = srv.waitForServiceHealth
 	srv.chownFile = os.Chown
 	srv.checkSnapshotFile = func(ctx context.Context, containerID, snapshotID, file string) error {
@@ -292,12 +312,28 @@ func main() {
 		if err != nil {
 			startedAt = time.Now()
 		}
-		srv.runControlPlaneTransaction(*transactionTarget, map[string]string{
+		release := controlPlaneRelease{
+			Target: *transactionTarget, Revision: *transactionRevision,
+			CoreDigest: *transactionCoreDigest, UpdaterDigest: *transactionUpdaterDigest,
+		}
+		previous := map[string]string{
 			"core": *transactionCoreImage, "updater": *transactionUpdaterImage,
-		}, startedAt)
+		}
+		if *transactionRecovery {
+			srv.runControlPlaneRecovery(State{
+				State: "restoring", Action: "update", Component: "core", Target: release.Target,
+				StartedAt: startedAt, UpdatedAt: srv.nowTime(), PreviousImageID: previous["core"], PreviousImages: previous,
+				ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
+				TransactionID: *transactionID,
+			})
+		} else {
+			srv.runControlPlaneTransaction(release, previous, startedAt, *transactionID)
+		}
 		return
 	}
-	srv.recoverCrashedState()
+	if srv.recoverCrashedState() {
+		go srv.monitorControlPlaneTransaction()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /update", srv.handleUpdate)
@@ -333,14 +369,17 @@ func main() {
 
 func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Action         string    `json:"action"`
-		Component      string    `json:"component,omitempty"`
-		Target         string    `json:"target,omitempty"`
-		Snapshot       string    `json:"snapshot,omitempty"` // rollback-only (#152)
-		Files          []string  `json:"files,omitempty"`    // rollback: basenames to restore
-		SafetySnapshot string    `json:"safety_snapshot,omitempty"`
-		SafetyFiles    []string  `json:"safety_files,omitempty"`
-		StartedAt      time.Time `json:"started_at,omitempty"`
+		Action          string    `json:"action"`
+		Component       string    `json:"component,omitempty"`
+		Target          string    `json:"target,omitempty"`
+		Snapshot        string    `json:"snapshot,omitempty"` // rollback-only (#152)
+		Files           []string  `json:"files,omitempty"`    // rollback: basenames to restore
+		SafetySnapshot  string    `json:"safety_snapshot,omitempty"`
+		SafetyFiles     []string  `json:"safety_files,omitempty"`
+		StartedAt       time.Time `json:"started_at,omitempty"`
+		ReleaseRevision string    `json:"release_revision,omitempty"`
+		CoreDigest      string    `json:"core_digest,omitempty"`
+		UpdaterDigest   string    `json:"updater_digest,omitempty"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&body); err != nil {
 		http.Error(w, "bad json: "+err.Error(), 400)
@@ -370,6 +409,16 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		if !isImmutableImageTag(body.Target) {
 			http.Error(w, "target must be stable vX.Y.Z or beta vX.Y.Z-beta.N", 400)
 			return
+		}
+		if body.Component == "core" {
+			release := controlPlaneRelease{
+				Target: body.Target, Revision: body.ReleaseRevision,
+				CoreDigest: body.CoreDigest, UpdaterDigest: body.UpdaterDigest,
+			}
+			if err := release.validate(); err != nil {
+				http.Error(w, "invalid control-plane release: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 		}
 	case "restart":
 		// target optional — when empty, compose's `${FTW_IMAGE_TAG:-latest}`
@@ -417,7 +466,7 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
 		return
 	}
-	if st := s.readState(); st.State == "transacting" {
+	if st := s.readState(); updaterStateInFlight(st.State) {
 		http.Error(w, "control-plane transaction already in progress", http.StatusConflict)
 		return
 	}
@@ -435,7 +484,10 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		} else if body.Action == "component_rollback" {
 			s.runComponentRollback(body.Component, body.StartedAt)
 		} else {
-			s.runComponentJob(body.Action, body.Target, body.Component, body.StartedAt)
+			s.runComponentJob(body.Action, body.Target, body.Component, body.StartedAt, controlPlaneRelease{
+				Target: body.Target, Revision: body.ReleaseRevision,
+				CoreDigest: body.CoreDigest, UpdaterDigest: body.UpdaterDigest,
+			})
 		}
 	}()
 
@@ -476,7 +528,7 @@ func (s *server) runJob(action, target string) {
 	s.runComponentJob(action, target, "core", time.Time{})
 }
 
-func (s *server) runComponentJob(action, target, component string, startedAt time.Time) {
+func (s *server) runComponentJob(action, target, component string, startedAt time.Time, releases ...controlPlaneRelease) {
 	now := startedAt
 	if now.IsZero() {
 		now = time.Now()
@@ -493,7 +545,11 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 			slog.Error("core update blocked", "err", err)
 			return
 		}
-		s.runControlPlaneUpdate(target, now)
+		var release controlPlaneRelease
+		if len(releases) > 0 {
+			release = releases[0]
+		}
+		s.runControlPlaneUpdate(release, now)
 		return
 	}
 	s.writeState(State{State: "pulling", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now})
@@ -1205,14 +1261,17 @@ func (s *server) previousImageID(component string) string {
 	return ""
 }
 
-// recoverCrashedState runs once at boot. Any in-flight state belongs to the
-// updater process that just died; waiting for a stale timeout would leave the
-// UI stuck forever. Rollback carries its safety backup in state.json, so it
-// can restore the pre-rollback data before reporting failure.
-func (s *server) recoverCrashedState() {
+// recoverCrashedState runs once at boot. A fresh paired transaction belongs to
+// the detached helper that intentionally replaced this updater, so the caller
+// starts a lease monitor instead of racing it. Other interrupted jobs can fail
+// immediately because no separate process owns them.
+func (s *server) recoverCrashedState() bool {
 	st := s.readState()
+	if controlPlaneRecoveryInFlight(st) {
+		return !s.recoverStaleControlPlaneTransaction()
+	}
 	if st.State != "pulling" && st.State != "restarting" && st.State != "restoring" {
-		return
+		return false
 	}
 	prev := st.State
 	if st.Action == "rollback" && validSnapshotID(st.SafetySnapshot) && hasRollbackState(st.SafetyFiles) && rollbackFilesValid(st.SafetyFiles) && s.containerID != nil && s.imageID != nil {
@@ -1223,7 +1282,7 @@ func (s *server) recoverCrashedState() {
 		if containerErr == nil && imageErr == nil {
 			s.recoverRollbackSafety(ctx, st, st.SafetySnapshot, st.SafetyFiles, containerID, imageID, "updater restarted during rollback")
 			slog.Warn("recovered interrupted rollback from safety backup", "prev_state", prev)
-			return
+			return false
 		}
 		st.Message = fmt.Sprintf("updater restarted during rollback; safety recovery unavailable: container=%v image=%v", containerErr, imageErr)
 	} else if st.Message == "" {
@@ -1233,6 +1292,16 @@ func (s *server) recoverCrashedState() {
 	st.UpdatedAt = time.Now()
 	s.writeState(st)
 	slog.Warn("recovered in-flight state as failed", "prev_state", prev)
+	return false
+}
+
+func updaterStateInFlight(state string) bool {
+	switch state {
+	case "pulling", "transacting", "restarting", "restoring":
+		return true
+	default:
+		return false
+	}
 }
 
 func rollbackFilesValid(files []string) bool {

@@ -22,8 +22,12 @@ Kör från installationskatalogen:
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
 RELEASE=vX.Y.Z # byt till den godkända beta- eller stable-releasen
+CORE_DIGEST=sha256:... # exakt värde från granskad ftw-control-plane.json
+UPDATER_DIGEST=sha256:... # exakt värde från samma fil
 bash /tmp/ftw-migrate.sh \
   --version "$RELEASE" \
+  --core-digest "$CORE_DIGEST" \
+  --updater-digest "$UPDATER_DIGEST" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -32,14 +36,18 @@ Om du saknar extern disk kan du utelämna `--backup-dir`, men kopiera den
 utskrivna `.ftwbak`-filen från `ftw-backups/` till en annan dator direkt efter
 migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
 `~/forty-two-watts`; om flera installationer hittas måste `--dir` anges.
+Detta är även den enda godkända första uppdateringen från
+`v1.10.0-beta.1`: den gamla produktens Update Center uppdaterar inte paret och
+skickar inte de verifierade digestvärdena.
 
 ### Fyra oberoende faser
 
 1. **Full backup.** Den nya backuphjälparen öppnar den äldre databasen
    skrivskyddat, gör ingen schemamigrering, bygger en komplett `.ftwbak`,
    verifierar filhashar och SQLite och stoppar vid minsta fel.
-2. **Core + updater.** Samma oföränderliga release-tagg används för båda.
-   Updatern startas före Core med samma data-bind. Core måste vara frisk på
+2. **Core + updater.** Samma verifierade releasepost och dess två exakta
+   digests används. Updatern startas före Core medan den äldre Core fortsätter
+   vara frisk. Därefter startas Core med samma data-bind. Core måste vara frisk på
    `/api/health` och helt
    startklar på `/api/status`; annars återställs Compose, tidigare
    oföränderliga image-ID:n och containrar automatiskt.
@@ -91,8 +99,12 @@ Run from the installation directory:
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
 RELEASE=vX.Y.Z # replace with the approved beta or stable release
+CORE_DIGEST=sha256:... # exact value from the reviewed ftw-control-plane.json
+UPDATER_DIGEST=sha256:... # exact value from the same file
 bash /tmp/ftw-migrate.sh \
   --version "$RELEASE" \
+  --core-digest "$CORE_DIGEST" \
+  --updater-digest "$UPDATER_DIGEST" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -101,14 +113,17 @@ If no external disk is available, omit `--backup-dir` and copy the printed
 archive from `ftw-backups/` to another computer immediately afterwards. The
 script can also discover the current directory, `~/ftw`, or
 `~/forty-two-watts`; ambiguous installations require `--dir`.
+This is also the only approved first update from `v1.10.0-beta.1`: the old
+product Update Center does not update the pair or send the verified digests.
 
 ### Four independent phases
 
 1. **Full backup.** The new helper opens the legacy database read-only, performs
    no schema migration, creates a complete archive, and verifies file hashes
    plus SQLite before any deployment change.
-2. **Core + updater.** Both use the same immutable release tag. Updater starts
-   before Core on the same data bind. Core must pass `/api/health` and full
+2. **Core + updater.** Both use the same verified release record and its two
+   exact digests. Updater starts first while old Core remains healthy. Core
+   then starts on the same data bind and must pass `/api/health` and full
    readiness on `/api/status`.
    Failure restores Compose, the prior immutable image IDs, and the previous
    containers automatically.

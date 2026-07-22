@@ -36,7 +36,10 @@ The checker uses GitHub Releases to select a release. It accepts a Core release
 only when `ftw-control-plane.json` names that release and pins both
 `ghcr.io/srcfl/ftw` and `ghcr.io/srcfl/ftw-updater` by digest. It resolves both
 exact tags again and rejects a missing or changed digest. The updater installs
-the exact `vX.Y.Z[-beta.N]` tag, never `:latest` or `:beta`.
+the two approved digest refs, never `:latest` or `:beta`. The tag remains the
+release identity, but the pull, Compose override and final running-image check
+all use the digests from the verified record. A moved tag cannot change the
+bytes installed after the check.
 
 Release notes are best-effort UI data. Failure to fetch notes does not weaken
 tag resolution or image verification.
@@ -73,8 +76,14 @@ The updater saves both prior image IDs before it pulls the pair. A detached
 helper starts the matching updater first, checks its handshake, then starts
 Core. Core must pass `/api/status` after state and migrations are ready. The
 helper marks the update done only after both containers report the exact target
-image refs. On failure it restores updater first and then Core. The final state
-remains failed even when rollback succeeds.
+digest refs. On failure it restores updater first and then Core. The final state
+remains failed even when rollback succeeds. The shared state file carries both
+old image IDs, both approved digests and a helper heartbeat. A new updater waits
+while that heartbeat is fresh. After five minutes without a heartbeat it starts
+a recovery helper from the saved old updater image. A durable transaction ID
+ties each heartbeat and helper name to one update. Recovery stops that exact
+stale helper before it restores updater first and Core second. It never changes
+the final result to `done`.
 
 The updater also requires a running, healthy `ftw-optimizer` service before it
 updates Core. If the merged Compose files lack that service, or its health
@@ -116,21 +125,35 @@ The version badge selects `stable` or `beta`, checks availability and starts
 an update. Changing channel does not deploy anything. A skipped version remains
 hidden only until a newer version appears.
 
-For manual Core + updater operation, set one exact release for both:
+The first pair-aware release needs one operator bridge from
+`v1.10.0-beta.1`. That updater can replace Core only and the old Core cannot
+send the verified digests required by the new updater. The old Update Center
+therefore must not be used for this one step.
+
+Use the migration command in [Upgrade an older installation](upgrade-from-legacy.md)
+with the exact Core and updater digests from the reviewed
+`ftw-control-plane.json`. The script:
+
+1. saves both running image IDs;
+2. pulls both approved digest refs and tags only those local images;
+3. replaces updater and confirms old Core remains healthy;
+4. replaces Core and waits for `/api/status`;
+5. restores updater first and Core second on any failure.
+
+After this one-time bridge, later pair-aware releases update through Update
+Center. A tag-only manual pull is not an approved pair update.
+
+For inspection after the bridge:
 
 ```bash
 cd ~/ftw
-RELEASE=vX.Y.Z # replace with an approved beta or stable release
-FTW_IMAGE_TAG="$RELEASE" FTW_UPDATER_IMAGE_TAG="$RELEASE" \
-  docker compose pull ftw ftw-updater
-FTW_IMAGE_TAG="$RELEASE" FTW_UPDATER_IMAGE_TAG="$RELEASE" \
-  docker compose up -d --no-deps ftw-updater
-FTW_IMAGE_TAG="$RELEASE" FTW_UPDATER_IMAGE_TAG="$RELEASE" \
-  docker compose up -d --no-deps ftw
+docker compose ps
+docker inspect "$(docker compose ps -q ftw-updater)" --format '{{.Image}} {{.Config.Image}}'
+docker inspect "$(docker compose ps -q ftw)" --format '{{.Image}} {{.Config.Image}}'
+curl -fsS http://127.0.0.1:8080/api/status
 ```
 
-Do not start Core first. Do not mix two release tags. For old layouts, use the
-migration script below instead of these commands.
+Do not start Core first and do not mix release records.
 
 Manage Optimizer and Drivers independently in Update Center. A blanket
 `docker compose pull` is intentionally not the documented upgrade procedure.
