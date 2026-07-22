@@ -19,6 +19,41 @@
     return caps.indexOf(capability) >= 0;
   }
 
+  // Some drivers expose more than one fixed register map. Keep these choices
+  // in the UI until the signed driver catalog grows a general config-schema
+  // field. Version gating prevents an older bundled GoodWe driver from being
+  // offered a profile it cannot load.
+  var DRIVER_CONFIG_PROFILES = {
+    goodwe: [
+      { value: "community-v1", label: "Community v1", unitId: 1 },
+      { value: "gw8kn-et-hk3000", label: "GW8KN-ET + HK3000", unitId: 247 }
+    ]
+  };
+
+  function versionAtLeast(version, minimum) {
+    var got = String(version || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    var want = String(minimum || "").match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!got || !want) return false;
+    for (var i = 1; i <= 3; i++) {
+      var g = parseInt(got[i], 10);
+      var w = parseInt(want[i], 10);
+      if (g !== w) return g > w;
+    }
+    return true;
+  }
+
+  function configProfilesFor(entry) {
+    if (!entry || entry.id !== "goodwe" || !versionAtLeast(entry.version, "1.0.2")) return [];
+    return DRIVER_CONFIG_PROFILES.goodwe;
+  }
+
+  function profileByValue(profiles, value) {
+    for (var i = 0; i < profiles.length; i++) {
+      if (profiles[i].value === value) return profiles[i];
+    }
+    return profiles[0] || null;
+  }
+
   S.tabs.devices = {
     render: function (ctx) {
       var help = ctx.help, escHtml = ctx.escHtml, config = ctx.config;
@@ -32,8 +67,12 @@
         '<select id="driver-catalog-picker"><option value="">Loading catalog…</option></select>' +
         '</div></div><div class="field-row"><div>' +
         '<label>Friendly name</label><input type="text" id="driver-catalog-name" placeholder="e.g. ferroamp-house">' +
-        '</div><div><p style="color:var(--text-dim);font-size:0.75rem;margin:24px 0 0">Beta installs only the selected signed driver. Core and other drivers stay unchanged.</p></div></div>' +
+        '</div><div id="driver-catalog-profile-wrap" hidden>' +
+        '<label>Register profile ' + help('Select the register map used by this inverter. The Unit ID remains editable after the driver is added.') + '</label>' +
+        '<select id="driver-catalog-profile"></select>' +
+        '</div></div>' +
         '<button class="btn-add" id="driver-catalog-add">+ Add selected</button>' +
+        '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">Beta installs only the selected signed driver. Core and other drivers stay unchanged.</p>' +
         '<p style="color:var(--text-dim);font-size:0.75rem;margin:8px 0 0">' +
         '<a href="https://github.com/srcfl/device-drivers/blob/main/SUPPORT_STATUS.md" target="_blank" rel="noopener" style="color:var(--accent-e)">Driver support and hardware test status</a>' +
         '</p>' +
@@ -92,6 +131,7 @@
             '<label>Unit ID ' + help('Slave address. Usually 1 for a single-device setup.') + '</label>' +
             '<input type="number" data-path="drivers.' + idx + '.capabilities.modbus.unit_id" value="' + (modbus.unit_id || 1) + '">' +
             '</fieldset>';
+          html += '<div class="drv-profile-slot" data-driver-idx="' + idx + '"></div>';
         }
         // Local-HTTP vs cloud-HTTP vs vehicle-over-proxy detection by
         // declared config shape + catalog capabilities. Vehicle drivers
@@ -333,6 +373,24 @@
       }
 
       // Driver catalog picker — fetch async, render into select.
+      function syncCatalogProfilePicker() {
+        var picker = document.getElementById("driver-catalog-picker");
+        var wrap = document.getElementById("driver-catalog-profile-wrap");
+        var profileSelect = document.getElementById("driver-catalog-profile");
+        if (!picker || !wrap || !profileSelect) return;
+        var chosen = picker.options[picker.selectedIndex];
+        var entry = chosen ? { id: chosen.dataset.id, version: chosen.dataset.version } : null;
+        var profiles = configProfilesFor(entry);
+        wrap.hidden = profiles.length === 0;
+        profileSelect.innerHTML = "";
+        profiles.forEach(function (profile) {
+          var opt = document.createElement("option");
+          opt.value = profile.value;
+          opt.textContent = profile.label + " · Unit ID " + profile.unitId;
+          profileSelect.appendChild(opt);
+        });
+      }
+
       function populateCatalogPicker(entries, channel) {
         var sel = document.getElementById("driver-catalog-picker");
         if (!sel) return;
@@ -357,6 +415,7 @@
           opt.dataset.readOnly = e.read_only ? "true" : "false";
           sel.appendChild(opt);
         });
+        syncCatalogProfilePicker();
       }
 
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -417,6 +476,30 @@
             }).then(function (r) { return r.json().then(function (body) { if (!r.ok) throw new Error(body.error || "rollback failed"); return body; }); })
               .then(function () { if (status) status.textContent = " Previous driver restored."; })
               .catch(function (err) { if (status) status.textContent = " " + err.message; btn.disabled = false; });
+          });
+        });
+        bodyEl.querySelectorAll(".drv-profile-slot").forEach(function (slot) {
+          var dIdx = parseInt(slot.getAttribute("data-driver-idx"), 10);
+          var d = config.drivers[dIdx];
+          if (!d || !d.lua) return;
+          var entry = byLua[d.lua];
+          var profiles = configProfilesFor(entry);
+          if (profiles.length === 0) return;
+          var current = (d.config && d.config.profile) || profiles[0].value;
+          var fs = '<fieldset><legend>Driver profile</legend>' +
+            '<label>Register profile ' + help('Choose the register map for this GoodWe model. Changing the profile also fills its usual Unit ID; you can edit that ID before saving.') + '</label>' +
+            '<select class="drv-profile-select" data-driver-idx="' + dIdx + '" data-path="drivers.' + dIdx + '.config.profile">';
+          profiles.forEach(function (profile) {
+            fs += '<option value="' + escHtml(profile.value) + '"' + (profile.value === current ? ' selected' : '') + '>' +
+              escHtml(profile.label + " · Unit ID " + profile.unitId) + '</option>';
+          });
+          fs += '</select></fieldset>';
+          slot.innerHTML = fs;
+          var select = slot.querySelector(".drv-profile-select");
+          if (select) select.addEventListener("change", function () {
+            var selected = profileByValue(profiles, select.value);
+            var unitInput = bodyEl.querySelector('[data-path="drivers.' + dIdx + '.capabilities.modbus.unit_id"]');
+            if (selected && unitInput) unitInput.value = String(selected.unitId);
           });
         });
         // Populate per-driver secret inputs (api_token, etc.) using the
@@ -553,6 +636,9 @@
           });
       });
 
+      var catalogPicker = document.getElementById("driver-catalog-picker");
+      if (catalogPicker) catalogPicker.addEventListener("change", syncCatalogProfilePicker);
+
       var btn = document.getElementById("driver-catalog-add");
       if (btn) btn.addEventListener("click", function () {
         var sel = document.getElementById("driver-catalog-picker");
@@ -566,6 +652,13 @@
         driver.capabilities = {};
         if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };
         if (protocols.indexOf("modbus") >= 0) driver.capabilities.modbus = { host: "", port: 502, unit_id: 1 };
+        var profileSelect = document.getElementById("driver-catalog-profile");
+        var profiles = configProfilesFor({ id: chosen.dataset.id, version: chosen.dataset.version });
+        if (profileSelect && profiles.length > 0) {
+          var selectedProfile = profileByValue(profiles, profileSelect.value);
+          driver.config = { profile: selectedProfile.value };
+          if (driver.capabilities.modbus) driver.capabilities.modbus.unit_id = selectedProfile.unitId;
+        }
         if (protocols.indexOf("http") >= 0) {
           var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
           driver.capabilities.http = { allowed_hosts: hosts };

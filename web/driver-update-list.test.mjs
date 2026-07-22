@@ -30,6 +30,17 @@ test("Devices can add one driver straight from the signed beta channel", () => {
   assert.match(devices, /Beta installs only the selected signed driver/);
 });
 
+test("Devices configure the GoodWe register profile without editing YAML", () => {
+  assert.match(devices, /DRIVER_CONFIG_PROFILES\s*=\s*\{/);
+  assert.match(devices, /goodwe:\s*\[/);
+  assert.match(devices, /value: "community-v1"/);
+  assert.match(devices, /value: "gw8kn-et-hk3000"/);
+  assert.match(devices, /id="driver-catalog-profile"/);
+  assert.match(devices, /data-path="drivers\.' \+ dIdx \+ '\.config\.profile"/);
+  assert.match(devices, /driver\.config = \{ profile: selectedProfile\.value \}/);
+  assert.match(devices, /unit_id = selectedProfile\.unitId/);
+});
+
 test("Update Center only offers an action for a newer signed version", () => {
   assert.match(badge, /entry\.update_available && entry\.repository_id && entry\.upstream_version/);
   assert.match(badge, /Update to /);
