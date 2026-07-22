@@ -589,10 +589,10 @@ type State struct {
 	FuseHoldMaxChargeW    float64
 	FuseHoldUntil         time.Time
 
-	// ManualHold pins the aggregate battery setpoint to a fixed power
-	// for a bounded duration, bypassing both the active manual mode
-	// and the MPC. Hot-installed via POST /api/battery/manual_hold;
-	// auto-expires. Zero ExpiresAt means inactive.
+	// ManualHold pins the battery pool or one battery to a fixed power
+	// for a bounded duration, bypassing both the active manual mode and
+	// the MPC. Hot-installed via POST /api/battery/manual_hold; it is
+	// never persisted and auto-expires. Zero ExpiresAt means inactive.
 	//
 	// Site sign convention: PowerW > 0 = charge, < 0 = discharge,
 	// 0 = idle. SoC clamps, slew, and the fuse guard still apply on
@@ -600,6 +600,10 @@ type State struct {
 	// Mutated under the same outer ctrlMu that protects the rest of
 	// State; no internal mutex.
 	ManualHold BatteryManualHold
+	// BatteryHoldTargetValid checks that a scoped hold still points at
+	// the same live hardware. Core wires this to driver health, battery
+	// telemetry, and the hardware identity reported by the driver.
+	BatteryHoldTargetValid func(driver, deviceID string) bool
 
 	// ManualPVHold pins a PV curtail cap for a bounded duration,
 	// overriding whatever the planner's slot directive says about
@@ -612,15 +616,17 @@ type State struct {
 }
 
 // BatteryManualHold is the full payload of a battery manual override.
-// See State.ManualHold for invariants.
+// Driver empty keeps the pool behavior. A scoped hold must also carry
+// DeviceID so a reused driver name cannot move it to other hardware.
 type BatteryManualHold struct {
+	Driver    string
+	DeviceID  string
 	PowerW    float64
 	ExpiresAt time.Time
 }
 
-// SetBatteryManualHold installs a manual override on the aggregate
-// battery setpoint. Caller must hold the outer ctrlMu. A zero
-// ExpiresAt clears any active hold (same as ClearBatteryManualHold).
+// SetBatteryManualHold installs a manual override. Caller must hold the
+// outer ctrlMu. A zero ExpiresAt clears any active hold.
 func (s *State) SetBatteryManualHold(h BatteryManualHold) {
 	if h.ExpiresAt.IsZero() {
 		s.ManualHold = BatteryManualHold{}
@@ -1108,6 +1114,15 @@ func ComputeDispatch(
 	// and the deadband. Falls through to distribute → slew → SoC clamp
 	// → fuse guard so safety bounds still apply.
 	manualHold, manualHoldActive := state.GetBatteryManualHold(time.Now())
+	if manualHoldActive && manualHold.Driver != "" {
+		valid := manualHold.DeviceID != "" && state.BatteryHoldTargetValid != nil &&
+			state.BatteryHoldTargetValid(manualHold.Driver, manualHold.DeviceID)
+		if !valid {
+			state.ClearBatteryManualHold()
+			manualHold = BatteryManualHold{}
+			manualHoldActive = false
+		}
+	}
 	if manualHoldActive {
 		// Reset PI + slot accumulators so reverting to a planner mode
 		// after the hold expires doesn't read stale state — same reset
@@ -2046,13 +2061,17 @@ func ComputeDispatch(
 
 	// ---- Distribute across batteries ----
 	var raw []DispatchTarget
-	switch effectiveMode {
-	case ModeSelfConsumption, ModePeakShaving:
-		raw = distributeProportional(onlineBats, totalCorrection, groupPV)
-	case ModePriority:
-		raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
-	case ModeWeighted:
-		raw = distributeWeighted(onlineBats, totalCorrection, state.Weights)
+	if manualHoldActive && manualHold.Driver != "" {
+		raw = distributeScopedManualHold(onlineBats, manualHold.Driver, currentTotal+totalCorrection)
+	} else {
+		switch effectiveMode {
+		case ModeSelfConsumption, ModePeakShaving:
+			raw = distributeProportional(onlineBats, totalCorrection, groupPV)
+		case ModePriority:
+			raw = distributePriority(onlineBats, totalCorrection, state.PriorityOrder)
+		case ModeWeighted:
+			raw = distributeWeighted(onlineBats, totalCorrection, state.Weights)
+		}
 	}
 
 	// ---- Slew rate limit per driver ----
@@ -2087,7 +2106,8 @@ func ComputeDispatch(
 		// A direct move to 0 W is safe here: it only removes battery load /
 		// discharge, and the fuse overflow guard below can still force
 		// discharge if the site actually needs it.
-		if (plannerSelfExportSurplusGate ||
+		scopedSiblingStanddown := manualHoldActive && manualHold.Driver != "" && raw[i].Driver != manualHold.Driver
+		if (plannerSelfExportSurplusGate || scopedSiblingStanddown ||
 			(manualHoldActive && math.Abs(manualHold.PowerW) < 1)) &&
 			math.Abs(raw[i].TargetW) < 1 {
 			raw[i].TargetW = 0
@@ -2782,6 +2802,19 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	}
 
 	return liveLoadW + batHeadroomW + evReserveW, true
+}
+
+func distributeScopedManualHold(bats []batteryInfo, driver string, powerW float64) []DispatchTarget {
+	out := make([]DispatchTarget, 0, len(bats))
+	for _, b := range bats {
+		targetW := 0.0
+		if b.driver == driver {
+			targetW = powerW
+		}
+		clamped, wasClamped := clampWithSoC(targetW, b)
+		out = append(out, DispatchTarget{Driver: b.driver, TargetW: clamped, Clamped: wasClamped})
+	}
+	return out
 }
 
 // distributeProportional splits the total desired battery power across the

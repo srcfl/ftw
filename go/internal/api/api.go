@@ -71,13 +71,17 @@ type Deps struct {
 	Tel            *telemetry.Store
 	// LogRing is the in-memory log buffer wired in main.go. Nil makes
 	// /api/drivers/{name}/logs and /api/support/dump return 503.
-	LogRing           *telemetry.LogRing
-	Ctrl              *control.State
-	CtrlMu            *sync.Mutex
-	State             *state.Store
-	CapMu             *sync.RWMutex
-	Capacities           map[string]float64 // driver → battery_capacity_wh (controllable pool)
-	TelemetryCapacities  map[string]float64 // all site batteries incl. observe_only (SoC weighting)
+	LogRing             *telemetry.LogRing
+	Ctrl                *control.State
+	CtrlMu              *sync.Mutex
+	State               *state.Store
+	CapMu               *sync.RWMutex
+	Capacities          map[string]float64 // driver → battery_capacity_wh (controllable pool)
+	TelemetryCapacities map[string]float64 // all site batteries incl. observe_only (SoC weighting)
+
+	// BatteryIdentity resolves the live driver to its current hardware.
+	BatteryIdentity func(driver string) (deviceID string, ok bool)
+
 	CfgMu             *sync.RWMutex
 	Cfg               *config.Config
 	ConfigPath        string

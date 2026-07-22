@@ -1,9 +1,11 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -98,6 +100,25 @@ func TestStaleSiteDefaultTrackerIncludesOwnerOnceAndRearmsOnRecovery(t *testing.
 		t.Fatal("tracker did not re-arm after recovery")
 	}
 	assertStringsEqual(t, pending, names)
+}
+
+func TestDispatchBlockClearsBatteryManualHold(t *testing.T) {
+	ctrl := control.NewState(0, 50, "meter")
+	ctrl.SetBatteryManualHold(control.BatteryManualHold{
+		Driver:    "bat_a",
+		DeviceID:  "maker:serial-a",
+		PowerW:    -2000,
+		ExpiresAt: time.Now().Add(time.Minute),
+	})
+	if _, active := ctrl.GetBatteryManualHold(time.Now()); !active {
+		t.Fatal("precondition: battery manual hold is not active")
+	}
+
+	clearBatteryManualHoldForDispatchBlock(ctrl, &sync.Mutex{})
+
+	if _, active := ctrl.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("stale site dispatch block left battery manual hold active")
+	}
 }
 
 func assertStringsEqual(t *testing.T, got, want []string) {

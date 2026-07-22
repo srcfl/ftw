@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
 // Battery manual-hold endpoint tests. Validation, route wiring, and
@@ -21,6 +22,22 @@ func newBatteryHoldServer(t *testing.T) (*Server, *control.State, *sync.Mutex) {
 	mu := &sync.Mutex{}
 	srv := New(&Deps{Ctrl: st, CtrlMu: mu})
 	return srv, st, mu
+}
+
+func newScopedBatteryHoldServer(t *testing.T) (*Server, *control.State) {
+	t.Helper()
+	srv, st, _ := newBatteryHoldServer(t)
+	soc := 0.5
+	tel := telemetry.NewStore()
+	tel.Update("bat_a", telemetry.DerBattery, 0, &soc, nil)
+	tel.DriverHealthMut("bat_a").RecordSuccess()
+	srv.deps.Tel = tel
+	srv.deps.CapMu = &sync.RWMutex{}
+	srv.deps.Capacities = map[string]float64{"bat_a": 10000}
+	srv.deps.BatteryIdentity = func(name string) (string, bool) {
+		return "maker:serial-a", name == "bat_a"
+	}
+	return srv, st
 }
 
 func TestBatteryHoldUnavailableWithoutCtrl(t *testing.T) {
@@ -171,5 +188,59 @@ func TestBatteryHoldGetReturnsInactiveWhenNoHold(t *testing.T) {
 	}
 	if got.Active {
 		t.Errorf("GET on empty state should report inactive, got %+v", got)
+	}
+}
+
+func TestBatteryHoldInstallsHardwareBoundDriverScope(t *testing.T) {
+	srv, st := newScopedBatteryHoldServer(t)
+	body := `{"direction":"charge","power_w":3000,"hold_s":60,"driver":"bat_a"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/battery/manual_hold", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	hold, active := st.GetBatteryManualHold(time.Now())
+	if !active || hold.Driver != "bat_a" || hold.DeviceID != "maker:serial-a" {
+		t.Fatalf("scoped hold = %+v, active=%v", hold, active)
+	}
+	var got batteryManualHoldResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Driver != hold.Driver {
+		t.Fatalf("response = %+v, hold = %+v", got, hold)
+	}
+}
+
+func TestBatteryHoldDriverScopeFailsClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Server)
+		want   int
+	}{
+		{"unknown driver", func(*Server) {}, http.StatusBadRequest},
+		{"offline driver", func(s *Server) { s.deps.Capacities["ghost"] = 10000 }, http.StatusConflict},
+		{"missing identity", func(s *Server) {
+			s.deps.Capacities["ghost"] = 10000
+			soc := 0.5
+			s.deps.Tel.Update("ghost", telemetry.DerBattery, 0, &soc, nil)
+			s.deps.Tel.DriverHealthMut("ghost").RecordSuccess()
+		}, http.StatusConflict},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newScopedBatteryHoldServer(t)
+			tc.mutate(srv)
+			body := `{"direction":"charge","power_w":3000,"hold_s":60,"driver":"ghost"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/battery/manual_hold", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("status=%d, want %d body=%s", rr.Code, tc.want, rr.Body.String())
+			}
+		})
 	}
 }
