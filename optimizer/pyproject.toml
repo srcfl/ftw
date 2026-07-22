@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ftw-optimizer"
-version = "0.1.0"
+version = "1.3.2"
 description = "CVXPY planning engine for ftw"
 requires-python = ">=3.11"
 dependencies = [
