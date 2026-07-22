@@ -5,10 +5,8 @@ name: changeset-check
 # CI tooling, markdown). Pattern lifted from umara/u-front.
 #
 # Escape layers, in order:
-#   1. PR title matches the auto-generated Version PR → skip (defensive;
-#      Version PRs are created via GITHUB_TOKEN so they don't cascade
-#      workflow runs, but this guards against a manual push to the
-#      Version PR branch).
+#   1. PR identity exactly matches the auto-generated Version PR → skip
+#      (trusted repository, head branch, base branch and title).
 #   2. PR carries the `no-changeset` label → skip (manual override for
 #      cases the allowlist doesn't anticipate).
 #   3. All changed files are in the path allowlist → skip.
@@ -32,9 +30,15 @@ jobs:
         id: version_pr
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          if [[ "${TITLE}" == "chore(release): version packages"* ]]; then
+          if [[ "${TITLE}" == "chore(release): version packages" \
+            && "${HEAD_REPO}" == "${GITHUB_REPOSITORY}" \
+            && "${HEAD_REF}" == "changeset-release/master" \
+            && "${BASE_REF}" == "master" ]]; then
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             echo "Auto-generated Version PR — gate skipped."
           else
