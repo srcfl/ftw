@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.3
+
+### Patch Changes
+
+- 8f26151: Add a GoodWe register-profile picker to the Devices UI so operators can install and configure the GW8KN-ET/HK3000 beta without editing YAML.
+
 ## 1.10.2
 
 ### Patch Changes
