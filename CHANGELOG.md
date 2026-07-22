@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.5
+
+### Patch Changes
+
+- c563cb5: Add a Settings control that disables duplicate battery readings from multi-resource gateways such as Sourceful Zap.
+
 ## 1.10.4
 
 ### Patch Changes
