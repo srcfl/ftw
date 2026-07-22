@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,6 +36,70 @@ func TestLoadOrCreate_RoundTrip(t *testing.T) {
 	}
 	if len(id1.PublicKeyHex()) != 128 {
 		t.Fatalf("pubkey hex must be 128 chars (64 bytes X||Y), got %d", len(id1.PublicKeyHex()))
+	}
+}
+
+func TestLoadOrCreate_ConcurrentFirstWriterWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nova.key")
+	const callers = 16
+	start := make(chan struct{})
+	identities := make(chan *Identity, callers)
+	errorsSeen := make(chan error, callers)
+	var wait sync.WaitGroup
+	for range callers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			identity, err := LoadOrCreateIdentity(path)
+			identities <- identity
+			errorsSeen <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(identities)
+	close(errorsSeen)
+
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	persisted, err := loadIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for identity := range identities {
+		if identity.PublicKeyHex() != persisted.PublicKeyHex() {
+			t.Fatal("concurrent creator returned a key that did not persist")
+		}
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "nova.key" {
+		t.Fatalf("identity creation left unexpected files: %v", entries)
+	}
+}
+
+func TestLoadOrCreate_DirectorySyncFailureKeepsInstalledKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nova.key")
+	wantErr := errors.New("directory sync failed")
+	if _, err := loadOrCreateIdentity(path, func(string) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("first create error = %v, want %v", err, wantErr)
+	}
+	persisted, err := loadIdentity(path)
+	if err != nil {
+		t.Fatalf("installed key after sync error: %v", err)
+	}
+	retried, err := LoadOrCreateIdentity(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.PublicKeyHex() != persisted.PublicKeyHex() {
+		t.Fatal("retry replaced the key left by the failed directory sync")
 	}
 }
 

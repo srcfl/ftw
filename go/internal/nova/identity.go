@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -23,18 +24,24 @@ type Identity struct {
 }
 
 // LoadOrCreateIdentity reads an ES256 private key from path, or generates
-// and writes one if the file does not exist. The file format is a
+// and writes one atomically if the file does not exist. The file format is a
 // standard PEM-encoded EC private key (matching Nova's own key layout
 // so the same PEM is interoperable).
 //
 // The enclosing directory is created with 0700 if missing; the key file
 // is written with 0600.
 func LoadOrCreateIdentity(path string) (*Identity, error) {
+	return loadOrCreateIdentity(path, syncDirectory)
+}
+
+func loadOrCreateIdentity(path string, syncDir func(string) error) (*Identity, error) {
 	if path == "" {
 		return nil, errors.New("nova: key path is empty")
 	}
 	if _, err := os.Stat(path); err == nil {
 		return loadIdentity(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("nova: stat key: %w", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("nova: mkdir keydir: %w", err)
@@ -48,10 +55,64 @@ func LoadOrCreateIdentity(path string) (*Identity, error) {
 		return nil, fmt.Errorf("nova: marshal key: %w", err)
 	}
 	out := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
-	if err := os.WriteFile(path, out, 0o600); err != nil {
+	installed, err := writeFileNoReplace(path, out, 0o600, syncDir)
+	if err != nil {
 		return nil, fmt.Errorf("nova: write key: %w", err)
 	}
+	if !installed {
+		return loadIdentity(path)
+	}
 	return &Identity{priv: priv}, nil
+}
+
+// writeFileNoReplace installs a fully synced temp file only when path does not
+// exist. A concurrent creator wins without having its key replaced.
+func writeFileNoReplace(path string, data []byte, perm fs.FileMode, syncDir func(string) error) (bool, error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return true, err
+	}
+	if err := syncDir(dir); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func loadIdentity(path string) (*Identity, error) {
@@ -77,12 +138,16 @@ func loadIdentity(path string) (*Identity, error) {
 // X||Y hex string (128 hex chars) that Nova's auth methods table stores.
 // This is what POST /gateways/claim expects in the `public_key` field.
 func (id *Identity) PublicKeyHex() string {
+	return hex.EncodeToString(id.PublicKeyBytes())
+}
+
+// PublicKeyBytes returns the raw 64-byte X||Y public key.
+func (id *Identity) PublicKeyBytes() []byte {
 	x := padBig(id.priv.X, 32)
 	y := padBig(id.priv.Y, 32)
 	buf := make([]byte, 0, 64)
 	buf = append(buf, x...)
-	buf = append(buf, y...)
-	return hex.EncodeToString(buf)
+	return append(buf, y...)
 }
 
 // SignRawHex signs msg with the identity's ES256 key and returns the raw
@@ -93,17 +158,27 @@ func (id *Identity) PublicKeyHex() string {
 // prefix msg with a unique, versioned purpose tag. Never pass
 // attacker-influenced bytes without that prefix.
 func (id *Identity) SignRawHex(msg string) (string, error) {
-	hash := sha256.Sum256([]byte(msg))
+	sig, err := id.SignRaw([]byte(msg))
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(sig), nil
+}
+
+// SignRaw hashes msg with SHA-256 and returns a raw 64-byte R||S signature.
+// Callers must start msg with a unique, versioned purpose tag.
+func (id *Identity) SignRaw(msg []byte) ([]byte, error) {
+	hash := sha256.Sum256(msg)
 	r, s, err := ecdsa.Sign(rand.Reader, id.priv, hash[:])
 	if err != nil {
-		return "", fmt.Errorf("nova: sign: %w", err)
+		return nil, fmt.Errorf("nova: sign: %w", err)
 	}
 	sig := make([]byte, 64)
 	rb := r.Bytes()
 	sb := s.Bytes()
 	copy(sig[32-len(rb):32], rb)
 	copy(sig[64-len(sb):64], sb)
-	return hex.EncodeToString(sig), nil
+	return sig, nil
 }
 
 func padBig(x *big.Int, size int) []byte {
