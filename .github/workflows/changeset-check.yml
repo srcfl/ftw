@@ -51,6 +51,10 @@ jobs:
           if echo "${LABELS}" | jq -e '.[] | select(.name == "no-changeset")' >/dev/null; then
             echo "skip=true" >> "${GITHUB_OUTPUT}"
             echo "PR carries 'no-changeset' label — release-notes gate satisfied."
+            {
+              echo "### Changeset exemption"
+              echo "The \`no-changeset\` label skips Changesets setup, install, validation, and entry checks."
+            } >> "${GITHUB_STEP_SUMMARY}"
           else
             echo "skip=false" >> "${GITHUB_OUTPUT}"
           fi
@@ -68,7 +72,7 @@ jobs:
       # with Changesets itself so an invalid entry fails on the PR instead of
       # breaking every release run after it reaches master.
       - name: Setup Node for Changesets validation
-        if: steps.version_pr.outputs.skip != 'true'
+        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -76,11 +80,11 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install Changesets dependencies
-        if: steps.version_pr.outputs.skip != 'true'
+        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: Validate pending Changesets
-        if: steps.version_pr.outputs.skip != 'true'
+        if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'
         # pull_request workflows run on a detached merge ref. Compare against
         # the fetched remote base because no local `master` branch exists.
         run: npx changeset status --since="origin/${{ github.base_ref }}"

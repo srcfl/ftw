@@ -40,4 +40,34 @@ describe("release metadata", () => {
       /changeset status --since=["']origin\/\$\{\{ github\.base_ref \}\}["']/,
     );
   });
+
+  it("resolves no-changeset before fail-closed Changesets validation", () => {
+    const labelDecision = changesetCheckWorkflow.indexOf(
+      "- name: Short-circuit on no-changeset label",
+    );
+    const setup = changesetCheckWorkflow.indexOf(
+      "- name: Setup Node for Changesets validation",
+    );
+    const install = changesetCheckWorkflow.indexOf(
+      "- name: Install Changesets dependencies",
+    );
+    const validate = changesetCheckWorkflow.indexOf(
+      "- name: Validate pending Changesets",
+    );
+    const guard =
+      "if: steps.version_pr.outputs.skip != 'true' && steps.label.outputs.skip != 'true'";
+
+    assert.ok(labelDecision >= 0, "workflow must resolve the label exemption");
+    assert.ok(labelDecision < setup && setup < install && install < validate);
+    for (const step of [setup, install, validate]) {
+      assert.equal(
+        changesetCheckWorkflow.slice(step, step + 240).includes(guard),
+        true,
+        "every Changesets validation step must use the label guard",
+      );
+    }
+    assert.match(changesetCheckWorkflow, /GITHUB_STEP_SUMMARY/);
+    assert.match(changesetCheckWorkflow, /npx changeset status/);
+    assert.doesNotMatch(changesetCheckWorkflow, /continue-on-error/);
+  });
 });
