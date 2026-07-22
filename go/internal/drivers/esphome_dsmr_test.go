@@ -2,10 +2,12 @@ package drivers
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -500,6 +502,134 @@ func TestESPHomeDSMR_BackoffResetsOnRecovery(t *testing.T) {
 	}
 	if next.Milliseconds() != 1000 {
 		t.Errorf("recovery poll interval: got %d ms, want 1000 (back to poll_ms)", next.Milliseconds())
+	}
+}
+
+func TestESPHomeDSMRRecoverySnapshotProvenance(t *testing.T) {
+	const (
+		sourceCommit = "2939543a2041a29566e6cf27a4eb5e4c69924de8"
+		assetURL     = "https://github.com/srcfl/device-drivers/releases/download/drivers-beta/driver-esphome-dsmr-v1.0.2-c415e507f4371c85.lua"
+		wantSHA256   = "c415e507f4371c859fbf60827cc0704c5e24ad122dca1a9e5e1f190d67e852d1"
+	)
+	raw, err := os.ReadFile("../../../drivers/esphome_dsmr.lua")
+	if err != nil {
+		t.Fatalf("read recovery snapshot: %v", err)
+	}
+	got := fmt.Sprintf("%x", sha256.Sum256(raw))
+	if got != wantSHA256 {
+		t.Fatalf("recovery snapshot SHA-256 = %s, want %s from %s at %s", got, wantSHA256, assetURL, sourceCommit)
+	}
+}
+
+func TestESPHomeDSMR_NameDerivedPhaseObjectIDs(t *testing.T) {
+	// Default ESPHome DSMR YAML derives object_ids from entity names
+	// ("Current Phase 1" → current_phase_1) rather than the DSMR
+	// platform keys (current_l1). Totals may still use consumed/
+	// produced when the operator renamed them.
+	srv := mkESPHomeStub(map[string]string{
+		"sensor/power_consumed":                   "0",
+		"sensor/power_produced":                   "4.782",
+		"sensor/power_consumed_phase_1":           "0",
+		"sensor/power_produced_phase_1":           "4.775",
+		"sensor/power_consumed_phase_2":           "0",
+		"sensor/power_produced_phase_2":           "4.783",
+		"sensor/power_consumed_phase_3":           "0",
+		"sensor/power_produced_phase_3":           "4.743",
+		"sensor/voltage_phase_1":                  "236.1",
+		"sensor/voltage_phase_2":                  "236.0",
+		"sensor/voltage_phase_3":                  "236.5",
+		"sensor/current_phase_1":                  "20.5",
+		"sensor/current_phase_2":                  "20.4",
+		"sensor/current_phase_3":                  "20.3",
+		"text_sensor/dsmr_identification":         "\"TESTDSMR-P1-00000001\"",
+		"text_sensor/electric_meter_equipment_id": "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
+	})
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	tel, env := loadESPHomeDriver(t, host, nil)
+
+	if _, sn := env.Identity(); sn != "TESTDSMR-P1-00000001" {
+		t.Errorf("serial = %q, want TESTDSMR-P1-00000001 (dsmr_identification)", sn)
+	}
+
+	m := tel.Get("zap-p1", telemetry.DerMeter)
+	if m == nil {
+		t.Fatal("expected meter telemetry")
+	}
+	if !near(m.RawW, -4782) {
+		t.Errorf("meter.w = %v, want -4782 (exporting)", m.RawW)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(m.Data, &data); err != nil {
+		t.Fatalf("meter data: %v", err)
+	}
+	if !near(data["l1_a"].(float64), 20.5) {
+		t.Errorf("l1_a = %v, want 20.5", data["l1_a"])
+	}
+	if !near(data["l2_a"].(float64), 20.4) {
+		t.Errorf("l2_a = %v, want 20.4", data["l2_a"])
+	}
+	if !near(data["l3_w"].(float64), -4743) {
+		t.Errorf("l3_w = %v, want -4743", data["l3_w"])
+	}
+	if !near(data["l1_v"].(float64), 236.1) {
+		t.Errorf("l1_v = %v, want 236.1", data["l1_v"])
+	}
+}
+
+func TestESPHomeDSMR_DeliveredReturnedObjectIDs(t *testing.T) {
+	// ESPHome's dsmr component names import/export totals
+	// power_delivered / power_returned. Phase reads may use the lN
+	// suffix (current_l1, power_delivered_l1, …) when the YAML pins
+	// those ids or the firmware exposes them directly.
+	srv := mkESPHomeStub(map[string]string{
+		"sensor/power_delivered":                  "1.5",
+		"sensor/power_returned":                   "0.25",
+		"sensor/power_delivered_l1":               "0.5",
+		"sensor/power_delivered_l2":               "0.5",
+		"sensor/power_delivered_l3":               "0.5",
+		"sensor/power_returned_l1":                "0.1",
+		"sensor/power_returned_l2":                "0.08",
+		"sensor/power_returned_l3":                "0.07",
+		"sensor/voltage_l1":                       "230",
+		"sensor/voltage_l2":                       "231",
+		"sensor/voltage_l3":                       "229",
+		"sensor/current_l1":                       "6.5",
+		"sensor/current_l2":                       "6.4",
+		"sensor/current_l3":                       "6.3",
+		"sensor/energy_delivered":                 "1000",
+		"sensor/energy_returned":                  "42",
+		"text_sensor/electric_meter_equipment_id": "\"\"",
+		"text_sensor/meter_identification":        "\"\"",
+	})
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "http://")
+
+	tel, _ := loadESPHomeDriver(t, host, nil)
+
+	m := tel.Get("zap-p1", telemetry.DerMeter)
+	if m == nil {
+		t.Fatal("expected meter telemetry")
+	}
+	if !near(m.RawW, 1250) {
+		t.Errorf("meter.w = %v, want +1250 (importing)", m.RawW)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(m.Data, &data); err != nil {
+		t.Fatalf("meter data: %v", err)
+	}
+	if !near(data["l1_w"].(float64), 400) {
+		t.Errorf("l1_w = %v, want 400", data["l1_w"])
+	}
+	if !near(data["l2_a"].(float64), 6.4) {
+		t.Errorf("l2_a = %v, want 6.4", data["l2_a"])
+	}
+	if !near(data["import_wh"].(float64), 1000000) {
+		t.Errorf("import_wh = %v, want 1000000", data["import_wh"])
 	}
 }
 
