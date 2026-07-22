@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.10.4
+
+### Patch Changes
+
+- d518600: Show only installed drivers with a different signed stable or beta version in Update Center.
+
 ## 1.10.3
 
 ### Patch Changes
