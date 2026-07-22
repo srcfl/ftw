@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -287,6 +288,49 @@ func TestStaleRestoringRecoveryHelperIsFencedBeforeRelaunch(t *testing.T) {
 	calls := runner.snapshot()
 	if launches != 1 || len(calls) != 1 || strings.Join(calls[0], " ") != "rm -f "+controlPlaneHelperName(true, testControlPlaneTransactionID) {
 		t.Fatalf("recovery helper fence: launches=%d calls=%v", launches, calls)
+	}
+}
+
+func TestRecoveryPreservesTerminalStateWrittenWhileHelperStops(t *testing.T) {
+	tests := []struct {
+		name          string
+		terminalState string
+		stopErr       error
+	}{
+		{name: "done after successful stop", terminalState: "done"},
+		{name: "failed before stop error", terminalState: "failed", stopErr: errors.New("helper already exited")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newTestServer(t)
+			now := time.Date(2026, 7, 22, 8, 40, 0, 0, time.UTC)
+			s.now = func() time.Time { return now }
+			release := testControlPlaneRelease("v1.2.3")
+			s.writeState(State{
+				State: "restoring", Action: "update", Component: "core", Target: release.Target,
+				StartedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-controlPlaneStaleAfter - time.Second),
+				PreviousImages:  map[string]string{"core": "sha256:core-old", "updater": "sha256:updater-old"},
+				ReleaseRevision: release.Revision, CoreDigest: release.CoreDigest, UpdaterDigest: release.UpdaterDigest,
+				TransactionID: testControlPlaneTransactionID, HelperKind: controlPlaneHelperNormal,
+			})
+			s.stopTransactionHelper = func(string, bool) error {
+				terminal := s.readState()
+				terminal.State = tc.terminalState
+				terminal.Message = "helper terminal result"
+				terminal.UpdatedAt = now
+				s.writeState(terminal)
+				return tc.stopErr
+			}
+			launches := 0
+			s.launchRecovery = func(State) error { launches++; return nil }
+			if recovered := s.recoverStaleControlPlaneTransaction(); !recovered {
+				t.Fatal("stale transaction was not handled")
+			}
+			state := s.readState()
+			if state.State != tc.terminalState || state.Message != "helper terminal result" || launches != 0 {
+				t.Fatalf("terminal result was overwritten: state=%+v launches=%d", state, launches)
+			}
+		})
 	}
 }
 

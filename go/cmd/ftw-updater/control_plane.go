@@ -379,47 +379,48 @@ func (s *server) recoverStaleControlPlaneTransaction() bool {
 		s.writeState(st)
 		return true
 	}
-	st.State = "restoring"
-	st.Message = "detached helper heartbeat expired; stopping it before updater-first pair recovery"
-	st.UpdatedAt = s.nowTime()
-	s.writeState(st)
 	if s.stopTransactionHelper == nil {
-		st.State = "failed"
-		st.Message = "detached helper heartbeat expired but helper fencing is unavailable; manual recovery required"
-		st.UpdatedAt = s.nowTime()
-		s.writeState(st)
+		current := s.readState()
+		if current.TransactionID != st.TransactionID || current.HelperKind != st.HelperKind || !controlPlaneRecoveryInFlight(current) {
+			return true
+		}
+		current.State = "failed"
+		current.Message = "detached helper heartbeat expired but helper fencing is unavailable; manual recovery required"
+		current.UpdatedAt = s.nowTime()
+		s.writeState(current)
 		return true
 	}
-	if err := s.stopTransactionHelper(st.TransactionID, recoveryHelper); err != nil {
-		st.State = "failed"
-		st.Message = "detached helper heartbeat expired but it could not be stopped; manual recovery required: " + err.Error()
-		st.UpdatedAt = s.nowTime()
-		s.writeState(st)
-		return true
-	}
+	stopErr := s.stopTransactionHelper(st.TransactionID, recoveryHelper)
 	// The helper may have written a terminal result while Docker stopped it.
-	// Keep that result. Otherwise renew the recovery claim after the helper
+	// Keep that result. Otherwise create the recovery claim after the helper
 	// can no longer overwrite it.
 	current := s.readState()
-	if current.TransactionID != st.TransactionID || !controlPlaneRecoveryInFlight(current) {
+	if current.TransactionID != st.TransactionID || current.HelperKind != st.HelperKind || !controlPlaneRecoveryInFlight(current) {
 		return true
 	}
-	st.State = "restoring"
-	st.HelperKind = controlPlaneHelperRecovery
-	st.Message = "detached helper stopped; launching updater-first pair recovery"
-	st.UpdatedAt = s.nowTime()
-	s.writeState(st)
+	if stopErr != nil {
+		current.State = "failed"
+		current.Message = "detached helper heartbeat expired but it could not be stopped; manual recovery required: " + stopErr.Error()
+		current.UpdatedAt = s.nowTime()
+		s.writeState(current)
+		return true
+	}
+	current.State = "restoring"
+	current.HelperKind = controlPlaneHelperRecovery
+	current.Message = "detached helper stopped; launching updater-first pair recovery"
+	current.UpdatedAt = s.nowTime()
+	s.writeState(current)
 	var err error
 	if s.launchRecovery != nil {
-		err = s.launchRecovery(st)
+		err = s.launchRecovery(current)
 	} else {
-		err = s.launchControlPlaneRecoveryHelper(st)
+		err = s.launchControlPlaneRecoveryHelper(current)
 	}
 	if err != nil {
-		st.State = "failed"
-		st.Message = "detached helper heartbeat expired and recovery helper could not start; pair may be mixed: " + err.Error()
-		st.UpdatedAt = s.nowTime()
-		s.writeState(st)
+		current.State = "failed"
+		current.Message = "detached helper heartbeat expired and recovery helper could not start; pair may be mixed: " + err.Error()
+		current.UpdatedAt = s.nowTime()
+		s.writeState(current)
 	}
 	return true
 }
