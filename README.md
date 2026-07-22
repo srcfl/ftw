@@ -67,6 +67,28 @@ The dashboard is intentionally local. Use a VPN or another operator-managed
 private network when access is needed away from home; FTW does not ship a
 public relay.
 
+## Install on Home Assistant
+
+The official Home Assistant app repository is
+[`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons).
+It has no published beta or stable app yet. The bootstrap version is not for
+normal or production use.
+
+After the first beta is published, open **Settings → Apps → App store →
+Repositories** in Home Assistant and add:
+
+```text
+https://github.com/srcfl/home-assistant-addons
+```
+
+Check the add-on repository's
+[compatibility record](https://github.com/srcfl/home-assistant-addons/blob/main/COMPATIBILITY.md)
+before each install or update. Report Home Assistant install, update, backup,
+restore, or container faults in its
+[issue tracker](https://github.com/srcfl/home-assistant-addons/issues).
+Report Core, API, UI, control, or state faults in this repository. Report driver
+faults to [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers/issues).
+
 ## Local development
 
 Requirements are Go, Python 3 and Node.js. The optimizer environment is cached
