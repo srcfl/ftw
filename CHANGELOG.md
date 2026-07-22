@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.10.1
+
+### Patch Changes
+
+- afd9a81: Add the internal read-only Home Link identity, grant, relay-auth, and energy-ledger contracts.
+- b4150d9: Reject unsafe Nova key files and persist first-boot identity atomically.
+  Key storage now fails closed without Unix owner and link metadata, hard links,
+  no-follow opens, file sync, and directory sync. It creates only the final key
+  directory and requires its trusted parent to exist.
+
 ## 1.10.0
 
 ### Minor Changes
