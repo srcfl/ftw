@@ -123,6 +123,10 @@ jobs:
           # needs broader scope, and a narrow token bounds the blast radius.
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
 
+      - name: Set up Docker Buildx for stable promotion validation
+        if: github.event_name == 'workflow_dispatch' && steps.changesets.outputs.hasChangesets == 'false'
+        uses: docker/setup-buildx-action@v3
+
       - name: Tag and create GitHub Release
         id: publish
         # Stable is an explicit promotion after real beta validation. Pushes
@@ -171,6 +175,55 @@ jobs:
             echo "Publish a beta from this exact commit before promotion." >&2
             exit 1
           fi
+
+          BETA_RELEASE_JSON="$(gh release view "${BETA_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json tagName,isDraft,isPrerelease,publishedAt 2>/dev/null || true)"
+          if ! jq -e --arg tag "${BETA_TAG}" '
+            .tagName == $tag
+            and .isDraft == false
+            and .isPrerelease == true
+            and (.publishedAt | type == "string" and length > 0)
+          ' <<<"${BETA_RELEASE_JSON}" >/dev/null; then
+            echo "${BETA_TAG} is not a completed GitHub prerelease." >&2
+            exit 1
+          fi
+
+          verify_beta_image() {
+            local image_ref="$1"
+            local metadata
+            metadata="${RUNNER_TEMP}/$(echo "${image_ref}" | tr '/:' '--').json"
+            if ! docker buildx imagetools inspect "${image_ref}" \
+              --format '{{json .Image}}' > "${metadata}"; then
+              echo "Published beta image ${image_ref} is unavailable." >&2
+              exit 1
+            fi
+            python3 - "${metadata}" "${GITHUB_SHA}" "${BETA_TAG}" "${image_ref}" <<'PY'
+          import json
+          import sys
+
+          path, expected_revision, expected_version, image_ref = sys.argv[1:]
+          with open(path, encoding="utf-8") as source:
+              images = json.load(source)
+
+          required_platforms = ("linux/amd64", "linux/arm64")
+          for platform in required_platforms:
+              image = images.get(platform)
+              if image is None:
+                  raise SystemExit(f"{image_ref} is missing required platform {platform}")
+              labels = image.get("config", {}).get("Labels", {})
+              revision = labels.get("org.opencontainers.image.revision")
+              version = labels.get("org.opencontainers.image.version")
+              if revision != expected_revision or version != expected_version:
+                  raise SystemExit(
+                      f"{image_ref} metadata mismatch for {platform}: "
+                      f"revision={revision!r} version={version!r}"
+                  )
+          PY
+          }
+
+          verify_beta_image "ghcr.io/srcfl/ftw:${BETA_TAG}"
+          verify_beta_image "ghcr.io/srcfl/ftw-updater:${BETA_TAG}"
           echo "Promoting tested ${BETA_TAG} to ${TAG}."
 
           # Build codename-annotated release notes. The script extracts

@@ -167,4 +167,45 @@ describe("release metadata", () => {
     assert.match(changesetCheckWorkflow, /npx changeset status/);
     assert.doesNotMatch(changesetCheckWorkflow, /continue-on-error/);
   });
+
+  it("checks the completed paired beta before any stable write", () => {
+    const prereleaseCheck = releaseWorkflow.indexOf(
+      'BETA_RELEASE_JSON="$(gh release view "${BETA_TAG}"',
+    );
+    const coreImageCheck = releaseWorkflow.indexOf(
+      'verify_beta_image "ghcr.io/srcfl/ftw:${BETA_TAG}"',
+    );
+    const updaterImageCheck = releaseWorkflow.indexOf(
+      'verify_beta_image "ghcr.io/srcfl/ftw-updater:${BETA_TAG}"',
+    );
+    const stableTagWrite = releaseWorkflow.indexOf('git tag -a "${TAG}"');
+    const stableReleaseWrite = releaseWorkflow.indexOf(
+      'gh release create "${TAG}"',
+    );
+    const assetDispatch = releaseWorkflow.lastIndexOf(
+      "gh workflow run release-assets.yml",
+    );
+
+    assert.ok(prereleaseCheck >= 0, "stable must require a completed beta release");
+    assert.ok(coreImageCheck >= 0, "stable must inspect the Core beta image");
+    assert.ok(updaterImageCheck >= 0, "stable must inspect the updater beta image");
+    assert.ok(stableTagWrite > updaterImageCheck, "beta checks must precede the stable tag");
+    assert.ok(
+      stableReleaseWrite > updaterImageCheck,
+      "beta checks must precede the stable release",
+    );
+    assert.ok(assetDispatch > updaterImageCheck, "beta checks must precede asset dispatch");
+    assert.match(releaseWorkflow, /BETA_COMMIT.+GITHUB_SHA/s);
+    assert.match(releaseWorkflow, /\.tagName == \$tag/);
+    assert.match(releaseWorkflow, /\.isDraft == false/);
+    assert.match(releaseWorkflow, /\.isPrerelease == true/);
+    assert.match(releaseWorkflow, /\.publishedAt/);
+    assert.match(
+      releaseWorkflow,
+      /python3 - "\$\{metadata\}" "\$\{GITHUB_SHA\}" "\$\{BETA_TAG\}"/,
+    );
+    assert.match(releaseWorkflow, /required_platforms = \("linux\/amd64", "linux\/arm64"\)/);
+    assert.match(releaseWorkflow, /org\.opencontainers\.image\.revision/);
+    assert.match(releaseWorkflow, /org\.opencontainers\.image\.version/);
+  });
 });
