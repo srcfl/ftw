@@ -69,13 +69,39 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
 	s := &server{
 		composeFile:     filepath.Join(dir, "docker-compose.yml"),
 		mainServiceName: canonicalMainServiceName,
+		socketPath:      filepath.Join(dir, "updater.sock"),
 		statusPath:      filepath.Join(dir, "state.json"),
 		pullRetryDelay:  time.Millisecond,
 		runner:          runner.run,
 		healthCheck:     func(context.Context, string) error { return nil },
 		imageID:         func(context.Context, string) (string, error) { return "sha256:current", nil },
-		containerID:     func(context.Context, string) (string, error) { return "ftw-container", nil },
-		chownFile:       func(string, int, int) error { return nil },
+		imageRef: func(_ context.Context, service string) (string, error) {
+			switch service {
+			case canonicalMainServiceName, legacyMainServiceName:
+				return canonicalMainImage + ":v1.2.3", nil
+			case updaterServiceName:
+				return canonicalUpdaterImage + ":v1.2.3", nil
+			default:
+				return "", fmt.Errorf("unknown service %q", service)
+			}
+		},
+		containerID:  func(context.Context, string) (string, error) { return "ftw-container", nil },
+		updaterReady: func(context.Context, string) error { return nil },
+		chownFile:    func(string, int, int) error { return nil },
+	}
+	s.launchTransaction = func(target string, previous map[string]string, startedAt time.Time) error {
+		s.imageRef = func(_ context.Context, service string) (string, error) {
+			switch service {
+			case canonicalMainServiceName, legacyMainServiceName:
+				return canonicalMainImage + ":" + target, nil
+			case updaterServiceName:
+				return canonicalUpdaterImage + ":" + target, nil
+			default:
+				return "", fmt.Errorf("unknown service %q", service)
+			}
+		}
+		s.runControlPlaneTransaction(target, previous, startedAt)
+		return nil
 	}
 	s.checkSnapshotFile = func(_ context.Context, _ string, snapshotID, file string) error {
 		_, err := os.Stat(filepath.Join(dir, "data", "snapshots", snapshotID, file))
@@ -95,6 +121,8 @@ func newTestServer(t *testing.T) (*server, *fakeRunner) {
       - ./data:/app/data
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
 `)
 	return s, runner
 }
@@ -115,11 +143,12 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	s.handleUpdate(rr, req)
 	waitForState(t, s, "done")
 	calls := runner.snapshot()
-	if len(calls) != 1 {
-		t.Fatalf("skip-pull should yield 1 call (up only), got %d: %v", len(calls), calls)
+	if len(calls) != 2 {
+		t.Fatalf("skip-pull should replace updater then Core, got %d calls: %v", len(calls), calls)
 	}
-	if !strings.Contains(strings.Join(calls[0], " "), "up -d") {
-		t.Errorf("single call should be `up -d`: %v", calls[0])
+	if !strings.Contains(strings.Join(calls[0], " "), "up -d "+updaterServiceName) ||
+		!strings.Contains(strings.Join(calls[1], " "), "up -d "+canonicalMainServiceName) {
+		t.Errorf("pair replacement order is wrong: %v", calls)
 	}
 }
 
@@ -205,15 +234,17 @@ func TestHandleUpdate_HappyPath(t *testing.T) {
 		t.Errorf("unexpected final state: %+v", st)
 	}
 	calls := runner.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("expected 2 docker calls, got %d: %v", len(calls), calls)
+	if len(calls) != 3 {
+		t.Fatalf("expected pull plus paired replacement, got %d calls: %v", len(calls), calls)
 	}
 	if calls[0][0] != "compose" || !strings.Contains(strings.Join(calls[0], " "), "pull") {
 		t.Errorf("first call should be pull: %v", calls[0])
 	}
-	up := strings.Join(calls[1], " ")
-	if !strings.Contains(up, "up -d") || strings.Contains(up, "--force-recreate") {
-		t.Errorf("update path should NOT force-recreate: %v", calls[1])
+	if up := strings.Join(calls[1], " "); !strings.Contains(up, "up -d "+updaterServiceName) || strings.Contains(up, "--force-recreate") {
+		t.Errorf("updater replacement is wrong: %v", calls[1])
+	}
+	if up := strings.Join(calls[2], " "); !strings.Contains(up, "up -d "+canonicalMainServiceName) || strings.Contains(up, "--force-recreate") {
+		t.Errorf("Core replacement is wrong: %v", calls[2])
 	}
 }
 
@@ -396,19 +427,21 @@ func TestHandleUpdate_PinsImageTagViaEnv(t *testing.T) {
 	}
 	waitForState(t, s, "done")
 	envs := runner.envSnapshot()
-	if len(envs) != 2 {
-		t.Fatalf("expected 2 docker calls (pull, up); got %d", len(envs))
+	if len(envs) != 3 {
+		t.Fatalf("expected pull plus paired replacement; got %d calls", len(envs))
 	}
 	for i, env := range envs {
-		found := false
+		foundCore, foundUpdater := false, false
 		for _, e := range env {
 			if e == "FTW_IMAGE_TAG=v0.44.0" {
-				found = true
-				break
+				foundCore = true
+			}
+			if e == "FTW_UPDATER_IMAGE_TAG=v0.44.0" {
+				foundUpdater = true
 			}
 		}
-		if !found {
-			t.Errorf("call %d missing FTW_IMAGE_TAG=v0.44.0; env=%v", i, env)
+		if !foundCore || !foundUpdater {
+			t.Errorf("call %d missing paired tag pins; env=%v", i, env)
 		}
 	}
 }
@@ -422,6 +455,8 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
       - ./data:/app/data
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -433,17 +468,17 @@ func TestHandleUpdate_MigratesHardcodedImageWithTransientOverride(t *testing.T) 
 	}
 	waitForState(t, s, "done")
 	calls := runner.snapshot()
-	if len(calls) != 2 {
-		t.Fatalf("want pull + up, got %v", calls)
+	if len(calls) != 3 {
+		t.Fatalf("want pair pull and updater-first replacement, got %v", calls)
 	}
 	for _, call := range calls {
 		joined := strings.Join(call, " ")
-		if !strings.Contains(joined, "-f "+s.composeFile+" -f ") || !strings.Contains(joined, "ftw-compose-update-") {
+		if !strings.Contains(joined, "-f "+s.composeFile+" -f ") || !strings.Contains(joined, "ftw-control-plane-update-") {
 			t.Fatalf("legacy update must append compatibility override after base file: %v", call)
 		}
-		if call[len(call)-1] != legacyMainServiceName {
-			t.Fatalf("legacy service identity must be preserved: %v", call)
-		}
+	}
+	if calls[1][len(calls[1])-1] != updaterServiceName || calls[2][len(calls[2])-1] != legacyMainServiceName {
+		t.Fatalf("pair replacement order or legacy service changed: %v", calls)
 	}
 }
 
@@ -456,6 +491,8 @@ func TestHandleUpdate_RestartMigratesHardcodedImageWithTransientOverride(t *test
       - ./data:/app/data
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
 
@@ -840,9 +877,16 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
       - ./data:/app/data
   ftw-optimizer:
     image: ghcr.io/srcfl/ftw-optimizer:${FTW_OPTIMIZER_IMAGE_TAG:-latest}
+  ftw-updater:
+    image: ghcr.io/srcfl/ftw-updater:${FTW_UPDATER_IMAGE_TAG:-latest}
 `)
 	s.mainServiceName = legacyMainServiceName
-	s.imageID = func(context.Context, string) (string, error) { return "sha256:previous", nil }
+	s.imageID = func(_ context.Context, service string) (string, error) {
+		if service == updaterServiceName {
+			return "sha256:updater-previous", nil
+		}
+		return "sha256:core-previous", nil
+	}
 	checks := 0
 	s.healthCheck = func(_ context.Context, service string) error {
 		if service == optimizerServiceName {
@@ -859,21 +903,27 @@ func TestUpdateHealthFailureRestoresPreviousImage(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
 	st := waitForState(t, s, "failed")
-	if !strings.Contains(st.Message, "previous image restored") {
-		t.Fatalf("state should report automatic rollback, got %+v", st)
+	if !strings.Contains(st.Message, "previous Core/updater pair restored") {
+		t.Fatalf("state should report pair rollback, got %+v", st)
 	}
 	calls := runner.snapshot()
-	if len(calls) != 4 {
-		t.Fatalf("want pull, new up, image tag, rollback up; got %v", calls)
+	if len(calls) != 7 {
+		t.Fatalf("want pair pull, two replacements, then updater-first pair rollback; got %v", calls)
 	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, "image tag sha256:previous") {
-		t.Fatalf("third call should tag previous image, got %q", got)
+	if got := strings.Join(calls[3], " "); !strings.Contains(got, "image tag sha256:updater-previous") {
+		t.Fatalf("rollback must tag updater first, got %q", got)
 	}
-	if got := strings.Join(calls[2], " "); !strings.Contains(got, canonicalMainImage+":ftw-rollback-") {
-		t.Fatalf("previous legacy image should be retagged into canonical repository, got %q", got)
+	if calls[4][len(calls[4])-1] != updaterServiceName {
+		t.Fatalf("rollback must recreate updater first, got %v", calls[4])
 	}
-	if got := strings.Join(calls[3], " "); !strings.Contains(got, "ftw-compose-update-") || calls[3][len(calls[3])-1] != legacyMainServiceName {
-		t.Fatalf("rollback must reuse transient pin and legacy service identity, got %q", got)
+	if got := strings.Join(calls[5], " "); !strings.Contains(got, "image tag sha256:core-previous") || !strings.Contains(got, canonicalMainImage+":ftw-rollback-") {
+		t.Fatalf("rollback must tag the previous Core image, got %q", got)
+	}
+	if calls[6][len(calls[6])-1] != legacyMainServiceName {
+		t.Fatalf("rollback must preserve the legacy Core service: %v", calls[6])
+	}
+	if st.PreviousImages["core"] != "sha256:core-previous" || st.PreviousImages["updater"] != "sha256:updater-previous" {
+		t.Fatalf("rollback history = %v", st.PreviousImages)
 	}
 }
 

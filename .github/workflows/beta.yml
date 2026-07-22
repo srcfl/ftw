@@ -94,8 +94,30 @@ jobs:
           username: ${{ vars.SOURCEFUL_GHCR_USER || github.actor }}
           password: ${{ secrets.SOURCEFUL_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
+      - name: Refuse to move an existing immutable tag
+        id: immutable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/srcfl/ftw${{ matrix.image_suffix }}:${{ needs.tag.outputs.version }}
+          TAG: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! scripts/inspect-image-digest.sh "${IMAGE}" >/dev/null 2>&1; then
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # A finished prior run is safe to repeat. A partial tag has no pair
+          # manifest, so a maintainer must review it instead of moving the tag.
+          mkdir -p existing
+          gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern ftw-control-plane.json --dir existing
+          scripts/verify-control-plane-manifest.sh \
+            existing/ftw-control-plane.json "${TAG}" "${GITHUB_SHA}"
+          echo "skip=true" >> "${GITHUB_OUTPUT}"
+
       - name: Build and publish beta image
         id: build
+        if: steps.immutable.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -118,6 +140,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
 
       - name: Login to compatibility GHCR namespace
+        if: steps.immutable.outputs.skip != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -125,6 +148,7 @@ jobs:
           password: ${{ secrets.LEGACY_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Mirror exact beta manifests to compatibility namespace
+        if: steps.immutable.outputs.skip != 'true'
         env:
           IMAGE_SUFFIX: ${{ matrix.image_suffix }}
           SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
@@ -140,11 +164,44 @@ jobs:
             test "${SOURCE_DIGEST}" = "${legacy_digest}"
           done
 
-  release:
-    name: publish GitHub prerelease
+  control-plane:
+    name: verify immutable Core/updater pair
     runs-on: ubuntu-latest
     needs: [tag, docker]
     steps:
+      - name: Checkout beta tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.tag.outputs.version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and verify pair manifest
+        env:
+          TAG: ${{ needs.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/create-control-plane-manifest.sh "${TAG}" "${GITHUB_SHA}" ftw-control-plane.json
+          scripts/verify-control-plane-manifest.sh ftw-control-plane.json "${TAG}" "${GITHUB_SHA}"
+
+      - name: Save pair manifest for release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-control-plane-${{ needs.tag.outputs.version }}
+          path: ftw-control-plane.json
+          if-no-files-found: error
+
+  release:
+    name: publish GitHub prerelease
+    runs-on: ubuntu-latest
+    needs: [tag, control-plane]
+    steps:
+      - name: Download verified pair manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: beta-control-plane-${{ needs.tag.outputs.version }}
+
       - name: Publish prerelease after images are available
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,11 +209,14 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "GitHub prerelease ${TAG} already exists"
+            gh release upload "${TAG}" ftw-control-plane.json \
+              --repo "${GITHUB_REPOSITORY}" --clobber
+            echo "Verified GitHub prerelease ${TAG} already exists"
             exit 0
           fi
           gh release create "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${TAG}" \
             --prerelease \
-            --generate-notes
+            --generate-notes \
+            ftw-control-plane.json

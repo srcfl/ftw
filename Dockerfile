@@ -90,8 +90,10 @@ EXPOSE 8080
 # Without this the binary fails fast with "open state … unable to
 # open database file" because SQLite can't create state.db inside
 # a directory it doesn't own.
-HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=12 \
-  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:8080/api/health || exit 1
+# Readiness must stay false until Core has opened and migrated state. The long
+# start period lets a valid large migration finish without marking it unhealthy.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30m --retries=12 \
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:8080/api/status || exit 1
 
 ENTRYPOINT ["/app/ftw"]
 CMD ["-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]

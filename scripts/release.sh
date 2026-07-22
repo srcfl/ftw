@@ -1,12 +1,11 @@
 #!/bin/bash
-# Build release archives and create (or attach to) a GitHub release.
+# Build release archives and attach them to a gated draft release.
 # Usage: ./scripts/release.sh v0.2.0
 #
 # Produces linux arm64/amd64 tarballs + windows amd64 zip via the
 # Makefile's `release` target, then uploads them to the GitHub release
-# for the given tag. If the release doesn't exist yet it's created with
-# auto-generated notes; if it does exist the assets are added with
-# --clobber so a re-run safely replaces a broken archive.
+# for the given tag. This script cannot create or publish a release. Only the
+# release workflow may publish after it checks the Core/updater pair.
 
 set -euo pipefail
 
@@ -14,6 +13,20 @@ VERSION=${1:?Usage: $0 <version>}
 REPO="srcfl/ftw"
 
 echo "Building FTW ${VERSION} (linux arm64/amd64, windows amd64)…"
+
+RELEASE_JSON="$(gh release view "${VERSION}" --repo "${REPO}" --json isDraft,assets)" || {
+    echo "Release ${VERSION} does not exist. Create it through release.yml." >&2
+    exit 1
+}
+if [ "$(jq -r .isDraft <<<"${RELEASE_JSON}")" != "true" ]; then
+    echo "Release ${VERSION} is not a draft; refusing local changes." >&2
+    exit 1
+fi
+if ! jq -e '.assets | any(.name == "ftw-control-plane.json")' <<<"${RELEASE_JSON}" >/dev/null; then
+    echo "Draft ${VERSION} lacks ftw-control-plane.json." >&2
+    exit 1
+fi
+
 make release
 
 ASSETS=(
@@ -35,14 +48,7 @@ for f in "${ASSETS[@]}"; do
     [ -f "$f" ] || { echo "missing: $f"; exit 1; }
 done
 
-if gh release view "${VERSION}" --repo "${REPO}" >/dev/null 2>&1; then
-    echo "Release ${VERSION} exists — uploading assets (clobbering duplicates)…"
-    gh release upload "${VERSION}" --repo "${REPO}" --clobber "${ASSETS[@]}"
-else
-    echo "Creating GitHub release ${VERSION}…"
-    gh release create "${VERSION}" --repo "${REPO}" \
-        --title "${VERSION}" --generate-notes \
-        "${ASSETS[@]}"
-fi
+echo "Uploading assets to verified draft ${VERSION}…"
+gh release upload "${VERSION}" --repo "${REPO}" --clobber "${ASSETS[@]}"
 
-echo "Done! Release: https://github.com/${REPO}/releases/tag/${VERSION}"
+echo "Assets attached. Only release-assets.yml may publish the draft."

@@ -40,14 +40,20 @@ const (
 	canonicalMainServiceName = "ftw"
 	legacyMainServiceName    = "forty-two-watts"
 	canonicalMainImage       = "ghcr.io/srcfl/ftw"
+	updaterServiceName       = "ftw-updater"
+	canonicalUpdaterImage    = "ghcr.io/srcfl/ftw-updater"
 	optimizerServiceName     = "ftw-optimizer"
 	canonicalOptimizerImage  = "ghcr.io/srcfl/ftw-optimizer"
+	updaterProtocolVersion   = 2
+	controlPlaneCapability   = "control-plane-pair-v1"
 )
+
+var Version = "dev"
 
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State           string            `json:"state"`            // idle, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"`            // idle, pulling, transacting, restarting, restoring, done, failed
 	Action          string            `json:"action,omitempty"` // update, restart, rollback (#152)
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
@@ -76,6 +82,7 @@ type server struct {
 	// main image. It lets immutable updates migrate safely without modifying
 	// the read-only host Compose file or changing its service/data layout.
 	updateOverrideFile string
+	socketPath         string
 	statusPath         string
 	stateMu            sync.Mutex
 	// skipPull is a dev-only escape hatch: when true, the "pulling" phase
@@ -105,8 +112,11 @@ type server struct {
 	// healthCheck waits for the recreated service to become healthy. Both are
 	// injectable so the rollback path is testable without Docker.
 	imageID           func(ctx context.Context, service string) (string, error)
+	imageRef          func(ctx context.Context, service string) (string, error)
 	containerID       func(ctx context.Context, service string) (string, error)
 	healthCheck       func(ctx context.Context, service string) error
+	updaterReady      func(ctx context.Context, target string) error
+	launchTransaction func(target string, previous map[string]string, startedAt time.Time) error
 	chownFile         func(string, int, int) error
 	checkSnapshotFile func(context.Context, string, string, string) error
 	stageSnapshotFile func(context.Context, string, string, string, string) error
@@ -217,6 +227,10 @@ func main() {
 	compose := flag.String("compose", envOr("FTW_UPDATER_COMPOSE", "/compose/docker-compose.yml"), "Path to docker-compose.yml")
 	mainService := flag.String("main-service", envOr("FTW_UPDATER_MAIN_SERVICE", ""), "Compose service for FTW (auto-detected when empty)")
 	skipPull := flag.Bool("skip-pull", envOr("FTW_UPDATER_SKIP_PULL", "") != "", "Dev: skip docker compose pull (keeps local image)")
+	transactionTarget := flag.String("control-plane-transaction", "", "Internal: apply a paired Core/updater release")
+	transactionCoreImage := flag.String("previous-core-image", "", "Internal: previous Core image ID")
+	transactionUpdaterImage := flag.String("previous-updater-image", "", "Internal: previous updater image ID")
+	transactionStartedAt := flag.String("transaction-started-at", "", "Internal: RFC3339 transaction start")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -237,6 +251,7 @@ func main() {
 
 	srv := &server{
 		composeFile:    *compose,
+		socketPath:     *socket,
 		statusPath:     *statusPath,
 		skipPull:       *skipPull,
 		pullRetryDelay: 60 * time.Second,
@@ -258,6 +273,7 @@ func main() {
 	}
 	srv.mainServiceName = selectedService
 	srv.imageID = srv.currentServiceImageID
+	srv.imageRef = srv.currentServiceImageRef
 	srv.containerID = srv.serviceContainerID
 	srv.healthCheck = srv.waitForServiceHealth
 	srv.chownFile = os.Chown
@@ -270,6 +286,16 @@ func main() {
 	slog.Info("ftw-updater: main service selected", "service", selectedService)
 	if *skipPull {
 		slog.Warn("ftw-updater: skip-pull enabled — production deploys should leave this off")
+	}
+	if *transactionTarget != "" {
+		startedAt, err := time.Parse(time.RFC3339Nano, *transactionStartedAt)
+		if err != nil {
+			startedAt = time.Now()
+		}
+		srv.runControlPlaneTransaction(*transactionTarget, map[string]string{
+			"core": *transactionCoreImage, "updater": *transactionUpdaterImage,
+		}, startedAt)
+		return
 	}
 	srv.recoverCrashedState()
 
@@ -391,6 +417,10 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "action must be update, restart, rollback, or component_rollback", 400)
 		return
 	}
+	if st := s.readState(); st.State == "transacting" {
+		http.Error(w, "control-plane transaction already in progress", http.StatusConflict)
+		return
+	}
 	if !s.runMu.TryLock() {
 		http.Error(w, "update already in progress", 409)
 		return
@@ -422,7 +452,15 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	st := s.readState()
-	_ = json.NewEncoder(w).Encode(st)
+	_ = json.NewEncoder(w).Encode(struct {
+		State
+		ProtocolVersion int      `json:"protocol_version"`
+		UpdaterVersion  string   `json:"updater_version"`
+		Capabilities    []string `json:"capabilities"`
+	}{
+		State: st, ProtocolVersion: updaterProtocolVersion, UpdaterVersion: Version,
+		Capabilities: []string{controlPlaneCapability},
+	})
 }
 
 // runJob executes a pull+up (or pull+up --force-recreate) sequence,
@@ -455,6 +493,8 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 			slog.Error("core update blocked", "err", err)
 			return
 		}
+		s.runControlPlaneUpdate(target, now)
+		return
 	}
 	s.writeState(State{State: "pulling", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now})
 
@@ -627,6 +667,13 @@ func (s *server) componentSpec(component string) (componentSpec, error) {
 			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", optimizerServiceName)
 		}
 		return componentSpec{name: "optimizer", service: optimizerServiceName, image: canonicalOptimizerImage, tagEnv: "FTW_OPTIMIZER_IMAGE_TAG", tagVariable: "FTW_OPTIMIZER_IMAGE_TAG"}, nil
+	case "updater":
+		if _, ok, err := serviceImageFromComposeFiles(s.composeFiles(), updaterServiceName); err != nil {
+			return componentSpec{}, err
+		} else if !ok {
+			return componentSpec{}, fmt.Errorf("compose service %q is unavailable", updaterServiceName)
+		}
+		return componentSpec{name: "updater", service: updaterServiceName, image: canonicalUpdaterImage, tagEnv: "FTW_UPDATER_IMAGE_TAG", tagVariable: "FTW_UPDATER_IMAGE_TAG"}, nil
 	default:
 		return componentSpec{}, fmt.Errorf("unsupported component %q", component)
 	}

@@ -21,7 +21,9 @@ Kör från installationskatalogen:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
+RELEASE=vX.Y.Z # byt till den godkända beta- eller stable-releasen
 bash /tmp/ftw-migrate.sh \
+  --version "$RELEASE" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -36,8 +38,9 @@ migreringen. Skriptet letar annars i aktuell katalog, `~/ftw` och
 1. **Full backup.** Den nya backuphjälparen öppnar den äldre databasen
    skrivskyddat, gör ingen schemamigrering, bygger en komplett `.ftwbak`,
    verifierar filhashar och SQLite och stoppar vid minsta fel.
-2. **Core + updater.** Det parade kontrollplanet hämtas och återskapas med
-   samma data-bind. Core måste både vara frisk på `/api/health` och helt
+2. **Core + updater.** Samma oföränderliga release-tagg används för båda.
+   Updatern startas före Core med samma data-bind. Core måste vara frisk på
+   `/api/health` och helt
    startklar på `/api/status`; annars återställs Compose, tidigare
    oföränderliga image-ID:n och containrar automatiskt.
 3. **Optimizer.** Optimizern hämtas och hälsokontrolleras separat. Om den
@@ -87,7 +90,9 @@ Run from the installation directory:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srcfl/ftw/master/scripts/migrate-legacy-compose.sh \
   -o /tmp/ftw-migrate.sh
+RELEASE=vX.Y.Z # replace with the approved beta or stable release
 bash /tmp/ftw-migrate.sh \
+  --version "$RELEASE" \
   --dir "$PWD" \
   --backup-dir /media/$USER/FTW-BACKUP
 ```
@@ -102,8 +107,9 @@ script can also discover the current directory, `~/ftw`, or
 1. **Full backup.** The new helper opens the legacy database read-only, performs
    no schema migration, creates a complete archive, and verifies file hashes
    plus SQLite before any deployment change.
-2. **Core + updater.** The paired control plane is recreated on the same data
-   bind and must pass both `/api/health` and full readiness on `/api/status`.
+2. **Core + updater.** Both use the same immutable release tag. Updater starts
+   before Core on the same data bind. Core must pass `/api/health` and full
+   readiness on `/api/status`.
    Failure restores Compose, the prior immutable image IDs, and the previous
    containers automatically.
 3. **Optimizer.** Optimizer is pulled and health-checked separately. Failure

@@ -181,6 +181,26 @@ func main() {
 		}
 	}()
 
+	// Core and updater share one release. Check the updater before state.Open
+	// so a legacy updater cannot start a new Core alone and let it migrate data.
+	if envBool("FTW_SELFUPDATE_ENABLED") && Version != "dev" {
+		socketPath := envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock")
+		var lastLog time.Time
+		for {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := selfupdate.RequireUpdaterRelease(probeCtx, socketPath, Version)
+			cancel()
+			if err == nil {
+				break
+			}
+			if time.Since(lastLog) >= 30*time.Second {
+				slog.Warn("waiting for matching updater", "core_version", Version, "err", err)
+				lastLog = time.Now()
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}
+
 	st, err := state.Open(statePath)
 	if err != nil {
 		slog.Error("open state", "err", err)
@@ -1811,9 +1831,12 @@ func main() {
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
-			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			CurrentVersion:         current,
+			RequiredUpdaterVersion: Version,
+			PairedImage:            "srcfl/ftw-updater",
+			PairManifestAsset:      "ftw-control-plane.json",
+			SocketPath:             envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:             envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 			// Publish events.UpdateAvailable when a new release lands so
 			// the notifications service (or any other subscriber) can act
 			// without polling the checker directly.
@@ -1835,9 +1858,10 @@ func main() {
 		optimizerUpdater = selfupdate.New(selfupdate.Config{
 			Repo: "srcfl/ftw", Image: "srcfl/ftw-optimizer",
 			ReleaseTagPrefix: "optimizer-", StoragePrefix: "optimizer.",
-			CurrentVersion: optimizerCurrent,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			CurrentVersion:         optimizerCurrent,
+			RequiredUpdaterVersion: Version,
+			SocketPath:             envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:             envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 		}, st)
 		optimizerUpdater.Start(ctx)
 		slog.Info("selfupdate enabled",

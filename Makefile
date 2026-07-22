@@ -11,7 +11,7 @@
 #   make dev                  — start sims + main app (hot-reload workflow)
 #   make clean                — remove all build artifacts
 
-.PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test build build-arm64 build-amd64 build-windows-amd64 release \
+.PHONY: help test optimizer-install optimizer-test compose-migration-test container-boundary-test release-contract-test build build-arm64 build-amd64 build-windows-amd64 release \
         run-sim dev fmt vet clean e2e ci ci-ui ci-hw-pi docs \
 		verify verify-all install-hooks driver-repository-validate driver-versions
 
@@ -71,6 +71,9 @@ compose-migration-test:
 container-boundary-test:
 	bash scripts/test-container-boundaries.sh
 
+release-contract-test:
+	bash scripts/test-control-plane-release.sh
+
 optimizer/.venv/.installed: optimizer/pyproject.toml
 	$(MAKE) optimizer-install
 
@@ -102,7 +105,7 @@ ci-hw-pi:
 # verify-all adds cross-compile checks for all release targets, catching
 # platform-specific syscall/import mistakes before push.
 
-verify: test compose-migration-test container-boundary-test
+verify: test compose-migration-test container-boundary-test release-contract-test
 	cd go && go vet ./...
 	cd go && go build ./...
 	@echo "verify: vet + test + build clean"

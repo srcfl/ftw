@@ -39,7 +39,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -97,6 +96,10 @@ type Config struct {
 	// Image overrides the registry path if it differs from Repo (rare —
 	// normally the GH repo and the GHCR image share a name). Defaults to Repo.
 	Image string
+	// PairedImage and PairManifestAsset make release checks require both
+	// control-plane images and their pinned digests.
+	PairedImage       string
+	PairManifestAsset string
 	// ReleaseTagPrefix selects component-specific GitHub Releases while the
 	// registry continues to use plain vX.Y.Z tags. Example: "optimizer-"
 	// resolves GitHub tag optimizer-v1.2.0 to GHCR tag v1.2.0.
@@ -112,6 +115,8 @@ type Config struct {
 
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
+	// RequiredUpdaterVersion is the Core release that the updater must report.
+	RequiredUpdaterVersion string
 	// CheckInterval is the probe cadence. 0 = 1 h.
 	CheckInterval time.Duration
 	// SocketPath is where the sidecar listens. Empty disables Trigger.
@@ -311,11 +316,19 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	}
 	targetTag := c.releaseTargetTag(rel.TagName)
 	if targetTag != "" {
-		ok, err := rp.hasTag(ctx, targetTag)
-		if err != nil {
-			return c.recordErr(fmt.Errorf("registry probe: %w", err))
+		if c.cfg.PairedImage != "" && c.cfg.PairManifestAsset != "" {
+			ok, err := c.verifyControlPlaneRelease(ctx, rel, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("control-plane release: %w", err))
+			}
+			deployable = ok
+		} else {
+			ok, err := rp.hasTag(ctx, targetTag)
+			if err != nil {
+				return c.recordErr(fmt.Errorf("registry probe: %w", err))
+			}
+			deployable = ok
 		}
-		deployable = ok
 	}
 
 	c.mu.Lock()
@@ -395,6 +408,10 @@ type ghRelease struct {
 	PublishedAt time.Time `json:"published_at"`
 	Draft       bool      `json:"draft"`
 	Prerelease  bool      `json:"prerelease"`
+	Assets      []struct {
+		Name               string `json:"name"`
+		BrowserDownloadURL string `json:"browser_download_url"`
+	} `json:"assets"`
 }
 
 // fetchLatestRelease asks GitHub for the most-recently-published
@@ -507,10 +524,10 @@ func (c *Checker) releaseTargetTag(releaseTag string) string {
 // periodic Check.
 func (c *Checker) Info() Info {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.reloadSkipLocked()
 	info := c.info
-	info.SidecarReady = c.sidecarReadyLocked()
+	c.mu.Unlock()
+	info.SidecarReady = c.sidecarReady()
 	return info
 }
 
@@ -557,19 +574,10 @@ func (c *Checker) SetChannel(channel Channel) error {
 	return nil
 }
 
-// sidecarReadyLocked reports whether the updater socket is present as an
-// actual Unix socket. An empty SocketPath means the feature was never
-// configured for this deploy — docker-compose sets it, native installs
-// typically don't.
-func (c *Checker) sidecarReadyLocked() bool {
-	if c.cfg.SocketPath == "" {
-		return false
-	}
-	fi, err := os.Stat(c.cfg.SocketPath)
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeSocket != 0
+func (c *Checker) sidecarReady() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), updaterCompatibilityHTTPTimeout)
+	defer cancel()
+	return RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.RequiredUpdaterVersion) == nil
 }
 
 func (c *Checker) reloadSkipLocked() {
@@ -684,15 +692,10 @@ func (c *Checker) TriggerRollback(ctx context.Context, snapshotID string, files 
 // endpoint. Shared by Trigger and TriggerRollback so the HTTP client
 // config (socket dialer + timeout) only lives in one place.
 func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
-	cli := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", c.cfg.SocketPath)
-			},
-		},
+	if err := RequireUpdaterRelease(ctx, c.cfg.SocketPath, c.cfg.RequiredUpdaterVersion); err != nil {
+		return err
 	}
+	cli := updaterHTTPClient(c.cfg.SocketPath)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://unix/update", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := cli.Do(req)
@@ -785,7 +788,7 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 
 func isInFlightState(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "transacting", "restarting", "restoring":
 		return true
 	default:
 		return false
