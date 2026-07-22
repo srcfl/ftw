@@ -125,6 +125,7 @@ type Manager struct {
 	store       *state.Store
 	hostVersion string
 	client      *http.Client
+	betaRepo    config.DriverRepositorySource
 
 	mu        sync.Mutex
 	manifests map[string]Manifest
@@ -151,10 +152,35 @@ func NewWithHostVersion(cfg *config.DeviceRepository, persistentDir string, stor
 	manager := &Manager{
 		cfg: effective, root: root, store: store, hostVersion: strings.TrimPrefix(hostVersion, "v"),
 		client:    &http.Client{Timeout: 15 * time.Second},
+		betaRepo:  officialBetaRepository(effective.Repositories),
 		manifests: make(map[string]Manifest), statuses: make(map[string]RepositoryStatus),
 	}
 	manager.reconcileActive()
 	return manager
+}
+
+func officialBetaRepository(configured []config.DriverRepositorySource) config.DriverRepositorySource {
+	id := config.DefaultDriverRepositoryBetaID
+	for {
+		available := true
+		for _, repo := range configured {
+			if repo.ID == id {
+				available = false
+				id += "-channel"
+				break
+			}
+		}
+		if available {
+			break
+		}
+	}
+	return config.DriverRepositorySource{
+		ID: id, Name: config.DefaultDriverRepositoryBetaName,
+		ManifestURL: config.DefaultDriverRepositoryBetaManifestURL, Enabled: true,
+		TrustedKeys: map[string]string{
+			config.DefaultDriverRepositorySigningKeyID: config.DefaultDriverRepositoryPublicKey,
+		},
+	}
 }
 
 func (m *Manager) ActiveDir() string { return filepath.Join(m.root, "active") }
@@ -338,6 +364,46 @@ func (m *Manager) Catalog() ([]CatalogCandidate, error) {
 	return out, nil
 }
 
+// ChannelCatalog reads the official signed beta channel without changing the
+// configured stable source. This lets an operator inspect or install one beta
+// driver while every other driver stays on its current artifact.
+func (m *Manager) ChannelCatalog(ctx context.Context, channel string) ([]CatalogCandidate, error) {
+	if m.store == nil {
+		return nil, errors.New("device repository store unavailable")
+	}
+	if channel != "beta" {
+		return nil, fmt.Errorf("unsupported driver channel %q", channel)
+	}
+	repo := m.betaRepo
+	if err := m.refreshOne(ctx, repo); err != nil {
+		return nil, err
+	}
+	manifest, err := m.manifestFor(repo)
+	if err != nil {
+		return nil, err
+	}
+	active, err := m.store.ActiveDriverRepoInstalls()
+	if err != nil {
+		return nil, err
+	}
+	activeByID := make(map[string]state.DriverRepoInstall, len(active))
+	for _, installed := range active {
+		activeByID[installed.DriverID] = installed
+	}
+	out := make([]CatalogCandidate, 0, len(manifest.Drivers))
+	for _, driver := range manifest.Drivers {
+		candidate := CatalogCandidate{RepositoryID: repo.ID, Repository: manifest.Repository, Driver: driver}
+		if installed, ok := activeByID[driver.ID]; ok {
+			copy := installed
+			candidate.Installed = &copy
+			candidate.UpdateAvailable = compareSemver(driver.Version, installed.Version) > 0
+		}
+		out = append(out, candidate)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Driver.ID < out[j].Driver.ID })
+	return out, nil
+}
+
 // EnrichCatalog overlays installed/upstream versions onto the resolver's
 // local/managed/bundled catalog without changing its precedence.
 func (m *Manager) EnrichCatalog(entries []drivers.CatalogEntry) []drivers.CatalogEntry {
@@ -438,6 +504,35 @@ func (m *Manager) Install(ctx context.Context, repositoryID, driverID, version s
 	if err != nil {
 		return state.DriverRepoInstall{}, err
 	}
+	return m.installResolved(ctx, repo, manifest, entry)
+}
+
+// InstallChannel installs one artifact from the pinned official beta channel.
+// The caller cannot supply a URL or trust root, and the configured stable
+// repository remains unchanged.
+func (m *Manager) InstallChannel(ctx context.Context, channel, driverID, version string) (state.DriverRepoInstall, error) {
+	if m.store == nil {
+		return state.DriverRepoInstall{}, errors.New("device repository store unavailable")
+	}
+	if channel != "beta" {
+		return state.DriverRepoInstall{}, fmt.Errorf("unsupported driver channel %q", channel)
+	}
+	repo := m.betaRepo
+	if err := m.refreshOne(ctx, repo); err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	manifest, err := m.manifestFor(repo)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	entry, err := findManifestDriver(manifest, driverID, version)
+	if err != nil {
+		return state.DriverRepoInstall{}, err
+	}
+	return m.installResolved(ctx, repo, manifest, entry)
+}
+
+func (m *Manager) installResolved(ctx context.Context, repo config.DriverRepositorySource, manifest Manifest, entry ManifestDriver) (state.DriverRepoInstall, error) {
 	raw, err := m.fetch(ctx, entry.URL, maxDriverBytes, repo.AllowInsecure)
 	if err != nil {
 		return state.DriverRepoInstall{}, err
@@ -689,14 +784,19 @@ func (m *Manager) find(repositoryID, driverID, version string) (config.DriverRep
 		if err != nil {
 			return repo, Manifest{}, ManifestDriver{}, err
 		}
-		for _, d := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
-			if d.ID == driverID && (version == "" || d.Version == version) {
-				return repo, manifest, d, nil
-			}
-		}
-		return repo, manifest, ManifestDriver{}, fmt.Errorf("driver %q version %q not found", driverID, version)
+		driver, err := findManifestDriver(manifest, driverID, version)
+		return repo, manifest, driver, err
 	}
 	return config.DriverRepositorySource{}, Manifest{}, ManifestDriver{}, fmt.Errorf("repository %q not found or disabled", repositoryID)
+}
+
+func findManifestDriver(manifest Manifest, driverID, version string) (ManifestDriver, error) {
+	for _, driver := range append(append([]ManifestDriver{}, manifest.Drivers...), manifest.History...) {
+		if driver.ID == driverID && (version == "" || driver.Version == version) {
+			return driver, nil
+		}
+	}
+	return ManifestDriver{}, fmt.Errorf("driver %q version %q not found", driverID, version)
 }
 
 func (m *Manager) prepareSymlink(logicalPath, target string) (commit func() error, cleanup func(), err error) {
