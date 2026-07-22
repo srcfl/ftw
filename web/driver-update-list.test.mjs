@@ -5,18 +5,21 @@ import test from "node:test";
 const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 const devices = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 
-test("Update Center lists configured drivers instead of the full repository", () => {
+test("Update Center lists only configured drivers with a signed update", () => {
   assert.match(badge, /apiFetch\("\/api\/drivers\/catalog"\)/);
   assert.match(badge, /apiFetch\("\/api\/config"\)/);
   assert.match(badge, /device_repository\/catalog\?channel=beta/);
   assert.match(badge, /configured\.has\(driverFileKey/);
-  assert.match(badge, /Installed drivers · signed updates/);
+  assert.match(badge, /stableAvailable \|\| betaAvailable/);
+  assert.match(badge, /Driver updates · choose stable or beta/);
+  assert.match(badge, /driverRows \? `<div class="component-subtitle">Driver updates/);
+  assert.doesNotMatch(badge, /No configured drivers found/);
   assert.doesNotMatch(badge, /apiFetch\("\/api\/device_repository\/catalog"\)/);
   assert.doesNotMatch(badge, /No managed driver candidates cached yet/);
 });
 
 test("Update Center can install one signed beta driver without a Core update", () => {
-  assert.match(badge, /Try beta /);
+  assert.match(badge, /"Beta " \+ escapeHTML\(betaDriver\.version\)/);
   assert.match(badge, /data-channel="beta"/);
   assert.match(badge, /channel \? \{ channel \} : \{\}/);
   assert.match(badge, /Only affected driver instances restart/);
@@ -41,9 +44,12 @@ test("Devices configure the GoodWe register profile without editing YAML", () =>
   assert.match(devices, /unit_id = selectedProfile\.unitId/);
 });
 
-test("Update Center only offers an action for a newer signed version", () => {
+test("Update Center only offers stable or beta when that signed version differs", () => {
   assert.match(badge, /entry\.update_available && entry\.repository_id && entry\.upstream_version/);
-  assert.match(badge, /Update to /);
+  assert.match(badge, /"Stable " \+ escapeHTML\(entry\.upstream_version\)/);
+  assert.match(badge, /betaDriver\.version !== current/);
+  assert.match(badge, /this\._driverCatalog\.entries\.length > 0/);
+  assert.doesNotMatch(badge, />current<\/span>/);
   assert.doesNotMatch(badge, /entry\.update_available \|\| !entry\.installed/);
   assert.doesNotMatch(badge, /\? "Update" : "Install"/);
 });

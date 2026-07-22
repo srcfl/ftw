@@ -236,7 +236,15 @@
             .map((candidate) => [candidate && candidate.driver && candidate.driver.id, candidate]));
           const entries = (Array.isArray(catalog.entries) ? catalog.entries : [])
             .filter((entry) => configured.has(driverFileKey(entry && (entry.path || entry.filename))))
-            .map((entry) => ({ ...entry, beta_candidate: betaByID.get(entry.id) || null }));
+            .map((entry) => ({ ...entry, beta_candidate: betaByID.get(entry.id) || null }))
+            .filter((entry) => {
+              if (entry.source === "local") return false;
+              const current = entry.installed_version || entry.version || "";
+              const betaDriver = entry.beta_candidate && entry.beta_candidate.driver;
+              const stableAvailable = !!(entry.update_available && entry.repository_id && entry.upstream_version);
+              const betaAvailable = !!(betaDriver && betaDriver.version && betaDriver.version !== current);
+              return stableAvailable || betaAvailable;
+            });
           this._driverCatalog = { entries };
           this._render();
         })
@@ -572,7 +580,7 @@
       const info = this._info || {};
       const optimizer = this._components && this._components.optimizer;
       const optimizerUpdates = optimizer && optimizer.updates;
-      const driverUpdate = this._driverCatalog && Array.isArray(this._driverCatalog.entries) && this._driverCatalog.entries.some((entry) => entry.update_available);
+      const driverUpdate = this._driverCatalog && Array.isArray(this._driverCatalog.entries) && this._driverCatalog.entries.length > 0;
       const showDot = ((info.update_available && !info.skipped) || (optimizerUpdates && optimizerUpdates.update_available) || driverUpdate) && this._phase !== "updating";
       const showOptimizerWarning = !!(optimizer && optimizer.configured && (optimizer.degraded === true || optimizer.healthy === false)) && this._phase !== "updating";
       const showBadge = showDot || showOptimizerWarning;
@@ -829,12 +837,12 @@
         const busy = this._componentAction === "driver:" + entry.id;
         const canReplace = entry.source !== "local";
         const action = canReplace && entry.update_available && entry.repository_id && entry.upstream_version
-          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Update to " + escapeHTML(entry.upstream_version)}</button>`
-          : `<span class="dim">current</span>`;
+          ? `<button class="btn btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(entry.repository_id)}" data-version="${escapeHTML(entry.upstream_version)}" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Stable " + escapeHTML(entry.upstream_version)}</button>`
+          : "";
         const beta = entry.beta_candidate || {};
         const betaDriver = beta.driver || {};
         const betaAction = canReplace && betaDriver.version && betaDriver.version !== current
-          ? `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(beta.repository_id || "")}" data-version="${escapeHTML(betaDriver.version)}" data-channel="beta" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Try beta " + escapeHTML(betaDriver.version)}</button>`
+          ? `<button class="btn btn-ghost btn-small" data-action="driver-change" data-id="${escapeHTML(entry.id || "")}" data-repository="${escapeHTML(beta.repository_id || "")}" data-version="${escapeHTML(betaDriver.version)}" data-channel="beta" data-installed="false" ${this._componentAction ? "disabled" : ""}>${busy ? "Updating…" : "Beta " + escapeHTML(betaDriver.version)}</button>`
           : "";
         const history = entry.repository_id
           ? `<button class="btn btn-ghost btn-small" data-action="driver-versions" data-id="${escapeHTML(entry.id || "")}">History</button>`
@@ -866,8 +874,8 @@
             <span class="component-actions"><span class="mini-channels">${optimizerChannelButtons}</span>${optimizerAction}${optimizerRollback}</span>
           </div>
         </div>
-        <div class="component-subtitle">Installed drivers · signed updates, one driver at a time</div>
-        <div class="component-card">${driverRows || `<p class="dim">No configured drivers found.</p>`}</div>
+        ${driverRows ? `<div class="component-subtitle">Driver updates · choose stable or beta</div>
+        <div class="component-card">${driverRows}</div>` : ""}
         ${historyRows ? `<details class="component-history"><summary>Update history</summary><table class="snapshots-table"><thead><tr><th>When</th><th>Component</th><th>Version</th><th>Result</th></tr></thead><tbody>${historyRows}</tbody></table></details>` : ""}
       </details>`;
     }
