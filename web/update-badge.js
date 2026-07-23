@@ -58,6 +58,7 @@
     }
 
     connectedCallback() {
+      this._resumeUpdateStatus();
       this._refresh(false);
       this._refreshComponents(false);
       this._refreshDriverCatalog();
@@ -66,6 +67,28 @@
         this._refreshComponents(false);
         this._refreshDriverCatalog();
       }, CHECK_INTERVAL_MS);
+    }
+
+    _resumeUpdateStatus() {
+      apiFetch("/api/version/update/status", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((st) => {
+          if (!st || !isUpdateInFlight(st.state) || this._phase === "updating") return;
+          const started = st.started_at ? Date.parse(st.started_at) : 0;
+          this._phase = "updating";
+          this._sidecarState = st;
+          this._updateStartedAt = started > 0 ? started : Date.now();
+          this._expectedRun = {
+            action: st.action || "update",
+            target: st.target || "",
+            snapshot: st.snapshot || "",
+            component: st.component || "",
+          };
+          this._render();
+          this._startElapsedTicker();
+          this._startStatusPolling();
+        })
+        .catch(() => { /* the service may still be starting */ });
     }
 
     disconnectedCallback() {
@@ -472,11 +495,16 @@
           }
           if (action === "update") {
             const skipped = resp.body && resp.body.snapshot_skipped;
+            const skipReason = resp.body && resp.body.snapshot_skip_reason;
             this._sidecarState = {
               state: skipped ? "pulling" : "snapshotting",
               action,
               target: this._expectedRun.target,
-              message: skipped ? "backup snapshot skipped for this update" : "creating backup snapshot",
+              message: skipped
+                ? (skipReason === "database schema unchanged"
+                  ? "Database schema unchanged; full history backup not needed"
+                  : "Backup snapshot skipped for this update")
+                : "Creating backup snapshot",
             };
             this._render();
           }
@@ -517,7 +545,10 @@
         .then((r) => (r.ok ? r.json() : null))
         .then((st) => {
           if (st && this._statusMatchesCurrentRun(st)) {
-            this._sidecarState = st;
+            const keepTimeout = this._sidecarState && this._sidecarState.timedOut &&
+              this._sidecarState.state === st.state &&
+              (this._sidecarState.phase_started_at || "") === (st.phase_started_at || "");
+            this._sidecarState = keepTimeout ? Object.assign({}, st, { timedOut: true }) : st;
             this._render();
             if (st.state === "done") {
               this._attemptReload();
@@ -555,7 +586,11 @@
       const timeoutMs = this._sidecarState && this._sidecarState.state === "snapshotting"
         ? SNAPSHOT_SOFT_TIMEOUT_MS
         : UPDATE_SOFT_TIMEOUT_MS;
-      if (Date.now() - this._updateStartedAt <= timeoutMs) return false;
+      const phaseStarted = this._sidecarState && this._sidecarState.phase_started_at
+        ? Date.parse(this._sidecarState.phase_started_at)
+        : 0;
+      const timeoutStartedAt = phaseStarted > 0 ? phaseStarted : this._updateStartedAt;
+      if (Date.now() - timeoutStartedAt <= timeoutMs) return false;
       if (!this._sidecarState || this._sidecarState.state === "done" || this._sidecarState.timedOut) return false;
       this._sidecarState = Object.assign({}, this._sidecarState, { timedOut: true });
       return true;
@@ -904,6 +939,19 @@
       const spinner = st.state === "failed" ? "" : `<span class="spinner"></span>`;
       const timedOut = !!st.timedOut;
       const failed = st.state === "failed";
+      const progress = operationProgress(st, action);
+      const phaseStarted = st.phase_started_at ? Date.parse(st.phase_started_at) : 0;
+      const phaseElapsed = Math.max(0, Math.round((Date.now() - (phaseStarted > 0 ? phaseStarted : this._updateStartedAt)) / 1000));
+      const byteProgress = st.progress_unit === "bytes" && st.progress_total > 0
+        ? `<p class="dim">${escapeHTML(formatBytes(st.progress_current || 0))} / ${escapeHTML(formatBytes(st.progress_total))}</p>`
+        : "";
+      const progressHTML = failed ? "" : `
+        <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.step}">
+          <span style="width:${progress.percent}%"></span>
+        </div>
+        <p class="update-step">Step ${progress.step} of ${progress.total} · ${escapeHTML(label)}</p>
+        <p class="dim">This step: ${escapeHTML(formatElapsed(phaseElapsed))}</p>
+        ${byteProgress}`;
 
       const body = failed
         ? `<p class="err">${escapeHTML(st.message || "Update failed")}</p>
@@ -911,9 +959,9 @@
         : timedOut
         ? `<p>Still working after ${elapsed}s. The main container may have been slow to restart.</p>
            <p>You can reload manually if the UI keeps the overlay stuck.</p>`
-        : `<p>${escapeHTML(label)}…</p>
+        : `${progressHTML}
            ${this._operationDetailHTML(st)}
-           <p class="dim">Elapsed: ${elapsed}s. The page will reload automatically.</p>`;
+           <p class="dim">Total: ${escapeHTML(formatElapsed(elapsed))}. The page will reload automatically.</p>`;
 
       const footer = failed || timedOut
         ? `<button class="btn btn-primary" data-action="reload">Reload page</button>
@@ -953,6 +1001,8 @@
           return msg + `<p class="dim">Downloading the pinned release image from GHCR.</p>`;
         case "restarting":
           return msg + `<p class="dim">Recreating the service. Short polling errors are expected while the container swaps.</p>`;
+        case "checking":
+          return msg + `<p class="dim">Core has started. Waiting for its API and health checks before marking the update complete.</p>`;
         case "restoring":
           return msg + `<p class="dim">Restoring files from the selected backup snapshot.</p>`;
         default:
@@ -1398,6 +1448,25 @@
           animation: spin 0.9s linear infinite;
           margin-bottom: 0.6rem;
         }
+        .update-progress {
+          width: min(360px, 82vw);
+          height: 8px;
+          margin: 0.2rem auto 0.7rem;
+          overflow: hidden;
+          border: 1px solid var(--line, #334155);
+          border-radius: 999px;
+          background: rgba(255,255,255,0.04);
+        }
+        .update-progress > span {
+          display: block;
+          height: 100%;
+          min-width: 4px;
+          border-radius: inherit;
+          background: var(--accent-e, #f59e0b);
+          transition: width 0.25s ease;
+        }
+        .update-step { margin: 0.25rem 0; font-weight: 600; }
+        .body.center .dim { margin: 0.25rem 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
       `;
     }
@@ -1412,6 +1481,7 @@
         if (action === "restart")  return "Restarting service";
         if (action === "rollback") return "Restarting on restored state";
         return "Applying update";
+      case "checking":   return "Checking service health";
       case "done":       return "Reloading";
       case "failed":     return "Failed";
       default:
@@ -1419,6 +1489,50 @@
         if (action === "rollback") return "Starting rollback";
         return "Starting update";
     }
+  }
+
+  function isUpdateInFlight(state) {
+    return ["starting", "snapshotting", "pulling", "restarting", "checking", "restoring"].includes(state);
+  }
+
+  function operationProgress(st, action) {
+    let total = Number(st && st.total_steps) || 0;
+    let step = Number(st && st.step) || 0;
+    if (!total) {
+      const hasBackup = action === "update" && (!st || !st.component || st.component === "core");
+      total = hasBackup ? 4 : 3;
+      const offset = hasBackup ? 1 : 0;
+      switch (st && st.state) {
+        case "snapshotting": step = 1; break;
+        case "pulling": step = 1 + offset; break;
+        case "restarting": step = 2 + offset; break;
+        case "checking":
+        case "done": step = 3 + offset; break;
+        default: step = 1;
+      }
+    }
+    step = Math.max(0, Math.min(step, total));
+    return { step, total, percent: total > 0 ? Math.round((step / total) * 100) : 0 };
+  }
+
+  function formatElapsed(seconds) {
+    const value = Math.max(0, Number(seconds) || 0);
+    if (value < 60) return `${value}s`;
+    const minutes = Math.floor(value / 60);
+    const rest = value % 60;
+    return `${minutes}m ${rest}s`;
+  }
+
+  function formatBytes(bytes) {
+    let value = Math.max(0, Number(bytes) || 0);
+    const units = ["B", "KB", "MB", "GB"];
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+      value /= 1024;
+      unit++;
+    }
+    const digits = unit > 0 && value < 10 ? 1 : 0;
+    return `${value.toFixed(digits)} ${units[unit]}`;
   }
 
   // safeHref rejects anything that isn't http:/https:. The release-notes URL

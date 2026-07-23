@@ -17,9 +17,8 @@
 //      button that can only fail.
 //   4. Update-now posts /api/version/update, opens an <ftw-modal>-based
 //      progress overlay, polls /api/version/update/status, and
-//      cache-busts reloads on `done`. Failure and ~3-minute timeout
-//      swap the spinner for a Reload / Continue-setup escape hatch so
-//      the operator can bail out.
+//      cache-busts reloads on `done`. Long phases keep polling while the
+//      UI offers a Reload / Continue-setup escape hatch.
 //   5. Continue-anyway hides the card for this page load only. We do
 //      NOT POST /api/version/skip — that would silence the dashboard's
 //      <ftw-update-badge> too, which is a separate decision the operator
@@ -37,6 +36,7 @@ import "./ftw-modal.js";
 
 const STATUS_POLL_MS = 2000;
 const UPDATE_SOFT_TIMEOUT_MS = 180 * 1000;
+const SNAPSHOT_SOFT_TIMEOUT_MS = 15 * 60 * 1000;
 
 class FtwUpdateCheck extends FtwElement {
   static styles = `
@@ -152,6 +152,24 @@ class FtwUpdateCheck extends FtwElement {
       color: var(--fg-dim);
       margin: 0;
     }
+    .update-progress {
+      width: min(340px, 78vw);
+      height: 8px;
+      margin: 0.2rem auto 0.7rem;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--fg) 5%, transparent);
+    }
+    .update-progress > span {
+      display: block;
+      height: 100%;
+      min-width: 4px;
+      border-radius: inherit;
+      background: var(--accent-e);
+      transition: width 0.25s ease;
+    }
+    .update-step { margin: 0.25rem 0; font-weight: 600; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
     /* Hide the modal's X during an active update. The operator should
@@ -264,7 +282,10 @@ class FtwUpdateCheck extends FtwElement {
         // should have rejected the promise above — but guard anyway so a
         // late resolution can never trigger _reload() after bailout.
         if (!st || this._phase !== "updating") return;
-        this._status = st;
+        const keepTimeout = this._status && this._status.timed_out &&
+          this._status.state === st.state &&
+          (this._status.phase_started_at || "") === (st.phase_started_at || "");
+        this._status = keepTimeout ? Object.assign({}, st, { timed_out: true }) : st;
         if (st.state === "failed") {
           this._fail(st.message || "Update failed");
           return;
@@ -281,12 +302,16 @@ class FtwUpdateCheck extends FtwElement {
       })
       .catch(() => { /* aborted, or main container mid-restart — both fine */ });
 
-    if (Date.now() - this._updateStartedAt > UPDATE_SOFT_TIMEOUT_MS) {
-      if (this._phase === "updating") {
-        this._stopPolling();
-        this._phase = "timedOut";
-        this.update();
-      }
+    const phaseStarted = this._status && this._status.phase_started_at
+      ? Date.parse(this._status.phase_started_at)
+      : 0;
+    const timeoutStartedAt = phaseStarted > 0 ? phaseStarted : this._updateStartedAt;
+    const timeout = this._status && this._status.state === "snapshotting"
+      ? SNAPSHOT_SOFT_TIMEOUT_MS
+      : UPDATE_SOFT_TIMEOUT_MS;
+    if (Date.now() - timeoutStartedAt > timeout && this._phase === "updating") {
+      this._status = Object.assign({}, this._status, { timed_out: true });
+      this.update();
     }
   }
 
@@ -389,7 +414,18 @@ class FtwUpdateCheck extends FtwElement {
     const st = this._status || { state: "starting" };
     const busy = this._phase === "updating";
     const failed = this._phase === "failed";
-    const timedOut = this._phase === "timedOut";
+    const timedOut = !!st.timed_out || this._phase === "timedOut";
+    const progress = operationProgress(st);
+    const elapsed = Math.max(0, Math.round((Date.now() - this._updateStartedAt) / 1000));
+    const phaseStarted = st.phase_started_at ? Date.parse(st.phase_started_at) : 0;
+    const phaseElapsed = Math.max(0, Math.round((Date.now() - (phaseStarted > 0 ? phaseStarted : this._updateStartedAt)) / 1000));
+    const progressHTML = `
+      <div class="update-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${progress.total}" aria-valuenow="${progress.step}">
+        <span style="width:${progress.percent}%"></span>
+      </div>
+      <p class="update-step">Step ${progress.step} of ${progress.total} · ${escapeHTML(stateLabel(st.state))}</p>
+      <p class="hint">${escapeHTML(st.message || "")}</p>
+      <p class="hint">This step: ${escapeHTML(formatElapsed(phaseElapsed))} · Total: ${escapeHTML(formatElapsed(elapsed))}</p>`;
 
     let title = "Updating";
     let msg = stateLabel(st.state) + "…";
@@ -406,7 +442,6 @@ class FtwUpdateCheck extends FtwElement {
         </div>
       `;
     } else if (timedOut) {
-      const elapsed = Math.round((Date.now() - this._updateStartedAt) / 1000);
       title = "Taking longer than expected";
       msg = `Still working after ${elapsed}s. You can reload to check, or continue setup and let the update finish in the background.`;
       hint = "";
@@ -423,7 +458,7 @@ class FtwUpdateCheck extends FtwElement {
         <span slot="title">${escapeHTML(title)}</span>
         <div class="progress">
           ${busy ? `<span class="spinner" aria-hidden="true"></span>` : ""}
-          <p class="msg">${escapeHTML(msg)}</p>
+          ${busy && !failed ? progressHTML : `<p class="msg">${escapeHTML(msg)}</p>`}
           ${hint ? `<p class="hint">${escapeHTML(hint)}</p>` : ""}
         </div>
         ${actions}
@@ -455,12 +490,37 @@ function escapeHTML(s) {
 
 function stateLabel(state) {
   switch (state) {
+    case "snapshotting": return "Creating backup";
     case "pulling":    return "Pulling new image";
     case "restarting": return "Applying update";
+    case "checking":   return "Checking service health";
     case "done":       return "Reloading";
     case "failed":     return "Failed";
     default:           return "Starting update";
   }
+}
+
+function operationProgress(st) {
+  let total = Number(st && st.total_steps) || 4;
+  let step = Number(st && st.step) || 0;
+  if (!step) {
+    switch (st && st.state) {
+      case "snapshotting": step = 1; break;
+      case "pulling": step = 2; break;
+      case "restarting": step = 3; break;
+      case "checking":
+      case "done": step = 4; break;
+      default: step = 1;
+    }
+  }
+  step = Math.max(0, Math.min(step, total));
+  return { step, total, percent: Math.round((step / total) * 100) };
+}
+
+function formatElapsed(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 60) return `${value}s`;
+  return `${Math.floor(value / 60)}m ${value % 60}s`;
 }
 
 customElements.define("ftw-update-check", FtwUpdateCheck);

@@ -150,6 +150,50 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing.T) {
+	const repo = "srcfl/ftw"
+	for _, tc := range []struct {
+		name           string
+		body           string
+		targetSchema   int
+		backupRequired bool
+	}{
+		{name: "same", body: "<!-- ftw-state-schema:7 -->", targetSchema: 7, backupRequired: false},
+		{name: "different", body: "<!-- ftw-state-schema:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "missing", body: "ordinary release notes", targetSchema: 0, backupRequired: true},
+		{name: "invalid", body: "<!-- ftw-state-schema:no -->", targetSchema: 0, backupRequired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newFakeRegistry(t, repo)
+			reg.addTag("v1.3.0")
+			registry := reg.server()
+			defer registry.Close()
+			releases := fakeReleasesServer(t, fakeRelease{
+				tag: "v1.3.0", body: tc.body, published: time.Now(),
+			})
+			defer releases.Close()
+
+			c := New(Config{
+				Repo: repo, CurrentVersion: "v1.2.0", CurrentStateSchema: 7,
+				RegistryBaseURL: registry.URL, LatestReleaseURL: releases.URL,
+			}, newMemStore())
+			info, err := c.Check(t.Context(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.CurrentStateSchema != 7 || info.TargetStateSchema != tc.targetSchema {
+				t.Fatalf("schema info = %+v", info)
+			}
+			if info.FullBackupRequired != tc.backupRequired {
+				t.Fatalf("FullBackupRequired = %v, want %v", info.FullBackupRequired, tc.backupRequired)
+			}
+			if strings.Contains(info.ReleaseBody, "ftw-state-schema") {
+				t.Fatalf("internal schema marker leaked into release notes: %q", info.ReleaseBody)
+			}
+		})
+	}
+}
+
 func TestPrefixedOptimizerBootstrapIsMonotonicFromLegacyBeta(t *testing.T) {
 	const image = "srcfl/ftw-optimizer"
 	reg := newFakeRegistry(t, image)
@@ -526,10 +570,44 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 		t.Errorf("fresh status = %+v, want restoring snapshot-123", s)
 	}
 
-	stale := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	stale := UpdateStatus{
+		State:          "pulling",
+		Action:         "update",
+		PhaseStartedAt: time.Now().Add(-10 * time.Minute),
+		UpdatedAt:      time.Now().Add(-10 * time.Minute),
+	}
 	writeJSON(t, path, stale)
 	if s := c.Status(); s.State != "failed" {
 		t.Errorf("stale state = %q, want failed", s.State)
+	}
+	stale.State = "checking"
+	writeJSON(t, path, stale)
+	if s := c.Status(); s.State != "failed" {
+		t.Errorf("stale checking state = %q, want failed", s.State)
+	}
+}
+
+func TestStatus_AllowsSilentLegacyPullUntilItsDockerTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	c := New(Config{StatusPath: path, Now: func() time.Time { return now }}, nil)
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-15 * time.Minute),
+	})
+	if got := c.Status(); got.State != "pulling" {
+		t.Fatalf("15-minute legacy pull state = %q, want pulling", got.State)
+	}
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-legacySidecarStaleThreshold - time.Second),
+	})
+	if got := c.Status(); got.State != "failed" {
+		t.Fatalf("expired legacy pull state = %q, want failed", got.State)
 	}
 }
 
@@ -540,11 +618,17 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 
 	started := time.Now().Add(-time.Second)
 	if err := c.WriteStatus(UpdateStatus{
-		State:     "snapshotting",
-		Action:    "update",
-		Target:    "v1.5.0",
-		StartedAt: started,
-		Message:   "creating backup snapshot",
+		State:           "snapshotting",
+		Action:          "update",
+		Target:          "v1.5.0",
+		StartedAt:       started,
+		PhaseStartedAt:  started,
+		Message:         "creating backup snapshot",
+		Step:            1,
+		TotalSteps:      4,
+		ProgressCurrent: 50,
+		ProgressTotal:   100,
+		ProgressUnit:    "bytes",
 	}); err != nil {
 		t.Fatalf("write status: %v", err)
 	}
@@ -555,6 +639,10 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt should be filled")
+	}
+	if got.Step != 1 || got.TotalSteps != 4 || got.ProgressCurrent != 50 ||
+		got.ProgressTotal != 100 || got.ProgressUnit != "bytes" || got.PhaseStartedAt.IsZero() {
+		t.Fatalf("progress fields = %+v", got)
 	}
 }
 

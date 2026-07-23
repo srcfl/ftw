@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      state_schema: ${{ steps.version.outputs.state_schema }}
     steps:
       - name: Checkout selected commit
         uses: actions/checkout@v5
@@ -45,6 +46,11 @@ jobs:
             echo "${TAG} does not match package.json version ${PACKAGE_VERSION}" >&2
             exit 1
           fi
+          STATE_SCHEMA="$(node -p "require('./state-schema.json').version")"
+          if [[ ! "${STATE_SCHEMA}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "state-schema.json must contain a positive integer version" >&2
+            exit 1
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -60,6 +66,7 @@ jobs:
             git push origin "refs/tags/${TAG}"
           fi
           echo "version=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "state_schema=${STATE_SCHEMA}" >> "${GITHUB_OUTPUT}"
 
   docker:
     name: beta docker (${{ matrix.target }})
@@ -149,6 +156,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.tag.outputs.version }}
+          STATE_SCHEMA: ${{ needs.tag.outputs.state_schema }}
         run: |
           set -euo pipefail
           if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
@@ -159,4 +167,5 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${TAG}" \
             --prerelease \
+            --notes "<!-- ftw-state-schema:${STATE_SCHEMA} -->" \
             --generate-notes

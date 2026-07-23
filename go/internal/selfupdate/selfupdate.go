@@ -66,6 +66,10 @@ const (
 	// state file hasn't been refreshed within this window. Catches the
 	// sidecar crashing mid-pull so the UI overlay can unblock.
 	staleThreshold = 5 * time.Minute
+	// Sidecars released before phase heartbeats can stay silent for the
+	// full Docker pull. Their pull timeout is two hours, so do not turn a
+	// slow but valid download into a false failure before then.
+	legacySidecarStaleThreshold = 2 * time.Hour
 )
 
 // Channel controls which immutable release stream the checker follows.
@@ -112,6 +116,10 @@ type Config struct {
 
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
+	// CurrentStateSchema is the running Core's on-disk state format. Core
+	// releases publish the target value in their release notes. A missing or
+	// different target keeps the full pre-update backup fail-closed.
+	CurrentStateSchema int
 	// CheckInterval is the probe cadence. 0 = 1 h.
 	CheckInterval time.Duration
 	// SocketPath is where the sidecar listens. Empty disables Trigger.
@@ -150,12 +158,15 @@ type Info struct {
 	// operators can read what's about to be applied without opening
 	// a new tab. Capped at MaxReleaseBodyBytes to keep a pathological
 	// release note from ballooning the Info payload.
-	ReleaseBody     string    `json:"release_body,omitempty"`
-	CheckedAt       time.Time `json:"checked_at,omitempty"`
-	UpdateAvailable bool      `json:"update_available"`
-	Skipped         bool      `json:"skipped"`
-	SkippedVersion  string    `json:"skipped_version,omitempty"`
-	Err             string    `json:"err,omitempty"`
+	ReleaseBody        string    `json:"release_body,omitempty"`
+	CurrentStateSchema int       `json:"current_state_schema,omitempty"`
+	TargetStateSchema  int       `json:"target_state_schema,omitempty"`
+	FullBackupRequired bool      `json:"full_backup_required"`
+	CheckedAt          time.Time `json:"checked_at,omitempty"`
+	UpdateAvailable    bool      `json:"update_available"`
+	Skipped            bool      `json:"skipped"`
+	SkippedVersion     string    `json:"skipped_version,omitempty"`
+	Err                string    `json:"err,omitempty"`
 	// SidecarReady is true only when the ftw-updater sidecar's Unix socket
 	// is present at SocketPath — i.e. the full pull+restart flow is wired
 	// up, which in practice means a docker-compose deploy. Native / WSL
@@ -175,14 +186,20 @@ const MaxReleaseBodyBytes = 16 * 1024
 // through unchanged. The main service may also write early states before
 // handing off to the sidecar, e.g. starting/snapshotting.
 type UpdateStatus struct {
-	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, checking, restoring, done, failed
 	Action          string            `json:"action,omitempty"`
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
 	Snapshot        string            `json:"snapshot,omitempty"`
 	StartedAt       time.Time         `json:"started_at,omitempty"`
+	PhaseStartedAt  time.Time         `json:"phase_started_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 	Message         string            `json:"message,omitempty"`
+	Step            int               `json:"step,omitempty"`
+	TotalSteps      int               `json:"total_steps,omitempty"`
+	ProgressCurrent int64             `json:"progress_current,omitempty"`
+	ProgressTotal   int64             `json:"progress_total,omitempty"`
+	ProgressUnit    string            `json:"progress_unit,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
 }
@@ -244,6 +261,8 @@ func New(cfg Config, store Store) *Checker {
 	}
 	c := &Checker{cfg: cfg, store: store, skippedKey: componentSkippedKey, channelKey: componentChannelKey}
 	c.info.Current = cfg.CurrentVersion
+	c.info.CurrentStateSchema = cfg.CurrentStateSchema
+	c.info.FullBackupRequired = true
 	c.info.Channel = channel
 	c.info.Channels = append([]Channel(nil), availableChannels...)
 	c.mu.Lock()
@@ -327,10 +346,15 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return info, nil
 	}
 	if deployable {
+		targetStateSchema := releaseStateSchema(rel.Body)
 		c.info.Latest = targetTag
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
-		c.info.ReleaseBody = truncateBody(rel.Body)
+		c.info.ReleaseBody = truncateBody(releaseBodyWithoutStateSchema(rel.Body))
+		c.info.TargetStateSchema = targetStateSchema
+		c.info.FullBackupRequired = c.cfg.CurrentStateSchema <= 0 ||
+			targetStateSchema <= 0 ||
+			targetStateSchema != c.cfg.CurrentStateSchema
 		c.info.UpdateAvailable = channelUpdateAvailable(targetTag, c.info.Current)
 	} else {
 		// Either GH has no published release yet, or the build workflow
@@ -548,6 +572,8 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.PublishedAt = time.Time{}
 	c.info.ReleaseNotesURL = ""
 	c.info.ReleaseBody = ""
+	c.info.TargetStateSchema = 0
+	c.info.FullBackupRequired = true
 	c.info.CheckedAt = time.Time{}
 	c.info.UpdateAvailable = false
 	c.info.Err = ""
@@ -708,8 +734,8 @@ func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
 }
 
 // Status reads the sidecar's state.json. Missing or unreadable returns
-// {state: idle}. A pulling/restarting state whose last heartbeat is older
-// than staleThreshold is surfaced as failed so the UI overlay unblocks.
+// {state: idle}. An in-flight state whose last heartbeat is too old is
+// surfaced as failed so the UI overlay unblocks.
 func (c *Checker) Status() UpdateStatus {
 	if c.cfg.StatusPath == "" {
 		return UpdateStatus{State: "idle"}
@@ -724,10 +750,11 @@ func (c *Checker) Status() UpdateStatus {
 		return UpdateStatus{State: "idle"}
 	}
 	if isInFlightState(st.State) && !st.UpdatedAt.IsZero() {
-		if c.cfg.Now().Sub(st.UpdatedAt) > staleThreshold {
+		threshold := updateStatusStaleThreshold(st)
+		if c.cfg.Now().Sub(st.UpdatedAt) > threshold {
 			st.State = "failed"
 			if st.Message == "" {
-				st.Message = "no heartbeat from updater in 5 min"
+				st.Message = fmt.Sprintf("no updater heartbeat for %s", threshold)
 			}
 		}
 	}
@@ -785,11 +812,21 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 
 func isInFlightState(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "restarting", "checking", "restoring":
 		return true
 	default:
 		return false
 	}
+}
+
+func updateStatusStaleThreshold(st UpdateStatus) time.Duration {
+	if st.PhaseStartedAt.IsZero() {
+		switch st.State {
+		case "pulling", "restarting", "restoring":
+			return legacySidecarStaleThreshold
+		}
+	}
+	return staleThreshold
 }
 
 func inferChannel(version string) Channel {
@@ -935,4 +972,36 @@ func truncateBody(b string) string {
 		return b
 	}
 	return b[:MaxReleaseBodyBytes] + "\n\n…(truncated — see release notes for full changelog)"
+}
+
+func releaseStateSchema(body string) int {
+	const prefix = "<!-- ftw-state-schema:"
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return 0
+	}
+	value := body[start+len(prefix):]
+	end := strings.Index(value, "-->")
+	if end < 0 {
+		return 0
+	}
+	schema, err := strconv.Atoi(strings.TrimSpace(value[:end]))
+	if err != nil || schema <= 0 {
+		return 0
+	}
+	return schema
+}
+
+func releaseBodyWithoutStateSchema(body string) string {
+	const prefix = "<!-- ftw-state-schema:"
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return body
+	}
+	rest := body[start+len(prefix):]
+	end := strings.Index(rest, "-->")
+	if end < 0 {
+		return body
+	}
+	return strings.TrimSpace(body[:start] + rest[end+3:])
 }

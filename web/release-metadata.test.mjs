@@ -14,6 +14,13 @@ const releaseWorkflow = readFileSync(
   join(repoRoot, ".github", "workflows", "release.yml"),
   "utf8",
 );
+const betaWorkflow = readFileSync(
+  join(repoRoot, ".github", "workflows", "beta.yml"),
+  "utf8",
+);
+const stateSchema = JSON.parse(
+  readFileSync(join(repoRoot, "state-schema.json"), "utf8"),
+);
 const changesetCheckWorkflow = readFileSync(
   join(repoRoot, ".github", "workflows", "changeset-check.yml"),
   "utf8",
@@ -83,6 +90,17 @@ describe("release metadata", () => {
       /changeset version.+npm install --package-lock-only/,
     );
     assert.match(releaseWorkflow, /version:\s+npm run version-packages/);
+  });
+
+  it("publishes the state schema in beta and stable release notes", () => {
+    assert.ok(Number.isInteger(stateSchema.version) && stateSchema.version > 0);
+    assert.match(betaWorkflow, /require\('\.\/state-schema\.json'\)\.version/);
+    assert.match(betaWorkflow, /--notes "<!-- ftw-state-schema:\$\{STATE_SCHEMA\} -->"/);
+    assert.match(releaseWorkflow, /require\('\.\/state-schema\.json'\)\.version/);
+    assert.match(
+      releaseWorkflow,
+      /<!-- ftw-state-schema:%s -->\\n' "\$\{STATE_SCHEMA\}" >> release-notes\.md/,
+    );
   });
 
   it("validates Changesets against the fetched PR base", () => {
