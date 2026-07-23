@@ -149,6 +149,11 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
+	fullBackupRequired := info.FullBackupRequired
+	startMessage := "starting update"
+	if !fullBackupRequired {
+		startMessage = "Database schema unchanged; full history backup not needed"
+	}
 	s.writeVersionUpdateStatus(selfupdate.UpdateStatus{
 		State:          "starting",
 		Action:         "update",
@@ -157,26 +162,29 @@ func (s *Server) handleVersionUpdate(w http.ResponseWriter, r *http.Request) {
 		StartedAt:      startedAt,
 		PhaseStartedAt: startedAt,
 		UpdatedAt:      time.Now(),
-		Message:        "starting update",
+		Message:        startMessage,
 		Step:           1,
 		TotalSteps:     4,
 	})
 	s.recordComponentStatus(selfupdate.UpdateStatus{
 		State: "starting", Action: "update", Component: "core", Target: info.Latest,
 		StartedAt: startedAt, PhaseStartedAt: startedAt, UpdatedAt: startedAt,
-		Message: "starting update", Step: 1, TotalSteps: 4,
+		Message: startMessage, Step: 1, TotalSteps: 4,
 	}, info.Current)
 
-	go s.runVersionUpdate(startedAt, info.Current, info.Latest)
+	go s.runVersionUpdate(startedAt, info.Current, info.Latest, fullBackupRequired)
 
 	resp := map[string]any{"status": "started", "action": "update", "target": info.Latest}
-	if s.deps.SnapshotDir == "" {
+	if !fullBackupRequired {
+		resp["snapshot_skipped"] = true
+		resp["snapshot_skip_reason"] = "database schema unchanged"
+	} else if s.deps.SnapshotDir == "" {
 		resp["snapshot_skipped"] = true
 	}
 	writeJSON(w, 202, resp)
 }
 
-func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
+func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string, fullBackupRequired bool) {
 	defer s.versionUpdateMu.Unlock()
 
 	writeUpdateStatus := func(updateState, message string) {
@@ -194,7 +202,7 @@ func (s *Server) runVersionUpdate(startedAt time.Time, current, latest string) {
 		})
 	}
 
-	snapshotSkipped := s.deps.SnapshotDir == ""
+	snapshotSkipped := s.deps.SnapshotDir == "" || !fullBackupRequired
 	if !snapshotSkipped {
 		phaseStarted := time.Now()
 		status := selfupdate.UpdateStatus{

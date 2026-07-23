@@ -495,11 +495,16 @@
           }
           if (action === "update") {
             const skipped = resp.body && resp.body.snapshot_skipped;
+            const skipReason = resp.body && resp.body.snapshot_skip_reason;
             this._sidecarState = {
               state: skipped ? "pulling" : "snapshotting",
               action,
               target: this._expectedRun.target,
-              message: skipped ? "backup snapshot skipped for this update" : "creating backup snapshot",
+              message: skipped
+                ? (skipReason === "database schema unchanged"
+                  ? "Database schema unchanged; full history backup not needed"
+                  : "Backup snapshot skipped for this update")
+                : "Creating backup snapshot",
             };
             this._render();
           }

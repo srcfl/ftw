@@ -116,6 +116,10 @@ type Config struct {
 
 	// CurrentVersion is the running binary's version (from main.Version).
 	CurrentVersion string
+	// CurrentStateSchema is the running Core's on-disk state format. Core
+	// releases publish the target value in their release notes. A missing or
+	// different target keeps the full pre-update backup fail-closed.
+	CurrentStateSchema int
 	// CheckInterval is the probe cadence. 0 = 1 h.
 	CheckInterval time.Duration
 	// SocketPath is where the sidecar listens. Empty disables Trigger.
@@ -154,12 +158,15 @@ type Info struct {
 	// operators can read what's about to be applied without opening
 	// a new tab. Capped at MaxReleaseBodyBytes to keep a pathological
 	// release note from ballooning the Info payload.
-	ReleaseBody     string    `json:"release_body,omitempty"`
-	CheckedAt       time.Time `json:"checked_at,omitempty"`
-	UpdateAvailable bool      `json:"update_available"`
-	Skipped         bool      `json:"skipped"`
-	SkippedVersion  string    `json:"skipped_version,omitempty"`
-	Err             string    `json:"err,omitempty"`
+	ReleaseBody        string    `json:"release_body,omitempty"`
+	CurrentStateSchema int       `json:"current_state_schema,omitempty"`
+	TargetStateSchema  int       `json:"target_state_schema,omitempty"`
+	FullBackupRequired bool      `json:"full_backup_required"`
+	CheckedAt          time.Time `json:"checked_at,omitempty"`
+	UpdateAvailable    bool      `json:"update_available"`
+	Skipped            bool      `json:"skipped"`
+	SkippedVersion     string    `json:"skipped_version,omitempty"`
+	Err                string    `json:"err,omitempty"`
 	// SidecarReady is true only when the ftw-updater sidecar's Unix socket
 	// is present at SocketPath — i.e. the full pull+restart flow is wired
 	// up, which in practice means a docker-compose deploy. Native / WSL
@@ -254,6 +261,8 @@ func New(cfg Config, store Store) *Checker {
 	}
 	c := &Checker{cfg: cfg, store: store, skippedKey: componentSkippedKey, channelKey: componentChannelKey}
 	c.info.Current = cfg.CurrentVersion
+	c.info.CurrentStateSchema = cfg.CurrentStateSchema
+	c.info.FullBackupRequired = true
 	c.info.Channel = channel
 	c.info.Channels = append([]Channel(nil), availableChannels...)
 	c.mu.Lock()
@@ -337,10 +346,15 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 		return info, nil
 	}
 	if deployable {
+		targetStateSchema := releaseStateSchema(rel.Body)
 		c.info.Latest = targetTag
 		c.info.PublishedAt = rel.PublishedAt
 		c.info.ReleaseNotesURL = rel.HtmlURL
-		c.info.ReleaseBody = truncateBody(rel.Body)
+		c.info.ReleaseBody = truncateBody(releaseBodyWithoutStateSchema(rel.Body))
+		c.info.TargetStateSchema = targetStateSchema
+		c.info.FullBackupRequired = c.cfg.CurrentStateSchema <= 0 ||
+			targetStateSchema <= 0 ||
+			targetStateSchema != c.cfg.CurrentStateSchema
 		c.info.UpdateAvailable = channelUpdateAvailable(targetTag, c.info.Current)
 	} else {
 		// Either GH has no published release yet, or the build workflow
@@ -558,6 +572,8 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.PublishedAt = time.Time{}
 	c.info.ReleaseNotesURL = ""
 	c.info.ReleaseBody = ""
+	c.info.TargetStateSchema = 0
+	c.info.FullBackupRequired = true
 	c.info.CheckedAt = time.Time{}
 	c.info.UpdateAvailable = false
 	c.info.Err = ""
@@ -956,4 +972,36 @@ func truncateBody(b string) string {
 		return b
 	}
 	return b[:MaxReleaseBodyBytes] + "\n\n…(truncated — see release notes for full changelog)"
+}
+
+func releaseStateSchema(body string) int {
+	const prefix = "<!-- ftw-state-schema:"
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return 0
+	}
+	value := body[start+len(prefix):]
+	end := strings.Index(value, "-->")
+	if end < 0 {
+		return 0
+	}
+	schema, err := strconv.Atoi(strings.TrimSpace(value[:end]))
+	if err != nil || schema <= 0 {
+		return 0
+	}
+	return schema
+}
+
+func releaseBodyWithoutStateSchema(body string) string {
+	const prefix = "<!-- ftw-state-schema:"
+	start := strings.Index(body, prefix)
+	if start < 0 {
+		return body
+	}
+	rest := body[start+len(prefix):]
+	end := strings.Index(rest, "-->")
+	if end < 0 {
+		return body
+	}
+	return strings.TrimSpace(body[:start] + rest[end+3:])
 }

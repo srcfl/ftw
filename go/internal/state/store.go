@@ -25,6 +25,10 @@ import (
 )
 
 const (
+	// SchemaVersion identifies the on-disk state format for update rollback.
+	// Increase it before a release that cannot safely reopen the same state.db
+	// with the prior Core version.
+	SchemaVersion = 1
 	// HotRetention = 30 days at 5s resolution
 	HotRetention = 30 * 24 * time.Hour
 	// WarmRetention = 12 months at 15-min buckets

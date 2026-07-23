@@ -3,12 +3,29 @@ package state
 import (
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestSchemaVersionMatchesReleaseMetadata(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "state-schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Version != SchemaVersion {
+		t.Fatalf("state-schema.json version = %d, Go schema version = %d", metadata.Version, SchemaVersion)
+	}
+}
 
 func freshStore(t *testing.T) *Store {
 	t.Helper()

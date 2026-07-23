@@ -54,6 +54,14 @@ func newCheckerAgainstWithStatus(t *testing.T, tag, current, statusPath string) 
 }
 
 func newCheckerAgainstWithStatusAndSocket(t *testing.T, tag, current, statusPath, socketPath string) *selfupdate.Checker {
+	return newCheckerAgainstOptions(t, tag, current, statusPath, socketPath, "", 0)
+}
+
+func newCheckerAgainstOptions(
+	t *testing.T,
+	tag, current, statusPath, socketPath, releaseBody string,
+	currentStateSchema int,
+) *selfupdate.Checker {
 	t.Helper()
 	const repo = "srcfl/ftw"
 
@@ -74,19 +82,21 @@ func newCheckerAgainstWithStatusAndSocket(t *testing.T, tag, current, statusPath
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"tag_name":     tag,
 			"html_url":     "https://example/releases/" + tag,
+			"body":         releaseBody,
 			"published_at": time.Now().Format(time.RFC3339),
 		})
 	}))
 	t.Cleanup(relSrv.Close)
 
 	c := selfupdate.New(selfupdate.Config{
-		Repo:             repo,
-		CurrentVersion:   current,
-		RegistryBaseURL:  regSrv.URL,
-		LatestReleaseURL: relSrv.URL,
-		CheckInterval:    time.Hour,
-		SocketPath:       socketPath,
-		StatusPath:       statusPath,
+		Repo:               repo,
+		CurrentVersion:     current,
+		CurrentStateSchema: currentStateSchema,
+		RegistryBaseURL:    regSrv.URL,
+		LatestReleaseURL:   relSrv.URL,
+		CheckInterval:      time.Hour,
+		SocketPath:         socketPath,
+		StatusPath:         statusPath,
 	}, newMemStore())
 	if _, err := c.Check(t.Context(), true); err != nil {
 		t.Fatalf("priming check: %v", err)
@@ -323,6 +333,42 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	gotStatus := c.Status()
 	if gotStatus.State != "failed" || gotStatus.Action != "update" || gotStatus.Target != "v1.5.0" {
 		t.Errorf("trigger failure should be published to status file, got %+v", gotStatus)
+	}
+}
+
+func TestVersionUpdateSkipsFullHistoryBackupWhenSchemaIsUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	statusPath := filepath.Join(dir, "update-state.json")
+	socketPath := startFakeSidecar(t, http.StatusInternalServerError)
+	c := newCheckerAgainstOptions(
+		t, "v1.5.0", "v1.4.0", statusPath, socketPath,
+		"<!-- ftw-state-schema:1 -->", 1,
+	)
+	st, err := state.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	snapDir := filepath.Join(dir, "snapshots")
+	srv := New(&Deps{SelfUpdate: c, State: st, SnapshotDir: snapDir})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/version/update", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["snapshot_skipped"] != true ||
+		response["snapshot_skip_reason"] != "database schema unchanged" {
+		t.Fatalf("response = %+v", response)
+	}
+	waitUntil(t, func() bool { return c.Status().State == "failed" })
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Fatalf("schema-compatible update created snapshot dir: %v", err)
 	}
 }
 

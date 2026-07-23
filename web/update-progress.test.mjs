@@ -14,6 +14,7 @@ test("update UI resumes work and shows each server phase", () => {
   assert.match(badge, /case "checking":\s+return "Checking service health"/);
   assert.match(badge, /This step:/);
   assert.match(badge, /Total:/);
+  assert.match(badge, /Database schema unchanged; full history backup not needed/);
 });
 
 test("setup keeps polling when a safe update takes longer", () => {

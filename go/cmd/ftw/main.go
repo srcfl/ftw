@@ -1811,9 +1811,10 @@ func main() {
 				"env", "FTW_SELFUPDATE_CURRENT_VERSION")
 		}
 		selfUpdater = selfupdate.New(selfupdate.Config{
-			CurrentVersion: current,
-			SocketPath:     envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
-			StatusPath:     envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
+			CurrentVersion:     current,
+			CurrentStateSchema: state.SchemaVersion,
+			SocketPath:         envOr("FTW_UPDATER_SOCKET", "/run/ftw-update/sock"),
+			StatusPath:         envOr("FTW_UPDATER_STATUS", "/run/ftw-update/state.json"),
 			// Publish events.UpdateAvailable when a new release lands so
 			// the notifications service (or any other subscriber) can act
 			// without polling the checker directly.

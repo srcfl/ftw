@@ -150,6 +150,50 @@ func TestCheck_UpdateAvailable(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresBackupOnlyWhenReleaseSchemaIsMissingOrDifferent(t *testing.T) {
+	const repo = "srcfl/ftw"
+	for _, tc := range []struct {
+		name           string
+		body           string
+		targetSchema   int
+		backupRequired bool
+	}{
+		{name: "same", body: "<!-- ftw-state-schema:7 -->", targetSchema: 7, backupRequired: false},
+		{name: "different", body: "<!-- ftw-state-schema:8 -->", targetSchema: 8, backupRequired: true},
+		{name: "missing", body: "ordinary release notes", targetSchema: 0, backupRequired: true},
+		{name: "invalid", body: "<!-- ftw-state-schema:no -->", targetSchema: 0, backupRequired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := newFakeRegistry(t, repo)
+			reg.addTag("v1.3.0")
+			registry := reg.server()
+			defer registry.Close()
+			releases := fakeReleasesServer(t, fakeRelease{
+				tag: "v1.3.0", body: tc.body, published: time.Now(),
+			})
+			defer releases.Close()
+
+			c := New(Config{
+				Repo: repo, CurrentVersion: "v1.2.0", CurrentStateSchema: 7,
+				RegistryBaseURL: registry.URL, LatestReleaseURL: releases.URL,
+			}, newMemStore())
+			info, err := c.Check(t.Context(), true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.CurrentStateSchema != 7 || info.TargetStateSchema != tc.targetSchema {
+				t.Fatalf("schema info = %+v", info)
+			}
+			if info.FullBackupRequired != tc.backupRequired {
+				t.Fatalf("FullBackupRequired = %v, want %v", info.FullBackupRequired, tc.backupRequired)
+			}
+			if strings.Contains(info.ReleaseBody, "ftw-state-schema") {
+				t.Fatalf("internal schema marker leaked into release notes: %q", info.ReleaseBody)
+			}
+		})
+	}
+}
+
 func TestPrefixedOptimizerBootstrapIsMonotonicFromLegacyBeta(t *testing.T) {
 	const image = "srcfl/ftw-optimizer"
 	reg := newFakeRegistry(t, image)

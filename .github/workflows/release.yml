@@ -231,6 +231,12 @@ jobs:
           # and the next version-shaped heading) and prepends the
           # Hitchhiker codename header.
           node scripts/apply-codename.cjs "${VERSION}" > release-notes.md
+          STATE_SCHEMA="$(node -p "require('./state-schema.json').version")"
+          if [[ ! "${STATE_SCHEMA}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "state-schema.json must contain a positive integer version" >&2
+            exit 1
+          fi
+          printf '\n\n<!-- ftw-state-schema:%s -->\n' "${STATE_SCHEMA}" >> release-notes.md
           echo "--- release-notes.md ---"
           cat release-notes.md
           echo "--- end ---"
