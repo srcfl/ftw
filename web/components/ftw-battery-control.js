@@ -1,18 +1,18 @@
 // <ftw-battery-control> — operator-pinned battery setpoint modal.
 //
 // Wraps a <ftw-modal> with a direction segmented control (charge /
-// discharge / idle), power input, duration chips (5 / 15 / 30 min),
-// active-hold banner, and Stop / Install buttons. Talks to the
-// /api/battery/manual_hold endpoints; safety clamps (SoC, per-driver
-// caps, slew, fuse guard) are enforced server-side regardless of what
-// is requested here.
+// discharge / idle), optional battery scope, power input, duration
+// chips (5 / 15 / 30 min), active-hold banner, and Stop / Install
+// buttons. Talks to the /api/battery/manual_hold endpoints; core keeps
+// every safety limit in force.
 //
 // Usage:
 //
 //   <ftw-battery-control id="battery-control"></ftw-battery-control>
 //
 //   const el = document.getElementById("battery-control");
-//   el.open();   // opens the modal and starts polling /api/battery/manual_hold
+//   el.open();          // whole battery pool
+//   el.open("bat_a");   // selected battery
 //
 // Opening from another component (e.g. battery-planet click) is the
 // only entry point — there's no auto-open behavior.
@@ -199,7 +199,7 @@ class FtwBatteryControl extends FtwElement {
   constructor() {
     super();
     this._refreshTimer = null;
-    this._formState = { direction: "charge", holdS: 900 };
+    this._formState = { direction: "charge", holdS: 900, scopeDriver: "", scopeMode: "pool" };
   }
 
   connectedCallback() {
@@ -213,12 +213,16 @@ class FtwBatteryControl extends FtwElement {
     }
   }
 
-  open() {
+  open(driverName) {
     const modal = this.shadowRoot.querySelector("ftw-modal");
     if (!modal) return;
     this._showError("");
+    const driver = (driverName && String(driverName).trim()) || "";
+    this._formState.scopeDriver = driver;
+    this._formState.scopeMode = driver ? "driver" : "pool";
     this._selectDirection(this._formState.direction);
     this._selectDuration(this._formState.holdS);
+    this._renderScope();
     modal.open();
     this._refresh();
     if (this._refreshTimer) clearInterval(this._refreshTimer);
@@ -233,6 +237,14 @@ class FtwBatteryControl extends FtwElement {
         <div class="active-banner hidden" data-active>
           <div class="active-headline"></div>
           <div class="active-detail"></div>
+        </div>
+
+        <div class="row hidden" data-scope-row>
+          <label class="label">Scope</label>
+          <div class="segmented" role="radiogroup" aria-label="Battery scope">
+            <button type="button" class="seg-btn active" data-scope="pool" role="radio" aria-checked="true">All batteries</button>
+            <button type="button" class="seg-btn" data-scope="driver" role="radio" aria-checked="false" data-scope-driver-label>This battery</button>
+          </div>
         </div>
 
         <div class="row">
@@ -274,13 +286,17 @@ class FtwBatteryControl extends FtwElement {
   afterRender() {
     const root = this.shadowRoot;
     const modal = root.querySelector("ftw-modal");
-    const segBtns = root.querySelectorAll(".seg-btn");
+    const directionBtns = root.querySelectorAll("[data-direction]");
+    const scopeBtns = root.querySelectorAll("[data-scope]");
     const chips = root.querySelectorAll(".chip");
     const installBtn = root.querySelector("[data-install]");
     const stopBtn = root.querySelector("[data-stop]");
 
-    segBtns.forEach((b) => {
+    directionBtns.forEach((b) => {
       b.addEventListener("click", () => this._selectDirection(b.dataset.direction));
+    });
+    scopeBtns.forEach((b) => {
+      b.addEventListener("click", () => this._selectScope(b.dataset.scope));
     });
     chips.forEach((c) => {
       c.addEventListener("click", () => this._selectDuration(Number(c.dataset.hold)));
@@ -297,10 +313,31 @@ class FtwBatteryControl extends FtwElement {
     });
   }
 
+  _renderScope() {
+    const root = this.shadowRoot;
+    const row = root.querySelector("[data-scope-row]");
+    if (!row) return;
+    const hasDriver = !!this._formState.scopeDriver;
+    row.classList.toggle("hidden", !hasDriver);
+    const label = root.querySelector("[data-scope-driver-label]");
+    if (label && hasDriver) label.textContent = this._formState.scopeDriver;
+    this._selectScope(this._formState.scopeMode);
+  }
+
+  _selectScope(mode) {
+    if (mode === "driver" && !this._formState.scopeDriver) mode = "pool";
+    this._formState.scopeMode = mode;
+    this.shadowRoot.querySelectorAll("[data-scope]").forEach((button) => {
+      const on = button.dataset.scope === mode;
+      button.classList.toggle("active", on);
+      button.setAttribute("aria-checked", on ? "true" : "false");
+    });
+  }
+
   _selectDirection(dir) {
     this._formState.direction = dir;
     const root = this.shadowRoot;
-    root.querySelectorAll(".seg-btn").forEach((b) => {
+    root.querySelectorAll("[data-direction]").forEach((b) => {
       const on = b.dataset.direction === dir;
       b.classList.toggle("active", on);
       b.setAttribute("aria-checked", on ? "true" : "false");
@@ -341,10 +378,11 @@ class FtwBatteryControl extends FtwElement {
       return;
     }
     const dir = d.direction || "idle";
+    const scope = d.driver ? " · " + d.driver : " · all batteries";
     const headline =
-      dir === "charge"    ? "Charging at " + (d.power_w || 0) + " W" :
-      dir === "discharge" ? "Discharging at " + (d.power_w || 0) + " W" :
-                            "Holding idle";
+      dir === "charge"    ? "Charging at " + (d.power_w || 0) + " W" + scope :
+      dir === "discharge" ? "Discharging at " + (d.power_w || 0) + " W" + scope :
+                            "Holding idle" + scope;
     let remaining = "";
     if (d.expires_at_ms) {
       const ms = d.expires_at_ms - Date.now();
@@ -384,11 +422,15 @@ class FtwBatteryControl extends FtwElement {
         return;
       }
     }
+    const body = { direction: dir, power_w: powerW, hold_s: holdS };
+    if (this._formState.scopeMode === "driver" && this._formState.scopeDriver) {
+      body.driver = this._formState.scopeDriver;
+    }
     installBtn.disabled = true;
     apiFetch("/api/battery/manual_hold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ direction: dir, power_w: powerW, hold_s: holdS }),
+      body: JSON.stringify(body),
     })
       .then((r) => {
         if (!r.ok) {

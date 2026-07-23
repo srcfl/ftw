@@ -3473,11 +3473,10 @@
       evModalDriver = null;
     });
 
-    // Planet click routing. EV → EV modal scoped to driver. Battery →
-    // <ftw-battery-control> manual-hold modal (no driver scoping; the
-    // hold applies to the aggregate battery setpoint). Grid → grid
-    // modal hosting the peak-import ceiling and the (legacy) grid
-    // target setpoint.
+    // Planet click routing. EV → EV modal scoped to driver. A battery
+    // driver opens its own short hold; the merged battery opens pool
+    // control. Grid → grid modal hosting the peak-import ceiling and
+    // the legacy grid target setpoint.
     var gridModal = document.getElementById("grid-modal");
     if (energyFlowEl) {
       energyFlowEl.addEventListener("ftw-planet-click", function (e) {
@@ -3488,7 +3487,7 @@
           var clicked = drv[d.name || ""] || {};
           if (clicked.observe_only) return;
           var bc = document.getElementById("battery-control");
-          if (bc && typeof bc.open === "function") bc.open();
+          if (bc && typeof bc.open === "function") bc.open(d.name || d.id || "");
         }
         if (d.role === "pv") {
           var pc = document.getElementById("pv-control");
