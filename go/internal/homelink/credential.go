@@ -55,8 +55,11 @@ type Principal struct {
 // opaque local lookup ID. The verifier keeps the expected RP, origin, expiry,
 // and one-use state; no caller can provide them to grant issuance.
 type LocalAssertionChallenge struct {
-	ID        string
-	Challenge []byte
+	ID                       string
+	Challenge                []byte
+	RPID                     string
+	AllowCredentials         [][]byte
+	UserVerificationRequired bool
 }
 
 // AssertionSession binds local assertion expectations to one GrantManager.
@@ -87,6 +90,7 @@ type PasskeyAssertion struct {
 	ClientDataJSON    []byte
 	AuthenticatorData []byte
 	Signature         []byte
+	ResponseJSON      []byte
 }
 
 func (c LocalAssertionChallenge) validate() error {

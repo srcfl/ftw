@@ -845,6 +845,27 @@ func (s *Store) migrate() error {
 			PRIMARY KEY (device_id, der_type)
 		) STRICT`,
 
+		// Home Link passkey verifier state stays local. The credential id and
+		// public key are verifier data; no private credential material or
+		// pairing secret is stored here.
+		`CREATE TABLE IF NOT EXISTS homelink_credentials (
+			site_id           TEXT NOT NULL,
+			credential_id     BLOB NOT NULL,
+			public_key        BLOB NOT NULL,
+			sign_count        INTEGER NOT NULL CHECK(sign_count BETWEEN 0 AND 4294967295),
+			label             TEXT NOT NULL,
+			user_handle       BLOB NOT NULL,
+			backup_eligible   INTEGER NOT NULL CHECK(backup_eligible IN (0, 1)),
+			backup_state      INTEGER NOT NULL CHECK(backup_state IN (0, 1)),
+			status            TEXT NOT NULL CHECK(status IN ('active', 'revoked', 'uncertain')),
+			revision          INTEGER NOT NULL CHECK(revision > 0),
+			created_at_ms     INTEGER NOT NULL,
+			updated_at_ms     INTEGER NOT NULL,
+			PRIMARY KEY (site_id, credential_id)
+		) WITHOUT ROWID, STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_homelink_credentials_site_status
+			ON homelink_credentials(site_id, status)`,
+
 		// Persistent daily-energy aggregate cache.
 		//
 		// 2026-05-25 measurement: /api/energy/daily?days=30 took ~25 s

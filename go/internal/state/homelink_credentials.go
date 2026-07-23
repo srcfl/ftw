@@ -1,0 +1,391 @@
+package state
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+)
+
+type HomeLinkCredentialStatus string
+
+const (
+	HomeLinkCredentialActive    HomeLinkCredentialStatus = "active"
+	HomeLinkCredentialRevoked   HomeLinkCredentialStatus = "revoked"
+	HomeLinkCredentialUncertain HomeLinkCredentialStatus = "uncertain"
+)
+
+var (
+	ErrHomeLinkCredentialNotFound = errors.New("Home Link credential was not found")
+	ErrHomeLinkCredentialInactive = errors.New("Home Link credential is not active")
+	ErrHomeLinkCredentialConflict = errors.New("Home Link credential state changed")
+	ErrHomeLinkCredentialPolicy   = errors.New("Home Link credential policy denied the assertion")
+)
+
+const (
+	maxHomeLinkSiteIDBytes       = 256
+	maxHomeLinkCredentialIDBytes = 1024
+	maxHomeLinkPublicKeyBytes    = 4096
+	maxHomeLinkLabelBytes        = 80
+	homeLinkUserHandleBytes      = 32
+)
+
+// HomeLinkCredentialRecord contains only local WebAuthn verifier state.
+type HomeLinkCredentialRecord struct {
+	SiteID         string
+	CredentialID   []byte
+	PublicKey      []byte
+	SignCount      uint32
+	Label          string
+	UserHandle     []byte
+	BackupEligible bool
+	BackupState    bool
+	Status         HomeLinkCredentialStatus
+	Revision       int64
+	CreatedAtMS    int64
+	UpdatedAtMS    int64
+}
+
+type HomeLinkAssertionUpdate struct {
+	SiteID           string
+	CredentialID     []byte
+	ExpectedRevision int64
+	SignCount        uint32
+	BackupEligible   bool
+	BackupState      bool
+	UpdatedAtMS      int64
+}
+
+func (s *Store) RegisterHomeLinkCredential(ctx context.Context, record HomeLinkCredentialRecord) error {
+	if err := validateHomeLinkCredential(record, true); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin Home Link credential registration: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx,
+		`SELECT DISTINCT user_handle FROM homelink_credentials WHERE site_id = ?`,
+		record.SiteID)
+	if err != nil {
+		return fmt.Errorf("read Home Link site user handle: %w", err)
+	}
+	var handles int
+	for rows.Next() {
+		var existingHandle []byte
+		if err := rows.Scan(&existingHandle); err != nil {
+			rows.Close()
+			return fmt.Errorf("read Home Link site user handle: %w", err)
+		}
+		handles++
+		if handles > 1 || !bytes.Equal(existingHandle, record.UserHandle) {
+			rows.Close()
+			return errors.New("Home Link user handle does not match this site")
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("read Home Link site user handle: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read Home Link site user handle: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `INSERT INTO homelink_credentials(
+		site_id, credential_id, public_key, sign_count, label, user_handle,
+		backup_eligible, backup_state, status, revision, created_at_ms, updated_at_ms
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
+		record.SiteID, cloneBytes(record.CredentialID), cloneBytes(record.PublicKey),
+		int64(record.SignCount), record.Label, cloneBytes(record.UserHandle),
+		boolInt(record.BackupEligible), boolInt(record.BackupState),
+		record.CreatedAtMS, record.UpdatedAtMS)
+	if err != nil {
+		return fmt.Errorf("insert Home Link credential: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit Home Link credential registration: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) HomeLinkCredential(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+) (HomeLinkCredentialRecord, error) {
+	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	return scanHomeLinkCredential(s.db.QueryRowContext(ctx, homeLinkCredentialSelect+
+		` WHERE site_id = ? AND credential_id = ?`, siteID, credentialID))
+}
+
+func (s *Store) ActiveHomeLinkCredentials(
+	ctx context.Context,
+	siteID string,
+) ([]HomeLinkCredentialRecord, error) {
+	if len(siteID) == 0 || len(siteID) > maxHomeLinkSiteIDBytes {
+		return nil, errors.New("Home Link site id is invalid")
+	}
+	rows, err := s.db.QueryContext(ctx, homeLinkCredentialSelect+
+		` WHERE site_id = ? AND status = 'active' ORDER BY credential_id`, siteID)
+	if err != nil {
+		return nil, fmt.Errorf("list active Home Link credentials: %w", err)
+	}
+	defer rows.Close()
+	var records []HomeLinkCredentialRecord
+	for rows.Next() {
+		record, err := scanHomeLinkCredential(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list active Home Link credentials: %w", err)
+	}
+	return records, nil
+}
+
+// HomeLinkSiteUserHandle returns the one opaque handle already owned by this
+// local site. It never performs credential lookup.
+func (s *Store) HomeLinkSiteUserHandle(ctx context.Context, siteID string) ([]byte, error) {
+	if len(siteID) == 0 || len(siteID) > maxHomeLinkSiteIDBytes {
+		return nil, errors.New("Home Link site id is invalid")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT user_handle FROM homelink_credentials WHERE site_id = ?`, siteID)
+	if err != nil {
+		return nil, fmt.Errorf("read Home Link site user handle: %w", err)
+	}
+	defer rows.Close()
+	var handle []byte
+	for rows.Next() {
+		var candidate []byte
+		if err := rows.Scan(&candidate); err != nil {
+			return nil, fmt.Errorf("read Home Link site user handle: %w", err)
+		}
+		if handle != nil && !bytes.Equal(handle, candidate) {
+			return nil, errors.New("stored Home Link user handles are inconsistent")
+		}
+		handle = cloneBytes(candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read Home Link site user handle: %w", err)
+	}
+	return handle, nil
+}
+
+func (s *Store) ApplyHomeLinkAssertion(
+	ctx context.Context,
+	update HomeLinkAssertionUpdate,
+) (HomeLinkCredentialRecord, error) {
+	if err := validateHomeLinkLookup(update.SiteID, update.CredentialID); err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if update.ExpectedRevision <= 0 || update.UpdatedAtMS <= 0 {
+		return HomeLinkCredentialRecord{}, errors.New("Home Link assertion revision or time is invalid")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("begin Home Link assertion update: %w", err)
+	}
+	defer tx.Rollback()
+	record, err := scanHomeLinkCredential(tx.QueryRowContext(ctx, homeLinkCredentialSelect+
+		` WHERE site_id = ? AND credential_id = ?`, update.SiteID, update.CredentialID))
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if record.Status != HomeLinkCredentialActive {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialInactive
+	}
+	if record.Revision != update.ExpectedRevision {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialConflict
+	}
+
+	policyOK := update.BackupEligible == record.BackupEligible &&
+		(!update.BackupState || update.BackupEligible) &&
+		validHomeLinkCounterTransition(record.SignCount, update.SignCount)
+	status := HomeLinkCredentialActive
+	if !policyOK {
+		status = HomeLinkCredentialUncertain
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE homelink_credentials SET
+		sign_count = ?, backup_state = ?, status = ?, revision = revision + 1,
+		updated_at_ms = ?
+		WHERE site_id = ? AND credential_id = ? AND status = 'active' AND revision = ?`,
+		int64(update.SignCount), boolInt(update.BackupState), string(status), update.UpdatedAtMS,
+		update.SiteID, update.CredentialID, update.ExpectedRevision)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("update Home Link assertion state: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("check Home Link assertion update: %w", err)
+	}
+	if changed != 1 {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link assertion state: %w", err)
+	}
+	record.SignCount = update.SignCount
+	record.BackupState = update.BackupState
+	record.Status = status
+	record.Revision++
+	record.UpdatedAtMS = update.UpdatedAtMS
+	if !policyOK {
+		return record, ErrHomeLinkCredentialPolicy
+	}
+	return record, nil
+}
+
+// RevokeHomeLinkCredential first commits an uncertain fence. If the final
+// commit fails, restart still denies the credential.
+func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, credentialID []byte, nowMS int64) error {
+	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
+		return err
+	}
+	if nowMS <= 0 {
+		return errors.New("Home Link revoke time is invalid")
+	}
+	record, err := s.HomeLinkCredential(ctx, siteID, credentialID)
+	if err != nil {
+		return err
+	}
+	if record.Status == HomeLinkCredentialRevoked {
+		return nil
+	}
+	if record.Status == HomeLinkCredentialActive {
+		result, err := s.db.ExecContext(ctx, `UPDATE homelink_credentials SET
+			status = 'uncertain', revision = revision + 1, updated_at_ms = ?
+			WHERE site_id = ? AND credential_id = ? AND status = 'active' AND revision = ?`,
+			nowMS, siteID, credentialID, record.Revision)
+		if err != nil {
+			return fmt.Errorf("commit Home Link revoke fence: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("check Home Link revoke fence: %w", err)
+		}
+		if changed != 1 {
+			return ErrHomeLinkCredentialConflict
+		}
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE homelink_credentials SET
+		status = 'revoked', revision = revision + 1, updated_at_ms = ?
+		WHERE site_id = ? AND credential_id = ? AND status = 'uncertain'`,
+		nowMS, siteID, credentialID)
+	if err != nil {
+		return fmt.Errorf("commit Home Link revoke: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check Home Link revoke: %w", err)
+	}
+	if changed != 1 {
+		return ErrHomeLinkCredentialConflict
+	}
+	return nil
+}
+
+const homeLinkCredentialSelect = `SELECT
+	site_id, credential_id, public_key, sign_count, label, user_handle,
+	backup_eligible, backup_state, status, revision, created_at_ms, updated_at_ms
+	FROM homelink_credentials`
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanHomeLinkCredential(row rowScanner) (HomeLinkCredentialRecord, error) {
+	var record HomeLinkCredentialRecord
+	var count int64
+	var backupEligible, backupState int
+	err := row.Scan(
+		&record.SiteID, &record.CredentialID, &record.PublicKey, &count, &record.Label,
+		&record.UserHandle, &backupEligible, &backupState, &record.Status, &record.Revision,
+		&record.CreatedAtMS, &record.UpdatedAtMS,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialNotFound
+	}
+	if err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("read Home Link credential: %w", err)
+	}
+	if count < 0 || count > math.MaxUint32 {
+		return HomeLinkCredentialRecord{}, errors.New("stored Home Link counter is invalid")
+	}
+	record.SignCount = uint32(count)
+	record.BackupEligible = backupEligible == 1
+	record.BackupState = backupState == 1
+	record.CredentialID = cloneBytes(record.CredentialID)
+	record.PublicKey = cloneBytes(record.PublicKey)
+	record.UserHandle = cloneBytes(record.UserHandle)
+	if err := validateHomeLinkCredential(record, false); err != nil {
+		return HomeLinkCredentialRecord{}, fmt.Errorf("stored Home Link credential is invalid: %w", err)
+	}
+	return record, nil
+}
+
+func validateHomeLinkCredential(record HomeLinkCredentialRecord, registration bool) error {
+	if err := validateHomeLinkLookup(record.SiteID, record.CredentialID); err != nil {
+		return err
+	}
+	if len(record.PublicKey) == 0 || len(record.PublicKey) > maxHomeLinkPublicKeyBytes {
+		return errors.New("Home Link public key is invalid")
+	}
+	if strings.TrimSpace(record.Label) == "" || len(record.Label) > maxHomeLinkLabelBytes {
+		return errors.New("Home Link credential label is invalid")
+	}
+	if len(record.UserHandle) != homeLinkUserHandleBytes {
+		return errors.New("Home Link user handle is invalid")
+	}
+	if record.BackupState && !record.BackupEligible &&
+		(registration || record.Status == HomeLinkCredentialActive) {
+		return errors.New("Home Link backup state is inconsistent")
+	}
+	if registration {
+		if record.Status != HomeLinkCredentialActive || record.Revision != 1 ||
+			record.CreatedAtMS <= 0 || record.UpdatedAtMS <= 0 {
+			return errors.New("new Home Link credential state is invalid")
+		}
+	} else if record.Status != HomeLinkCredentialActive &&
+		record.Status != HomeLinkCredentialRevoked &&
+		record.Status != HomeLinkCredentialUncertain {
+		return errors.New("Home Link credential status is invalid")
+	}
+	return nil
+}
+
+func validateHomeLinkLookup(siteID string, credentialID []byte) error {
+	if len(siteID) == 0 || len(siteID) > maxHomeLinkSiteIDBytes {
+		return errors.New("Home Link site id is invalid")
+	}
+	if len(credentialID) == 0 || len(credentialID) > maxHomeLinkCredentialIDBytes {
+		return errors.New("Home Link credential id is invalid")
+	}
+	return nil
+}
+
+func validHomeLinkCounterTransition(stored, next uint32) bool {
+	if stored == 0 && next == 0 {
+		return true
+	}
+	return next > stored
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func cloneBytes(value []byte) []byte {
+	return bytes.Clone(value)
+}
