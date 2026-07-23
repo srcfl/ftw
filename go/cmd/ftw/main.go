@@ -5,10 +5,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -36,6 +40,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
 	"github.com/srcfl/ftw/go/internal/forecast"
+	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -58,12 +63,169 @@ import (
 // local runs.
 var Version = "dev"
 
+type siteIdentityLoad struct {
+	Nova     *nova.Identity
+	HomeLink gatewayidentity.Identity
+	Binding  gatewayidentity.SoftwareBinding
+}
+
+func loadSiteIdentity(keyPath string) (siteIdentityLoad, error) {
+	return loadSiteIdentityWith(
+		keyPath,
+		gatewayidentity.LoadBoundSoftwareIdentity,
+		nova.LoadExistingIdentity,
+		gatewayidentity.LoadOrCreateUnboundNovaIdentity,
+	)
+}
+
+func loadSiteIdentityWith(
+	keyPath string,
+	loadBound func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
+	loadNovaExisting func(string) (*nova.Identity, error),
+	loadNovaUnbound func(string) (*nova.Identity, error),
+) (siteIdentityLoad, error) {
+	identity, binding, err := loadBound(keyPath)
+	switch {
+	case err == nil:
+		if identity == nil {
+			return siteIdentityLoad{}, errors.New("bound home link identity is nil")
+		}
+		existing, loadErr := loadNovaExisting(keyPath)
+		if loadErr != nil {
+			return siteIdentityLoad{}, loadErr
+		}
+		if existing == nil {
+			return siteIdentityLoad{}, errors.New("existing nova identity is nil")
+		}
+		publicKey := identity.PublicKey()
+		if existing.PublicKeyHex() != hex.EncodeToString(publicKey) {
+			return siteIdentityLoad{}, errors.New("nova and home link identities use different keys")
+		}
+		publicHash := sha256.Sum256(publicKey)
+		if binding.PublicKeySHA256 != hex.EncodeToString(publicHash[:]) {
+			return siteIdentityLoad{}, errors.New("home link binding key hash changed")
+		}
+		return siteIdentityLoad{
+			Nova: existing, HomeLink: identity, Binding: binding,
+		}, nil
+	case errors.Is(err, gatewayidentity.ErrBindingNotAdopted),
+		errors.Is(err, gatewayidentity.ErrUnsupportedBinding),
+		errors.Is(err, fs.ErrNotExist):
+		existing, existingErr := loadNovaExisting(keyPath)
+		if existingErr == nil {
+			if existing == nil {
+				return siteIdentityLoad{}, errors.New("existing nova identity is nil")
+			}
+			return siteIdentityLoad{Nova: existing}, nil
+		}
+		if !errors.Is(existingErr, fs.ErrNotExist) {
+			return siteIdentityLoad{}, existingErr
+		}
+		legacy, legacyErr := loadNovaUnbound(keyPath)
+		if legacyErr != nil {
+			return siteIdentityLoad{}, legacyErr
+		}
+		if legacy == nil {
+			return siteIdentityLoad{}, errors.New("unbound nova identity is nil")
+		}
+		return siteIdentityLoad{Nova: legacy}, nil
+	default:
+		return siteIdentityLoad{}, err
+	}
+}
+
+func runHomeLinkAdopt(args []string) {
+	if err := adoptHomeLinkIdentity(args, os.Stdout); err != nil {
+		slog.Error("home link identity adoption failed", "err", err)
+		os.Exit(2)
+	}
+}
+
+func adoptHomeLinkIdentity(args []string, out io.Writer) error {
+	return adoptHomeLinkIdentityWith(
+		args,
+		out,
+		gatewayidentity.PreviewSoftwareBinding,
+		gatewayidentity.ApplySoftwareBinding,
+		gatewayidentity.LoadBoundSoftwareIdentity,
+		gatewayidentity.RouteHandle,
+	)
+}
+
+func adoptHomeLinkIdentityWith(
+	args []string,
+	out io.Writer,
+	preview func(context.Context, string) (gatewayidentity.SoftwareBindingPreview, error),
+	apply func(context.Context, string, string) (gatewayidentity.SoftwareBinding, error),
+	load func(string) (gatewayidentity.Identity, gatewayidentity.SoftwareBinding, error),
+	routeHandle func([]byte) (string, error),
+) error {
+	flags := flag.NewFlagSet("home-link-adopt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	keyPath := flags.String("key", "", "Path to the existing canonical nova.key")
+	confirmation := flags.String("confirm", "", "Exact confirmation from a fresh preview")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*keyPath) == "" {
+		return errors.New("home-link-adopt requires --key=<existing nova.key>")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if strings.TrimSpace(*confirmation) == "" {
+		candidate, err := preview(ctx, *keyPath)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(
+			out,
+			"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nconfirmation=%s\n",
+			candidate.Binding.GatewayID,
+			candidate.ThreeWordName,
+			candidate.KeyFingerprint,
+			candidate.Confirmation,
+		)
+		return err
+	}
+	binding, err := apply(ctx, *keyPath, *confirmation)
+	if err != nil {
+		return err
+	}
+	identity, loaded, err := load(*keyPath)
+	if err != nil {
+		return err
+	}
+	if loaded != binding {
+		return errors.New("adopted home link identity changed while reopening")
+	}
+	if identity == nil {
+		return errors.New("adopted home link identity is nil")
+	}
+	handle, err := routeHandle(identity.PublicKey())
+	if err != nil {
+		return err
+	}
+	name, err := gatewayidentity.ThreeWordName(binding.GatewayID)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(
+		out,
+		"gateway_id=%s\nthree_word_name=%s\nkey_fingerprint_sha256=%s\nroute_handle=%s\n",
+		binding.GatewayID, name, binding.PublicKeySHA256, handle,
+	)
+	return err
+}
+
 func main() {
 	// Subcommand dispatch — a bare first non-flag argument selects one
 	// of the bootstrap CLIs, e.g. `ftw nova-claim --url=…`.
 	// Everything else is the long-running service.
 	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
 		switch os.Args[1] {
+		case "home-link-adopt":
+			runHomeLinkAdopt(os.Args[2:])
+			return
 		case "nova-claim":
 			// Shift os.Args so the subcommand's flag.FlagSet sees its own flags.
 			runNovaClaim(os.Args[2:])
@@ -1860,11 +2022,24 @@ func main() {
 	if cfg.Nova != nil && cfg.Nova.KeyPath != "" {
 		identityKeyPath = cfg.Nova.KeyPath
 	}
-	siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
-	if err != nil {
-		slog.Warn("site identity: load/create failed", "err", err, "path", identityKeyPath)
-	} else {
-		slog.Info("site identity ready", "pubkey_prefix", siteIdentity.PublicKeyHex()[:16])
+	identityState, identityErr := loadSiteIdentity(identityKeyPath)
+	switch {
+	case identityErr != nil:
+		// Binding and platform checks fail closed. Never create a replacement
+		// key when state is incomplete or this host cannot protect it.
+		slog.Warn("home link identity disabled", "err", identityErr, "path", identityKeyPath)
+	case identityState.HomeLink != nil:
+		handle, handleErr := gatewayidentity.RouteHandle(identityState.HomeLink.PublicKey())
+		if handleErr != nil {
+			slog.Warn("home link identity disabled", "err", handleErr, "path", identityKeyPath)
+		} else {
+			slog.Info("home link identity ready",
+				"gateway_id", identityState.Binding.GatewayID,
+				"route_handle", handle,
+			)
+		}
+	case identityState.Nova != nil:
+		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
 
 	deps = &api.Deps{
@@ -2076,17 +2251,11 @@ func main() {
 	// device/DER records under an org. When disabled or unconfigured,
 	// this block is a no-op.
 	if cfg.Nova != nil && cfg.Nova.Enabled {
-		// Load the persistent gateway identity only for explicitly enabled
-		// federation. Keep the canonical nova.key path so already-claimed
-		// gateways retain their identity across upgrades.
-		identityKeyPath := filepath.Join(filepath.Dir(statePath), "nova.key")
-		if cfg.Nova.KeyPath != "" {
-			identityKeyPath = cfg.Nova.KeyPath
-		}
-		siteIdentity, err := nova.LoadOrCreateIdentity(identityKeyPath)
-		if err != nil {
-			slog.Warn("nova federation disabled — gateway identity unavailable", "err", err, "path", identityKeyPath)
-		} else if pub, err := nova.Start(cfg.Nova, siteIdentity, st, tel,
+		// Reuse the startup result. A failed or adopted Home Link binding
+		// must never reach a create-if-missing key path later in boot.
+		if identityState.Nova == nil {
+			slog.Warn("nova federation disabled — canonical identity unavailable", "path", identityKeyPath)
+		} else if pub, err := nova.Start(cfg.Nova, identityState.Nova, st, tel,
 			nova.WithDriverInventory(func(now time.Time) (driverinventory.Snapshot, error) {
 				cfgMu.RLock()
 				driverCfg := append([]config.Driver(nil), cfg.Drivers...)
