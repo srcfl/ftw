@@ -370,6 +370,20 @@ func (s *Store) SnapshotTo(dstPath string) error {
 	return nil
 }
 
+// BackupProgress reports the current phase of a complete database backup.
+// TotalBytes is known once SQLite has produced the consistent raw copy.
+type BackupProgress struct {
+	Phase          string
+	CompletedBytes int64
+	TotalBytes     int64
+}
+
+const (
+	BackupPhaseCopying     = "copying_database"
+	BackupPhaseCompressing = "compressing_database"
+	BackupPhaseSyncing     = "syncing_backup"
+)
+
 // BackupToCompressed writes a complete, point-in-time copy of state.db as a
 // gzip stream. Unlike SnapshotTo, this is a user-data backup: it includes the
 // history and sample tables as well as configuration, models, and identities.
@@ -380,6 +394,13 @@ func (s *Store) SnapshotTo(dstPath string) error {
 // SQLite cannot stream VACUUM INTO, so the complete raw copy is materialised
 // next to dstPath, compressed, synced, and removed. dstPath must not exist.
 func (s *Store) BackupToCompressed(dstPath string) error {
+	return s.BackupToCompressedWithProgress(dstPath, nil)
+}
+
+// BackupToCompressedWithProgress is BackupToCompressed with phase and byte
+// progress. The callback may take long enough to write a small status file,
+// but it must not call back into Store.
+func (s *Store) BackupToCompressedWithProgress(dstPath string, report func(BackupProgress)) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: backup on nil store")
 	}
@@ -392,6 +413,7 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 	rawPath := dstPath + ".raw.tmp"
 	_ = os.Remove(rawPath)
 	defer os.Remove(rawPath)
+	reportBackupProgress(report, BackupProgress{Phase: BackupPhaseCopying})
 	escaped := strings.ReplaceAll(rawPath, "'", "''")
 	if _, err := s.db.Exec(fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
 		return fmt.Errorf("backup to %s: %w", rawPath, err)
@@ -402,6 +424,15 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 		return fmt.Errorf("open backup temp: %w", err)
 	}
 	defer in.Close()
+	rawInfo, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("stat backup temp: %w", err)
+	}
+	rawBytes := rawInfo.Size()
+	reportBackupProgress(report, BackupProgress{
+		Phase:      BackupPhaseCompressing,
+		TotalBytes: rawBytes,
+	})
 	out, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create compressed backup: %w", err)
@@ -418,13 +449,24 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("create gzip writer: %w", err)
 	}
-	if _, err := io.Copy(zw, in); err != nil {
+	progress := &backupProgressReader{
+		r:      in,
+		total:  rawBytes,
+		report: report,
+		lastAt: time.Now(),
+	}
+	if _, err := io.CopyBuffer(zw, progress, make([]byte, 1<<20)); err != nil {
 		_ = zw.Close()
 		return fmt.Errorf("compress backup: %w", err)
 	}
 	if err := zw.Close(); err != nil {
 		return fmt.Errorf("finish compressed backup: %w", err)
 	}
+	reportBackupProgress(report, BackupProgress{
+		Phase:          BackupPhaseSyncing,
+		CompletedBytes: rawBytes,
+		TotalBytes:     rawBytes,
+	})
 	if err := out.Sync(); err != nil {
 		return fmt.Errorf("sync compressed backup: %w", err)
 	}
@@ -433,6 +475,35 @@ func (s *Store) BackupToCompressed(dstPath string) error {
 	}
 	committed = true
 	return nil
+}
+
+type backupProgressReader struct {
+	r         io.Reader
+	total     int64
+	completed int64
+	report    func(BackupProgress)
+	lastAt    time.Time
+}
+
+func (r *backupProgressReader) Read(p []byte) (int, error) {
+	n, err := r.r.Read(p)
+	r.completed += int64(n)
+	now := time.Now()
+	if r.completed == r.total || now.Sub(r.lastAt) >= time.Second {
+		reportBackupProgress(r.report, BackupProgress{
+			Phase:          BackupPhaseCompressing,
+			CompletedBytes: r.completed,
+			TotalBytes:     r.total,
+		})
+		r.lastAt = now
+	}
+	return n, err
+}
+
+func reportBackupProgress(report func(BackupProgress), progress BackupProgress) {
+	if report != nil {
+		report(progress)
+	}
 }
 
 type snapshotSchemaRow struct {

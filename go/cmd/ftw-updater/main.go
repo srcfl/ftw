@@ -47,7 +47,7 @@ const (
 // State mirrors selfupdate.UpdateStatus (we keep a local copy to avoid
 // importing the main module's internal package from this separate cmd).
 type State struct {
-	State           string            `json:"state"`            // idle, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"`            // idle, pulling, restarting, checking, restoring, done, failed
 	Action          string            `json:"action,omitempty"` // update, restart, rollback (#152)
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
@@ -56,8 +56,14 @@ type State struct {
 	SafetySnapshot  string            `json:"safety_snapshot,omitempty"`
 	SafetyFiles     []string          `json:"safety_files,omitempty"`
 	StartedAt       time.Time         `json:"started_at,omitempty"`
+	PhaseStartedAt  time.Time         `json:"phase_started_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 	Message         string            `json:"message,omitempty"`
+	Step            int               `json:"step,omitempty"`
+	TotalSteps      int               `json:"total_steps,omitempty"`
+	ProgressCurrent int64             `json:"progress_current,omitempty"`
+	ProgressTotal   int64             `json:"progress_total,omitempty"`
+	ProgressUnit    string            `json:"progress_unit,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
 }
@@ -92,6 +98,10 @@ type server struct {
 	// after an arbitrary N. Tests that exercise the "always-fail" path set
 	// this to a small value to avoid looping forever.
 	maxPullAttempts int
+	// statusHeartbeatInterval refreshes UpdatedAt while Docker performs a
+	// long pull, recreate, or health check. A zero value disables heartbeats
+	// in focused tests.
+	statusHeartbeatInterval time.Duration
 
 	// runMu ensures only one pull+up runs at a time. HTTP handlers that
 	// arrive while a job is in flight return 409.
@@ -236,11 +246,12 @@ func main() {
 	}
 
 	srv := &server{
-		composeFile:    *compose,
-		statusPath:     *statusPath,
-		skipPull:       *skipPull,
-		pullRetryDelay: 60 * time.Second,
-		runner:         dockerCompose,
+		composeFile:             *compose,
+		statusPath:              *statusPath,
+		skipPull:                *skipPull,
+		pullRetryDelay:          60 * time.Second,
+		statusHeartbeatInterval: 2 * time.Second,
+		runner:                  dockerCompose,
 	}
 	// Auto-discover override files alongside the base, the same way the
 	// compose CLI does when invoked without -f. Without this the sidecar
@@ -456,7 +467,22 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 			return
 		}
 	}
-	s.writeState(State{State: "pulling", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: now})
+	totalSteps := 3
+	pullStep := 1
+	if action == "update" && spec.name == "core" {
+		totalSteps = 4
+		pullStep = 2
+	}
+	phaseState := func(state, message string, step int) State {
+		at := time.Now()
+		return State{
+			State: state, Action: action, Component: component, Target: target,
+			StartedAt: now, PhaseStartedAt: at, UpdatedAt: at,
+			Message: message, Step: step, TotalSteps: totalSteps,
+		}
+	}
+	pullState := phaseState("pulling", "Downloading pinned release image", pullStep)
+	s.writeState(pullState)
 
 	var env []string
 	if target != "" {
@@ -502,7 +528,12 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 			// single slow download on a 0.5 Mbps link (~400 MB image ≈ 90 min)
 			// is never cut short by a shared outer deadline.
 			attemptCtx, cancelAttempt := context.WithTimeout(context.Background(), 2*time.Hour)
-			pullErr = s.runner(attemptCtx, env, pullArgs...)
+			pullState.Message = fmt.Sprintf("Downloading pinned release image (attempt %d)", attempt)
+			pullState.UpdatedAt = time.Now()
+			s.writeState(pullState)
+			pullErr = s.runWithStateHeartbeat(pullState, func() error {
+				return s.runner(attemptCtx, env, pullArgs...)
+			})
 			cancelAttempt()
 			if pullErr == nil {
 				break
@@ -511,7 +542,13 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 			if s.maxPullAttempts > 0 && attempt >= s.maxPullAttempts {
 				break
 			}
-			time.Sleep(s.pullRetryDelay)
+			pullState.Message = fmt.Sprintf("Download failed; retrying after %s", s.pullRetryDelay)
+			pullState.UpdatedAt = time.Now()
+			s.writeState(pullState)
+			_ = s.runWithStateHeartbeat(pullState, func() error {
+				time.Sleep(s.pullRetryDelay)
+				return nil
+			})
 		}
 		if pullErr != nil {
 			s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "pull failed: " + pullErr.Error()})
@@ -522,7 +559,8 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		slog.Info("skip-pull active; continuing straight to compose up")
 	}
 
-	s.writeState(State{State: "restarting", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now()})
+	restartState := phaseState("restarting", "Recreating service with the downloaded image", pullStep+1)
+	s.writeState(restartState)
 
 	// compose up -d just recreates the container from an already-pulled
 	// image — should complete in seconds, 10 min is a generous upper bound.
@@ -536,15 +574,21 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 		// UI exposes as the "Restart" button.
 		upArgs = s.composeArgs("up", "-d", "--force-recreate", spec.service)
 	}
-	if err := s.runner(upCtx, env, upArgs...); err != nil {
+	if err := s.runWithStateHeartbeat(restartState, func() error {
+		return s.runner(upCtx, env, upArgs...)
+	}); err != nil {
 		s.writeState(State{State: "failed", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "up -d failed: " + err.Error()})
 		slog.Error("compose up failed", "err", err)
 		return
 	}
 
 	if s.healthCheck != nil {
+		checkState := phaseState("checking", "Waiting for the new service to become ready", pullStep+2)
+		s.writeState(checkState)
 		healthCtx, cancelHealth := context.WithTimeout(context.Background(), componentHealthTimeout(spec.name))
-		healthErr := s.healthCheck(healthCtx, spec.service)
+		healthErr := s.runWithStateHeartbeat(checkState, func() error {
+			return s.healthCheck(healthCtx, spec.service)
+		})
 		cancelHealth()
 		if healthErr != nil {
 			if action == "update" && previousImageID != "" {
@@ -563,7 +607,9 @@ func (s *server) runComponentJob(action, target, component string, startedAt tim
 	// The main container is now being recreated. The brand-new replica
 	// will read this "done" state on startup and serve it to the UI that's
 	// still polling in the browser.
-	s.writeState(State{State: "done", Action: action, Component: component, Target: target, StartedAt: now, UpdatedAt: time.Now(), Message: "compose up -d completed", PreviousImageID: previousImageID})
+	done := phaseState("done", "Update completed and service is ready", totalSteps)
+	done.PreviousImageID = previousImageID
+	s.writeState(done)
 }
 
 // requireHealthyOptimizer keeps a Core image without embedded Python from
@@ -1060,6 +1106,32 @@ func (s *server) recoverRollbackSafety(ctx context.Context, base State, safetySn
 	s.writeState(State{State: "failed", Action: base.Action, Snapshot: base.Snapshot, StartedAt: base.StartedAt, UpdatedAt: time.Now(), Message: message})
 }
 
+func (s *server) runWithStateHeartbeat(st State, run func() error) error {
+	if s.statusHeartbeatInterval <= 0 {
+		return run()
+	}
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(s.statusHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				st.UpdatedAt = time.Now()
+				s.writeState(st)
+			case <-done:
+				return
+			}
+		}
+	}()
+	err := run()
+	close(done)
+	<-stopped
+	return err
+}
+
 func (s *server) writeState(st State) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -1164,7 +1236,7 @@ func (s *server) previousImageID(component string) string {
 // can restore the pre-rollback data before reporting failure.
 func (s *server) recoverCrashedState() {
 	st := s.readState()
-	if st.State != "pulling" && st.State != "restarting" && st.State != "restoring" {
+	if st.State != "pulling" && st.State != "restarting" && st.State != "checking" && st.State != "restoring" {
 		return
 	}
 	prev := st.State
@@ -1234,14 +1306,19 @@ func (s *server) waitForServiceHealth(ctx context.Context, service string) error
 		out, inspectErr := dockerOutput(ctx, "inspect", "--format", "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}", containerID)
 		if inspectErr == nil {
 			switch status := strings.TrimSpace(out); status {
-			case "healthy", "running":
+			case "healthy", "running", "starting":
 				if service != s.mainServiceName {
+					if status == "starting" {
+						break
+					}
 					return nil
 				}
 				// Core intentionally answers /api/health while opening or
 				// migrating a large database so Docker does not kill valid slow
 				// boots. /api/status is served only by the fully wired API, so
 				// require it before committing an update or restored state.
+				// Probe while Docker still reports "starting" so a healthy Core
+				// does not wait for the next 10-second healthcheck tick.
 				if _, readyErr := dockerOutput(ctx, "exec", containerID, "wget", "-q", "-T", "4", "-O", "/dev/null", "http://127.0.0.1:8080/api/status"); readyErr == nil {
 					return nil
 				}

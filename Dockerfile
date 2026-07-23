@@ -55,15 +55,15 @@ RUN apk add --no-cache ca-certificates tzdata
 # on container recreate. See go/cmd/ftw/main.go:66 — there
 # is no path resolution against the config file's directory; the open
 # call is literally state.Open(cfg.State.Path).
-COPY --from=builder /out/ftw             /app/ftw
-COPY --from=builder /out/ftw-backup      /app/ftw-backup
-COPY drivers/ /app/drivers/
-COPY web/     /app/web/
+COPY --from=builder --chown=100:101 /out/ftw        /app/ftw
+COPY --from=builder --chown=100:101 /out/ftw-backup /app/ftw-backup
+COPY --chown=100:101 drivers/ /app/drivers/
+COPY --chown=100:101 web/     /app/web/
 COPY LICENSE NOTICE /usr/share/doc/ftw/
 
 RUN ln -s /app/ftw /app/forty-two-watts && \
     mkdir -p /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer && \
-    chown -R 100:101 /app /run/ftw-update /run/ftw-optimizer
+    chown 100:101 /app/data /app/data/drivers /run/ftw-update /run/ftw-optimizer
 
 ENV HOME=/app/data
 

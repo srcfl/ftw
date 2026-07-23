@@ -66,6 +66,10 @@ const (
 	// state file hasn't been refreshed within this window. Catches the
 	// sidecar crashing mid-pull so the UI overlay can unblock.
 	staleThreshold = 5 * time.Minute
+	// Sidecars released before phase heartbeats can stay silent for the
+	// full Docker pull. Their pull timeout is two hours, so do not turn a
+	// slow but valid download into a false failure before then.
+	legacySidecarStaleThreshold = 2 * time.Hour
 )
 
 // Channel controls which immutable release stream the checker follows.
@@ -175,14 +179,20 @@ const MaxReleaseBodyBytes = 16 * 1024
 // through unchanged. The main service may also write early states before
 // handing off to the sidecar, e.g. starting/snapshotting.
 type UpdateStatus struct {
-	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, restoring, done, failed
+	State           string            `json:"state"` // idle, starting, snapshotting, pulling, restarting, checking, restoring, done, failed
 	Action          string            `json:"action,omitempty"`
 	Component       string            `json:"component,omitempty"`
 	Target          string            `json:"target,omitempty"`
 	Snapshot        string            `json:"snapshot,omitempty"`
 	StartedAt       time.Time         `json:"started_at,omitempty"`
+	PhaseStartedAt  time.Time         `json:"phase_started_at,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at,omitempty"`
 	Message         string            `json:"message,omitempty"`
+	Step            int               `json:"step,omitempty"`
+	TotalSteps      int               `json:"total_steps,omitempty"`
+	ProgressCurrent int64             `json:"progress_current,omitempty"`
+	ProgressTotal   int64             `json:"progress_total,omitempty"`
+	ProgressUnit    string            `json:"progress_unit,omitempty"`
 	PreviousImageID string            `json:"previous_image_id,omitempty"`
 	PreviousImages  map[string]string `json:"previous_images,omitempty"`
 }
@@ -708,8 +718,8 @@ func (c *Checker) postSidecar(ctx context.Context, body []byte) error {
 }
 
 // Status reads the sidecar's state.json. Missing or unreadable returns
-// {state: idle}. A pulling/restarting state whose last heartbeat is older
-// than staleThreshold is surfaced as failed so the UI overlay unblocks.
+// {state: idle}. An in-flight state whose last heartbeat is too old is
+// surfaced as failed so the UI overlay unblocks.
 func (c *Checker) Status() UpdateStatus {
 	if c.cfg.StatusPath == "" {
 		return UpdateStatus{State: "idle"}
@@ -724,10 +734,11 @@ func (c *Checker) Status() UpdateStatus {
 		return UpdateStatus{State: "idle"}
 	}
 	if isInFlightState(st.State) && !st.UpdatedAt.IsZero() {
-		if c.cfg.Now().Sub(st.UpdatedAt) > staleThreshold {
+		threshold := updateStatusStaleThreshold(st)
+		if c.cfg.Now().Sub(st.UpdatedAt) > threshold {
 			st.State = "failed"
 			if st.Message == "" {
-				st.Message = "no heartbeat from updater in 5 min"
+				st.Message = fmt.Sprintf("no updater heartbeat for %s", threshold)
 			}
 		}
 	}
@@ -785,11 +796,21 @@ func (c *Checker) WriteStatus(st UpdateStatus) error {
 
 func isInFlightState(state string) bool {
 	switch state {
-	case "starting", "snapshotting", "pulling", "restarting", "restoring":
+	case "starting", "snapshotting", "pulling", "restarting", "checking", "restoring":
 		return true
 	default:
 		return false
 	}
+}
+
+func updateStatusStaleThreshold(st UpdateStatus) time.Duration {
+	if st.PhaseStartedAt.IsZero() {
+		switch st.State {
+		case "pulling", "restarting", "restoring":
+			return legacySidecarStaleThreshold
+		}
+	}
+	return staleThreshold
 }
 
 func inferChannel(version string) Channel {

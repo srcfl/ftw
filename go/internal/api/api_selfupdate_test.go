@@ -326,6 +326,33 @@ func TestVersionUpdate_CreatesSnapshotBeforeTrigger(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusHeartbeatPublishesBackupProgress(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	checker := selfupdate.New(selfupdate.Config{StatusPath: path}, nil)
+	started := time.Now().Add(-time.Minute)
+	heartbeat := newUpdateStatusHeartbeat(checker, selfupdate.UpdateStatus{
+		State: "snapshotting", Action: "update", Component: "core", Target: "v1.5.0",
+		StartedAt: started, PhaseStartedAt: started, Step: 1, TotalSteps: 4,
+	})
+	heartbeat.Start()
+	heartbeat.SetBackupProgress(state.BackupProgress{
+		Phase: state.BackupPhaseCompressing, CompletedBytes: 25, TotalBytes: 100,
+	})
+	heartbeat.Stop()
+
+	got := checker.Status()
+	if got.State != "snapshotting" || got.Step != 1 || got.TotalSteps != 4 {
+		t.Fatalf("status = %+v", got)
+	}
+	if got.Message != "Compressing rollback backup" ||
+		got.ProgressCurrent != 25 || got.ProgressTotal != 100 || got.ProgressUnit != "bytes" {
+		t.Fatalf("backup progress = %+v", got)
+	}
+	if got.PhaseStartedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatalf("progress timestamps = %+v", got)
+	}
+}
+
 func gunzipTestFile(t *testing.T, src, dst string) {
 	t.Helper()
 	in, err := os.Open(src)

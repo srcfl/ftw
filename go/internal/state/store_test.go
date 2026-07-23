@@ -806,5 +806,36 @@ func TestBackupToCompressedPreservesCompleteHistory(t *testing.T) {
 	}
 }
 
+func TestBackupToCompressedReportsPhasesAndBytes(t *testing.T) {
+	s := freshStore(t)
+	dst := filepath.Join(t.TempDir(), "state.db.gz")
+	var progress []BackupProgress
+	if err := s.BackupToCompressedWithProgress(dst, func(update BackupProgress) {
+		progress = append(progress, update)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 4 {
+		t.Fatalf("progress = %#v", progress)
+	}
+	if progress[0].Phase != BackupPhaseCopying {
+		t.Fatalf("first progress = %#v", progress[0])
+	}
+	var compressed, synced bool
+	for _, update := range progress {
+		if update.Phase == BackupPhaseCompressing && update.TotalBytes > 0 &&
+			update.CompletedBytes == update.TotalBytes {
+			compressed = true
+		}
+		if update.Phase == BackupPhaseSyncing && update.TotalBytes > 0 &&
+			update.CompletedBytes == update.TotalBytes {
+			synced = true
+		}
+	}
+	if !compressed || !synced {
+		t.Fatalf("progress did not finish compression and sync: %#v", progress)
+	}
+}
+
 // avoid unused import if context not used
 var _ = context.Canceled

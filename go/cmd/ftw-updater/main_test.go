@@ -113,13 +113,37 @@ func TestSkipPull_BypassesPullStep(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(`{"action":"update","target":"v1.2.3"}`))
 	rr := httptest.NewRecorder()
 	s.handleUpdate(rr, req)
-	waitForState(t, s, "done")
+	done := waitForState(t, s, "done")
+	if done.Step != 4 || done.TotalSteps != 4 || done.PhaseStartedAt.IsZero() {
+		t.Fatalf("done progress = %+v", done)
+	}
 	calls := runner.snapshot()
 	if len(calls) != 1 {
 		t.Fatalf("skip-pull should yield 1 call (up only), got %d: %v", len(calls), calls)
 	}
 	if !strings.Contains(strings.Join(calls[0], " "), "up -d") {
 		t.Errorf("single call should be `up -d`: %v", calls[0])
+	}
+}
+
+func TestRunWithStateHeartbeatRefreshesLongPhase(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.statusHeartbeatInterval = 5 * time.Millisecond
+	started := time.Now()
+	initial := State{
+		State: "pulling", Action: "update", Component: "core", Target: "v1.2.3",
+		StartedAt: started, PhaseStartedAt: started, UpdatedAt: started,
+		Message: "Downloading pinned release image", Step: 2, TotalSteps: 4,
+	}
+	if err := s.runWithStateHeartbeat(initial, func() error {
+		time.Sleep(18 * time.Millisecond)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := s.readState()
+	if !got.UpdatedAt.After(started) || got.State != "pulling" || got.Step != 2 || got.TotalSteps != 4 {
+		t.Fatalf("heartbeat state = %+v", got)
 	}
 }
 

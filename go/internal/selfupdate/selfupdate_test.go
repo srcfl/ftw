@@ -526,10 +526,44 @@ func TestStatus_ReadsAndDetectsStale(t *testing.T) {
 		t.Errorf("fresh status = %+v, want restoring snapshot-123", s)
 	}
 
-	stale := UpdateStatus{State: "pulling", Action: "update", UpdatedAt: time.Now().Add(-10 * time.Minute)}
+	stale := UpdateStatus{
+		State:          "pulling",
+		Action:         "update",
+		PhaseStartedAt: time.Now().Add(-10 * time.Minute),
+		UpdatedAt:      time.Now().Add(-10 * time.Minute),
+	}
 	writeJSON(t, path, stale)
 	if s := c.Status(); s.State != "failed" {
 		t.Errorf("stale state = %q, want failed", s.State)
+	}
+	stale.State = "checking"
+	writeJSON(t, path, stale)
+	if s := c.Status(); s.State != "failed" {
+		t.Errorf("stale checking state = %q, want failed", s.State)
+	}
+}
+
+func TestStatus_AllowsSilentLegacyPullUntilItsDockerTimeout(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now()
+	c := New(Config{StatusPath: path, Now: func() time.Time { return now }}, nil)
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-15 * time.Minute),
+	})
+	if got := c.Status(); got.State != "pulling" {
+		t.Fatalf("15-minute legacy pull state = %q, want pulling", got.State)
+	}
+
+	writeJSON(t, path, UpdateStatus{
+		State:     "pulling",
+		Action:    "update",
+		UpdatedAt: now.Add(-legacySidecarStaleThreshold - time.Second),
+	})
+	if got := c.Status(); got.State != "failed" {
+		t.Fatalf("expired legacy pull state = %q, want failed", got.State)
 	}
 }
 
@@ -540,11 +574,17 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 
 	started := time.Now().Add(-time.Second)
 	if err := c.WriteStatus(UpdateStatus{
-		State:     "snapshotting",
-		Action:    "update",
-		Target:    "v1.5.0",
-		StartedAt: started,
-		Message:   "creating backup snapshot",
+		State:           "snapshotting",
+		Action:          "update",
+		Target:          "v1.5.0",
+		StartedAt:       started,
+		PhaseStartedAt:  started,
+		Message:         "creating backup snapshot",
+		Step:            1,
+		TotalSteps:      4,
+		ProgressCurrent: 50,
+		ProgressTotal:   100,
+		ProgressUnit:    "bytes",
 	}); err != nil {
 		t.Fatalf("write status: %v", err)
 	}
@@ -555,6 +595,10 @@ func TestWriteStatusPublishesPreSidecarState(t *testing.T) {
 	}
 	if got.UpdatedAt.IsZero() {
 		t.Fatal("UpdatedAt should be filled")
+	}
+	if got.Step != 1 || got.TotalSteps != 4 || got.ProgressCurrent != 50 ||
+		got.ProgressTotal != 100 || got.ProgressUnit != "bytes" || got.PhaseStartedAt.IsZero() {
+		t.Fatalf("progress fields = %+v", got)
 	}
 }
 
