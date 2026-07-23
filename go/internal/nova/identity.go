@@ -27,6 +27,8 @@ const (
 	identityBarrierPollPeriod = 5 * time.Millisecond
 )
 
+var ErrIdentityCreationBlocked = errors.New("nova: identity creation is blocked by reserved state")
+
 // Identity is the ES256 keypair this FTW instance uses to
 // authenticate with Nova. The private key signs MQTT auth JWTs (see
 // SignJWT) and claim-flow proof messages (see SignClaimMessage).
@@ -51,6 +53,106 @@ func LoadOrCreateIdentity(path string) (*Identity, error) {
 	return loadOrCreateIdentity(path, policy, defaultIdentityFileOps())
 }
 
+// LoadExistingIdentity reads and verifies an existing key without changing the
+// file system. It never creates a directory or key and never cleans install
+// state. Missing path components remain fs.ErrNotExist-compatible.
+func LoadExistingIdentity(path string) (*Identity, error) {
+	policy, err := currentIdentityFilePolicy()
+	if err != nil {
+		return nil, err
+	}
+	return loadExistingIdentity(path, policy, existingIdentityHooks{})
+}
+
+// LoadOrCreateIdentityGuarded loads an existing key or creates one only while
+// reserved files remain absent under the same pinned directory descriptor.
+// lockDirectory must exclude every writer that can install a reserved file.
+func LoadOrCreateIdentityGuarded(
+	path string,
+	reservedNames []string,
+	lockDirectory func(*os.File) error,
+) (*Identity, error) {
+	policy, err := currentIdentityFilePolicy()
+	if err != nil {
+		return nil, err
+	}
+	return loadOrCreateIdentityGuarded(
+		path, reservedNames, lockDirectory, policy, defaultIdentityFileOps(),
+		guardedIdentityHooks{},
+	)
+}
+
+type existingIdentityHooks struct {
+	afterParentOpen    func() error
+	afterDirectoryOpen func() error
+	afterKeyOpen       func() error
+}
+
+type guardedIdentityHooks struct {
+	afterAbsence func() error
+}
+
+func loadExistingIdentity(
+	path string,
+	policy identityFilePolicy,
+	hooks existingIdentityHooks,
+) (*Identity, error) {
+	if path == "" {
+		return nil, errors.New("nova: key path is empty")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("nova: resolve key path: %w", err)
+	}
+	keyName := filepath.Base(absPath)
+	if keyName == "." || keyName == string(filepath.Separator) ||
+		!fs.ValidPath(filepath.ToSlash(keyName)) {
+		return nil, errors.New("nova: key path has no file name")
+	}
+	dirPath := filepath.Dir(absPath)
+	parentPath := filepath.Dir(dirPath)
+	var dir *identityDirectory
+	if parentPath == dirPath {
+		dir, err = openIdentityDirectoryPath(dirPath, policy.directoryOwnerUID, false)
+	} else {
+		parent, parentErr := openIdentityDirectoryPath(
+			parentPath, policy.directoryOwnerUID, true,
+		)
+		if parentErr != nil {
+			return nil, fmt.Errorf("nova: open existing key directory parent: %w", parentErr)
+		}
+		if hooks.afterParentOpen != nil {
+			if hookErr := hooks.afterParentOpen(); hookErr != nil {
+				parent.close()
+				return nil, hookErr
+			}
+		}
+		dir, err = openIdentityDirectoryEntry(
+			parent, filepath.Base(dirPath), dirPath, policy.directoryOwnerUID,
+		)
+		if err != nil {
+			parent.close()
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("nova: open existing key directory: %w", err)
+	}
+	defer dir.close()
+	if hooks.afterDirectoryOpen != nil {
+		if err := hooks.afterDirectoryOpen(); err != nil {
+			return nil, err
+		}
+	}
+	identity, err := loadIdentityWithHook(dir, keyName, policy, hooks.afterKeyOpen)
+	if err != nil {
+		return nil, err
+	}
+	if err := dir.revalidate(policy); err != nil {
+		return nil, err
+	}
+	return identity, nil
+}
+
 type identityFilePolicy struct {
 	directoryOwnerUID uint64
 	fileOwnerUID      uint64
@@ -62,6 +164,8 @@ type identityFileOps struct {
 	link          func(*os.Root, string, string) error
 	remove        func(*os.Root, string) error
 	syncDirectory func(*os.File) error
+	stat          func(*os.File) (os.FileInfo, error)
+	beforeLink    func() error
 	now           func() time.Time
 	sleep         func(time.Duration)
 }
@@ -98,6 +202,9 @@ func defaultIdentityFileOps() identityFileOps {
 		syncDirectory: func(dir *os.File) error {
 			return dir.Sync()
 		},
+		stat: func(file *os.File) (os.FileInfo, error) {
+			return file.Stat()
+		},
 		now: time.Now, sleep: time.Sleep,
 	}
 }
@@ -119,7 +226,81 @@ func loadOrCreateIdentity(path string, policy identityFilePolicy, ops identityFi
 		return nil, err
 	}
 	defer dir.close()
+	return loadOrCreateIdentityInDirectory(
+		dir, created, keyName, policy, ops, nil, false,
+	)
+}
 
+func loadOrCreateIdentityGuarded(
+	path string,
+	reservedNames []string,
+	lockDirectory func(*os.File) error,
+	policy identityFilePolicy,
+	ops identityFileOps,
+	hooks guardedIdentityHooks,
+) (*Identity, error) {
+	if lockDirectory == nil {
+		return nil, errors.New("nova: identity directory lock is missing")
+	}
+	if path == "" {
+		return nil, errors.New("nova: key path is empty")
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("nova: resolve key path: %w", err)
+	}
+	keyName := filepath.Base(absPath)
+	if keyName == "." || keyName == string(filepath.Separator) ||
+		!fs.ValidPath(filepath.ToSlash(keyName)) {
+		return nil, errors.New("nova: key path has no file name")
+	}
+	names, err := validateReservedIdentityNames(keyName, reservedNames)
+	if err != nil {
+		return nil, err
+	}
+	dir, created, err := openOrCreateIdentityDirectory(filepath.Dir(absPath), policy, ops)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.close()
+	if err := lockDirectory(dir.file); err != nil {
+		return nil, fmt.Errorf("nova: lock identity directory: %w", err)
+	}
+	if err := ensureReservedIdentityFilesAbsent(dir, names, policy); err != nil {
+		return nil, err
+	}
+	beforeInstall := func() error {
+		return ensureReservedIdentityFilesAbsent(dir, names, policy)
+	}
+	guardedOps := ops
+	priorBeforeLink := guardedOps.beforeLink
+	guardedOps.beforeLink = func() error {
+		if priorBeforeLink != nil {
+			if err := priorBeforeLink(); err != nil {
+				return err
+			}
+		}
+		if hooks.afterAbsence != nil {
+			if err := hooks.afterAbsence(); err != nil {
+				return err
+			}
+		}
+		return ensureReservedIdentityFilesAbsent(dir, names, policy)
+	}
+	return loadOrCreateIdentityInDirectory(
+		dir, created, keyName, policy, guardedOps, beforeInstall, true,
+	)
+}
+
+func loadOrCreateIdentityInDirectory(
+	dir *identityDirectory,
+	created bool,
+	keyName string,
+	policy identityFilePolicy,
+	ops identityFileOps,
+	beforeInstall func() error,
+	rollbackPostLinkMismatch bool,
+) (*Identity, error) {
 	if info, err := dir.root.Lstat(keyName); err == nil {
 		links, err := validateIdentityFileInfo(info, policy.fileOwnerUID, true)
 		if err != nil {
@@ -153,6 +334,11 @@ func loadOrCreateIdentity(path string, policy identityFilePolicy, ops identityFi
 	if err := dir.revalidate(policy); err != nil {
 		return nil, err
 	}
+	if beforeInstall != nil {
+		if err := beforeInstall(); err != nil {
+			return nil, err
+		}
+	}
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -165,7 +351,24 @@ func loadOrCreateIdentity(path string, policy identityFilePolicy, ops identityFi
 	out := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
 	installed, err := installIdentityFileNoReplace(dir, keyName, out, 0o600, policy, ops)
 	if err != nil {
-		return nil, fmt.Errorf("nova: write key: %w", err)
+		writeErr := fmt.Errorf("nova: write key: %w", err)
+		if installed && rollbackPostLinkMismatch {
+			if revalidateErr := dir.revalidate(policy); revalidateErr != nil {
+				rollbackErr := rollbackInstalledIdentity(
+					dir, keyName, priv, policy, ops,
+				)
+				return nil, errors.Join(writeErr, revalidateErr, rollbackErr)
+			}
+		}
+		return nil, writeErr
+	}
+	if rollbackPostLinkMismatch {
+		if err := dir.revalidate(policy); err != nil {
+			rollbackErr := rollbackInstalledIdentity(
+				dir, keyName, priv, policy, ops,
+			)
+			return nil, errors.Join(err, rollbackErr)
+		}
 	}
 	persisted, err := loadIdentity(dir, keyName, policy)
 	if err != nil {
@@ -175,9 +378,402 @@ func loadOrCreateIdentity(path string, policy identityFilePolicy, ops identityFi
 		return nil, errors.New("nova: installed key does not match generated key")
 	}
 	if err := dir.revalidate(policy); err != nil {
+		if installed && rollbackPostLinkMismatch {
+			rollbackErr := rollbackInstalledIdentity(
+				dir, keyName, priv, policy, ops,
+			)
+			return nil, errors.Join(err, rollbackErr)
+		}
 		return nil, err
 	}
 	return persisted, nil
+}
+
+func rollbackInstalledIdentity(
+	dir *identityDirectory,
+	name string,
+	expected *ecdsa.PrivateKey,
+	policy identityFilePolicy,
+	ops identityFileOps,
+) error {
+	state, err := loadIdentityForRollback(
+		dir, name, policy, ops,
+	)
+	if err != nil {
+		return fmt.Errorf("nova: verify linked key before rollback: %w", err)
+	}
+	defer state.file.Close()
+	if !publicKeysEqual(expected, state.identity.priv) {
+		return errors.New("nova: linked key changed before rollback")
+	}
+
+	expectedLinks := uint64(len(state.tempNames) + 1)
+	if err := requireRollbackLinkCount(
+		state.file, policy.fileOwnerUID, expectedLinks, ops,
+		"before rollback cleanup",
+	); err != nil {
+		return err
+	}
+
+	var cleanupErrs []error
+	mutatedDirectory := false
+	stopCleanup := false
+	for _, tempName := range state.tempNames {
+		if err := requireRollbackLinkCount(
+			state.file, policy.fileOwnerUID, expectedLinks, ops,
+			"before rollback temp unlink",
+		); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+			stopCleanup = true
+			break
+		}
+		info, statErr := dir.root.Lstat(tempName)
+		if statErr != nil {
+			cleanupErrs = append(
+				cleanupErrs,
+				fmt.Errorf("nova: revalidate rollback temp %s: %w", tempName, statErr),
+			)
+			stopCleanup = true
+			break
+		}
+		if !os.SameFile(state.targetInfo, info) {
+			cleanupErrs = append(
+				cleanupErrs,
+				fmt.Errorf("nova: rollback temp %s changed before removal", tempName),
+			)
+			stopCleanup = true
+			break
+		}
+		removeErr := ops.remove(dir.root, tempName)
+		mutatedDirectory = true
+		expectedLinks--
+		linkErr := requireRollbackLinkCount(
+			state.file, policy.fileOwnerUID, expectedLinks, ops,
+			"after rollback temp unlink",
+		)
+		if removeErr != nil {
+			cleanupErrs = append(
+				cleanupErrs,
+				fmt.Errorf("nova: remove rollback temp %s: %w", tempName, removeErr),
+			)
+		}
+		if linkErr != nil {
+			cleanupErrs = append(cleanupErrs, linkErr)
+		}
+		if removeErr != nil || linkErr != nil {
+			stopCleanup = true
+			break
+		}
+	}
+
+	if !stopCleanup {
+		if err := requireRollbackLinkCount(
+			state.file, policy.fileOwnerUID, expectedLinks, ops,
+			"before rollback key unlink",
+		); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+			stopCleanup = true
+		}
+	}
+	if !stopCleanup {
+		currentTarget, targetErr := dir.root.Lstat(name)
+		if targetErr != nil {
+			cleanupErrs = append(
+				cleanupErrs,
+				fmt.Errorf("nova: revalidate rollback key: %w", targetErr),
+			)
+			stopCleanup = true
+		} else if !os.SameFile(state.targetInfo, currentTarget) {
+			cleanupErrs = append(
+				cleanupErrs,
+				errors.New("nova: rollback key changed before removal"),
+			)
+			stopCleanup = true
+		}
+	}
+	if !stopCleanup {
+		removeErr := ops.remove(dir.root, name)
+		mutatedDirectory = true
+		expectedLinks--
+		linkErr := requireRollbackLinkCount(
+			state.file, policy.fileOwnerUID, expectedLinks, ops,
+			"after rollback key unlink",
+		)
+		if removeErr != nil {
+			cleanupErrs = append(
+				cleanupErrs,
+				fmt.Errorf("nova: remove rollback key: %w", removeErr),
+			)
+		}
+		if linkErr != nil {
+			cleanupErrs = append(cleanupErrs, linkErr)
+		}
+	}
+
+	if mutatedDirectory {
+		if syncErr := ops.syncDirectory(dir.file); syncErr != nil {
+			cleanupErrs = append(
+				cleanupErrs,
+				wrapIdentityError("sync rolled back key install", syncErr),
+			)
+		}
+	}
+	if len(cleanupErrs) == 0 {
+		if !mutatedDirectory || expectedLinks != 0 {
+			cleanupErrs = append(
+				cleanupErrs,
+				errors.New("nova: rollback did not unlink the complete key state"),
+			)
+		} else if err := requireRollbackLinkCount(
+			state.file, policy.fileOwnerUID, 0, ops,
+			"after rollback directory sync",
+		); err != nil {
+			cleanupErrs = append(cleanupErrs, err)
+		}
+	}
+
+	for _, removedName := range append(state.tempNames, name) {
+		if _, statErr := dir.root.Lstat(removedName); !errors.Is(statErr, fs.ErrNotExist) {
+			if statErr == nil {
+				cleanupErrs = append(
+					cleanupErrs,
+					fmt.Errorf("nova: rolled back entry %s still exists", removedName),
+				)
+			} else {
+				cleanupErrs = append(
+					cleanupErrs,
+					fmt.Errorf("nova: recheck rolled back entry %s: %w", removedName, statErr),
+				)
+			}
+		}
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+type rollbackIdentityState struct {
+	identity   *Identity
+	file       *os.File
+	targetInfo os.FileInfo
+	tempNames  []string
+}
+
+func loadIdentityForRollback(
+	dir *identityDirectory,
+	name string,
+	policy identityFilePolicy,
+	ops identityFileOps,
+) (*rollbackIdentityState, error) {
+	lstatInfo, err := dir.root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("nova: lstat rollback key: %w", err)
+	}
+	lstatLinks, err := validateRollbackIdentityFileInfo(
+		lstatInfo, policy.fileOwnerUID, false,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	file, err := openIdentityRootFileNoFollow(dir.root, name)
+	if err != nil {
+		return nil, fmt.Errorf("nova: open rollback key: %w", err)
+	}
+	closeFile := true
+	defer func() {
+		if closeFile {
+			_ = file.Close()
+		}
+	}()
+	fstatInfo, err := ops.stat(file)
+	if err != nil {
+		return nil, fmt.Errorf("nova: fstat rollback key: %w", err)
+	}
+	if !os.SameFile(lstatInfo, fstatInfo) {
+		return nil, errors.New("nova: rollback key changed while opening")
+	}
+	fstatLinks, err := validateRollbackIdentityFileInfo(
+		fstatInfo, policy.fileOwnerUID, false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if fstatLinks != lstatLinks {
+		return nil, errors.New("nova: rollback key link count changed while opening")
+	}
+
+	b, err := io.ReadAll(io.LimitReader(file, maxIdentityKeyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("nova: read rollback key: %w", err)
+	}
+	if len(b) > maxIdentityKeyBytes {
+		return nil, errors.New("nova: rollback key file is too large")
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, fmt.Errorf(
+			"nova: %s: no PEM block", filepath.Join(dir.path, name),
+		)
+	}
+	priv, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("nova: parse rollback key: %w", err)
+	}
+	if priv.Curve != elliptic.P256() {
+		return nil, errors.New("nova: rollback key is not P-256")
+	}
+
+	finalInfo, err := dir.root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("nova: revalidate rollback key entry: %w", err)
+	}
+	if !os.SameFile(fstatInfo, finalInfo) {
+		return nil, errors.New("nova: rollback key changed before cleanup")
+	}
+	finalLinks, err := validateRollbackIdentityFileInfo(
+		finalInfo, policy.fileOwnerUID, false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if finalLinks != fstatLinks {
+		return nil, errors.New("nova: rollback key link count changed before cleanup")
+	}
+
+	entries, err := fs.ReadDir(dir.root.FS(), ".")
+	if err != nil {
+		return nil, fmt.Errorf("nova: list rollback key directory: %w", err)
+	}
+	prefix := "." + name + ".tmp-"
+	tempNames := make([]string, 0, 1)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		info, statErr := dir.root.Lstat(entry.Name())
+		if statErr != nil {
+			return nil, fmt.Errorf(
+				"nova: lstat rollback temp %s: %w", entry.Name(), statErr,
+			)
+		}
+		if !os.SameFile(finalInfo, info) {
+			return nil, fmt.Errorf(
+				"nova: rollback temp %s is not the installed key", entry.Name(),
+			)
+		}
+		tempNames = append(tempNames, entry.Name())
+	}
+	if uint64(len(tempNames))+1 != finalLinks {
+		return nil, fmt.Errorf(
+			"nova: rollback key has %d links but %d matching install temps",
+			finalLinks, len(tempNames),
+		)
+	}
+	closeFile = false
+	return &rollbackIdentityState{
+		identity:   &Identity{priv: priv},
+		file:       file,
+		targetInfo: finalInfo,
+		tempNames:  tempNames,
+	}, nil
+}
+
+func requireRollbackLinkCount(
+	file *os.File,
+	expectedUID uint64,
+	expectedLinks uint64,
+	ops identityFileOps,
+	phase string,
+) error {
+	info, err := ops.stat(file)
+	if err != nil {
+		return fmt.Errorf("nova: fstat rollback key %s: %w", phase, err)
+	}
+	links, err := validateRollbackIdentityFileInfo(
+		info, expectedUID, expectedLinks == 0,
+	)
+	if err != nil {
+		return err
+	}
+	if links != expectedLinks {
+		return fmt.Errorf(
+			"nova: rollback key has %d links %s, want %d",
+			links, phase, expectedLinks,
+		)
+	}
+	return nil
+}
+
+func validateRollbackIdentityFileInfo(
+	info os.FileInfo,
+	expectedUID uint64,
+	allowUnlinked bool,
+) (uint64, error) {
+	if !info.Mode().IsRegular() {
+		return 0, errors.New("nova: rollback key is not a regular file")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return 0, fmt.Errorf(
+			"nova: rollback key mode %04o permits group or world access",
+			info.Mode().Perm(),
+		)
+	}
+	if err := requireIdentityOwner(info, expectedUID, "rollback key"); err != nil {
+		return 0, err
+	}
+	links, err := identityStatUint(info, "Nlink")
+	if err != nil {
+		return 0, fmt.Errorf("nova: rollback key link metadata: %w", err)
+	}
+	if allowUnlinked && links == 0 {
+		return 0, nil
+	}
+	if links != 1 && links != 2 {
+		return links, fmt.Errorf("nova: rollback key has %d links", links)
+	}
+	return links, nil
+}
+
+func validateReservedIdentityNames(keyName string, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, errors.New("nova: reserved identity files are missing")
+	}
+	seen := make(map[string]struct{}, len(names))
+	validated := make([]string, 0, len(names))
+	for _, name := range names {
+		if !fs.ValidPath(name) || name == "." || filepath.Base(name) != name ||
+			name == keyName {
+			return nil, errors.New("nova: reserved identity file name is invalid")
+		}
+		if _, ok := seen[name]; ok {
+			return nil, errors.New("nova: reserved identity file name is repeated")
+		}
+		seen[name] = struct{}{}
+		validated = append(validated, name)
+	}
+	return validated, nil
+}
+
+func ensureReservedIdentityFilesAbsent(
+	dir *identityDirectory,
+	names []string,
+	policy identityFilePolicy,
+) error {
+	if err := dir.revalidate(policy); err != nil {
+		return err
+	}
+	entries, err := fs.ReadDir(dir.root.FS(), ".")
+	if err != nil {
+		return fmt.Errorf("nova: list identity directory: %w", err)
+	}
+	for _, entry := range entries {
+		for _, name := range names {
+			if entry.Name() == name ||
+				strings.HasPrefix(entry.Name(), "."+name+".tmp-") {
+				return fmt.Errorf("%w: %s", ErrIdentityCreationBlocked, entry.Name())
+			}
+		}
+	}
+	return dir.revalidate(policy)
 }
 
 func openOrCreateIdentityDirectory(
@@ -231,7 +827,7 @@ func openIdentityDirectoryPath(path string, expectedUID uint64, allowRootOwner b
 	if err := validateIdentityDirectoryInfo(info, expectedUID, allowRootOwner); err != nil {
 		return nil, err
 	}
-	opened, err := openIdentityFileNoFollow(path)
+	opened, err := openIdentityDirectoryFileNoFollow(path)
 	if err != nil {
 		return nil, fmt.Errorf("nova: open directory: %w", err)
 	}
@@ -280,7 +876,7 @@ func openIdentityDirectoryEntry(
 	if err := validateIdentityDirectoryInfo(info, expectedUID, false); err != nil {
 		return nil, err
 	}
-	opened, err := openIdentityRootFileNoFollow(parent.root, name)
+	opened, err := openIdentityRootDirectoryNoFollow(parent.root, name)
 	if err != nil {
 		return nil, fmt.Errorf("nova: open keydir entry: %w", err)
 	}
@@ -366,6 +962,11 @@ func installIdentityFileNoReplace(
 		return false, err
 	}
 
+	if ops.beforeLink != nil {
+		if err := ops.beforeLink(); err != nil {
+			return false, err
+		}
+	}
 	if err := ops.link(dir.root, tmpName, name); err != nil {
 		if !errors.Is(err, fs.ErrExist) {
 			return false, fmt.Errorf("install key without replace: %w", err)
@@ -506,6 +1107,15 @@ func hasIdentityInstallTemp(dir *identityDirectory, name string, targetInfo os.F
 }
 
 func loadIdentity(dir *identityDirectory, name string, policy identityFilePolicy) (*Identity, error) {
+	return loadIdentityWithHook(dir, name, policy, nil)
+}
+
+func loadIdentityWithHook(
+	dir *identityDirectory,
+	name string,
+	policy identityFilePolicy,
+	afterOpen func() error,
+) (*Identity, error) {
 	lstatInfo, err := dir.root.Lstat(name)
 	if err != nil {
 		return nil, fmt.Errorf("nova: lstat key: %w", err)
@@ -529,6 +1139,11 @@ func loadIdentity(dir *identityDirectory, name string, policy identityFilePolicy
 	if _, err := validateIdentityFileInfo(fstatInfo, policy.fileOwnerUID, false); err != nil {
 		return nil, err
 	}
+	if afterOpen != nil {
+		if err := afterOpen(); err != nil {
+			return nil, err
+		}
+	}
 
 	b, err := io.ReadAll(io.LimitReader(file, maxIdentityKeyBytes+1))
 	if err != nil {
@@ -548,6 +1163,16 @@ func loadIdentity(dir *identityDirectory, name string, policy identityFilePolicy
 	if priv.Curve != elliptic.P256() {
 		return nil, fmt.Errorf("nova: key is not P-256")
 	}
+	finalInfo, err := dir.root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("nova: revalidate key entry: %w", err)
+	}
+	if !os.SameFile(fstatInfo, finalInfo) {
+		return nil, errors.New("nova: key changed before return")
+	}
+	if _, err := validateIdentityFileInfo(finalInfo, policy.fileOwnerUID, false); err != nil {
+		return nil, err
+	}
 	return &Identity{priv: priv}, nil
 }
 
@@ -556,7 +1181,11 @@ func openIdentityFileNoFollow(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return os.OpenFile(path, os.O_RDONLY|flag, 0)
+	nonblock, err := identityNonblockFlag()
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, os.O_RDONLY|flag|nonblock, 0)
 }
 
 func openIdentityRootFileNoFollow(root *os.Root, name string) (*os.File, error) {
@@ -564,7 +1193,27 @@ func openIdentityRootFileNoFollow(root *os.Root, name string) (*os.File, error) 
 	if err != nil {
 		return nil, err
 	}
-	return root.OpenFile(name, os.O_RDONLY|flag, 0)
+	nonblock, err := identityNonblockFlag()
+	if err != nil {
+		return nil, err
+	}
+	return root.OpenFile(name, os.O_RDONLY|flag|nonblock, 0)
+}
+
+func openIdentityDirectoryFileNoFollow(path string) (*os.File, error) {
+	flags, err := identityDirectoryFlags()
+	if err != nil {
+		return nil, err
+	}
+	return os.OpenFile(path, flags, 0)
+}
+
+func openIdentityRootDirectoryNoFollow(root *os.Root, name string) (*os.File, error) {
+	flags, err := identityDirectoryFlags()
+	if err != nil {
+		return nil, err
+	}
+	return root.OpenFile(name, flags, 0)
 }
 
 // The os package does not expose O_NOFOLLOW. These values come from the
@@ -582,6 +1231,48 @@ func identityNoFollowFlag() (int, error) {
 		}
 	}
 	return 0, fmt.Errorf("nova: key storage does not support %s/%s", runtime.GOOS, runtime.GOARCH)
+}
+
+func identityNonblockFlag() (int, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return 0x4, nil
+	case "linux":
+		return 0x800, nil
+	default:
+		return 0, fmt.Errorf("nova: key storage does not support %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+}
+
+func identityDirectoryFlags() (int, error) {
+	noFollow, err := identityNoFollowFlag()
+	if err != nil {
+		return 0, err
+	}
+	nonblock, err := identityNonblockFlag()
+	if err != nil {
+		return 0, err
+	}
+	var directory int
+	switch runtime.GOOS {
+	case "darwin":
+		directory = 0x100000
+	case "linux":
+		switch runtime.GOARCH {
+		case "arm", "arm64", "ppc64", "ppc64le":
+			directory = 0x4000
+		case "386", "amd64", "loong64", "mips", "mips64", "mips64le",
+			"mipsle", "riscv64", "s390x":
+			directory = 0x10000
+		default:
+			return 0, fmt.Errorf(
+				"nova: key storage does not support %s/%s", runtime.GOOS, runtime.GOARCH,
+			)
+		}
+	default:
+		return 0, fmt.Errorf("nova: key storage does not support %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	return os.O_RDONLY | noFollow | nonblock | directory, nil
 }
 
 func validateIdentityFileDescriptor(file *os.File, expectedUID uint64, allowInstallLink bool) error {
