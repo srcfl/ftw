@@ -29,24 +29,25 @@ describe("dashboard information architecture", () => {
     assert.match(html, /role="tablist" aria-label="Primary navigation"/);
     assert.match(html, /aria-controls="view-overview" aria-selected="true"/);
     assert.match(router, /parts\[0\] === 'live' \? 'overview'/);
-    assert.match(router, /parts\[0\] === 'diagnose' \? 'history'/);
+    assert.match(router, /parts\[0\] === 'diagnose' \? 'plan'/);
     assert.match(router, /\['ArrowLeft', 'ArrowRight', 'Home', 'End'\]/);
   });
 
   it("moves each existing dashboard section instead of cloning it", () => {
     assert.match(router, /append\(plan, '#plan-section'\)/);
-    assert.match(router, /querySelector\('\.energy-history-header'\)/);
-    assert.match(router, /insertHistory\('\.history-row'\)/);
+    assert.match(router, /append\(energy, '\.history-row'\)/);
+    assert.match(router, /append\(plan, '#plan-history-details'\)/);
     assert.doesNotMatch(router, /insertHistory\('\.savings-row'\)/);
     assert.match(router, /'#chart-section'/);
     assert.match(router, /'#drivers-section'/);
   });
 
-  it("loads planner decisions only when their History section is open", () => {
+  it("loads past planner decisions only when their Plan section is open", () => {
     assert.match(router, /getElementById\('plan-history-details'\)/);
     assert.match(router, /plannerDetails\.addEventListener\('toggle'/);
     assert.match(router, /if \(!plannerDetails\.open\) return/);
     assert.match(router, /if \(selectedTs && plannerDetails\) plannerDetails\.open = true/);
+    assert.match(router, /parts\[0\] === 'diagnose' \? 'plan'/);
   });
 
   it("keeps saved vs no PV or battery on Overview", () => {

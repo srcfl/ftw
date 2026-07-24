@@ -1,8 +1,8 @@
 // diagnose.js — time-travel through persisted planner snapshots.
 //
 // Owns the five-destination dashboard router. Historical deep links remain
-// compatible: #live maps to #overview and #diagnose/<ts> maps to
-// #history/<ts>.
+// compatible: #live maps to #overview and #diagnose/<ts> opens the
+// matching decision under Plan.
 //
 // Fetches from /api/mpc/diagnose/history for the timeline list and
 // /api/mpc/diagnose/at?ts=<ms> for the detail pane. Persistence lands
@@ -29,22 +29,17 @@
   function organizeDestinations() {
     const energy = document.getElementById('view-energy');
     const plan = document.getElementById('view-plan');
-    const historyView = document.getElementById('view-history');
     const more = document.getElementById('view-more');
-    const historyAnchor = historyView && historyView.querySelector('.energy-history-header');
     const append = (host, selector) => {
       const el = document.querySelector(selector);
       if (host && el) host.appendChild(el);
     };
-    const insertHistory = (selector) => {
-      const el = document.querySelector(selector);
-      if (historyView && historyAnchor && el) historyView.insertBefore(el, historyAnchor);
-    };
 
     ['.prices-row', '.energy-row', '#heating-section', '#chart-section']
       .forEach(selector => append(energy, selector));
+    append(energy, '.history-row');
     append(plan, '#plan-section');
-    insertHistory('.history-row');
+    append(plan, '#plan-history-details');
     ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
       .forEach(selector => append(more, selector));
 
@@ -67,7 +62,7 @@
     const h = (location.hash || '#overview').replace(/^#/, '');
     const parts = h.split('/');
     const requested = parts[0] === 'live' ? 'overview'
-      : parts[0] === 'diagnose' ? 'history'
+      : parts[0] === 'diagnose' ? 'plan'
       : parts[0];
     const view = VIEW_NAMES.includes(requested) ? requested : 'overview';
     document.querySelectorAll('.app-view').forEach(panel => {
@@ -85,6 +80,8 @@
       if (typeof window.ftwEnergyHistoryLoad === 'function') {
         window.ftwEnergyHistoryLoad();
       }
+    }
+    if (view === 'plan' && parts[0] === 'diagnose') {
       const selectedTs = parts[1] ? Number(parts[1]) : null;
       const plannerDetails = document.getElementById('plan-history-details');
       state.selectedTs = selectedTs;
@@ -210,7 +207,7 @@
     el.querySelectorAll('.diag-row').forEach(b => {
       b.addEventListener('click', () => {
         const ts = Number(b.dataset.ts);
-        location.hash = '#history/' + ts;
+        location.hash = '#diagnose/' + ts;
       });
     });
     const activeRow = el.querySelector('.diag-row.active');
