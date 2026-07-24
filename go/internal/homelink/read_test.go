@@ -18,6 +18,7 @@ func TestReadTargetsAreFixedCoreGETs(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	manager := newGrantTestManager(t, true, &now, 18)
 	want := map[Scope]string{
+		ScopeOverviewRead:      "/api/home-link/overview",
 		ScopeHealthRead:        "/api/health",
 		ScopePlanRead:          "/api/mpc/plan",
 		ScopeEnergyAssetsRead:  "/api/energy/assets",

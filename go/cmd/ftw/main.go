@@ -2042,7 +2042,7 @@ func main() {
 		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
 	homeLinkAdmin, homeLinkEnabled, homeLinkErr := startHomeLink(
-		ctx, cfg, identityState, st, tel, mpcSvc,
+		ctx, cfg, identityState, st, tel, mpcSvc, ctrl, ctrlMu,
 	)
 	if homeLinkErr != nil {
 		slog.Warn("Home Link unavailable")

@@ -53,6 +53,7 @@ type ReadResultDispatcher interface {
 }
 
 var readTargets = map[Scope]ReadTarget{
+	ScopeOverviewRead:      {Method: http.MethodGet, Path: "/api/home-link/overview"},
 	ScopeHealthRead:        {Method: http.MethodGet, Path: "/api/health"},
 	ScopePlanRead:          {Method: http.MethodGet, Path: "/api/mpc/plan"},
 	ScopeEnergyAssetsRead:  {Method: http.MethodGet, Path: "/api/energy/assets"},
@@ -148,6 +149,31 @@ type HealthReadResponse struct {
 	CheckedAtMS int64  `json:"checked_at_ms"`
 }
 
+type OverviewEnergyToday struct {
+	ImportWh        float64 `json:"import_wh"`
+	ExportWh        float64 `json:"export_wh"`
+	PVWh            float64 `json:"pv_wh"`
+	BatChargedWh    float64 `json:"bat_charged_wh"`
+	BatDischargedWh float64 `json:"bat_discharged_wh"`
+	LoadWh          float64 `json:"load_wh"`
+}
+
+type OverviewReadResponse struct {
+	CheckedAtMS     int64                `json:"checked_at_ms"`
+	GridAvailable   bool                 `json:"grid_available"`
+	GridW           float64              `json:"grid_w"`
+	PVW             float64              `json:"pv_w"`
+	BatW            float64              `json:"bat_w"`
+	EVW             float64              `json:"ev_w"`
+	V2XW            float64              `json:"v2x_w"`
+	LoadW           float64              `json:"load_w"`
+	BatSoCAvailable bool                 `json:"bat_soc_available"`
+	BatSoC          float64              `json:"bat_soc"`
+	Mode            string               `json:"mode"`
+	PlanStale       bool                 `json:"plan_stale"`
+	EnergyToday     *OverviewEnergyToday `json:"energy_today,omitempty"`
+}
+
 type PlanReadResponse struct {
 	Available     bool    `json:"available"`
 	GeneratedAtMS int64   `json:"generated_at_ms,omitempty"`
@@ -169,6 +195,7 @@ type EnergyHistoryReadResponse struct {
 type ReadResponse struct {
 	Version       int                        `json:"version"`
 	Scope         Scope                      `json:"scope"`
+	Overview      *OverviewReadResponse      `json:"overview,omitempty"`
 	Health        *HealthReadResponse        `json:"health,omitempty"`
 	Plan          *PlanReadResponse          `json:"plan,omitempty"`
 	EnergyAssets  *EnergyAssetsReadResponse  `json:"energy_assets,omitempty"`
@@ -180,7 +207,10 @@ func (r ReadResponse) Validate() error {
 		return errors.New("read response version is invalid")
 	}
 	count := 0
-	for _, present := range []bool{r.Health != nil, r.Plan != nil, r.EnergyAssets != nil, r.EnergyHistory != nil} {
+	for _, present := range []bool{
+		r.Overview != nil, r.Health != nil, r.Plan != nil,
+		r.EnergyAssets != nil, r.EnergyHistory != nil,
+	} {
 		if present {
 			count++
 		}
@@ -189,6 +219,40 @@ func (r ReadResponse) Validate() error {
 		return errors.New("read response payload is invalid")
 	}
 	switch r.Scope {
+	case ScopeOverviewRead:
+		if r.Overview == nil || r.Overview.CheckedAtMS <= 0 ||
+			!finite(r.Overview.GridW) || !finite(r.Overview.PVW) ||
+			!finite(r.Overview.BatW) || !finite(r.Overview.EVW) ||
+			!finite(r.Overview.V2XW) || !finite(r.Overview.LoadW) ||
+			!finite(r.Overview.BatSoC) ||
+			!safeReadString(r.Overview.Mode, 64, false) {
+			return errors.New("overview response is invalid")
+		}
+		if !r.Overview.GridAvailable &&
+			(r.Overview.GridW != 0 || r.Overview.LoadW != 0) {
+			return errors.New("unavailable overview grid is invalid")
+		}
+		if r.Overview.BatSoCAvailable &&
+			(r.Overview.BatSoC < 0 || r.Overview.BatSoC > 1) {
+			return errors.New("overview battery state is invalid")
+		}
+		if !r.Overview.BatSoCAvailable && r.Overview.BatSoC != 0 {
+			return errors.New("unavailable overview battery state is invalid")
+		}
+		if r.Overview.EnergyToday != nil {
+			for _, value := range []float64{
+				r.Overview.EnergyToday.ImportWh,
+				r.Overview.EnergyToday.ExportWh,
+				r.Overview.EnergyToday.PVWh,
+				r.Overview.EnergyToday.BatChargedWh,
+				r.Overview.EnergyToday.BatDischargedWh,
+				r.Overview.EnergyToday.LoadWh,
+			} {
+				if !finite(value) || value < 0 {
+					return errors.New("overview energy total is invalid")
+				}
+			}
+		}
 	case ScopeHealthRead:
 		if r.Health == nil || !validHealthStatus(r.Health.Status) ||
 			r.Health.CheckedAtMS < 0 {

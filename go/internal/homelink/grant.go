@@ -20,6 +20,7 @@ type Scope string
 
 const (
 	ScopePasskeyEnroll     Scope = "ftw.passkey.enroll"
+	ScopeOverviewRead      Scope = "ftw.overview.read"
 	ScopeHealthRead        Scope = "ftw.health.read"
 	ScopePlanRead          Scope = "ftw.plan.read"
 	ScopeEnergyAssetsRead  Scope = "ftw.energy.assets.read"
