@@ -66,7 +66,7 @@
         '  .sys-row .sys-label { color: var(--text-dim); font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-row .sys-value { font-family: var(--mono, monospace); font-variant-numeric: tabular-nums; text-align: right; }' +
         '  .sys-bar { width: 100%; height: 10px; border-radius: 5px; background: var(--line, rgba(255,255,255,0.08)); overflow: hidden; }' +
-        '  .sys-bar-fill { height: 100%; background: var(--accent, #6cf); transition: width 250ms ease-out; }' +
+        '  .sys-bar-fill { height: 100%; background: var(--accent-e, #f5b942); transition: width 250ms ease-out; }' +
         '  .sys-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: -4px; }' +
         '  .sys-alert { grid-column: 1 / -1; padding: 9px 11px; border: 1px solid #f59e0b; border-radius: 6px; background: rgba(245,158,11,0.12); color: var(--text, #e2e8f0); font-size: 0.82rem; line-height: 1.4; overflow-wrap: anywhere; }' +
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +

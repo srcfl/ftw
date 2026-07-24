@@ -63,6 +63,13 @@ const PANEL_CLUSTER_DEG = 15;
 // healthy margin regardless of kWp totals.
 const GROUND_MARGIN = 4;
 
+function themeColor(name, fallback) {
+  const value = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  return value || fallback;
+}
+
 class FtwPvArrays3d extends FtwElement {
   static styles = `
     :host {
@@ -587,8 +594,8 @@ class FtwPvArrays3d extends FtwElement {
     // floating far above where it loses its association.
     if (p.name) {
       const sprite = makeLabelSprite(p.name, {
-        color: "#0a0a0a",
-        bgColor: "#f5c45a",
+        color: themeColor("--on-accent", "#0a0a0a"),
+        bgColor: themeColor("--accent-e", "#f5b942"),
         canvasSize: 72,
       });
       sprite.position.set(0, 0.15 + p.edge * 0.2, 0);

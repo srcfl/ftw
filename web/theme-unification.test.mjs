@@ -108,3 +108,85 @@ describe("terminal-native light DOM chrome", () => {
     );
   });
 });
+
+describe("component fallback palette", () => {
+  const registeredComponents = [
+    "components/ftw-modal.js",
+    "components/ftw-progress-bar.js",
+    "components/ftw-badge.js",
+    "components/ftw-card.js",
+    "components/ftw-tabs.js",
+    "components/ftw-legend.js",
+    "components/ftw-energy-flow.js",
+    "components/ftw-battery-control.js",
+    "components/ftw-pv-control.js",
+    "components/ftw-price-chart.js",
+    "components/ftw-energy-cake.js",
+    "components/ftw-bar-chart.js",
+    "components/ftw-history-card.js",
+    "components/ftw-savings-card.js",
+    "components/ftw-update-check.js",
+    "components/ftw-notif-status.js",
+    "components/ftw-notif-test-button.js",
+    "components/ftw-notif-history.js",
+    "components/ftw-pv-arrays-3d.js",
+  ];
+  const audited = [
+    ...registeredComponents,
+    "update-badge.js",
+    "settings/tabs/devices.js",
+    "settings/tabs/weather.js",
+    "settings/tabs/system.js",
+  ];
+
+  it("contains no legacy blue-slate chrome fallback", () => {
+    const disallowed =
+      /#(?:0f172a|1e293b|334155|94a3b8|3b82f6|375a8f|6cf)\b/gi;
+    for (const path of audited) {
+      assert.deepEqual(read(path).match(disallowed) || [], [], path);
+    }
+  });
+
+  it("uses the shared on-accent token", () => {
+    assert.doesNotMatch(read("update-badge.js"), /color:\s*#0a0a0a/);
+    for (const path of [
+      "update-badge.js",
+      "components/ftw-energy-flow.js",
+      "components/ftw-savings-card.js",
+      "components/ftw-notif-history.js",
+      "components/ftw-notif-test-button.js",
+    ]) {
+      assert.match(read(path), /var\(--on-accent,\s*#0a0a0a\)/, path);
+    }
+  });
+
+  it("resolves PV scene label chrome from the active theme", () => {
+    const pvScene = read("components/ftw-pv-arrays-3d.js");
+    assert.match(pvScene, /themeColor\("--on-accent",\s*"#0a0a0a"\)/);
+    assert.match(pvScene, /themeColor\("--accent-e",\s*"#f5b942"\)/);
+  });
+
+  it("uses tokens for tooltip and recessed component surfaces", () => {
+    const savings = read("components/ftw-savings-card.js");
+    assert.match(savings, /\.spark-tip\s*\{[^}]*var\(--ink-elevated\)/s);
+    assert.match(savings, /\.spark-tip\s*\{[^}]*var\(--line\)/s);
+    assert.doesNotMatch(
+      read("update-badge.js"),
+      /rgba\(\s*(?:255,\s*255,\s*255|148,\s*163,\s*184)/,
+    );
+  });
+
+  it("keeps every registered component in the explicit theme audit", () => {
+    const registry = read("components/index.js");
+    for (const path of registeredComponents.filter(
+      (path) => !path.endsWith("ftw-pv-arrays-3d.js"),
+    )) {
+      const file = path.split("/").at(-1).replace(".", "\\.");
+      assert.match(registry, new RegExp(file), path);
+    }
+    assert.match(
+      read("settings/tabs/weather.js"),
+      /ftw-pv-arrays-3d\.js/,
+    );
+  });
+});

@@ -80,7 +80,7 @@ class FtwSavingsCard extends FtwElement {
       cursor: pointer;
       transition: color 220ms ease;
     }
-    .toggle button.active { color: #0a0a0a; }
+    .toggle button.active { color: var(--on-accent, #0a0a0a); }
     .toggle button:not(.active):hover { color: var(--fg); }
     .toggle button:focus-visible {
       outline: 1px solid var(--accent-e);
@@ -184,23 +184,23 @@ class FtwSavingsCard extends FtwElement {
       max-width: 220px;
       z-index: 5;
       pointer-events: none;
-      background: rgba(15,23,42,0.97);
-      border: 1px solid rgba(255,255,255,0.14);
+      background: var(--ink-elevated);
+      border: 1px solid var(--line);
       border-radius: 6px;
       padding: 7px 9px;
-      color: #e2e8f0;
+      color: var(--fg);
       font-family: var(--sans);
       font-size: 11px;
       line-height: 1.35;
       box-shadow: 0 8px 24px rgba(0,0,0,0.35);
     }
     .spark-tip b {
-      color: #fff;
+      color: var(--fg);
       font-family: var(--mono);
       font-weight: 600;
     }
     .spark-tip .muted {
-      color: #94a3b8;
+      color: var(--fg-muted, #858585);
       margin-top: 2px;
     }
     .day-labels span {

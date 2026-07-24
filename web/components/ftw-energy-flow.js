@@ -235,7 +235,7 @@ class FtwEnergyFlow extends FtwElement {
     .sv-hub-label  { font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; }
     .sv-hub-sub    { font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
     .ef-clickable { cursor: pointer; outline: none; }
-    .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent, #6cf)); }
+    .ef-clickable:focus-visible > circle { stroke-width: 3; filter: drop-shadow(0 0 4px var(--accent-e, #f5b942)); }
     /* One dash cycle advances by exactly (dash + gap). The fwd/rev pair
        keeps direction declarative — we flip the animation-name, not the
        path, so swapping a source→sink edge (grid export, battery
@@ -375,7 +375,7 @@ class FtwEnergyFlow extends FtwElement {
          right gap (2) = 12 px, landing the thumb with the same 2 px
          margin on the right that it had on the left in the OFF state. */
       transform: translateX(12px);
-      background: #0a0a0a;
+      background: var(--on-accent, #0a0a0a);
     }
 
     /* Layer fade — both aggregation modes live in the SVG at the same
