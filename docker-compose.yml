@@ -51,10 +51,10 @@ services:
       # fully-qualified hostname. Keep it in .env so updater-driven recreates
       # retain it. Local LAN addresses continue to work without a token.
       FTW_API_TOKEN: ${FTW_API_TOKEN:-}
-      # Prefer the independently versioned optimizer sidecar. During the
-      # migration window core falls back to its bundled Python worker, then
-      # to the Go DP planner, if this socket is unavailable or incompatible.
-      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}
+      # Use the independently versioned optimizer sidecar. Core falls straight
+      # back to its safe Go DP planner if the socket is unavailable or invalid;
+      # the Core image never starts a hidden local Python worker.
+      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}
       FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock
 
     # Host networking is required for:

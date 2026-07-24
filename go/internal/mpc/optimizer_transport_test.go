@@ -11,7 +11,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
+
+func TestOptimizerProtocolVersionKeepsContractAlias(t *testing.T) {
+	if OptimizerProtocolVersion != optimizercontract.ProtocolVersion {
+		t.Fatalf("OptimizerProtocolVersion = %d, want %d", OptimizerProtocolVersion, optimizercontract.ProtocolVersion)
+	}
+}
 
 func TestUnixTransportHandshakeAndRoundTrip(t *testing.T) {
 	path := fmt.Sprintf("/tmp/ftw-opt-%d.sock", time.Now().UnixNano())
@@ -120,14 +128,15 @@ func TestProcessTransportHealthRejectsIncompatibleHandshake(t *testing.T) {
 }
 
 type fakeTransport struct {
-	healthErr error
-	reply     []byte
-	calls     int
+	healthErr    error
+	roundTripErr error
+	reply        []byte
+	calls        int
 }
 
 func (f *fakeTransport) RoundTrip(context.Context, []byte) ([]byte, error) {
 	f.calls++
-	return f.reply, nil
+	return f.reply, f.roundTripErr
 }
 func (f *fakeTransport) Health(context.Context) (OptimizerRuntimeInfo, error) {
 	return OptimizerRuntimeInfo{ProtocolVersion: 1, Features: []string{"champion"}}, f.healthErr
@@ -158,5 +167,57 @@ func TestAutoTransportFallsBackWhenSidecarUnhealthy(t *testing.T) {
 	}
 	if string(response) != `{"fallback":true}` || primary.calls != 0 || fallback.calls != 1 {
 		t.Fatalf("response=%s primary=%d fallback=%d", response, primary.calls, fallback.calls)
+	}
+}
+
+func TestAutoTransportReportsSidecarFailureBeforeProcessFailure(t *testing.T) {
+	sidecarErr := errors.New("connection closed")
+	processErr := errors.New(`start optimizer "python3": executable file not found`)
+	primary := &fakeTransport{healthErr: sidecarErr}
+	fallback := &fakeTransport{roundTripErr: processErr}
+	transport := NewAutoTransport(primary, fallback)
+
+	_, err := transport.RoundTrip(context.Background(), []byte(`{}`))
+	if err == nil {
+		t.Fatal("RoundTrip succeeded, want both transport failures")
+	}
+	if !errors.Is(err, sidecarErr) || !errors.Is(err, processErr) {
+		t.Fatalf("RoundTrip error does not unwrap both failures: %v", err)
+	}
+	message := err.Error()
+	sidecarAt := strings.Index(message, sidecarErr.Error())
+	processAt := strings.Index(message, processErr.Error())
+	if sidecarAt < 0 || processAt < 0 || sidecarAt >= processAt {
+		t.Fatalf("RoundTrip error = %q, want sidecar cause before process failure", message)
+	}
+}
+
+func TestAutoTransportReportsRequestFailureBeforeProcessFailure(t *testing.T) {
+	sidecarErr := errors.New("connection closed")
+	processErr := errors.New("process unavailable")
+	primary := &fakeTransport{roundTripErr: sidecarErr}
+	fallback := &fakeTransport{roundTripErr: processErr}
+	transport := NewAutoTransport(primary, fallback)
+
+	_, err := transport.RoundTrip(context.Background(), []byte(`{}`))
+	if err == nil || !strings.Contains(err.Error(), "optimizer sidecar failed: connection closed") {
+		t.Fatalf("RoundTrip error = %v, want failed sidecar request as primary cause", err)
+	}
+}
+
+func TestAutoTransportHealthReportsBothFailures(t *testing.T) {
+	sidecarErr := errors.New("socket unavailable")
+	processErr := errors.New("python unavailable")
+	transport := NewAutoTransport(
+		&fakeTransport{healthErr: sidecarErr},
+		&fakeTransport{healthErr: processErr},
+	)
+
+	_, err := transport.Health(context.Background())
+	if err == nil || !errors.Is(err, sidecarErr) || !errors.Is(err, processErr) {
+		t.Fatalf("Health error = %v, want both failures", err)
+	}
+	if strings.Index(err.Error(), sidecarErr.Error()) >= strings.Index(err.Error(), processErr.Error()) {
+		t.Fatalf("Health error = %q, want sidecar cause first", err)
 	}
 }

@@ -3459,10 +3459,7 @@ func buildMPC(cfg *config.Config, st *state.Store, tel *telemetry.Store, capacit
 		if moduleDir == "" {
 			moduleDir = resolveOptimizerDir()
 		}
-		timeout := time.Duration(pl.OptimizerTimeoutS * float64(time.Second))
-		if timeout <= 0 {
-			timeout = 30 * time.Second
-		}
+		timeout := pl.OptimizerTimeout()
 		idleTimeout := time.Duration(pl.OptimizerIdleTimeoutS * float64(time.Second))
 		if idleTimeout <= 0 {
 			idleTimeout = 2 * time.Minute
