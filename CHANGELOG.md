@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.4
+
+### Patch Changes
+
+- 2b53817: Make History show clear daily home, solar, import and export totals, move technical data behind one section, and reject impossible energy-counter jumps.
+
 ## 1.11.3
 
 ### Patch Changes
