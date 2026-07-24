@@ -4,6 +4,9 @@
   var loadedAssets = false;
   var loading = false;
   var lastData = null;
+  var tablePoints = [];
+  var tablePage = 0;
+  var tablePageSize = 50;
   var rangeMS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000 };
   var bucket = { '24h': '15m', '7d': '1h', '30d': '6h' };
   var flowLabel = {
@@ -73,16 +76,36 @@
           (totals[name] / 1000).toFixed(2) + ' kWh</strong></article>';
       }).join('') : '<div class="diagnose-empty">No energy recorded in this range.</div>';
     }
+    tablePoints = points.slice().reverse();
+    tablePage = 0;
+    renderTablePage();
+    drawChart(data);
+  }
+
+  function renderTablePage() {
     var rows = document.getElementById('energy-history-rows');
     if (!rows) return;
-    rows.innerHTML = points.length ? points.slice().reverse().map(function (point) {
+    var pageCount = Math.max(1, Math.ceil(tablePoints.length / tablePageSize));
+    tablePage = Math.max(0, Math.min(tablePage, pageCount - 1));
+    var start = tablePage * tablePageSize;
+    var visible = tablePoints.slice(start, start + tablePageSize);
+    rows.innerHTML = visible.length ? visible.map(function (point) {
       return '<tr><td>' + escapeHtml(new Date(point.bucket_start_ms).toLocaleString()) + '</td><td>' +
         escapeHtml(flowLabel[point.flow] || point.flow) + '</td><td>' +
         Number(point.energy_wh || 0).toFixed(2) + ' Wh</td><td><span class="energy-quality energy-quality-' +
         escapeHtml(point.quality) + '">' + escapeHtml(point.quality) + '</span></td><td>' +
         escapeHtml(point.source + ' · ' + point.provenance) + '</td></tr>';
     }).join('') : '<tr><td colspan="5">No energy recorded in this range.</td></tr>';
-    drawChart(data);
+    var page = document.getElementById('energy-history-page');
+    if (page) page.textContent = 'Page ' + (tablePage + 1) + ' of ' + pageCount;
+    var previous = document.getElementById('energy-history-prev');
+    var next = document.getElementById('energy-history-next');
+    if (previous) previous.disabled = tablePage === 0;
+    if (next) next.disabled = tablePage >= pageCount - 1;
+    var meta = document.getElementById('energy-history-detail-meta');
+    if (meta) {
+      meta.textContent = tablePoints.length + ' row' + (tablePoints.length === 1 ? '' : 's');
+    }
   }
 
   function drawChart(data) {
@@ -211,6 +234,20 @@
   });
   var refresh = document.getElementById('energy-history-refresh');
   if (refresh) refresh.addEventListener('click', load);
+  var previous = document.getElementById('energy-history-prev');
+  if (previous) previous.addEventListener('click', function () {
+    if (tablePage > 0) {
+      tablePage -= 1;
+      renderTablePage();
+    }
+  });
+  var next = document.getElementById('energy-history-next');
+  if (next) next.addEventListener('click', function () {
+    if ((tablePage + 1) * tablePageSize < tablePoints.length) {
+      tablePage += 1;
+      renderTablePage();
+    }
+  });
   window.addEventListener('resize', function () {
     if (lastData) drawChart(lastData);
   });

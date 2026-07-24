@@ -136,7 +136,7 @@ header h1 {
   min-width: 0; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 0.75rem 1rem 0.6rem;
 }
-#energy-history-chart { display: block; width: 100%; height: 260px; }
+#energy-history-chart { display: block; width: 100%; height: 220px; }
 .energy-history-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 0.9rem; padding-top: 0.4rem; color: var(--text-dim); font-size: 0.75rem; }
 .energy-history-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .energy-history-legend i { width: 0.65rem; height: 0.65rem; border-radius: 999px; }
@@ -147,10 +147,73 @@ header h1 {
 }
 .energy-history-summary span { color: var(--text-dim); font-size: 0.78rem; }
 .energy-history-summary strong { font-size: 1.05rem; }
-.energy-history-table-wrap { overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.history-disclosure {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: clip;
+}
+.history-disclosure > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+.history-disclosure > summary::-webkit-details-marker { display: none; }
+.history-disclosure > summary::before {
+  content: '›';
+  color: var(--text-dim);
+  font-size: 1.15rem;
+  transition: transform 0.15s ease;
+}
+.history-disclosure[open] > summary::before { transform: rotate(90deg); }
+.history-disclosure > summary > span:first-of-type {
+  display: grid;
+  gap: 0.15rem;
+  flex: 1;
+}
+.history-disclosure > summary strong { font-size: 0.9rem; }
+.history-disclosure > summary small,
+.history-disclosure-meta {
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+.history-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.history-disclosure-body { padding: 1rem; }
+.history-plan-body { padding: 0; }
+.energy-history-table-wrap {
+  max-height: min(52vh, 580px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 .energy-history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .energy-history-table th, .energy-history-table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-.energy-history-table th { color: var(--text-dim); font-weight: 500; }
+.energy-history-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.energy-history-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.energy-history-pager button:disabled { opacity: 0.4; cursor: default; }
+.history-disclosure .energy-history-note { margin: 0.75rem 0 0; text-align: center; }
+#view-history > .history-row { margin-top: 0; }
+#view-history > .history-row > .history-disclosure { width: 100%; }
+.history-numbers-disclosure .history-disclosure-body { padding: 0; }
+.history-numbers-disclosure .history-group { border: 0; border-radius: 0; }
 .energy-quality { border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.4rem; }
 .energy-quality-measured { color: var(--green); }
 .energy-quality-integrated { color: var(--yellow); }
@@ -161,6 +224,11 @@ header h1 {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.75rem 1rem;
+}
+.history-plan-body > .diagnose-header {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
 }
 .diagnose-header-row {
   display: flex;
@@ -356,6 +424,12 @@ header h1 {
   .diagnose-body { grid-template-columns: 1fr; }
   .diagnose-timeline { max-height: 260px; }
   .app-tabs { margin-left: 0.5rem; }
+  #energy-history-chart { height: 190px; }
+  .history-disclosure > summary { align-items: flex-start; }
+  .history-disclosure-meta { white-space: nowrap; }
+  .energy-history-controls { width: 100%; }
+  .energy-history-controls label { flex: 1 1 130px; }
+  .energy-history-controls select { width: 100%; }
 }
 
 /* ---- Setup banner (bootstrap / no-config) ---- */

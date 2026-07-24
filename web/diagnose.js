@@ -31,7 +31,7 @@
     const plan = document.getElementById('view-plan');
     const historyView = document.getElementById('view-history');
     const more = document.getElementById('view-more');
-    const historyAnchor = historyView && historyView.querySelector('.diagnose-header');
+    const historyAnchor = historyView && historyView.querySelector('.energy-history-header');
     const append = (host, selector) => {
       const el = document.querySelector(selector);
       if (host && el) host.appendChild(el);
@@ -85,17 +85,18 @@
       if (typeof window.ftwEnergyHistoryLoad === 'function') {
         window.ftwEnergyHistoryLoad();
       }
-      state.selectedTs = parts[1] ? Number(parts[1]) : null;
-      loadTimeline().then(() => {
-        if (state.selectedTs) loadDetail(state.selectedTs);
-        else if (state.timeline.length > 0) {
-          // Default selection: newest snapshot, update hash without
-          // pushing history so Back still returns to the previous destination.
-          const ts = state.timeline[0].ts_ms;
-          history.replaceState(null, '', '#history/' + ts);
-          loadDetail(ts);
-        }
-      });
+      const selectedTs = parts[1] ? Number(parts[1]) : null;
+      const plannerDetails = document.getElementById('plan-history-details');
+      state.selectedTs = selectedTs;
+      if (selectedTs && plannerDetails) plannerDetails.open = true;
+      if (selectedTs || (plannerDetails && plannerDetails.open)) {
+        loadTimeline().then(() => {
+          if (selectedTs) loadDetail(selectedTs);
+          else if (!state.selectedTs && state.timeline.length > 0) {
+            loadDetail(state.timeline[0].ts_ms);
+          }
+        });
+      }
     }
   }
 
@@ -133,6 +134,7 @@
     rangeMs: 24 * 3600 * 1000,
     chartGeom: null,   // {padL, padT, barW, plotH, nSlots} — for hover hit-testing
     hoverSlotIdx: null,
+    timelineLoading: null,
   };
 
   const rangeSelect = document.getElementById('diagnose-range-select');
@@ -144,6 +146,17 @@
   }
   const refreshBtn = document.getElementById('diagnose-refresh');
   if (refreshBtn) refreshBtn.addEventListener('click', () => loadTimeline());
+  const plannerDetails = document.getElementById('plan-history-details');
+  if (plannerDetails) {
+    plannerDetails.addEventListener('toggle', () => {
+      if (!plannerDetails.open) return;
+      loadTimeline().then(() => {
+        if (!state.selectedTs && state.timeline.length > 0) {
+          loadDetail(state.timeline[0].ts_ms);
+        }
+      });
+    });
+  }
 
   function parseRange(v) {
     const map = { '1h': 3600e3, '6h': 6 * 3600e3, '24h': 86400e3,
@@ -152,7 +165,15 @@
   }
 
   // ---- Timeline fetch + render ----
-  async function loadTimeline() {
+  function loadTimeline() {
+    if (state.timelineLoading) return state.timelineLoading;
+    state.timelineLoading = fetchTimeline().finally(() => {
+      state.timelineLoading = null;
+    });
+    return state.timelineLoading;
+  }
+
+  async function fetchTimeline() {
     const until = Date.now();
     const since = until - state.rangeMs;
     try {
@@ -165,7 +186,7 @@
       if (el) el.innerHTML = `<div class="diagnose-empty">Error loading: ${escapeHtml(e.message)}</div>`;
     }
     const meta = document.getElementById('diagnose-meta');
-    if (meta) meta.textContent = state.timeline.length + ' snapshot' +
+    if (meta) meta.textContent = state.timeline.length + ' decision' +
       (state.timeline.length === 1 ? '' : 's');
   }
 
