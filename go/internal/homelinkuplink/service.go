@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
+	"github.com/srcfl/ftw/go/internal/homelink"
 	"github.com/srcfl/ftw/go/internal/homelink/wire"
 	"github.com/srcfl/ftw/go/internal/homelinksession"
 )
@@ -21,13 +23,20 @@ type transport interface {
 }
 
 type Service struct {
-	sessions *homelinksession.Manager
+	sessions    *homelinksession.Manager
+	reads       ReadExecutor
+	readTimeout time.Duration
 }
 
 type streamState struct {
 	open      wire.StreamOpen
 	confirmed bool
 	session   *homelinksession.Session
+
+	mu     sync.Mutex
+	busy   bool
+	closed bool
+	cancel context.CancelFunc
 }
 
 type sessionConfirm struct {
@@ -41,11 +50,20 @@ type sessionReady struct {
 }
 
 func NewService(identity gatewayidentity.Identity) (*Service, error) {
+	return NewServiceWithReads(identity, nil)
+}
+
+func NewServiceWithReads(
+	identity gatewayidentity.Identity,
+	reads ReadExecutor,
+) (*Service, error) {
 	sessions, err := homelinksession.NewManager(identity)
 	if err != nil {
 		return nil, err
 	}
-	return &Service{sessions: sessions}, nil
+	return &Service{
+		sessions: sessions, reads: reads, readTimeout: defaultReadTimeout,
+	}, nil
 }
 
 func (s *Service) Serve(ctx context.Context, connection *Connection) error {
@@ -57,23 +75,30 @@ func (s *Service) Serve(ctx context.Context, connection *Connection) error {
 
 func (s *Service) serve(ctx context.Context, connection transport) error {
 	streams := make(map[string]*streamState)
+	serviceCtx, cancelService := context.WithCancel(ctx)
+	defer cancelService()
 	var closeOnce sync.Once
 	stop := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-serviceCtx.Done():
 			closeOnce.Do(func() { _ = connection.Close() })
 		case <-stop:
 		}
 	}()
 	defer close(stop)
+	defer func() {
+		for _, state := range streams {
+			state.stop()
+		}
+	}()
 	defer closeOnce.Do(func() { _ = connection.Close() })
 
 	for {
 		frame, err := connection.ReadFrame()
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if serviceCtx.Err() != nil {
+				return serviceCtx.Err()
 			}
 			return err
 		}
@@ -113,13 +138,41 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 				return errors.New("Home Link sealed frame is missing")
 			}
 			state := streams[frame.Sealed.StreamID]
-			if state == nil || state.session == nil || state.confirmed {
+			if state == nil || state.session == nil {
 				_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-session")
 				delete(streams, frame.Sealed.StreamID)
 				continue
 			}
 			plaintext, err := state.session.Decrypt(*frame.Sealed)
-			if err != nil || !validSessionConfirm(plaintext) {
+			if err != nil {
+				state.stop()
+				_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-session")
+				delete(streams, frame.Sealed.StreamID)
+				continue
+			}
+			if state.confirmed {
+				if s.reads == nil {
+					state.stop()
+					_ = connection.CloseStream(frame.Sealed.StreamID, "remote-disabled")
+					delete(streams, frame.Sealed.StreamID)
+					continue
+				}
+				message, request, binding, err := decodeReadRequest(
+					plaintext, state.session.Context(),
+				)
+				if err != nil || !state.beginRead() {
+					state.stop()
+					_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+					delete(streams, frame.Sealed.StreamID)
+					continue
+				}
+				go s.executeRead(
+					serviceCtx, connection, state, message, request, binding,
+				)
+				continue
+			}
+			if !validSessionConfirm(plaintext) {
+				state.stop()
 				_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-confirmation")
 				delete(streams, frame.Sealed.StreamID)
 				continue
@@ -138,12 +191,88 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 			state.confirmed = true
 		case wire.TypeStreamClose:
 			if frame.Close != nil {
+				if state := streams[frame.Close.StreamID]; state != nil {
+					state.stop()
+				}
 				delete(streams, frame.Close.StreamID)
 			}
 		default:
 			return errors.New("Home Link uplink delivered an unsupported frame")
 		}
 	}
+}
+
+func (s *Service) executeRead(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message readRequestMessage,
+	request homelink.ReadRequest,
+	binding homelink.ReadBinding,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+
+	response, err := s.reads.VerifyAndDispatchBoundRead(
+		ctx, message.Grant, message.RequestID, request, binding,
+	)
+	payload, encodeErr := encodeReadResponse(message.RequestID, response, err)
+	if encodeErr != nil || !state.canReply() || parent.Err() != nil {
+		return
+	}
+	sealed, encryptErr := state.session.Encrypt(payload)
+	if encryptErr != nil || !state.canReply() {
+		return
+	}
+	if err := connection.SendSealed(sealed); err != nil {
+		_ = connection.Close()
+	}
+}
+
+func (s *streamState) beginRead() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.busy {
+		return false
+	}
+	s.busy = true
+	return true
+}
+
+func (s *streamState) setReadCancel(cancel context.CancelFunc) {
+	s.mu.Lock()
+	if s.closed {
+		cancel()
+	} else {
+		s.cancel = cancel
+	}
+	s.mu.Unlock()
+}
+
+func (s *streamState) canReply() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.closed
+}
+
+func (s *streamState) finishRead() {
+	s.mu.Lock()
+	s.busy = false
+	s.cancel = nil
+	s.mu.Unlock()
+}
+
+func (s *streamState) stop() {
+	s.mu.Lock()
+	s.closed = true
+	if s.cancel != nil {
+		s.cancel()
+	}
+	s.mu.Unlock()
 }
 
 func validSessionConfirm(data []byte) bool {
