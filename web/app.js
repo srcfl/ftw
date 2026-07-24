@@ -197,19 +197,13 @@
   // Minimal CSS.escape polyfill (legend keys contain ':').
   function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) { return "\\" + c; }); }
 
-  // Latest MPC plan — refreshed every 30s. Drives the forward-looking
-  // dashed PV + Load forecast on the live chart (right-hand segment
-  // extending past "now").
+  // Latest MPC plan for the live chart's forward-looking dashed PV +
+  // Load forecast. plan.js owns the sole plan poll and publishes each
+  // result in-page so the chart and both briefing surfaces stay aligned.
   var chartPlan = null;
-  function refreshChartPlan() {
-    // Local API read.
-    apiFetch("/api/mpc/plan")
-      .then(function (r) { return r.json(); })
-      .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
-      .catch(function () {});
-  }
-  refreshChartPlan();
-  setInterval(refreshChartPlan, 30000);
+  window.addEventListener("ftw-plan-data", function (event) {
+    chartPlan = event && event.detail ? event.detail.plan : null;
+  });
   var chartLayout = null;
   var hoverIndex = -1;
   var hoverForecast = null; // { ts, action } when hovering in future region
@@ -228,7 +222,10 @@
   const pvW = $("pv-w");
   const batW = $("bat-w");
   const batDir = $("bat-dir");
+  const batSoc = $("bat-soc");
   const connStatus = $("conn-status");
+  const overviewHealth = $("overview-health");
+  const overviewHealthLabel = $("overview-health-label");
   const driversGrid = $("drivers-grid");
   const dispatchList = $("dispatch-list");
   const modeButtons = $("mode-buttons");
@@ -274,10 +271,14 @@
   const eCharged = $("e-charged");
   const eDischarged = $("e-discharged");
   const eLoad = $("e-load");
+  const overviewEImport = $("overview-e-import");
+  const overviewEExport = $("overview-e-export");
+  const overviewEPv = $("overview-e-pv");
   const lastUpdate = $("last-update");
   const versionEl = $("version");
   // ---- Formatting ----
   function formatW(w) {
+    if (w == null || !isFinite(w)) return "—";
     const abs = Math.abs(w);
     if (abs >= 1000) {
       return (w / 1000).toFixed(1) + " kW";
@@ -484,6 +485,14 @@
     return "status-offline";
   }
 
+  // The component registry loads as a deferred module while this classic
+  // dashboard script starts immediately at the end of the document. A fast
+  // first /api/status response can therefore arrive before <ftw-energy-flow>
+  // has upgraded. Cache the derived payload and replay it when the element is
+  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  var lastFlowReadings = null;
+  var flowUpgradeReplayQueued = false;
+
   // ---- Render ----
   function render(data) {
     var batteryTargetsByDriver = {};
@@ -614,6 +623,11 @@
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
     }
+    if (batSoc) {
+      batSoc.textContent = Number.isFinite(data.bat_soc)
+        ? Math.round(data.bat_soc * 100) + "% SoC"
+        : "—";
+    }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
       batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
@@ -638,7 +652,7 @@
     // setReadings() replaces `planets` atomically, so a transient
     // /api/status error preserves the last good layout if we skip it.
     var flowEl = document.getElementById("energy-flow");
-    if (flowEl && typeof flowEl.setReadings === "function") {
+    if (flowEl) {
       var planets = [];
 
       // Today's totals are aggregate across all drivers; per-driver kWh split
@@ -794,11 +808,26 @@
         selfPoweredPctToday = Math.max(0, Math.min(100,
           (1 - importKwh / loadKwhTotal) * 100));
       }
-      flowEl.setReadings({
+      lastFlowReadings = {
         load:    (data.load_w || 0) / 1000,
         planets: planets,
         selfPoweredPctToday: selfPoweredPctToday,
-      });
+      };
+      if (typeof flowEl.setReadings === "function") {
+        flowEl.setReadings(lastFlowReadings);
+      } else if (!flowUpgradeReplayQueued &&
+                 window.customElements &&
+                 typeof window.customElements.whenDefined === "function") {
+        flowUpgradeReplayQueued = true;
+        window.customElements.whenDefined("ftw-energy-flow").then(function () {
+          var readyFlow = document.getElementById("energy-flow");
+          if (readyFlow &&
+              typeof readyFlow.setReadings === "function" &&
+              lastFlowReadings) {
+            readyFlow.setReadings(lastFlowReadings);
+          }
+        });
+      }
     }
 
     // Mode buttons — primary (strategy) + advanced (manual)
@@ -890,6 +919,9 @@
       if (eCharged) eCharged.textContent = formatKwh(t.bat_charged_wh);
       if (eDischarged) eDischarged.textContent = formatKwh(t.bat_discharged_wh);
       if (eLoad) eLoad.textContent = formatKwh(t.load_wh);
+      if (overviewEImport) overviewEImport.textContent = formatKwh(t.import_wh);
+      if (overviewEExport) overviewEExport.textContent = formatKwh(t.export_wh);
+      if (overviewEPv) overviewEPv.textContent = formatKwh(t.pv_wh);
     }
 
     // Fuse gauge — per-phase bars if the server reports phase amperage,
@@ -1542,9 +1574,9 @@
       dim:     cssColor("--fg-dim", "#aaaaaa"),
       muted:   cssColor("--fg-muted", "#888888"),
       grid:    cssColor("--line", "#2a2a2a"),
-      surface: cssColor("--ink-raised", "#14141f"),
+      surface: cssColor("--ink-raised", "#161616"),
       accent:  cssColor("--accent-e", "#fbbf24"),
-      load:    cssColor("--fg", "#e2e8f0"),
+      load:    cssColor("--white-s", "#e8e8e8"),
     };
     return _chartColors;
   }
@@ -2398,10 +2430,14 @@
     if (ok) {
       connStatus.className = "conn-status connected";
       connStatus.title = "Connected";
+      if (overviewHealth) overviewHealth.classList.add("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Live";
       // render() will update lastUpdate with timestamp
     } else {
       connStatus.className = "conn-status disconnected";
       connStatus.title = "Disconnected";
+      if (overviewHealth) overviewHealth.classList.remove("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Connection lost";
       lastUpdate.textContent = "Connection lost";
     }
   }
@@ -3621,9 +3657,9 @@
     if (!legend) return;
     var items = chartView === "energy" ? [
       ["#ef4444", "Import"], ["#22c55e", "Export"], ["#10b981", "PV"],
-      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["#e2e8f0", "Load"],
+      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["var(--white-s)", "Load"],
     ] : [
-      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["#e2e8f0", "Load"],
+      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["var(--white-s)", "Load"],
       ["#f59e0b", "Ferroamp"], ["#8b5cf6", "Sungrow"],
     ];
     legend.innerHTML = items.map(function(it) {

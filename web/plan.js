@@ -2,6 +2,8 @@
 // Renders a stacked canvas chart: price bars on top, battery+grid bars in
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
+import { derivePlanBrief } from "./plan-brief.js";
+
 (function () {
   'use strict';
 
@@ -9,6 +11,19 @@
 
   function apiFetch(path, opts) {
     return fetch(path, opts);
+  }
+
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942',
+        };
   }
 
   function escapeHTML(value) {
@@ -103,6 +118,9 @@
       mpc: m && m.enabled,
     };
     state.lastUpdate = new Date();
+    window.dispatchEvent(new CustomEvent("ftw-plan-data", {
+      detail: { plan: state.plan },
+    }));
     render();
   }
 
@@ -111,6 +129,9 @@
       const r = await apiFetch('/api/mpc/replan', { method: 'POST' });
       const j = await r.json();
       if (j && j.plan) state.plan = j.plan;
+      window.dispatchEvent(new CustomEvent("ftw-plan-data", {
+        detail: { plan: state.plan },
+      }));
       render();
     } catch (e) { /* ignore */ }
   }
@@ -126,138 +147,47 @@
     if (el) el.textContent = value;
   }
 
-  function readableReason(reason) {
-    if (!reason) return 'Balancing expected energy use and supply';
-    const known = {
-      scheduled: 'Regular schedule refresh',
-      manual: 'You requested a fresh plan',
-      'reactive-pv': 'Solar production changed more than expected',
-      'reactive-load': 'Home use changed more than expected',
-      'twin-drift-pv': 'The solar forecast was corrected',
-      'twin-drift-load': 'The home-use forecast was corrected',
-      'surplus_only_disabled': 'EV surplus-only charging was changed',
-      'loadpoint_schedule_changed': 'An EV schedule was changed',
-      'loadpoint_target_changed': 'An EV charge target was changed',
-    };
-    if (known[reason]) return known[reason];
-    const text = String(reason).replace(/[_-]+/g, ' ').trim();
-    return text.charAt(0).toUpperCase() + text.slice(1);
+  function applyStateBadge(id, planState) {
+    const badge = document.getElementById(id);
+    if (!badge) return;
+    badge.className = `plan-state-badge is-${planState.tone}`;
+    badge.textContent = planState.label;
   }
 
-  function actionLabel(action) {
-    if (!action) return 'Hold current operation';
-    if ((action.loadpoint_w || 0) > 100) return `Charge EV at ${(action.loadpoint_w / 1000).toFixed(1)} kW`;
-    if ((action.pv_limit_w || 0) > 0) return `Limit solar output to ${(action.pv_limit_w / 1000).toFixed(1)} kW`;
-    if ((action.battery_w || 0) > 100) return `Charge battery at ${(action.battery_w / 1000).toFixed(1)} kW`;
-    if ((action.battery_w || 0) < -100) return `Use battery at ${(Math.abs(action.battery_w) / 1000).toFixed(1)} kW`;
-    return 'Keep the battery steady';
-  }
-
-  function briefPower(w) {
-    const value = Number(w) || 0;
-    return Math.abs(value) >= 1000 ? `${(value / 1000).toFixed(1)} kW` : `${Math.round(value)} W`;
+  function renderOverviewPlanBrief(brief) {
+    applyStateBadge('overview-plan-state', brief.state);
+    setText('overview-plan-action', brief.next.action);
+    setText('overview-plan-time', brief.next.time);
+    setText('overview-plan-reason', brief.reason);
+    setText('overview-plan-constraint', brief.constraint);
+    const soc = document.getElementById('overview-plan-soc');
+    if (soc) {
+      soc.hidden = !brief.soc;
+      soc.textContent = brief.soc ? `Expected charge · ${brief.soc.label}` : '';
+    }
   }
 
   function renderPlanBrief(plan) {
-    const status = state.status || {};
-    const plannerActive = String(status.mode || '').startsWith('planner_');
-    const stale = !!status.plan_stale;
-    const badge = document.getElementById('plan-state-badge');
-    if (badge) badge.className = 'plan-state-badge';
+    const brief = derivePlanBrief({
+      enabled: !!(state.enabled && state.enabled.mpc),
+      plan,
+      status: state.status || {},
+    });
+    applyStateBadge('plan-state-badge', brief.state);
+    setText('plan-next-action', brief.next.action);
+    setText('plan-next-time', brief.next.time);
+    setText('plan-main-reason', brief.reason);
+    setText('plan-constraint', brief.constraint);
+    setText('plan-forecast-state', brief.forecast.label);
+    setText('plan-forecast-detail', brief.forecast.detail);
+    setText('plan-solver-state', brief.planner.label);
+    setText('plan-solver-detail', brief.planner.detail);
 
-    if (!state.enabled || !state.enabled.mpc) {
-      setText('plan-state-badge', 'Planner off');
-      if (badge) badge.classList.add('is-idle');
-      setText('plan-next-action', 'Manual control is active');
-      setText('plan-next-time', 'Choose a planning strategy to create a schedule');
-      setText('plan-main-reason', 'Planning is not controlling the battery');
-      setText('plan-constraint', 'FTW safety limits still apply to manual control');
-      setText('plan-forecast-state', 'No plan forecast');
-      setText('plan-forecast-detail', 'Live readings continue without a forward schedule');
-      setText('plan-expected-soc', Number.isFinite(status.bat_soc) ? `${(status.bat_soc * 100).toFixed(0)}% now` : 'Live value unavailable');
-      setText('plan-soc-detail', 'Expected charge needs an active plan');
-      setText('plan-solver-state', 'Planner off');
-      setText('plan-solver-detail', 'Select a planning strategy to enable it');
-      return;
-    }
-    if (!plan || !Array.isArray(plan.actions) || !plan.actions.length) {
-      setText('plan-state-badge', 'Preparing');
-      if (badge) badge.classList.add('is-warn');
-      setText('plan-next-action', 'Waiting for the first plan');
-      setText('plan-next-time', 'FTW needs current price and forecast data');
-      setText('plan-main-reason', 'Gathering enough data to plan safely');
-      setText('plan-constraint', 'No schedule is being dispatched');
-      setText('plan-forecast-state', 'Inputs pending');
-      setText('plan-forecast-detail', 'Price and energy forecasts are still loading');
-      setText('plan-expected-soc', Number.isFinite(status.bat_soc) ? `${(status.bat_soc * 100).toFixed(0)}% now` : 'Live value unavailable');
-      setText('plan-soc-detail', 'No planned charge path yet');
-      setText('plan-solver-state', 'Waiting');
-      setText('plan-solver-detail', 'No plan has passed validation yet');
-      return;
-    }
-
-    const solver = plan.solver || {};
-    if (stale) {
-      setText('plan-state-badge', 'Fallback active');
-      if (badge) badge.classList.add('is-warn');
-    } else if (solver.fallback) {
-      setText('plan-state-badge', 'Built-in plan active');
-      if (badge) badge.classList.add('is-warn');
-    } else if (plannerActive) {
-      setText('plan-state-badge', 'Plan active');
-      if (badge) badge.classList.add('is-active');
-    } else {
-      setText('plan-state-badge', 'Plan ready');
-      if (badge) badge.classList.add('is-idle');
-    }
-
-    const now = Date.now();
-    const live = plan.actions.find(a => now >= a.slot_start_ms && now < a.slot_start_ms + a.slot_len_min * 60000);
-    const futureMeaningful = plan.actions.find(a => a.slot_start_ms >= now &&
-      (Math.abs(a.battery_w || 0) > 100 || (a.loadpoint_w || 0) > 100 || (a.pv_limit_w || 0) > 0));
-    const next = live && (Math.abs(live.battery_w || 0) > 100 || (live.loadpoint_w || 0) > 100 || (live.pv_limit_w || 0) > 0)
-      ? live : futureMeaningful || live || plan.actions.find(a => a.slot_start_ms >= now) || plan.actions[plan.actions.length - 1];
-    const isNow = next && live === next;
-    const nextEnd = next ? next.slot_start_ms + next.slot_len_min * 60000 : null;
-    setText('plan-next-action', actionLabel(next));
-    setText('plan-next-time', next
-      ? (isNow ? `Now, until ${fmtHHMM(nextEnd)}` : `At ${fmtHHMM(next.slot_start_ms)}`)
-      : 'No action inside the current horizon');
-    setText('plan-main-reason', readableReason(next && next.reason));
-
-    const clamps = (status.dispatch || []).filter(d => d.clamped);
-    if (clamps.length) {
-      const adjusted = clamps.map(d => `${d.driver || 'device'} to ${briefPower(d.target_w)}`).join(', ');
-      setText('plan-constraint', `Safety adjusted ${adjusted} to stay within battery or site limits`);
-    } else if (stale) {
-      setText('plan-constraint', 'The schedule is old, so FTW is using safe live balancing');
-    } else {
-      setText('plan-constraint', 'No active safety adjustment');
-    }
-
-    const uncertain = plan.actions.filter(a => a.confidence != null && a.confidence < 0.999);
-    if (uncertain.length) {
-      const first = uncertain[0];
-      const average = uncertain.reduce((sum, a) => sum + a.confidence, 0) / uncertain.length;
-      setText('plan-forecast-state', average >= 0.75 ? 'Some modeled inputs' : 'Higher uncertainty later');
-      setText('plan-forecast-detail', `Observed market data to ${fmtHHMM(first.slot_start_ms)}; forecast after that`);
-    } else {
-      setText('plan-forecast-state', 'Current published inputs');
-      setText('plan-forecast-detail', 'No modeled price period in this plan');
-    }
-
-    const finalAction = plan.actions[plan.actions.length - 1];
-    const nextSoc = next && Number.isFinite(next.soc_pct) ? `${next.soc_pct.toFixed(0)}% after next step` : '—';
-    setText('plan-expected-soc', nextSoc);
-    setText('plan-soc-detail', finalAction && Number.isFinite(finalAction.soc_pct)
-      ? `${finalAction.soc_pct.toFixed(0)}% at the end of the plan` : 'No battery forecast available');
-
-    const solverName = [solver.engine, solver.backend].filter(Boolean).join(' / ') || 'FTW planner';
-    setText('plan-solver-state', solver.fallback ? 'Built-in fallback' : solverName);
-    setText('plan-solver-detail', solver.fallback
-      ? readableReason(solver.fallback_reason || 'Primary solver unavailable')
-      : (solver.status ? `Plan result: ${readableReason(solver.status)}` : 'Plan passed FTW validation'));
-
+    const socMeta = document.getElementById('plan-soc-meta');
+    if (socMeta) socMeta.hidden = !brief.soc;
+    setText('plan-expected-soc', brief.soc ? brief.soc.label : '—');
+    setText('plan-soc-detail', brief.soc ? brief.soc.detail : '');
+    renderOverviewPlanBrief(brief);
   }
 
   function renderOptimizerFallbackAlert(plan) {
@@ -293,6 +223,7 @@
     canvas.style.height = cssH + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+    const C = canvasColors();
 
     const pad = { l: 44, r: 44, t: 16, b: 28 };
     const plotW = cssW - pad.l - pad.r;
@@ -351,9 +282,9 @@
     const socY = p => socY0 + socH - (p / 100) * socH;
 
     // ---- Grid ticks (hours) ----
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillStyle = C.dim;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
     const tickStep = chartTickStepMs(tMin, tMax);
@@ -501,7 +432,7 @@
       });
     }
     // Price axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText(priceMax.toFixed(0) + ' öre', pad.l - 6, priceY0 + 10);
     ctx.fillText(priceMin.toFixed(0), pad.l - 6, priceY0 + priceH);
@@ -592,13 +523,13 @@
     }
 
     // Power zero-line
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, powerYCenter);
     ctx.lineTo(pad.l + plotW, powerYCenter);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText('+' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(pMagMax) + 4);
     ctx.fillText('−' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(-pMagMax) + 4);
@@ -607,7 +538,7 @@
     // to remember that positive means "into the site". Placed just below
     // the heading at lower opacity to read as a subtitle.
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillStyle = C.muted;
     ctx.font = '9px system-ui, sans-serif';
     ctx.fillText('+ import / charge   − export / discharge', pad.l + 40, powerY0 + 12);
     ctx.font = '11px system-ui, sans-serif';
@@ -631,7 +562,7 @@
         ctx.fillStyle = color;
         ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillStyle = C.dim;
       ctx.font = '9px system-ui, sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText('Battery', pad.l + 4, modeBandY0 + modeBandH - 2);
@@ -669,7 +600,7 @@
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
-      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillStyle = C.dim;
       ctx.textAlign = 'right';
       ctx.fillText('100%', cssW - pad.r - 4, socY(100) + 4);
       ctx.fillText('0%',   cssW - pad.r - 4, socY(0)   + 4);
@@ -803,8 +734,8 @@
       hoverLine.id = 'plan-hover-line';
       hoverLine.style.cssText =
         'position:absolute;top:0;width:1px;height:100%;' +
-        'background:rgba(255,255,255,0.3);' +
-        'border-left:1px dashed rgba(255,255,255,0.45);' +
+        'background:var(--line);' +
+        'border-left:1px dashed var(--fg-muted);' +
         'pointer-events:none;display:none;z-index:2';
       const host = canvas.parentElement;
       if (host) {
@@ -1012,6 +943,7 @@
     setInterval(fetchAll, PLAN_REFRESH_MS);
     setInterval(renderStrategyHint, 5000);
     window.addEventListener('resize', render);
+    window.addEventListener('ftw-theme-change', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
     // Horizon toggle wiring. Each click flips state.horizon, persists

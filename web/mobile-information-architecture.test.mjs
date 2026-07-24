@@ -8,6 +8,7 @@ const webRoot = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(webRoot, "index.html"), "utf8");
 const router = readFileSync(join(webRoot, "diagnose.js"), "utf8");
 const plan = readFileSync(join(webRoot, "plan.js"), "utf8");
+const planBrief = readFileSync(join(webRoot, "plan-brief.js"), "utf8");
 
 const destinations = ["overview", "energy", "plan", "history", "more"];
 
@@ -55,7 +56,8 @@ describe("dashboard information architecture", () => {
       /<main id="view-overview"[\s\S]*?<main id="view-energy"/,
     )?.[0] || "";
 
-    assert.match(overview, /<section class="savings-row">/);
+    assert.doesNotMatch(overview, /<section class="savings-row">/);
+    assert.match(overview, /<ftw-savings-card compact\b/);
     assert.equal(
       (overview.match(/<ftw-savings-card\b/g) || []).length,
       1,
@@ -64,7 +66,10 @@ describe("dashboard information architecture", () => {
 });
 
 describe("plain-language plan briefing", () => {
-  it("covers plan state, next action, reason, forecast, SoC and planner source", () => {
+  it("condenses state, action, reason, safety, and metadata without losing detail", () => {
+    assert.match(html, /class="plan-now-primary"/);
+    assert.match(html, /class="plan-now-secondary"/);
+    assert.match(html, /class="plan-now-meta"/);
     for (const id of [
       "plan-state-badge",
       "plan-next-action",
@@ -75,11 +80,11 @@ describe("plain-language plan briefing", () => {
       "plan-solver-state",
     ]) {
       assert.match(html, new RegExp(`id="${id}"`));
-      assert.match(plan, new RegExp(`['"]${id}['"]`));
     }
-    assert.match(plan, /Fallback active/);
-    assert.match(plan, /No active safety adjustment/);
-    assert.match(plan, /forecast after that/);
-    assert.match(plan, /at the end of the plan/);
+    assert.match(plan, /derivePlanBrief/);
+    assert.match(planBrief, /Fallback active/);
+    assert.match(planBrief, /No active safety adjustment/);
+    assert.match(planBrief, /forecast after that/);
+    assert.match(planBrief, /at the end of the plan/);
   });
 });

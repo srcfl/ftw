@@ -15,19 +15,6 @@ body.ftw-app {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
-body.ftw-app::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(ellipse 80% 60% at 50% -10%,
-      oklch(0.25 0.08 var(--accent-hue) / 0.25), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 100%,
-      oklch(0.25 0.1 220 / 0.15), transparent 60%),
-    linear-gradient(to bottom, transparent 0%, oklch(0.1 0.015 250) 100%);
-}
 body.ftw-app > main,
 body.ftw-app > footer,
 body.ftw-app > section {
@@ -81,7 +68,7 @@ body.ftw-app .view-kicker {
 }
 body.ftw-app .mobile-destinations { display: none; }
 
-/* ---- Header — rounded pill with backdrop blur.
+/* ---- Header — flat raised terminal surface.
        Outer rectangle lines up with main's CONTENT box (not main's
        outer box): width caps at 1560 − 2×28 = 1504 px on wide screens,
        and `width: calc(100% - 56px)` keeps it 28 px inside the viewport
@@ -97,41 +84,15 @@ body.ftw-app > header {
   max-width: 1504px;
   margin: 20px auto 20px;
   padding: 12px 28px;
+  background: var(--ink-elevated);
   border: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  /* Background + backdrop-filter live on the ::before below, NOT on
-     the header itself. Why: backdrop-filter on an element creates a
-     new containing block for its position:fixed descendants, which
-     made the <ftw-update-badge> modal center against the header pill
-     instead of the viewport — visibly half-off-screen on narrow
-     viewports. Moving the blur to a pseudo-element keeps the same
-     visual while leaving the header a normal flow element for
-     modal-positioning purposes. */
-}
-body.ftw-app > header::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: oklch(0.16 0.018 250 / 0.7);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-radius: inherit;
-  pointer-events: none;
-  z-index: -1;
 }
 /* On viewports wider than 1560 px, the header pill already has 28px of
    horizontal padding so the brand / nav / right-cluster line up with
    the grid cells below. On narrower viewports, header spans full width
    (minus the side pads on main), giving the same alignment without
    explicit margin math. */
-body.ftw-app > header h1 {
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 17px;
-  letter-spacing: -0.01em;
-  color: var(--fg);
-}
 body.ftw-app > header .header-logo {
   height: 30px;
   border-radius: 6px;
@@ -149,7 +110,7 @@ body.ftw-app .tab-btn {
 }
 body.ftw-app .tab-btn:hover {
   color: var(--fg);
-  background: oklch(0.22 0.02 250);
+  background: var(--ink-sunken);
 }
 body.ftw-app .tab-btn.active {
   background: var(--ink-raised);
@@ -290,38 +251,153 @@ body.ftw-app .mobile-menu-btn:hover {
   background: var(--ink-raised);
 }
 
-/* ---- Energy flow hero slot ---- */
+/* ---- Overview: now → price/plan → today → safety ---- */
+body.ftw-app #view-overview:not(.hidden) {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+}
+body.ftw-app #view-overview > * {
+  min-width: 0;
+}
+body.ftw-app .overview-heading {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+}
+body.ftw-app .overview-heading p {
+  margin: 0;
+}
+body.ftw-app .overview-heading h2 {
+  margin-top: 3px;
+}
+body.ftw-app .overview-heading > div:first-child > p:last-child {
+  max-width: 62ch;
+  color: var(--fg-dim);
+}
+body.ftw-app .overview-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+body.ftw-app .overview-health-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red-e);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--red-e) 14%, transparent);
+}
+body.ftw-app .overview-health.is-connected {
+  color: var(--fg-dim);
+}
+body.ftw-app .overview-health.is-connected .overview-health-dot {
+  background: var(--green-e);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--green-e) 14%, transparent);
+}
+body.ftw-app .section-kicker {
+  margin: 0 0 3px;
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* Power now is deliberately one instrument panel. Flow is the default
+   overview; Values keeps the dense readout one tab away. */
+body.ftw-app .power-now {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+body.ftw-app .power-now-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--line);
+}
+body.ftw-app .power-now-head h2,
+body.ftw-app .overview-card h2,
+body.ftw-app .overview-today h2 {
+  margin: 0;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
+body.ftw-app .power-now-tabs {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(82px, 1fr));
+  padding: 2px;
+  isolation: isolate;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+body.ftw-app .power-now-tabs::before {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  inset: 2px auto 2px 2px;
+  width: calc(50% - 2px);
+  border-radius: 999px;
+  background: var(--accent-e);
+  transform: translateX(0);
+  transition: transform 220ms cubic-bezier(.4, 0, .2, 1);
+}
+body.ftw-app.mode-numbers .power-now-tabs::before {
+  transform: translateX(100%);
+}
+body.ftw-app .power-now-tabs button {
+  position: relative;
+  z-index: 1;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+body.ftw-app .power-now-tabs button[aria-selected="true"] {
+  color: var(--on-accent);
+}
+body.ftw-app .power-now-tabs button:focus-visible {
+  outline: 2px solid var(--fg);
+  outline-offset: 3px;
+  border-radius: 999px;
+}
+body.ftw-app .power-now-panel[hidden] {
+  display: none !important;
+}
 body.ftw-app .flow-hero {
-  margin-bottom: 4px;
+  border-top: 0;
 }
 body.ftw-app .flow-hero ftw-energy-flow {
   display: block;
-  /* Desktop breathing room under the planets. The Combined switch
-     sits inside this host at `position:absolute; bottom:14px`, so
-     padding-bottom controls how far BELOW the SVG it lands — growing
-     this value is what gives the toggle more top-margin, and the
-     extra padding also keeps the hero from crowding the cards right
-     below it. Mobile stays tight (no extra padding). */
-  padding-bottom: 80px;
+  padding: 12px 0 66px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
-@media (max-width: 900px) {
-  body.ftw-app .flow-hero ftw-energy-flow { padding-bottom: 0; }
-}
-
-/* ---- Hero / numbers mode switch ---- */
-/* Default body has mode-hero OR mode-numbers applied from the init
-   block at the bottom of index.html. mode-hero hides the four big-number
-   tiles for Grid/PV/Battery/Load (they duplicate the hero); mode-numbers
-   hides the hero. Non-dup tiles (SoC, Fuse, EV, energy totals, controls,
-   charts) stay visible in both modes. */
-body.ftw-app.mode-hero    .ftw-hide-in-hero { display: none !important; }
-body.ftw-app.mode-numbers .flow-hero        { display: none !important; }
-/* In hero mode the summary-cards row only holds .ftw-hide-in-hero tiles
-   (SoC/EV/Fuse moved out), so the section collapses to zero height but
-   still claims a flex gap slot — visible as an extra ~16 px between the
-   hero and the history-row wrapper card. Hide the empty section to keep all
-   inter-section gaps uniform. */
-body.ftw-app.mode-hero    .summary-cards    { display: none !important; }
 
 /* ---- Card labels — single themeable rule shared by every .card-label
        across the dashboard (summary, fuse, energy, control, history…).
@@ -343,21 +419,26 @@ body.ftw-app .card-label {
 
 /* ---- Summary tiles ---- */
 body.ftw-app .summary-cards {
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
 }
 body.ftw-app .summary-card {
-  background: var(--ink-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: var(--card-pad, 14px 16px);
+  min-width: 0;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--line);
+  border-radius: 0;
+  padding: 18px 20px 20px;
   text-align: left;
   position: relative;
-  overflow: hidden;
-  transition: border-color .2s;
+  transition: background-color .18s;
 }
-body.ftw-app .summary-card:hover {
-  border-color: oklch(0.35 0.02 250);
+body.ftw-app .summary-card:last-child {
+  border-right: 0;
+}
+body.ftw-app .summary-card.clickable:hover {
+  background: color-mix(in oklch, var(--accent-e) 5%, transparent);
 }
 
 /* Heat-pump card. heating.js renders into a bare `.card`, whose base rule in
@@ -382,6 +463,20 @@ body.ftw-app .summary-card .card-value {
   color: var(--fg);
   line-height: 1.1;
 }
+body.ftw-app .power-value-pair {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+body.ftw-app .power-soc {
+  flex: none;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 body.ftw-app .summary-card .card-sub {
   font-family: var(--mono);
   font-size: 10px;
@@ -393,6 +488,114 @@ body.ftw-app .card-target {
   font-family: var(--mono);
   color: var(--fg-muted);
   opacity: 0.8;
+}
+
+body.ftw-app .overview-outlook {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+body.ftw-app .overview-card,
+body.ftw-app .overview-today {
+  min-width: 0;
+  background: var(--ink-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+body.ftw-app .overview-card-head,
+body.ftw-app .overview-today-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+body.ftw-app .overview-plan-summary {
+  display: flex;
+  flex-direction: column;
+}
+body.ftw-app .overview-plan-action {
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: clamp(17px, 2vw, 22px);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+}
+body.ftw-app .overview-plan-time {
+  margin-top: 3px;
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+body.ftw-app .overview-plan-reason,
+body.ftw-app .overview-plan-constraint,
+body.ftw-app .overview-plan-soc {
+  margin: 12px 0 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+body.ftw-app .overview-plan-constraint {
+  margin-top: 4px;
+  color: var(--fg-muted);
+}
+body.ftw-app .overview-detail-link {
+  align-self: flex-start;
+  margin-top: auto;
+  padding-top: 16px;
+  color: var(--accent-e);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+body.ftw-app .overview-detail-link:hover {
+  color: var(--fg);
+}
+body.ftw-app .overview-detail-link:focus-visible {
+  outline: 2px solid var(--accent-e);
+  outline-offset: 4px;
+  border-radius: 2px;
+}
+body.ftw-app .overview-today {
+  grid-column: 1 / -1;
+}
+body.ftw-app .overview-today-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+body.ftw-app .overview-today-value {
+  display: flex;
+  min-width: 0;
+  min-height: 74px;
+  box-sizing: border-box;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 12px 14px;
+  background: var(--ink-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+body.ftw-app .overview-today-value span {
+  color: var(--fg-label);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+body.ftw-app .overview-today-value strong {
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Directional colour accents — preserve legacy val-* hooks but rebind
@@ -408,8 +611,9 @@ body.ftw-app .val-ev-connected{ color: var(--amber); }
 
 /* Fuse — own row, one box per phase. */
 body.ftw-app .fuse-row {
+  grid-column: 1 / -1;
   display: block;
-  margin: 12px 0;
+  margin: 0;
 }
 body.ftw-app .fuse-card {
   background: var(--ink-raised);
@@ -547,6 +751,29 @@ body.ftw-app .history-row {
    Just sets the top margin so it doesn't collide with the history
    wrapper above. */
 body.ftw-app .savings-row {
+  margin-top: 12px;
+}
+body.ftw-app .history-technical {
+  margin-top: 18px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--ink-raised) 58%, transparent);
+}
+body.ftw-app .history-technical-label {
+  margin: 0 0 8px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+body.ftw-app .history-technical .energy-history-header,
+body.ftw-app .history-technical .diagnose-header {
+  margin-top: 0;
+}
+body.ftw-app .history-technical-plan {
   margin-top: 12px;
 }
 body.ftw-app .history-group {
@@ -751,7 +978,7 @@ body.ftw-app .ftw-toggle-slider {
   position: relative;
   width: 40px;
   height: 22px;
-  background: oklch(0.20 0.015 250);
+  background: var(--ink-elevated);
   border: 1px solid var(--line-soft);
   border-radius: 999px;
   transition: background .15s, border-color .15s;
@@ -784,7 +1011,7 @@ body.ftw-app .mode-buttons {
   gap: 6px;
 }
 body.ftw-app .mode-buttons button {
-  background: oklch(0.13 0.015 250);
+  background: var(--ink-sunken);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   color: var(--fg-dim);
@@ -794,7 +1021,7 @@ body.ftw-app .mode-buttons button {
   transition: background .15s, color .15s, border-color .15s;
 }
 body.ftw-app .mode-buttons button:hover {
-  background: oklch(0.2 0.02 250);
+  background: var(--ink-elevated);
   color: var(--fg);
 }
 body.ftw-app .mode-buttons button.active {
@@ -936,7 +1163,7 @@ body.ftw-app .card-hint.card-hint-active {
 body.ftw-app .btn-send {
   background: var(--accent-e);
   border-color: var(--accent-e);
-  color: oklch(0.15 0.02 250);
+  color: var(--on-accent);
   font-family: var(--mono);
   font-weight: 600;
   font-size: 12px;
@@ -967,7 +1194,6 @@ body.ftw-app .live-plan-row {
 @media (max-width: 1100px) {
   body.ftw-app .live-plan-row { grid-template-columns: 1fr; }
   body.ftw-app .controls-row  { grid-template-columns: 1fr; }
-  body.ftw-app .plan-now { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 body.ftw-app #chart-section,
@@ -1111,35 +1337,75 @@ body.ftw-app .plan-summary .s-sep { opacity: 0.45; margin: 0 4px; }
 body.ftw-app .plan-summary .s-label { color: var(--fg-muted); opacity: 0.75; }
 body.ftw-app .plan-summary .s-value { color: var(--fg-dim); }
 body.ftw-app .plan-now {
-  display: grid;
-  grid-template-columns: minmax(190px, 1.2fr) repeat(4, minmax(150px, 1fr));
-  gap: 8px;
+  overflow: hidden;
   margin: 10px 0 12px;
-}
-body.ftw-app .plan-now-lead,
-body.ftw-app .plan-now-item {
-  min-width: 0;
-  padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--ink-sunken);
 }
-body.ftw-app .plan-now-lead {
+body.ftw-app .plan-now-primary {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
 }
-body.ftw-app .plan-now-item,
-body.ftw-app .plan-now-lead > div {
+body.ftw-app .plan-now-action {
   display: flex;
+  min-width: 0;
   flex-direction: column;
   gap: 2px;
+}
+body.ftw-app .plan-now-secondary {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+}
+body.ftw-app .plan-now-secondary > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+body.ftw-app .plan-now-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+body.ftw-app .plan-now-meta > div {
+  min-width: 0;
+  padding: 9px 16px 11px;
+  border-right: 1px solid var(--line);
+}
+body.ftw-app .plan-now-meta > div:last-child {
+  border-right: 0;
+}
+body.ftw-app .plan-now-meta dt {
+  margin: 0 0 3px;
+}
+body.ftw-app .plan-now-meta dd {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  flex-direction: column;
+  gap: 1px;
 }
 body.ftw-app .plan-now-label {
   color: var(--fg-muted);
   font-family: var(--mono);
   font-size: 9px;
   letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+body.ftw-app .plan-now-meta dt {
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 body.ftw-app .plan-now strong {
@@ -1149,10 +1415,19 @@ body.ftw-app .plan-now strong {
   font-weight: 650;
   line-height: 1.35;
 }
+body.ftw-app .plan-now-primary strong {
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
 body.ftw-app .plan-now small {
   color: var(--fg-dim);
   font-size: 10px;
   line-height: 1.35;
+}
+body.ftw-app .plan-now-secondary > small {
+  max-width: 44ch;
+  text-align: right;
 }
 body.ftw-app .plan-state-badge {
   flex: 0 0 auto;
@@ -1333,7 +1608,7 @@ body.ftw-app footer .refresh-label {
   color: var(--fg-dim);
 }
 body.ftw-app .status-bar {
-  background: oklch(0.11 0.015 250);
+  background: var(--ink-sunken);
   border-top: 1px solid var(--line);
   color: var(--fg-muted);
   font-family: var(--mono);
@@ -1701,6 +1976,88 @@ body.ftw-app .diagnose-detail {
   }
   body.ftw-app .view-heading { margin-bottom: 12px; }
   body.ftw-app .view-heading h2 { font-size: 22px; }
+  body.ftw-app #view-overview:not(.hidden) {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  body.ftw-app .overview-heading {
+    grid-column: 1;
+    align-items: start;
+  }
+  body.ftw-app .overview-heading > div:first-child > p:last-child {
+    display: none;
+  }
+  body.ftw-app .overview-health {
+    padding-top: 4px;
+  }
+  body.ftw-app .power-now,
+  body.ftw-app .overview-outlook,
+  body.ftw-app .overview-today,
+  body.ftw-app .fuse-row {
+    grid-column: 1;
+  }
+  body.ftw-app .power-now-head {
+    padding: 4px 8px;
+  }
+  body.ftw-app .power-now-tabs {
+    grid-template-columns: repeat(2, minmax(72px, 1fr));
+  }
+  body.ftw-app .power-now-tabs button {
+    min-height: 44px;
+    padding-inline: 12px;
+  }
+  body.ftw-app .summary-cards {
+    grid-template-columns: 1fr;
+  }
+  body.ftw-app .summary-card {
+    display: grid;
+    grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr);
+    grid-template-rows: auto auto;
+    align-items: center;
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 3px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  body.ftw-app .summary-card:last-child {
+    border-bottom: 0;
+  }
+  body.ftw-app .summary-card .card-label {
+    grid-row: 1 / 3;
+    margin: 0;
+  }
+  body.ftw-app .summary-card .card-value,
+  body.ftw-app .summary-card .card-sub,
+  body.ftw-app .power-value-pair {
+    text-align: right;
+  }
+  body.ftw-app .summary-card .card-value {
+    font-size: 1.2rem;
+  }
+  body.ftw-app .summary-card .card-sub {
+    margin-top: 1px;
+  }
+  body.ftw-app .power-value-pair {
+    justify-content: flex-end;
+  }
+  body.ftw-app .flow-hero ftw-energy-flow {
+    padding: 8px 0 42px;
+  }
+  body.ftw-app .overview-outlook {
+    grid-template-columns: 1fr;
+  }
+  body.ftw-app .overview-card,
+  body.ftw-app .overview-today {
+    padding: 13px;
+  }
+  body.ftw-app .overview-today-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  body.ftw-app .history-technical {
+    margin-top: 12px;
+    padding: 11px;
+  }
   /* Same rail alignment as desktop, but with the mobile 12 px gutter:
      header's outer border sits 12 px inside the viewport, matching
      main's 12 px content inset. */
@@ -1712,7 +2069,6 @@ body.ftw-app .diagnose-detail {
     padding: 10px 12px;
     position: relative;
   }
-  body.ftw-app > header h1 { font-size: 15px; }
   body.ftw-app > header .header-logo { height: 26px; }
   body.ftw-app footer {
     width: calc(100% - 24px);
@@ -1735,10 +2091,8 @@ body.ftw-app .diagnose-detail {
     padding: 5px;
     border: 1px solid var(--line);
     border-radius: 16px;
-    background: color-mix(in oklch, var(--ink-raised) 92%, transparent);
+    background: var(--ink-elevated);
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.38);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
   }
   body.ftw-app .mobile-destinations button {
     display: flex;
@@ -1804,7 +2158,7 @@ body.ftw-app .diagnose-detail {
     right: 0;
     min-width: 240px;
     padding: 14px;
-    background: var(--ink-raised);
+    background: var(--ink-elevated);
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
@@ -1850,7 +2204,7 @@ body.ftw-app .diagnose-detail {
 
   /* Compact the summary/energy card padding so the smaller tiles
      don't waste vertical space. */
-  body.ftw-app .summary-card { padding: 10px 12px; }
+  body.ftw-app .summary-card { padding: 3px 10px; }
   body.ftw-app .summary-card .card-value { font-size: 1.25rem; }
   body.ftw-app .energy-tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
   body.ftw-app .energy-tile  { padding: 9px 11px; }
@@ -1861,8 +2215,31 @@ body.ftw-app .diagnose-detail {
   body.ftw-app .live-plan-row { grid-template-columns: 1fr; gap: 12px; }
   body.ftw-app #chart-section,
   body.ftw-app #plan-section { padding: 12px 14px; }
-  body.ftw-app .plan-now { grid-template-columns: 1fr; }
-  body.ftw-app .plan-now-lead { flex-direction: column; }
+  body.ftw-app .plan-now-primary {
+    flex-direction: column;
+    padding: 12px;
+  }
+  body.ftw-app .plan-now-secondary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+    padding: 10px 12px;
+  }
+  body.ftw-app .plan-now-secondary > small {
+    max-width: none;
+    text-align: left;
+  }
+  body.ftw-app .plan-now-meta {
+    grid-template-columns: 1fr;
+  }
+  body.ftw-app .plan-now-meta > div {
+    padding: 9px 12px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  body.ftw-app .plan-now-meta > div:last-child {
+    border-bottom: 0;
+  }
   body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
   body.ftw-app .more-actions { grid-template-columns: 1fr; }
 }
@@ -1879,35 +2256,13 @@ body.ftw-app .diagnose-detail {
 }
 
 /* ---------- Light-theme specific fixes ---------- */
-/* Most surfaces use tokens that flip automatically. These are the cases
-   where the dark-mode sheet hardcoded a rgba or hex that needs an
-   explicit override so the light variant reads correctly. */
-html[data-theme="light"] body.ftw-app::before {
-  background:
-    radial-gradient(ellipse 80% 60% at 50% -10%,
-      oklch(0.8 0.08 var(--accent-hue) / 0.20), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 100%,
-      oklch(0.8 0.1 220 / 0.12), transparent 60%),
-    linear-gradient(to bottom, transparent 0%, oklch(0.94 0.012 250) 100%);
-}
-html[data-theme="light"] body.ftw-app > header::before {
-  background: oklch(0.98 0.005 250 / 0.7);
-}
-/* Light-mode header chrome:
-   - Remove the ambient pill border: the paper body + translucent
-     ::before already carry enough separation; the hairline ring on
-     a paper-ish background read as a dark frame that competed with
-     the header content for attention.
-   - Pull every text element in the header to the full --fg (very
+/* Most surfaces use tokens that flip automatically. Pull every text
+   element in the header to the full --fg (very
      near black). In dark mode the tabs and the Advanced link use
      --fg-dim (a 0.7 L gray) so they don't steal focus from the
      active tab, but on paper 0.7 L is muddy — the operator
      complained it looked washed out. Black is correct contrast
      for light mode; the active state still has the accent tint. */
-html[data-theme="light"] body.ftw-app > header {
-  border-color: transparent;
-}
-html[data-theme="light"] body.ftw-app > header h1,
 html[data-theme="light"] body.ftw-app > header .tab-btn,
 html[data-theme="light"] body.ftw-app > header .btn-link,
 html[data-theme="light"] body.ftw-app > header .version,
@@ -1919,7 +2274,7 @@ html[data-theme="light"] body.ftw-app .mode-buttons button.active {
   background: oklch(0.75 0.14 var(--accent-hue) / 0.25);
 }
 html[data-theme="light"] body.ftw-app .status-bar {
-  background: oklch(0.94 0.01 250);
+  background: var(--ink-sunken);
 }
 /* Legacy val-* text colours are tuned for dark-on-dark in style.css;
    tokens above re-point them but a few hex fallbacks slip through in

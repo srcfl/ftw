@@ -16,11 +16,11 @@ import { apiFetch } from "./api-fetch.js";
 export class FtwNotifTestButton extends FtwElement {
   static styles = `
     :host { display: inline-flex; align-items: center; gap: 8px; }
-    button { background: var(--accent, #375a8f); color: var(--fg, #fff);
-             border: 0; padding: 6px 12px; border-radius: 4px;
+    button { background: var(--accent-e, #f5b942); color: var(--on-accent, #0a0a0a);
+             border: 1px solid var(--accent-e, #f5b942); padding: 6px 12px; border-radius: 4px;
              cursor: pointer; font: inherit; }
     button[disabled] { opacity: 0.6; cursor: default; }
-    .status { font-size: 0.85rem; color: var(--text-dim, #888); }
+    .status { font-size: 0.85rem; color: var(--fg-muted, #858585); }
     .ok { color: var(--ok-fg, #7dd17d); }
     .err { color: var(--warn-fg, #e0b353); }
   `;

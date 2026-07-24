@@ -26,6 +26,19 @@
     { key: 'export_wh', label: 'Grid export', color: '#f97316' }
   ];
 
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942'
+        };
+  }
+
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -123,6 +136,7 @@
     var ctx = canvas.getContext('2d');
     ctx.scale(ratio, ratio);
     ctx.clearRect(0, 0, width, height);
+    var C = canvasColors();
 
     var legend = document.getElementById('energy-history-legend');
     if (legend) {
@@ -131,7 +145,7 @@
       }).join('');
     }
     if (!days.length) {
-      ctx.fillStyle = '#94a3b8';
+      ctx.fillStyle = C.muted;
       ctx.font = '13px system-ui, sans-serif';
       ctx.fillText('No energy history is available for this period.', 16, 28);
       return;
@@ -144,9 +158,8 @@
       return dailySeries.map(function (series) { return Math.max(0, Number(day[series.key]) || 0); });
     }));
     maxWh = Math.max(1000, maxWh);
-    var style = getComputedStyle(document.documentElement);
-    var textColor = style.getPropertyValue('--text-dim').trim() || '#94a3b8';
-    var borderColor = style.getPropertyValue('--border').trim() || '#334155';
+    var textColor = C.dim;
+    var borderColor = C.line;
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillStyle = textColor;
     ctx.strokeStyle = borderColor;
@@ -361,5 +374,8 @@
   });
   window.addEventListener('resize', function () {
     if (lastDays.length) drawDailyChart(lastDays);
+  });
+  window.addEventListener('ftw-theme-change', function () {
+    drawDailyChart(lastDays);
   });
 })();

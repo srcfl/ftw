@@ -80,7 +80,7 @@ class FtwSavingsCard extends FtwElement {
       cursor: pointer;
       transition: color 220ms ease;
     }
-    .toggle button.active { color: #0a0a0a; }
+    .toggle button.active { color: var(--on-accent, #0a0a0a); }
     .toggle button:not(.active):hover { color: var(--fg); }
     .toggle button:focus-visible {
       outline: 1px solid var(--accent-e);
@@ -184,23 +184,23 @@ class FtwSavingsCard extends FtwElement {
       max-width: 220px;
       z-index: 5;
       pointer-events: none;
-      background: rgba(15,23,42,0.97);
-      border: 1px solid rgba(255,255,255,0.14);
+      background: var(--ink-elevated);
+      border: 1px solid var(--line);
       border-radius: 6px;
       padding: 7px 9px;
-      color: #e2e8f0;
+      color: var(--fg);
       font-family: var(--sans);
       font-size: 11px;
       line-height: 1.35;
       box-shadow: 0 8px 24px rgba(0,0,0,0.35);
     }
     .spark-tip b {
-      color: #fff;
+      color: var(--fg);
       font-family: var(--mono);
       font-weight: 600;
     }
     .spark-tip .muted {
-      color: #94a3b8;
+      color: var(--fg-muted, #858585);
       margin-top: 2px;
     }
     .day-labels span {
@@ -219,6 +219,25 @@ class FtwSavingsCard extends FtwElement {
       padding: 8px 0;
     }
 
+    :host([compact]) .card-inner {
+      height: 100%;
+      box-sizing: border-box;
+      justify-content: center;
+      gap: 5px;
+      background: var(--ink-sunken);
+      border-radius: var(--radius-md, 10px);
+      padding: 12px 14px;
+    }
+    :host([compact]) .toggle,
+    :host([compact]) .pct,
+    :host([compact]) .sub,
+    :host([compact]) .spark-wrap {
+      display: none !important;
+    }
+    :host([compact]) .total {
+      font-size: 1.05rem;
+    }
+
     @media (max-width: 900px) {
       .card-inner { padding: var(--card-pad-tight, 12px 14px); }
       .total { font-size: 1.2rem; }
@@ -226,7 +245,7 @@ class FtwSavingsCard extends FtwElement {
   `;
 
   static get observedAttributes() {
-    return ["default-range", "range", "poll-ms"];
+    return ["default-range", "range", "poll-ms", "compact"];
   }
 
   constructor() {
@@ -276,6 +295,7 @@ class FtwSavingsCard extends FtwElement {
   }
 
   _daysFor(range) {
+    if (this.hasAttribute("compact")) return 1;
     if (range === "month") {
       const now = new Date();
       return now.getDate();
@@ -290,10 +310,11 @@ class FtwSavingsCard extends FtwElement {
       this._range = this.getAttribute("default-range") || "week";
     }
     const wk = this._range === "week";
+    const compact = this.hasAttribute("compact");
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">Saved vs no PV/battery</div>
+          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? "Saved today" : "Saved vs no PV/battery"}</div>
           <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
