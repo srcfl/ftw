@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
+	"github.com/srcfl/ftw/go/internal/homelink"
 	"github.com/srcfl/ftw/go/internal/homelink/wire"
 	"github.com/srcfl/ftw/go/internal/homelinkrelay"
 )
@@ -109,7 +111,7 @@ func TestServiceCompletesOnlyEncryptedSessionConfirmation(t *testing.T) {
 		t, browserOutbound, accept, 2, []byte(`{"version":1,"type":"read"}`),
 	)}
 	closed := waitValue(t, transport.closes)
-	if closed.StreamID != streamID || closed.Code != "invalid-session" {
+	if closed.StreamID != streamID || closed.Code != "remote-disabled" {
 		t.Fatalf("post-confirm application frame close = %+v", closed)
 	}
 	cancel()
@@ -159,6 +161,7 @@ func TestServiceRejectsDuplicateConfirmationFields(t *testing.T) {
 
 func TestEncryptedSessionEndToEndThroughRelay(t *testing.T) {
 	identity := newUplinkTestIdentity(t)
+	var readCalls atomic.Int32
 	invites, err := homelinkrelay.NewStaticInvites([]homelinkrelay.StaticInvite{{
 		GatewayID: uplinkTestGatewayID,
 		PublicKey: base64.RawURLEncoding.EncodeToString(identity.publicKey),
@@ -181,7 +184,25 @@ func TestEncryptedSessionEndToEndThroughRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(identity)
+	service, err := NewServiceWithReads(identity, readExecutorFunc(func(
+		_ context.Context,
+		_ string,
+		_ string,
+		request homelink.ReadRequest,
+		_ homelink.ReadBinding,
+	) (homelink.ReadResponse, error) {
+		readCalls.Add(1)
+		if request.Scope != homelink.ScopePlanRead {
+			t.Fatalf("relay read scope = %q", request.Scope)
+		}
+		return homelink.ReadResponse{
+			Version: homelink.ReadContractVersion,
+			Scope:   homelink.ScopePlanRead,
+			Plan: &homelink.PlanReadResponse{
+				Available: true, GeneratedAtMS: 1, Mode: "cost", HorizonSlots: 24,
+			},
+		}, nil
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,6 +248,26 @@ func TestEncryptedSessionEndToEndThroughRelay(t *testing.T) {
 	readTestJSON(t, browser, &ready)
 	if plaintext := browserOpen(t, browserInbound, accept, ready); string(plaintext) != `{"version":1,"type":"session.ready"}` {
 		t.Fatalf("end-to-end ready = %q", plaintext)
+	}
+	read := browserSeal(t, browserOutbound, accept, 2, []byte(
+		`{"version":1,"type":"read.request","request_id":"`+
+			testRequestID(31)+`","grant":"`+testGrantToken(31)+
+			`","scope":"ftw.plan.read"}`,
+	))
+	writeTestJSON(t, browser, read)
+	var sealedResponse wire.Sealed
+	readTestJSON(t, browser, &sealedResponse)
+	var readResponse readResponseMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, sealedResponse),
+		wire.MaxPlaintextBytes,
+		&readResponse,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if readResponse.Error != "" || readResponse.Response == nil ||
+		readResponse.Response.Plan == nil || readCalls.Load() != 1 {
+		t.Fatalf("end-to-end read = %+v calls=%d", readResponse, readCalls.Load())
 	}
 	cancel()
 	if err := <-result; !errorsIsCanceled(err) {

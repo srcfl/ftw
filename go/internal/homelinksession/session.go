@@ -35,17 +35,28 @@ type Manager struct {
 }
 
 type Session struct {
-	routeHandle string
-	streamID    string
-	sessionID   string
-	expiresAt   time.Time
-	now         func() time.Time
-	inbound     cipher.AEAD
-	outbound    cipher.AEAD
+	gatewayID       string
+	routeGeneration uint64
+	routeHandle     string
+	streamID        string
+	sessionID       string
+	expiresAt       time.Time
+	now             func() time.Time
+	inbound         cipher.AEAD
+	outbound        cipher.AEAD
 
 	mu          sync.Mutex
 	inboundSeq  uint64
 	outboundSeq uint64
+}
+
+type Context struct {
+	GatewayID       string
+	RouteGeneration uint64
+	RouteHandle     string
+	StreamID        string
+	SessionID       string
+	ExpiresAt       time.Time
 }
 
 func NewManager(identity gatewayidentity.Identity) (*Manager, error) {
@@ -125,10 +136,19 @@ func (m *Manager) Accept(hello wire.SessionHello) (wire.SessionAccept, *Session,
 		return wire.SessionAccept{}, nil, err
 	}
 	return accept, &Session{
+		gatewayID: m.identity.GatewayID(), routeGeneration: hello.RouteGeneration,
 		routeHandle: hello.RouteHandle, streamID: hello.StreamID,
 		sessionID: sessionID, expiresAt: expiresAt, now: m.now,
 		inbound: inbound, outbound: outbound,
 	}, nil
+}
+
+func (s *Session) Context() Context {
+	return Context{
+		GatewayID: s.gatewayID, RouteGeneration: s.routeGeneration,
+		RouteHandle: s.routeHandle, StreamID: s.streamID,
+		SessionID: s.sessionID, ExpiresAt: s.expiresAt,
+	}
 }
 
 func (s *Session) Decrypt(message wire.Sealed) ([]byte, error) {

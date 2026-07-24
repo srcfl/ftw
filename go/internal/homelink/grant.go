@@ -234,6 +234,7 @@ var (
 	ErrWrongSite              = errors.New("grant belongs to another gateway")
 	ErrWrongScope             = errors.New("grant does not allow this scope")
 	ErrWrongPurpose           = errors.New("grant has another purpose")
+	ErrWrongBinding           = errors.New("grant belongs to another read binding")
 	ErrCredentialRevoked      = errors.New("credential has been revoked")
 	ErrCredentialDispatchBusy = errors.New("credential read dispatch did not stop")
 )
@@ -322,6 +323,7 @@ type grantRecord struct {
 	deadline  time.Duration
 	revoked   bool
 	consumed  bool
+	binding   *ReadBinding
 }
 
 func NewGrantManager(gatewayID string, opts GrantManagerOptions) (*GrantManager, error) {
@@ -420,6 +422,39 @@ func (m *GrantManager) IssueOneUseAccess(
 	scope Scope,
 	ttl time.Duration,
 ) (Grant, error) {
+	return m.issueOneUseAccess(ctx, challengeID, assertion, scope, ttl, nil)
+}
+
+// IssueOneUseBoundAccess creates an access grant for one exact encrypted
+// session and request. It cannot be consumed by the legacy unbound path.
+func (m *GrantManager) IssueOneUseBoundAccess(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+	scope Scope,
+	ttl time.Duration,
+	binding ReadBinding,
+) (Grant, error) {
+	if !m.enabled {
+		return Grant{}, ErrRemoteDisabled
+	}
+	if err := binding.Validate(); err != nil {
+		return Grant{}, err
+	}
+	if binding.GatewayID != m.gatewayID {
+		return Grant{}, ErrWrongSite
+	}
+	return m.issueOneUseAccess(ctx, challengeID, assertion, scope, ttl, &binding)
+}
+
+func (m *GrantManager) issueOneUseAccess(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+	scope Scope,
+	ttl time.Duration,
+	binding *ReadBinding,
+) (Grant, error) {
 	if !m.enabled {
 		return Grant{}, ErrRemoteDisabled
 	}
@@ -431,7 +466,7 @@ func (m *GrantManager) IssueOneUseAccess(
 	defer m.coordinator.operations.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	principal, binding, err := m.authority.VerifyAndConsumeAssertion(
+	principal, assertionBinding, err := m.authority.VerifyAndConsumeAssertion(
 		ctx, challengeID, assertion, credentialSiteOperation{
 			coordinator: m.coordinator,
 		},
@@ -443,7 +478,7 @@ func (m *GrantManager) IssueOneUseAccess(
 	if err != nil {
 		return Grant{}, err
 	}
-	if err := binding.validate(m.assertionSession, monotonicNow); err != nil {
+	if err := assertionBinding.validate(m.assertionSession, monotonicNow); err != nil {
 		return Grant{}, err
 	}
 	principal = clonePrincipal(principal)
@@ -456,7 +491,7 @@ func (m *GrantManager) IssueOneUseAccess(
 	if ttl <= 0 || ttl > AccessGrantMaxTTL {
 		return Grant{}, fmt.Errorf("grant lifetime must be from 1ns through %s", AccessGrantMaxTTL)
 	}
-	return m.issueLocked(GrantPurposeAccess, principal, scope, ttl, AccessGrantMaxTTL)
+	return m.issueLocked(GrantPurposeAccess, principal, scope, ttl, AccessGrantMaxTTL, binding)
 }
 
 func (m *GrantManager) issue(purpose GrantPurpose, principal Principal, scope Scope, ttl, maxTTL time.Duration) (Grant, error) {
@@ -468,7 +503,7 @@ func (m *GrantManager) issue(purpose GrantPurpose, principal Principal, scope Sc
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.issueLocked(purpose, principal, scope, ttl, maxTTL)
+	return m.issueLocked(purpose, principal, scope, ttl, maxTTL, nil)
 }
 
 func (m *GrantManager) issueLocked(
@@ -476,6 +511,7 @@ func (m *GrantManager) issueLocked(
 	principal Principal,
 	scope Scope,
 	ttl, maxTTL time.Duration,
+	binding *ReadBinding,
 ) (Grant, error) {
 	if ttl <= 0 || ttl > maxTTL {
 		return Grant{}, fmt.Errorf("grant lifetime must be from 1ns through %s", maxTTL)
@@ -512,6 +548,7 @@ func (m *GrantManager) issueLocked(
 		m.records[hash] = &grantRecord{
 			gatewayID: m.gatewayID, purpose: purpose, scope: scope,
 			principal: clonePrincipal(principal), deadline: deadline,
+			binding: cloneReadBinding(binding),
 		}
 		return Grant{
 			Token: base64.RawURLEncoding.EncodeToString(raw), GatewayID: m.gatewayID,
@@ -531,7 +568,7 @@ func (m *GrantManager) ConsumePairing(token, gatewayID string) error {
 func (m *GrantManager) consume(token, gatewayID string, purpose GrantPurpose, scope Scope) (grantRecord, error) {
 	m.coordinator.operations.RLock()
 	defer m.coordinator.operations.RUnlock()
-	return m.consumeSiteLocked(token, gatewayID, purpose, scope)
+	return m.consumeSiteLocked(token, gatewayID, purpose, scope, nil)
 }
 
 func (m *GrantManager) consumeForDispatch(
@@ -541,7 +578,29 @@ func (m *GrantManager) consumeForDispatch(
 	scope Scope,
 ) (grantRecord, context.Context, *credentialDispatch, error) {
 	m.coordinator.operations.RLock()
-	record, err := m.consumeSiteLocked(token, gatewayID, GrantPurposeAccess, scope)
+	record, err := m.consumeSiteLocked(token, gatewayID, GrantPurposeAccess, scope, nil)
+	if err != nil {
+		m.coordinator.operations.RUnlock()
+		return grantRecord{}, nil, nil, err
+	}
+	dispatchCtx, dispatch := m.coordinator.startDispatch(
+		ctx, record.principal.CredentialID,
+	)
+	m.coordinator.operations.RUnlock()
+	return record, dispatchCtx, dispatch, nil
+}
+
+func (m *GrantManager) consumeForBoundDispatch(
+	ctx context.Context,
+	token string,
+	gatewayID string,
+	scope Scope,
+	binding ReadBinding,
+) (grantRecord, context.Context, *credentialDispatch, error) {
+	m.coordinator.operations.RLock()
+	record, err := m.consumeSiteLocked(
+		token, gatewayID, GrantPurposeAccess, scope, &binding,
+	)
 	if err != nil {
 		m.coordinator.operations.RUnlock()
 		return grantRecord{}, nil, nil, err
@@ -558,6 +617,7 @@ func (m *GrantManager) consumeSiteLocked(
 	gatewayID string,
 	purpose GrantPurpose,
 	scope Scope,
+	binding *ReadBinding,
 ) (grantRecord, error) {
 	if !m.enabled {
 		return grantRecord{}, ErrRemoteDisabled
@@ -598,6 +658,9 @@ func (m *GrantManager) consumeSiteLocked(
 	if record.scope != scope {
 		return grantRecord{}, ErrWrongScope
 	}
+	if !sameReadBinding(record.binding, binding) {
+		return grantRecord{}, ErrWrongBinding
+	}
 	if record.purpose == GrantPurposeAccess {
 		if m.coordinator.credentialBlocked(record.principal.CredentialID) {
 			return grantRecord{}, ErrCredentialRevoked
@@ -610,6 +673,26 @@ func (m *GrantManager) consumeSiteLocked(
 	result := *record
 	result.principal = clonePrincipal(record.principal)
 	return result, nil
+}
+
+func cloneReadBinding(binding *ReadBinding) *ReadBinding {
+	if binding == nil {
+		return nil
+	}
+	copy := *binding
+	return &copy
+}
+
+func sameReadBinding(left, right *ReadBinding) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.GatewayID == right.GatewayID &&
+		left.RouteHandle == right.RouteHandle &&
+		left.RouteGeneration == right.RouteGeneration &&
+		left.SessionID == right.SessionID &&
+		left.StreamID == right.StreamID &&
+		bytes.Equal(left.RequestHash[:], right.RequestHash[:])
 }
 
 func (m *GrantManager) Revoke(token string) error {

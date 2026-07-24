@@ -61,6 +61,15 @@ func TestSessionHandshakeSignatureAndBidirectionalEncryption(t *testing.T) {
 		accept.ExpiresAtMS != now.Add(MaxSessionLifetime).UnixMilli() {
 		t.Fatalf("session accept lost binding: %+v", accept)
 	}
+	sessionContext := session.Context()
+	if sessionContext.GatewayID != identity.GatewayID() ||
+		sessionContext.RouteGeneration != hello.RouteGeneration ||
+		sessionContext.RouteHandle != hello.RouteHandle ||
+		sessionContext.StreamID != hello.StreamID ||
+		sessionContext.SessionID != accept.SessionID ||
+		!sessionContext.ExpiresAt.Equal(now.Add(MaxSessionLifetime)) {
+		t.Fatalf("session context lost binding: %+v", sessionContext)
+	}
 
 	browserOutbound, browserInbound := browserAEADs(t, browserPrivate, accept, transcript)
 	request := []byte(`{"type":"session.confirm"}`)
