@@ -2024,7 +2024,7 @@ body.ftw-app .diagnose-detail {
     align-items: start;
   }
   body.ftw-app .overview-heading > div:first-child > p:last-child {
-    font-size: 12px;
+    display: none;
   }
   body.ftw-app .overview-health {
     padding-top: 4px;
@@ -2036,7 +2036,7 @@ body.ftw-app .diagnose-detail {
     grid-column: 1;
   }
   body.ftw-app .power-now-head {
-    padding: 12px;
+    padding: 4px 8px;
   }
   body.ftw-app .power-now-tabs {
     grid-template-columns: repeat(2, minmax(72px, 1fr));
@@ -2053,9 +2053,9 @@ body.ftw-app .diagnose-detail {
     grid-template-columns: minmax(92px, 0.8fr) minmax(0, 1.2fr);
     grid-template-rows: auto auto;
     align-items: center;
-    min-height: 66px;
+    min-height: 44px;
     box-sizing: border-box;
-    padding: 10px 12px;
+    padding: 3px 10px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
   }
@@ -2246,7 +2246,7 @@ body.ftw-app .diagnose-detail {
 
   /* Compact the summary/energy card padding so the smaller tiles
      don't waste vertical space. */
-  body.ftw-app .summary-card { padding: 10px 12px; }
+  body.ftw-app .summary-card { padding: 3px 10px; }
   body.ftw-app .summary-card .card-value { font-size: 1.25rem; }
   body.ftw-app .energy-tiles { grid-template-columns: repeat(2, 1fr); gap: 8px; }
   body.ftw-app .energy-tile  { padding: 9px 11px; }

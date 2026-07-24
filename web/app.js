@@ -485,6 +485,14 @@
     return "status-offline";
   }
 
+  // The component registry loads as a deferred module while this classic
+  // dashboard script starts immediately at the end of the document. A fast
+  // first /api/status response can therefore arrive before <ftw-energy-flow>
+  // has upgraded. Cache the derived payload and replay it when the element is
+  // ready so switching to Flow never reveals placeholders for one poll cycle.
+  var lastFlowReadings = null;
+  var flowUpgradeReplayQueued = false;
+
   // ---- Render ----
   function render(data) {
     var batteryTargetsByDriver = {};
@@ -644,7 +652,7 @@
     // setReadings() replaces `planets` atomically, so a transient
     // /api/status error preserves the last good layout if we skip it.
     var flowEl = document.getElementById("energy-flow");
-    if (flowEl && typeof flowEl.setReadings === "function") {
+    if (flowEl) {
       var planets = [];
 
       // Today's totals are aggregate across all drivers; per-driver kWh split
@@ -800,11 +808,26 @@
         selfPoweredPctToday = Math.max(0, Math.min(100,
           (1 - importKwh / loadKwhTotal) * 100));
       }
-      flowEl.setReadings({
+      lastFlowReadings = {
         load:    (data.load_w || 0) / 1000,
         planets: planets,
         selfPoweredPctToday: selfPoweredPctToday,
-      });
+      };
+      if (typeof flowEl.setReadings === "function") {
+        flowEl.setReadings(lastFlowReadings);
+      } else if (!flowUpgradeReplayQueued &&
+                 window.customElements &&
+                 typeof window.customElements.whenDefined === "function") {
+        flowUpgradeReplayQueued = true;
+        window.customElements.whenDefined("ftw-energy-flow").then(function () {
+          var readyFlow = document.getElementById("energy-flow");
+          if (readyFlow &&
+              typeof readyFlow.setReadings === "function" &&
+              lastFlowReadings) {
+            readyFlow.setReadings(lastFlowReadings);
+          }
+        });
+      }
     }
 
     // Mode buttons — primary (strategy) + advanced (manual)

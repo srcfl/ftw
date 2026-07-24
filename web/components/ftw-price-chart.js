@@ -359,10 +359,17 @@ class FtwPriceChart extends FtwElement {
         gap: 12px;
       }
       .compact-value {
-        font-size: 2.15rem;
+        font-size: 2rem;
       }
       .compact-low {
         padding-left: 12px;
+      }
+      .compact-head {
+        margin-bottom: 10px;
+      }
+      .compact-profile {
+        height: 44px;
+        margin-top: 10px;
       }
     }
   `;

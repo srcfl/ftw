@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const webRoot = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(webRoot, "index.html"), "utf8");
 const app = readFileSync(join(webRoot, "app.js"), "utf8");
+const css = readFileSync(join(webRoot, "app.css"), "utf8");
 const plan = readFileSync(join(webRoot, "plan.js"), "utf8");
 const router = readFileSync(join(webRoot, "diagnose.js"), "utf8");
 const flow = readFileSync(join(webRoot, "components/ftw-energy-flow.js"), "utf8");
@@ -57,6 +58,14 @@ describe("simplified dashboard overview", () => {
     assert.match(overview, /id="power-now-flow"[^>]*role="tabpanel"[^>]*hidden/);
     assert.match(overview, /<ftw-energy-flow id="energy-flow"[^>]*embedded/);
     assert.match(flow, /:host\(\[embedded\]\) \.title/);
+  });
+
+  it("replays the first live payload when the Flow component finishes upgrading", () => {
+    assert.match(app, /lastFlowReadings/);
+    assert.match(
+      app,
+      /customElements\.whenDefined\("ftw-energy-flow"\)[\s\S]*?setReadings\(lastFlowReadings\)/,
+    );
   });
 
   it("keeps each live telemetry rendering target singular", () => {
@@ -138,6 +147,25 @@ describe("simplified dashboard overview", () => {
       history.indexOf('class="history-technical history-technical-energy"') <
         history.indexOf('class="history-technical history-technical-plan"'),
       "raw energy records should precede prior plan decisions",
+    );
+  });
+
+  it("keeps the mobile primary answers above the fixed destination bar", () => {
+    assert.match(
+      css,
+      /\.overview-heading > div:first-child > p:last-child \{\s*display: none;/,
+    );
+    assert.match(
+      css,
+      /\.summary-card \{[\s\S]*?min-height: 44px;[\s\S]*?padding: 3px 10px;/,
+    );
+    assert.match(
+      price,
+      /@media \(max-width: 600px\)[\s\S]*?\.compact-profile \{\s*height: 44px;\s*margin-top: 10px;/,
+    );
+    assert.match(
+      flow,
+      /@media \(max-width: 600px\)[\s\S]*?:host\(\[embedded\]\) \.ef-toggle \{\s*bottom: 30px;/,
     );
   });
 });

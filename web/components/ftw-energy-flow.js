@@ -437,6 +437,9 @@ class FtwEnergyFlow extends FtwElement {
     }
     @media (max-width: 600px) {
       svg { height: calc(var(--efl-h-factor, 1) * 460px); }
+      :host([embedded]) .ef-toggle {
+        bottom: 30px;
+      }
       .sv-node-title { font-size: 18px; }
       .sv-node-value { font-size: 30px; }
       .sv-node-sub   { font-size: 16px; }
