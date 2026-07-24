@@ -79,13 +79,25 @@ def process_stream(reader: Any, writer: Any) -> None:
             response = handshake(raw)
             if response is None:
                 # Handshakes stay responsive while a solve is in progress,
-                # but CVXPY/warm-start state remains strictly serialized.
+                # but solver state and its memory cleanup remain serialized.
                 with SOLVE_LOCK:
                     response = handle(raw)
+                    try:
+                        writer.write(
+                            json.dumps(
+                                response,
+                                separators=(",", ":"),
+                                allow_nan=False,
+                            )
+                            + "\n"
+                        )
+                        writer.flush()
+                    finally:
+                        response = None
+                        release_unused_memory()
+                continue
         writer.write(json.dumps(response, separators=(",", ":"), allow_nan=False) + "\n")
         writer.flush()
-        response = None
-        release_unused_memory()
 
 
 def serve_unix(socket_path: str) -> None:

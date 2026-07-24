@@ -206,7 +206,7 @@ state:
 #   soc_max_pct: 95
 #   optimizer_solver: HIGHS
 #   optimizer_formulation: auto
-#   optimizer_transport: auto # auto | unix | process
+#   optimizer_transport: process # process | auto | unix; official Compose sets unix
 #   optimizer_socket: /run/ftw-optimizer/optimizer.sock
 #   optimizer_timeout_s: 30
 #   optimizer_idle_timeout_s: 120 # release Python/CVXPY memory between planning bursts

@@ -431,7 +431,7 @@ if [ "$optimizer_service_added" = true ]; then
     echo 'services:'
     echo "  ${main_service}:"
     echo '    environment:'
-    echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}'
+    echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
     echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
     echo '    volumes:'
     echo '      - optimizer-ipc:/run/ftw-optimizer'

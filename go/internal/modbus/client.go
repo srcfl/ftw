@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -42,23 +43,89 @@ type Capability struct {
 
 // Dial opens a Modbus TCP connection.
 func Dial(host string, port, unitID int) (*Capability, error) {
+	if err := validateEndpoint(host, port, unitID); err != nil {
+		return nil, err
+	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	url := "tcp://" + addr
 	cli := newTCPClient(addr, modbusRequestTimeout, modbusTCPKeepAlive)
-	if err := cli.Open(); err != nil {
-		return nil, err
-	}
-	if unitID > 0 {
-		cli.SetUnitId(uint8(unitID))
-	}
-	return &Capability{
-		client:         cli,
+	capability := &Capability{
 		url:            url,
 		addr:           addr,
 		unitID:         unitID,
 		requestTimeout: modbusRequestTimeout,
 		now:            time.Now,
-	}, nil
+	}
+	if err := cli.Open(); err != nil {
+		if !isRetryableDialError(err) {
+			return nil, err
+		}
+		capability.noteTransportFailure()
+		slog.Warn("modbus initial connection unavailable; polling will retry",
+			"url", url, "err", err)
+		return capability, nil
+	}
+	if unitID > 0 {
+		cli.SetUnitId(uint8(unitID))
+	}
+	capability.client = cli
+	return capability, nil
+}
+
+func isRetryableDialError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		// A valid local hostname may not resolve until the device starts
+		// advertising it. Endpoint syntax has already been validated, so
+		// resolution failures belong to the normal reconnect loop.
+		return true
+	}
+	return isTransportError(err)
+}
+
+func validateEndpoint(host string, port, unitID int) error {
+	if host == "" || host != strings.TrimSpace(host) || !validHost(host) {
+		return fmt.Errorf("invalid modbus host %q", host)
+	}
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid modbus port %d", port)
+	}
+	if unitID < 0 || unitID > 247 {
+		return fmt.Errorf("invalid modbus unit id %d", unitID)
+	}
+	return nil
+}
+
+func validHost(host string) bool {
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	if zoneAt := strings.LastIndexByte(host, '%'); zoneAt > 0 && zoneAt < len(host)-1 &&
+		net.ParseIP(host[:zoneAt]) != nil && !strings.ContainsAny(host[zoneAt+1:], " \t\r\n/") {
+		return true
+	}
+	if len(host) > 253 {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || !asciiAlphaNum(label[0]) || !asciiAlphaNum(label[len(label)-1]) {
+			return false
+		}
+		for i := 1; i+1 < len(label); i++ {
+			if !asciiAlphaNum(label[i]) && label[i] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func asciiAlphaNum(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 // Close the underlying connection.
@@ -272,7 +339,8 @@ func isTransportError(err error) bool {
 	}
 	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) ||
 		errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ENOTCONN) ||
-		errors.Is(err, syscall.ETIMEDOUT) {
+		errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
 		return true
 	}
 	// simonvetter's own deadline sentinel. It is a plain string-typed value,
@@ -285,7 +353,7 @@ func isTransportError(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
+	if errors.As(err, &netErr) {
 		return true
 	}
 	// simonvetter wraps some errors as plain strings; match on the text as

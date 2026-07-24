@@ -1,6 +1,29 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
+)
+
+func TestPlannerOptimizerTimeoutUsesSharedDefault(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML+"\nplanner:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Planner.OptimizerTimeout(); got != optimizercontract.DefaultTimeout {
+		t.Fatalf("OptimizerTimeout = %s, want %s", got, optimizercontract.DefaultTimeout)
+	}
+	if got := cfg.Planner.OptimizerTimeoutS; got != optimizercontract.DefaultTimeout.Seconds() {
+		t.Fatalf("OptimizerTimeoutS = %g, want %g", got, optimizercontract.DefaultTimeout.Seconds())
+	}
+
+	explicit := &Planner{OptimizerTimeoutS: 12.5}
+	if got := explicit.OptimizerTimeout(); got != 12500*time.Millisecond {
+		t.Fatalf("explicit OptimizerTimeout = %s, want 12.5s", got)
+	}
+}
 
 func TestPlannerOptimizerConfigValidation(t *testing.T) {
 	validWeight := 0.2

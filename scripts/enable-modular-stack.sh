@@ -64,7 +64,7 @@ trap cleanup EXIT
   echo 'services:'
   echo "  ${main}:"
   echo '    environment:'
-  echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-auto}'
+  echo '      FTW_OPTIMIZER_TRANSPORT: ${FTW_OPTIMIZER_TRANSPORT:-unix}'
   echo '      FTW_OPTIMIZER_SOCKET: /run/ftw-optimizer/optimizer.sock'
   echo '    volumes:'
   echo '      - optimizer-ipc:/run/ftw-optimizer'
@@ -92,4 +92,4 @@ if ! docker compose -f "${base}" -f "${override}" up -d ftw-optimizer "${main}";
   exit 1
 fi
 
-echo "Modular optimizer enabled in ${override}. Core keeps its process/Go-DP fallbacks."
+echo "Modular optimizer enabled in ${override}. Core keeps its Go-DP fallback."
