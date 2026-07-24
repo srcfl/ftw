@@ -267,6 +267,81 @@ func TestHomeLinkPolicyViolationFenceSurvivesFailedStatusWriteAndRestart(t *test
 	}
 }
 
+func TestHomeLinkPolicyViolationFallsBackWhenPolicyIntentWriteFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testHomeLinkCredential("001122334455667788", 1)
+	record.SignCount = 4
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER homelink_fail_policy_intent
+		BEFORE INSERT ON homelink_credential_policy_blocks
+		BEGIN SELECT RAISE(ABORT, 'policy intent failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+		SiteID: record.SiteID, CredentialID: record.CredentialID,
+		ExpectedRevision: record.Revision, SignCount: record.SignCount,
+		BackupEligible: record.BackupEligible, BackupState: record.BackupState,
+		UpdatedAtMS: 2,
+	}); err == nil {
+		t.Fatal("policy violation unexpectedly succeeded")
+	}
+	var policyBlocks, revokeBlocks int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM homelink_credential_policy_blocks
+		WHERE site_id = ? AND credential_id = ?`,
+		record.SiteID, record.CredentialID).Scan(&policyBlocks); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM homelink_credential_revocations
+		WHERE site_id = ? AND credential_id = ?`,
+		record.SiteID, record.CredentialID).Scan(&revokeBlocks); err != nil {
+		t.Fatal(err)
+	}
+	if policyBlocks != 0 || revokeBlocks != 1 {
+		t.Fatalf(
+			"fallback blocks policy=%d revoke=%d, want policy=0 revoke=1",
+			policyBlocks, revokeBlocks,
+		)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stored, err := store.HomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != HomeLinkCredentialUncertain {
+		t.Fatalf("status after failed policy intent = %q", stored.Status)
+	}
+	active, err := store.ActiveHomeLinkCredentials(context.Background(), record.SiteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("credential reopened after policy intent failure: %+v", active)
+	}
+	if _, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+		SiteID: record.SiteID, CredentialID: record.CredentialID,
+		ExpectedRevision: record.Revision, SignCount: record.SignCount + 1,
+		BackupEligible: record.BackupEligible, BackupState: record.BackupState,
+		UpdatedAtMS: 3,
+	}); !errors.Is(err, ErrHomeLinkCredentialInactive) {
+		t.Fatalf("later assertion after policy intent failure = %v", err)
+	}
+}
+
 func TestHomeLinkAssertionRevisionSerializesConcurrentUpdates(t *testing.T) {
 	store := freshStore(t)
 	record := testHomeLinkCredential("001122334455667788", 1)

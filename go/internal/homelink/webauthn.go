@@ -31,6 +31,7 @@ const (
 	webAuthnExpectationIDBytes = 24
 	webAuthnUserHandleBytes    = 32
 	maxWebAuthnExpectations    = 32
+	credentialStateTimeout     = 2 * time.Second
 )
 
 var (
@@ -109,18 +110,32 @@ type webAuthnProtocolVerifier interface {
 
 type pinnedWebAuthnProtocolVerifier struct{}
 
+type credentialStateStore interface {
+	ActiveHomeLinkCredentials(context.Context, string) ([]state.HomeLinkCredentialRecord, error)
+	HomeLinkSiteUserHandle(context.Context, string) ([]byte, error)
+	RegisterHomeLinkCredential(context.Context, state.HomeLinkCredentialRecord) error
+	HomeLinkCredential(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error)
+	ApplyHomeLinkAssertion(
+		context.Context,
+		state.HomeLinkAssertionUpdate,
+	) (state.HomeLinkCredentialRecord, error)
+	EnsureHomeLinkCredentialPolicyBlock(context.Context, string, []byte, int64) error
+	RevokeHomeLinkCredential(context.Context, string, []byte, int64) error
+}
+
 type PersistentCredentialAuthority struct {
-	mu                sync.Mutex
-	store             *state.Store
-	siteID            string
-	pairingAuthorizer PairingAuthorizer
-	random            io.Reader
-	now               func() time.Time
-	monotonicNow      func() time.Duration
-	clock             monotonicClockState
-	assertions        map[string]assertionExpectation
-	registrations     map[string]registrationExpectation
-	verifier          webAuthnProtocolVerifier
+	mu                 sync.Mutex
+	store              credentialStateStore
+	siteID             string
+	pairingAuthorizer  PairingAuthorizer
+	random             io.Reader
+	now                func() time.Time
+	monotonicNow       func() time.Duration
+	clock              monotonicClockState
+	assertions         map[string]assertionExpectation
+	registrations      map[string]registrationExpectation
+	blockedCredentials map[string]struct{}
+	verifier           webAuthnProtocolVerifier
 }
 
 func NewPersistentCredentialAuthority(
@@ -145,9 +160,10 @@ func NewPersistentCredentialAuthority(
 	return &PersistentCredentialAuthority{
 		store: opts.Store, siteID: siteID, pairingAuthorizer: opts.PairingAuthorizer,
 		random: opts.Random, now: opts.Now, monotonicNow: opts.MonotonicNow,
-		assertions:    make(map[string]assertionExpectation),
-		registrations: make(map[string]registrationExpectation),
-		verifier:      pinnedWebAuthnProtocolVerifier{},
+		assertions:         make(map[string]assertionExpectation),
+		registrations:      make(map[string]registrationExpectation),
+		blockedCredentials: make(map[string]struct{}),
+		verifier:           pinnedWebAuthnProtocolVerifier{},
 	}, nil
 }
 
@@ -268,6 +284,7 @@ func (a *PersistentCredentialAuthority) CreateAssertion(
 	if err != nil {
 		return LocalAssertionChallenge{}, errors.New("read local passkey verifier state")
 	}
+	active = a.filterMemoryBlockedCredentialsLocked(active)
 	if len(active) == 0 {
 		return LocalAssertionChallenge{}, ErrCredentialUnknown
 	}
@@ -330,6 +347,9 @@ func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
 	if !ok {
 		return Principal{}, binding, ErrCredentialUnknown
 	}
+	if a.credentialMemoryBlockedLocked(parsed.credentialID) {
+		return Principal{}, binding, ErrCredentialUncertain
+	}
 	if len(parsed.userHandle) != 0 &&
 		subtle.ConstantTimeCompare(parsed.userHandle, record.UserHandle) != 1 {
 		return Principal{}, binding, ErrWebAuthnVerification
@@ -338,13 +358,20 @@ func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
 	if err != nil {
 		return Principal{}, binding, err
 	}
-	updated, err := a.store.ApplyHomeLinkAssertion(ctx, state.HomeLinkAssertionUpdate{
+	wallNow := a.now().UTC().UnixMilli()
+	stateCtx, cancelState := credentialStateContext(ctx)
+	updated, err := a.store.ApplyHomeLinkAssertion(stateCtx, state.HomeLinkAssertionUpdate{
 		SiteID: a.siteID, CredentialID: parsed.credentialID, ExpectedRevision: record.Revision,
 		SignCount:      verified.signCount,
 		BackupEligible: verified.backupEligible, BackupState: verified.backupState,
-		UpdatedAtMS: a.now().UTC().UnixMilli(),
+		UpdatedAtMS: wallNow,
 	})
+	cancelState()
 	if err != nil {
+		a.secureCredentialAfterStateErrorLocked(ctx, parsed.credentialID, wallNow)
+		if requestErr := ctx.Err(); requestErr != nil {
+			return Principal{}, binding, requestErr
+		}
 		if errors.Is(err, state.ErrHomeLinkCredentialPolicy) ||
 			errors.Is(err, state.ErrHomeLinkCredentialInactive) ||
 			errors.Is(err, state.ErrHomeLinkCredentialConflict) {
@@ -352,7 +379,52 @@ func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
 		}
 		return Principal{}, binding, errors.New("update local passkey verifier state")
 	}
+	if requestErr := ctx.Err(); requestErr != nil {
+		return Principal{}, binding, requestErr
+	}
 	return Principal{CredentialID: slices.Clone(updated.CredentialID), Label: updated.Label}, binding, nil
+}
+
+func credentialStateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), credentialStateTimeout)
+}
+
+func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
+	requestCtx context.Context,
+	credentialID []byte,
+	nowMS int64,
+) {
+	ctx, cancel := credentialStateContext(requestCtx)
+	_ = a.store.EnsureHomeLinkCredentialPolicyBlock(
+		ctx, a.siteID, credentialID, nowMS,
+	)
+	cancel()
+	readCtx, cancelRead := credentialStateContext(requestCtx)
+	record, err := a.store.HomeLinkCredential(readCtx, a.siteID, credentialID)
+	cancelRead()
+	if err == nil && record.Status != state.HomeLinkCredentialActive {
+		return
+	}
+	a.blockedCredentials[string(credentialID)] = struct{}{}
+}
+
+func (a *PersistentCredentialAuthority) credentialMemoryBlockedLocked(
+	credentialID []byte,
+) bool {
+	_, blocked := a.blockedCredentials[string(credentialID)]
+	return blocked
+}
+
+func (a *PersistentCredentialAuthority) filterMemoryBlockedCredentialsLocked(
+	records []state.HomeLinkCredentialRecord,
+) []state.HomeLinkCredentialRecord {
+	filtered := records[:0]
+	for _, record := range records {
+		if !a.credentialMemoryBlockedLocked(record.CredentialID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
 }
 
 func (a *PersistentCredentialAuthority) RevokeCredential(

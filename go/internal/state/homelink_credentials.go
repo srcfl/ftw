@@ -240,19 +240,27 @@ func (s *Store) ApplyHomeLinkAssertion(
 		(!update.BackupState || update.BackupEligible) &&
 		validHomeLinkCounterTransition(record.SignCount, update.SignCount)
 	if !policyOK {
-		if err := tx.Rollback(); err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("rollback denied Home Link assertion: %w", err)
+		rollbackErr := tx.Rollback()
+		if err := s.EnsureHomeLinkCredentialPolicyBlock(
+			ctx, update.SiteID, update.CredentialID, update.UpdatedAtMS,
+		); err != nil {
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("persist Home Link policy block: %w", err),
+			)
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO homelink_credential_policy_blocks(
-			site_id, credential_id, started_at_ms
-		) VALUES (?, ?, ?)
-		ON CONFLICT(site_id, credential_id) DO NOTHING`,
-			update.SiteID, cloneBytes(update.CredentialID), update.UpdatedAtMS); err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy block: %w", err)
+		if rollbackErr != nil {
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("rollback denied Home Link assertion: %w", rollbackErr),
+			)
 		}
 		fence, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("begin Home Link policy fence: %w", err)
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("begin Home Link policy fence: %w", err),
+			)
 		}
 		defer fence.Rollback()
 		result, err := fence.ExecContext(ctx, `UPDATE homelink_credentials SET
@@ -262,17 +270,26 @@ func (s *Store) ApplyHomeLinkAssertion(
 			int64(update.SignCount), boolInt(update.BackupState), update.UpdatedAtMS,
 			update.SiteID, update.CredentialID, update.ExpectedRevision)
 		if err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy fence: %w", err)
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("commit Home Link policy fence: %w", err),
+			)
 		}
 		changed, err := result.RowsAffected()
 		if err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("check Home Link policy fence: %w", err)
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("check Home Link policy fence: %w", err),
+			)
 		}
 		if changed != 1 {
 			return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialPolicy
 		}
 		if err := fence.Commit(); err != nil {
-			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy fence: %w", err)
+			return HomeLinkCredentialRecord{}, errors.Join(
+				ErrHomeLinkCredentialPolicy,
+				fmt.Errorf("commit Home Link policy fence: %w", err),
+			)
 		}
 		record.SignCount = update.SignCount
 		record.BackupState = update.BackupState
@@ -315,6 +332,50 @@ func (s *Store) ApplyHomeLinkAssertion(
 	record.Revision++
 	record.UpdatedAtMS = update.UpdatedAtMS
 	return record, nil
+}
+
+// EnsureHomeLinkCredentialPolicyBlock commits a permanent fail-closed marker
+// when a verified assertion violates policy or its verifier-state write is
+// ambiguous. If the dedicated marker cannot be written, the permanent revoke
+// marker is a conservative fallback. A successful return always includes a
+// read-back proving that the credential is no longer active.
+func (s *Store) EnsureHomeLinkCredentialPolicyBlock(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+	nowMS int64,
+) error {
+	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
+		return err
+	}
+	if nowMS <= 0 {
+		return errors.New("Home Link policy block time is invalid")
+	}
+	_, policyErr := s.db.ExecContext(ctx, `INSERT INTO homelink_credential_policy_blocks(
+		site_id, credential_id, started_at_ms
+	) VALUES (?, ?, ?)
+	ON CONFLICT(site_id, credential_id) DO NOTHING`,
+		siteID, cloneBytes(credentialID), nowMS)
+	if policyErr != nil {
+		if _, revokeErr := s.db.ExecContext(ctx, `INSERT INTO homelink_credential_revocations(
+			site_id, credential_id, started_at_ms
+		) VALUES (?, ?, ?)
+		ON CONFLICT(site_id, credential_id) DO NOTHING`,
+			siteID, cloneBytes(credentialID), nowMS); revokeErr != nil {
+			return errors.Join(
+				fmt.Errorf("commit Home Link policy block: %w", policyErr),
+				fmt.Errorf("commit conservative Home Link revoke block: %w", revokeErr),
+			)
+		}
+	}
+	record, err := s.HomeLinkCredential(ctx, siteID, credentialID)
+	if err != nil {
+		return fmt.Errorf("read back Home Link policy block: %w", err)
+	}
+	if record.Status == HomeLinkCredentialActive {
+		return errors.New("Home Link policy block was not durable")
+	}
+	return nil
 }
 
 // RevokeHomeLinkCredential first commits a permanent intent row. All active

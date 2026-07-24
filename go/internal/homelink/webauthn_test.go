@@ -27,6 +27,70 @@ type webAuthnFixture struct {
 	publicKey    []byte
 }
 
+type cancelAfterAssertionVerification struct {
+	pinnedWebAuthnProtocolVerifier
+	cancel context.CancelFunc
+}
+
+type faultCredentialStateStore struct {
+	credentialStateStore
+	apply func(
+		context.Context,
+		state.HomeLinkAssertionUpdate,
+	) (state.HomeLinkCredentialRecord, error)
+	ensure func(context.Context, string, []byte, int64) error
+	read   func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error)
+}
+
+func (s *faultCredentialStateStore) ApplyHomeLinkAssertion(
+	ctx context.Context,
+	update state.HomeLinkAssertionUpdate,
+) (state.HomeLinkCredentialRecord, error) {
+	if s.apply != nil {
+		return s.apply(ctx, update)
+	}
+	return s.credentialStateStore.ApplyHomeLinkAssertion(ctx, update)
+}
+
+func (s *faultCredentialStateStore) EnsureHomeLinkCredentialPolicyBlock(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+	nowMS int64,
+) error {
+	if s.ensure != nil {
+		return s.ensure(ctx, siteID, credentialID, nowMS)
+	}
+	return s.credentialStateStore.EnsureHomeLinkCredentialPolicyBlock(
+		ctx, siteID, credentialID, nowMS,
+	)
+}
+
+func (s *faultCredentialStateStore) HomeLinkCredential(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+) (state.HomeLinkCredentialRecord, error) {
+	if s.read != nil {
+		return s.read(ctx, siteID, credentialID)
+	}
+	return s.credentialStateStore.HomeLinkCredential(ctx, siteID, credentialID)
+}
+
+func (v cancelAfterAssertionVerification) VerifyAssertion(
+	assertion parsedPasskeyAssertion,
+	challenge string,
+	publicKey []byte,
+) (verifiedPasskeyAssertion, error) {
+	verified, err := v.pinnedWebAuthnProtocolVerifier.VerifyAssertion(
+		assertion, challenge, publicKey,
+	)
+	if err == nil {
+		v.cancel()
+	}
+	return verified, err
+}
+
 func newWebAuthnFixture(t *testing.T, credentialID []byte) webAuthnFixture {
 	t.Helper()
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -780,6 +844,248 @@ func TestAssertionAcceptsAllowedCounterAndBackupTransitions(t *testing.T) {
 				t.Fatalf("stored state = %+v", stored)
 			}
 		})
+	}
+}
+
+func TestCanceledAssertionAfterVerificationPersistsStateWithoutPrincipal(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 0,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	authority.verifier = cancelAfterAssertionVerification{cancel: cancel}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	principal, _, err := authority.VerifyAndConsumeAssertion(
+		ctx, challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled assertion = %v", err)
+	}
+	if len(principal.CredentialID) != 0 || principal.Label != "" {
+		t.Fatalf("canceled assertion returned principal: %+v", principal)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), "001122334455667788", fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SignCount != 1 {
+		t.Fatalf("counter after post-verification cancel = %d, want 1", stored.SignCount)
+	}
+	if _, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrWebAuthnExpectation) {
+		t.Fatalf("canceled assertion expectation reopened = %v", err)
+	}
+}
+
+func TestCanceledDuringAssertionStateWritePersistsStateWithoutPrincipal(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 0,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		apply: func(
+			stateCtx context.Context,
+			update state.HomeLinkAssertionUpdate,
+		) (state.HomeLinkCredentialRecord, error) {
+			cancel()
+			if err := stateCtx.Err(); err != nil {
+				t.Fatalf("detached state context canceled with request: %v", err)
+			}
+			return store.ApplyHomeLinkAssertion(stateCtx, update)
+		},
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	principal, _, err := authority.VerifyAndConsumeAssertion(
+		ctx, challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("assertion canceled during state write = %v", err)
+	}
+	if len(principal.CredentialID) != 0 || principal.Label != "" {
+		t.Fatalf("state-write cancellation returned principal: %+v", principal)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), "001122334455667788", fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SignCount != 1 {
+		t.Fatalf("counter after state-write cancellation = %d, want 1", stored.SignCount)
+	}
+	if _, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrWebAuthnExpectation) {
+		t.Fatalf("state-write cancellation expectation reopened = %v", err)
+	}
+}
+
+func TestCanceledPolicyAssertionPersistsBlockWithoutPrincipal(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 2,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	authority.verifier = cancelAfterAssertionVerification{cancel: cancel}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 2, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	principal, _, err := authority.VerifyAndConsumeAssertion(
+		ctx, challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled policy assertion = %v", err)
+	}
+	if len(principal.CredentialID) != 0 || principal.Label != "" {
+		t.Fatalf("canceled policy assertion returned principal: %+v", principal)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), "001122334455667788", fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != state.HomeLinkCredentialUncertain {
+		t.Fatalf("status after canceled policy assertion = %q", stored.Status)
+	}
+	if _, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("canceled policy credential reopened = %v", err)
+	}
+	if _, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrWebAuthnExpectation) {
+		t.Fatalf("canceled policy expectation reopened = %v", err)
+	}
+}
+
+func TestAmbiguousAssertionStoreErrorPersistsConservativeBlock(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 0,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		apply: func(
+			context.Context,
+			state.HomeLinkAssertionUpdate,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, errors.New("ambiguous assertion commit")
+		},
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	if principal, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); err == nil || len(principal.CredentialID) != 0 {
+		t.Fatalf("ambiguous assertion returned principal=%+v err=%v", principal, err)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), "001122334455667788", fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != state.HomeLinkCredentialUncertain {
+		t.Fatalf("status after ambiguous assertion commit = %q", stored.Status)
+	}
+	restarted, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: "001122334455667788",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("durable conservative block reopened after restart = %v", err)
+	}
+	if _, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrWebAuthnExpectation) {
+		t.Fatalf("ambiguous assertion expectation reopened = %v", err)
+	}
+}
+
+func TestAssertionStoreOutageBlocksCurrentAuthorityInMemory(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 0,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("credential store unavailable")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		apply: func(
+			context.Context,
+			state.HomeLinkAssertionUpdate,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+		ensure: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		read: func(
+			context.Context,
+			string,
+			[]byte,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	if principal, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); err == nil || len(principal.CredentialID) != 0 {
+		t.Fatalf("store outage returned principal=%+v err=%v", principal, err)
+	}
+	authority.store = store
+	if _, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("in-memory block reopened after store recovery = %v", err)
+	}
+	if _, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrWebAuthnExpectation) {
+		t.Fatalf("store-outage expectation reopened = %v", err)
 	}
 }
 
