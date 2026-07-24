@@ -101,6 +101,22 @@ describe("terminal-native light DOM chrome", () => {
     );
   });
 
+  it("contains no legacy blue-slate neutral chrome", () => {
+    const sources = [
+      appCss,
+      styleCss,
+      read("app.js"),
+      html,
+      read("settings/tabs/system.js"),
+    ];
+    const legacyNeutral = /#(?:14141f|1e1e2e|94a3b8|e2e8f0)\b/gi;
+    for (const source of sources) {
+      assert.deepEqual(source.match(legacyNeutral) || [], []);
+    }
+    assert.doesNotMatch(appCss, /oklch\([^)]*\b250\b[^)]*\)/i);
+    assert.match(theme, /--white-s:\s*var\(--fg\)/);
+  });
+
   it("loads canonical tokens before shared setup styles", () => {
     assert.ok(
       setup.indexOf("/components/theme.css") < setup.indexOf("/style.css"),

@@ -978,7 +978,7 @@ body.ftw-app .ftw-toggle-slider {
   position: relative;
   width: 40px;
   height: 22px;
-  background: oklch(0.20 0.015 250);
+  background: var(--ink-elevated);
   border: 1px solid var(--line-soft);
   border-radius: 999px;
   transition: background .15s, border-color .15s;
@@ -1011,7 +1011,7 @@ body.ftw-app .mode-buttons {
   gap: 6px;
 }
 body.ftw-app .mode-buttons button {
-  background: oklch(0.13 0.015 250);
+  background: var(--ink-sunken);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
   color: var(--fg-dim);
@@ -1021,7 +1021,7 @@ body.ftw-app .mode-buttons button {
   transition: background .15s, color .15s, border-color .15s;
 }
 body.ftw-app .mode-buttons button:hover {
-  background: oklch(0.2 0.02 250);
+  background: var(--ink-elevated);
   color: var(--fg);
 }
 body.ftw-app .mode-buttons button.active {
@@ -1163,7 +1163,7 @@ body.ftw-app .card-hint.card-hint-active {
 body.ftw-app .btn-send {
   background: var(--accent-e);
   border-color: var(--accent-e);
-  color: oklch(0.15 0.02 250);
+  color: var(--on-accent);
   font-family: var(--mono);
   font-weight: 600;
   font-size: 12px;
@@ -1608,7 +1608,7 @@ body.ftw-app footer .refresh-label {
   color: var(--fg-dim);
 }
 body.ftw-app .status-bar {
-  background: oklch(0.11 0.015 250);
+  background: var(--ink-sunken);
   border-top: 1px solid var(--line);
   color: var(--fg-muted);
   font-family: var(--mono);

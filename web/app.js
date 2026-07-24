@@ -1574,9 +1574,9 @@
       dim:     cssColor("--fg-dim", "#aaaaaa"),
       muted:   cssColor("--fg-muted", "#888888"),
       grid:    cssColor("--line", "#2a2a2a"),
-      surface: cssColor("--ink-raised", "#14141f"),
+      surface: cssColor("--ink-raised", "#161616"),
       accent:  cssColor("--accent-e", "#fbbf24"),
-      load:    cssColor("--fg", "#e2e8f0"),
+      load:    cssColor("--white-s", "#e8e8e8"),
     };
     return _chartColors;
   }
@@ -3657,9 +3657,9 @@
     if (!legend) return;
     var items = chartView === "energy" ? [
       ["#ef4444", "Import"], ["#22c55e", "Export"], ["#10b981", "PV"],
-      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["#e2e8f0", "Load"],
+      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["var(--white-s)", "Load"],
     ] : [
-      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["#e2e8f0", "Load"],
+      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["var(--white-s)", "Load"],
       ["#f59e0b", "Ferroamp"], ["#8b5cf6", "Sungrow"],
     ];
     legend.innerHTML = items.map(function(it) {

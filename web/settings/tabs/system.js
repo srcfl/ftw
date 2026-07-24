@@ -68,7 +68,7 @@
         '  .sys-bar { width: 100%; height: 10px; border-radius: 5px; background: var(--line, rgba(255,255,255,0.08)); overflow: hidden; }' +
         '  .sys-bar-fill { height: 100%; background: var(--accent-e, #f5b942); transition: width 250ms ease-out; }' +
         '  .sys-meta { color: var(--text-dim); font-size: 0.8rem; margin-top: -4px; }' +
-        '  .sys-alert { grid-column: 1 / -1; padding: 9px 11px; border: 1px solid #f59e0b; border-radius: 6px; background: rgba(245,158,11,0.12); color: var(--text, #e2e8f0); font-size: 0.82rem; line-height: 1.4; overflow-wrap: anywhere; }' +
+        '  .sys-alert { grid-column: 1 / -1; padding: 9px 11px; border: 1px solid #f59e0b; border-radius: 6px; background: rgba(245,158,11,0.12); color: var(--text, #e8e8e8); font-size: 0.82rem; line-height: 1.4; overflow-wrap: anywhere; }' +
         '  .sys-net { font-family: var(--mono, monospace); font-size: 0.85rem; }' +
         '  .sys-net-iface { color: var(--text-dim); margin-right: 8px; }' +
 		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +

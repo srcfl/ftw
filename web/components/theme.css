@@ -34,7 +34,7 @@
   --cyan:     oklch(0.82 0.14 210);
   --cyan-dim: oklch(0.65 0.10 210);
   --violet:   oklch(0.80 0.14 300);
-  --white-s:  oklch(0.95 0.01 250);
+  --white-s:  var(--fg);
 
   --accent-hue: 65;
   --accent-e: oklch(0.82 0.16 var(--accent-hue));
@@ -117,8 +117,6 @@ html[data-theme="light"] {
   --cyan:     oklch(0.58 0.14 210);
   --cyan-dim: oklch(0.48 0.10 210);
   --violet:   oklch(0.55 0.14 300);
-  --white-s:  oklch(0.30 0.015 250);
-
   --accent-e: oklch(0.68 0.16 var(--accent-hue));
 
   /* Hero: neutral paper surfaces with semantic energy colors intact. */

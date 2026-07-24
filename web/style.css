@@ -502,10 +502,10 @@ main {
   align-items: center;
   gap: 16px;
   padding: 4px 16px;
-  background: var(--bg-card, #1e1e2e);
+  background: var(--bg-card, #161616);
   border-top: 1px solid rgba(255,255,255,0.06);
   font-size: 0.72rem;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   z-index: 50;
   font-family: monospace;
 }
@@ -1453,7 +1453,7 @@ footer {
 }
 .plan-summary {
   font-size: 0.8rem;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   text-align: right;
   line-height: 1.3;
   max-width: 55%;
@@ -1512,7 +1512,7 @@ footer {
   font-size: 0.7rem;
   text-transform: uppercase;
   letter-spacing: 0.18em;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   margin-bottom: 8px;
 }
 
@@ -1534,13 +1534,13 @@ footer {
 .btn-link {
   background: none;
   border: none;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   cursor: pointer;
   font-size: 0.8rem;
   padding: 2px 6px;
   text-decoration: underline dotted;
 }
-.btn-link:hover { color: var(--text, #e2e8f0); }
+.btn-link:hover { color: var(--text, #e8e8e8); }
 .mode-buttons-advanced {
   display: none;
   gap: 6px;
@@ -1551,7 +1551,7 @@ footer {
 }
 .card-hint {
   font-size: 0.72rem;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   margin-top: 6px;
   display: none;
 }
@@ -1564,7 +1564,7 @@ footer {
   margin-bottom: 10px;
   border: 1px solid rgba(255,255,255,0.1);
   background: rgba(255,255,255,0.03);
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
 }
 .ha-status-indicator.ha-ok {
   border-color: rgba(34,197,94,0.4);
@@ -1579,7 +1579,7 @@ footer {
 .ha-status-indicator.ha-off {
   border-color: rgba(148,163,184,0.3);
   background: rgba(148,163,184,0.08);
-  color: #94a3b8;
+  color: var(--fg-dim, #a0a0a0);
 }
 
 /* ---- Calendar (CalDAV) settings tab ---- */
@@ -1756,7 +1756,7 @@ footer {
 
 .strategy-hint {
   font-size: 0.78rem;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   margin-top: 8px;
   padding: 6px 8px;
   background: var(--ink-sunken);
@@ -1781,7 +1781,7 @@ footer {
 .plan-tip .tip-head { font-weight: 600; margin-bottom: 4px; color: #fff; }
 .plan-tip .tip-pred { font-size: 0.7rem; color: #fbbf24; font-weight: normal; }
 .plan-tip .tip-row { display: flex; justify-content: space-between; padding: 1px 0; }
-.plan-tip .tip-row span { color: var(--text-dim, #94a3b8); }
+.plan-tip .tip-row span { color: var(--text-dim, #a0a0a0); }
 .plan-tip .tip-breakdown {
   margin: 4px 0 2px;
   padding: 4px 0 2px;
@@ -1797,7 +1797,7 @@ footer {
 }
 .plan-tip .tip-break-row > span:nth-child(2) {
   flex: 1;
-  color: var(--text-dim, #94a3b8);
+  color: var(--text-dim, #a0a0a0);
   opacity: 0.85;
 }
 .plan-tip .tip-break-sw {
@@ -1837,7 +1837,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
 .twin-card h3 {
   font-size: 0.9rem;
   margin: 0 0 8px 0;
-  color: var(--text, #e2e8f0);
+  color: var(--text, #e8e8e8);
 }
 .twin-card .twin-row {
   display: flex;
@@ -1845,8 +1845,8 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   font-size: 0.78rem;
   padding: 2px 0;
 }
-.twin-card .twin-row span { color: var(--text-dim, #94a3b8); }
-.twin-card .twin-row b { color: var(--text, #e2e8f0); font-weight: 500; }
+.twin-card .twin-row span { color: var(--text-dim, #a0a0a0); }
+.twin-card .twin-row b { color: var(--text, #e8e8e8); font-weight: 500; }
 .twin-quality {
   height: 4px;
   background: rgba(255,255,255,0.08);
@@ -1897,7 +1897,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   letter-spacing: 0.18em;
   font-size: 0.78rem;
   margin: 0;
-  color: var(--fg-label, var(--text, #e2e8f0));
+  color: var(--fg-label, var(--text, #e8e8e8));
 }
 .lp-card-body {
   display: grid;
@@ -1923,14 +1923,14 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
 }
 .lp-cfg-row:last-child { border-bottom: 0; }
 .lp-cfg-key {
-  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  color: var(--fg-dim, var(--text-dim, #a0a0a0));
   font-family: var(--mono, monospace);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 0.68rem;
 }
 .lp-cfg-val {
-  color: var(--fg, var(--text, #e2e8f0));
+  color: var(--fg, var(--text, #e8e8e8));
   font-variant-numeric: tabular-nums;
 }
 .lp-badge {
@@ -1941,7 +1941,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   padding: 1px 6px;
   border: 1px solid var(--line, rgba(255,255,255,0.08));
   border-radius: 3px;
-  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  color: var(--fg-dim, var(--text-dim, #a0a0a0));
   background: transparent;
 }
 .lp-badge-on {
@@ -1965,7 +1965,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   background: color-mix(in oklch, var(--amber, #fbbf24) 14%, transparent);
 }
 .lp-empty {
-  color: var(--fg-muted, var(--text-dim, #94a3b8));
+  color: var(--fg-muted, var(--text-dim, #a0a0a0));
   font-size: 0.78rem;
   padding: 12px 0;
   font-style: italic;
@@ -1989,12 +1989,12 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   font-family: var(--mono, monospace);
   text-transform: uppercase;
   letter-spacing: 0.07em;
-  color: var(--fg, var(--text, #e2e8f0));
+  color: var(--fg, var(--text, #e8e8e8));
 }
 .lp-boost-copy, .lp-boost-reason, .lp-boost-blocked, .lp-boost-msg {
   display: block;
   margin-top: 6px;
-  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  color: var(--fg-dim, var(--text-dim, #a0a0a0));
   line-height: 1.35;
 }
 .lp-boost-reason, .lp-boost-msg { color: var(--amber, #fbbf24); }
@@ -2005,7 +2005,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   margin: 8px 0;
 }
 .lp-boost-fields label {
-  color: var(--fg-dim, var(--text-dim, #94a3b8));
+  color: var(--fg-dim, var(--text-dim, #a0a0a0));
   font-family: var(--mono, monospace);
   font-size: 0.62rem;
   text-transform: uppercase;
@@ -2016,7 +2016,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   width: 100%;
   margin-top: 3px;
   padding: 4px;
-  color: var(--fg, var(--text, #e2e8f0));
+  color: var(--fg, var(--text, #e8e8e8));
   background: var(--ink, #111827);
   border: 1px solid var(--line, rgba(255,255,255,0.08));
   border-radius: 3px;
@@ -2024,7 +2024,7 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
 }
 .lp-boost button {
   padding: 5px 8px;
-  color: var(--fg, var(--text, #e2e8f0));
+  color: var(--fg, var(--text, #e8e8e8));
   background: transparent;
   border: 1px solid var(--line, rgba(255,255,255,0.12));
   border-radius: 3px;
