@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.11.0
+
+### Minor Changes
+
+- 912c392: Add crash-safe local adoption and startup checks for the software Home Link identity.
+
+### Patch Changes
+
+- 6009831: Skip full history backups when the release uses the same database schema, reduce Core image downloads, and show live backup, download, restart, and health-check progress.
+- 2a036d7: Stop stale driver readings from adding to dashboard energy history, and let Modbus drivers reconnect when a device comes online after Core starts.
+- 2a036d7: Use the optimizer sidecar without a hidden Python process in Compose, keep its first failure visible when a development fallback also fails, and use the 30-second Core timeout throughout the backend.
+
 ## 1.10.5
 
 ### Patch Changes
