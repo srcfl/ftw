@@ -774,6 +774,48 @@ func TestRegistrationRequiresConsumedLocalPairingProof(t *testing.T) {
 	}
 }
 
+func TestRegistrationAndAssertionCredentialCountMatchBrowserBound(t *testing.T) {
+	const siteID = "001122334455667788"
+	store := newAuthorityTestStore(t)
+	handle := bytes.Repeat([]byte{0x44}, webAuthnUserHandleBytes)
+	for i := 0; i < state.MaxHomeLinkActiveCredentials; i++ {
+		record := state.HomeLinkCredentialRecord{
+			SiteID: siteID, CredentialID: []byte{byte(i + 1)},
+			PublicKey: []byte{0xa1, byte(i + 1)}, Label: "phone",
+			UserHandle: bytes.Clone(handle), Status: state.HomeLinkCredentialActive,
+			Revision: 1, CreatedAtMS: 1, UpdatedAtMS: 1,
+		}
+		if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+			t.Fatalf("seed credential %d: %v", i, err)
+		}
+	}
+	authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+		PairingAuthorizer: pairingAuthorizerFunc(func(context.Context, LocalPairingProof) error {
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { forgetSiteCredentialCoordinatorForTest(siteID) })
+	assertion, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Minute},
+	)
+	if err != nil {
+		t.Fatalf("create assertion at cap: %v", err)
+	}
+	if len(assertion.AllowCredentials) != state.MaxHomeLinkActiveCredentials {
+		t.Fatalf("allow credentials = %d, want %d",
+			len(assertion.AllowCredentials), state.MaxHomeLinkActiveCredentials)
+	}
+	if _, err := authority.BeginRegistration(
+		context.Background(), LocalPairingProof{}, "phone",
+	); !errors.Is(err, ErrRegistrationDenied) {
+		t.Fatalf("registration at active cap = %v", err)
+	}
+}
+
 func TestRegistrationExpectationIsOneUseExpiresAndDoesNotSurviveRestart(t *testing.T) {
 	var monotonic time.Duration
 	store := newAuthorityTestStore(t)

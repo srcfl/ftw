@@ -249,6 +249,57 @@ func TestCoreReadAdapterDispatchesOnlyFourTypedSources(t *testing.T) {
 	}
 }
 
+func TestCoreReadAdapterAllowsSeveralFlowsPerHistoryBucket(t *testing.T) {
+	points := []state.EnergyLedgerPoint{
+		{
+			SchemaVersion: 1, AssetID: "system", Flow: state.FlowGridImport,
+			BucketStartMS: 1, BucketLenMS: state.EnergyLedgerBucketMS,
+			EnergyWh: 2, Source: "counter", Quality: "measured",
+			Provenance: "hardware", SampleCount: 1,
+		},
+		{
+			SchemaVersion: 1, AssetID: "system", Flow: state.FlowPVGeneration,
+			BucketStartMS: 1, BucketLenMS: state.EnergyLedgerBucketMS,
+			EnergyWh: 3, Source: "counter", Quality: "measured",
+			Provenance: "hardware", SampleCount: 1,
+		},
+	}
+	adapter, err := NewCoreReadAdapter(CoreReadSources{
+		Health: func(context.Context) (HealthReadResponse, error) {
+			return HealthReadResponse{}, nil
+		},
+		Plan: func(context.Context) (PlanReadResponse, error) {
+			return PlanReadResponse{}, nil
+		},
+		Assets: func(context.Context) ([]state.EnergyAsset, error) {
+			return nil, nil
+		},
+		History: func(
+			_ context.Context,
+			query state.EnergyHistoryQuery,
+		) ([]state.EnergyLedgerPoint, bool, error) {
+			if query.Limit != 1 {
+				t.Fatalf("history bucket limit = %d, want 1", query.Limit)
+			}
+			return points, false, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testReadRequest(ScopeEnergyHistoryRead)
+	request.History.Limit = 1
+	response, err := adapter.DispatchReadResult(
+		context.Background(), readTargets[request.Scope], request, testPrincipal(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.EnergyHistory == nil || len(response.EnergyHistory.Points) != len(points) {
+		t.Fatalf("history response = %+v", response.EnergyHistory)
+	}
+}
+
 func TestDisabledBoundReadNeverCallsLocalCore(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	manager := newGrantTestManager(t, false, &now, 73)

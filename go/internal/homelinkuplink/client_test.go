@@ -259,6 +259,32 @@ func TestRunBacksOffRapidDisconnectsAndResetsAfterStableConnection(t *testing.T)
 	}
 }
 
+func TestRunWithStatusReportsReadyAndDisconnected(t *testing.T) {
+	identity := newUplinkTestIdentity(t)
+	client, err := newClient(identity, Endpoint, websocket.DefaultDialer, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var states []bool
+	err = client.runWithStatus(
+		ctx,
+		func(context.Context) (*Connection, error) { return &Connection{}, nil },
+		func(context.Context, *Connection) error { return errors.New("closed") },
+		func(int) (time.Duration, error) {
+			cancel()
+			return 0, nil
+		},
+		func(connected bool, _ error) { states = append(states, connected) },
+	)
+	if err != context.Canceled {
+		t.Fatalf("run stop = %v", err)
+	}
+	if !slices.Equal(states, []bool{true, false}) {
+		t.Fatalf("status states = %v", states)
+	}
+}
+
 func TestRetryDelayBoundsAndCancellation(t *testing.T) {
 	identity := newUplinkTestIdentity(t)
 	client, err := newClient(identity, Endpoint, websocket.DefaultDialer, time.Now)

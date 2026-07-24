@@ -37,8 +37,16 @@ type Config struct {
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
 	V2X              *V2XPolicy         `yaml:"v2x,omitempty" json:"v2x,omitempty"`
 	Notifications    *Notifications     `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+	HomeLink         *HomeLink          `yaml:"home_link,omitempty" json:"home_link,omitempty"`
 	Nova             *Nova              `yaml:"nova,omitempty" json:"nova,omitempty"`
 	DeviceRepository *DeviceRepository  `yaml:"device_repository,omitempty" json:"device_repository,omitempty"`
+}
+
+// HomeLink enables the outbound-only encrypted remote read service. The relay
+// and browser origins are fixed by the protocol and cannot be changed in site
+// config.
+type HomeLink struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
 // DeviceRepository configures independently distributed Lua drivers. Remote

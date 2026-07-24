@@ -136,6 +136,23 @@ fleet_statistics:
 	}
 }
 
+func TestHomeLinkIsExplicitAndDisabledByDefault(t *testing.T) {
+	cfg, err := Parse([]byte(minimalYAML), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeLink != nil && cfg.HomeLink.Enabled {
+		t.Fatal("Home Link enabled without explicit config")
+	}
+	cfg, err = Parse([]byte(minimalYAML+"\nhome_link:\n  enabled: true\n"), "/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HomeLink == nil || !cfg.HomeLink.Enabled {
+		t.Fatal("explicit Home Link enable was lost")
+	}
+}
+
 func TestSiteTroubleshootingModeParses(t *testing.T) {
 	raw := strings.Replace(minimalYAML, "name: Test", "name: Test\n  troubleshooting_mode: true", 1)
 	c, err := Parse([]byte(raw), "/tmp")

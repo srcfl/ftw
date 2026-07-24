@@ -131,6 +131,11 @@ type Deps struct {
 	// Optional: HA MQTT bridge (nil if disabled).
 	HA *ha.Bridge
 
+	// HomeLink owns local-only pairing, passkey enrollment, revocation and
+	// status. Nil reports that this host has no safe Home Link identity.
+	HomeLink        HomeLinkAdmin
+	HomeLinkEnabled bool
+
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
 	Registry *drivers.Registry
@@ -263,6 +268,9 @@ func (s *Server) routes() {
 	s.handle("POST /api/components/optimizer/rollback", s.handleOptimizerComponentRollback)
 	s.handle("POST /api/components/optimizer/channel", s.handleOptimizerComponentChannel)
 	s.handle("GET  /api/ha/status", s.handleHAStatus)
+	s.handle("GET  /api/home-link/status", s.handleHomeLinkStatus)
+	s.handle("POST /api/home-link/pairing", s.handleHomeLinkPairing)
+	s.handle("POST /api/home-link/passkeys/revoke", s.handleHomeLinkPasskeyRevoke)
 	s.handle("GET  /api/caldav/status", s.handleCalDAVStatus)
 	s.handle("GET  /api/caldav/credentials", s.handleCalDAVCredentials)
 	s.handle("GET  /api/notifications/status", s.handleNotificationsStatus)

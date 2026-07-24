@@ -23,9 +23,11 @@ type transport interface {
 }
 
 type Service struct {
-	sessions    *homelinksession.Manager
-	reads       ReadExecutor
-	readTimeout time.Duration
+	sessions        *homelinksession.Manager
+	reads           ReadExecutor
+	authorizedReads AuthorizedReadExecutor
+	remoteAccess    RemoteAccessExecutor
+	readTimeout     time.Duration
 }
 
 type streamState struct {
@@ -64,6 +66,30 @@ func NewServiceWithReads(
 	return &Service{
 		sessions: sessions, reads: reads, readTimeout: defaultReadTimeout,
 	}, nil
+}
+
+func NewServiceWithAuthorizedReads(
+	identity gatewayidentity.Identity,
+	reads AuthorizedReadExecutor,
+) (*Service, error) {
+	service, err := NewServiceWithReads(identity, reads)
+	if err != nil {
+		return nil, err
+	}
+	service.authorizedReads = reads
+	return service, nil
+}
+
+func NewServiceWithRemoteAccess(
+	identity gatewayidentity.Identity,
+	access RemoteAccessExecutor,
+) (*Service, error) {
+	service, err := NewServiceWithAuthorizedReads(identity, access)
+	if err != nil {
+		return nil, err
+	}
+	service.remoteAccess = access
+	return service, nil
 }
 
 func (s *Service) Serve(ctx context.Context, connection *Connection) error {
@@ -157,18 +183,73 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 					delete(streams, frame.Sealed.StreamID)
 					continue
 				}
-				message, request, binding, err := decodeReadRequest(
-					plaintext, state.session.Context(),
-				)
+				messageType, err := applicationMessageType(plaintext)
 				if err != nil || !state.beginRead() {
 					state.stop()
 					_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
 					delete(streams, frame.Sealed.StreamID)
 					continue
 				}
-				go s.executeRead(
-					serviceCtx, connection, state, message, request, binding,
-				)
+				switch messageType {
+				case readRequestType:
+					message, request, binding, err := decodeReadRequest(
+						plaintext, state.session.Context(),
+					)
+					if err != nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeRead(
+						serviceCtx, connection, state, message, request, binding,
+					)
+				case assertionBeginType:
+					message, err := decodeAssertionBegin(plaintext)
+					if err != nil || s.authorizedReads == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeAssertionBegin(serviceCtx, connection, state, message)
+				case authorizedReadType:
+					message, request, binding, err := decodeAuthorizedReadRequest(
+						plaintext, state.session.Context(),
+					)
+					if err != nil || s.authorizedReads == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-read")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeAuthorizedRead(
+						serviceCtx, connection, state, message, request, binding,
+					)
+				case registrationBeginType:
+					message, err := decodeRegistrationBegin(plaintext)
+					if err != nil || s.remoteAccess == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-registration")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeRegistrationBegin(serviceCtx, connection, state, message)
+				case registrationFinishType:
+					message, err := decodeRegistrationFinish(plaintext)
+					if err != nil || s.remoteAccess == nil {
+						state.finishRead()
+						state.stop()
+						_ = connection.CloseStream(frame.Sealed.StreamID, "invalid-registration")
+						delete(streams, frame.Sealed.StreamID)
+						continue
+					}
+					go s.executeRegistrationFinish(serviceCtx, connection, state, message)
+				}
 				continue
 			}
 			if !validSessionConfirm(plaintext) {
@@ -202,6 +283,93 @@ func (s *Service) serve(ctx context.Context, connection transport) error {
 	}
 }
 
+func (s *Service) executeRegistrationBegin(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message registrationBeginMessage,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	challenge, err := s.remoteAccess.BeginRegistration(
+		ctx, message.PairingID, message.PairingSecret, message.Label,
+	)
+	payload, encodeErr := encodeRegistrationChallenge(message.RequestID, challenge, err)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
+func (s *Service) executeRegistrationFinish(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message registrationFinishMessage,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	credential, err := s.remoteAccess.FinishRegistration(
+		ctx, message.ExpectationID, append([]byte(nil), message.Response...),
+	)
+	payload, encodeErr := encodeRegistrationResult(message.RequestID, credential, err)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
+func (s *Service) executeAssertionBegin(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message assertionBeginMessage,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	challenge, err := s.authorizedReads.BeginLocalAssertion(ctx)
+	payload, encodeErr := encodeAssertionChallenge(message.RequestID, challenge, err)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
+func (s *Service) executeAuthorizedRead(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	message authorizedReadRequestMessage,
+	request homelink.ReadRequest,
+	binding homelink.ReadBinding,
+) {
+	ctx, cancel := context.WithTimeout(parent, s.readTimeout)
+	state.setReadCancel(cancel)
+	defer func() {
+		cancel()
+		state.finishRead()
+	}()
+	grant, err := s.authorizedReads.IssueOneUseBoundAccess(
+		ctx,
+		message.ChallengeID,
+		homelink.PasskeyAssertion{ResponseJSON: append([]byte(nil), message.Assertion...)},
+		request.Scope,
+		s.readTimeout,
+		binding,
+	)
+	var response homelink.ReadResponse
+	if err == nil {
+		response, err = s.authorizedReads.VerifyAndDispatchBoundRead(
+			ctx, grant.Token, message.RequestID, request, binding,
+		)
+	}
+	payload, encodeErr := encodeReadResponse(message.RequestID, response, err)
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
 func (s *Service) executeRead(
 	parent context.Context,
 	connection transport,
@@ -221,16 +389,39 @@ func (s *Service) executeRead(
 		ctx, message.Grant, message.RequestID, request, binding,
 	)
 	payload, encodeErr := encodeReadResponse(message.RequestID, response, err)
-	if encodeErr != nil || !state.canReply() || parent.Err() != nil {
+	s.sendApplicationResponse(parent, connection, state, payload, encodeErr)
+}
+
+func (s *Service) sendApplicationResponse(
+	parent context.Context,
+	connection transport,
+	state *streamState,
+	payload []byte,
+	encodeErr error,
+) {
+	if encodeErr != nil {
+		closeApplicationStream(connection, state, "response-failed")
+		return
+	}
+	if !state.canReply() || parent.Err() != nil {
 		return
 	}
 	sealed, encryptErr := state.session.Encrypt(payload)
-	if encryptErr != nil || !state.canReply() {
+	if encryptErr != nil {
+		closeApplicationStream(connection, state, "session-expired")
+		return
+	}
+	if !state.canReply() {
 		return
 	}
 	if err := connection.SendSealed(sealed); err != nil {
 		_ = connection.Close()
 	}
+}
+
+func closeApplicationStream(connection transport, state *streamState, code string) {
+	state.stop()
+	_ = connection.CloseStream(state.open.StreamID, code)
 }
 
 func (s *streamState) beginRead() bool {

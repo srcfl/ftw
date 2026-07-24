@@ -159,6 +159,21 @@ func TestServiceRejectsDuplicateConfirmationFields(t *testing.T) {
 	<-result
 }
 
+func TestApplicationResponseEncodeFailureClosesStream(t *testing.T) {
+	transport := newFakeTransport()
+	state := &streamState{open: wire.StreamOpen{StreamID: "stream-1"}}
+	(&Service{}).sendApplicationResponse(
+		context.Background(), transport, state, nil, fmt.Errorf("encode failed"),
+	)
+	closed := waitValue(t, transport.closes)
+	if closed.StreamID != "stream-1" || closed.Code != "response-failed" {
+		t.Fatalf("application failure close = %+v", closed)
+	}
+	if state.canReply() {
+		t.Fatal("failed application response left the stream open")
+	}
+}
+
 func TestEncryptedSessionEndToEndThroughRelay(t *testing.T) {
 	identity := newUplinkTestIdentity(t)
 	var readCalls atomic.Int32

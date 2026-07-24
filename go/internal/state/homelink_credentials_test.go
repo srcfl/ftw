@@ -158,6 +158,91 @@ func TestHomeLinkRegistrationRequiresOneSiteUserHandle(t *testing.T) {
 	}
 }
 
+func TestHomeLinkRegistrationCapsActiveCredentialsAndAllowsReplacementAfterRevoke(t *testing.T) {
+	store := freshStore(t)
+	const siteID = "001122334455667788"
+	handle := bytes.Repeat([]byte{0x42}, homeLinkUserHandleBytes)
+	records := make([]HomeLinkCredentialRecord, 0, MaxHomeLinkActiveCredentials)
+	for i := 0; i < MaxHomeLinkActiveCredentials; i++ {
+		record := testHomeLinkCredential(siteID, byte(i+1))
+		record.UserHandle = bytes.Clone(handle)
+		if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+			t.Fatalf("register credential %d: %v", i, err)
+		}
+		records = append(records, record)
+	}
+	extra := testHomeLinkCredential(siteID, byte(MaxHomeLinkActiveCredentials+1))
+	extra.UserHandle = bytes.Clone(handle)
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(), extra,
+	); !errors.Is(err, ErrHomeLinkCredentialLimit) {
+		t.Fatalf("credential above active cap = %v", err)
+	}
+	if err := store.RevokeHomeLinkCredential(
+		context.Background(), siteID, records[0].CredentialID, 2,
+	); err != nil {
+		t.Fatalf("revoke credential at cap: %v", err)
+	}
+	if err := store.RegisterHomeLinkCredential(context.Background(), extra); err != nil {
+		t.Fatalf("register replacement credential: %v", err)
+	}
+	active, err := store.ActiveHomeLinkCredentials(context.Background(), siteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != MaxHomeLinkActiveCredentials {
+		t.Fatalf("active credentials = %d, want %d", len(active), MaxHomeLinkActiveCredentials)
+	}
+}
+
+func TestHomeLinkConcurrentRegistrationCannotExceedActiveCredentialCap(t *testing.T) {
+	store := freshStore(t)
+	const siteID = "001122334455667788"
+	handle := bytes.Repeat([]byte{0x43}, homeLinkUserHandleBytes)
+	for i := 0; i < MaxHomeLinkActiveCredentials-1; i++ {
+		record := testHomeLinkCredential(siteID, byte(i+1))
+		record.UserHandle = bytes.Clone(handle)
+		if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+			t.Fatalf("seed credential %d: %v", i, err)
+		}
+	}
+
+	const contenders = 8
+	errs := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			record := testHomeLinkCredential(siteID, byte(100+i))
+			record.UserHandle = bytes.Clone(handle)
+			errs <- store.RegisterHomeLinkCredential(context.Background(), record)
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	var registered int
+	for err := range errs {
+		switch {
+		case err == nil:
+			registered++
+		case errors.Is(err, ErrHomeLinkCredentialLimit):
+		default:
+			t.Fatalf("concurrent registration = %v", err)
+		}
+	}
+	if registered != 1 {
+		t.Fatalf("concurrent registrations = %d, want 1", registered)
+	}
+	active, err := store.ActiveHomeLinkCredentials(context.Background(), siteID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != MaxHomeLinkActiveCredentials {
+		t.Fatalf("active credentials = %d, want %d", len(active), MaxHomeLinkActiveCredentials)
+	}
+}
+
 func TestHomeLinkAssertionCounterAndBackupPolicy(t *testing.T) {
 	tests := []struct {
 		name       string

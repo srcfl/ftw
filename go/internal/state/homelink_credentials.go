@@ -29,9 +29,11 @@ var (
 	ErrHomeLinkCredentialInactive = errors.New("Home Link credential is not active")
 	ErrHomeLinkCredentialConflict = errors.New("Home Link credential state changed")
 	ErrHomeLinkCredentialPolicy   = errors.New("Home Link credential policy denied the assertion")
+	ErrHomeLinkCredentialLimit    = errors.New("Home Link active credential limit reached")
 )
 
 const (
+	MaxHomeLinkActiveCredentials   = 32
 	maxHomeLinkSiteIDBytes         = 256
 	maxHomeLinkCredentialIDBytes   = 1024
 	maxHomeLinkPublicKeyBytes      = 4096
@@ -87,42 +89,54 @@ func (s *Store) RegisterHomeLinkCredential(ctx context.Context, record HomeLinkC
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.QueryContext(ctx,
-		`SELECT DISTINCT user_handle FROM homelink_credentials WHERE site_id = ?`,
-		record.SiteID)
-	if err != nil {
-		return fmt.Errorf("read Home Link site user handle: %w", err)
-	}
-	var handles int
-	for rows.Next() {
-		var existingHandle []byte
-		if err := rows.Scan(&existingHandle); err != nil {
-			rows.Close()
-			return fmt.Errorf("read Home Link site user handle: %w", err)
-		}
-		handles++
-		if handles > 1 || !bytes.Equal(existingHandle, record.UserHandle) {
-			rows.Close()
-			return errors.New("Home Link user handle does not match this site")
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("read Home Link site user handle: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read Home Link site user handle: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `INSERT INTO homelink_credentials(
+	result, err := tx.ExecContext(ctx, `INSERT INTO homelink_credentials(
 		site_id, credential_id, public_key, sign_count, label, user_handle,
 		backup_eligible, backup_state, status, revision, created_at_ms, updated_at_ms
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?)`,
+	)
+	SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?, ?
+	WHERE (
+		SELECT COUNT(*) FROM homelink_credentials credentials
+		WHERE credentials.site_id = ? AND credentials.status = 'active'
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_revocations revocations
+			WHERE revocations.site_id = credentials.site_id
+			AND revocations.credential_id = credentials.credential_id
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_policy_blocks policy_blocks
+			WHERE policy_blocks.site_id = credentials.site_id
+			AND policy_blocks.credential_id = credentials.credential_id
+		)
+	) < ?
+	AND NOT EXISTS (
+		SELECT 1 FROM homelink_credentials credentials
+		WHERE credentials.site_id = ? AND credentials.user_handle != ?
+	)`,
 		record.SiteID, cloneBytes(record.CredentialID), cloneBytes(record.PublicKey),
 		int64(record.SignCount), record.Label, cloneBytes(record.UserHandle),
 		boolInt(record.BackupEligible), boolInt(record.BackupState),
-		record.CreatedAtMS, record.UpdatedAtMS)
+		record.CreatedAtMS, record.UpdatedAtMS,
+		record.SiteID, MaxHomeLinkActiveCredentials,
+		record.SiteID, cloneBytes(record.UserHandle))
 	if err != nil {
 		return fmt.Errorf("insert Home Link credential: %w", err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check Home Link credential registration: %w", err)
+	}
+	if inserted != 1 {
+		var mismatched int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM homelink_credentials
+			WHERE site_id = ? AND user_handle != ?
+		)`, record.SiteID, cloneBytes(record.UserHandle)).Scan(&mismatched); err != nil {
+			return fmt.Errorf("read Home Link site user handle: %w", err)
+		}
+		if mismatched != 0 {
+			return errors.New("Home Link user handle does not match this site")
+		}
+		return ErrHomeLinkCredentialLimit
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit Home Link credential registration: %w", err)
