@@ -165,6 +165,11 @@ state:
   path: state.db
   # backup_dir: backups            # use an absolute mounted path for off-device backups
 
+# Home Link is opt-in. It opens only an outbound TLS connection and exposes
+# four read-only views after a local passkey is enrolled.
+home_link:
+  enabled: false
+
 # Independently distributed Lua drivers. The signed stable catalog is refreshed
 # by default, but refresh never downloads, activates, or restarts a driver.
 # Add `device_repository: { enabled: false }` to opt out. The expanded form is:

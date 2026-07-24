@@ -35,6 +35,78 @@ func (f readExecutorFunc) VerifyAndDispatchBoundRead(
 	return f(ctx, token, requestID, request, binding)
 }
 
+type authorizedReadExecutor struct {
+	begin func(context.Context) (homelink.LocalAssertionChallenge, error)
+	issue func(
+		context.Context,
+		string,
+		homelink.PasskeyAssertion,
+		homelink.Scope,
+		time.Duration,
+		homelink.ReadBinding,
+	) (homelink.Grant, error)
+	dispatch readExecutorFunc
+}
+
+type remoteAccessExecutor struct {
+	authorizedReadExecutor
+	beginRegistration func(
+		context.Context,
+		string,
+		string,
+		string,
+	) (homelink.RegistrationChallenge, error)
+	finishRegistration func(
+		context.Context,
+		string,
+		[]byte,
+	) (homelink.CredentialSummary, error)
+}
+
+func (f remoteAccessExecutor) BeginRegistration(
+	ctx context.Context,
+	pairingID string,
+	pairingSecret string,
+	label string,
+) (homelink.RegistrationChallenge, error) {
+	return f.beginRegistration(ctx, pairingID, pairingSecret, label)
+}
+
+func (f remoteAccessExecutor) FinishRegistration(
+	ctx context.Context,
+	expectationID string,
+	responseJSON []byte,
+) (homelink.CredentialSummary, error) {
+	return f.finishRegistration(ctx, expectationID, responseJSON)
+}
+
+func (f authorizedReadExecutor) BeginLocalAssertion(
+	ctx context.Context,
+) (homelink.LocalAssertionChallenge, error) {
+	return f.begin(ctx)
+}
+
+func (f authorizedReadExecutor) IssueOneUseBoundAccess(
+	ctx context.Context,
+	challengeID string,
+	assertion homelink.PasskeyAssertion,
+	scope homelink.Scope,
+	ttl time.Duration,
+	binding homelink.ReadBinding,
+) (homelink.Grant, error) {
+	return f.issue(ctx, challengeID, assertion, scope, ttl, binding)
+}
+
+func (f authorizedReadExecutor) VerifyAndDispatchBoundRead(
+	ctx context.Context,
+	token string,
+	requestID string,
+	request homelink.ReadRequest,
+	binding homelink.ReadBinding,
+) (homelink.ReadResponse, error) {
+	return f.dispatch(ctx, token, requestID, request, binding)
+}
+
 func TestEncryptedReadReturnsTypedResponse(t *testing.T) {
 	identity := newUplinkTestIdentity(t)
 	var calls atomic.Int32
@@ -96,6 +168,289 @@ func TestEncryptedReadReturnsTypedResponse(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("read calls = %d", calls.Load())
+	}
+}
+
+func TestEncryptedRemotePasskeyAuthorizesOneBoundRead(t *testing.T) {
+	identity := newUplinkTestIdentity(t)
+	var beginCalls atomic.Int32
+	var issueCalls atomic.Int32
+	var dispatchCalls atomic.Int32
+	executor := authorizedReadExecutor{
+		begin: func(context.Context) (homelink.LocalAssertionChallenge, error) {
+			beginCalls.Add(1)
+			return homelink.LocalAssertionChallenge{
+				ID: "challenge-1", Challenge: []byte("browser-challenge"),
+				RPID:                     "home.sourceful.energy",
+				AllowCredentials:         [][]byte{{1, 2, 3}},
+				UserVerificationRequired: true,
+			}, nil
+		},
+		issue: func(
+			_ context.Context,
+			challengeID string,
+			assertion homelink.PasskeyAssertion,
+			scope homelink.Scope,
+			ttl time.Duration,
+			binding homelink.ReadBinding,
+		) (homelink.Grant, error) {
+			issueCalls.Add(1)
+			if challengeID != "challenge-1" ||
+				string(assertion.ResponseJSON) != `{"id":"credential","response":{}}` ||
+				scope != homelink.ScopeHealthRead ||
+				ttl != defaultReadTimeout ||
+				binding.RequestHash == ([32]byte{}) {
+				t.Fatalf("authorized issue changed: id=%q assertion=%s scope=%q ttl=%v binding=%+v",
+					challengeID, assertion.ResponseJSON, scope, ttl, binding)
+			}
+			return homelink.Grant{Token: testGrantToken(21)}, nil
+		},
+		dispatch: func(
+			_ context.Context,
+			token string,
+			requestID string,
+			request homelink.ReadRequest,
+			binding homelink.ReadBinding,
+		) (homelink.ReadResponse, error) {
+			dispatchCalls.Add(1)
+			if token != testGrantToken(21) || requestID != testRequestID(21) ||
+				request.Scope != homelink.ScopeHealthRead ||
+				binding.RequestHash == ([32]byte{}) {
+				t.Fatalf("authorized dispatch changed: token=%q id=%q request=%+v binding=%+v",
+					token, requestID, request, binding)
+			}
+			return homelink.ReadResponse{
+				Version: homelink.ReadContractVersion,
+				Scope:   homelink.ScopeHealthRead,
+				Health:  &homelink.HealthReadResponse{Status: "ok", CheckedAtMS: 1},
+			}, nil
+		},
+	}
+	service, err := NewServiceWithAuthorizedReads(identity, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, accept, browserOutbound, browserInbound, cancel, result :=
+		startConfirmedReadService(t, service, identity)
+	defer stopReadService(t, cancel, result)
+
+	begin := `{"version":1,"type":"assertion.begin","request_id":"` +
+		testRequestID(20) + `"}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 2, []byte(begin),
+	)}
+	var challenge assertionChallengeMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+		wire.MaxPlaintextBytes,
+		&challenge,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Type != assertionResultType ||
+		challenge.RequestID != testRequestID(20) ||
+		challenge.ChallengeID != "challenge-1" ||
+		challenge.Challenge != base64.RawURLEncoding.EncodeToString([]byte("browser-challenge")) ||
+		challenge.RPID != "home.sourceful.energy" ||
+		len(challenge.AllowCredentials) != 1 ||
+		challenge.UserVerification != "required" ||
+		challenge.Error != "" {
+		t.Fatalf("assertion challenge = %+v", challenge)
+	}
+
+	authorized := `{"version":1,"type":"read.authorize","request_id":"` +
+		testRequestID(21) +
+		`","challenge_id":"challenge-1","assertion":{"id":"credential","response":{}}` +
+		`,"scope":"ftw.health.read"}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 3, []byte(authorized),
+	)}
+	var response readResponseMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+		wire.MaxPlaintextBytes,
+		&response,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error != "" || response.Response == nil ||
+		response.Response.Health == nil ||
+		response.Response.Health.Status != "ok" ||
+		beginCalls.Load() != 1 || issueCalls.Load() != 1 ||
+		dispatchCalls.Load() != 1 {
+		t.Fatalf("authorized read = %+v calls=%d/%d/%d",
+			response, beginCalls.Load(), issueCalls.Load(), dispatchCalls.Load())
+	}
+}
+
+func TestEncryptedRemotePairingRegistersPasskey(t *testing.T) {
+	identity := newUplinkTestIdentity(t)
+	pairingID := base64.RawURLEncoding.EncodeToString(make([]byte, 24))
+	pairingSecret := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	var beginCalls atomic.Int32
+	var finishCalls atomic.Int32
+	executor := remoteAccessExecutor{
+		authorizedReadExecutor: authorizedReadExecutor{
+			begin: func(context.Context) (homelink.LocalAssertionChallenge, error) {
+				return homelink.LocalAssertionChallenge{}, errors.New("not used")
+			},
+			issue: func(
+				context.Context,
+				string,
+				homelink.PasskeyAssertion,
+				homelink.Scope,
+				time.Duration,
+				homelink.ReadBinding,
+			) (homelink.Grant, error) {
+				return homelink.Grant{}, errors.New("not used")
+			},
+			dispatch: func(
+				context.Context,
+				string,
+				string,
+				homelink.ReadRequest,
+				homelink.ReadBinding,
+			) (homelink.ReadResponse, error) {
+				return homelink.ReadResponse{}, errors.New("not used")
+			},
+		},
+		beginRegistration: func(
+			_ context.Context,
+			gotID string,
+			gotSecret string,
+			label string,
+		) (homelink.RegistrationChallenge, error) {
+			beginCalls.Add(1)
+			if gotID != pairingID || gotSecret != pairingSecret || label != "Fredde's Mac" {
+				t.Fatalf("registration pairing changed: %q %q %q", gotID, gotSecret, label)
+			}
+			return homelink.RegistrationChallenge{
+				ID: "registration-1", Challenge: []byte("registration-challenge"),
+				RPID: "home.sourceful.energy", UserHandle: []byte("local-user"),
+				UserVerificationRequired: true, Attestation: "none",
+				Algorithms: []int{-7},
+			}, nil
+		},
+		finishRegistration: func(
+			_ context.Context,
+			expectationID string,
+			responseJSON []byte,
+		) (homelink.CredentialSummary, error) {
+			finishCalls.Add(1)
+			if expectationID != "registration-1" ||
+				string(responseJSON) != `{"id":"credential","response":{}}` {
+				t.Fatalf("registration finish changed: %q %s", expectationID, responseJSON)
+			}
+			return homelink.CredentialSummary{
+				ID: "credential", Label: "Fredde's Mac", CreatedAtMS: 1, UpdatedAtMS: 1,
+			}, nil
+		},
+	}
+	service, err := NewServiceWithRemoteAccess(identity, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, accept, browserOutbound, browserInbound, cancel, result :=
+		startConfirmedReadService(t, service, identity)
+	defer stopReadService(t, cancel, result)
+
+	begin := `{"version":1,"type":"registration.begin","request_id":"` +
+		testRequestID(30) + `","pairing_id":"` + pairingID +
+		`","pairing_secret":"` + pairingSecret + `","label":"Fredde's Mac"}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 2, []byte(begin),
+	)}
+	var challenge registrationChallengeMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+		wire.MaxPlaintextBytes,
+		&challenge,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Type != registrationChallengeType ||
+		challenge.RequestID != testRequestID(30) ||
+		challenge.ExpectationID != "registration-1" ||
+		challenge.Challenge != base64.RawURLEncoding.EncodeToString(
+			[]byte("registration-challenge"),
+		) ||
+		challenge.RPID != "home.sourceful.energy" ||
+		challenge.UserHandle != base64.RawURLEncoding.EncodeToString([]byte("local-user")) ||
+		challenge.Algorithm != -7 ||
+		challenge.Attestation != "none" ||
+		challenge.UserVerification != "required" ||
+		challenge.Error != "" {
+		t.Fatalf("registration challenge = %+v", challenge)
+	}
+
+	finish := `{"version":1,"type":"registration.finish","request_id":"` +
+		testRequestID(31) +
+		`","expectation_id":"registration-1","response":{"id":"credential","response":{}}}`
+	transport.frames <- Frame{Type: wire.TypeSealed, Sealed: browserSeal(
+		t, browserOutbound, accept, 3, []byte(finish),
+	)}
+	var registration registrationResultMessage
+	if err := wire.DecodeStrict(
+		browserOpen(t, browserInbound, accept, waitValue(t, transport.sealed)),
+		wire.MaxPlaintextBytes,
+		&registration,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if registration.Type != registrationResultType ||
+		registration.RequestID != testRequestID(31) ||
+		registration.Error != "" ||
+		registration.Credential == nil ||
+		registration.Credential.ID != "credential" ||
+		registration.Credential.Label != "Fredde's Mac" ||
+		beginCalls.Load() != 1 ||
+		finishCalls.Load() != 1 {
+		t.Fatalf("registration result = %+v calls=%d/%d",
+			registration, beginCalls.Load(), finishCalls.Load())
+	}
+}
+
+func TestRemoteRegistrationEnvelopeIsStrict(t *testing.T) {
+	requestID := testRequestID(40)
+	pairingID := base64.RawURLEncoding.EncodeToString(make([]byte, 24))
+	pairingSecret := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	validBegin := `{"version":1,"type":"registration.begin","request_id":"` +
+		requestID + `","pairing_id":"` + pairingID +
+		`","pairing_secret":"` + pairingSecret + `","label":"Browser"}`
+	if _, err := decodeRegistrationBegin([]byte(validBegin)); err != nil {
+		t.Fatalf("valid registration begin: %v", err)
+	}
+	for name, input := range map[string]string{
+		"wrong id size": strings.Replace(validBegin, pairingID, testRequestID(1), 1),
+		"padded secret": strings.Replace(validBegin, pairingSecret, pairingSecret+"=", 1),
+		"empty label":   strings.Replace(validBegin, `"Browser"`, `""`, 1),
+		"format label":  strings.Replace(validBegin, `"Browser"`, `"Browser\u202e"`, 1),
+		"unknown field": strings.TrimSuffix(validBegin, "}") + `,"extra":true}`,
+		"duplicate":     strings.Replace(validBegin, `"label":"Browser"`, `"label":"Browser","label":"Other"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeRegistrationBegin([]byte(input)); err == nil {
+				t.Fatal("invalid registration begin passed")
+			}
+		})
+	}
+
+	validFinish := `{"version":1,"type":"registration.finish","request_id":"` +
+		requestID + `","expectation_id":"registration-1","response":{}}`
+	if _, err := decodeRegistrationFinish([]byte(validFinish)); err != nil {
+		t.Fatalf("valid registration finish: %v", err)
+	}
+	for name, input := range map[string]string{
+		"null response":    strings.Replace(validFinish, `"response":{}`, `"response":null`, 1),
+		"array response":   strings.Replace(validFinish, `"response":{}`, `"response":[]`, 1),
+		"unknown field":    strings.TrimSuffix(validFinish, "}") + `,"extra":true}`,
+		"duplicate result": strings.Replace(validFinish, `"response":{}`, `"response":{},"response":{}`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeRegistrationFinish([]byte(input)); err == nil {
+				t.Fatal("invalid registration finish passed")
+			}
+		})
 	}
 }
 
@@ -235,6 +590,60 @@ func TestReadEnvelopeIsClosedAndBounded(t *testing.T) {
 	} {
 		if _, _, _, err := decodeReadRequest([]byte(invalid), session); err == nil {
 			t.Fatalf("accepted invalid read envelope: %s", invalid)
+		}
+	}
+}
+
+func TestRemotePasskeyEnvelopesAreClosedAndBounded(t *testing.T) {
+	begin := `{"version":1,"type":"assertion.begin","request_id":"` +
+		testRequestID(22) + `"}`
+	if messageType, err := applicationMessageType([]byte(begin)); err != nil ||
+		messageType != assertionBeginType {
+		t.Fatalf("begin type = %q, %v", messageType, err)
+	}
+	if _, err := decodeAssertionBegin([]byte(begin)); err != nil {
+		t.Fatal(err)
+	}
+	authorized := `{"version":1,"type":"read.authorize","request_id":"` +
+		testRequestID(23) +
+		`","challenge_id":"challenge-1","assertion":{"id":"credential","response":{}}` +
+		`,"scope":"ftw.plan.read"}`
+	if messageType, err := applicationMessageType([]byte(authorized)); err != nil ||
+		messageType != authorizedReadType {
+		t.Fatalf("authorized type = %q, %v", messageType, err)
+	}
+	if _, request, binding, err := decodeAuthorizedReadRequest(
+		[]byte(authorized), testSessionContext(),
+	); err != nil {
+		t.Fatal(err)
+	} else if request.Scope != homelink.ScopePlanRead ||
+		binding.RequestHash == ([32]byte{}) {
+		t.Fatalf("authorized request = %+v %+v", request, binding)
+	}
+	for _, invalid := range []string{
+		strings.Replace(begin, `"request_id"`, `"extra":1,"request_id"`, 1),
+		strings.Replace(begin, `"type":"assertion.begin"`,
+			`"type":"assertion.begin","type":"assertion.begin"`, 1),
+		strings.Replace(authorized, `"assertion":{"id":"credential","response":{}}`,
+			`"assertion":null`, 1),
+		strings.Replace(authorized, `"challenge_id":"challenge-1"`,
+			`"challenge_id":""`, 1),
+		authorized + `{}`,
+		strings.Repeat(" ", maxReadRequestBytes+1),
+	} {
+		messageType, err := applicationMessageType([]byte(invalid))
+		if err == nil {
+			switch messageType {
+			case assertionBeginType:
+				_, err = decodeAssertionBegin([]byte(invalid))
+			case authorizedReadType:
+				_, _, _, err = decodeAuthorizedReadRequest(
+					[]byte(invalid), testSessionContext(),
+				)
+			}
+		}
+		if err == nil {
+			t.Fatalf("accepted invalid passkey envelope: %s", invalid)
 		}
 	}
 }

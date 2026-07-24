@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FTW Home Link</title>
+  <script>
+    window.__ftwHomeLinkSourceURL = window.location.href;
+    if (window.location.hash) {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  </script>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/app.css">
+  <style>
+    .home-link-shell { max-width: 980px; margin: 0 auto; padding: 32px 18px; }
+    .home-link-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+    .home-link-result { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 160px; }
+  </style>
+</head>
+<body>
+  <main class="home-link-shell">
+    <header>
+      <h1>FTW Home Link</h1>
+      <p id="home-link-state">Connecting to your home…</p>
+    </header>
+    <section class="card">
+      <div class="home-link-actions">
+        <button class="btn-send" data-scope="ftw.health.read">Health</button>
+        <button class="btn-send" data-scope="ftw.plan.read">Plan</button>
+        <button class="btn-send" data-scope="ftw.energy.assets.read">Energy assets</button>
+        <button class="btn-send" data-scope="ftw.energy.history.read">Last 24 hours</button>
+      </div>
+      <p>Each read asks for your passkey. The relay only carries encrypted bytes.</p>
+      <pre id="home-link-result" class="home-link-result">No read yet.</pre>
+    </section>
+  </main>
+  <script src="/home-link-session.js?v=home1"></script>
+  <script>
+    (function () {
+      "use strict";
+      var state = document.getElementById("home-link-state");
+      var result = document.getElementById("home-link-result");
+      var buttons = Array.prototype.slice.call(document.querySelectorAll("[data-scope]"));
+      var session;
+
+      function setBusy(value) {
+        buttons.forEach(function (button) { button.disabled = value; });
+      }
+      setBusy(true);
+
+      try {
+        var sourceURL = window.__ftwHomeLinkSourceURL || window.location.href;
+        window.__ftwHomeLinkSourceURL = "";
+        var invite = FTWHomeLinkSession.parseInvite(sourceURL);
+        var pairing = FTWHomeLinkSession.parsePairing(sourceURL);
+        session = new FTWHomeLinkSession.HomeLinkSession(invite);
+        session.connect().then(function () {
+          if (!pairing) return null;
+          state.textContent = "Create your passkey to finish setup.";
+          return session.enroll(pairing);
+        }).then(function (credential) {
+          state.textContent = credential
+            ? "Passkey added. Choose what you want to read."
+            : "Connected. Choose what you want to read.";
+          setBusy(false);
+        }).catch(function () {
+          state.textContent = "Could not reach this home. Check that Core is online and Remote is enabled.";
+          setBusy(true);
+        });
+      } catch (_) {
+        state.textContent = "This Home Link invite is invalid.";
+        setBusy(true);
+      }
+
+      buttons.forEach(function (button) {
+        button.addEventListener("click", function () {
+          setBusy(true);
+          result.textContent = "Waiting for passkey…";
+          var history = null;
+          if (button.dataset.scope === "ftw.energy.history.read") {
+            var now = Date.now();
+            history = {
+              asset_id: "", since_ms: now - 24 * 60 * 60 * 1000,
+              until_ms: now, bucket_ms: 60 * 60 * 1000, limit: 24,
+            };
+          }
+          session.read(button.dataset.scope, history).then(function (response) {
+            result.textContent = JSON.stringify(response, null, 2);
+          }).catch(function () {
+            result.textContent = "The read was denied or the connection closed. Reconnect and try again.";
+          }).finally(function () { setBusy(false); });
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

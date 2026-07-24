@@ -96,7 +96,9 @@ func (a *CoreReadAdapter) DispatchReadResult(
 		if err != nil {
 			return ReadResponse{}, err
 		}
-		if len(points) > request.History.Limit || len(points) > MaxRemotePoints {
+		// History.Limit bounds time buckets. One bucket may contain several
+		// flow/source rows, so only the separate response-row cap applies here.
+		if len(points) > MaxRemotePoints {
 			return ReadResponse{}, errors.New("Home Link energy history source exceeded its bound")
 		}
 		response.EnergyHistory = &EnergyHistoryReadResponse{

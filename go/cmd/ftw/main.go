@@ -2041,6 +2041,12 @@ func main() {
 	case identityState.Nova != nil:
 		slog.Info("site identity ready", "pubkey_prefix", identityState.Nova.PublicKeyHex()[:16])
 	}
+	homeLinkAdmin, homeLinkEnabled, homeLinkErr := startHomeLink(
+		ctx, cfg, identityState, st, tel, mpcSvc,
+	)
+	if homeLinkErr != nil {
+		slog.Warn("Home Link unavailable")
+	}
 
 	deps = &api.Deps{
 		Tel: tel, LogRing: logRing, Ctrl: ctrl, CtrlMu: ctrlMu,
@@ -2083,6 +2089,8 @@ func main() {
 		Notifications:    notifSvc,
 		SelfUpdate:       selfUpdater,
 		OptimizerUpdate:  optimizerUpdater,
+		HomeLink:         homeLinkAdmin,
+		HomeLinkEnabled:  homeLinkEnabled,
 		Restart: func(reqCtx context.Context) error {
 			// Prefer the docker-compose sidecar path when wired up: the
 			// updater container does docker compose up -d --force-recreate,

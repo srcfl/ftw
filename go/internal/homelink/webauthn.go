@@ -212,6 +212,9 @@ func (a *PersistentCredentialAuthority) BeginRegistration(
 	if err != nil {
 		return RegistrationChallenge{}, errors.New("read local passkey verifier state")
 	}
+	if len(active) >= state.MaxHomeLinkActiveCredentials {
+		return RegistrationChallenge{}, ErrRegistrationDenied
+	}
 	userHandle, err := a.store.HomeLinkSiteUserHandle(ctx, a.siteID)
 	if err != nil {
 		return RegistrationChallenge{}, errors.New("read local passkey user handle")
@@ -272,6 +275,9 @@ func (a *PersistentCredentialAuthority) FinishRegistration(
 		CreatedAtMS: wallNow, UpdatedAtMS: wallNow,
 	}
 	if err := a.store.RegisterHomeLinkCredential(ctx, record); err != nil {
+		if errors.Is(err, state.ErrHomeLinkCredentialLimit) {
+			return CredentialVerifier{}, ErrRegistrationDenied
+		}
 		return CredentialVerifier{}, errors.New("store local passkey verifier")
 	}
 	a.knownCredentials[string(record.CredentialID)] = struct{}{}
@@ -315,6 +321,9 @@ func (a *PersistentCredentialAuthority) createAssertionSiteLocked(
 	}
 	a.rememberCredentialsLocked(active)
 	active = a.filterMemoryBlockedCredentialsLocked(active)
+	if len(active) > state.MaxHomeLinkActiveCredentials {
+		return LocalAssertionChallenge{}, ErrCredentialUncertain
+	}
 	if len(active) == 0 {
 		return LocalAssertionChallenge{}, ErrCredentialUnknown
 	}

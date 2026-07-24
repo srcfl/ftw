@@ -83,10 +83,20 @@ func newClient(identity gatewayidentity.Identity, endpoint string, socketDialer 
 // Run maintains only the authenticated machine connection. Application
 // requests are never queued or replayed across a reconnect.
 func (c *Client) Run(ctx context.Context, service *Service) error {
+	return c.RunWithStatus(ctx, service, nil)
+}
+
+// RunWithStatus maintains the outbound connection and reports only its
+// connected state plus the fixed local error class chosen by the caller.
+func (c *Client) RunWithStatus(
+	ctx context.Context,
+	service *Service,
+	status func(bool, error),
+) error {
 	if service == nil {
 		return errors.New("Home Link uplink service is missing")
 	}
-	return c.run(ctx, c.Dial, service.Serve, c.retryDelay)
+	return c.runWithStatus(ctx, c.Dial, service.Serve, c.retryDelay, status)
 }
 
 func (c *Client) run(
@@ -95,6 +105,16 @@ func (c *Client) run(
 	serve func(context.Context, *Connection) error,
 	retry func(int) (time.Duration, error),
 ) error {
+	return c.runWithStatus(ctx, dial, serve, retry, nil)
+}
+
+func (c *Client) runWithStatus(
+	ctx context.Context,
+	dial func(context.Context) (*Connection, error),
+	serve func(context.Context, *Connection) error,
+	retry func(int) (time.Duration, error),
+	status func(bool, error),
+) error {
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
@@ -102,11 +122,17 @@ func (c *Client) run(
 		}
 		connection, err := dial(ctx)
 		if err == nil {
+			if status != nil {
+				status(true, nil)
+			}
 			connectedAt := c.now()
 			err = serve(ctx, connection)
 			if c.now().Sub(connectedAt) >= stableConnection {
 				attempt = 0
 			}
+		}
+		if status != nil && ctx.Err() == nil {
+			status(false, err)
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
