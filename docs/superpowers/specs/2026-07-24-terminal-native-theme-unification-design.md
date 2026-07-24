@@ -1,7 +1,7 @@
 # Terminal Native theme unification design
 
 Date: 2026-07-24
-Status: approved direction; written specification awaiting review
+Status: approved
 
 ## Summary
 
