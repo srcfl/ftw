@@ -59,6 +59,11 @@ type Store struct {
 	// cache.db gets no marker: it is tiny + disposable, so it is always checked.
 	mainDBPath string
 
+	// homeLinkFenceMu serializes the append-only emergency revoke markers
+	// stored beside state.db. Those markers remain writable when SQLite itself
+	// is unavailable and keep a failed revoke closed across restart.
+	homeLinkFenceMu sync.Mutex
+
 	// healMu guards corrupt + verifyCancel. corrupt is set by the background
 	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
 	// marked clean). verifyCancel interrupts the in-flight background scan so

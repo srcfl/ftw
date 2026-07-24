@@ -143,6 +143,7 @@ type PairingAuthorizer interface {
 // before it returns. It returns nil only after the revoked state is durable.
 // Verifier and revoke state survive restart. Assertion expectations do not.
 type CredentialAuthority interface {
+	CredentialSite() CredentialSite
 	CreateAssertion(context.Context, AssertionExpectationBinding) (LocalAssertionChallenge, error)
 	VerifyAndConsumeAssertion(context.Context, string, PasskeyAssertion) (Principal, AssertionExpectationBinding, error)
 	RevokeCredential(context.Context, []byte) error

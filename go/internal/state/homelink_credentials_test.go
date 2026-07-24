@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -550,6 +551,102 @@ func TestHomeLinkFirstRevokeFenceFailurePersistsIntentAcrossRestart(t *testing.T
 	}
 	if stored.Status != HomeLinkCredentialRevoked {
 		t.Fatalf("status after retry = %q", stored.Status)
+	}
+}
+
+func TestHomeLinkEmergencyRevokeBlockPersistsAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testHomeLinkCredential("001122334455667788", 21)
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureHomeLinkCredentialEmergencyBlock(
+		context.Background(), record.SiteID, record.CredentialID, 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != HomeLinkCredentialUncertain {
+		t.Fatalf("emergency-blocked status = %q", stored.Status)
+	}
+	if active, err := store.ActiveHomeLinkCredentials(
+		context.Background(), record.SiteID,
+	); err != nil {
+		t.Fatal(err)
+	} else if len(active) != 0 {
+		t.Fatalf("emergency-blocked credential listed active: %+v", active)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	stored, err = store.HomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != HomeLinkCredentialUncertain {
+		t.Fatalf("emergency block after restart = %q", stored.Status)
+	}
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(), record,
+	); !errors.Is(err, ErrHomeLinkCredentialInactive) {
+		t.Fatalf("emergency-blocked credential re-registration = %v", err)
+	}
+}
+
+func TestHomeLinkEmergencyRevokeBlockTamperFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record := testHomeLinkCredential("001122334455667788", 22)
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureHomeLinkCredentialEmergencyBlock(
+		context.Background(), record.SiteID, record.CredentialID, 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	payload := homeLinkEmergencyBlockPayload(record.SiteID, record.CredentialID)
+	marker := filepath.Join(
+		path+homeLinkEmergencyBlockSuffix,
+		homeLinkEmergencyBlockName(payload),
+	)
+	if err := os.WriteFile(marker, []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActiveHomeLinkCredentials(
+		context.Background(), record.SiteID,
+	); err == nil {
+		t.Fatal("tampered emergency block reopened active credential")
+	}
+	if _, err := store.ApplyHomeLinkAssertion(
+		context.Background(),
+		HomeLinkAssertionUpdate{
+			SiteID: record.SiteID, CredentialID: record.CredentialID,
+			ExpectedRevision: 1, SignCount: 1, UpdatedAtMS: 3,
+		},
+	); err == nil {
+		t.Fatal("tampered emergency block allowed assertion update")
 	}
 }
 

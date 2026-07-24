@@ -3,10 +3,16 @@ package state
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -26,11 +32,14 @@ var (
 )
 
 const (
-	maxHomeLinkSiteIDBytes       = 256
-	maxHomeLinkCredentialIDBytes = 1024
-	maxHomeLinkPublicKeyBytes    = 4096
-	maxHomeLinkLabelBytes        = 80
-	homeLinkUserHandleBytes      = 32
+	maxHomeLinkSiteIDBytes         = 256
+	maxHomeLinkCredentialIDBytes   = 1024
+	maxHomeLinkPublicKeyBytes      = 4096
+	maxHomeLinkLabelBytes          = 80
+	homeLinkUserHandleBytes        = 32
+	homeLinkEmergencyBlockSuffix   = ".homelink-blocks"
+	homeLinkEmergencyBlockHeader   = "ftw-homelink-emergency-block-v1\n"
+	maxHomeLinkEmergencyBlockBytes = 2048
 )
 
 // HomeLinkCredentialRecord contains only local WebAuthn verifier state.
@@ -62,6 +71,15 @@ type HomeLinkAssertionUpdate struct {
 func (s *Store) RegisterHomeLinkCredential(ctx context.Context, record HomeLinkCredentialRecord) error {
 	if err := validateHomeLinkCredential(record, true); err != nil {
 		return err
+	}
+	blocked, err := s.homeLinkCredentialEmergencyBlocked(
+		ctx, record.SiteID, record.CredentialID,
+	)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		return ErrHomeLinkCredentialInactive
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -132,6 +150,13 @@ func (s *Store) HomeLinkCredential(
 	if pending && record.Status == HomeLinkCredentialActive {
 		record.Status = HomeLinkCredentialUncertain
 	}
+	emergencyBlocked, err := s.homeLinkCredentialEmergencyBlocked(ctx, siteID, credentialID)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if emergencyBlocked && record.Status == HomeLinkCredentialActive {
+		record.Status = HomeLinkCredentialUncertain
+	}
 	return record, nil
 }
 
@@ -170,7 +195,19 @@ func (s *Store) ActiveHomeLinkCredentials(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list active Home Link credentials: %w", err)
 	}
-	return records, nil
+	filtered := records[:0]
+	for _, record := range records {
+		blocked, err := s.homeLinkCredentialEmergencyBlocked(
+			ctx, siteID, record.CredentialID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !blocked {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered, nil
 }
 
 // HomeLinkSiteUserHandle returns the one opaque handle already owned by this
@@ -208,6 +245,15 @@ func (s *Store) ApplyHomeLinkAssertion(
 ) (HomeLinkCredentialRecord, error) {
 	if err := validateHomeLinkLookup(update.SiteID, update.CredentialID); err != nil {
 		return HomeLinkCredentialRecord{}, err
+	}
+	emergencyBlocked, err := s.homeLinkCredentialEmergencyBlocked(
+		ctx, update.SiteID, update.CredentialID,
+	)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if emergencyBlocked {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialInactive
 	}
 	if update.ExpectedRevision <= 0 || update.UpdatedAtMS <= 0 {
 		return HomeLinkCredentialRecord{}, errors.New("Home Link assertion revision or time is invalid")
@@ -388,7 +434,17 @@ func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, cre
 	if nowMS <= 0 {
 		return errors.New("Home Link revoke time is invalid")
 	}
-	record, err := s.HomeLinkCredential(ctx, siteID, credentialID)
+	if err := s.EnsureHomeLinkCredentialEmergencyBlock(
+		ctx, siteID, credentialID, nowMS,
+	); err != nil {
+		return err
+	}
+	record, err := scanHomeLinkCredential(s.db.QueryRowContext(
+		ctx,
+		homeLinkCredentialSelect+` WHERE site_id = ? AND credential_id = ?`,
+		siteID,
+		credentialID,
+	))
 	if err != nil {
 		return err
 	}
@@ -431,6 +487,252 @@ func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, cre
 	}
 	if changed != 1 {
 		return ErrHomeLinkCredentialConflict
+	}
+	return nil
+}
+
+// EnsureHomeLinkCredentialEmergencyBlock writes an append-only marker beside
+// state.db before SQLite revocation starts. The marker is a second durable
+// fail-closed path for a valid revoke request when SQLite is unavailable. It is
+// never removed or reused for another credential.
+func (s *Store) EnsureHomeLinkCredentialEmergencyBlock(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+	nowMS int64,
+) error {
+	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
+		return err
+	}
+	if nowMS <= 0 {
+		return errors.New("Home Link emergency block time is invalid")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	payload := homeLinkEmergencyBlockPayload(siteID, credentialID)
+	name := homeLinkEmergencyBlockName(payload)
+
+	s.homeLinkFenceMu.Lock()
+	defer s.homeLinkFenceMu.Unlock()
+	parent, directory, err := s.homeLinkEmergencyBlockRoot(true)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	defer directory.Close()
+	if blocked, err := readHomeLinkEmergencyBlock(
+		ctx, directory, name, payload,
+	); err != nil || blocked {
+		return err
+	}
+	file, err := directory.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			_, verifyErr := readHomeLinkEmergencyBlock(ctx, directory, name, payload)
+			return verifyErr
+		}
+		return fmt.Errorf("create Home Link emergency block: %w", err)
+	}
+	writeErr := writeFull(file, payload)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if writeErr != nil {
+		return fmt.Errorf("write Home Link emergency block: %w", writeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close Home Link emergency block: %w", closeErr)
+	}
+	dirFile, err := directory.Open(".")
+	if err != nil {
+		return fmt.Errorf("open Home Link emergency block directory: %w", err)
+	}
+	syncErr := dirFile.Sync()
+	closeErr = dirFile.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync Home Link emergency block directory: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close Home Link emergency block directory: %w", closeErr)
+	}
+	blocked, err := readHomeLinkEmergencyBlock(ctx, directory, name, payload)
+	if err != nil {
+		return err
+	}
+	if !blocked {
+		return errors.New("Home Link emergency block was not durable")
+	}
+	return nil
+}
+
+func (s *Store) homeLinkCredentialEmergencyBlocked(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+) (bool, error) {
+	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	payload := homeLinkEmergencyBlockPayload(siteID, credentialID)
+	name := homeLinkEmergencyBlockName(payload)
+
+	s.homeLinkFenceMu.Lock()
+	defer s.homeLinkFenceMu.Unlock()
+	parent, directory, err := s.homeLinkEmergencyBlockRoot(false)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer parent.Close()
+	defer directory.Close()
+	return readHomeLinkEmergencyBlock(ctx, directory, name, payload)
+}
+
+func (s *Store) homeLinkEmergencyBlockRoot(
+	create bool,
+) (*os.Root, *os.Root, error) {
+	absolute, err := filepath.Abs(s.mainDBPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve Home Link emergency block root: %w", err)
+	}
+	parent, err := os.OpenRoot(filepath.Dir(absolute))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open Home Link emergency block root: %w", err)
+	}
+	directoryName := filepath.Base(absolute) + homeLinkEmergencyBlockSuffix
+	info, err := parent.Lstat(directoryName)
+	created := false
+	if errors.Is(err, os.ErrNotExist) && create {
+		if err := parent.Mkdir(directoryName, 0o700); err != nil &&
+			!errors.Is(err, os.ErrExist) {
+			parent.Close()
+			return nil, nil, fmt.Errorf("create Home Link emergency block directory: %w", err)
+		}
+		created = true
+		info, err = parent.Lstat(directoryName)
+	}
+	if err != nil {
+		parent.Close()
+		return nil, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+		parent.Close()
+		return nil, nil, errors.New("Home Link emergency block directory is unsafe")
+	}
+	if created {
+		parentFile, err := parent.Open(".")
+		if err != nil {
+			parent.Close()
+			return nil, nil, fmt.Errorf("open Home Link emergency block parent: %w", err)
+		}
+		syncErr := parentFile.Sync()
+		closeErr := parentFile.Close()
+		if syncErr != nil {
+			parent.Close()
+			return nil, nil, fmt.Errorf("sync Home Link emergency block parent: %w", syncErr)
+		}
+		if closeErr != nil {
+			parent.Close()
+			return nil, nil, fmt.Errorf("close Home Link emergency block parent: %w", closeErr)
+		}
+	}
+	directory, err := parent.OpenRoot(directoryName)
+	if err != nil {
+		parent.Close()
+		return nil, nil, fmt.Errorf("open Home Link emergency block directory: %w", err)
+	}
+	opened, err := directory.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		directory.Close()
+		parent.Close()
+		return nil, nil, errors.New("Home Link emergency block directory changed")
+	}
+	after, err := parent.Lstat(directoryName)
+	if err != nil || !os.SameFile(opened, after) {
+		directory.Close()
+		parent.Close()
+		return nil, nil, errors.New("Home Link emergency block directory changed")
+	}
+	return parent, directory, nil
+}
+
+func homeLinkEmergencyBlockPayload(siteID string, credentialID []byte) []byte {
+	return []byte(homeLinkEmergencyBlockHeader + siteID + "\n" +
+		base64.RawURLEncoding.EncodeToString(credentialID) + "\n")
+}
+
+func homeLinkEmergencyBlockName(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func readHomeLinkEmergencyBlock(
+	ctx context.Context,
+	root *os.Root,
+	name string,
+	want []byte,
+) (bool, error) {
+	before, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Home Link emergency block: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		before.Mode().Perm()&0o077 != 0 ||
+		before.Size() <= 0 || before.Size() > maxHomeLinkEmergencyBlockBytes {
+		return false, errors.New("Home Link emergency block is unsafe")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return false, fmt.Errorf("open Home Link emergency block: %w", err)
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		file.Close()
+		return false, errors.New("Home Link emergency block changed before read")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxHomeLinkEmergencyBlockBytes+1))
+	afterFD, statErr := file.Stat()
+	closeErr := file.Close()
+	afterPath, pathErr := root.Lstat(name)
+	if readErr != nil {
+		return false, fmt.Errorf("read Home Link emergency block: %w", readErr)
+	}
+	if statErr != nil || pathErr != nil || !os.SameFile(opened, afterFD) ||
+		!os.SameFile(afterFD, afterPath) || int64(len(data)) != afterFD.Size() {
+		return false, errors.New("Home Link emergency block changed during read")
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close Home Link emergency block: %w", closeErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if !bytes.Equal(data, want) {
+		return false, errors.New("Home Link emergency block content is invalid")
+	}
+	return true, nil
+}
+
+func writeFull(file *os.File, data []byte) error {
+	for len(data) > 0 {
+		written, err := file.Write(data)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[written:]
 	}
 	return nil
 }

@@ -1080,6 +1080,89 @@ func TestRevokeStoreOutageBlocksCurrentAuthorityInMemory(t *testing.T) {
 	}
 }
 
+func TestRevokeStoreOutageEmergencyBlockSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteID := "001122334455667788"
+	fixture := newWebAuthnFixture(t, []byte{9, 8, 7, 6})
+	handle := bytes.Repeat([]byte{3}, webAuthnUserHandleBytes)
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(),
+		state.HomeLinkCredentialRecord{
+			SiteID: siteID, CredentialID: fixture.credentialID,
+			PublicKey: fixture.publicKey, Label: "phone", UserHandle: handle,
+			Status: state.HomeLinkCredentialActive, Revision: 1,
+			CreatedAtMS: 1, UpdatedAtMS: 1,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("credential database unavailable")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		revoke: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		ensure: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		read: func(
+			context.Context,
+			string,
+			[]byte,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	if err := authority.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); err == nil {
+		t.Fatal("revoke during credential database outage unexpectedly succeeded")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forgetSiteCredentialCoordinatorForTest(siteID)
+
+	store, err = state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		store.Close()
+		forgetSiteCredentialCoordinatorForTest(siteID)
+	})
+	restarted, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("database-outage revoke reopened after restart = %v", err)
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), siteID, fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != state.HomeLinkCredentialUncertain {
+		t.Fatalf("emergency-blocked credential status = %q", stored.Status)
+	}
+}
+
 func TestAssertionExpectationUsesLocalMonotonicDeadline(t *testing.T) {
 	var monotonic time.Duration
 	store := newAuthorityTestStore(t)

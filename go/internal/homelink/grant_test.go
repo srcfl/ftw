@@ -472,6 +472,25 @@ func TestAccessGrantRequiresCredentialAuthority(t *testing.T) {
 	}
 }
 
+func TestGrantManagerRejectsDecoratedAuthorityFromAnotherSite(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	otherSite := "1123dca63201f838f7"
+	authority := blockingVerifyCredentialAuthority{
+		CredentialAuthority: newMemoryCredentialAuthorityForSite(
+			newMemoryCredentialState(), otherSite,
+		),
+		verifyStarted:   make(chan struct{}),
+		verifyMayFinish: make(chan struct{}),
+	}
+	if _, err := NewGrantManager(testGatewayID, GrantManagerOptions{
+		Enabled: true, Now: func() time.Time { return now },
+		CredentialAuthority: authority,
+		ReadDispatcher:      successfulReadDispatcher(),
+	}); err == nil || !strings.Contains(err.Error(), "another gateway") {
+		t.Fatalf("manager accepted decorated authority from %s: %v", otherSite, err)
+	}
+}
+
 func TestAccessGrantRevocationAndRestart(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	state := newMemoryCredentialState()
@@ -590,7 +609,7 @@ func TestCredentialRevokeDoesNotCrossSites(t *testing.T) {
 	secondSite := newGrantTestManagerForSiteWithAuthority(
 		t, secondSiteID, true, func() time.Time { return now },
 		func() time.Duration { return 0 }, 66,
-		newMemoryCredentialAuthority(newMemoryCredentialState()),
+		newMemoryCredentialAuthorityForSite(newMemoryCredentialState(), secondSiteID),
 	)
 	grant := issueTestAccess(t, secondSite, ScopePlanRead, time.Minute)
 	if err := firstSite.RevokeCredential(
@@ -893,9 +912,19 @@ func testReadRequest(scope Scope) ReadRequest {
 }
 
 type credentialAuthorityStub struct {
+	site   CredentialSite
 	create func(context.Context, AssertionExpectationBinding) (LocalAssertionChallenge, error)
 	verify func(context.Context, string, PasskeyAssertion) (Principal, AssertionExpectationBinding, error)
 	revoke func(context.Context, []byte) error
+}
+
+func (s credentialAuthorityStub) CredentialSite() CredentialSite {
+	if s.site.coordinator == nil {
+		return CredentialSite{
+			id: testGatewayID, coordinator: siteCredentialCoordinatorFor(testGatewayID),
+		}
+	}
+	return s.site
 }
 
 func (s credentialAuthorityStub) CreateAssertion(
@@ -949,10 +978,27 @@ func newMemoryCredentialState() *memoryCredentialState {
 type memoryCredentialAuthority struct {
 	state     *memoryCredentialState
 	revokeErr error
+	site      CredentialSite
 }
 
 func newMemoryCredentialAuthority(state *memoryCredentialState) *memoryCredentialAuthority {
-	return &memoryCredentialAuthority{state: state}
+	return newMemoryCredentialAuthorityForSite(state, testGatewayID)
+}
+
+func newMemoryCredentialAuthorityForSite(
+	state *memoryCredentialState,
+	siteID string,
+) *memoryCredentialAuthority {
+	return &memoryCredentialAuthority{
+		state: state,
+		site: CredentialSite{
+			id: siteID, coordinator: siteCredentialCoordinatorFor(siteID),
+		},
+	}
+}
+
+func (a *memoryCredentialAuthority) CredentialSite() CredentialSite {
+	return a.site
 }
 
 func (a *memoryCredentialAuthority) CreateAssertion(

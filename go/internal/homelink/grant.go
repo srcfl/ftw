@@ -43,6 +43,50 @@ type siteCredentialCoordinator struct {
 	operations sync.RWMutex
 	blockedMu  sync.RWMutex
 	blocked    map[string]struct{}
+	dispatchMu sync.Mutex
+	dispatchID uint64
+	dispatches map[uint64]*credentialDispatch
+}
+
+type credentialDispatch struct {
+	id           uint64
+	credentialID string
+	cancel       context.CancelFunc
+	done         chan struct{}
+}
+
+type credentialDispatchContext struct {
+	coordinator *siteCredentialCoordinator
+	id          uint64
+}
+
+type credentialDispatchContextKey struct{}
+
+type credentialSiteLockMode uint8
+
+const (
+	credentialSiteReadLock credentialSiteLockMode = iota + 1
+	credentialSiteWriteLock
+)
+
+type credentialSiteLockContext struct {
+	coordinator *siteCredentialCoordinator
+	mode        credentialSiteLockMode
+}
+
+type credentialSiteLockContextKey struct{}
+
+// CredentialSite binds a credential authority to one normalized gateway and
+// its process-wide operation fence. CredentialAuthority includes this method,
+// so a decorator that embeds the interface keeps the binding.
+type CredentialSite struct {
+	id          string
+	coordinator *siteCredentialCoordinator
+}
+
+// ID returns the normalized gateway identity owned by the authority.
+func (s CredentialSite) ID() string {
+	return s.id
 }
 
 var credentialCoordinators = struct {
@@ -57,7 +101,10 @@ func siteCredentialCoordinatorFor(siteID string) *siteCredentialCoordinator {
 	defer credentialCoordinators.Unlock()
 	coordinator := credentialCoordinators.sites[siteID]
 	if coordinator == nil {
-		coordinator = &siteCredentialCoordinator{blocked: make(map[string]struct{})}
+		coordinator = &siteCredentialCoordinator{
+			blocked:    make(map[string]struct{}),
+			dispatches: make(map[uint64]*credentialDispatch),
+		}
 		credentialCoordinators.sites[siteID] = coordinator
 	}
 	return coordinator
@@ -82,16 +129,122 @@ func (c *siteCredentialCoordinator) credentialBlocked(credentialID []byte) bool 
 	return blocked
 }
 
+func (c *siteCredentialCoordinator) startDispatch(
+	parent context.Context,
+	credentialID []byte,
+) (context.Context, *credentialDispatch) {
+	ctx, cancel := context.WithCancel(parent)
+	c.dispatchMu.Lock()
+	c.dispatchID++
+	dispatch := &credentialDispatch{
+		id: c.dispatchID, credentialID: string(credentialID),
+		cancel: cancel, done: make(chan struct{}),
+	}
+	c.dispatches[dispatch.id] = dispatch
+	c.dispatchMu.Unlock()
+	return context.WithValue(ctx, credentialDispatchContextKey{}, credentialDispatchContext{
+		coordinator: c,
+		id:          dispatch.id,
+	}), dispatch
+}
+
+func (c *siteCredentialCoordinator) finishDispatch(dispatch *credentialDispatch) {
+	dispatch.cancel()
+	c.dispatchMu.Lock()
+	if current := c.dispatches[dispatch.id]; current == dispatch {
+		delete(c.dispatches, dispatch.id)
+		close(dispatch.done)
+	}
+	c.dispatchMu.Unlock()
+}
+
+func (c *siteCredentialCoordinator) credentialDispatches(
+	credentialID []byte,
+) []*credentialDispatch {
+	c.dispatchMu.Lock()
+	defer c.dispatchMu.Unlock()
+	var dispatches []*credentialDispatch
+	for _, dispatch := range c.dispatches {
+		if dispatch.credentialID == string(credentialID) {
+			dispatches = append(dispatches, dispatch)
+		}
+	}
+	return dispatches
+}
+
+func (c *siteCredentialCoordinator) waitCredentialDispatches(
+	ctx context.Context,
+	dispatches []*credentialDispatch,
+) error {
+	ownID := uint64(0)
+	if own, ok := ctx.Value(credentialDispatchContextKey{}).(credentialDispatchContext); ok &&
+		own.coordinator == c {
+		ownID = own.id
+	}
+	ownDispatch := false
+	for _, dispatch := range dispatches {
+		if dispatch.id == ownID {
+			ownDispatch = true
+			dispatch.cancel()
+		}
+	}
+	timer := time.NewTimer(credentialStateTimeout)
+	defer timer.Stop()
+	for index, dispatch := range dispatches {
+		if dispatch.id == ownID {
+			continue
+		}
+		select {
+		case <-dispatch.done:
+		case <-ctx.Done():
+			for _, pending := range dispatches[index:] {
+				pending.cancel()
+			}
+			return ctx.Err()
+		case <-timer.C:
+			for _, pending := range dispatches[index:] {
+				pending.cancel()
+			}
+			return ErrCredentialDispatchBusy
+		}
+	}
+	if ownDispatch {
+		return ErrCredentialDispatchBusy
+	}
+	return nil
+}
+
+func withCredentialSiteLock(
+	ctx context.Context,
+	coordinator *siteCredentialCoordinator,
+	mode credentialSiteLockMode,
+) context.Context {
+	return context.WithValue(ctx, credentialSiteLockContextKey{}, credentialSiteLockContext{
+		coordinator: coordinator,
+		mode:        mode,
+	})
+}
+
+func credentialSiteLockHeld(
+	ctx context.Context,
+	coordinator *siteCredentialCoordinator,
+	mode credentialSiteLockMode,
+) bool {
+	lock, ok := ctx.Value(credentialSiteLockContextKey{}).(credentialSiteLockContext)
+	return ok && lock.coordinator == coordinator && lock.mode == mode
+}
+
 var (
-	ErrRemoteDisabled    = errors.New("Home Link is disabled")
-	ErrInvalidGrant      = errors.New("grant is invalid")
-	ErrGrantExpired      = errors.New("grant has expired")
-	ErrGrantRevoked      = errors.New("grant has been revoked")
-	ErrGrantConsumed     = errors.New("grant has already been used")
-	ErrWrongSite         = errors.New("grant belongs to another gateway")
-	ErrWrongScope        = errors.New("grant does not allow this scope")
-	ErrWrongPurpose      = errors.New("grant has another purpose")
-	ErrCredentialRevoked = errors.New("credential has been revoked")
+	ErrRemoteDisabled         = errors.New("Home Link is disabled")
+	ErrInvalidGrant           = errors.New("grant is invalid")
+	ErrGrantExpired           = errors.New("grant has expired")
+	ErrGrantRevoked           = errors.New("grant has been revoked")
+	ErrGrantConsumed          = errors.New("grant has already been used")
+	ErrWrongSite              = errors.New("grant belongs to another gateway")
+	ErrWrongScope             = errors.New("grant does not allow this scope")
+	ErrWrongPurpose           = errors.New("grant has another purpose")
+	ErrCredentialRevoked      = errors.New("credential has been revoked")
+	ErrCredentialDispatchBusy = errors.New("credential read dispatch did not stop")
 )
 
 type GrantPurpose string
@@ -137,21 +290,6 @@ type GrantManager struct {
 	clock              monotonicClockState
 	records            map[[sha256.Size]byte]*grantRecord
 	blockedCredentials map[string]struct{}
-}
-
-type siteCoordinatedCredentialAuthority interface {
-	credentialSiteID() string
-	credentialSiteCoordinator() *siteCredentialCoordinator
-	createAssertionSiteLocked(
-		context.Context,
-		AssertionExpectationBinding,
-	) (LocalAssertionChallenge, error)
-	verifyAndConsumeAssertionSiteLocked(
-		context.Context,
-		string,
-		PasskeyAssertion,
-	) (Principal, AssertionExpectationBinding, error)
-	revokeCredentialSiteLocked(context.Context, []byte) error
 }
 
 type monotonicClockState struct {
@@ -211,13 +349,11 @@ func NewGrantManager(gatewayID string, opts GrantManagerOptions) (*GrantManager,
 	if opts.CredentialAuthority == nil {
 		return nil, errors.New("local credential authority is missing")
 	}
-	coordinator := siteCredentialCoordinatorFor(normalized)
-	if coordinated, ok := opts.CredentialAuthority.(siteCoordinatedCredentialAuthority); ok {
-		if coordinated.credentialSiteID() != normalized {
-			return nil, errors.New("local credential authority belongs to another gateway")
-		}
-		coordinator = coordinated.credentialSiteCoordinator()
+	site := opts.CredentialAuthority.CredentialSite()
+	if site.id != normalized || site.coordinator == nil {
+		return nil, errors.New("local credential authority belongs to another gateway")
 	}
+	coordinator := site.coordinator
 	var assertionSession AssertionSession
 	if _, err := io.ReadFull(rand.Reader, assertionSession.id[:]); err != nil {
 		return nil, fmt.Errorf("create local assertion session: %w", err)
@@ -270,7 +406,10 @@ func (m *GrantManager) BeginLocalAssertion(ctx context.Context) (LocalAssertionC
 		return LocalAssertionChallenge{}, err
 	}
 	binding := AssertionExpectationBinding{session: m.assertionSession, deadline: deadline}
-	challenge, err := m.createAssertionSiteLocked(ctx, binding)
+	challenge, err := m.authority.CreateAssertion(
+		withCredentialSiteLock(ctx, m.coordinator, credentialSiteReadLock),
+		binding,
+	)
 	if err != nil {
 		return LocalAssertionChallenge{}, fmt.Errorf("create local passkey assertion: %w", err)
 	}
@@ -301,8 +440,9 @@ func (m *GrantManager) IssueOneUseAccess(
 	defer m.coordinator.operations.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	principal, binding, err := m.verifyAndConsumeAssertionSiteLocked(
-		ctx, challengeID, assertion,
+	principal, binding, err := m.authority.VerifyAndConsumeAssertion(
+		withCredentialSiteLock(ctx, m.coordinator, credentialSiteReadLock),
+		challengeID, assertion,
 	)
 	if err != nil {
 		return Grant{}, fmt.Errorf("verify local passkey: %w", err)
@@ -402,17 +542,22 @@ func (m *GrantManager) consume(token, gatewayID string, purpose GrantPurpose, sc
 }
 
 func (m *GrantManager) consumeForDispatch(
+	ctx context.Context,
 	token string,
 	gatewayID string,
 	scope Scope,
-) (grantRecord, func(), error) {
+) (grantRecord, context.Context, *credentialDispatch, error) {
 	m.coordinator.operations.RLock()
 	record, err := m.consumeSiteLocked(token, gatewayID, GrantPurposeAccess, scope)
 	if err != nil {
 		m.coordinator.operations.RUnlock()
-		return grantRecord{}, nil, err
+		return grantRecord{}, nil, nil, err
 	}
-	return record, m.coordinator.operations.RUnlock, nil
+	dispatchCtx, dispatch := m.coordinator.startDispatch(
+		ctx, record.principal.CredentialID,
+	)
+	m.coordinator.operations.RUnlock()
+	return record, dispatchCtx, dispatch, nil
 }
 
 func (m *GrantManager) consumeSiteLocked(
@@ -499,52 +644,26 @@ func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte
 	}
 	id := slices.Clone(credentialID)
 	m.coordinator.operations.Lock()
-	authorityErr := m.revokeCredentialSiteLocked(ctx, id)
 	m.coordinator.blockCredential(id)
+	dispatches := m.coordinator.credentialDispatches(id)
+	authorityErr := m.authority.RevokeCredential(
+		withCredentialSiteLock(ctx, m.coordinator, credentialSiteWriteLock),
+		id,
+	)
 	m.coordinator.operations.Unlock()
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.blockedCredentials[string(id)] = struct{}{}
 	for _, record := range m.records {
 		if record.purpose == GrantPurposeAccess && bytes.Equal(record.principal.CredentialID, id) {
 			record.revoked = true
 		}
 	}
+	m.mu.Unlock()
+	waitErr := m.coordinator.waitCredentialDispatches(ctx, dispatches)
 	if authorityErr != nil {
-		return fmt.Errorf("revoke local credential: %w", authorityErr)
+		authorityErr = fmt.Errorf("revoke local credential: %w", authorityErr)
 	}
-	return nil
-}
-
-func (m *GrantManager) createAssertionSiteLocked(
-	ctx context.Context,
-	binding AssertionExpectationBinding,
-) (LocalAssertionChallenge, error) {
-	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
-		return authority.createAssertionSiteLocked(ctx, binding)
-	}
-	return m.authority.CreateAssertion(ctx, binding)
-}
-
-func (m *GrantManager) verifyAndConsumeAssertionSiteLocked(
-	ctx context.Context,
-	challengeID string,
-	assertion PasskeyAssertion,
-) (Principal, AssertionExpectationBinding, error) {
-	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
-		return authority.verifyAndConsumeAssertionSiteLocked(ctx, challengeID, assertion)
-	}
-	return m.authority.VerifyAndConsumeAssertion(ctx, challengeID, assertion)
-}
-
-func (m *GrantManager) revokeCredentialSiteLocked(
-	ctx context.Context,
-	credentialID []byte,
-) error {
-	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
-		return authority.revokeCredentialSiteLocked(ctx, credentialID)
-	}
-	return m.authority.RevokeCredential(ctx, credentialID)
+	return errors.Join(authorityErr, waitErr)
 }
 
 func (m *GrantManager) pruneLocked(monotonicNow time.Duration) {

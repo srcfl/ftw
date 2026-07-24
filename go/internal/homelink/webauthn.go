@@ -120,6 +120,7 @@ type credentialStateStore interface {
 		state.HomeLinkAssertionUpdate,
 	) (state.HomeLinkCredentialRecord, error)
 	EnsureHomeLinkCredentialPolicyBlock(context.Context, string, []byte, int64) error
+	EnsureHomeLinkCredentialEmergencyBlock(context.Context, string, []byte, int64) error
 	RevokeHomeLinkCredential(context.Context, string, []byte, int64) error
 }
 
@@ -272,6 +273,9 @@ func (a *PersistentCredentialAuthority) CreateAssertion(
 	ctx context.Context,
 	binding AssertionExpectationBinding,
 ) (LocalAssertionChallenge, error) {
+	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteReadLock) {
+		return a.createAssertionSiteLocked(ctx, binding)
+	}
 	a.coordinator.operations.RLock()
 	defer a.coordinator.operations.RUnlock()
 	return a.createAssertionSiteLocked(ctx, binding)
@@ -328,6 +332,9 @@ func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
 	expectationID string,
 	assertion PasskeyAssertion,
 ) (Principal, AssertionExpectationBinding, error) {
+	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteReadLock) {
+		return a.verifyAndConsumeAssertionSiteLocked(ctx, expectationID, assertion)
+	}
 	a.coordinator.operations.RLock()
 	defer a.coordinator.operations.RUnlock()
 	return a.verifyAndConsumeAssertionSiteLocked(ctx, expectationID, assertion)
@@ -410,12 +417,8 @@ func credentialStateContext(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(context.WithoutCancel(ctx), credentialStateTimeout)
 }
 
-func (a *PersistentCredentialAuthority) credentialSiteID() string {
-	return a.siteID
-}
-
-func (a *PersistentCredentialAuthority) credentialSiteCoordinator() *siteCredentialCoordinator {
-	return a.coordinator
+func (a *PersistentCredentialAuthority) CredentialSite() CredentialSite {
+	return CredentialSite{id: a.siteID, coordinator: a.coordinator}
 }
 
 func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
@@ -463,9 +466,18 @@ func (a *PersistentCredentialAuthority) RevokeCredential(
 	ctx context.Context,
 	credentialID []byte,
 ) error {
+	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteWriteLock) {
+		return a.revokeCredentialSiteLocked(ctx, credentialID)
+	}
 	a.coordinator.operations.Lock()
-	defer a.coordinator.operations.Unlock()
-	return a.revokeCredentialSiteLocked(ctx, credentialID)
+	a.coordinator.blockCredential(credentialID)
+	dispatches := a.coordinator.credentialDispatches(credentialID)
+	err := a.revokeCredentialSiteLocked(
+		withCredentialSiteLock(ctx, a.coordinator, credentialSiteWriteLock),
+		credentialID,
+	)
+	a.coordinator.operations.Unlock()
+	return errors.Join(err, a.coordinator.waitCredentialDispatches(ctx, dispatches))
 }
 
 func (a *PersistentCredentialAuthority) revokeCredentialSiteLocked(
@@ -476,6 +488,18 @@ func (a *PersistentCredentialAuthority) revokeCredentialSiteLocked(
 	defer a.mu.Unlock()
 	a.coordinator.blockCredential(credentialID)
 	nowMS := a.now().UTC().UnixMilli()
+	emergencyCtx, cancelEmergency := credentialStateContext(ctx)
+	emergencyErr := a.store.EnsureHomeLinkCredentialEmergencyBlock(
+		emergencyCtx, a.siteID, credentialID, nowMS,
+	)
+	cancelEmergency()
+	if emergencyErr != nil {
+		a.secureCredentialAfterStateErrorLocked(ctx, credentialID, nowMS)
+		if requestErr := ctx.Err(); requestErr != nil {
+			return requestErr
+		}
+		return errors.New("persist local passkey emergency revoke block")
+	}
 	stateCtx, cancelState := credentialStateContext(ctx)
 	err := a.store.RevokeHomeLinkCredential(
 		stateCtx, a.siteID, credentialID, nowMS,
