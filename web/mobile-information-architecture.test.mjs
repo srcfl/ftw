@@ -35,9 +35,22 @@ describe("dashboard information architecture", () => {
 
   it("moves each existing dashboard section instead of cloning it", () => {
     assert.match(router, /append\(plan, '#plan-section'\)/);
-    assert.match(router, /'\.history-row', '\.savings-row'/);
+    assert.match(router, /insertHistory\('\.history-row'\)/);
+    assert.doesNotMatch(router, /insertHistory\('\.savings-row'\)/);
     assert.match(router, /'#chart-section'/);
     assert.match(router, /'#drivers-section'/);
+  });
+
+  it("keeps saved vs no PV or battery on Overview", () => {
+    const overview = html.match(
+      /<main id="view-overview"[\s\S]*?<main id="view-energy"/,
+    )?.[0] || "";
+
+    assert.match(overview, /<section class="savings-row">/);
+    assert.equal(
+      (overview.match(/<ftw-savings-card\b/g) || []).length,
+      1,
+    );
   });
 });
 
