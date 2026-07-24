@@ -930,6 +930,7 @@ func (s credentialAuthorityStub) CredentialSite() CredentialSite {
 func (s credentialAuthorityStub) CreateAssertion(
 	ctx context.Context,
 	binding AssertionExpectationBinding,
+	_ ...credentialSiteOperation,
 ) (LocalAssertionChallenge, error) {
 	return s.create(ctx, binding)
 }
@@ -938,11 +939,16 @@ func (s credentialAuthorityStub) VerifyAndConsumeAssertion(
 	ctx context.Context,
 	challengeID string,
 	assertion PasskeyAssertion,
+	_ ...credentialSiteOperation,
 ) (Principal, AssertionExpectationBinding, error) {
 	return s.verify(ctx, challengeID, assertion)
 }
 
-func (s credentialAuthorityStub) RevokeCredential(ctx context.Context, credentialID []byte) error {
+func (s credentialAuthorityStub) RevokeCredential(
+	ctx context.Context,
+	credentialID []byte,
+	_ ...credentialSiteOperation,
+) error {
 	return s.revoke(ctx, credentialID)
 }
 
@@ -1004,6 +1010,7 @@ func (a *memoryCredentialAuthority) CredentialSite() CredentialSite {
 func (a *memoryCredentialAuthority) CreateAssertion(
 	ctx context.Context,
 	binding AssertionExpectationBinding,
+	_ ...credentialSiteOperation,
 ) (LocalAssertionChallenge, error) {
 	if err := ctx.Err(); err != nil {
 		return LocalAssertionChallenge{}, err
@@ -1024,6 +1031,7 @@ func (a *memoryCredentialAuthority) VerifyAndConsumeAssertion(
 	ctx context.Context,
 	challengeID string,
 	assertion PasskeyAssertion,
+	_ ...credentialSiteOperation,
 ) (Principal, AssertionExpectationBinding, error) {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
@@ -1047,7 +1055,11 @@ func (a *memoryCredentialAuthority) VerifyAndConsumeAssertion(
 	return testPrincipal(), expectation.binding, nil
 }
 
-func (a *memoryCredentialAuthority) RevokeCredential(ctx context.Context, credentialID []byte) error {
+func (a *memoryCredentialAuthority) RevokeCredential(
+	ctx context.Context,
+	credentialID []byte,
+	_ ...credentialSiteOperation,
+) error {
 	a.state.mu.Lock()
 	defer a.state.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -1068,14 +1080,18 @@ type blockingCredentialAuthority struct {
 	revokeMayFinish <-chan struct{}
 }
 
-func (a blockingCredentialAuthority) RevokeCredential(ctx context.Context, credentialID []byte) error {
+func (a blockingCredentialAuthority) RevokeCredential(
+	ctx context.Context,
+	credentialID []byte,
+	operation ...credentialSiteOperation,
+) error {
 	close(a.revokeStarted)
 	select {
 	case <-a.revokeMayFinish:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return a.CredentialAuthority.RevokeCredential(ctx, credentialID)
+	return a.CredentialAuthority.RevokeCredential(ctx, credentialID, operation...)
 }
 
 type blockingVerifyCredentialAuthority struct {
@@ -1088,6 +1104,7 @@ func (a blockingVerifyCredentialAuthority) VerifyAndConsumeAssertion(
 	ctx context.Context,
 	challengeID string,
 	assertion PasskeyAssertion,
+	operation ...credentialSiteOperation,
 ) (Principal, AssertionExpectationBinding, error) {
 	close(a.verifyStarted)
 	select {
@@ -1095,7 +1112,9 @@ func (a blockingVerifyCredentialAuthority) VerifyAndConsumeAssertion(
 	case <-ctx.Done():
 		return Principal{}, AssertionExpectationBinding{}, ctx.Err()
 	}
-	return a.CredentialAuthority.VerifyAndConsumeAssertion(ctx, challengeID, assertion)
+	return a.CredentialAuthority.VerifyAndConsumeAssertion(
+		ctx, challengeID, assertion, operation...,
+	)
 }
 
 type readDispatcherFunc func(context.Context, ReadTarget, ReadRequest, Principal) error

@@ -62,7 +62,9 @@ type Store struct {
 	// homeLinkFenceMu serializes the append-only emergency revoke markers
 	// stored beside state.db. Those markers remain writable when SQLite itself
 	// is unavailable and keep a failed revoke closed across restart.
-	homeLinkFenceMu sync.Mutex
+	homeLinkFenceMu     sync.Mutex
+	homeLinkFenceRoot   *os.Root
+	homeLinkFenceDBName string
 
 	// healMu guards corrupt + verifyCancel. corrupt is set by the background
 	// integrity scan when it fails; Close consults it (a corrupt DB must NOT be
@@ -98,9 +100,18 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	fenceRoot, absolutePath, dbName, err := openHomeLinkFenceRoot(path)
+	if err != nil {
+		db.Close()
+		cache.Close()
+		return nil, err
+	}
 	slog.Info("state: integrity gate complete", "elapsed", time.Since(tGate).Round(time.Millisecond))
 
-	s := &Store{db: db, cache: cache, ts: newInternCache(), mainDBPath: path}
+	s := &Store{
+		db: db, cache: cache, ts: newInternCache(), mainDBPath: absolutePath,
+		homeLinkFenceRoot: fenceRoot, homeLinkFenceDBName: dbName,
+	}
 	for _, ev := range []*HealEvent{stEv, caEv} {
 		if ev != nil {
 			s.healEvents = append(s.healEvents, *ev)
@@ -110,11 +121,13 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		cache.Close()
+		fenceRoot.Close()
 		return nil, err
 	}
 	if err := s.migrateLegacyTierSplit(); err != nil {
 		db.Close()
 		cache.Close()
+		fenceRoot.Close()
 		return nil, err
 	}
 	slog.Info("state: migrations complete", "elapsed", time.Since(tMig).Round(time.Millisecond))
@@ -182,10 +195,61 @@ func (s *Store) Close() error {
 	}
 	if s.db != nil {
 		if e := s.db.Close(); e != nil {
-			err = e
+			err = errors.Join(err, e)
 		}
 	}
+	s.homeLinkFenceMu.Lock()
+	if s.homeLinkFenceRoot != nil {
+		if e := s.homeLinkFenceRoot.Close(); e != nil {
+			err = errors.Join(err, e)
+		}
+		s.homeLinkFenceRoot = nil
+	}
+	s.homeLinkFenceMu.Unlock()
 	return err
+}
+
+func openHomeLinkFenceRoot(path string) (*os.Root, string, string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("resolve Home Link emergency block root: %w", err)
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(absolute))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("resolve Home Link emergency block parent: %w", err)
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("open Home Link emergency block root: %w", err)
+	}
+	name := filepath.Base(absolute)
+	before, err := root.Lstat(name)
+	if err != nil {
+		root.Close()
+		return nil, "", "", fmt.Errorf("inspect Home Link state database: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		root.Close()
+		return nil, "", "", errors.New("Home Link state database path is unsafe")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		root.Close()
+		return nil, "", "", fmt.Errorf("open Home Link state database: %w", err)
+	}
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	after, pathErr := root.Lstat(name)
+	if statErr != nil || pathErr != nil || !os.SameFile(before, opened) ||
+		!os.SameFile(opened, after) {
+		root.Close()
+		return nil, "", "", errors.New("Home Link state database changed while binding its parent")
+	}
+	if closeErr != nil {
+		root.Close()
+		return nil, "", "", fmt.Errorf("close Home Link state database: %w", closeErr)
+	}
+	return root, filepath.Join(parent, name), name, nil
 }
 
 // VerifyInBackground runs the integrity check OFF the startup hot path. Call it

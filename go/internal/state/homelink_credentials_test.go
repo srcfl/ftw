@@ -21,6 +21,61 @@ func testHomeLinkCredential(site string, id byte) HomeLinkCredentialRecord {
 	}
 }
 
+func TestHomeLinkEmergencyBlockUsesPinnedDatabaseParent(t *testing.T) {
+	root := t.TempDir()
+	live := filepath.Join(root, "live")
+	moved := filepath.Join(root, "moved")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(live, "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testHomeLinkCredential("001122334455667788", 1)
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(live, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureHomeLinkCredentialEmergencyBlock(
+		context.Background(), record.SiteID, record.CredentialID, 2,
+	); err != nil {
+		t.Fatalf("write through pinned database parent: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(live); err != nil || len(entries) != 0 {
+		t.Fatalf("replacement parent was changed: entries=%v err=%v", entries, err)
+	}
+	if err := os.RemoveAll(live); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, live); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	active, err := restarted.ActiveHomeLinkCredentials(
+		context.Background(), record.SiteID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("credential reopened after database parent replacement: %+v", active)
+	}
+}
+
 func TestHomeLinkCredentialsAreSiteLocalAndPersistVerifierState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	store, err := Open(path)
@@ -647,6 +702,35 @@ func TestHomeLinkEmergencyRevokeBlockTamperFailsClosed(t *testing.T) {
 		},
 	); err == nil {
 		t.Fatal("tampered emergency block allowed assertion update")
+	}
+}
+
+func TestHomeLinkEmergencyRevokeBlockRejectsExtraHardLink(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record := testHomeLinkCredential("001122334455667788", 23)
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureHomeLinkCredentialEmergencyBlock(
+		context.Background(), record.SiteID, record.CredentialID, 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	payload := homeLinkEmergencyBlockPayload(record.SiteID, record.CredentialID)
+	directory := path + homeLinkEmergencyBlockSuffix
+	marker := filepath.Join(directory, homeLinkEmergencyBlockName(payload))
+	if err := os.Link(marker, filepath.Join(directory, "unexpected-link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ActiveHomeLinkCredentials(
+		context.Background(), record.SiteID,
+	); err == nil {
+		t.Fatal("hard-linked emergency block reopened active credential")
 	}
 }
 

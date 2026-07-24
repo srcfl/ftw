@@ -31,6 +31,10 @@ const (
 	AccessGrantMaxTTL  = 5 * time.Minute
 	grantTokenBytes    = 32
 	maxMonotonicTime   = time.Duration(1<<63 - 1)
+	// A normal home has only a few credentials. Keep a firm memory bound in
+	// case a future caller or store fault presents many distinct IDs. Hitting
+	// the bound blocks the whole site instead of forgetting an earlier block.
+	maxCredentialProcessBlocks = 4096
 )
 
 var monotonicEpoch = time.Now()
@@ -43,6 +47,7 @@ type siteCredentialCoordinator struct {
 	operations sync.RWMutex
 	blockedMu  sync.RWMutex
 	blocked    map[string]struct{}
+	blockedAll bool
 	dispatchMu sync.Mutex
 	dispatchID uint64
 	dispatches map[uint64]*credentialDispatch
@@ -62,19 +67,13 @@ type credentialDispatchContext struct {
 
 type credentialDispatchContextKey struct{}
 
-type credentialSiteLockMode uint8
-
-const (
-	credentialSiteReadLock credentialSiteLockMode = iota + 1
-	credentialSiteWriteLock
-)
-
-type credentialSiteLockContext struct {
+// credentialSiteOperation is an explicit, package-private proof that a manager
+// owns the site's operation lock. Decorators must pass it through unchanged;
+// it must never depend on context values that a decorator may replace.
+type credentialSiteOperation struct {
 	coordinator *siteCredentialCoordinator
-	mode        credentialSiteLockMode
+	write       bool
 }
-
-type credentialSiteLockContextKey struct{}
 
 // CredentialSite binds a credential authority to one normalized gateway and
 // its process-wide operation fence. CredentialAuthority includes this method,
@@ -118,13 +117,25 @@ func forgetSiteCredentialCoordinatorForTest(siteID string) {
 
 func (c *siteCredentialCoordinator) blockCredential(credentialID []byte) {
 	c.blockedMu.Lock()
-	c.blocked[string(credentialID)] = struct{}{}
-	c.blockedMu.Unlock()
+	defer c.blockedMu.Unlock()
+	if c.blockedAll {
+		return
+	}
+	key := string(credentialID)
+	if _, blocked := c.blocked[key]; blocked {
+		return
+	}
+	if len(c.blocked) >= maxCredentialProcessBlocks {
+		c.blockedAll = true
+		return
+	}
+	c.blocked[key] = struct{}{}
 }
 
 func (c *siteCredentialCoordinator) credentialBlocked(credentialID []byte) bool {
 	c.blockedMu.RLock()
 	_, blocked := c.blocked[string(credentialID)]
+	blocked = blocked || c.blockedAll
 	c.blockedMu.RUnlock()
 	return blocked
 }
@@ -214,26 +225,6 @@ func (c *siteCredentialCoordinator) waitCredentialDispatches(
 	return nil
 }
 
-func withCredentialSiteLock(
-	ctx context.Context,
-	coordinator *siteCredentialCoordinator,
-	mode credentialSiteLockMode,
-) context.Context {
-	return context.WithValue(ctx, credentialSiteLockContextKey{}, credentialSiteLockContext{
-		coordinator: coordinator,
-		mode:        mode,
-	})
-}
-
-func credentialSiteLockHeld(
-	ctx context.Context,
-	coordinator *siteCredentialCoordinator,
-	mode credentialSiteLockMode,
-) bool {
-	lock, ok := ctx.Value(credentialSiteLockContextKey{}).(credentialSiteLockContext)
-	return ok && lock.coordinator == coordinator && lock.mode == mode
-}
-
 var (
 	ErrRemoteDisabled         = errors.New("Home Link is disabled")
 	ErrInvalidGrant           = errors.New("grant is invalid")
@@ -290,6 +281,7 @@ type GrantManager struct {
 	clock              monotonicClockState
 	records            map[[sha256.Size]byte]*grantRecord
 	blockedCredentials map[string]struct{}
+	blockedAll         bool
 }
 
 type monotonicClockState struct {
@@ -406,10 +398,9 @@ func (m *GrantManager) BeginLocalAssertion(ctx context.Context) (LocalAssertionC
 		return LocalAssertionChallenge{}, err
 	}
 	binding := AssertionExpectationBinding{session: m.assertionSession, deadline: deadline}
-	challenge, err := m.authority.CreateAssertion(
-		withCredentialSiteLock(ctx, m.coordinator, credentialSiteReadLock),
-		binding,
-	)
+	challenge, err := m.authority.CreateAssertion(ctx, binding, credentialSiteOperation{
+		coordinator: m.coordinator,
+	})
 	if err != nil {
 		return LocalAssertionChallenge{}, fmt.Errorf("create local passkey assertion: %w", err)
 	}
@@ -441,8 +432,9 @@ func (m *GrantManager) IssueOneUseAccess(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	principal, binding, err := m.authority.VerifyAndConsumeAssertion(
-		withCredentialSiteLock(ctx, m.coordinator, credentialSiteReadLock),
-		challengeID, assertion,
+		ctx, challengeID, assertion, credentialSiteOperation{
+			coordinator: m.coordinator,
+		},
 	)
 	if err != nil {
 		return Grant{}, fmt.Errorf("verify local passkey: %w", err)
@@ -500,7 +492,8 @@ func (m *GrantManager) issueLocked(
 	expiresAt := wallNow.Add(ttl)
 	m.pruneLocked(monotonicNow)
 	if purpose == GrantPurposeAccess {
-		if _, revoked := m.blockedCredentials[string(principal.CredentialID)]; revoked {
+		if _, revoked := m.blockedCredentials[string(principal.CredentialID)]; revoked ||
+			m.blockedAll {
 			return Grant{}, ErrCredentialRevoked
 		}
 		if m.coordinator.credentialBlocked(principal.CredentialID) {
@@ -644,15 +637,20 @@ func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte
 	}
 	id := slices.Clone(credentialID)
 	m.coordinator.operations.Lock()
+	authorityErr := m.authority.RevokeCredential(ctx, id, credentialSiteOperation{
+		coordinator: m.coordinator,
+		write:       true,
+	})
+	if errors.Is(authorityErr, ErrCredentialUnknown) ||
+		errors.Is(authorityErr, errCredentialUnproven) {
+		m.coordinator.operations.Unlock()
+		return fmt.Errorf("revoke local credential: %w", authorityErr)
+	}
 	m.coordinator.blockCredential(id)
 	dispatches := m.coordinator.credentialDispatches(id)
-	authorityErr := m.authority.RevokeCredential(
-		withCredentialSiteLock(ctx, m.coordinator, credentialSiteWriteLock),
-		id,
-	)
 	m.coordinator.operations.Unlock()
 	m.mu.Lock()
-	m.blockedCredentials[string(id)] = struct{}{}
+	m.blockCredentialLocked(id)
 	for _, record := range m.records {
 		if record.purpose == GrantPurposeAccess && bytes.Equal(record.principal.CredentialID, id) {
 			record.revoked = true
@@ -664,6 +662,21 @@ func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte
 		authorityErr = fmt.Errorf("revoke local credential: %w", authorityErr)
 	}
 	return errors.Join(authorityErr, waitErr)
+}
+
+func (m *GrantManager) blockCredentialLocked(credentialID []byte) {
+	if m.blockedAll {
+		return
+	}
+	key := string(credentialID)
+	if _, blocked := m.blockedCredentials[key]; blocked {
+		return
+	}
+	if len(m.blockedCredentials) >= maxCredentialProcessBlocks {
+		m.blockedAll = true
+		return
+	}
+	m.blockedCredentials[key] = struct{}{}
 }
 
 func (m *GrantManager) pruneLocked(monotonicNow time.Duration) {

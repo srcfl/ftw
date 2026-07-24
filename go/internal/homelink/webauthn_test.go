@@ -11,10 +11,12 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,6 +43,491 @@ type faultCredentialStateStore struct {
 	ensure func(context.Context, string, []byte, int64) error
 	read   func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error)
 	revoke func(context.Context, string, []byte, int64) error
+}
+
+type contextDroppingCredentialAuthority struct {
+	CredentialAuthority
+}
+
+func (a contextDroppingCredentialAuthority) RevokeCredential(
+	_ context.Context,
+	credentialID []byte,
+	operation ...credentialSiteOperation,
+) error {
+	return a.CredentialAuthority.RevokeCredential(
+		context.Background(), credentialID, operation...,
+	)
+}
+
+func TestCredentialAuthorityDecoratorCannotDeadlockRevoke(t *testing.T) {
+	siteID := "aabbccddeeff001122"
+	store := newAuthorityTestStore(t)
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewGrantManager(siteID, GrantManagerOptions{
+		Enabled: true,
+		CredentialAuthority: contextDroppingCredentialAuthority{
+			CredentialAuthority: authority,
+		},
+		ReadDispatcher: successfulReadDispatcher(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- manager.RevokeCredential(
+			context.Background(), []byte{1, 2, 3, 4},
+		)
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrCredentialUnknown) {
+			t.Fatalf("decorated revoke = %v", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("credential authority decorator deadlocked revoke")
+	}
+	if manager.coordinator.credentialBlocked([]byte{1, 2, 3, 4}) {
+		t.Fatal("unknown credential entered the site block map")
+	}
+	if _, blocked := manager.blockedCredentials[string([]byte{1, 2, 3, 4})]; blocked {
+		t.Fatal("unknown credential entered the manager block map")
+	}
+}
+
+func TestUnknownCredentialRevokeDoesNotCreateEmergencyMarkers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{
+			Store: store, SiteID: "ccddee001122334455",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range 32 {
+		err := authority.RevokeCredential(
+			context.Background(), []byte(fmt.Sprintf("unknown-%02d", index)),
+		)
+		if !errors.Is(err, ErrCredentialUnknown) {
+			t.Fatalf("unknown credential %d revoke = %v", index, err)
+		}
+	}
+	entries, err := os.ReadDir(path + ".homelink-blocks")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unknown credentials created %d permanent markers", len(entries))
+	}
+}
+
+func TestCrossSiteCredentialRevokeDoesNotCreateEmergencyMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := newWebAuthnFixture(t, []byte{8, 7, 6, 5})
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(),
+		state.HomeLinkCredentialRecord{
+			SiteID: "001122334455667788", CredentialID: fixture.credentialID,
+			PublicKey: fixture.publicKey, Label: "phone",
+			UserHandle: bytes.Repeat([]byte{3}, webAuthnUserHandleBytes),
+			Status:     state.HomeLinkCredentialActive, Revision: 1,
+			CreatedAtMS: 1, UpdatedAtMS: 1,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{
+			Store: store, SiteID: "112233445566778899",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("cross-site revoke = %v", err)
+	}
+	entries, err := os.ReadDir(path + ".homelink-blocks")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cross-site revoke created %d permanent markers", len(entries))
+	}
+}
+
+func TestUnknownCredentialRevokeDuringStoreOutageDoesNotGrowBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	siteID := "223344556677889900"
+	defer forgetSiteCredentialCoordinatorForTest(siteID)
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("sqlite lookup unavailable")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		read: func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	manager, err := NewGrantManager(siteID, GrantManagerOptions{
+		Enabled: true, CredentialAuthority: authority,
+		ReadDispatcher: successfulReadDispatcher(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := &grantRecord{
+		gatewayID: siteID, purpose: GrantPurposeAccess, scope: ScopeHealthRead,
+		principal: Principal{CredentialID: []byte("existing"), Label: "phone"},
+		deadline:  time.Hour,
+	}
+	manager.records[[sha256.Size]byte{1}] = unrelated
+
+	for index := range maxCredentialProcessBlocks + 32 {
+		credentialID := []byte(fmt.Sprintf("unknown-outage-%04d", index))
+		err := manager.RevokeCredential(context.Background(), credentialID)
+		if !errors.Is(err, errCredentialUnproven) {
+			t.Fatalf("unknown credential %d revoke = %v", index, err)
+		}
+	}
+	manager.coordinator.blockedMu.RLock()
+	sharedBlocks := len(manager.coordinator.blocked)
+	sharedAll := manager.coordinator.blockedAll
+	manager.coordinator.blockedMu.RUnlock()
+	if sharedBlocks != 0 || sharedAll {
+		t.Fatalf("unknown credentials changed shared blocks: entries=%d all=%v",
+			sharedBlocks, sharedAll)
+	}
+	if len(manager.blockedCredentials) != 0 || manager.blockedAll {
+		t.Fatalf("unknown credentials changed manager blocks: entries=%d all=%v",
+			len(manager.blockedCredentials), manager.blockedAll)
+	}
+	if len(authority.blockedCredentials) != 0 || authority.blockedAll {
+		t.Fatalf("unknown credentials changed authority blocks: entries=%d all=%v",
+			len(authority.blockedCredentials), authority.blockedAll)
+	}
+	if unrelated.revoked || unrelated.consumed {
+		t.Fatalf("unknown credentials changed an existing grant: %+v", unrelated)
+	}
+	entries, err := os.ReadDir(path + ".homelink-blocks")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unknown credentials created %d permanent markers", len(entries))
+	}
+}
+
+func TestCrossSiteCredentialRevokeDuringStoreOutageDoesNotGrowBlocks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := newWebAuthnFixture(t, []byte{4, 3, 2, 1})
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(),
+		state.HomeLinkCredentialRecord{
+			SiteID: "334455667788990011", CredentialID: fixture.credentialID,
+			PublicKey: fixture.publicKey, Label: "phone",
+			UserHandle: bytes.Repeat([]byte{4}, webAuthnUserHandleBytes),
+			Status:     state.HomeLinkCredentialActive, Revision: 1,
+			CreatedAtMS: 1, UpdatedAtMS: 1,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	otherSiteID := "445566778899001122"
+	defer forgetSiteCredentialCoordinatorForTest(otherSiteID)
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: otherSiteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("sqlite lookup unavailable")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		read: func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	manager, err := NewGrantManager(otherSiteID, GrantManagerOptions{
+		Enabled: true, CredentialAuthority: authority,
+		ReadDispatcher: successfulReadDispatcher(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); !errors.Is(err, errCredentialUnproven) {
+		t.Fatalf("cross-site outage revoke = %v", err)
+	}
+	if manager.coordinator.credentialBlocked(fixture.credentialID) ||
+		len(manager.blockedCredentials) != 0 || manager.blockedAll ||
+		len(authority.blockedCredentials) != 0 || authority.blockedAll {
+		t.Fatal("cross-site outage changed process block state")
+	}
+	entries, err := os.ReadDir(path + ".homelink-blocks")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cross-site outage created %d permanent markers", len(entries))
+	}
+}
+
+func TestKnownCredentialRevokeOutageBlocksAndSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteID := "556677889900112233"
+	fixture := newWebAuthnFixture(t, []byte{1, 3, 5, 7})
+	handle := bytes.Repeat([]byte{7}, webAuthnUserHandleBytes)
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(),
+		state.HomeLinkCredentialRecord{
+			SiteID: siteID, CredentialID: fixture.credentialID,
+			PublicKey: fixture.publicKey, Label: "phone", UserHandle: handle,
+			Status: state.HomeLinkCredentialActive, Revision: 1,
+			CreatedAtMS: 1, UpdatedAtMS: 1,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewGrantManager(siteID, GrantManagerOptions{
+		Enabled: true, CredentialAuthority: authority,
+		ReadDispatcher: successfulReadDispatcher(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("complete sqlite outage")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		read: func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+		ensure: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		revoke: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+	}
+	if err := manager.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); err == nil || errors.Is(err, errCredentialUnproven) {
+		t.Fatalf("known credential outage revoke = %v", err)
+	}
+	if !manager.coordinator.credentialBlocked(fixture.credentialID) {
+		t.Fatal("known credential outage did not block the shared site")
+	}
+	if _, blocked := manager.blockedCredentials[string(fixture.credentialID)]; !blocked {
+		t.Fatal("known credential outage did not block the manager")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forgetSiteCredentialCoordinatorForTest(siteID)
+
+	store, err = state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restarted, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge, err := restarted.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); err == nil {
+		t.Fatalf("known credential reopened after outage restart: %+v", challenge)
+	}
+}
+
+func TestCredentialProcessBlockMapsAreBoundedWithoutEviction(t *testing.T) {
+	coordinator := &siteCredentialCoordinator{blocked: make(map[string]struct{})}
+	manager := &GrantManager{blockedCredentials: make(map[string]struct{})}
+	authority := &PersistentCredentialAuthority{
+		blockedCredentials: make(map[string]struct{}),
+	}
+	for index := range maxCredentialProcessBlocks {
+		id := []byte(fmt.Sprintf("known-%04d", index))
+		coordinator.blockCredential(id)
+		manager.blockCredentialLocked(id)
+		authority.blockCredentialLocked(id)
+	}
+	overflow := []byte("known-overflow")
+	coordinator.blockCredential(overflow)
+	manager.blockCredentialLocked(overflow)
+	authority.blockCredentialLocked(overflow)
+	if len(coordinator.blocked) != maxCredentialProcessBlocks ||
+		len(manager.blockedCredentials) != maxCredentialProcessBlocks ||
+		len(authority.blockedCredentials) != maxCredentialProcessBlocks {
+		t.Fatalf("block maps exceeded their cap: shared=%d manager=%d authority=%d",
+			len(coordinator.blocked), len(manager.blockedCredentials),
+			len(authority.blockedCredentials))
+	}
+	if !coordinator.blockedAll || !manager.blockedAll || !authority.blockedAll {
+		t.Fatal("block-map overflow did not fail the site closed")
+	}
+	for _, id := range [][]byte{[]byte("known-0000"), overflow, []byte("unrelated")} {
+		if !coordinator.credentialBlocked(id) {
+			t.Fatalf("shared site forgot or missed block for %q", id)
+		}
+		if !manager.blockedAll || !authority.credentialMemoryBlockedLocked(id) {
+			t.Fatalf("local block maps forgot or missed block for %q", id)
+		}
+	}
+}
+
+func TestCredentialProcessBlockCoordinatorConcurrentBound(t *testing.T) {
+	coordinator := &siteCredentialCoordinator{blocked: make(map[string]struct{})}
+	var workers sync.WaitGroup
+	for worker := range 64 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range 80 {
+				coordinator.blockCredential(
+					[]byte(fmt.Sprintf("known-%02d-%02d", worker, index)),
+				)
+			}
+		}()
+	}
+	workers.Wait()
+	coordinator.blockedMu.RLock()
+	defer coordinator.blockedMu.RUnlock()
+	if len(coordinator.blocked) != maxCredentialProcessBlocks ||
+		!coordinator.blockedAll {
+		t.Fatalf("concurrent block bound = entries=%d all=%v",
+			len(coordinator.blocked), coordinator.blockedAll)
+	}
+}
+
+func TestAssertionStoreOutageBlockSurvivesProcessRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteID := "bbccddeeff00112233"
+	fixture := newWebAuthnFixture(t, []byte{5, 6, 7, 8})
+	handle := bytes.Repeat([]byte{9}, webAuthnUserHandleBytes)
+	if err := store.RegisterHomeLinkCredential(
+		context.Background(),
+		state.HomeLinkCredentialRecord{
+			SiteID: siteID, CredentialID: fixture.credentialID,
+			PublicKey: fixture.publicKey, Label: "phone", UserHandle: handle,
+			Status: state.HomeLinkCredentialActive, Revision: 1,
+			CreatedAtMS: 1, UpdatedAtMS: 1,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("complete sqlite outage")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		apply: func(
+			context.Context,
+			state.HomeLinkAssertionUpdate,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+		ensure: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		read: func(
+			context.Context,
+			string,
+			[]byte,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	if principal, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID,
+		PasskeyAssertion{ResponseJSON: raw},
+	); err == nil || len(principal.CredentialID) != 0 {
+		t.Fatalf("store outage returned principal=%+v err=%v", principal, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forgetSiteCredentialCoordinatorForTest(siteID)
+
+	store, err = state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	restarted, err := NewPersistentCredentialAuthority(
+		PersistentCredentialAuthorityOptions{Store: store, SiteID: siteID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge, err := restarted.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); err == nil {
+		t.Fatalf("ambiguous assertion reopened after restart: %+v", challenge)
+	}
 }
 
 func (s *faultCredentialStateStore) ApplyHomeLinkAssertion(

@@ -40,6 +40,7 @@ var (
 	ErrWebAuthnExpectation  = errors.New("passkey expectation is unknown or consumed")
 	ErrCredentialUnknown    = errors.New("passkey credential is not active for this site")
 	ErrCredentialUncertain  = errors.New("passkey credential state is uncertain")
+	errCredentialUnproven   = errors.New("passkey credential could not be proven for this site")
 	ErrRegistrationDenied   = errors.New("passkey registration was denied")
 )
 
@@ -137,6 +138,8 @@ type PersistentCredentialAuthority struct {
 	assertions         map[string]assertionExpectation
 	registrations      map[string]registrationExpectation
 	blockedCredentials map[string]struct{}
+	blockedAll         bool
+	knownCredentials   map[string]struct{}
 	verifier           webAuthnProtocolVerifier
 }
 
@@ -159,15 +162,24 @@ func NewPersistentCredentialAuthority(
 	if opts.MonotonicNow == nil {
 		opts.MonotonicNow = defaultMonotonicNow
 	}
-	return &PersistentCredentialAuthority{
+	authority := &PersistentCredentialAuthority{
 		store: opts.Store, siteID: siteID,
 		coordinator: siteCredentialCoordinatorFor(siteID), pairingAuthorizer: opts.PairingAuthorizer,
 		random: opts.Random, now: opts.Now, monotonicNow: opts.MonotonicNow,
 		assertions:         make(map[string]assertionExpectation),
 		registrations:      make(map[string]registrationExpectation),
 		blockedCredentials: make(map[string]struct{}),
+		knownCredentials:   make(map[string]struct{}),
 		verifier:           pinnedWebAuthnProtocolVerifier{},
-	}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), credentialStateTimeout)
+	active, err := opts.Store.ActiveHomeLinkCredentials(ctx, siteID)
+	cancel()
+	if err != nil {
+		return nil, errors.New("read local passkey verifier state")
+	}
+	authority.rememberCredentialsLocked(active)
+	return authority, nil
 }
 
 func (a *PersistentCredentialAuthority) BeginRegistration(
@@ -262,6 +274,7 @@ func (a *PersistentCredentialAuthority) FinishRegistration(
 	if err := a.store.RegisterHomeLinkCredential(ctx, record); err != nil {
 		return CredentialVerifier{}, errors.New("store local passkey verifier")
 	}
+	a.knownCredentials[string(record.CredentialID)] = struct{}{}
 	return CredentialVerifier{
 		CredentialID: slices.Clone(verified.credentialID),
 		PublicKey:    slices.Clone(verified.publicKey),
@@ -272,8 +285,9 @@ func (a *PersistentCredentialAuthority) FinishRegistration(
 func (a *PersistentCredentialAuthority) CreateAssertion(
 	ctx context.Context,
 	binding AssertionExpectationBinding,
+	operation ...credentialSiteOperation,
 ) (LocalAssertionChallenge, error) {
-	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteReadLock) {
+	if credentialSiteOperationHeld(operation, a.coordinator, false) {
 		return a.createAssertionSiteLocked(ctx, binding)
 	}
 	a.coordinator.operations.RLock()
@@ -299,6 +313,7 @@ func (a *PersistentCredentialAuthority) createAssertionSiteLocked(
 	if err != nil {
 		return LocalAssertionChallenge{}, errors.New("read local passkey verifier state")
 	}
+	a.rememberCredentialsLocked(active)
 	active = a.filterMemoryBlockedCredentialsLocked(active)
 	if len(active) == 0 {
 		return LocalAssertionChallenge{}, ErrCredentialUnknown
@@ -331,8 +346,9 @@ func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
 	ctx context.Context,
 	expectationID string,
 	assertion PasskeyAssertion,
+	operation ...credentialSiteOperation,
 ) (Principal, AssertionExpectationBinding, error) {
-	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteReadLock) {
+	if credentialSiteOperationHeld(operation, a.coordinator, false) {
 		return a.verifyAndConsumeAssertionSiteLocked(ctx, expectationID, assertion)
 	}
 	a.coordinator.operations.RLock()
@@ -427,6 +443,11 @@ func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
 	nowMS int64,
 ) {
 	a.coordinator.blockCredential(credentialID)
+	emergencyCtx, cancelEmergency := credentialStateContext(requestCtx)
+	_ = a.store.EnsureHomeLinkCredentialEmergencyBlock(
+		emergencyCtx, a.siteID, credentialID, nowMS,
+	)
+	cancelEmergency()
 	ctx, cancel := credentialStateContext(requestCtx)
 	_ = a.store.EnsureHomeLinkCredentialPolicyBlock(
 		ctx, a.siteID, credentialID, nowMS,
@@ -438,16 +459,34 @@ func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
 	if err == nil && record.Status != state.HomeLinkCredentialActive {
 		return
 	}
-	a.blockedCredentials[string(credentialID)] = struct{}{}
+	a.blockCredentialLocked(credentialID)
 }
 
 func (a *PersistentCredentialAuthority) credentialMemoryBlockedLocked(
 	credentialID []byte,
 ) bool {
-	if _, blocked := a.blockedCredentials[string(credentialID)]; blocked {
+	if _, blocked := a.blockedCredentials[string(credentialID)]; blocked ||
+		a.blockedAll {
 		return true
 	}
 	return a.coordinator.credentialBlocked(credentialID)
+}
+
+func (a *PersistentCredentialAuthority) blockCredentialLocked(
+	credentialID []byte,
+) {
+	if a.blockedAll {
+		return
+	}
+	key := string(credentialID)
+	if _, blocked := a.blockedCredentials[key]; blocked {
+		return
+	}
+	if len(a.blockedCredentials) >= maxCredentialProcessBlocks {
+		a.blockedAll = true
+		return
+	}
+	a.blockedCredentials[key] = struct{}{}
 }
 
 func (a *PersistentCredentialAuthority) filterMemoryBlockedCredentialsLocked(
@@ -462,22 +501,79 @@ func (a *PersistentCredentialAuthority) filterMemoryBlockedCredentialsLocked(
 	return filtered
 }
 
+func (a *PersistentCredentialAuthority) rememberCredentialsLocked(
+	records []state.HomeLinkCredentialRecord,
+) {
+	for _, record := range records {
+		a.knownCredentials[string(record.CredentialID)] = struct{}{}
+	}
+}
+
+func (a *PersistentCredentialAuthority) credentialKnownLocked(
+	ctx context.Context,
+	credentialID []byte,
+) (bool, error) {
+	if len(credentialID) == 0 || len(credentialID) > maxCredentialIDBytes {
+		return false, errors.New("credential id is invalid")
+	}
+	if _, known := a.knownCredentials[string(credentialID)]; known {
+		return true, nil
+	}
+	record, err := a.store.HomeLinkCredential(ctx, a.siteID, credentialID)
+	if errors.Is(err, state.ErrHomeLinkCredentialNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	a.knownCredentials[string(record.CredentialID)] = struct{}{}
+	return true, nil
+}
+
 func (a *PersistentCredentialAuthority) RevokeCredential(
 	ctx context.Context,
 	credentialID []byte,
+	operation ...credentialSiteOperation,
 ) error {
-	if credentialSiteLockHeld(ctx, a.coordinator, credentialSiteWriteLock) {
-		return a.revokeCredentialSiteLocked(ctx, credentialID)
+	delegated := credentialSiteOperationHeld(operation, a.coordinator, true)
+	if !delegated {
+		a.coordinator.operations.Lock()
 	}
-	a.coordinator.operations.Lock()
+	a.mu.Lock()
+	known, err := a.credentialKnownLocked(ctx, credentialID)
+	a.mu.Unlock()
+	if err != nil {
+		if !delegated {
+			a.coordinator.operations.Unlock()
+		}
+		return errors.Join(
+			errCredentialUnproven,
+			errors.New("read local passkey credential"),
+		)
+	}
+	if !known {
+		if !delegated {
+			a.coordinator.operations.Unlock()
+		}
+		return ErrCredentialUnknown
+	}
 	a.coordinator.blockCredential(credentialID)
 	dispatches := a.coordinator.credentialDispatches(credentialID)
-	err := a.revokeCredentialSiteLocked(
-		withCredentialSiteLock(ctx, a.coordinator, credentialSiteWriteLock),
-		credentialID,
-	)
+	err = a.revokeCredentialSiteLocked(ctx, credentialID)
+	if delegated {
+		return err
+	}
 	a.coordinator.operations.Unlock()
 	return errors.Join(err, a.coordinator.waitCredentialDispatches(ctx, dispatches))
+}
+
+func credentialSiteOperationHeld(
+	operations []credentialSiteOperation,
+	coordinator *siteCredentialCoordinator,
+	write bool,
+) bool {
+	return len(operations) == 1 && operations[0].coordinator == coordinator &&
+		operations[0].write == write
 }
 
 func (a *PersistentCredentialAuthority) revokeCredentialSiteLocked(

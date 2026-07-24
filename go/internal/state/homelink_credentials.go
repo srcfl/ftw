@@ -12,7 +12,7 @@ import (
 	"io"
 	"math"
 	"os"
-	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -515,11 +515,10 @@ func (s *Store) EnsureHomeLinkCredentialEmergencyBlock(
 
 	s.homeLinkFenceMu.Lock()
 	defer s.homeLinkFenceMu.Unlock()
-	parent, directory, err := s.homeLinkEmergencyBlockRoot(true)
+	directory, err := s.homeLinkEmergencyBlockRoot(true)
 	if err != nil {
 		return err
 	}
-	defer parent.Close()
 	defer directory.Close()
 	if blocked, err := readHomeLinkEmergencyBlock(
 		ctx, directory, name, payload,
@@ -534,9 +533,23 @@ func (s *Store) EnsureHomeLinkCredentialEmergencyBlock(
 		}
 		return fmt.Errorf("create Home Link emergency block: %w", err)
 	}
+	created, statErr := file.Stat()
+	pathInfo, pathErr := directory.Lstat(name)
+	if statErr != nil || pathErr != nil || !os.SameFile(created, pathInfo) ||
+		validateHomeLinkEmergencyInfo(created, false) != nil {
+		file.Close()
+		return errors.New("Home Link emergency block changed during creation")
+	}
 	writeErr := writeFull(file, payload)
 	if writeErr == nil {
 		writeErr = file.Sync()
+	}
+	afterWrite, statErr := file.Stat()
+	afterPath, pathErr := directory.Lstat(name)
+	if writeErr == nil && (statErr != nil || pathErr != nil ||
+		!os.SameFile(created, afterWrite) || !os.SameFile(afterWrite, afterPath) ||
+		validateHomeLinkEmergencyInfo(afterWrite, false) != nil) {
+		writeErr = errors.New("Home Link emergency block changed during write")
 	}
 	closeErr := file.Close()
 	if writeErr != nil {
@@ -564,6 +577,9 @@ func (s *Store) EnsureHomeLinkCredentialEmergencyBlock(
 	if !blocked {
 		return errors.New("Home Link emergency block was not durable")
 	}
+	if err := s.revalidateHomeLinkEmergencyDirectory(directory); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -583,84 +599,148 @@ func (s *Store) homeLinkCredentialEmergencyBlocked(
 
 	s.homeLinkFenceMu.Lock()
 	defer s.homeLinkFenceMu.Unlock()
-	parent, directory, err := s.homeLinkEmergencyBlockRoot(false)
+	directory, err := s.homeLinkEmergencyBlockRoot(false)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	defer parent.Close()
 	defer directory.Close()
-	return readHomeLinkEmergencyBlock(ctx, directory, name, payload)
+	blocked, err := readHomeLinkEmergencyBlock(ctx, directory, name, payload)
+	if err != nil {
+		return false, err
+	}
+	if err := s.revalidateHomeLinkEmergencyDirectory(directory); err != nil {
+		return false, err
+	}
+	return blocked, nil
 }
 
 func (s *Store) homeLinkEmergencyBlockRoot(
 	create bool,
-) (*os.Root, *os.Root, error) {
-	absolute, err := filepath.Abs(s.mainDBPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("resolve Home Link emergency block root: %w", err)
+) (*os.Root, error) {
+	if s.homeLinkFenceRoot == nil || s.homeLinkFenceDBName == "" {
+		return nil, errors.New("Home Link emergency block root is unavailable")
 	}
-	parent, err := os.OpenRoot(filepath.Dir(absolute))
-	if err != nil {
-		return nil, nil, fmt.Errorf("open Home Link emergency block root: %w", err)
-	}
-	directoryName := filepath.Base(absolute) + homeLinkEmergencyBlockSuffix
+	parent := s.homeLinkFenceRoot
+	directoryName := s.homeLinkFenceDBName + homeLinkEmergencyBlockSuffix
 	info, err := parent.Lstat(directoryName)
 	created := false
 	if errors.Is(err, os.ErrNotExist) && create {
-		if err := parent.Mkdir(directoryName, 0o700); err != nil &&
-			!errors.Is(err, os.ErrExist) {
-			parent.Close()
-			return nil, nil, fmt.Errorf("create Home Link emergency block directory: %w", err)
+		if mkdirErr := parent.Mkdir(directoryName, 0o700); mkdirErr != nil &&
+			!errors.Is(mkdirErr, os.ErrExist) {
+			return nil, fmt.Errorf("create Home Link emergency block directory: %w", mkdirErr)
+		} else if mkdirErr == nil {
+			created = true
 		}
-		created = true
 		info, err = parent.Lstat(directoryName)
 	}
 	if err != nil {
-		parent.Close()
-		return nil, nil, err
+		return nil, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
-		parent.Close()
-		return nil, nil, errors.New("Home Link emergency block directory is unsafe")
+	if err := validateHomeLinkEmergencyInfo(info, true); err != nil {
+		return nil, err
 	}
 	if created {
 		parentFile, err := parent.Open(".")
 		if err != nil {
-			parent.Close()
-			return nil, nil, fmt.Errorf("open Home Link emergency block parent: %w", err)
+			return nil, fmt.Errorf("open Home Link emergency block parent: %w", err)
 		}
 		syncErr := parentFile.Sync()
 		closeErr := parentFile.Close()
 		if syncErr != nil {
-			parent.Close()
-			return nil, nil, fmt.Errorf("sync Home Link emergency block parent: %w", syncErr)
+			return nil, fmt.Errorf("sync Home Link emergency block parent: %w", syncErr)
 		}
 		if closeErr != nil {
-			parent.Close()
-			return nil, nil, fmt.Errorf("close Home Link emergency block parent: %w", closeErr)
+			return nil, fmt.Errorf("close Home Link emergency block parent: %w", closeErr)
 		}
 	}
 	directory, err := parent.OpenRoot(directoryName)
 	if err != nil {
-		parent.Close()
-		return nil, nil, fmt.Errorf("open Home Link emergency block directory: %w", err)
+		return nil, fmt.Errorf("open Home Link emergency block directory: %w", err)
 	}
 	opened, err := directory.Stat(".")
-	if err != nil || !os.SameFile(info, opened) {
+	if err != nil || !os.SameFile(info, opened) ||
+		validateHomeLinkEmergencyInfo(opened, true) != nil {
 		directory.Close()
-		parent.Close()
-		return nil, nil, errors.New("Home Link emergency block directory changed")
+		return nil, errors.New("Home Link emergency block directory changed")
 	}
 	after, err := parent.Lstat(directoryName)
 	if err != nil || !os.SameFile(opened, after) {
 		directory.Close()
-		parent.Close()
-		return nil, nil, errors.New("Home Link emergency block directory changed")
+		return nil, errors.New("Home Link emergency block directory changed")
 	}
-	return parent, directory, nil
+	return directory, nil
+}
+
+func (s *Store) revalidateHomeLinkEmergencyDirectory(directory *os.Root) error {
+	opened, err := directory.Stat(".")
+	if err != nil || validateHomeLinkEmergencyInfo(opened, true) != nil {
+		return errors.New("Home Link emergency block directory changed")
+	}
+	after, err := s.homeLinkFenceRoot.Lstat(
+		s.homeLinkFenceDBName + homeLinkEmergencyBlockSuffix,
+	)
+	if err != nil || !os.SameFile(opened, after) {
+		return errors.New("Home Link emergency block directory changed")
+	}
+	return nil
+}
+
+func validateHomeLinkEmergencyInfo(info os.FileInfo, directory bool) error {
+	if info == nil || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("Home Link emergency block path is unsafe")
+	}
+	if directory {
+		if !info.IsDir() || info.Mode().Perm()&0o077 != 0 {
+			return errors.New("Home Link emergency block directory is unsafe")
+		}
+	} else if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 ||
+		info.Size() < 0 ||
+		info.Size() > maxHomeLinkEmergencyBlockBytes {
+		return errors.New("Home Link emergency block is unsafe")
+	}
+	uid, uidErr := homeLinkStatUint(info, "Uid")
+	if os.Geteuid() >= 0 && (uidErr != nil || uid != uint64(os.Geteuid())) {
+		return errors.New("Home Link emergency block owner is unsafe")
+	}
+	links, linkErr := homeLinkStatUint(info, "Nlink")
+	if os.Geteuid() >= 0 && (linkErr != nil || links == 0 || !directory && links != 1) {
+		return errors.New("Home Link emergency block link count is unsafe")
+	}
+	return nil
+}
+
+func homeLinkStatUint(info os.FileInfo, field string) (uint64, error) {
+	value := reflect.ValueOf(info.Sys())
+	if !value.IsValid() {
+		return 0, errors.New("metadata is unavailable")
+	}
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0, errors.New("metadata is unavailable")
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return 0, errors.New("metadata is unavailable")
+	}
+	value = value.FieldByName(field)
+	if !value.IsValid() {
+		return 0, errors.New("metadata is unavailable")
+	}
+	switch value.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return value.Uint(), nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if value.Int() < 0 {
+			return 0, errors.New("metadata is invalid")
+		}
+		return uint64(value.Int()), nil
+	default:
+		return 0, errors.New("metadata is unavailable")
+	}
 }
 
 func homeLinkEmergencyBlockPayload(siteID string, credentialID []byte) []byte {
@@ -686,9 +766,8 @@ func readHomeLinkEmergencyBlock(
 	if err != nil {
 		return false, fmt.Errorf("inspect Home Link emergency block: %w", err)
 	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
-		before.Mode().Perm()&0o077 != 0 ||
-		before.Size() <= 0 || before.Size() > maxHomeLinkEmergencyBlockBytes {
+	if err := validateHomeLinkEmergencyInfo(before, false); err != nil ||
+		before.Size() <= 0 {
 		return false, errors.New("Home Link emergency block is unsafe")
 	}
 	file, err := root.Open(name)
@@ -696,7 +775,8 @@ func readHomeLinkEmergencyBlock(
 		return false, fmt.Errorf("open Home Link emergency block: %w", err)
 	}
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) {
+	if err != nil || !os.SameFile(before, opened) ||
+		validateHomeLinkEmergencyInfo(opened, false) != nil {
 		file.Close()
 		return false, errors.New("Home Link emergency block changed before read")
 	}
@@ -708,7 +788,8 @@ func readHomeLinkEmergencyBlock(
 		return false, fmt.Errorf("read Home Link emergency block: %w", readErr)
 	}
 	if statErr != nil || pathErr != nil || !os.SameFile(opened, afterFD) ||
-		!os.SameFile(afterFD, afterPath) || int64(len(data)) != afterFD.Size() {
+		!os.SameFile(afterFD, afterPath) || int64(len(data)) != afterFD.Size() ||
+		validateHomeLinkEmergencyInfo(afterFD, false) != nil {
 		return false, errors.New("Home Link emergency block changed during read")
 	}
 	if closeErr != nil {
