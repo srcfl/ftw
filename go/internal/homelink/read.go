@@ -72,9 +72,12 @@ func (r ReadRequest) Validate() error {
 
 // VerifyAndDispatchRead validates the request, consumes its exact one-use
 // access grant, resolves one fixed Core GET, and calls Core once. Grant
-// consumption is the dispatch start boundary. A later credential revoke does
-// not cancel that in-flight Core call. The method returns no reusable
-// authorization or target to the untrusted caller.
+// consumption is the dispatch start boundary. The method returns no reusable
+// authorization or target to the untrusted caller. Credential revocation
+// blocks later dispatches, waits only for a bounded time for an in-flight call,
+// and cancels the dispatch context if that wait expires. A revoke called from
+// inside the dispatch is recognized and cancels that call without waiting on
+// itself.
 func (m *GrantManager) VerifyAndDispatchRead(
 	ctx context.Context,
 	token string,
@@ -90,16 +93,23 @@ func (m *GrantManager) VerifyAndDispatchRead(
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	record, err := m.consume(token, request.GatewayID, GrantPurposeAccess, request.Scope)
+	record, dispatchCtx, dispatch, err := m.consumeForDispatch(
+		ctx, token, request.GatewayID, request.Scope,
+	)
 	if err != nil {
 		return err
 	}
+	defer m.coordinator.finishDispatch(dispatch)
 	if err := record.principal.validate(); err != nil {
 		return err
 	}
-	return m.readDispatcher.DispatchRead(
-		ctx, readTargets[request.Scope], request, clonePrincipal(record.principal),
+	err = m.readDispatcher.DispatchRead(
+		dispatchCtx, readTargets[request.Scope], request, clonePrincipal(record.principal),
 	)
+	if err == nil && dispatchCtx.Err() != nil {
+		return dispatchCtx.Err()
+	}
+	return err
 }
 
 func cloneReadRequest(request ReadRequest) ReadRequest {
