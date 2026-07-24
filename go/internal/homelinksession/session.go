@@ -192,15 +192,25 @@ func (s *Session) Encrypt(plaintext []byte) (wire.Sealed, error) {
 	return message, nil
 }
 
-// VerifyAccept checks the site, route and gateway signature that a browser
-// expects before it derives session keys.
-func VerifyAccept(expectedGatewayID, expectedRouteHandle string, accept wire.SessionAccept) error {
+// VerifyAccept checks that an accept belongs to the exact browser hello and
+// gateway that the browser expects before it derives session keys.
+func VerifyAccept(
+	expectedGatewayID string,
+	hello wire.SessionHello,
+	now time.Time,
+	accept wire.SessionAccept,
+) error {
 	normalized, err := gatewayidentity.NormalizeGatewayID(expectedGatewayID)
 	if err != nil || normalized != expectedGatewayID || accept.GatewayID != expectedGatewayID {
 		return errors.New("Home Link session gateway is invalid")
 	}
-	if accept.RouteHandle != expectedRouteHandle {
-		return errors.New("Home Link session route is invalid")
+	helloData, err := wire.Encode(hello, wire.MaxHandshakeBytes)
+	if err != nil {
+		return err
+	}
+	decodedHello, _, err := wire.DecodeSessionHello(helloData)
+	if err != nil {
+		return err
 	}
 	data, err := wire.Encode(accept, wire.MaxHandshakeBytes)
 	if err != nil {
@@ -209,6 +219,19 @@ func VerifyAccept(expectedGatewayID, expectedRouteHandle string, accept wire.Ses
 	decoded, _, publicKey, signature, err := wire.DecodeSessionAccept(data)
 	if err != nil {
 		return err
+	}
+	if decoded.ConnectionID != decodedHello.ConnectionID ||
+		decoded.RouteGeneration != decodedHello.RouteGeneration ||
+		decoded.RouteHandle != decodedHello.RouteHandle ||
+		decoded.StreamID != decodedHello.StreamID ||
+		decoded.BrowserKey != decodedHello.BrowserKey ||
+		decoded.BrowserNonce != decodedHello.BrowserNonce {
+		return errors.New("Home Link session accept does not match browser hello")
+	}
+	expiresAt := time.UnixMilli(decoded.ExpiresAtMS)
+	if now.IsZero() || !now.Before(expiresAt) ||
+		expiresAt.After(now.Add(MaxSessionLifetime)) {
+		return errors.New("Home Link session expiry is invalid")
 	}
 	transcript, err := wire.SessionAcceptMessage(decoded)
 	if err != nil {

@@ -354,7 +354,7 @@ func (s *Server) waitForConfirmation(
 	confirmDeadline, sessionDeadline time.Time,
 ) bool {
 	if stream.confirmedBefore(confirmDeadline) {
-		return true
+		return s.finishConfirmation(stream, confirmDeadline, sessionDeadline)
 	}
 	remaining := confirmDeadline.Sub(s.now())
 	if remaining <= 0 {
@@ -362,21 +362,40 @@ func (s *Server) waitForConfirmation(
 	}
 	timer := time.NewTimer(remaining)
 	defer timer.Stop()
-	select {
-	case <-stream.confirmedC:
-		if !stream.confirmedBefore(confirmDeadline) {
-			return false
-		}
-		next := s.now().Add(browserIdle)
-		if sessionDeadline.Before(next) {
-			next = sessionDeadline
-		}
-		return stream.conn.SetReadDeadline(next) == nil
-	case <-stream.done:
-		return false
-	case <-timer.C:
+	if !waitForConfirmationSignal(stream, confirmDeadline, timer.C) {
 		return false
 	}
+	return s.finishConfirmation(stream, confirmDeadline, sessionDeadline)
+}
+
+func waitForConfirmationSignal(
+	stream *browserStream,
+	confirmDeadline time.Time,
+	timer <-chan time.Time,
+) bool {
+	select {
+	case <-stream.confirmedC:
+	case <-stream.done:
+		return false
+	case <-timer:
+	}
+	// The timer and confirmation can become ready together. The timestamp
+	// recorded under the stream lock decides which event happened in time.
+	return stream.confirmedBefore(confirmDeadline)
+}
+
+func (s *Server) finishConfirmation(
+	stream *browserStream,
+	confirmDeadline, sessionDeadline time.Time,
+) bool {
+	if !stream.confirmedBefore(confirmDeadline) {
+		return false
+	}
+	next := s.now().Add(browserIdle)
+	if sessionDeadline.Before(next) {
+		next = sessionDeadline
+	}
+	return stream.conn.SetReadDeadline(next) == nil
 }
 
 func (r *gatewayRoute) readGateway() {

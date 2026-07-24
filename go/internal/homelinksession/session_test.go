@@ -89,9 +89,10 @@ func TestSessionHandshakeSignatureAndBidirectionalEncryption(t *testing.T) {
 	}
 }
 
-func TestVerifyAcceptRejectsCrossSiteAndSignatureMutation(t *testing.T) {
+func TestVerifyAcceptRejectsWrongGatewayHelloExpiryAndSignatureMutation(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
 	identity := newSessionTestIdentity(t)
-	manager, err := NewManager(identity)
+	manager, err := newManager(identity, rand.Reader, func() time.Time { return now })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,17 +101,73 @@ func TestVerifyAcceptRejectsCrossSiteAndSignatureMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyAccept(identity.GatewayID(), hello.RouteHandle, accept); err != nil {
+	if err := VerifyAccept(identity.GatewayID(), hello, now, accept); err != nil {
 		t.Fatalf("valid accept = %v", err)
 	}
-	if err := VerifyAccept("0123aabbcc01ddeeff", hello.RouteHandle, accept); err == nil {
+	if err := VerifyAccept("0123aabbcc01ddeeff", hello, now, accept); err == nil {
 		t.Fatal("cross-site accept was accepted")
 	}
 	tampered := accept
 	tampered.GatewayID = "0123aabbcc01ddeeff"
-	if err := VerifyAccept(tampered.GatewayID, hello.RouteHandle, tampered); err == nil {
+	if err := VerifyAccept(tampered.GatewayID, hello, now, tampered); err == nil {
 		t.Fatal("unsigned gateway mutation was accepted")
 	}
+
+	otherPrivate, otherHello := newBrowserHello(t, identity)
+	_ = otherPrivate
+	otherHello.ConnectionID = rawURL(wire.ConnectionIDBytes, 14)
+	otherHello.StreamID = rawURL(wire.StreamIDBytes, 15)
+	otherHello.BrowserNonce = rawURL(wire.SessionNonceBytes, 16)
+	for name, mutate := range map[string]func(*wire.SessionAccept){
+		"connection": func(value *wire.SessionAccept) {
+			value.ConnectionID = otherHello.ConnectionID
+		},
+		"route generation": func(value *wire.SessionAccept) {
+			value.RouteGeneration++
+		},
+		"stream": func(value *wire.SessionAccept) {
+			value.StreamID = otherHello.StreamID
+		},
+		"browser key": func(value *wire.SessionAccept) {
+			value.BrowserKey = otherHello.BrowserKey
+		},
+		"browser nonce": func(value *wire.SessionAccept) {
+			value.BrowserNonce = otherHello.BrowserNonce
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			substituted := accept
+			mutate(&substituted)
+			signSessionAccept(t, identity, &substituted)
+			if err := VerifyAccept(identity.GatewayID(), hello, now, substituted); err == nil {
+				t.Fatal("re-signed accept for another hello was accepted")
+			}
+		})
+	}
+
+	if err := VerifyAccept(identity.GatewayID(), hello,
+		time.UnixMilli(accept.ExpiresAtMS), accept); err == nil {
+		t.Fatal("expired accept was accepted")
+	}
+	future := accept
+	future.ExpiresAtMS = now.Add(MaxSessionLifetime + time.Millisecond).UnixMilli()
+	signSessionAccept(t, identity, &future)
+	if err := VerifyAccept(identity.GatewayID(), hello, now, future); err == nil {
+		t.Fatal("accept with excessive lifetime was accepted")
+	}
+}
+
+func signSessionAccept(t *testing.T, identity sessionTestIdentity, accept *wire.SessionAccept) {
+	t.Helper()
+	transcript, err := wire.SessionAcceptMessage(*accept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := identity.Sign(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept.Signature = base64.RawURLEncoding.EncodeToString(signature)
 }
 
 func TestEncryptHonorsExactWireFrameBoundaryWithoutAdvancingSequence(t *testing.T) {

@@ -397,6 +397,27 @@ func TestRelayConfirmedSessionSurvivesOldConfirmationDeadline(t *testing.T) {
 	}
 }
 
+func TestConfirmationRecordedBeforeDeadlineWinsTimerSelection(t *testing.T) {
+	deadline := time.Unix(1_800_000_000, 0)
+	for i := 0; i < 1000; i++ {
+		stream := &browserStream{
+			acceptSeen: true,
+			browserSeq: 1,
+			gatewaySeq: 1,
+			confirmedC: make(chan struct{}),
+			done:       make(chan struct{}),
+		}
+		if !stream.markConfirmed(deadline.Add(-time.Nanosecond)) {
+			t.Fatal("mark confirmation")
+		}
+		timer := make(chan time.Time, 1)
+		timer <- deadline
+		if !waitForConfirmationSignal(stream, deadline, timer) {
+			t.Fatalf("recorded confirmation lost to ready timer at iteration %d", i)
+		}
+	}
+}
+
 func newRelayTestServer(t *testing.T, identity relayTestIdentity) *httptest.Server {
 	t.Helper()
 	invites, err := NewStaticInvites([]StaticInvite{{
