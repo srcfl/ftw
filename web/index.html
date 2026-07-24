@@ -163,17 +163,23 @@
           <h2 id="power-now-title">Power now</h2>
         </div>
         <div class="power-now-tabs" role="tablist" aria-label="Power now view">
-          <button id="power-now-tab-values" type="button" role="tab"
-                  data-power-now-mode="values" aria-controls="power-now-values"
-                  aria-selected="true">Values</button>
           <button id="power-now-tab-flow" type="button" role="tab"
                   data-power-now-mode="flow" aria-controls="power-now-flow"
-                  aria-selected="false" tabindex="-1">Flow</button>
+                  aria-selected="true">Flow</button>
+          <button id="power-now-tab-values" type="button" role="tab"
+                  data-power-now-mode="values" aria-controls="power-now-values"
+                  aria-selected="false" tabindex="-1">Values</button>
         </div>
       </div>
 
+      <div id="power-now-flow" class="power-now-panel flow-hero" role="tabpanel"
+           aria-labelledby="power-now-tab-flow">
+        <ftw-energy-flow id="energy-flow" embedded pv="0" grid="0" battery="0"
+                         load="0" ev="0" soc="0"></ftw-energy-flow>
+      </div>
+
       <div id="power-now-values" class="power-now-panel" role="tabpanel"
-           aria-labelledby="power-now-tab-values">
+           aria-labelledby="power-now-tab-values" hidden>
         <div class="summary-cards">
           <div class="summary-card" id="card-pv">
             <div class="card-label">Solar</div>
@@ -204,12 +210,6 @@
             <div class="card-sub" id="card-ev-sub">charger</div>
           </div>
         </div>
-      </div>
-
-      <div id="power-now-flow" class="power-now-panel flow-hero" role="tabpanel"
-           aria-labelledby="power-now-tab-flow" hidden>
-        <ftw-energy-flow id="energy-flow" embedded pv="0" grid="0" battery="0"
-                         load="0" ev="0" soc="0"></ftw-energy-flow>
       </div>
     </section>
 

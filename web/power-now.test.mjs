@@ -91,7 +91,7 @@ function fixture() {
         return elements.get(id) || null;
       },
       querySelectorAll(selector) {
-        return selector === "[data-power-now-mode]" ? [valuesTab, flowTab] : [];
+        return selector === "[data-power-now-mode]" ? [flowTab, valuesTab] : [];
       },
     },
     valuesTab,
@@ -104,12 +104,12 @@ function fixture() {
 describe("Power now preference compatibility", () => {
   it("maps legacy and current stored values to the two visible modes", () => {
     for (const [stored, expected] of [
-      [null, "values"],
+      [null, "flow"],
       ["numbers", "values"],
       ["values", "values"],
       ["hero", "flow"],
       ["flow", "flow"],
-      ["corrupt", "values"],
+      ["corrupt", "flow"],
     ]) {
       assert.equal(normalizePowerNowMode(stored), expected);
     }
@@ -151,7 +151,7 @@ describe("Power now controller", () => {
     cleanup();
   });
 
-  it("defaults to Values and remains interactive when storage is unavailable", () => {
+  it("defaults to Flow and remains interactive when storage is unavailable", () => {
     const ui = fixture();
     const storage = {
       getItem() {
@@ -164,15 +164,15 @@ describe("Power now controller", () => {
 
     initPowerNow(ui.root, storage);
 
-    assert.equal(ui.valuesTab.getAttribute("aria-selected"), "true");
-    assert.equal(ui.valuesPanel.hidden, false);
-    assert.equal(ui.flowPanel.hidden, true);
-
-    const event = ui.valuesTab.dispatch("keydown", { key: "ArrowRight" });
-
-    assert.equal(event.defaultPrevented, true);
-    assert.equal(ui.flowTab.focused, true);
     assert.equal(ui.flowTab.getAttribute("aria-selected"), "true");
     assert.equal(ui.flowPanel.hidden, false);
+    assert.equal(ui.valuesPanel.hidden, true);
+
+    const event = ui.flowTab.dispatch("keydown", { key: "ArrowRight" });
+
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(ui.valuesTab.focused, true);
+    assert.equal(ui.valuesTab.getAttribute("aria-selected"), "true");
+    assert.equal(ui.valuesPanel.hidden, false);
   });
 });

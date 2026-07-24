@@ -1,8 +1,10 @@
 const STORAGE_KEY = "ftw-hero-mode";
-const MODES = ["values", "flow"];
+const MODES = ["flow", "values"];
 
 export function normalizePowerNowMode(storedValue) {
-  return storedValue === "hero" || storedValue === "flow" ? "flow" : "values";
+  return storedValue === "numbers" || storedValue === "values"
+    ? "values"
+    : "flow";
 }
 
 export function storedPowerNowMode(mode) {
@@ -36,7 +38,7 @@ export function initPowerNow(root = document, storage = null) {
   }
 
   const apply = (requestedMode, { persist = true, focus = false } = {}) => {
-    const mode = MODES.includes(requestedMode) ? requestedMode : "values";
+    const mode = MODES.includes(requestedMode) ? requestedMode : "flow";
     tabs.forEach((tab) => {
       const selected = tab.dataset.powerNowMode === mode;
       tab.setAttribute("aria-selected", selected ? "true" : "false");

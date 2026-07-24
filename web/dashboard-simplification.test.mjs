@@ -44,18 +44,32 @@ describe("simplified dashboard overview", () => {
     }
   });
 
-  it("offers accessible Values and Flow panels around the existing diagram", () => {
+  it("offers accessible Flow and Values panels around the existing diagram", () => {
     assert.match(overview, /role="tablist" aria-label="Power now view"/);
-    assert.match(
-      overview,
-      /id="power-now-tab-values"[\s\S]*?data-power-now-mode="values"[\s\S]*?aria-controls="power-now-values"/,
-    );
     assert.match(
       overview,
       /id="power-now-tab-flow"[\s\S]*?data-power-now-mode="flow"[\s\S]*?aria-controls="power-now-flow"/,
     );
-    assert.match(overview, /id="power-now-values"[^>]*role="tabpanel"/);
-    assert.match(overview, /id="power-now-flow"[^>]*role="tabpanel"[^>]*hidden/);
+    assert.match(
+      overview,
+      /id="power-now-tab-values"[\s\S]*?data-power-now-mode="values"[\s\S]*?aria-controls="power-now-values"/,
+    );
+    assert.ok(
+      overview.indexOf('id="power-now-tab-flow"') <
+        overview.indexOf('id="power-now-tab-values"'),
+    );
+    assert.match(
+      overview,
+      /id="power-now-tab-flow"[^>]*aria-selected="true"/,
+    );
+    assert.match(
+      overview,
+      /id="power-now-flow"[^>]*role="tabpanel"(?![^>]*hidden)/,
+    );
+    assert.match(
+      overview,
+      /id="power-now-values"[^>]*role="tabpanel"[^>]*hidden/,
+    );
     assert.match(overview, /<ftw-energy-flow id="energy-flow"[^>]*embedded/);
     assert.match(flow, /:host\(\[embedded\]\) \.title/);
   });
