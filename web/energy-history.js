@@ -19,6 +19,19 @@
     vehicle_charge: '#06b6d4', vehicle_discharge: '#14b8a6'
   };
 
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942'
+        };
+  }
+
   function escapeHtml(value) {
     return String(value).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -100,18 +113,19 @@
     var ctx = canvas.getContext('2d');
     ctx.scale(ratio, ratio);
     ctx.clearRect(0, 0, width, height);
+    var C = canvasColors();
 
     var legend = document.getElementById('energy-history-legend');
     var flows = Array.from(new Set(points.map(function (point) { return point.flow; }))).sort();
     if (legend) {
       legend.innerHTML = flows.map(function (flow) {
-        var color = flowColor[flow] || '#94a3b8';
+        var color = flowColor[flow] || C.muted;
         return '<span><i style="background:' + color + '"></i>' +
           escapeHtml(flowLabel[flow] || flow) + '</span>';
       }).join('');
     }
     if (!points.length) {
-      ctx.fillStyle = '#94a3b8';
+      ctx.fillStyle = C.muted;
       ctx.font = '13px system-ui, sans-serif';
       ctx.fillText('No energy recorded in this range.', 16, 28);
       return;
@@ -127,8 +141,8 @@
       return Math.max(0, Number(point.energy_wh) || 0);
     }));
     maxWh = Math.max(1, maxWh);
-    var textColor = getComputedStyle(document.documentElement).getPropertyValue('--text-dim').trim() || '#94a3b8';
-    var borderColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#334155';
+    var textColor = C.dim;
+    var borderColor = C.line;
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillStyle = textColor;
     ctx.strokeStyle = borderColor;
@@ -153,7 +167,7 @@
       points.forEach(function (point) {
         if (point.flow === flow) byTime.set(Number(point.bucket_start_ms), Math.max(0, Number(point.energy_wh) || 0));
       });
-      ctx.strokeStyle = flowColor[flow] || '#94a3b8';
+      ctx.strokeStyle = flowColor[flow] || C.muted;
       ctx.lineWidth = 2;
       ctx.beginPath();
       var drawing = false;
@@ -169,7 +183,7 @@
         drawing = true;
       });
       ctx.stroke();
-      ctx.fillStyle = flowColor[flow] || '#94a3b8';
+      ctx.fillStyle = flowColor[flow] || C.muted;
       byTime.forEach(function (value, time) {
         ctx.beginPath();
         ctx.arc(xFor(timeIndex.get(time)), yFor(value), 3, 0, Math.PI * 2);
@@ -212,6 +226,9 @@
   var refresh = document.getElementById('energy-history-refresh');
   if (refresh) refresh.addEventListener('click', load);
   window.addEventListener('resize', function () {
+    if (lastData) drawChart(lastData);
+  });
+  window.addEventListener('ftw-theme-change', function () {
     if (lastData) drawChart(lastData);
   });
 })();

@@ -49,6 +49,7 @@
     }
   }
   </script>
+  <script type="module" src="/theme-runtime.js?v=theme1"></script>
   <script type="module" src="/components/index.js?v=histwrap7"></script>
 </head>
 <body class="ftw-app">
@@ -967,6 +968,9 @@
       function iconFor(t) { return t === 'light' ? '\u263E' /* ☾ */ : '\u2600' /* ☀ */; }
       function apply(theme) {
         root.setAttribute('data-theme', theme);
+        window.dispatchEvent(new CustomEvent("ftw-theme-change", {
+          detail: { theme: theme },
+        }));
         if (btn) {
           btn.textContent = iconFor(theme);
           btn.title = 'Switch to ' + (theme === 'light' ? 'dark' : 'light') + ' theme';

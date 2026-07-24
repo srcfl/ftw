@@ -13,6 +13,19 @@ import { derivePlanBrief } from "./plan-brief.js";
     return fetch(path, opts);
   }
 
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942',
+        };
+  }
+
   function escapeHTML(value) {
     return String(value)
       .replace(/&/g, '&amp;')
@@ -210,6 +223,7 @@ import { derivePlanBrief } from "./plan-brief.js";
     canvas.style.height = cssH + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+    const C = canvasColors();
 
     const pad = { l: 44, r: 44, t: 16, b: 28 };
     const plotW = cssW - pad.l - pad.r;
@@ -268,9 +282,9 @@ import { derivePlanBrief } from "./plan-brief.js";
     const socY = p => socY0 + socH - (p / 100) * socH;
 
     // ---- Grid ticks (hours) ----
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
-    ctx.fillStyle = 'rgba(255,255,255,0.45)';
+    ctx.fillStyle = C.dim;
     ctx.font = '11px system-ui, sans-serif';
     ctx.textAlign = 'center';
     const tickStep = chartTickStepMs(tMin, tMax);
@@ -418,7 +432,7 @@ import { derivePlanBrief } from "./plan-brief.js";
       });
     }
     // Price axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText(priceMax.toFixed(0) + ' öre', pad.l - 6, priceY0 + 10);
     ctx.fillText(priceMin.toFixed(0), pad.l - 6, priceY0 + priceH);
@@ -509,13 +523,13 @@ import { derivePlanBrief } from "./plan-brief.js";
     }
 
     // Power zero-line
-    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, powerYCenter);
     ctx.lineTo(pad.l + plotW, powerYCenter);
     ctx.stroke();
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = C.dim;
     ctx.textAlign = 'right';
     ctx.fillText('+' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(pMagMax) + 4);
     ctx.fillText('−' + (pMagMax / 1000).toFixed(1) + 'kW', pad.l - 6, powerY(-pMagMax) + 4);
@@ -524,7 +538,7 @@ import { derivePlanBrief } from "./plan-brief.js";
     // to remember that positive means "into the site". Placed just below
     // the heading at lower opacity to read as a subtitle.
     ctx.fillText('Power', pad.l + 4, powerY0 + 12);
-    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillStyle = C.muted;
     ctx.font = '9px system-ui, sans-serif';
     ctx.fillText('+ import / charge   − export / discharge', pad.l + 40, powerY0 + 12);
     ctx.font = '11px system-ui, sans-serif';
@@ -548,7 +562,7 @@ import { derivePlanBrief } from "./plan-brief.js";
         ctx.fillStyle = color;
         ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.45)';
+      ctx.fillStyle = C.dim;
       ctx.font = '9px system-ui, sans-serif';
       ctx.textAlign = 'left';
       ctx.fillText('Battery', pad.l + 4, modeBandY0 + modeBandH - 2);
@@ -586,7 +600,7 @@ import { derivePlanBrief } from "./plan-brief.js";
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
       // in whitespace.
-      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillStyle = C.dim;
       ctx.textAlign = 'right';
       ctx.fillText('100%', cssW - pad.r - 4, socY(100) + 4);
       ctx.fillText('0%',   cssW - pad.r - 4, socY(0)   + 4);
@@ -720,8 +734,8 @@ import { derivePlanBrief } from "./plan-brief.js";
       hoverLine.id = 'plan-hover-line';
       hoverLine.style.cssText =
         'position:absolute;top:0;width:1px;height:100%;' +
-        'background:rgba(255,255,255,0.3);' +
-        'border-left:1px dashed rgba(255,255,255,0.45);' +
+        'background:var(--line);' +
+        'border-left:1px dashed var(--fg-muted);' +
         'pointer-events:none;display:none;z-index:2';
       const host = canvas.parentElement;
       if (host) {
@@ -929,6 +943,7 @@ import { derivePlanBrief } from "./plan-brief.js";
     setInterval(fetchAll, PLAN_REFRESH_MS);
     setInterval(renderStrategyHint, 5000);
     window.addEventListener('resize', render);
+    window.addEventListener('ftw-theme-change', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
     // Horizon toggle wiring. Each click flips state.horizon, persists

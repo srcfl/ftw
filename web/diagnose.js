@@ -19,6 +19,19 @@
     return fetch(path, opts);
   }
 
+  function canvasColors() {
+    return window.ftwThemeColors
+      ? window.ftwThemeColors.palette()
+      : {
+          text: '#e8e8e8',
+          dim: '#a0a0a0',
+          muted: '#858585',
+          line: '#2a2a2a',
+          panel: '#161616',
+          accent: '#f5b942',
+        };
+  }
+
   // ---- Destination layout + routing ----
   const VIEW_NAMES = ['overview', 'energy', 'plan', 'history', 'more'];
 
@@ -418,6 +431,7 @@
     const ctx = canvas.getContext('2d');
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
+    const C = canvasColors();
 
     const pad = { t: 16, r: 40, b: 24, l: 44 };
     const plotW = cssW - pad.l - pad.r;
@@ -449,9 +463,12 @@
     });
 
     // Background bands
-    ctx.fillStyle = 'rgba(255,255,255,0.02)';
+    ctx.save();
+    ctx.globalAlpha = 0.03;
+    ctx.fillStyle = C.text;
     ctx.fillRect(pad.l, priceY0, plotW, priceH);
     ctx.fillRect(pad.l, socY0, plotW, socH);
+    ctx.restore();
 
     // Price bars — green cheap, red expensive (relative to horizon mean)
     const priceMean = slots.reduce((a, s) => a + s.price_ore, 0) / nSlots;
@@ -469,7 +486,7 @@
 
     // Power zero line
     const powerMidY = powerY0 + powerH / 2;
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, powerMidY);
@@ -534,7 +551,7 @@
     ctx.stroke();
 
     // Y-axis labels
-    ctx.fillStyle = '#94a3b8';
+    ctx.fillStyle = C.dim;
     ctx.font = '10px system-ui, -apple-system, sans-serif';
     ctx.textAlign = 'right';
     ctx.fillText(maxPrice.toFixed(0) + 'ö', pad.l - 4, priceY0 + 10);
@@ -584,6 +601,9 @@
 
   // ---- Boot ----
   // Build the destination layout before first paint and keep deep links.
+  window.addEventListener('ftw-theme-change', function () {
+    if (state.detail) drawChart(state.detail);
+  });
   organizeDestinations();
   applyHash();
 })();

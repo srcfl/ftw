@@ -190,3 +190,18 @@ describe("component fallback palette", () => {
     );
   });
 });
+
+describe("canvas theme integration", () => {
+  it("loads the resolver and redraws themed canvases", () => {
+    assert.match(html, /src="\/theme-runtime\.js\?v=theme1"/);
+    assert.match(
+      html,
+      /new CustomEvent\("ftw-theme-change"[\s\S]*?theme:\s*theme/,
+    );
+    for (const path of ["energy-history.js", "diagnose.js", "plan.js"]) {
+      const source = read(path);
+      assert.match(source, /ftwThemeColors/, path);
+      assert.match(source, /ftw-theme-change/, path);
+    }
+  });
+});
