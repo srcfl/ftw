@@ -2491,6 +2491,10 @@ func main() {
 			}
 
 			if !freshness.Allowed() {
+				sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
+				if err != nil {
+					slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
+				}
 				continue
 			}
 
@@ -2725,15 +2729,9 @@ func main() {
 			// ---- Persist the tick: history snapshot + flushed metrics ----
 			// One transaction for both — separate commits doubled the WAL
 			// commit rate for no isolation benefit (SD-card wear).
-			hp := buildHistoryPoint(tel, ctrl, nowMs)
-			samples := tel.FlushSamples()
-			stSamples := make([]state.Sample, len(samples))
-			for i, sm := range samples {
-				stSamples[i] = state.Sample{Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs, Value: sm.Value, Unit: sm.Unit}
-			}
-			energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
-			if err := st.RecordTickWithEnergy(hp, stSamples, energyObservations); err != nil {
-				slog.Warn("tick persistence failed", "samples", len(samples), "err", err)
+			sampleCount, err := persistTelemetryTick(st, tel, ctrl, nowMs, watchdogTimeout)
+			if err != nil {
+				slog.Warn("tick persistence failed", "samples", sampleCount, "err", err)
 			}
 
 			// ---- Periodic battery-model persistence (every 12 cycles ≈ 60s) ----
@@ -3575,17 +3573,87 @@ func isConfigMissing(err error) bool {
 	return strings.Contains(err.Error(), "no such file")
 }
 
-func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) state.HistoryPoint {
-	gridW := 0.0
-	if r := tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter); r != nil {
-		gridW = r.SmoothedW
+func persistTelemetryTick(st *state.Store, tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration) (int, error) {
+	hp, historyAvailable := buildHistoryPoint(tel, ctrl, nowMs, historyMaxAge)
+	samples := tel.FlushSamples()
+	stSamples := make([]state.Sample, len(samples))
+	for i, sm := range samples {
+		stSamples[i] = state.Sample{
+			Driver: sm.Driver, Metric: sm.Metric, TsMs: sm.TsMs,
+			Value: sm.Value, Unit: sm.Unit,
+		}
 	}
+	energyObservations := buildEnergyObservations(st, tel, ctrl, hp)
+	filtered := energyObservations[:0]
+	for _, observation := range energyObservations {
+		if !historyAvailable && (observation.AssetKind == state.AssetGridMeter ||
+			observation.AssetKind == state.AssetObservedConsumer) {
+			continue
+		}
+		if observation.AssetKind != state.AssetObservedConsumer {
+			h := tel.DriverHealth(observation.Label)
+			maxAge := historyMaxAge
+			if h == nil || h.Status == telemetry.StatusOffline {
+				continue
+			}
+			if h.WatchdogTimeoutOverride > 0 {
+				maxAge = h.WatchdogTimeoutOverride
+			}
+			if maxAge > 0 && time.UnixMilli(nowMs).Sub(time.UnixMilli(observation.AtMs)) > maxAge {
+				continue
+			}
+		}
+		filtered = append(filtered, observation)
+	}
+	energyObservations = filtered
+	var historyPoint *state.HistoryPoint
+	if historyAvailable {
+		historyPoint = &hp
+	}
+	return len(samples), st.RecordTickWithOptionalHistory(historyPoint, stSamples, energyObservations)
+}
+
+func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64, historyMaxAge time.Duration) (state.HistoryPoint, bool) {
+	unavailable := state.HistoryPoint{TsMs: nowMs}
+	if tel == nil || ctrl == nil || ctrl.SiteMeterDriver == "" {
+		return unavailable, false
+	}
+	meterHealth := tel.DriverHealth(ctrl.SiteMeterDriver)
+	if meterHealth == nil || meterHealth.Status == telemetry.StatusOffline {
+		return unavailable, false
+	}
+	meter := tel.Get(ctrl.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
+		return unavailable, false
+	}
+	if historyMaxAge > 0 && time.UnixMilli(nowMs).Sub(meter.UpdatedAt) > historyMaxAge {
+		return unavailable, false
+	}
+	now := time.UnixMilli(nowMs)
+	readingUsable := func(driver string, updatedAt time.Time) bool {
+		h := tel.DriverHealth(driver)
+		if h == nil || h.Status == telemetry.StatusOffline {
+			return false
+		}
+		maxAge := historyMaxAge
+		if h.WatchdogTimeoutOverride > 0 {
+			maxAge = h.WatchdogTimeoutOverride
+		}
+		return maxAge <= 0 || now.Sub(updatedAt) <= maxAge
+	}
+	gridW := meter.SmoothedW
 	var pvW, batW, sumSoC float64
 	var socCount int
 	for _, r := range tel.ReadingsByType(telemetry.DerPV) {
+		if !readingUsable(r.Driver, r.UpdatedAt) {
+			continue
+		}
 		pvW += r.SmoothedW
 	}
 	for _, r := range tel.ReadingsByType(telemetry.DerBattery) {
+		if !readingUsable(r.Driver, r.UpdatedAt) {
+			continue
+		}
 		batW += r.SmoothedW
 		if r.SoC != nil {
 			sumSoC += *r.SoC
@@ -3596,8 +3664,23 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	if socCount > 0 {
 		avgSoC = sumSoC / float64(socCount)
 	}
-	evW := tel.SumOnlineEVW()
-	v2xW := tel.SumOnlineV2XW()
+	var evW, v2xW float64
+	for _, r := range tel.ReadingsByType(telemetry.DerEV) {
+		if readingUsable(r.Driver, r.UpdatedAt) {
+			evW += r.SmoothedW
+		}
+	}
+	for _, r := range tel.ReadingsByType(telemetry.DerV2X) {
+		if readingUsable(r.Driver, r.UpdatedAt) {
+			v2xW += r.SmoothedW
+		}
+	}
+	if evW > -1 && evW < 1 {
+		evW = 0
+	}
+	if v2xW > -1 && v2xW < 1 {
+		v2xW = 0
+	}
 	loadW := gridW - batW - pvW - evW - v2xW
 	if loadW < 0 {
 		loadW = 0
@@ -3607,18 +3690,21 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	// schema-less by design — UI code reads what it understands and
 	// ignores the rest, so drivers can add fields without a migration.
 	perDriver := make(map[string]map[string]float64)
-	for name, h := range tel.AllHealth() {
+	for name := range tel.AllHealth() {
 		row := map[string]float64{}
-		if r := tel.Get(name, telemetry.DerBattery); r != nil {
+		if r := tel.Get(name, telemetry.DerBattery); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["bat_w"] = r.SmoothedW
 			if r.SoC != nil {
 				row["soc"] = *r.SoC
 			}
 		}
-		if r := tel.Get(name, telemetry.DerPV); r != nil {
+		if r := tel.Get(name, telemetry.DerPV); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["pv_w"] = r.SmoothedW
 		}
-		if r := tel.Get(name, telemetry.DerMeter); r != nil {
+		if r := tel.Get(name, telemetry.DerMeter); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["meter_w"] = r.SmoothedW
 		}
 		// EV charge power: required for the live chart's EV series
@@ -3626,16 +3712,17 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 		// Without it the chart's EV trace is always zero — the in-memory
 		// /api/status DOES carry ev_w, but history rows never did until
 		// this row was added.
-		if r := tel.Get(name, telemetry.DerEV); r != nil {
+		if r := tel.Get(name, telemetry.DerEV); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["ev_w"] = r.SmoothedW
 		}
-		if r := tel.Get(name, telemetry.DerV2X); r != nil {
+		if r := tel.Get(name, telemetry.DerV2X); r != nil &&
+			readingUsable(name, r.UpdatedAt) {
 			row["v2x_w"] = r.SmoothedW
 			if r.SoC != nil {
 				row["v2x_vehicle_soc"] = *r.SoC
 			}
 		}
-		_ = h
 		perDriver[name] = row
 	}
 	targets := make(map[string]float64)
@@ -3652,7 +3739,7 @@ func buildHistoryPoint(tel *telemetry.Store, ctrl *control.State, nowMs int64) s
 	return state.HistoryPoint{
 		TsMs: nowMs, GridW: gridW, PVW: pvW, BatW: batW, LoadW: loadW, BatSoC: avgSoC,
 		JSON: string(jsonBlob),
-	}
+	}, true
 }
 
 func restoreLatestMPCDiagnostic(st *state.Store, svc *mpc.Service, now time.Time) {

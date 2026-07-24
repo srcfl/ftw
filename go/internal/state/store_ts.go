@@ -215,6 +215,13 @@ func (s *Store) RecordTick(p HistoryPoint, samples []Sample) error {
 // RecordTickWithEnergy persists legacy history, long-format samples, and the
 // versioned energy ledger in one transaction.
 func (s *Store) RecordTickWithEnergy(p HistoryPoint, samples []Sample, observations []EnergyObservation) error {
+	return s.RecordTickWithOptionalHistory(&p, samples, observations)
+}
+
+// RecordTickWithOptionalHistory persists long-format samples and energy
+// observations, and writes legacy history only when p is non-nil. All selected
+// writes share one transaction.
+func (s *Store) RecordTickWithOptionalHistory(p *HistoryPoint, samples []Sample, observations []EnergyObservation) error {
 	if err := s.hydrateIntern(); err != nil {
 		return err
 	}
@@ -241,12 +248,14 @@ func (s *Store) RecordTickWithEnergy(p HistoryPoint, samples []Sample, observati
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(
-		`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
-	); err != nil {
-		return err
+	if p != nil {
+		if _, err := tx.Exec(
+			`INSERT OR REPLACE INTO history_hot (ts_ms, grid_w, pv_w, bat_w, load_w, bat_soc, json)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			p.TsMs, p.GridW, p.PVW, p.BatW, p.LoadW, p.BatSoC, p.JSON,
+		); err != nil {
+			return err
+		}
 	}
 	if len(rs) > 0 {
 		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO ts_samples (driver_id, metric_id, ts_ms, value) VALUES (?, ?, ?, ?)`)
