@@ -65,6 +65,14 @@ describe("terminal-native light DOM chrome", () => {
     assert.equal((html.match(/class="header-logo"/g) || []).length, 1);
     assert.match(html, /<img[^>]+alt="FTW"[^>]+class="header-logo"/);
     assert.doesNotMatch(html, /<h1>\s*FTW\s*<\/h1>/);
+    assert.equal((setup.match(/class="wizard-logo"/g) || []).length, 1);
+    assert.match(setup, /<img[^>]+alt="FTW"[^>]+class="wizard-logo"/);
+    assert.doesNotMatch(setup, /<h1>\s*FTW\s*<\/h1>/);
+    assert.match(
+      setup,
+      /\.btn-primary\s*\{[^}]*color:\s*var\(--on-accent\)/,
+    );
+    assert.doesNotMatch(setup, /\.btn-primary\s*\{[^}]*color:\s*#0a0a0a/);
   });
 
   it("uses flat token surfaces for page, header, and mobile destinations", () => {

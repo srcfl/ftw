@@ -70,6 +70,14 @@ describe("simplified dashboard overview", () => {
       overview,
       /id="power-now-values"[^>]*role="tabpanel"[^>]*hidden/,
     );
+    assert.match(
+      css,
+      /body\.ftw-app\.mode-numbers \.power-now-tabs::before\s*\{[^}]*transform:\s*translateX\(100%\)/,
+    );
+    assert.doesNotMatch(
+      css,
+      /body\.ftw-app\.mode-hero \.power-now-tabs::before\s*\{[^}]*translateX\(100%\)/,
+    );
     assert.match(overview, /<ftw-energy-flow id="energy-flow"[^>]*embedded/);
     assert.match(flow, /:host\(\[embedded\]\) \.title/);
   });

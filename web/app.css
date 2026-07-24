@@ -312,8 +312,8 @@ body.ftw-app .section-kicker {
   text-transform: uppercase;
 }
 
-/* Power now is deliberately one instrument panel. Values are the dense,
-   default readout; Flow keeps the existing orbital diagram one tab away. */
+/* Power now is deliberately one instrument panel. Flow is the default
+   overview; Values keeps the dense readout one tab away. */
 body.ftw-app .power-now {
   grid-column: 1 / -1;
   overflow: hidden;
@@ -359,7 +359,7 @@ body.ftw-app .power-now-tabs::before {
   transform: translateX(0);
   transition: transform 220ms cubic-bezier(.4, 0, .2, 1);
 }
-body.ftw-app.mode-hero .power-now-tabs::before {
+body.ftw-app.mode-numbers .power-now-tabs::before {
   transform: translateX(100%);
 }
 body.ftw-app .power-now-tabs button {
@@ -378,7 +378,7 @@ body.ftw-app .power-now-tabs button {
   text-transform: uppercase;
 }
 body.ftw-app .power-now-tabs button[aria-selected="true"] {
-  color: #0a0a0a;
+  color: var(--on-accent);
 }
 body.ftw-app .power-now-tabs button:focus-visible {
   outline: 2px solid var(--fg);
