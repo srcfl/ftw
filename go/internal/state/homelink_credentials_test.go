@@ -155,6 +155,118 @@ func TestHomeLinkAssertionCounterAndBackupPolicy(t *testing.T) {
 	}
 }
 
+func TestHomeLinkPolicyViolationFenceSurvivesFailedStatusWriteAndRestart(t *testing.T) {
+	tests := []struct {
+		name     string
+		stored   uint32
+		next     uint32
+		storedBE bool
+		nextBE   bool
+		nextBS   bool
+	}{
+		{"positive to zero", 4, 0, false, false, false},
+		{"equal positive", 4, 4, false, false, false},
+		{"counter regression", 4, 3, false, false, false},
+		{"backup eligibility changes", 0, 0, false, true, false},
+		{"backup state without eligibility", 0, 0, false, false, true},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := testHomeLinkCredential("001122334455667788", byte(index+1))
+			record.SignCount = test.stored
+			record.BackupEligible = test.storedBE
+			if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.Exec(`CREATE TRIGGER homelink_fail_policy_fence
+				BEFORE UPDATE OF status ON homelink_credentials
+				WHEN OLD.status = 'active' AND NEW.status = 'uncertain'
+				BEGIN SELECT RAISE(ABORT, 'policy fence failed'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+				SiteID: record.SiteID, CredentialID: record.CredentialID,
+				ExpectedRevision: record.Revision, SignCount: test.next,
+				BackupEligible: test.nextBE, BackupState: test.nextBS, UpdatedAtMS: 2,
+			}); err == nil {
+				t.Fatal("policy violation unexpectedly succeeded")
+			}
+			var blocks int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM homelink_credential_policy_blocks
+				WHERE site_id = ? AND credential_id = ?`,
+				record.SiteID, record.CredentialID).Scan(&blocks); err != nil {
+				t.Fatal(err)
+			}
+			if blocks != 1 {
+				t.Fatalf("durable policy blocks = %d, want 1", blocks)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			store, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			stored, err := store.HomeLinkCredential(
+				context.Background(), record.SiteID, record.CredentialID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != HomeLinkCredentialUncertain {
+				t.Fatalf("status after failed policy fence = %q", stored.Status)
+			}
+			active, err := store.ActiveHomeLinkCredentials(context.Background(), record.SiteID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(active) != 0 {
+				t.Fatalf("policy-blocked credential listed active: %+v", active)
+			}
+			if _, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+				SiteID: record.SiteID, CredentialID: record.CredentialID,
+				ExpectedRevision: record.Revision, SignCount: test.stored + 10,
+				BackupEligible: record.BackupEligible, BackupState: record.BackupState,
+				UpdatedAtMS: 3,
+			}); !errors.Is(err, ErrHomeLinkCredentialInactive) {
+				t.Fatalf("later assertion after restart = %v", err)
+			}
+			if _, err := store.db.Exec(`DROP TRIGGER homelink_fail_policy_fence`); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.RevokeHomeLinkCredential(
+				context.Background(), record.SiteID, record.CredentialID, 4,
+			); err != nil {
+				t.Fatalf("revoke policy-blocked credential: %v", err)
+			}
+			stored, err = store.HomeLinkCredential(
+				context.Background(), record.SiteID, record.CredentialID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != HomeLinkCredentialRevoked {
+				t.Fatalf("status after revoke = %q", stored.Status)
+			}
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM homelink_credential_policy_blocks
+				WHERE site_id = ? AND credential_id = ?`,
+				record.SiteID, record.CredentialID).Scan(&blocks); err != nil {
+				t.Fatal(err)
+			}
+			if blocks != 1 {
+				t.Fatalf("policy block was removed after revoke: %d", blocks)
+			}
+		})
+	}
+}
+
 func TestHomeLinkAssertionRevisionSerializesConcurrentUpdates(t *testing.T) {
 	store := freshStore(t)
 	record := testHomeLinkCredential("001122334455667788", 1)
@@ -187,6 +299,68 @@ func TestHomeLinkAssertionRevisionSerializesConcurrentUpdates(t *testing.T) {
 	}
 	if successes != 1 {
 		t.Fatalf("successful updates = %d, want 1", successes)
+	}
+}
+
+func TestHomeLinkPolicyFenceSerializesWithValidAssertion(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		store := freshStore(t)
+		record := testHomeLinkCredential("001122334455667788", byte(iteration+1))
+		record.SignCount = 4
+		if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		var wg sync.WaitGroup
+		for _, count := range []uint32{4, 5} {
+			wg.Add(1)
+			go func(count uint32) {
+				defer wg.Done()
+				<-start
+				_, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+					SiteID: record.SiteID, CredentialID: record.CredentialID,
+					ExpectedRevision: record.Revision, SignCount: count,
+					BackupEligible: record.BackupEligible, BackupState: record.BackupState,
+					UpdatedAtMS: int64(count + 10),
+				})
+				errs <- err
+			}(count)
+		}
+		close(start)
+		wg.Wait()
+		close(errs)
+		var policyDetected bool
+		for err := range errs {
+			if errors.Is(err, ErrHomeLinkCredentialPolicy) {
+				policyDetected = true
+			}
+		}
+		stored, err := store.HomeLinkCredential(
+			context.Background(), record.SiteID, record.CredentialID,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := store.ActiveHomeLinkCredentials(context.Background(), record.SiteID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policyDetected {
+			if stored.Status != HomeLinkCredentialUncertain || len(active) != 0 {
+				t.Fatalf(
+					"iteration %d: detected policy violation ended status=%q active=%d",
+					iteration, stored.Status, len(active),
+				)
+			}
+			continue
+		}
+		if stored.Status != HomeLinkCredentialActive || stored.SignCount != 5 || len(active) != 1 {
+			t.Fatalf(
+				"iteration %d: valid winner ended status=%q count=%d active=%d",
+				iteration, stored.Status, stored.SignCount, len(active),
+			)
+		}
 	}
 }
 

@@ -1210,6 +1210,103 @@ func TestWebAuthnRejectsWrongJSONTypesAndNonCanonicalBase64(t *testing.T) {
 	}
 }
 
+func TestWebAuthnRequiresEmptyClientExtensionResultsObject(t *testing.T) {
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	ceremonies := []struct {
+		name  string
+		raw   []byte
+		parse func([]byte) error
+	}{
+		{
+			name: "registration",
+			raw: fixture.registrationResponse(
+				challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
+			),
+			parse: func(raw []byte) error {
+				_, err := parseRegistration(raw)
+				return err
+			},
+		},
+		{
+			name: "assertion",
+			raw: fixture.assertionResponse(
+				challenge, 0, 0x01|0x04, nil, HomeLinkOrigin,
+			),
+			parse: func(raw []byte) error {
+				_, err := parseAssertion(raw)
+				return err
+			},
+		},
+	}
+	cases := []struct {
+		name   string
+		change func(map[string]any)
+		valid  bool
+	}{
+		{
+			name: "missing",
+			change: func(object map[string]any) {
+				delete(object, "clientExtensionResults")
+			},
+		},
+		{
+			name: "null",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = nil
+			},
+		},
+		{
+			name: "string",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = "x"
+			},
+		},
+		{
+			name: "number",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = float64(1)
+			},
+		},
+		{
+			name: "array",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = []any{}
+			},
+		},
+		{
+			name: "empty object",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = map[string]any{}
+			},
+			valid: true,
+		},
+		{
+			name: "nonempty object",
+			change: func(object map[string]any) {
+				object["clientExtensionResults"] = map[string]any{"appid": false}
+			},
+		},
+	}
+	for _, ceremony := range ceremonies {
+		for _, test := range cases {
+			t.Run(ceremony.name+"/"+test.name, func(t *testing.T) {
+				raw := changeCredentialJSON(t, ceremony.raw, test.change)
+				err := ceremony.parse(raw)
+				if test.valid {
+					if err != nil {
+						t.Fatalf("empty extension object = %v", err)
+					}
+					return
+				}
+				if !errors.Is(err, ErrWebAuthnInput) {
+					t.Fatalf("invalid extension output = %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestStrictCOSERejectsNonMinimalEncodings(t *testing.T) {
 	tests := []struct {
 		name string

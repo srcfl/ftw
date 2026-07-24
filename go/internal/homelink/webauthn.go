@@ -536,6 +536,15 @@ func validateCredentialEnvelope(raw []byte, registration bool) error {
 	if _, err := requiredJSONString(outer, "type"); err != nil {
 		return err
 	}
+	extensionsRaw, ok := outer["clientExtensionResults"]
+	if !ok {
+		return errors.New("credential extension results are missing")
+	}
+	var extensions map[string]json.RawMessage
+	if err := json.Unmarshal(extensionsRaw, &extensions); err != nil ||
+		extensions == nil || len(extensions) != 0 {
+		return errors.New("credential extension results must be an empty object")
+	}
 	responseRaw, ok := outer["response"]
 	if !ok {
 		return errors.New("credential response is missing")

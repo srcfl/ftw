@@ -125,7 +125,7 @@ func (s *Store) HomeLinkCredential(
 	if err != nil {
 		return HomeLinkCredentialRecord{}, err
 	}
-	pending, err := homeLinkRevocationPending(ctx, s.db, siteID, credentialID)
+	pending, err := homeLinkCredentialBlocked(ctx, s.db, siteID, credentialID)
 	if err != nil {
 		return HomeLinkCredentialRecord{}, err
 	}
@@ -148,6 +148,11 @@ func (s *Store) ActiveHomeLinkCredentials(
 			SELECT 1 FROM homelink_credential_revocations revocations
 			WHERE revocations.site_id = homelink_credentials.site_id
 			AND revocations.credential_id = homelink_credentials.credential_id
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_policy_blocks policy_blocks
+			WHERE policy_blocks.site_id = homelink_credentials.site_id
+			AND policy_blocks.credential_id = homelink_credentials.credential_id
 		)
 		ORDER BY credential_id`, siteID)
 	if err != nil {
@@ -220,7 +225,7 @@ func (s *Store) ApplyHomeLinkAssertion(
 	if record.Status != HomeLinkCredentialActive {
 		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialInactive
 	}
-	pending, err := homeLinkRevocationPending(ctx, tx, update.SiteID, update.CredentialID)
+	pending, err := homeLinkCredentialBlocked(ctx, tx, update.SiteID, update.CredentialID)
 	if err != nil {
 		return HomeLinkCredentialRecord{}, err
 	}
@@ -234,16 +239,63 @@ func (s *Store) ApplyHomeLinkAssertion(
 	policyOK := update.BackupEligible == record.BackupEligible &&
 		(!update.BackupState || update.BackupEligible) &&
 		validHomeLinkCounterTransition(record.SignCount, update.SignCount)
-	status := HomeLinkCredentialActive
 	if !policyOK {
-		status = HomeLinkCredentialUncertain
+		if err := tx.Rollback(); err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("rollback denied Home Link assertion: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO homelink_credential_policy_blocks(
+			site_id, credential_id, started_at_ms
+		) VALUES (?, ?, ?)
+		ON CONFLICT(site_id, credential_id) DO NOTHING`,
+			update.SiteID, cloneBytes(update.CredentialID), update.UpdatedAtMS); err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy block: %w", err)
+		}
+		fence, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("begin Home Link policy fence: %w", err)
+		}
+		defer fence.Rollback()
+		result, err := fence.ExecContext(ctx, `UPDATE homelink_credentials SET
+			sign_count = ?, backup_state = ?, status = 'uncertain',
+			revision = revision + 1, updated_at_ms = ?
+			WHERE site_id = ? AND credential_id = ? AND status = 'active' AND revision = ?`,
+			int64(update.SignCount), boolInt(update.BackupState), update.UpdatedAtMS,
+			update.SiteID, update.CredentialID, update.ExpectedRevision)
+		if err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy fence: %w", err)
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("check Home Link policy fence: %w", err)
+		}
+		if changed != 1 {
+			return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialPolicy
+		}
+		if err := fence.Commit(); err != nil {
+			return HomeLinkCredentialRecord{}, fmt.Errorf("commit Home Link policy fence: %w", err)
+		}
+		record.SignCount = update.SignCount
+		record.BackupState = update.BackupState
+		record.Status = HomeLinkCredentialUncertain
+		record.Revision++
+		record.UpdatedAtMS = update.UpdatedAtMS
+		return record, ErrHomeLinkCredentialPolicy
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE homelink_credentials SET
 		sign_count = ?, backup_state = ?, status = ?, revision = revision + 1,
 		updated_at_ms = ?
-		WHERE site_id = ? AND credential_id = ? AND status = 'active' AND revision = ?`,
-		int64(update.SignCount), boolInt(update.BackupState), string(status), update.UpdatedAtMS,
-		update.SiteID, update.CredentialID, update.ExpectedRevision)
+		WHERE site_id = ? AND credential_id = ? AND status = 'active' AND revision = ?
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_revocations
+			WHERE site_id = ? AND credential_id = ?
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_policy_blocks
+			WHERE site_id = ? AND credential_id = ?
+		)`,
+		int64(update.SignCount), boolInt(update.BackupState), string(HomeLinkCredentialActive), update.UpdatedAtMS,
+		update.SiteID, update.CredentialID, update.ExpectedRevision,
+		update.SiteID, update.CredentialID, update.SiteID, update.CredentialID)
 	if err != nil {
 		return HomeLinkCredentialRecord{}, fmt.Errorf("update Home Link assertion state: %w", err)
 	}
@@ -259,12 +311,9 @@ func (s *Store) ApplyHomeLinkAssertion(
 	}
 	record.SignCount = update.SignCount
 	record.BackupState = update.BackupState
-	record.Status = status
+	record.Status = HomeLinkCredentialActive
 	record.Revision++
 	record.UpdatedAtMS = update.UpdatedAtMS
-	if !policyOK {
-		return record, ErrHomeLinkCredentialPolicy
-	}
 	return record, nil
 }
 
@@ -329,20 +378,23 @@ type homeLinkQueryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-func homeLinkRevocationPending(
+func homeLinkCredentialBlocked(
 	ctx context.Context,
 	db homeLinkQueryRower,
 	siteID string,
 	credentialID []byte,
 ) (bool, error) {
-	var pending int
+	var blocked int
 	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM homelink_credential_revocations
 		WHERE site_id = ? AND credential_id = ?
-	)`, siteID, credentialID).Scan(&pending); err != nil {
-		return false, fmt.Errorf("read Home Link revoke intent: %w", err)
+	) OR EXISTS(
+		SELECT 1 FROM homelink_credential_policy_blocks
+		WHERE site_id = ? AND credential_id = ?
+	)`, siteID, credentialID, siteID, credentialID).Scan(&blocked); err != nil {
+		return false, fmt.Errorf("read Home Link credential block: %w", err)
 	}
-	return pending == 1, nil
+	return blocked == 1, nil
 }
 
 const homeLinkCredentialSelect = `SELECT

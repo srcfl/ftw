@@ -874,6 +874,15 @@ func (s *Store) migrate() error {
 			started_at_ms     INTEGER NOT NULL,
 			PRIMARY KEY (site_id, credential_id)
 		) WITHOUT ROWID, STRICT`,
+		// A policy block is a permanent fail-closed tombstone. It is committed
+		// before a credential row is marked uncertain, so a later failed or
+		// ambiguous write cannot make a cloned credential usable after restart.
+		`CREATE TABLE IF NOT EXISTS homelink_credential_policy_blocks (
+			site_id           TEXT NOT NULL,
+			credential_id     BLOB NOT NULL,
+			started_at_ms     INTEGER NOT NULL,
+			PRIMARY KEY (site_id, credential_id)
+		) WITHOUT ROWID, STRICT`,
 
 		// Persistent daily-energy aggregate cache.
 		//
