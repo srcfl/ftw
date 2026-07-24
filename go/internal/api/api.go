@@ -1576,8 +1576,34 @@ func (s *Server) setDriverDisabled(w http.ResponseWriter, r *http.Request, disab
 // Used by the Settings UI to show a live connection indicator
 // instead of silently relying on "it's saved".
 func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
-	if s.deps.HA == nil {
+	enabled := s.deps.HA != nil
+	broker := ""
+	if s.deps.Cfg != nil {
+		if s.deps.CfgMu != nil {
+			s.deps.CfgMu.RLock()
+		}
+		if cfg := s.deps.Cfg.HomeAssistant; cfg != nil {
+			enabled = cfg.Enabled
+			if cfg.Broker != "" {
+				broker = fmt.Sprintf("%s:%d", cfg.Broker, cfg.Port)
+			}
+		} else {
+			enabled = false
+		}
+		if s.deps.CfgMu != nil {
+			s.deps.CfgMu.RUnlock()
+		}
+	}
+	if !enabled {
 		writeJSON(w, 200, map[string]any{"enabled": false})
+		return
+	}
+	if s.deps.HA == nil {
+		writeJSON(w, 200, map[string]any{
+			"enabled":   true,
+			"connected": false,
+			"broker":    broker,
+		})
 		return
 	}
 	writeJSON(w, 200, map[string]any{

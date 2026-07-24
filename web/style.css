@@ -113,7 +113,7 @@ header h1 {
 }
 .energy-history-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 1rem;
   flex-wrap: wrap;
@@ -125,6 +125,26 @@ header h1 {
 .energy-history-header h2 { font-size: 1rem; }
 .energy-history-header p,
 .energy-history-note { color: var(--text-dim); font-size: 0.82rem; }
+.energy-history-range {
+  display: inline-flex;
+  padding: 0.2rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.energy-history-range button {
+  min-height: 2rem;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.energy-history-range button.active {
+  color: var(--on-accent);
+  background: var(--accent-e);
+}
 .energy-history-controls { display: flex; align-items: flex-end; gap: 0.6rem; flex-wrap: wrap; }
 .energy-history-controls label { display: grid; gap: 0.2rem; color: var(--text-dim); font-size: 0.78rem; }
 .energy-history-controls select {
@@ -132,35 +152,153 @@ header h1 {
   border-radius: 4px; padding: 0.35rem 0.5rem;
 }
 .energy-history-controls a { text-decoration: none; }
+.energy-history-story {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr);
+  gap: 0.75rem;
+}
 .energy-history-chart-wrap {
   min-width: 0; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 0.75rem 1rem 0.6rem;
 }
-#energy-history-chart { display: block; width: 100%; height: 260px; }
+.energy-history-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+}
+.energy-history-card-heading h3,
+.energy-history-insight h3 { font-size: 0.9rem; }
+.energy-history-card-heading p {
+  margin-top: 0.15rem;
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+.btn-quiet {
+  padding: 0.25rem 0.45rem;
+  color: var(--text-dim);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+#energy-history-chart { display: block; width: 100%; height: 220px; }
 .energy-history-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 0.9rem; padding-top: 0.4rem; color: var(--text-dim); font-size: 0.75rem; }
 .energy-history-legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
 .energy-history-legend i { width: 0.65rem; height: 0.65rem; border-radius: 999px; }
-.energy-history-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75rem; }
+.energy-history-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; }
 .energy-history-summary article {
   display: grid; gap: 0.2rem; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 0.8rem 1rem;
 }
 .energy-history-summary span { color: var(--text-dim); font-size: 0.78rem; }
-.energy-history-summary strong { font-size: 1.05rem; }
-.energy-history-table-wrap { overflow: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+.energy-history-summary strong { font-size: 1.15rem; }
+.energy-history-summary small { color: var(--text-dim); font-size: 0.7rem; }
+.energy-history-insight {
+  padding: 0.9rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.energy-history-insight ul {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0.75rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.energy-history-insight strong { color: var(--text); }
+.history-disclosure {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: clip;
+}
+.history-disclosure > summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  cursor: pointer;
+  list-style: none;
+}
+.history-disclosure > summary::-webkit-details-marker { display: none; }
+.history-disclosure > summary::before {
+  content: '›';
+  color: var(--text-dim);
+  font-size: 1.15rem;
+  transition: transform 0.15s ease;
+}
+.history-disclosure[open] > summary::before { transform: rotate(90deg); }
+.history-disclosure > summary > span:first-of-type {
+  display: grid;
+  gap: 0.15rem;
+  flex: 1;
+}
+.history-disclosure > summary strong { font-size: 0.9rem; }
+.history-disclosure > summary small,
+.history-disclosure-meta {
+  color: var(--text-dim);
+  font-size: 0.76rem;
+}
+.history-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.history-disclosure-body { padding: 1rem; }
+.history-plan-body { padding: 0; }
+.energy-history-quality-note {
+  margin: 0.8rem 0;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.energy-history-quality-note.good { color: var(--green); }
+.energy-history-quality-note.warning { color: var(--yellow); }
+.energy-history-table-wrap {
+  max-height: min(52vh, 580px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 .energy-history-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .energy-history-table th, .energy-history-table td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
-.energy-history-table th { color: var(--text-dim); font-weight: 500; }
+.energy-history-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-weight: 500;
+}
+.energy-history-pager {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 0.75rem;
+  padding-top: 0.75rem;
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+.energy-history-pager button:disabled { opacity: 0.4; cursor: default; }
+.history-disclosure .energy-history-note { margin: 0.75rem 0 0; text-align: center; }
+#view-energy > .history-row { margin-top: 0; }
+#view-energy > .history-row > .history-disclosure { width: 100%; }
+.history-numbers-disclosure .history-disclosure-body { padding: 0; }
+.history-numbers-disclosure .history-group { border: 0; border-radius: 0; }
 .energy-quality { border: 1px solid var(--border); border-radius: 999px; padding: 0.1rem 0.4rem; }
 .energy-quality-measured { color: var(--green); }
 .energy-quality-integrated { color: var(--yellow); }
-.energy-quality-gap, .energy-quality-reset { color: var(--red); }
+.energy-quality-gap, .energy-quality-reset, .energy-quality-invalid { color: var(--red); }
 
 .diagnose-header {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.75rem 1rem;
+}
+.history-plan-body > .diagnose-header {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
 }
 .diagnose-header-row {
   display: flex;
@@ -371,6 +509,25 @@ header h1 {
   .diagnose-body { grid-template-columns: 1fr; }
   .diagnose-timeline { max-height: 260px; }
   .app-tabs { margin-left: 0.5rem; }
+  #energy-history-chart { height: 190px; }
+  .energy-history-story { grid-template-columns: 1fr; }
+  .energy-history-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .history-disclosure > summary { align-items: flex-start; }
+  .history-disclosure-meta { white-space: nowrap; }
+  .energy-history-controls { width: 100%; }
+  .energy-history-controls label { flex: 1 1 130px; }
+  .energy-history-controls select { width: 100%; }
+}
+
+@media (max-width: 520px) {
+  #view-history { padding-inline: 0.75rem; }
+  .energy-history-header { align-items: stretch; }
+  .energy-history-range { display: grid; grid-template-columns: repeat(3, 1fr); width: 100%; }
+  .energy-history-summary { gap: 0.5rem; }
+  .energy-history-summary article { padding: 0.7rem 0.75rem; }
+  .energy-history-summary strong { font-size: 1rem; }
+  .energy-history-story { gap: 0.5rem; }
+  .energy-history-card-heading { align-items: center; }
 }
 
 /* ---- Setup banner (bootstrap / no-config) ---- */

@@ -103,6 +103,14 @@ describe("terminal-native light DOM chrome", () => {
       styleCss,
       /\.modal-tabs button\.active\s*\{[^}]*var\(--accent-e\)/,
     );
+    assert.match(
+      styleCss,
+      /\.energy-history-range button\.active\s*\{[^}]*var\(--accent-e\)/,
+    );
+    assert.match(
+      styleCss,
+      /\.energy-history-range button\.active\s*\{[^}]*var\(--on-accent\)/,
+    );
     assert.doesNotMatch(
       styleCss,
       /\.diag-row\.active\s*\{[^}]*#60a5fa/,

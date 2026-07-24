@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 	"gopkg.in/yaml.v3"
 )
 
@@ -557,6 +558,16 @@ type Planner struct {
 	// to the energy path on upgrade. Honored with a startup WARN
 	// and will be removed after one release.
 	UseEnergyDispatch *bool `yaml:"use_energy_dispatch,omitempty" json:"use_energy_dispatch,omitempty"`
+}
+
+// OptimizerTimeout returns the runtime contract value for an unset timeout.
+// Parsing also fills it so API clients do not invent a shorter default when
+// they save an otherwise unchanged planner.
+func (p *Planner) OptimizerTimeout() time.Duration {
+	if p == nil || p.OptimizerTimeoutS <= 0 {
+		return optimizercontract.DefaultTimeout
+	}
+	return time.Duration(p.OptimizerTimeoutS * float64(time.Second))
 }
 
 // PVSafetyK resolves the downside-PV haircut scale (forecast − k·σ). Unset
@@ -1333,6 +1344,9 @@ func applyDefaults(c *Config) {
 		// response — at 2 s ticks the natural cadence is already the
 		// minimum, so the holdoff is a no-op debouncer in practice.
 		c.Site.MinDispatchIntervalS = 2
+	}
+	if c.Planner != nil && c.Planner.OptimizerTimeoutS == 0 {
+		c.Planner.OptimizerTimeoutS = optimizercontract.DefaultTimeout.Seconds()
 	}
 	if c.Fuse.Phases == 0 {
 		c.Fuse.Phases = 3

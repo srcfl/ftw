@@ -36,6 +36,105 @@ func loadLedgerTestPoints(t *testing.T, s *Store, assetID string, sinceMS, until
 	return points
 }
 
+func TestRecordTickWithOptionalHistoryKeepsSamplesAndLedger(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:optional", AssetGridMeter)
+	for i, counter := range []float64{100, 110} {
+		atMS := base + int64(i)*60_000
+		observation := ledgerObservation(assetID, AssetGridMeter, FlowGridImport,
+			atMS, energyPtr(counter), energyPtr(600))
+		sample := Sample{Driver: "meter", Metric: "meter_w", TsMs: atMS, Value: 600, Unit: "W"}
+		if err := s.RecordTickWithOptionalHistory(nil, []Sample{sample}, []EnergyObservation{observation}); err != nil {
+			t.Fatalf("RecordTickWithOptionalHistory: %v", err)
+		}
+	}
+
+	history, err := s.LoadHistory(base, base+60_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("optional history wrote %d legacy rows", len(history))
+	}
+	samples, err := s.LoadSeries("meter", "meter_w", base, base+60_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("optional history kept %d samples, want 2", len(samples))
+	}
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	var measured float64
+	for _, point := range points {
+		if point.Quality == "measured" {
+			measured += point.EnergyWh
+		}
+	}
+	if measured != 10 {
+		t.Fatalf("optional history ledger energy = %v Wh, want 10", measured)
+	}
+}
+
+func TestRecordTickWithOptionalHistoryWritesZeroAndRecoveryRows(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000)
+	zero := HistoryPoint{TsMs: base, GridW: 0, JSON: "{}"}
+	if err := s.RecordTickWithOptionalHistory(&zero, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordTickWithOptionalHistory(nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	recovered := HistoryPoint{TsMs: base + 120_000, GridW: 450, JSON: "{}"}
+	if err := s.RecordTickWithOptionalHistory(&recovered, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	history, err := s.LoadHistory(base, base+120_000, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 || history[0].TsMs != base || history[0].GridW != 0 ||
+		history[1].TsMs != base+120_000 || history[1].GridW != 450 {
+		t.Fatalf("zero/recovery history = %+v", history)
+	}
+}
+
+func TestRecordTickWithOptionalHistoryRollsBackRemainingWrites(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000)
+	sample := Sample{Driver: "meter", Metric: "meter_w", TsMs: base, Value: 600}
+	invalid := EnergyObservation{
+		AssetID: "maker:rollback/grid_meter", AssetKind: AssetGridMeter,
+		Flow: FlowGridImport, AtMs: base, PowerW: energyPtr(-1),
+	}
+	if err := s.RecordTickWithOptionalHistory(nil, []Sample{sample}, []EnergyObservation{invalid}); err == nil {
+		t.Fatal("invalid ledger observation should roll back the tick")
+	}
+	samples, err := s.LoadSeries("meter", "meter_w", base, base, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 0 {
+		t.Fatalf("failed optional tick committed samples: %+v", samples)
+	}
+}
+
+func TestRecordTickWithEnergyStillWritesLegacyHistory(t *testing.T) {
+	s := freshStore(t)
+	point := HistoryPoint{TsMs: 1_800_000_000_000, GridW: 321, JSON: "{}"}
+	if err := s.RecordTickWithEnergy(point, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	history, err := s.LoadHistory(point.TsMs, point.TsMs, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 || history[0].GridW != 321 {
+		t.Fatalf("RecordTickWithEnergy compatibility history = %+v", history)
+	}
+}
+
 func TestEnergyLedgerKeepsSimultaneousMeterDirections(t *testing.T) {
 	s := freshStore(t)
 	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
@@ -89,6 +188,48 @@ func TestEnergyLedgerMarksCounterResetAndUsesPowerFallback(t *testing.T) {
 	}
 	if math.Abs(fallbackWh-1000.0/60.0) > 1e-9 {
 		t.Fatalf("fallback energy = %v Wh, want %v", fallbackWh, 1000.0/60.0)
+	}
+}
+
+func TestEnergyLedgerRejectsImplausibleCounterJump(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:counter-jump", AssetPV)
+	recordEnergyTestTick(t, s, base,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base, energyPtr(100), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+5_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+5_000, energyPtr(25_000_100), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+10_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+10_000, energyPtr(110), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+15_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+15_000, energyPtr(120), energyPtr(5000)))
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	if !hasLedgerQuality(points, "invalid", "counter_jump") {
+		t.Fatalf("counter jump was not marked invalid: %+v", points)
+	}
+	var trustedWh float64
+	for _, p := range points {
+		if p.Quality != "invalid" && p.Quality != "gap" && p.Quality != "reset" {
+			trustedWh += p.EnergyWh
+		}
+	}
+	if trustedWh > 20 {
+		t.Fatalf("counter jump entered trusted total: %v Wh; points=%+v", trustedWh, points)
+	}
+}
+
+func TestEnergyHistoryMarksStoredImplausibleEnergyInvalid(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:legacy-jump", AssetPV)
+	insertLedgerEntryTest(t, s, assetID, FlowPVGeneration, base,
+		EnergyLedgerBucketMS, 25_000_000, "hardware_counter", "measured", "counter", 1)
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	if len(points) != 1 || points[0].Quality != "invalid" ||
+		points[0].Provenance != "implausible_energy" {
+		t.Fatalf("stored counter jump remained trusted: %+v", points)
 	}
 }
 

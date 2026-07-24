@@ -2,13 +2,31 @@ package mpc
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
+
+type externalOptimizerTransportStub struct {
+	healthErr    error
+	roundTripErr error
+}
+
+func (t *externalOptimizerTransportStub) RoundTrip(context.Context, []byte) ([]byte, error) {
+	return nil, t.roundTripErr
+}
+
+func (t *externalOptimizerTransportStub) Health(context.Context) (OptimizerRuntimeInfo, error) {
+	return OptimizerRuntimeInfo{Features: []string{"champion"}}, t.healthErr
+}
+
+func (t *externalOptimizerTransportStub) Close() error { return nil }
 
 func externalTestFixture() ([]Slot, Params) {
 	slots := []Slot{
@@ -38,6 +56,49 @@ func TestExternalOptimizerPreservesExplicitZeroServiceCVaRWeight(t *testing.T) {
 	}
 	if got := *optimizer.cfg.Multistage.ServiceCVaRWeight; got != 0 {
 		t.Fatalf("explicit zero weight replaced by default: %g", got)
+	}
+}
+
+func TestExternalOptimizerUsesSharedDefaultTimeout(t *testing.T) {
+	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
+		Command: []string{"python3"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if optimizer.cfg.Timeout != optimizercontract.DefaultTimeout {
+		t.Fatalf("timeout = %s, want %s", optimizer.cfg.Timeout, optimizercontract.DefaultTimeout)
+	}
+}
+
+func TestExternalOptimizerTimeoutPreservesAutoTransportCauses(t *testing.T) {
+	sidecarErr := errors.New("connection closed")
+	transport := NewAutoTransport(
+		&externalOptimizerTransportStub{healthErr: sidecarErr},
+		&externalOptimizerTransportStub{roundTripErr: context.DeadlineExceeded},
+	)
+	optimizer, err := NewExternalOptimizer(ExternalOptimizerConfig{
+		Transport: transport,
+		Timeout:   time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	slots, params := externalTestFixture()
+	_, err = optimizer.Optimize(context.Background(), slots, params)
+	if err == nil {
+		t.Fatal("Optimize succeeded, want timeout")
+	}
+	if !errors.Is(err, sidecarErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Optimize error does not unwrap sidecar and timeout failures: %v", err)
+	}
+	message := err.Error()
+	sidecarAt := strings.Index(message, sidecarErr.Error())
+	fallbackAt := strings.Index(message, context.DeadlineExceeded.Error())
+	if !strings.HasPrefix(message, "optimizer timeout after 1s: ") ||
+		sidecarAt < 0 || fallbackAt < 0 || sidecarAt >= fallbackAt {
+		t.Fatalf("Optimize error = %q, want timeout class with sidecar cause first", message)
 	}
 }
 

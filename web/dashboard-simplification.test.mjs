@@ -154,21 +154,19 @@ describe("simplified dashboard overview", () => {
     }
   });
 
-  it("orders detailed destinations from operator answer to technical evidence", () => {
+  it("keeps the daily story primary and technical evidence contextual", () => {
     assert.match(
       router,
       /\['#chart-section', '\.energy-row', '\.prices-row', '#heating-section'\]/,
     );
-    assert.match(
-      router,
-      /historyView\.querySelector\('\.history-technical-energy'\)/,
-    );
-    assert.match(history, /class="history-technical history-technical-energy"/);
-    assert.match(history, /class="history-technical history-technical-plan"/);
+    assert.match(router, /append\(plan, '#plan-history-details'\)/);
+    assert.match(history, /class="energy-history-story"/);
+    assert.match(history, /id="energy-history-details"/);
+    assert.match(history, /id="plan-history-details"/);
     assert.ok(
-      history.indexOf('class="history-technical history-technical-energy"') <
-        history.indexOf('class="history-technical history-technical-plan"'),
-      "raw energy records should precede prior plan decisions",
+      history.indexOf('class="energy-history-story"') <
+        history.indexOf('id="energy-history-details"'),
+      "the daily story should precede raw source records",
     );
   });
 

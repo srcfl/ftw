@@ -13,9 +13,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/optimizercontract"
 )
 
-const OptimizerProtocolVersion = 1
+const OptimizerProtocolVersion = optimizercontract.ProtocolVersion
 
 // OptimizerRuntimeInfo is returned by the sidecar handshake and exposed to
 // component diagnostics. Protocol compatibility, not matching app versions,
@@ -259,12 +261,25 @@ func decodeOptimizerHandshake(line []byte, transport string) (OptimizerRuntimeIn
 
 func (t *UnixTransport) Close() error { return nil }
 
-// AutoTransport prefers an independently updated sidecar, but treats it as an
-// optional capability. Socket absence, failed handshake, protocol mismatch, or
-// a broken request all retry once through the bundled process transport.
+// AutoTransport is an explicit native/development mode. It prefers an
+// independently updated sidecar, then tries a local process. Official
+// containers select unix transport so Core falls straight back to Go DP.
 type AutoTransport struct {
 	primary  OptimizerTransport
 	fallback OptimizerTransport
+}
+
+type autoTransportError struct {
+	primary  error
+	fallback error
+}
+
+func (e *autoTransportError) Error() string {
+	return fmt.Sprintf("optimizer sidecar failed: %v; process fallback failed: %v", e.primary, e.fallback)
+}
+
+func (e *autoTransportError) Unwrap() []error {
+	return []error{e.primary, e.fallback}
 }
 
 func NewAutoTransport(primary, fallback OptimizerTransport) *AutoTransport {
@@ -272,12 +287,22 @@ func NewAutoTransport(primary, fallback OptimizerTransport) *AutoTransport {
 }
 
 func (t *AutoTransport) RoundTrip(ctx context.Context, payload []byte) ([]byte, error) {
-	if info, err := t.primary.Health(ctx); err == nil && optimizerHasFeature(info, requiredOptimizerFeature(payload)) {
-		if response, err := t.primary.RoundTrip(ctx, payload); err == nil {
+	requiredFeature := requiredOptimizerFeature(payload)
+	info, primaryErr := t.primary.Health(ctx)
+	if primaryErr == nil {
+		if !optimizerHasFeature(info, requiredFeature) {
+			primaryErr = fmt.Errorf("optimizer handshake is missing required %s feature", requiredFeature)
+		} else if response, err := t.primary.RoundTrip(ctx, payload); err == nil {
 			return response, nil
+		} else {
+			primaryErr = err
 		}
 	}
-	return t.fallback.RoundTrip(ctx, payload)
+	response, fallbackErr := t.fallback.RoundTrip(ctx, payload)
+	if fallbackErr != nil {
+		return nil, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
+	}
+	return response, nil
 }
 
 func requiredOptimizerFeature(payload []byte) string {
@@ -305,10 +330,15 @@ func optimizerHasFeature(info OptimizerRuntimeInfo, feature string) bool {
 }
 
 func (t *AutoTransport) Health(ctx context.Context) (OptimizerRuntimeInfo, error) {
-	if info, err := t.primary.Health(ctx); err == nil {
+	info, primaryErr := t.primary.Health(ctx)
+	if primaryErr == nil {
 		return info, nil
 	}
-	return t.fallback.Health(ctx)
+	info, fallbackErr := t.fallback.Health(ctx)
+	if fallbackErr != nil {
+		return OptimizerRuntimeInfo{}, &autoTransportError{primary: primaryErr, fallback: fallbackErr}
+	}
+	return info, nil
 }
 
 func (t *AutoTransport) Close() error {
