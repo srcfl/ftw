@@ -10,23 +10,24 @@ import (
 // CoreReadSources are fixed local functions. They are supplied by Core during
 // startup and never selected by a remote request.
 type CoreReadSources struct {
-	Health  func(context.Context) (HealthReadResponse, error)
-	Plan    func(context.Context) (PlanReadResponse, error)
-	Assets  func(context.Context) ([]state.EnergyAsset, error)
-	History func(
+	Overview func(context.Context) (OverviewReadResponse, error)
+	Health   func(context.Context) (HealthReadResponse, error)
+	Plan     func(context.Context) (PlanReadResponse, error)
+	Assets   func(context.Context) ([]state.EnergyAsset, error)
+	History  func(
 		context.Context,
 		state.EnergyHistoryQuery,
 	) ([]state.EnergyLedgerPoint, bool, error)
 }
 
-// CoreReadAdapter implements the four closed read targets without invoking
+// CoreReadAdapter implements the closed read targets without invoking
 // Core's HTTP server.
 type CoreReadAdapter struct {
 	sources CoreReadSources
 }
 
 func NewCoreReadAdapter(sources CoreReadSources) (*CoreReadAdapter, error) {
-	if sources.Health == nil || sources.Plan == nil ||
+	if sources.Overview == nil || sources.Health == nil || sources.Plan == nil ||
 		sources.Assets == nil || sources.History == nil {
 		return nil, errors.New("Home Link Core read source is missing")
 	}
@@ -65,6 +66,12 @@ func (a *CoreReadAdapter) DispatchReadResult(
 
 	response := ReadResponse{Version: ReadContractVersion, Scope: request.Scope}
 	switch request.Scope {
+	case ScopeOverviewRead:
+		value, err := a.sources.Overview(ctx)
+		if err != nil {
+			return ReadResponse{}, err
+		}
+		response.Overview = &value
 	case ScopeHealthRead:
 		value, err := a.sources.Health(ctx)
 		if err != nil {

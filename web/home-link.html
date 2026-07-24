@@ -9,33 +9,291 @@
     if (window.location.hash) {
       history.replaceState(null, "", window.location.pathname + window.location.search);
     }
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem("ftw-theme"); } catch (_) {}
+      var light = window.matchMedia &&
+        window.matchMedia("(prefers-color-scheme: light)").matches;
+      document.documentElement.setAttribute("data-theme", saved || (light ? "light" : "dark"));
+    })();
   </script>
-  <link rel="stylesheet" href="/style.css">
-  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/components/theme.css">
   <style>
-    .home-link-shell { max-width: 980px; margin: 0 auto; padding: 32px 18px; }
-    .home-link-actions { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
-    .home-link-result { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 160px; }
+    * { box-sizing: border-box; }
+    html { color-scheme: dark light; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--fg);
+      background:
+        radial-gradient(circle at 50% -20%, color-mix(in oklab, var(--accent-e) 16%, transparent), transparent 42rem),
+        var(--ink);
+      font-family: var(--sans);
+      line-height: 1.45;
+    }
+    button { font: inherit; }
+    .home-link-shell {
+      width: min(1120px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 28px 0 56px;
+    }
+    .home-link-header, .home-link-panel, .home-link-metric {
+      border: 1px solid var(--line);
+      background: color-mix(in oklab, var(--ink-raised) 94%, transparent);
+      box-shadow: 0 18px 60px oklch(0.06 0.01 250 / 0.2);
+    }
+    .home-link-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 16px;
+      padding: 20px 22px;
+      border-radius: var(--radius-lg);
+    }
+    .home-link-brand { display: flex; align-items: center; gap: 12px; }
+    .home-link-logo {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 13px;
+      color: oklch(0.15 0.02 250);
+      background: var(--accent-e);
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: clamp(20px, 4vw, 28px); letter-spacing: -0.03em; }
+    h2 { font-size: 18px; }
+    .home-link-sub, .home-link-help, .metric-label, .detail-label {
+      color: var(--fg-dim);
+    }
+    .home-link-sub { margin-top: 2px; font-size: 13px; }
+    .home-link-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: 440px;
+      color: var(--fg);
+      font-size: 13px;
+      text-align: right;
+    }
+    .home-link-state::before {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--amber);
+      content: "";
+    }
+    .home-link-state.connected::before { background: var(--green-e); }
+    .home-link-state.error::before { background: var(--red-e); }
+    .home-link-panel {
+      margin-top: 16px;
+      padding: 20px;
+      border-radius: var(--radius-lg);
+    }
+    .home-link-panel-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+    .home-link-help { margin-top: 4px; font-size: 13px; }
+    .home-link-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+    .home-link-button {
+      min-height: 42px;
+      padding: 9px 15px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      color: var(--fg);
+      background: var(--ink-sunken);
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .home-link-button:hover:not(:disabled) {
+      border-color: var(--accent-e);
+      color: var(--accent-e);
+    }
+    .home-link-button.primary {
+      border-color: var(--accent-e);
+      color: oklch(0.15 0.02 250);
+      background: var(--accent-e);
+    }
+    .home-link-button:disabled { cursor: wait; opacity: .5; }
+    .home-link-metrics {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .home-link-metric {
+      min-width: 0;
+      padding: 16px;
+      border-radius: var(--radius-md);
+    }
+    .metric-label {
+      display: block;
+      margin-bottom: 7px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .metric-value {
+      display: block;
+      overflow: hidden;
+      color: var(--fg);
+      font-family: var(--mono);
+      font-size: clamp(19px, 3vw, 28px);
+      font-weight: 760;
+      letter-spacing: -.04em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .metric-note { display: block; margin-top: 4px; color: var(--fg-muted); font-size: 12px; }
+    .metric-grid .metric-value { color: var(--red-e); }
+    .metric-pv .metric-value { color: var(--amber); }
+    .metric-battery .metric-value { color: var(--cyan); }
+    .metric-home .metric-value { color: var(--fg); }
+    .metric-soc .metric-value { color: var(--green-e); }
+    .home-link-detail {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .detail-row {
+      min-width: 0;
+      padding: 13px 14px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-sm);
+      background: var(--ink-sunken);
+    }
+    .detail-label { display: block; font-size: 12px; }
+    .detail-value {
+      display: block;
+      margin-top: 4px;
+      overflow-wrap: anywhere;
+      color: var(--fg);
+      font-family: var(--mono);
+      font-weight: 650;
+    }
+    .home-link-empty {
+      padding: 24px;
+      border: 1px dashed var(--line);
+      border-radius: var(--radius-md);
+      color: var(--fg-dim);
+      text-align: center;
+    }
+    .home-link-table { display: grid; gap: 8px; }
+    .home-link-table-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1.3fr) minmax(110px, .7fr) minmax(100px, .5fr);
+      gap: 12px;
+      align-items: center;
+      padding: 11px 13px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius-sm);
+      background: var(--ink-sunken);
+    }
+    .home-link-table-row span:last-child {
+      color: var(--fg-dim);
+      font-size: 12px;
+      text-align: right;
+    }
+    .home-link-busy { color: var(--amber); }
+    .home-link-error { color: var(--red-e); }
+    @media (max-width: 840px) {
+      .home-link-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .home-link-metric:last-child { grid-column: span 2; }
+      .home-link-detail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 600px) {
+      .home-link-shell { width: min(100% - 20px, 1120px); padding-top: 10px; }
+      .home-link-header { align-items: flex-start; padding: 16px; }
+      .home-link-state { max-width: 145px; font-size: 11px; }
+      .home-link-panel { padding: 15px; }
+      .home-link-panel-heading { align-items: flex-start; flex-direction: column; }
+      .home-link-actions { width: 100%; }
+      .home-link-button { flex: 1 1 140px; }
+      .home-link-metrics, .home-link-detail { grid-template-columns: 1fr; }
+      .home-link-metric:last-child { grid-column: auto; }
+      .home-link-table-row { grid-template-columns: 1fr auto; }
+      .home-link-table-row span:last-child { grid-column: 1 / -1; text-align: left; }
+    }
   </style>
 </head>
 <body>
   <main class="home-link-shell">
-    <header>
-      <h1>FTW Home Link</h1>
-      <p id="home-link-state">Connecting to your home…</p>
-    </header>
-    <section class="card">
-      <div class="home-link-actions">
-        <button class="btn-send" data-scope="ftw.health.read">Health</button>
-        <button class="btn-send" data-scope="ftw.plan.read">Plan</button>
-        <button class="btn-send" data-scope="ftw.energy.assets.read">Energy assets</button>
-        <button class="btn-send" data-scope="ftw.energy.history.read">Last 24 hours</button>
+    <header class="home-link-header">
+      <div class="home-link-brand">
+        <div class="home-link-logo" aria-hidden="true">42</div>
+        <div>
+          <h1>FTW Home Link</h1>
+          <p class="home-link-sub">Your home, end-to-end encrypted</p>
+        </div>
       </div>
-      <p>Each read asks for your passkey. The relay only carries encrypted bytes.</p>
-      <pre id="home-link-result" class="home-link-result">No read yet.</pre>
+      <p id="home-link-state" class="home-link-state">Connecting to your home…</p>
+    </header>
+
+    <section class="home-link-panel" aria-labelledby="overview-title">
+      <div class="home-link-panel-heading">
+        <div>
+          <h2 id="overview-title">Overview</h2>
+          <p class="home-link-help">A fresh snapshot from Core. Touch ID protects each refresh.</p>
+        </div>
+        <button class="home-link-button primary" data-scope="ftw.overview.read">Refresh overview</button>
+      </div>
+      <div class="home-link-metrics">
+        <article class="home-link-metric metric-grid">
+          <span class="metric-label">Grid</span>
+          <strong id="remote-grid" class="metric-value">—</strong>
+          <span id="remote-grid-note" class="metric-note">No snapshot yet</span>
+        </article>
+        <article class="home-link-metric metric-pv">
+          <span class="metric-label">Solar</span>
+          <strong id="remote-pv" class="metric-value">—</strong>
+          <span class="metric-note">Generation</span>
+        </article>
+        <article class="home-link-metric metric-battery">
+          <span class="metric-label">Battery</span>
+          <strong id="remote-battery" class="metric-value">—</strong>
+          <span id="remote-battery-note" class="metric-note">Charge / discharge</span>
+        </article>
+        <article class="home-link-metric metric-home">
+          <span class="metric-label">Home</span>
+          <strong id="remote-load" class="metric-value">—</strong>
+          <span class="metric-note">Current use</span>
+        </article>
+        <article class="home-link-metric metric-soc">
+          <span class="metric-label">Battery level</span>
+          <strong id="remote-soc" class="metric-value">—</strong>
+          <span class="metric-note">State of charge</span>
+        </article>
+      </div>
+      <div id="remote-today" class="home-link-detail" style="margin-top:12px">
+        <div class="home-link-empty">Today’s energy totals appear after the first refresh.</div>
+      </div>
+    </section>
+
+    <section class="home-link-panel" aria-labelledby="details-title">
+      <div class="home-link-panel-heading">
+        <div>
+          <h2 id="details-title">Remote details</h2>
+          <p class="home-link-help">Plan, health and energy stay read-only in this beta.</p>
+        </div>
+        <div class="home-link-actions">
+          <button class="home-link-button" data-scope="ftw.health.read">System health</button>
+          <button class="home-link-button" data-scope="ftw.plan.read">Plan</button>
+          <button class="home-link-button" data-scope="ftw.energy.assets.read">Energy assets</button>
+          <button class="home-link-button" data-scope="ftw.energy.history.read">Last 24 hours</button>
+        </div>
+      </div>
+      <div id="home-link-result" class="home-link-empty">Choose a view above.</div>
     </section>
   </main>
-  <script src="/home-link-session.js?v=home1"></script>
+  <script src="/home-link-session.js?v=home2"></script>
   <script>
     (function () {
       "use strict";
@@ -47,8 +305,168 @@
       function setBusy(value) {
         buttons.forEach(function (button) { button.disabled = value; });
       }
-      setBusy(true);
+      function formatPower(value) {
+        if (!Number.isFinite(value)) return "—";
+        var magnitude = Math.abs(value);
+        if (magnitude >= 1000) return (magnitude / 1000).toFixed(magnitude >= 10000 ? 1 : 2) + " kW";
+        return Math.round(magnitude) + " W";
+      }
+      function formatEnergy(value) {
+        if (!Number.isFinite(value)) return "—";
+        return value >= 1000 ? (value / 1000).toFixed(2) + " kWh" : Math.round(value) + " Wh";
+      }
+      function replaceChildren(node, children) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+        children.forEach(function (child) { node.appendChild(child); });
+      }
+      function detail(label, value, note) {
+        var row = document.createElement("div");
+        row.className = "detail-row";
+        var key = document.createElement("span");
+        key.className = "detail-label";
+        key.textContent = label;
+        var data = document.createElement("strong");
+        data.className = "detail-value";
+        data.textContent = value;
+        row.appendChild(key);
+        row.appendChild(data);
+        if (note) {
+          var extra = document.createElement("span");
+          extra.className = "metric-note";
+          extra.textContent = note;
+          row.appendChild(extra);
+        }
+        return row;
+      }
+      function showMessage(message, className) {
+        result.className = className || "home-link-empty";
+        result.textContent = message;
+      }
+      function renderOverview(response) {
+        var overview = response && response.overview;
+        if (!overview) throw new Error("missing overview");
+        document.getElementById("remote-grid").textContent =
+          overview.grid_available ? formatPower(overview.grid_w) : "Unavailable";
+        document.getElementById("remote-grid-note").textContent =
+          !overview.grid_available ? "Site meter offline" :
+            overview.grid_w >= 0 ? "Importing" : "Exporting";
+        document.getElementById("remote-pv").textContent = formatPower(overview.pv_w);
+        document.getElementById("remote-battery").textContent = formatPower(overview.bat_w);
+        document.getElementById("remote-battery-note").textContent =
+          overview.bat_w > 10 ? "Charging" : overview.bat_w < -10 ? "Discharging" : "Idle";
+        document.getElementById("remote-load").textContent =
+          overview.grid_available ? formatPower(overview.load_w) : "—";
+        document.getElementById("remote-soc").textContent =
+          overview.bat_soc_available ? Math.round(overview.bat_soc * 100) + "%" : "—";
 
+        var today = overview.energy_today;
+        var children = today ? [
+          detail("Solar today", formatEnergy(today.pv_wh)),
+          detail("Home use today", formatEnergy(today.load_wh)),
+          detail("Grid import", formatEnergy(today.import_wh)),
+          detail("Grid export", formatEnergy(today.export_wh)),
+          detail("Battery charged", formatEnergy(today.bat_charged_wh)),
+          detail("Battery discharged", formatEnergy(today.bat_discharged_wh)),
+        ] : [detail("Energy today", "Not available yet")];
+        replaceChildren(document.getElementById("remote-today"), children);
+        state.textContent = "Connected · updated " +
+          new Date(overview.checked_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        state.className = "home-link-state connected";
+      }
+      function renderHealth(response) {
+        var health = response && response.health;
+        if (!health) throw new Error("missing health");
+        replaceChildren(result, [
+          detail("Core status", health.status),
+          detail("Checked", new Date(health.checked_at_ms).toLocaleString()),
+        ]);
+        result.className = "home-link-detail";
+      }
+      function renderPlan(response) {
+        var plan = response && response.plan;
+        if (!plan) throw new Error("missing plan");
+        if (!plan.available) {
+          showMessage("No active plan is available.", "home-link-empty");
+          return;
+        }
+        replaceChildren(result, [
+          detail("Mode", plan.mode),
+          detail("Horizon", String(plan.horizon_slots) + " slots"),
+          detail("Estimated cost", Number(plan.total_cost_ore).toFixed(0) + " öre"),
+          detail("Generated", new Date(plan.generated_at_ms).toLocaleString()),
+        ]);
+        result.className = "home-link-detail";
+      }
+      function renderAssets(response) {
+        var assets = response && response.energy_assets && response.energy_assets.assets;
+        if (!Array.isArray(assets) || assets.length === 0) {
+          showMessage("No energy assets are available.", "home-link-empty");
+          return;
+        }
+        var rows = assets.map(function (asset) {
+          var row = document.createElement("div");
+          row.className = "home-link-table-row";
+          var label = document.createElement("strong");
+          label.textContent = asset.label || asset.asset_id;
+          var kind = document.createElement("span");
+          kind.textContent = String(asset.kind || "").replaceAll("_", " ");
+          var seen = document.createElement("span");
+          seen.textContent = "Updated " + new Date(asset.last_seen_ms).toLocaleString();
+          row.appendChild(label);
+          row.appendChild(kind);
+          row.appendChild(seen);
+          return row;
+        });
+        replaceChildren(result, rows);
+        result.className = "home-link-table";
+      }
+      function renderHistory(response) {
+        var history = response && response.energy_history;
+        var points = history && history.points;
+        if (!Array.isArray(points) || points.length === 0) {
+          showMessage("No energy history is available for the last 24 hours.", "home-link-empty");
+          return;
+        }
+        var totals = new Map();
+        points.forEach(function (point) {
+          totals.set(point.flow, (totals.get(point.flow) || 0) + point.energy_wh);
+        });
+        var labels = {
+          grid_import: "Grid import", grid_export: "Grid export",
+          pv_generation: "Solar production", consumer_use: "Home use",
+          battery_charge: "Battery charged", battery_discharge: "Battery discharged",
+          vehicle_charge: "Vehicle charged", vehicle_discharge: "Vehicle discharged",
+        };
+        var rows = Array.from(totals.entries()).sort(function (a, b) { return b[1] - a[1]; })
+          .map(function (entry) {
+            var row = document.createElement("div");
+            row.className = "home-link-table-row";
+            var label = document.createElement("strong");
+            label.textContent = labels[entry[0]] || String(entry[0]).replaceAll("_", " ");
+            var value = document.createElement("span");
+            value.textContent = formatEnergy(entry[1]);
+            var note = document.createElement("span");
+            note.textContent = "Last 24 hours";
+            row.appendChild(label);
+            row.appendChild(value);
+            row.appendChild(note);
+            return row;
+          });
+        replaceChildren(result, rows);
+        result.className = "home-link-table";
+      }
+      function renderResponse(scope, response) {
+        switch (scope) {
+        case "ftw.overview.read": renderOverview(response); break;
+        case "ftw.health.read": renderHealth(response); break;
+        case "ftw.plan.read": renderPlan(response); break;
+        case "ftw.energy.assets.read": renderAssets(response); break;
+        case "ftw.energy.history.read": renderHistory(response); break;
+        default: throw new Error("unsupported view");
+        }
+      }
+
+      setBusy(true);
       try {
         var sourceURL = window.__ftwHomeLinkSourceURL || window.location.href;
         window.__ftwHomeLinkSourceURL = "";
@@ -61,34 +479,48 @@
           return session.enroll(pairing);
         }).then(function (credential) {
           state.textContent = credential
-            ? "Passkey added. Choose what you want to read."
-            : "Connected. Choose what you want to read.";
+            ? "Passkey added · refresh the overview"
+            : "Connected · refresh the overview";
+          state.className = "home-link-state connected";
           setBusy(false);
         }).catch(function () {
-          state.textContent = "Could not reach this home. Check that Core is online and Remote is enabled.";
+          state.textContent = "Could not reach this home.";
+          state.className = "home-link-state error";
           setBusy(true);
         });
       } catch (_) {
         state.textContent = "This Home Link invite is invalid.";
+        state.className = "home-link-state error";
         setBusy(true);
       }
 
       buttons.forEach(function (button) {
         button.addEventListener("click", function () {
+          var scope = button.dataset.scope;
           setBusy(true);
-          result.textContent = "Waiting for passkey…";
+          if (scope !== "ftw.overview.read") {
+            showMessage("Waiting for passkey…", "home-link-empty home-link-busy");
+          }
           var history = null;
-          if (button.dataset.scope === "ftw.energy.history.read") {
+          if (scope === "ftw.energy.history.read") {
             var now = Date.now();
             history = {
               asset_id: "", since_ms: now - 24 * 60 * 60 * 1000,
               until_ms: now, bucket_ms: 60 * 60 * 1000, limit: 24,
             };
           }
-          session.read(button.dataset.scope, history).then(function (response) {
-            result.textContent = JSON.stringify(response, null, 2);
+          session.read(scope, history).then(function (response) {
+            renderResponse(scope, response);
           }).catch(function () {
-            result.textContent = "The read was denied or the connection closed. Reconnect and try again.";
+            if (scope === "ftw.overview.read") {
+              state.textContent = "The overview read was denied. Try again.";
+              state.className = "home-link-state error";
+            } else {
+              showMessage(
+                "The read was denied or the connection closed. Reconnect and try again.",
+                "home-link-empty home-link-error"
+              );
+            }
           }).finally(function () { setBusy(false); });
         });
       });

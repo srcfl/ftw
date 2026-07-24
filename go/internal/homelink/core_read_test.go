@@ -197,9 +197,15 @@ func TestReadRequestHashBindsRequestIDAndEveryHistoryField(t *testing.T) {
 	}
 }
 
-func TestCoreReadAdapterDispatchesOnlyFourTypedSources(t *testing.T) {
-	var healthCalls, planCalls, assetCalls, historyCalls atomic.Int32
+func TestCoreReadAdapterDispatchesOnlyClosedTypedSources(t *testing.T) {
+	var overviewCalls, healthCalls, planCalls, assetCalls, historyCalls atomic.Int32
 	adapter, err := NewCoreReadAdapter(CoreReadSources{
+		Overview: func(context.Context) (OverviewReadResponse, error) {
+			overviewCalls.Add(1)
+			return OverviewReadResponse{
+				CheckedAtMS: 1, GridAvailable: true, Mode: "idle",
+			}, nil
+		},
 		Health: func(context.Context) (HealthReadResponse, error) {
 			healthCalls.Add(1)
 			return HealthReadResponse{Status: "ok", CheckedAtMS: 1}, nil
@@ -230,7 +236,8 @@ func TestCoreReadAdapterDispatchesOnlyFourTypedSources(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, scope := range []Scope{
-		ScopeHealthRead, ScopePlanRead, ScopeEnergyAssetsRead, ScopeEnergyHistoryRead,
+		ScopeOverviewRead, ScopeHealthRead, ScopePlanRead,
+		ScopeEnergyAssetsRead, ScopeEnergyHistoryRead,
 	} {
 		request := testReadRequest(scope)
 		response, err := adapter.DispatchReadResult(
@@ -243,9 +250,13 @@ func TestCoreReadAdapterDispatchesOnlyFourTypedSources(t *testing.T) {
 			t.Fatalf("%s response = %+v", scope, response)
 		}
 	}
-	if healthCalls.Load() != 1 || planCalls.Load() != 1 ||
+	if overviewCalls.Load() != 1 || healthCalls.Load() != 1 || planCalls.Load() != 1 ||
 		assetCalls.Load() != 1 || historyCalls.Load() != 1 {
-		t.Fatalf("calls = %d/%d/%d/%d", healthCalls.Load(), planCalls.Load(), assetCalls.Load(), historyCalls.Load())
+		t.Fatalf(
+			"calls = %d/%d/%d/%d/%d",
+			overviewCalls.Load(), healthCalls.Load(), planCalls.Load(),
+			assetCalls.Load(), historyCalls.Load(),
+		)
 	}
 }
 
@@ -265,6 +276,9 @@ func TestCoreReadAdapterAllowsSeveralFlowsPerHistoryBucket(t *testing.T) {
 		},
 	}
 	adapter, err := NewCoreReadAdapter(CoreReadSources{
+		Overview: func(context.Context) (OverviewReadResponse, error) {
+			return OverviewReadResponse{CheckedAtMS: 1, GridAvailable: true, Mode: "idle"}, nil
+		},
 		Health: func(context.Context) (HealthReadResponse, error) {
 			return HealthReadResponse{}, nil
 		},
