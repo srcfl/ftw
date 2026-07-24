@@ -433,10 +433,21 @@ func (a *PersistentCredentialAuthority) RevokeCredential(
 ) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if err := a.store.RevokeHomeLinkCredential(
-		ctx, a.siteID, credentialID, a.now().UTC().UnixMilli(),
-	); err != nil {
+	nowMS := a.now().UTC().UnixMilli()
+	stateCtx, cancelState := credentialStateContext(ctx)
+	err := a.store.RevokeHomeLinkCredential(
+		stateCtx, a.siteID, credentialID, nowMS,
+	)
+	cancelState()
+	if err != nil {
+		a.secureCredentialAfterStateErrorLocked(ctx, credentialID, nowMS)
+		if requestErr := ctx.Err(); requestErr != nil {
+			return requestErr
+		}
 		return errors.New("revoke local passkey credential")
+	}
+	if requestErr := ctx.Err(); requestErr != nil {
+		return requestErr
 	}
 	return nil
 }

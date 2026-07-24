@@ -40,6 +40,7 @@ type faultCredentialStateStore struct {
 	) (state.HomeLinkCredentialRecord, error)
 	ensure func(context.Context, string, []byte, int64) error
 	read   func(context.Context, string, []byte) (state.HomeLinkCredentialRecord, error)
+	revoke func(context.Context, string, []byte, int64) error
 }
 
 func (s *faultCredentialStateStore) ApplyHomeLinkAssertion(
@@ -75,6 +76,20 @@ func (s *faultCredentialStateStore) HomeLinkCredential(
 		return s.read(ctx, siteID, credentialID)
 	}
 	return s.credentialStateStore.HomeLinkCredential(ctx, siteID, credentialID)
+}
+
+func (s *faultCredentialStateStore) RevokeHomeLinkCredential(
+	ctx context.Context,
+	siteID string,
+	credentialID []byte,
+	nowMS int64,
+) error {
+	if s.revoke != nil {
+		return s.revoke(ctx, siteID, credentialID, nowMS)
+	}
+	return s.credentialStateStore.RevokeHomeLinkCredential(
+		ctx, siteID, credentialID, nowMS,
+	)
 }
 
 func (v cancelAfterAssertionVerification) VerifyAssertion(
@@ -667,6 +682,230 @@ func TestCredentialRevokeDeniesPendingAndFutureAssertions(t *testing.T) {
 	}
 	if stored.Status != state.HomeLinkCredentialRevoked {
 		t.Fatalf("status = %q", stored.Status)
+	}
+}
+
+func TestCanceledCredentialRevokePersistsBeforeReturningCanceled(t *testing.T) {
+	tests := []struct {
+		name       string
+		cancelCall func(
+			*PersistentCredentialAuthority,
+			*state.Store,
+			context.CancelFunc,
+		)
+	}{
+		{
+			name: "before revoke",
+			cancelCall: func(
+				_ *PersistentCredentialAuthority,
+				_ *state.Store,
+				cancel context.CancelFunc,
+			) {
+				cancel()
+			},
+		},
+		{
+			name: "during state write",
+			cancelCall: func(
+				authority *PersistentCredentialAuthority,
+				store *state.Store,
+				cancel context.CancelFunc,
+			) {
+				authority.store = &faultCredentialStateStore{
+					credentialStateStore: store,
+					revoke: func(
+						stateCtx context.Context,
+						siteID string,
+						credentialID []byte,
+						nowMS int64,
+					) error {
+						cancel()
+						if err := stateCtx.Err(); err != nil {
+							t.Fatalf("revoke state context canceled with request: %v", err)
+						}
+						return store.RevokeHomeLinkCredential(
+							stateCtx, siteID, credentialID, nowMS,
+						)
+					},
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			authority, fixture, handle, store := newRegisteredAuthority(
+				t, "001122334455667788", 0x01|0x04|0x40, 0,
+			)
+			challenge, err := authority.CreateAssertion(
+				context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			test.cancelCall(authority, store, cancel)
+			err = authority.RevokeCredential(ctx, fixture.credentialID)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("canceled revoke = %v", err)
+			}
+			stored, err := store.HomeLinkCredential(
+				context.Background(), "001122334455667788", fixture.credentialID,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != state.HomeLinkCredentialRevoked {
+				t.Fatalf("status after canceled revoke = %q", stored.Status)
+			}
+			raw := fixture.assertionResponse(
+				challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+			)
+			if principal, _, err := authority.VerifyAndConsumeAssertion(
+				context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+			); !errors.Is(err, ErrCredentialUncertain) ||
+				len(principal.CredentialID) != 0 {
+				t.Fatalf(
+					"pending assertion after canceled revoke returned principal=%+v err=%v",
+					principal, err,
+				)
+			}
+			if _, err := authority.CreateAssertion(
+				context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+			); !errors.Is(err, ErrCredentialUnknown) {
+				t.Fatalf("future assertion after canceled revoke = %v", err)
+			}
+		})
+	}
+}
+
+func TestRevokeIntentFailurePersistsPolicyFallbackAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	siteID := "001122334455667788"
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3, 4})
+	handle := bytes.Repeat([]byte{7}, webAuthnUserHandleBytes)
+	if err := store.RegisterHomeLinkCredential(context.Background(), state.HomeLinkCredentialRecord{
+		SiteID: siteID, CredentialID: fixture.credentialID, PublicKey: fixture.publicKey,
+		Label: "phone", UserHandle: handle, Status: state.HomeLinkCredentialActive,
+		Revision: 1, CreatedAtMS: 1, UpdatedAtMS: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		revoke: func(context.Context, string, []byte, int64) error {
+			return errors.New("commit Home Link revoke intent")
+		},
+	}
+	if err := authority.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); err == nil {
+		t.Fatal("revoke with failed intent unexpectedly succeeded")
+	}
+	stored, err := store.HomeLinkCredential(
+		context.Background(), siteID, fixture.credentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != state.HomeLinkCredentialUncertain {
+		t.Fatalf("status after revoke-intent fallback = %q", stored.Status)
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	if principal, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrCredentialUncertain) || len(principal.CredentialID) != 0 {
+		t.Fatalf(
+			"pending assertion after revoke-intent failure returned principal=%+v err=%v",
+			principal, err,
+		)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	restarted, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restarted.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("policy fallback reopened after restart = %v", err)
+	}
+}
+
+func TestRevokeStoreOutageBlocksCurrentAuthorityInMemory(t *testing.T) {
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, "001122334455667788", 0x01|0x04|0x40, 0,
+	)
+	challenge, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outage := errors.New("credential store unavailable")
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		revoke: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		ensure: func(context.Context, string, []byte, int64) error {
+			return outage
+		},
+		read: func(
+			context.Context,
+			string,
+			[]byte,
+		) (state.HomeLinkCredentialRecord, error) {
+			return state.HomeLinkCredentialRecord{}, outage
+		},
+	}
+	if err := authority.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); err == nil {
+		t.Fatal("revoke during total store outage unexpectedly succeeded")
+	}
+	authority.store = store
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	if principal, _, err := authority.VerifyAndConsumeAssertion(
+		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+	); !errors.Is(err, ErrCredentialUncertain) || len(principal.CredentialID) != 0 {
+		t.Fatalf(
+			"pending assertion after revoke outage returned principal=%+v err=%v",
+			principal, err,
+		)
+	}
+	if _, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("memory block reopened after store recovery = %v", err)
 	}
 }
 
