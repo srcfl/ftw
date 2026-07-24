@@ -213,6 +213,12 @@ class FtwEnergyFlow extends FtwElement {
       margin-bottom: 48px;
       position: relative;
     }
+    :host([embedded]) .title {
+      display: none;
+    }
+    :host([embedded]) svg {
+      margin-top: -12px;
+    }
     svg {
       width: 100%;
       height: calc(var(--efl-h-factor, 1) * 535px);

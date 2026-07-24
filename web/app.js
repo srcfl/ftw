@@ -228,7 +228,10 @@
   const pvW = $("pv-w");
   const batW = $("bat-w");
   const batDir = $("bat-dir");
+  const batSoc = $("bat-soc");
   const connStatus = $("conn-status");
+  const overviewHealth = $("overview-health");
+  const overviewHealthLabel = $("overview-health-label");
   const driversGrid = $("drivers-grid");
   const dispatchList = $("dispatch-list");
   const modeButtons = $("mode-buttons");
@@ -274,10 +277,14 @@
   const eCharged = $("e-charged");
   const eDischarged = $("e-discharged");
   const eLoad = $("e-load");
+  const overviewEImport = $("overview-e-import");
+  const overviewEExport = $("overview-e-export");
+  const overviewEPv = $("overview-e-pv");
   const lastUpdate = $("last-update");
   const versionEl = $("version");
   // ---- Formatting ----
   function formatW(w) {
+    if (w == null || !isFinite(w)) return "—";
     const abs = Math.abs(w);
     if (abs >= 1000) {
       return (w / 1000).toFixed(1) + " kW";
@@ -614,6 +621,11 @@
       batDir.textContent = "idle";
       batW.className = "card-value val-neutral";
     }
+    if (batSoc) {
+      batSoc.textContent = Number.isFinite(data.bat_soc)
+        ? Math.round(data.bat_soc * 100) + "% SoC"
+        : "—";
+    }
     var batTargetDisp = document.getElementById("bat-target-display");
     if (batTargetDisp) {
       batTargetDisp.textContent = hasBatteryTarget ? batteryTargetLine(totalBatteryTargetW) : "";
@@ -890,6 +902,9 @@
       if (eCharged) eCharged.textContent = formatKwh(t.bat_charged_wh);
       if (eDischarged) eDischarged.textContent = formatKwh(t.bat_discharged_wh);
       if (eLoad) eLoad.textContent = formatKwh(t.load_wh);
+      if (overviewEImport) overviewEImport.textContent = formatKwh(t.import_wh);
+      if (overviewEExport) overviewEExport.textContent = formatKwh(t.export_wh);
+      if (overviewEPv) overviewEPv.textContent = formatKwh(t.pv_wh);
     }
 
     // Fuse gauge — per-phase bars if the server reports phase amperage,
@@ -2398,10 +2413,14 @@
     if (ok) {
       connStatus.className = "conn-status connected";
       connStatus.title = "Connected";
+      if (overviewHealth) overviewHealth.classList.add("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Live";
       // render() will update lastUpdate with timestamp
     } else {
       connStatus.className = "conn-status disconnected";
       connStatus.title = "Disconnected";
+      if (overviewHealth) overviewHealth.classList.remove("is-connected");
+      if (overviewHealthLabel) overviewHealthLabel.textContent = "Connection lost";
       lastUpdate.textContent = "Connection lost";
     }
   }

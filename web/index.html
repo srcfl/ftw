@@ -66,7 +66,6 @@
          handled in the init block at the bottom of this file. -->
     <button id="mobile-menu-btn" class="mobile-menu-btn" aria-label="Open menu" aria-expanded="false" title="Menu">&#9776;</button>
     <div class="header-right">
-      <button id="hero-toggle" class="icon-btn" data-menu-label="Hero / tiles" title="Switch between hero diagram and numeric tiles">&#9638;</button>
       <button id="theme-toggle" class="icon-btn" data-menu-label="Dark mode" title="Toggle light / dark theme">&#9790;</button>
       <!-- Advanced toggle moved below the Plan chart so it's visually
            colocated with the controls + diagnostics it reveals (twins,
@@ -144,51 +143,123 @@
   </div>
 
   <main id="view-overview" class="app-view" role="tabpanel" aria-label="Overview">
-    <!-- Energy-flow hero — central house, PV top, Grid left, Battery right,
-         EV bottom. app.js calls el.setReadings(...) each status tick. -->
-    <section class="flow-hero">
-      <ftw-energy-flow id="energy-flow" pv="0" grid="0" battery="0" load="0" ev="0" soc="0"></ftw-energy-flow>
-    </section>
-
-    <!-- Summary Cards — compact 5-in-a-row -->
-    <section class="summary-cards">
-      <!-- The four "big numbers" that duplicate what the energy-flow
-           hero shows. Hidden when body.mode-hero is active — the mode
-           toggle in the header flips between hero and numeric tiles. -->
-      <div class="card summary-card ftw-hide-in-hero" id="card-grid">
-        <div class="card-label">Grid <span class="card-target" id="grid-target-display"></span></div>
-        <div class="card-value" id="grid-w">-- W</div>
-        <div class="card-sub" id="grid-dir">--</div>
+    <section class="view-heading overview-heading">
+      <div>
+        <p class="view-kicker">Overview</p>
+        <h2>Your home, right now</h2>
+        <p>Live power, today’s price and the next safe action.</p>
       </div>
-      <div class="card summary-card ftw-hide-in-hero" id="card-pv">
-        <div class="card-label">PV</div>
-        <div class="card-value" id="pv-w">-- W</div>
-        <div class="card-sub">gen</div>
-      </div>
-      <div class="card summary-card ftw-hide-in-hero" id="card-bat">
-        <div class="card-label">Battery <span class="card-target" id="bat-target-display"></span></div>
-        <div class="card-value" id="bat-w">-- W</div>
-        <div class="card-sub" id="bat-dir">--</div>
-      </div>
-      <div class="card summary-card ftw-hide-in-hero" id="card-load">
-        <div class="card-label">Load</div>
-        <div class="card-value val-neutral" id="load-w">-- W</div>
-        <div class="card-sub">house</div>
-      </div>
-      <!-- EV tile — mirrors the energy-flow's EV planet so tile-mode
-           operators can reach the EV charging modal too. Click opens
-           #ev-modal (same modal the planet click opens). When no EV
-           is connected the value reads "—" and the click is a no-op. -->
-      <div class="card summary-card ftw-hide-in-hero" id="card-ev">
-        <div class="card-label">EV</div>
-        <div class="card-value val-neutral" id="card-ev-w">-- W</div>
-        <div class="card-sub" id="card-ev-sub">charger</div>
+      <div class="overview-health" id="overview-health" aria-live="polite">
+        <span class="overview-health-dot" aria-hidden="true"></span>
+        <span id="overview-health-label">Connecting…</span>
       </div>
     </section>
 
+    <section class="power-now" id="power-now" aria-labelledby="power-now-title">
+      <div class="power-now-head">
+        <div>
+          <p class="section-kicker">Live telemetry</p>
+          <h2 id="power-now-title">Power now</h2>
+        </div>
+        <div class="power-now-tabs" role="tablist" aria-label="Power now view">
+          <button id="power-now-tab-values" type="button" role="tab"
+                  data-power-now-mode="values" aria-controls="power-now-values"
+                  aria-selected="true">Values</button>
+          <button id="power-now-tab-flow" type="button" role="tab"
+                  data-power-now-mode="flow" aria-controls="power-now-flow"
+                  aria-selected="false" tabindex="-1">Flow</button>
+        </div>
+      </div>
 
-    <!-- Fuse — own row, one box per phase. Falls back to a single bar when
-         site meter doesn't report per-phase amperage. -->
+      <div id="power-now-values" class="power-now-panel" role="tabpanel"
+           aria-labelledby="power-now-tab-values">
+        <div class="summary-cards">
+          <div class="summary-card" id="card-pv">
+            <div class="card-label">Solar</div>
+            <div class="card-value" id="pv-w">—</div>
+            <div class="card-sub">generating</div>
+          </div>
+          <div class="summary-card" id="card-grid">
+            <div class="card-label">Grid <span class="card-target" id="grid-target-display"></span></div>
+            <div class="card-value" id="grid-w">—</div>
+            <div class="card-sub" id="grid-dir">—</div>
+          </div>
+          <div class="summary-card" id="card-load">
+            <div class="card-label">Home</div>
+            <div class="card-value val-neutral" id="load-w">—</div>
+            <div class="card-sub">using now</div>
+          </div>
+          <div class="summary-card bat-only" id="card-bat">
+            <div class="card-label">Battery <span class="card-target" id="bat-target-display"></span></div>
+            <div class="power-value-pair">
+              <div class="card-value" id="bat-w">—</div>
+              <div class="power-soc" id="bat-soc">—</div>
+            </div>
+            <div class="card-sub" id="bat-dir">—</div>
+          </div>
+          <div class="summary-card" id="card-ev">
+            <div class="card-label">EV</div>
+            <div class="card-value val-neutral" id="card-ev-w">—</div>
+            <div class="card-sub" id="card-ev-sub">charger</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="power-now-flow" class="power-now-panel flow-hero" role="tabpanel"
+           aria-labelledby="power-now-tab-flow" hidden>
+        <ftw-energy-flow id="energy-flow" embedded pv="0" grid="0" battery="0"
+                         load="0" ev="0" soc="0"></ftw-energy-flow>
+      </div>
+    </section>
+
+    <section class="overview-outlook" aria-label="Immediate outlook">
+      <section class="overview-card" id="overview-price" aria-label="Electricity price">
+        <ftw-price-chart compact></ftw-price-chart>
+      </section>
+      <section class="overview-card overview-plan-summary" id="overview-plan-summary"
+               aria-labelledby="overview-plan-title" aria-live="polite">
+        <div class="overview-card-head">
+          <div>
+            <p class="section-kicker">Automation</p>
+            <h2 id="overview-plan-title">What FTW does next</h2>
+          </div>
+          <span class="plan-state-badge is-idle" id="overview-plan-state">Checking…</span>
+        </div>
+        <strong class="overview-plan-action" id="overview-plan-action">Reading the current plan</strong>
+        <span class="overview-plan-time" id="overview-plan-time">—</span>
+        <p class="overview-plan-reason" id="overview-plan-reason">Waiting for planner state.</p>
+        <p class="overview-plan-constraint" id="overview-plan-constraint">Safety limits remain active.</p>
+        <p class="overview-plan-soc" id="overview-plan-soc" hidden></p>
+        <a class="overview-detail-link" href="#plan">Open full plan <span aria-hidden="true">→</span></a>
+      </section>
+    </section>
+
+    <section class="overview-today" id="overview-today" aria-labelledby="overview-today-title">
+      <div class="overview-today-head">
+        <div>
+          <p class="section-kicker">Since midnight</p>
+          <h2 id="overview-today-title">Today</h2>
+        </div>
+      </div>
+      <div class="overview-today-grid">
+        <div class="overview-today-value">
+          <span>Imported</span>
+          <strong class="val-import" id="overview-e-import">—</strong>
+        </div>
+        <div class="overview-today-value">
+          <span>Exported</span>
+          <strong class="val-export" id="overview-e-export">—</strong>
+        </div>
+        <div class="overview-today-value">
+          <span>Solar</span>
+          <strong class="val-generation" id="overview-e-pv">—</strong>
+        </div>
+        <ftw-savings-card compact poll-ms="300000"></ftw-savings-card>
+      </div>
+    </section>
+
+    <!-- Fuse remains on Overview because it is the site's primary live
+         safety boundary. -->
     <section class="fuse-row">
       <div class="card fuse-card" id="card-fuse">
         <div class="card-label">Fuse</div>

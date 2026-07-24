@@ -219,6 +219,25 @@ class FtwSavingsCard extends FtwElement {
       padding: 8px 0;
     }
 
+    :host([compact]) .card-inner {
+      height: 100%;
+      box-sizing: border-box;
+      justify-content: center;
+      gap: 5px;
+      background: var(--ink-sunken);
+      border-radius: var(--radius-md, 10px);
+      padding: 12px 14px;
+    }
+    :host([compact]) .toggle,
+    :host([compact]) .pct,
+    :host([compact]) .sub,
+    :host([compact]) .spark-wrap {
+      display: none !important;
+    }
+    :host([compact]) .total {
+      font-size: 1.05rem;
+    }
+
     @media (max-width: 900px) {
       .card-inner { padding: var(--card-pad-tight, 12px 14px); }
       .total { font-size: 1.2rem; }
@@ -226,7 +245,7 @@ class FtwSavingsCard extends FtwElement {
   `;
 
   static get observedAttributes() {
-    return ["default-range", "range", "poll-ms"];
+    return ["default-range", "range", "poll-ms", "compact"];
   }
 
   constructor() {
@@ -276,6 +295,7 @@ class FtwSavingsCard extends FtwElement {
   }
 
   _daysFor(range) {
+    if (this.hasAttribute("compact")) return 1;
     if (range === "month") {
       const now = new Date();
       return now.getDate();
@@ -290,10 +310,11 @@ class FtwSavingsCard extends FtwElement {
       this._range = this.getAttribute("default-range") || "week";
     }
     const wk = this._range === "week";
+    const compact = this.hasAttribute("compact");
     return `
       <div class="card-inner">
         <div class="head">
-          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">Saved vs no PV/battery</div>
+          <div class="label" title="Actual historical net grid cost compared with buying the recorded house load from the grid with no PV and no battery.">${compact ? "Saved today" : "Saved vs no PV/battery"}</div>
           <div class="toggle" role="tablist" data-active="${wk ? "week" : "month"}">
             <button type="button" role="tab" data-range="week"  aria-selected="${wk ? "true" : "false"}"${wk ? ' class="active"' : ""}>Week</button>
             <button type="button" role="tab" data-range="month" aria-selected="${!wk ? "true" : "false"}"${!wk ? ' class="active"' : ""}>Month</button>
