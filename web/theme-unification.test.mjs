@@ -59,3 +59,52 @@ describe("terminal-native palette", () => {
     }
   });
 });
+
+describe("terminal-native light DOM chrome", () => {
+  it("uses one accessible FTW brand mark", () => {
+    assert.equal((html.match(/class="header-logo"/g) || []).length, 1);
+    assert.match(html, /<img[^>]+alt="FTW"[^>]+class="header-logo"/);
+    assert.doesNotMatch(html, /<h1>\s*FTW\s*<\/h1>/);
+  });
+
+  it("uses flat token surfaces for page, header, and mobile destinations", () => {
+    assert.doesNotMatch(
+      appCss,
+      /body\.ftw-app::before\s*\{[\s\S]*?radial-gradient/,
+    );
+    assert.doesNotMatch(
+      appCss,
+      /body\.ftw-app > header::before\s*\{[\s\S]*?backdrop-filter/,
+    );
+    assert.match(
+      appCss,
+      /body\.ftw-app > header\s*\{[\s\S]*?background:\s*var\(--ink-elevated\)/,
+    );
+    assert.match(
+      appCss,
+      /\.mobile-destinations\s*\{[\s\S]*?background:\s*var\(--ink-elevated\)/,
+    );
+  });
+
+  it("uses amber instead of blue for selected interface chrome", () => {
+    assert.match(
+      styleCss,
+      /\.diag-row\.active\s*\{[^}]*var\(--accent-e\)/,
+    );
+    assert.match(
+      styleCss,
+      /\.modal-tabs button\.active\s*\{[^}]*var\(--accent-e\)/,
+    );
+    assert.doesNotMatch(
+      styleCss,
+      /\.diag-row\.active\s*\{[^}]*#60a5fa/,
+    );
+  });
+
+  it("loads canonical tokens before shared setup styles", () => {
+    assert.ok(
+      setup.indexOf("/components/theme.css") < setup.indexOf("/style.css"),
+      "setup must load theme.css before style.css",
+    );
+  });
+});

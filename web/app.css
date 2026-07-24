@@ -15,19 +15,6 @@ body.ftw-app {
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
-body.ftw-app::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  background:
-    radial-gradient(ellipse 80% 60% at 50% -10%,
-      oklch(0.25 0.08 var(--accent-hue) / 0.25), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 100%,
-      oklch(0.25 0.1 220 / 0.15), transparent 60%),
-    linear-gradient(to bottom, transparent 0%, oklch(0.1 0.015 250) 100%);
-}
 body.ftw-app > main,
 body.ftw-app > footer,
 body.ftw-app > section {
@@ -81,7 +68,7 @@ body.ftw-app .view-kicker {
 }
 body.ftw-app .mobile-destinations { display: none; }
 
-/* ---- Header — rounded pill with backdrop blur.
+/* ---- Header — flat raised terminal surface.
        Outer rectangle lines up with main's CONTENT box (not main's
        outer box): width caps at 1560 − 2×28 = 1504 px on wide screens,
        and `width: calc(100% - 56px)` keeps it 28 px inside the viewport
@@ -97,41 +84,15 @@ body.ftw-app > header {
   max-width: 1504px;
   margin: 20px auto 20px;
   padding: 12px 28px;
+  background: var(--ink-elevated);
   border: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  /* Background + backdrop-filter live on the ::before below, NOT on
-     the header itself. Why: backdrop-filter on an element creates a
-     new containing block for its position:fixed descendants, which
-     made the <ftw-update-badge> modal center against the header pill
-     instead of the viewport — visibly half-off-screen on narrow
-     viewports. Moving the blur to a pseudo-element keeps the same
-     visual while leaving the header a normal flow element for
-     modal-positioning purposes. */
-}
-body.ftw-app > header::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: oklch(0.16 0.018 250 / 0.7);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border-radius: inherit;
-  pointer-events: none;
-  z-index: -1;
 }
 /* On viewports wider than 1560 px, the header pill already has 28px of
    horizontal padding so the brand / nav / right-cluster line up with
    the grid cells below. On narrower viewports, header spans full width
    (minus the side pads on main), giving the same alignment without
    explicit margin math. */
-body.ftw-app > header h1 {
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 17px;
-  letter-spacing: -0.01em;
-  color: var(--fg);
-}
 body.ftw-app > header .header-logo {
   height: 30px;
   border-radius: 6px;
@@ -149,7 +110,7 @@ body.ftw-app .tab-btn {
 }
 body.ftw-app .tab-btn:hover {
   color: var(--fg);
-  background: oklch(0.22 0.02 250);
+  background: var(--ink-sunken);
 }
 body.ftw-app .tab-btn.active {
   background: var(--ink-raised);
@@ -2108,7 +2069,6 @@ body.ftw-app .diagnose-detail {
     padding: 10px 12px;
     position: relative;
   }
-  body.ftw-app > header h1 { font-size: 15px; }
   body.ftw-app > header .header-logo { height: 26px; }
   body.ftw-app footer {
     width: calc(100% - 24px);
@@ -2131,10 +2091,8 @@ body.ftw-app .diagnose-detail {
     padding: 5px;
     border: 1px solid var(--line);
     border-radius: 16px;
-    background: color-mix(in oklch, var(--ink-raised) 92%, transparent);
+    background: var(--ink-elevated);
     box-shadow: 0 12px 36px rgba(0, 0, 0, 0.38);
-    backdrop-filter: blur(16px);
-    -webkit-backdrop-filter: blur(16px);
   }
   body.ftw-app .mobile-destinations button {
     display: flex;
@@ -2200,7 +2158,7 @@ body.ftw-app .diagnose-detail {
     right: 0;
     min-width: 240px;
     padding: 14px;
-    background: var(--ink-raised);
+    background: var(--ink-elevated);
     border: 1px solid var(--line);
     border-radius: var(--radius-md);
     box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
@@ -2298,35 +2256,13 @@ body.ftw-app .diagnose-detail {
 }
 
 /* ---------- Light-theme specific fixes ---------- */
-/* Most surfaces use tokens that flip automatically. These are the cases
-   where the dark-mode sheet hardcoded a rgba or hex that needs an
-   explicit override so the light variant reads correctly. */
-html[data-theme="light"] body.ftw-app::before {
-  background:
-    radial-gradient(ellipse 80% 60% at 50% -10%,
-      oklch(0.8 0.08 var(--accent-hue) / 0.20), transparent 60%),
-    radial-gradient(ellipse 60% 40% at 90% 100%,
-      oklch(0.8 0.1 220 / 0.12), transparent 60%),
-    linear-gradient(to bottom, transparent 0%, oklch(0.94 0.012 250) 100%);
-}
-html[data-theme="light"] body.ftw-app > header::before {
-  background: oklch(0.98 0.005 250 / 0.7);
-}
-/* Light-mode header chrome:
-   - Remove the ambient pill border: the paper body + translucent
-     ::before already carry enough separation; the hairline ring on
-     a paper-ish background read as a dark frame that competed with
-     the header content for attention.
-   - Pull every text element in the header to the full --fg (very
+/* Most surfaces use tokens that flip automatically. Pull every text
+   element in the header to the full --fg (very
      near black). In dark mode the tabs and the Advanced link use
      --fg-dim (a 0.7 L gray) so they don't steal focus from the
      active tab, but on paper 0.7 L is muddy — the operator
      complained it looked washed out. Black is correct contrast
      for light mode; the active state still has the accent tint. */
-html[data-theme="light"] body.ftw-app > header {
-  border-color: transparent;
-}
-html[data-theme="light"] body.ftw-app > header h1,
 html[data-theme="light"] body.ftw-app > header .tab-btn,
 html[data-theme="light"] body.ftw-app > header .btn-link,
 html[data-theme="light"] body.ftw-app > header .version,
@@ -2338,7 +2274,7 @@ html[data-theme="light"] body.ftw-app .mode-buttons button.active {
   background: oklch(0.75 0.14 var(--accent-hue) / 0.25);
 }
 html[data-theme="light"] body.ftw-app .status-bar {
-  background: oklch(0.94 0.01 250);
+  background: var(--ink-sunken);
 }
 /* Legacy val-* text colours are tuned for dark-on-dark in style.css;
    tokens above re-point them but a few hex fallbacks slip through in
