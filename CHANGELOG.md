@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.12.0
+
+### Minor Changes
+
+- a5a797e: Add encrypted Home Link sessions for four bounded, read-only Core views with session-bound one-use grants.
+- e1d8055: Add the first Home Link remote transport: a strict versioned wire and a separate invite-only relay that forwards only encrypted session frames.
+- a5f9c23: Add opt-in Home Link remote access with local passkey setup, end-to-end encrypted relay sessions, and four bounded read-only views.
+- 1418c00: Add local, revocable Home Link passkey enrollment and verification.
+
+### Patch Changes
+
+- f1bd56f: Accept the shipped Home Link route-handle format in remote browser invites.
+- bbc3f6e: Update Go network dependencies to include current DNS parser security fixes.
+- b2993b5: Show Home Link as a readable remote energy overview instead of raw JSON, and fix its light and dark theme colours.
+
 ## 1.11.4
 
 ### Patch Changes
