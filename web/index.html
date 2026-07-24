@@ -900,32 +900,6 @@
       });
     })();
 
-    // -------- Hero / numbers toggle. --------
-    // mode-hero: show the energy-flow diagram, hide the big numeric
-    //   tiles for Grid/PV/Battery/Load (they're in the hero already).
-    // mode-numbers: hide the hero, show all tiles. Both paths leave
-    //   SoC, Fuse, EV, energy totals, controls + charts visible.
-    (function () {
-      var KEY = 'ftw-hero-mode';
-      var btn = document.getElementById('hero-toggle');
-      function iconFor(m) { return m === 'hero' ? '\u25A6' /* ▦ */ : '\u2638' /* ☸ */; }
-      function apply(mode) {
-        document.body.classList.remove('mode-hero', 'mode-numbers');
-        document.body.classList.add('mode-' + mode);
-        if (btn) {
-          btn.textContent = iconFor(mode);
-          btn.title = mode === 'hero' ? 'Show numeric tiles' : 'Show energy-flow hero';
-          btn.setAttribute('aria-pressed', mode === 'hero' ? 'true' : 'false');
-        }
-      }
-      apply(localStorage.getItem(KEY) || 'hero');
-      if (btn) btn.addEventListener('click', function () {
-        var next = document.body.classList.contains('mode-numbers') ? 'hero' : 'numbers';
-        localStorage.setItem(KEY, next);
-        apply(next);
-      });
-    })();
-
     // -------- Mobile menu drawer. --------
     // On narrow viewports the header right-cluster (tabs + toggles +
     // settings + version) collapses behind a hamburger. Clicking the
@@ -957,6 +931,7 @@
       });
     })();
   </script>
+  <script type="module" src="/power-now.js?v=dashboard1"></script>
 
 
 </body>
