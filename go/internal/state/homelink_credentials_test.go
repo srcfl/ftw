@@ -235,6 +235,75 @@ func TestHomeLinkRevokeFailureStaysUncertainAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestHomeLinkFirstRevokeFenceFailurePersistsIntentAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testHomeLinkCredential("001122334455667788", 1)
+	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER homelink_fail_first_revoke_fence
+		BEFORE UPDATE OF status ON homelink_credentials
+		WHEN OLD.status = 'active' AND NEW.status = 'uncertain'
+		BEGIN SELECT RAISE(ABORT, 'first revoke fence failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeHomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID, 2,
+	); err == nil {
+		t.Fatal("revoke unexpectedly succeeded")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	stored, err := store.HomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != HomeLinkCredentialUncertain {
+		t.Fatalf("status with pending revoke = %q", stored.Status)
+	}
+	if active, err := store.ActiveHomeLinkCredentials(context.Background(), record.SiteID); err != nil {
+		t.Fatal(err)
+	} else if len(active) != 0 {
+		t.Fatalf("pending revoke listed active credentials: %+v", active)
+	}
+	if _, err := store.ApplyHomeLinkAssertion(context.Background(), HomeLinkAssertionUpdate{
+		SiteID: record.SiteID, CredentialID: record.CredentialID,
+		ExpectedRevision: record.Revision, SignCount: 2,
+		BackupEligible: record.BackupEligible, BackupState: record.BackupState,
+		UpdatedAtMS: 3,
+	}); !errors.Is(err, ErrHomeLinkCredentialInactive) {
+		t.Fatalf("assertion with pending revoke = %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER homelink_fail_first_revoke_fence`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeHomeLinkCredential(
+		context.Background(), record.SiteID, record.CredentialID, 4,
+	); err != nil {
+		t.Fatalf("retry revoke: %v", err)
+	}
+	stored, err = store.HomeLinkCredential(context.Background(), record.SiteID, record.CredentialID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != HomeLinkCredentialRevoked {
+		t.Fatalf("status after retry = %q", stored.Status)
+	}
+}
+
 func TestHomeLinkMigrationOpensOlderDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := sql.Open("sqlite", path)

@@ -865,6 +865,15 @@ func (s *Store) migrate() error {
 		) WITHOUT ROWID, STRICT`,
 		`CREATE INDEX IF NOT EXISTS idx_homelink_credentials_site_status
 			ON homelink_credentials(site_id, status)`,
+		// A revoke intent is a permanent fail-closed tombstone. It is committed
+		// before the credential row changes, so a failed or ambiguous later
+		// write cannot make the credential active again after restart.
+		`CREATE TABLE IF NOT EXISTS homelink_credential_revocations (
+			site_id           TEXT NOT NULL,
+			credential_id     BLOB NOT NULL,
+			started_at_ms     INTEGER NOT NULL,
+			PRIMARY KEY (site_id, credential_id)
+		) WITHOUT ROWID, STRICT`,
 
 		// Persistent daily-energy aggregate cache.
 		//

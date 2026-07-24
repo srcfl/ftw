@@ -991,37 +991,180 @@ func TestRegistrationRejectsIDAlgorithmExtensionsAndTruncatedCBOR(t *testing.T) 
 	})
 }
 
-func TestAssertionRejectsTruncatedStoredCOSEKey(t *testing.T) {
-	store := newAuthorityTestStore(t)
+func TestRegistrationRejectsNonEC2AndAmbiguousCOSEKeys(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  []byte
+	}{
+		{"OKP labeled ES256", cborMap(
+			cborInt(1), cborInt(1),
+			cborInt(3), cborInt(-7),
+			cborInt(-1), cborInt(6),
+			cborInt(-2), cborBytes(bytes.Repeat([]byte{7}, 32)),
+		)},
+		{"RSA labeled ES256", cborMap(
+			cborInt(1), cborInt(3),
+			cborInt(3), cborInt(-7),
+			cborInt(-1), cborBytes(bytes.Repeat([]byte{7}, 256)),
+			cborInt(-2), cborBytes([]byte{1, 0, 1}),
+		)},
+		{"trailing COSE", append(coseES256PublicKey(
+			newWebAuthnFixture(t, []byte{1}).private.PublicKey,
+		), 0)},
+		{"duplicate COSE label", cborMap(
+			cborInt(1), cborInt(2),
+			cborInt(1), cborInt(2),
+			cborInt(3), cborInt(-7),
+			cborInt(-1), cborInt(1),
+			cborInt(-2), cborBytes(bytes.Repeat([]byte{1}, 32)),
+		)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newAuthorityTestStore(t)
+			pairing := NewLocalPairingManager(LocalPairingManagerOptions{})
+			authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+				Store: store, SiteID: "001122334455667788", PairingAuthorizer: pairing,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pair, err := pairing.Create(time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			begin, err := authority.BeginRegistration(context.Background(), LocalPairingProof{
+				Challenge: []byte(pair.ID), Response: pair.Secret,
+			}, "phone")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+			fixture.publicKey = test.key
+			if _, err := authority.FinishRegistration(
+				context.Background(), begin.ID, PasskeyRegistration{ResponseJSON: fixture.registrationResponse(
+					begin.Challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
+				)},
+			); err == nil {
+				t.Fatalf("registration error = %v", err)
+			}
+		})
+	}
+}
+
+func TestAssertionRejectsInvalidStoredCOSEKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  []byte
+	}{
+		{"truncated", []byte{0xa5, 0x01}},
+		{"OKP labeled ES256", cborMap(
+			cborInt(1), cborInt(1),
+			cborInt(3), cborInt(-7),
+			cborInt(-1), cborInt(6),
+			cborInt(-2), cborBytes(bytes.Repeat([]byte{7}, 32)),
+		)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := newAuthorityTestStore(t)
+			fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+			record := state.HomeLinkCredentialRecord{
+				SiteID: "001122334455667788", CredentialID: fixture.credentialID,
+				PublicKey: test.key, Label: "phone",
+				UserHandle: bytes.Repeat([]byte{2}, webAuthnUserHandleBytes),
+				Status:     state.HomeLinkCredentialActive, Revision: 1, CreatedAtMS: 1, UpdatedAtMS: 1,
+			}
+			if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
+				t.Fatal(err)
+			}
+			authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+				Store: store, SiteID: record.SiteID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			challenge, err := authority.CreateAssertion(
+				context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := fixture.assertionResponse(
+				challenge.Challenge, 0, 0x01|0x04, record.UserHandle, HomeLinkOrigin,
+			)
+			if _, _, err := authority.VerifyAndConsumeAssertion(
+				context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
+			); !errors.Is(err, ErrWebAuthnVerification) {
+				t.Fatalf("stored COSE key = %v", err)
+			}
+		})
+	}
+}
+
+func TestWebAuthnStrictJSONAndAttestationCBOR(t *testing.T) {
 	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
-	record := state.HomeLinkCredentialRecord{
-		SiteID: "001122334455667788", CredentialID: fixture.credentialID,
-		PublicKey: []byte{0xa5, 0x01}, Label: "phone",
-		UserHandle: bytes.Repeat([]byte{2}, webAuthnUserHandleBytes),
-		Status:     state.HomeLinkCredentialActive, Revision: 1, CreatedAtMS: 1, UpdatedAtMS: 1,
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	assertion := fixture.assertionResponse(challenge, 0, 0x01|0x04, nil, HomeLinkOrigin)
+	duplicateOuter := append([]byte(`{"id":"AQ","id":"AQ",`), assertion[1:]...)
+	if _, err := parseAssertion(duplicateOuter); !errors.Is(err, ErrWebAuthnInput) {
+		t.Fatalf("duplicate outer JSON = %v", err)
 	}
-	if err := store.RegisterHomeLinkCredential(context.Background(), record); err != nil {
-		t.Fatal(err)
-	}
-	authority, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
-		Store: store, SiteID: record.SiteID,
+	duplicateClient := changeCredentialJSON(t, assertion, func(object map[string]any) {
+		response := object["response"].(map[string]any)
+		response["clientDataJSON"] = base64.RawURLEncoding.EncodeToString([]byte(
+			`{"type":"webauthn.get","type":"webauthn.create","challenge":"AQ","origin":"https://home.sourceful.energy","crossOrigin":false}`,
+		))
 	})
-	if err != nil {
-		t.Fatal(err)
+	if _, err := parseAssertion(duplicateClient); !errors.Is(err, ErrWebAuthnInput) {
+		t.Fatalf("duplicate clientData JSON = %v", err)
 	}
-	challenge, err := authority.CreateAssertion(
-		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+
+	registration := fixture.registrationResponse(
+		challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw := fixture.assertionResponse(
-		challenge.Challenge, 0, 0x01|0x04, record.UserHandle, HomeLinkOrigin,
-	)
-	if _, _, err := authority.VerifyAndConsumeAssertion(
-		context.Background(), challenge.ID, PasskeyAssertion{ResponseJSON: raw},
-	); !errors.Is(err, ErrWebAuthnVerification) {
-		t.Fatalf("truncated stored COSE key = %v", err)
+	for _, test := range []struct {
+		name   string
+		change func([]byte) []byte
+	}{
+		{"trailing value", func(raw []byte) []byte { return append(bytes.Clone(raw), 0) }},
+		{"null attStmt", func(authData []byte) []byte {
+			return cborMap(
+				cborText("fmt"), cborText("none"),
+				cborText("attStmt"), []byte{0xf6},
+				cborText("authData"), cborBytes(authData),
+			)
+		}},
+		{"nonempty attStmt", func(authData []byte) []byte {
+			return cborMap(
+				cborText("fmt"), cborText("none"),
+				cborText("attStmt"), cborMap(cborText("x"), cborInt(1)),
+				cborText("authData"), cborBytes(authData),
+			)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := changeCredentialJSON(t, registration, func(object map[string]any) {
+				response := object["response"].(map[string]any)
+				encoded := response["attestationObject"].(string)
+				attestation, err := base64.RawURLEncoding.DecodeString(encoded)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.name == "trailing value" {
+					attestation = test.change(attestation)
+				} else {
+					parsed, err := parseRegistration(registration)
+					if err != nil {
+						t.Fatal(err)
+					}
+					attestation = test.change(parsed.Response.AttestationObject.RawAuthData)
+				}
+				response["attestationObject"] = base64.RawURLEncoding.EncodeToString(attestation)
+			})
+			if _, err := parseRegistration(changed); !errors.Is(err, ErrWebAuthnInput) {
+				t.Fatalf("attestation CBOR = %v", err)
+			}
+		})
 	}
 }
 

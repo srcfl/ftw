@@ -120,8 +120,19 @@ func (s *Store) HomeLinkCredential(
 	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
 		return HomeLinkCredentialRecord{}, err
 	}
-	return scanHomeLinkCredential(s.db.QueryRowContext(ctx, homeLinkCredentialSelect+
+	record, err := scanHomeLinkCredential(s.db.QueryRowContext(ctx, homeLinkCredentialSelect+
 		` WHERE site_id = ? AND credential_id = ?`, siteID, credentialID))
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	pending, err := homeLinkRevocationPending(ctx, s.db, siteID, credentialID)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if pending && record.Status == HomeLinkCredentialActive {
+		record.Status = HomeLinkCredentialUncertain
+	}
+	return record, nil
 }
 
 func (s *Store) ActiveHomeLinkCredentials(
@@ -132,7 +143,13 @@ func (s *Store) ActiveHomeLinkCredentials(
 		return nil, errors.New("Home Link site id is invalid")
 	}
 	rows, err := s.db.QueryContext(ctx, homeLinkCredentialSelect+
-		` WHERE site_id = ? AND status = 'active' ORDER BY credential_id`, siteID)
+		` WHERE site_id = ? AND status = 'active'
+		AND NOT EXISTS (
+			SELECT 1 FROM homelink_credential_revocations revocations
+			WHERE revocations.site_id = homelink_credentials.site_id
+			AND revocations.credential_id = homelink_credentials.credential_id
+		)
+		ORDER BY credential_id`, siteID)
 	if err != nil {
 		return nil, fmt.Errorf("list active Home Link credentials: %w", err)
 	}
@@ -203,6 +220,13 @@ func (s *Store) ApplyHomeLinkAssertion(
 	if record.Status != HomeLinkCredentialActive {
 		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialInactive
 	}
+	pending, err := homeLinkRevocationPending(ctx, tx, update.SiteID, update.CredentialID)
+	if err != nil {
+		return HomeLinkCredentialRecord{}, err
+	}
+	if pending {
+		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialInactive
+	}
 	if record.Revision != update.ExpectedRevision {
 		return HomeLinkCredentialRecord{}, ErrHomeLinkCredentialConflict
 	}
@@ -244,8 +268,9 @@ func (s *Store) ApplyHomeLinkAssertion(
 	return record, nil
 }
 
-// RevokeHomeLinkCredential first commits an uncertain fence. If the final
-// commit fails, restart still denies the credential.
+// RevokeHomeLinkCredential first commits a permanent intent row. All active
+// reads and assertion updates consult that row, so any later error remains
+// fail-closed across restart.
 func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, credentialID []byte, nowMS int64) error {
 	if err := validateHomeLinkLookup(siteID, credentialID); err != nil {
 		return err
@@ -259,6 +284,13 @@ func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, cre
 	}
 	if record.Status == HomeLinkCredentialRevoked {
 		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO homelink_credential_revocations(
+		site_id, credential_id, started_at_ms
+	) VALUES (?, ?, ?)
+	ON CONFLICT(site_id, credential_id) DO NOTHING`,
+		siteID, cloneBytes(credentialID), nowMS); err != nil {
+		return fmt.Errorf("commit Home Link revoke intent: %w", err)
 	}
 	if record.Status == HomeLinkCredentialActive {
 		result, err := s.db.ExecContext(ctx, `UPDATE homelink_credentials SET
@@ -278,7 +310,7 @@ func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, cre
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE homelink_credentials SET
 		status = 'revoked', revision = revision + 1, updated_at_ms = ?
-		WHERE site_id = ? AND credential_id = ? AND status = 'uncertain'`,
+		WHERE site_id = ? AND credential_id = ? AND status IN ('active', 'uncertain')`,
 		nowMS, siteID, credentialID)
 	if err != nil {
 		return fmt.Errorf("commit Home Link revoke: %w", err)
@@ -291,6 +323,26 @@ func (s *Store) RevokeHomeLinkCredential(ctx context.Context, siteID string, cre
 		return ErrHomeLinkCredentialConflict
 	}
 	return nil
+}
+
+type homeLinkQueryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func homeLinkRevocationPending(
+	ctx context.Context,
+	db homeLinkQueryRower,
+	siteID string,
+	credentialID []byte,
+) (bool, error) {
+	var pending int
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM homelink_credential_revocations
+		WHERE site_id = ? AND credential_id = ?
+	)`, siteID, credentialID).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read Home Link revoke intent: %w", err)
+	}
+	return pending == 1, nil
 }
 
 const homeLinkCredentialSelect = `SELECT

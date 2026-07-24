@@ -3,11 +3,16 @@ package homelink
 import (
 	"bytes"
 	"context"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
+	"math"
+	"math/big"
 	"slices"
 	"strings"
 	"sync"
@@ -368,8 +373,20 @@ func parseRegistration(raw []byte) (*protocol.ParsedCredentialCreationData, erro
 	if len(raw) == 0 || len(raw) > maxWebAuthnResponseBytes {
 		return nil, ErrWebAuthnInput
 	}
+	if err := validateStrictJSON(raw); err != nil {
+		return nil, ErrWebAuthnInput
+	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(raw)
 	if err != nil {
+		return nil, ErrWebAuthnInput
+	}
+	if err := validateStrictJSON(parsed.Raw.AttestationResponse.ClientDataJSON); err != nil {
+		return nil, ErrWebAuthnInput
+	}
+	if err := validateNoneAttestationCBOR(
+		parsed.Raw.AttestationResponse.AttestationObject,
+		parsed.Response.AttestationObject.RawAuthData,
+	); err != nil {
 		return nil, ErrWebAuthnInput
 	}
 	return parsed, nil
@@ -379,8 +396,14 @@ func parseAssertion(raw []byte) (*protocol.ParsedCredentialAssertionData, error)
 	if len(raw) == 0 || len(raw) > maxWebAuthnResponseBytes {
 		return nil, ErrWebAuthnInput
 	}
+	if err := validateStrictJSON(raw); err != nil {
+		return nil, ErrWebAuthnInput
+	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(raw)
 	if err != nil {
+		return nil, ErrWebAuthnInput
+	}
+	if err := validateStrictJSON(parsed.Raw.AssertionResponse.ClientDataJSON); err != nil {
 		return nil, ErrWebAuthnInput
 	}
 	return parsed, nil
@@ -402,6 +425,9 @@ func (pinnedWebAuthnProtocolVerifier) VerifyRegistration(
 		parsed.Response.AttestationObject.Format != "none" ||
 		len(parsed.Response.AttestationObject.AttStatement) != 0 ||
 		hasWebAuthnExtensions(parsed.ClientExtensionResults, authData) {
+		return verifiedRegistration{}, ErrWebAuthnVerification
+	}
+	if err := validateES256CredentialPublicKey(authData.AttData.CredentialPublicKey); err != nil {
 		return verifiedRegistration{}, ErrWebAuthnVerification
 	}
 	if _, err := parsed.Verify(
@@ -451,6 +477,9 @@ func (pinnedWebAuthnProtocolVerifier) VerifyAssertion(
 	if assertion.parsed == nil {
 		return verifiedPasskeyAssertion{}, ErrWebAuthnInput
 	}
+	if err := validateES256CredentialPublicKey(storedPublicKey); err != nil {
+		return verifiedPasskeyAssertion{}, ErrWebAuthnVerification
+	}
 	if err := assertion.parsed.Verify(
 		challenge, HomeLinkRPID, "", []string{HomeLinkOrigin}, nil,
 		protocol.TopOriginExplicitVerificationMode, false, true, true, storedPublicKey,
@@ -462,6 +491,243 @@ func (pinnedWebAuthnProtocolVerifier) VerifyAssertion(
 		signCount:      assertion.parsed.Response.AuthenticatorData.Counter,
 		backupEligible: flags.HasBackupEligible(), backupState: flags.HasBackupState(),
 	}, nil
+}
+
+func validateStrictJSON(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := readStrictJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("JSON has trailing data")
+		}
+		return err
+	}
+	return nil
+}
+
+func readStrictJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		names := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("JSON object name is invalid")
+			}
+			if _, exists := names[name]; exists {
+				return errors.New("JSON object has a duplicate name")
+			}
+			names[name] = struct{}{}
+			if err := readStrictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("JSON object is not complete")
+		}
+	case '[':
+		for decoder.More() {
+			if err := readStrictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("JSON array is not complete")
+		}
+	default:
+		return errors.New("JSON delimiter is invalid")
+	}
+	return nil
+}
+
+type strictCBORReader struct {
+	raw    []byte
+	offset int
+}
+
+func (r *strictCBORReader) head() (byte, uint64, error) {
+	if r.offset >= len(r.raw) {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	initial := r.raw[r.offset]
+	r.offset++
+	major := initial >> 5
+	additional := initial & 0x1f
+	switch {
+	case additional < 24:
+		return major, uint64(additional), nil
+	case additional == 24:
+		value, err := r.take(1)
+		if err != nil {
+			return 0, 0, err
+		}
+		return major, uint64(value[0]), nil
+	case additional == 25:
+		value, err := r.take(2)
+		if err != nil {
+			return 0, 0, err
+		}
+		return major, uint64(binary.BigEndian.Uint16(value)), nil
+	case additional == 26:
+		value, err := r.take(4)
+		if err != nil {
+			return 0, 0, err
+		}
+		return major, uint64(binary.BigEndian.Uint32(value)), nil
+	case additional == 27:
+		value, err := r.take(8)
+		if err != nil {
+			return 0, 0, err
+		}
+		return major, binary.BigEndian.Uint64(value), nil
+	default:
+		return 0, 0, errors.New("indefinite or reserved CBOR value")
+	}
+}
+
+func (r *strictCBORReader) take(size uint64) ([]byte, error) {
+	if size > uint64(len(r.raw)-r.offset) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	start := r.offset
+	r.offset += int(size)
+	return r.raw[start:r.offset], nil
+}
+
+func (r *strictCBORReader) integer() (int64, error) {
+	major, value, err := r.head()
+	if err != nil {
+		return 0, err
+	}
+	if value > math.MaxInt64 {
+		return 0, errors.New("CBOR integer overflows")
+	}
+	switch major {
+	case 0:
+		return int64(value), nil
+	case 1:
+		return -1 - int64(value), nil
+	default:
+		return 0, errors.New("CBOR value is not an integer")
+	}
+}
+
+func (r *strictCBORReader) bytes(majorWant byte) ([]byte, error) {
+	major, size, err := r.head()
+	if err != nil {
+		return nil, err
+	}
+	if major != majorWant {
+		return nil, errors.New("CBOR value has the wrong type")
+	}
+	return r.take(size)
+}
+
+func validateNoneAttestationCBOR(raw, parsedAuthData []byte) error {
+	reader := strictCBORReader{raw: raw}
+	major, count, err := reader.head()
+	if err != nil || major != 5 || count != 3 {
+		return errors.New("attestation object is not the required map")
+	}
+	seen := make(map[string]struct{}, 3)
+	for range count {
+		nameRaw, err := reader.bytes(3)
+		if err != nil {
+			return err
+		}
+		name := string(nameRaw)
+		if _, exists := seen[name]; exists {
+			return errors.New("attestation object has a duplicate field")
+		}
+		seen[name] = struct{}{}
+		switch name {
+		case "fmt":
+			value, err := reader.bytes(3)
+			if err != nil || string(value) != "none" {
+				return errors.New("attestation format is not none")
+			}
+		case "authData":
+			value, err := reader.bytes(2)
+			if err != nil || !bytes.Equal(value, parsedAuthData) {
+				return errors.New("attestation auth data does not match")
+			}
+		case "attStmt":
+			valueMajor, valueCount, err := reader.head()
+			if err != nil || valueMajor != 5 || valueCount != 0 {
+				return errors.New("none attestation statement is not an empty map")
+			}
+		default:
+			return errors.New("attestation object has an unknown field")
+		}
+	}
+	if len(seen) != 3 || reader.offset != len(raw) {
+		return errors.New("attestation object has missing or trailing data")
+	}
+	return nil
+}
+
+func validateES256CredentialPublicKey(raw []byte) error {
+	reader := strictCBORReader{raw: raw}
+	major, count, err := reader.head()
+	if err != nil || major != 5 || count != 5 {
+		return errors.New("credential public key is not the required COSE map")
+	}
+	seen := make(map[int64]struct{}, 5)
+	var keyType, algorithm, curve int64
+	var x, y []byte
+	for range count {
+		label, err := reader.integer()
+		if err != nil {
+			return err
+		}
+		if _, exists := seen[label]; exists {
+			return errors.New("credential public key has a duplicate label")
+		}
+		seen[label] = struct{}{}
+		switch label {
+		case 1:
+			keyType, err = reader.integer()
+		case 3:
+			algorithm, err = reader.integer()
+		case -1:
+			curve, err = reader.integer()
+		case -2:
+			x, err = reader.bytes(2)
+		case -3:
+			y, err = reader.bytes(2)
+		default:
+			return errors.New("credential public key has an unknown label")
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if reader.offset != len(raw) || len(seen) != 5 ||
+		keyType != 2 || algorithm != -7 || curve != 1 ||
+		len(x) != 32 || len(y) != 32 {
+		return errors.New("credential public key is not EC2 ES256 P-256")
+	}
+	if !elliptic.P256().IsOnCurve(new(big.Int).SetBytes(x), new(big.Int).SetBytes(y)) {
+		return errors.New("credential public key point is not on P-256")
+	}
+	return nil
 }
 
 func validateParsedCredentialID(id string, rawID []byte) error {
