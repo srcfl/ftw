@@ -30,7 +30,7 @@
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
-  <link rel="stylesheet" href="/style.css?v=lp6">
+  <link rel="stylesheet" href="/style.css?v=history3">
   <!-- Dashboard layout is layered on the shared base styles. -->
   <link rel="stylesheet" href="/app.css?v=ia1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
@@ -558,50 +558,62 @@
     </section>
   </main>
 
-  <!-- History view — energy history plus persisted planner decisions. -->
+  <!-- History view — plain daily energy story plus optional source data. -->
   <main id="view-history" class="app-view hidden" role="tabpanel" aria-label="History">
     <section class="view-heading">
       <p class="view-kicker">History</p>
-      <h2>Energy over time</h2>
-      <p>Start with totals and trends. Open detailed data or past plan decisions only when needed.</p>
+      <h2>Your energy, day by day</h2>
+      <p>See how much the home used, produced, bought and sold.</p>
     </section>
     <section class="energy-history-header">
       <div>
-        <h2>Energy totals</h2>
-        <p>Directional totals from hardware counters when available, with marked power integration as fallback.</p>
+        <h2 id="energy-history-period-title">Last 7 days</h2>
+        <p>Daily totals from the same readings used by Energy today.</p>
       </div>
-      <div class="energy-history-controls">
-        <label>Asset
-          <select id="energy-history-asset"><option value="">System</option></select>
-        </label>
-        <label>Range
-          <select id="energy-history-range">
-            <option value="24h">24 hours</option>
-            <option value="7d" selected>7 days</option>
-            <option value="30d">30 days</option>
-          </select>
-        </label>
-        <button id="energy-history-refresh" class="btn-send">Refresh</button>
-        <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
+      <div id="energy-history-range" class="energy-history-range" role="tablist" aria-label="History period">
+        <button type="button" role="tab" data-range="24h" aria-selected="false">Today</button>
+        <button type="button" role="tab" data-range="7d" class="active" aria-selected="true">7 days</button>
+        <button type="button" role="tab" data-range="30d" aria-selected="false">30 days</button>
       </div>
     </section>
     <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
-    <section class="energy-history-chart-wrap">
-      <canvas id="energy-history-chart" role="img" aria-label="Energy by flow and time bucket">Energy history chart</canvas>
-      <div id="energy-history-legend" class="energy-history-legend" aria-label="Energy flow legend"></div>
+    <section class="energy-history-story">
+      <article class="energy-history-chart-wrap">
+        <div class="energy-history-card-heading">
+          <div>
+            <h3>Energy by day</h3>
+            <p>Compare home use and solar with energy bought from or sold to the grid.</p>
+          </div>
+          <button id="energy-history-refresh" class="btn-quiet" type="button">Refresh</button>
+        </div>
+        <canvas id="energy-history-chart" role="img" aria-label="Daily home use, solar, grid import and grid export">Energy history chart</canvas>
+        <div id="energy-history-legend" class="energy-history-legend" aria-label="Energy flow legend"></div>
+      </article>
+      <aside id="energy-history-insight" class="energy-history-insight" aria-live="polite">
+        <h3>What stands out</h3>
+        <p>Loading the selected period…</p>
+      </aside>
     </section>
+
     <details id="energy-history-details" class="history-disclosure">
       <summary>
         <span>
-          <strong>Detailed energy data</strong>
-          <small>Raw time buckets, quality and source</small>
+          <strong>Devices, data quality and export</strong>
+          <small>Use this when checking a meter or downloading source data</small>
         </span>
         <span id="energy-history-detail-meta" class="history-disclosure-meta">Open</span>
       </summary>
       <div class="history-disclosure-body">
+        <div class="energy-history-controls">
+          <label>Device
+            <select id="energy-history-asset"><option value="">Whole system</option></select>
+          </label>
+          <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
+        </div>
+        <p id="energy-history-quality" class="energy-history-quality-note">Open this section to load source data.</p>
         <section class="energy-history-table-wrap">
           <table class="energy-history-table">
-            <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
+            <thead><tr><th>Time</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
             <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
           </table>
         </section>
@@ -850,8 +862,8 @@
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=lp4"></script>
-  <script src="/energy-history.js?v=ledger2"></script>
-  <script src="/diagnose.js?v=ia2"></script>
+  <script src="/energy-history.js?v=story1"></script>
+  <script src="/diagnose.js?v=ia3"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal

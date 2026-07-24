@@ -15,6 +15,10 @@ const (
 	EnergyLedgerSchemaVersion = 1
 	EnergyLedgerBucketMS      = int64(5 * 60 * 1000)
 	energyLedgerMaxPowerGapMS = int64(2 * 60 * 1000)
+	// One megawatt is far above a home site's physical range, but low enough
+	// to reject corrupt cumulative-counter reads before they become trusted
+	// energy. Reads use the same bound so old bad rows cannot distort totals.
+	energyLedgerMaxPlausiblePowerW = 1_000_000.0
 
 	// Keep recent ledger detail aligned with the legacy history hot tier.
 	// Older energy is additive, so hourly totals preserve its contract while
@@ -239,13 +243,19 @@ func recordEnergyObservationTx(tx *sql.Tx, o EnergyObservation) error {
 				if delta < 0 {
 					delta = 0
 				}
-				quality, provenance := "measured", "counter"
-				if o.AtMs-counter.tsMS > energyLedgerMaxPowerGapMS {
-					quality, provenance = "recovered", "counter_gap"
-				}
-				if err := addLedgerInterval(tx, o, counter.tsMS, o.AtMs, delta,
-					"hardware_counter", quality, provenance); err != nil {
-					return err
+				if !plausibleEnergy(delta, o.AtMs-counter.tsMS) {
+					if err := addLedgerMarker(tx, o, "hardware_counter", "invalid", "counter_jump"); err != nil {
+						return err
+					}
+				} else {
+					quality, provenance := "measured", "counter"
+					if o.AtMs-counter.tsMS > energyLedgerMaxPowerGapMS {
+						quality, provenance = "recovered", "counter_gap"
+					}
+					if err := addLedgerInterval(tx, o, counter.tsMS, o.AtMs, delta,
+						"hardware_counter", quality, provenance); err != nil {
+						return err
+					}
 				}
 			} else {
 				if err := addLedgerMarker(tx, o, "hardware_counter", "reset", "counter_reset"); err != nil {
@@ -317,6 +327,14 @@ func addLedgerInterval(tx *sql.Tx, o EnergyObservation, fromMS, toMS int64, ener
 		}
 	}
 	return nil
+}
+
+func plausibleEnergy(energyWh float64, durationMS int64) bool {
+	if energyWh < 0 || durationMS <= 0 {
+		return false
+	}
+	maxWh := energyLedgerMaxPlausiblePowerW * float64(durationMS) / 3_600_000
+	return energyWh <= maxWh+1e-6
 }
 
 func upsertLedgerEntry(tx *sql.Tx, o EnergyObservation, bucketStart int64, energyWh float64, source, quality, provenance string) error {
@@ -408,6 +426,10 @@ func (s *Store) LoadEnergyHistory(q EnergyHistoryQuery) ([]EnergyLedgerPoint, bo
 		if rank > q.Limit {
 			truncated = true
 			continue
+		}
+		if p.EnergyWh > 0 && !plausibleEnergy(p.EnergyWh, p.BucketLenMS) {
+			p.Quality = "invalid"
+			p.Provenance = "implausible_energy"
 		}
 		out = append(out, p)
 	}

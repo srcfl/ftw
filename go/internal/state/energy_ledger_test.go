@@ -191,6 +191,48 @@ func TestEnergyLedgerMarksCounterResetAndUsesPowerFallback(t *testing.T) {
 	}
 }
 
+func TestEnergyLedgerRejectsImplausibleCounterJump(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:counter-jump", AssetPV)
+	recordEnergyTestTick(t, s, base,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base, energyPtr(100), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+5_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+5_000, energyPtr(25_000_100), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+10_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+10_000, energyPtr(110), energyPtr(5000)))
+	recordEnergyTestTick(t, s, base+15_000,
+		ledgerObservation(assetID, AssetPV, FlowPVGeneration, base+15_000, energyPtr(120), energyPtr(5000)))
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	if !hasLedgerQuality(points, "invalid", "counter_jump") {
+		t.Fatalf("counter jump was not marked invalid: %+v", points)
+	}
+	var trustedWh float64
+	for _, p := range points {
+		if p.Quality != "invalid" && p.Quality != "gap" && p.Quality != "reset" {
+			trustedWh += p.EnergyWh
+		}
+	}
+	if trustedWh > 20 {
+		t.Fatalf("counter jump entered trusted total: %v Wh; points=%+v", trustedWh, points)
+	}
+}
+
+func TestEnergyHistoryMarksStoredImplausibleEnergyInvalid(t *testing.T) {
+	s := freshStore(t)
+	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
+	assetID := HardwareEnergyAssetID("maker:legacy-jump", AssetPV)
+	insertLedgerEntryTest(t, s, assetID, FlowPVGeneration, base,
+		EnergyLedgerBucketMS, 25_000_000, "hardware_counter", "measured", "counter", 1)
+
+	points := loadLedgerTestPoints(t, s, assetID, base, base+EnergyLedgerBucketMS)
+	if len(points) != 1 || points[0].Quality != "invalid" ||
+		points[0].Provenance != "implausible_energy" {
+		t.Fatalf("stored counter jump remained trusted: %+v", points)
+	}
+}
+
 func TestEnergyLedgerMarksPowerGapAndRecoversCounterDelta(t *testing.T) {
 	s := freshStore(t)
 	base := int64(1_800_000_000_000 / EnergyLedgerBucketMS * EnergyLedgerBucketMS)
