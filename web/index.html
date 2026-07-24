@@ -482,34 +482,44 @@
              evidence, while this strip answers the first operational
              questions without requiring hover or optimizer vocabulary. -->
         <section id="plan-now" class="plan-now" aria-live="polite" aria-label="Current plan status">
-          <div class="plan-now-lead">
+          <div class="plan-now-primary">
             <span id="plan-state-badge" class="plan-state-badge">Checking plan…</span>
-            <div>
+            <div class="plan-now-action">
               <span class="plan-now-label">Next</span>
               <strong id="plan-next-action">Waiting for a plan</strong>
               <small id="plan-next-time">—</small>
             </div>
           </div>
-          <div class="plan-now-item">
-            <span class="plan-now-label">Why</span>
-            <strong id="plan-main-reason">—</strong>
+          <div class="plan-now-secondary">
+            <div>
+              <span class="plan-now-label">Why</span>
+              <strong id="plan-main-reason">—</strong>
+            </div>
             <small id="plan-constraint">No active limit reported</small>
           </div>
-          <div class="plan-now-item">
-            <span class="plan-now-label">Forecast</span>
-            <strong id="plan-forecast-state">—</strong>
-            <small id="plan-forecast-detail">—</small>
-          </div>
-          <div class="plan-now-item">
-            <span class="plan-now-label">Expected charge</span>
-            <strong id="plan-expected-soc">—</strong>
-            <small id="plan-soc-detail">—</small>
-          </div>
-          <div class="plan-now-item">
-            <span class="plan-now-label">Planner</span>
-            <strong id="plan-solver-state">—</strong>
-            <small id="plan-solver-detail">—</small>
-          </div>
+          <dl class="plan-now-meta">
+            <div>
+              <dt>Forecast</dt>
+              <dd>
+                <strong id="plan-forecast-state">—</strong>
+                <small id="plan-forecast-detail">—</small>
+              </dd>
+            </div>
+            <div id="plan-soc-meta">
+              <dt>Expected charge</dt>
+              <dd>
+                <strong id="plan-expected-soc">—</strong>
+                <small id="plan-soc-detail">—</small>
+              </dd>
+            </div>
+            <div>
+              <dt>Planner</dt>
+              <dd>
+                <strong id="plan-solver-state">—</strong>
+                <small id="plan-solver-detail">—</small>
+              </dd>
+            </div>
+          </dl>
         </section>
 
         <!-- Strategy — the operator-facing knob that drives plan
@@ -879,7 +889,7 @@
   <script src="/settings/tabs/system.js?v=tabsplit2"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
   <script src="/models.js?v=diag2"></script>
-  <script src="/plan.js?v=ia1"></script>
+  <script type="module" src="/plan.js?v=dashboard1"></script>
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=lp4"></script>

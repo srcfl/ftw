@@ -197,19 +197,13 @@
   // Minimal CSS.escape polyfill (legend keys contain ':').
   function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) { return "\\" + c; }); }
 
-  // Latest MPC plan — refreshed every 30s. Drives the forward-looking
-  // dashed PV + Load forecast on the live chart (right-hand segment
-  // extending past "now").
+  // Latest MPC plan for the live chart's forward-looking dashed PV +
+  // Load forecast. plan.js owns the sole plan poll and publishes each
+  // result in-page so the chart and both briefing surfaces stay aligned.
   var chartPlan = null;
-  function refreshChartPlan() {
-    // Local API read.
-    apiFetch("/api/mpc/plan")
-      .then(function (r) { return r.json(); })
-      .then(function (j) { if (j && j.plan) chartPlan = j.plan; })
-      .catch(function () {});
-  }
-  refreshChartPlan();
-  setInterval(refreshChartPlan, 30000);
+  window.addEventListener("ftw-plan-data", function (event) {
+    chartPlan = event && event.detail ? event.detail.plan : null;
+  });
   var chartLayout = null;
   var hoverIndex = -1;
   var hoverForecast = null; // { ts, action } when hovering in future region

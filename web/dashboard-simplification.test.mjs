@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const webRoot = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(webRoot, "index.html"), "utf8");
 const app = readFileSync(join(webRoot, "app.js"), "utf8");
+const plan = readFileSync(join(webRoot, "plan.js"), "utf8");
 const flow = readFileSync(join(webRoot, "components/ftw-energy-flow.js"), "utf8");
 const price = readFileSync(join(webRoot, "components/ftw-price-chart.js"), "utf8");
 const savings = readFileSync(join(webRoot, "components/ftw-savings-card.js"), "utf8");
@@ -99,5 +100,24 @@ describe("simplified dashboard overview", () => {
     assert.match(price, /buildCompactPriceView/);
     assert.match(price, /ftw-price-vat-change/);
     assert.match(price, /href="#energy"/);
+  });
+
+  it("renders Overview and Plan from the sole plan polling path", () => {
+    assert.match(html, /<script type="module" src="\/plan\.js\?v=dashboard1"><\/script>/);
+    assert.match(plan, /import \{ derivePlanBrief \} from "\.\/plan-brief\.js"/);
+    assert.equal((plan.match(/apiFetch\(['"]\/api\/mpc\/plan['"]/g) || []).length, 1);
+    assert.doesNotMatch(app, /apiFetch\(['"]\/api\/mpc\/plan['"]/);
+    assert.match(plan, /ftw-plan-data/);
+    assert.match(app, /ftw-plan-data/);
+    for (const id of [
+      "overview-plan-state",
+      "overview-plan-action",
+      "overview-plan-time",
+      "overview-plan-reason",
+      "overview-plan-constraint",
+      "overview-plan-soc",
+    ]) {
+      assert.match(plan, new RegExp(`["']${id}["']`));
+    }
   });
 });
