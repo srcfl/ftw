@@ -1168,6 +1168,236 @@ func TestWebAuthnStrictJSONAndAttestationCBOR(t *testing.T) {
 	}
 }
 
+func TestWebAuthnRejectsWrongJSONTypesAndNonCanonicalBase64(t *testing.T) {
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	assertion := fixture.assertionResponse(
+		challenge, 0, 0x01|0x04, nil, HomeLinkOrigin,
+	)
+	tests := []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"numeric id", func(object map[string]any) { object["id"] = float64(1) }},
+		{"numeric rawId", func(object map[string]any) { object["rawId"] = float64(1) }},
+		{"padded id", func(object map[string]any) { object["id"] = object["id"].(string) + "=" }},
+		{"padded rawId", func(object map[string]any) { object["rawId"] = object["rawId"].(string) + "=" }},
+		{"numeric type", func(object map[string]any) { object["type"] = float64(1) }},
+		{"response is string", func(object map[string]any) { object["response"] = "x" }},
+		{"extensions are array", func(object map[string]any) {
+			object["clientExtensionResults"] = []any{}
+		}},
+		{"numeric client data", func(object map[string]any) {
+			object["response"].(map[string]any)["clientDataJSON"] = float64(1)
+		}},
+		{"numeric authenticator data", func(object map[string]any) {
+			object["response"].(map[string]any)["authenticatorData"] = float64(1)
+		}},
+		{"numeric signature", func(object map[string]any) {
+			object["response"].(map[string]any)["signature"] = float64(1)
+		}},
+		{"numeric user handle", func(object map[string]any) {
+			object["response"].(map[string]any)["userHandle"] = float64(1)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := changeCredentialJSON(t, assertion, test.change)
+			if _, err := parseAssertion(changed); !errors.Is(err, ErrWebAuthnInput) {
+				t.Fatalf("wrong JSON type or encoding = %v", err)
+			}
+		})
+	}
+}
+
+func TestStrictCOSERejectsNonMinimalEncodings(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{"small integer in uint8", []byte{0x18, 0x17}},
+		{"uint8 value in uint16", []byte{0x19, 0x00, 0xff}},
+		{"uint16 value in uint32", []byte{0x1a, 0x00, 0x00, 0xff, 0xff}},
+		{"uint32 value in uint64", []byte{0x1b, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff}},
+		{"negative integer in uint8", []byte{0x38, 0x00}},
+		{"map length in uint8", []byte{0xb8, 0x03}},
+		{"text length in uint8", append([]byte{0x78, 0x03}, []byte("fmt")...)},
+		{"bytes length in uint8", append([]byte{0x58, 0x03}, []byte{1, 2, 3}...)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reader := strictCBORReader{raw: test.raw}
+			if _, _, err := reader.head(); err == nil {
+				t.Fatal("accepted non-minimal CBOR head")
+			}
+		})
+	}
+
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	registration := fixture.registrationResponse(
+		challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
+	)
+	nonMinimalAttestation := changeCredentialJSON(t, registration, func(object map[string]any) {
+		response := object["response"].(map[string]any)
+		encoded := response["attestationObject"].(string)
+		attestation, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(attestation) == 0 || attestation[0] != 0xa3 {
+			t.Fatalf("unexpected attestation fixture %x", attestation)
+		}
+		attestation = append([]byte{0xb8, 0x03}, attestation[1:]...)
+		response["attestationObject"] = base64.RawURLEncoding.EncodeToString(attestation)
+	})
+	if _, err := parseRegistration(nonMinimalAttestation); !errors.Is(err, ErrWebAuthnInput) {
+		t.Fatalf("non-minimal attestation map = %v", err)
+	}
+
+	nonMinimalCOSE := append([]byte{0xb8, 0x05}, fixture.publicKey[1:]...)
+	if err := validateES256CredentialPublicKey(nonMinimalCOSE); err == nil {
+		t.Fatal("accepted non-minimal COSE map")
+	}
+}
+
+func TestWebAuthnEnvelopeTypesAndCanonicalBase64URL(t *testing.T) {
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	assertion := fixture.assertionResponse(
+		challenge, 0, 0x01|0x04, nil, HomeLinkOrigin,
+	)
+	for _, test := range []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"numeric id", func(object map[string]any) { object["id"] = 1 }},
+		{"null rawId", func(object map[string]any) { object["rawId"] = nil }},
+		{"array type", func(object map[string]any) { object["type"] = []any{} }},
+		{"string response", func(object map[string]any) { object["response"] = "no" }},
+		{"numeric clientDataJSON", func(object map[string]any) {
+			object["response"].(map[string]any)["clientDataJSON"] = 1
+		}},
+		{"null authenticatorData", func(object map[string]any) {
+			object["response"].(map[string]any)["authenticatorData"] = nil
+		}},
+		{"object signature", func(object map[string]any) {
+			object["response"].(map[string]any)["signature"] = map[string]any{}
+		}},
+		{"numeric userHandle", func(object map[string]any) {
+			object["response"].(map[string]any)["userHandle"] = 1
+		}},
+		{"padded id", func(object map[string]any) {
+			object["id"] = object["id"].(string) + "="
+		}},
+		{"padded rawId", func(object map[string]any) {
+			object["rawId"] = object["rawId"].(string) + "="
+		}},
+		{"padded clientDataJSON", func(object map[string]any) {
+			response := object["response"].(map[string]any)
+			response["clientDataJSON"] = response["clientDataJSON"].(string) + "="
+		}},
+		{"padded authenticatorData", func(object map[string]any) {
+			response := object["response"].(map[string]any)
+			response["authenticatorData"] = response["authenticatorData"].(string) + "="
+		}},
+		{"padded signature", func(object map[string]any) {
+			response := object["response"].(map[string]any)
+			response["signature"] = response["signature"].(string) + "="
+		}},
+		{"padded userHandle", func(object map[string]any) {
+			object["response"].(map[string]any)["userHandle"] = "AQ=="
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := changeCredentialJSON(t, assertion, test.change)
+			if _, err := parseAssertion(raw); !errors.Is(err, ErrWebAuthnInput) {
+				t.Fatalf("parse assertion = %v", err)
+			}
+		})
+	}
+	emptyHandle := changeCredentialJSON(t, assertion, func(object map[string]any) {
+		object["response"].(map[string]any)["userHandle"] = ""
+	})
+	if _, err := parseAssertion(emptyHandle); err != nil {
+		t.Fatalf("empty canonical user handle: %v", err)
+	}
+
+	registration := fixture.registrationResponse(
+		challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
+	)
+	for _, test := range []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"numeric clientDataJSON", func(object map[string]any) {
+			object["response"].(map[string]any)["clientDataJSON"] = 1
+		}},
+		{"null attestationObject", func(object map[string]any) {
+			object["response"].(map[string]any)["attestationObject"] = nil
+		}},
+		{"padded clientDataJSON", func(object map[string]any) {
+			response := object["response"].(map[string]any)
+			response["clientDataJSON"] = response["clientDataJSON"].(string) + "="
+		}},
+		{"padded attestationObject", func(object map[string]any) {
+			response := object["response"].(map[string]any)
+			response["attestationObject"] = response["attestationObject"].(string) + "="
+		}},
+	} {
+		t.Run("registration "+test.name, func(t *testing.T) {
+			raw := changeCredentialJSON(t, registration, test.change)
+			if _, err := parseRegistration(raw); !errors.Is(err, ErrWebAuthnInput) {
+				t.Fatalf("parse registration = %v", err)
+			}
+		})
+	}
+}
+
+func TestStrictCBORRejectsNonMinimalHeads(t *testing.T) {
+	fixture := newWebAuthnFixture(t, []byte{1, 2, 3})
+	validKey := fixture.publicKey
+	coordinateHead := bytes.Index(validKey, []byte{0x58, 0x20})
+	if coordinateHead < 0 {
+		t.Fatal("fixture lacks 32-byte coordinate")
+	}
+	for _, test := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"map count", append([]byte{0xb8, 0x05}, validKey[1:]...)},
+		{"integer", append(append([]byte{0xa5, 0x18, 0x01}, validKey[2:]...), nil...)},
+		{"byte string length", append(
+			append(bytes.Clone(validKey[:coordinateHead]), 0x59, 0x00, 0x20),
+			validKey[coordinateHead+2:]...,
+		)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateES256CredentialPublicKey(test.raw); err == nil {
+				t.Fatal("non-minimal COSE key accepted")
+			}
+		})
+	}
+
+	challenge := bytes.Repeat([]byte{1}, webAuthnChallengeBytes)
+	registration := fixture.registrationResponse(
+		challenge, 0x01|0x04|0x40, 0, "none", HomeLinkOrigin,
+	)
+	overlongMap := changeCredentialJSON(t, registration, func(object map[string]any) {
+		response := object["response"].(map[string]any)
+		encoded := response["attestationObject"].(string)
+		raw, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = append([]byte{0xb8, 0x03}, raw[1:]...)
+		response["attestationObject"] = base64.RawURLEncoding.EncodeToString(raw)
+	})
+	if _, err := parseRegistration(overlongMap); !errors.Is(err, ErrWebAuthnInput) {
+		t.Fatalf("overlong attestation map = %v", err)
+	}
+}
+
 func TestConcurrentAssertionAndRevokeEndsRevoked(t *testing.T) {
 	authority, fixture, handle, store := newRegisteredAuthority(
 		t, "001122334455667788", 0x01|0x04|0x40, 0,

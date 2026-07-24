@@ -376,6 +376,9 @@ func parseRegistration(raw []byte) (*protocol.ParsedCredentialCreationData, erro
 	if err := validateStrictJSON(raw); err != nil {
 		return nil, ErrWebAuthnInput
 	}
+	if err := validateCredentialEnvelope(raw, true); err != nil {
+		return nil, ErrWebAuthnInput
+	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(raw)
 	if err != nil {
 		return nil, ErrWebAuthnInput
@@ -397,6 +400,9 @@ func parseAssertion(raw []byte) (*protocol.ParsedCredentialAssertionData, error)
 		return nil, ErrWebAuthnInput
 	}
 	if err := validateStrictJSON(raw); err != nil {
+		return nil, ErrWebAuthnInput
+	}
+	if err := validateCredentialEnvelope(raw, false); err != nil {
 		return nil, ErrWebAuthnInput
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(raw)
@@ -508,6 +514,97 @@ func validateStrictJSON(raw []byte) error {
 	return nil
 }
 
+func validateCredentialEnvelope(raw []byte, registration bool) error {
+	var outer map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &outer); err != nil || outer == nil {
+		return errors.New("credential JSON is not an object")
+	}
+	id, err := requiredJSONString(outer, "id")
+	if err != nil {
+		return err
+	}
+	rawID, err := requiredJSONString(outer, "rawId")
+	if err != nil {
+		return err
+	}
+	if _, err := canonicalRawURLValue(id, false); err != nil {
+		return err
+	}
+	if _, err := canonicalRawURLValue(rawID, false); err != nil {
+		return err
+	}
+	if _, err := requiredJSONString(outer, "type"); err != nil {
+		return err
+	}
+	responseRaw, ok := outer["response"]
+	if !ok {
+		return errors.New("credential response is missing")
+	}
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(responseRaw, &response); err != nil || response == nil {
+		return errors.New("credential response is not an object")
+	}
+	required := []string{"clientDataJSON", "authenticatorData", "signature"}
+	if registration {
+		required = []string{"clientDataJSON", "attestationObject"}
+	}
+	for _, name := range required {
+		value, err := requiredJSONString(response, name)
+		if err != nil {
+			return err
+		}
+		if _, err := canonicalRawURLValue(value, false); err != nil {
+			return err
+		}
+	}
+	if !registration {
+		if rawHandle, exists := response["userHandle"]; exists {
+			handle, err := jsonString(rawHandle)
+			if err != nil {
+				return err
+			}
+			if _, err := canonicalRawURLValue(handle, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func requiredJSONString(object map[string]json.RawMessage, name string) (string, error) {
+	raw, exists := object[name]
+	if !exists {
+		return "", errors.New("required credential JSON field is missing")
+	}
+	value, err := jsonString(raw)
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		return "", errors.New("required credential JSON string is empty")
+	}
+	return value, nil
+}
+
+func jsonString(raw json.RawMessage) (string, error) {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", errors.New("credential JSON field is not a string")
+	}
+	return value, nil
+}
+
+func canonicalRawURLValue(value string, allowEmpty bool) ([]byte, error) {
+	if value == "" && !allowEmpty {
+		return nil, errors.New("base64url value is empty")
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || base64.RawURLEncoding.EncodeToString(decoded) != value {
+		return nil, errors.New("base64url value is not canonical")
+	}
+	return decoded, nil
+}
+
 func readStrictJSONValue(decoder *json.Decoder) error {
 	token, err := decoder.Token()
 	if err != nil {
@@ -578,25 +675,40 @@ func (r *strictCBORReader) head() (byte, uint64, error) {
 		if err != nil {
 			return 0, 0, err
 		}
+		if value[0] < 24 {
+			return 0, 0, errors.New("CBOR head is not minimally encoded")
+		}
 		return major, uint64(value[0]), nil
 	case additional == 25:
 		value, err := r.take(2)
 		if err != nil {
 			return 0, 0, err
 		}
-		return major, uint64(binary.BigEndian.Uint16(value)), nil
+		decoded := binary.BigEndian.Uint16(value)
+		if decoded <= math.MaxUint8 {
+			return 0, 0, errors.New("CBOR head is not minimally encoded")
+		}
+		return major, uint64(decoded), nil
 	case additional == 26:
 		value, err := r.take(4)
 		if err != nil {
 			return 0, 0, err
 		}
-		return major, uint64(binary.BigEndian.Uint32(value)), nil
+		decoded := binary.BigEndian.Uint32(value)
+		if decoded <= math.MaxUint16 {
+			return 0, 0, errors.New("CBOR head is not minimally encoded")
+		}
+		return major, uint64(decoded), nil
 	case additional == 27:
 		value, err := r.take(8)
 		if err != nil {
 			return 0, 0, err
 		}
-		return major, binary.BigEndian.Uint64(value), nil
+		decoded := binary.BigEndian.Uint64(value)
+		if decoded <= math.MaxUint32 {
+			return 0, 0, errors.New("CBOR head is not minimally encoded")
+		}
+		return major, decoded, nil
 	default:
 		return 0, 0, errors.New("indefinite or reserved CBOR value")
 	}
