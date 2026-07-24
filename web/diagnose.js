@@ -44,7 +44,7 @@
     ['.prices-row', '.energy-row', '#heating-section', '#chart-section']
       .forEach(selector => append(energy, selector));
     append(plan, '#plan-section');
-    ['.history-row', '.savings-row'].forEach(insertHistory);
+    insertHistory('.history-row');
     ['#ui-mode-row', '#twins-section', '#loadpoints-section', '#drivers-section', '#models-section']
       .forEach(selector => append(more, selector));
 
