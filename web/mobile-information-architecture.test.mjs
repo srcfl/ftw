@@ -35,10 +35,18 @@ describe("dashboard information architecture", () => {
 
   it("moves each existing dashboard section instead of cloning it", () => {
     assert.match(router, /append\(plan, '#plan-section'\)/);
+    assert.match(router, /querySelector\('\.energy-history-header'\)/);
     assert.match(router, /insertHistory\('\.history-row'\)/);
     assert.doesNotMatch(router, /insertHistory\('\.savings-row'\)/);
     assert.match(router, /'#chart-section'/);
     assert.match(router, /'#drivers-section'/);
+  });
+
+  it("loads planner decisions only when their History section is open", () => {
+    assert.match(router, /getElementById\('plan-history-details'\)/);
+    assert.match(router, /plannerDetails\.addEventListener\('toggle'/);
+    assert.match(router, /if \(!plannerDetails\.open\) return/);
+    assert.match(router, /if \(selectedTs && plannerDetails\) plannerDetails\.open = true/);
   });
 
   it("keeps saved vs no PV or battery on Overview", () => {

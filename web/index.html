@@ -250,30 +250,41 @@
          tile. app.js binds #history-toggle to push range= onto all
          three children in lock-step. -->
     <section class="history-row">
-      <div class="card history-group">
-        <div class="history-head">
-          <div class="card-label">History in numbers</div>
-          <div class="history-toggles">
-            <div class="history-toggle" id="history-view-toggle" role="tablist" data-active="bars">
-              <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
-              <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
+      <details id="history-numbers-details" class="history-disclosure history-numbers-disclosure">
+        <summary>
+          <span>
+            <strong>Week and month comparison</strong>
+            <small>Compare import, production, use and export</small>
+          </span>
+          <span class="history-disclosure-meta">Open</span>
+        </summary>
+        <div class="history-disclosure-body">
+          <div class="card history-group">
+            <div class="history-head">
+              <div class="card-label">History in numbers</div>
+              <div class="history-toggles">
+                <div class="history-toggle" id="history-view-toggle" role="tablist" data-active="bars">
+                  <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
+                  <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
+                </div>
+                <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
+                  <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
+                  <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+                </div>
+              </div>
             </div>
-            <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
-              <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
-              <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+            <div class="history-tiles" id="history-tiles">
+              <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
+              <ftw-history-card metric="pv"     label="Produced" hide-toggle range="week"></ftw-history-card>
+              <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
+              <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
+            </div>
+            <div class="history-cake hidden" id="history-cake">
+              <ftw-energy-cake id="history-cake-el"></ftw-energy-cake>
             </div>
           </div>
         </div>
-        <div class="history-tiles" id="history-tiles">
-          <ftw-history-card metric="import" label="Imported" hide-toggle range="week"></ftw-history-card>
-          <ftw-history-card metric="pv"     label="Produced" hide-toggle range="week"></ftw-history-card>
-          <ftw-history-card metric="load"   label="Consumed" hide-toggle range="week"></ftw-history-card>
-          <ftw-history-card metric="export" label="Exported" hide-toggle range="week"></ftw-history-card>
-        </div>
-        <div class="history-cake hidden" id="history-cake">
-          <ftw-energy-cake id="history-cake-el"></ftw-energy-cake>
-        </div>
-      </div>
+      </details>
     </section>
 
     <!-- Actual historical savings compared with buying recorded house
@@ -551,12 +562,12 @@
   <main id="view-history" class="app-view hidden" role="tabpanel" aria-label="History">
     <section class="view-heading">
       <p class="view-kicker">History</p>
-      <h2>Energy and past decisions</h2>
-      <p>Review measured outcomes first, then inspect what informed an earlier plan.</p>
+      <h2>Energy over time</h2>
+      <p>Start with totals and trends. Open detailed data or past plan decisions only when needed.</p>
     </section>
     <section class="energy-history-header">
       <div>
-        <h2>Energy history</h2>
+        <h2>Energy totals</h2>
         <p>Directional totals from hardware counters when available, with marked power integration as fallback.</p>
       </div>
       <div class="energy-history-controls">
@@ -574,50 +585,77 @@
         <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
       </div>
     </section>
+    <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
     <section class="energy-history-chart-wrap">
       <canvas id="energy-history-chart" role="img" aria-label="Energy by flow and time bucket">Energy history chart</canvas>
       <div id="energy-history-legend" class="energy-history-legend" aria-label="Energy flow legend"></div>
     </section>
-    <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
-    <section class="energy-history-table-wrap">
-      <table class="energy-history-table">
-        <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
-        <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
-      </table>
-    </section>
-    <p class="energy-history-note">CSV is the supported export format in this phase. XLSX export is planned for a later phase.</p>
-    <section class="diagnose-header">
-      <div class="diagnose-header-row">
-        <div class="diagnose-title">
-          <h2>Plan decisions</h2>
-          <span class="plan-summary" id="diagnose-meta">—</span>
-        </div>
-        <div class="diagnose-range">
-          <label>Range:
-            <select id="diagnose-range-select">
-              <option value="1h">Last 1h</option>
-              <option value="6h">Last 6h</option>
-              <option value="24h" selected>Last 24h</option>
-              <option value="7d">Last 7d</option>
-              <option value="30d">Last 30d</option>
-            </select>
-          </label>
-          <button id="diagnose-refresh" class="btn-send" title="Reload snapshots">↻</button>
-        </div>
+    <details id="energy-history-details" class="history-disclosure">
+      <summary>
+        <span>
+          <strong>Detailed energy data</strong>
+          <small>Raw time buckets, quality and source</small>
+        </span>
+        <span id="energy-history-detail-meta" class="history-disclosure-meta">Open</span>
+      </summary>
+      <div class="history-disclosure-body">
+        <section class="energy-history-table-wrap">
+          <table class="energy-history-table">
+            <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
+            <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
+          </table>
+        </section>
+        <nav class="energy-history-pager" aria-label="Detailed energy data pages">
+          <button id="energy-history-prev" class="btn-send" type="button" disabled>Previous</button>
+          <span id="energy-history-page">Page 1 of 1</span>
+          <button id="energy-history-next" class="btn-send" type="button" disabled>Next</button>
+        </nav>
+        <p class="energy-history-note">CSV contains the complete selected range.</p>
       </div>
-    </section>
+    </details>
 
-    <section class="diagnose-body">
-      <!-- Left: timeline of replans -->
-      <aside class="diagnose-timeline" id="diagnose-timeline">
-        <div class="diagnose-empty">Loading snapshots…</div>
-      </aside>
+    <details id="plan-history-details" class="history-disclosure history-plan-disclosure">
+      <summary>
+        <span>
+          <strong>Past plan decisions</strong>
+          <small>Technical detail for inspecting an earlier schedule</small>
+        </span>
+        <span class="history-disclosure-meta" id="diagnose-meta">Open</span>
+      </summary>
+      <div class="history-disclosure-body history-plan-body">
+        <section class="diagnose-header">
+          <div class="diagnose-header-row">
+            <div class="diagnose-title">
+              <h2>Plan decisions</h2>
+            </div>
+            <div class="diagnose-range">
+              <label>Range:
+                <select id="diagnose-range-select">
+                  <option value="1h">Last 1h</option>
+                  <option value="6h">Last 6h</option>
+                  <option value="24h" selected>Last 24h</option>
+                  <option value="7d">Last 7d</option>
+                  <option value="30d">Last 30d</option>
+                </select>
+              </label>
+              <button id="diagnose-refresh" class="btn-send" title="Reload snapshots">↻</button>
+            </div>
+          </div>
+        </section>
 
-      <!-- Right: detail pane for selected snapshot -->
-      <section class="diagnose-detail" id="diagnose-detail">
-        <div class="diagnose-empty">Select a decision to inspect what FTW expected and chose.</div>
-      </section>
-    </section>
+        <section class="diagnose-body">
+          <!-- Left: timeline of replans -->
+          <aside class="diagnose-timeline" id="diagnose-timeline">
+            <div class="diagnose-empty">Open this section to load planner decisions.</div>
+          </aside>
+
+          <!-- Right: detail pane for selected snapshot -->
+          <section class="diagnose-detail" id="diagnose-detail">
+            <div class="diagnose-empty">Select a decision to inspect what FTW expected and chose.</div>
+          </section>
+        </section>
+      </div>
+    </details>
   </main>
 
   <main id="view-more" class="app-view hidden" role="tabpanel" aria-label="More">
@@ -812,8 +850,8 @@
   <script src="/twins.js?v=diag2"></script>
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=lp4"></script>
-  <script src="/energy-history.js?v=ledger1"></script>
-  <script src="/diagnose.js?v=ia1"></script>
+  <script src="/energy-history.js?v=ledger2"></script>
+  <script src="/diagnose.js?v=ia2"></script>
   <script src="/update-badge.js?v=modal2" defer></script>
   <script>
     // Bridge: clicking the plain-text version span opens the update modal
