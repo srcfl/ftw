@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.1
+
+### Patch Changes
+
+- fb9c05a: Show Home Assistant as enabled but disconnected when its MQTT bridge cannot start, and mark unsaved enable changes in Settings.
+
 ## 1.11.0
 
 ### Minor Changes
