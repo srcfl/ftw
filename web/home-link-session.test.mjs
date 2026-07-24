@@ -13,10 +13,10 @@ describe("Home Link browser session", () => {
   it("accepts one canonical invite", () => {
     const invite = session.parseInvite(
       "https://home.sourceful.energy/home-link.html?gateway=001122334455667788" +
-      "&route=" + encoded(18, 7) + "&key=" + encoded(64, 8)
+      "&route=" + encoded(32, 7) + "&key=" + encoded(64, 8)
     );
     assert.equal(invite.gateway, "001122334455667788");
-    assert.equal(invite.route, encoded(18, 7));
+    assert.equal(invite.route, encoded(32, 7));
     assert.equal(invite.key, encoded(64, 8));
   });
 
@@ -186,7 +186,7 @@ describe("Home Link browser session", () => {
 
     let closes = 0;
     const instance = new session.HomeLinkSession(
-      { gateway: "001122334455667788", route: encoded(18, 1), key: encoded(64, 2) },
+      { gateway: "001122334455667788", route: encoded(32, 1), key: encoded(64, 2) },
       null,
       10
     );
@@ -198,7 +198,7 @@ describe("Home Link browser session", () => {
     assert.equal(closes, 1);
 
     const waiting = new session.HomeLinkSession(
-      { gateway: "001122334455667788", route: encoded(18, 1), key: encoded(64, 2) },
+      { gateway: "001122334455667788", route: encoded(32, 1), key: encoded(64, 2) },
       null,
       10
     );

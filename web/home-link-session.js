@@ -95,7 +95,7 @@
     var route = url.searchParams.get("route") || "";
     var key = url.searchParams.get("key") || "";
     if (!/^[0-9a-f]{18}$/.test(gateway)) throw new Error("invalid gateway");
-    if (rawURLToBytes(route).length !== 18) throw new Error("invalid route");
+    if (rawURLToBytes(route).length !== 32) throw new Error("invalid route");
     if (rawURLToBytes(key).length !== 64) throw new Error("invalid gateway key");
     return { gateway: gateway, route: route, key: key };
   }
