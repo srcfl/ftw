@@ -8,10 +8,12 @@ const webRoot = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(webRoot, "index.html"), "utf8");
 const app = readFileSync(join(webRoot, "app.js"), "utf8");
 const plan = readFileSync(join(webRoot, "plan.js"), "utf8");
+const router = readFileSync(join(webRoot, "diagnose.js"), "utf8");
 const flow = readFileSync(join(webRoot, "components/ftw-energy-flow.js"), "utf8");
 const price = readFileSync(join(webRoot, "components/ftw-price-chart.js"), "utf8");
 const savings = readFileSync(join(webRoot, "components/ftw-savings-card.js"), "utf8");
 const overview = html.match(/<main id="view-overview"[\s\S]*?<\/main>/)?.[0] || "";
+const history = html.match(/<main id="view-history"[\s\S]*?<\/main>/)?.[0] || "";
 
 describe("simplified dashboard overview", () => {
   it("answers now, price, plan, today, and fuse in that order", () => {
@@ -119,5 +121,23 @@ describe("simplified dashboard overview", () => {
     ]) {
       assert.match(plan, new RegExp(`["']${id}["']`));
     }
+  });
+
+  it("orders detailed destinations from operator answer to technical evidence", () => {
+    assert.match(
+      router,
+      /\['#chart-section', '\.energy-row', '\.prices-row', '#heating-section'\]/,
+    );
+    assert.match(
+      router,
+      /historyView\.querySelector\('\.history-technical-energy'\)/,
+    );
+    assert.match(history, /class="history-technical history-technical-energy"/);
+    assert.match(history, /class="history-technical history-technical-plan"/);
+    assert.ok(
+      history.indexOf('class="history-technical history-technical-energy"') <
+        history.indexOf('class="history-technical history-technical-plan"'),
+      "raw energy records should precede prior plan decisions",
+    );
   });
 });

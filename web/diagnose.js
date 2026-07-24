@@ -31,7 +31,7 @@
     const plan = document.getElementById('view-plan');
     const historyView = document.getElementById('view-history');
     const more = document.getElementById('view-more');
-    const historyAnchor = historyView && historyView.querySelector('.diagnose-header');
+    const historyAnchor = historyView && historyView.querySelector('.history-technical-energy');
     const append = (host, selector) => {
       const el = document.querySelector(selector);
       if (host && el) host.appendChild(el);
@@ -41,7 +41,7 @@
       if (historyView && historyAnchor && el) historyView.insertBefore(el, historyAnchor);
     };
 
-    ['.prices-row', '.energy-row', '#heating-section', '#chart-section']
+    ['#chart-section', '.energy-row', '.prices-row', '#heating-section']
       .forEach(selector => append(energy, selector));
     append(plan, '#plan-section');
     ['.history-row', '.savings-row'].forEach(insertHistory);

@@ -615,8 +615,8 @@
   <main id="view-energy" class="app-view hidden" role="tabpanel" aria-label="Energy and assets">
     <section class="view-heading">
       <p class="view-kicker">Energy</p>
-      <h2>Flows and assets</h2>
-      <p>Current power, today’s energy, prices and the last 24 hours.</p>
+      <h2>Live energy detail</h2>
+      <p>Start with current power, then inspect today’s totals, prices and the last 24 hours.</p>
     </section>
   </main>
 
@@ -635,68 +635,75 @@
       <h2>Energy and past decisions</h2>
       <p>Review measured outcomes first, then inspect what informed an earlier plan.</p>
     </section>
-    <section class="energy-history-header">
-      <div>
-        <h2>Energy history</h2>
-        <p>Directional totals from hardware counters when available, with marked power integration as fallback.</p>
-      </div>
-      <div class="energy-history-controls">
-        <label>Asset
-          <select id="energy-history-asset"><option value="">System</option></select>
-        </label>
-        <label>Range
-          <select id="energy-history-range">
-            <option value="24h">24 hours</option>
-            <option value="7d" selected>7 days</option>
-            <option value="30d">30 days</option>
-          </select>
-        </label>
-        <button id="energy-history-refresh" class="btn-send">Refresh</button>
-        <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
-      </div>
-    </section>
-    <section class="energy-history-chart-wrap">
-      <canvas id="energy-history-chart" role="img" aria-label="Energy by flow and time bucket">Energy history chart</canvas>
-      <div id="energy-history-legend" class="energy-history-legend" aria-label="Energy flow legend"></div>
-    </section>
-    <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
-    <section class="energy-history-table-wrap">
-      <table class="energy-history-table">
-        <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
-        <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
-      </table>
-    </section>
-    <p class="energy-history-note">CSV is the supported export format in this phase. XLSX export is planned for a later phase.</p>
-    <section class="diagnose-header">
-      <div class="diagnose-header-row">
-        <div class="diagnose-title">
-          <h2>Plan decisions</h2>
-          <span class="plan-summary" id="diagnose-meta">—</span>
+    <section class="history-technical history-technical-energy" aria-label="Detailed energy records">
+      <p class="history-technical-label">Detailed records</p>
+      <section class="energy-history-header">
+        <div>
+          <h2>Energy history</h2>
+          <p>Directional totals from hardware counters when available, with marked power integration as fallback.</p>
         </div>
-        <div class="diagnose-range">
-          <label>Range:
-            <select id="diagnose-range-select">
-              <option value="1h">Last 1h</option>
-              <option value="6h">Last 6h</option>
-              <option value="24h" selected>Last 24h</option>
-              <option value="7d">Last 7d</option>
-              <option value="30d">Last 30d</option>
+        <div class="energy-history-controls">
+          <label>Asset
+            <select id="energy-history-asset"><option value="">System</option></select>
+          </label>
+          <label>Range
+            <select id="energy-history-range">
+              <option value="24h">24 hours</option>
+              <option value="7d" selected>7 days</option>
+              <option value="30d">30 days</option>
             </select>
           </label>
-          <button id="diagnose-refresh" class="btn-send" title="Reload snapshots">↻</button>
+          <button id="energy-history-refresh" class="btn-send">Refresh</button>
+          <a id="energy-history-csv" class="btn-send" href="/api/energy/history.csv">Export CSV</a>
         </div>
-      </div>
+      </section>
+      <section class="energy-history-chart-wrap">
+        <canvas id="energy-history-chart" role="img" aria-label="Energy by flow and time bucket">Energy history chart</canvas>
+        <div id="energy-history-legend" class="energy-history-legend" aria-label="Energy flow legend"></div>
+      </section>
+      <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
+      <section class="energy-history-table-wrap">
+        <table class="energy-history-table">
+          <thead><tr><th>Bucket</th><th>Flow</th><th>Energy</th><th>Quality</th><th>Source</th></tr></thead>
+          <tbody id="energy-history-rows"><tr><td colspan="5">Open History to load energy data.</td></tr></tbody>
+        </table>
+      </section>
+      <p class="energy-history-note">CSV is the supported export format in this phase. XLSX export is planned for a later phase.</p>
     </section>
 
-    <section class="diagnose-body">
-      <!-- Left: timeline of replans -->
-      <aside class="diagnose-timeline" id="diagnose-timeline">
-        <div class="diagnose-empty">Loading snapshots…</div>
-      </aside>
+    <section class="history-technical history-technical-plan" aria-label="Earlier plan decisions">
+      <p class="history-technical-label">Earlier decisions</p>
+      <section class="diagnose-header">
+        <div class="diagnose-header-row">
+          <div class="diagnose-title">
+            <h2>Plan decisions</h2>
+            <span class="plan-summary" id="diagnose-meta">—</span>
+          </div>
+          <div class="diagnose-range">
+            <label>Range:
+              <select id="diagnose-range-select">
+                <option value="1h">Last 1h</option>
+                <option value="6h">Last 6h</option>
+                <option value="24h" selected>Last 24h</option>
+                <option value="7d">Last 7d</option>
+                <option value="30d">Last 30d</option>
+              </select>
+            </label>
+            <button id="diagnose-refresh" class="btn-send" title="Reload snapshots">↻</button>
+          </div>
+        </div>
+      </section>
 
-      <!-- Right: detail pane for selected snapshot -->
-      <section class="diagnose-detail" id="diagnose-detail">
-        <div class="diagnose-empty">Select a decision to inspect what FTW expected and chose.</div>
+      <section class="diagnose-body">
+        <!-- Left: timeline of replans -->
+        <aside class="diagnose-timeline" id="diagnose-timeline">
+          <div class="diagnose-empty">Loading snapshots…</div>
+        </aside>
+
+        <!-- Right: detail pane for selected snapshot -->
+        <section class="diagnose-detail" id="diagnose-detail">
+          <div class="diagnose-empty">Select a decision to inspect what FTW expected and chose.</div>
+        </section>
       </section>
     </section>
   </main>
