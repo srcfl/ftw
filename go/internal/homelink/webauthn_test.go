@@ -143,6 +143,7 @@ func newRegisteredAuthority(
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { forgetSiteCredentialCoordinatorForTest(siteID) })
 	pair, err := pairing.Create(time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -685,6 +686,136 @@ func TestCredentialRevokeDeniesPendingAndFutureAssertions(t *testing.T) {
 	}
 }
 
+func TestDirectRevokeBlocksOtherLiveAuthorityAndManager(t *testing.T) {
+	siteID := "001122334455667788"
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, siteID, 0x01|0x04|0x40, 0,
+	)
+	now := time.Unix(1_800_000_000, 0)
+	manager := newGrantTestManagerForSiteWithAuthority(
+		t, siteID, true, func() time.Time { return now },
+		func() time.Duration { return 0 }, 64, authority,
+	)
+	challenge, err := manager.BeginLocalAssertion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	grant, err := manager.IssueOneUseAccess(
+		context.Background(), challenge.ID,
+		PasskeyAssertion{ResponseJSON: raw}, ScopePlanRead, time.Minute,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.RevokeCredential(
+		context.Background(), fixture.credentialID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.VerifyAndDispatchRead(
+		context.Background(), grant.Token,
+		ReadRequest{Version: ReadContractVersion, GatewayID: siteID, Scope: ScopePlanRead},
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("other authority's direct revoke left grant usable = %v", err)
+	}
+	if _, err := authority.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("first live authority reopened revoked credential = %v", err)
+	}
+}
+
+func TestPersistentApplyStartedBeforeRevokeCompletesFirst(t *testing.T) {
+	siteID := "221122334455667788"
+	authority, fixture, handle, store := newRegisteredAuthority(
+		t, siteID, 0x01|0x04|0x40, 0,
+	)
+	other, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: siteID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	manager := newGrantTestManagerForSiteWithAuthority(
+		t, siteID, true, func() time.Time { return now },
+		func() time.Duration { return 0 }, 68, authority,
+	)
+	challenge, err := manager.BeginLocalAssertion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyStarted := make(chan struct{})
+	applyMayFinish := make(chan struct{})
+	authority.store = &faultCredentialStateStore{
+		credentialStateStore: store,
+		apply: func(
+			ctx context.Context,
+			update state.HomeLinkAssertionUpdate,
+		) (state.HomeLinkCredentialRecord, error) {
+			close(applyStarted)
+			select {
+			case <-applyMayFinish:
+			case <-ctx.Done():
+				return state.HomeLinkCredentialRecord{}, ctx.Err()
+			}
+			return store.ApplyHomeLinkAssertion(ctx, update)
+		},
+	}
+	raw := fixture.assertionResponse(
+		challenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	type issueOutcome struct {
+		grant Grant
+		err   error
+	}
+	issueResult := make(chan issueOutcome, 1)
+	go func() {
+		grant, err := manager.IssueOneUseAccess(
+			context.Background(), challenge.ID,
+			PasskeyAssertion{ResponseJSON: raw}, ScopePlanRead, time.Minute,
+		)
+		issueResult <- issueOutcome{grant: grant, err: err}
+	}()
+	<-applyStarted
+	revokeResult := make(chan error, 1)
+	go func() {
+		revokeResult <- other.RevokeCredential(
+			context.Background(), fixture.credentialID,
+		)
+	}()
+	select {
+	case err := <-revokeResult:
+		close(applyMayFinish)
+		<-issueResult
+		t.Fatalf("revoke passed an in-flight assertion apply: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(applyMayFinish)
+	issued := <-issueResult
+	if issued.err != nil {
+		t.Fatalf("assertion apply that started first = %v", issued.err)
+	}
+	if err := <-revokeResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.VerifyAndDispatchRead(
+		context.Background(), issued.grant.Token,
+		ReadRequest{Version: ReadContractVersion, GatewayID: siteID, Scope: ScopePlanRead},
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("grant minted before revoke remained usable = %v", err)
+	}
+}
+
 func TestCanceledCredentialRevokePersistsBeforeReturningCanceled(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -785,6 +916,7 @@ func TestRevokeIntentFailurePersistsPolicyFallbackAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	siteID := "001122334455667788"
+	t.Cleanup(func() { forgetSiteCredentialCoordinatorForTest(siteID) })
 	fixture := newWebAuthnFixture(t, []byte{1, 2, 3, 4})
 	handle := bytes.Repeat([]byte{7}, webAuthnUserHandleBytes)
 	if err := store.RegisterHomeLinkCredential(context.Background(), state.HomeLinkCredentialRecord{
@@ -868,6 +1000,31 @@ func TestRevokeStoreOutageBlocksCurrentAuthorityInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	other, err := NewPersistentCredentialAuthority(PersistentCredentialAuthorityOptions{
+		Store: store, SiteID: "001122334455667788",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_800_000_000, 0)
+	manager := newGrantTestManagerForSiteWithAuthority(
+		t, "001122334455667788", true, func() time.Time { return now },
+		func() time.Duration { return 0 }, 67, other,
+	)
+	managerChallenge, err := manager.BeginLocalAssertion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	managerRaw := fixture.assertionResponse(
+		managerChallenge.Challenge, 1, 0x01|0x04, handle, HomeLinkOrigin,
+	)
+	grant, err := manager.IssueOneUseAccess(
+		context.Background(), managerChallenge.ID,
+		PasskeyAssertion{ResponseJSON: managerRaw}, ScopePlanRead, time.Minute,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	outage := errors.New("credential store unavailable")
 	authority.store = &faultCredentialStateStore{
 		credentialStateStore: store,
@@ -889,6 +1046,20 @@ func TestRevokeStoreOutageBlocksCurrentAuthorityInMemory(t *testing.T) {
 		context.Background(), fixture.credentialID,
 	); err == nil {
 		t.Fatal("revoke during total store outage unexpectedly succeeded")
+	}
+	if err := manager.VerifyAndDispatchRead(
+		context.Background(), grant.Token,
+		ReadRequest{
+			Version: ReadContractVersion, GatewayID: "001122334455667788",
+			Scope: ScopePlanRead,
+		},
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("other live manager consumed grant after revoke outage = %v", err)
+	}
+	if _, err := other.CreateAssertion(
+		context.Background(), AssertionExpectationBinding{deadline: time.Hour},
+	); !errors.Is(err, ErrCredentialUnknown) {
+		t.Fatalf("other live authority reopened after revoke outage = %v", err)
 	}
 	authority.store = store
 	raw := fixture.assertionResponse(

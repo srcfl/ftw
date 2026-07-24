@@ -209,13 +209,22 @@ func TestMissingDispatcherDoesNotConsumeGrant(t *testing.T) {
 	}
 }
 
-func TestCredentialRevokeDoesNotCancelStartedDispatch(t *testing.T) {
+func TestCredentialRevokeWaitsForStartedDispatchAndBlocksLaterReads(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
-	manager := newGrantTestManager(t, true, &now, 25)
-	grant := issueTestAccess(t, manager, ScopePlanRead, time.Minute)
+	authority := newMemoryCredentialAuthority(newMemoryCredentialState())
+	first := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 25,
+		authority,
+	)
+	second := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 26,
+		authority,
+	)
+	startedGrant := issueTestAccess(t, first, ScopePlanRead, time.Minute)
+	pendingGrant := issueTestAccess(t, first, ScopePlanRead, time.Minute)
 	dispatchStarted := make(chan struct{})
 	dispatchMayFinish := make(chan struct{})
-	manager.readDispatcher = readDispatcherFunc(func(context.Context, ReadTarget, ReadRequest, Principal) error {
+	first.readDispatcher = readDispatcherFunc(func(context.Context, ReadTarget, ReadRequest, Principal) error {
 		close(dispatchStarted)
 		<-dispatchMayFinish
 		return nil
@@ -223,22 +232,35 @@ func TestCredentialRevokeDoesNotCancelStartedDispatch(t *testing.T) {
 
 	readResult := make(chan error, 1)
 	go func() {
-		readResult <- manager.VerifyAndDispatchRead(
-			context.Background(), grant.Token, testReadRequest(ScopePlanRead),
+		readResult <- first.VerifyAndDispatchRead(
+			context.Background(), startedGrant.Token, testReadRequest(ScopePlanRead),
 		)
 	}()
 	<-dispatchStarted
-	if err := manager.RevokeCredential(context.Background(), testPrincipal().CredentialID); err != nil {
-		t.Fatal(err)
+	revokeResult := make(chan error, 1)
+	go func() {
+		revokeResult <- second.RevokeCredential(
+			context.Background(), testPrincipal().CredentialID,
+		)
+	}()
+	select {
+	case err := <-revokeResult:
+		close(dispatchMayFinish)
+		<-readResult
+		t.Fatalf("revoke returned before started dispatch: %v", err)
+	case <-time.After(20 * time.Millisecond):
 	}
 	close(dispatchMayFinish)
 	if err := <-readResult; err != nil {
 		t.Fatalf("revoke canceled an already started dispatch: %v", err)
 	}
-	if err := manager.VerifyAndDispatchRead(
-		context.Background(), grant.Token, testReadRequest(ScopePlanRead),
-	); !errors.Is(err, ErrGrantRevoked) {
-		t.Fatalf("revoked grant replay = %v", err)
+	if err := <-revokeResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := first.VerifyAndDispatchRead(
+		context.Background(), pendingGrant.Token, testReadRequest(ScopePlanRead),
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("pending grant after revoke = %v", err)
 	}
 }
 

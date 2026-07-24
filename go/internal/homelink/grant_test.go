@@ -33,13 +33,28 @@ func newGrantTestManagerWithAuthority(
 	authority CredentialAuthority,
 ) *GrantManager {
 	t.Helper()
+	return newGrantTestManagerForSiteWithAuthority(
+		t, testGatewayID, enabled, now, monotonicNow, fill, authority,
+	)
+}
+
+func newGrantTestManagerForSiteWithAuthority(
+	t *testing.T,
+	siteID string,
+	enabled bool,
+	now func() time.Time,
+	monotonicNow func() time.Duration,
+	fill byte,
+	authority CredentialAuthority,
+) *GrantManager {
+	t.Helper()
 	random := make([]byte, 8*grantTokenBytes)
 	for block := range 8 {
 		for i := range grantTokenBytes {
 			random[block*grantTokenBytes+i] = fill + byte(block)
 		}
 	}
-	manager, err := NewGrantManager(testGatewayID, GrantManagerOptions{
+	manager, err := NewGrantManager(siteID, GrantManagerOptions{
 		Enabled: enabled, Random: bytes.NewReader(random), Now: now,
 		MonotonicNow: monotonicNow, CredentialAuthority: authority,
 		ReadDispatcher: successfulReadDispatcher(),
@@ -50,6 +65,7 @@ func newGrantTestManagerWithAuthority(
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { forgetSiteCredentialCoordinatorForTest(siteID) })
 	return manager
 }
 
@@ -539,6 +555,120 @@ func TestCredentialRevokeBlocksGrantIssueUntilDurableCommit(t *testing.T) {
 	}
 }
 
+func TestCredentialRevokeIsSharedAcrossManagers(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	authority := newMemoryCredentialAuthority(newMemoryCredentialState())
+	first := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 60,
+		authority,
+	)
+	second := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 61,
+		authority,
+	)
+	grant := issueTestAccess(t, first, ScopePlanRead, time.Minute)
+	if err := second.RevokeCredential(
+		context.Background(), testPrincipal().CredentialID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.VerifyAndDispatchRead(
+		context.Background(), grant.Token, testReadRequest(ScopePlanRead),
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("other manager consumed grant after revoke = %v", err)
+	}
+}
+
+func TestCredentialRevokeDoesNotCrossSites(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	firstSite := newGrantTestManagerForSiteWithAuthority(
+		t, testGatewayID, true, func() time.Time { return now },
+		func() time.Duration { return 0 }, 65,
+		newMemoryCredentialAuthority(newMemoryCredentialState()),
+	)
+	secondSiteID := "1123dca63201f838f7"
+	secondSite := newGrantTestManagerForSiteWithAuthority(
+		t, secondSiteID, true, func() time.Time { return now },
+		func() time.Duration { return 0 }, 66,
+		newMemoryCredentialAuthority(newMemoryCredentialState()),
+	)
+	grant := issueTestAccess(t, secondSite, ScopePlanRead, time.Minute)
+	if err := firstSite.RevokeCredential(
+		context.Background(), testPrincipal().CredentialID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	request := testReadRequest(ScopePlanRead)
+	request.GatewayID = secondSiteID
+	if err := secondSite.VerifyAndDispatchRead(
+		context.Background(), grant.Token, request,
+	); err != nil {
+		t.Fatalf("revoke crossed site boundary: %v", err)
+	}
+}
+
+func TestGrantIssueStartedBeforeRevokeCompletesFirst(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	state := newMemoryCredentialState()
+	authority := newMemoryCredentialAuthority(state)
+	verifyStarted := make(chan struct{})
+	verifyMayFinish := make(chan struct{})
+	first := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 62,
+		blockingVerifyCredentialAuthority{
+			CredentialAuthority: authority,
+			verifyStarted:       verifyStarted,
+			verifyMayFinish:     verifyMayFinish,
+		},
+	)
+	second := newGrantTestManagerWithAuthority(
+		t, true, func() time.Time { return now }, func() time.Duration { return 0 }, 63,
+		authority,
+	)
+	challenge, err := first.BeginLocalAssertion(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type issueOutcome struct {
+		grant Grant
+		err   error
+	}
+	issueResult := make(chan issueOutcome, 1)
+	go func() {
+		grant, err := first.IssueOneUseAccess(
+			context.Background(), challenge.ID, testAssertion(), ScopePlanRead, time.Minute,
+		)
+		issueResult <- issueOutcome{grant: grant, err: err}
+	}()
+	<-verifyStarted
+	revokeResult := make(chan error, 1)
+	go func() {
+		revokeResult <- second.RevokeCredential(
+			context.Background(), testPrincipal().CredentialID,
+		)
+	}()
+	select {
+	case err := <-revokeResult:
+		close(verifyMayFinish)
+		<-issueResult
+		t.Fatalf("revoke passed an in-flight grant issue: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(verifyMayFinish)
+	issued := <-issueResult
+	if issued.err != nil {
+		t.Fatalf("grant issue that started first = %v", issued.err)
+	}
+	if err := <-revokeResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := first.VerifyAndDispatchRead(
+		context.Background(), issued.grant.Token, testReadRequest(ScopePlanRead),
+	); !errors.Is(err, ErrCredentialRevoked) {
+		t.Fatalf("grant minted before revoke remained usable = %v", err)
+	}
+}
+
 func TestCredentialRevokeFailureStaysClosedAcrossRestart(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	state := newMemoryCredentialState()
@@ -900,6 +1030,26 @@ func (a blockingCredentialAuthority) RevokeCredential(ctx context.Context, crede
 		return ctx.Err()
 	}
 	return a.CredentialAuthority.RevokeCredential(ctx, credentialID)
+}
+
+type blockingVerifyCredentialAuthority struct {
+	CredentialAuthority
+	verifyStarted   chan<- struct{}
+	verifyMayFinish <-chan struct{}
+}
+
+func (a blockingVerifyCredentialAuthority) VerifyAndConsumeAssertion(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+) (Principal, AssertionExpectationBinding, error) {
+	close(a.verifyStarted)
+	select {
+	case <-a.verifyMayFinish:
+	case <-ctx.Done():
+		return Principal{}, AssertionExpectationBinding{}, ctx.Err()
+	}
+	return a.CredentialAuthority.VerifyAndConsumeAssertion(ctx, challengeID, assertion)
 }
 
 type readDispatcherFunc func(context.Context, ReadTarget, ReadRequest, Principal) error

@@ -39,6 +39,49 @@ func defaultMonotonicNow() time.Duration {
 	return time.Since(monotonicEpoch)
 }
 
+type siteCredentialCoordinator struct {
+	operations sync.RWMutex
+	blockedMu  sync.RWMutex
+	blocked    map[string]struct{}
+}
+
+var credentialCoordinators = struct {
+	sync.Mutex
+	sites map[string]*siteCredentialCoordinator
+}{
+	sites: make(map[string]*siteCredentialCoordinator),
+}
+
+func siteCredentialCoordinatorFor(siteID string) *siteCredentialCoordinator {
+	credentialCoordinators.Lock()
+	defer credentialCoordinators.Unlock()
+	coordinator := credentialCoordinators.sites[siteID]
+	if coordinator == nil {
+		coordinator = &siteCredentialCoordinator{blocked: make(map[string]struct{})}
+		credentialCoordinators.sites[siteID] = coordinator
+	}
+	return coordinator
+}
+
+func forgetSiteCredentialCoordinatorForTest(siteID string) {
+	credentialCoordinators.Lock()
+	delete(credentialCoordinators.sites, siteID)
+	credentialCoordinators.Unlock()
+}
+
+func (c *siteCredentialCoordinator) blockCredential(credentialID []byte) {
+	c.blockedMu.Lock()
+	c.blocked[string(credentialID)] = struct{}{}
+	c.blockedMu.Unlock()
+}
+
+func (c *siteCredentialCoordinator) credentialBlocked(credentialID []byte) bool {
+	c.blockedMu.RLock()
+	_, blocked := c.blocked[string(credentialID)]
+	c.blockedMu.RUnlock()
+	return blocked
+}
+
 var (
 	ErrRemoteDisabled    = errors.New("Home Link is disabled")
 	ErrInvalidGrant      = errors.New("grant is invalid")
@@ -83,6 +126,7 @@ type GrantManager struct {
 	mu                 sync.Mutex
 	enabled            bool
 	gatewayID          string
+	coordinator        *siteCredentialCoordinator
 	random             io.Reader
 	now                func() time.Time
 	monotonicNow       func() time.Duration
@@ -93,6 +137,21 @@ type GrantManager struct {
 	clock              monotonicClockState
 	records            map[[sha256.Size]byte]*grantRecord
 	blockedCredentials map[string]struct{}
+}
+
+type siteCoordinatedCredentialAuthority interface {
+	credentialSiteID() string
+	credentialSiteCoordinator() *siteCredentialCoordinator
+	createAssertionSiteLocked(
+		context.Context,
+		AssertionExpectationBinding,
+	) (LocalAssertionChallenge, error)
+	verifyAndConsumeAssertionSiteLocked(
+		context.Context,
+		string,
+		PasskeyAssertion,
+	) (Principal, AssertionExpectationBinding, error)
+	revokeCredentialSiteLocked(context.Context, []byte) error
 }
 
 type monotonicClockState struct {
@@ -152,12 +211,19 @@ func NewGrantManager(gatewayID string, opts GrantManagerOptions) (*GrantManager,
 	if opts.CredentialAuthority == nil {
 		return nil, errors.New("local credential authority is missing")
 	}
+	coordinator := siteCredentialCoordinatorFor(normalized)
+	if coordinated, ok := opts.CredentialAuthority.(siteCoordinatedCredentialAuthority); ok {
+		if coordinated.credentialSiteID() != normalized {
+			return nil, errors.New("local credential authority belongs to another gateway")
+		}
+		coordinator = coordinated.credentialSiteCoordinator()
+	}
 	var assertionSession AssertionSession
 	if _, err := io.ReadFull(rand.Reader, assertionSession.id[:]); err != nil {
 		return nil, fmt.Errorf("create local assertion session: %w", err)
 	}
 	return &GrantManager{
-		enabled: opts.Enabled, gatewayID: normalized, random: opts.Random,
+		enabled: opts.Enabled, gatewayID: normalized, coordinator: coordinator, random: opts.Random,
 		now: opts.Now, monotonicNow: opts.MonotonicNow, authority: opts.CredentialAuthority,
 		readDispatcher:     opts.ReadDispatcher,
 		pairingAuthorizer:  opts.PairingAuthorizer,
@@ -191,6 +257,8 @@ func (m *GrantManager) BeginLocalAssertion(ctx context.Context) (LocalAssertionC
 	if !m.enabled {
 		return LocalAssertionChallenge{}, ErrRemoteDisabled
 	}
+	m.coordinator.operations.RLock()
+	defer m.coordinator.operations.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	monotonicNow, err := m.clock.sample(m.monotonicNow)
@@ -202,7 +270,7 @@ func (m *GrantManager) BeginLocalAssertion(ctx context.Context) (LocalAssertionC
 		return LocalAssertionChallenge{}, err
 	}
 	binding := AssertionExpectationBinding{session: m.assertionSession, deadline: deadline}
-	challenge, err := m.authority.CreateAssertion(ctx, binding)
+	challenge, err := m.createAssertionSiteLocked(ctx, binding)
 	if err != nil {
 		return LocalAssertionChallenge{}, fmt.Errorf("create local passkey assertion: %w", err)
 	}
@@ -229,9 +297,13 @@ func (m *GrantManager) IssueOneUseAccess(
 		return Grant{}, err
 	}
 
+	m.coordinator.operations.RLock()
+	defer m.coordinator.operations.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	principal, binding, err := m.authority.VerifyAndConsumeAssertion(ctx, challengeID, assertion)
+	principal, binding, err := m.verifyAndConsumeAssertionSiteLocked(
+		ctx, challengeID, assertion,
+	)
 	if err != nil {
 		return Grant{}, fmt.Errorf("verify local passkey: %w", err)
 	}
@@ -291,6 +363,9 @@ func (m *GrantManager) issueLocked(
 		if _, revoked := m.blockedCredentials[string(principal.CredentialID)]; revoked {
 			return Grant{}, ErrCredentialRevoked
 		}
+		if m.coordinator.credentialBlocked(principal.CredentialID) {
+			return Grant{}, ErrCredentialRevoked
+		}
 	}
 	for range 4 {
 		raw := make([]byte, grantTokenBytes)
@@ -321,6 +396,31 @@ func (m *GrantManager) ConsumePairing(token, gatewayID string) error {
 }
 
 func (m *GrantManager) consume(token, gatewayID string, purpose GrantPurpose, scope Scope) (grantRecord, error) {
+	m.coordinator.operations.RLock()
+	defer m.coordinator.operations.RUnlock()
+	return m.consumeSiteLocked(token, gatewayID, purpose, scope)
+}
+
+func (m *GrantManager) consumeForDispatch(
+	token string,
+	gatewayID string,
+	scope Scope,
+) (grantRecord, func(), error) {
+	m.coordinator.operations.RLock()
+	record, err := m.consumeSiteLocked(token, gatewayID, GrantPurposeAccess, scope)
+	if err != nil {
+		m.coordinator.operations.RUnlock()
+		return grantRecord{}, nil, err
+	}
+	return record, m.coordinator.operations.RUnlock, nil
+}
+
+func (m *GrantManager) consumeSiteLocked(
+	token string,
+	gatewayID string,
+	purpose GrantPurpose,
+	scope Scope,
+) (grantRecord, error) {
 	if !m.enabled {
 		return grantRecord{}, ErrRemoteDisabled
 	}
@@ -360,6 +460,14 @@ func (m *GrantManager) consume(token, gatewayID string, purpose GrantPurpose, sc
 	if record.scope != scope {
 		return grantRecord{}, ErrWrongScope
 	}
+	if record.purpose == GrantPurposeAccess {
+		if m.coordinator.credentialBlocked(record.principal.CredentialID) {
+			return grantRecord{}, ErrCredentialRevoked
+		}
+		if err := record.principal.validate(); err != nil {
+			return grantRecord{}, err
+		}
+	}
 	record.consumed = true
 	result := *record
 	result.principal = clonePrincipal(record.principal)
@@ -381,17 +489,21 @@ func (m *GrantManager) Revoke(token string) error {
 	return nil
 }
 
-// RevokeCredential serializes with grant issue and consumption. The local
-// authority commits durable revoked or uncertain state first. The manager then
-// blocks this credential and all matching grants before returning any result.
+// RevokeCredential serializes across every live manager for this site. The
+// local authority commits durable revoked or uncertain state first. The
+// shared coordinator then blocks this credential before any later grant can
+// be issued or consumed.
 func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte) error {
 	if len(credentialID) == 0 || len(credentialID) > maxCredentialIDBytes {
 		return errors.New("credential id is invalid")
 	}
 	id := slices.Clone(credentialID)
+	m.coordinator.operations.Lock()
+	authorityErr := m.revokeCredentialSiteLocked(ctx, id)
+	m.coordinator.blockCredential(id)
+	m.coordinator.operations.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	authorityErr := m.authority.RevokeCredential(ctx, id)
 	m.blockedCredentials[string(id)] = struct{}{}
 	for _, record := range m.records {
 		if record.purpose == GrantPurposeAccess && bytes.Equal(record.principal.CredentialID, id) {
@@ -402,6 +514,37 @@ func (m *GrantManager) RevokeCredential(ctx context.Context, credentialID []byte
 		return fmt.Errorf("revoke local credential: %w", authorityErr)
 	}
 	return nil
+}
+
+func (m *GrantManager) createAssertionSiteLocked(
+	ctx context.Context,
+	binding AssertionExpectationBinding,
+) (LocalAssertionChallenge, error) {
+	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
+		return authority.createAssertionSiteLocked(ctx, binding)
+	}
+	return m.authority.CreateAssertion(ctx, binding)
+}
+
+func (m *GrantManager) verifyAndConsumeAssertionSiteLocked(
+	ctx context.Context,
+	challengeID string,
+	assertion PasskeyAssertion,
+) (Principal, AssertionExpectationBinding, error) {
+	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
+		return authority.verifyAndConsumeAssertionSiteLocked(ctx, challengeID, assertion)
+	}
+	return m.authority.VerifyAndConsumeAssertion(ctx, challengeID, assertion)
+}
+
+func (m *GrantManager) revokeCredentialSiteLocked(
+	ctx context.Context,
+	credentialID []byte,
+) error {
+	if authority, ok := m.authority.(siteCoordinatedCredentialAuthority); ok {
+		return authority.revokeCredentialSiteLocked(ctx, credentialID)
+	}
+	return m.authority.RevokeCredential(ctx, credentialID)
 }
 
 func (m *GrantManager) pruneLocked(monotonicNow time.Duration) {

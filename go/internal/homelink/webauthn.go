@@ -127,6 +127,7 @@ type PersistentCredentialAuthority struct {
 	mu                 sync.Mutex
 	store              credentialStateStore
 	siteID             string
+	coordinator        *siteCredentialCoordinator
 	pairingAuthorizer  PairingAuthorizer
 	random             io.Reader
 	now                func() time.Time
@@ -158,7 +159,8 @@ func NewPersistentCredentialAuthority(
 		opts.MonotonicNow = defaultMonotonicNow
 	}
 	return &PersistentCredentialAuthority{
-		store: opts.Store, siteID: siteID, pairingAuthorizer: opts.PairingAuthorizer,
+		store: opts.Store, siteID: siteID,
+		coordinator: siteCredentialCoordinatorFor(siteID), pairingAuthorizer: opts.PairingAuthorizer,
 		random: opts.Random, now: opts.Now, monotonicNow: opts.MonotonicNow,
 		assertions:         make(map[string]assertionExpectation),
 		registrations:      make(map[string]registrationExpectation),
@@ -270,6 +272,15 @@ func (a *PersistentCredentialAuthority) CreateAssertion(
 	ctx context.Context,
 	binding AssertionExpectationBinding,
 ) (LocalAssertionChallenge, error) {
+	a.coordinator.operations.RLock()
+	defer a.coordinator.operations.RUnlock()
+	return a.createAssertionSiteLocked(ctx, binding)
+}
+
+func (a *PersistentCredentialAuthority) createAssertionSiteLocked(
+	ctx context.Context,
+	binding AssertionExpectationBinding,
+) (LocalAssertionChallenge, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now, deadline, err := a.expectationDeadlineLocked()
@@ -313,6 +324,16 @@ func (a *PersistentCredentialAuthority) CreateAssertion(
 }
 
 func (a *PersistentCredentialAuthority) VerifyAndConsumeAssertion(
+	ctx context.Context,
+	expectationID string,
+	assertion PasskeyAssertion,
+) (Principal, AssertionExpectationBinding, error) {
+	a.coordinator.operations.RLock()
+	defer a.coordinator.operations.RUnlock()
+	return a.verifyAndConsumeAssertionSiteLocked(ctx, expectationID, assertion)
+}
+
+func (a *PersistentCredentialAuthority) verifyAndConsumeAssertionSiteLocked(
 	ctx context.Context,
 	expectationID string,
 	assertion PasskeyAssertion,
@@ -389,11 +410,20 @@ func credentialStateContext(ctx context.Context) (context.Context, context.Cance
 	return context.WithTimeout(context.WithoutCancel(ctx), credentialStateTimeout)
 }
 
+func (a *PersistentCredentialAuthority) credentialSiteID() string {
+	return a.siteID
+}
+
+func (a *PersistentCredentialAuthority) credentialSiteCoordinator() *siteCredentialCoordinator {
+	return a.coordinator
+}
+
 func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
 	requestCtx context.Context,
 	credentialID []byte,
 	nowMS int64,
 ) {
+	a.coordinator.blockCredential(credentialID)
 	ctx, cancel := credentialStateContext(requestCtx)
 	_ = a.store.EnsureHomeLinkCredentialPolicyBlock(
 		ctx, a.siteID, credentialID, nowMS,
@@ -411,8 +441,10 @@ func (a *PersistentCredentialAuthority) secureCredentialAfterStateErrorLocked(
 func (a *PersistentCredentialAuthority) credentialMemoryBlockedLocked(
 	credentialID []byte,
 ) bool {
-	_, blocked := a.blockedCredentials[string(credentialID)]
-	return blocked
+	if _, blocked := a.blockedCredentials[string(credentialID)]; blocked {
+		return true
+	}
+	return a.coordinator.credentialBlocked(credentialID)
 }
 
 func (a *PersistentCredentialAuthority) filterMemoryBlockedCredentialsLocked(
@@ -431,8 +463,18 @@ func (a *PersistentCredentialAuthority) RevokeCredential(
 	ctx context.Context,
 	credentialID []byte,
 ) error {
+	a.coordinator.operations.Lock()
+	defer a.coordinator.operations.Unlock()
+	return a.revokeCredentialSiteLocked(ctx, credentialID)
+}
+
+func (a *PersistentCredentialAuthority) revokeCredentialSiteLocked(
+	ctx context.Context,
+	credentialID []byte,
+) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.coordinator.blockCredential(credentialID)
 	nowMS := a.now().UTC().UnixMilli()
 	stateCtx, cancelState := credentialStateContext(ctx)
 	err := a.store.RevokeHomeLinkCredential(

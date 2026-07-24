@@ -75,6 +75,8 @@ func (r ReadRequest) Validate() error {
 // consumption is the dispatch start boundary. A later credential revoke does
 // not cancel that in-flight Core call. The method returns no reusable
 // authorization or target to the untrusted caller.
+// Credential revocation waits for an already consumed grant's dispatch to
+// return, then prevents every later dispatch for that credential.
 func (m *GrantManager) VerifyAndDispatchRead(
 	ctx context.Context,
 	token string,
@@ -90,10 +92,11 @@ func (m *GrantManager) VerifyAndDispatchRead(
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	record, err := m.consume(token, request.GatewayID, GrantPurposeAccess, request.Scope)
+	record, release, err := m.consumeForDispatch(token, request.GatewayID, request.Scope)
 	if err != nil {
 		return err
 	}
+	defer release()
 	if err := record.principal.validate(); err != nil {
 		return err
 	}
