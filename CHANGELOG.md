@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.2
+
+### Patch Changes
+
+- 8c66e46: Show the saved-versus-no-PV-or-battery result on Overview instead of moving it into History.
+
 ## 1.11.1
 
 ### Patch Changes
