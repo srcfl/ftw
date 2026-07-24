@@ -55,8 +55,11 @@ type Principal struct {
 // opaque local lookup ID. The verifier keeps the expected RP, origin, expiry,
 // and one-use state; no caller can provide them to grant issuance.
 type LocalAssertionChallenge struct {
-	ID        string
-	Challenge []byte
+	ID                       string
+	Challenge                []byte
+	RPID                     string
+	AllowCredentials         [][]byte
+	UserVerificationRequired bool
 }
 
 // AssertionSession binds local assertion expectations to one GrantManager.
@@ -87,6 +90,7 @@ type PasskeyAssertion struct {
 	ClientDataJSON    []byte
 	AuthenticatorData []byte
 	Signature         []byte
+	ResponseJSON      []byte
 }
 
 func (c LocalAssertionChallenge) validate() error {
@@ -139,7 +143,8 @@ type PairingAuthorizer interface {
 // before it returns. It returns nil only after the revoked state is durable.
 // Verifier and revoke state survive restart. Assertion expectations do not.
 type CredentialAuthority interface {
-	CreateAssertion(context.Context, AssertionExpectationBinding) (LocalAssertionChallenge, error)
-	VerifyAndConsumeAssertion(context.Context, string, PasskeyAssertion) (Principal, AssertionExpectationBinding, error)
-	RevokeCredential(context.Context, []byte) error
+	CredentialSite() CredentialSite
+	CreateAssertion(context.Context, AssertionExpectationBinding, ...credentialSiteOperation) (LocalAssertionChallenge, error)
+	VerifyAndConsumeAssertion(context.Context, string, PasskeyAssertion, ...credentialSiteOperation) (Principal, AssertionExpectationBinding, error)
+	RevokeCredential(context.Context, []byte, ...credentialSiteOperation) error
 }
