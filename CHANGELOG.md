@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.11.3
+
+### Patch Changes
+
+- b92a57d: Make History shorter by showing summaries first and folding raw energy rows and plan diagnostics into paged detail sections.
+
 ## 1.11.2
 
 ### Patch Changes
