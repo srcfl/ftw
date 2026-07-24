@@ -18,6 +18,10 @@
 
 import { FtwElement } from "./ftw-element.js";
 import { apiFetch } from "./api-fetch.js";
+import {
+  buildCompactPriceView,
+  formatPriceSlotLabel,
+} from "./price-summary.js";
 
 class FtwPriceChart extends FtwElement {
   static styles = `
@@ -177,6 +181,167 @@ class FtwPriceChart extends FtwElement {
     .tip-price.peak  { color: var(--red-e); }
     .tip-price.low   { color: var(--green-e); }
 
+    .compact-head {
+      display: flex;
+      align-items: start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .compact-kicker {
+      margin-bottom: 3px;
+      color: var(--accent-e);
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .compact-title {
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.015em;
+    }
+    .compact-link,
+    .compact-setup {
+      color: var(--accent-e);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.08em;
+      text-decoration: none;
+      text-transform: uppercase;
+    }
+    .compact-link {
+      padding-top: 3px;
+      white-space: nowrap;
+    }
+    .compact-link:hover,
+    .compact-setup:hover {
+      color: var(--fg);
+    }
+    .compact-link:focus-visible,
+    .compact-setup:focus-visible {
+      outline: 2px solid var(--accent-e);
+      outline-offset: 4px;
+      border-radius: 2px;
+    }
+    .compact-summary {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(130px, 0.8fr);
+      align-items: end;
+      gap: 18px;
+    }
+    .compact-current {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: baseline;
+      column-gap: 7px;
+    }
+    .compact-value {
+      color: var(--fg);
+      font-family: var(--mono);
+      font-size: clamp(2rem, 5vw, 3.15rem);
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.065em;
+      line-height: 0.95;
+    }
+    .compact-unit {
+      color: var(--fg-dim);
+      font-family: var(--mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .compact-meta {
+      grid-column: 1 / -1;
+      margin-top: 6px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .compact-low {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      padding-left: 16px;
+      border-left: 1px solid var(--line);
+    }
+    .compact-low > span {
+      color: var(--fg-label);
+      font-family: var(--mono);
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .compact-low strong {
+      margin-top: 3px;
+      color: var(--green-e);
+      font-family: var(--mono);
+      font-size: 1rem;
+      font-variant-numeric: tabular-nums;
+    }
+    .compact-low small {
+      overflow: hidden;
+      margin-top: 1px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .compact-profile {
+      display: block;
+      width: 100%;
+      height: 58px;
+      margin-top: 16px;
+      overflow: visible;
+    }
+    .compact-profile rect {
+      fill: var(--fg-muted);
+      opacity: 0.38;
+    }
+    .compact-profile rect.is-current {
+      fill: var(--accent-e);
+      opacity: 1;
+    }
+    .compact-profile rect.is-low {
+      fill: var(--green-e);
+      opacity: 0.9;
+    }
+    .compact-profile line {
+      stroke: var(--line);
+      stroke-width: 1;
+    }
+    .compact-stale,
+    .compact-profile-empty {
+      display: block;
+      margin-top: 8px;
+      color: var(--fg-muted);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+    .compact-stale {
+      color: var(--amber);
+    }
+    .compact-empty {
+      display: flex;
+      min-height: 126px;
+      flex-direction: column;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 9px;
+      color: var(--fg-muted);
+    }
+    .compact-empty strong {
+      color: var(--fg-dim);
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
     /* Phone layout — the JS picks a taller viewBox H on small screens
        so bars get more vertical room WITHOUT vertically stretching
        text (which made labels like "NOW" look horizontally squeezed
@@ -189,12 +354,27 @@ class FtwPriceChart extends FtwElement {
         transform: translate(-50%, 0);
         transition: opacity 80ms, left 120ms cubic-bezier(.4, 0, .2, 1);
       }
+      .compact-summary {
+        grid-template-columns: minmax(0, 1fr) minmax(112px, 0.75fr);
+        gap: 12px;
+      }
+      .compact-value {
+        font-size: 2.15rem;
+      }
+      .compact-low {
+        padding-left: 12px;
+      }
     }
   `;
+
+  static get observedAttributes() {
+    return ["compact"];
+  }
 
   constructor() {
     super();
     this._data = null;        // { zone, items: [{tsMs, ore}], min, max, vatPct }
+    this._priceState = "loading";
     this._vatOn = readVatPref(); // persisted across reloads, defaults to true
     this._horizon = readHorizonPref(); // "today" or "all", persisted
     this._refreshTimer = null;
@@ -202,6 +382,10 @@ class FtwPriceChart extends FtwElement {
     this._vatPct = 25;        // fallback; overwritten from /api/config
     this._geom = null;        // { padL, plotW, n, W } — set in _renderChart
     this._isTouching = false; // suppresses synthesized mouse events after touch
+  }
+
+  attributeChangedCallback() {
+    this.update();
   }
 
   connectedCallback() {
@@ -218,6 +402,13 @@ class FtwPriceChart extends FtwElement {
       if (this._mql.addEventListener) this._mql.addEventListener("change", this._mqlListener);
       else if (this._mql.addListener) this._mql.addListener(this._mqlListener);
     }
+    this._vatSyncListener = (event) => {
+      const next = event && event.detail && event.detail.vatOn;
+      if (typeof next !== "boolean" || next === this._vatOn) return;
+      this._vatOn = next;
+      this.update();
+    };
+    window.addEventListener("ftw-price-vat-change", this._vatSyncListener);
   }
 
   disconnectedCallback() {
@@ -230,6 +421,10 @@ class FtwPriceChart extends FtwElement {
       else if (this._mql.removeListener) this._mql.removeListener(this._mqlListener);
       this._mql = null;
       this._mqlListener = null;
+    }
+    if (this._vatSyncListener) {
+      window.removeEventListener("ftw-price-vat-change", this._vatSyncListener);
+      this._vatSyncListener = null;
     }
   }
 
@@ -256,9 +451,13 @@ class FtwPriceChart extends FtwElement {
       const since = midnight.getTime();
       const until = Date.now() + 48 * 3600_000;
       const r = await apiFetch(`/api/prices?since_ms=${since}&until_ms=${until}`);
+      if (r.ok === false) throw new Error(`Price request failed: ${r.status}`);
       const j = await r.json();
-      if (!j || !Array.isArray(j.items)) {
+      if (j && j.enabled === false) {
         this._data = null;
+        this._priceState = "unconfigured";
+      } else if (!j || !Array.isArray(j.items)) {
+        throw new Error("Price response did not include items");
       } else {
         // Items already carry both spot_ore_kwh and total_ore_kwh, but
         // the operator's mental model is "spot price ± VAT" — so we
@@ -271,10 +470,11 @@ class FtwPriceChart extends FtwElement {
           spot:  Number(it.spot_ore_kwh) || 0,
         })).sort((a, b) => a.tsMs - b.tsMs);
         this._data = { zone: j.zone || "", items };
+        this._priceState = "ready";
       }
       this.update();
     } catch (e) {
-      this._data = null;
+      this._priceState = this._data ? "stale" : "error";
       this.update();
     }
   }
@@ -287,6 +487,7 @@ class FtwPriceChart extends FtwElement {
   }
 
   render() {
+    if (this.hasAttribute("compact")) return this._renderCompact();
     const data = this._data;
     const hasTomorrow = data ? itemsIncludeTomorrow(data.items) : false;
     // No tomorrow data → no choice to make, so the toggle is hidden
@@ -375,6 +576,108 @@ class FtwPriceChart extends FtwElement {
       return head + `<div class="empty">No price data for ${which}.</div>`;
     }
     return head + this._renderChart({ ...data, items: visible });
+  }
+
+  _renderCompact() {
+    const data = this._data;
+    const view = buildCompactPriceView({
+      state: this._priceState,
+      items: data && data.items,
+      now: Date.now(),
+      vatOn: this._vatOn,
+      vatPercent: this._vatPct,
+    });
+    const head = `
+      <div class="compact-head">
+        <div>
+          <div class="compact-kicker">Market now</div>
+          <div class="compact-title">Electricity price</div>
+        </div>
+        <a class="compact-link" href="#energy">Full view <span aria-hidden="true">→</span></a>
+      </div>
+    `;
+    if (view.kind !== "ready") {
+      const settings = view.kind === "unconfigured"
+        ? `<a class="compact-setup" href="#more">Open price settings</a>`
+        : "";
+      return `${head}
+        <div class="compact-empty" role="status">
+          <strong>${escapeXml(view.message)}</strong>
+          ${settings}
+        </div>
+      `;
+    }
+
+    const summary = view.summary;
+    const formatOre = (value) => {
+      if (!Number.isFinite(value)) return "—";
+      const digits = Math.abs(value) >= 100 ? 0 : 1;
+      return Number(value).toFixed(digits);
+    };
+    const currentValue = summary.current ? formatOre(summary.current.ore) : "—";
+    const lowValue = summary.nextLow ? formatOre(summary.nextLow.ore) : "—";
+    const lowTime = summary.nextLow
+      ? formatPriceSlotLabel(summary.nextLow.tsMs)
+      : "No later slot published";
+    const vatLabel = this._vatOn ? "incl. VAT" : "spot only";
+    const stale = view.stale
+      ? `<span class="compact-stale">Last update failed</span>`
+      : "";
+    const accessible = summary.current
+      ? `Current electricity price ${currentValue} öre per kilowatt-hour. Next low ${lowValue} öre at ${lowTime}.`
+      : `No current electricity price slot. Next low ${lowValue} öre at ${lowTime}.`;
+
+    return `${head}
+      <div class="compact-summary" aria-label="${escapeXml(accessible)}">
+        <div class="compact-current">
+          <span class="compact-value">${currentValue}</span>
+          <span class="compact-unit">öre/kWh</span>
+          <span class="compact-meta">${escapeXml(data.zone || "—")} · ${vatLabel}</span>
+        </div>
+        <div class="compact-low">
+          <span>Next low</span>
+          <strong>${lowValue} öre</strong>
+          <small>${escapeXml(lowTime)}</small>
+        </div>
+      </div>
+      ${this._renderCompactProfile(summary)}
+      ${stale}
+    `;
+  }
+
+  _renderCompactProfile(summary) {
+    const items = summary.today;
+    if (!items.length) {
+      return `<div class="compact-profile-empty">Today’s profile is not published yet.</div>`;
+    }
+    const W = 360;
+    const H = 58;
+    const pad = 2;
+    const values = items.map((item) => item.ore);
+    const min = Math.min(0, ...values);
+    const max = Math.max(0, ...values);
+    const range = Math.max(1, max - min);
+    const y = (value) => pad + ((max - value) / range) * (H - pad * 2);
+    const zeroY = y(0);
+    const slotW = W / items.length;
+    const bars = items.map((item, index) => {
+      const valueY = y(item.ore);
+      const top = Math.min(zeroY, valueY);
+      const height = Math.max(1, Math.abs(zeroY - valueY));
+      const current = summary.current && summary.current.tsMs === item.tsMs;
+      const low = summary.nextLow && summary.nextLow.tsMs === item.tsMs;
+      const className = current ? "is-current" : low ? "is-low" : "";
+      return `<rect class="${className}" x="${(index * slotW + 1).toFixed(2)}"
+                    y="${top.toFixed(2)}" width="${Math.max(1, slotW - 2).toFixed(2)}"
+                    height="${height.toFixed(2)}" />`;
+    }).join("");
+    return `
+      <svg class="compact-profile" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"
+           role="img" aria-label="Today’s electricity price profile">
+        <line x1="0" x2="${W}" y1="${zeroY.toFixed(2)}" y2="${zeroY.toFixed(2)}" />
+        ${bars}
+      </svg>
+    `;
   }
 
   _renderChart(data) {
@@ -615,6 +918,9 @@ class FtwPriceChart extends FtwElement {
           if (next === this._vatOn) return;
           this._vatOn = next;
           writeVatPref(next);
+          window.dispatchEvent(new CustomEvent("ftw-price-vat-change", {
+            detail: { vatOn: next },
+          }));
           this.update();
         });
       });
