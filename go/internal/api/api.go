@@ -26,6 +26,7 @@ import (
 
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/calendar"
+	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
@@ -173,6 +174,12 @@ type Deps struct {
 	//     the binary back up.
 	// nil disables /api/restart (returns 503).
 	Restart func(ctx context.Context) error
+
+	// Bundle describes single-image packaging (e.g. the Home Assistant
+	// add-on) whose host platform owns update and rollback. Nil means a
+	// native install; /api/components then reports each component
+	// separately.
+	Bundle *components.Bundle
 
 	Version string
 }

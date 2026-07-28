@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 globalThis.window = {};
 await import("./system.js");
-const { optimizerStatus } = globalThis.window.FTWSettings.tabs.system._pure;
+const { optimizerStatus, bundleDisplay } = globalThis.window.FTWSettings.tabs.system._pure;
 
 describe("optimizerStatus", () => {
   it("shows the active Go fallback and its reason", () => {
@@ -46,5 +46,31 @@ describe("optimizerStatus", () => {
       warning: "",
       lastPlanAtMs: 0,
     });
+  });
+});
+
+describe("bundleDisplay", () => {
+  it("keeps the per-component breakdown for native installs", () => {
+    assert.equal(bundleDisplay({ core: { version: "v1.10.0" } }), null);
+    assert.equal(bundleDisplay({ bundle: { kind: "something_else" }, core: { version: "v1.10.0" } }), null);
+  });
+
+  it("collapses the Home Assistant add-on to one bundled FTW version", () => {
+    const got = bundleDisplay({
+      core: { version: "v1.10.0-beta.1" },
+      optimizer: { configured: true, runtime: { version: "v1.3.2-beta.1" } },
+      bundle: { kind: "home_assistant_addon", version: "0.1.0-beta.1" },
+    });
+    assert.equal(got.ftwVersion, "v1.10.0-beta.1");
+    assert.equal(got.bundleVersion, "0.1.0-beta.1");
+    assert.match(got.note, /FTW v1\.10\.0-beta\.1 is bundled with the Home Assistant add-on 0\.1\.0-beta\.1/);
+    assert.match(got.note, /Home Assistant manages updates and rollback/);
+  });
+
+  it("still names a bundled FTW version when the add-on version is unknown", () => {
+    const got = bundleDisplay({ bundle: { kind: "home_assistant_addon" } });
+    assert.equal(got.ftwVersion, "dev");
+    assert.equal(got.bundleVersion, "");
+    assert.match(got.note, /bundled with the Home Assistant add-on\./);
   });
 });

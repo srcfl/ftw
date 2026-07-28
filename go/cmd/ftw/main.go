@@ -30,6 +30,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/caldavserver"
 	"github.com/srcfl/ftw/go/internal/calendar"
+	"github.com/srcfl/ftw/go/internal/components"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
@@ -2120,6 +2121,7 @@ func main() {
 			})
 			return nil
 		},
+		Bundle:  components.BundleFromEnv(),
 		Version: Version,
 	}
 	srv := api.New(deps)
