@@ -23,17 +23,27 @@ import (
 	"time"
 
 	ocpp16 "github.com/lorenzodonini/ocpp-go/ocpp1.6"
+	ocpp201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1"
 	"github.com/lorenzodonini/ocpp-go/ws"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// Server is a running OCPP 1.6J Central System.
+// Server is a running OCPP Central System, serving one listener per enabled
+// protocol version.
+//
+// Each version needs its own port. The OCPP library's ws.Server keeps a single
+// message handler, so one listener cannot dispatch both dialects, and a charger
+// picks its dialect in the WebSocket handshake before any message is sent.
 type Server struct {
-	cfg      *Config
-	cs       ocpp16.CentralSystem
-	handler  *Handler
+	cfg     *Config
+	cs      ocpp16.CentralSystem
+	csms    ocpp201.CSMS
+	handler *Handler
+	// done closes when the 1.6 listener goroutine exits; doneV201 likewise for
+	// 2.0.1. A nil channel means that version was not enabled.
 	done     chan struct{}
+	doneV201 chan struct{}
 	stopOnce sync.Once
 }
 
@@ -65,12 +75,52 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (*Server, err
 	cs.SetCoreHandler(h)
 	cs.SetNewChargePointHandler(func(cp ocpp16.ChargePointConnection) {
 		h.OnConnect(cp.ID())
+		// Which listener a charger reached is what identifies its dialect, so
+		// record it here rather than inferring it from a later message.
+		h.setVersion(cp.ID(), Version16)
 	})
 	cs.SetChargePointDisconnectedHandler(func(cp ocpp16.ChargePointConnection) {
 		h.OnDisconnect(cp.ID())
 	})
 
 	s := &Server{cfg: cfg, cs: cs, handler: h, done: make(chan struct{})}
+
+	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
+	// the same charger state and telemetry — only the message encoding differs.
+	if cfg.PortV201 > 0 {
+		wsServer201 := ws.NewServer()
+		if cfg.Username != "" || cfg.Password != "" {
+			u, p := cfg.Username, cfg.Password
+			wsServer201.SetBasicAuthHandler(func(user, pass string) bool {
+				return user == u && pass == p
+			})
+		}
+		h201 := &handlerV201{Handler: h}
+		csms := ocpp201.NewCSMS(nil, wsServer201)
+		csms.SetProvisioningHandler(h201)
+		csms.SetAvailabilityHandler(h201)
+		csms.SetTransactionsHandler(h201)
+		csms.SetMeterHandler(h201)
+		csms.SetAuthorizationHandler(h201)
+		csms.SetNewChargingStationHandler(func(cs ocpp201.ChargingStationConnection) {
+			h.OnConnect(cs.ID())
+			h.setVersion(cs.ID(), Version201)
+		})
+		csms.SetChargingStationDisconnectedHandler(func(cs ocpp201.ChargingStationConnection) {
+			h.OnDisconnect(cs.ID())
+		})
+
+		s.csms = csms
+		s.doneV201 = make(chan struct{})
+		go func() {
+			defer close(s.doneV201)
+			slog.Info("OCPP central system listening",
+				"version", Version201, "port", cfg.PortV201, "path", cfg.Path,
+				"basic_auth", cfg.Username != "")
+			csms.Start(cfg.PortV201, fmt.Sprintf("%s{ws}", cfg.Path))
+		}()
+	}
+
 	go func() {
 		defer close(s.done)
 		slog.Info("OCPP central system listening",
@@ -100,11 +150,23 @@ func (s *Server) Stop() {
 	if s == nil || s.cs == nil {
 		return
 	}
-	s.stopOnce.Do(func() { s.cs.Stop() })
+	s.stopOnce.Do(func() {
+		s.cs.Stop()
+		if s.csms != nil {
+			s.csms.Stop()
+		}
+	})
 	select {
 	case <-s.done:
 	case <-time.After(5 * time.Second):
-		slog.Warn("ocpp: shutdown timeout — forcing close")
+		slog.Warn("ocpp: shutdown timeout — forcing close", "version", Version16)
+	}
+	if s.doneV201 != nil {
+		select {
+		case <-s.doneV201:
+		case <-time.After(5 * time.Second):
+			slog.Warn("ocpp: shutdown timeout — forcing close", "version", Version201)
+		}
 	}
 }
 

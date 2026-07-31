@@ -54,6 +54,7 @@ type Config struct {
 type OCPP struct {
 	Enabled            bool   `yaml:"enabled" json:"enabled"`
 	Port               int    `yaml:"port,omitempty" json:"port,omitempty"`
+	PortV201           int    `yaml:"port_v201,omitempty" json:"port_v201,omitempty"`
 	Path               string `yaml:"path,omitempty" json:"path,omitempty"`
 	Username           string `yaml:"username,omitempty" json:"username,omitempty"`
 	Password           string `yaml:"password,omitempty" json:"password,omitempty"`
@@ -71,6 +72,13 @@ func (o *OCPP) Validate() error {
 	}
 	if o.Port < 0 || o.Port > 65535 {
 		return fmt.Errorf("ocpp.port must be between 0 and 65535, got %d", o.Port)
+	}
+	if o.PortV201 < 0 || o.PortV201 > 65535 {
+		return fmt.Errorf("ocpp.port_v201 must be between 0 and 65535, got %d", o.PortV201)
+	}
+	// Each version needs its own listener, so they cannot share a port.
+	if o.PortV201 > 0 && o.PortV201 == o.Port {
+		return fmt.Errorf("ocpp.port_v201 must differ from ocpp.port, both are %d", o.Port)
 	}
 	if o.HeartbeatIntervalS < 0 {
 		return fmt.Errorf("ocpp.heartbeat_interval_s must be >= 0, got %d", o.HeartbeatIntervalS)

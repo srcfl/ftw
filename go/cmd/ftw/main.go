@@ -920,6 +920,7 @@ func main() {
 		srv, err := ocpp.Start(ctx, &ocpp.Config{
 			Enabled:            cfg.OCPP.Enabled,
 			Port:               cfg.OCPP.Port,
+			PortV201:           cfg.OCPP.PortV201,
 			Path:               cfg.OCPP.Path,
 			Username:           cfg.OCPP.Username,
 			Password:           cfg.OCPP.Password,
@@ -934,6 +935,7 @@ func main() {
 			defer ocppSrv.Stop()
 			slog.Info("ocpp: central system started",
 				"port", ocppSrv.Port(),
+				"port_v201", cfg.OCPP.PortV201,
 				"path", ocppSrv.Path(),
 				"note", "listener is reachable on every interface; basic auth is the only gate")
 		}

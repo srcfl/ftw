@@ -43,6 +43,12 @@ type chargerState struct {
 	// lastAmps is the most recent per-phase limit this charger accepted.
 	// A resume with no rate of its own restores it.
 	lastAmps float64
+	// version is the OCPP dialect this charger connected with, which decides
+	// how commands are encoded on the way back.
+	version Version
+	// transactionRef is the 2.0.1 transaction id, which is a string rather
+	// than the int transactionID above. Empty on the 1.6 path.
+	transactionRef string
 }
 
 // NewHandler returns a Handler ready to register with a CentralSystem.

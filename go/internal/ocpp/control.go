@@ -26,6 +26,8 @@ import (
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/types"
+	smartcharging201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/smartcharging"
+	types201 "github.com/lorenzodonini/ocpp-go/ocpp2.0.1/types"
 )
 
 const (
@@ -53,9 +55,15 @@ const (
 	// dual-socket units such as the Charge Amps Aura.
 	allConnectors = 0
 
+	// The 2.0.1 equivalent: EVSE 0 addresses the whole charging station.
+	allEVSEs = 0
+
 	// A single, stable profile id and stack level means each new limit
 	// replaces the previous one instead of stacking on top of it.
-	ftwProfileID   = 1
+	ftwProfileID = 1
+	// 2.0.1 schedules carry their own id; one stable id keeps replacement
+	// semantics identical to 1.6.
+	ftwScheduleID  = 1
 	ftwStackLevel  = 0
 	scheduleStartS = 0
 )
@@ -176,30 +184,19 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 		amps = 0
 	}
 
-	period := types.NewChargingSchedulePeriod(scheduleStartS, amps)
-	// Declared only when the loadpoint pinned single-phase charging. Left
-	// unset otherwise so a charger that can switch phases keeps deciding.
-	period.NumberPhases = numberPhases
-	schedule := types.NewChargingSchedule(types.ChargingRateUnitAmperes, period)
-	profile := types.NewChargingProfile(
-		ftwProfileID,
-		ftwStackLevel,
-		types.ChargingProfilePurposeTxDefaultProfile,
-		types.ChargingProfileKindAbsolute,
-		schedule,
-	)
-
-	type result struct {
-		conf *smartcharging.SetChargingProfileConfirmation
-		err  error
-	}
 	// Buffered: the library's callback must never block if we have already
 	// stopped waiting.
-	done := make(chan result, 1)
+	done := make(chan profileResult, 1)
 
-	err := s.cs.SetChargingProfile(id, func(conf *smartcharging.SetChargingProfileConfirmation, err error) {
-		done <- result{conf: conf, err: err}
-	}, allConnectors, profile)
+	// The two versions describe the same intent with different types, so the
+	// request is built per dialect and the outcome normalised back.
+	var err error
+	switch version, _ := s.handler.Version(id); version {
+	case Version201:
+		err = s.sendProfileV201(id, amps, numberPhases, done)
+	default:
+		err = s.sendProfileV16(id, amps, numberPhases, done)
+	}
 	if err != nil {
 		return fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
 	}
@@ -212,11 +209,11 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 		if r.err != nil {
 			return fmt.Errorf("ocpp: %s rejected charging profile: %w", id, r.err)
 		}
-		if r.conf == nil {
+		if !r.answered {
 			return fmt.Errorf("ocpp: %s returned no charging profile confirmation", id)
 		}
-		if r.conf.Status != smartcharging.ChargingProfileStatusAccepted {
-			return fmt.Errorf("ocpp: %s answered %s to charging profile", id, r.conf.Status)
+		if !r.accepted {
+			return fmt.Errorf("ocpp: %s answered %s to charging profile", id, r.status)
 		}
 		// Only a real charging rate is worth remembering. Recording the zero
 		// from a pause would erase the rate a later resume is supposed to
@@ -234,6 +231,73 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 	case <-timeout.C:
 		return fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
 	}
+}
+
+// profileResult is a version-neutral answer to a charging profile request, so
+// the waiting code above does not need to know which dialect produced it.
+type profileResult struct {
+	answered bool
+	accepted bool
+	status   string
+	err      error
+}
+
+// sendProfileV16 issues the limit as an OCPP 1.6 TxDefaultProfile.
+func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, done chan<- profileResult) error {
+	period := types.NewChargingSchedulePeriod(scheduleStartS, amps)
+	// Declared only when the loadpoint pinned single-phase charging. Left
+	// unset otherwise so a charger that can switch phases keeps deciding.
+	period.NumberPhases = numberPhases
+	schedule := types.NewChargingSchedule(types.ChargingRateUnitAmperes, period)
+	profile := types.NewChargingProfile(
+		ftwProfileID,
+		ftwStackLevel,
+		types.ChargingProfilePurposeTxDefaultProfile,
+		types.ChargingProfileKindAbsolute,
+		schedule,
+	)
+
+	return s.cs.SetChargingProfile(id, func(conf *smartcharging.SetChargingProfileConfirmation, err error) {
+		r := profileResult{err: err}
+		if conf != nil {
+			r.answered = true
+			r.status = string(conf.Status)
+			r.accepted = conf.Status == smartcharging.ChargingProfileStatusAccepted
+		}
+		done <- r
+	}, allConnectors, profile)
+}
+
+// sendProfileV201 issues the same limit as an OCPP 2.0.1 TxDefaultProfile.
+//
+// 2.0.1 carries a list of schedules rather than one, and each schedule needs
+// its own id; a single-entry list with a stable id keeps the meaning identical
+// to the 1.6 request.
+func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, done chan<- profileResult) error {
+	if s.csms == nil {
+		return fmt.Errorf("ocpp: %s speaks %s but no %s listener is configured", id, Version201, Version201)
+	}
+
+	period := types201.NewChargingSchedulePeriod(scheduleStartS, amps)
+	period.NumberPhases = numberPhases
+	schedule := types201.NewChargingSchedule(ftwScheduleID, types201.ChargingRateUnitAmperes, period)
+	profile := types201.NewChargingProfile(
+		ftwProfileID,
+		ftwStackLevel,
+		types201.ChargingProfilePurposeTxDefaultProfile,
+		types201.ChargingProfileKindAbsolute,
+		[]types201.ChargingSchedule{*schedule},
+	)
+
+	return s.csms.SetChargingProfile(id, func(conf *smartcharging201.SetChargingProfileResponse, err error) {
+		r := profileResult{err: err}
+		if conf != nil {
+			r.answered = true
+			r.status = string(conf.Status)
+			r.accepted = conf.Status == smartcharging201.ChargingProfileStatusAccepted
+		}
+		done <- r
+	}, allEVSEs, profile)
 }
 
 // DefaultMode is what a charger is left in when FTW stops steering it, and

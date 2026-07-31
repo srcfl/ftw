@@ -1,7 +1,7 @@
 # OCPP chargers
 
-FTW has a built-in OCPP 1.6J Central System. An EV charger that speaks OCPP
-connects straight to FTW over your local network.
+FTW has a built-in OCPP Central System speaking **1.6J and 2.0.1**. An EV
+charger that speaks either connects straight to FTW over your local network.
 
 **An OCPP charger does not need a driver.** There is no Lua file to write, no
 entry in `drivers:`, and nothing to add to the device catalog. OCPP is a vendor-
@@ -33,6 +33,39 @@ From there it behaves like any other EV reading: `MeterValues` and
 `StatusNotification` become telemetry, and dispatch stops the home battery
 discharging into an active EV charge.
 
+## Protocol versions
+
+| Version | Status | Port |
+|---|---|---|
+| 1.6J | supported | `port`, default 8887 |
+| 2.0.1 | supported | `port_v201`, off unless set |
+| 2.1 | not yet — see below | — |
+
+**Each version needs its own port.** A charger picks its dialect in the
+WebSocket handshake, before any message is sent, and the underlying library
+keeps one message handler per listener — so one port cannot serve both. Point
+each charger at the port matching what it speaks.
+
+Everything above the protocol is shared. Both dialects land in the same charger
+map, produce the same telemetry, and take the same commands, so a 2.0.1 charger
+is throttled and paused exactly like a 1.6 one and nothing downstream knows the
+difference.
+
+### On OCPP 2.1
+
+2.1 is not supported, because no production-grade Go implementation of it
+exists. `lorenzodonini/ocpp-go`, the library FTW uses and the only mature option
+at 367 stars, implements 1.6 and 2.0.1 and has no 2.1 support. The Go projects
+that do claim 2.1 are all early — single-digit stars, and mostly message
+validators or emulators rather than servers.
+
+This is not a blocker in practice. Every charger on the bench speaks 1.6J only,
+and 2.0.1 is what current hardware is migrating to.
+
+Adding 2.1 later means writing one more handler file and one more listener. The
+version-neutral core — charger state, telemetry mapping, control semantics —
+does not change.
+
 ## Enabling the server
 
 OCPP is off by default. Add an `ocpp` section:
@@ -40,7 +73,8 @@ OCPP is off by default. Add an `ocpp` section:
 ```yaml
 ocpp:
   enabled: true
-  port: 8887          # default 8887
+  port: 8887          # OCPP 1.6J, default 8887
+  port_v201: 8888     # OCPP 2.0.1; omit or 0 to disable
   path: /             # default /
   username: ftw
   password: <a long random string>

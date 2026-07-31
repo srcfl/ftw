@@ -14,6 +14,7 @@ type Config struct {
 	Enabled            bool   `yaml:"enabled"`
 	Bind               string `yaml:"bind"`
 	Port               int    `yaml:"port"`
+	PortV201           int    `yaml:"port_v201"`
 	Path               string `yaml:"path"`
 	Username           string `yaml:"username"`
 	Password           string `yaml:"password"`

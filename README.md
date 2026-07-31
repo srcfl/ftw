@@ -40,7 +40,7 @@ rule. See [docs/architecture.md](docs/architecture.md).
 - Home Assistant MQTT discovery;
 - CalDAV planning intents and published schedules;
 - hot-reloadable, independently released Lua drivers;
-- a built-in OCPP 1.6J server, so OCPP chargers connect with no driver at all.
+- a built-in OCPP 1.6J + 2.0.1 server, so OCPP chargers connect with no driver.
 
 The current device catalog is generated from the `DRIVER` metadata in
 [`drivers/*.lua`](drivers/); that source is authoritative.
@@ -115,7 +115,7 @@ artifacts use the same `beta` → `stable` progression as core and can be
 installed or rolled back independently.
 
 EV chargers that speak OCPP are the exception: they need no driver. FTW runs an
-OCPP 1.6J Central System, so the charger connects to FTW and registers itself.
+OCPP Central System (1.6J and 2.0.1), so the charger connects and registers itself.
 See [docs/ocpp.md](docs/ocpp.md).
 
 ## Releases
